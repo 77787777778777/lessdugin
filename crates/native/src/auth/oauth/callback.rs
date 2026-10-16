@@ -8,15 +8,22 @@
 
 use std::time::Duration;
 
+use futures::StreamExt;
+use futures::stream::FuturesUnordered;
 use lessdugin_core::engine::{EngineError, ErrorCode};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use url::Url;
 
 use crate::auth::redact::Secret;
 
 /// The longest request head the listener reads.
 const MAX_REQUEST_HEAD: usize = 16 * 1024;
+/// How long one connection may take to send its request head.
+const HEAD_TIMEOUT: Duration = Duration::from_secs(10);
+/// Connections served at once (more wait in the listen backlog), so that a local process that
+/// opens connections and sends nothing cannot stall the login.
+const MAX_CONNECTIONS: usize = 32;
 
 /// An authorization code that passed the `state` and `iss` checks.
 #[derive(Debug)]
@@ -158,7 +165,7 @@ fn page(status: &str, title: &str, text: &str) -> Vec<u8> {
 }
 
 /// Reads one request head; `None` if the connection sent no complete head.
-async fn read_head(stream: &mut tokio::net::TcpStream) -> Option<String> {
+async fn read_head(stream: &mut TcpStream) -> Option<String> {
     let mut buf = Vec::with_capacity(1024);
     let mut chunk = [0u8; 2048];
     while buf.len() < MAX_REQUEST_HEAD {
@@ -174,59 +181,72 @@ async fn read_head(stream: &mut tokio::net::TcpStream) -> Option<String> {
     None
 }
 
+/// Serves one connection: `None` unless it was a `GET /callback`.
+async fn serve(mut stream: TcpStream, expected: &Expected<'_>) -> Option<Checked> {
+    let head = tokio::time::timeout(HEAD_TIMEOUT, read_head(&mut stream))
+        .await
+        .ok()
+        .flatten()?;
+    let line = head.lines().next().unwrap_or("");
+    let mut parts = line.split(' ');
+    let (method, target) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
+    let (path, query) = target.split_once('?').unwrap_or((target, ""));
+    if method != "GET" || path != "/callback" {
+        let _ = stream
+            .write_all(&page("404 Not Found", "Not found", "Nothing here."))
+            .await;
+        return None;
+    }
+    let outcome = check(&params_of(query), expected);
+    let response = match &outcome {
+        Checked::Code(_) => page(
+            "200 OK",
+            "lessdugin: signed in",
+            "Authorization complete. You can close this tab and return to the terminal.",
+        ),
+        Checked::Denied(_) => page(
+            "400 Bad Request",
+            "lessdugin: sign-in failed",
+            "The authorization did not complete. See the terminal for details.",
+        ),
+        Checked::Foreign => page(
+            "400 Bad Request",
+            "lessdugin: unknown request",
+            "This callback does not belong to the pending login.",
+        ),
+    };
+    let _ = stream.write_all(&response).await;
+    let _ = stream.shutdown().await;
+    Some(outcome)
+}
+
 /// Waits for the redirect to `GET /callback` on `listener` and returns its code. Requests for
 /// other paths, other methods, and callbacks whose `state` is not ours are answered and
-/// ignored. Fails after `timeout`.
+/// ignored. Connections are served concurrently (each has [`HEAD_TIMEOUT`] to send its request
+/// head), so a silent connection does not hold up the browser's. Fails after `timeout`.
 pub(crate) async fn accept(
     listener: &TcpListener,
     expected: &Expected<'_>,
     timeout: Duration,
 ) -> Result<AuthorizationCode, EngineError> {
     let work = async {
+        let mut connections = FuturesUnordered::new();
         loop {
-            let Ok((mut stream, _)) = listener.accept().await else {
-                continue;
-            };
-            let head = tokio::time::timeout(Duration::from_secs(10), read_head(&mut stream))
-                .await
-                .ok()
-                .flatten();
-            let Some(head) = head else { continue };
-            let line = head.lines().next().unwrap_or("");
-            let mut parts = line.split(' ');
-            let (method, target) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
-            let (path, query) = target.split_once('?').unwrap_or((target, ""));
-            if method != "GET" || path != "/callback" {
-                let _ = stream
-                    .write_all(&page("404 Not Found", "Not found", "Nothing here."))
-                    .await;
-                continue;
-            }
-            let outcome = check(&params_of(query), expected);
-            let response = match &outcome {
-                Checked::Code(_) => page(
-                    "200 OK",
-                    "lessdugin: signed in",
-                    "Authorization complete. You can close this tab and return to the terminal.",
-                ),
-                Checked::Denied(_) => page(
-                    "400 Bad Request",
-                    "lessdugin: sign-in failed",
-                    "The authorization did not complete. See the terminal for details.",
-                ),
-                Checked::Foreign => page(
-                    "400 Bad Request",
-                    "lessdugin: unknown request",
-                    "This callback does not belong to the pending login.",
-                ),
-            };
-            let _ = stream.write_all(&response).await;
-            let _ = stream.shutdown().await;
-            match outcome {
-                Checked::Code(c) => return Ok(c),
-                Checked::Denied(e) => return Err(e),
-                Checked::Foreign => {
-                    tracing::warn!("ignored a callback that does not belong to this login");
+            tokio::select! {
+                accepted = listener.accept(), if connections.len() < MAX_CONNECTIONS => {
+                    if let Ok((stream, _)) = accepted {
+                        connections.push(serve(stream, expected));
+                    }
+                }
+                Some(outcome) = connections.next(), if !connections.is_empty() => {
+                    match outcome {
+                        Some(Checked::Code(c)) => return Ok(c),
+                        Some(Checked::Denied(e)) => return Err(e),
+                        Some(Checked::Foreign) => {
+                            tracing::warn!("ignored a callback that does not belong to this login");
+                        }
+                        None => {}
+                    }
                 }
             }
         }
@@ -329,6 +349,41 @@ mod tests {
         assert!(a.starts_with("HTTP/1.1 404"));
         assert!(b.starts_with("HTTP/1.1 400"));
         assert!(c.starts_with("HTTP/1.1 200") && c.contains("no-store"));
+    }
+
+    #[tokio::test]
+    async fn silent_connections_do_not_stall_the_callback() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let client = tokio::spawn(async move {
+            // A local process opens connections and sends nothing.
+            let mut idle = Vec::new();
+            for _ in 0..3 {
+                idle.push(
+                    tokio::net::TcpStream::connect(("127.0.0.1", port))
+                        .await
+                        .unwrap(),
+                );
+            }
+            let mut s = tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .unwrap();
+            s.write_all(
+                b"GET /callback?code=good&state=st4te&iss=https%3A%2F%2Fas.example.com HTTP/1.1\r\n\r\n",
+            )
+            .await
+            .unwrap();
+            let mut out = String::new();
+            s.read_to_string(&mut out).await.unwrap();
+            drop(idle);
+            out
+        });
+        // Well within the 10 s each idle connection may take.
+        let code = accept(&listener, &EXP, Duration::from_secs(3))
+            .await
+            .unwrap();
+        assert_eq!(code.0.expose(), "good");
+        assert!(client.await.unwrap().starts_with("HTTP/1.1 200"));
     }
 
     #[tokio::test]

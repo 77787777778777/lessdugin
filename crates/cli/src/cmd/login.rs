@@ -1,15 +1,22 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! `lessdugin login` (`docs/design/synthesis-v1.md` §6.7, `threat-model.md` AUTH-1…AUTH-5).
+//! `lessdugin login` (`docs/design/synthesis-v1.md` §6.7, `threat-model.md` AUTH-1…AUTH-5, F25).
+//!
+//! The account is resolved first, without the cache ([`resolve_login_target`]); a handle found
+//! only through a hint is refused. When the input handle is not the account's handle verified
+//! both ways, the DID is shown and the user must confirm (on a terminal) before any credential
+//! is sent; without a terminal the login is refused (give the DID instead).
 
 use std::time::Duration;
 
 use lessdugin_core::engine::{EngineError, ErrorCode, PinStatus, is_app_password_shape};
 use lessdugin_native::auth::oauth::{self, ClientKind, OAuthOptions};
-use lessdugin_native::auth::{AppPassword, Backend, LoginOutcome, login_app_password};
+use lessdugin_native::auth::{
+    AppPassword, Backend, LoginOutcome, LoginTarget, login_app_password, resolve_login_target,
+};
 
 use crate::args::{LoginArgs, OAuthClientArg};
 use crate::ctx::{CliError, Ctx};
-use crate::out::{Style, TermText, cat, lit, name, tt};
+use crate::out::{Style, TermText, cat, dto, lit, name, tt};
 use crate::prompt;
 
 /// How long the loopback listener waits for the browser.
@@ -56,9 +63,55 @@ fn read_actor(args: &LoginArgs) -> Result<String, CliError> {
     }
 }
 
+/// Shows who a target is when the input handle is not its verified handle, and asks (on a
+/// terminal) before any credential is sent; refuses without a terminal.
+fn confirm_target(ctx: &Ctx, target: &LoginTarget, can_ask: bool) -> Result<(), CliError> {
+    if !target.needs_confirmation() {
+        return Ok(());
+    }
+    let input = target.input_handle.as_deref().unwrap_or(&target.input);
+    let whose = match (&target.handle, &target.claimed_handle) {
+        (Some(h), _) => cat([lit("whose handle is @"), name(h)]),
+        (None, Some(c)) => cat([
+            lit("whose claimed handle "),
+            name(c),
+            lit(" is not verified"),
+        ]),
+        (None, None) => lit("which has no handle"),
+    };
+    ctx.out.err_line(&[
+        (lit("warning: "), Style::Warn),
+        (
+            cat([
+                name(input),
+                lit(" points to "),
+                tt(target.did.as_str()),
+                lit(", "),
+                whose,
+                lit(". The handle is not verified for that account."),
+            ]),
+            Style::Plain,
+        ),
+    ]);
+    if !can_ask {
+        return Err(EngineError::blocked(format!(
+            "the handle {input} is not verified for {}; log in with the DID instead",
+            target.did
+        ))
+        .with_detail("kind", "unverifiedHandle")
+        .with_detail("did", target.did.as_str())
+        .into());
+    }
+    if prompt::confirm(&format!("Log in as {}?", target.did)) {
+        Ok(())
+    } else {
+        Err(EngineError::new(ErrorCode::AuthRequired, "login cancelled").into())
+    }
+}
+
 /// `lessdugin login`.
 pub async fn run(ctx: &Ctx, args: LoginArgs) -> Result<(), CliError> {
-    if args.password_argv.is_some() {
+    if args.password_argv.is_some() || !args.extra.is_empty() {
         return Err(argv_password_refusal());
     }
     if args.actor.as_deref().is_some_and(is_app_password_shape) {
@@ -73,16 +126,24 @@ pub async fn run(ctx: &Ctx, args: LoginArgs) -> Result<(), CliError> {
     };
     let actor = read_actor(&args)?;
     let engine = ctx.engine()?;
+    // Resolved now, never through a hint, before any credential leaves the machine.
+    let target = resolve_login_target(engine, &actor).await?;
+    let can_ask = !args.password_stdin && prompt::stdin_is_tty();
+    confirm_target(ctx, &target, can_ask)?;
     let store = ctx.store();
     let outcome = match password {
-        Some(pw) => login_app_password(engine, &store, &ctx.paths, &actor, &pw).await?,
-        None => oauth_login(ctx, &actor, &args).await?,
+        Some(pw) => login_app_password(engine, &store, &ctx.paths, &target, &pw).await?,
+        None => oauth_login(ctx, &target, &args).await?,
     };
     report(ctx, &outcome);
     Ok(())
 }
 
-async fn oauth_login(ctx: &Ctx, actor: &str, args: &LoginArgs) -> Result<LoginOutcome, CliError> {
+async fn oauth_login(
+    ctx: &Ctx,
+    target: &LoginTarget,
+    args: &LoginArgs,
+) -> Result<LoginOutcome, CliError> {
     let engine = ctx.engine()?;
     let store = ctx.store();
     let client = match args.oauth_client {
@@ -94,13 +155,14 @@ async fn oauth_login(ctx: &Ctx, actor: &str, args: &LoginArgs) -> Result<LoginOu
         hosted_fallback: args.oauth_client.is_none(),
         listen: !args.no_browser,
     };
-    let pending = oauth::begin(engine, actor, &opts).await?;
+    let pending = oauth::begin(engine, target, &opts).await?;
     let out = &ctx.out;
+    // The account is named by its verified handle, or its DID: never by an unverified input.
     out.err_line(&[
         (lit("Signing in at "), Style::Plain),
         (tt(&pending.authorization_server_host()), Style::Bold),
         (lit(" (authorization server of "), Style::Plain),
-        (name(actor), Style::Plain),
+        (name(&target.display_name()), Style::Plain),
         (lit(")"), Style::Plain),
     ]);
     let code = if args.no_browser {
@@ -199,7 +261,7 @@ fn detail_str(e: &EngineError, key: &str) -> String {
 fn report(ctx: &Ctx, o: &LoginOutcome) {
     let out = &ctx.out;
     if out.is_json() {
-        out.json(&o.account);
+        out.json(&dto(&o.account));
         return;
     }
     let who = match &o.account.handle {

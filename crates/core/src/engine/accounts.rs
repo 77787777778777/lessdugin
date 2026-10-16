@@ -16,6 +16,15 @@
 //!                     `confirm_issuer_change`, then re-pin
 //! ```
 //!
+//! Login code that must order its own steps (store the session only after the binding holds,
+//! record the account only after the session is stored) calls [`Engine::bind_login`], then
+//! [`Engine::record_account`] with the [`LoginBinding`] it returned: the binding is checked once.
+//! A `LoginBinding` can only be made by `bind_login`.
+//!
+//! [`Engine::refresh_account`] re-checks a recorded account against its current DID document:
+//! the recorded handle follows the identity (verified both ways, or none), and a document whose
+//! PDS is no longer the one bound at login means `needs-relogin` (`threat-model.md` AUTH-8).
+//!
 //! State rows (in `state`, `sync.md` §10.4 `loc` kinds): `("loc", "account", did)`,
 //! `("loc", "active_account")` and `("loc", "as_pin", did)`.
 
@@ -25,6 +34,7 @@ use lessdugin_atp::syntax::Did;
 
 use super::{Engine, EngineError};
 use crate::dto::{AccountView, AuthKind};
+use crate::engine::ErrorCode;
 use crate::host::{Dir, Host, KeyRange, KvOp, KvStore};
 use crate::identity::IdentityLevel;
 use crate::identity::doc::check_service_endpoint;
@@ -106,7 +116,11 @@ pub enum PinStatus {
     Changed,
 }
 
-/// A verified login binding.
+/// Proof that a [`LoginBinding`] came from [`Engine::bind_login`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Sealed;
+
+/// A verified login binding. Only [`Engine::bind_login`] makes one.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LoginBinding {
@@ -125,6 +139,11 @@ pub struct LoginBinding {
     /// The previously pinned issuer, when it changed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub previous_issuer: Option<String>,
+    /// The auth kind that was bound.
+    #[serde(skip)]
+    auth: Option<AuthKind>,
+    #[serde(skip)]
+    _sealed: Sealed,
 }
 
 /// `true` for the app-password shape `xxxx-xxxx-xxxx-xxxx` (`threat-model.md` AUTH-3). Login code
@@ -263,6 +282,8 @@ impl<H: Host> Engine<H> {
             issuer: None,
             pin: PinStatus::NotApplicable,
             previous_issuer: None,
+            auth: Some(info.auth),
+            _sealed: Sealed,
         };
         if info.auth == AuthKind::AppPassword {
             return Ok(binding);
@@ -334,6 +355,25 @@ impl<H: Host> Engine<H> {
     /// account. Call it before using the session (`sync.md` §3.6).
     pub async fn add_account(&self, info: AccountInfo) -> Result<AccountView, EngineError> {
         let binding = self.bind_login(&info).await?;
+        self.record_account(&info, &binding).await
+    }
+
+    /// Records the account of a binding that [`Engine::bind_login`] verified for `info` (without
+    /// checking it a second time), and makes it the active account.
+    pub async fn record_account(
+        &self,
+        info: &AccountInfo,
+        binding: &LoginBinding,
+    ) -> Result<AccountView, EngineError> {
+        let did = parse_did(&info.did)?;
+        if did.as_str() != binding.did
+            || binding.auth != Some(info.auth)
+            || (info.auth == AuthKind::Oauth && binding.issuer != info.issuer)
+        {
+            return Err(EngineError::internal(
+                "the login binding belongs to another session",
+            ));
+        }
         let added = match self
             .state_get::<AccountRow>(account_key(&binding.did))
             .await?
@@ -360,6 +400,55 @@ impl<H: Host> Engine<H> {
         ])
         .await?;
         Ok(row.view(Some(&binding.did)))
+    }
+
+    /// Re-checks a recorded account against its DID document (the cached one, at most 24 h old):
+    /// the recorded handle becomes the identity's handle verified both ways (or none), and a
+    /// document whose PDS is not the PDS bound at login fails with `auth_required`
+    /// (`detail.kind = "needsRelogin"`, `threat-model.md` AUTH-8) — never silent re-targeting.
+    /// A hint identity changes nothing. Resolution failures are returned as errors and leave the
+    /// record unchanged.
+    pub async fn refresh_account(&self, did: &str) -> Result<AccountView, EngineError> {
+        let did = parse_did(did)?;
+        let Some(mut row) = self
+            .state_get::<AccountRow>(account_key(did.as_str()))
+            .await?
+        else {
+            return Err(EngineError::not_found(format!("no account {did}")));
+        };
+        let active = self.active_did().await?;
+        let ident = self.resolver().resolve_did(&did).await?;
+        if ident.level != IdentityLevel::Doc {
+            return Ok(row.view(active.as_deref()));
+        }
+        if ident.pds.as_deref() != Some(row.pds.as_str()) {
+            let now = ident
+                .pds
+                .clone()
+                .or(ident.pds_problem.clone())
+                .unwrap_or_default();
+            return Err(EngineError::new(
+                ErrorCode::AuthRequired,
+                format!(
+                    "the PDS of {did} changed ({} at login, now {now}); log in again",
+                    row.pds
+                ),
+            )
+            .with_detail("kind", "needsRelogin")
+            .with_detail("did", did.as_str())
+            .with_detail("boundPds", row.pds.as_str())
+            .with_detail("docPds", ident.pds.as_deref().unwrap_or("")));
+        }
+        let handle = ident.handle().map(str::to_owned);
+        if handle != row.handle {
+            row.handle = handle;
+            self.state_write(vec![KvOp::Put(
+                account_key(did.as_str()),
+                Self::encode_row(&row)?,
+            )])
+            .await?;
+        }
+        Ok(row.view(active.as_deref()))
     }
 
     async fn active_did(&self) -> Result<Option<String>, EngineError> {

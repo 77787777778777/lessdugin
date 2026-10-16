@@ -22,7 +22,7 @@ pub use error::{EngineError, ErrorCode};
 
 use crate::dto::{ActorView, VerifyReport};
 use crate::host::Host;
-use crate::identity::{HandleResolution, ResolvedActor, Resolver};
+use crate::identity::{ResolvedActor, Resolver};
 use crate::xrpc::Xrpc;
 
 /// The engine.
@@ -95,6 +95,13 @@ impl<H: Host> Engine<H> {
         Ok(self.resolver.resolve_actor(input).await?)
     }
 
+    /// Like [`Engine::resolve_identity`], bypassing the identity cache: the handle is looked up
+    /// now and the DID document is fetched now. Login code uses it before any credential leaves
+    /// the machine (`sync.md` §3.6).
+    pub async fn resolve_identity_fresh(&self, input: &str) -> Result<ResolvedActor, EngineError> {
+        Ok(self.resolver.resolve_actor_fresh(input).await?)
+    }
+
     /// Drops the cached identity of `did` (and its claimed handle).
     pub async fn invalidate_identity(&self, did: &str) -> Result<(), EngineError> {
         let did = Did::parse(did).map_err(|e| EngineError::invalid_ref(e.to_string()))?;
@@ -114,17 +121,8 @@ impl<H: Host> Engine<H> {
                     .resolver
                     .check_handle(h.as_str())
                     .map_err(|e| EngineError::invalid_ref(format!("{h}: {e}")))?;
-                match self.resolver.resolve_handle(&h).await {
-                    HandleResolution::Did { did, .. } => loose.with_did(did),
-                    HandleResolution::NoAnswer => {
-                        return Err(EngineError::not_found(format!(
-                            "handle {h} did not resolve to a DID"
-                        )));
-                    }
-                    HandleResolution::Invalid => {
-                        return Err(EngineError::invalid_ref(format!("handle {h} is invalid")));
-                    }
-                }
+                let (did, _) = self.resolver.resolve_handle_did(&h).await?;
+                loose.with_did(did)
             }
         };
         let strict = loose.to_strict().ok_or_else(|| {

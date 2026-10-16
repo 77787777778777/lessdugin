@@ -12,7 +12,7 @@ use serde::Serialize;
 
 use crate::args::{AccountsAction, AccountsArgs, LogoutArgs};
 use crate::ctx::{CliError, Ctx, find_account};
-use crate::out::{Style, cat, lit, name, tt};
+use crate::out::{Style, cat, dto, lit, name, tt};
 use crate::prompt;
 
 fn who(a: &AccountView) -> crate::out::TermText {
@@ -27,6 +27,13 @@ fn auth_label(kind: AuthKind) -> &'static str {
         AuthKind::Oauth => "oauth",
         AuthKind::AppPassword => "app password",
     }
+}
+
+/// The `accounts --json` output.
+#[derive(Serialize)]
+struct AccountsView<'a> {
+    dto: u32,
+    accounts: &'a [AccountView],
 }
 
 /// The `logout --json` output.
@@ -63,6 +70,16 @@ pub async fn logout(ctx: &Ctx, args: LogoutArgs) -> Result<(), CliError> {
     let engine = ctx.engine()?;
     let report = logout_session(engine.host(), &ctx.store(), &account.did).await?;
     engine.remove_account(&account.did, args.purge).await?;
+    if let Some(why) = &report.unreadable {
+        ctx.out.warn(cat([
+            lit("the stored session could not be read safely ("),
+            tt(why),
+            lit(
+                "); it was deleted without being revoked. If it may have leaked, revoke it in \
+                 your PDS's settings.",
+            ),
+        ]));
+    }
     if ctx.out.is_json() {
         ctx.out.json(&LogoutView {
             dto: DTO_VERSION,
@@ -115,7 +132,7 @@ pub async fn whoami(ctx: &Ctx) -> Result<(), CliError> {
         .into());
     }
     if ctx.out.is_json() {
-        ctx.out.json(&account);
+        ctx.out.json(&dto(&account));
         return Ok(());
     }
     ctx.out.line(&[(who(&account), Style::Bold)]);
@@ -141,7 +158,7 @@ pub async fn accounts(ctx: &Ctx, args: AccountsArgs) -> Result<(), CliError> {
         engine.set_active_account(&a.did).await?;
         let a = engine.account(&a.did).await?.unwrap_or(a);
         if ctx.out.is_json() {
-            ctx.out.json(&a);
+            ctx.out.json(&dto(&a));
         } else {
             ctx.out.line(&[
                 (lit("Active account: "), Style::Plain),
@@ -152,7 +169,10 @@ pub async fn accounts(ctx: &Ctx, args: AccountsArgs) -> Result<(), CliError> {
     }
     let list = engine.accounts().await?;
     if ctx.out.is_json() {
-        ctx.out.json(&list);
+        ctx.out.json(&AccountsView {
+            dto: DTO_VERSION,
+            accounts: &list,
+        });
         return Ok(());
     }
     if list.is_empty() {

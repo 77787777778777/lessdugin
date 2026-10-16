@@ -243,8 +243,13 @@ fn deep_is_reported_but_does_not_decide() {
     assert_eq!(r.result, VerifyOutcome::Proven);
     let deep = r.checks.last().unwrap();
     assert_eq!(deep.name, checks::DEEP);
-    assert!(!deep.ok);
-    assert_eq!(deep.detail.as_deref(), Some("not implemented in M1"));
+    // Skipped, not failed: a `proven` report never carries a failing check.
+    assert!(deep.ok);
+    assert_eq!(
+        deep.detail.as_deref(),
+        Some(lessdugin_core::verify::DEEP_SKIPPED)
+    );
+    assert!(r.checks.iter().all(|c| c.ok), "{:?}", r.checks);
 }
 
 #[test]

@@ -10,6 +10,15 @@
 //!   directory, written to an `O_EXCL | O_NOFOLLOW` temporary name and renamed atomically, and
 //!   refused on read if it is a symlink or grants any group or world permission.
 //!
+//! A keyring that fails only sometimes (locked for a moment) must not bring back an older,
+//! already-used session: every stored session carries `savedMs` (strictly increasing per
+//! account, [`next_saved_ms`]); a save that falls back to the file also deletes the keyring
+//! entry, and [`SecretStore::load`] returns the newer of the keyring entry and the file when both
+//! exist. Sessions refreshed by another process are adopted only if strictly newer.
+//!
+//! Devnet sessions use their own keyring service ([`SecretStore::with_keyring_service`]) and
+//! data directory, so they never meet production sessions.
+//!
 //! App passwords themselves are never stored (AUTH-3), only the resulting session.
 
 use std::path::{Path, PathBuf};
@@ -58,6 +67,21 @@ impl StoredSession {
             Self::Oauth(d) => &d.pds,
         }
     }
+
+    /// When this version of the session was saved (ms; 0 for sessions saved before the field
+    /// existed).
+    pub fn saved_ms(&self) -> i64 {
+        match self {
+            Self::AppPassword(d) => d.saved_ms,
+            Self::Oauth(d) => d.saved_ms,
+        }
+    }
+}
+
+/// The `savedMs` stamp of a new version of a session whose previous version had `previous`:
+/// the clock, but always strictly greater than `previous`.
+pub fn next_saved_ms(previous: i64) -> i64 {
+    super::now_ms().max(previous.saturating_add(1))
 }
 
 /// An app-password session. `Debug` redacts the tokens.
@@ -84,6 +108,9 @@ pub struct AppPasswordData {
     pub refresh_exp_ms: Option<i64>,
     /// When the session was created (ms).
     pub created_ms: i64,
+    /// When this version was saved (ms, strictly increasing per account; [`next_saved_ms`]).
+    #[serde(default)]
+    pub saved_ms: i64,
 }
 
 /// An OAuth session. `Debug` redacts the tokens and the DPoP key.
@@ -125,6 +152,9 @@ pub struct OAuthData {
     pub dpop_host_nonce: Option<String>,
     /// When the session was created (ms).
     pub created_ms: i64,
+    /// When this version was saved (ms, strictly increasing per account; [`next_saved_ms`]).
+    #[serde(default)]
+    pub saved_ms: i64,
 }
 
 /// Where a session was stored.
@@ -152,6 +182,7 @@ pub enum KeyringStatus {
 pub struct SecretStore {
     dir: PathBuf,
     use_keyring: bool,
+    service: String,
 }
 
 fn storage_error(what: &str, e: impl std::fmt::Display) -> EngineError {
@@ -175,6 +206,7 @@ impl SecretStore {
         Self {
             dir: paths.data_dir.join("sessions"),
             use_keyring: keyring_enabled_by_env(),
+            service: KEYRING_SERVICE.to_owned(),
         }
     }
 
@@ -183,7 +215,20 @@ impl SecretStore {
         Self {
             dir: dir.into(),
             use_keyring: false,
+            service: KEYRING_SERVICE.to_owned(),
         }
+    }
+
+    /// The same store with another keyring service name (devnet sessions use
+    /// `lessdugin-devnet-<h(plc, pds)>`, so they never share entries with production).
+    pub fn with_keyring_service(mut self, service: impl Into<String>) -> Self {
+        self.service = service.into();
+        self
+    }
+
+    /// The keyring service name.
+    pub fn keyring_service(&self) -> &str {
+        &self.service
     }
 
     /// The fallback directory.
@@ -206,12 +251,13 @@ impl SecretStore {
         if !self.use_keyring {
             return KeyringStatus::Disabled;
         }
-        let probe = tokio::task::spawn_blocking(|| {
+        let service = self.service.clone();
+        let probe = tokio::task::spawn_blocking(move || {
             // The store's own initialisation error says why (e.g. no D-Bus session).
             if let Err(e) = keyring::Entry::store_status() {
                 return Err(e.to_string());
             }
-            let entry = keyring::Entry::new(KEYRING_SERVICE, "lessdugin-doctor-probe")
+            let entry = keyring::Entry::new(&service, "lessdugin-doctor-probe")
                 .map_err(|e| e.to_string())?;
             match entry.get_secret() {
                 Ok(_) | Err(keyring::Error::NoEntry) => Ok(()),
@@ -226,48 +272,89 @@ impl SecretStore {
         }
     }
 
-    /// Loads the session of `did`: the keyring first, then the file fallback.
-    pub async fn load(&self, did: &str) -> Result<Option<StoredSession>, EngineError> {
-        if self.use_keyring {
-            let account = did.to_owned();
-            let got = tokio::task::spawn_blocking(move || {
-                keyring::Entry::new(KEYRING_SERVICE, &account)?.get_secret()
-            })
-            .await
-            .map_err(|e| storage_error("keyring", e))?;
-            match got {
-                Ok(bytes) => return parse_session(&bytes, did).map(Some),
-                Err(keyring::Error::NoEntry) => {}
-                Err(e) => {
-                    tracing::debug!(error = %e, "keyring unavailable; trying the session file")
-                }
-            }
-        }
-        let path = self.session_file(did);
-        let bytes = tokio::task::spawn_blocking(move || {
-            fsutil::read_private(&path, SESSION_MAX_BYTES, true)
+    async fn keyring_get(&self, did: &str) -> Result<Option<Vec<u8>>, EngineError> {
+        let (service, account) = (self.service.clone(), did.to_owned());
+        let got = tokio::task::spawn_blocking(move || {
+            keyring::Entry::new(&service, &account)?.get_secret()
         })
         .await
-        .map_err(|e| storage_error("session file", e))?
-        .map_err(|e| {
-            EngineError::blocked(format!("refusing to read the session file: {e}"))
-                .with_detail("kind", "insecureSessionFile")
-        })?;
-        match bytes {
-            Some(b) => parse_session(&b, did).map(Some),
-            None => Ok(None),
+        .map_err(|e| storage_error("keyring", e))?;
+        match got {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(e) => {
+                tracing::debug!(error = %e, "keyring unavailable; trying the session file");
+                Ok(None)
+            }
         }
     }
 
+    async fn keyring_delete(&self, did: &str) -> Result<(), EngineError> {
+        let (service, account) = (self.service.clone(), did.to_owned());
+        let del = tokio::task::spawn_blocking(move || {
+            keyring::Entry::new(&service, &account)?.delete_credential()
+        })
+        .await
+        .map_err(|e| storage_error("keyring", e))?;
+        match del {
+            Ok(()) | Err(keyring::Error::NoEntry) => {}
+            Err(e) => tracing::debug!(error = %e, "keyring delete failed"),
+        }
+        Ok(())
+    }
+
+    async fn file_get(&self, did: &str) -> Result<Option<Vec<u8>>, EngineError> {
+        let path = self.session_file(did);
+        tokio::task::spawn_blocking(move || fsutil::read_private(&path, SESSION_MAX_BYTES, true))
+            .await
+            .map_err(|e| storage_error("session file", e))?
+            .map_err(|e| {
+                EngineError::blocked(format!("refusing to read the session file: {e}"))
+                    .with_detail("kind", "insecureSessionFile")
+            })
+    }
+
+    /// Loads the session of `did` from the keyring and the file fallback; when both hold one,
+    /// the newer (`savedMs`) wins, the keyring on a tie. With a usable keyring entry, a file
+    /// that cannot be read safely is ignored (and logged); without one, it is an error.
+    pub async fn load(&self, did: &str) -> Result<Option<StoredSession>, EngineError> {
+        let from_keyring = if self.use_keyring {
+            match self.keyring_get(did).await? {
+                Some(bytes) => Some(parse_session(&bytes, did)?),
+                None => None,
+            }
+        } else {
+            None
+        };
+        let from_file = match self.file_get(did).await {
+            Ok(Some(bytes)) => Some(parse_session(&bytes, did)),
+            Ok(None) => None,
+            Err(e) if from_keyring.is_some() => {
+                tracing::warn!(error = %e.message, "ignoring an unsafe session file");
+                None
+            }
+            Err(e) => return Err(e),
+        };
+        Ok(match (from_keyring, from_file) {
+            (k, None) => k,
+            (None, Some(f)) => Some(f?),
+            (Some(k), Some(Err(e))) => {
+                tracing::debug!(error = %e.message, "ignoring an unreadable session file");
+                Some(k)
+            }
+            (Some(k), Some(Ok(f))) => Some(newest(k, f)),
+        })
+    }
+
     /// Saves a session: in the keyring if it works (removing any fallback file), else in the
-    /// fallback file.
+    /// fallback file (removing any keyring entry, which would be older).
     pub async fn save(&self, session: &StoredSession) -> Result<Backend, EngineError> {
         let bytes = serde_json::to_vec(session).map_err(|e| storage_error("session", e))?;
         let did = session.did().to_owned();
         if self.use_keyring {
-            let (account, secret) = (did.clone(), bytes.clone());
+            let (service, account, secret) = (self.service.clone(), did.clone(), bytes.clone());
             let set = tokio::task::spawn_blocking(move || {
-                keyring::Entry::new(KEYRING_SERVICE, &account)?.set_secret(&secret)
+                keyring::Entry::new(&service, &account)?.set_secret(&secret)
             })
             .await
             .map_err(|e| storage_error("keyring", e))?;
@@ -288,22 +375,17 @@ impl SecretStore {
             .await
             .map_err(|e| storage_error("session file", e))?
             .map_err(|e| storage_error("cannot write the session file", e))?;
+        if self.use_keyring {
+            // Best effort: if the entry stays, `load` still prefers the newer file.
+            self.keyring_delete(&did).await?;
+        }
         Ok(Backend::File(path))
     }
 
     /// Deletes the session of `did` from the keyring and the fallback file.
     pub async fn delete(&self, did: &str) -> Result<(), EngineError> {
         if self.use_keyring {
-            let account = did.to_owned();
-            let del = tokio::task::spawn_blocking(move || {
-                keyring::Entry::new(KEYRING_SERVICE, &account)?.delete_credential()
-            })
-            .await
-            .map_err(|e| storage_error("keyring", e))?;
-            match del {
-                Ok(()) | Err(keyring::Error::NoEntry) => {}
-                Err(e) => tracing::debug!(error = %e, "keyring delete failed"),
-            }
+            self.keyring_delete(did).await?;
         }
         let path = self.session_file(did);
         match tokio::task::spawn_blocking(move || std::fs::remove_file(path))
@@ -315,6 +397,11 @@ impl SecretStore {
             Err(e) => Err(storage_error("cannot delete the session file", e)),
         }
     }
+}
+
+/// The newer of two stored versions of one session (`savedMs`); `a` on a tie.
+pub fn newest(a: StoredSession, b: StoredSession) -> StoredSession {
+    if b.saved_ms() > a.saved_ms() { b } else { a }
 }
 
 fn parse_session(bytes: &[u8], did: &str) -> Result<StoredSession, EngineError> {
@@ -348,6 +435,7 @@ mod tests {
             access_exp_ms: Some(1),
             refresh_exp_ms: None,
             created_ms: 0,
+            saved_ms: 0,
         })
     }
 
@@ -374,6 +462,7 @@ mod tests {
             dpop: SecretJson(serde_json::json!({"dpop_key": {"d": "jwk-private"}})),
             dpop_host_nonce: None,
             created_ms: 0,
+            saved_ms: 0,
         });
         let s = format!("{o:?}");
         assert!(
@@ -421,5 +510,45 @@ mod tests {
         store.delete(did).await.unwrap();
         store.delete(did).await.unwrap();
         assert_eq!(store.load(did).await.unwrap(), None);
+    }
+
+    fn stamped(did: &str, saved_ms: i64, refresh: &str) -> StoredSession {
+        let StoredSession::AppPassword(mut d) = sample(did) else {
+            unreachable!()
+        };
+        d.saved_ms = saved_ms;
+        d.refresh_jwt = Secret::new(refresh);
+        StoredSession::AppPassword(d)
+    }
+
+    #[test]
+    fn the_newest_copy_wins() {
+        let did = "did:plc:abc";
+        let old = stamped(did, 10, "old");
+        let new = stamped(did, 11, "new");
+        assert_eq!(newest(old.clone(), new.clone()), new);
+        assert_eq!(newest(new.clone(), old.clone()), new);
+        // A tie keeps the first (the keyring's).
+        let other = stamped(did, 11, "other");
+        assert_eq!(newest(new.clone(), other.clone()), new);
+        // Stamps always increase, even if the clock went back.
+        let far = i64::MAX / 2;
+        assert_eq!(next_saved_ms(far), far + 1);
+        assert!(next_saved_ms(0) >= 1);
+        // Old sessions without the field still parse.
+        let json = serde_json::to_value(sample(did)).unwrap();
+        let mut obj = json.as_object().unwrap().clone();
+        obj.remove("savedMs");
+        let back = parse_session(&serde_json::to_vec(&obj).unwrap(), did).unwrap();
+        assert_eq!(back.saved_ms(), 0);
+    }
+
+    #[tokio::test]
+    async fn keyring_services_are_separate() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SecretStore::file_only(dir.path());
+        assert_eq!(store.keyring_service(), KEYRING_SERVICE);
+        let dev = store.with_keyring_service("lessdugin-devnet-x");
+        assert_eq!(dev.keyring_service(), "lessdugin-devnet-x");
     }
 }

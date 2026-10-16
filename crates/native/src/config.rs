@@ -114,6 +114,19 @@ impl Paths {
         }
     }
 
+    /// The paths of a devnet: its own data and cache directories,
+    /// `<data>/devnet-<id>/` and `<cache>/devnet-<id>/` ([`DevnetProfile::id`]), so that devnet
+    /// identities, accounts, issuer pins and sessions never meet production ones (or another
+    /// devnet's). The configuration file is shared.
+    pub fn for_devnet(&self, devnet: &DevnetProfile) -> Self {
+        let dir = format!("devnet-{}", devnet.id());
+        Self {
+            config_file: self.config_file.clone(),
+            data_dir: self.data_dir.join(&dir),
+            cache_dir: self.cache_dir.join(&dir),
+        }
+    }
+
     /// The durable `state` store.
     pub fn state_db(&self) -> PathBuf {
         self.data_dir.join("state.sqlite")
@@ -324,6 +337,19 @@ pub struct DevnetProfile {
     /// A local Jetstream, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jetstream: Option<Url>,
+}
+
+impl DevnetProfile {
+    /// `h(plc + "\n" + pds)`: names this devnet's directories ([`Paths::for_devnet`]) and its
+    /// keyring service (`lessdugin-devnet-<id>`).
+    pub fn id(&self) -> String {
+        lock_hash(&format!("{}\n{}", self.plc.as_str(), self.pds.as_str()))
+    }
+
+    /// The keyring service of this devnet's sessions.
+    pub fn keyring_service(&self) -> String {
+        format!("lessdugin-devnet-{}", self.id())
+    }
 }
 
 /// Which sources to use (`sync.md` §2.3).
@@ -711,6 +737,35 @@ mod tests {
             Paths::resolve(Some(Path::new("/y"))).unwrap(),
             Paths::under(Path::new("/y"))
         );
+    }
+
+    #[test]
+    fn devnets_have_their_own_directories() {
+        let p = Paths::under(Path::new("/x"));
+        let dev = |plc: &str, pds: &str| DevnetProfile {
+            plc: Url::parse(plc).unwrap(),
+            pds: Url::parse(pds).unwrap(),
+            jetstream: None,
+        };
+        let a = dev("http://localhost:2582", "http://localhost:2583");
+        let d = p.for_devnet(&a);
+        let id = a.id();
+        assert_eq!(id.len(), 16);
+        assert_eq!(d.config_file, p.config_file, "the configuration is shared");
+        assert_eq!(d.data_dir, Path::new("/x").join(format!("devnet-{id}")));
+        assert_eq!(
+            d.cache_dir,
+            Path::new("/x/cache").join(format!("devnet-{id}"))
+        );
+        assert!(d.state_db().starts_with(&d.data_dir));
+        assert!(d.cache_db().starts_with(&d.cache_dir));
+        assert_ne!(d.state_db(), p.state_db());
+        assert_ne!(d.cache_db(), p.cache_db());
+        // Another devnet, another place; the same devnet, the same place.
+        let b = dev("http://localhost:2582", "http://localhost:9999");
+        assert_ne!(p.for_devnet(&b).data_dir, d.data_dir);
+        assert_eq!(p.for_devnet(&a.clone()), d);
+        assert_eq!(a.keyring_service(), format!("lessdugin-devnet-{id}"));
     }
 
     #[test]

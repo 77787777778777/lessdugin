@@ -325,6 +325,8 @@ impl XrpcCallError {
                 message: Some(s),
             },
             HostError::Unsupported(s) => Self::Unsupported(s),
+            // A blob that does not hash to its CID is a refusal of bad data, not a bug.
+            HostError::CidMismatch => Self::Blocked(HostError::CidMismatch.to_string()),
             HostError::HttpStatus(status, name) => Self::from_parts(status, name, None, || None),
             other => Self::Other(other.to_string()),
         }

@@ -3,8 +3,14 @@
 //! devnet allowance): `createSession`, bearer requests through the host, proactive and
 //! reactive refresh, single-use refresh tokens under the refresh lock with two sessions
 //! standing in for two processes, no redirects for `UserPds`, and no secrets in `Debug`.
+//!
+//! The same server also acts as the devnet PLC directory (`GET /<did>`) and handle resolver, for
+//! the whole login: the login target (resolved now, never through a hint; confirmation when the
+//! input handle is not the verified one), the ordered login, `restore_session` refusing a
+//! migrated account, `logout` with an unsafe session file, and adoption of stored sessions only
+//! when strictly newer.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -15,10 +21,14 @@ use axum::routing::{get, post};
 use base64::Engine as _;
 use lessdugin_atp::syntax::Did;
 use lessdugin_core::engine::ErrorCode;
+use lessdugin_core::engine::{Engine, EngineConfig};
 use lessdugin_core::host::{Host, HostError, HttpRequest, Target};
 use lessdugin_core::store::mem::MemKv;
 use lessdugin_native::auth::app_password::{create_session, session_data};
-use lessdugin_native::auth::{AppPassword, AppPasswordSession, SecretStore, StoredSession};
+use lessdugin_native::auth::{
+    AppPassword, AppPasswordSession, SecretStore, StoredSession, login_app_password,
+    logout_session, resolve_login_target, restore_session,
+};
 use lessdugin_native::config::Paths;
 use lessdugin_native::host::{AuthSession, NativeHost, Net, NetPolicy};
 use serde_json::{Value, json};
@@ -39,6 +49,11 @@ struct Pds {
     /// Answer `getSession` with a redirect.
     redirect_get_session: Mutex<bool>,
     get_session_hits: AtomicUsize,
+    /// The DID document served at `GET /<did>` (the server is also the devnet PLC).
+    doc: Mutex<Option<Value>>,
+    /// `com.atproto.identity.resolveHandle` answers.
+    handles: Mutex<HashMap<String, String>>,
+    deleted_sessions: AtomicUsize,
 }
 
 fn jwt(kind: &str, n: usize, exp_secs: i64) -> String {
@@ -93,7 +108,50 @@ async fn serve(pds: Arc<Pds>) -> Url {
     let p2 = pds.clone();
     let p3 = pds.clone();
     let p4 = pds.clone();
+    let p5 = pds.clone();
+    let p6 = pds.clone();
+    let p7 = pds.clone();
     let app = Router::new()
+        .route(
+            "/{did}",
+            get(
+                move |axum::extract::Path(did): axum::extract::Path<String>| {
+                    let pds = p5.clone();
+                    async move {
+                        match pds.doc.lock().unwrap().clone() {
+                            Some(doc) if did == DID => axum::Json(doc).into_response(),
+                            _ => StatusCode::NOT_FOUND.into_response(),
+                        }
+                    }
+                },
+            ),
+        )
+        .route(
+            "/xrpc/com.atproto.identity.resolveHandle",
+            get(
+                move |axum::extract::Query(q): axum::extract::Query<HashMap<String, String>>| {
+                    let pds = p6.clone();
+                    async move {
+                        let handle = q.get("handle").cloned().unwrap_or_default();
+                        match pds.handles.lock().unwrap().get(&handle) {
+                            Some(did) => axum::Json(json!({"did": did})).into_response(),
+                            None => xrpc_error(StatusCode::BAD_REQUEST, "HandleNotFound"),
+                        }
+                    }
+                },
+            ),
+        )
+        .route(
+            "/xrpc/com.atproto.server.deleteSession",
+            post(move |h: HeaderMap| {
+                let pds = p7.clone();
+                async move {
+                    pds.refresh.lock().unwrap().remove(&bearer(&h));
+                    pds.deleted_sessions.fetch_add(1, Ordering::SeqCst);
+                    StatusCode::OK
+                }
+            }),
+        )
         .route(
             "/xrpc/com.atproto.server.createSession",
             post(move |axum::Json(body): axum::Json<Value>| {
@@ -344,4 +402,248 @@ async fn two_processes_refresh_once() {
         first.data().await.refresh_jwt,
         second.data().await.refresh_jwt
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Logins over a devnet-mode engine whose PLC and PDS are the fake server
+
+/// alice's DID document, with `pds` as her PDS and `handle` as her claimed handle.
+fn doc(pds: &str, handle: &str) -> Value {
+    json!({
+        "id": DID,
+        "alsoKnownAs": [format!("at://{handle}")],
+        "verificationMethod": [{
+            "id": format!("{DID}#atproto"),
+            "type": "Multikey",
+            "controller": DID,
+            "publicKeyMultibase": "zQ3shXjHeiBuRCKmM36cuYnm7YEMzhGnCmCyW92sRJ9pribSF",
+        }],
+        "service": [{
+            "id": "#atproto_pds",
+            "type": "AtprotoPersonalDataServer",
+            "serviceEndpoint": pds,
+        }],
+    })
+}
+
+impl Fixture {
+    fn engine(&self) -> Engine<NativeHost<MemKv>> {
+        {
+            let mut d = self.pds.doc.lock().unwrap();
+            if d.is_none() {
+                *d = Some(doc(&self.pds_str(), "alice.test"));
+            }
+        }
+        self.pds
+            .handles
+            .lock()
+            .unwrap()
+            .insert("alice.test".into(), DID.into());
+        let host = NativeHost::with_parts(
+            MemKv::new(),
+            MemKv::new(),
+            self.paths.blobs_dir(),
+            self.net.clone(),
+        );
+        Engine::new(
+            host,
+            EngineConfig::devnet(self.url.clone(), self.url.clone()),
+        )
+    }
+}
+
+#[tokio::test]
+async fn app_password_login_end_to_end() {
+    let f = fixture().await;
+    let e = f.engine();
+    let target = resolve_login_target(&e, "alice.test").await.unwrap();
+    assert_eq!(target.did.as_str(), DID);
+    assert_eq!(target.pds, f.pds_str());
+    assert!(!target.needs_confirmation());
+    assert_eq!(target.display_name(), "@alice.test");
+    let pw = AppPassword::new(APP_PASSWORD).unwrap();
+    let out = login_app_password(&e, &f.store, &f.paths, &target, &pw)
+        .await
+        .unwrap();
+    assert_eq!(out.account.did, DID);
+    assert_eq!(out.account.handle.as_deref(), Some("alice.test"));
+    assert!(out.account.active);
+    assert!(f.store.load(DID).await.unwrap().is_some());
+    // The registered session works.
+    let resp = e.host().http(get_session_req()).await.unwrap();
+    assert_eq!(resp.status, 200);
+    // restore_session re-checks the account and registers the stored session.
+    let host = e.host();
+    host.remove_session(&Did::parse(DID).unwrap());
+    let a = restore_session(&e, &f.store, &f.paths, &out.account)
+        .await
+        .unwrap();
+    assert_eq!(a.pds, f.pds_str());
+    assert_eq!(e.host().http(get_session_req()).await.unwrap().status, 200);
+}
+
+#[tokio::test]
+async fn an_unverified_input_handle_needs_confirmation() {
+    let f = fixture().await;
+    let e = f.engine();
+    // other.test points at alice's DID, but her document claims alice.test.
+    f.pds
+        .handles
+        .lock()
+        .unwrap()
+        .insert("other.test".into(), DID.into());
+    let t = resolve_login_target(&e, "other.test").await.unwrap();
+    assert!(t.needs_confirmation());
+    assert_eq!(t.handle.as_deref(), Some("alice.test"));
+    assert_eq!(t.display_name(), "@alice.test");
+    // A DID input never needs confirmation; with no verified handle, the DID is the name.
+    *f.pds.doc.lock().unwrap() = Some(doc(&f.pds_str(), "nobody.test"));
+    let t = resolve_login_target(&e, DID).await.unwrap();
+    assert!(!t.needs_confirmation());
+    assert_eq!(t.handle, None);
+    assert_eq!(t.display_name(), DID);
+}
+
+#[tokio::test]
+async fn the_login_target_uses_a_document_fetched_now() {
+    let f = fixture().await;
+    let e = f.engine();
+    // Cached: the document names this PDS.
+    e.resolve_identity(DID).await.unwrap();
+    // The document changes (a poisoned or stale cache would still say the old one).
+    *f.pds.doc.lock().unwrap() = Some(doc("http://127.0.0.1:1", "alice.test"));
+    let t = resolve_login_target(&e, "alice.test").await.unwrap();
+    assert_eq!(t.pds, "http://127.0.0.1:1");
+}
+
+#[tokio::test]
+async fn a_migrated_account_needs_relogin() {
+    let f = fixture().await;
+    let e = f.engine();
+    let target = resolve_login_target(&e, DID).await.unwrap();
+    let pw = AppPassword::new(APP_PASSWORD).unwrap();
+    let out = login_app_password(&e, &f.store, &f.paths, &target, &pw)
+        .await
+        .unwrap();
+    // The account moves to another PDS.
+    *f.pds.doc.lock().unwrap() = Some(doc("http://127.0.0.1:1", "alice.test"));
+    e.invalidate_identity(DID).await.unwrap();
+    let err = restore_session(&e, &f.store, &f.paths, &out.account)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::AuthRequired);
+    assert_eq!(err.detail.unwrap()["kind"], "needsRelogin");
+    assert!(
+        e.host().session(&Did::parse(DID).unwrap()).is_none(),
+        "no session stays registered"
+    );
+    assert!(matches!(
+        e.host().http(get_session_req()).await,
+        Err(HostError::AuthRequired(_))
+    ));
+}
+
+#[tokio::test]
+async fn a_failed_binding_deletes_the_new_session() {
+    let f = fixture().await;
+    let e = f.engine();
+    let target = resolve_login_target(&e, DID).await.unwrap();
+    // Between resolution and the binding, the document moves the account elsewhere.
+    *f.pds.doc.lock().unwrap() = Some(doc("http://127.0.0.1:1", "alice.test"));
+    let pw = AppPassword::new(APP_PASSWORD).unwrap();
+    let err = login_app_password(&e, &f.store, &f.paths, &target, &pw)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::Conflict);
+    assert_eq!(f.pds.deleted_sessions.load(Ordering::SeqCst), 1);
+    assert!(f.store.load(DID).await.unwrap().is_none());
+    assert!(e.accounts().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn logout_deletes_an_unsafe_session_file() {
+    let f = fixture().await;
+    let session = f.login().await;
+    drop(session);
+    let path = f.store.session_file(DID);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+    let host = NativeHost::with_parts(
+        MemKv::new(),
+        MemKv::new(),
+        f.paths.blobs_dir(),
+        f.net.clone(),
+    );
+    #[cfg(unix)]
+    assert_eq!(
+        f.store.load(DID).await.unwrap_err().code,
+        ErrorCode::Blocked
+    );
+    let report = logout_session(&host, &f.store, DID).await.unwrap();
+    #[cfg(unix)]
+    {
+        assert!(report.unreadable.is_some(), "{report:?}");
+        assert!(!report.revoked && !report.had_session);
+    }
+    assert!(!path.exists(), "the exposed secret is gone");
+    assert_eq!(f.store.load(DID).await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn an_older_stored_copy_is_never_adopted() {
+    let f = fixture().await;
+    let session = f.login().await;
+    let current = session.data().await;
+    // A failed save left an older copy (an already-used refresh token) in storage.
+    let stale = lessdugin_native::auth::store::AppPasswordData {
+        refresh_jwt: lessdugin_native::auth::redact::Secret::new("stale-refresh"),
+        access_jwt: lessdugin_native::auth::redact::Secret::new("stale-access"),
+        saved_ms: current.saved_ms - 1,
+        ..current.clone()
+    };
+    f.store
+        .save(&StoredSession::AppPassword(stale))
+        .await
+        .unwrap();
+    // The PDS rejects the access token: the session refreshes with its own refresh token.
+    f.pds.access.lock().unwrap().clear();
+    let resp = session.send(get_session_req()).await.unwrap();
+    assert_eq!(resp.status, 200);
+    assert_eq!(f.pds.refreshes.load(Ordering::SeqCst), 1);
+    let now = session.data().await;
+    assert!(now.saved_ms > current.saved_ms);
+    let Some(StoredSession::AppPassword(saved)) = f.store.load(DID).await.unwrap() else {
+        panic!("not saved");
+    };
+    assert_eq!(saved.refresh_jwt, now.refresh_jwt);
+}
+
+#[tokio::test]
+async fn a_hint_resolution_is_refused_for_login() {
+    use lessdugin_testkit::identity::{DOH, PLC, install_doc, install_nxdomain};
+    use lessdugin_testkit::{FakeIdentity, MemHost, resp};
+    let host = MemHost::new();
+    let alice = FakeIdentity::plc("alice", "alice.example.com", "https://pds.example.com");
+    install_doc(&host, PLC, &alice.did, &alice.doc());
+    install_nxdomain(&host, DOH, "alice.example.com");
+    host.respond_get("https://alice.example.com/", resp::status(404));
+    host.respond_get(
+        "https://slingshot.microcosm.blue/xrpc/com.bad-example.identity.resolveMiniDoc",
+        resp::ok_json(&json!({"did": alice.did.as_str(), "handle": "alice.example.com"})),
+    );
+    let e = Engine::new(host.clone(), EngineConfig::default());
+    let err = resolve_login_target(&e, "alice.example.com")
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::Blocked);
+    let d = err.detail.unwrap();
+    assert_eq!(d["kind"], "hintResolution");
+    assert_eq!(d["did"], alice.did.as_str());
+    // The DID itself is fine (the document comes from PLC).
+    let t = resolve_login_target(&e, alice.did.as_str()).await.unwrap();
+    assert_eq!(t.pds, "https://pds.example.com");
+    assert!(!t.needs_confirmation());
 }

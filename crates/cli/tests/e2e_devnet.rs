@@ -23,7 +23,7 @@ use lessdugin_atp::syntax::Did;
 use lessdugin_core::host::{HttpRequest, Target};
 use lessdugin_native::auth::oauth::OAuthSession;
 use lessdugin_native::auth::{SecretStore, StoredSession};
-use lessdugin_native::config::Paths;
+use lessdugin_native::config::{DevnetProfile, Paths};
 use lessdugin_native::host::{AuthSession, Net, NetPolicy};
 use serde_json::{Value, json};
 
@@ -101,7 +101,8 @@ impl Devnet {
         self.s(&["plc"])
     }
 
-    /// `lessdugin` in devnet mode with its own data directory and no OS keyring.
+    /// `lessdugin --dev` with its own data directory and no OS keyring (`--dev` has no
+    /// environment variable; the devnet URLs do).
     fn cli(&self, data: &Path) -> Command {
         let mut c = Command::new(env!("CARGO_BIN_EXE_lessdugin"));
         for (k, _) in std::env::vars() {
@@ -109,15 +110,42 @@ impl Devnet {
                 c.env_remove(k);
             }
         }
-        c.env("LESSDUGIN_DATA_DIR", data)
+        c.arg("--dev")
+            .env("LESSDUGIN_DATA_DIR", data)
             .env("LESSDUGIN_KEYRING", "off")
-            .env("LESSDUGIN_DEV", "1")
             .env("LESSDUGIN_PLC_URL", self.plc())
             .env("LESSDUGIN_PDS_URL", self.pds())
             .env("NO_COLOR", "1")
             .env_remove("RUST_LOG");
         c
     }
+
+    /// The paths the CLI uses for this devnet under `data` (its own `devnet-<id>` directories).
+    fn paths(&self, data: &Path) -> Paths {
+        Paths::under(data).for_devnet(&DevnetProfile {
+            plc: url::Url::parse(&self.plc()).unwrap(),
+            pds: url::Url::parse(&self.pds()).unwrap(),
+            jetstream: None,
+        })
+    }
+}
+
+/// The devnet data directory the CLI created under `data` (exactly one).
+fn devnet_data(data: &Path) -> PathBuf {
+    let mut dirs: Vec<_> = std::fs::read_dir(data)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| {
+            p.file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with("devnet-"))
+        })
+        .collect();
+    assert_eq!(dirs.len(), 1, "{dirs:?}");
+    assert!(
+        !data.join("state.sqlite").exists(),
+        "devnet runs never touch the production stores"
+    );
+    dirs.pop().unwrap()
 }
 
 fn run(cmd: &mut Command, stdin: Option<&str>) -> Output {
@@ -146,7 +174,7 @@ fn ok_json(out: &Output, what: &str) -> Value {
 }
 
 fn session_file(data: &Path) -> PathBuf {
-    let dir = data.join("sessions");
+    let dir = devnet_data(data).join("sessions");
     let mut files: Vec<_> = std::fs::read_dir(&dir)
         .unwrap()
         .map(|e| e.unwrap().path())
@@ -288,10 +316,13 @@ fn e2e_cli_against_devnet() {
         Some(&format!("{alice_app_pw}\n")),
     );
     let account = ok_json(&out, "app-password login");
+    assert_eq!(account["dto"], 1);
     assert_eq!(account["did"], alice_did.as_str());
     assert_eq!(account["handle"], "alice.test");
     assert_eq!(account["authKind"], "appPassword");
     assert_eq!(account["active"], true);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("warning: devnet mode"));
+    assert_eq!(devnet_data(data), devnet.paths(data).data_dir);
     assert!(!String::from_utf8_lossy(&out.stderr).contains(&alice_app_pw));
     #[cfg(unix)]
     {
@@ -307,6 +338,7 @@ fn e2e_cli_against_devnet() {
         "whoami",
     );
     assert_eq!(me["did"], alice_did.as_str());
+    assert_eq!(me["dto"], 1);
 
     let r = ok_json(
         &run(
@@ -315,6 +347,7 @@ fn e2e_cli_against_devnet() {
         ),
         "resolve",
     );
+    assert_eq!(r["dto"], 1);
     assert_eq!(r["identity"]["did"], alice_did.as_str());
     assert_eq!(r["identity"]["handleState"], "verified");
     assert_eq!(r["identity"]["pds"], pds.as_str());
@@ -355,7 +388,8 @@ fn e2e_cli_against_devnet() {
         &run(devnet.cli(data).args(["--json", "accounts"]), None),
         "accounts",
     );
-    assert_eq!(list.as_array().unwrap().len(), 1);
+    assert_eq!(list["dto"], 1);
+    assert_eq!(list["accounts"].as_array().unwrap().len(), 1);
     let bye = ok_json(
         &run(devnet.cli(data).args(["--json", "logout"]), None),
         "logout",
@@ -364,7 +398,7 @@ fn e2e_cli_against_devnet() {
     let out = run(devnet.cli(data).args(["whoami"]), None);
     assert_eq!(out.status.code(), Some(3));
     assert!(
-        std::fs::read_dir(data.join("sessions"))
+        std::fs::read_dir(devnet_data(data).join("sessions"))
             .unwrap()
             .next()
             .is_none()
@@ -421,8 +455,8 @@ fn e2e_cli_against_devnet() {
 
     // A write through the stored OAuth session (DPoP), with the native facade.
     let uri = rt.block_on(async {
-        let paths = Paths::under(data);
-        let store = SecretStore::file_only(data.join("sessions"));
+        let paths = devnet.paths(data);
+        let store = SecretStore::file_only(paths.data_dir.join("sessions"));
         let Some(StoredSession::Oauth(stored)) = store.load(&alice_did).await.unwrap() else {
             panic!("no OAuth session");
         };

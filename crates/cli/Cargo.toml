@@ -18,6 +18,10 @@ tui = ["dep:lessdugin-tui"]
 web = []
 # Read and write the final (published) namespace (release builds).
 final-ns = ["lessdugin-native/final-ns", "lessdugin-lexicon/final-ns"]
+# Devnet mode (`--dev`, a `[network] mode = "devnet"` profile) in release builds. Debug builds
+# always have it; release builds without this feature talk only to the public network over
+# https/wss (`threat-model.md` INFRA-9).
+devnet = []
 
 [dependencies]
 lessdugin-core.workspace = true

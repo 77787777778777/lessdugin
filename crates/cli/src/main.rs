@@ -63,7 +63,20 @@ fn main() -> ExitCode {
     let cli = match Cli::try_parse() {
         Ok(c) => c,
         Err(e) => {
-            let _ = e.print();
+            use clap::error::ErrorKind;
+            match e.kind() {
+                ErrorKind::DisplayHelp
+                | ErrorKind::DisplayVersion
+                | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand => {
+                    let _ = e.print();
+                }
+                // Parse errors echo the raw arguments: sanitise them, never show a password.
+                _ => {
+                    use std::io::Write;
+                    let text = out::clap_error_text(&e.render().to_string());
+                    let _ = std::io::stderr().lock().write_all(text.as_bytes());
+                }
+            }
             return exit_code(e.exit_code());
         }
     };

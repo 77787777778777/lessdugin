@@ -30,7 +30,6 @@ macro_rules! dto {
         $(#[$m])*
         #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
         #[cfg_attr(feature = "tsify", derive(Tsify))]
-        #[cfg_attr(feature = "tsify", tsify(into_wasm_abi, from_wasm_abi))]
         #[serde(rename_all = "camelCase")]
         pub struct $name { $($body)* }
     };
@@ -38,7 +37,6 @@ macro_rules! dto {
         $(#[$m])*
         #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
         #[cfg_attr(feature = "tsify", derive(Tsify))]
-        #[cfg_attr(feature = "tsify", tsify(into_wasm_abi, from_wasm_abi))]
         #[serde(tag = "kind", rename_all = "camelCase")]
         pub enum $name { $($body)* }
     };
@@ -50,7 +48,6 @@ macro_rules! untagged {
         $(#[$m])*
         #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
         #[cfg_attr(feature = "tsify", derive(Tsify))]
-        #[cfg_attr(feature = "tsify", tsify(into_wasm_abi, from_wasm_abi))]
         #[serde(untagged, rename_all = "camelCase")]
         pub enum $name { $($body)* }
     };
@@ -910,9 +907,83 @@ dto! {
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// §3.5 Writes
+
+dto! {
+    /// The state of a write (`engine-api.md` §3.5): `pending → sending → done | failed | undone`.
+    /// `pending` may say why it waits (held for the undo window, or throttled by the write budget,
+    /// a rate limit or a back-off) and until when; a conflict is `failed` with code `conflict`.
+    pub enum WriteState {
+        #[serde(rename_all = "camelCase")]
+        Pending {
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            not_before_ms: Option<i64>,
+            #[serde(default, skip_serializing_if = "is_false")]
+            held: bool,
+            #[serde(default, skip_serializing_if = "is_false")]
+            throttled: bool,
+        },
+        Sending,
+        /// `cid` is absent for deletes.
+        Done {
+            uri: String,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            cid: Option<String>,
+        },
+        Failed { error: crate::engine::EngineError },
+        Undone,
+    }
+}
+
+dto! {
+    /// What a write operation returns once the write is persisted (`engine-api.md` §3.5).
+    pub struct WriteTicket {
+        pub id: String,
+        pub state: WriteState,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn write_ticket_shapes() {
+        let t = WriteTicket {
+            id: "did:plc:x/1".into(),
+            state: WriteState::Pending {
+                not_before_ms: None,
+                held: false,
+                throttled: false,
+            },
+        };
+        assert_eq!(
+            serde_json::to_string(&t).unwrap(),
+            r#"{"id":"did:plc:x/1","state":{"kind":"pending"}}"#
+        );
+        let held = WriteState::Pending {
+            not_before_ms: Some(5),
+            held: true,
+            throttled: false,
+        };
+        assert_eq!(
+            serde_json::to_string(&held).unwrap(),
+            r#"{"kind":"pending","notBeforeMs":5,"held":true}"#
+        );
+        let done = WriteState::Done {
+            uri: "at://x/y/z".into(),
+            cid: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&done).unwrap(),
+            r#"{"kind":"done","uri":"at://x/y/z"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&WriteState::Undone).unwrap(),
+            r#"{"kind":"undone"}"#
+        );
+    }
 
     #[test]
     fn item_state_shapes() {

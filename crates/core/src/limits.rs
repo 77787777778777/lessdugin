@@ -89,3 +89,33 @@ pub const RECORD_CBOR_MAX_BYTES: usize = 1_000_000;
 pub const TOMBSTONE_MIN_RETENTION_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 /// Dirty marks kept per repo (`sync.md` §6.5); beyond it `marksOverflow` is set.
 pub const REPO_MARKS_MAX: usize = 1_000;
+
+// ---------------------------------------------------------------------------------------------
+// Write path (`limits.md` §4, §14; `data-model.md` §5.3, §8)
+
+/// A spillable `md` field whose UTF-8 source is longer is written as `textBlob` (W).
+pub const SPILL_THRESHOLD_BYTES: usize = 65_536;
+/// The exact JSON request body of `createRecord`, `putRecord` or `applyWrites` (W).
+pub const WRITE_BODY_MAX_BYTES: usize = 900_000;
+/// Opinion intents are held this long so they can be undone or coalesced (ms).
+pub const OPINION_HOLD_MS: i64 = 4_000;
+/// Attempts of an edit, opinion write, modAction removal or `mod adopt` batch on `InvalidSwap`.
+pub const SWAP_RETRY_MAX: u32 = 3;
+/// Lower bound of the delay before such a retry (ms).
+pub const SWAP_RETRY_JITTER_MIN_MS: u64 = 200;
+/// Upper bound of the delay before such a retry (ms).
+pub const SWAP_RETRY_JITTER_MAX_MS: u64 = 800;
+/// Ops per `applyWrites` (delete chunks, redaction, `mod adopt`).
+pub const APPLYWRITES_MAX_OPS: usize = 200;
+/// Write budget per account and hour (points).
+pub const WRITE_BUDGET_POINTS_PER_HOUR: u32 = 5_000;
+/// Write budget per account and day (points).
+pub const WRITE_BUDGET_POINTS_PER_DAY: u32 = 35_000;
+/// Points of a create op.
+pub const WRITE_COST_CREATE: u32 = 3;
+/// Points of an update op.
+pub const WRITE_COST_UPDATE: u32 = 2;
+/// Points of a delete op.
+pub const WRITE_COST_DELETE: u32 = 1;
+/// `#lock.allowed` entries; a longer computed allow-list is refused.
+pub const LOCK_ALLOWED_MAX: usize = 5_000;

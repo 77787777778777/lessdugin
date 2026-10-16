@@ -399,8 +399,18 @@ fn transport_failures_are_not_cached_but_answers_are() {
         HostError::Network("down".into()),
     );
     let e = direct_engine(&host);
+    // No resolver could be reached: a network error (exit 1), not "the handle does not exist".
     let err = block_on(e.resolve_actor("alice.example.com")).unwrap_err();
-    assert_eq!(err.code, ErrorCode::NotFound);
+    assert_eq!(err.code, ErrorCode::Network, "{err:?}");
+    assert!(err.retryable);
+    let uri = format!(
+        "at://alice.example.com/{}/3jzfcijpj2z2a",
+        "app.bsky.feed.post"
+    );
+    assert_eq!(
+        block_on(e.verify(&uri, false)).unwrap_err().code,
+        ErrorCode::Network
+    );
     // DNS comes back: the failure was not cached.
     host.clear_routes();
     alice.install(&host, PLC, DOH);
@@ -592,4 +602,208 @@ fn bad_inputs() {
         assert_eq!(err.code, ErrorCode::InvalidRef, "{bad:?}");
     }
     assert!(host.requests().is_empty());
+}
+
+#[test]
+fn an_unreachable_host_after_nxdomain_is_not_found() {
+    // DNS answered authoritatively (NXDOMAIN); only the handle's own host is unreachable, which is
+    // what a mistyped handle looks like: not found, not a network error.
+    let host = MemHost::new();
+    install_nxdomain(&host, DOH, "nobody.example.com");
+    host.fail(
+        "https://nobody.example.com/",
+        HostError::Network("no such host".into()),
+    );
+    let err = block_on(direct_engine(&host).resolve_actor("nobody.example.com")).unwrap_err();
+    assert_eq!(err.code, ErrorCode::NotFound, "{err:?}");
+    // DNS down, but the host answered 404: a definitive no.
+    let host = MemHost::new();
+    host.fail(DOH, HostError::Network("down".into()));
+    host.fail(DOH2, HostError::Network("down".into()));
+    host.respond_get("https://nobody.example.com/", resp::status(404));
+    let err = block_on(direct_engine(&host).resolve_actor("nobody.example.com")).unwrap_err();
+    assert_eq!(err.code, ErrorCode::NotFound, "{err:?}");
+}
+
+#[test]
+fn an_unreachable_devnet_pds_is_a_network_error() {
+    let host = MemHost::new();
+    host.fail(
+        "http://localhost:2583/",
+        HostError::Network("refused".into()),
+    );
+    let cfg = EngineConfig::devnet(
+        url::Url::parse("http://localhost:2582").unwrap(),
+        url::Url::parse("http://localhost:2583").unwrap(),
+    );
+    let err = block_on(Engine::new(host.clone(), cfg).resolve_actor("alice.test")).unwrap_err();
+    assert_eq!(err.code, ErrorCode::Network, "{err:?}");
+}
+
+/// A lying devnet (PLC + PDS) and the public network over one shared cache: devnet answers are
+/// never used outside devnet mode, and production answers are never used in devnet mode.
+#[test]
+fn devnet_and_production_cache_rows_never_mix() {
+    let (dev_plc, dev_pds) = ("http://localhost:2582", "http://localhost:2583");
+    let host = MemHost::new();
+    let dev = Engine::new(
+        host.clone(),
+        EngineConfig::devnet(
+            url::Url::parse(dev_plc).unwrap(),
+            url::Url::parse(dev_pds).unwrap(),
+        ),
+    );
+    let prod = engine(&host);
+
+    // The real alice.example.com and the attacker's identity, which claims that handle.
+    let alice = alice();
+    alice.install(&host, PLC, DOH);
+    let mallory = FakeIdentity::plc("mallory", "alice.example.com", "https://evil.example.com");
+    install_doc(&host, PLC, &mallory.did, &mallory.doc());
+    // The devnet PDS says alice.example.com is mallory; the devnet PLC serves a document for
+    // alice's real DID with the attacker's PDS.
+    let pds = FakePds::install(&host, dev_pds);
+    pds.set_handle("alice.example.com", &mallory.did);
+    install_doc(&host, dev_plc, &mallory.did, &mallory.doc());
+    let forged = FakeIdentity {
+        pds: "http://localhost:6666".into(),
+        ..alice.clone()
+    };
+    install_doc(&host, dev_plc, &alice.did, &forged.doc());
+
+    let d = block_on(dev.resolve_identity("alice.example.com")).unwrap();
+    assert_eq!(d.identity.did, mallory.did);
+    assert_eq!(d.identity.handle_state, HandleState::Verified, "in devnet");
+    let d = block_on(dev.resolve_identity(alice.did.as_str())).unwrap();
+    assert_eq!(d.identity.pds.as_deref(), Some("http://localhost:6666"));
+
+    // Production ignores both devnet rows: DoH and the real PLC are asked again.
+    host.clear_requests();
+    let p = block_on(prod.resolve_identity("alice.example.com")).unwrap();
+    assert_eq!(p.identity.did, alice.did);
+    assert_eq!(p.identity.handle_state, HandleState::Verified);
+    assert_eq!(p.identity.pds.as_deref(), Some(PDS));
+    assert_eq!(p.identity.source, DocSource::Plc);
+    assert!(!host.requests_to(DOH).is_empty());
+    assert_eq!(
+        host.requests_to(&format!("{PLC}/{}", alice.did)).len(),
+        1,
+        "the devnet document was not used"
+    );
+    let m = block_on(prod.resolve_actor(mallory.did.as_str())).unwrap();
+    assert_eq!(
+        m.handle, None,
+        "mallory's claim is not verified in production"
+    );
+
+    // And the other way round: devnet ignores the production rows just written.
+    host.clear_requests();
+    let d = block_on(dev.resolve_identity(alice.did.as_str())).unwrap();
+    assert_eq!(d.identity.pds.as_deref(), Some("http://localhost:6666"));
+    assert_eq!(d.identity.source, DocSource::Devnet);
+    assert_eq!(host.requests_to(dev_plc).len(), 1);
+    assert!(host.requests_to(PLC).is_empty() && host.requests_to(DOH).is_empty());
+}
+
+#[test]
+fn did_web_follows_the_mode() {
+    // devnet: did:web under .test resolves (https, as always for did:web).
+    let host = MemHost::new();
+    let web = FakeIdentity::web("alice.test", "alice.test", "http://localhost:2583");
+    host.respond_get(
+        "https://alice.test/.well-known/did.json",
+        resp::ok_json(&web.doc()),
+    );
+    let cfg = EngineConfig::devnet(
+        url::Url::parse("http://localhost:2582").unwrap(),
+        url::Url::parse("http://localhost:2583").unwrap(),
+    );
+    let r =
+        block_on(Engine::new(host.clone(), cfg).resolve_identity("did:web:alice.test")).unwrap();
+    assert_eq!(r.identity.pds.as_deref(), Some("http://localhost:2583"));
+    assert_eq!(r.identity.source, DocSource::Devnet);
+    // production: refused before any request, with the real reason.
+    let host = MemHost::new();
+    for did in ["did:web:alice.test", "did:web:pds.local"] {
+        let err = block_on(engine(&host).resolve_actor(did)).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidRef, "{did}");
+        assert!(err.message.contains("top-level domain"), "{}", err.message);
+        assert!(!err.message.contains("with a port"), "{}", err.message);
+    }
+    assert!(host.requests().is_empty());
+}
+
+#[test]
+fn a_hint_identity_is_retried_after_an_hour() {
+    let host = MemHost::new();
+    let web = FakeIdentity::web("example.com", "example.com", PDS);
+    host.fail("https://example.com/.well-known/did.json", HostError::Cors);
+    minidoc_route(&host, &web);
+    let e = engine(&host);
+    let r = block_on(e.resolve_identity("did:web:example.com")).unwrap();
+    assert_eq!(r.identity.level, IdentityLevel::Hint);
+    // Reused for a while…
+    host.clear_requests();
+    host.advance_ms(lessdugin_core::identity::HINT_DOC_TTL_MS - 1);
+    block_on(e.resolve_identity("did:web:example.com")).unwrap();
+    assert!(host.requests_to("https://example.com/").is_empty());
+    // …then the real document is tried again (and now it works).
+    host.respond_get(
+        "https://example.com/.well-known/did.json",
+        resp::ok_json(&web.doc()),
+    );
+    install_txt(&host, DOH, "example.com", &[&format!("did={}", web.did)]);
+    host.advance_ms(1);
+    let r = block_on(e.resolve_identity("did:web:example.com")).unwrap();
+    assert_eq!(r.identity.level, IdentityLevel::Doc);
+    assert_eq!(r.identity.handle_state, HandleState::Verified);
+}
+
+#[test]
+fn local_only_pds_endpoints_are_unusable_in_production() {
+    let host = MemHost::new();
+    let alice = alice();
+    for (i, endpoint) in [
+        "https://pds.local",
+        "https://router.internal",
+        "https://x.localhost",
+        "https://pds.test",
+        "https://x.home.arpa",
+        "https://foo.onion",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        install_doc(
+            &host,
+            PLC,
+            &alice.did,
+            &did_doc(alice.did.as_str(), None, &alice.multikey(), endpoint),
+        );
+        host.advance_ms(DID_DOC_TTL_MS * (i as i64 + 1));
+        let r = block_on(engine(&host).resolve_identity(alice.did.as_str())).unwrap();
+        assert_eq!(r.identity.pds, None, "{endpoint}");
+        assert!(r.identity.pds_problem.is_some(), "{endpoint}");
+    }
+}
+
+#[test]
+fn fresh_resolution_bypasses_the_cache() {
+    let host = MemHost::new();
+    let alice = alice();
+    alice.install(&host, PLC, DOH);
+    let e = engine(&host);
+    block_on(e.resolve_identity("alice.example.com")).unwrap();
+    host.clear_requests();
+    // The cached answers are used by a normal resolution…
+    block_on(e.resolve_identity("alice.example.com")).unwrap();
+    assert!(host.requests().is_empty());
+    // …but a fresh one asks DNS and PLC again.
+    let r = block_on(e.resolve_identity_fresh("alice.example.com")).unwrap();
+    assert_eq!(r.identity.handle_state, HandleState::Verified);
+    assert_eq!(host.requests_to(DOH).len(), 1);
+    assert_eq!(host.requests_to(PLC).len(), 1);
+    host.clear_requests();
+    block_on(e.resolve_identity_fresh(alice.did.as_str())).unwrap();
+    assert_eq!(host.requests_to(PLC).len(), 1);
 }

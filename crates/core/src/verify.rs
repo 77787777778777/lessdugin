@@ -9,7 +9,8 @@
 //!   lessdugin_atp::proof::verify_proof(car, did, coll, rkey, key, now)   (= verify_record_proof)
 //!   json = com.atproto.repo.getRecord at the PDS: cid(DAG-CBOR(json.value)) must equal the proven
 //!          CID (or the PDS must report RecordNotFound for a proven absence)
-//!   deep = strongRef and blob checks: not implemented in M1 (reported as a check)
+//!   deep = strongRef and blob checks: not implemented in M1 (reported as a skipped check:
+//!          ok, with detail DEEP_SKIPPED)
 //! ```
 //!
 //! The result is `proven`/`absent` only if every check passed (the informational `deep` check
@@ -55,9 +56,13 @@ pub mod checks {
     /// `com.atproto.repo.getRecord` agrees: its JSON hashes to the proven CID (or the PDS reports
     /// `RecordNotFound` for a proven absence).
     pub const RECORD_JSON: &str = "record json";
-    /// `--deep` (informational in M1).
+    /// `--deep` (informational in M1: reported as skipped, see [`super::DEEP_SKIPPED`]).
     pub const DEEP: &str = "deep";
 }
+
+/// The detail of the `deep` check while reference and blob checks are not implemented (M1). The
+/// check is `ok` (it did not fail); clients show it as skipped.
+pub const DEEP_SKIPPED: &str = "skipped: strongRef and blob checks are not implemented yet";
 
 /// The proof-stage checks in the order `verify_proof` performs them.
 const PROOF_STAGES: [&str; 6] = [
@@ -283,11 +288,9 @@ pub async fn verify_record<H: Host>(
     r.check(checks::RECORD_JSON, ok, Some(detail));
 
     if deep {
-        r.check(
-            checks::DEEP,
-            false,
-            Some("not implemented in M1".to_owned()),
-        );
+        // Not a failure: nothing was checked. `ok` stays true so that consumers that require
+        // every check to be ok do not see a failure next to a `proven` result.
+        r.check(checks::DEEP, true, Some(DEEP_SKIPPED.to_owned()));
     }
 
     let all_ok = r

@@ -26,7 +26,7 @@ use tokio::sync::Mutex;
 use url::Url;
 
 use super::redact::Secret;
-use super::store::{AppPasswordData, SESSION_VERSION, SecretStore, StoredSession};
+use super::store::{AppPasswordData, SESSION_VERSION, SecretStore, StoredSession, next_saved_ms};
 use super::{expiring, now_ms};
 use crate::config::FileLock;
 use crate::host::{AuthSession, Net, NetRequest, user_pds_url};
@@ -178,7 +178,7 @@ pub async fn delete_session(net: &Net, pds: &Url, refresh_jwt: &Secret) -> Resul
     }
 }
 
-/// The stored form of a fresh `createSession` / `refreshSession` result.
+/// The stored form of a fresh `createSession` / `refreshSession` result (saved now).
 pub fn session_data(session: &Session, pds: &str, created_ms: i64) -> AppPasswordData {
     AppPasswordData {
         v: SESSION_VERSION,
@@ -190,6 +190,7 @@ pub fn session_data(session: &Session, pds: &str, created_ms: i64) -> AppPasswor
         access_exp_ms: jwt_exp_ms(&session.access_jwt),
         refresh_exp_ms: jwt_exp_ms(&session.refresh_jwt),
         created_ms,
+        saved_ms: next_saved_ms(0),
     }
 }
 
@@ -266,7 +267,8 @@ impl AppPasswordSession {
     }
 
     /// Refreshes under the account's refresh lock. Another process may have refreshed since
-    /// this one loaded the session: the stored session is re-read first and adopted if newer.
+    /// this one loaded the session: the stored session is re-read first and adopted if it is
+    /// strictly newer (an older stored copy, left by a failed save, is never adopted).
     async fn refresh(&self, data: &mut AppPasswordData, forced: bool) -> Result<(), HostError> {
         let _lock = FileLock::acquire_async(self.lock_file.clone())
             .await
@@ -274,6 +276,7 @@ impl AppPasswordSession {
         if let Ok(Some(StoredSession::AppPassword(stored))) =
             self.store.load(self.did.as_str()).await
             && stored.refresh_jwt != data.refresh_jwt
+            && stored.saved_ms > data.saved_ms
         {
             *data = stored;
             let fresh = !data.access_exp_ms.is_some_and(|e| expiring(e, now_ms()));
@@ -311,7 +314,7 @@ impl AppPasswordSession {
             ));
         }
         *data = AppPasswordData {
-            created_ms: data.created_ms,
+            saved_ms: next_saved_ms(data.saved_ms),
             ..session_data(&session, &data.pds, data.created_ms)
         };
         self.store

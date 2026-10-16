@@ -287,3 +287,124 @@ fn account_info_wire_shape() {
         AccountInfo::app_password("did:plc:ewvi7nxzyoun6zhxrhs64oiz", PDS)
     );
 }
+
+#[test]
+fn a_login_checks_its_binding_once() {
+    let (host, pds, alice, bob) = setup();
+    let e = engine(&host);
+    pds.set_authorization_servers(vec![PDS.to_owned()]);
+    let info = AccountInfo::oauth(alice.did.as_str(), PDS, PDS);
+    host.clear_requests();
+    let b = block_on(e.bind_login(&info)).unwrap();
+    let v = block_on(e.record_account(&info, &b)).unwrap();
+    assert!(v.active);
+    assert_eq!(v.auth_kind, AuthKind::Oauth);
+    // One fresh document and one protected-resource fetch for the whole login.
+    assert_eq!(host.requests_to(&format!("{PLC}/{}", alice.did)).len(), 1);
+    assert_eq!(
+        host.requests_to(&format!("{PDS}/.well-known/oauth-protected-resource"))
+            .len(),
+        1
+    );
+    // A binding cannot be recorded for another session.
+    let other = AccountInfo::app_password(bob.did.as_str(), PDS);
+    assert_eq!(
+        block_on(e.record_account(&other, &b)).unwrap_err().code,
+        ErrorCode::Internal
+    );
+    let as_app_password = AccountInfo::app_password(alice.did.as_str(), PDS);
+    assert!(block_on(e.record_account(&as_app_password, &b)).is_err());
+    let other_issuer = AccountInfo::oauth(alice.did.as_str(), PDS, "https://as.example.com");
+    assert!(block_on(e.record_account(&other_issuer, &b)).is_err());
+}
+
+#[test]
+fn refresh_account_follows_the_identity() {
+    let (host, _pds, alice, _) = setup();
+    let e = engine(&host);
+    block_on(e.add_account(AccountInfo::app_password(alice.did.as_str(), PDS))).unwrap();
+
+    // The handle moves to another domain: the recorded handle follows (after the cache TTL).
+    let moved = lessdugin_testkit::FakeIdentity {
+        handle: Some("alice.example.org".into()),
+        ..alice.clone()
+    };
+    install_doc(&host, PLC, &alice.did, &moved.doc());
+    lessdugin_testkit::identity::install_txt(
+        &host,
+        DOH,
+        "alice.example.org",
+        &[&format!("did={}", alice.did)],
+    );
+    host.advance_ms(lessdugin_core::identity::DID_DOC_TTL_MS);
+    let v = block_on(e.refresh_account(alice.did.as_str())).unwrap();
+    assert_eq!(v.handle.as_deref(), Some("alice.example.org"));
+    assert!(v.active);
+    assert_eq!(
+        block_on(e.account(alice.did.as_str()))
+            .unwrap()
+            .unwrap()
+            .handle
+            .as_deref(),
+        Some("alice.example.org"),
+        "the record was updated"
+    );
+
+    // The old handle now belongs to someone else: alice's document no longer claims a handle
+    // that resolves back, so no handle is recorded.
+    let unclaimed = lessdugin_testkit::FakeIdentity {
+        handle: Some("alice.example.com".into()),
+        ..alice.clone()
+    };
+    install_doc(&host, PLC, &alice.did, &unclaimed.doc());
+    lessdugin_testkit::identity::install_txt(
+        &host,
+        DOH,
+        "alice.example.com",
+        &["did=did:plc:aaaaaaaaaaaaaaaaaaaaaaaa"],
+    );
+    host.advance_ms(lessdugin_core::identity::DID_DOC_TTL_MS);
+    let v = block_on(e.refresh_account(alice.did.as_str())).unwrap();
+    assert_eq!(v.handle, None);
+
+    // The PDS changed (migration): needs-relogin, never silent re-targeting (AUTH-8).
+    let migrated = lessdugin_testkit::FakeIdentity {
+        pds: "https://new-pds.example.com".into(),
+        ..alice.clone()
+    };
+    install_doc(&host, PLC, &alice.did, &migrated.doc());
+    host.advance_ms(lessdugin_core::identity::DID_DOC_TTL_MS);
+    let err = block_on(e.refresh_account(alice.did.as_str())).unwrap_err();
+    assert_eq!(err.code, ErrorCode::AuthRequired);
+    let d = err.detail.unwrap();
+    assert_eq!(d["kind"], "needsRelogin");
+    assert_eq!(d["boundPds"], PDS);
+    assert_eq!(d["docPds"], "https://new-pds.example.com");
+    assert_eq!(
+        block_on(e.account(alice.did.as_str()))
+            .unwrap()
+            .unwrap()
+            .pds,
+        PDS,
+        "the bound PDS is never changed silently"
+    );
+
+    // An unreachable PLC directory is an error, and changes nothing.
+    host.fail(
+        &format!("{PLC}/{}", alice.did),
+        lessdugin_core::host::HostError::Network("down".into()),
+    );
+    host.advance_ms(lessdugin_core::identity::DID_DOC_TTL_MS);
+    assert_eq!(
+        block_on(e.refresh_account(alice.did.as_str()))
+            .unwrap_err()
+            .code,
+        ErrorCode::Network
+    );
+    assert_eq!(
+        block_on(e.refresh_account("did:plc:aaaaaaaaaaaaaaaaaaaaaaaa"))
+            .unwrap_err()
+            .code,
+        ErrorCode::NotFound
+    );
+}

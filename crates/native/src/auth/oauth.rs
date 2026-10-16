@@ -5,7 +5,8 @@
 //!
 //! The flow, with what comes from jacquard and what lessdugin adds:
 //!
-//! 1. [`begin`]: the identity (DID, PDS) comes from `lessdugin-core`; the PDS's
+//! 1. [`begin`]: the identity (DID, PDS) comes from `lessdugin-core` through
+//!    [`super::resolve_login_target`] (resolved now, never through a hint); the PDS's
 //!    `oauth-protected-resource` names exactly one authorization server, whose metadata is
 //!    fetched with jacquard's `resolve_*` helpers through `Bridge` (SSRF guard).
 //! 2. PAR with jacquard's `oauth_request` (DPoP with `use_dpop_nonce` retry, PKCE S256 and
@@ -17,10 +18,13 @@
 //!    `state` and `iss` are checked (module `callback`).
 //! 4. [`PendingAuthorization::exchange`]: the code and the PKCE verifier go to the token
 //!    endpoint (jacquard's `oauth_request`). jacquard's `exchange_code` is not used: its
-//!    issuer check resolves the `sub` with jacquard's own resolver. Instead
-//!    [`OAuthGrant::finish`] runs the login binding of `sync.md` §3.6 in the engine (fresh DID
-//!    document of `sub`, its PDS's protected-resource metadata must list `iss`, TOFU pin of the
-//!    issuer) **before** the tokens are stored or used.
+//!    issuer check resolves the `sub` with jacquard's own resolver. The token response must
+//!    have a `sub`, a DPoP token type, and a scope that includes `atproto` and grants nothing
+//!    broader than requested ([`check_granted_scope`]); otherwise the tokens are revoked at once.
+//!    Then [`OAuthGrant::finish`] runs the login binding of `sync.md` §3.6 in the engine (fresh
+//!    DID document of `sub`, its PDS's protected-resource metadata must list `iss`, TOFU pin of
+//!    the issuer) **before** the tokens are stored or used, stores the session, and only then
+//!    records the account.
 //! 5. [`OAuthSession`] sends `UserPds` requests with `Authorization: DPoP` and a DPoP proof
 //!    (`htu` without query, `ath`, the PDS's nonce, one retry on `use_dpop_nonce`), refreshes
 //!    under the account's refresh lock, and never follows redirects.
@@ -62,8 +66,8 @@ use self::bridge::{Bridge, BridgeError};
 pub use self::callback::AuthorizationCode;
 use self::callback::Expected;
 use super::redact::{Secret, SecretJson, redact_secrets};
-use super::store::{OAuthData, SESSION_VERSION, SecretStore, StoredSession};
-use super::{LoginOutcome, expiring, now_ms};
+use super::store::{OAuthData, SESSION_VERSION, SecretStore, StoredSession, next_saved_ms};
+use super::{LoginOutcome, LoginTarget, expiring, now_ms};
 use crate::config::{FileLock, Paths};
 use crate::host::{AuthSession, NativeHost, NetRequest};
 
@@ -296,22 +300,14 @@ async fn push_request(
     })
 }
 
-/// Starts an OAuth login for `input` (a handle or DID): resolves the account and its
+/// Starts an OAuth login for `target` ([`super::resolve_login_target`]): finds the account's
 /// authorization server, reserves the loopback port and pushes the authorization request.
 pub async fn begin<K: KvStore + 'static>(
     engine: &Engine<NativeHost<K>>,
-    input: &str,
+    target: &LoginTarget,
     opts: &OAuthOptions,
 ) -> Result<PendingAuthorization, EngineError> {
-    let resolved = engine.resolve_identity(input).await?;
-    let ident = &resolved.identity;
-    let pds = ident.pds.clone().ok_or_else(|| {
-        EngineError::not_found(format!(
-            "{} has no usable PDS: {}",
-            ident.did,
-            ident.pds_problem.as_deref().unwrap_or("unknown")
-        ))
-    })?;
+    let pds = target.pds.clone();
     let bridge = Bridge::new(engine.host().net().clone());
 
     let prm = resolve_protected_resource_info(&bridge, &pds)
@@ -379,10 +375,10 @@ pub async fn begin<K: KvStore + 'static>(
         dpop_key,
         dpop_authserver_nonce: None,
     };
-    let login_hint = resolved
-        .input_handle
+    let login_hint = target
+        .handle
         .clone()
-        .unwrap_or_else(|| ident.did.to_string());
+        .unwrap_or_else(|| target.did.to_string());
     let clients = match (opts.client, opts.hosted_fallback) {
         (ClientKind::Loopback, true) => vec![ClientKind::Loopback, ClientKind::Hosted],
         (kind, _) => vec![kind],
@@ -429,7 +425,7 @@ pub async fn begin<K: KvStore + 'static>(
                         client_id,
                         client_kind,
                         scope: scope.clone(),
-                        intended: ident.did.clone(),
+                        intended: target.did.clone(),
                         pds,
                         state: Secret::new(state.to_string()),
                         verifier: Secret::new(verifier.to_string()),
@@ -549,28 +545,12 @@ impl PendingAuthorization {
         )
         .await
         .map_err(|e| request_error(e, "token request"))?;
-        let sub = token
-            .sub
-            .as_deref()
-            .ok_or_else(|| EngineError::blocked("the token response has no sub"))?;
-        if token.token_type != OAuthTokenType::DPoP {
-            return Err(EngineError::blocked(
-                "the authorization server issued a token that is not DPoP-bound",
-            ));
-        }
-        if let Some(granted) = &token.scope
-            && !granted.split(' ').any(|s| s == "atproto")
-        {
-            return Err(EngineError::blocked(
-                "the granted scope does not include atproto",
-            ));
-        }
         let now = now_ms();
         let dpop = serde_json::to_value(&self.dpop)
             .map_err(|e| EngineError::internal(format!("DPoP key: {e}")))?;
         let data = OAuthData {
             v: SESSION_VERSION,
-            did: sub.to_owned(),
+            did: token.sub.as_deref().unwrap_or_default().to_owned(),
             pds: self.pds.clone(),
             issuer: self.issuer.clone(),
             token_endpoint: self.server.token_endpoint.to_string(),
@@ -594,13 +574,73 @@ impl PendingAuthorization {
             dpop: SecretJson(dpop),
             dpop_host_nonce: None,
             created_ms: now,
+            saved_ms: next_saved_ms(0),
         };
+        if let Err(e) = check_token(&token, &self.scope) {
+            // A grant we will not use must not stay live at the server.
+            if let Err(r) = revoke(&data, self.bridge.net()).await {
+                tracing::debug!(error = %r, "revoking a refused grant failed");
+            }
+            return Err(e);
+        }
         Ok(OAuthGrant {
             data,
             intended: self.intended,
             bridge: self.bridge,
         })
     }
+}
+
+/// The checks on a token response before the grant is kept: a `sub`, a DPoP token type, and a
+/// granted scope that includes `atproto` and is no broader than `requested`.
+fn check_token(token: &OAuthTokenResponse, requested: &str) -> Result<(), EngineError> {
+    if token.sub.as_deref().is_none_or(str::is_empty) {
+        return Err(EngineError::blocked("the token response has no sub"));
+    }
+    if token.token_type != OAuthTokenType::DPoP {
+        return Err(EngineError::blocked(
+            "the authorization server issued a token that is not DPoP-bound",
+        ));
+    }
+    if let Some(granted) = &token.scope {
+        check_granted_scope(requested, granted).map_err(|why| {
+            EngineError::blocked(format!("refusing the granted scope: {why}"))
+                .with_detail("kind", "scopeRefused")
+                .with_detail("granted", granted.as_str())
+        })?;
+    }
+    Ok(())
+}
+
+/// A scope token broader than lessdugin ever asks for: `transition:*` (AUTH-1), identity and
+/// account control, and wildcards other than the enumerated blob types (AUTH-2).
+fn is_broad_scope(token: &str) -> bool {
+    token.starts_with("transition:")
+        || token.starts_with("identity:")
+        || token.starts_with("account:")
+        || (token.contains('*') && !scope::BLOB_SCOPES.split(' ').any(|b| b == token))
+}
+
+/// Checks a granted scope against the requested one (`threat-model.md` AUTH-1, AUTH-2): it must
+/// include `atproto`; a token that was not requested is refused if it is broad
+/// ([`is_broad_scope`]), and also otherwise unless a permission set (`include:`) was requested,
+/// which the server may expand into its granular scopes.
+pub fn check_granted_scope(requested: &str, granted: &str) -> Result<(), String> {
+    let requested: Vec<&str> = requested.split_ascii_whitespace().collect();
+    let granted: Vec<&str> = granted.split_ascii_whitespace().collect();
+    if !granted.contains(&"atproto") {
+        return Err("it does not include atproto".to_owned());
+    }
+    let include = requested.iter().any(|t| t.starts_with("include:"));
+    for t in granted {
+        if requested.contains(&t) {
+            continue;
+        }
+        if is_broad_scope(t) || !include {
+            return Err(format!("{t:?} was not requested"));
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -640,9 +680,10 @@ impl OAuthGrant {
     }
 
     /// Checks the login binding (`sync.md` §3.6; with `confirm_issuer_change` after the user
-    /// confirmed a changed authorization server), records the account, stores the session and
-    /// registers it with the host. A `conflict` with `detail.kind = "issuerChanged"` can be
-    /// retried with confirmation; the grant stays usable.
+    /// confirmed a changed authorization server), stores the session, records the account and
+    /// registers the session with the host. A `conflict` with `detail.kind = "issuerChanged"`
+    /// can be retried with confirmation; the grant stays usable. If the account cannot be
+    /// recorded, the stored session is deleted again (the caller then abandons the grant).
     pub async fn finish<K: KvStore + 'static>(
         &self,
         engine: &Engine<NativeHost<K>>,
@@ -656,11 +697,22 @@ impl OAuthGrant {
             info = info.confirming_issuer_change();
         }
         let binding = engine.bind_login(&info).await?;
-        let account = engine.add_account(info).await?;
         let mut data = self.data.clone();
         data.pds = binding.pds.clone();
+        let session = OAuthSession::new(
+            data.clone(),
+            self.bridge.net().clone(),
+            store.clone(),
+            paths,
+        )?;
         let backend = store.save(&StoredSession::Oauth(data.clone())).await?;
-        let session = OAuthSession::new(data, self.bridge.net().clone(), store.clone(), paths)?;
+        let account = match engine.record_account(&info, &binding).await {
+            Ok(a) => a,
+            Err(e) => {
+                let _ = store.delete(&data.did).await;
+                return Err(e);
+            }
+        };
         engine.host().set_session(Arc::new(session));
         Ok(LoginOutcome {
             account,
@@ -808,13 +860,15 @@ impl OAuthSession {
     }
 
     /// Refreshes under the account's refresh lock, adopting a session another process
-    /// refreshed meanwhile.
+    /// refreshed meanwhile (only a strictly newer one: an older stored copy, left by a failed
+    /// save, is never adopted).
     async fn refresh(&self, st: &mut OAuthState, forced: bool) -> Result<(), HostError> {
         let _lock = FileLock::acquire_async(self.lock_file.clone())
             .await
             .map_err(|e| HostError::Storage(format!("refresh lock: {e}")))?;
         if let Ok(Some(StoredSession::Oauth(stored))) = self.store.load(self.did.as_str()).await
             && stored.refresh_token != st.data.refresh_token
+            && stored.saved_ms > st.data.saved_ms
             && let Ok(dpop) = parse_dpop(&stored)
         {
             st.data = stored;
@@ -886,6 +940,7 @@ impl OAuthSession {
         st.data.dpop = SecretJson(
             serde_json::to_value(&st.dpop).map_err(|e| HostError::Other(e.to_string()))?,
         );
+        st.data.saved_ms = next_saved_ms(st.data.saved_ms);
         self.store
             .save(&StoredSession::Oauth(st.data.clone()))
             .await
@@ -1007,6 +1062,91 @@ mod tests {
         assert_eq!(auth_error(&resp).as_deref(), Some("ExpiredToken"));
         assert_eq!(host_of("http://localhost:2583"), "localhost:2583");
         assert_eq!(host_of("https://bsky.social"), "bsky.social");
+    }
+
+    #[test]
+    fn granted_scopes_are_checked() {
+        let enumerated = scope::enumerated_scope();
+        assert!(check_granted_scope(&enumerated, &enumerated).is_ok());
+        // A subset (the user or server narrowed it) is fine; order does not matter.
+        assert!(check_granted_scope(&enumerated, "blob:image/* atproto").is_ok());
+        // atproto is required.
+        assert!(check_granted_scope(&enumerated, "blob:image/*").is_err());
+        // Anything broader than requested is refused.
+        for extra in [
+            "transition:generic",
+            "transition:chat.bsky",
+            "blob:*/*",
+            "repo:*",
+            "repo?collection=*",
+            "identity:*",
+            "account:email",
+            "repo?collection=app.bsky.feed.post",
+        ] {
+            let granted = format!("{enumerated} {extra}");
+            let err = check_granted_scope(&enumerated, &granted).unwrap_err();
+            assert!(err.contains(extra), "{extra}: {err}");
+        }
+        // A permission set may be expanded into granular scopes, but never into broad ones.
+        let include = format!(
+            "atproto include:online.7778777.lessdugin.authFull {}",
+            scope::BLOB_SCOPES
+        );
+        let expanded = format!(
+            "atproto repo?collection=online.7778777.lessdugin.post {}",
+            scope::BLOB_SCOPES
+        );
+        assert!(check_granted_scope(&include, &expanded).is_ok());
+        assert!(check_granted_scope(&include, "atproto transition:generic").is_err());
+        assert!(check_granted_scope(&include, "atproto blob:*/*").is_err());
+    }
+
+    fn token(
+        sub: Option<&str>,
+        token_type: OAuthTokenType,
+        scope: Option<&str>,
+    ) -> OAuthTokenResponse {
+        serde_json::from_value(serde_json::json!({
+            "access_token": "at",
+            "token_type": match token_type { OAuthTokenType::DPoP => "DPoP", _ => "Bearer" },
+            "sub": sub,
+            "scope": scope,
+            "expires_in": 60,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn token_responses_are_checked() {
+        let req = scope::enumerated_scope();
+        assert!(
+            check_token(
+                &token(Some("did:plc:x"), OAuthTokenType::DPoP, Some(&req)),
+                &req
+            )
+            .is_ok()
+        );
+        assert!(check_token(&token(Some("did:plc:x"), OAuthTokenType::DPoP, None), &req).is_ok());
+        assert!(check_token(&token(None, OAuthTokenType::DPoP, Some(&req)), &req).is_err());
+        assert!(check_token(&token(Some(""), OAuthTokenType::DPoP, Some(&req)), &req).is_err());
+        assert!(
+            check_token(
+                &token(Some("did:plc:x"), OAuthTokenType::Bearer, Some(&req)),
+                &req
+            )
+            .is_err()
+        );
+        let e = check_token(
+            &token(
+                Some("did:plc:x"),
+                OAuthTokenType::DPoP,
+                Some("atproto transition:generic"),
+            ),
+            &req,
+        )
+        .unwrap_err();
+        assert_eq!(e.code, ErrorCode::Blocked);
+        assert_eq!(e.detail.unwrap()["kind"], "scopeRefused");
     }
 
     #[test]

@@ -80,7 +80,6 @@ impl ErrorCode {
 /// An engine error.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, thiserror::Error)]
 #[cfg_attr(feature = "tsify", derive(Tsify))]
-#[cfg_attr(feature = "tsify", tsify(into_wasm_abi, from_wasm_abi))]
 #[error("{message}")]
 pub struct EngineError {
     /// The code.
@@ -219,6 +218,7 @@ impl From<IdentityError> for EngineError {
             IdentityError::HandleNotFound(_) | IdentityError::DidNotFound(_) => {
                 Self::not_found(message)
             }
+            IdentityError::HandleUnreachable(_) => Self::new(ErrorCode::Network, message),
             IdentityError::InvalidDoc { .. } => {
                 Self::not_found(message).with_detail("reason", "invalidDidDocument")
             }
@@ -317,6 +317,16 @@ mod tests {
         assert_eq!(
             EngineError::from(HostError::Storage("disk".into())).code,
             ErrorCode::Internal
+        );
+        // A blob that fails its CID check is refused data, not a bug.
+        let e = EngineError::from(HostError::CidMismatch);
+        assert_eq!((e.code, e.retryable), (ErrorCode::Blocked, false));
+        // No reachable handle resolver is a network failure, not "not found".
+        let e = EngineError::from(IdentityError::HandleUnreachable("alice.example.com".into()));
+        assert_eq!((e.code, e.retryable), (ErrorCode::Network, true));
+        assert_eq!(
+            EngineError::from(IdentityError::HandleNotFound("alice.example.com".into())).code,
+            ErrorCode::NotFound
         );
     }
 }

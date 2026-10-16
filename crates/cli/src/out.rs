@@ -5,11 +5,16 @@
 //!   everything else via [`term_sanitize`]. The printer adds SGR sequences (bold, dim, colours,
 //!   reverse video for escaped runs) and nothing else, and only when colour is on.
 //! - `--json` writes a DTO to stdout; on a TTY, C1 controls, U+2028/2029 and bidi controls are
-//!   escaped as `\uXXXX` ([`escape_json_for_tty`]); piped output is byte-exact.
-//! - Errors go to stderr: a sanitised one-line message, or the `EngineError` JSON with `--json`.
+//!   escaped as `\uXXXX` ([`escape_json_for_tty`]); piped output is byte-exact. Every top-level
+//!   object carries `"dto": 1` (`engine-api.md` §1; [`Dto`] adds it to engine views).
+//! - Errors go to stderr: a sanitised one-line message, or the `EngineError` JSON with `--json`
+//!   (escaped the same way on a TTY).
+//! - Command-line parse errors ([`clap_error_text`]) are sanitised too, and never echo an
+//!   app-password-shaped argument.
 
 use std::io::{IsTerminal, Write};
 
+use lessdugin_core::dto::DTO_VERSION;
 use lessdugin_core::engine::EngineError;
 use serde::Serialize;
 
@@ -41,6 +46,64 @@ pub fn cat(parts: impl IntoIterator<Item = TermText>) -> TermText {
         t.append(p);
     }
     t
+}
+
+/// A `--json` object: `"dto": 1` first, then the fields of the wrapped view.
+#[derive(Serialize)]
+pub struct Dto<'a, T: Serialize> {
+    dto: u32,
+    #[serde(flatten)]
+    inner: &'a T,
+}
+
+/// Wraps a view (an object) for `--json` output.
+pub fn dto<T: Serialize>(inner: &T) -> Dto<'_, T> {
+    Dto {
+        dto: DTO_VERSION,
+        inner,
+    }
+}
+
+/// Replaces every app-password-shaped word (`xxxx-xxxx-xxxx-xxxx`) with `<redacted>`.
+pub fn redact_app_passwords(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut word = String::new();
+    let flush = |word: &mut String, out: &mut String| {
+        if lessdugin_core::engine::is_app_password_shape(word) {
+            out.push_str("<redacted>");
+        } else {
+            out.push_str(word);
+        }
+        word.clear();
+    };
+    for c in text.chars() {
+        if c.is_ascii_alphanumeric() || c == '-' {
+            word.push(c);
+        } else {
+            flush(&mut word, &mut out);
+            out.push(c);
+        }
+    }
+    flush(&mut word, &mut out);
+    out
+}
+
+/// A command-line parse error as plain text for stderr: app-password-shaped arguments redacted
+/// (with advice when there was one), every line sanitised (clap echoes the raw arguments).
+pub fn clap_error_text(rendered: &str) -> String {
+    let redacted = redact_app_passwords(rendered);
+    let mut out = String::new();
+    for line in redacted.lines() {
+        out.push_str(&tt(line).to_plain_string());
+        out.push('\n');
+    }
+    if redacted != rendered {
+        out.push_str(
+            "note: passwords are never accepted as command-line arguments; if that was a real \
+             app password, revoke it in your PDS's settings.\n",
+        );
+    }
+    out
 }
 
 /// A style the printer may apply (SGR only).
@@ -221,7 +284,13 @@ impl Printer {
     pub fn usage_error(&self, msg: &str) {
         if self.json {
             let v = serde_json::json!({"code": "usage", "message": msg, "retryable": false});
-            let _ = writeln!(std::io::stderr().lock(), "{v}");
+            let text = v.to_string();
+            let text = if std::io::stderr().is_terminal() {
+                escape_json_for_tty(&text)
+            } else {
+                text
+            };
+            let _ = writeln!(std::io::stderr().lock(), "{text}");
             return;
         }
         self.err_line(&[(lit("error: "), Style::Bad), (tt(msg), Style::Plain)]);
@@ -272,5 +341,27 @@ mod tests {
             );
         }
         assert!(colored.contains("\x1b[7m^[\x1b[0m"));
+    }
+
+    #[test]
+    fn dto_wrapper_comes_first() {
+        let v = serde_json::to_string(&dto(&serde_json::json!({"did": "did:plc:x"}))).unwrap();
+        assert_eq!(v, r#"{"dto":1,"did":"did:plc:x"}"#);
+    }
+
+    #[test]
+    fn clap_errors_are_redacted_and_sanitised() {
+        let e =
+            "error: unexpected argument 'abcd-efgh-ijkl-mnop' found\n\nUsage: x \u{1b}]0;t\u{7}";
+        let t = clap_error_text(e);
+        assert!(!t.contains("abcd-efgh-ijkl-mnop"), "{t}");
+        assert!(t.contains("'<redacted>'") && t.contains("revoke"), "{t}");
+        assert!(!t.contains('\u{1b}') && !t.contains('\u{7}'), "{t:?}");
+        let plain = clap_error_text("error: unrecognized subcommand 'frobnicate'");
+        assert!(plain.contains("frobnicate") && !plain.contains("revoke"));
+        assert_eq!(
+            redact_app_passwords("a abcd-1234-efgh-5678, b-c 1234-5678"),
+            "a <redacted>, b-c 1234-5678"
+        );
     }
 }

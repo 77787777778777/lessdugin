@@ -19,7 +19,15 @@
 //! are valid, and `http`/IP-literal PDS endpoints are accepted.
 //!
 //! Cache failures never fail a resolution (the cache is disposable, I1). A `NoAnswer` reached
-//! after a transport failure is not cached, so a network blip does not hide a handle for 6 h.
+//! after a transport failure is not cached, so a network blip does not hide a handle for 6 h. When
+//! no resolver could be reached at all, resolving an actor fails with
+//! [`IdentityError::HandleUnreachable`] (`network`), not "not found".
+//!
+//! Cached rows are tagged with the mode that produced them (`HandleRow.method = devnet`,
+//! `IdentityRow.src = devnet`): rows from devnet mode are ignored outside it, and production rows
+//! are ignored in devnet mode, so a devnet PDS or PLC can never answer for the public network
+//! even if both modes share one cache. A Slingshot mini-doc (`hint`) is reused for at most
+//! [`HINT_DOC_TTL_MS`], so the real document is retried.
 
 pub mod doc;
 pub mod doh;
@@ -43,6 +51,9 @@ pub const HANDLE_TTL_MS: i64 = 6 * 60 * 60 * 1000;
 pub const DID_DOC_TTL_MS: i64 = 24 * 60 * 60 * 1000;
 /// Third-party proofs need a DID document fetched at most this long ago (`sync.md` §1.1).
 pub const THIRD_PARTY_DOC_MAX_AGE_MS: i64 = 60 * 60 * 1000;
+/// A cached Slingshot mini-doc (identity level `hint`) is reused for at most this long, so the
+/// real DID document is retried (*tunable*).
+pub const HINT_DOC_TTL_MS: i64 = 60 * 60 * 1000;
 /// Default DoH JSON endpoints, in order.
 pub const DEFAULT_DOH: [&str; 2] = [
     "https://cloudflare-dns.com/dns-query",
@@ -152,8 +163,32 @@ pub enum DocSource {
     Web,
     /// A Slingshot mini-doc (hint).
     Slingshot,
-    /// The devnet PLC directory.
+    /// Fetched in devnet mode (the devnet PLC directory, or a did:web document): never used
+    /// outside devnet mode.
     Devnet,
+}
+
+/// The outcome of an uncached handle lookup ([`Resolver::lookup_handle`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HandleLookup {
+    /// The answer.
+    pub resolution: HandleResolution,
+    /// The answer may be cached: no transport failure was involved, and it is not a hint.
+    pub cacheable: bool,
+    /// No resolver could be reached: every DNS provider (or the devnet PDS) failed with a
+    /// transport error and `/.well-known/atproto-did` gave no definitive answer either. Only
+    /// meaningful with [`HandleResolution::NoAnswer`].
+    pub unreachable: bool,
+}
+
+impl HandleLookup {
+    fn new(resolution: HandleResolution, cacheable: bool) -> Self {
+        Self {
+            resolution,
+            cacheable,
+            unreachable: false,
+        }
+    }
 }
 
 /// The answer to `resolve_handle` (`sync.md` §3.1).
@@ -349,6 +384,10 @@ pub enum IdentityError {
     /// The handle did not resolve.
     #[error("handle {0} did not resolve to a DID")]
     HandleNotFound(String),
+    /// No handle resolver (DNS over HTTPS, the system resolver or the devnet PDS, and
+    /// `/.well-known/atproto-did`) could be reached.
+    #[error("could not reach any resolver for handle {0}")]
+    HandleUnreachable(String),
     /// The DID is not registered (PLC 404/410, did:web 404).
     #[error("DID {0} not found")]
     DidNotFound(String),
@@ -391,13 +430,16 @@ struct HandleRow {
 }
 
 impl HandleRow {
-    fn new(res: &HandleResolution, at: i64) -> Self {
+    /// A row for `res`. In devnet mode every row (also `none` and `invalid`) has method `devnet`,
+    /// which is how rows of the two modes are told apart.
+    fn new(res: &HandleResolution, at: i64, devnet: bool) -> Self {
+        let mode = devnet.then_some(ResolutionMethod::Devnet);
         let (result, did, method) = match res {
             HandleResolution::Did { did, method } => {
                 (HandleResult::Did, Some(did.to_string()), Some(*method))
             }
-            HandleResolution::NoAnswer => (HandleResult::None, None, None),
-            HandleResolution::Invalid => (HandleResult::Invalid, None, None),
+            HandleResolution::NoAnswer => (HandleResult::None, None, mode),
+            HandleResolution::Invalid => (HandleResult::Invalid, None, mode),
         };
         Self {
             v: ROW_VERSION,
@@ -406,6 +448,11 @@ impl HandleRow {
             method,
             at,
         }
+    }
+
+    /// True if the row was written in the current mode.
+    fn matches_mode(&self, devnet: bool) -> bool {
+        (self.method == Some(ResolutionMethod::Devnet)) == devnet
     }
 
     fn resolution(&self) -> Option<HandleResolution> {
@@ -603,30 +650,70 @@ impl<H: Host> Resolver<H> {
 
     /// `resolve_handle` (`sync.md` §3.1), cached for [`HANDLE_TTL_MS`].
     pub async fn resolve_handle(&self, handle: &Handle) -> HandleResolution {
+        self.resolve_handle_outcome(handle, true).await.resolution
+    }
+
+    /// Resolves a handle to a DID (cached): [`IdentityError::HandleNotFound`] for no answer,
+    /// [`IdentityError::HandleUnreachable`] when no resolver could be reached, and
+    /// [`IdentityError::InvalidHandle`] for invalid handles and several DIDs in DNS.
+    pub async fn resolve_handle_did(
+        &self,
+        handle: &Handle,
+    ) -> Result<(Did, ResolutionMethod), IdentityError> {
+        self.handle_did(handle, true).await
+    }
+
+    async fn handle_did(
+        &self,
+        handle: &Handle,
+        use_cache: bool,
+    ) -> Result<(Did, ResolutionMethod), IdentityError> {
+        let out = self.resolve_handle_outcome(handle, use_cache).await;
+        match out.resolution {
+            HandleResolution::Did { did, method } => Ok((did, method)),
+            HandleResolution::NoAnswer if out.unreachable => {
+                Err(IdentityError::HandleUnreachable(handle.to_string()))
+            }
+            HandleResolution::NoAnswer => Err(IdentityError::HandleNotFound(handle.to_string())),
+            HandleResolution::Invalid => Err(IdentityError::InvalidHandle {
+                handle: handle.to_string(),
+                reason: match self.check_handle(handle.as_str()) {
+                    Err(p) => p.to_string(),
+                    Ok(_) => "DNS names more than one DID".to_owned(),
+                },
+            }),
+        }
+    }
+
+    /// `resolve_handle` with the cache read only when `use_cache` (the answer is cached either
+    /// way when it may be).
+    async fn resolve_handle_outcome(&self, handle: &Handle, use_cache: bool) -> HandleLookup {
         if self.check_handle(handle.as_str()).is_err() {
-            return HandleResolution::Invalid;
+            return HandleLookup::new(HandleResolution::Invalid, false);
         }
         let key = handle_key(handle.as_str());
         let now = self.host.now_ms();
-        let cached = self
-            .read_row::<HandleRow>(&key)
-            .await
-            .filter(|r| r.v == ROW_VERSION && fresh(r.at, now, HANDLE_TTL_MS));
-        if let Some(res) = cached.and_then(|r| r.resolution()) {
-            return res;
+        if use_cache {
+            let devnet = self.devnet();
+            let cached = self.read_row::<HandleRow>(&key).await.filter(|r| {
+                r.v == ROW_VERSION && fresh(r.at, now, HANDLE_TTL_MS) && r.matches_mode(devnet)
+            });
+            if let Some(res) = cached.and_then(|r| r.resolution()) {
+                return HandleLookup::new(res, true);
+            }
         }
-        let (res, cacheable) = self.lookup_handle(handle).await;
-        if cacheable {
-            self.write_row(key, &HandleRow::new(&res, now)).await;
+        let out = self.lookup_handle(handle).await;
+        if out.cacheable {
+            self.write_row(key, &HandleRow::new(&out.resolution, now, self.devnet()))
+                .await;
         }
-        res
+        out
     }
 
-    /// `resolve_handle` without the cache. The flag says whether the answer may be cached (no
-    /// transport failure was involved, and it is not a hint).
-    pub async fn lookup_handle(&self, handle: &Handle) -> (HandleResolution, bool) {
+    /// `resolve_handle` without the cache.
+    pub async fn lookup_handle(&self, handle: &Handle) -> HandleLookup {
         if self.check_handle(handle.as_str()).is_err() {
-            return (HandleResolution::Invalid, true);
+            return HandleLookup::new(HandleResolution::Invalid, true);
         }
         if let Some(pds) = &self.config.devnet_pds {
             return self.lookup_devnet(pds, handle).await;
@@ -659,16 +746,20 @@ impl<H: Host> Resolver<H> {
                 }
             },
         };
+        let dns_answered = answer.is_some();
         match answer {
             Some((doh::TxtDids::One(did), method)) => {
-                return (HandleResolution::Did { did, method }, true);
+                return HandleLookup::new(HandleResolution::Did { did, method }, true);
             }
-            Some((doh::TxtDids::Many, _)) => return (HandleResolution::Invalid, true),
+            Some((doh::TxtDids::Many, _)) => {
+                return HandleLookup::new(HandleResolution::Invalid, true);
+            }
             Some((doh::TxtDids::None, _)) | None => {}
         }
+        let mut wellknown_failed = false;
         match self.wellknown(handle).await {
             Ok(Some(did)) => {
-                return (
+                return HandleLookup::new(
                     HandleResolution::Did {
                         did,
                         method: ResolutionMethod::Wellknown,
@@ -677,10 +768,13 @@ impl<H: Host> Resolver<H> {
                 );
             }
             Ok(None) => {}
-            Err(()) => transport_failure = true,
+            Err(()) => {
+                transport_failure = true;
+                wellknown_failed = true;
+            }
         }
         if let Some(did) = self.slingshot_handle(handle).await {
-            return (
+            return HandleLookup::new(
                 HandleResolution::Did {
                     did,
                     method: ResolutionMethod::Hint,
@@ -688,7 +782,11 @@ impl<H: Host> Resolver<H> {
                 false,
             );
         }
-        (HandleResolution::NoAnswer, !transport_failure)
+        HandleLookup {
+            resolution: HandleResolution::NoAnswer,
+            cacheable: !transport_failure,
+            unreachable: !dns_answered && wellknown_failed,
+        }
     }
 
     /// One DoH provider: `Some(txt strings)` for an answer (NXDOMAIN is empty), `None` for a
@@ -732,7 +830,7 @@ impl<H: Host> Resolver<H> {
         }
     }
 
-    async fn lookup_devnet(&self, pds: &url::Url, handle: &Handle) -> (HandleResolution, bool) {
+    async fn lookup_devnet(&self, pds: &url::Url, handle: &Handle) -> HandleLookup {
         let params = ResolveHandle {
             handle: handle.clone(),
         };
@@ -743,16 +841,20 @@ impl<H: Host> Resolver<H> {
             .await
         {
             Ok(out) => match policy_did(&out.did) {
-                Some(did) => (
+                Some(did) => HandleLookup::new(
                     HandleResolution::Did {
                         did,
                         method: ResolutionMethod::Devnet,
                     },
                     true,
                 ),
-                None => (HandleResolution::NoAnswer, true),
+                None => HandleLookup::new(HandleResolution::NoAnswer, true),
             },
-            Err(e) => (HandleResolution::NoAnswer, !e.is_transient()),
+            Err(e) => HandleLookup {
+                resolution: HandleResolution::NoAnswer,
+                cacheable: !e.is_transient(),
+                unreachable: e.is_transient(),
+            },
         }
     }
 
@@ -829,8 +931,14 @@ impl<H: Host> Resolver<H> {
         let now = self.host.now_ms();
         if let Some(mut r) = self.read_row::<IdentityRow>(&key).await {
             let usable = r.v == ROW_VERSION
-                && fresh(r.doc_at, now, max_age_ms)
-                && (r.level == IdentityLevel::Doc || self.slingshot().is_some());
+                && (r.src == DocSource::Devnet) == self.devnet()
+                && match r.level {
+                    IdentityLevel::Doc => fresh(r.doc_at, now, max_age_ms),
+                    IdentityLevel::Hint => {
+                        self.slingshot().is_some()
+                            && fresh(r.doc_at, now, max_age_ms.min(HINT_DOC_TTL_MS))
+                    }
+                };
             if usable {
                 if !fresh(r.h_at, now, HANDLE_TTL_MS) {
                     let verdict = self.handle_state(did, r.aka.as_deref()).await;
@@ -843,6 +951,44 @@ impl<H: Host> Resolver<H> {
         let mut r = self.fetch_row(did).await?;
         let verdict = self.handle_state(did, r.aka.as_deref()).await;
         r.set_verdict(verdict, self.host.now_ms());
+        self.write_row(key, &r).await;
+        Ok(r.identity(did))
+    }
+
+    /// The identity of `did` from a document at most `max_age_ms` old, **without** computing
+    /// the handle state: sync resolves documents only (PDS and key), and DoH lookups happen
+    /// only for authors on screen (`sync.md` §3.3, §14.1). A cached row is returned whatever
+    /// the age of its handle state; a fetched document is cached with a handle state that is
+    /// due at once (stamped 0, `unverified`), so the next [`Resolver::resolve_did`] computes
+    /// it.
+    pub async fn resolve_did_doc(
+        &self,
+        did: &Did,
+        max_age_ms: i64,
+    ) -> Result<ResolvedIdentity, IdentityError> {
+        did.check_lessdugin_policy()
+            .map_err(|e| IdentityError::UnsupportedDid {
+                did: did.to_string(),
+                reason: e.reason.to_owned(),
+            })?;
+        let key = did_key(did);
+        let now = self.host.now_ms();
+        if let Some(r) = self.read_row::<IdentityRow>(&key).await {
+            let usable = r.v == ROW_VERSION
+                && (r.src == DocSource::Devnet) == self.devnet()
+                && match r.level {
+                    IdentityLevel::Doc => fresh(r.doc_at, now, max_age_ms),
+                    IdentityLevel::Hint => {
+                        self.slingshot().is_some()
+                            && fresh(r.doc_at, now, max_age_ms.min(HINT_DOC_TTL_MS))
+                    }
+                };
+            if usable {
+                return Ok(r.identity(did));
+            }
+        }
+        let mut r = self.fetch_row(did).await?;
+        r.set_verdict(HandleVerdict::of(HandleState::Unverified), 0);
         self.write_row(key, &r).await;
         Ok(r.identity(did))
     }
@@ -861,21 +1007,21 @@ impl<H: Host> Resolver<H> {
 
     async fn fetch_row(&self, did: &Did) -> Result<IdentityRow, IdentityError> {
         let (url, src) = match did.method_kind() {
-            DidMethod::Plc => (
-                self.plc_doc_url(did)?,
-                if self.devnet() {
-                    DocSource::Devnet
-                } else {
-                    DocSource::Plc
-                },
-            ),
+            DidMethod::Plc => (self.plc_doc_url(did)?, DocSource::Plc),
             DidMethod::Web => {
-                let s = did
-                    .web_document_url()
-                    .ok_or_else(|| IdentityError::UnsupportedDid {
+                // The policy (no port, no path) was checked by the caller; what is left is the TLD.
+                let s = did.web_document_url_with(self.devnet()).ok_or_else(|| {
+                    IdentityError::UnsupportedDid {
                         did: did.to_string(),
-                        reason: "did:web with a port or path".to_owned(),
-                    })?;
+                        reason: if self.devnet() {
+                            "did:web under a reserved or local-only top-level domain".to_owned()
+                        } else {
+                            "did:web under a reserved or local-only top-level domain (or .test \
+                             outside devnet mode)"
+                                .to_owned()
+                        },
+                    }
+                })?;
                 let url = url::Url::parse(&s).map_err(|e| IdentityError::UnsupportedDid {
                     did: did.to_string(),
                     reason: e.to_string(),
@@ -919,7 +1065,11 @@ impl<H: Host> Resolver<H> {
             v: ROW_VERSION,
             doc: resp.body,
             level: IdentityLevel::Doc,
-            src,
+            src: if self.devnet() {
+                DocSource::Devnet
+            } else {
+                src
+            },
             pds,
             pds_problem,
             key,
@@ -979,6 +1129,22 @@ impl<H: Host> Resolver<H> {
 
     /// Resolves user input naming an actor: a DID, a handle, `@handle` or `at://<handle|did>`.
     pub async fn resolve_actor(&self, input: &str) -> Result<ResolvedActor, IdentityError> {
+        self.resolve_actor_with(input, false).await
+    }
+
+    /// Like [`Resolver::resolve_actor`], but bypassing the cache: the handle is looked up now and
+    /// the DID document fetched now (login, before any credential leaves the machine). The fresh
+    /// answers are cached.
+    pub async fn resolve_actor_fresh(&self, input: &str) -> Result<ResolvedActor, IdentityError> {
+        self.resolve_actor_with(input, true).await
+    }
+
+    async fn resolve_actor_with(
+        &self,
+        input: &str,
+        fresh: bool,
+    ) -> Result<ResolvedActor, IdentityError> {
+        let max_age_ms = if fresh { 0 } else { DID_DOC_TTL_MS };
         let s = input.trim();
         let s = match s.get(..5) {
             Some(p) if p.eq_ignore_ascii_case("at://") => &s[5..],
@@ -991,7 +1157,7 @@ impl<H: Host> Resolver<H> {
         }
         if s.starts_with("did:") {
             let did = Did::parse(s).map_err(|_| IdentityError::InvalidInput(input.to_owned()))?;
-            let identity = self.resolve_did(&did).await?;
+            let identity = self.resolve_did_fresh(&did, max_age_ms).await?;
             return Ok(ResolvedActor {
                 input: input.to_owned(),
                 input_handle: None,
@@ -1011,24 +1177,12 @@ impl<H: Host> Resolver<H> {
                 });
             }
         };
-        let resolution = self.resolve_handle(&handle).await;
-        let did = match &resolution {
-            HandleResolution::Did { did, .. } => did.clone(),
-            HandleResolution::NoAnswer => {
-                return Err(IdentityError::HandleNotFound(handle.to_string()));
-            }
-            HandleResolution::Invalid => {
-                return Err(IdentityError::InvalidHandle {
-                    handle: handle.to_string(),
-                    reason: "DNS names more than one DID".to_owned(),
-                });
-            }
-        };
-        let identity = self.resolve_did(&did).await?;
+        let (did, method) = self.handle_did(&handle, !fresh).await?;
+        let identity = self.resolve_did_fresh(&did, max_age_ms).await?;
         Ok(ResolvedActor {
             input: input.to_owned(),
             input_handle: Some(handle.to_string()),
-            resolution: Some(resolution),
+            resolution: Some(HandleResolution::Did { did, method }),
             identity,
         })
     }
@@ -1090,13 +1244,26 @@ mod tests {
             did: did.clone(),
             method: ResolutionMethod::Wellknown,
         };
-        let r = HandleRow::new(&res, 5);
+        let r = HandleRow::new(&res, 5, false);
         let back: HandleRow = row::decode(&row::encode(&r).unwrap()).unwrap();
         assert_eq!(back.resolution(), Some(res));
-        assert_eq!(
-            HandleRow::new(&HandleResolution::NoAnswer, 1).resolution(),
-            Some(HandleResolution::NoAnswer)
+        assert!(back.matches_mode(false) && !back.matches_mode(true));
+        let none = HandleRow::new(&HandleResolution::NoAnswer, 1, false);
+        assert_eq!(none.resolution(), Some(HandleResolution::NoAnswer));
+        assert!(none.matches_mode(false) && !none.matches_mode(true));
+        // Devnet rows are tagged, whatever the result.
+        let dev_none = HandleRow::new(&HandleResolution::NoAnswer, 1, true);
+        assert_eq!(dev_none.method, Some(ResolutionMethod::Devnet));
+        assert!(dev_none.matches_mode(true) && !dev_none.matches_mode(false));
+        let dev_did = HandleRow::new(
+            &HandleResolution::Did {
+                did: did.clone(),
+                method: ResolutionMethod::Devnet,
+            },
+            1,
+            true,
         );
+        assert!(dev_did.matches_mode(true) && !dev_did.matches_mode(false));
         let ir = IdentityRow {
             v: ROW_VERSION,
             doc: b"{}".to_vec(),

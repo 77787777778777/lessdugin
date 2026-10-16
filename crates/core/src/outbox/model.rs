@@ -6,15 +6,19 @@
 //! |---|---|
 //! | `("out", account, seq)` | [`PendingWrite`] |
 //! | `("out.budget", account)` | [`super::budget::BudgetRow`] |
-//! | `("out.meta", account)` | [`MetaRow`]: the last TID and the next `seq` (W6) |
-//! | `("out.blob", account, seq, index, chunk)` | ≤ 1 MiB of a blob uploaded when the write is sent (§8.8) |
+//! | `("out.meta", account)` | [`MetaRow`]: the last TID handed out (W6) |
+//! | `("out.blob", account, seq, index, chunk)` | [`ChunkRow`]: ≤ 1 MiB of a blob uploaded when the write is sent (§8.8) |
+//!
+//! `seq` is the integer value of a TID taken when the write is persisted, so it increases per
+//! account (FIFO order) and two processes enqueueing at once do not collide.
 //!
 //! Record values are kept as their JSON bytes (`serde_bytes`), so a record of any depth, with
 //! `$link` and `$bytes` objects, round-trips verbatim whatever the row caps.
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
-use crate::dto::WriteStatus;
+use crate::dto::{WriteState, WriteTicket};
 use crate::engine::{EngineError, ErrorCode};
 
 /// Row version of every outbox row.
@@ -65,7 +69,7 @@ pub fn blob_prefix(account: &str, seq: i64) -> Vec<u8> {
 /// The state of a write (`data-model.md` §8.2), plus `undone` (`sync.md` §7.4).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub enum WriteState {
+pub enum WriteStage {
     /// Waiting for its turn.
     Queued,
     /// Held for the undo / coalescing window until `notBefore` (opinions).
@@ -84,7 +88,7 @@ pub enum WriteState {
     Undone,
 }
 
-impl WriteState {
+impl WriteStage {
     /// `true` for states the pump still has to process.
     pub fn is_pending(self) -> bool {
         matches!(
@@ -106,6 +110,17 @@ pub enum OpAction {
     Delete,
 }
 
+impl OpAction {
+    /// Write-budget points of one op (`data-model.md` §8.2: create 3, update 2, delete 1).
+    pub fn cost(self) -> u32 {
+        match self {
+            Self::Create => crate::limits::WRITE_COST_CREATE,
+            Self::Update => crate::limits::WRITE_COST_UPDATE,
+            Self::Delete => crate::limits::WRITE_COST_DELETE,
+        }
+    }
+}
+
 /// One record a write targets, with its key and intended value fixed when the write is
 /// persisted (W6). Revisions created by the edit protocols are built at send time from the
 /// current value; their keys are fixed in the [`Intent`].
@@ -118,27 +133,80 @@ pub struct Op {
     pub collection: String,
     /// Record key.
     pub rkey: String,
-    /// The intended value as JSON bytes (creates and updates). Spillable markdown fields hold
-    /// their inline source; spilling happens when the write is sent (§5.3, §8.9).
+    /// The intended value as JSON bytes (creates and updates). Blobs are placeholders (the
+    /// locally computed blob object) until they are uploaded, then the object `uploadBlob`
+    /// returned, verbatim (§8.8).
     #[serde(default, skip_serializing_if = "Option::is_none", with = "serde_bytes")]
     pub value: Option<Vec<u8>>,
     /// A compare-and-swap CID (`deleteRecord` with `swapRecord`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub swap: Option<String>,
+    /// For a `post`: its plain-text excerpt, written if the body has to be spilled when the
+    /// write is sent (`data-model.md` §5.3 rule 3, §8.9).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub excerpt: Option<String>,
 }
 
 impl Op {
+    fn with(action: OpAction, collection: &str, rkey: &str, value: Option<&Value>) -> Self {
+        Self {
+            action,
+            collection: collection.to_owned(),
+            rkey: rkey.to_owned(),
+            value: value.map(|v| serde_json::to_vec(v).unwrap_or_default()),
+            swap: None,
+            excerpt: None,
+        }
+    }
+
+    /// A create of `value`.
+    pub fn create(collection: &str, rkey: &str, value: &Value) -> Self {
+        Self::with(OpAction::Create, collection, rkey, Some(value))
+    }
+
+    /// An update to `value`.
+    pub fn update(collection: &str, rkey: &str, value: &Value) -> Self {
+        Self::with(OpAction::Update, collection, rkey, Some(value))
+    }
+
+    /// A delete.
+    pub fn delete(collection: &str, rkey: &str) -> Self {
+        Self::with(OpAction::Delete, collection, rkey, None)
+    }
+
+    /// Sets the compare-and-swap CID.
+    pub fn with_swap(mut self, cid: impl Into<String>) -> Self {
+        self.swap = Some(cid.into());
+        self
+    }
+
+    /// Sets the spill excerpt (posts).
+    pub fn with_excerpt(mut self, excerpt: impl Into<String>) -> Self {
+        self.excerpt = Some(excerpt.into());
+        self
+    }
+
     /// The value as JSON.
-    pub fn value_json(&self) -> Option<serde_json::Value> {
+    pub fn value_json(&self) -> Option<Value> {
         self.value
             .as_deref()
             .and_then(|b| serde_json::from_slice(b).ok())
+    }
+
+    /// Replaces the value.
+    pub fn set_value(&mut self, v: &Value) {
+        self.value = Some(serde_json::to_vec(v).unwrap_or_default());
+    }
+
+    /// The record uri in `account`'s repo.
+    pub fn uri(&self, account: &str) -> String {
+        format!("at://{account}/{}/{}", self.collection, self.rkey)
     }
 }
 
 /// What to do when a create-if-absent finds the key taken (`data-model.md` §8.4).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", tag = "kind")]
 pub enum OnExists {
     /// An existing record means success (join).
     Succeed,
@@ -152,25 +220,45 @@ pub enum OnExists {
     },
 }
 
-/// One persisted opinion intent (`data-model.md` §8.5), mapped to
-/// [`lessdugin_lexicon::records::OpinionIntent`] when the write is sent.
+/// One opinion intent (`data-model.md` §8.5, `engine-api.md` §3.5 `OpinionIntent`), mapped to
+/// [`lessdugin_lexicon::records::OpinionIntent`] when the write is sent. An absent `value`
+/// clears.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct OpinionStep {
-    /// `karma`, `agreement`, `react`, `unreact` or `tag`.
-    pub op: String,
-    /// The karma, agreement or tag value; `None` clears.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub value: Option<String>,
-    /// React id or tag slug.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    /// React stance.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stance: Option<String>,
-    /// React quote (`defs#textQuote` JSON).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub quote: Option<String>,
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum OpinionStep {
+    /// `setKarma(x | clear)`.
+    Karma {
+        /// `up`, `down`, `strongUp` or `strongDown`; absent clears.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        value: Option<String>,
+    },
+    /// `setAgreement(x | clear)`.
+    Agreement {
+        /// `agree`, `disagree`, `strongAgree` or `strongDisagree`; absent clears.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        value: Option<String>,
+    },
+    /// `react(add | remove, id, quote?, stance)`.
+    React {
+        /// React id (a palette slug).
+        id: String,
+        /// `for` or `against`.
+        stance: String,
+        /// The `defs#textQuote` object, as JSON text.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        quote: Option<String>,
+        /// Remove instead of add.
+        #[serde(default)]
+        remove: bool,
+    },
+    /// `tag(set, slug, value | clear)`.
+    Tag {
+        /// Tag slug.
+        slug: String,
+        /// `up`, `down`, `strongUp` or `strongDown`; absent clears.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        value: Option<String>,
+    },
 }
 
 /// The protocol a write runs and its fixed parameters (`data-model.md` §8.3–§8.8). The records
@@ -183,7 +271,8 @@ pub enum Intent {
     /// First content in a forum (§8.4): `ops = [create content, create membership]`; the
     /// membership is included only if a fresh `getRecord` shows it absent.
     FirstContent,
-    /// Create forum (§8.4): `ops = [create forum, create membership?]`.
+    /// Create forum (§8.4): `ops = [create forum, create membership]`, the membership included
+    /// only if absent.
     CreateForum,
     /// Create-if-absent (ADR 0005): `ops = [create]`.
     CreateIfAbsent {
@@ -207,7 +296,8 @@ pub enum Intent {
     },
     /// The delete protocol (§8.7): `ops = [delete target]`; its revisions are purged.
     DeleteContent,
-    /// `deleteRecord` (leave, wikiRevision, single records): `ops = [delete]`.
+    /// `deleteRecord` (leave, wikiRevision, single records): `ops = [delete]`, with the op's
+    /// `swap` as `swapRecord`.
     DeleteRecord,
     /// ModAction removal (§8.4): `ops = [delete modAction]`, snapshotted by a `delete` revision.
     RemoveModAction {
@@ -216,7 +306,8 @@ pub enum Intent {
     },
     /// Redact history: `ops = [delete revision…]`, chunked at ≤ 200.
     Redact,
-    /// An opinion write (§8.5): `ops = [opinion rkey]` (the value is computed when sent).
+    /// An opinion write (§8.5): `ops = [update opinion]` without a value (it is computed when
+    /// sent from the current value and `steps`).
     Opinion {
         /// Subject at-uri.
         subject: String,
@@ -225,15 +316,16 @@ pub enum Intent {
         /// Forum at-uri.
         forum: String,
         /// The intents, in order (coalesced while held).
-        intents: Vec<OpinionStep>,
-        /// The opinion before this write (JSON), once sent: the base of `undo` after sending.
+        steps: Vec<OpinionStep>,
+        /// The opinion before this write (JSON text; `None` = absent), once read: the base of
+        /// `undo` after sending.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         prior: Option<String>,
-        /// `true` once `prior` is known (it is `None` both before sending and for "absent").
+        /// `true` once `prior` is known.
         #[serde(default)]
         prior_known: bool,
     },
-    /// `mod adopt` (§8.6).
+    /// `mod adopt` (§8.6): no ops until sent.
     Adopt {
         /// Forum at-uri.
         forum: String,
@@ -283,6 +375,9 @@ pub struct PendingBlob {
     pub size: u64,
     /// Number of chunk rows.
     pub chunks: u32,
+    /// Set once uploaded (the placeholders were replaced by the returned object).
+    #[serde(default)]
+    pub uploaded: bool,
 }
 
 /// The result of one target once the write is done.
@@ -355,7 +450,7 @@ pub struct PendingWrite {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blobs: Vec<PendingBlob>,
     /// The state.
-    pub state: WriteState,
+    pub state: WriteStage,
     /// Protocol runs so far.
     pub attempts: u32,
     /// When it was persisted (ms).
@@ -387,41 +482,42 @@ impl PendingWrite {
 
     /// The primary target's uri.
     pub fn primary_uri(&self) -> Option<String> {
-        self.ops
-            .first()
-            .map(|o| format!("at://{}/{}/{}", self.account, o.collection, o.rkey))
+        self.ops.first().map(|o| o.uri(&self.account))
     }
 
     /// The ticket state (`engine-api.md` §3.5).
-    pub fn status(&self) -> WriteStatus {
+    pub fn status(&self) -> WriteState {
         match self.state {
-            WriteState::Queued => WriteStatus::Pending {
+            WriteStage::Queued => WriteState::Pending {
                 not_before_ms: None,
                 held: false,
                 throttled: false,
             },
-            WriteState::Held => WriteStatus::Pending {
+            WriteStage::Held => WriteState::Pending {
                 not_before_ms: self.not_before,
                 held: true,
                 throttled: false,
             },
-            WriteState::Throttled => WriteStatus::Pending {
+            WriteStage::Throttled => WriteState::Pending {
                 not_before_ms: self.not_before,
                 held: false,
                 throttled: true,
             },
-            WriteState::Sending => WriteStatus::Sending,
-            WriteState::Done => {
+            WriteStage::Sending => WriteState::Sending,
+            WriteStage::Done => {
                 let first = self.results.first();
-                WriteStatus::Done {
-                    uri: first.map(|r| r.uri.clone()).or_else(|| self.primary_uri()),
+                WriteState::Done {
+                    uri: first
+                        .map(|r| r.uri.clone())
+                        .or_else(|| self.primary_uri())
+                        .unwrap_or_default(),
                     cid: first.and_then(|r| r.cid.clone()),
                 }
             }
-            WriteState::Conflict | WriteState::Failed => WriteStatus::Failed {
+            WriteStage::Conflict | WriteStage::Failed => WriteState::Failed {
                 error: self.error.as_ref().map_or_else(
                     || {
-                        if self.state == WriteState::Conflict {
+                        if self.state == WriteStage::Conflict {
                             EngineError::conflict("the record changed")
                         } else {
                             EngineError::internal("the write failed")
@@ -430,7 +526,30 @@ impl PendingWrite {
                     StoredError::to_engine_error,
                 ),
             },
-            WriteState::Undone => WriteStatus::Undone,
+            WriteStage::Undone => WriteState::Undone,
+        }
+    }
+
+    /// The ticket.
+    pub fn ticket(&self) -> WriteTicket {
+        WriteTicket {
+            id: self.id(),
+            state: self.status(),
+        }
+    }
+
+    /// Write-budget points of the ops known before sending (an estimate for protocols that
+    /// compute their ops when sent).
+    pub fn estimated_cost(&self) -> u32 {
+        let ops: u32 = self.ops.iter().map(|o| o.action.cost()).sum();
+        match &self.intent {
+            // + the revision create
+            Intent::Edit { .. } | Intent::RemoveModAction { .. } => {
+                ops + OpAction::Create.cost()
+            }
+            // the opinion op is a create, an update or a delete
+            Intent::Opinion { .. } => OpAction::Create.cost(),
+            _ => ops.max(1),
         }
     }
 }
@@ -449,7 +568,7 @@ pub fn parse_write_id(id: &str) -> Option<(String, i64)> {
     Some((account.to_owned(), seq.parse().ok()?))
 }
 
-/// `("out.meta", account)`: TIDs strictly increase per account (W6) and `seq` never repeats.
+/// `("out.meta", account)`: TIDs strictly increase per account (W6).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MetaRow {
@@ -457,8 +576,6 @@ pub struct MetaRow {
     pub v: u32,
     /// The last TID handed out (its integer value).
     pub last_tid: u64,
-    /// The next `seq`.
-    pub next_seq: i64,
 }
 
 /// A blob chunk row value.
@@ -469,4 +586,131 @@ pub struct ChunkRow {
     /// The bytes.
     #[serde(with = "serde_bytes")]
     pub b: Vec<u8>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::row;
+    use serde_json::json;
+
+    fn sample() -> PendingWrite {
+        PendingWrite {
+            v: OUTBOX_ROW_VERSION,
+            account: "did:plc:ewvi7nxzyoun6zhxrhs64oiz".into(),
+            seq: 1_792_151_363_000_123,
+            intent: Intent::Opinion {
+                subject: "at://did:plc:ewvi7nxzyoun6zhxrhs64oiz/x.y.post/a".into(),
+                subject_cid: "bafyrei".into(),
+                forum: "at://did:plc:ewvi7nxzyoun6zhxrhs64oiz/x.y.forum/f".into(),
+                steps: vec![
+                    OpinionStep::Karma {
+                        value: Some("up".into()),
+                    },
+                    OpinionStep::React {
+                        id: "insightful".into(),
+                        stance: "for".into(),
+                        quote: Some(r#"{"exact":"q"}"#.into()),
+                        remove: false,
+                    },
+                    OpinionStep::Tag {
+                        slug: "x".into(),
+                        value: None,
+                    },
+                ],
+                prior: None,
+                prior_known: true,
+            },
+            ops: vec![
+                Op::create(
+                    "x.y.post",
+                    "k",
+                    &json!({"a": {"$link": "bafyrei"}, "n": -3, "deep": [[[[{"b": true}]]]]}),
+                )
+                .with_excerpt("e"),
+                Op::delete("x.y.post", "k2").with_swap("bafy"),
+            ],
+            blobs: vec![PendingBlob {
+                cid: "bafkrei".into(),
+                mime: "image/png".into(),
+                size: 69,
+                chunks: 1,
+                uploaded: false,
+            }],
+            state: WriteStage::Held,
+            attempts: 2,
+            created_at: 5,
+            updated_at: 6,
+            not_before: Some(4_005),
+            sent: false,
+            results: vec![OpResult {
+                uri: "at://x/y/z".into(),
+                cid: None,
+            }],
+            error: Some(StoredError::from(
+                &EngineError::conflict("x").with_detail("current", "bafy"),
+            )),
+            undo_of: None,
+        }
+    }
+
+    #[test]
+    fn rows_roundtrip() {
+        let w = sample();
+        let bytes = row::encode(&w).unwrap();
+        assert_eq!(row::decode::<PendingWrite>(&bytes).unwrap(), w);
+        for intent in [
+            Intent::Create,
+            Intent::CreateIfAbsent {
+                on_exists: OnExists::Update {
+                    revision_rkey: "r".into(),
+                },
+            },
+            Intent::Edit {
+                base: "b".into(),
+                summary: None,
+                revision_rkey: "r".into(),
+            },
+            Intent::Adopt {
+                forum: "f".into(),
+                former: "d".into(),
+                former_pds: "p".into(),
+                role: "owner".into(),
+                revision_tid: "t".into(),
+                report: vec!["x".into()],
+            },
+        ] {
+            let w = PendingWrite { intent, ..w.clone() };
+            let bytes = row::encode(&w).unwrap();
+            assert_eq!(row::decode::<PendingWrite>(&bytes).unwrap(), w);
+        }
+        let m = MetaRow { v: 1, last_tid: 7 };
+        assert_eq!(row::decode::<MetaRow>(&row::encode(&m).unwrap()).unwrap(), m);
+    }
+
+    #[test]
+    fn ids_and_status() {
+        let w = sample();
+        assert_eq!(
+            parse_write_id(&w.id()),
+            Some((w.account.clone(), w.seq))
+        );
+        assert_eq!(parse_write_id("x/1"), None);
+        assert!(matches!(
+            w.status(),
+            WriteState::Pending {
+                held: true,
+                not_before_ms: Some(4_005),
+                ..
+            }
+        ));
+        let mut d = w.clone();
+        d.state = WriteStage::Conflict;
+        let WriteState::Failed { error } = d.status() else {
+            panic!()
+        };
+        assert_eq!(error.code, ErrorCode::Conflict);
+        assert_eq!(error.detail.unwrap()["current"], "bafy");
+        assert_eq!(w.estimated_cost(), 3);
+    }
 }

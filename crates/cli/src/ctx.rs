@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! The command context: paths, configuration, the native host and the engine (opened lazily),
 //! the session store, and account selection.
+//!
+//! Devnet mode (`threat-model.md` INFRA-9, `sync.md` §3.7) exists only in builds with
+//! [`DEVNET_AVAILABLE`]. When it is on, a warning is printed on every run, and the data and
+//! cache live in the devnet's own directories ([`Paths::for_devnet`]) with its own keyring
+//! service, so a devnet can never answer for, or leave accounts and issuer pins in, the
+//! production stores.
 
 use std::sync::OnceLock;
 
@@ -44,6 +50,17 @@ impl CliError {
     }
 }
 
+/// True in builds that have devnet mode: debug builds, and release builds with the `devnet`
+/// feature. Other builds refuse `--dev` and devnet profiles.
+pub const DEVNET_AVAILABLE: bool = cfg!(any(debug_assertions, feature = "devnet"));
+
+fn devnet_unavailable() -> CliError {
+    CliError::usage(
+        "devnet mode (--dev, or a [network] mode = \"devnet\" profile) is not available in this \
+         build; it is for development builds only",
+    )
+}
+
 /// The context of one invocation.
 pub struct Ctx {
     /// Global options.
@@ -56,6 +73,8 @@ pub struct Ctx {
     pub config: Config,
     /// Why `config.toml` could not be used, if it could not (defaults are used instead).
     pub config_problem: Option<String>,
+    /// The keyring service of the session store (a devnet's own in devnet mode).
+    keyring_service: Option<String>,
     engine: OnceLock<Engine<NativeHost>>,
 }
 
@@ -89,12 +108,15 @@ impl Ctx {
     /// Resolves paths, loads `config.toml` and applies `--dev`/`--plc-url`/`--pds-url`.
     pub fn new(g: GlobalArgs) -> Result<Self, CliError> {
         let out = Printer::new(g.json, g.color, g.quiet);
-        let paths = Paths::resolve(g.data_dir.as_deref())
+        let mut paths = Paths::resolve(g.data_dir.as_deref())
             .map_err(|e| EngineError::internal(e.to_string()))?;
         let (mut config, config_problem) = match Config::load(&paths.config_file) {
             Ok(c) => (c, None),
             Err(e) => (Config::default(), Some(e.to_string())),
         };
+        if !DEVNET_AVAILABLE && (g.dev || config.is_devnet()) {
+            return Err(devnet_unavailable());
+        }
         if (g.plc_url.is_some() || g.pds_url.is_some()) && !g.dev {
             return Err(CliError::usage(
                 "--plc-url and --pds-url select a devnet and need --dev",
@@ -137,12 +159,25 @@ impl Ctx {
         if let Some(p) = &config_problem {
             out.warn(tt(&format!("ignoring the configuration: {p}")));
         }
+        let mut keyring_service = None;
+        if let NetworkProfile::Devnet(d) = &config.network {
+            paths = paths.for_devnet(d);
+            keyring_service = Some(d.keyring_service());
+            out.warn(tt(&format!(
+                "devnet mode: PLC {} and PDS {} (plain http and loopback allowed); devnet data \
+                 is kept in {}",
+                d.plc,
+                d.pds,
+                paths.data_dir.display()
+            )));
+        }
         Ok(Self {
             g,
             out,
             paths,
             config,
             config_problem,
+            keyring_service,
             engine: OnceLock::new(),
         })
     }
@@ -157,9 +192,13 @@ impl Ctx {
         Ok(self.engine.get_or_init(|| engine))
     }
 
-    /// The session store.
+    /// The session store (the devnet's own keyring service in devnet mode).
     pub fn store(&self) -> SecretStore {
-        SecretStore::new(&self.paths)
+        let store = SecretStore::new(&self.paths);
+        match &self.keyring_service {
+            Some(s) => store.with_keyring_service(s.clone()),
+            None => store,
+        }
     }
 
     /// The account to act as: `--account` (a recorded handle or DID) or the active one.
@@ -173,34 +212,63 @@ impl Ctx {
         }
     }
 
-    /// The account, with its stored session registered for `UserPds` requests.
+    /// The account, re-checked against its DID document, with its stored session registered
+    /// for `UserPds` requests.
     pub async fn account_with_session(&self) -> Result<AccountView, CliError> {
         let account = self.account().await?;
         let engine = self.engine()?;
-        restore_session(engine.host(), &self.store(), &self.paths, &account).await?;
-        Ok(account)
+        Ok(restore_session(engine, &self.store(), &self.paths, &account).await?)
     }
 }
 
-/// A recorded account by handle (`@` optional, case-insensitive) or DID.
+fn not_logged_in_as(want: &str) -> CliError {
+    CliError::Engine(
+        EngineError::new(ErrorCode::AuthRequired, format!("not logged in as {want}"))
+            .with_detail("account", want),
+    )
+}
+
+/// A recorded account by DID, or by handle (`@` optional, case-insensitive). A handle must
+/// still be the account's handle: the recorded one is re-checked against the identity
+/// ([`Engine::refresh_account`]), and a handle that moved to another recorded account selects
+/// that one. Offline, the recorded handle is used as is.
 pub async fn find_account(
     engine: &Engine<NativeHost>,
     want: &str,
 ) -> Result<AccountView, CliError> {
     let w = want.trim().trim_start_matches('@').to_ascii_lowercase();
     let accounts = engine.accounts().await?;
-    accounts
-        .into_iter()
-        .find(|a| {
-            a.did == w
-                || a.handle
-                    .as_deref()
-                    .is_some_and(|h| h.to_ascii_lowercase() == w)
-        })
-        .ok_or_else(|| {
-            CliError::Engine(
-                EngineError::new(ErrorCode::AuthRequired, format!("not logged in as {want}"))
-                    .with_detail("account", want),
-            )
-        })
+    if accounts.is_empty() {
+        return Err(not_logged_in_as(want));
+    }
+    if w.starts_with("did:") {
+        return accounts
+            .into_iter()
+            .find(|a| a.did == w)
+            .ok_or_else(|| not_logged_in_as(want));
+    }
+    let recorded = accounts.iter().find(|a| {
+        a.handle
+            .as_deref()
+            .is_some_and(|h| h.eq_ignore_ascii_case(&w))
+    });
+    if let Some(a) = recorded {
+        match engine.refresh_account(&a.did).await {
+            Ok(fresh) if fresh.handle.as_deref() == Some(w.as_str()) => return Ok(fresh),
+            Ok(_) => {} // the handle moved: look it up below
+            Err(e) => {
+                tracing::debug!(error = %e.message, "could not re-check the account's handle");
+                return Ok(a.clone());
+            }
+        }
+    }
+    match engine.resolve_actor(&w).await {
+        Ok(actor) if actor.handle.as_deref() == Some(w.as_str()) => {
+            match accounts.iter().find(|a| a.did == actor.did) {
+                Some(a) => Ok(engine.refresh_account(&a.did).await.unwrap_or(a.clone())),
+                None => Err(not_logged_in_as(want)),
+            }
+        }
+        _ => Err(not_logged_in_as(want)),
+    }
 }

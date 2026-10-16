@@ -3,7 +3,12 @@
 //!
 //! There is deliberately no option that takes a password: app passwords come from a no-echo
 //! prompt, `--password-stdin` or `LESSDUGIN_APP_PASSWORD` (`threat-model.md` AUTH-3). A hidden
-//! `--password` exists only to refuse it with an explanation.
+//! `--password` and a hidden catch-all positional of `login` exist only to refuse them with an
+//! explanation, without echoing the value.
+//!
+//! `--dev` has no environment variable: devnet mode is switched on only by the command line or
+//! by a `[network]` profile in `config.toml` (and only in builds that have it, see
+//! `ctx::DEVNET_AVAILABLE`).
 
 use std::path::PathBuf;
 
@@ -60,13 +65,9 @@ pub struct GlobalArgs {
     #[arg(long, global = true, value_enum, default_value_t = ColorChoice::Auto)]
     pub color: ColorChoice,
 
-    /// Use a local devnet (PLC + PDS, `.test` handles; never enabled implicitly).
-    #[arg(
-        long,
-        global = true,
-        env = "LESSDUGIN_DEV",
-        value_parser = clap::builder::FalseyValueParser::new()
-    )]
+    /// Use a local devnet (PLC + PDS, `.test` handles; never enabled implicitly, development
+    /// builds only).
+    #[arg(long, global = true)]
     pub dev: bool,
 
     /// Devnet PLC directory (with --dev).
@@ -145,6 +146,10 @@ pub struct LoginArgs {
     /// Refused: passwords are never read from the command line.
     #[arg(long = "password", short = 'p', hide = true, num_args = 0..=1, value_name = "X")]
     pub password_argv: Option<Option<String>>,
+
+    /// Refused: anything after the handle (most likely a password) is not echoed back.
+    #[arg(hide = true, value_name = "EXTRA", num_args = 0..)]
+    pub extra: Vec<String>,
 }
 
 /// `logout`.

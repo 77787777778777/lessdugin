@@ -3,17 +3,18 @@
 
 use lessdugin_core::dto::{HandleState, VerifyOutcome};
 use lessdugin_core::identity::IdentityLevel;
+use lessdugin_core::verify::DEEP_SKIPPED;
 
 use crate::args::{ResolveArgs, VerifyArgs};
 use crate::ctx::{CliError, Ctx};
-use crate::out::{Style, cat, lit, name, tt};
+use crate::out::{Style, cat, dto, lit, name, tt};
 
 /// `lessdugin resolve <handle|did>`: prints `ResolvedActor` with `--json`.
 pub async fn resolve(ctx: &Ctx, args: ResolveArgs) -> Result<(), CliError> {
     let engine = ctx.engine()?;
     let r = engine.resolve_identity(&args.actor).await?;
     if ctx.out.is_json() {
-        ctx.out.json(&r);
+        ctx.out.json(&dto(&r));
         return Ok(());
     }
     let id = &r.identity;
@@ -89,10 +90,11 @@ pub async fn verify(ctx: &Ctx, args: VerifyArgs) -> Result<(), CliError> {
         }
         out.field("key", 6, tt(&report.key_source));
         for c in &report.checks {
-            let (mark, st) = if c.ok {
-                (lit("  ok    "), Style::Good)
-            } else {
-                (lit("  FAIL  "), Style::Bad)
+            let skipped = c.ok && c.detail.as_deref() == Some(DEEP_SKIPPED);
+            let (mark, st) = match (c.ok, skipped) {
+                (_, true) => (lit("  skip  "), Style::Dim),
+                (true, false) => (lit("  ok    "), Style::Good),
+                (false, _) => (lit("  FAIL  "), Style::Bad),
             };
             let mut spans = vec![(mark, st), (tt(&c.name), Style::Plain)];
             if let Some(d) = &c.detail {

@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Offline tests of the `lessdugin` binary: help, usage errors and exit codes, refusal of
-//! passwords in argv and of main passwords, `--json` shapes, and terminal sanitising of error
-//! messages. Network commands run against a "devnet" on a closed port, so nothing leaves the
-//! machine.
+//! passwords in argv and of main passwords, `--json` shapes (`"dto": 1`), terminal sanitising of
+//! error messages, parse errors and successful output, and devnet mode (explicit only, warned
+//! about, kept in its own directories). Network commands run against a "devnet" on a closed
+//! port or a tiny local server, so nothing leaves the machine.
 
+use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 
 use assert_cmd::Command;
@@ -113,11 +115,43 @@ fn passwords_in_argv_are_refused() {
         assert!(err.contains("never accepted"), "{args:?}: {err}");
         assert!(!err.contains("hunter2"), "{err}");
     }
-    // A second positional is a usage error, not a password.
-    bin(dir.path())
-        .args(["login", "alice.test", "abcd-efgh-ijkl-mnop"])
-        .assert()
-        .code(2);
+    // Anything after the handle is refused the same way, and never echoed.
+    for extra in ["abcd-efgh-ijkl-mnop", "hunter2"] {
+        let out = bin(dir.path())
+            .args(["login", "alice.test", extra])
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2));
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains("never accepted"), "{err}");
+        assert!(!err.contains(extra), "{err}");
+    }
+}
+
+#[test]
+fn parse_errors_never_echo_passwords_or_controls() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = bin(dir.path())
+        .args(["whoami", "abcd-efgh-ijkl-mnop"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!err.contains("abcd-efgh-ijkl-mnop"), "{err}");
+    assert!(
+        err.contains("<redacted>") && err.contains("revoke"),
+        "{err}"
+    );
+    let out = bin(dir.path())
+        .arg("frob\u{1b}]0;pwned\u{7}\u{202e}x")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let err = String::from_utf8(out.stderr).unwrap();
+    for bad in ['\u{1b}', '\u{7}', '\u{202e}'] {
+        assert!(!err.contains(bad), "{bad:?} in {err:?}");
+    }
+    assert!(err.contains("unrecognized subcommand 'frob"), "{err:?}");
 }
 
 #[test]
@@ -275,7 +309,7 @@ fn account_commands_without_login() {
         .unwrap();
     assert!(out.status.success());
     let v: Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(v, serde_json::json!([]));
+    assert_eq!(v, serde_json::json!({"dto": 1, "accounts": []}));
 }
 
 #[test]
@@ -341,4 +375,212 @@ fn completions_are_generated() {
         assert!(out.status.success());
         assert!(String::from_utf8_lossy(&out.stdout).contains("lessdugin"));
     }
+}
+
+#[test]
+fn devnet_mode_is_explicit_and_announced() {
+    let dir = tempfile::tempdir().unwrap();
+    // LESSDUGIN_DEV is not read: the devnet URLs alone are a usage error.
+    let out = bin(dir.path())
+        .env("LESSDUGIN_DEV", "1")
+        .env("LESSDUGIN_PLC_URL", "http://127.0.0.1:9")
+        .env("LESSDUGIN_PDS_URL", "http://127.0.0.1:9")
+        .args(["resolve", "alice.test"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("need --dev"));
+    // Every devnet run says so on stderr (not with -q), and keeps stdout clean.
+    let out = bin(dir.path())
+        .args(DEAD)
+        .args(["--json", "resolve", "alice.test"])
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("warning: devnet mode"), "{err}");
+    assert!(out.stdout.is_empty());
+    let out = bin(dir.path())
+        .args(DEAD)
+        .args(["-q", "resolve", "alice.test"])
+        .output()
+        .unwrap();
+    assert!(!String::from_utf8_lossy(&out.stderr).contains("devnet mode"));
+    // A devnet profile in config.toml is announced too.
+    let cfg = tempfile::tempdir().unwrap();
+    std::fs::write(
+        cfg.path().join("config.toml"),
+        "[network]\nmode = \"devnet\"\nplc = \"http://127.0.0.1:9\"\npds = \"http://127.0.0.1:9\"\n",
+    )
+    .unwrap();
+    let out = bin(cfg.path())
+        .args(["resolve", "alice.test"])
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&out.stderr).contains("warning: devnet mode"));
+}
+
+#[test]
+fn devnet_data_lives_apart_from_production() {
+    let dir = tempfile::tempdir().unwrap();
+    bin(dir.path())
+        .args(DEAD)
+        .args(["resolve", "did:plc:ewvi7nxzyoun6zhxrhs64oiz"])
+        .output()
+        .unwrap();
+    assert!(
+        !dir.path().join("state.sqlite").exists(),
+        "the production state store is untouched"
+    );
+    assert!(!dir.path().join("cache").join("cache.sqlite").exists());
+    let devnet: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .filter(|n| n.starts_with("devnet-"))
+        .collect();
+    assert_eq!(devnet.len(), 1, "{devnet:?}");
+    assert!(dir.path().join(&devnet[0]).join("state.sqlite").exists());
+    assert!(
+        dir.path()
+            .join("cache")
+            .join(&devnet[0])
+            .join("cache.sqlite")
+            .exists()
+    );
+    // Another devnet (another PDS) gets another directory.
+    bin(dir.path())
+        .args([
+            "--dev",
+            "--plc-url",
+            "http://127.0.0.1:9",
+            "--pds-url",
+            "http://127.0.0.1:10",
+            "resolve",
+            "did:plc:ewvi7nxzyoun6zhxrhs64oiz",
+        ])
+        .output()
+        .unwrap();
+    let n = std::fs::read_dir(dir.path())
+        .unwrap()
+        .filter(|e| {
+            e.as_ref()
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("devnet-")
+        })
+        .count();
+    assert_eq!(n, 2);
+}
+
+/// A one-thread HTTP server that answers every GET with `body` (a devnet PLC and PDS).
+fn serve_forever(body: String) -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut request_line = String::new();
+            let _ = reader.read_line(&mut request_line);
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                    break;
+                }
+            }
+            let (status, body) = if request_line.contains("/did:plc:") {
+                ("200 OK", body.as_str())
+            } else {
+                ("400 Bad Request", r#"{"error":"HandleNotFound"}"#)
+            };
+            let _ = write!(
+                stream,
+                "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        }
+    });
+    port
+}
+
+#[test]
+fn successful_output_is_sanitised() {
+    let did = "did:plc:ewvi7nxzyoun6zhxrhs64oiz";
+    let doc = serde_json::json!({
+        "id": did,
+        "alsoKnownAs": ["at://evil\u{1b}]0;pwned\u{7}\u{202e}x.test"],
+        "verificationMethod": [{"id": "#atproto", "type": "Multikey\u{1b}[31m",
+                                "publicKeyMultibase": "z\u{1b}[2J"}],
+        "service": [{"id": "#atproto_pds", "type": "AtprotoPersonalDataServer",
+                     "serviceEndpoint": "http://127.0.0.1:1"}],
+    });
+    let port = serve_forever(doc.to_string());
+    let url = format!("http://127.0.0.1:{port}");
+    let dir = tempfile::tempdir().unwrap();
+    let out = bin(dir.path())
+        .args([
+            "--dev",
+            "--plc-url",
+            &url,
+            "--pds-url",
+            &url,
+            "resolve",
+            did,
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8(out.stdout).unwrap();
+    for bad in ['\u{1b}', '\u{7}', '\u{202e}'] {
+        assert!(!text.contains(bad), "{bad:?} in {text:?}");
+    }
+    assert!(text.contains("evil^[]0;pwned"), "{text}");
+    assert!(text.contains("signing key"), "{text}");
+    // --color always adds only our SGR sequences.
+    let out = bin(dir.path())
+        .args([
+            "--dev",
+            "--plc-url",
+            &url,
+            "--pds-url",
+            &url,
+            "--color",
+            "always",
+            "resolve",
+            did,
+        ])
+        .output()
+        .unwrap();
+    let text = String::from_utf8(out.stdout).unwrap();
+    for (i, _) in text.match_indices('\u{1b}') {
+        let rest = &text[i..];
+        assert!(
+            ["\x1b[0m", "\x1b[1m", "\x1b[2m", "\x1b[7m"]
+                .iter()
+                .any(|p| rest.starts_with(p)),
+            "{text:?}"
+        );
+    }
+    // --json carries "dto": 1; piped output is the exact data.
+    let out = bin(dir.path())
+        .args([
+            "--dev",
+            "--plc-url",
+            &url,
+            "--pds-url",
+            &url,
+            "--json",
+            "resolve",
+            did,
+        ])
+        .output()
+        .unwrap();
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["dto"], 1);
+    assert_eq!(v["identity"]["did"], did);
+    assert_eq!(v["identity"]["handleState"], "invalid");
 }

@@ -1,22 +1,28 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! DID document checks for identity level `doc` (`sync.md` §3.2).
+//! DID document checks for identity level `doc` (`sync.md` §3.2), through `lessdugin-atp`'s
+//! [`DidDocument`] under the [`DocPolicy`] of the mode ([`policy`]).
 //!
 //! 1. The document is a JSON object whose `id` equals the resolved DID.
 //! 2. **PDS:** exactly one `service` entry has id `#atproto_pds` (or `<did>#atproto_pds`) and type
 //!    `AtprotoPersonalDataServer`; its endpoint is an origin URL (no userinfo, path, query or
-//!    fragment) with scheme `https` and a hostname that is not an IP literal or `localhost` —
-//!    `http`, IP literals and `localhost` are allowed only in devnet mode (`sync.md` §3.7).
-//! 3. **Key:** exactly one `verificationMethod` has id `#atproto` (or `<did>#atproto`) and a
-//!    decodable `publicKeyMultibase` for secp256k1 or P-256. `Multikey` is the normal type; the
-//!    legacy `EcdsaSecp256k1VerificationKey2019` / `EcdsaSecp256r1VerificationKey2019` encodings
-//!    are accepted too (the devnet PLC still emits them). Anything else leaves the key unavailable
-//!    without affecting the PDS.
+//!    fragment) with scheme `https` and a DNS name of at least two labels that is not an IP
+//!    literal, `localhost`, or under a reserved or local-only TLD (`.local`, `.internal`,
+//!    `.localhost`, `.arpa` — so `home.arpa` —, `.onion`, `.test`, …; `threat-model.md` §5.6.2).
+//!    `http`, IP literals and local names are allowed only in devnet mode (`sync.md` §3.7).
+//! 3. **Key:** exactly one `verificationMethod` has id `#atproto` (or `<did>#atproto`) and type
+//!    `Multikey`, with a `publicKeyMultibase` for secp256k1 or P-256. The legacy
+//!    `EcdsaSecp256k1VerificationKey2019` / `EcdsaSecp256r1VerificationKey2019` encodings are
+//!    accepted only in devnet mode (the devnet PLC still emits them), so that every client reaches
+//!    the same verdict on production documents. Anything else leaves the key unavailable without
+//!    affecting the PDS.
 //!
 //! The claimed handle is the first `alsoKnownAs` entry starting with `at://`, without that prefix,
 //! lowercased — unvalidated here (see `handle_state`).
 
 use lessdugin_atp::crypto::{Curve, PublicKey};
-use lessdugin_atp::did_doc::{DidDocError, DidDocument, normalize_service_endpoint};
+use lessdugin_atp::did_doc::{
+    DidDocError, DidDocument, DocPolicy, EndpointError, ServiceEndpoint, ServiceError,
+};
 use lessdugin_atp::syntax::Did;
 use serde::Deserialize;
 
@@ -31,83 +37,55 @@ pub struct DocFacts {
     pub claimed_handle: Option<String>,
 }
 
-fn id_matches(id: &str, did: &Did, fragment: &str) -> bool {
-    id == fragment || id.strip_suffix(fragment) == Some(did.as_str())
-}
-
-/// Checks a service endpoint (check 2) and normalizes it.
-pub fn check_service_endpoint(endpoint: &str, devnet: bool) -> Result<String, String> {
-    let n = normalize_service_endpoint(endpoint)
-        .ok_or_else(|| "the PDS endpoint is not an origin URL".to_owned())?;
+/// The document policy of a mode: [`DocPolicy::STRICT`] in production, [`DocPolicy::DEVNET`]
+/// (http, IP literals, local names, legacy key encodings) in devnet mode.
+pub fn policy(devnet: bool) -> DocPolicy {
     if devnet {
-        return Ok(n);
+        DocPolicy::DEVNET
+    } else {
+        DocPolicy::STRICT
     }
-    let Some(rest) = n.strip_prefix("https://") else {
-        return Err("the PDS endpoint must use https".to_owned());
-    };
-    let host = rest.rsplit_once(':').map_or(rest, |(h, _)| h);
-    let is_ip = host
-        .split('.')
-        .all(|l| !l.is_empty() && l.bytes().all(|b| b.is_ascii_digit()));
-    if host == "localhost" || is_ip {
-        return Err(
-            "the PDS endpoint must be a hostname (not an IP literal or localhost)".to_owned(),
-        );
-    }
-    Ok(n)
 }
 
-fn decode_key(type_: &str, multibase: Option<&str>) -> Result<PublicKey, String> {
-    let mb = multibase.ok_or_else(|| "the #atproto key has no publicKeyMultibase".to_owned())?;
-    let r = match type_ {
-        "Multikey" => PublicKey::from_multikey(mb),
-        "EcdsaSecp256k1VerificationKey2019" => {
-            PublicKey::from_legacy_multibase(Curve::Secp256k1, mb)
+fn endpoint_problem(e: EndpointError) -> String {
+    match e {
+        EndpointError::Syntax(why) => format!("the PDS endpoint is not an origin URL ({why})"),
+        EndpointError::Insecure => "the PDS endpoint must use https".to_owned(),
+        EndpointError::IpLiteral => {
+            "the PDS endpoint must be a hostname (not an IP literal)".to_owned()
         }
-        "EcdsaSecp256r1VerificationKey2019" => PublicKey::from_legacy_multibase(Curve::P256, mb),
-        other => return Err(format!("unsupported #atproto key type {other:?}")),
-    };
-    r.map_err(|e| format!("the #atproto key does not decode: {e}"))
+        EndpointError::LocalName => {
+            "the PDS endpoint is localhost or a local-only or reserved name".to_owned()
+        }
+    }
+}
+
+/// Checks a service endpoint (check 2) and normalizes it to `scheme://host[:port]`.
+pub fn check_service_endpoint(endpoint: &str, devnet: bool) -> Result<String, String> {
+    ServiceEndpoint::parse_with(endpoint, &policy(devnet))
+        .map(|e| e.as_str().to_owned())
+        .map_err(endpoint_problem)
 }
 
 /// Validates a DID document for `did`.
 pub fn validate(bytes: &[u8], did: &Did, devnet: bool) -> Result<DocFacts, DidDocError> {
     let doc = DidDocument::parse_for(bytes, did)?;
-    let pds = {
-        let found: Vec<_> = doc
-            .services
-            .iter()
-            .filter(|s| {
-                id_matches(&s.id, did, "#atproto_pds") && s.type_ == "AtprotoPersonalDataServer"
-            })
-            .collect();
-        match found.as_slice() {
-            [] => Err("no #atproto_pds service".to_owned()),
-            [s] => check_service_endpoint(&s.endpoint, devnet),
-            _ => Err("more than one #atproto_pds service".to_owned()),
-        }
-    };
-    let key = {
-        let found: Vec<_> = doc
-            .verification_methods
-            .iter()
-            .filter(|m| id_matches(&m.id, did, "#atproto"))
-            .collect();
-        match found.as_slice() {
-            [] => Err("no #atproto verification method".to_owned()),
-            [m] => decode_key(&m.type_, m.public_key_multibase.as_deref()),
-            _ => Err("more than one #atproto verification method".to_owned()),
-        }
-    };
-    let claimed_handle = doc
-        .also_known_as
-        .iter()
-        .find_map(|a| a.strip_prefix("at://"))
-        .map(str::to_ascii_lowercase);
+    let policy = policy(devnet);
+    let pds = doc
+        .atproto_pds(&policy)
+        .map(|e| e.as_str().to_owned())
+        .map_err(|e| match e {
+            ServiceError::Missing => "no #atproto_pds service".to_owned(),
+            ServiceError::Ambiguous(n) => {
+                format!("{n} #atproto_pds services (exactly one is allowed)")
+            }
+            ServiceError::Invalid(e) => endpoint_problem(e),
+        });
+    let key = doc.atproto_key(&policy).map_err(|e| e.to_string());
     Ok(DocFacts {
         pds,
         key,
-        claimed_handle,
+        claimed_handle: doc.claimed_handle(),
     })
 }
 
@@ -204,7 +182,33 @@ mod tests {
             with_endpoint("https://pds.example.com:8443").as_deref(),
             Ok("https://pds.example.com:8443")
         );
-        // devnet allows http, localhost and IP literals
+        // Local-only and reserved names are refused in production (threat-model §5.6.2): the
+        // browser has no DNS guard behind this check.
+        for local in [
+            "https://pds.local",
+            "https://router.internal",
+            "https://x.localhost",
+            "https://pds.test",
+            "https://x.home.arpa",
+            "https://foo.onion",
+            "https://pds.example",
+            "https://router",
+            "https://[::1]",
+            "https://127.1",
+        ] {
+            assert!(with_endpoint(local).is_err(), "{local}");
+            assert!(check_service_endpoint(local, false).is_err(), "{local}");
+        }
+        assert!(
+            check_service_endpoint("https://pds.local", false)
+                .unwrap_err()
+                .contains("local-only")
+        );
+        // devnet allows http, localhost, local names and IP literals
+        assert_eq!(
+            check_service_endpoint("http://pds.test:2583", true).as_deref(),
+            Ok("http://pds.test:2583")
+        );
         assert_eq!(
             check_service_endpoint("http://localhost:2583", true).as_deref(),
             Ok("http://localhost:2583")
@@ -238,6 +242,23 @@ mod tests {
         let mut v = base();
         v["verificationMethod"][0]["publicKeyMultibase"] = json!("zNotAKey");
         assert!(validate(&doc(v), &did, false).unwrap().key.is_err());
+        // Legacy key encodings are accepted only in devnet mode (sync.md §3.2: Multikey only).
+        let legacy = "zQYEBzXeuTM9UR3rfvNag6L3RNAs5pQZyYPsomTsgQhsxLdEgCrPTLgFna8yqCnxPpNT7DBk6Ym3dgPKNu86vt9GR";
+        let mut v = base();
+        v["verificationMethod"][0]["type"] = json!("EcdsaSecp256k1VerificationKey2019");
+        v["verificationMethod"][0]["publicKeyMultibase"] = json!(legacy);
+        let prod = validate(&doc(v.clone()), &did, false).unwrap();
+        assert!(prod.key.unwrap_err().contains("unsupported"));
+        assert!(prod.pds.is_ok());
+        let dev = validate(&doc(v), &did, true).unwrap();
+        assert_eq!(curve_name(&dev.key.unwrap()), "k256");
+        // A second #atproto method of another type does not hide the Multikey one.
+        let mut v = base();
+        v["verificationMethod"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"id": "#atproto", "type": "JsonWebKey2020"}));
+        assert!(validate(&doc(v), &did, false).unwrap().key.is_ok());
         // no aliases
         let mut v = base();
         v["alsoKnownAs"] = json!([]);
