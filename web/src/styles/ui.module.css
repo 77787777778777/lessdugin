@@ -1,0 +1,237 @@
+/* SPDX-License-Identifier: AGPL-3.0-or-later */
+/* Shared UI primitives (buttons, fields, cards, page headings). */
+
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  min-height: 2.1rem;
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-size: var(--text-sm);
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.button:hover {
+  border-color: var(--color-primary);
+  text-decoration: none;
+}
+
+.button:disabled {
+  opacity: 0.55;
+}
+
+.primary {
+  composes: button;
+  background: var(--color-primary-strong);
+  border-color: var(--color-primary-strong);
+  color: #fff;
+}
+
+.primary:hover {
+  background: var(--color-primary);
+}
+
+.danger {
+  composes: button;
+  border-color: var(--color-danger);
+  color: var(--color-danger);
+}
+
+.ghost {
+  composes: button;
+  border-color: transparent;
+  background: transparent;
+  color: var(--color-text-muted);
+}
+
+.ghost:hover {
+  color: var(--color-text);
+  border-color: var(--color-border);
+}
+
+.link {
+  border: 0;
+  background: none;
+  padding: 0;
+  color: var(--color-link);
+  font-size: inherit;
+}
+
+.link:hover {
+  text-decoration: underline;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 0.1rem 0.55rem;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  background: var(--color-surface);
+  color: var(--color-text-muted);
+  font-size: var(--text-xs);
+  text-decoration: none;
+}
+
+.chip:hover {
+  border-color: var(--color-primary);
+  color: var(--color-text);
+  text-decoration: none;
+}
+
+.chipActive {
+  composes: chip;
+  background: var(--color-primary-soft);
+  border-color: var(--color-primary);
+  color: var(--color-text);
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin-bottom: var(--space-4);
+}
+
+.label {
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+
+.hint {
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+}
+
+.input {
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+}
+
+.input:focus {
+  border-color: var(--color-focus);
+  outline: none;
+}
+
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.fieldsetRow {
+  composes: row;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.spread {
+  composes: row;
+  justify-content: space-between;
+}
+
+.fullWidth {
+  flex: 1 1 100%;
+  min-width: 0;
+}
+
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.muted {
+  color: var(--color-text-muted);
+}
+
+.small {
+  font-size: var(--text-sm);
+}
+
+.card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  padding: var(--space-4) var(--space-5);
+}
+
+.page {
+  max-width: var(--measure);
+  margin: 0 auto;
+}
+
+.pageWide {
+  max-width: var(--page-max);
+  margin: 0 auto;
+}
+
+.pageTitle {
+  font-family: var(--font-serif);
+  font-size: var(--text-2xl);
+  font-weight: 500;
+  margin: 0 0 var(--space-4);
+}
+
+.sectionTitle {
+  font-size: var(--text-sm);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+  margin: var(--space-6) 0 var(--space-3);
+}
+
+.error {
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--color-danger);
+  background: var(--color-danger-soft);
+  border-radius: var(--radius-md);
+  color: var(--color-text);
+}
+
+.notice {
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--color-border);
+  background: var(--color-warning-soft);
+  border-radius: var(--radius-md);
+}
+
+.list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-sm);
+}
+
+.table th,
+.table td {
+  text-align: left;
+  padding: var(--space-2);
+  border-bottom: 1px solid var(--color-border);
+  vertical-align: top;
+}
+
+.mono {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  overflow-wrap: anywhere;
+}

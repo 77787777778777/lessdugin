@@ -74,11 +74,25 @@ impl Did {
         (self.method() == "web").then(|| self.identifier())
     }
 
-    /// For a `did:web` that passes [`Did::check_lessdugin_policy`], the DID document URL
+    /// For a `did:web` that passes [`Did::check_lessdugin_policy`] and whose host may be fetched
+    /// (see [`Did::web_document_url_with`], outside devnet mode), the DID document URL
     /// `https://<host>/.well-known/did.json`; `None` otherwise.
     pub fn web_document_url(&self) -> Option<String> {
+        self.web_document_url_with(false)
+    }
+
+    /// Like [`Did::web_document_url`]; the host must also not be under a reserved or local-only
+    /// TLD ([`super::DISALLOWED_TLDS`]: `.localhost`, `.local`, `.internal`, `.arpa`, …), which
+    /// would make a native client fetch from loopback or the LAN (`threat-model.md` §5.6.2), and
+    /// not `.test` unless `devnet` (`sync.md` §3.7). Such DIDs are still syntactically canonical
+    /// (`data-model.md` §2.3); they just never resolve.
+    pub fn web_document_url_with(&self, devnet: bool) -> Option<String> {
         let host = self.web_host()?;
         self.check_lessdugin_policy().ok()?;
+        let tld = host.rsplit('.').next().unwrap_or("");
+        if handle::DISALLOWED_TLDS.contains(&tld) || (tld == "test" && !devnet) {
+            return None;
+        }
         Some(format!("https://{host}/.well-known/did.json"))
     }
 
@@ -181,6 +195,26 @@ mod tests {
                 .is_none()
         );
         assert!(w.check_lessdugin_policy().is_ok());
+        // reserved and local-only TLDs never resolve; .test only in devnet
+        for local in [
+            "did:web:evil.localhost",
+            "did:web:x.local",
+            "did:web:pds.internal",
+            "did:web:router.home.arpa",
+            "did:web:x.onion",
+            "did:web:x.example",
+        ] {
+            let d = Did::parse(local).unwrap();
+            assert!(d.check_lessdugin_policy().is_ok(), "{local}");
+            assert!(d.web_document_url().is_none(), "{local}");
+            assert!(d.web_document_url_with(true).is_none(), "{local}");
+        }
+        let t = Did::parse("did:web:alice.test").unwrap();
+        assert!(t.web_document_url().is_none());
+        assert_eq!(
+            t.web_document_url_with(true).as_deref(),
+            Some("https://alice.test/.well-known/did.json")
+        );
         let m = Did::parse("did:method::::val").unwrap();
         assert_eq!(m.method(), "method");
         assert_eq!(m.identifier(), ":::val");

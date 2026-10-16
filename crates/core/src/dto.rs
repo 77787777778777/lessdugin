@@ -708,6 +708,7 @@ dto! {
 
 untagged! {
     /// A search hit's item.
+    #[allow(clippy::large_enum_variant)]
     pub enum SearchItem {
         Post(PostSummary),
         Comment(Box<CommentNode>),
@@ -889,6 +890,26 @@ dto! {
     }
 }
 
+string_enum! {
+    /// How an account is authenticated.
+    pub enum AuthKind { Oauth, AppPassword }
+}
+
+dto! {
+    /// A logged-in account (`engine-api.md` §3.1 `accounts()`). The session itself lives in the
+    /// host's secret store; this is only the local record of it.
+    pub struct AccountView {
+        pub did: String,
+        /// The handle, if it was verified in both directions at login.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub handle: Option<String>,
+        /// The PDS bound at login (`sync.md` §3.6).
+        pub pds: String,
+        pub auth_kind: AuthKind,
+        pub active: bool,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -896,13 +917,20 @@ mod tests {
     #[test]
     fn item_state_shapes() {
         let s = ItemState::Hidden {
-            reason: HiddenReason::Removed { rank: 1, actor: None, spam: false, reason: None },
+            reason: HiddenReason::Removed {
+                rank: 1,
+                actor: None,
+                spam: false,
+                reason: None,
+            },
         };
         assert_eq!(
             serde_json::to_string(&s).unwrap(),
             r#"{"kind":"hidden","reason":{"kind":"removed","rank":1,"spam":false}}"#
         );
-        let c = ItemState::Collapsed { reason: CollapseReason::NewUser };
+        let c = ItemState::Collapsed {
+            reason: CollapseReason::NewUser,
+        };
         assert_eq!(
             serde_json::to_string(&c).unwrap(),
             r#"{"kind":"collapsed","reason":"newUser"}"#
@@ -911,8 +939,30 @@ mod tests {
 
     #[test]
     fn badges_omit_false() {
-        let b = Badges { edited: true, ..Default::default() };
+        let b = Badges {
+            edited: true,
+            ..Default::default()
+        };
         assert_eq!(serde_json::to_string(&b).unwrap(), r#"{"edited":true}"#);
+    }
+
+    #[test]
+    fn account_view_shape() {
+        let a = AccountView {
+            did: "did:plc:ewvi7nxzyoun6zhxrhs64oiz".into(),
+            handle: None,
+            pds: "https://pds.example.com".into(),
+            auth_kind: AuthKind::AppPassword,
+            active: true,
+        };
+        assert_eq!(
+            serde_json::to_string(&a).unwrap(),
+            r#"{"did":"did:plc:ewvi7nxzyoun6zhxrhs64oiz","pds":"https://pds.example.com","authKind":"appPassword","active":true}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&AuthKind::Oauth).unwrap(),
+            r#""oauth""#
+        );
     }
 
     #[test]

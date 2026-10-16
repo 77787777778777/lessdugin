@@ -9,11 +9,14 @@ repository.workspace = true
 
 [features]
 default = ["math"]
+# MathML output through math-core (lfm-1.md §7.2). Without it the renderer emits the documented
+# Temml-mode `<span data-tex>` fallback (§7.5).
 math = ["dep:math-core"]
 # Defence-in-depth equality check with ammonia (native only; large in wasm).
 ammonia = ["dep:ammonia"]
 
 [dependencies]
+lessdugin-atp.workspace = true
 pulldown-cmark.workspace = true
 math-core = { workspace = true, optional = true }
 ammonia = { workspace = true, optional = true }
@@ -23,6 +26,10 @@ unicode-width.workspace = true
 unicode-security.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+# Footnote label matching must agree with pulldown-cmark, which uses `UniCase` (lfm-1.md §3 step 5).
+unicase = "2.10"
+# General_Category for heading slugs and anchors (lfm-1.md §4.6, §5.1; spec open question).
+unicode-general-category = "1.1"
 
 [dev-dependencies]
 proptest.workspace = true

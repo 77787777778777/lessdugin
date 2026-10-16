@@ -1,0 +1,9 @@
+/* SPDX-License-Identifier: AGPL-3.0-or-later */
+.dialog {
+  width: 32rem;
+}
+
+.title {
+  margin: 0 0 var(--space-3);
+  font-size: var(--text-lg);
+}

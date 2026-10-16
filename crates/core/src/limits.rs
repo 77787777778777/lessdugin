@@ -25,6 +25,14 @@ pub const CONNECT_TIMEOUT_MS: u32 = 5_000;
 pub const REQUEST_TIMEOUT_MS: u32 = 20_000;
 /// CAR download timeout (ms).
 pub const CAR_TIMEOUT_MS: u32 = 60_000;
+/// Blob downloads fail after this long without progress (ms).
+pub const BLOB_IDLE_TIMEOUT_MS: u32 = 20_000;
+/// Total timeout of a blob download (ms).
+pub const BLOB_TOTAL_TIMEOUT_MS: u32 = 300_000;
+/// Hard cap on redirects followed by one anonymous request (`threat-model.md` §5.6.2).
+pub const MAX_REDIRECTS: u8 = 5;
+/// Redirects followed by identity lookups (`/.well-known/atproto-did`, did:web documents).
+pub const IDENTITY_REDIRECTS: u8 = 3;
 
 /// Normative fetch cap per (repo, forum, collection): the first N keys in descending rkey order
 /// of the `{fk}-` range. Beyond it the view is `[partial]` (`data-model.md` §7.4).
@@ -45,3 +53,26 @@ pub const INFLIGHT_PER_HOST: usize = 6;
 pub const INFLIGHT_PLC: usize = 8;
 /// DoH requests in flight.
 pub const INFLIGHT_DOH: usize = 8;
+
+/// Cap on a DID document (bytes, `sync.md` §3.2).
+pub const DID_DOC_MAX_BYTES: u64 = 65_536;
+/// Cap on `/.well-known/atproto-did` (bytes, `sync.md` §3.1).
+pub const WELLKNOWN_DID_MAX_BYTES: u64 = 2_048;
+/// Cap on a DNS-over-HTTPS JSON response (bytes).
+pub const DOH_RESPONSE_MAX_BYTES: u64 = 65_536;
+/// Cap on `/.well-known/oauth-protected-resource` (bytes, `sync.md` §3.6).
+pub const OAUTH_METADATA_MAX_BYTES: u64 = 65_536;
+/// Cap on small XRPC JSON responses (`resolveHandle`, `getLatestCommit`, mini-docs, errors).
+pub const SMALL_RESPONSE_MAX_BYTES: u64 = 65_536;
+/// Cap on a `com.atproto.repo.getRecord` response: one record's JSON plus the envelope.
+pub const RECORD_RESPONSE_MAX_BYTES: u64 = RECORD_JSON_MAX_BYTES + 16 * 1024;
+
+/// GET retries on network errors, timeouts, 5xx and 429 (`sync.md` §9.3, *tunable*).
+pub const RETRY_MAX: u32 = 3;
+/// Base of the full-jitter exponential backoff (ms).
+pub const RETRY_BASE_MS: u64 = 250;
+/// Cap of the full-jitter exponential backoff (ms).
+pub const RETRY_CAP_MS: u64 = 8_000;
+/// The transport waits at most this long for a `Retry-After` inside one call; a longer wait is
+/// returned to the caller as `RateLimited` (the scheduler owns longer pauses).
+pub const RETRY_AFTER_MAX_WAIT_MS: u64 = 60_000;

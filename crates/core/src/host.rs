@@ -53,15 +53,28 @@ pub enum Target {
     },
 }
 
+/// Redirect handling for a request (`sync.md` §12.1).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Redirects {
+    /// Never follow: a 3xx response is returned as is. Always the case for [`Target::UserPds`].
+    #[default]
+    None,
+    /// Follow at most this many redirects ([`Target::Anon`] only). Every hop is re-checked by
+    /// the host's policy (scheme, SSRF guard); hosts cap the count at
+    /// [`crate::limits::MAX_REDIRECTS`]. Exceeding it fails with [`HostError::Blocked`].
+    Follow(u8),
+}
+
 /// An HTTP request.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct HttpRequest {
     /// Method (GET or POST in practice).
     pub method: http::Method,
     /// Destination.
     pub target: Target,
     /// Extra headers. Browser hosts must not add custom headers to anonymous cross-origin GETs
-    /// (to avoid CORS preflights); the core only sets `content-type` on bodies.
+    /// (to avoid CORS preflights); the core only sets `content-type` on bodies and CORS-safelisted
+    /// `accept` values.
     pub headers: Vec<(String, String)>,
     /// Request body.
     pub body: Option<Vec<u8>>,
@@ -70,10 +83,12 @@ pub struct HttpRequest {
     pub max_bytes: u64,
     /// Total timeout in milliseconds.
     pub timeout_ms: u32,
+    /// Redirect policy (default: none).
+    pub redirects: Redirects,
 }
 
 impl HttpRequest {
-    /// A GET with default caps (4 MB, 20 s).
+    /// A GET with default caps (4 MB, 20 s) and no redirects.
     pub fn get(target: Target) -> Self {
         Self {
             method: http::Method::GET,
@@ -82,10 +97,11 @@ impl HttpRequest {
             body: None,
             max_bytes: crate::limits::DEFAULT_RESPONSE_MAX_BYTES,
             timeout_ms: crate::limits::REQUEST_TIMEOUT_MS,
+            redirects: Redirects::None,
         }
     }
 
-    /// A POST with a JSON body and default caps.
+    /// A POST with a JSON body, default caps and no redirects.
     pub fn post_json(target: Target, body: Vec<u8>) -> Self {
         Self {
             method: http::Method::POST,
@@ -94,7 +110,79 @@ impl HttpRequest {
             body: Some(body),
             max_bytes: crate::limits::DEFAULT_RESPONSE_MAX_BYTES,
             timeout_ms: crate::limits::REQUEST_TIMEOUT_MS,
+            redirects: Redirects::None,
         }
+    }
+
+    /// Sets the response cap.
+    pub fn with_max_bytes(mut self, max_bytes: u64) -> Self {
+        self.max_bytes = max_bytes;
+        self
+    }
+
+    /// Sets the total timeout.
+    pub fn with_timeout_ms(mut self, timeout_ms: u32) -> Self {
+        self.timeout_ms = timeout_ms;
+        self
+    }
+
+    /// Sets the redirect policy.
+    pub fn with_redirects(mut self, redirects: Redirects) -> Self {
+        self.redirects = redirects;
+        self
+    }
+
+    /// Adds a header (the name is lowercased).
+    pub fn with_header(mut self, name: &str, value: &str) -> Self {
+        self.headers
+            .push((name.to_ascii_lowercase(), value.to_owned()));
+        self
+    }
+
+    /// The first header with this (lowercase) name.
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.as_str())
+    }
+}
+
+/// Header names whose values are never printed (`threat-model.md` AUTH-10).
+pub fn is_sensitive_header(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    matches!(
+        n.as_str(),
+        "authorization" | "dpop" | "cookie" | "set-cookie" | "proxy-authorization"
+    ) || n.contains("token")
+        || n.contains("secret")
+        || n.contains("password")
+}
+
+/// `Debug` never prints bodies (they may hold passwords or tokens) or sensitive header values.
+impl std::fmt::Debug for HttpRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let headers: Vec<(&str, &str)> = self
+            .headers
+            .iter()
+            .map(|(k, v)| {
+                let v = if is_sensitive_header(k) {
+                    "<redacted>"
+                } else {
+                    v.as_str()
+                };
+                (k.as_str(), v)
+            })
+            .collect();
+        f.debug_struct("HttpRequest")
+            .field("method", &self.method)
+            .field("target", &self.target)
+            .field("headers", &headers)
+            .field("body_len", &self.body.as_ref().map(Vec::len))
+            .field("max_bytes", &self.max_bytes)
+            .field("timeout_ms", &self.timeout_ms)
+            .field("redirects", &self.redirects)
+            .finish()
     }
 }
 
@@ -112,7 +200,10 @@ pub struct HttpResponse {
 impl HttpResponse {
     /// The first header with this (lowercase) name.
     pub fn header(&self, name: &str) -> Option<&str> {
-        self.headers.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
+        self.headers
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.as_str())
     }
 }
 
@@ -143,6 +234,13 @@ pub enum HostError {
     /// The operation is not supported by this host (e.g. system DNS in a browser).
     #[error("unsupported: {0}")]
     Unsupported(String),
+    /// A fetched blob did not hash to its CID (`Host::fetch_blob`); nothing was stored.
+    #[error("blob does not match its CID")]
+    CidMismatch,
+    /// An operation that needs a success status got another one (`Host::fetch_blob`), with the
+    /// XRPC error name from the body if there was one (e.g. 400 `BlobNotFound`).
+    #[error("HTTP status {0}")]
+    HttpStatus(u16, Option<String>),
     /// Anything else.
     #[error("{0}")]
     Other(String),
@@ -162,7 +260,10 @@ pub trait WebSocket: MaybeSend {
     /// The next message; `None` when the socket closed.
     fn next(&mut self) -> impl Future<Output = Option<Result<WsMessage, HostError>>> + MaybeSend;
     /// Send a text frame.
-    fn send_text(&mut self, text: String) -> impl Future<Output = Result<(), HostError>> + MaybeSend;
+    fn send_text(
+        &mut self,
+        text: String,
+    ) -> impl Future<Output = Result<(), HostError>> + MaybeSend;
     /// Close the socket.
     fn close(&mut self) -> impl Future<Output = ()> + MaybeSend;
 }
@@ -258,6 +359,7 @@ pub trait KvStore: MaybeSendSync {
     ) -> impl Future<Output = Result<Vec<Option<Vec<u8>>>, HostError>> + MaybeSend;
 
     /// Scan a key range in the given direction, returning at most `limit` pairs.
+    #[allow(clippy::type_complexity)]
     fn scan(
         &self,
         range: KeyRange,
@@ -289,6 +391,11 @@ pub trait Host: MaybeSendSync + 'static {
 
     /// Fetch `com.atproto.sync.getBlob` for (`did`, `cid`) from `pds`, streaming it while
     /// hashing, and fail unless sha256 matches the CID. Blob bytes never pass through wasm memory.
+    ///
+    /// No redirects are followed. Errors: [`HostError::Unsupported`] for a CID that is not
+    /// CIDv1/raw/sha2-256, [`HostError::TooLarge`] past `max_bytes`, [`HostError::CidMismatch`],
+    /// [`HostError::HttpStatus`] for a non-2xx answer. On any error nothing is stored; an
+    /// already stored CID returns its handle without a request.
     fn fetch_blob(
         &self,
         pds: url::Url,
@@ -336,5 +443,20 @@ mod tests {
         assert_eq!(prefix_successor(b"\xff\xff"), None);
         let all = KeyRange::prefix(b"\xff");
         assert!(all.contains(b"\xff\x00"));
+    }
+
+    #[test]
+    fn request_debug_redacts() {
+        let url = url::Url::parse("https://pds.example.com/xrpc/x").unwrap();
+        let req = HttpRequest::post_json(Target::Anon(url), b"{\"password\":\"hunter2\"}".to_vec())
+            .with_header("Authorization", "Bearer secret-token")
+            .with_header("DPoP", "proof");
+        let dbg = format!("{req:?}");
+        assert!(!dbg.contains("hunter2"));
+        assert!(!dbg.contains("secret-token"));
+        assert!(!dbg.contains("proof\""));
+        assert!(dbg.contains("body_len: Some(22)"));
+        assert_eq!(req.header("authorization"), Some("Bearer secret-token"));
+        assert_eq!(req.redirects, Redirects::None);
     }
 }

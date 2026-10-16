@@ -5,5 +5,6 @@
 
 pub mod auth;
 pub mod config;
+pub mod fsutil;
 pub mod host;
 pub mod kv;

@@ -6,8 +6,20 @@
 //! `{"$bytes": "<base64>"}` is a byte string (exactly one key; RFC 4648 §4 base64, padding
 //! optional on input, never written); blobs are ordinary maps with `$type: "blob"` whose `ref` is a
 //! link. Floats are rejected, except JSON numbers with a zero fraction (such as `123.0`) within
-//! ±(2^53 − 1), which are integers (as in JavaScript, and per the interop fixtures). Integers must
-//! fit in `i64`. A `$type` field must be a non-empty string.
+//! ±(2^53 − 1), which are integers (as in JavaScript, and per the interop fixtures). JSON numbers
+//! are parsed with correct rounding (serde_json's `float_roundtrip`, enabled in this crate's
+//! manifest), so the integer is the one JavaScript's `JSON.parse` yields and record CIDs agree with
+//! the reference implementation. Integers must fit in `i64`. A `$type` field must be a non-empty
+//! string.
+//!
+//! **CIDs.** Only "blessed" CIDs are part of the data model (`/specs/data-model`): CIDv1, sha2-256
+//! with a 32-byte digest, codec dag-cbor or raw. A blob's `ref` must use the raw codec. Conversion
+//! and [`validate`] reject anything else; the DAG-CBOR codec itself ([`crate::dagcbor`]) accepts any
+//! CIDv1, as strict DAG-CBOR does (`sync.md` §8.3).
+//!
+//! **Nesting depth** is counted on the data model, identically for JSON and DAG-CBOR: maps and
+//! lists are containers; links and byte strings are leaves, including their JSON spellings
+//! `{"$link": …}` and `{"$bytes": …}`. So a record has one depth whichever encoding it arrives in.
 //!
 //! All walkers use explicit depth counters checked before descending ([`Limits`]).
 
@@ -36,8 +48,14 @@ pub struct Limits {
 }
 
 impl Limits {
-    /// Default caps: depth 32, 131,072 elements per container, 1 MiB strings and byte strings,
-    /// 262,144 nodes.
+    /// Default caps for decoding untrusted records into memory: depth 32 (`NESTING_MAX_RECORD`),
+    /// 131,072 elements per container, 1 MiB strings and byte strings, 262,144 values.
+    ///
+    /// Only the depth is a protocol rule; the other caps are safety (S-class) caps that bound the
+    /// memory a decoded tree may take. A value over them is *unreadable* here, not invalid. Data a
+    /// program wrote itself (store rows, caches) should be read back with the limits it was
+    /// written with, or with [`Limits::uncapped`]: [`crate::dagcbor::encode_with`] enforces the
+    /// same caps, so whatever it wrote reads back under the same limits.
     pub const DEFAULT: Self = Self {
         max_depth: 32,
         max_container_len: 131_072,
@@ -45,6 +63,23 @@ impl Limits {
         max_bytes_len: 1 << 20,
         max_total_nodes: 262_144,
     };
+
+    /// Strict decoding for `proofs/1` (`sync.md` §8.3): nesting depth ≤ 32 and nothing else; the
+    /// input length bounds everything. Use it with [`crate::dagcbor::validate_with`], which
+    /// allocates nothing. Decoding untrusted input into an [`Ipld`] tree with it can amplify memory
+    /// (each value takes far more memory than its one encoded byte); prefer [`Limits::DEFAULT`].
+    pub const STRICT: Self = Self::uncapped(32);
+
+    /// No caps except `max_depth`: for validation passes, and for reading back trusted data.
+    pub const fn uncapped(max_depth: usize) -> Self {
+        Self {
+            max_depth,
+            max_container_len: usize::MAX,
+            max_string_bytes: usize::MAX,
+            max_bytes_len: usize::MAX,
+            max_total_nodes: usize::MAX,
+        }
+    }
 }
 
 impl Default for Limits {
@@ -234,8 +269,8 @@ fn from_json(v: &Value, depth: usize, limits: &Limits, nodes: &mut usize) -> Res
                 let s = link
                     .as_str()
                     .ok_or_else(|| DataModelError::InvalidLink("$link must be a string".into()))?;
-                let cid =
-                    crate::cid::parse(s).map_err(|e| DataModelError::InvalidLink(e.to_string()))?;
+                let cid = crate::cid::parse_blessed(s)
+                    .map_err(|e| DataModelError::InvalidLink(e.to_string()))?;
                 return Ok(Ipld::Link(cid));
             }
             if let Some(bytes) = obj.get("$bytes") {
@@ -248,7 +283,7 @@ fn from_json(v: &Value, depth: usize, limits: &Limits, nodes: &mut usize) -> Res
                     .as_str()
                     .ok_or(DataModelError::InvalidBytes("$bytes must be a string"))?;
                 // base64 expands 3 -> 4; reject before decoding.
-                if s.len() / 4 * 3 > limits.max_bytes_len + 3 {
+                if s.len() / 4 * 3 > limits.max_bytes_len.saturating_add(3) {
                     return Err(DataModelError::BytesTooLong {
                         len: s.len() / 4 * 3,
                         max: limits.max_bytes_len,
@@ -274,6 +309,21 @@ fn from_json(v: &Value, depth: usize, limits: &Limits, nodes: &mut usize) -> Res
             Ipld::Map(map)
         }
     })
+}
+
+/// A blessed CID with the raw codec (a blob `ref`).
+fn is_blob_cid(c: &Cid) -> bool {
+    crate::cid::is_blessed(c) && c.codec() == crate::cid::RAW
+}
+
+fn check_link(c: &Cid) -> Result<()> {
+    if crate::cid::is_blessed(c) {
+        Ok(())
+    } else {
+        Err(DataModelError::InvalidLink(
+            "not a blessed CID (v1, sha2-256, dag-cbor or raw)".into(),
+        ))
+    }
 }
 
 fn check_string<'s>(s: &'s str, limits: &Limits) -> Result<&'s str> {
@@ -315,8 +365,14 @@ fn check_special_map(map: &BTreeMap<String, Ipld>) -> Result<()> {
 }
 
 fn check_blob(map: &BTreeMap<String, Ipld>) -> Result<()> {
-    if !matches!(map.get("ref"), Some(Ipld::Link(_))) {
-        return Err(DataModelError::InvalidBlob("ref must be a link"));
+    match map.get("ref") {
+        Some(Ipld::Link(c)) if is_blob_cid(c) => {}
+        Some(Ipld::Link(_)) => {
+            return Err(DataModelError::InvalidBlob(
+                "ref must be a blessed CID with the raw codec",
+            ));
+        }
+        _ => return Err(DataModelError::InvalidBlob("ref must be a link")),
     }
     match map.get("mimeType") {
         Some(Ipld::String(m)) if !m.is_empty() => {}
@@ -360,6 +416,7 @@ fn to_json(v: &Ipld, depth: usize, limits: &Limits) -> Result<Value> {
             Value::Object(m)
         }
         Ipld::Link(c) => {
+            check_link(c)?;
             let mut m = Map::new();
             m.insert("$link".into(), Value::String(c.to_string()));
             Value::Object(m)
@@ -386,8 +443,8 @@ fn to_json(v: &Ipld, depth: usize, limits: &Limits) -> Result<Value> {
 }
 
 /// Validates an IPLD value against the abstract atproto data model: no floats, integers in
-/// `i64`, `$type` non-empty strings, well-formed blobs, no reserved `$link`/`$bytes` keys in
-/// plain maps, depth within [`Limits::default`].
+/// `i64`, blessed CIDs only, `$type` non-empty strings, well-formed blobs (with a raw-codec
+/// `ref`), no reserved `$link`/`$bytes` keys in plain maps, depth within [`Limits::default`].
 pub fn validate(v: &Ipld) -> Result<()> {
     validate_inner(v, 0, &Limits::default())
 }
@@ -398,6 +455,7 @@ fn validate_inner(v: &Ipld, depth: usize, limits: &Limits) -> Result<()> {
         Ipld::Integer(i) => i64::try_from(*i)
             .map(|_| ())
             .map_err(|_| DataModelError::IntegerOutOfRange),
+        Ipld::Link(c) => check_link(c),
         Ipld::List(items) => {
             let d = enter(depth, limits)?;
             items.iter().try_for_each(|i| validate_inner(i, d, limits))
@@ -454,8 +512,9 @@ pub struct BlobRef {
 }
 
 /// Collects every well-formed blob reference in a value, anywhere (including unknown and nested
-/// fields), depth-first with map keys in sorted order. Malformed blob objects and legacy
-/// `{cid, mimeType}` blobs are skipped. Iterative; never recurses.
+/// fields), depth-first with map keys in sorted order. Malformed blob objects (including a `ref`
+/// that is not a blessed raw-codec CID) and legacy `{cid, mimeType}` blobs are skipped. Iterative;
+/// never recurses.
 pub fn blob_refs(v: &Ipld) -> Vec<BlobRef> {
     let mut out = Vec::new();
     let mut stack = vec![v];
@@ -473,6 +532,7 @@ pub fn blob_refs(v: &Ipld) -> Vec<BlobRef> {
                     map.get("mimeType"),
                     map.get("size"),
                 ) && t == "blob"
+                    && is_blob_cid(cid)
                     && !m.is_empty()
                     && let Ok(size) = i64::try_from(*n)
                     && size >= 0

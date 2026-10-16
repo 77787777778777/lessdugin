@@ -49,11 +49,21 @@ impl KvStore for MemKv {
         limit: u32,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, HostError> {
         let map = self.lock();
+        if range_is_empty(&range) {
+            return Ok(Vec::new());
+        }
         let iter = map.range((range.start.clone(), range.end.clone()));
         let take = limit as usize;
         Ok(match dir {
-            Dir::Forward => iter.take(take).map(|(k, v)| (k.clone(), v.clone())).collect(),
-            Dir::Reverse => iter.rev().take(take).map(|(k, v)| (k.clone(), v.clone())).collect(),
+            Dir::Forward => iter
+                .take(take)
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+            Dir::Reverse => iter
+                .rev()
+                .take(take)
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
         })
     }
 
@@ -68,8 +78,13 @@ impl KvStore for MemKv {
                     map.remove(&k);
                 }
                 KvOp::DeleteRange(r) => {
-                    let doomed: Vec<Vec<u8>> =
-                        map.range((r.start, r.end)).map(|(k, _)| k.clone()).collect();
+                    if range_is_empty(&r) {
+                        continue;
+                    }
+                    let doomed: Vec<Vec<u8>> = map
+                        .range((r.start, r.end))
+                        .map(|(k, _)| k.clone())
+                        .collect();
                     for k in doomed {
                         map.remove(&k);
                     }
@@ -77,6 +92,18 @@ impl KvStore for MemKv {
             }
         }
         Ok(())
+    }
+}
+
+/// True if no key can be in `r` (`BTreeMap::range` panics on such ranges).
+fn range_is_empty(r: &KeyRange) -> bool {
+    use std::ops::Bound::{Excluded, Included};
+    match (&r.start, &r.end) {
+        (Included(s), Included(e)) => s > e,
+        (Included(s), Excluded(e)) | (Excluded(s), Included(e)) | (Excluded(s), Excluded(e)) => {
+            s >= e
+        }
+        _ => false,
     }
 }
 
@@ -96,14 +123,43 @@ mod tests {
             ])
             .await
             .unwrap();
-            let fwd = kv.scan(KeyRange::prefix(b"a"), Dir::Forward, 10).await.unwrap();
+            let fwd = kv
+                .scan(KeyRange::prefix(b"a"), Dir::Forward, 10)
+                .await
+                .unwrap();
             assert_eq!(fwd.len(), 2);
-            let rev = kv.scan(KeyRange::prefix(b"a"), Dir::Reverse, 1).await.unwrap();
+            let rev = kv
+                .scan(KeyRange::prefix(b"a"), Dir::Reverse, 1)
+                .await
+                .unwrap();
             assert_eq!(rev[0].0, b"a2");
-            kv.write(vec![KvOp::DeleteRange(KeyRange::prefix(b"a"))]).await.unwrap();
+            kv.write(vec![KvOp::DeleteRange(KeyRange::prefix(b"a"))])
+                .await
+                .unwrap();
             assert_eq!(kv.len(), 1);
-            let got = kv.get_many(vec![b"b1".to_vec(), b"zz".to_vec()]).await.unwrap();
+            let got = kv
+                .get_many(vec![b"b1".to_vec(), b"zz".to_vec()])
+                .await
+                .unwrap();
             assert_eq!(got, vec![Some(b"z".to_vec()), None]);
+            // inverted and empty ranges select nothing (and do not panic)
+            let inverted = KeyRange {
+                start: std::ops::Bound::Included(b"b".to_vec()),
+                end: std::ops::Bound::Excluded(b"a".to_vec()),
+            };
+            assert!(
+                kv.scan(inverted.clone(), Dir::Forward, 10)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            let empty = KeyRange {
+                start: std::ops::Bound::Excluded(b"b1".to_vec()),
+                end: std::ops::Bound::Excluded(b"b1".to_vec()),
+            };
+            assert!(kv.scan(empty, Dir::Reverse, 10).await.unwrap().is_empty());
+            kv.write(vec![KvOp::DeleteRange(inverted)]).await.unwrap();
+            assert_eq!(kv.len(), 1);
         });
     }
 }

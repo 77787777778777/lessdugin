@@ -1,0 +1,337 @@
+/* SPDX-License-Identifier: AGPL-3.0-or-later */
+.forumHeader {
+  margin-bottom: var(--space-5);
+}
+
+.forumTitle {
+  margin: 0;
+  font-family: var(--font-serif);
+  font-size: var(--text-2xl);
+  font-weight: 500;
+}
+
+.forumDescription {
+  margin: var(--space-1) 0 var(--space-3);
+  color: var(--color-text-muted);
+}
+
+.banner {
+  margin: var(--space-2) 0;
+  padding: var(--space-2) var(--space-3);
+  border-left: 3px solid var(--color-warning);
+  background: var(--color-warning-soft);
+  font-size: var(--text-sm);
+}
+
+.tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  margin-top: var(--space-4);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.tab {
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 2px solid transparent;
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+}
+
+.tab:hover {
+  color: var(--color-text);
+  text-decoration: none;
+}
+
+.tabActive {
+  composes: tab;
+  border-bottom-color: var(--color-primary);
+  color: var(--color-text);
+  font-weight: 600;
+}
+
+.controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-4);
+  margin-bottom: var(--space-3);
+  font-size: var(--text-sm);
+}
+
+.select {
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 16rem;
+  gap: var(--space-6);
+}
+
+.aside {
+  font-size: var(--text-sm);
+}
+
+.cardList {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.forumCard {
+  composes: cardList;
+  padding: var(--space-4) var(--space-5);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+}
+
+.forumCardTitle {
+  margin: 0;
+  font-family: var(--font-serif);
+  font-size: var(--text-xl);
+  font-weight: 500;
+}
+
+.discussion {
+  padding: var(--space-4) 0;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.discussionTitle {
+  margin: 0 0 var(--space-2);
+  font-family: var(--font-serif);
+  font-size: var(--text-lg);
+  font-weight: 500;
+}
+
+.miniComment {
+  margin: 0 0 var(--space-2) var(--space-3);
+  padding-left: var(--space-3);
+  border-left: 2px solid var(--color-border);
+}
+
+.miniMeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+}
+
+/* Post page: ToC sidebar | article | sidenote margin on wide screens. */
+.postLayout {
+  display: grid;
+  grid-template-columns: 13rem minmax(0, var(--measure)) 1fr;
+  gap: var(--space-6);
+}
+
+.tocColumn {
+  position: relative;
+}
+
+.articleColumn {
+  min-width: 0;
+}
+
+/* The thread sits under the article, in the same column. */
+.threadColumn {
+  grid-column: 2;
+  min-width: 0;
+}
+
+.postTitle {
+  margin: 0 0 var(--space-3);
+  font-family: var(--font-serif);
+  font-size: 2.4rem;
+  font-weight: 500;
+  line-height: 1.15;
+}
+
+.byline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+  margin-bottom: var(--space-5);
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+}
+
+.linkCard {
+  margin: 0 0 var(--space-5);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+}
+
+.linkCardTitle {
+  margin: 0 0 var(--space-1);
+  font-weight: 600;
+}
+
+.postFooter {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3) var(--space-5);
+  margin: var(--space-6) 0 var(--space-4);
+  padding: var(--space-3) 0;
+  border-top: 1px solid var(--color-border);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.seqNav {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin: var(--space-4) 0;
+  padding: var(--space-3) var(--space-4);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  font-size: var(--text-sm);
+}
+
+.commentsHeader {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin: var(--space-6) 0 var(--space-3);
+}
+
+.commentsTitle {
+  margin: 0;
+  font-size: var(--text-lg);
+}
+
+.hiddenPost {
+  padding: var(--space-4);
+  border: 1px dashed var(--color-border-strong);
+  border-radius: var(--radius-md);
+  color: var(--color-text-muted);
+}
+
+.toc {
+  position: sticky;
+  top: calc(var(--header-height) + var(--space-5));
+  max-height: calc(100vh - var(--header-height) - 3rem);
+  overflow-y: auto;
+  font-size: var(--text-sm);
+}
+
+.tocTitle {
+  margin: 0 0 var(--space-2);
+  font-size: var(--text-xs);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+.tocList {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.tocItem {
+  margin: 0 0 var(--space-1);
+}
+
+.tocLevel3 {
+  composes: tocItem;
+  padding-left: var(--space-3);
+}
+
+.tocLevel4 {
+  composes: tocItem;
+  padding-left: var(--space-5);
+}
+
+.tocButton {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--color-text-muted);
+  text-align: left;
+}
+
+.tocButton:hover {
+  color: var(--color-text);
+  text-decoration: underline;
+}
+
+.notification {
+  display: grid;
+  grid-template-columns: 1.5rem 1fr auto;
+  gap: var(--space-3);
+  padding: var(--space-3) 0;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.unreadNotification {
+  composes: notification;
+  background: color-mix(in srgb, var(--color-info-soft) 60%, transparent);
+}
+
+.snippet mark {
+  background: var(--color-warning-soft);
+  color: inherit;
+}
+
+.kv {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: var(--space-1) var(--space-4);
+  font-size: var(--text-sm);
+}
+
+.kv dt {
+  color: var(--color-text-muted);
+}
+
+.kv dd {
+  margin: 0;
+}
+
+.raw {
+  max-height: 24rem;
+  overflow: auto;
+  padding: var(--space-3);
+  background: var(--color-code-bg);
+  border-radius: var(--radius-md);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
+
+@media (max-width: 1100px) {
+  .postLayout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .threadColumn {
+    grid-column: 1;
+  }
+
+  .tocColumn {
+    display: none;
+  }
+}
+
+@media (max-width: 900px) {
+  .layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 720px) {
+  .postTitle {
+    font-size: 1.8rem;
+  }
+}

@@ -4,14 +4,24 @@
 //! **Encoding** is canonical: shortest-form heads, map keys sorted length-first then bytewise (the
 //! RFC 7049 canonical order used by DAG-CBOR; `serde_ipld_dagcbor` 0.7 produces the same order by
 //! sorting encoded entries, which the tests cross-check), CIDs as tag 42 over `0x00 ‖ cid-bytes`.
-//! Floats, integers outside `i64` and CIDv0 links are rejected.
+//! Floats, integers outside `i64` and CIDv0 links are rejected. The encoder applies the same
+//! [`Limits`] as the decoder, so `encode_with(v, l)` succeeding implies that
+//! `decode_with(&bytes, l)` succeeds: a value too large to be read back fails when it is written,
+//! never silently later.
 //!
-//! **Decoding** accepts only canonical input and the atproto subset: no floats, no indefinite
-//! lengths, no tags other than 42 (in its 2-byte form), no `undefined`/simple values, minimal-length
-//! heads, string map keys in strictly increasing canonical order (so duplicates are rejected),
-//! valid UTF-8, integers within `i64`, CIDv1 links only, no trailing bytes. Caps from [`Limits`]
-//! (depth, container length, string/byte length, total node count) are checked *before* recursing
-//! or allocating; nothing is preallocated from a declared length.
+//! **Decoding** accepts only canonical input and the atproto subset (`sync.md` §8.3): no floats,
+//! no indefinite lengths, no tags other than 42 (in its 2-byte form), no `undefined`/simple values,
+//! minimal-length heads, string map keys in strictly increasing canonical order (so duplicates are
+//! rejected), valid UTF-8, integers within `i64`, CIDv1 links only, no trailing bytes. Caps from
+//! [`Limits`] (depth, container length, string/byte length, total node count) are checked *before*
+//! recursing or allocating; nothing is preallocated from a declared length.
+//!
+//! **Validation without materialising.** [`validate_with`] runs exactly the decoder's checks but
+//! allocates nothing, so the N-class verdict "strict DAG-CBOR with nesting ≤ 32"
+//! ([`Limits::STRICT`]) can be reached for any input size, independently of the S-class caps that
+//! bound how much memory a decoded [`Ipld`] tree may take ([`Limits::DEFAULT`]). [`map_entries_raw`]
+//! and [`list_items_raw`] then navigate validated bytes without decoding them, so callers can pick
+//! out the fields they need (commits, MST nodes, manifests) and ignore unknown ones at no cost.
 
 use std::collections::BTreeMap;
 
@@ -22,19 +32,23 @@ use crate::datamodel::{DataModelError, Limits};
 
 const TAG_CID: u64 = 42;
 
-/// Encodes a value as canonical DAG-CBOR, using [`Limits::default`] for the depth guard.
+/// Encodes a value as canonical DAG-CBOR under [`Limits::default`] (see [`encode_with`]).
 pub fn encode(v: &Ipld) -> Result<Vec<u8>, DataModelError> {
     encode_with(v, &Limits::default())
 }
 
-/// Encodes a value as canonical DAG-CBOR with an explicit depth guard (`limits.max_depth`).
+/// Encodes a value as canonical DAG-CBOR, enforcing every cap of `limits` (depth, container
+/// length, string and byte-string length, total values), exactly as [`decode_with`] would when
+/// reading the result back.
 pub fn encode_with(v: &Ipld, limits: &Limits) -> Result<Vec<u8>, DataModelError> {
     let mut out = Vec::new();
-    enc(&mut out, v, 0, limits.max_depth)?;
+    let mut nodes = 0usize;
+    enc(&mut out, v, 0, limits, &mut nodes)?;
     Ok(out)
 }
 
-fn write_head(out: &mut Vec<u8>, major: u8, arg: u64) {
+/// Appends a CBOR head (major type and argument) in its shortest form.
+pub(crate) fn write_head(out: &mut Vec<u8>, major: u8, arg: u64) {
     let m = major << 5;
     if arg < 24 {
         out.push(m | arg as u8);
@@ -60,7 +74,27 @@ pub fn canonical_key_cmp(a: &str, b: &str) -> core::cmp::Ordering {
         .then_with(|| a.as_bytes().cmp(b.as_bytes()))
 }
 
-fn enc(out: &mut Vec<u8>, v: &Ipld, depth: usize, max_depth: usize) -> Result<(), DataModelError> {
+fn check_string_len(len: usize, limits: &Limits) -> Result<(), DataModelError> {
+    if len > limits.max_string_bytes {
+        Err(string_too_long(len, limits.max_string_bytes))
+    } else {
+        Ok(())
+    }
+}
+
+fn enc(
+    out: &mut Vec<u8>,
+    v: &Ipld,
+    depth: usize,
+    limits: &Limits,
+    nodes: &mut usize,
+) -> Result<(), DataModelError> {
+    *nodes += 1;
+    if *nodes > limits.max_total_nodes {
+        return Err(DataModelError::TooManyNodes {
+            max: limits.max_total_nodes,
+        });
+    }
     match v {
         Ipld::Null => out.push(0xf6),
         Ipld::Bool(false) => out.push(0xf4),
@@ -76,29 +110,40 @@ fn enc(out: &mut Vec<u8>, v: &Ipld, depth: usize, max_depth: usize) -> Result<()
         }
         Ipld::Float(_) => return Err(DataModelError::Float),
         Ipld::String(s) => {
+            check_string_len(s.len(), limits)?;
             write_head(out, 3, s.len() as u64);
             out.extend_from_slice(s.as_bytes());
         }
         Ipld::Bytes(b) => {
+            if b.len() > limits.max_bytes_len {
+                return Err(bytes_too_long(b.len(), limits.max_bytes_len));
+            }
             write_head(out, 2, b.len() as u64);
             out.extend_from_slice(b);
         }
         Ipld::List(items) => {
-            let d = enter(depth, max_depth)?;
+            let d = enter(depth, limits.max_depth)?;
+            if items.len() > limits.max_container_len {
+                return Err(container_too_large(items.len(), limits.max_container_len));
+            }
             write_head(out, 4, items.len() as u64);
             for item in items {
-                enc(out, item, d, max_depth)?;
+                enc(out, item, d, limits, nodes)?;
             }
         }
         Ipld::Map(map) => {
-            let d = enter(depth, max_depth)?;
+            let d = enter(depth, limits.max_depth)?;
+            if map.len() > limits.max_container_len {
+                return Err(container_too_large(map.len(), limits.max_container_len));
+            }
             write_head(out, 5, map.len() as u64);
             let mut entries: Vec<(&String, &Ipld)> = map.iter().collect();
             entries.sort_by(|a, b| canonical_key_cmp(a.0, b.0));
             for (k, val) in entries {
+                check_string_len(k.len(), limits)?;
                 write_head(out, 3, k.len() as u64);
                 out.extend_from_slice(k.as_bytes());
-                enc(out, val, d, max_depth)?;
+                enc(out, val, d, limits, nodes)?;
             }
         }
         Ipld::Link(cid) => {
@@ -106,8 +151,12 @@ fn enc(out: &mut Vec<u8>, v: &Ipld, depth: usize, max_depth: usize) -> Result<()
                 return Err(DataModelError::InvalidLink("CIDv0 is not allowed".into()));
             }
             let bytes = cid.to_bytes();
+            let len = bytes.len() + 1;
+            if len > limits.max_bytes_len {
+                return Err(bytes_too_long(len, limits.max_bytes_len));
+            }
             write_head(out, 6, TAG_CID);
-            write_head(out, 2, bytes.len() as u64 + 1);
+            write_head(out, 2, len as u64);
             out.push(0x00);
             out.extend_from_slice(&bytes);
         }
@@ -131,17 +180,23 @@ pub fn decode(bytes: &[u8]) -> Result<Ipld, DataModelError> {
 
 /// Decodes strict canonical DAG-CBOR with explicit limits. The whole slice must be one value.
 pub fn decode_with(bytes: &[u8], limits: &Limits) -> Result<Ipld, DataModelError> {
-    let mut d = Decoder {
-        buf: bytes,
-        pos: 0,
-        limits,
-        nodes: 0,
-    };
-    let v = d.value(0)?;
-    if d.pos != bytes.len() {
-        return Err(d.err("trailing bytes after value"));
-    }
-    Ok(v)
+    let mut d = Decoder::new(bytes, limits);
+    let v = d.value(0, true)?;
+    d.finish()?;
+    // `build = true` always yields a value.
+    v.ok_or(DataModelError::Cbor {
+        offset: 0,
+        reason: "no value",
+    })
+}
+
+/// Checks that `bytes` is exactly one strict canonical DAG-CBOR value under `limits`, with the
+/// same rules and errors as [`decode_with`], without allocating. With [`Limits::STRICT`] this is
+/// the `proofs/1` "strict decoding" verdict (`sync.md` §8.3).
+pub fn validate_with(bytes: &[u8], limits: &Limits) -> Result<(), DataModelError> {
+    let mut d = Decoder::new(bytes, limits);
+    d.value(0, false)?;
+    d.finish()
 }
 
 fn string_too_long(len: usize, max: usize) -> DataModelError {
@@ -169,6 +224,22 @@ enum Head {
 }
 
 impl<'a> Decoder<'a> {
+    fn new(buf: &'a [u8], limits: &'a Limits) -> Self {
+        Self {
+            buf,
+            pos: 0,
+            limits,
+            nodes: 0,
+        }
+    }
+
+    fn finish(&self) -> Result<(), DataModelError> {
+        if self.pos != self.buf.len() {
+            return Err(self.err("trailing bytes after value"));
+        }
+        Ok(())
+    }
+
     fn err(&self, reason: &'static str) -> DataModelError {
         DataModelError::Cbor {
             offset: self.pos,
@@ -250,47 +321,55 @@ impl<'a> Decoder<'a> {
         }
     }
 
-    fn string(&mut self, arg: u64) -> Result<String, DataModelError> {
+    fn string(&mut self, arg: u64) -> Result<&'a str, DataModelError> {
         let len = Self::len_arg(arg, self.limits.max_string_bytes, string_too_long)?;
         let start = self.pos;
         let raw = self.take(len)?;
-        match core::str::from_utf8(raw) {
-            Ok(s) => Ok(s.to_owned()),
-            Err(_) => Err(DataModelError::Cbor {
-                offset: start,
-                reason: "invalid UTF-8 in string",
-            }),
-        }
+        core::str::from_utf8(raw).map_err(|_| DataModelError::Cbor {
+            offset: start,
+            reason: "invalid UTF-8 in string",
+        })
     }
 
-    fn value(&mut self, depth: usize) -> Result<Ipld, DataModelError> {
+    /// Reads one value. With `build`, returns it; otherwise only checks it (`Ok(None)`).
+    fn value(&mut self, depth: usize, build: bool) -> Result<Option<Ipld>, DataModelError> {
         self.nodes += 1;
         if self.nodes > self.limits.max_total_nodes {
             return Err(DataModelError::TooManyNodes {
                 max: self.limits.max_total_nodes,
             });
         }
-        match self.head()? {
+        let v = match self.head()? {
             Head::Simple(b) => match b {
-                0xf4 => Ok(Ipld::Bool(false)),
-                0xf5 => Ok(Ipld::Bool(true)),
-                0xf6 => Ok(Ipld::Null),
-                0xf9..=0xfb => Err(DataModelError::Float),
-                _ => Err(self.err("unsupported simple value")),
+                0xf4 => Ipld::Bool(false),
+                0xf5 => Ipld::Bool(true),
+                0xf6 => Ipld::Null,
+                0xf9..=0xfb => return Err(DataModelError::Float),
+                _ => return Err(self.err("unsupported simple value")),
             },
             Head::Major(0, arg) => {
                 let v = i64::try_from(arg).map_err(|_| DataModelError::IntegerOutOfRange)?;
-                Ok(Ipld::Integer(i128::from(v)))
+                Ipld::Integer(i128::from(v))
             }
             Head::Major(1, arg) => {
                 let n = i64::try_from(arg).map_err(|_| DataModelError::IntegerOutOfRange)?;
-                Ok(Ipld::Integer(-1 - i128::from(n)))
+                Ipld::Integer(-1 - i128::from(n))
             }
             Head::Major(2, arg) => {
                 let len = Self::len_arg(arg, self.limits.max_bytes_len, bytes_too_long)?;
-                Ok(Ipld::Bytes(self.take(len)?.to_vec()))
+                let b = self.take(len)?;
+                if !build {
+                    return Ok(None);
+                }
+                Ipld::Bytes(b.to_vec())
             }
-            Head::Major(3, arg) => Ok(Ipld::String(self.string(arg)?)),
+            Head::Major(3, arg) => {
+                let s = self.string(arg)?;
+                if !build {
+                    return Ok(None);
+                }
+                Ipld::String(s.to_owned())
+            }
             Head::Major(4, arg) => {
                 let len = Self::len_arg(arg, self.limits.max_container_len, container_too_large)?;
                 let d = enter(depth, self.limits.max_depth)?;
@@ -299,9 +378,14 @@ impl<'a> Decoder<'a> {
                 }
                 let mut items = Vec::new();
                 for _ in 0..len {
-                    items.push(self.value(d)?);
+                    if let Some(item) = self.value(d, build)? {
+                        items.push(item);
+                    }
                 }
-                Ok(Ipld::List(items))
+                if !build {
+                    return Ok(None);
+                }
+                Ipld::List(items)
             }
             Head::Major(5, arg) => {
                 let len = Self::len_arg(arg, self.limits.max_container_len, container_too_large)?;
@@ -310,7 +394,7 @@ impl<'a> Decoder<'a> {
                     return Err(self.err("map longer than remaining input"));
                 }
                 let mut map = BTreeMap::new();
-                let mut prev: Option<String> = None;
+                let mut prev: Option<&'a str> = None;
                 for _ in 0..len {
                     let key_at = self.pos;
                     let key = match self.head()? {
@@ -322,19 +406,23 @@ impl<'a> Decoder<'a> {
                             });
                         }
                     };
-                    if let Some(p) = &prev
-                        && canonical_key_cmp(p, &key) != core::cmp::Ordering::Less
+                    if let Some(p) = prev
+                        && canonical_key_cmp(p, key) != core::cmp::Ordering::Less
                     {
                         return Err(DataModelError::Cbor {
                             offset: key_at,
                             reason: "map keys must be unique and in canonical order",
                         });
                     }
-                    let val = self.value(d)?;
-                    prev = Some(key.clone());
-                    map.insert(key, val);
+                    prev = Some(key);
+                    if let Some(val) = self.value(d, build)? {
+                        map.insert(key.to_owned(), val);
+                    }
                 }
-                Ok(Ipld::Map(map))
+                if !build {
+                    return Ok(None);
+                }
+                Ipld::Map(map)
             }
             Head::Major(6, tag) => {
                 if tag != TAG_CID {
@@ -357,11 +445,176 @@ impl<'a> Decoder<'a> {
                 };
                 let cid: Cid = crate::cid::from_bytes(cid_bytes)
                     .map_err(|e| DataModelError::InvalidLink(e.to_string()))?;
-                Ok(Ipld::Link(cid))
+                Ipld::Link(cid)
             }
-            Head::Major(..) => Err(self.err("invalid major type")),
+            Head::Major(..) => return Err(self.err("invalid major type")),
+        };
+        Ok(build.then_some(v))
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Navigation over validated bytes
+
+/// Reads the head at `pos`: `(major, argument, head length)`. For major type 7 the argument is
+/// the additional information. `None` if the input ends early.
+fn raw_head(buf: &[u8], pos: usize) -> Option<(u8, u64, usize)> {
+    let b = *buf.get(pos)?;
+    let (major, info) = (b >> 5, b & 0x1f);
+    let n = match info {
+        0..=23 => return Some((major, u64::from(info), 1)),
+        24 => 1,
+        25 => 2,
+        26 => 4,
+        27 => 8,
+        _ => return None,
+    };
+    let bytes = buf.get(pos + 1..pos + 1 + n)?;
+    let arg = bytes.iter().fold(0u64, |a, &x| (a << 8) | u64::from(x));
+    Some((major, if major == 7 { u64::from(info) } else { arg }, 1 + n))
+}
+
+/// The end offset of the value starting at `pos` (iterative; no recursion).
+fn raw_skip(buf: &[u8], mut pos: usize) -> Option<usize> {
+    let mut pending: u64 = 1;
+    while pending > 0 {
+        let (major, arg, n) = raw_head(buf, pos)?;
+        pos = pos.checked_add(n)?;
+        pending -= 1;
+        match major {
+            2 | 3 => pos = pos.checked_add(usize::try_from(arg).ok()?)?,
+            4 => pending = pending.checked_add(arg)?,
+            5 => pending = pending.checked_add(arg.checked_mul(2)?)?,
+            6 => pending = pending.checked_add(1)?,
+            _ => {}
+        }
+        if pos > buf.len() {
+            return None;
         }
     }
+    Some(pos)
+}
+
+/// The entries of an encoded map: `(key, encoded value)` in encoded (canonical) order.
+///
+/// Meant for bytes that passed [`validate_with`] (or a slice of such bytes, as yielded by these
+/// iterators): on anything else iteration simply stops early. Never panics.
+#[derive(Debug, Clone)]
+pub struct RawMapIter<'a> {
+    buf: &'a [u8],
+    pos: usize,
+    remaining: u64,
+}
+
+impl<'a> Iterator for RawMapIter<'a> {
+    type Item = (&'a str, &'a [u8]);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 {
+            return None;
+        }
+        let item = (|| {
+            let (major, len, n) = raw_head(self.buf, self.pos)?;
+            if major != 3 {
+                return None;
+            }
+            let kstart = self.pos + n;
+            let kend = kstart.checked_add(usize::try_from(len).ok()?)?;
+            let key = core::str::from_utf8(self.buf.get(kstart..kend)?).ok()?;
+            let vend = raw_skip(self.buf, kend)?;
+            self.pos = vend;
+            Some((key, self.buf.get(kend..vend)?))
+        })();
+        self.remaining = if item.is_some() {
+            self.remaining - 1
+        } else {
+            0
+        };
+        item
+    }
+}
+
+/// The items of an encoded list (see [`RawMapIter`] for the contract).
+#[derive(Debug, Clone)]
+pub struct RawListIter<'a> {
+    buf: &'a [u8],
+    pos: usize,
+    remaining: u64,
+}
+
+impl<'a> Iterator for RawListIter<'a> {
+    type Item = &'a [u8];
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 {
+            return None;
+        }
+        let item = raw_skip(self.buf, self.pos).and_then(|end| {
+            let s = self.buf.get(self.pos..end)?;
+            self.pos = end;
+            Some(s)
+        });
+        self.remaining = if item.is_some() {
+            self.remaining - 1
+        } else {
+            0
+        };
+        item
+    }
+}
+
+impl RawMapIter<'_> {
+    /// The number of entries not yet yielded, as declared by the map head.
+    pub fn declared_len(&self) -> u64 {
+        self.remaining
+    }
+}
+
+impl RawListIter<'_> {
+    /// The number of items not yet yielded, as declared by the list head.
+    pub fn declared_len(&self) -> u64 {
+        self.remaining
+    }
+}
+
+/// If `bytes` (validated, see [`RawMapIter`]) is a map, iterates its entries without decoding.
+pub fn map_entries_raw(bytes: &[u8]) -> Option<RawMapIter<'_>> {
+    match raw_head(bytes, 0)? {
+        (5, len, n) => Some(RawMapIter {
+            buf: bytes,
+            pos: n,
+            remaining: len,
+        }),
+        _ => None,
+    }
+}
+
+/// If `bytes` (validated, see [`RawMapIter`]) is a list, iterates its items without decoding.
+pub fn list_items_raw(bytes: &[u8]) -> Option<RawListIter<'_>> {
+    match raw_head(bytes, 0)? {
+        (4, len, n) => Some(RawListIter {
+            buf: bytes,
+            pos: n,
+            remaining: len,
+        }),
+        _ => None,
+    }
+}
+
+/// Decodes a validated non-container value (null, bool, integer, string, bytes, link); `None`
+/// for a map or a list (or invalid input). Allocates at most the value's own size.
+pub fn decode_scalar(bytes: &[u8]) -> Option<Ipld> {
+    let (major, _, _) = raw_head(bytes, 0)?;
+    if major == 4 || major == 5 {
+        return None;
+    }
+    let limits = Limits {
+        max_depth: 0,
+        max_container_len: 0,
+        max_total_nodes: 1,
+        ..Limits::uncapped(0)
+    };
+    decode_with(bytes, &limits).ok()
 }
 
 #[cfg(test)]

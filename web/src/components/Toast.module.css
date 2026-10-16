@@ -1,0 +1,62 @@
+/* SPDX-License-Identifier: AGPL-3.0-or-later */
+.region {
+  position: fixed;
+  z-index: 50;
+  right: var(--space-4);
+  bottom: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  max-width: min(26rem, calc(100vw - 2rem));
+}
+
+.toast {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  background: var(--color-text);
+  color: var(--color-bg);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-2);
+  font-size: var(--text-sm);
+}
+
+.error {
+  background: var(--color-danger);
+  color: #fff;
+}
+
+.success {
+  background: var(--color-primary-strong);
+  color: #fff;
+}
+
+.message {
+  flex: 1;
+}
+
+.action {
+  border: 1px solid currentcolor;
+  background: transparent;
+  border-radius: var(--radius-sm);
+  padding: var(--space-1) var(--space-3);
+  font-weight: 600;
+}
+
+.close {
+  border: 0;
+  background: transparent;
+  font-size: var(--text-lg);
+  line-height: 1;
+  opacity: 0.7;
+}
+
+@media (max-width: 720px) {
+  .region {
+    left: var(--space-3);
+    right: var(--space-3);
+    bottom: calc(4rem + var(--space-3));
+    max-width: none;
+  }
+}

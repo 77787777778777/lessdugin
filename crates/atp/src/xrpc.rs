@@ -4,10 +4,13 @@
 //! responses with serde.
 //!
 //! Request parameters use validated syntax types. Response bodies keep server-provided
-//! identifiers (`uri`, `cid`, `rev`, …) as plain strings so that one malformed entry does not fail
-//! a whole page; callers validate each item (`AtUri::parse`, `cid::parse`, `Tid::parse`). Record
-//! values stay as `serde_json::Value` (see [`crate::datamodel`]). Unknown response fields are
-//! ignored. `Debug` output of credential-bearing types redacts secrets.
+//! identifiers (`uri`, `cid`, `rev`, …) as plain strings, and list entries
+//! ([`RecordEntry`], [`RepoRef`]) decode whatever shape they have (a missing or non-string field
+//! becomes `None`), so that one malformed entry never fails a whole page: callers validate each
+//! item (`AtUri::parse`, `cid::parse`, `Tid::parse`) and decide whether that entry, or the page,
+//! is rejected (`sync.md` §5.3, §5.5). Record values stay as `serde_json::Value` (see
+//! [`crate::datamodel`]). Unknown response fields are ignored. `Debug` output of credential- or
+//! PII-bearing types redacts secrets and email addresses.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -119,15 +122,36 @@ pub struct CommitMeta {
     pub rev: String,
 }
 
-/// One record in a response: `{uri, cid, value}`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// One record in a list response: `{uri, cid, value}`. Decoding never fails: a field that is
+/// missing or of the wrong type is `None` (an entry that is not an object has every field
+/// `None`), so callers can reject the entry instead of the page.
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct RecordEntry {
-    /// The record's AT URI.
-    pub uri: String,
-    /// The record CID.
-    pub cid: String,
-    /// The record value (atproto JSON).
-    pub value: Value,
+    /// The record's AT URI, if a string.
+    pub uri: Option<String>,
+    /// The record CID, if a string.
+    pub cid: Option<String>,
+    /// The record value (atproto JSON), if present.
+    pub value: Option<Value>,
+}
+
+/// Takes `k` out of `v` if it is a string.
+fn take_string(v: &mut Value, k: &str) -> Option<String> {
+    match v.get_mut(k).map(Value::take) {
+        Some(Value::String(s)) => Some(s),
+        _ => None,
+    }
+}
+
+impl<'de> Deserialize<'de> for RecordEntry {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let mut v = Value::deserialize(d)?;
+        Ok(Self {
+            uri: take_string(&mut v, "uri"),
+            cid: take_string(&mut v, "cid"),
+            value: v.get_mut("value").map(Value::take),
+        })
+    }
 }
 
 macro_rules! endpoint {
@@ -224,7 +248,8 @@ pub struct ListRecordsOutput {
     /// Next-page cursor.
     #[serde(default)]
     pub cursor: Option<String>,
-    /// Records.
+    /// Records, each decoded leniently (see [`RecordEntry`]).
+    #[serde(default)]
     pub records: Vec<RecordEntry>,
 }
 
@@ -610,11 +635,20 @@ impl QueryParams for ListReposByCollection {
     }
 }
 
-/// One repo in a `listReposByCollection` page.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// One repo in a `listReposByCollection` page. Decoding never fails (see [`RecordEntry`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RepoRef {
-    /// Repo DID.
-    pub did: String,
+    /// Repo DID, if a string.
+    pub did: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for RepoRef {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let mut v = Value::deserialize(d)?;
+        Ok(Self {
+            did: take_string(&mut v, "did"),
+        })
+    }
 }
 
 /// `com.atproto.sync.listReposByCollection` output.
@@ -736,8 +770,8 @@ impl QueryParams for GetSession {
     }
 }
 
-/// `com.atproto.server.getSession` output.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// `com.atproto.server.getSession` output. `Debug` redacts the email address.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GetSessionOutput {
     /// Handle.
@@ -762,6 +796,20 @@ pub struct GetSessionOutput {
     /// Inactive status.
     #[serde(default)]
     pub status: Option<String>,
+}
+
+impl core::fmt::Debug for GetSessionOutput {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("GetSessionOutput")
+            .field("handle", &self.handle)
+            .field("did", &self.did)
+            .field("email", &self.email.as_ref().map(|_| "<redacted>"))
+            .field("email_confirmed", &self.email_confirmed)
+            .field("email_auth_factor", &self.email_auth_factor)
+            .field("active", &self.active)
+            .field("status", &self.status)
+            .finish_non_exhaustive()
+    }
 }
 
 /// `com.atproto.server.describeServer` (no parameters).
@@ -971,6 +1019,44 @@ mod tests {
         )
         .unwrap();
         assert!(lr.cursor.is_none());
+        assert_eq!(lr.records[0].uri.as_deref(), Some("at://a/b.c.d/e"));
+        assert_eq!(lr.records[0].value, Some(json!({"x": 1})));
+        // malformed entries do not fail the page
+        let lr: ListRecordsOutput = serde_json::from_str(
+            r#"{"cursor":"c","records":[{"cid":"bafy","value":{}},{"uri":5,"cid":null},null,"x",{"uri":"at://a/b.c.d/f","cid":"bafz","value":{"y":2}}]}"#,
+        )
+        .unwrap();
+        assert_eq!(lr.records.len(), 5);
+        assert_eq!(lr.records[0].uri, None);
+        assert_eq!(lr.records[0].cid.as_deref(), Some("bafy"));
+        assert_eq!(lr.records[1].uri, None);
+        assert_eq!(lr.records[1].cid, None);
+        assert_eq!(lr.records[1].value, None);
+        assert_eq!(
+            lr.records[2],
+            RecordEntry {
+                uri: None,
+                cid: None,
+                value: None
+            }
+        );
+        assert_eq!(lr.records[4].cid.as_deref(), Some("bafz"));
+        let lr: ListRecordsOutput = serde_json::from_str("{}").unwrap();
+        assert!(lr.records.is_empty());
+        let lr: ListReposByCollectionOutput =
+            serde_json::from_str(r#"{"repos":[{"did":"did:plc:x"},{"x":1},{"did":3}]}"#).unwrap();
+        assert_eq!(lr.repos.len(), 3);
+        assert_eq!(lr.repos[0].did.as_deref(), Some("did:plc:x"));
+        assert_eq!(lr.repos[1].did, None);
+        assert_eq!(lr.repos[2].did, None);
+        let gs: GetSessionOutput = serde_json::from_value(json!({
+            "handle": "a.test", "did": "did:plc:x", "email": "alice@example.com", "emailConfirmed": true
+        }))
+        .unwrap();
+        assert_eq!(gs.email.as_deref(), Some("alice@example.com"));
+        let dbg = format!("{gs:?}");
+        assert!(!dbg.contains("alice@"), "{dbg}");
+        assert!(dbg.contains("a.test"));
         let p = PutRecord {
             repo: AtIdentifier::Did(did()),
             collection: Nsid::parse("a.b.c").unwrap(),

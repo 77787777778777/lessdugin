@@ -31,6 +31,10 @@ pub enum CryptoError {
     /// The key bytes are not a valid point on the curve.
     #[error("invalid public key")]
     InvalidKey,
+    /// A Multikey / did:key holds an uncompressed point; atproto requires the 33-byte compressed
+    /// form (`/specs/cryptography`, `sync.md` §3.2).
+    #[error("public key is not a 33-byte compressed point")]
+    NotCompressed,
     /// The signature is not 64 bytes of `r ‖ s` with valid scalars.
     #[error("malformed signature (expected 64-byte compact r||s)")]
     MalformedSignature,
@@ -69,18 +73,26 @@ impl PublicKey {
         Self::from_multikey(mb)
     }
 
-    /// Parses a Multikey `publicKeyMultibase` (`z` + base58btc of multicodec prefix ‖ key).
-    /// The key bytes are normally the 33-byte compressed point; an uncompressed 65-byte SEC1
-    /// point is tolerated.
+    /// Parses a Multikey `publicKeyMultibase` (`z` + base58btc of multicodec prefix ‖ key): the
+    /// multicodec `secp256k1-pub` (0xe7) or `p256-pub` (0x1200) followed by a 33-byte compressed
+    /// SEC1 point. Anything else is rejected ([`CryptoError::UnsupportedKeyType`],
+    /// [`CryptoError::NotCompressed`], [`CryptoError::InvalidKey`]).
     pub fn from_multikey(s: &str) -> Result<Self, CryptoError> {
         let bytes = decode_z_base58(s)?;
-        if let Some(key) = bytes.strip_prefix(&K256_PREFIX) {
-            Self::from_sec1(Curve::Secp256k1, key)
+        let (curve, key) = if let Some(key) = bytes.strip_prefix(&K256_PREFIX) {
+            (Curve::Secp256k1, key)
         } else if let Some(key) = bytes.strip_prefix(&P256_PREFIX) {
-            Self::from_sec1(Curve::P256, key)
+            (Curve::P256, key)
         } else {
-            Err(CryptoError::UnsupportedKeyType)
+            return Err(CryptoError::UnsupportedKeyType);
+        };
+        if key.len() == 65 {
+            return Err(CryptoError::NotCompressed);
         }
+        if key.len() != 33 {
+            return Err(CryptoError::InvalidKey);
+        }
+        Self::from_sec1(curve, key)
     }
 
     /// Parses the legacy DID-document encoding (`EcdsaSecp256k1VerificationKey2019` /
@@ -234,6 +246,24 @@ mod tests {
         b.extend_from_slice(&[2u8; 8]);
         let s = multibase::encode(multibase::Base::Base58Btc, &b);
         assert_eq!(PublicKey::from_multikey(&s), Err(CryptoError::InvalidKey));
+        // an uncompressed point under a Multikey prefix is not accepted (both curves)
+        let k = k::SigningKey::from_slice(&[7u8; 32]).unwrap();
+        let mut b = K256_PREFIX.to_vec();
+        b.extend_from_slice(k.verifying_key().to_encoded_point(false).as_bytes());
+        let s = multibase::encode(multibase::Base::Base58Btc, &b);
+        assert_eq!(PublicKey::from_multikey(&s), Err(CryptoError::NotCompressed));
+        assert_eq!(
+            PublicKey::from_did_key(&format!("did:key:{s}")),
+            Err(CryptoError::NotCompressed)
+        );
+        let pk = p::SigningKey::from_slice(&[9u8; 32]).unwrap();
+        let mut b = P256_PREFIX.to_vec();
+        b.extend_from_slice(pk.verifying_key().to_encoded_point(false).as_bytes());
+        let s = multibase::encode(multibase::Base::Base58Btc, &b);
+        assert_eq!(PublicKey::from_multikey(&s), Err(CryptoError::NotCompressed));
+        // the compressed form of the same keys is fine
+        let ok = PublicKey::Secp256k1(*k.verifying_key()).multikey();
+        assert!(PublicKey::from_multikey(&ok).is_ok());
     }
 
     #[test]

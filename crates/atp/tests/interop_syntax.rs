@@ -54,12 +54,14 @@ fn aturi_lexicon_syntax() {
 
 #[test]
 fn aturi_strict_subset() {
-    // The strict form accepts exactly the valid URIs with a DID authority and a full record path
-    // (and a lowercase collection authority).
+    // The canonical form accepts exactly the valid URIs with a DID authority that passes the
+    // lessdugin DID policy (did:plc / host-only did:web) and a full record path (and a lowercase
+    // collection authority).
     let mut strict = 0;
     for v in common::lines("syntax/aturi_syntax_valid.txt") {
         let loose = LooseAtUri::parse(&v).unwrap();
-        let full = matches!(loose.authority(), AtIdentifier::Did(_)) && loose.rkey().is_some();
+        let full = matches!(loose.authority(), AtIdentifier::Did(d) if d.check_lessdugin_policy().is_ok())
+            && loose.rkey().is_some();
         assert_eq!(AtUri::parse(&v).is_ok(), full, "{v}");
         if full {
             assert_eq!(loose.to_strict().unwrap().as_str(), v);

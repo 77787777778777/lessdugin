@@ -2,9 +2,11 @@
 //! CARv1 reader with hard caps (no preallocation from declared lengths), and a writer.
 //!
 //! Format: `varint(len) ‖ header` then sections `varint(len) ‖ cid ‖ block`, where the header is
-//! DAG-CBOR `{version: 1, roots: [cid…]}`. Every block is verified against its CID (sha2-256;
-//! other hashes and CIDv0 are rejected). Duplicate blocks are tolerated when identical. Varints are
-//! unsigned LEB128, minimal, at most 9 bytes (63 bits).
+//! DAG-CBOR `{version: 1, roots: [cid…]}`. Every block CID must be a blessed atproto CID (v1,
+//! sha2-256, dag-cbor or raw; CIDv0, other hashes and other codecs are rejected, since repo CARs
+//! only ever carry dag-cbor commits, nodes and records) and every block is verified against it.
+//! Duplicate blocks are tolerated when identical. Varints are unsigned LEB128, minimal, at most 9
+//! bytes (63 bits).
 
 use std::collections::BTreeMap;
 
@@ -30,14 +32,27 @@ pub struct CarLimits {
 }
 
 impl CarLimits {
-    /// Caps for `proofs/1` CARs (`docs/design/synthesis-v1.md` §3.6): 1 MB total, ≤ 2,000
-    /// blocks.
+    /// Caps for a `proofs/1` CAR from `com.atproto.sync.getRecord` (`sync.md` §8.2):
+    /// `PROOF_CAR_MAX_BYTES` (1,000,000 bytes) and `PROOF_CAR_MAX_BLOCKS` (2,000 blocks), and
+    /// exactly one root (a CAR with more roots is malformed; one with none fails in the proof).
     pub const PROOF: Self = Self {
         max_total_bytes: 1_000_000,
         max_blocks: 2_000,
         max_block_bytes: 1_000_000,
         max_header_bytes: 4096,
-        max_roots: 16,
+        max_roots: 1,
+    };
+
+    /// Caps for an indexer proof bundle (`getRecordProofs`, `sync.md` §8.6, `limits.md` §5):
+    /// `INDEXER_BUNDLE_MAX_BYTES` (8 MiB) and `INDEXER_BUNDLE_MAX_BLOCKS` (50,000), one root (the
+    /// manifest). Each item's verification is further capped by what it reads
+    /// ([`crate::proof::ReadCaps::PROOF`]).
+    pub const BUNDLE: Self = Self {
+        max_total_bytes: 8_388_608,
+        max_blocks: 50_000,
+        max_block_bytes: 8_388_608,
+        max_header_bytes: 4096,
+        max_roots: 1,
     };
 }
 
@@ -91,6 +106,9 @@ pub enum CarError {
     /// sharing a digest, kept for completeness).
     #[error("conflicting duplicate block {0}")]
     ConflictingDuplicate(Cid),
+    /// An indexer bundle's manifest (or one of its items) is malformed.
+    #[error("invalid proof bundle manifest: {0}")]
+    Manifest(&'static str),
 }
 
 /// A parsed, fully verified CAR.
@@ -204,6 +222,10 @@ pub fn read_car(buf: &[u8], limits: &CarLimits) -> Result<Car, CarError> {
         if data.len() > limits.max_block_bytes {
             return Err(CarError::BlockTooLarge { offset: section });
         }
+        crate::cid::check_blessed(&cid).map_err(|err| CarError::Cid {
+            offset: section,
+            err,
+        })?;
         crate::cid::verify(&cid, data).map_err(|err| match err {
             CidError::Mismatch(c) => CarError::HashMismatch(c),
             err => CarError::Cid {
@@ -397,6 +419,16 @@ mod tests {
         assert!(matches!(
             read_car(&car, &CarLimits::PROOF),
             Err(CarError::Cid { .. })
+        ));
+        // sha-256 but an unexpected codec (dag-pb)
+        let pb = Cid::new_v1(0x70, *ca.hash());
+        let car = write_car(&[ca], [(&pb, a.as_slice())]);
+        assert!(matches!(
+            read_car(&car, &CarLimits::PROOF),
+            Err(CarError::Cid {
+                err: CidError::NotBlessed,
+                ..
+            })
         ));
     }
 }

@@ -100,7 +100,10 @@ impl TermText {
         }
         match self.runs.last_mut() {
             Some(last) if last.kind == kind => last.text.push_str(s),
-            _ => self.runs.push(TermRun { text: s.to_owned(), kind }),
+            _ => self.runs.push(TermRun {
+                text: s.to_owned(),
+                kind,
+            }),
         }
     }
 
@@ -116,6 +119,34 @@ impl std::fmt::Display for TermText {
             f.write_str(&r.text)?;
         }
         Ok(())
+    }
+}
+
+impl serde::Serialize for TermText {
+    /// A single JSON string when every run is plain; otherwise an array of
+    /// `{"plain": …}` / `{"escaped": …}` objects.
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::{SerializeMap, SerializeSeq};
+        if self.runs.iter().all(|r| r.kind == RunKind::Plain) {
+            return s.serialize_str(&self.to_plain_string());
+        }
+        struct Run<'a>(&'a TermRun);
+        impl serde::Serialize for Run<'_> {
+            fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+                let mut m = s.serialize_map(Some(1))?;
+                let key = match self.0.kind {
+                    RunKind::Plain => "plain",
+                    RunKind::Escaped => "escaped",
+                };
+                m.serialize_entry(key, &self.0.text)?;
+                m.end()
+            }
+        }
+        let mut seq = s.serialize_seq(Some(self.runs.len()))?;
+        for r in &self.runs {
+            seq.serialize_element(&Run(r))?;
+        }
+        seq.end()
     }
 }
 
@@ -269,8 +300,7 @@ fn sanitize_code_char(out: &mut TermText, c: char, column: usize) -> usize {
 fn sanitize_name_char(out: &mut TermText, c: char) {
     if is_white_space(c) {
         out.push(RunKind::Plain, " ");
-    } else if bidi_name(c).is_some() || zero_width_name(c).is_some() || BADGE_GLYPHS.contains(&c)
-    {
+    } else if bidi_name(c).is_some() || zero_width_name(c).is_some() || BADGE_GLYPHS.contains(&c) {
         // removed
     } else if !sanitize_controls(out, c) {
         out.push_char(RunKind::Plain, c);
@@ -312,7 +342,11 @@ fn finish_name(text: TermText, max_graphemes: usize) -> TermText {
     if max_graphemes == 0 {
         return collapsed;
     }
-    let total: usize = collapsed.runs.iter().map(|r| r.text.graphemes(true).count()).sum();
+    let total: usize = collapsed
+        .runs
+        .iter()
+        .map(|r| r.text.graphemes(true).count())
+        .sum();
     if total <= max_graphemes {
         return collapsed;
     }
@@ -372,12 +406,19 @@ mod tests {
         let t = term_sanitize("a\u{1b}[31mred\u{7}b\rc\u{85}d\u{9b}e", TermCtx::Prose);
         assert_eq!(s(&t), "a^[[31mred^Gb^Mc\\u{85}d\\u{9b}e");
         assert_invariant(&t);
-        assert!(t.runs().iter().any(|r| r.kind() == RunKind::Escaped && r.text() == "^["));
+        assert!(
+            t.runs()
+                .iter()
+                .any(|r| r.kind() == RunKind::Escaped && r.text() == "^[")
+        );
     }
 
     #[test]
     fn prose_whitespace_and_bidi() {
-        let t = term_sanitize("a\tb\nc\u{2028}d\u{202E}e\u{200B}f\u{00A0}g", TermCtx::Prose);
+        let t = term_sanitize(
+            "a\tb\nc\u{2028}d\u{202E}e\u{200B}f\u{00A0}g",
+            TermCtx::Prose,
+        );
         assert_eq!(s(&t), "a b c de\u{200B}f\u{00A0}g");
         assert_invariant(&t);
     }
@@ -415,16 +456,20 @@ mod tests {
         let t = term_sanitize("abcd", TermCtx::Name { max_graphemes: 4 });
         assert_eq!(s(&t), "abcd");
         // family emoji is one grapheme
-        let t = term_sanitize("\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}xyz", TermCtx::Name {
-            max_graphemes: 3,
-        });
+        let t = term_sanitize(
+            "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}xyz",
+            TermCtx::Name { max_graphemes: 3 },
+        );
         // ZWJ is removed in names, so the family splits into three graphemes.
         assert_eq!(t.to_plain_string().graphemes(true).count(), 3);
     }
 
     #[test]
     fn json_tty_escape() {
-        assert_eq!(escape_json_for_tty("\"a\u{202E}b\u{85}\""), "\"a\\u202eb\\u0085\"");
+        assert_eq!(
+            escape_json_for_tty("\"a\u{202E}b\u{85}\""),
+            "\"a\\u202eb\\u0085\""
+        );
     }
 
     #[test]
@@ -435,7 +480,11 @@ mod tests {
 
     #[test]
     fn exhaustive_invariant_over_bmp_controls() {
-        for ctx in [TermCtx::Prose, TermCtx::Code, TermCtx::Name { max_graphemes: 0 }] {
+        for ctx in [
+            TermCtx::Prose,
+            TermCtx::Code,
+            TermCtx::Name { max_graphemes: 0 },
+        ] {
             let all: String = (0u32..0x3000).filter_map(char::from_u32).collect();
             assert_invariant(&term_sanitize(&all, ctx));
         }

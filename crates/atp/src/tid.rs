@@ -101,7 +101,9 @@ string_type_impls!(Tid);
 ///
 /// Each [`TidGenerator::next`] returns a TID greater than every TID previously returned or
 /// [`observed`](TidGenerator::observe), even if the clock stalls or goes backwards: in that case
-/// the timestamp advances by one microsecond past the last value (keeping the clock id).
+/// the timestamp advances by one microsecond past the last value (keeping the clock id). Observed
+/// TIDs that are too far in the future are ignored, so a hostile or broken `rev` can neither
+/// exhaust the timestamp space nor push the user's new TIDs into the future.
 #[derive(Debug, Clone)]
 pub struct TidGenerator {
     clock_id: u16,
@@ -123,9 +125,19 @@ impl TidGenerator {
         self.clock_id
     }
 
-    /// Ensures future TIDs sort after `tid` (for example the repo's latest `rev`).
-    pub fn observe(&mut self, tid: &Tid) {
+    /// Ensures future TIDs sort after `tid` (for example the repo's latest `rev`), unless its
+    /// timestamp is more than [`crate::commit::MAX_FUTURE_SKEW_MICROS`] (5 minutes, the
+    /// `FUTURE_SKEW_MS` rule commits are held to) after `now_micros`: such a TID is ignored and
+    /// `false` is returned. A server that holds a far-future rev will then reject writes whose
+    /// rev is lower, which is the correct outcome for a repo with a broken clock.
+    pub fn observe(&mut self, tid: &Tid, now_micros: i64) -> bool {
+        let limit = now_micros.saturating_add(crate::commit::MAX_FUTURE_SKEW_MICROS);
+        let ts = i64::try_from(tid.timestamp_micros()).unwrap_or(i64::MAX);
+        if ts > limit {
+            return false;
+        }
         self.last = self.last.max(tid.to_u64());
+        true
     }
 
     /// Returns the next TID for the given wall-clock time (µs since the Unix epoch; negative
@@ -190,15 +202,36 @@ mod tests {
         assert_eq!(t1.clock_id(), 7);
         assert_eq!(t3.clock_id(), 7);
         assert_eq!(t4.timestamp_micros(), 1_800_000_000_000_000);
-        let future = Tid::from_parts(1_900_000_000_000_000, 1).unwrap();
-        g.observe(&future);
-        assert!(g.next(1_800_000_000_000_001).unwrap() > future);
-        assert_eq!(
-            g.next(-5).unwrap().timestamp_micros(),
-            1_900_000_000_000_002
-        );
+        // an observed rev within the skew window is honoured
+        let now = 1_900_000_000_000_000;
+        let ahead = Tid::from_parts((now + 299_000_000) as u64, 1).unwrap();
+        assert!(g.observe(&ahead, now));
+        assert!(g.next(1_800_000_000_000_001).unwrap() > ahead);
+        assert_eq!(g.next(-5).unwrap().timestamp_micros(), ahead.timestamp_micros() + 2);
+        // the timestamp space can still run out at its real end
         let mut end = TidGenerator::new(0);
-        end.observe(&Tid::from_parts(MAX_TIMESTAMP_MICROS, 0).unwrap());
-        assert!(end.next(0).is_err());
+        let max = MAX_TIMESTAMP_MICROS as i64;
+        assert!(end.observe(&Tid::from_parts(MAX_TIMESTAMP_MICROS, 0).unwrap(), max));
+        assert!(end.next(max).is_err());
+    }
+
+    #[test]
+    fn hostile_observed_revs_are_ignored() {
+        let now = 1_760_000_000_000_000i64;
+        for hostile in ["jzzzzzzzzzzzz", "bzzzzzzzzzzzz", "7zzzzzzzzzzzz"] {
+            let mut g = TidGenerator::new(1);
+            let t = Tid::parse(hostile).unwrap();
+            assert!(!g.observe(&t, now), "{hostile}");
+            let next = g.next(now).unwrap();
+            assert_eq!(next.timestamp_micros(), now as u64, "{hostile}");
+        }
+        // just past the 5-minute window
+        let mut g = TidGenerator::new(1);
+        let edge = now + crate::commit::MAX_FUTURE_SKEW_MICROS;
+        assert!(!g.observe(&Tid::from_parts(edge as u64 + 1, 0).unwrap(), now));
+        assert!(g.observe(&Tid::from_parts(edge as u64, 0).unwrap(), now));
+        assert!(g.next(now).unwrap().timestamp_micros() > edge as u64);
+        // a hostile `now` cannot overflow
+        assert!(g.observe(&Tid::from_u64(u64::MAX), i64::MAX));
     }
 }

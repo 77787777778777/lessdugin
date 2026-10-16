@@ -23,3 +23,4 @@ pub mod social;
 pub mod store;
 pub mod sync;
 pub mod verify;
+pub mod xrpc;

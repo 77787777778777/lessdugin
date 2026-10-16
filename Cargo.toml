@@ -75,6 +75,9 @@ tokio-tungstenite = { version = "0.30", default-features = false, features = ["c
 keyring = "4"
 fd-lock = "4"
 directories = "6"
+toml = "1"
+libc = "0.2"
+tempfile = "3"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 jacquard-oauth = { version = "=0.12.2" }
 webbrowser = "1"
@@ -104,6 +107,7 @@ getrandom = "0.3"
 proptest = "1"
 insta = { version = "1", features = ["json"] }
 assert_cmd = "2"
+flate2 = "1"
 
 [profile.release]
 lto = "thin"

@@ -11,8 +11,17 @@ publish = false
 [dependencies]
 lessdugin-atp.workspace = true
 lessdugin-lexicon.workspace = true
-lessdugin-markdown.workspace = true
 lessdugin-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+k256.workspace = true
+url.workspace = true
+http.workspace = true
+futures.workspace = true
+data-encoding.workspace = true
+
+[dev-dependencies]
+# End-to-end tests against the local devnet (LESSDUGIN_E2E=1) need a real HTTP client.
+tokio.workspace = true
+reqwest.workspace = true

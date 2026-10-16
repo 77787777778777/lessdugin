@@ -1,0 +1,174 @@
+/* SPDX-License-Identifier: AGPL-3.0-or-later */
+.bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  font-family: var(--font-sans);
+  font-size: var(--text-xs);
+}
+
+.tallies {
+  display: contents;
+  list-style: none;
+}
+
+.tallies > li {
+  display: inline-flex;
+}
+
+.tally {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3em;
+  padding: 0.1rem 0.5rem;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  background: var(--color-surface);
+  color: var(--color-text-muted);
+}
+
+.tally:hover:not(:disabled) {
+  border-color: var(--color-primary);
+}
+
+.mine {
+  border-color: var(--color-primary);
+  background: var(--color-primary-soft);
+  color: var(--color-text);
+}
+
+.glyph {
+  font-size: 0.95rem;
+  line-height: 1;
+}
+
+.against {
+  color: var(--color-danger);
+}
+
+.quote {
+  max-width: 16rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-style: italic;
+}
+
+.orphan {
+  text-decoration: line-through;
+}
+
+.paletteAnchor {
+  position: relative;
+}
+
+.add {
+  padding: 0.1rem 0.5rem;
+  border: 1px dashed var(--color-border-strong);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--color-text-muted);
+}
+
+.add:hover {
+  color: var(--color-text);
+  border-color: var(--color-primary);
+}
+
+.palette {
+  position: absolute;
+  z-index: 30;
+  top: calc(100% + 0.3rem);
+  left: 0;
+  width: min(26rem, calc(100vw - 2rem));
+  max-height: 24rem;
+  overflow-y: auto;
+  padding: var(--space-3);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-2);
+  font-size: var(--text-sm);
+}
+
+.paletteHead {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.paletteTitle {
+  margin: 0;
+  font-size: var(--text-sm);
+}
+
+.close {
+  border: 0;
+  background: none;
+  font-size: var(--text-lg);
+  color: var(--color-text-muted);
+}
+
+.quoting {
+  margin: var(--space-2) 0;
+  color: var(--color-text-muted);
+}
+
+.filter {
+  width: 100%;
+  margin: var(--space-2) 0;
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+}
+
+.group {
+  margin-top: var(--space-2);
+}
+
+.groupLabel {
+  margin: 0 0 var(--space-1);
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--color-text-muted);
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(9rem, 1fr));
+  gap: var(--space-1);
+}
+
+.choice {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  text-align: left;
+}
+
+.choice:hover,
+.choice:focus-visible {
+  border-color: var(--color-border);
+  background: var(--color-surface-2);
+}
+
+/* Bottom sheet on small screens (synthesis §6.12 "bottom-sheet react palette"). */
+@media (max-width: 720px) {
+  .palette {
+    position: fixed;
+    top: auto;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    width: auto;
+    max-height: 60vh;
+    border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  }
+}

@@ -1,0 +1,19 @@
+/* SPDX-License-Identifier: AGPL-3.0-or-later */
+.actor {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.name {
+  color: var(--color-text);
+  font-weight: 600;
+  unicode-bidi: isolate;
+}
+
+.ident {
+  color: var(--color-text-muted);
+  font-size: 0.9em;
+  overflow-wrap: anywhere;
+}

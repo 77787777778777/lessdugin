@@ -29,7 +29,7 @@ fn fixture() -> Fixture {
     // "now" = one minute after the captured commit's rev (deterministic).
     let parsed = car::read_car(&present, &car::CarLimits::PROOF).unwrap();
     let commit = Commit::decode(parsed.get(&parsed.roots[0]).unwrap()).unwrap();
-    let now = commit.rev.timestamp_micros() as i64 + 60_000_000;
+    let now = commit.rev_tid().unwrap().timestamp_micros() as i64 + 60_000_000;
     Fixture {
         did,
         doc,
@@ -50,7 +50,7 @@ fn did_document() {
     let id = f.doc.atproto();
     assert_eq!(id.handle.unwrap().as_str(), "bsky.app");
     assert_eq!(
-        id.pds.unwrap(),
+        id.pds.unwrap().as_str(),
         "https://puffball.us-east.host.bsky.network"
     );
     assert_eq!(
@@ -75,7 +75,12 @@ fn present_proof_verifies() {
     )
     .unwrap();
     assert_eq!(out.rev.as_str(), "3mxxmh55uhk2l");
-    let (cid, bytes) = out.record.expect("present");
+    let rec = out.record.clone().expect("present");
+    let (cid, bytes) = (rec.cid, rec.bytes);
+    assert_eq!(
+        datamodel::ipld_to_json(out.value().unwrap()).unwrap(),
+        f.record["value"]
+    );
     assert_eq!(cid.to_string(), f.record["cid"].as_str().unwrap());
     assert_eq!(
         datamodel::record_cbor_to_json(&bytes).unwrap(),

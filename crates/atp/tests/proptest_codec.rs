@@ -102,6 +102,7 @@ proptest! {
         t[i] = val;
         let _ = read_car(&t, &CarLimits::PROOF);
         let r = verify_record_proof(&t, &did, &coll, &rkey, &key, NOW, &ProofCaps::default());
+        // every block is needed, so any change must break the proof
         if t != car {
             prop_assert!(r.is_err());
         }
@@ -202,8 +203,29 @@ fn sample_proof() -> (
     };
     let sig: k256::ecdsa::Signature = sk.sign(&u.signing_bytes());
     let (ccid, cbytes) = u.signed(&sig.to_bytes());
+    // only the blocks the proof needs: commit, the nodes on the path, the record
+    let path = mst::repo_path(&coll, &rkey);
     let mut blocks: Vec<(Cid, Vec<u8>)> = vec![(ccid, cbytes), (rcid, rec)];
-    blocks.extend(nodes);
+    let mut node_cid = root;
+    loop {
+        let bytes = nodes[&node_cid].clone();
+        let n = mst::Node::decode(&bytes).unwrap();
+        blocks.push((node_cid, bytes));
+        let keys = n.keys().unwrap();
+        let idx = keys.partition_point(|k| k.as_slice() < path.as_bytes());
+        if keys
+            .get(idx)
+            .is_some_and(|k| k.as_slice() == path.as_bytes())
+        {
+            break;
+        }
+        node_cid = if idx == 0 {
+            n.left
+        } else {
+            n.entries[idx - 1].tree
+        }
+        .unwrap();
+    }
     let car = write_car(&[ccid], blocks.iter().map(|(c, b)| (c, b.as_slice())));
     (
         car,

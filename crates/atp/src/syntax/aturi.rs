@@ -50,12 +50,16 @@ impl AtIdentifier {
 
 string_type_impls!(AtIdentifier);
 
-/// A strict, canonical record AT URI: exactly `at://<did>/<nsid>/<rkey>`.
+/// A strict, canonical record AT URI (`data-model.md` §2.3): exactly `at://<did>/<nsid>/<rkey>`
+/// where the DID passes [`Did::check_lessdugin_policy`] (`did:plc:[a-z2-7]{24}` or a lowercase
+/// host-only `did:web`).
 ///
-/// This is the only form lessdugin stores. It rejects handle authorities, queries, fragments,
-/// trailing or doubled slashes, partial paths and NSIDs whose authority is not lowercase. The DID
-/// only needs generic syntax here; [`AtUri::check_lessdugin_canonical`] adds the lessdugin DID
-/// policy (`did:plc` / host-only `did:web`, `data-model.md` §2.3).
+/// This is the only form lessdugin stores, and every constructor ([`AtUri::parse`],
+/// [`AtUri::new`], `FromStr`, serde, [`LooseAtUri::to_strict`]) enforces it, so holding an `AtUri`
+/// proves the reference is canonical. It rejects handle authorities, other DID methods, queries,
+/// fragments, trailing or doubled slashes, partial paths and NSIDs whose authority is not
+/// lowercase. (Collection-specific record-key grammars are the lexicon validator's.) For
+/// arbitrary Lexicon `at-uri` strings use [`LooseAtUri`].
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AtUri {
     s: String,
@@ -65,7 +69,7 @@ pub struct AtUri {
 }
 
 impl AtUri {
-    /// Parses a strict canonical record URI.
+    /// Parses a canonical record URI (strict syntax and the lessdugin DID policy).
     pub fn parse(s: &str) -> Result<Self, SyntaxError> {
         if s.len() > MAX_AT_URI_LEN {
             return Err(SyntaxError::new(KIND, "too long"));
@@ -89,6 +93,7 @@ impl AtUri {
             return Err(SyntaxError::new(KIND, "authority must be a DID"));
         }
         let did = Did::parse(a)?;
+        did.check_lessdugin_policy()?;
         let collection = Nsid::parse(c)?;
         if !collection.is_authority_normalized() {
             return Err(SyntaxError::new(
@@ -105,8 +110,10 @@ impl AtUri {
         })
     }
 
-    /// Builds a URI from its parts. Fails only if the collection authority is not lowercase.
+    /// Builds a URI from its parts. Fails if the DID does not pass
+    /// [`Did::check_lessdugin_policy`] or the collection authority is not lowercase.
     pub fn new(did: Did, collection: Nsid, rkey: RecordKey) -> Result<Self, SyntaxError> {
+        did.check_lessdugin_policy()?;
         if !collection.is_authority_normalized() {
             return Err(SyntaxError::new(
                 KIND,
@@ -152,8 +159,8 @@ impl AtUri {
         format!("{}/{}", self.collection.as_str(), self.rkey.as_str())
     }
 
-    /// Applies the lessdugin reference policy on top of strict syntax: the DID must pass
-    /// [`Did::check_lessdugin_policy`].
+    /// The lessdugin reference policy: the DID passes [`Did::check_lessdugin_policy`]. Always
+    /// `Ok` for a constructed value (every constructor enforces it); kept for explicitness.
     pub fn check_lessdugin_canonical(&self) -> Result<(), SyntaxError> {
         self.did.check_lessdugin_policy()
     }
@@ -250,7 +257,8 @@ impl LooseAtUri {
         self.rkey.as_ref()
     }
 
-    /// Converts to a strict [`AtUri`] if the authority is a DID and both path parts are present.
+    /// Converts to a canonical [`AtUri`] if the authority is a DID that passes the lessdugin
+    /// policy and both path parts are present.
     pub fn to_strict(&self) -> Option<AtUri> {
         let did = self.authority.as_did()?.clone();
         AtUri::new(did, self.collection.clone()?, self.rkey.clone()?).ok()
@@ -324,8 +332,24 @@ mod tests {
         ] {
             assert!(AtUri::parse(bad).is_err(), "{bad}");
         }
-        let web = AtUri::parse("at://did:web:example.com:8080/app.bsky.feed.post/x").unwrap();
-        assert!(web.check_lessdugin_canonical().is_err());
+        // the lessdugin DID policy is part of the canonical form, for every constructor
+        for bad in [
+            "at://did:web:example.com:8080/app.bsky.feed.post/x",
+            "at://did:web:localhost%3A8080/a.b.c/x",
+            "at://did:web:Example.com/a.b.c/x",
+            "at://did:plc:short/a.b.c/x",
+            "at://did:key:zQ3shQo6TF2moaqMTrUZEM1jeuYRQXeHEx4evX9751y2qPqRA/a.b.c/x",
+        ] {
+            assert!(AtUri::parse(bad).is_err(), "{bad}");
+            assert!(bad.parse::<AtUri>().is_err(), "{bad}");
+            assert!(serde_json::from_value::<AtUri>(serde_json::json!(bad)).is_err(), "{bad}");
+            let loose = LooseAtUri::parse(bad).unwrap();
+            assert!(loose.to_strict().is_none(), "{bad}");
+        }
+        let key = Did::parse("did:key:zQ3shQo6TF2moaqMTrUZEM1jeuYRQXeHEx4evX9751y2qPqRA").unwrap();
+        assert!(AtUri::new(key, u.collection().clone(), u.rkey().clone()).is_err());
+        let web = AtUri::parse("at://did:web:example.com/a.b.c/x").unwrap();
+        assert!(web.check_lessdugin_canonical().is_ok());
     }
 
     #[test]

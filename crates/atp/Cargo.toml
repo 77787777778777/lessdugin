@@ -17,7 +17,10 @@ p256.workspace = true
 multibase.workspace = true
 data-encoding.workspace = true
 serde.workspace = true
-serde_json.workspace = true
+# `float_roundtrip`: correctly rounded float parsing, so a whole-number JSON float such as
+# `9007199254740991.0` becomes the integer JavaScript's `JSON.parse` yields (record CIDs must agree
+# with the reference implementation; see `datamodel`). Pure Rust, a few KiB of wasm.
+serde_json = { workspace = true, features = ["float_roundtrip"] }
 thiserror.workspace = true
 
 [dev-dependencies]

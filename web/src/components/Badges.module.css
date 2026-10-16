@@ -1,0 +1,36 @@
+/* SPDX-License-Identifier: AGPL-3.0-or-later */
+/* The fixed badge column: one style for every badge, never mixed with user text. */
+.column {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  line-height: 1.6;
+  vertical-align: middle;
+}
+
+.badge {
+  display: inline-flex;
+  gap: 0.2em;
+  padding: 0 0.3em;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-muted);
+  background: var(--color-surface-2);
+  white-space: nowrap;
+}
+
+.good {
+  border-color: var(--color-primary);
+  color: var(--color-primary-strong);
+}
+
+.warn {
+  border-color: var(--color-warning);
+  color: var(--color-warning);
+}
+
+.glyph {
+  font-family: var(--font-sans);
+}

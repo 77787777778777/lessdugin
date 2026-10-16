@@ -3,13 +3,32 @@
 //! inclusion/exclusion proofs and a deterministic builder.
 //!
 //! Node schema: `{l: link|null, e: [{p: int, k: bytes, v: link, t: link|null}]}`. Keys are
-//! prefix-compressed within a node (`p` = bytes shared with the previous key, mandatory and exact).
-//! A key's height is the number of leading zero bits of `sha256(key)` divided by two (fanout 4).
+//! prefix-compressed within a node (`p` = bytes reused from the previous key). A key's layer is
+//! the number of leading zero bits of `sha256(key)` divided by two (fanout 4).
 //!
-//! Every visited node is checked: its block hashes to its CID, subtree links are blessed dag-cbor
-//! CIDs, keys are valid repo paths, strictly increasing, within the bounds implied by the parent,
-//! all at the node's layer, and child layers are exactly one less than their parent's. The walk is
-//! iterative and bounded by [`MAX_DEPTH`] nodes.
+//! [`prove`] and [`list_entries`] implement the `proofs/1` walk of `sync.md` §8.5 exactly, so that
+//! every client reaches the same verdict on the same blocks, malformed trees included:
+//!
+//! ```text
+//! walk(cid, target, depth, lo, hi, ceiling)
+//!   depth ≤ MAX_DEPTH (the root is depth 0)                      else DepthExceeded
+//!   node = strict_decode(block(cid))                             missing → MissingBlock
+//!   keys: k_0 has p = 0; k_i = k_{i−1}[..p_i] ‖ suffix_i, p_i ≤ |k_{i−1}|; every key valid;
+//!         strictly increasing; lo < k_i < hi
+//!   entries: one layer λ = layer(k_i) for all i, λ < ceiling;  ceiling' = λ
+//!   no entries: l ≠ null unless depth = 0;                      ceiling' = ceiling
+//!   found → Present(v); else descend into the gap's subtree; a null subtree → Absent
+//! ```
+//!
+//! The walk always descends to the target's gap: there is no early exit when the target's layer
+//! is at or above the node's, so a proof must contain the whole search path (as the reference
+//! implementation's covering proofs do). Subtree links are only checked when followed (their
+//! block must be present, dag-cbor, and hash to the link). Errors on structure are
+//! [`MstError::Malformed`], [`MstError::InvalidKey`], [`MstError::Ordering`],
+//! [`MstError::PrefixNotCanonical`] and [`MstError::Layer`] (`MstInvalid` in `sync.md` terms).
+//!
+//! [`build`] produces the canonical atproto tree (exact layers, empty intermediate nodes where a
+//! level would be skipped, maximal prefix compression), which the walk accepts.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -18,15 +37,15 @@ use ::cid::Cid;
 use crate::Ipld;
 use crate::car::Car;
 use crate::cid::CidError;
+use crate::dagcbor::{decode_scalar, list_items_raw, map_entries_raw};
 use crate::datamodel::{DataModelError, Limits};
 use crate::syntax::{Nsid, RecordKey};
 
 /// Maximum repo path (MST key) length accepted.
 pub const MAX_KEY_LEN: usize = 1024;
-/// Maximum number of nodes on one root-to-leaf path.
+/// Maximum node depth on a path (`MST_DEPTH_MAX`): the root is depth 0, so a path visits at most
+/// `MAX_DEPTH + 1` nodes.
 pub const MAX_DEPTH: usize = 32;
-/// Maximum entries in one node (statistically unreachable for honest repos with fanout 4).
-pub const MAX_NODE_ENTRIES: usize = 1024;
 
 /// MST errors.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -34,13 +53,13 @@ pub enum MstError {
     /// A needed node block is not available.
     #[error("missing MST block {0}")]
     MissingBlock(Cid),
-    /// A node block is not valid DAG-CBOR.
+    /// A node block is not strict DAG-CBOR.
     #[error("MST node is not valid DAG-CBOR: {0}")]
     Decode(DataModelError),
     /// A node does not match the schema.
     #[error("malformed MST node: {0}")]
     Malformed(&'static str),
-    /// A link is not a blessed CID, or a block does not hash to its CID.
+    /// A followed link is not a dag-cbor CID, or a block does not hash to its CID.
     #[error("MST link: {0}")]
     Cid(CidError),
     /// A key is not a valid repo path.
@@ -49,14 +68,15 @@ pub enum MstError {
     /// Keys are not strictly increasing, or fall outside their subtree's range.
     #[error("MST key ordering violation")]
     Ordering,
-    /// A prefix length is not the exact common prefix with the previous key.
-    #[error("MST key prefix compression is not canonical")]
+    /// A prefix length is impossible: the first entry's is not 0, or a later one exceeds the
+    /// previous key's length.
+    #[error("MST key prefix length is invalid")]
     PrefixNotCanonical,
-    /// A key sits at the wrong layer, or a subtree skips or repeats a layer.
+    /// A node mixes layers, or its layer is not below its parent's.
     #[error("MST layer violation")]
     Layer,
-    /// The path is longer than [`MAX_DEPTH`] nodes.
-    #[error("MST deeper than {0} nodes")]
+    /// The path is deeper than [`MAX_DEPTH`].
+    #[error("MST deeper than {0}")]
     DepthExceeded(usize),
 }
 
@@ -82,64 +102,72 @@ pub struct Node {
     pub entries: Vec<TreeEntry>,
 }
 
-fn node_limits() -> Limits {
-    Limits {
-        max_depth: 4,
-        max_container_len: MAX_NODE_ENTRIES,
-        max_string_bytes: 256,
-        max_bytes_len: MAX_KEY_LEN + 128,
-        max_total_nodes: MAX_NODE_ENTRIES * 6 + 16,
-    }
-}
-
-fn opt_link(v: Option<&Ipld>, what: &'static str) -> Result<Option<Cid>, MstError> {
-    match v {
-        None | Some(Ipld::Null) => Ok(None),
-        Some(Ipld::Link(c)) => {
-            crate::cid::check_blessed_dag_cbor(c).map_err(MstError::Cid)?;
-            Ok(Some(*c))
-        }
+/// `link | null` (an absent field counts as `null`).
+fn opt_link(raw: Option<&[u8]>, what: &'static str) -> Result<Option<Cid>, MstError> {
+    match raw.map(decode_scalar) {
+        None | Some(Some(Ipld::Null)) => Ok(None),
+        Some(Some(Ipld::Link(c))) => Ok(Some(c)),
         Some(_) => Err(MstError::Malformed(what)),
     }
 }
 
+fn decode_entry(raw: &[u8]) -> Result<TreeEntry, MstError> {
+    let fields = map_entries_raw(raw).ok_or(MstError::Malformed("entry is not a map"))?;
+    let (mut p, mut k, mut v, mut t) = (None, None, None, None);
+    for (key, val) in fields {
+        match key {
+            "p" => p = Some(val),
+            "k" => k = Some(val),
+            "v" => v = Some(val),
+            "t" => t = Some(val),
+            _ => {}
+        }
+    }
+    let prefix_len = match p.and_then(decode_scalar) {
+        Some(Ipld::Integer(p)) if p >= 0 => usize::try_from(p).unwrap_or(usize::MAX),
+        _ => {
+            return Err(MstError::Malformed(
+                "p must be a non-negative integer",
+            ));
+        }
+    };
+    let Some(Ipld::Bytes(key_suffix)) = k.and_then(decode_scalar) else {
+        return Err(MstError::Malformed("k must be bytes"));
+    };
+    let Some(Ipld::Link(value)) = v.and_then(decode_scalar) else {
+        return Err(MstError::Malformed("v must be a link"));
+    };
+    let tree = opt_link(t, "t must be a link or null")?;
+    Ok(TreeEntry {
+        prefix_len,
+        key_suffix,
+        value,
+        tree,
+    })
+}
+
 impl Node {
-    /// Decodes a node block (structure only; see [`Node::keys`] for key validation).
+    /// Decodes a node block: strict DAG-CBOR (`sync.md` §8.3, nesting ≤ 32, checked without
+    /// allocating), then the schema. Unknown fields are ignored; links are not checked until
+    /// followed. See [`Node::keys`] for key validation.
     pub fn decode(bytes: &[u8]) -> Result<Self, MstError> {
-        let v = crate::dagcbor::decode_with(bytes, &node_limits()).map_err(MstError::Decode)?;
-        let Ipld::Map(map) = v else {
-            return Err(MstError::Malformed("node is not a map"));
-        };
-        let left = opt_link(map.get("l"), "l must be a link or null")?;
-        let Some(Ipld::List(raw)) = map.get("e") else {
-            return Err(MstError::Malformed("e must be a list"));
-        };
+        crate::dagcbor::validate_with(bytes, &Limits::STRICT).map_err(MstError::Decode)?;
+        let fields = map_entries_raw(bytes).ok_or(MstError::Malformed("node is not a map"))?;
+        let (mut l, mut e) = (None, None);
+        for (key, val) in fields {
+            match key {
+                "l" => l = Some(val),
+                "e" => e = Some(val),
+                _ => {}
+            }
+        }
+        let left = opt_link(l, "l must be a link or null")?;
+        let items = e
+            .and_then(list_items_raw)
+            .ok_or(MstError::Malformed("e must be a list"))?;
         let mut entries = Vec::new();
-        for e in raw {
-            let Ipld::Map(e) = e else {
-                return Err(MstError::Malformed("entry is not a map"));
-            };
-            let prefix_len = match e.get("p") {
-                Some(Ipld::Integer(p)) if *p >= 0 && *p <= MAX_KEY_LEN as i128 => *p as usize,
-                _ => {
-                    return Err(MstError::Malformed(
-                        "p must be a small non-negative integer",
-                    ));
-                }
-            };
-            let Some(Ipld::Bytes(key_suffix)) = e.get("k") else {
-                return Err(MstError::Malformed("k must be bytes"));
-            };
-            let Some(Ipld::Link(value)) = e.get("v") else {
-                return Err(MstError::Malformed("v must be a link"));
-            };
-            let tree = opt_link(e.get("t"), "t must be a link or null")?;
-            entries.push(TreeEntry {
-                prefix_len,
-                key_suffix: key_suffix.clone(),
-                value: *value,
-                tree,
-            });
+        for item in items {
+            entries.push(decode_entry(item)?);
         }
         Ok(Self { left, entries })
     }
@@ -167,32 +195,28 @@ impl Node {
 
     /// Canonical DAG-CBOR encoding.
     pub fn encode(&self) -> Vec<u8> {
-        // Depth 3, no floats, no large integers: encoding cannot fail.
-        crate::dagcbor::encode(&self.to_ipld()).unwrap_or_default()
+        // Depth 3, no floats, no large integers, no size caps: encoding cannot fail.
+        crate::dagcbor::encode_with(&self.to_ipld(), &Limits::uncapped(8)).unwrap_or_default()
     }
 
-    /// Reconstructs the full keys, checking prefix compression, ordering and key syntax.
+    /// Reconstructs the full keys: the first entry's `p` must be 0 and every `p` at most the
+    /// previous key's length; every key must be valid ([`validate_key`]) and keys strictly
+    /// increasing. (Maximal prefix compression is what writers produce, but `sync.md` §8.5 does
+    /// not require it of readers.)
     pub fn keys(&self) -> Result<Vec<Vec<u8>>, MstError> {
         let mut out: Vec<Vec<u8>> = Vec::with_capacity(self.entries.len());
-        for (i, e) in self.entries.iter().enumerate() {
+        for e in &self.entries {
             let prev: &[u8] = out.last().map_or(&[], Vec::as_slice);
-            if i == 0 && e.prefix_len != 0 {
-                return Err(MstError::PrefixNotCanonical);
-            }
             if e.prefix_len > prev.len() {
+                // Includes a first entry with p ≠ 0 (there is no previous key).
                 return Err(MstError::PrefixNotCanonical);
             }
             let mut key = Vec::with_capacity(e.prefix_len + e.key_suffix.len());
             key.extend_from_slice(&prev[..e.prefix_len]);
             key.extend_from_slice(&e.key_suffix);
             validate_key(&key)?;
-            if i > 0 {
-                if common_prefix_len(prev, &key) != e.prefix_len {
-                    return Err(MstError::PrefixNotCanonical);
-                }
-                if key.as_slice() <= prev {
-                    return Err(MstError::Ordering);
-                }
+            if !out.is_empty() && key.as_slice() <= prev {
+                return Err(MstError::Ordering);
             }
             out.push(key);
         }
@@ -220,25 +244,23 @@ pub fn common_prefix_len(a: &[u8], b: &[u8]) -> usize {
     a.iter().zip(b).take_while(|(x, y)| x == y).count()
 }
 
-/// Validates a repo path / MST key generically: 1..=[`MAX_KEY_LEN`] bytes of
-/// `[A-Za-z0-9._:~-]` and exactly one `/` separating two non-empty segments, neither `.` nor
-/// `..`. (Segments are not required to be a valid NSID / record key, matching the interop
-/// fixtures; use [`repo_path`] to build strict keys.)
+/// Validates an MST key as `sync.md` §8.5 defines it: at most [`MAX_KEY_LEN`] bytes, exactly one
+/// `/`, and otherwise only `[A-Za-z0-9._:~-]`. (Segments are not required to be a valid NSID or
+/// record key; use [`repo_path`] to build keys from validated parts.)
 pub fn validate_key(key: &[u8]) -> Result<(), MstError> {
-    if key.is_empty() || key.len() > MAX_KEY_LEN {
+    if key.len() > MAX_KEY_LEN {
         return Err(MstError::InvalidKey("length"));
     }
-    let Some(slash) = key.iter().position(|&b| b == b'/') else {
-        return Err(MstError::InvalidKey("missing '/'"));
-    };
-    let (coll, rkey) = (&key[..slash], &key[slash + 1..]);
-    for seg in [coll, rkey] {
-        if seg.is_empty() || seg == b"." || seg == b".." {
-            return Err(MstError::InvalidKey("empty or dot segment"));
-        }
-        if !seg.iter().all(|&b| crate::syntax::is_rkey_byte(b)) {
+    let mut slashes = 0usize;
+    for &b in key {
+        if b == b'/' {
+            slashes += 1;
+        } else if !crate::syntax::is_rkey_byte(b) {
             return Err(MstError::InvalidKey("invalid character"));
         }
+    }
+    if slashes != 1 {
+        return Err(MstError::InvalidKey("must contain exactly one '/'"));
     }
     Ok(())
 }
@@ -272,6 +294,12 @@ impl<S: std::hash::BuildHasher> BlockSource for HashMap<Cid, Vec<u8>, S> {
     }
 }
 
+impl<T: BlockSource + ?Sized> BlockSource for &T {
+    fn get_block(&self, cid: &Cid) -> Option<&[u8]> {
+        (**self).get_block(cid)
+    }
+}
+
 /// Result of a proof walk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Proof {
@@ -281,7 +309,7 @@ pub enum Proof {
     Absent,
 }
 
-/// A node loaded and fully checked for a walk.
+/// A node loaded and checked on its own (block, schema, keys, one layer).
 struct Loaded {
     node: Node,
     keys: Vec<Vec<u8>>,
@@ -289,8 +317,8 @@ struct Loaded {
 }
 
 fn load(cid: &Cid, blocks: &impl BlockSource) -> Result<Loaded, MstError> {
-    crate::cid::check_blessed_dag_cbor(cid).map_err(MstError::Cid)?;
     let bytes = blocks.get_block(cid).ok_or(MstError::MissingBlock(*cid))?;
+    crate::cid::check_blessed_dag_cbor(cid).map_err(MstError::Cid)?;
     crate::cid::verify(cid, bytes).map_err(MstError::Cid)?;
     let node = Node::decode(bytes)?;
     let keys = node.keys()?;
@@ -306,23 +334,15 @@ fn load(cid: &Cid, blocks: &impl BlockSource) -> Result<Loaded, MstError> {
     Ok(Loaded { node, keys, layer })
 }
 
-/// Checks a loaded node against its expected layer and key range; returns its layer.
+/// Checks a loaded node at `depth` against the bounds and ceiling implied by its parent; returns
+/// the ceiling for its children (`None` = unbounded).
 fn check_node(
     n: &Loaded,
-    expected: Option<u32>,
+    depth: usize,
+    ceiling: Option<u32>,
     low: Option<&[u8]>,
     high: Option<&[u8]>,
-) -> Result<u32, MstError> {
-    let layer = match (n.layer, expected) {
-        (Some(l), Some(e)) if l != e => return Err(MstError::Layer),
-        (Some(l), _) => l,
-        // An empty intermediate node must point to a subtree.
-        (None, Some(e)) if n.node.left.is_some() => e,
-        (None, _) => return Err(MstError::Malformed("empty non-root node")),
-    };
-    if layer == 0 && (n.node.left.is_some() || n.node.entries.iter().any(|e| e.tree.is_some())) {
-        return Err(MstError::Layer);
-    }
+) -> Result<Option<u32>, MstError> {
     if let (Some(first), Some(lo)) = (n.keys.first(), low)
         && first.as_slice() <= lo
     {
@@ -333,38 +353,34 @@ fn check_node(
     {
         return Err(MstError::Ordering);
     }
-    Ok(layer)
+    match n.layer {
+        Some(l) if ceiling.is_some_and(|c| l >= c) => Err(MstError::Layer),
+        Some(l) => Ok(Some(l)),
+        None if depth > 0 && n.node.left.is_none() => Err(MstError::Malformed(
+            "empty node below the root without a subtree",
+        )),
+        None => Ok(ceiling),
+    }
 }
 
-/// Walks from `root` toward `key` using only `blocks`, proving presence or absence.
-///
-/// Fails on a missing block, a malformed node, an ordering or layer violation, or a path longer
-/// than [`MAX_DEPTH`] nodes. `key` itself must be a valid repo path.
+/// Walks from `root` toward `key` using only `blocks`, proving presence or absence
+/// (`sync.md` §8.5; see the module docs). `key` itself must be a valid MST key.
 pub fn prove(root: &Cid, key: &[u8], blocks: &impl BlockSource) -> Result<Proof, MstError> {
     validate_key(key)?;
-    let target_height = key_height(key);
     let mut cid = *root;
-    let mut expected: Option<u32> = None;
+    let mut ceiling: Option<u32> = None;
     let mut low: Option<Vec<u8>> = None;
     let mut high: Option<Vec<u8>> = None;
-    for _ in 0..MAX_DEPTH {
-        let n = load(&cid, blocks)?;
-        if expected.is_none() && n.keys.is_empty() {
-            // Root: either the empty tree, or an invalid empty node pointing down.
-            return if n.node.left.is_none() {
-                Ok(Proof::Absent)
-            } else {
-                Err(MstError::Malformed("root node is empty but has a subtree"))
-            };
+    let mut depth = 0usize;
+    loop {
+        if depth > MAX_DEPTH {
+            return Err(MstError::DepthExceeded(MAX_DEPTH));
         }
-        let layer = check_node(&n, expected, low.as_deref(), high.as_deref())?;
+        let n = load(&cid, blocks)?;
+        ceiling = check_node(&n, depth, ceiling, low.as_deref(), high.as_deref())?;
         let idx = n.keys.partition_point(|k| k.as_slice() < key);
         if n.keys.get(idx).is_some_and(|k| k.as_slice() == key) {
             return Ok(Proof::Present(n.node.entries[idx].value));
-        }
-        if target_height >= layer {
-            // The key would have to be in this node (or an ancestor, already searched).
-            return Ok(Proof::Absent);
         }
         let child = if idx == 0 {
             n.node.left
@@ -380,14 +396,13 @@ pub fn prove(root: &Cid, key: &[u8], blocks: &impl BlockSource) -> Result<Proof,
         if let Some(k) = n.keys.get(idx) {
             high = Some(k.clone());
         }
-        expected = Some(layer - 1);
         cid = child;
+        depth += 1;
     }
-    Err(MstError::DepthExceeded(MAX_DEPTH))
 }
 
-/// Lists every `(key, value)` in the tree in key order, validating every node like [`prove`].
-/// Visits at most `max_nodes` nodes (a cap on work for untrusted input).
+/// Lists every `(key, value)` in the tree in key order, validating every node with the rules of
+/// [`prove`]. Visits at most `max_nodes` nodes (a cap on work for untrusted input).
 pub fn list_entries(
     root: &Cid,
     blocks: &impl BlockSource,
@@ -397,7 +412,7 @@ pub fn list_entries(
     enum Item {
         Node {
             cid: Cid,
-            expected: Option<u32>,
+            ceiling: Option<u32>,
             low: Option<Vec<u8>>,
             high: Option<Vec<u8>>,
             depth: usize,
@@ -407,25 +422,25 @@ pub fn list_entries(
     let mut out = Vec::new();
     let mut stack = vec![Item::Node {
         cid: *root,
-        expected: None,
+        ceiling: None,
         low: None,
         high: None,
-        depth: 1,
+        depth: 0,
     }];
     let mut visited = 0usize;
     while let Some(item) = stack.pop() {
-        let (cid, expected, low, high, depth) = match item {
+        let (cid, ceiling, low, high, depth) = match item {
             Item::Entry(k, v) => {
                 out.push((k, v));
                 continue;
             }
             Item::Node {
                 cid,
-                expected,
+                ceiling,
                 low,
                 high,
                 depth,
-            } => (cid, expected, low, high, depth),
+            } => (cid, ceiling, low, high, depth),
         };
         visited += 1;
         if visited > max_nodes {
@@ -435,22 +450,15 @@ pub fn list_entries(
             return Err(MstError::DepthExceeded(MAX_DEPTH));
         }
         let n = load(&cid, blocks)?;
-        if expected.is_none() && n.keys.is_empty() {
-            if n.node.left.is_some() {
-                return Err(MstError::Malformed("root node is empty but has a subtree"));
-            }
-            continue;
-        }
-        let layer = check_node(&n, expected, low.as_deref(), high.as_deref())?;
+        let child_ceiling = check_node(&n, depth, ceiling, low.as_deref(), high.as_deref())?;
         // Push in reverse so items pop in key order: left, e0, t0, e1, t1, …
-        let child_layer = layer.checked_sub(1);
         let mut frames = Vec::new();
         let child =
             |c: Option<Cid>, lo: Option<Vec<u8>>, hi: Option<Vec<u8>>, frames: &mut Vec<Item>| {
                 if let Some(c) = c {
                     frames.push(Item::Node {
                         cid: c,
-                        expected: child_layer,
+                        ceiling: child_ceiling,
                         low: lo,
                         high: hi,
                         depth: depth + 1,
@@ -473,7 +481,7 @@ pub fn list_entries(
     Ok(out)
 }
 
-/// Builds the canonical MST for `entries` (keys must be valid repo paths; later duplicates win).
+/// Builds the canonical MST for `entries` (keys must be valid MST keys; later duplicates win).
 /// Returns the root CID and every node block. Intended for tests, fixtures and fake servers.
 pub fn build<K: AsRef<[u8]>>(
     entries: impl IntoIterator<Item = (K, Cid)>,
@@ -576,16 +584,19 @@ mod tests {
     fn keys_validation() {
         assert!(validate_key(b"com.example.foo/self").is_ok());
         assert!(validate_key(b"A0/374913").is_ok());
+        // sync.md §8.5 only asks for one '/' and the charset, so these are valid MST keys
+        for ok in [&b"/x"[..], b"x/", b"/", b"a/..", b"./a", b"~:-_./."] {
+            assert!(validate_key(ok).is_ok(), "{:?}", String::from_utf8_lossy(ok));
+        }
+        assert!(validate_key(&[b'a'; MAX_KEY_LEN - 2].iter().chain(b"/b").copied().collect::<Vec<_>>()).is_ok());
         for bad in [
             &b""[..],
             b"noslash",
-            b"/x",
-            b"x/",
             b"a/b/c",
-            b"a/..",
-            b"./a",
+            b"//",
             b"a/b c",
             b"a/b#",
+            "a/\u{e9}".as_bytes(),
         ] {
             assert!(
                 validate_key(bad).is_err(),
@@ -593,7 +604,11 @@ mod tests {
                 String::from_utf8_lossy(bad)
             );
         }
-        assert!(validate_key(&[b'a'; MAX_KEY_LEN + 1]).is_err());
+        let mut long = vec![b'a'; MAX_KEY_LEN];
+        long[0] = b'/';
+        assert!(validate_key(&long).is_ok());
+        long.push(b'a');
+        assert_eq!(validate_key(&long), Err(MstError::InvalidKey("length")));
     }
 
     #[test]
@@ -741,11 +756,22 @@ mod tests {
         };
         let (r, b) = forged_root(&dup);
         assert!(prove(&r, ks[0].as_bytes(), &b).is_err());
-        let bad_prefix = Node {
+        // a shorter-than-maximal prefix still reconstructs the key (sync.md §8.5 asks only
+        // p ≤ |previous key|)
+        let short_prefix = Node {
             left: None,
             entries: vec![e(0, &ks[0]), e(1, &ks[1][1..])],
         };
-        let (r, b) = forged_root(&bad_prefix);
+        let (r, b) = forged_root(&short_prefix);
+        assert_eq!(
+            prove(&r, ks[1].as_bytes(), &b).unwrap(),
+            Proof::Present(v)
+        );
+        let long_prefix = Node {
+            left: None,
+            entries: vec![e(0, &ks[0]), e(ks[0].len() + 1, "1")],
+        };
+        let (r, b) = forged_root(&long_prefix);
         assert_eq!(
             prove(&r, ks[1].as_bytes(), &b),
             Err(MstError::PrefixNotCanonical)
@@ -768,7 +794,7 @@ mod tests {
             prove(&r, b"a/1", &b),
             Err(MstError::InvalidKey(_))
         ));
-        // empty root with a subtree
+        // an empty root that only points to a subtree is walked (sync.md §8.5 allows it)
         let (inner, mut b) = forged_root(&good);
         let top = Node {
             left: Some(inner),
@@ -776,22 +802,80 @@ mod tests {
         };
         let (r, b2) = forged_root(&top);
         b.extend(b2);
-        assert!(prove(&r, ks[0].as_bytes(), &b).is_err());
+        assert_eq!(prove(&r, ks[0].as_bytes(), &b).unwrap(), Proof::Present(v));
+        assert_eq!(list_entries(&r, &b, 10).unwrap().len(), 3);
+        // but an empty node below the root must point to a subtree
+        let (dead, mut b) = forged_root(&Node::default());
+        let (r, b2) = forged_root(&Node {
+            left: Some(dead),
+            entries: vec![],
+        });
+        b.extend(b2);
+        assert!(matches!(
+            prove(&r, b"a/1", &b),
+            Err(MstError::Malformed(_))
+        ));
         // wrong field types
         let mut m = BTreeMap::new();
         m.insert("e".to_owned(), Ipld::Integer(1));
         let bytes = crate::dagcbor::encode(&Ipld::Map(m)).unwrap();
         assert!(matches!(Node::decode(&bytes), Err(MstError::Malformed(_))));
         assert!(matches!(Node::decode(&[0xff]), Err(MstError::Decode(_))));
-        // subtree link that is not dag-cbor
+        // subtree links are checked only when followed
+        let raw = crate::cid::for_raw(b"x");
         let raw_link = Node {
-            left: Some(crate::cid::for_raw(b"x")),
+            left: Some(raw),
             entries: vec![],
         };
+        assert_eq!(Node::decode(&raw_link.encode()).unwrap(), raw_link);
+        let mut t = good.clone();
+        t.entries[2].tree = Some(raw);
+        let (r, mut b) = forged_root(&t);
+        // not on the path to ks[0]
+        assert_eq!(prove(&r, ks[0].as_bytes(), &b).unwrap(), Proof::Present(v));
+        // on the path: missing, then present but not dag-cbor
+        assert_eq!(prove(&r, b"a/zzz", &b), Err(MstError::MissingBlock(raw)));
+        b.insert(raw, b"x".to_vec());
+        assert_eq!(
+            prove(&r, b"a/zzz", &b),
+            Err(MstError::Cid(CidError::NotBlessed))
+        );
+        // unknown fields are ignored (at any depth up to 32), but must be strict DAG-CBOR
+        let mut m = match good.to_ipld() {
+            Ipld::Map(m) => m,
+            _ => unreachable!(),
+        };
+        let mut deep = Ipld::List(vec![]);
+        for _ in 0..30 {
+            deep = Ipld::List(vec![deep]);
+        }
+        m.insert("zz".to_owned(), deep.clone());
+        let bytes = crate::dagcbor::encode(&Ipld::Map(m.clone())).unwrap();
+        assert_eq!(Node::decode(&bytes).unwrap(), good);
+        m.insert("zz".to_owned(), Ipld::List(vec![deep]));
+        let bytes = crate::dagcbor::encode_with(&Ipld::Map(m), &Limits::uncapped(64)).unwrap();
         assert!(matches!(
-            Node::decode(&raw_link.encode()),
-            Err(MstError::Cid(_))
+            Node::decode(&bytes),
+            Err(MstError::Decode(DataModelError::DepthExceeded { max: 32 }))
         ));
+        // more than 1,024 entries is fine
+        let many: Vec<String> = (0..20_000)
+            .map(|i| format!("a/{i:05}"))
+            .filter(|k| key_height(k.as_bytes()) == 0)
+            .take(1_100)
+            .collect();
+        let mut n = Node::default();
+        let mut prev: &[u8] = &[];
+        for k in &many {
+            let p = common_prefix_len(prev, k.as_bytes());
+            n.entries.push(e(p, &k[p..]));
+            prev = k.as_bytes();
+        }
+        let (r, b) = forged_root(&n);
+        assert_eq!(
+            prove(&r, many[1_099].as_bytes(), &b).unwrap(),
+            Proof::Present(v)
+        );
     }
 
     #[test]
@@ -845,21 +929,49 @@ mod tests {
         );
         assert_eq!(list_entries(&r, &blocks, 10).unwrap().len(), 2);
 
-        // a layer-0 node may not have children
+        // a layer-0 node's subtree cannot hold any key: following it fails, but a key found in
+        // the node itself is proven (sync.md §8.5 only checks what the walk visits)
         let (r, b) = forged_root(&Node {
             left: Some(c),
             entries: vec![entry(&h0)],
         });
         blocks.extend(b);
-        assert_eq!(prove(&r, h0.as_bytes(), &blocks), Err(MstError::Layer));
+        assert_eq!(prove(&r, h0.as_bytes(), &blocks).unwrap(), Proof::Present(v));
+        assert_eq!(prove(&r, low0.as_bytes(), &blocks), Err(MstError::Layer));
+        // a child at the same layer as its parent
+        let (r, b) = forged_root(&Node {
+            left: Some(c),
+            entries: vec![entry(&find(0, &|k| k > low0.as_str()))],
+        });
+        blocks.extend(b);
+        assert_eq!(prove(&r, low0.as_bytes(), &blocks), Err(MstError::Layer));
+        // a child above its parent
+        let above_parent = find(2, &|k| k > h1.as_str());
+        let (c2, b) = forged_root(&Node {
+            left: None,
+            entries: vec![entry(&above_parent)],
+        });
+        blocks.extend(b);
+        let mut top = entry(&h1);
+        top.tree = Some(c2);
+        let (r, b) = forged_root(&Node {
+            left: None,
+            entries: vec![top],
+        });
+        blocks.extend(b);
+        assert_eq!(
+            prove(&r, above_parent.as_bytes(), &blocks),
+            Err(MstError::Layer)
+        );
 
-        // a subtree may not skip a layer (layer-2 root -> layer-0 child)
+        // a subtree may skip layers (layer-2 root -> layer-0 child): only λ < ceiling is required
         let (r, b) = forged_root(&Node {
             left: Some(c),
             entries: vec![entry(&h2)],
         });
         blocks.extend(b);
-        assert_eq!(prove(&r, low0.as_bytes(), &blocks), Err(MstError::Layer));
+        assert_eq!(prove(&r, low0.as_bytes(), &blocks).unwrap(), Proof::Present(v));
+        assert_eq!(list_entries(&r, &blocks, 10).unwrap().len(), 2);
 
         // a left subtree holding a key greater than its parent's first key
         let above = find(0, &|k| k > h1.as_str());
@@ -878,5 +990,82 @@ mod tests {
         // walking right never sees it: the right slot is empty, so the key is absent
         assert_eq!(prove(&r, above.as_bytes(), &blocks).unwrap(), Proof::Absent);
         assert_eq!(list_entries(&r, &blocks, 10), Err(MstError::Ordering));
+    }
+
+    /// A chain of `n` empty nodes (each pointing to the next) above `bottom`.
+    fn empty_chain(bottom: Cid, n: usize, blocks: &mut BTreeMap<Cid, Vec<u8>>) -> Cid {
+        let mut top = bottom;
+        for _ in 0..n {
+            let (c, b) = forged_root(&Node {
+                left: Some(top),
+                entries: vec![],
+            });
+            blocks.extend(b);
+            top = c;
+        }
+        top
+    }
+
+    #[test]
+    fn depth_limit_boundary() {
+        // MST_DEPTH_MAX = 32 with the root at depth 0: a key at depth 32 is reachable, one at
+        // depth 33 is not, whether present or absent
+        let v = leaf();
+        let k = height0_keys(1).remove(0);
+        let (bottom, mut blocks) = forged_root(&Node {
+            left: None,
+            entries: vec![TreeEntry {
+                prefix_len: 0,
+                key_suffix: k.as_bytes().to_vec(),
+                value: v,
+                tree: None,
+            }],
+        });
+        let at_32 = empty_chain(bottom, 32, &mut blocks);
+        assert_eq!(prove(&at_32, k.as_bytes(), &blocks).unwrap(), Proof::Present(v));
+        assert_eq!(prove(&at_32, b"a/zzzz", &blocks).unwrap(), Proof::Absent);
+        assert_eq!(list_entries(&at_32, &blocks, 100).unwrap().len(), 1);
+        let at_33 = empty_chain(bottom, 33, &mut blocks);
+        assert_eq!(
+            prove(&at_33, k.as_bytes(), &blocks),
+            Err(MstError::DepthExceeded(MAX_DEPTH))
+        );
+        assert_eq!(
+            list_entries(&at_33, &blocks, 100),
+            Err(MstError::DepthExceeded(MAX_DEPTH))
+        );
+        // the depth check comes before the block lookup
+        let mut no_bottom = blocks.clone();
+        no_bottom.remove(&bottom);
+        assert_eq!(
+            prove(&at_33, k.as_bytes(), &no_bottom),
+            Err(MstError::DepthExceeded(MAX_DEPTH))
+        );
+        assert_eq!(
+            prove(&at_32, k.as_bytes(), &no_bottom),
+            Err(MstError::MissingBlock(bottom))
+        );
+    }
+
+    #[test]
+    fn no_early_exit_on_high_keys() {
+        // A target whose layer is at or above the root's still needs the whole search path down
+        // to a missing child (sync.md §8.5): with only the root block, the walk cannot finish.
+        let v = leaf();
+        let ks = keys(400);
+        let (root, blocks) = build(ks.iter().map(|k| (k.as_bytes(), v))).unwrap();
+        let root_node = Node::decode(&blocks[&root]).unwrap();
+        let root_layer = key_height(&root_node.keys().unwrap()[0]);
+        let target = (0..2_000_000)
+            .map(|i| format!("com.example.record/{i:06}x"))
+            .find(|k| key_height(k.as_bytes()) > root_layer)
+            .unwrap();
+        let mut only_root = BTreeMap::new();
+        only_root.insert(root, blocks[&root].clone());
+        assert!(matches!(
+            prove(&root, target.as_bytes(), &only_root),
+            Err(MstError::MissingBlock(_))
+        ));
+        assert_eq!(prove(&root, target.as_bytes(), &blocks).unwrap(), Proof::Absent);
     }
 }

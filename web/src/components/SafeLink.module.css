@@ -1,0 +1,26 @@
+/* SPDX-License-Identifier: AGPL-3.0-or-later */
+.external {
+  overflow-wrap: anywhere;
+}
+
+.host {
+  margin-left: 0.35em;
+  font-size: 0.8em;
+  color: var(--color-text-muted);
+}
+
+.host::before {
+  content: "(";
+}
+
+.host::after {
+  content: ") ↗";
+}
+
+.internal {
+  overflow-wrap: anywhere;
+}
+
+.plain {
+  overflow-wrap: anywhere;
+}

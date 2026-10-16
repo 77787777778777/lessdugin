@@ -1,0 +1,399 @@
+/* SPDX-License-Identifier: AGPL-3.0-or-later */
+/* Styles for rendered LFM/1 content (lfm-1.md §8). These class names are fixed by the renderer,
+   so they are global. Nothing here depends on inline styles: tables align through ta-* classes,
+   alerts get their labels from CSS (§8.1), and media sizes come from width/height attributes. */
+
+.lfm {
+  font-family: var(--font-serif);
+  font-size: var(--text-body);
+  line-height: var(--leading-body);
+  overflow-wrap: anywhere;
+  unicode-bidi: isolate;
+}
+
+.lfm.lfm-compact,
+.lfm-compact .lfm {
+  font-size: 1.0625rem;
+  line-height: 1.55;
+}
+
+.lfm :where(p, h1, h2, h3, h4, h5, h6, li, th, td, summary, figcaption) {
+  unicode-bidi: isolate;
+}
+
+.lfm > :first-child {
+  margin-top: 0;
+}
+
+.lfm > :last-child {
+  margin-bottom: 0;
+}
+
+.lfm p {
+  margin: 0 0 1em;
+}
+
+.lfm :where(h1, h2, h3, h4, h5, h6) {
+  font-family: var(--font-sans);
+  margin: 1.6em 0 0.6em;
+  scroll-margin-top: calc(var(--header-height) + var(--space-4));
+}
+
+.lfm h1 {
+  font-size: 1.6em;
+}
+
+.lfm h2 {
+  font-size: 1.3em;
+}
+
+.lfm h3 {
+  font-size: 1.1em;
+}
+
+.lfm :where(h4, h5, h6) {
+  font-size: 1em;
+}
+
+.lfm a {
+  color: var(--color-link);
+}
+
+.lfm a:hover {
+  text-decoration: underline;
+}
+
+.lfm a.at-link {
+  border-bottom: 1px dotted currentcolor;
+}
+
+.lfm a.mention {
+  font-family: var(--font-sans);
+  font-size: 0.9em;
+  background: var(--color-primary-soft);
+  border-radius: var(--radius-sm);
+  padding: 0 0.25em;
+}
+
+.lfm a.ext-image::before {
+  content: "🖼 ";
+}
+
+.lfm .link-host {
+  font-family: var(--font-sans);
+  font-size: 0.75em;
+  color: var(--color-warning);
+  margin-left: 0.35em;
+}
+
+.lfm .link-host::before {
+  content: "(";
+}
+
+.lfm .link-host::after {
+  content: ")";
+}
+
+.lfm a[data-anchor] {
+  cursor: pointer;
+}
+
+.lfm blockquote {
+  margin: 0 0 1em;
+  padding: 0 0 0 1em;
+  border-left: 3px solid var(--color-border-strong);
+  color: var(--color-text-muted);
+}
+
+.lfm :where(.alert-note, .alert-tip, .alert-important, .alert-warning, .alert-caution) {
+  margin: 0 0 1em;
+  padding: 0.6em 1em;
+  border-left: 4px solid var(--color-info-soft);
+  background: var(--color-surface-2);
+  border-radius: 0 var(--radius-md) var(--radius-md) 0;
+}
+
+.lfm
+  :where(.alert-note, .alert-tip, .alert-important, .alert-warning, .alert-caution)
+  > :last-child,
+.lfm blockquote > :last-child,
+.lfm details > :last-child {
+  margin-bottom: 0;
+}
+
+.lfm sup {
+  line-height: 0;
+}
+
+.lfm :where(.alert-note, .alert-tip, .alert-important, .alert-warning, .alert-caution)::before {
+  display: block;
+  font-family: var(--font-sans);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  margin-bottom: 0.25em;
+}
+
+.lfm .alert-note {
+  border-left-color: #4f86c6;
+}
+
+.lfm .alert-note::before {
+  content: "Note";
+  color: #4f86c6;
+}
+
+.lfm .alert-tip {
+  border-left-color: var(--color-primary);
+}
+
+.lfm .alert-tip::before {
+  content: "Tip";
+  color: var(--color-primary-strong);
+}
+
+.lfm .alert-important {
+  border-left-color: #8957e5;
+}
+
+.lfm .alert-important::before {
+  content: "Important";
+  color: #8957e5;
+}
+
+.lfm .alert-warning {
+  border-left-color: var(--color-warning);
+}
+
+.lfm .alert-warning::before {
+  content: "Warning";
+  color: var(--color-warning);
+}
+
+.lfm .alert-caution {
+  border-left-color: var(--color-danger);
+}
+
+.lfm .alert-caution::before {
+  content: "Caution";
+  color: var(--color-danger);
+}
+
+.lfm :where(ul, ol) {
+  margin: 0 0 1em;
+  padding-left: 1.6em;
+}
+
+.lfm li > input[type="checkbox"] {
+  margin: 0 0.3em 0 0;
+}
+
+.lfm code {
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  background: var(--color-code-bg);
+  border-radius: var(--radius-sm);
+  padding: 0.1em 0.3em;
+}
+
+.lfm code.math-error {
+  color: var(--color-danger);
+}
+
+.lfm pre {
+  margin: 0 0 1em;
+  padding: 0.8em 1em;
+  overflow-x: auto;
+  background: var(--color-code-bg);
+  border-radius: var(--radius-md);
+  line-height: 1.45;
+}
+
+.lfm pre code {
+  padding: 0;
+  background: none;
+  font-size: 0.82em;
+}
+
+.lfm table {
+  border-collapse: collapse;
+  margin: 0 0 1em;
+  font-family: var(--font-sans);
+  font-size: 0.85em;
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.lfm :where(th, td) {
+  border: 1px solid var(--color-border);
+  padding: 0.35em 0.7em;
+}
+
+.lfm th {
+  background: var(--color-surface-2);
+}
+
+.lfm .ta-l {
+  text-align: left;
+}
+
+.lfm .ta-c {
+  text-align: center;
+}
+
+.lfm .ta-r {
+  text-align: right;
+}
+
+.lfm hr {
+  border: 0;
+  border-top: 1px solid var(--color-border);
+  margin: 2em 0;
+}
+
+.lfm details {
+  margin: 0 0 1em;
+  padding: 0.4em 0.8em;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.lfm details > summary {
+  cursor: pointer;
+  font-family: var(--font-sans);
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+}
+
+.lfm details[open] > summary {
+  margin-bottom: 0.5em;
+}
+
+.lfm details.spoiler {
+  background: var(--color-surface-2);
+}
+
+.lfm figure {
+  margin: 0 0 1em;
+}
+
+.lfm figcaption {
+  font-family: var(--font-sans);
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+  text-align: center;
+}
+
+.lfm img {
+  max-width: 100%;
+  height: auto;
+}
+
+.lfm math {
+  font-size: 1.05em;
+}
+
+.lfm math[display="block"] {
+  display: block;
+  margin: 0.5em 0;
+  overflow-x: auto;
+}
+
+.lfm p.notice {
+  font-family: var(--font-sans);
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+  font-style: italic;
+}
+
+.lfm .media-missing {
+  font-family: var(--font-sans);
+  font-size: var(--text-sm);
+  color: var(--color-text-faint);
+  text-decoration: line-through;
+}
+
+.lfm .gallery {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5em;
+  margin-top: 1em;
+}
+
+.lfm section.footnotes {
+  margin-top: 2em;
+  padding-top: 0.75em;
+  border-top: 1px solid var(--color-border);
+  font-size: 0.85em;
+}
+
+.lfm section.footnotes li p {
+  display: inline;
+}
+
+.lfm sup[id] {
+  scroll-margin-top: calc(var(--header-height) + var(--space-4));
+}
+
+.lfm li[id] {
+  scroll-margin-top: calc(var(--header-height) + var(--space-4));
+}
+
+/* Runtime enhancements made by RenderedHtml after sanitisation (lfm-1.md §8.2, last para). */
+
+.lfm .lfm-media-pending {
+  display: none;
+}
+
+.lfm .lfm-media-load {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4em;
+  min-height: 3.5rem;
+  max-width: 100%;
+  padding: 0.6em 1em;
+  border: 1px dashed var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-2);
+  color: var(--color-text-muted);
+  font-family: var(--font-sans);
+  font-size: var(--text-sm);
+}
+
+.lfm .lfm-media-load:hover {
+  border-color: var(--color-primary);
+  color: var(--color-text);
+}
+
+.lfm .lfm-sidenote {
+  display: none;
+}
+
+.lfm .lfm-target {
+  background: var(--color-warning-soft);
+  transition: background 1.2s ease-out;
+}
+
+@media (min-width: 1280px) {
+  .lfm-sidenotes .lfm .lfm-sidenote {
+    display: block;
+    float: right;
+    clear: right;
+    width: 15rem;
+    margin: 0.2em -18rem 0.8em 0;
+    font-family: var(--font-sans);
+    font-size: 0.8rem;
+    line-height: 1.45;
+    color: var(--color-text-muted);
+  }
+
+  .lfm-sidenotes .lfm .lfm-sidenote-n {
+    font-weight: 600;
+    margin-right: 0.35em;
+    color: var(--color-text);
+  }
+
+  .lfm-sidenotes .lfm section.footnotes {
+    display: none;
+  }
+}

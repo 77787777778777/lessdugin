@@ -5,12 +5,17 @@
   "license": "AGPL-3.0-or-later",
   "type": "module",
   "exports": {
+    "./api": "./src/api.ts",
+    "./types": "./src/types.ts",
+    "./mock": "./src/mock.ts",
+    "./palette": "./src/palette.ts",
     "./client": "./src/client.ts",
     "./worker": "./src/worker.ts"
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json",
-    "test": "vitest run --passWithNoTests"
+    "check": "tsc -p tsconfig.json && biome check .",
+    "test": "vitest run"
   },
   "dependencies": {
     "comlink": "^4.0.0",
