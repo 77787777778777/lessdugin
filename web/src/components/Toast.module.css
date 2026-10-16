@@ -24,12 +24,12 @@
 
 .error {
   background: var(--color-danger);
-  color: #fff;
+  color: var(--color-on-danger);
 }
 
 .success {
   background: var(--color-primary-strong);
-  color: #fff;
+  color: var(--color-on-primary);
 }
 
 .message {

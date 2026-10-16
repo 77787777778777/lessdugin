@@ -16,7 +16,7 @@ function Sequence({ uri }: { uri: string }) {
   const engine = useEngine();
   const q = useQuery({ queryKey: qk.sequence(uri), queryFn: () => engine.sequence(uri) });
   if (q.isPending) return <Loading />;
-  if (q.isError) return <ErrorView error={q.error} title="Sequence not found" />;
+  if (q.isError) return <ErrorView page error={q.error} title="Sequence not found" />;
   const { sequence, body, chapters } = q.data;
   return (
     <article className={ui.page}>
@@ -44,8 +44,8 @@ export function SequencePage() {
   const { author, rkey } = route.useParams();
   const ref = useParsedRef(`#/s/${author}/${rkey}`);
   if (ref.isPending) return <Loading />;
-  if (ref.isError) return <ErrorView error={ref.error} />;
+  if (ref.isError) return <ErrorView page error={ref.error} />;
   if (ref.data.kind !== "sequence")
-    return <ErrorView error={new Error("This address is not a sequence.")} />;
+    return <ErrorView page error={new Error("This address is not a sequence.")} />;
   return <Sequence uri={ref.data.uri} />;
 }

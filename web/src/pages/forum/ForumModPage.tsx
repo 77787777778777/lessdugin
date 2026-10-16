@@ -40,28 +40,30 @@ export function ForumModPage() {
             <p className={ui.muted}>Nothing to review.</p>
           )}
           {queue.data && queue.data.items.length > 0 && (
-            <table className={ui.table}>
-              <thead>
-                <tr>
-                  <th scope="col">Kind</th>
-                  <th scope="col">Subject</th>
-                  <th scope="col">Reason</th>
-                  <th scope="col">Detail</th>
-                </tr>
-              </thead>
-              <tbody>
-                {queue.data.items.map((item) => (
-                  <tr key={`${item.kind}:${item.subject}`}>
-                    <td>{item.kind}</td>
-                    <td>
-                      <Subject subject={item.subject} />
-                    </td>
-                    <td>{item.reason}</td>
-                    <td className={ui.muted}>{item.detail}</td>
+            <div className={ui.tableScroll}>
+              <table className={ui.table}>
+                <thead>
+                  <tr>
+                    <th scope="col">Kind</th>
+                    <th scope="col">Subject</th>
+                    <th scope="col">Reason</th>
+                    <th scope="col">Detail</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {queue.data.items.map((item) => (
+                    <tr key={`${item.kind}:${item.subject}`}>
+                      <td>{item.kind}</td>
+                      <td>
+                        <Subject subject={item.subject} />
+                      </td>
+                      <td>{item.reason}</td>
+                      <td className={ui.muted}>{item.detail}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           )}
         </>
       )}
@@ -72,36 +74,38 @@ export function ForumModPage() {
       {log.isPending && <Loading />}
       {log.isError && <ErrorView error={log.error} />}
       {log.data && (
-        <table className={ui.table}>
-          <thead>
-            <tr>
-              <th scope="col">When</th>
-              <th scope="col">Moderator</th>
-              <th scope="col">Action</th>
-              <th scope="col">Subject</th>
-              <th scope="col">Reason</th>
-            </tr>
-          </thead>
-          <tbody>
-            {log.data.entries.map((e) => (
-              <tr key={`${e.atMs}:${e.subject}:${e.action}`}>
-                <td>{fullDate(e.atMs)}</td>
-                <td>
-                  <ActorName actor={e.actor} />
-                  {e.lapsed && <span className={ui.muted}> (lapsed)</span>}
-                </td>
-                <td>
-                  {e.action}: {e.value}
-                  {e.adoptedFrom && <span className={ui.muted}> (adopted)</span>}
-                </td>
-                <td>
-                  <Subject subject={e.subject} />
-                </td>
-                <td className={ui.muted}>{e.reason}</td>
+        <div className={ui.tableScroll}>
+          <table className={ui.table}>
+            <thead>
+              <tr>
+                <th scope="col">When</th>
+                <th scope="col">Moderator</th>
+                <th scope="col">Action</th>
+                <th scope="col">Subject</th>
+                <th scope="col">Reason</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {log.data.entries.map((e) => (
+                <tr key={`${e.atMs}:${e.subject}:${e.action}`}>
+                  <td>{fullDate(e.atMs)}</td>
+                  <td>
+                    <ActorName actor={e.actor} />
+                    {e.lapsed && <span className={ui.muted}> (lapsed)</span>}
+                  </td>
+                  <td>
+                    {e.action}: {e.value}
+                    {e.adoptedFrom && <span className={ui.muted}> (adopted)</span>}
+                  </td>
+                  <td>
+                    <Subject subject={e.subject} />
+                  </td>
+                  <td className={ui.muted}>{e.reason}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
     </section>
   );

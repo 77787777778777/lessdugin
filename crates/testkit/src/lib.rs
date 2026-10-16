@@ -9,18 +9,23 @@
 //! | [`identity`] | [`FakeIdentity`], DID documents, DoH answers, route installers |
 //! | [`repo`] | [`TestRepo`]: signed commits, MST, proof CARs |
 //! | [`pds`] | [`FakePds`]: `sync.getRecord`, `repo.getRecord`, `getLatestCommit`, `resolveHandle` |
+//! | [`fake_pds`] | [`FakeNet`]: multi-repo PDS hosts with real repos, PLC, relays, DoH, writes, sessions, faults (feature `http`: real HTTP) |
 //! | [`kv`] | the shared `KvStore` contract suite |
+//! | [`store`] | the shared record-store scenario, run over any `KvStore` |
 
 #![forbid(unsafe_code)]
 
+pub mod fake_pds;
 pub mod identity;
 pub mod kv;
 pub mod memhost;
 pub mod pds;
 pub mod repo;
 pub mod resp;
+pub mod store;
 pub mod vectors;
 
+pub use fake_pds::FakeNet;
 pub use identity::FakeIdentity;
 pub use memhost::MemHost;
 pub use pds::FakePds;

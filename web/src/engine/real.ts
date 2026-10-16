@@ -7,11 +7,15 @@ import type { EngineApi } from "@lessdugin/engine/api";
 import { type EngineClient, startEngine } from "@lessdugin/engine/client";
 import type { EngineError } from "@lessdugin/engine/types";
 import type { EngineHandle } from "./handle.ts";
+import { mockAllowed } from "./select.ts";
 
 export function engineNotAvailable(operation: string): EngineError {
+  const demo = mockAllowed(import.meta.env)
+    ? " Open the app with ?mock to explore it with demo data."
+    : "";
   return {
     code: "unsupported",
-    message: `engine not yet available: "${operation}" is not implemented by the wasm engine in this build. Open the app with ?mock to explore it with demo data.`,
+    message: `engine not yet available: "${operation}" is not implemented by the wasm engine in this build.${demo}`,
     retryable: false,
   };
 }

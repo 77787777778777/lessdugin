@@ -10,6 +10,8 @@ repository.workspace = true
 [features]
 default = ["oauth"]
 oauth = ["dep:jacquard-oauth", "dep:jacquard-common", "dep:jacquard-identity"]
+# Request the final namespace's scopes (`include:NS.authFull` first; `data-model.md` §10.3).
+final-ns = ["lessdugin-lexicon/final-ns"]
 
 [dependencies]
 lessdugin-atp.workspace = true

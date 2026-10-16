@@ -182,6 +182,9 @@ mod tests {
     #[test]
     fn macro_builds_keys() {
         let k = crate::key!("rec", "fk123", 5i64);
-        assert_eq!(decode(&k).unwrap(), vec![Part::from("rec"), Part::from("fk123"), Part::Int(5)]);
+        assert_eq!(
+            decode(&k).unwrap(),
+            vec![Part::from("rec"), Part::from("fk123"), Part::Int(5)]
+        );
     }
 }

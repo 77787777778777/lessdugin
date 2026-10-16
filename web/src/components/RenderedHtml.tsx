@@ -11,9 +11,13 @@
 // - `a[data-anchor]`: scrolls inside this root only (lfm-1.md §4.6; never `location.hash`);
 // - `[data-cid]` media: "click to load" placeholders (media loading arrives later);
 // - hover/focus previews for eligible record links and DIDs, depth 1 (lfm-1.md §5.3).
-// After insertion it also substitutes verified handles into mentions (§5.4) and, when asked,
-// copies footnotes next to their references as sidenotes for wide screens.
+// After insertion it also substitutes verified handles into mentions (§5.4: eagerly only for
+// the first 16 distinct mentioned DIDs that are forum participants; any other mention only once
+// its identity is in the cache, e.g. after a hover preview resolved it), makes in-content anchor
+// links keyboard-reachable, and, when asked, copies footnotes next to their references as
+// sidenotes for wide screens.
 
+import type { ActorView } from "@lessdugin/engine/types";
 import { useQueryClient } from "@tanstack/react-query";
 import { type Ref, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState } from "react";
 import { useEngine } from "../engine/context.tsx";
@@ -22,6 +26,7 @@ import { cx } from "../lib/cx.ts";
 import { sanitizerMismatch, setSanitizedHtml } from "../lib/sanitize.ts";
 import { isDid, parseAtUri, previewEligible } from "../lib/uri.ts";
 import { HoverPreview, type HoverTarget } from "./HoverPreview.tsx";
+import { useParticipants } from "./participants.tsx";
 import { useOpenRef } from "./RecordLink.tsx";
 import styles from "./RenderedHtml.module.css";
 import { toasts } from "./Toast.tsx";
@@ -41,8 +46,13 @@ function elementsWithId(root: Element, id: string): Element | null {
   return null;
 }
 
-/** lfm-1.md §4.6 "Resolving an anchor", scoped to one rendered root. */
-export function scrollToAnchor(root: Element | null, value: string): void {
+/** lfm-1.md §4.6 "Resolving an anchor", scoped to one rendered root. With `focus`, keyboard
+ * focus follows (the target is made programmatically focusable). */
+export function scrollToAnchor(
+  root: Element | null,
+  value: string,
+  opts: { focus?: boolean } = {},
+): void {
   if (!root || value === "") return;
   const id = value.startsWith("md-") ? value : `md-h-${value}`;
   let target = elementsWithId(root, id);
@@ -55,6 +65,10 @@ export function scrollToAnchor(root: Element | null, value: string): void {
   }
   if (!target) return;
   target.scrollIntoView?.({ block: "center" });
+  if (opts.focus && target instanceof HTMLElement) {
+    if (!target.hasAttribute("tabindex")) target.setAttribute("tabindex", "-1");
+    target.focus({ preventScroll: true });
+  }
   target.classList.add("lfm-target");
   setTimeout(() => target?.classList.remove("lfm-target"), 1500);
 }
@@ -73,6 +87,16 @@ function addMediaPlaceholders(root: Element): void {
     button.textContent = `${isImage ? "🖼" : "▶"} ${label} (click to load)`;
     el.classList.add("lfm-media-pending");
     el.before(button);
+  }
+}
+
+/** In-content anchor links (`a[data-anchor]`: footnote references, back-links, `#frag` links)
+ * have no `href`, so they are made focusable links by hand; Enter activates them through the
+ * delegated handler. */
+function makeAnchorsFocusable(root: Element): void {
+  for (const a of root.querySelectorAll("a[data-anchor]")) {
+    a.setAttribute("tabindex", "0");
+    a.setAttribute("role", "link");
   }
 }
 
@@ -122,6 +146,7 @@ export function RenderedHtml({
   const engine = useEngine();
   const qc = useQueryClient();
   const openRef = useOpenRef();
+  const participants = useParticipants();
   const rootRef = useRef<HTMLDivElement>(null);
   const [mismatch, setMismatch] = useState(false);
   const [hover, setHover] = useState<HoverTarget | null>(null);
@@ -145,38 +170,57 @@ export function RenderedHtml({
     }
     setSanitizedHtml(el, html);
     addMediaPlaceholders(el);
-    if (sidenotes) addSidenotes(el);
+    makeAnchorsFocusable(el);
+    if (sidenotes) {
+      addSidenotes(el);
+      makeAnchorsFocusable(el);
+    }
   }, [html, sidenotes]);
 
-  // Mentions: substitute handles verified both ways, for the first 16 distinct DIDs (§5.4).
+  // Mentions: substitute handles verified both ways (§5.4). Eager resolution covers only the
+  // participants among the first 16 distinct mentioned DIDs; the others are substituted only
+  // from the identity cache, i.e. after the reader hovered, focused or opened them.
   useEffect(() => {
     const root = rootRef.current;
     if (!root || !html.includes('class="mention"')) return;
     let cancelled = false;
     const anchors = [...root.querySelectorAll("a.mention[data-did]")];
-    const dids = [...new Set(anchors.map((a) => a.getAttribute("data-did") ?? ""))]
-      .filter(isDid)
-      .slice(0, MAX_EAGER_MENTIONS);
+    const dids = [...new Set(anchors.map((a) => a.getAttribute("data-did") ?? ""))].filter(isDid);
+    const substitute = (did: string, actor: ActorView | undefined): void => {
+      if (cancelled || !actor || actor.handleState !== "verified" || !actor.handle) return;
+      for (const a of anchors) {
+        if (a.getAttribute("data-did") === did && a.isConnected) a.textContent = `@${actor.handle}`;
+      }
+    };
+    const eager = new Set(dids.slice(0, MAX_EAGER_MENTIONS).filter((d) => participants.has(d)));
     for (const did of dids) {
-      qc.fetchQuery({
-        queryKey: qk.actor(did),
-        queryFn: () => engine.resolveActor(did),
-        staleTime: 5 * 60_000,
-      }).then(
-        (actor) => {
-          if (cancelled || actor.handleState !== "verified" || !actor.handle) return;
-          for (const a of anchors) {
-            if (a.getAttribute("data-did") === did && a.isConnected)
-              a.textContent = `@${actor.handle}`;
-          }
-        },
-        () => {},
-      );
+      if (eager.has(did)) {
+        qc.fetchQuery({
+          queryKey: qk.actor(did),
+          queryFn: () => engine.resolveActor(did),
+          staleTime: 5 * 60_000,
+        }).then(
+          (actor) => substitute(did, actor),
+          () => {},
+        );
+      } else {
+        substitute(did, qc.getQueryData<ActorView>(qk.actor(did)));
+      }
     }
+    const lazy = new Set(dids.filter((d) => !eager.has(d)));
+    const unsubscribe =
+      lazy.size === 0
+        ? () => {}
+        : qc.getQueryCache().subscribe((event) => {
+            const [kind, did] = event.query.queryKey as readonly unknown[];
+            if (event.type !== "updated" || kind !== "actor" || typeof did !== "string") return;
+            if (lazy.has(did)) substitute(did, event.query.state.data as ActorView | undefined);
+          });
     return () => {
       cancelled = true;
+      unsubscribe();
     };
-  }, [html, engine, qc]);
+  }, [html, engine, qc, participants]);
 
   useImperativeHandle(
     ref,
@@ -196,6 +240,14 @@ export function RenderedHtml({
       if (!(target instanceof Element)) return null;
       const a = target.closest("a");
       return a && root.contains(a) ? a : null;
+    };
+    const onKeyDown = (e: KeyboardEvent): void => {
+      if (e.key !== "Enter" || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+      const a = linkFrom(e.target);
+      const anchor = a?.getAttribute("data-anchor");
+      if (!a || anchor === null || anchor === undefined) return;
+      e.preventDefault();
+      scrollToAnchor(root, anchor, { focus: true });
     };
     const onClick = (e: MouseEvent): void => {
       const target = e.target instanceof Element ? e.target : null;
@@ -238,7 +290,7 @@ export function RenderedHtml({
       const did = a.getAttribute("data-did");
       return did !== null && isDid(did) ? { raw: did, rect: a.getBoundingClientRect() } : null;
     };
-    const open = (a: HTMLAnchorElement, delay: number): void => {
+    const openPreview = (a: HTMLAnchorElement, delay: number): void => {
       clearTimeout(t.close);
       clearTimeout(t.open);
       t.open = setTimeout(() => {
@@ -254,16 +306,17 @@ export function RenderedHtml({
     const onOver = (e: Event): void => {
       const a = linkFrom(e.target);
       if (a && (a.hasAttribute("data-at-uri") || a.hasAttribute("data-did")))
-        open(a, HOVER_DELAY_MS);
+        openPreview(a, HOVER_DELAY_MS);
     };
     const onFocus = (e: Event): void => {
       const a = linkFrom(e.target);
-      if (a && (a.hasAttribute("data-at-uri") || a.hasAttribute("data-did"))) open(a, 0);
+      if (a && (a.hasAttribute("data-at-uri") || a.hasAttribute("data-did"))) openPreview(a, 0);
     };
     const onOut = (e: Event): void => {
       if (linkFrom(e.target)) scheduleClose();
     };
     root.addEventListener("click", onClick);
+    root.addEventListener("keydown", onKeyDown);
     if (!preview) {
       root.addEventListener("mouseover", onOver);
       root.addEventListener("mouseout", onOut);
@@ -272,6 +325,7 @@ export function RenderedHtml({
     }
     return () => {
       root.removeEventListener("click", onClick);
+      root.removeEventListener("keydown", onKeyDown);
       root.removeEventListener("mouseover", onOver);
       root.removeEventListener("mouseout", onOut);
       root.removeEventListener("focusin", onFocus);

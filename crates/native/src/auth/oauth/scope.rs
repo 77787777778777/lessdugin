@@ -13,19 +13,7 @@
 use lessdugin_atp::xrpc::percent_encode;
 use lessdugin_lexicon::ns::{NS, NS_FINAL};
 
-/// The 10 record collections of `NS.authFull` (`data-model.md` §10.1), without the prefix.
-pub const COLLECTIONS: [&str; 10] = [
-    "forum",
-    "membership",
-    "post",
-    "comment",
-    "revision",
-    "opinion",
-    "modAction",
-    "wikiRevision",
-    "sequence",
-    "profile",
-];
+pub use crate::auth::allowlist::COLLECTIONS;
 
 /// The enumerated blob scopes (AUTH-2).
 pub const BLOB_SCOPES: &str =
@@ -70,7 +58,10 @@ pub fn scope_candidates() -> Vec<String> {
 /// `SUPERSET` (`data-model.md` §10.4): every scope any variant may request.
 pub fn superset_scope() -> String {
     if is_final_ns() {
-        format!("atproto include:{NS}.authFull {} {BLOB_SCOPES}", repo_scope())
+        format!(
+            "atproto include:{NS}.authFull {} {BLOB_SCOPES}",
+            repo_scope()
+        )
     } else {
         enumerated_scope()
     }

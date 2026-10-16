@@ -4,9 +4,12 @@
 // collapsed comments render their reason instead of the body (social.md §10.2).
 
 import type { CommentNode, HiddenReason } from "@lessdugin/engine/types";
-import { useRef } from "react";
+import { isOrphanAnchor } from "@lessdugin/engine/types";
+import { useNavigate } from "@tanstack/react-router";
+import { type FocusEvent, type KeyboardEvent, useRef } from "react";
 import { useEngine } from "../engine/context.tsx";
-import { writeStore } from "../engine/writes.ts";
+import { useCommentDraft } from "../engine/drafts.ts";
+import { usePendingWrite, writeStore } from "../engine/writes.ts";
 import { cx } from "../lib/cx.ts";
 import type { VotingMode } from "../lib/policy.ts";
 import { quoteFromSelection } from "../lib/quote.ts";
@@ -22,8 +25,9 @@ import { COLLAPSE_LABEL } from "./PostMeta.tsx";
 import { ReactBar } from "./Reacts.tsx";
 import { RecordLink } from "./RecordLink.tsx";
 import { RenderedHtml, type RenderedHtmlHandle } from "./RenderedHtml.tsx";
+import { Loading } from "./Status.tsx";
 import { toasts } from "./Toast.tsx";
-import type { CommentRow } from "./threadRows.ts";
+import { type CommentRow, THREAD_AUTHOR_EXPANDED_MAX } from "./threadRows.ts";
 import { VoteControls } from "./VoteControls.tsx";
 
 export interface ThreadContext {
@@ -68,6 +72,44 @@ function versionNote(node: CommentNode): string | null {
 
 const INDENT_CLASS = ["", "indent1", "indent2", "indent3", "indent4", "indent5", "indent6"];
 
+function hiddenRepliesText(n: number): string {
+  return `${n} ${n === 1 ? "reply" : "replies"} hidden.`;
+}
+
+/** The reply composer, resuming a saved draft for this parent if there is one. */
+function ReplyBox({
+  ctx,
+  node,
+  onDone,
+  onSubmit,
+}: {
+  ctx: ThreadContext;
+  node: CommentNode;
+  onDone: () => void;
+  onSubmit: (markdown: string) => Promise<boolean>;
+}) {
+  const { ready, draft } = useCommentDraft(ctx.postUri, node.uri);
+  if (!ready) return <Loading label="Loading the editor…" />;
+  return (
+    <LazyComposer
+      compact
+      autoFocus
+      label={`Reply to ${actorLabel(node.author)}`}
+      submitLabel="Publish reply"
+      placeholder="Write a reply…"
+      initial={draft?.markdown ?? ""}
+      draftId={draft?.id}
+      makeDraft={(markdown, id) => ({
+        kind: "comment",
+        ...(id !== undefined ? { id } : {}),
+        comment: { root: ctx.postUri, parent: node.uri, body: { markdown, media: [] } },
+      })}
+      onSubmit={onSubmit}
+      onCancel={onDone}
+    />
+  );
+}
+
 export function CommentItem({
   row,
   index,
@@ -77,6 +119,7 @@ export function CommentItem({
   onToggle,
   onFocusRow,
   onReply,
+  onShowAuthor,
 }: {
   row: CommentRow;
   index: number;
@@ -84,58 +127,80 @@ export function CommentItem({
   focused: boolean;
   replying: boolean;
   onToggle: (uri: string) => void;
-  onFocusRow: (index: number) => void;
+  /** The row with this comment uri received focus. */
+  onFocusRow: (uri: string) => void;
   onReply: (uri: string | null) => void;
+  /** Expands every comment of this author hidden by the per-author limit. */
+  onShowAuthor?: ((did: string) => void) | undefined;
 }) {
   const engine = useEngine();
+  const navigate = useNavigate();
   const bodyRef = useRef<RenderedHtmlHandle>(null);
   const { node } = row;
+  const pending = usePendingWrite(node.uri);
   const indentClass = styles[INDENT_CLASS[row.indent] ?? "indent6"];
-  const common = {
-    "data-row-index": index,
-    tabIndex: -1,
-    onFocus: (e: React.FocusEvent<HTMLElement>) => {
-      if (e.target === e.currentTarget) onFocusRow(index);
-    },
-    onKeyDown: (e: React.KeyboardEvent<HTMLElement>) => {
-      if (e.key === "Enter" && e.target === e.currentTarget) {
-        e.preventDefault();
-        onToggle(node.uri);
-      }
-    },
+  const onFocus = (e: FocusEvent<HTMLElement>): void => {
+    if (e.target === e.currentTarget) onFocusRow(node.uri);
+  };
+  /** Enter on the focused row expands or collapses it (rows with a collapse control only). */
+  const onKeyDown = (e: KeyboardEvent<HTMLElement>): void => {
+    if (e.key === "Enter" && e.target === e.currentTarget) {
+      e.preventDefault();
+      onToggle(node.uri);
+    }
+  };
+  const placeholderKeyDown = (e: KeyboardEvent<HTMLElement>): void => {
+    if (row.collapsed) onKeyDown(e);
   };
 
-  if (node.missing) {
-    return (
-      <article
-        {...common}
-        className={cx(styles.comment, styles.placeholder, indentClass, focused && styles.focused)}
-        aria-label="Missing comment"
-      >
+  const placeholder = (label: string, className: string | undefined, text: string) => (
+    <article
+      data-row-index={index}
+      data-comment-uri={node.uri}
+      tabIndex={-1}
+      onFocus={onFocus}
+      onKeyDown={placeholderKeyDown}
+      className={cx(styles.comment, className, indentClass, focused && styles.focused)}
+      aria-label={label}
+    >
+      <p className={styles.reason}>{text}</p>
+      {row.collapsed && (
         <p className={styles.reason}>
-          [missing comment] The comment these replies answer is not available.
+          <button
+            type="button"
+            className={styles.toggle}
+            aria-expanded={false}
+            onClick={() => onToggle(node.uri)}
+          >
+            [+]
+          </button>{" "}
+          {hiddenRepliesText(row.hiddenReplies)}
         </p>
-      </article>
+      )}
+    </article>
+  );
+
+  if (node.missing) {
+    return placeholder(
+      "Missing comment",
+      styles.placeholder,
+      "[missing comment] The comment these replies answer is not available.",
     );
   }
 
   if (node.state.kind === "tombstone" || node.state.kind === "hidden") {
-    return (
-      <article
-        {...common}
-        className={cx(styles.comment, styles.tombstone, indentClass, focused && styles.focused)}
-        aria-label="Removed comment"
-      >
-        <p className={styles.reason}>[{hiddenReasonText(node.state.reason)}]</p>
-      </article>
+    return placeholder(
+      "Removed comment",
+      styles.tombstone,
+      `[${hiddenReasonText(node.state.reason)}]`,
     );
   }
 
   const mine = ctx.myDid !== null && node.author.did === ctx.myDid;
+  const signedIn = ctx.myDid !== null;
   const version = versionNote(node);
   const collapsedReason = node.state.kind === "collapsed" ? node.state.reason : null;
-  const quoteOrphan =
-    node.quoteAnchor !== undefined && "orphan" in node.quoteAnchor && node.quoteAnchor.orphan;
+  const quoteOrphan = node.quoteAnchor !== undefined && isOrphanAnchor(node.quoteAnchor);
 
   const submitReply = async (markdown: string): Promise<boolean> => {
     const ticket = await engine.comment({
@@ -154,7 +219,11 @@ export function CommentItem({
 
   return (
     <article
-      {...common}
+      data-row-index={index}
+      data-comment-uri={node.uri}
+      tabIndex={-1}
+      onFocus={onFocus}
+      onKeyDown={onKeyDown}
       className={cx(
         styles.comment,
         indentClass,
@@ -163,7 +232,6 @@ export function CommentItem({
         mine && styles.mine,
       )}
       aria-label={`Comment by ${actorLabel(node.author)}${node.unread ? " (new)" : ""}`}
-      data-comment-uri={node.uri}
     >
       <header className={styles.header}>
         <button
@@ -188,7 +256,7 @@ export function CommentItem({
             score={node.score}
             mode={ctx.votingMode}
             ownItem={mine}
-            signedIn={ctx.myDid !== null}
+            signedIn={signedIn}
           />
         )}
         {node.pinned && <span className={styles.flag}>📌 Pinned</span>}
@@ -196,13 +264,28 @@ export function CommentItem({
         {version && <span className={styles.note}>{version}</span>}
         {node.orphaned && <span className={styles.note}>re-attached reply</span>}
         {node.retracted && <span className={styles.note}>retracted</span>}
-        <Badges badges={node.badges} />
+        <Badges badges={node.badges} pending={mine && pending} />
       </header>
       {row.collapsed ? (
         <p className={styles.reason}>
-          {collapsedReason ? `Collapsed: ${COLLAPSE_LABEL[collapsedReason]}. ` : "Collapsed. "}
-          {row.hiddenReplies > 0 &&
-            `${row.hiddenReplies} ${row.hiddenReplies === 1 ? "reply" : "replies"} hidden.`}
+          {collapsedReason
+            ? `Collapsed: ${COLLAPSE_LABEL[collapsedReason]}. `
+            : row.authorOverflow !== undefined
+              ? `Collapsed: more than ${THREAD_AUTHOR_EXPANDED_MAX} comments by this author. `
+              : "Collapsed. "}
+          {row.hiddenReplies > 0 && hiddenRepliesText(row.hiddenReplies)}
+          {row.authorOverflow !== undefined && onShowAuthor && (
+            <>
+              {" "}
+              <button
+                type="button"
+                className={ui.link}
+                onClick={() => onShowAuthor(node.author.did)}
+              >
+                Show {row.authorOverflow} more by <bdi>{actorLabel(node.author)}</bdi>
+              </button>
+            </>
+          )}
         </p>
       ) : (
         <>
@@ -219,20 +302,31 @@ export function CommentItem({
               subject={node.uri}
               reacts={node.reacts}
               ownItem={mine}
-              signedIn={ctx.myDid !== null}
+              signedIn={signedIn}
               getQuote={() => quoteFromSelection(bodyRef.current?.root() ?? null, node.body.text)}
             />
           )}
           <footer className={styles.footer}>
-            <button
-              type="button"
-              className={ui.link}
-              disabled={ctx.locked && !ctx.isAuthority}
-              title={ctx.locked && !ctx.isAuthority ? "Comments are locked" : undefined}
-              onClick={() => onReply(replying ? null : node.uri)}
-            >
-              Reply
-            </button>
+            {signedIn ? (
+              <button
+                type="button"
+                className={ui.link}
+                disabled={ctx.locked && !ctx.isAuthority}
+                title={ctx.locked && !ctx.isAuthority ? "Comments are locked" : undefined}
+                aria-expanded={replying}
+                onClick={() => onReply(replying ? null : node.uri)}
+              >
+                Reply
+              </button>
+            ) : (
+              <button
+                type="button"
+                className={ui.link}
+                onClick={() => void navigate({ to: "/login" })}
+              >
+                Sign in to reply
+              </button>
+            )}
             {mine && <OwnCommentActions node={node} postUri={ctx.postUri} />}
             {ctx.isAuthority && (
               <ModMenu
@@ -248,22 +342,9 @@ export function CommentItem({
               />
             )}
           </footer>
-          {replying && (
+          {replying && signedIn && (
             <div className={styles.replyBox}>
-              <LazyComposer
-                compact
-                autoFocus
-                label={`Reply to ${actorLabel(node.author)}`}
-                submitLabel="Publish reply"
-                placeholder="Write a reply…"
-                makeDraft={(markdown, id) => ({
-                  kind: "comment",
-                  ...(id !== undefined ? { id } : {}),
-                  comment: { root: ctx.postUri, parent: node.uri, body: { markdown, media: [] } },
-                })}
-                onSubmit={submitReply}
-                onCancel={() => onReply(null)}
-              />
+              <ReplyBox ctx={ctx} node={node} onDone={() => onReply(null)} onSubmit={submitReply} />
             </div>
           )}
         </>

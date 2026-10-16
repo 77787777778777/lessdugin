@@ -17,8 +17,14 @@ import styles from "./pages.module.css";
 
 const route = getRouteApi("/u/$actor");
 
+/** Keyed by the actor: going from /u/A to /u/B must not carry A's local state (the mute
+ * override) over to B. */
 export function UserPage() {
   const { actor } = route.useParams();
+  return <UserProfile key={actor} actor={actor} />;
+}
+
+function UserProfile({ actor }: { actor: string }) {
   const engine = useEngine();
   const qc = useQueryClient();
   const forum = useCurrentForum() ?? undefined;
@@ -27,7 +33,7 @@ export function UserPage() {
   const subs = useQuery({ queryKey: qk.subscriptions(), queryFn: () => engine.subscriptions() });
   const [mutedOverride, setMutedOverride] = useState<boolean | null>(null);
   if (q.isPending) return <Loading />;
-  if (q.isError) return <ErrorView error={q.error} title="Unknown user" />;
+  if (q.isError) return <ErrorView page error={q.error} title="Unknown user" />;
   const u = q.data;
   const isMe = active.data?.did === u.actor.did;
   const subscribed =

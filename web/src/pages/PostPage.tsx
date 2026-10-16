@@ -5,7 +5,7 @@
 import type { CommentNode, CommentSort, PostView } from "@lessdugin/engine/types";
 import { COMMENT_SORTS, isMissingRoot } from "@lessdugin/engine/types";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { getRouteApi } from "@tanstack/react-router";
+import { getRouteApi, Link, useNavigate } from "@tanstack/react-router";
 import { type ReactNode, useEffect, useId, useMemo, useRef, useState } from "react";
 import { ActorName } from "../components/ActorName.tsx";
 import { Badges } from "../components/Badges.tsx";
@@ -22,20 +22,25 @@ import {
   TagChips,
   TierBadge,
 } from "../components/PostMeta.tsx";
+import { ParticipantsProvider } from "../components/participants.tsx";
 import { ReactBar } from "../components/Reacts.tsx";
 import { RecordLink } from "../components/RecordLink.tsx";
 import { RenderedHtml, type RenderedHtmlHandle } from "../components/RenderedHtml.tsx";
 import { SafeLink } from "../components/SafeLink.tsx";
-import { ErrorView, Loading } from "../components/Status.tsx";
+import { ErrorView, errorMessage, Loading } from "../components/Status.tsx";
 import { toasts } from "../components/Toast.tsx";
 import { Toc } from "../components/Toc.tsx";
 import { VoteControls } from "../components/VoteControls.tsx";
 import { useEngine } from "../engine/context.tsx";
+import { useCommentDraft } from "../engine/drafts.ts";
 import { qk, useActiveAccount, useForum, useParsedRef } from "../engine/queries.ts";
-import { writeStore } from "../engine/writes.ts";
+import { useThreadSync } from "../engine/sync.ts";
+import { usePendingWrite, writeStore } from "../engine/writes.ts";
 import { votingMode } from "../lib/policy.ts";
 import { quoteFromSelection } from "../lib/quote.ts";
+import { cleanName } from "../lib/text.ts";
 import { fullDate, shortAge } from "../lib/time.ts";
+import { parseAtUri } from "../lib/uri.ts";
 import ui from "../styles/ui.module.css";
 import { isAuthorityRole } from "./forum/forumContext.tsx";
 import styles from "./pages.module.css";
@@ -133,6 +138,59 @@ function LocalToggles({ uri }: { uri: string }) {
   );
 }
 
+/** Edit and delete for the viewer's own post (data-model.md §8.3, §8.7). */
+function OwnPostActions({ uri, forum }: { uri: string; forum: string }) {
+  const engine = useEngine();
+  const navigate = useNavigate();
+  const [confirm, setConfirm] = useState(false);
+  const f = parseAtUri(forum);
+  const remove = async (): Promise<void> => {
+    setConfirm(false);
+    try {
+      const ticket = await engine.delete(uri);
+      writeStore.track(ticket, uri);
+      const final = await writeStore.wait(ticket.id);
+      if (final.kind === "failed") throw final.error;
+      if (final.kind !== "done") return;
+      toasts.show({ message: "Post deleted", tone: "success" });
+      if (f) void navigate({ to: "/f/$owner/$slug", params: { owner: f.did, slug: f.rkey } });
+    } catch (e) {
+      toasts.show({ message: errorMessage(e), tone: "error" });
+    }
+  };
+  return (
+    <span className={ui.row}>
+      {f && (
+        <Link
+          to="/f/$owner/$slug/new"
+          params={{ owner: f.did, slug: f.rkey }}
+          search={{ edit: uri }}
+          className={ui.ghost}
+        >
+          Edit
+        </Link>
+      )}
+      <button type="button" className={ui.ghost} onClick={() => setConfirm(true)}>
+        Delete
+      </button>
+      <Dialog open={confirm} onClose={() => setConfirm(false)} title="Delete this post?">
+        <p>
+          The post and its edit history are deleted from your repository. Its comments stay, under a
+          "the post is not available" placeholder. Copies others have archived may remain.
+        </p>
+        <div className={ui.row}>
+          <button type="button" className={ui.danger} onClick={() => void remove()}>
+            Delete
+          </button>
+          <button type="button" className={ui.ghost} onClick={() => setConfirm(false)}>
+            Cancel
+          </button>
+        </div>
+      </Dialog>
+    </span>
+  );
+}
+
 function PostBody({
   view,
   ctx,
@@ -178,6 +236,7 @@ function PostBodyView({
   const titleId = useId();
   const { post, body } = view;
   const own = myDid !== null && post.author.did === myDid;
+  const pending = usePendingWrite(post.uri);
   const hidden = post.state.kind === "hidden" || post.state.kind === "tombstone";
   return (
     <div className={styles.postLayout}>
@@ -210,7 +269,7 @@ function PostBodyView({
             {post.state.kind === "collapsed" && (
               <span>Collapsed: {COLLAPSE_LABEL[post.state.reason]}</span>
             )}
-            <Badges badges={post.badges} />
+            <Badges badges={post.badges} pending={own && pending} />
             <HistoryButton
               uri={post.uri}
               revisions={view.history.revisions}
@@ -221,7 +280,9 @@ function PostBodyView({
         {post.link && (
           <div className={styles.linkCard}>
             <p className={styles.linkCardTitle}>
-              <SafeLink raw={post.link.uri}>{post.link.title ?? post.link.uri}</SafeLink>
+              <SafeLink raw={post.link.uri}>
+                {post.link.title ? cleanName(post.link.title, 300) : undefined}
+              </SafeLink>
             </p>
             {post.link.description && <p className={ui.muted}>{post.link.description}</p>}
           </div>
@@ -241,7 +302,7 @@ function PostBodyView({
           <nav key={s.sequence} className={styles.seqNav} aria-label={`Sequence: ${s.title}`}>
             {s.prev ? <RecordLink uri={s.prev}>← Previous</RecordLink> : <span />}
             <RecordLink uri={s.sequence}>
-              <bdi>{s.title}</bdi>
+              <bdi>{cleanName(s.title, 300)}</bdi>
             </RecordLink>
             {s.next ? <RecordLink uri={s.next}>Next →</RecordLink> : <span />}
           </nav>
@@ -265,6 +326,7 @@ function PostBodyView({
             />
           )}
           <LocalToggles uri={post.uri} />
+          {own && <OwnPostActions uri={post.uri} forum={post.forum} />}
           {ctx.isAuthority && (
             <ModMenu
               forum={post.forum}
@@ -302,6 +364,9 @@ export function PostThread({ uri }: { uri: string }) {
   const forumUri = postView?.post.forum;
   const forum = useForum(forumUri);
   const loaded = thread.data !== undefined;
+  useThreadSync(uri);
+  const myDidEarly = active.data?.did ?? null;
+  const topDraft = useCommentDraft(uri, undefined, myDidEarly !== null);
 
   // Keep this visit's unread highlights after `markRead` re-queries the thread.
   const unreadAtOpen = useRef<Set<string> | null>(null);
@@ -320,10 +385,15 @@ export function PostThread({ uri }: { uri: string }) {
       !c.unread && seen?.has(c.uri) ? { ...c, unread: true } : c,
     );
   }, [thread.data]);
+  // Items whose authors count as forum participants for mention resolution (lfm-1.md §5.4).
+  const participantItems = useMemo(
+    () => [...(postView ? [postView.post] : []), ...comments],
+    [postView, comments],
+  );
 
   if (thread.isPending) return <Loading label="Loading the post…" />;
   if (thread.isError)
-    return <ErrorView error={thread.error} title="This post could not be loaded" />;
+    return <ErrorView page error={thread.error} title="This post could not be loaded" />;
 
   const myDid = active.data?.did ?? null;
   const role = forum.data?.myRole ?? "none";
@@ -350,58 +420,82 @@ export function PostThread({ uri }: { uri: string }) {
   };
 
   return (
-    <PostBody view={postView} ctx={ctx} myDid={myDid}>
-      <section aria-labelledby={headingId}>
-        <div className={styles.commentsHeader}>
-          <h2 id={headingId} className={styles.commentsTitle} data-testid="comment-count">
-            {count} {count === 1 ? "comment" : "comments"}
-          </h2>
-          <div className={ui.row}>
-            <label className={ui.row}>
-              <span className={ui.muted}>Sort</span>
-              <select
-                className={styles.select}
-                value={sort}
-                onChange={(e) => setSort(e.target.value as CommentSort)}
-              >
-                {COMMENT_SORTS.map((s) => (
-                  <option key={s} value={s}>
-                    {SORT_LABEL[s]}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className={ui.row}>
-              <input
-                type="checkbox"
-                checked={unreadOnly}
-                onChange={(e) => setUnreadOnly(e.target.checked)}
-              />
-              <span>Unread only</span>
-            </label>
+    <ParticipantsProvider forum={forum.data} items={participantItems}>
+      <PostBody view={postView} ctx={ctx} myDid={myDid}>
+        <section aria-labelledby={headingId}>
+          <div className={styles.commentsHeader}>
+            <h2 id={headingId} className={styles.commentsTitle} data-testid="comment-count">
+              {count} {count === 1 ? "comment" : "comments"}
+            </h2>
+            <Badges completeness={thread.data.completeness} />
+            <div className={ui.row}>
+              <label className={ui.row}>
+                <span className={ui.muted}>Sort</span>
+                <select
+                  className={styles.select}
+                  value={sort}
+                  onChange={(e) => setSort(e.target.value as CommentSort)}
+                >
+                  {COMMENT_SORTS.map((s) => (
+                    <option key={s} value={s}>
+                      {SORT_LABEL[s]}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className={ui.row}>
+                <input
+                  type="checkbox"
+                  checked={unreadOnly}
+                  onChange={(e) => setUnreadOnly(e.target.checked)}
+                />
+                <span>Unread only</span>
+              </label>
+            </div>
           </div>
-        </div>
-        {ctx.locked && !ctx.isAuthority && (
-          <p className={ui.notice}>Comments on this post are locked.</p>
-        )}
-        {canComment && (
-          <LazyComposer
-            label="New comment"
-            submitLabel="Comment"
-            placeholder="Write a comment…"
-            compact
-            makeDraft={(markdown, id) => ({
-              kind: "comment",
-              ...(id !== undefined ? { id } : {}),
-              comment: { root: uri, body: { markdown, media: [] } },
-            })}
-            onSubmit={submitComment}
-          />
-        )}
-        {myDid === null && <p className={ui.muted}>Sign in to comment.</p>}
-        <CommentTree comments={comments} ctx={ctx} />
-      </section>
-    </PostBody>
+          {thread.data.completeness.partial && (
+            <p className={ui.notice}>
+              Only {thread.data.completeness.reposComplete} of {thread.data.completeness.reposTotal}{" "}
+              participants' repositories are synced: some comments may be missing.
+            </p>
+          )}
+          {thread.data.completeness.degraded && (
+            <p className={ui.notice}>
+              Moderation data is unavailable: comments whose moderation cannot be checked stay
+              hidden until it loads.
+            </p>
+          )}
+          {ctx.locked && !ctx.isAuthority && (
+            <p className={ui.notice}>Comments on this post are locked.</p>
+          )}
+          {canComment &&
+            (topDraft.ready ? (
+              <LazyComposer
+                label="New comment"
+                submitLabel="Comment"
+                placeholder="Write a comment…"
+                compact
+                initial={topDraft.draft?.markdown ?? ""}
+                draftId={topDraft.draft?.id}
+                makeDraft={(markdown, id) => ({
+                  kind: "comment",
+                  ...(id !== undefined ? { id } : {}),
+                  comment: { root: uri, body: { markdown, media: [] } },
+                })}
+                onSubmit={submitComment}
+              />
+            ) : (
+              <Loading label="Loading the editor…" />
+            ))}
+          {myDid === null && (
+            <p className={ui.muted}>
+              <Link to="/login">Sign in</Link> to comment.
+            </p>
+          )}
+          <CommentTree comments={comments} ctx={ctx} />
+        </section>
+      </PostBody>
+    </ParticipantsProvider>
   );
 }
 
@@ -409,8 +503,8 @@ export function PostPage() {
   const { author, rkey } = route.useParams();
   const ref = useParsedRef(`#/p/${author}/${rkey}`);
   if (ref.isPending) return <Loading />;
-  if (ref.isError) return <ErrorView error={ref.error} title="Unknown post" />;
+  if (ref.isError) return <ErrorView page error={ref.error} title="Unknown post" />;
   if (ref.data.kind !== "post")
-    return <ErrorView error={new Error("This address is not a post.")} />;
+    return <ErrorView page error={new Error("This address is not a post.")} />;
   return <PostThread key={ref.data.uri} uri={ref.data.uri} />;
 }

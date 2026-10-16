@@ -1741,6 +1741,17 @@ export class MockEngine implements EngineApi {
       if (c && draft.kind === "comment") {
         c.markdown = draft.comment.body.markdown;
         c.body = renderMarkdown(c.markdown).body;
+        // The edit replaces the whole record: the quote is whatever the draft carries.
+        if (draft.comment.quote) {
+          c.quote = clone(draft.comment.quote);
+          const target = c.parent
+            ? this.s.comments.get(c.parent)?.body.text
+            : this.s.posts.get(c.root)?.body.text;
+          c.quoteAnchor = cpIndexOf(target ?? "", normalizeP(draft.comment.quote.exact));
+        } else {
+          delete c.quote;
+          delete c.quoteAnchor;
+        }
         c.cid = fakeCid(`${uri}#t${t}`);
         c.badges = { ...c.badges, edited: true };
         return { uri, cid: c.cid, topics: this.threadTopics(c.root) };

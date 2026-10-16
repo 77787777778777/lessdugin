@@ -13,8 +13,30 @@
   list-style: none;
 }
 
-.tallies > li {
+.tallies > li,
+.tallyItem {
   display: inline-flex;
+  align-items: center;
+  gap: 0.15rem;
+}
+
+.oppose {
+  padding: 0 0.3rem;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--color-text-muted);
+  font-size: var(--text-xs);
+}
+
+.oppose:hover {
+  border-color: var(--color-danger);
+  color: var(--color-danger);
+}
+
+.opposed {
+  border-color: var(--color-danger);
+  color: var(--color-danger);
 }
 
 .tally {
@@ -113,6 +135,14 @@
 .quoting {
   margin: var(--space-2) 0;
   color: var(--color-text-muted);
+}
+
+.unmatched {
+  margin: var(--space-2) 0;
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--color-warning-soft);
+  color: var(--color-text);
 }
 
 .filter {

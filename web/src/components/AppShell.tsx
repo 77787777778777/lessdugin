@@ -3,18 +3,21 @@
 // account menu; the main landmark (focused on every route change); a bottom navigation bar on
 // small screens; and the toast region.
 
+import type { Href } from "@lessdugin/engine/types";
 import { useQueryClient } from "@tanstack/react-query";
 import { Link, Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
 import { useEffect, useRef, useState } from "react";
 import { useEngine, useEngineHandle } from "../engine/context.tsx";
 import { useCurrentForum } from "../engine/currentForum.ts";
 import { qk, useActiveAccount, useFollowed, useUnreadNotifications } from "../engine/queries.ts";
+import { mockAllowed } from "../engine/select.ts";
 import { useWritesInFlight } from "../engine/writes.ts";
 import { cleanName } from "../lib/text.ts";
 import { parseAtUri } from "../lib/uri.ts";
 import { useAccountActor } from "./AccountName.tsx";
 import { actorLabel } from "./ActorName.tsx";
 import styles from "./AppShell.module.css";
+import { SafeLink } from "./SafeLink.tsx";
 import { ToastRegion } from "./Toast.tsx";
 
 function ForumSwitcher() {
@@ -212,18 +215,38 @@ function EngineBanner() {
   }
   return (
     <p className={styles.engineBanner}>
-      The lessdugin engine is not yet available in this build; add <code>?mock</code> to the address
-      to explore with demo data.
+      The lessdugin engine is not yet available in this build.
+      {mockAllowed(import.meta.env) && (
+        <>
+          {" "}
+          Add <code>?mock</code> to the address to explore with demo data.
+        </>
+      )}
     </p>
   );
 }
 
-/** Moves focus to the new page's heading (or the main landmark) after navigation. */
+/** Where the Corresponding Source of this build is offered (AGPL-3.0 §13; threat-model SITE-2). */
+const SOURCE_URL: string =
+  import.meta.env.VITE_SOURCE_URL || "https://github.com/77787777778777/lessdugin";
+
+function sourceHref(url: string): Href | null {
+  try {
+    const u = new URL(url);
+    return u.protocol === "https:" ? { kind: "external", url: u.href, host: u.hostname } : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Moves focus to the new page's heading (or the main landmark) after navigation to another
+ * page. Keyed on the path only: a change of search parameters (a sort, a filter chip) keeps the
+ * page, so focus stays on the control the user is operating. */
 function useRouteFocus(mainRef: React.RefObject<HTMLElement | null>): void {
-  const href = useRouterState({ select: (s) => s.location.href });
+  const pathname = useRouterState({ select: (s) => s.location.pathname });
   const first = useRef(true);
   useEffect(() => {
-    void href;
+    void pathname;
     if (first.current) {
       first.current = false;
       return;
@@ -237,11 +260,12 @@ function useRouteFocus(mainRef: React.RefObject<HTMLElement | null>): void {
       target.focus({ preventScroll: true });
     }, 0);
     return () => clearTimeout(t);
-  }, [href, mainRef]);
+  }, [pathname, mainRef]);
 }
 
 export function AppShell() {
   const mainRef = useRef<HTMLElement>(null);
+  const source = sourceHref(SOURCE_URL);
   const inFlight = useWritesInFlight();
   useRouteFocus(mainRef);
   // Keep the active account warm for components that need "mine".
@@ -308,7 +332,14 @@ export function AppShell() {
       <footer className={styles.footer}>
         <p>
           LessDugin: a forum whose database is your own PDS. Free software under the GNU AGPL v3 or
-          later.
+          later
+          {source && (
+            <>
+              {": "}
+              <SafeLink href={source}>source code</SafeLink>
+            </>
+          )}
+          .
         </p>
       </footer>
       <ToastRegion />

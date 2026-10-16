@@ -1,17 +1,25 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Reacts (social.md §9): the tallies under an item, and the `default/1` palette
 // (docs/spec/reacts-default-1.json). A react made while text in the item is selected is
-// anchored to that quote (lfm-1.md §11 "Writers"). Reacts are public; the first one shows an
-// interstitial, and each is held for the undo window.
+// anchored to that quote (lfm-1.md §11 "Writers"); a selection that cannot be anchored is
+// reported in the palette and the react then applies to the whole item. Each tally shows its
+// creator, how many seconded it and how many oppose it (§9.2 "Display"), and offers both stances.
+// Reacts are public; the first one shows an interstitial, and each is held for the undo window.
 
 import { DEFAULT_PALETTE } from "@lessdugin/engine/palette";
-import type { ReactTally, TextQuote } from "@lessdugin/engine/types";
-import { OPINION_UNDO_WINDOW_MS } from "@lessdugin/engine/types";
+import type { ActorView, ReactTally, Stance, TextQuote } from "@lessdugin/engine/types";
+import { isOrphanAnchor, OPINION_UNDO_WINDOW_MS } from "@lessdugin/engine/types";
+import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
-import { useEffect, useId, useRef, useState } from "react";
+import { type RefObject, useEffect, useId, useRef, useState } from "react";
 import { useEngine } from "../engine/context.tsx";
+import { qk } from "../engine/queries.ts";
 import { writeStore } from "../engine/writes.ts";
 import { cx } from "../lib/cx.ts";
+import type { QuoteSelection } from "../lib/quote.ts";
+import { cleanName } from "../lib/text.ts";
+import { isDid } from "../lib/uri.ts";
+import { Badges } from "./Badges.tsx";
 import { usePublicAck } from "./PublicAck.tsx";
 import styles from "./Reacts.module.css";
 import { errorMessage } from "./Status.tsx";
@@ -26,24 +34,33 @@ function tallyKey(react: string, q: TextQuote | undefined): string {
 }
 
 export function ReactPalette({
-  quote,
+  selection,
   onPick,
   onClose,
+  containerRef,
 }: {
-  quote: TextQuote | null;
+  selection: QuoteSelection | null;
   onPick: (id: string) => void;
   onClose: () => void;
+  /** Clicks inside this element (the palette and its trigger) do not close the palette; the
+   * trigger toggles it itself. Defaults to the palette. */
+  containerRef?: RefObject<HTMLElement | null> | undefined;
 }) {
   const [filter, setFilter] = useState("");
   const ref = useRef<HTMLDivElement>(null);
   const titleId = useId();
+  const close = useRef(onClose);
+  close.current = onClose;
   useEffect(() => {
     ref.current?.querySelector("input")?.focus();
+  }, []);
+  useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape") close.current();
     };
     const onDown = (e: Event): void => {
-      if (ref.current && e.target instanceof Node && !ref.current.contains(e.target)) onClose();
+      const inside = containerRef?.current ?? ref.current;
+      if (inside && e.target instanceof Node && !inside.contains(e.target)) close.current();
     };
     window.addEventListener("keydown", onKey);
     window.addEventListener("pointerdown", onDown);
@@ -51,7 +68,7 @@ export function ReactPalette({
       window.removeEventListener("keydown", onKey);
       window.removeEventListener("pointerdown", onDown);
     };
-  }, [onClose]);
+  }, [containerRef]);
   const needle = filter.trim().toLowerCase();
   const reacts = DEFAULT_PALETTE.reacts.filter(
     (r) => needle === "" || r.label.toLowerCase().includes(needle) || r.id.includes(needle),
@@ -66,9 +83,16 @@ export function ReactPalette({
           ×
         </button>
       </div>
-      {quote && (
+      {selection?.kind === "anchored" && (
         <p className={styles.quoting}>
-          Reacting to the selected text: <q>{quote.exact}</q>
+          Reacting to the selected text: <q>{selection.quote.exact}</q>
+        </p>
+      )}
+      {selection?.kind === "unmatched" && (
+        <p className={styles.unmatched} role="status">
+          The selected text cannot be anchored: it does not appear word for word in the text of this
+          item (it may span math, footnote numbers or images). This react will apply to the whole
+          item.
         </p>
       )}
       <input
@@ -108,7 +132,94 @@ export function ReactPalette({
   );
 }
 
-type Pending = Record<string, { delta: number; mine: boolean }>;
+/** A react's creator as a short label. Creators are voters, hence forum participants, so their
+ * identities may be resolved eagerly (lfm-1.md §5.4 / F16). */
+function useCreatorLabel(did: string | undefined): string | null {
+  const engine = useEngine();
+  const q = useQuery({
+    queryKey: qk.actor(did ?? ""),
+    queryFn: () => engine.resolveActor(did ?? ""),
+    enabled: did !== undefined && isDid(did),
+    staleTime: 5 * 60_000,
+  });
+  if (!did) return null;
+  const actor: ActorView | undefined = q.data;
+  if (actor?.handleState === "verified" && actor.handle) return `@${actor.handle}`;
+  if (actor?.displayName) return cleanName(actor.displayName);
+  return actor?.shortDid ?? did;
+}
+
+/** One stance change in flight: the deltas it applies to the shown tally. */
+type Pending = Record<string, { forDelta: number; againstDelta: number; mine: Stance | null }>;
+
+function Tally({
+  tally,
+  ownItem,
+  pending,
+  onToggle,
+}: {
+  tally: ReactTally;
+  ownItem: boolean;
+  pending: boolean;
+  onToggle: (stance: Stance) => void;
+}) {
+  const t = tally;
+  const creator = useCreatorLabel(t.creator);
+  const orphan = t.anchor !== undefined && isOrphanAnchor(t.anchor);
+  const seconded = Math.max(0, t.for - 1);
+  const details = [
+    creator ? `added by ${creator}` : null,
+    seconded > 0 ? `seconded by ${seconded}` : null,
+    t.against > 0 ? `${t.against} against` : null,
+  ]
+    .filter((x) => x !== null)
+    .join(", ");
+  const quoteText = t.quote ? ` on “${t.quote.exact}”` : "";
+  return (
+    <li className={styles.tallyItem}>
+      <button
+        type="button"
+        className={cx(styles.tally, t.mine === "for" && styles.mine)}
+        aria-pressed={t.mine === "for"}
+        disabled={ownItem}
+        title={`${t.label}${quoteText}${details ? ` (${details})` : ""}`}
+        onClick={() => onToggle("for")}
+      >
+        <span className={styles.glyph} aria-hidden="true">
+          {t.glyph}
+        </span>
+        <span className="visually-hidden">{t.label}: </span>
+        <span>{t.for}</span>
+        {t.against > 0 && (
+          <span className={styles.against}>
+            <span aria-hidden="true">−</span>
+            <span className="visually-hidden">, against: </span>
+            {t.against}
+          </span>
+        )}
+        {t.quote && (
+          <span className={cx(styles.quote, orphan && styles.orphan)}>
+            {orphan ? "quoted text no longer present" : `“${t.quote.exact}”`}
+          </span>
+        )}
+        {details && <span className="visually-hidden">; {details}</span>}
+      </button>
+      {!ownItem && (
+        <button
+          type="button"
+          className={cx(styles.oppose, t.mine === "against" && styles.opposed)}
+          aria-pressed={t.mine === "against"}
+          aria-label={`Oppose “${t.label}”${quoteText}`}
+          title="Oppose this react"
+          onClick={() => onToggle("against")}
+        >
+          <span aria-hidden="true">✗</span>
+        </button>
+      )}
+      {pending && <Badges pending />}
+    </li>
+  );
+}
 
 export function ReactBar({
   subject,
@@ -119,8 +230,8 @@ export function ReactBar({
 }: {
   subject: string;
   reacts: ReactTally[];
-  /** The current selection inside the item's body, as a quote (null when none). */
-  getQuote: () => TextQuote | null;
+  /** The current selection inside the item's body (null when there is none). */
+  getQuote: () => QuoteSelection | null;
   ownItem?: boolean | undefined;
   signedIn?: boolean | undefined;
 }) {
@@ -128,9 +239,10 @@ export function ReactBar({
   const requestAck = usePublicAck();
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
-  const [quote, setQuote] = useState<TextQuote | null>(null);
+  const [selection, setSelection] = useState<QuoteSelection | null>(null);
   const [pending, setPending] = useState<Pending>({});
   const awaiting = useRef(new Set<string>());
+  const anchorRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     void reacts;
@@ -142,14 +254,22 @@ export function ReactBar({
     });
   }, [reacts]);
 
-  const send = async (id: string, q: TextQuote | undefined, remove: boolean): Promise<void> => {
+  /** Sets `stance` for (id, q), or removes the viewer's react when `stance` is null. */
+  const send = async (
+    id: string,
+    q: TextQuote | undefined,
+    stance: Stance | null,
+    current: Stance | null,
+  ): Promise<void> => {
     if (!signedIn) {
       void navigate({ to: "/login" });
       return;
     }
     if (!(await requestAck("react"))) return;
     const key = tallyKey(id, q);
-    setPending((p) => ({ ...p, [key]: { delta: remove ? -1 : 1, mine: !remove } }));
+    const forDelta = (stance === "for" ? 1 : 0) - (current === "for" ? 1 : 0);
+    const againstDelta = (stance === "against" ? 1 : 0) - (current === "against" ? 1 : 0);
+    setPending((p) => ({ ...p, [key]: { forDelta, againstDelta, mine: stance } }));
     const drop = (): void =>
       setPending((p) => {
         const next = { ...p };
@@ -160,13 +280,18 @@ export function ReactBar({
       const ticket = await engine.opinion(subject, {
         kind: "react",
         id,
-        stance: "for",
-        remove,
+        stance: stance ?? current ?? "for",
+        remove: stance === null,
         ...(q ? { quote: q } : {}),
       });
-      writeStore.track(ticket);
+      writeStore.track(ticket, subject);
       toasts.show({
-        message: remove ? "React removed" : "React added (public)",
+        message:
+          stance === null
+            ? "React removed"
+            : stance === "against"
+              ? "Opposition recorded (public)"
+              : "React added (public)",
         durationMs: OPINION_UNDO_WINDOW_MS,
         action: {
           label: "Undo",
@@ -188,21 +313,32 @@ export function ReactBar({
 
   const shown = reacts.map((t) => {
     const p = pending[tallyKey(t.react, t.quote)];
-    return p ? { ...t, for: t.for + p.delta, mine: p.mine ? ("for" as const) : undefined } : t;
+    if (!p) return { tally: t, pending: false };
+    const tally: ReactTally = {
+      ...t,
+      for: t.for + p.forDelta,
+      against: t.against + p.againstDelta,
+    };
+    if (p.mine) tally.mine = p.mine;
+    else delete tally.mine;
+    return { tally, pending: true };
   });
   for (const [key, p] of Object.entries(pending)) {
-    if (p.delta > 0 && !reacts.some((t) => tallyKey(t.react, t.quote) === key)) {
-      const [id] = key.split("\u{1f}");
+    if (p.mine !== null && !reacts.some((t) => tallyKey(t.react, t.quote) === key)) {
+      const [id, exact] = key.split("\u{1f}");
       const r = DEFAULT_PALETTE.reacts.find((x) => x.id === id);
-      if (r)
-        shown.push({
+      if (r) {
+        const tally: ReactTally = {
           react: r.id,
           label: r.label,
           glyph: r.glyph,
-          for: 1,
-          against: 0,
-          mine: "for",
-        });
+          for: Math.max(0, p.forDelta),
+          against: Math.max(0, p.againstDelta),
+          mine: p.mine,
+        };
+        if (exact) tally.quote = { exact };
+        shown.push({ tally, pending: true });
+      }
     }
   }
 
@@ -210,46 +346,38 @@ export function ReactBar({
     <div className={styles.bar}>
       <ul className={styles.tallies} aria-label="Reacts">
         {shown
-          .filter((t) => t.for > 0 || t.against > 0)
-          .map((t) => {
-            const orphan = t.anchor !== undefined && "orphan" in t.anchor && t.anchor.orphan;
-            return (
-              <li key={tallyKey(t.react, t.quote)}>
-                <button
-                  type="button"
-                  className={cx(styles.tally, t.mine === "for" && styles.mine)}
-                  aria-pressed={t.mine === "for"}
-                  disabled={ownItem}
-                  title={`${t.label}${t.quote ? ` on “${t.quote.exact}”` : ""}${t.against > 0 ? `; ${t.against} against` : ""}`}
-                  onClick={() => void send(t.react, t.quote, t.mine === "for")}
-                >
-                  <span className={styles.glyph} aria-hidden="true">
-                    {t.glyph}
-                  </span>
-                  <span className="visually-hidden">{t.label}: </span>
-                  <span>{t.for}</span>
-                  {t.against > 0 && <span className={styles.against}>−{t.against}</span>}
-                  {t.quote && (
-                    <span className={cx(styles.quote, orphan && styles.orphan)}>
-                      {orphan ? "quoted text no longer present" : `“${t.quote.exact}”`}
-                    </span>
-                  )}
-                </button>
-              </li>
-            );
-          })}
+          .filter(({ tally: t }) => t.for > 0 || t.against > 0)
+          .map(({ tally: t, pending: inFlight }) => (
+            <Tally
+              key={tallyKey(t.react, t.quote)}
+              tally={t}
+              ownItem={ownItem}
+              pending={inFlight}
+              onToggle={(stance) => {
+                const current = t.mine ?? null;
+                void send(t.react, t.quote, current === stance ? null : stance, current);
+              }}
+            />
+          ))}
       </ul>
       {!ownItem && (
-        <div className={styles.paletteAnchor}>
+        <div className={styles.paletteAnchor} ref={anchorRef}>
           <button
             type="button"
             className={styles.add}
             aria-expanded={open}
             aria-haspopup="dialog"
-            onPointerDown={() => setQuote(getQuote())}
+            onPointerDown={() => {
+              if (!open) setSelection(getQuote());
+            }}
             onClick={() => {
-              setQuote((q) => q ?? getQuote());
-              setOpen((o) => !o);
+              if (open) {
+                setOpen(false);
+                setSelection(null);
+                return;
+              }
+              setSelection((s) => s ?? getQuote());
+              setOpen(true);
             }}
           >
             <span aria-hidden="true">☺+</span>
@@ -257,11 +385,18 @@ export function ReactBar({
           </button>
           {open && (
             <ReactPalette
-              quote={quote}
-              onClose={() => setOpen(false)}
+              selection={selection}
+              containerRef={anchorRef}
+              onClose={() => {
+                setOpen(false);
+                setSelection(null);
+              }}
               onPick={(id) => {
                 setOpen(false);
-                void send(id, quote ?? undefined, false);
+                const q = selection?.kind === "anchored" ? selection.quote : undefined;
+                setSelection(null);
+                const existing = reacts.find((t) => tallyKey(t.react, t.quote) === tallyKey(id, q));
+                void send(id, q, "for", existing?.mine ?? null);
               }}
             />
           )}

@@ -10,7 +10,7 @@ import { ErrorView, Loading } from "../components/Status.tsx";
 import { useEngine } from "../engine/context.tsx";
 import { qk } from "../engine/queries.ts";
 import { fullDate, shortAge } from "../lib/time.ts";
-import { parseAtUri } from "../lib/uri.ts";
+import { parseAtUri, recordKind } from "../lib/uri.ts";
 import ui from "../styles/ui.module.css";
 import styles from "./pages.module.css";
 
@@ -24,6 +24,23 @@ const REASON: Record<NotificationReason, { glyph: string; text: string }> = {
   modAction: { glyph: "🛡", text: "Moderation on your item" },
   karmaChange: { glyph: "±", text: "Karma change" },
 };
+
+/** A link text for a notification without a preview. */
+function subjectLabel(uri: string): string {
+  const p = parseAtUri(uri);
+  switch (p ? recordKind(p.collection) : "other") {
+    case "post":
+      return "Open the post";
+    case "comment":
+      return "Open the comment";
+    case "sequence":
+      return "Open the sequence";
+    case "forum":
+      return "Open the forum";
+    default:
+      return "Open the record";
+  }
+}
 
 export function NotificationsPage() {
   const engine = useEngine();
@@ -68,14 +85,13 @@ export function NotificationsPage() {
                   {n.actor && <ActorName actor={n.actor} />} {r.text}
                   {!n.read && <span className="visually-hidden"> (unread)</span>}
                 </p>
-                {n.preview &&
-                  (isRecord ? (
-                    <RecordLink uri={n.subject} className={ui.small}>
-                      {n.preview}
-                    </RecordLink>
-                  ) : (
-                    <p className={ui.small}>{n.preview}</p>
-                  ))}
+                {isRecord ? (
+                  <RecordLink uri={n.subject} className={ui.small}>
+                    {n.preview ?? subjectLabel(n.subject)}
+                  </RecordLink>
+                ) : (
+                  n.preview && <p className={ui.small}>{n.preview}</p>
+                )}
               </div>
               <time
                 className={ui.muted}

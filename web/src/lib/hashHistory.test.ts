@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, expect, it } from "vitest";
-import { routeHrefFromHash } from "./hashHistory.ts";
+import { pageQuery, routeHrefFromHash } from "./hashHistory.ts";
 
 describe("routeHrefFromHash", () => {
   it("takes the route path and query from the fragment only", () => {
@@ -11,5 +11,14 @@ describe("routeHrefFromHash", () => {
     expect(routeHrefFromHash("")).toBe("/");
     expect(routeHrefFromHash("#")).toBe("/");
     expect(routeHrefFromHash("#/p/a/b#md-h-intro")).toBe("/p/a/b#md-h-intro");
+  });
+});
+
+describe("pageQuery", () => {
+  it("keeps only the mock flag of the page's query string", () => {
+    expect(pageQuery("?mock")).toBe("?mock");
+    expect(pageQuery("?mock=&code=abc&state=xyz")).toBe("?mock");
+    expect(pageQuery("?code=abc&state=xyz")).toBe("");
+    expect(pageQuery("")).toBe("");
   });
 });

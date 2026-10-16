@@ -1,34 +1,42 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Edit, retract and delete for the viewer's own comments (data-model.md §8.3, §8.7). Edits keep
-// a public revision; retraction keeps the comment, struck through.
+// a public revision; retraction keeps the comment, struck through. An edit rebuilds the draft
+// from the record itself, so the parent, the quote and the body's media survive it.
 
-import type { CommentNode } from "@lessdugin/engine/types";
+import type { CommentNode, MediaRef, TextQuote } from "@lessdugin/engine/types";
 import { useState } from "react";
 import { useEngine } from "../engine/context.tsx";
 import { writeStore } from "../engine/writes.ts";
+import { markdownOf, mediaRefsOf, objectField, refUri, textQuoteOf } from "../lib/records.ts";
 import ui from "../styles/ui.module.css";
 import { Dialog } from "./Dialog.tsx";
 import { LazyComposer } from "./LazyComposer.tsx";
 import { errorMessage } from "./Status.tsx";
 import { toasts } from "./Toast.tsx";
 
-interface Source {
+export interface CommentSource {
   markdown: string;
   parent?: string;
+  quote?: TextQuote;
+  media: MediaRef[];
 }
 
-function sourceOf(record: unknown): Source | null {
-  if (typeof record !== "object" || record === null) return null;
-  const r = record as { body?: { text?: unknown }; parent?: { uri?: unknown } };
-  if (typeof r.body?.text !== "string") return null;
-  const out: Source = { markdown: r.body.text };
-  if (typeof r.parent?.uri === "string") out.parent = r.parent.uri;
+/** The editable parts of a comment record, or null if it has no inline markdown body. */
+export function commentSourceOf(record: unknown): CommentSource | null {
+  const body = objectField(record, "body");
+  const markdown = markdownOf(body);
+  if (markdown === undefined) return null;
+  const out: CommentSource = { markdown, media: mediaRefsOf(body) };
+  const parent = refUri(record, "parent");
+  if (parent !== undefined) out.parent = parent;
+  const quote = textQuoteOf(objectField(record, "quote"));
+  if (quote) out.quote = quote;
   return out;
 }
 
 export function OwnCommentActions({ node, postUri }: { node: CommentNode; postUri: string }) {
   const engine = useEngine();
-  const [editing, setEditing] = useState<Source | null>(null);
+  const [editing, setEditing] = useState<CommentSource | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
 
   const run = async (
@@ -37,7 +45,7 @@ export function OwnCommentActions({ node, postUri }: { node: CommentNode; postUr
   ): Promise<boolean> => {
     try {
       const ticket = await start();
-      writeStore.track(ticket);
+      writeStore.track(ticket, node.uri);
       const final = await writeStore.wait(ticket.id);
       if (final.kind === "failed") throw final.error;
       if (final.kind === "done") toasts.show({ message: what, tone: "success" });
@@ -51,7 +59,7 @@ export function OwnCommentActions({ node, postUri }: { node: CommentNode; postUr
   const startEdit = async (): Promise<void> => {
     try {
       const raw = await engine.raw(node.uri);
-      const source = sourceOf(raw.record);
+      const source = commentSourceOf(raw.record);
       if (!source) throw new Error("The comment's source is not available.");
       setEditing(source);
     } catch (e) {
@@ -96,7 +104,8 @@ export function OwnCommentActions({ node, postUri }: { node: CommentNode; postUr
                       comment: {
                         root: postUri,
                         ...(editing.parent !== undefined ? { parent: editing.parent } : {}),
-                        body: { markdown, media: [] },
+                        ...(editing.quote !== undefined ? { quote: editing.quote } : {}),
+                        body: { markdown, media: editing.media },
                       },
                     },
                     { history: true },

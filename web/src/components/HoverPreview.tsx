@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Hover and focus previews for record links and DIDs in rendered content (lfm-1.md §5.3).
 // Depth 1: the preview's own RenderedHtml runs in preview mode and opens no further previews.
-// The target is re-parsed by the engine before use (F5). Bodies are shown only for posts that
-// resolve as visible or collapsed; everything else gets a metadata card with "open".
+// The target is re-parsed by the engine before use (F5). Bodies (and titles) are shown only for
+// posts that resolve as visible or collapsed; everything else gets a metadata card with "open":
+// kind, author and forum (§5.3, fail closed). DID cards resolve the identity lazily, at hover
+// time; the resolved identity also lets mentions of that DID show its handle (§5.4).
 
 import type { Ref as EngineRef } from "@lessdugin/engine/types";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useEffect, useLayoutEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 import { useEngine } from "../engine/context.tsx";
@@ -25,6 +27,24 @@ export interface HoverTarget {
 
 const WIDTH = 384;
 
+/** The forum of a metadata card, named only from the cache (a hover opens no forum). */
+function ForumLine({ uri }: { uri: string }) {
+  const engine = useEngine();
+  const q = useQuery({
+    queryKey: qk.forumRef(uri),
+    queryFn: () => engine.forumOpen(uri),
+    enabled: false,
+  });
+  return (
+    <p className={styles.muted}>
+      in{" "}
+      <RecordLink uri={uri}>
+        {q.data ? <bdi>{cleanName(q.data.forum.name)}</bdi> : "a forum"}
+      </RecordLink>
+    </p>
+  );
+}
+
 function PostPreview({ uri }: { uri: string }) {
   const engine = useEngine();
   const q = useQuery({ queryKey: qk.post(uri), queryFn: () => engine.getPost(uri) });
@@ -32,11 +52,27 @@ function PostPreview({ uri }: { uri: string }) {
   if (q.isError || !q.data) return <MetaCard uri={uri} />;
   const { post, body } = q.data;
   const listed = post.state.kind === "visible" || post.state.kind === "collapsed";
+  const kind =
+    post.kind === "quickTake" ? "Quick take" : post.kind === "question" ? "Question" : "Post";
+  if (!listed) {
+    // Metadata card only: no title, no body (lfm-1.md §5.3).
+    return (
+      <>
+        <p className={styles.kicker}>
+          {kind} by <ActorName actor={post.author} link={false} />
+        </p>
+        <ForumLine uri={post.forum} />
+        <p className={styles.muted}>This item is not shown.</p>
+        <RecordLink uri={uri} className={styles.open}>
+          Open →
+        </RecordLink>
+      </>
+    );
+  }
   return (
     <>
       <p className={styles.kicker}>
-        {post.kind === "quickTake" ? "Quick take" : post.kind === "question" ? "Question" : "Post"}{" "}
-        by <ActorName actor={post.author} link={false} />
+        {kind} by <ActorName actor={post.author} link={false} />
       </p>
       {post.title && (
         <p className={styles.title}>
@@ -46,13 +82,9 @@ function PostPreview({ uri }: { uri: string }) {
       {post.state.kind === "collapsed" && (
         <p className={styles.muted}>Collapsed ({post.state.reason})</p>
       )}
-      {listed ? (
-        <div className={styles.body}>
-          <RenderedHtml html={body.html} preview className="lfm-compact" />
-        </div>
-      ) : (
-        <p className={styles.muted}>This item is not shown.</p>
-      )}
+      <div className={styles.body}>
+        <RenderedHtml html={body.html} preview className="lfm-compact" />
+      </div>
       <RecordLink uri={uri} className={styles.open}>
         Open →
       </RecordLink>
@@ -62,9 +94,16 @@ function PostPreview({ uri }: { uri: string }) {
 
 function UserCard({ did }: { did: string }) {
   const engine = useEngine();
+  const qc = useQueryClient();
   const q = useQuery({
     queryKey: qk.user(did, undefined),
-    queryFn: () => engine.user(undefined, did),
+    queryFn: async () => {
+      const user = await engine.user(undefined, did);
+      // Hover time is when a non-participant's identity may be resolved (F16); share it with
+      // mention substitution.
+      if (user.actor.did === did) qc.setQueryData(qk.actor(did), user.actor);
+      return user;
+    },
   });
   if (q.isPending) return <p className={styles.muted}>Loading…</p>;
   if (q.isError || !q.data) return <p className={styles.muted}>Unknown user.</p>;

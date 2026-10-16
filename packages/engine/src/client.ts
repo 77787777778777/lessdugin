@@ -3,6 +3,7 @@
 
 import * as Comlink from "comlink";
 import type { EngineWorkerApi } from "./worker.ts";
+import { workerScriptUrl } from "./workerUrl.ts";
 
 export type { EngineApi } from "./api.ts";
 export type * from "./types.ts";
@@ -10,6 +11,7 @@ export type * from "./types.ts";
 export type EngineClient = Comlink.Remote<EngineWorkerApi>;
 
 export function startEngine(): EngineClient {
-  const worker = new Worker(new URL("./worker.ts", import.meta.url), { type: "module" });
+  // The URL passes the `lessdugin-worker` Trusted Types policy (threat-model SPA-2).
+  const worker = new Worker(workerScriptUrl(), { type: "module" });
   return Comlink.wrap<EngineWorkerApi>(worker);
 }

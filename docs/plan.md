@@ -430,7 +430,7 @@ S3 and S10 were run together. ADR numbers: 0000 template, 0001 decision log, 000
 | U7 | Review of the open questions in `data-model.md` §14, `social.md` §20.2, `sync.md` §17, `lfm-1.md` §14, `limits.md` §22, `threat-model.md` §12, `docs/spec/README.md` §7, ADR 0001 and §9 below; and a decision on the known issue K3 of `docs/spec/README.md` §1.4 (math normaliser, ADR 0002 against `lfm-1.md` §7) before M4 freezes the math vectors | M4 (K3), M7 (before freezing) | pending |
 | U8 | Authorisation to publish. Publication is irreversible: published NSIDs, limits and behaviour IDs are frozen. | M7 | pending |
 
-**Pending user runs** (updated as milestones finish): S1, S2, S8, S11; the M2 production smoke test; the M5 production logins; the S4 audio MIME check on a production PDS.
+**Pending user runs** (updated as milestones finish): S1 (passed on the devnet, ADR 0007; pending: a bsky.social entryway login, the hosted client metadata, the `include:` scope with `final-ns`, the OS keyrings), S2, S8, S11; the M2 production smoke test; the M5 production logins; the S4 audio MIME check on a production PDS.
 
 ---
 

@@ -10,7 +10,8 @@
     "./mock": "./src/mock.ts",
     "./palette": "./src/palette.ts",
     "./client": "./src/client.ts",
-    "./worker": "./src/worker.ts"
+    "./worker": "./src/worker.ts",
+    "./worker-url": "./src/workerUrl.ts"
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json",
@@ -24,6 +25,7 @@
   "devDependencies": {
     "@types/node": "^22.0.0",
     "typescript": "^7.0.0",
+    "vite": "^8.0.0",
     "vitest": "^5.0.0"
   }
 }

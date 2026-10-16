@@ -81,8 +81,8 @@
   margin-left: var(--space-1);
   padding: 0 0.35rem;
   border-radius: 999px;
-  background: var(--color-unread);
-  color: #fff;
+  background: var(--color-unread-strong);
+  color: var(--color-on-unread);
   font-size: var(--text-xs);
 }
 

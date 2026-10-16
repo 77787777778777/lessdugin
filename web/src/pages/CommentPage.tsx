@@ -39,10 +39,10 @@ function CommentThread({ uri }: { uri: string }) {
   const post = root && !isMissingRoot(root) ? root.post : null;
   const forum = useForum(post?.forum);
   if (raw.isPending || (rootUri !== null && thread.isPending)) return <Loading />;
-  if (raw.isError) return <ErrorView error={raw.error} title="Unknown comment" />;
-  if (thread.isError) return <ErrorView error={thread.error} />;
+  if (raw.isError) return <ErrorView page error={raw.error} title="Unknown comment" />;
+  if (thread.isError) return <ErrorView page error={thread.error} />;
   if (!rootUri || !thread.data)
-    return <ErrorView error={new Error("This comment has no thread.")} />;
+    return <ErrorView page error={new Error("This comment has no thread.")} />;
   const comments = subtree(thread.data.comments, uri);
   const first = comments[0];
   const role = forum.data?.myRole ?? "none";
@@ -84,8 +84,8 @@ export function CommentPage() {
   const { author, rkey } = route.useParams();
   const ref = useParsedRef(`#/c/${author}/${rkey}`);
   if (ref.isPending) return <Loading />;
-  if (ref.isError) return <ErrorView error={ref.error} title="Unknown comment" />;
+  if (ref.isError) return <ErrorView page error={ref.error} title="Unknown comment" />;
   if (ref.data.kind !== "comment")
-    return <ErrorView error={new Error("This address is not a comment.")} />;
+    return <ErrorView page error={new Error("This address is not a comment.")} />;
   return <CommentThread key={ref.data.uri} uri={ref.data.uri} />;
 }

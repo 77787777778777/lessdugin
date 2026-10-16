@@ -15,7 +15,9 @@ use jacquard_common::BosStr;
 use jacquard_common::http_client::HttpClient;
 use jacquard_common::types::did::Did as JDid;
 use jacquard_common::types::string::Handle as JHandle;
-use jacquard_identity::resolver::{DidDocResponse, IdentityError, IdentityResolver, ResolverOptions};
+use jacquard_identity::resolver::{
+    DidDocResponse, IdentityError, IdentityResolver, ResolverOptions,
+};
 use jacquard_oauth::dpop::DpopExt;
 use jacquard_oauth::resolver::OAuthResolver;
 use lessdugin_core::host::HostError;

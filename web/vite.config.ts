@@ -2,6 +2,7 @@
 import { createHash } from "node:crypto";
 import react from "@vitejs/plugin-react";
 import { defineConfig, type Plugin } from "vite";
+import { injectMetaCsp } from "./csp.mjs";
 
 /**
  * Emits `build-info.json` with the SHA-256 of every emitted file and an aggregate hash, so
@@ -33,10 +34,22 @@ function buildInfo(): Plugin {
   };
 }
 
-export default defineConfig({
+/**
+ * GitHub Pages cannot send headers, so `vite build --mode pages` delivers the CSP as the first
+ * element of <head> (threat-model.md §6.3; the text comes from csp.mjs, like `_headers`).
+ */
+function pagesMetaCsp(): Plugin {
+  return {
+    name: "lessdugin-pages-meta-csp",
+    apply: "build",
+    transformIndexHtml: { order: "post", handler: (html) => injectMetaCsp(html) },
+  };
+}
+
+export default defineConfig(({ mode }) => ({
   // Relative base so the static build works from any path (static hosts, IPFS, `lessdugin web`).
   base: "./",
-  plugins: [react(), buildInfo()],
+  plugins: [react(), buildInfo(), ...(mode === "pages" ? [pagesMetaCsp()] : [])],
   worker: { format: "es" },
   build: {
     target: "es2023",
@@ -47,4 +60,4 @@ export default defineConfig({
   },
   server: { fs: { allow: [".."] } },
   preview: { port: 4173, strictPort: true },
-});
+}));

@@ -75,9 +75,9 @@ impl AppPassword {
     pub fn from_reader(reader: impl BufRead) -> Result<Self, EngineError> {
         let mut line = String::new();
         let mut limited = reader.take(1024);
-        limited
-            .read_line(&mut line)
-            .map_err(|e| EngineError::invalid_input(format!("cannot read the app password: {e}")))?;
+        limited.read_line(&mut line).map_err(|e| {
+            EngineError::invalid_input(format!("cannot read the app password: {e}"))
+        })?;
         if line.is_empty() {
             return Err(EngineError::invalid_input(
                 "no app password on standard input",
@@ -255,7 +255,11 @@ impl AppPasswordSession {
 
     async fn access_token(&self, force_refresh: bool) -> Result<Secret, HostError> {
         let mut data = self.data.lock().await;
-        if force_refresh || data.access_exp_ms.is_some_and(|exp| expiring(exp, now_ms())) {
+        if force_refresh
+            || data
+                .access_exp_ms
+                .is_some_and(|exp| expiring(exp, now_ms()))
+        {
             self.refresh(&mut data, force_refresh).await?;
         }
         Ok(data.access_jwt.clone())
@@ -319,6 +323,7 @@ impl AppPasswordSession {
     }
 
     async fn send_inner(&self, req: HttpRequest) -> Result<HttpResponse, HostError> {
+        super::allowlist::check(&self.did, &req)?;
         let mut token = self.access_token(false).await?;
         let mut refreshed = false;
         loop {

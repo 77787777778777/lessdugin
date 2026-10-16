@@ -6,6 +6,7 @@ import { POST_FILTERS, POST_SORTS } from "@lessdugin/engine/types";
 import { createRootRoute, createRoute, createRouter } from "@tanstack/react-router";
 import { AppShell } from "./components/AppShell.tsx";
 import { createAppHashHistory } from "./lib/hashHistory.ts";
+import { parseAtUri } from "./lib/uri.ts";
 import { AtPage } from "./pages/AtPage.tsx";
 import { BookmarksPage } from "./pages/BookmarksPage.tsx";
 import { CommentPage } from "./pages/CommentPage.tsx";
@@ -77,9 +78,13 @@ const forumNewRoute = createRoute({
   getParentRoute: () => forumRoute,
   path: "new",
   component: ForumNewPostPage,
-  validateSearch: (s: Record<string, unknown>): { draft?: string } => {
+  validateSearch: (s: Record<string, unknown>): { draft?: string; edit?: string } => {
     const draft = str(s.draft);
-    return draft ? { draft } : {};
+    const edit = str(s.edit);
+    return {
+      ...(draft ? { draft } : {}),
+      ...(edit && parseAtUri(edit) ? { edit } : {}),
+    };
   },
 });
 const forumTagsRoute = createRoute({

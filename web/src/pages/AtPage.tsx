@@ -84,7 +84,8 @@ export function AtPage() {
     if (target && target.kind !== "record") openRef(target, { replace: true });
   }, [target, openRef]);
   if (ref.isPending) return <Loading label="Resolving…" />;
-  if (ref.isError) return <ErrorView error={ref.error} title="This link could not be resolved" />;
+  if (ref.isError)
+    return <ErrorView page error={ref.error} title="This link could not be resolved" />;
   if (ref.data.kind === "record") return <RawRecord uri={ref.data.uri} />;
   return <Loading label="Opening…" />;
 }

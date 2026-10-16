@@ -2,17 +2,20 @@
 // Karma and agreement voting (social.md §7; data-model.md §8.5). Click for a normal vote,
 // shift-click or long-press for a strong one; clicking the current vote clears it. Votes are
 // applied optimistically, held by the engine for the 4 s undo window (with an "Undo" toast),
-// and reconciled when the engine's `changed` event brings the new score. The first vote ever
-// shows an interstitial explaining that votes are public records.
+// and reconciled when the engine's `changed` event brings the new score. Each vote is tracked
+// by its own sequence number: an older vote's completion, failure or undo never touches the
+// display of a newer vote on the same axis. The first vote ever shows an interstitial explaining
+// that votes are public records. A vote still in the outbox shows `[pending]` (sync.md §1.6).
 
 import type { AgreementValue, KarmaValue, OpinionIntent, ScoreView } from "@lessdugin/engine/types";
 import { OPINION_UNDO_WINDOW_MS } from "@lessdugin/engine/types";
 import { useNavigate } from "@tanstack/react-router";
 import { type MouseEvent, type PointerEvent, useEffect, useId, useRef, useState } from "react";
 import { useEngine } from "../engine/context.tsx";
-import { writeStore } from "../engine/writes.ts";
+import { usePendingWrite, writeStore } from "../engine/writes.ts";
 import { cx } from "../lib/cx.ts";
 import type { VotingMode } from "../lib/policy.ts";
+import { Badges } from "./Badges.tsx";
 import { usePublicAck } from "./PublicAck.tsx";
 import { errorMessage } from "./Status.tsx";
 import { toasts } from "./Toast.tsx";
@@ -74,7 +77,8 @@ export function displayedAxis(
   optimistic: Optimistic,
 ): { mine: AxisValue | null; total: number } {
   const server = (axis === "karma" ? score.mine?.karma : score.mine?.agreement) ?? null;
-  const total = axis === "karma" ? score.score : score.agreement;
+  // `agreement` is absent from the wire DTO under `voting = karmaOnly` (engine-api.md §4.1).
+  const total = axis === "karma" ? score.score : (score.agreement ?? 0);
   const o = optimistic[axis];
   if (o === undefined) return { mine: server, total };
   return { mine: o, total: total - estimatedPower(server) + estimatedPower(o) };
@@ -176,25 +180,33 @@ export function VoteControls({
   const navigate = useNavigate();
   const hintId = useId();
   const [optimistic, setOptimistic] = useState<Optimistic>({});
-  const awaitingRefresh = useRef<Record<Axis, boolean>>({ karma: false, agreement: false });
+  const pending = usePendingWrite(subject);
+  /** The sequence number of the vote whose value `optimistic[axis]` shows. */
+  const shownSeq = useRef<Record<Axis, number>>({ karma: 0, agreement: 0 });
+  const nextSeq = useRef(0);
+  /** A completed vote waiting for the engine's re-query to bring its score. */
+  const awaitingRefresh = useRef<Record<Axis, number | null>>({ karma: null, agreement: null });
 
-  // A completed write is reconciled when the engine's re-query brings a new score.
+  // A completed write is reconciled when the engine's re-query brings a new score, unless a
+  // newer vote on the same axis is still being shown.
   useEffect(() => {
     void score;
     setOptimistic((o) => {
       const next = { ...o };
       for (const axis of ["karma", "agreement"] as const) {
-        if (awaitingRefresh.current[axis]) {
-          delete next[axis];
-          awaitingRefresh.current[axis] = false;
-        }
+        const seq = awaitingRefresh.current[axis];
+        if (seq === null) continue;
+        if (shownSeq.current[axis] === seq) delete next[axis];
+        awaitingRefresh.current[axis] = null;
       }
       return next;
     });
   }, [score]);
 
-  const revert = (axis: Axis): void =>
+  /** Drops the optimistic value of vote `seq`, if it is still the one shown. */
+  const revert = (axis: Axis, seq: number): void =>
     setOptimistic((o) => {
+      if (shownSeq.current[axis] !== seq) return o;
       const next = { ...o };
       delete next[axis];
       return next;
@@ -210,17 +222,20 @@ export function VoteControls({
     const target = valueFor(axis, dir, strong);
     const next = current === target ? null : target;
     if (!(await requestAck("vote"))) return;
+    nextSeq.current += 1;
+    const seq = nextSeq.current;
+    shownSeq.current[axis] = seq;
     setOptimistic((o) => ({ ...o, [axis]: next }));
     const intent = (next === null ? { kind: axis } : { kind: axis, value: next }) as OpinionIntent;
     let ticket: Awaited<ReturnType<typeof engine.opinion>>;
     try {
       ticket = await engine.opinion(subject, intent);
     } catch (e) {
-      revert(axis);
+      revert(axis, seq);
       toasts.show({ message: errorMessage(e), tone: "error" });
       return;
     }
-    writeStore.track(ticket);
+    writeStore.track(ticket, subject);
     const what = axis === "karma" ? "Vote" : "Agreement vote";
     const toastId = toasts.show({
       message: next === null ? `${what} removed` : `${what} recorded (public)`,
@@ -236,10 +251,10 @@ export function VoteControls({
     });
     const final = await writeStore.wait(ticket.id);
     if (final.kind === "done") {
-      awaitingRefresh.current[axis] = true;
+      awaitingRefresh.current[axis] = seq;
       return;
     }
-    revert(axis);
+    revert(axis, seq);
     toasts.dismiss(toastId);
     toasts.show(
       final.kind === "failed"
@@ -311,9 +326,11 @@ export function VoteControls({
           />
         </fieldset>
       )}
+      {!ownItem && pending && <Badges pending />}
       {size === "post" && score.earlierVersionVotes > 0 && (
         <span className={styles.note}>
-          {score.earlierVersionVotes} votes were cast on an earlier version
+          {score.earlierVersionVotes} {score.earlierVersionVotes === 1 ? "vote was" : "votes were"}{" "}
+          cast on an earlier version
         </span>
       )}
       {size === "post" && score.unweighted > 0 && (

@@ -207,16 +207,21 @@ impl SecretStore {
             return KeyringStatus::Disabled;
         }
         let probe = tokio::task::spawn_blocking(|| {
-            let entry = keyring::Entry::new(KEYRING_SERVICE, "lessdugin-doctor-probe")?;
+            // The store's own initialisation error says why (e.g. no D-Bus session).
+            if let Err(e) = keyring::Entry::store_status() {
+                return Err(e.to_string());
+            }
+            let entry = keyring::Entry::new(KEYRING_SERVICE, "lessdugin-doctor-probe")
+                .map_err(|e| e.to_string())?;
             match entry.get_secret() {
                 Ok(_) | Err(keyring::Error::NoEntry) => Ok(()),
-                Err(e) => Err(e),
+                Err(e) => Err(e.to_string()),
             }
         })
         .await;
         match probe {
             Ok(Ok(())) => KeyringStatus::Available,
-            Ok(Err(e)) => KeyringStatus::Unavailable(e.to_string()),
+            Ok(Err(e)) => KeyringStatus::Unavailable(e),
             Err(e) => KeyringStatus::Unavailable(e.to_string()),
         }
     }
@@ -233,7 +238,9 @@ impl SecretStore {
             match got {
                 Ok(bytes) => return parse_session(&bytes, did).map(Some),
                 Err(keyring::Error::NoEntry) => {}
-                Err(e) => tracing::debug!(error = %e, "keyring unavailable; trying the session file"),
+                Err(e) => {
+                    tracing::debug!(error = %e, "keyring unavailable; trying the session file")
+                }
             }
         }
         let path = self.session_file(did);
@@ -347,7 +354,10 @@ mod tests {
     #[test]
     fn debug_redacts_tokens() {
         let s = format!("{:?}", sample("did:plc:x"));
-        assert!(!s.contains("access-secret") && !s.contains("refresh-secret"), "{s}");
+        assert!(
+            !s.contains("access-secret") && !s.contains("refresh-secret"),
+            "{s}"
+        );
         let o = StoredSession::Oauth(OAuthData {
             v: 1,
             did: "did:plc:x".into(),

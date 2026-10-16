@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // The markdown composer: CodeMirror 6 with the markdown language, a toolbar (bold, italic,
 // link, image, math, spoiler), a live preview rendered by the engine (150 ms debounce) and
-// draft autosave through `saveDraft`.
+// draft autosave through `saveDraft`. A save still in flight when the text is published (or
+// discarded) deletes the draft it wrote instead of resurrecting it.
 //
 // CSP: CodeMirror injects its base theme through style-mod. In a document that is a <style>
 // element, which `style-src 'self'` forbids; in a shadow root it is a constructed stylesheet
@@ -13,7 +14,7 @@ import { markdown } from "@codemirror/lang-markdown";
 import { EditorSelection, EditorState } from "@codemirror/state";
 import { EditorView, keymap, placeholder as placeholderExt } from "@codemirror/view";
 import type { Draft, RenderedBody } from "@lessdugin/engine/types";
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useEngine } from "../engine/context.tsx";
 import { cx } from "../lib/cx.ts";
 import ui from "../styles/ui.module.css";
@@ -127,12 +128,19 @@ export function Composer({
   const [showPreview, setShowPreview] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [draftId, setDraftId] = useState<string | undefined>(initialDraftId);
   const [savedAt, setSavedAt] = useState<number | null>(null);
-  const labelId = useId();
   const submitRef = useRef<() => void>(() => {});
   // The editor is created once; these only seed it.
-  const mountOptions = useRef({ initial, placeholder, autoFocus, labelId });
+  const mountOptions = useRef({ initial, placeholder, autoFocus, label });
+  // Autosave state lives in refs: async completions must see the latest values.
+  const draftIdRef = useRef<string | undefined>(initialDraftId);
+  const makeDraftRef = useRef(makeDraft);
+  makeDraftRef.current = makeDraft;
+  /** Bumped when the text is published: saves started before then must not leave a draft
+   * behind. (Unmounting keeps the draft, which is the point of a draft.) */
+  const generation = useRef(0);
+  const pendingSave = useRef<Promise<void> | null>(null);
+  const autosave = makeDraft !== undefined;
 
   // Mount CodeMirror inside a shadow root (see the header comment).
   useEffect(() => {
@@ -141,7 +149,7 @@ export function Composer({
     const shadow = host.shadowRoot ?? host.attachShadow({ mode: "open" });
     const parent = document.createElement("div");
     shadow.replaceChildren(parent);
-    const { initial, placeholder, autoFocus, labelId } = mountOptions.current;
+    const { initial, placeholder, autoFocus, label } = mountOptions.current;
     const view = new EditorView({
       parent,
       root: shadow,
@@ -178,7 +186,9 @@ export function Composer({
           EditorView.lineWrapping,
           placeholderExt(placeholder),
           editorTheme,
-          EditorView.contentAttributes.of({ "aria-labelledby": labelId, "aria-multiline": "true" }),
+          // The editable element lives in a shadow root, so `aria-labelledby` cannot reach a
+          // label in the document: name it directly.
+          EditorView.contentAttributes.of({ "aria-label": label, "aria-multiline": "true" }),
           EditorView.updateListener.of((u) => {
             if (u.docChanged) setText(u.state.doc.toString());
           }),
@@ -216,18 +226,27 @@ export function Composer({
 
   // Draft autosave.
   useEffect(() => {
-    if (!makeDraft || text.trim() === "" || text === initial) return;
+    if (!autosave || text.trim() === "" || text === initial) return;
+    const gen = generation.current;
     const t = setTimeout(() => {
-      engine.saveDraft(makeDraft(text, draftId)).then(
+      const build = makeDraftRef.current;
+      if (!build) return;
+      const save = engine.saveDraft(build(text, draftIdRef.current)).then(
         (id) => {
-          setDraftId(id);
+          if (generation.current !== gen) {
+            // Published meanwhile: this save must not resurrect the draft.
+            void engine.deleteDraft(id).catch(() => {});
+            return;
+          }
+          draftIdRef.current = id;
           setSavedAt(Date.now());
         },
         () => {},
       );
+      pendingSave.current = save;
     }, DRAFT_DEBOUNCE_MS);
     return () => clearTimeout(t);
-  }, [text, makeDraft, draftId, engine, initial]);
+  }, [text, autosave, engine, initial]);
 
   const submit = async (): Promise<void> => {
     const value = viewRef.current?.state.doc.toString() ?? text;
@@ -237,10 +256,14 @@ export function Composer({
     try {
       const ok = await onSubmit(value);
       if (ok) {
+        generation.current++;
         const view = viewRef.current;
         view?.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: "" } });
-        if (draftId !== undefined) await engine.deleteDraft(draftId).catch(() => {});
-        setDraftId(undefined);
+        // A save still in flight deletes its own draft when it lands (generation changed).
+        await pendingSave.current?.catch(() => {});
+        const id = draftIdRef.current;
+        draftIdRef.current = undefined;
+        if (id !== undefined) await engine.deleteDraft(id).catch(() => {});
         setSavedAt(null);
       }
     } catch (e) {
@@ -253,9 +276,6 @@ export function Composer({
 
   return (
     <div className={cx(styles.composer, compact && styles.compact)}>
-      <span id={labelId} className="visually-hidden">
-        {label}
-      </span>
       <div className={styles.toolbar} role="toolbar" aria-label="Formatting">
         {TOOLS.map((t) => (
           <button

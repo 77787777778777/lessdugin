@@ -2,7 +2,13 @@
 // A thread as a flat, pre-order list with depth indentation capped at six levels ("continue
 // thread →"), collapse/expand, collapsed reasons, tombstones, unread highlights and inline
 // reply composers. Long threads are virtualised with @tanstack/react-virtual. Keyboard: `j`/`k`
-// move between comments, Enter expands or collapses the focused one.
+// move between comments, Enter expands or collapses the focused one. Focus is tracked by comment
+// uri, so collapsing a comment or a live re-query never moves it to another comment.
+//
+// The window virtualiser needs the list's offset from the top of the document (its scroll
+// margin). Content above the list changes height at any time (the composer's live preview, media,
+// banners, a reply box), so the margin is re-measured on every commit and whenever the document
+// or the list resizes; a stale margin renders the wrong rows, or none.
 
 import type { CommentNode } from "@lessdugin/engine/types";
 import { useWindowVirtualizer } from "@tanstack/react-virtual";
@@ -75,20 +81,54 @@ export function CommentTree({
   emptyText?: string | undefined;
 }) {
   const [toggled, setToggled] = useState<ReadonlySet<string>>(() => new Set());
+  const [expandedAuthors, setExpandedAuthors] = useState<ReadonlySet<string>>(() => new Set());
   const [replyTo, setReplyTo] = useState<string | null>(null);
-  const [focused, setFocused] = useState<number | null>(null);
+  const [focused, setFocused] = useState<string | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const rows: ThreadRow[] = useMemo(
-    () => buildRows(comments, toggled, { baseDepth }),
-    [comments, toggled, baseDepth],
+    () => buildRows(comments, toggled, { baseDepth, expandedAuthors }),
+    [comments, toggled, baseDepth, expandedAuthors],
   );
+  const showAuthor = useCallback((did: string) => {
+    setExpandedAuthors((prev) => new Set(prev).add(did));
+  }, []);
   const virtual = rows.length > VIRTUALIZE_ABOVE;
+  const indexOfUri = useMemo(() => {
+    const m = new Map<string, number>();
+    rows.forEach((r, i) => {
+      if (r.kind === "comment") m.set(r.node.uri, i);
+    });
+    return m;
+  }, [rows]);
 
   const [scrollMargin, setScrollMargin] = useState(0);
-  useLayoutEffect(() => {
+  const measureMargin = useCallback(() => {
     const el = listRef.current;
-    if (el && virtual) setScrollMargin(el.getBoundingClientRect().top + window.scrollY);
+    if (!el || !virtual) return;
+    const margin = Math.round(el.getBoundingClientRect().top + window.scrollY);
+    setScrollMargin((m) => (m === margin ? m : margin));
   }, [virtual]);
+  // Every commit (content above may have changed with it)…
+  useLayoutEffect(measureMargin);
+  // …and every layout change outside React's knowledge (images, fonts, other subtrees).
+  useEffect(() => {
+    if (!virtual) return;
+    const list = listRef.current;
+    let frame = 0;
+    const schedule = (): void => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(measureMargin);
+    };
+    const ro = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(schedule);
+    ro?.observe(document.body);
+    if (list?.parentElement) ro?.observe(list.parentElement);
+    window.addEventListener("resize", schedule);
+    return () => {
+      cancelAnimationFrame(frame);
+      ro?.disconnect();
+      window.removeEventListener("resize", schedule);
+    };
+  }, [virtual, measureMargin]);
 
   const virtualizer = useWindowVirtualizer({
     count: virtual ? rows.length : 0,
@@ -108,12 +148,17 @@ export function CommentTree({
   }, []);
 
   const focusRow = useCallback(
-    (index: number) => {
-      setFocused(index);
+    (uri: string) => {
+      const index = indexOfUri.get(uri);
+      if (index === undefined) return;
+      setFocused(uri);
+      measureMargin();
       if (virtual) virtualizer.scrollToIndex(index, { align: "center" });
       let tries = 0;
       const attempt = (): void => {
-        const el = listRef.current?.querySelector(`[data-row-index="${index}"]`);
+        const el = [...(listRef.current?.querySelectorAll("[data-comment-uri]") ?? [])].find(
+          (x) => x.getAttribute("data-comment-uri") === uri,
+        );
         if (el instanceof HTMLElement) {
           el.focus({ preventScroll: true });
           if (!virtual) el.scrollIntoView?.({ block: "nearest" });
@@ -123,7 +168,7 @@ export function CommentTree({
       };
       requestAnimationFrame(attempt);
     },
-    [virtual, virtualizer],
+    [virtual, virtualizer, indexOfUri, measureMargin],
   );
 
   // j / k navigation between comment rows.
@@ -133,18 +178,24 @@ export function CommentTree({
         return;
       if (e.key !== "j" && e.key !== "k") return;
       const step = e.key === "j" ? 1 : -1;
-      let i = focused === null ? (step > 0 ? -1 : rows.length) : focused;
+      const at = focused === null ? undefined : indexOfUri.get(focused);
+      let i = at === undefined ? (step > 0 ? -1 : rows.length) : at;
+      let target: string | null = null;
       for (;;) {
         i += step;
         if (i < 0 || i >= rows.length) return;
-        if (rows[i]?.kind === "comment") break;
+        const row = rows[i];
+        if (row?.kind === "comment") {
+          target = row.node.uri;
+          break;
+        }
       }
       e.preventDefault();
-      focusRow(i);
+      focusRow(target);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [rows, focused, focusRow]);
+  }, [rows, focused, focusRow, indexOfUri]);
 
   if (rows.length === 0) return <p className={styles.empty}>{emptyText}</p>;
 
@@ -163,11 +214,12 @@ export function CommentTree({
         row={row}
         index={index}
         ctx={ctx}
-        focused={focused === index}
+        focused={focused === row.node.uri}
         replying={replyTo === row.node.uri}
         onToggle={toggle}
         onFocusRow={setFocused}
         onReply={setReplyTo}
+        onShowAuthor={showAuthor}
       />
     );
   };

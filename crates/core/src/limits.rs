@@ -76,3 +76,16 @@ pub const RETRY_CAP_MS: u64 = 8_000;
 /// The transport waits at most this long for a `Retry-After` inside one call; a longer wait is
 /// returned to the caller as `RateLimited` (the scheduler owns longer pauses).
 pub const RETRY_AFTER_MAX_WAIT_MS: u64 = 60_000;
+
+/// Nesting depth of a record value, in JSON or DAG-CBOR (`limits.md` §6, rule G10). Deeper: the
+/// record is stored as an invalid version.
+pub const NESTING_MAX_RECORD: usize = 32;
+/// Nesting depth of any JSON response document or DAG-CBOR block (`limits.md` §6). Deeper: the
+/// response is rejected whole (R1).
+pub const NESTING_MAX_DOCUMENT: usize = 36;
+/// DAG-CBOR size of a record value (`limits.md` §4, rule G6). Larger: the record is invalid.
+pub const RECORD_CBOR_MAX_BYTES: usize = 1_000_000;
+/// Tombstones are kept at least this long (`limits.md` §15, I4).
+pub const TOMBSTONE_MIN_RETENTION_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+/// Dirty marks kept per repo (`sync.md` §6.5); beyond it `marksOverflow` is set.
+pub const REPO_MARKS_MAX: usize = 1_000;

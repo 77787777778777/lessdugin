@@ -7,11 +7,13 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "build:demo": "VITE_DEMO=1 vite build",
+    "build:pages": "vite build --mode pages",
     "preview": "vite preview",
     "typecheck": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json && biome check . && node scripts/check-no-raw-href.mjs",
     "test": "vitest run",
-    "e2e": "vite build && PLAYWRIGHT_BROWSERS_PATH=${PLAYWRIGHT_BROWSERS_PATH:-/opt/pw-browsers} playwright test -c e2e/playwright.config.ts"
+    "e2e": "VITE_DEMO=1 vite build && PLAYWRIGHT_BROWSERS_PATH=${PLAYWRIGHT_BROWSERS_PATH:-/opt/pw-browsers} playwright test -c e2e/playwright.config.ts"
   },
   "dependencies": {
     "@codemirror/commands": "^6.0.0",
@@ -29,6 +31,7 @@
     "react-dom": "^19.0.0"
   },
   "devDependencies": {
+    "@axe-core/playwright": "^4.10.0",
     "@playwright/test": "1.56.1",
     "@testing-library/dom": "^10.0.0",
     "@testing-library/react": "^16.0.0",

@@ -22,8 +22,13 @@ export function ForumMembersPage() {
     try {
       const t = await (on ? engine.grant(uri, [did]) : engine.revoke(uri, [did]));
       writeStore.track(t);
-      await writeStore.wait(t.id);
-      toasts.show({ message: on ? "Membership granted" : "Grant revoked" });
+      const final = await writeStore.wait(t.id);
+      if (final.kind === "failed") throw final.error;
+      if (final.kind === "done") {
+        toasts.show({ message: on ? "Membership granted" : "Grant revoked", tone: "success" });
+      } else {
+        toasts.show({ message: on ? "Grant undone" : "Revocation undone" });
+      }
     } catch (e) {
       toasts.show({ message: errorMessage(e), tone: "error" });
     }
@@ -31,43 +36,45 @@ export function ForumMembersPage() {
   return (
     <section className={ui.pageWide} aria-label="Members">
       <h2 className={ui.sectionTitle}>Members ({q.data.length})</h2>
-      <table className={ui.table}>
-        <thead>
-          <tr>
-            <th scope="col">Member</th>
-            <th scope="col">Status</th>
-            <th scope="col">Joined</th>
-            <th scope="col">Note</th>
-            {authority && <th scope="col">Grant</th>}
-          </tr>
-        </thead>
-        <tbody>
-          {q.data.map((m) => (
-            <tr key={m.actor.did}>
-              <td>
-                <ActorName actor={m.actor} showIdent />
-              </td>
-              <td>
-                {m.status}
-                {m.granted && <span className={ui.muted}> (granted)</span>}
-              </td>
-              <td>{fullDate(m.joinedAtMs)}</td>
-              <td className={ui.muted}>{m.membershipNote}</td>
-              {authority && (
-                <td>
-                  <button
-                    type="button"
-                    className={ui.ghost}
-                    onClick={() => void grant(m.actor.did, !m.granted)}
-                  >
-                    {m.granted ? "Revoke" : "Grant"}
-                  </button>
-                </td>
-              )}
+      <div className={ui.tableScroll}>
+        <table className={ui.table}>
+          <thead>
+            <tr>
+              <th scope="col">Member</th>
+              <th scope="col">Status</th>
+              <th scope="col">Joined</th>
+              <th scope="col">Note</th>
+              {authority && <th scope="col">Grant</th>}
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {q.data.map((m) => (
+              <tr key={m.actor.did}>
+                <td>
+                  <ActorName actor={m.actor} showIdent />
+                </td>
+                <td>
+                  {m.status}
+                  {m.granted && <span className={ui.muted}> (granted)</span>}
+                </td>
+                <td>{fullDate(m.joinedAtMs)}</td>
+                <td className={ui.muted}>{m.membershipNote}</td>
+                {authority && (
+                  <td>
+                    <button
+                      type="button"
+                      className={ui.ghost}
+                      onClick={() => void grant(m.actor.did, !m.granted)}
+                    >
+                      {m.granted ? "Revoke" : "Grant"}
+                    </button>
+                  </td>
+                )}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </section>
   );
 }

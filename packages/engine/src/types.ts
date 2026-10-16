@@ -210,6 +210,7 @@ export type PostFilter = "frontpage" | "all" | "curated";
 /** social.md §12.4 */
 export type CommentSort = "magic" | "top" | "new" | "old" | "latestReply";
 
+export const POST_KINDS: readonly PostKind[] = ["article", "link", "question", "quickTake"];
 export const POST_SORTS: readonly PostSort[] = ["magic", "top", "new", "old", "recentComments"];
 export const POST_FILTERS: readonly PostFilter[] = ["frontpage", "all", "curated"];
 export const COMMENT_SORTS: readonly CommentSort[] = ["magic", "top", "new", "old", "latestReply"];
@@ -1001,8 +1002,10 @@ export function isMissingRoot(root: ThreadRoot): root is { missing: AtUri } {
   return "missing" in root;
 }
 
+/** `{ orphan: true }`. The Rust DTO's `orphan` is a bool, so `{ orphan: false }` can be
+ * serialised too; it is not an orphan (and carries no range). */
 export function isOrphanAnchor(anchor: Anchor): anchor is { orphan: true } {
-  return "orphan" in anchor;
+  return "orphan" in anchor && anchor.orphan === true;
 }
 
 export function isEngineError(e: unknown): e is EngineError {

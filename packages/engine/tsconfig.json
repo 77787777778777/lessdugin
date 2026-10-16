@@ -2,7 +2,7 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "allowImportingTsExtensions": true,
-    "types": ["node"]
+    "types": ["node", "vite/client"]
   },
   "include": ["src", "pkg/*.d.ts"]
 }

@@ -16,6 +16,8 @@ path = "src/main.rs"
 default = ["tui", "web"]
 tui = ["dep:lessdugin-tui"]
 web = []
+# Read and write the final (published) namespace (release builds).
+final-ns = ["lessdugin-native/final-ns", "lessdugin-lexicon/final-ns"]
 
 [dependencies]
 lessdugin-core.workspace = true
@@ -35,6 +37,12 @@ tracing-subscriber.workspace = true
 lessdugin-markdown.workspace = true
 lessdugin-atp.workspace = true
 lessdugin-lexicon.workspace = true
+crossterm.workspace = true
+webbrowser.workspace = true
+futures.workspace = true
+url = { workspace = true, features = ["serde"] }
 
 [dev-dependencies]
 assert_cmd.workspace = true
+tempfile.workspace = true
+reqwest.workspace = true

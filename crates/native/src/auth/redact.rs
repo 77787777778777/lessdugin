@@ -258,10 +258,7 @@ mod tests {
         let jwt = "eyJhbGciOiJFUzI1NiJ9.eyJzdWIiOiJkaWQ6cGxjOngifQ.c2lnbmF0dXJl";
         let r = redact_secrets(&format!("token {jwt} end"));
         assert_eq!(r, "token <redacted> end");
-        assert_eq!(
-            redact_secrets("pw abcd-efgh-ijkl-mnop."),
-            "pw <redacted>."
-        );
+        assert_eq!(redact_secrets("pw abcd-efgh-ijkl-mnop."), "pw <redacted>.");
         // Longer dash-separated words are not app passwords.
         assert_eq!(
             redact_secrets("id abcd-efgh-ijkl-mnop-qrst"),

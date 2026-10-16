@@ -4,15 +4,29 @@
 //
 // - `LFM_CONFIG` is DOMPurify configured with exactly the renderer's allowlist (lfm-1.md §8.2
 //   and the MathML filter of §7.3): the allowed tags and attributes, `ALLOW_DATA_ATTR: false`,
-//   the URI regexp, and a hook that enforces per-element attributes, class tokens and value
-//   grammars. `ALLOW_ARIA_ATTR: false` and `ADD_URI_SAFE_ATTR` keep it exact: without the
-//   latter DOMPurify would test every non-URL attribute value (`dir="auto"`, `rel`, …) against
-//   the URI regexp and drop it.
-// - The Trusted Types policy `lessdugin-md` wraps `DOMPurify.sanitize(html, LFM_CONFIG)`. It is
-//   created once, at startup, and is the only way rendered content reaches the DOM.
+//   the URI regexp, and hooks that enforce per-element attributes, class tokens, value grammars
+//   and whole-element shapes. `ALLOW_ARIA_ATTR: false` and `ADD_URI_SAFE_ATTR` keep it exact:
+//   without the latter DOMPurify would test every non-URL attribute value (`dir="auto"`, `rel`,
+//   …) against the URI regexp and drop it.
+// - The sanitiser is a dedicated DOMPurify instance, configured once with `setConfig`: its hooks
+//   and configuration never leak into (or from) any other user of the shared default instance.
+// - The Trusted Types policy `lessdugin-md` wraps `sanitize(html)`. It is created once, at
+//   startup, and is the only way rendered content reaches the DOM.
 // - This module is the only place that assigns `innerHTML` (scripts/check-no-raw-href.mjs).
+//
+// `SAFE_FOR_XML: false`. DOMPurify's SAFE_FOR_XML mode drops every attribute whose decoded value
+// contains `</script`, `</style`, `-->` and similar, and every comment or raw-text element whose
+// text looks like markup. It exists for output that may be re-parsed as XML or inside a raw-text
+// context. Here the output is only ever assigned to `innerHTML` of an element in an HTML
+// document (`setSanitizedHtml`), and the allowlist has no raw-text element (no `style`,
+// `script`, `textarea`, `title`, `noscript`, `xmp`, `iframe`, `noembed`, `noframes`), no
+// comments, and none of the declarative-partial-update attributes it also polices (`for`,
+// `patchsrc`; dropped by the attribute hook). With it on, an `img alt` that merely contains the
+// text `</script` (the `xss/html.json#attribute-breakout-media-alt` vector) loses its `alt`, so
+// the sanitiser would change conforming renderer output, which lfm-1.md §8.3 forbids.
 
-import DOMPurify, { type Config } from "dompurify";
+import DOMPurify, { type Config, type DOMPurify as Purifier } from "dompurify";
+import { isDid, isRecordUri } from "./uri.ts";
 
 const HTML_TAGS = [
   "div",
@@ -142,7 +156,7 @@ const MATHML_ATTRS = [
 
 const ALLOWED_ATTR = [...new Set<string>([...HTML_ATTRS, ...MATHML_ATTRS])];
 
-/** `href` is the only URL-valued attribute; every other value is checked by the hook below. */
+/** `href` is the only URL-valued attribute; every other value is checked by the hooks below. */
 const URI_SAFE_ATTR = ALLOWED_ATTR.filter((a) => a !== "href");
 
 export const LFM_URI_REGEXP = /^(?:https?:|mailto:|#\/at\/|#\/u\/)/;
@@ -154,6 +168,8 @@ export const LFM_CONFIG = {
   ALLOW_ARIA_ATTR: false,
   ALLOWED_URI_REGEXP: LFM_URI_REGEXP,
   ADD_URI_SAFE_ATTR: URI_SAFE_ATTR,
+  SAFE_FOR_XML: false,
+  RETURN_TRUSTED_TYPE: false,
 } satisfies Config;
 
 // ------------------------------------------------------------------------- value grammars
@@ -170,6 +186,8 @@ const ANY: Check = () => true;
 const CID: Check = (v) => /^b[a-z2-7]{1,127}$/.test(v);
 const DIMENSION: Check = (v) => /^[1-9][0-9]{0,7}$/.test(v);
 const HEADING: Record<string, Check> = { id: (v) => /^md-h-[\p{L}\p{N}_-]*$/u.test(v), dir: AUTO };
+const EXTERNAL_HREF = /^(?:https?:\/\/|mailto:)/;
+const WEB_HREF = /^https?:\/\//;
 
 const HTML_RULES: Record<string, Record<string, Check>> = {
   div: {
@@ -204,8 +222,8 @@ const HTML_RULES: Record<string, Record<string, Check>> = {
   sup: { id: (v) => /^md-fnref-[1-9][0-9]*-[1-9][0-9]*$/.test(v) },
   a: {
     href: (v) => /^(https?:\/\/|mailto:|#\/at\/|#\/u\/)/.test(v),
-    "data-at-uri": (v) => /^at:\/\/did:(plc|web):[^\s"'<>/]+\/[^\s"'<>/]+\/[^\s"'<>/]+$/.test(v),
-    "data-did": (v) => /^did:(plc:[a-z2-7]{24}|web:[a-z0-9.-]+)$/.test(v),
+    "data-at-uri": isRecordUri,
+    "data-did": isDid,
     "data-anchor": (v) => /^[\p{L}\p{N}_-]{1,512}$/u.test(v),
     class: oneOf("at-link", "mention", "ext-image", "fn-back"),
     rel: oneOf("nofollow ugc noopener noreferrer"),
@@ -240,6 +258,7 @@ function mathAttrAllowed(tag: string, name: string, value: string): boolean {
 }
 
 const MATHML_NS = "http://www.w3.org/1998/Math/MathML";
+const HTML_NS = "http://www.w3.org/1999/xhtml";
 
 /** True if `name="value"` is allowed on `el` by lfm-1.md §8.2 / §7.3. */
 export function attributeAllowed(el: Element, name: string, value: string): boolean {
@@ -250,23 +269,105 @@ export function attributeAllowed(el: Element, name: string, value: string): bool
   return HTML_RULES[tag]?.[name]?.(value, el) ?? false;
 }
 
-let hooksInstalled = false;
+// ------------------------------------------------------------------------- element shapes
 
-function installHooks(): void {
-  if (hooksInstalled) return;
-  hooksInstalled = true;
-  DOMPurify.addHook("uponSanitizeAttribute", (node, data) => {
+/** The element's attribute names, sorted and comma-joined (the "shape key"). */
+function shapeKey(el: Element): string {
+  return el.getAttributeNames().sort().join(",");
+}
+
+/**
+ * `a` shapes of lfm-1.md §8.1, checked on the attributes that survived the value grammars:
+ * external (`href` + `rel`, optionally `class="ext-image"`), record link (`href` exactly
+ * `#/at/` + the at-uri without `at://`), profile link or mention (`href` exactly `#/u/` + the
+ * DID), and anchor links (`data-anchor`, optionally `class="fn-back"`).
+ */
+export function linkShapeValid(el: Element): boolean {
+  const href = el.getAttribute("href") ?? "";
+  const cls = el.getAttribute("class");
+  switch (shapeKey(el)) {
+    case "data-anchor":
+      return true;
+    case "class,data-anchor":
+      return cls === "fn-back";
+    case "href,rel":
+      return EXTERNAL_HREF.test(href);
+    case "class,href,rel":
+      return cls === "ext-image" && WEB_HREF.test(href);
+    case "class,data-at-uri,href": {
+      const uri = el.getAttribute("data-at-uri") ?? "";
+      return cls === "at-link" && uri.startsWith("at://") && href === `#/at/${uri.slice(5)}`;
+    }
+    case "class,data-did,href":
+      return (
+        (cls === "at-link" || cls === "mention") && href === `#/u/${el.getAttribute("data-did")}`
+      );
+    default:
+      return false;
+  }
+}
+
+const SHAPES: Record<string, (el: Element) => boolean> = {
+  a: linkShapeValid,
+  // `<input type="checkbox" disabled="">`, optionally `checked=""` (TaskListMarker).
+  input: (el) => {
+    const k = shapeKey(el);
+    return (
+      (k === "disabled,type" || k === "checked,disabled,type") &&
+      el.getAttribute("type") === "checkbox"
+    );
+  },
+  // `<img data-cid alt>`, with `width` and `height` together or not at all (lfm-1.md §6.2).
+  img: (el) => {
+    const k = shapeKey(el);
+    return k === "alt,data-cid" || k === "alt,data-cid,height,width";
+  },
+  // `span.media[data-cid]`, `span.media-missing`, `span.link-host`, or `span[data-tex]`.
+  span: (el) => {
+    const k = shapeKey(el);
+    const cls = el.getAttribute("class");
+    if (k === "class") return cls === "media-missing" || cls === "link-host";
+    if (k === "class,data-cid") return cls === "media";
+    return k === "data-tex";
+  },
+};
+
+/** Void elements are removed when malformed; others lose every attribute, which leaves them
+ * inert (an `a` without `href` is not a link). */
+const REMOVE_WHEN_MALFORMED = new Set(["input", "img"]);
+
+/** The `afterSanitizeAttributes` hook: whole-element shapes (lfm-1.md §8.1). */
+function enforceShape(node: Node): void {
+  if (node.nodeType !== 1) return; // Node.ELEMENT_NODE
+  const el = node as Element;
+  if (el.namespaceURI !== HTML_NS) return;
+  const check = SHAPES[el.localName];
+  if (!check || check(el)) return;
+  if (REMOVE_WHEN_MALFORMED.has(el.localName)) {
+    el.remove();
+    return;
+  }
+  for (const name of el.getAttributeNames()) el.removeAttribute(name);
+}
+
+let purifier: Purifier | null = null;
+
+/** The dedicated, configured DOMPurify instance (created on first use). */
+function lfmPurifier(): Purifier {
+  if (purifier) return purifier;
+  const p = DOMPurify(window);
+  p.setConfig(LFM_CONFIG);
+  p.addHook("uponSanitizeAttribute", (node, data) => {
     if (!attributeAllowed(node as Element, data.attrName, data.attrValue)) data.keepAttr = false;
   });
+  p.addHook("afterSanitizeAttributes", enforceShape);
+  purifier = p;
+  return p;
 }
 
 /** `DOMPurify.sanitize(html, LFM_CONFIG)` as a string. */
 export function sanitizeLfm(html: string): string {
-  installHooks();
-  return DOMPurify.sanitize(html, {
-    ...LFM_CONFIG,
-    RETURN_TRUSTED_TYPE: false,
-  }) as unknown as string;
+  return lfmPurifier().sanitize(html) as unknown as string;
 }
 
 /** `null` when the sanitiser leaves `html` unchanged (the renderer's contract, lfm-1.md §8.3),

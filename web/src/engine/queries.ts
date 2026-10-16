@@ -28,7 +28,8 @@ export const qk = {
   members: (forum: string) => ["forum", forum, "members"] as const,
   modQueue: (forum: string) => ["forum", forum, "modQueue"] as const,
   modLog: (forum: string) => ["forum", forum, "modLog"] as const,
-  ref: (input: string) => ["ref", input] as const,
+  /** `forum` is part of the key: `handle/rkey` refs resolve against the current forum. */
+  ref: (input: string, forum?: string) => ["ref", input, forum ?? null] as const,
   post: (uri: string) => ["post", uri, "view"] as const,
   thread: (uri: string, sort: CommentSort, unreadOnly: boolean) =>
     ["post", uri, "thread", sort, unreadOnly] as const,
@@ -50,12 +51,16 @@ export const qk = {
   safeHref: (raw: string, ctx: HrefContext) => ["safeHref", ctx, raw] as const,
 };
 
-/** The query-key prefixes a topic invalidates. */
+/** The query-key prefixes a topic invalidates. A forum change (moderation, membership, policy,
+ * authorities) can change the state, score or visibility of any post or thread in it, and post
+ * query keys do not carry their forum, so `Forum(uri)` also invalidates every post query; only
+ * the active ones refetch. */
 export function keysForTopic(topic: Topic): readonly (readonly unknown[])[] {
   switch (topic.kind) {
     case "forum":
       return [
         ["forum", topic.uri],
+        ["post"],
         ["forumRef"],
         ["followed"],
         ["discover"],
@@ -106,7 +111,7 @@ export function useForum(ref: string | undefined) {
 export function useParsedRef(input: string | null, forum?: string) {
   const engine = useEngine();
   return useQuery({
-    queryKey: qk.ref(input ?? ""),
+    queryKey: qk.ref(input ?? "", forum),
     queryFn: () => engine.parseRef(input ?? "", forum !== undefined ? { forum } : {}),
     enabled: input !== null,
     staleTime: Number.POSITIVE_INFINITY,

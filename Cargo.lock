@@ -3128,19 +3128,25 @@ dependencies = [
  "axum",
  "clap",
  "clap_complete",
+ "crossterm",
+ "futures",
  "lessdugin-atp",
  "lessdugin-core",
  "lessdugin-lexicon",
  "lessdugin-markdown",
  "lessdugin-native",
  "lessdugin-tui",
+ "reqwest",
  "rust-embed",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "url",
+ "webbrowser",
 ]
 
 [[package]]
@@ -3271,6 +3277,7 @@ dependencies = [
 name = "lessdugin-testkit"
 version = "0.0.1"
 dependencies = [
+ "axum",
  "data-encoding",
  "futures",
  "http",

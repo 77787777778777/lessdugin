@@ -19,9 +19,18 @@ export interface BadgeDef {
 export function badgeList(
   badges: BadgeFlags | undefined,
   completeness?: Completeness | undefined,
+  pending = false,
 ): BadgeDef[] {
   const out: BadgeDef[] = [];
   const b = badges ?? {};
+  if (pending) {
+    out.push({
+      key: "pending",
+      label: "[pending]",
+      description: "Your change is in the outbox and has not reached your repository yet.",
+      tone: "neutral",
+    });
+  }
   if (b.verified) {
     out.push({
       key: "verified",
@@ -54,6 +63,16 @@ export function badgeList(
       label: `[partial ${completeness.reposComplete}/${completeness.reposTotal}]`,
       glyph: GLYPH.warning,
       description: `Only ${completeness.reposComplete} of ${completeness.reposTotal} participants' repositories are synced.`,
+      tone: "warn",
+    });
+  }
+  if (completeness?.degraded) {
+    out.push({
+      key: "degraded",
+      label: "[degraded]",
+      glyph: GLYPH.warning,
+      description:
+        "Moderation data is unavailable: items whose moderation cannot be checked stay hidden.",
       tone: "warn",
     });
   }
@@ -99,13 +118,16 @@ export function badgeList(
 export function Badges({
   badges,
   completeness,
+  pending = false,
   className,
 }: {
   badges?: BadgeFlags | undefined;
   completeness?: Completeness | undefined;
+  /** An own write about this item is not yet done (sync.md §1.6 `[pending]`). */
+  pending?: boolean | undefined;
   className?: string | undefined;
 }) {
-  const list = badgeList(badges, completeness);
+  const list = badgeList(badges, completeness, pending);
   if (list.length === 0) return null;
   return (
     <span className={cx(styles.column, className)}>

@@ -256,9 +256,15 @@ mod tests {
     #[test]
     fn pasted_query_and_fragment() {
         let q = "http://127.0.0.1:53124/callback?code=c0de&state=st4te&iss=https%3A%2F%2Fas.example.com";
-        assert_eq!(parse_pasted(q, &redirect(), &EXP).unwrap().0.expose(), "c0de");
+        assert_eq!(
+            parse_pasted(q, &redirect(), &EXP).unwrap().0.expose(),
+            "c0de"
+        );
         let f = "  http://127.0.0.1:53124/callback#state=st4te&iss=https%3A%2F%2Fas.example.com&code=xyz\n";
-        assert_eq!(parse_pasted(f, &redirect(), &EXP).unwrap().0.expose(), "xyz");
+        assert_eq!(
+            parse_pasted(f, &redirect(), &EXP).unwrap().0.expose(),
+            "xyz"
+        );
     }
 
     #[test]
@@ -300,7 +306,9 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         let client = tokio::spawn(async move {
             let send = |target: &'static str| async move {
-                let mut s = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+                let mut s = tokio::net::TcpStream::connect(("127.0.0.1", port))
+                    .await
+                    .unwrap();
                 s.write_all(format!("GET {target} HTTP/1.1\r\nhost: x\r\n\r\n").as_bytes())
                     .await
                     .unwrap();
@@ -313,7 +321,9 @@ mod tests {
             let c = send("/callback?code=good&state=st4te&iss=https%3A%2F%2Fas.example.com").await;
             (a, b, c)
         });
-        let code = accept(&listener, &EXP, Duration::from_secs(10)).await.unwrap();
+        let code = accept(&listener, &EXP, Duration::from_secs(10))
+            .await
+            .unwrap();
         assert_eq!(code.0.expose(), "good");
         let (a, b, c) = client.await.unwrap();
         assert!(a.starts_with("HTTP/1.1 404"));

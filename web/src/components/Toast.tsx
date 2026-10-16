@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import { useEffect, useSyncExternalStore } from "react";
+// Toasts. They dismiss themselves after `durationMs`, but never while the pointer is over one
+// or focus is inside it (WCAG 2.2.1), and when too many are shown the oldest one without an
+// action goes first, so an "Undo" is not pushed out by later messages.
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { cx } from "../lib/cx.ts";
 import styles from "./Toast.module.css";
 
@@ -14,6 +17,8 @@ interface ToastItem extends ToastOptions {
   id: number;
 }
 
+const MAX_TOASTS = 4;
+
 class ToastStore {
   private items: ToastItem[] = [];
   private nextId = 1;
@@ -21,7 +26,12 @@ class ToastStore {
 
   show(opts: ToastOptions): number {
     const id = this.nextId++;
-    this.items = [...this.items.slice(-3), { ...opts, id }];
+    const items = [...this.items, { ...opts, id }];
+    while (items.length > MAX_TOASTS) {
+      const plain = items.findIndex((t) => !t.action);
+      items.splice(plain >= 0 ? plain : 0, 1);
+    }
+    this.items = items;
     this.emit();
     return id;
   }
@@ -50,17 +60,63 @@ export const toasts = new ToastStore();
 
 function ToastView({ item }: { item: ToastItem }) {
   const { id, durationMs = 5000 } = item;
+  const ref = useRef<HTMLDivElement>(null);
+  const [paused, setPaused] = useState(false);
+  const remaining = useRef(durationMs);
   useEffect(() => {
-    const t = setTimeout(() => toasts.dismiss(id), durationMs);
-    return () => clearTimeout(t);
-  }, [id, durationMs]);
+    if (paused) return;
+    const started = Date.now();
+    const t = setTimeout(() => toasts.dismiss(id), remaining.current);
+    return () => {
+      clearTimeout(t);
+      remaining.current = Math.max(0, remaining.current - (Date.now() - started));
+    };
+  }, [paused, id]);
+  // Hover or focus inside the toast pauses its timer (listeners on the element: a toast is
+  // not itself interactive, its buttons are).
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    let hovered = false;
+    let focused = false;
+    const sync = (): void => setPaused(hovered || focused);
+    const enter = (): void => {
+      hovered = true;
+      sync();
+    };
+    const leave = (): void => {
+      hovered = false;
+      sync();
+    };
+    const focusIn = (): void => {
+      focused = true;
+      sync();
+    };
+    const focusOut = (e: FocusEvent): void => {
+      if (e.relatedTarget instanceof Node && el.contains(e.relatedTarget)) return;
+      focused = false;
+      sync();
+    };
+    el.addEventListener("pointerenter", enter);
+    el.addEventListener("pointerleave", leave);
+    el.addEventListener("focusin", focusIn);
+    el.addEventListener("focusout", focusOut);
+    return () => {
+      el.removeEventListener("pointerenter", enter);
+      el.removeEventListener("pointerleave", leave);
+      el.removeEventListener("focusin", focusIn);
+      el.removeEventListener("focusout", focusOut);
+    };
+  }, []);
   return (
     <div
+      ref={ref}
       className={cx(
         styles.toast,
         item.tone === "error" && styles.error,
         item.tone === "success" && styles.success,
       )}
+      data-paused={paused ? "" : undefined}
     >
       <span className={styles.message}>{item.message}</span>
       {item.action && (

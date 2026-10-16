@@ -13,6 +13,7 @@ import { ErrorView, errorMessage, Loading } from "../components/Status.tsx";
 import { toasts } from "../components/Toast.tsx";
 import { useEngine, useEngineHandle } from "../engine/context.tsx";
 import { qk, useFollowed, useSettings } from "../engine/queries.ts";
+import { downloadBlob } from "../lib/download.ts";
 import { cleanName } from "../lib/text.ts";
 import ui from "../styles/ui.module.css";
 import styles from "./pages.module.css";
@@ -188,12 +189,7 @@ function LocalData() {
   const exportLocal = async (): Promise<void> => {
     const json = await engine.exportLocal();
     const blob = new Blob([`${JSON.stringify(json, null, 2)}\n`], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.download = "lessdugin-local-state.json";
-    a.href = url;
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    downloadBlob(blob, "lessdugin-local-state.json");
   };
   const importLocal = async (file: File): Promise<void> => {
     try {
@@ -219,18 +215,18 @@ function LocalData() {
         </button>
         <label htmlFor={fileId} className={ui.button}>
           Import…
+          <input
+            id={fileId}
+            type="file"
+            accept="application/json"
+            className="visually-hidden"
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              if (f) void importLocal(f);
+              e.target.value = "";
+            }}
+          />
         </label>
-        <input
-          id={fileId}
-          type="file"
-          accept="application/json"
-          className="visually-hidden"
-          onChange={(e) => {
-            const f = e.target.files?.[0];
-            if (f) void importLocal(f);
-            e.target.value = "";
-          }}
-        />
         <button
           type="button"
           className={ui.ghost}
@@ -258,7 +254,7 @@ export function SettingsPage() {
   const set = useSetSetting();
   const [indexerUrl, setIndexerUrl] = useState("");
   if (settings.isPending) return <Loading />;
-  if (settings.isError) return <ErrorView error={settings.error} />;
+  if (settings.isError) return <ErrorView page error={settings.error} />;
   const s = settings.data;
   const radio = <K extends "sources" | "verify" | "karmaNotifications">(
     key: K,

@@ -30,11 +30,11 @@
   composes: button;
   background: var(--color-primary-strong);
   border-color: var(--color-primary-strong);
-  color: #fff;
+  color: var(--color-on-primary);
 }
 
 .primary:hover {
-  background: var(--color-primary);
+  border-color: var(--color-text);
 }
 
 .danger {
@@ -91,6 +91,14 @@
   background: var(--color-primary-soft);
   border-color: var(--color-primary);
   color: var(--color-text);
+}
+
+/* Chips and buttons that wrap a visually hidden input (radio and checkbox chips, the file
+   picker) show that input's keyboard focus. */
+.chip:has(input:focus-visible),
+.button:has(input:focus-visible) {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
 }
 
 .field {
@@ -201,6 +209,17 @@
   background: var(--color-danger-soft);
   border-radius: var(--radius-md);
   color: var(--color-text);
+  overflow-wrap: anywhere;
+}
+
+.errorView {
+  composes: error;
+  margin: var(--space-4) 0;
+}
+
+.errorTitle {
+  margin: 0 0 var(--space-2);
+  font-size: var(--text-lg);
 }
 
 .notice {
@@ -220,6 +239,12 @@
   width: 100%;
   border-collapse: collapse;
   font-size: var(--text-sm);
+}
+
+/* Wide tables scroll inside their own box instead of widening the page on small screens. */
+.tableScroll {
+  max-width: 100%;
+  overflow-x: auto;
 }
 
 .table th,

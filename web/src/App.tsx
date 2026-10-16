@@ -8,6 +8,7 @@ import { toasts } from "./components/Toast.tsx";
 import { EngineProvider } from "./engine/context.tsx";
 import type { EngineHandle } from "./engine/handle.ts";
 import { invalidateTopics } from "./engine/queries.ts";
+import { startEngineTasks, syncProgress } from "./engine/sync.ts";
 import { writeStore } from "./engine/writes.ts";
 import { createAppRouter } from "./router.tsx";
 
@@ -50,11 +51,15 @@ export function App({ engine }: { engine: EngineHandle }) {
             }
             break;
           case "syncProgress":
+            syncProgress.update(event.forum, event.done, event.total);
             break;
         }
       }),
     [engine, queryClient],
   );
+
+  // The engine's long-lived tasks (live tail, outbox pump) run for the app's lifetime.
+  useEffect(() => startEngineTasks(engine.api), [engine]);
 
   return (
     <EngineProvider engine={engine}>
