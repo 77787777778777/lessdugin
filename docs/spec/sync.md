@@ -633,7 +633,7 @@ Every record returned by `getRecord` or `listRecords` passes these checks before
 2. **JSON → DAG-CBOR** (atproto data model):
    - objects become maps, with keys sorted by DAG-CBOR order (shorter first, then bytewise); duplicate keys are rejected;
    - an object whose only key is `$link` (a string CID) becomes a CID (tag 42); an object whose only key is `$bytes` (base64) becomes a byte string;
-   - integers must be within ±(2^53 − 1); any number with a fraction or exponent is rejected (no floats);
+   - integers must be within ±(2^53 − 1); any number with a fraction or exponent is rejected (no floats), even when integral (`123.0`, `1e3`). This check runs on the raw response bytes, before any JSON parser, together with the duplicate-key check, because common parsers silently keep the last duplicate and normalise numbers;
    - nesting depth is bounded only by the response limit (`NESTING_MAX_DOCUMENT`, `limits.md` §6): a value deeper than 32 is still converted and CID-checked here, then fails validity rule G10 (step 5) and is stored as an invalid version; a response deeper than the document limit is rejected whole (R1), so nothing is admitted, tombstoned or replaced from it;
    - strings, booleans and null map directly.
 3. **CID.** The returned `cid` parses as CIDv1, codec dag-cbor (`0x71`), multihash sha2-256, and equals the CID of the encoding. Comparison is on the binary CID.

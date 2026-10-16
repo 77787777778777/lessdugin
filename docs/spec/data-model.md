@@ -140,7 +140,7 @@ The lexicon type of every record key is `any`, except `profile`, which is `liter
 | `slug` | `s(64b)` that the core checks against `^[a-z0-9]+(-[a-z0-9]+)*$` | `{"type":"string","maxLength":64}` |
 | `sref` | `com.atproto.repo.strongRef` `{uri, cid}` | `{"type":"ref","ref":"com.atproto.repo.strongRef"}` |
 | `atu` | at-uri, at most 3000 bytes | `{"type":"string","format":"at-uri","maxLength":3000}` |
-| `url` | URI, at most 3000 bytes | `{"type":"string","format":"uri","maxLength":3000}` |
+| `url` | URI, at most 3000 bytes. The `uri` format is RFC 3986 and therefore ASCII-only: the scheme is case-insensitive, and writers percent-encode any non-ASCII character (an IRI fails G2) | `{"type":"string","format":"uri","maxLength":3000}` |
 | `int[a..b]` | integer between a and b inclusive | `{"type":"integer","minimum":a,"maximum":b}` |
 | `did`, `cid`, `tid`, `datetime`, `nsid` | format-typed strings | `{"type":"string","format":"did"}` and so on |
 | `count`, `sint` | integer in `[0..2^53−1]`, or in `[−(2^53−1)..2^53−1]` (indexer responses only, §11) | `{"type":"integer","minimum":0,"maximum":9007199254740991}` and so on |
@@ -832,7 +832,7 @@ A third-party proof counts as current only if its rev is at least the head retur
 | MA4 | The subject form and collection are allowed for the action (table in §6.7). |
 | MA5 | Positive assertions (§6.7) carry `subjectCid`. |
 | MA6 | If `scope_eff = author`, the action is allowed in author scope (table in §6.7). Whether the subject is in the actor's own thread or post, and the author gates, are checked by the fold (`social.md`). |
-| MA7 | An unknown `scope` value, an unknown action `$type`, or an unknown `#access.level`, `#tier.tier` or `#pin.scope` makes the record valid but **without effect**. It is shown as "unknown action" in the mod log. |
+| MA7 | An unknown `scope` value, an unknown action `$type`, or an unknown `#access.level`, `#tier.tier` or `#pin.scope` makes the record valid but **without effect**. It is shown as "unknown action" in the mod log. When MA7 applies, MA3–MA6 are not checked (the subject may name any collection, since a future action may target one); G1–G10, MA1, MA2 and MA10–MA12 still apply. |
 | MA8 | *entry.* Unknown `#restrict.capabilities` items are ignored, and duplicates collapse. A `#restrict` with no known capability and no `nullifyVotes: true` asserts the empty set and `nullify = false`: it restricts nothing itself, but like any assertion it competes in resolution, so at a higher rank it lifts lower-rank restrictions of the same DID (`social.md` §4.4, §4.7). |
 | MA9 | `#lock` whose subject is an `NS.forum` uri: reserved (P2), valid but without effect. *entry:* `allowed` entries outside the subject post's thread (comment rkey not `{fk}-{T}-…` with `T = threadTid(subject)`) are ignored. |
 | MA10 | `#tag.head`, if present, is an `NS.wikiRevision` uri with `fkOf = fk(forum)`. Whether `head` names a revision of the same slug is checked by the fold. |
@@ -1497,9 +1497,15 @@ These choices fill gaps or resolve ambiguities in the sources. Each takes the si
     - §9 gives the explicit ForumMagnum deferrals the phases of `docs/plan.md` §6.5; the nofollow gate is Never. §11.1 names the "later" indexer methods Reserved (P2).
     - `qkey` (§6.6) and the excerpt projection (§5.3) now point at their single definitions in `lfm-1.md`.
 
+23. **Lexicon implementation review (M1).**
+    - MA7 takes precedence over MA3–MA6 (§7.3).
+    - Numbers: a JSON number with a fraction or exponent is never a valid integer, even when its value is integral (`123.0`, `1e3`). This deliberately diverges from the atproto interop fixture that accepts `123.0`; lessdugin never writes such numbers, and admission rejects them before the conversion (`sync.md` §5.5 step 2).
+    - A `revision` whose `record` is a snapshot of a record already at depth 32 is itself at depth 33 and therefore invalid (G10). Writers refuse such edits; this cannot happen with records lessdugin writes.
+    - FO2: when a DID appears several times in `moderators`, the first entry wins even if that entry is itself ignored (owner, unknown role).
+    - Validity reports list at most 16 violations per rule ID; the rest are counted. The first failing rule and the set of failing rule IDs are always exact.
+
 **Open questions** for the owner or the other spec authors:
 - confirm item 1 (agreement value names);
 - confirm item 6 (quickTake requires a body);
 - confirm the opt-out in item 11;
-- `.github/workflows/ci.yml` and `xtask lex lint` still run plain `goat lex lint lexicons`. Until they pass `-I large-string` (item 20), they fail on `markdown.json`;
 - `goat lex validate` rejects every record whose union holds `com.atproto.label.defs#selfLabels` ("NSID syntax didn't validate via regex"), `app.bsky.feed.post` included. This is a goat bug. Spike S4 should record it, and no lessdugin check may rely on `goat lex validate` for `post`.

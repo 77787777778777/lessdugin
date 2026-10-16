@@ -47,7 +47,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 serde_bytes = "0.11"
 thiserror = "2"
-unicode-segmentation = "1"
+unicode-segmentation = "=1.13.3" # Unicode 17.0; grapheme counts are normative (G2), see testdata/vectors/limits
 unicode-normalization = "0.1"
 unicode-width = "0.2"
 unicode-security = "0.1"
