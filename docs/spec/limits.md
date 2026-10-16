@@ -26,7 +26,7 @@
 | response bytes | bytes of an HTTP or WebSocket body **after** content decoding (gzip, deflate, br, zstd), counted as they arrive |
 | graphemes | extended grapheme clusters as computed by the pinned `unicode-segmentation` (`data-model.md` §2.2) |
 | code points | Unicode scalar values |
-| nesting depth | for JSON and DAG-CBOR: the number of containers (maps and arrays) on the path from the root to the deepest value; a root container has depth 1, a scalar root depth 0. For markdown: `lfm-1.md` §8.4. For MathML: elements inside `math`, where `math` is 1 |
+| nesting depth | for JSON and DAG-CBOR: the number of containers (maps and arrays) on the path from the root to the deepest value; a root container has depth 1, a scalar root depth 0. Depth is counted on the atproto data model, not on its JSON spelling: a `{"$link": …}` or `{"$bytes": …}` object is a leaf (a CID or bytes value), so it adds no level, and the same record has the same depth in JSON and in DAG-CBOR. For markdown: `lfm-1.md` §8.4. For MathML: elements inside `math`, where `math` is 1 |
 | durations | integers in milliseconds (`_MS`) unless the name says otherwise; human forms in parentheses are informative |
 | ranges | "a–b" for a randomised delay means a uniform draw from the closed interval [a, b] |
 | bounds | inclusive: "≤ N" admits N and rejects N + 1 |
