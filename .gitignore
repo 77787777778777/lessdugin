@@ -1,0 +1,11 @@
+/target
+node_modules/
+dist/
+/web/dist
+/packages/engine/pkg
+*.log
+.DS_Store
+/coverage
+/playwright-report
+/test-results
+.env

@@ -1,0 +1,26 @@
+[package]
+name = "lessdugin-atp"
+description = "Minimal, wasm-safe AT Protocol primitives: syntax types, DAG-CBOR, CIDs, CAR, MST proofs, commit verification"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "MIT OR Apache-2.0"
+repository.workspace = true
+
+[dependencies]
+cid.workspace = true
+multihash.workspace = true
+serde_ipld_dagcbor.workspace = true
+ipld-core.workspace = true
+sha2.workspace = true
+k256.workspace = true
+p256.workspace = true
+multibase.workspace = true
+data-encoding.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_bytes.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

@@ -1,0 +1,12 @@
+packages:
+  - web
+  - packages/*
+
+# Supply-chain hygiene (docs/spec/threat-model.md): wait a week before adopting new releases,
+# and only run install scripts for the packages that genuinely need them.
+minimumReleaseAge: 10080
+onlyBuiltDependencies:
+  - better-sqlite3
+minimumReleaseAgeExclude:
+  - "@atproto/*"
+  - "@did-plc/*"

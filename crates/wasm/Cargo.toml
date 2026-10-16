@@ -1,0 +1,33 @@
+[package]
+name = "lessdugin-wasm"
+description = "WebAssembly bindings for the lessdugin engine (used by the SPA)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["math", "verify"]
+math = ["lessdugin-markdown/math"]
+verify = ["lessdugin-core/verify"]
+vectors = []
+debug-panic = []
+
+[dependencies]
+lessdugin-core = { path = "../core", default-features = false }
+lessdugin-markdown = { path = "../markdown", default-features = false }
+lessdugin-lexicon.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen.workspace = true
+wasm-bindgen-futures.workspace = true
+js-sys.workspace = true
+serde-wasm-bindgen.workspace = true
+getrandom = { workspace = true, features = ["wasm_js"] }

@@ -1,0 +1,12 @@
+{
+  "client_id": "https://lessdugin.7778777.online/oauth/client-metadata.json",
+  "client_name": "lessdugin",
+  "client_uri": "https://lessdugin.7778777.online/",
+  "application_type": "web",
+  "grant_types": ["authorization_code", "refresh_token"],
+  "response_types": ["code"],
+  "redirect_uris": ["https://lessdugin.7778777.online/"],
+  "scope": "atproto include:online.7778777.lessdugin.authFull blob:image/* blob:video/* blob:audio/* blob:text/* blob:application/pdf repo?collection=online.7778777.lessdugin.forum&collection=online.7778777.lessdugin.membership&collection=online.7778777.lessdugin.post&collection=online.7778777.lessdugin.comment&collection=online.7778777.lessdugin.revision&collection=online.7778777.lessdugin.opinion&collection=online.7778777.lessdugin.modAction&collection=online.7778777.lessdugin.wikiRevision&collection=online.7778777.lessdugin.sequence&collection=online.7778777.lessdugin.profile",
+  "token_endpoint_auth_method": "none",
+  "dpop_bound_access_tokens": true
+}

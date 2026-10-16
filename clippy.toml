@@ -1,0 +1,7 @@
+# Wasm-safe crates (atp, lexicon, markdown, core) must not read clocks or sleep directly:
+# time and randomness come from the Host (docs/spec/sync.md). Native crates may allow these locally.
+disallowed-methods = [
+  { path = "std::time::SystemTime::now", reason = "use Host::now_ms (determinism, wasm)" },
+  { path = "std::time::Instant::now", reason = "use Host::now_ms (determinism, wasm)" },
+  { path = "std::thread::sleep", reason = "use Host::sleep" },
+]

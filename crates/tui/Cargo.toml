@@ -1,0 +1,15 @@
+[package]
+name = "lessdugin-tui"
+description = "Terminal UI for lessdugin (ratatui)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+lessdugin-core.workspace = true
+lessdugin-markdown.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
+anyhow.workspace = true

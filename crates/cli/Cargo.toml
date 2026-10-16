@@ -1,0 +1,29 @@
+[package]
+name = "lessdugin"
+description = "lessdugin: a serverless markdown and media forum on atproto — command line, TUI and local web UI"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+default-run = "lessdugin"
+
+[[bin]]
+name = "lessdugin"
+path = "src/main.rs"
+
+[features]
+default = ["tui", "web"]
+tui = ["dep:lessdugin-tui"]
+web = []
+
+[dependencies]
+lessdugin-core.workspace = true
+lessdugin-native.workspace = true
+lessdugin-tui = { workspace = true, optional = true }
+clap.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+assert_cmd.workspace = true

@@ -1,0 +1,23 @@
+{
+  "name": "@lessdugin/engine",
+  "version": "0.0.1",
+  "private": true,
+  "license": "AGPL-3.0-or-later",
+  "type": "module",
+  "exports": {
+    "./client": "./src/client.ts",
+    "./worker": "./src/worker.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run --passWithNoTests"
+  },
+  "dependencies": {
+    "comlink": "^4.0.0",
+    "idb": "^8.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^7.0.0",
+    "vitest": "^5.0.0"
+  }
+}

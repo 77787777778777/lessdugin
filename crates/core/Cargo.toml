@@ -1,0 +1,30 @@
+[package]
+name = "lessdugin-core"
+description = "lessdugin engine: identity, discovery, sync, outbox, verification and the deterministic social fold"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = ["verify"]
+verify = []
+
+[dependencies]
+lessdugin-atp.workspace = true
+lessdugin-lexicon.workspace = true
+lessdugin-markdown.workspace = true
+futures.workspace = true
+http.workspace = true
+url.workspace = true
+tracing.workspace = true
+libm.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+img-parts.workspace = true
+imagesize.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

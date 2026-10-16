@@ -1,0 +1,30 @@
+[package]
+name = "lessdugin-markdown"
+description = "LFM/1 markdown: one renderer for HTML+MathML, terminal styled text and plain-text projection"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = ["math"]
+math = ["dep:math-core"]
+# Defence-in-depth equality check with ammonia (native only; large in wasm).
+ammonia = ["dep:ammonia"]
+
+[dependencies]
+pulldown-cmark.workspace = true
+math-core = { workspace = true, optional = true }
+ammonia = { workspace = true, optional = true }
+unicode-segmentation.workspace = true
+unicode-normalization.workspace = true
+unicode-width.workspace = true
+unicode-security.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+insta.workspace = true
+serde_json.workspace = true
