@@ -3,10 +3,11 @@
 // images, media autoload hosts, karma notifications, export/import of local state, storage
 // persistence, and the running build's hash (threat-model SUP-4).
 
-import type { Json, Settings } from "@lessdugin/engine/types";
+import type { AccountView, Json, Settings } from "@lessdugin/engine/types";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { useId, useState } from "react";
+import { useAccountActor } from "../components/AccountName.tsx";
 import { ActorName } from "../components/ActorName.tsx";
 import { ErrorView, errorMessage, Loading } from "../components/Status.tsx";
 import { toasts } from "../components/Toast.tsx";
@@ -37,6 +38,11 @@ function useSetSetting() {
   };
 }
 
+function AccountRow({ account }: { account: AccountView }) {
+  const actor = useAccountActor(account);
+  return actor ? <ActorName actor={actor} showIdent /> : null;
+}
+
 function Accounts() {
   const engine = useEngine();
   const qc = useQueryClient();
@@ -49,8 +55,8 @@ function Accounts() {
       {accounts.data?.length === 0 && <p className={ui.muted}>No account signed in.</p>}
       <ul className={ui.list}>
         {accounts.data?.map((a) => (
-          <li key={a.actor.did} className={ui.row}>
-            <ActorName actor={a.actor} showIdent />
+          <li key={a.did} className={ui.row}>
+            <AccountRow account={a} />
             <span className={ui.muted}>{a.pds}</span>
             {a.active ? (
               <span className={ui.chipActive}>active</span>
@@ -59,7 +65,7 @@ function Accounts() {
                 type="button"
                 className={ui.ghost}
                 onClick={() =>
-                  void engine.setActiveAccount(a.actor.did).then(() => qc.invalidateQueries())
+                  void engine.setActiveAccount(a.did).then(() => qc.invalidateQueries())
                 }
               >
                 Switch to
@@ -69,7 +75,7 @@ function Accounts() {
               type="button"
               className={ui.ghost}
               onClick={() =>
-                void engine.removeAccount(a.actor.did, false).then(() => qc.invalidateQueries())
+                void engine.removeAccount(a.did, false).then(() => qc.invalidateQueries())
               }
             >
               Sign out
@@ -159,7 +165,7 @@ function BuildInfo() {
         </dd>
         <dt>Engine</dt>
         <dd>
-          {handle.kind === "mock" ? "mock (in-memory fixture)" : "wasm"}
+          {handle.kind === "mock" ? "mock" : "wasm"}
           {version.data && <span className={ui.muted}> · {version.data}</span>}
           {version.isError && <span className={ui.muted}> · {errorMessage(version.error)}</span>}
         </dd>

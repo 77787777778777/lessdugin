@@ -80,7 +80,7 @@ describe("MockEngine writes", () => {
 
   async function firstVotablePost(e: MockEngine) {
     const list = await e.listPosts({ forum: FORUM_URI, sort: "top", filter: "all", limit: 100 });
-    const me = (await e.activeAccount())?.actor.did;
+    const me = (await e.activeAccount())?.did;
     const post = list.items.find((p) => p.author.did !== me && p.score.mine === undefined);
     if (!post) throw new Error("no votable post");
     return post;

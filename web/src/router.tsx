@@ -3,13 +3,9 @@
 
 import type { PostFilter, PostSort } from "@lessdugin/engine/types";
 import { POST_FILTERS, POST_SORTS } from "@lessdugin/engine/types";
-import {
-  createHashHistory,
-  createRootRoute,
-  createRoute,
-  createRouter,
-} from "@tanstack/react-router";
+import { createRootRoute, createRoute, createRouter } from "@tanstack/react-router";
 import { AppShell } from "./components/AppShell.tsx";
+import { createAppHashHistory } from "./lib/hashHistory.ts";
 import { AtPage } from "./pages/AtPage.tsx";
 import { BookmarksPage } from "./pages/BookmarksPage.tsx";
 import { CommentPage } from "./pages/CommentPage.tsx";
@@ -202,7 +198,7 @@ export const routeTree = rootRoute.addChildren([
 export function createAppRouter() {
   return createRouter({
     routeTree,
-    history: createHashHistory(),
+    history: createAppHashHistory(),
     defaultPreload: false,
     scrollRestoration: true,
     pathParamsAllowedCharacters: [":", "@"],

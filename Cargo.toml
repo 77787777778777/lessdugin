@@ -80,6 +80,9 @@ libc = "0.2"
 tempfile = "3"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 jacquard-oauth = { version = "=0.12.2" }
+# jacquard-oauth's own building blocks used by the native OAuth facade (same exact pins).
+jacquard-common = { version = "=0.12.2" }
+jacquard-identity = { version = "=0.12.2" }
 webbrowser = "1"
 anyhow = "1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }

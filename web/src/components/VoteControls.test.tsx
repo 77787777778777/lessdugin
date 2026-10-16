@@ -11,7 +11,7 @@ import { displayedAxis, VoteControls } from "./VoteControls.tsx";
 
 async function votablePost(engine: MockEngine): Promise<PostSummary> {
   const forum = (await engine.followed())[0]?.uri ?? "";
-  const me = (await engine.activeAccount())?.actor.did;
+  const me = (await engine.activeAccount())?.did;
   const list = await engine.listPosts({ forum, sort: "top", filter: "all", limit: 50 });
   const post = list.items.find((p) => p.author.did !== me && p.score.mine === undefined);
   if (!post) throw new Error("no votable post");

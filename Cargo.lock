@@ -3235,6 +3235,7 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "axum",
+ "base64 0.22.1",
  "directories",
  "fd-lock",
  "flate2",
@@ -3242,6 +3243,8 @@ dependencies = [
  "getrandom 0.3.4",
  "http",
  "image",
+ "jacquard-common",
+ "jacquard-identity",
  "jacquard-oauth",
  "keyring",
  "lessdugin-atp",

@@ -12,6 +12,7 @@ import { qk, useActiveAccount, useFollowed, useUnreadNotifications } from "../en
 import { useWritesInFlight } from "../engine/writes.ts";
 import { cleanName } from "../lib/text.ts";
 import { parseAtUri } from "../lib/uri.ts";
+import { useAccountActor } from "./AccountName.tsx";
 import { actorLabel } from "./ActorName.tsx";
 import styles from "./AppShell.module.css";
 import { ToastRegion } from "./Toast.tsx";
@@ -66,7 +67,8 @@ function AccountMenu() {
     };
   }, [open]);
   const account = active.data;
-  if (!account) {
+  const actor = useAccountActor(account);
+  if (!account || !actor) {
     return (
       <Link to="/login" className={styles.signIn}>
         Sign in
@@ -83,15 +85,15 @@ function AccountMenu() {
         onClick={() => setOpen((o) => !o)}
       >
         <span className={styles.avatar} aria-hidden="true">
-          {actorLabel(account.actor).slice(0, 1).toUpperCase()}
+          {actorLabel(actor).slice(0, 1).toUpperCase()}
         </span>
-        <bdi className={styles.accountName}>{actorLabel(account.actor)}</bdi>
+        <bdi className={styles.accountName}>{actorLabel(actor)}</bdi>
       </button>
       {open && (
         <div className={styles.menu} role="menu">
           <Link
             to="/u/$actor"
-            params={{ actor: account.actor.did }}
+            params={{ actor: account.did }}
             role="menuitem"
             className={styles.menuItem}
             onClick={() => setOpen(false)}
@@ -136,9 +138,7 @@ function AccountMenu() {
             className={styles.menuItem}
             onClick={() => {
               setOpen(false);
-              void engine
-                .removeAccount(account.actor.did, false)
-                .then(() => qc.invalidateQueries());
+              void engine.removeAccount(account.did, false).then(() => qc.invalidateQueries());
             }}
           >
             Sign out

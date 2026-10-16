@@ -125,6 +125,29 @@ test("home → forum → post → expand → vote and undo → reply → live up
   expect(w.errors).toEqual([]);
 });
 
+test("forum filters, sorts and search keep their query in the hash", async ({ page }) => {
+  const w = await watch(page);
+  await page.goto("/?mock#/");
+  await page.getByRole("link", { name: FORUM }).first().click();
+  await expect(page.getByText(/Quick take: the cheapest way/)).toHaveCount(0);
+  await page.getByRole("button", { name: "All posts" }).click();
+  await expect(page.getByRole("link", { name: /Quick take: the cheapest way/ })).toBeVisible();
+  await expect(page).toHaveURL(/\?mock#\/f\/[^?]+\?filter=all$/);
+  await page.getByLabel("Sort").selectOption("new");
+  await expect(page).toHaveURL(/filter=all/);
+  await expect(page).toHaveURL(/sort=new/);
+  await expect(page.getByRole("button", { name: "All posts" })).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+  const search = page.getByRole("searchbox", { name: "Search" });
+  await search.fill("confusion");
+  await search.press("Enter");
+  await expect(page.getByRole("heading", { level: 1, name: "Search" })).toBeVisible();
+  await expect(page.locator("mark").first()).toHaveText(/confusion/i);
+  expect(w.errors).toEqual([]);
+});
+
 test("keyboard navigation through a thread", async ({ page }) => {
   const w = await watch(page);
   await openWelcomePost(page);

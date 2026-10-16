@@ -774,13 +774,10 @@ export class MockEngine implements EngineApi {
   private accountView(did: Did): AccountView {
     const a = this.s.accounts.find((x) => x.did === did);
     if (!a) throw err("not_found", `No account ${did}`);
-    return {
-      actor: this.actor(did),
-      pds: a.pds,
-      auth: clone(a.auth),
-      active: this.s.active === did,
-      state: { kind: "ok" },
-    };
+    const view: AccountView = { did, pds: a.pds, authKind: a.auth, active: this.s.active === did };
+    const actor = this.s.actors.get(did)?.view;
+    if (actor?.handle !== undefined) view.handle = actor.handle;
+    return view;
   }
 
   async accounts(): Promise<AccountView[]> {
@@ -790,7 +787,7 @@ export class MockEngine implements EngineApi {
   async addAccount(info: AccountInfo): Promise<AccountView> {
     this.actorRec(info.did);
     if (!this.s.accounts.some((a) => a.did === info.did)) {
-      this.s.accounts.push({ did: info.did, pds: info.pds, auth: clone(info.auth) });
+      this.s.accounts.push({ did: info.did, pds: info.pds, auth: info.auth });
     }
     if (!this.s.active) this.s.active = info.did;
     this.changed({ kind: "accounts" });

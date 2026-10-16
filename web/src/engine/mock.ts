@@ -13,7 +13,7 @@ export function createMockHandle(engine: MockEngine = new MockEngine()): EngineH
         await engine.addAccount({
           did: actor.did,
           pds: "https://pds.example.test",
-          auth: { kind: "oauth" },
+          auth: "oauth",
         });
         await engine.setActiveAccount(actor.did);
       },

@@ -1403,7 +1403,7 @@ export function buildFixture(): Fixture {
     notifications: new Map([[me, notifications]]),
     modLog: new Map([[FORUM_URI, modLog]]),
     modQueue: new Map([[FORUM_URI, modQueue]]),
-    accounts: [{ did: me, pds: "https://pds.example.test", auth: { kind: "oauth" } }],
+    accounts: [{ did: me, pds: "https://pds.example.test", auth: "oauth" }],
     active: me,
     followed: new Map([[FORUM_URI, undefined]]),
     lastVisited: new Map([[postUri.welcome ?? "", FIXTURE_NOW - 2 * D]]),

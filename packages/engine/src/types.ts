@@ -9,9 +9,11 @@
 // optional fields omitted when `None` (hence `field?: T`, never `T | null`), integer
 // milliseconds for every `…Ms` field, and `dto: 1` on every top-level response.
 //
-// Where engine-api.md names a type without spelling out its fields, the shape below is derived
-// from data-model.md, social.md and lfm-1.md; those places are marked "derived" so the Rust side
-// can either adopt them verbatim or the two can be reconciled in one commit.
+// The view DTOs (§4) and `AccountView`/`AuthKind` mirror `crates/core/src/dto.rs` one-to-one,
+// type names included; `types.parity.test.ts` fails on drift. The request types, `Href` and the
+// events have no Rust definition yet: where engine-api.md names such a type without spelling out
+// its fields, the shape below is derived from data-model.md, social.md and lfm-1.md and marked
+// "derived", so the Rust side can adopt it verbatim or the two can be reconciled in one commit.
 
 // ---------------------------------------------------------------------------------------------
 // Scalars
@@ -618,11 +620,24 @@ export type Href =
   | { kind: "anchor"; id: string };
 
 // ---------------------------------------------------------------------------------------------
-// §3.1 Identity, accounts, refs (derived shapes)
+// §3.1 Identity, accounts, refs
 // ---------------------------------------------------------------------------------------------
 
-export type AuthKind = { kind: "oauth" } | { kind: "appPassword" } | { kind: "bridge" };
+/** How an account is authenticated (`dto.rs` `AuthKind`). */
+export type AuthKind = "oauth" | "appPassword";
 
+/** A logged-in account (`dto.rs` `AccountView`, engine-api.md §3.1 `accounts()`). */
+export interface AccountView {
+  did: string;
+  /** The handle, if it was verified in both directions at login. */
+  handle?: string;
+  /** The PDS bound at login. */
+  pds: string;
+  authKind: AuthKind;
+  active: boolean;
+}
+
+/** `add_account(AccountInfo { did, pds, auth: AuthKind })`. */
 export interface AccountInfo {
   did: Did;
   pds: string;
@@ -630,14 +645,6 @@ export interface AccountInfo {
 }
 
 export type AuthState = { kind: "ok" } | { kind: "expiring"; inMs: Ms } | { kind: "expired" };
-
-export interface AccountView {
-  actor: ActorView;
-  pds: string;
-  auth: AuthKind;
-  active: boolean;
-  state: AuthState;
-}
 
 /** The result of `parse_ref`. */
 export type Ref =

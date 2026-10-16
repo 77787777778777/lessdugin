@@ -150,10 +150,16 @@ impl Paths {
     }
 
     /// The lock file for a host lock name (`sync.md` §10.6, §12.3): `sync-leader`,
-    /// `repo:<did>` or `outbox:<did>`. `None` for an unknown name.
+    /// `repo:<did>`, `outbox:<did>`, or `refresh:<did>` (token refresh, `threat-model.md`
+    /// AUTH-7). `None` for an unknown name.
     pub fn lock_file(&self, name: &str) -> Option<PathBuf> {
         if name == "sync-leader" {
             Some(self.sync_leader_lock_file())
+        } else if let Some(did) = name.strip_prefix("refresh:") {
+            Some(
+                self.data_locks_dir()
+                    .join(format!("refresh-{}.lock", lock_hash(did))),
+            )
         } else if let Some(did) = name.strip_prefix("repo:") {
             Some(
                 self.cache_locks_dir()
@@ -692,6 +698,11 @@ mod tests {
         assert_eq!(name.len(), "repo-.lock".len() + 16);
         assert!(
             p.lock_file("outbox:did:plc:abc")
+                .unwrap()
+                .starts_with("/x/locks")
+        );
+        assert!(
+            p.lock_file("refresh:did:plc:abc")
                 .unwrap()
                 .starts_with("/x/locks")
         );

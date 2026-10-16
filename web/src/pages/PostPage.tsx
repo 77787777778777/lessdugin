@@ -325,7 +325,7 @@ export function PostThread({ uri }: { uri: string }) {
   if (thread.isError)
     return <ErrorView error={thread.error} title="This post could not be loaded" />;
 
-  const myDid = active.data?.actor.did ?? null;
+  const myDid = active.data?.did ?? null;
   const role = forum.data?.myRole ?? "none";
   const ctx: ThreadContext = {
     postUri: uri,

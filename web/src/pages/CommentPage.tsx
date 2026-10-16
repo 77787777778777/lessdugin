@@ -51,7 +51,7 @@ function CommentThread({ uri }: { uri: string }) {
     forum: post?.forum ?? "",
     votingMode: votingMode(forum.data?.policy),
     locked: post?.locked ?? false,
-    myDid: active.data?.actor.did ?? null,
+    myDid: active.data?.did ?? null,
     isAuthority: isAuthorityRole(role),
     canCurate: role === "owner" || role === "admin",
   };

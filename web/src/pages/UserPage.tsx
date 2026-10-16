@@ -29,7 +29,7 @@ export function UserPage() {
   if (q.isPending) return <Loading />;
   if (q.isError) return <ErrorView error={q.error} title="Unknown user" />;
   const u = q.data;
-  const isMe = active.data?.actor.did === u.actor.did;
+  const isMe = active.data?.did === u.actor.did;
   const subscribed =
     subs.data?.some((s) => s.subscription.kind === "user" && s.subscription.did === u.actor.did) ??
     false;
