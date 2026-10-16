@@ -9,7 +9,7 @@ repository.workspace = true
 
 [features]
 default = ["oauth"]
-oauth = []
+oauth = ["dep:jacquard-oauth"]
 
 [dependencies]
 lessdugin-atp.workspace = true
@@ -22,3 +22,15 @@ serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 directories.workspace = true
+reqwest.workspace = true
+rusqlite.workspace = true
+tokio-tungstenite.workspace = true
+keyring.workspace = true
+fd-lock.workspace = true
+image.workspace = true
+url.workspace = true
+http.workspace = true
+futures.workspace = true
+sha2.workspace = true
+webbrowser.workspace = true
+jacquard-oauth = { workspace = true, optional = true }

@@ -54,11 +54,11 @@ unicode-security = "0.1"
 
 # rendering
 pulldown-cmark = { version = "=0.13.4", default-features = false }
-math-core = "0.9"
+math-core = "=0.9.0"
 ammonia = "4.2"
 
 # core runtime-agnostic
-futures = { version = "0.3", default-features = false, features = ["std", "alloc", "async-await"] }
+futures = { version = "0.3", default-features = false, features = ["std", "alloc", "async-await", "executor"] }
 http = "1"
 url = "2"
 tracing = "0.1"
@@ -69,7 +69,7 @@ base64 = "0.22"
 
 # native
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "fs", "io-util", "net", "signal"] }
-reqwest = { version = "0.13", default-features = false, features = ["rustls", "http2", "gzip", "stream", "json"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2", "gzip", "stream", "json"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 keyring = "4"

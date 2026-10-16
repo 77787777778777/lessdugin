@@ -10,11 +10,12 @@ repository.workspace = true
 [features]
 default = ["verify"]
 verify = []
+# Generate TypeScript types for the DTOs (used by lessdugin-wasm).
+tsify = ["dep:tsify"]
 
 [dependencies]
 lessdugin-atp.workspace = true
 lessdugin-lexicon.workspace = true
-lessdugin-markdown.workspace = true
 futures.workspace = true
 http.workspace = true
 url.workspace = true
@@ -25,6 +26,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 img-parts.workspace = true
 imagesize.workspace = true
+tsify = { workspace = true, optional = true }
 
 [dev-dependencies]
 proptest.workspace = true

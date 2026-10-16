@@ -10,7 +10,6 @@ repository.workspace = true
 [dependencies]
 cid.workspace = true
 multihash.workspace = true
-serde_ipld_dagcbor.workspace = true
 ipld-core.workspace = true
 sha2.workspace = true
 k256.workspace = true
@@ -19,8 +18,11 @@ multibase.workspace = true
 data-encoding.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-serde_bytes.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
+# Cross-check only: the crate has its own strict DAG-CBOR codec (src/dagcbor.rs) so that depth,
+# size and canonical-form checks happen before allocation; tests assert byte-equality with this
+# reference encoder.
+serde_ipld_dagcbor.workspace = true

@@ -12,4 +12,5 @@ lessdugin-core.workspace = true
 lessdugin-markdown.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true
+ratatui-image.workspace = true
 anyhow.workspace = true
