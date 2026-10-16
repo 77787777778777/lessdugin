@@ -120,6 +120,9 @@ pub(crate) struct ImageData {
     /// `plain(inner events)`; filled by pass 5.
     pub alt: String,
     pub res: ImageRes,
+    /// Whether an empty markdown alt may fall back to `media.alt` (§6.2): only for the first
+    /// rendered reference to a media item that needs it ([`crate::media::assign_alt_fallback`]).
+    pub fallback_alt: bool,
 }
 
 /// Container tags.

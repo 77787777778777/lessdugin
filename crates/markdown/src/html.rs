@@ -72,7 +72,7 @@ pub(crate) fn escape_attr(s: &str) -> String {
 
 /// The code-block language class token (§8.1), if valid.
 pub(crate) fn code_lang(info: &str) -> Option<String> {
-    let l = info.split_whitespace().next()?.to_ascii_lowercase();
+    let l = info.split_ascii_whitespace().next()?.to_ascii_lowercase();
     ((1..=32).contains(&l.len())
         && l.bytes()
             .all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'_' | b'+' | b'-')))
@@ -379,7 +379,7 @@ impl Writer<'_> {
                     Tag::Image(d) => {
                         match &d.res {
                             ImageRes::Media(idx) => {
-                                let a = self.media[*idx].alt_text(&d.alt);
+                                let a = self.media[*idx].alt_text(&d.alt, d.fallback_alt);
                                 self.media_item(*idx, &a);
                             }
                             ImageRes::Missing => {
@@ -515,7 +515,16 @@ pub(crate) fn write_document(
             let id = format!("md-fn-{}", n.ord);
             w.out.push_str(&format!("<li id=\"{id}\" dir=\"auto\">"));
             w.anchors.push(id);
-            w.flow(&n.events);
+            if n.in_spoiler {
+                w.out
+                    .push_str("<details class=\"spoiler\">\n<summary dir=\"auto\">");
+                w.out.push_str(fixed::SPOILER);
+                w.out.push_str("</summary>\n");
+                w.flow(&n.events);
+                w.out.push_str("</details>\n");
+            } else {
+                w.flow(&n.events);
+            }
             for k in 1..=n.refs {
                 if k > 1 {
                     w.out.push(' ');
@@ -540,7 +549,7 @@ pub(crate) fn write_document(
     if !gallery.is_empty() {
         w.out.push_str("<div class=\"gallery\">\n");
         for i in gallery {
-            let a = media[i].alt.clone().unwrap_or_default();
+            let a = media[i].gallery_alt();
             w.media_item(i, &a);
             w.out.push('\n');
         }

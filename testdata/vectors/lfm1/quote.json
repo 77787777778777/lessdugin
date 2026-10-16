@@ -220,6 +220,23 @@
       }
     },
     {
+      "name": "normalisation-controls-removed",
+      "input": {
+        "quote": {
+          "exact": "c\u0007a\u202et s\u001bat"
+        },
+        "target": "the cat sat on"
+      },
+      "expected": {
+        "result": {
+          "type": "anchored",
+          "start": 4,
+          "end": 11
+        },
+        "qkey": "cat sat"
+      }
+    },
+    {
       "name": "astral-offsets",
       "input": {
         "quote": {

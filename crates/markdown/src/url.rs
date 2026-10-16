@@ -108,11 +108,14 @@ pub fn safe_href(raw: &str, ctx: HrefCtx) -> Option<Href> {
             if rest.is_empty() || rest.starts_with('/') {
                 return None;
             }
-            let addr = rest.split('?').next().unwrap_or("");
-            let host = match addr.rfind('@') {
-                Some(i) => addr[i + 1..].to_ascii_lowercase(),
-                None => String::new(),
+            let (addr, query) = match rest.split_once('?') {
+                Some((a, q)) => (a, Some(q)),
+                None => (rest, None),
             };
+            let host = mailto_host(addr)?;
+            if query.is_some_and(|q| !mailto_query_ok(q)) {
+                return None;
+            }
             Some(Href::Mailto {
                 url: format!("mailto:{}", pct(rest)),
                 host,
@@ -121,6 +124,44 @@ pub fn safe_href(raw: &str, ctx: HrefCtx) -> Option<Href> {
         "at" => parse_at_link(rest, ctx),
         _ => None,
     }
+}
+
+/// The domain of a `mailto:` address part, which must be exactly one address: a non-empty
+/// local part and a domain under the `http` host grammar (ASCII, `[a-z0-9._-]+`, not only
+/// dots), checked after percent-decoding as a mail client would decode it. More addresses
+/// (`a@x,b@y`), an empty address (`mailto:?to=…`) or an internationalised domain are refused:
+/// the host shown next to the link (§5.5, §9.4) must be the only one the mail goes to.
+fn mailto_host(addr: &str) -> Option<String> {
+    let addr = percent_decode_utf8(addr)?;
+    let (local, domain) = addr.split_once('@')?;
+    if local.is_empty()
+        || local
+            .chars()
+            .any(|c| matches!(c, '@' | ',' | ';' | '<' | '>') || forbidden_in_href(c))
+    {
+        return None;
+    }
+    let domain = domain.to_ascii_lowercase();
+    let ok = !domain.is_empty()
+        && domain
+            .bytes()
+            .all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b'-'))
+        && !domain.bytes().all(|b| b == b'.');
+    ok.then_some(domain)
+}
+
+/// A `mailto:` query may not add recipients: no `to`, `cc` or `bcc` field (names compared
+/// after percent-decoding, ASCII case-insensitively).
+fn mailto_query_ok(q: &str) -> bool {
+    q.split('&').all(|field| {
+        let name = field.split('=').next().unwrap_or("");
+        match percent_decode_utf8(name) {
+            Some(n) => !["to", "cc", "bcc"]
+                .iter()
+                .any(|r| n.eq_ignore_ascii_case(r)),
+            None => false,
+        }
+    })
 }
 
 /// Length of the scheme (the index of its `:`), for `^[A-Za-z][A-Za-z0-9+.-]*:`.
@@ -277,25 +318,70 @@ pub fn preview_eligible(uri: &AtUri, ns: &str) -> bool {
         })
 }
 
-/// `[a-z0-9_-]+(\.[a-z0-9_-]+)+` at the start of `t`, followed by end, `/`, `:`, `?` or `#`.
-fn host_like(t: &str) -> Option<&str> {
-    let end = t
-        .bytes()
-        .position(|b| !matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'_' | b'-' | b'.'))
-        .unwrap_or(t.len());
-    if end < t.len() && !matches!(t.as_bytes()[end], b'/' | b':' | b'?' | b'#') {
-        return None;
-    }
-    let m = &t[..end];
-    let segs: Vec<&str> = m.split('.').collect();
-    (segs.len() >= 2 && segs.iter().all(|s| !s.is_empty())).then_some(m)
+/// Default_Ignorable_Code_Point (Unicode DerivedCoreProperties): characters that render as
+/// nothing, such as U+00AD SOFT HYPHEN, U+200B ZERO WIDTH SPACE and U+2060 WORD JOINER.
+fn is_default_ignorable(c: char) -> bool {
+    matches!(c,
+        '\u{00AD}' | '\u{034F}' | '\u{061C}' | '\u{115F}'..='\u{1160}' | '\u{17B4}'..='\u{17B5}'
+        | '\u{180B}'..='\u{180F}' | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}'
+        | '\u{2060}'..='\u{206F}' | '\u{3164}' | '\u{FE00}'..='\u{FE0F}' | '\u{FEFF}' | '\u{FFA0}'
+        | '\u{FFF0}'..='\u{FFF8}' | '\u{1BCA0}'..='\u{1BCA3}' | '\u{1D173}'..='\u{1D17A}'
+        | '\u{E0000}'..='\u{E0FFF}')
+}
+
+/// A character of a host-like name: a letter, mark or number of any script (so that
+/// lookalikes such as `ɡoogle.com` or Cyrillic `gооgle.com` count), `_` or `-`.
+fn is_name_char(c: char) -> bool {
+    use unicode_general_category::{GeneralCategory as G, get_general_category};
+    c == '_'
+        || c == '-'
+        || matches!(
+            get_general_category(c),
+            G::UppercaseLetter
+                | G::LowercaseLetter
+                | G::TitlecaseLetter
+                | G::ModifierLetter
+                | G::OtherLetter
+                | G::NonspacingMark
+                | G::SpacingMark
+                | G::EnclosingMark
+                | G::DecimalNumber
+                | G::LetterNumber
+                | G::OtherNumber
+        )
+}
+
+/// True if `t` starts with a dotted name: two or more non-empty runs of name characters
+/// joined by `.`, whatever follows (`google.com!` is host-like).
+fn starts_host_like(t: &str) -> bool {
+    let mut segs = t.split('.');
+    let name = |s: Option<&str>| s.and_then(|s| s.chars().next()).is_some_and(is_name_char);
+    name(segs.next()) && name(segs.next())
 }
 
 /// The HTML real-host rule (§5.5, F9): true when a `<span class="link-host">` must be
 /// appended to an external link whose visible text is `inner` (`plain(inner)`, unnormalised).
+///
+/// The visible text is first normalised the way it is displayed: NFKC (fullwidth and other
+/// compatibility forms become ASCII), Default_Ignorable code points removed (invisible
+/// characters cannot split a name), the ideographic full stops IDNA treats as dots mapped to
+/// `.`. It is host-like if it starts with a dotted name of any script; the host is then shown
+/// unless the text starts with exactly the link's host (one `www.` stripped from both), followed
+/// by something other than a name character or a dot.
 pub(crate) fn html_host_suffix(inner: &str, host: &str) -> bool {
-    let nfc: String = inner.nfc().collect();
-    let mut t = nfc.trim().to_ascii_lowercase();
+    let visible: String = inner
+        .chars()
+        .filter(|&c| !is_default_ignorable(c))
+        .nfkc()
+        .map(|c| {
+            if matches!(c, '\u{3002}' | '\u{FF61}') {
+                '.'
+            } else {
+                c
+            }
+        })
+        .collect();
+    let mut t = visible.trim().to_ascii_lowercase();
     if let Some(s) = t.strip_prefix('@') {
         t = s.to_owned();
     }
@@ -311,9 +397,13 @@ pub(crate) fn html_host_suffix(inner: &str, host: &str) -> bool {
     if let Some(s) = t.strip_prefix("www.") {
         t = s.to_owned();
     }
-    let Some(m) = host_like(&t) else {
+    if !starts_host_like(&t) {
         return false;
-    };
+    }
+    let end = t
+        .find(|c: char| c != '.' && !is_name_char(c))
+        .unwrap_or(t.len());
+    let m = t[..end].trim_end_matches('.');
     let h = host.strip_prefix("www.").unwrap_or(host);
     m != h
 }
@@ -439,8 +529,40 @@ mod tests {
     }
 
     #[test]
+    fn mailto() {
+        let host = |raw: &str| match safe_href(raw, HrefCtx::Markdown) {
+            Some(Href::Mailto { host, .. }) => Some(host),
+            _ => None,
+        };
+        assert_eq!(
+            host("mailto:a@Example.com?subject=x"),
+            Some("example.com".into())
+        );
+        assert_eq!(host("mailto:a%40b@example.com"), None);
+        assert_eq!(host("mailto:?to=attacker@evil.com"), None);
+        assert_eq!(host("mailto:a@evil.com,b@google.com"), None);
+        assert_eq!(host("mailto:a@evil.com%2Cb@google.com"), None);
+        assert_eq!(host("mailto:a@evil.com?cc=b@google.com"), None);
+        assert_eq!(host("mailto:a@evil.com?subject=x&BCC=b@google.com"), None);
+        assert_eq!(host("mailto:a@evil.com?%74o=b@google.com"), None);
+        assert_eq!(host("mailto:support@g\u{43e}\u{43e}gle.com"), None);
+        assert_eq!(host("mailto:example.com"), None);
+    }
+
+    #[test]
     fn host_rule() {
         assert!(html_host_suffix("google.com", "evil.com"));
+        assert!(html_host_suffix("google.com\u{200B}", "evil.com"));
+        assert!(html_host_suffix("goo\u{AD}gle.com", "evil.com"));
+        assert!(html_host_suffix("google.com!", "evil.com"));
+        assert!(!html_host_suffix("google.com!", "google.com"));
+        assert!(html_host_suffix("\u{261}oogle.com", "evil.com"));
+        assert!(html_host_suffix("g\u{43e}\u{43e}gle.com", "google.com"));
+        assert!(html_host_suffix("\u{FF47}oogle\u{FF0E}com", "evil.com"));
+        assert!(!html_host_suffix("\u{FF47}oogle\u{FF0E}com", "google.com"));
+        assert!(html_host_suffix("google\u{3002}com", "evil.com"));
+        assert!(html_host_suffix("google.com.evil.com", "google.com"));
+        assert!(!html_host_suffix("google.com.", "google.com"));
         assert!(!html_host_suffix(
             "https://www.Example.com/x",
             "example.com"

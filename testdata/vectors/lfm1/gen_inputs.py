@@ -13,6 +13,7 @@ CID1 = "bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku"
 CID2 = "bafkreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy"
 CID3 = "bafkreiabcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrst"
 CID4 = "bafkreib2rxk3rh6kzwq2tzz5qsmsa6e7rqikz3uwpl3iuvbb4hgsndhzzq"
+CID5 = "bafkrei" + "a" * 52
 
 
 def media(cid, mime="image/png", alt=None, ar=None, name=None):
@@ -50,12 +51,12 @@ FILES = {}
 
 
 KIND_DESC = {
-    "render": "render(text, media, profile) vectors (docs/spec/lfm-1.md). input: {text | gen, media?, profile?, encoding_error?}; gen = prefix + repeat*times + suffix. expected holds only the asserted Rendered fields (html, styled, text, excerpt, toc, word_count, read_minutes, links, mentions, media_used, anchors, flags, error) plus derived fields: html_temml (Temml-mode HTML, sec. 7.5), text_x (P_x, sec. 10.3), html_head/html_tail (first/last 400 chars of html), html_rle (html lines, runs of identical lines as 'line \u00d7N'). Every render vector is also checked against the sec. 13 invariants (allowlist, idempotence, sanitiser equality, terminal escapes).",
+    "render": "render(text, media, profile) vectors (docs/spec/lfm-1.md). input: {text | gen, media?, profile?, encoding_error?}; gen = prefix + repeat*times + suffix. expected holds only the asserted Rendered fields (html, styled, text, excerpt, toc, word_count, read_minutes, links, mentions, media_used, anchors, flags, error) plus derived fields: html_temml (Temml-mode HTML, sec. 7.5), text_x (P_x, sec. 10.3), html_head/html_tail (first/last 400 chars of html), html_rle (html lines, runs of identical lines as 'line \u00d7N'), html_bytes (UTF-8 length of html). Every render vector is also checked against the sec. 13 invariants (allowlist, idempotence, sanitiser equality, terminal escapes).",
     "safe_href": "safe_href(raw, ctx) vectors (docs/spec/lfm-1.md sec. 5.1-5.2). input: {raw | raw_gen, ctx: markdown|field}; expected.href is the Href as JSON ({type, ...}) or null.",
     "quote": "Quote resolution vectors (docs/spec/lfm-1.md sec. 11). input: {quote: {exact, prefix?, suffix?, start?}, target | target_gen (absent = Pending)}; expected: result ({type: anchored, start, end} in code points | orphaned | pending), qkey, first (CLI --quote first occurrence [start, end] or null).",
     "term_sanitize": "term_sanitize(text, ctx) vectors (docs/spec/lfm-1.md sec. 9.1). input: {text, ctx: prose|code|name, max? (Name grapheme cap, 0 = none)}; expected.out is the TermText: a string when every run is plain, else [{plain|escaped: text}, ...].",
     "short_did": "short_did(did) vectors (docs/spec/lfm-1.md sec. 5.4). expected.out is the placeholder without the leading @.",
-    "terminal": "Terminal escape corpus (docs/spec/lfm-1.md sec. 9). input as for render plus print: {color, hyperlinks, reveal_spoilers, width} options of the plain-stdout printer; expected: styled (StyledDoc JSON) and printed (printer output). Invariants: no TermText contains C0, C1, DEL, U+2028/9 or bidi controls; printer output contains no escape sequence other than the allowed SGR and OSC 8 forms.",
+    "terminal": "Terminal escape corpus (docs/spec/lfm-1.md sec. 9). input as for render plus print: {color, hyperlinks, reveal_spoilers, width} options of the plain-stdout printer; expected: styled (StyledDoc JSON) and printed (printer output), printed_bytes (its UTF-8 length) or printed_rle (its lines, runs of identical lines as 'line \u00d7N'). Invariants: no TermText contains C0, C1, DEL, U+2028/9 or bidi controls; printer output contains no escape sequence other than the allowed SGR and OSC 8 forms.",
     "mathml": "Engine-specific MathML snapshots (math-core 0.9, filtered by sec. 7.3). input: {tex, display}; expected: html (the document HTML of $tex$ or $$tex$$) and math_errors.",
 }
 
@@ -298,7 +299,15 @@ F("lfm1/links.json", "render", [
     R("host-display-match", "[example.com](https://www.example.com) [https://Example.com/a](https://example.com/b) [Click here](https://evil.com)\n", *LK),
     R("host-display-at-handle", "[@bob.bsky.social](https://evil.com) [bob@good.com](mailto:bob@evil.com)\n", *LK),
     R("host-display-with-port-text", "[good.com:443/x](https://evil.com)\n", *LK),
-    R("host-display-not-host-like", "[not.a host](https://evil.com) [a..b](https://evil.com) [x.y!](https://evil.com)\n", *LK),
+    R("host-display-host-like-prefix", "[not.a host](https://evil.com) [a..b](https://evil.com) [x.y!](https://evil.com)\n", *LK),
+    R("host-display-invisible-characters", "[google.com&#8203;](https://evil.com) [goo&#173;gle.com](https://evil.com) [goo\u2060gle.com](https://evil.com) [\ufeffgoogle.com](https://evil.com) [evil\u200b.com](https://evil.com)\n", *LK),
+    R("host-display-trailing-punctuation", "[google.com!](https://evil.com) [google.com.](https://evil.com) [google.com/x](https://evil.com) [evil.com.](https://evil.com) [evil.com!](https://evil.com)\n", *LK),
+    R("host-display-lookalikes", "[\u0261oogle.com](https://evil.com) [g\u043e\u043egle.com](https://evil.com) [\uff47\uff4f\uff4f\uff47\uff4c\uff45\uff0e\uff43\uff4f\uff4d](https://evil.com) [google\u3002com](https://evil.com) [\uff45\uff56\uff49\uff4c\uff0e\uff43\uff4f\uff4d](https://evil.com)\n", *LK),
+    R("mailto-empty-address-dropped", "[support@google.com](mailto:?to=attacker@evil.com)\n", *LK),
+    R("mailto-recipient-fields-dropped", "[a](mailto:a@evil.com?cc=b@google.com) [b](mailto:a@evil.com?BCC=b@google.com) [c](mailto:a@evil.com?subject=x&%74o=b@google.com)\n", *LK),
+    R("mailto-multiple-recipients-dropped", "[google.com](mailto:a@evil.com,b@google.com) [x](mailto:a@evil.com;b@google.com) [y](mailto:a%40evil.com@google.com)\n", *LK),
+    R("mailto-non-ascii-host-dropped", "[support@google.com](mailto:support@g\u043e\u043egle.com) [b](mailto:a@b%C3%BC.de)\n", *LK),
+    R("mailto-subject-and-body-kept", "[support@example.com](mailto:a@Example.com?subject=hi&body=x%20y)\n", *LK),
     R("unknown-scheme-dropped", "[a](ftp://example.com) [b](irc://x) [c](tel:123)\n", *LK),
     R("link-text-keeps-formatting", "[**bold** `code`](https://example.com)\n", *LK),
 ])
@@ -323,6 +332,9 @@ F("lfm1/at-links.json", "render", [
     R("did-web-record", f"[w](at://{DIDWEB}/{NS}.forum/self)\n", *AL),
     R("uppercase-scheme", f"[u](AT://{DID})\n", *AL),
     R("autolink-at-uri", f"<at://{DID}>\n", *AL),
+    R("unreferenced-footnote-not-derived", f"x\n\n[^x]: [@v](at://{DID}) [r]({P})\n", *AL),
+    R("referenced-footnote-derived", f"x[^x]\n\n[^x]: [@v](at://{DID}) [r]({P})\n", *AL),
+    G("depth-flattened-not-derived", {"prefix": "", "repeat": ">", "times": 70, "suffix": f" [@v](at://{DID}) [r]({P})\n"}, "html_rle", "links", "mentions"),
 ])
 
 # ------------------------------------------------------------------ images.json
@@ -353,6 +365,12 @@ F("lfm1/images.json", "render", [
     R("nested-image-alt", "x ![a ![b](c.png) d](https://img.example/x.png)\n", *IM),
     R("cid-image-in-link", f"[![a](cid:{CID1})](https://example.com)\n", *IM, media=[M1]),
     R("lone-cid-image-paragraph-styled", f"![a](cid:{CID1})\n", "html", "styled", media=[M1]),
+    R("cid-alt-fallback-first-reference-only", f"![](cid:{CID1}) ![ ](cid:{CID1}) ![own](cid:{CID1})\n\n![](cid:{CID1})\n", *IM, media=[M1]),
+    R("cid-alt-fallback-body-before-footnotes", f"x[^1]\n\n[^1]: ![](cid:{CID1})\n\n![](cid:{CID1}) ![](cid:{CID2})\n", *IM, media=[M1, media(CID2, alt="two")]),
+    G("media-alt-amplification-bounded", {"prefix": "", "repeat": f"![](cid:{CID5}) ", "times": 1470}, "html_bytes", "html_head", "flags", media=[media(CID5, alt='"' * 20000)]),
+    G("media-alt-amplification-video-bounded", {"prefix": "", "repeat": f"![](cid:{CID5}) ", "times": 1470}, "html_bytes", "flags", media=[media(CID5, "video/mp4", alt="&" * 20000)]),
+    R("alt-trimmed", f"![ \u00a0\ufeffshown\t ](cid:{CID1}) ![ ](cid:{CID2})\n", *IM, media=[media(CID1), media(CID2, alt="  spaced  "), media(CID3, alt="\u00a0\ngallery\u3000\ufeff")]),
+    R("mime-exact-match", f"![a](cid:{CID1}) ![b](cid:{CID2}) ![c](cid:{CID3}) ![d](cid:{CID4})\n", *IM, media=[media(CID1, "IMAGE/PNG"), media(CID2, "image/png; x=y"), media(CID3, " image/png"), media(CID4, "Video/MP4")]),
 ])
 
 # ------------------------------------------------------------------ gallery.json
@@ -404,6 +422,8 @@ F("lfm1/footnotes.json", "render", [
     R("self-reference", "x[^s]\n\n[^s]: me[^s]\n", *FN),
     R("multi-paragraph-definition", "x[^m]\n\n[^m]: para one\n\n    para two\n", *FN),
     R("footnote-styled", "x[^1]\n\n[^1]: note\n", "styled"),
+    R("definition-inside-spoiler", "> [!spoiler]\n> secret[^1]\n>\n> [^1]: footnote secret\n", "html", "text", "text_x", "styled"),
+    R("definition-inside-details-and-quoted-spoiler", "x[^a] y[^b]\n\n> [!details] d\n> [^a]: in details\n\n> [!spoiler]\n> > [^b]: in quote in spoiler\n", "html", "text_x"),
 ])
 
 # ------------------------------------------------------------------ blocks.json
@@ -423,6 +443,7 @@ F("lfm1/blocks.json", "render", [
     R("list-item-empty", "- \n- x\n"),
     R("code-block-empty", "```\n```\n"),
     R("rule-in-list", "- a\n\n  ***\n"),
+    R("code-language-ascii-whitespace-only", "```a\u00a0b\nx\n```\n\n```c\u3000d e\ny\n```\n\n```f\u2003g\th\nz\n```\n\n```k\tl\nw\n```\n"),
 ])
 
 # ------------------------------------------------------------------ math.json
@@ -463,6 +484,17 @@ F("lfm1/math.json", "render", [
     R("output-size-cap", "$" + "\\pmod{x}" * 512 + "$\n", "flags"),
     R("output-size-under-cap", "$" + "\\pmod{x}" * 300 + "$\n", "flags"),
     R("engine-nesting-guard", "$" + "\\sqrt" * 100 + " x$\n", "flags", "html"),
+    R("guard-unmatched-paren-28", "$" + "(" * 28 + "x$\n", "html", "flags"),
+    R("guard-unmatched-8-accepted", "$" + "(" * 8 + "x$\n", "flags", "html_temml"),
+    R("guard-unmatched-9-refused", "$" + "(" * 9 + "x$\n", "html", "flags"),
+    R("guard-unmatched-display-langle", "$$" + "\\lAngle " * 30 + "$$\n", "html", "flags"),
+    R("guard-unmatched-open-kinds", "\n\n".join("$" + (t * 30).strip() + "$" for t in ["[x", "\\{", "\\lvert x", "\u27e8", "\u230a", "\\bigl(", "\\Biggl\\langle ", "\\mathopen{(}", "\\mathclose(", "{(}", "\\llcorner ", "\\ulcorner ", "\\lmoustache ", "(^2"]) + "\n\n$" + "\\sin(" * 24 + "$\n", "html", "flags"),
+    R("guard-unmatched-in-arguments", "$\\frac{" + "(" * 30 + "x}{y}$\n\n$\\mathrm{" + "(" * 30 + "x}$\n\n$\\sqrt[" + "(" * 30 + "x]{y}$\n\n$\\left(" + "(" * 30 + "x\\right)$\n", "html", "flags"),
+    R("guard-closing-arguments-cancel-nothing", "$" + "(\\sqrt)" * 30 + "$\n\n$" + "(x^)" * 30 + "$\n\n$" + "(\\big)" * 30 + "$\n\n$" + "(\\left.\\right)" * 30 + "$\n", "html", "flags"),
+    R("guard-row-break-between", "$" + "(" * 30 + "x & " + ")" * 30 + "$\n\n$$" + "(" * 30 + "x \\\\ " + ")" * 30 + "$$\n\n$" + "(" * 30 + "x \\over " + ")" * 30 + "$\n", "html", "flags"),
+    R("guard-delimiter-nesting-65", "$" + "(" * 65 + "x" + ")" * 65 + "$\n", "html", "flags"),
+    R("guard-balanced-accepted", "$" + ("[0, 1) \\cup " * 40).strip() + "$ $" + ("f(\\pi) + " * 40).strip() + "$ $" + ("n! + " * 40).strip() + "$ $\\begin{pmatrix} (a) & [b] \\\\ \\{c\\} & \\langle d \\rangle \\end{pmatrix}$\n", "flags", "html_temml"),
+    G("mathml-document-budget", {"prefix": "", "repeat": "$" + "\\," * 1720 + "$ ", "times": 280}, "flags", "html_bytes", "html_tail"),
     R("math-in-heading-and-link", "# $x^2$\n\n[$y$](https://example.com)\n", *MA),
     R("matrix", "$$\\begin{pmatrix} 1 & 2 \\\\ 3 & 4 \\end{pmatrix}$$\n", *MA),
     R("display-math-styled", "a $b$\n\n$$c\nd$$\n", "styled"),
@@ -483,7 +515,7 @@ F("lfm1/limits.json", "render", [
     G("table-flattened", {"prefix": "", "repeat": ">", "times": 62, "suffix": " | a |\n" + ">" * 62 + " |---|\n" + ">" * 62 + " | b |\n"}, "html_rle", "flags"),
     G("code-block-flattened", {"prefix": "", "repeat": ">", "times": 63, "suffix": " ```\n" + ">" * 63 + " code\n" + ">" * 63 + " ```\n"}, "html_rle", "flags"),
     G("spoiler-at-62-fits", {"prefix": "", "repeat": ">", "times": 63, "suffix": " [!spoiler]\n" + ">" * 63 + " hidden\n"}, "html_rle", "flags"),
-    G("spoiler-flattened-reveals", {"prefix": "", "repeat": ">", "times": 64, "suffix": " [!spoiler]\n" + ">" * 64 + " hidden\n"}, "html_rle", "flags", "text_x"),
+    G("spoiler-flattened-to-summary", {"prefix": "", "repeat": ">", "times": 64, "suffix": " [!spoiler]\n" + ">" * 64 + " hidden\n"}, "html_rle", "flags", "text_x"),
     G("figure-at-depth-limit", {"prefix": "", "repeat": ">", "times": 63, "suffix": " ![a](https://x.example/i.png \"Cap\")\n"}, "html_rle", "flags"),
     G("heading-flattened-no-id", {"prefix": "", "repeat": ">", "times": 64, "suffix": " # H\n"}, "html_rle", "flags", "anchors", "toc"),
     G("leaf-exemption", {"prefix": "", "repeat": ">", "times": 63, "suffix": " `code` ![i](https://x.example/i.png) $x$ [^1]\n\n[^1]: n\n"}, "html_rle", "flags"),
@@ -534,7 +566,8 @@ F("lfm1/projection.json", "render", [
     R("mention-source-text", f"[@alice](at://{DID}) hi\n", *PJ),
     R("spoiler-p-vs-px", "a\n\n> [!spoiler]\n> hidden\n\nb\n", *PJ),
     R("details-marker-removed", "> [!details] Sum\n> body\n", *PJ),
-    R("control-chars-kept", "a\u0001b\u007fc\u0085d\n", *PJ),
+    R("control-chars-removed", "a\u0001b\u007fc\u0085d\n", *PJ),
+    R("terminal-escapes-removed", "hello \u001b]0;pwned\u0007 \u001b[2J \u009b \u202eevil\n", "text", "text_x", "excerpt", "word_count"),
     R("unreferenced-footnote-in-p", "x\n\n[^u]: u text\n", *PJ),
 ])
 
@@ -579,6 +612,7 @@ F("lfm1/quote.json", "quote", [
     Q("overlapping", {"exact": "aa", "suffix": "a!"}, "aaaa!"),
     Q("normalisation-exact-trimmed-ws", {"exact": "  cat\n sat\u00a0 "}, T1),
     Q("normalisation-nfc", {"exact": "Cafe\u0301"}, "a Café b"),
+    Q("normalisation-controls-removed", {"exact": "c\u0007a\u202et s\u001bat"}, "the cat sat on", "result", "qkey"),
     Q("astral-offsets", {"exact": "x"}, "😀😀 x"),
     Q("empty-exact-orphaned", {"exact": "   "}, T1),
     Q("quote-2000-bytes-ok", {"exact": "a" * 2000}, "b" + "a" * 2000),
@@ -644,7 +678,17 @@ F("lfm1/safe-href.json", "safe_href", [
     S("pct-keeps-percent-and-reserved", "https://e.com/%2F%zz/[]!$&'()*+,;=:@~"),
     S("pct-encodes-quote-angle-backtick", "https://e.com/\"<>`{}|^"),
     S("mailto", "mailto:a@B.com"),
-    S("mailto-query-host", "mailto:a@b.com?cc=c@d.com"),
+    S("mailto-cc-rejected", "mailto:a@b.com?cc=c@d.com"),
+    S("mailto-to-rejected", "mailto:?to=a@b.com"),
+    S("mailto-to-percent-encoded-rejected", "mailto:a@b.com?subject=x&%54O=c@d.com"),
+    S("mailto-bcc-uppercase-rejected", "mailto:a@b.com?BCC=c@d.com"),
+    S("mailto-two-addresses", "mailto:a@b.com,c@d.com"),
+    S("mailto-encoded-comma", "mailto:a@b.com%2Cc@d.com"),
+    S("mailto-non-ascii-host", "mailto:a@g\u043e\u043egle.com"),
+    S("mailto-dots-host", "mailto:a@.."),
+    S("mailto-empty-local", "mailto:@b.com"),
+    S("mailto-encoded-at", "mailto:a%40b.com"),
+    S("mailto-subject", "mailto:a@b.com?subject=x"),
     S("mailto-no-at", "mailto:nobody"),
     S("mailto-empty", "mailto:"),
     S("mailto-slash", "mailto:/x"),
@@ -776,6 +820,9 @@ F("xss/html.json", "render", desc="XSS corpus: classic HTML injection, dangerous
     R("figcaption-injection", "![a](https://x.example/i.png \"<script>alert(1)</script>\")", *X),
     R("ext-image-javascript", "![a](javascript:alert(1)) ![b](https://x.example/\"><svg onload=alert(1)>)", *X),
     R("nul-in-tags", "<scr\u0000ipt>alert(1)</scr\u0000ipt>", *X),
+    R("alt-safe-for-xml-patterns", f"![a --> b](cid:{CID1}) ![c \\]\\]> d](cid:{CID1}) ![e </title> f](cid:{CID1}) ![g </script h](cid:{CID1}) ![i --!> j](cid:{CID1})", "html", media=[media(CID1)]),
+    R("media-alt-safe-for-xml-patterns", f"![](cid:{CID1}) ![](cid:{CID2})", "html", media=[media(CID1, alt="a --!> b </style"), media(CID2, alt="]]><!-- </noscript>")]),
+    R("alt-whitespace-trimmed", f"![ x ](cid:{CID1}) ![\tx\u00a0](cid:{CID1}) ![\u000cx\ufeff](cid:{CID1}) ![](cid:{CID2})", "html", media=[media(CID1), media(CID2, alt="\n\u2028 y \u3000")]),
 ])
 F("xss/mathml.json", "render", desc="MathML XSS/mXSS corpus: disabled macros, href/xlink/actiontype, annotation-xml and mglyph namespace confusion, text-mode HTML.", vectors=[
     R("math-href", "$\\href{javascript:alert(1)}{x}$", "html", "flags"),
@@ -843,6 +890,17 @@ F("terminal/escapes.json", "terminal", [
     T("ext-image-in-link-shows-link-host", "[![cat](https://img.example/c.png)](https://evil.com) and [![](https://img.example/d.png)](https://img.example/d.png)", NEVER, "styled", "printed"),
     T("escaped-run-reverse-video", "a\u0001b", {"color": True}, "printed"),
     T("mention-placeholder", f"hi [@alice](at://{DID})", NEVER, "printed"),
+    T("table-padding-bounded", "|h|h|\n|-|-|\n|" + "w" * 40000 + "|y|\n" + "|x|y|\n" * 10000, NEVER, "printed_bytes"),
+    T("table-wide-cell-wrapped", "| a | b |\n|---|---|\n| " + "word " * 30 + "| x |\n| y | z |", NEVER, "printed"),
+    T("osc8-once-per-line", "[" + "a " * 48000 + "](https://a.example/" + "A" * 2020 + ")", COLOR, "printed_bytes"),
+    T("osc8-long-word-bounded", "[" + "a" * 96000 + "](https://a.example/" + "A" * 2020 + ")", {"color": True, "hyperlinks": True, "width": 60}, "printed_bytes"),
+    T("osc8-and-sgr-per-line", "[" + "word " * 20 + "](https://e.com/x) **bold" + " w" * 30 + "**", {"color": True, "hyperlinks": True, "width": 40}, "printed"),
+    V("media-alt-amplification-color", {"gen": {"prefix": "", "repeat": f"![](cid:{CID5}) ", "times": 1470}, "media": [media(CID5, alt='"' * 20000)], "print": COLOR}, "printed_bytes"),
+    V("media-alt-amplification-plain", {"gen": {"prefix": "", "repeat": f"![](cid:{CID5}) ", "times": 1470}, "media": [media(CID5, alt='"' * 20000)], "print": NEVER}, "printed_bytes"),
+    T("footnote-in-spoiler-hidden", "> [!spoiler]\n> secret[^1]\n>\n> [^1]: footnote secret", NEVER, "printed"),
+    T("footnote-in-spoiler-revealed", "> [!spoiler]\n> secret[^1]\n>\n> [^1]: footnote secret", {"reveal_spoilers": True}, "printed"),
+    T("deep-gutters-elided", "> " * 60 + "x", NEVER, "printed"),
+    T("mailto-real-host", "[support@google.com](mailto:?to=attacker@evil.com) [google.com](mailto:a@evil.com,b@google.com) [ok](mailto:a@evil.com)", NEVER, "printed"),
 ])
 
 # ------------------------------------------------------------------ mathml (engine snapshots)

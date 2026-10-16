@@ -494,10 +494,20 @@ fn json_list<'a>(items: impl Iterator<Item = &'a str>) -> String {
     format!("[{}]", v.join(","))
 }
 
-/// The DOMPurify configuration generated from §8.2 and §7.3 (§8.5), as JSON:
-/// `ALLOWED_TAGS`, `ALLOWED_ATTR`, `ALLOW_DATA_ATTR: false` and `ALLOWED_URI_REGEXP`, plus
-/// `LFM_CLASSES` (class tokens per element) for the hook that enforces class tokens and value
-/// grammars. Deterministic (table order).
+/// The DOMPurify configuration generated from §8.2 and §7.3 (§8.5), as JSON, usable as is:
+///
+/// - `ALLOWED_TAGS` and `ALLOWED_ATTR` exactly as listed, `ALLOW_DATA_ATTR: false`,
+///   `ALLOW_ARIA_ATTR: false` and `ALLOWED_URI_REGEXP`;
+/// - `ADD_URI_SAFE_ATTR`: every allowed attribute except `href`, which is the only URL-valued
+///   one. Without it DOMPurify tests other values (`dir="auto"`, `rel`, `data-cid`, …) against
+///   the URI pattern and drops them;
+/// - `SAFE_FOR_XML: false`: that mode drops any attribute whose value merely contains
+///   `</script`, `-->` and similar text (an `img` `alt` may), and the output is only ever
+///   parsed as HTML, with no raw-text element or comment allowed;
+/// - `LFM_CLASSES` (class tokens per element), for the hook that enforces class tokens and
+///   value grammars; strip it before passing the object to DOMPurify.
+///
+/// Deterministic (table order).
 pub fn dompurify_config_json() -> String {
     let mut tags: Vec<&str> = HTML_ALLOWLIST.iter().map(|(t, _)| *t).collect();
     tags.extend(MATHML_ELEMENTS.iter().copied());
@@ -515,13 +525,21 @@ pub fn dompurify_config_json() -> String {
         .iter()
         .map(|(t, cs)| format!("{}:{}", json_str(t), json_list(cs.iter().copied())))
         .collect();
+    let uri_safe: Vec<&str> = attrs.iter().copied().filter(|a| *a != "href").collect();
     format!(
-        "{{\"ALLOWED_TAGS\":{},\"ALLOWED_ATTR\":{},\"ALLOW_DATA_ATTR\":false,\"ALLOWED_URI_REGEXP\":{},\"LFM_CLASSES\":{{{}}}}}",
+        "{{\"ALLOWED_TAGS\":{},\"ALLOWED_ATTR\":{},\"ALLOW_DATA_ATTR\":false,\"ALLOW_ARIA_ATTR\":false,\"ADD_URI_SAFE_ATTR\":{},\"SAFE_FOR_XML\":false,\"ALLOWED_URI_REGEXP\":{},\"LFM_CLASSES\":{{{}}}}}",
         json_list(tags.into_iter()),
-        json_list(attrs.into_iter()),
+        json_list(attrs.iter().copied()),
+        json_list(uri_safe.into_iter()),
         json_str(ALLOWED_URI_REGEXP),
         classes.join(",")
     )
+}
+
+/// ammonia's relative-URL rule: keep `#/at/…` and `#/u/…`, drop everything else.
+#[cfg(feature = "ammonia")]
+fn internal_route(url: &str) -> Option<std::borrow::Cow<'_, str>> {
+    (url.starts_with("#/at/") || url.starts_with("#/u/")).then_some(std::borrow::Cow::Borrowed(url))
 }
 
 /// Sanitise `html` with ammonia configured from exactly the allowlist tables. Renderer
@@ -551,7 +569,9 @@ pub fn ammonia_clean(html: &str) -> String {
         .tag_attributes(attrs)
         .allowed_classes(classes)
         .url_schemes(["http", "https", "mailto"].into_iter().collect())
-        .url_relative(ammonia::UrlRelative::PassThrough)
+        // The only relative URLs the renderer emits are the internal routes (§5.2); anything
+        // else relative (`//host`, `/path`, `x`) is removed, as DOMPurify's URI pattern does.
+        .url_relative(ammonia::UrlRelative::Custom(Box::new(internal_route)))
         .link_rel(None)
         .strip_comments(true);
     b.clean(html).to_string()
@@ -580,6 +600,15 @@ mod tests {
                 && !cleaned.contains("javascript"),
             "{cleaned}"
         );
+        // Relative URLs other than the internal routes are removed.
+        for href in ["//evil.com/x", "/x", "x.html", "#x"] {
+            let html = format!(
+                "<div class=\"lfm\" dir=\"auto\">\n<p dir=\"auto\"><a href=\"{href}\" rel=\"nofollow ugc noopener noreferrer\">x</a></p>\n</div>\n"
+            );
+            assert!(!ammonia_clean(&html).contains("href"), "{href}");
+        }
+        let route = "<div class=\"lfm\" dir=\"auto\">\n<p dir=\"auto\"><a href=\"#/u/did:plc:abcdefghijklmnopqrstuvwx\" data-did=\"did:plc:abcdefghijklmnopqrstuvwx\" class=\"mention\">x</a></p>\n</div>\n";
+        assert_eq!(ammonia_clean(route), route);
     }
 
     #[test]
@@ -601,6 +630,11 @@ mod tests {
                 .any(|t| t == "data-at-uri")
         );
         assert_eq!(v["LFM_CLASSES"]["details"][0], "spoiler");
+        assert_eq!(v["ALLOW_ARIA_ATTR"], false);
+        assert_eq!(v["SAFE_FOR_XML"], false);
+        let safe = v["ADD_URI_SAFE_ATTR"].as_array().unwrap();
+        assert!(safe.iter().any(|a| a == "dir") && safe.iter().any(|a| a == "data-cid"));
+        assert!(!safe.iter().any(|a| a == "href"));
     }
 
     #[test]

@@ -12,7 +12,7 @@
 //!
 //! | Item | Spec |
 //! |---|---|
-//! | [`render`], [`Rendered`], [`RenderOpts`], [`RENDERER_VERSION`] | §1, §12 |
+//! | [`render`], [`Rendered`], [`RenderOpts`], [`RENDERER_VERSION`], [`derive_metadata`] | §1, §12 |
 //! | [`safe_href`], [`Href`], [`short_did`], [`preview_eligible`] | §5 |
 //! | [`MediaItem`] (`defs#media`) | §6 |
 //! | [`math`] (pre-scan, MathML filter, Temml mode) | §7 |
@@ -34,6 +34,7 @@
 
 pub mod allowlist;
 mod at;
+mod budget;
 mod event;
 pub mod html;
 mod lfm;
@@ -59,8 +60,9 @@ pub use quote::{
     resolve_quote,
 };
 pub use render::{
-    BodyError, Flags, MAX_SOURCE_BYTES, PROFILE, RENDERER_VERSION, RenderOpts, Rendered, TocEntry,
-    decode_text_blob, render, render_error, render_profile, render_with_math_mode,
+    BodyError, Flags, MAX_SOURCE_BYTES, Metadata, PROFILE, RENDERER_VERSION, RenderOpts, Rendered,
+    TocEntry, decode_text_blob, derive_metadata, render, render_error, render_profile,
+    render_with_math_mode,
 };
 pub use styled::{Gutter, SBlock, SKind, SLine, SLink, Span, Style, StyledDoc};
 pub use term::{RunKind, TermCtx, TermRun, TermText, term_sanitize};

@@ -5,7 +5,9 @@
 use serde::{Serialize, Serializer};
 
 use crate::at::{AtUri, Did};
-use crate::event::{AlertKind, Align, Ev, ImageRes, LinkRes, Tag, TagKind, match_indices};
+use crate::event::{
+    AlertKind, Align, Ev, ImageData, ImageRes, LinkRes, Tag, TagKind, match_indices,
+};
 use crate::html::{code_lang, fixed};
 use crate::lfm::Footnote;
 use crate::media::{MediaClass, MediaItem};
@@ -369,11 +371,12 @@ impl Builder<'_> {
         }
     }
 
-    fn image_span(&mut self, res: &ImageRes, alt: &str, style: Style, link: Option<SLink>) {
+    fn image_span(&mut self, d: &ImageData, style: Style, link: Option<SLink>) {
         let st = style | Style::PLACEHOLDER;
-        match res {
+        let alt = d.alt.as_str();
+        match &d.res {
             ImageRes::Media(i) => {
-                let a = self.media[*i].alt_text(alt);
+                let a = self.media[*i].alt_text(alt, d.fallback_alt);
                 let t = media_placeholder(self.media, *i, &a);
                 let l = link.or(Some(SLink::Media(u16::try_from(*i).unwrap_or(u16::MAX))));
                 self.push_span(t, st, l);
@@ -441,7 +444,7 @@ impl Builder<'_> {
                             && m[i + 1] + 1 == end
                             && let ImageRes::Media(idx) = d.res
                         {
-                            let a = self.media[idx].alt_text(&d.alt);
+                            let a = self.media[idx].alt_text(&d.alt, d.fallback_alt);
                             let t = media_placeholder(self.media, idx, &a);
                             let ix = u16::try_from(idx).unwrap_or(u16::MAX);
                             let line = vec![Span {
@@ -607,7 +610,7 @@ impl Builder<'_> {
                             }];
                             match &d.res {
                                 ImageRes::Media(idx) => {
-                                    let a = self.media[*idx].alt_text(&d.alt);
+                                    let a = self.media[*idx].alt_text(&d.alt, d.fallback_alt);
                                     let t = media_placeholder(self.media, *idx, &a);
                                     let ix = u16::try_from(*idx).unwrap_or(u16::MAX);
                                     let line = vec![Span {
@@ -617,14 +620,14 @@ impl Builder<'_> {
                                     }];
                                     self.emit(SKind::Media { index: ix, line });
                                 }
-                                res => {
-                                    self.image_span(res, &d.alt, style, link.clone());
+                                _ => {
+                                    self.image_span(d, style, link.clone());
                                     self.flush_para();
                                 }
                             }
                             self.emit(SKind::Caption(cap));
                         } else {
-                            self.image_span(&d.res, &d.alt, style, link.clone());
+                            self.image_span(d, style, link.clone());
                         }
                         i = m[i].min(evs.len() - 1) + 1;
                         continue;
@@ -823,6 +826,22 @@ pub(crate) fn build(
     }
     for n in notes {
         b.gutters = vec![Gutter::Footnote(n.ord)];
+        if n.in_spoiler {
+            // A definition written inside a spoiler stays hidden behind one of its own.
+            b.next_summary_id += 1;
+            let id = b.next_summary_id;
+            let line = vec![Span {
+                text: prose(fixed::SPOILER),
+                style: Style::empty(),
+                link: None,
+            }];
+            b.emit(SKind::Summary {
+                id,
+                spoiler: true,
+                line,
+            });
+            b.gutters.push(Gutter::Spoiler(id));
+        }
         b.flow(&n.events);
     }
     b.gutters.clear();
@@ -830,7 +849,7 @@ pub(crate) fn build(
         if used.iter().any(|&u| usize::from(u) == i) {
             continue;
         }
-        let a = media[i].alt.clone().unwrap_or_default();
+        let a = media[i].gallery_alt();
         let ix = u16::try_from(i).unwrap_or(u16::MAX);
         let line = vec![Span {
             text: media_placeholder(media, i, &a),

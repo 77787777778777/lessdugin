@@ -4,6 +4,8 @@
 //! and only when allowed, the real-host suffix (F1), spoiler hiding, reverse video for escaped
 //! runs and a plain `--color never` form. It returns a `String`; the CLI writes it.
 
+use std::cell::{Cell, RefCell};
+
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -82,32 +84,135 @@ pub fn osc8_uri(url: &str) -> Option<String> {
     (out.len() <= 2048).then_some(out)
 }
 
-/// One printable piece: a word, a run of spaces, or an escaped run.
+/// The most bytes of OSC 8 hyperlink sequences one document may print. Past it, links print
+/// without OSC 8 (their text and ` ⟨host⟩` suffix are unchanged), so that a long link text
+/// wrapped over many lines cannot repeat a 2,048-byte URI on every line without bound.
+pub const OSC8_BUDGET: usize = 1 << 20;
+
+/// The widest a table column is laid out; wider cells wrap.
+pub const TABLE_COLUMN_MAX: usize = 40;
+
+/// A run style: the SGR sequences around it and the URI of its OSC 8 hyperlink.
+#[derive(Clone, Default, PartialEq, Eq)]
+struct Sty {
+    pre: String,
+    post: String,
+    osc: Option<String>,
+}
+
+/// One printable piece: a word, a run of spaces, or an escaped run, with its style (an index
+/// into [`Printer::styles`]; 0 is unstyled).
 #[derive(Clone)]
 struct Piece {
-    pre: String,
     text: String,
-    post: String,
     width: usize,
     space: bool,
+    sty: usize,
 }
 
 struct Printer<'a> {
     opts: PrintOpts,
     handle_of: &'a dyn Fn(&str) -> Option<String>,
+    styles: RefCell<Vec<Sty>>,
+    osc_left: Cell<usize>,
+}
+
+/// One output line being built. A style is opened when the first piece that uses it is
+/// written and closed when the style changes or the line ends, so SGR and OSC 8 sequences
+/// are written once per style run per line, never once per word or grapheme.
+struct LineBuf<'p, 'a> {
+    p: &'p Printer<'a>,
+    s: String,
+    w: usize,
+    /// The open style and whether its OSC 8 was written.
+    open: Option<(usize, bool)>,
+}
+
+impl<'p, 'a> LineBuf<'p, 'a> {
+    fn new(p: &'p Printer<'a>) -> Self {
+        Self {
+            p,
+            s: String::new(),
+            w: 0,
+            open: None,
+        }
+    }
+
+    fn close(&mut self) {
+        if let Some((sty, osc)) = self.open.take() {
+            let styles = self.p.styles.borrow();
+            self.s.push_str(&styles[sty].post);
+            if osc {
+                self.s.push_str("\u{1b}]8;;\u{1b}\\");
+            }
+        }
+    }
+
+    fn push(&mut self, text: &str, width: usize, sty: usize) {
+        let same = match self.open {
+            Some((o, _)) => o == sty || self.p.styles.borrow()[o] == self.p.styles.borrow()[sty],
+            None => sty == 0,
+        };
+        if !same {
+            self.close();
+            if sty != 0 {
+                let styles = self.p.styles.borrow();
+                let st = &styles[sty];
+                let mut osc = false;
+                if let Some(uri) = &st.osc {
+                    let cost = uri.len() + 12;
+                    if self.p.osc_left.get() >= cost {
+                        self.p.osc_left.set(self.p.osc_left.get() - cost);
+                        self.s.push_str("\u{1b}]8;;");
+                        self.s.push_str(uri);
+                        self.s.push_str("\u{1b}\\");
+                        osc = true;
+                    }
+                }
+                self.s.push_str(&st.pre);
+                self.open = Some((sty, osc));
+            }
+        }
+        self.s.push_str(text);
+        self.w += width;
+    }
+
+    fn finish(mut self) -> String {
+        self.close();
+        self.s
+    }
 }
 
 impl Printer<'_> {
-    fn wrap_style(&self, style: Style, extra: &[u8]) -> (String, String) {
-        if !self.opts.color {
-            return (String::new(), String::new());
+    fn new<'a>(opts: PrintOpts, handle_of: &'a dyn Fn(&str) -> Option<String>) -> Printer<'a> {
+        Printer {
+            opts,
+            handle_of,
+            styles: RefCell::new(vec![Sty::default()]),
+            osc_left: Cell::new(OSC8_BUDGET),
         }
-        let mut codes = style_codes(style);
-        codes.extend_from_slice(extra);
-        if codes.is_empty() {
-            return (String::new(), String::new());
+    }
+
+    /// The style index of `style` (plus `extra` SGR codes and an optional OSC 8 URI).
+    fn style(&self, style: Style, extra: &[u8], osc: Option<&str>) -> usize {
+        let osc = osc.map(str::to_owned);
+        let (pre, post) = if self.opts.color {
+            let mut codes = style_codes(style);
+            codes.extend_from_slice(extra);
+            if codes.is_empty() {
+                (String::new(), String::new())
+            } else {
+                (sgr(&codes), sgr(&[0]))
+            }
+        } else {
+            (String::new(), String::new())
+        };
+        if pre.is_empty() && osc.is_none() {
+            return 0;
         }
-        (sgr(&codes), sgr(&[0]))
+        let mut styles = self.styles.borrow_mut();
+        styles.push(Sty { pre, post, osc });
+        styles.len() - 1
     }
 
     fn push_text_pieces(
@@ -118,67 +223,41 @@ impl Printer<'_> {
         style: Style,
         osc: Option<&str>,
     ) {
-        let (mut pre, mut post) =
-            self.wrap_style(style, if kind == RunKind::Escaped { &[7] } else { &[] });
-        if let Some(uri) = osc {
-            pre = format!("{ESC}]8;;{uri}{ESC}\\{pre}");
-            post = format!("{post}{ESC}]8;;{ESC}\\");
-        }
+        let sty = self.style(
+            style,
+            if kind == RunKind::Escaped { &[7] } else { &[] },
+            osc,
+        );
         if kind == RunKind::Escaped {
             out.push(Piece {
-                pre,
                 text: text.to_owned(),
-                post,
                 width: text.width(),
                 space: false,
+                sty,
             });
             return;
         }
-        let mut word = String::new();
-        let mut spaces = String::new();
-        let flush_word = |out: &mut Vec<Piece>, w: &mut String| {
-            if !w.is_empty() {
+        let mut start = 0usize;
+        let mut in_space: Option<bool> = None;
+        let flush = |out: &mut Vec<Piece>, s: &str, space: bool| {
+            if !s.is_empty() {
                 out.push(Piece {
-                    pre: pre.clone(),
-                    text: std::mem::take(w),
-                    post: post.clone(),
-                    width: 0,
-                    space: false,
+                    text: s.to_owned(),
+                    width: s.width(),
+                    space,
+                    sty,
                 });
-                if let Some(p) = out.last_mut() {
-                    p.width = p.text.width();
-                }
             }
         };
-        for c in text.chars() {
-            if c == ' ' {
-                flush_word(out, &mut word);
-                spaces.push(c);
-            } else {
-                if !spaces.is_empty() {
-                    let n = spaces.len();
-                    out.push(Piece {
-                        pre: String::new(),
-                        text: std::mem::take(&mut spaces),
-                        post: String::new(),
-                        width: n,
-                        space: true,
-                    });
-                }
-                word.push(c);
+        for (i, c) in text.char_indices() {
+            let sp = c == ' ';
+            if in_space.is_some_and(|s| s != sp) {
+                flush(out, &text[start..i], !sp);
+                start = i;
             }
+            in_space = Some(sp);
         }
-        flush_word(out, &mut word);
-        if !spaces.is_empty() {
-            let n = spaces.len();
-            out.push(Piece {
-                pre: String::new(),
-                text: spaces,
-                post: String::new(),
-                width: n,
-                space: true,
-            });
-        }
+        flush(out, &text[start..], in_space.unwrap_or(false));
     }
 
     fn line_pieces(&self, line: &SLine) -> Vec<Piece> {
@@ -212,26 +291,29 @@ impl Printer<'_> {
                 && !plain.contains(&format!("\u{27E8}{h}\u{27E9}"))
                 && term_shows_host(&plain, url)
             {
-                let (pre, post) = if self.opts.color {
-                    (sgr(&[2]), sgr(&[22]))
-                } else {
-                    (String::new(), String::new())
-                };
                 out.push(Piece {
-                    pre: String::new(),
                     text: " ".into(),
-                    post: String::new(),
                     width: 1,
                     space: true,
+                    sty: 0,
                 });
                 let t = format!("\u{27E8}{h}\u{27E9}");
-                let w = t.width();
+                let sty = if self.opts.color {
+                    let mut styles = self.styles.borrow_mut();
+                    styles.push(Sty {
+                        pre: sgr(&[2]),
+                        post: sgr(&[22]),
+                        osc: None,
+                    });
+                    styles.len() - 1
+                } else {
+                    0
+                };
                 out.push(Piece {
-                    pre,
+                    width: t.width(),
                     text: t,
-                    post,
-                    width: w,
                     space: false,
+                    sty,
                 });
             }
             i = j;
@@ -263,66 +345,57 @@ impl Printer<'_> {
         }
     }
 
-    /// Lay pieces out into lines of at most `avail` columns (no wrapping when `None`).
-    fn layout(pieces: Vec<Piece>, avail: Option<usize>) -> Vec<String> {
+    /// Lay pieces out into lines of at most `avail` columns. Without `avail` there is one line
+    /// that keeps its leading spaces; trailing spaces are always dropped, and so are spaces at a
+    /// wrap.
+    fn layout(&self, pieces: Vec<Piece>, avail: Option<usize>) -> Vec<String> {
         let mut lines: Vec<String> = Vec::new();
-        let mut cur = String::new();
-        let mut cur_w = 0usize;
+        let mut cur = LineBuf::new(self);
         let mut pending_space: Option<Piece> = None;
-        let Some(avail) = avail.map(|a| a.max(1)) else {
-            let s: String = pieces
-                .iter()
-                .map(|p| format!("{}{}{}", p.pre, p.text, p.post))
-                .collect();
-            return vec![s.trim_end_matches(' ').to_owned()];
-        };
+        let keep_leading = avail.is_none();
+        let avail = avail.map_or(usize::MAX, |a| a.max(1));
         for p in pieces {
             if p.space {
-                if cur_w > 0 {
+                if cur.w > 0 {
                     pending_space = Some(p);
+                } else if keep_leading {
+                    cur.push(&p.text, p.width, p.sty);
                 }
                 continue;
             }
             let sp = pending_space.as_ref().map_or(0, |s| s.width);
-            if cur_w > 0 && cur_w + sp + p.width > avail {
-                lines.push(std::mem::take(&mut cur));
-                cur_w = 0;
+            if cur.w > 0 && cur.w.saturating_add(sp).saturating_add(p.width) > avail {
+                lines.push(std::mem::replace(&mut cur, LineBuf::new(self)).finish());
                 pending_space = None;
             } else if let Some(s) = pending_space.take() {
-                cur.push_str(&s.text);
-                cur_w += s.width;
+                cur.push(&s.text, s.width, s.sty);
             }
-            if p.width <= avail.saturating_sub(cur_w) {
-                cur.push_str(&p.pre);
-                cur.push_str(&p.text);
-                cur.push_str(&p.post);
-                cur_w += p.width;
+            if p.width <= avail.saturating_sub(cur.w) {
+                cur.push(&p.text, p.width, p.sty);
                 continue;
             }
             // A word longer than the line: break at grapheme boundaries.
             for g in p.text.graphemes(true) {
                 let gw = g.width();
-                if cur_w > 0 && cur_w + gw > avail {
-                    lines.push(std::mem::take(&mut cur));
-                    cur_w = 0;
+                if cur.w > 0 && cur.w + gw > avail {
+                    lines.push(std::mem::replace(&mut cur, LineBuf::new(self)).finish());
                 }
-                cur.push_str(&p.pre);
-                cur.push_str(g);
-                cur.push_str(&p.post);
-                cur_w += gw;
+                cur.push(g, gw, p.sty);
             }
         }
-        lines.push(cur);
+        lines.push(cur.finish());
         lines
     }
 
     fn render_line(&self, line: &SLine, avail: Option<usize>) -> Vec<String> {
-        Self::layout(self.line_pieces(line), avail)
+        self.layout(self.line_pieces(line), avail)
     }
 
     fn styled_plain(&self, text: &str, style: Style) -> String {
-        let (pre, post) = self.wrap_style(style, &[]);
-        format!("{pre}{text}{post}")
+        let sty = self.style(style, &[], None);
+        let mut l = LineBuf::new(self);
+        l.push(text, 0, sty);
+        l.finish()
     }
 }
 
@@ -353,6 +426,9 @@ fn gutter_text(g: &Gutter, first_footnote: bool) -> String {
     }
 }
 
+/// The widest gutter prefix printed before a line, in columns.
+const GUTTER_MAX: usize = 32;
+
 /// Print a document for plain stdout (§9.4). Mentions keep their placeholder.
 pub fn print_doc(doc: &StyledDoc, opts: &PrintOpts) -> String {
     print_doc_with(doc, opts, &|_| None)
@@ -365,10 +441,7 @@ pub fn print_doc_with(
     opts: &PrintOpts,
     handle_of: &dyn Fn(&str) -> Option<String>,
 ) -> String {
-    let p = Printer {
-        opts: *opts,
-        handle_of,
-    };
+    let p = Printer::new(*opts, handle_of);
     let mut out = String::new();
     let mut prev: Option<&SBlock> = None;
     let mut last_footnote: Option<u32> = None;
@@ -405,12 +478,12 @@ pub fn print_doc_with(
             }
         }
         prev = Some(block);
-        let first_prefix: String = block
+        let first: Vec<String> = block
             .gutters
             .iter()
             .map(|g| gutter_text(g, first_footnote))
             .collect();
-        let cont_prefix: String = block
+        let cont: Vec<String> = block
             .gutters
             .iter()
             .map(|g| match g {
@@ -424,6 +497,20 @@ pub fn print_doc_with(
                 g => gutter_text(g, false),
             })
             .collect();
+        // Deeply nested blocks show only their innermost gutters (at most GUTTER_MAX columns),
+        // after `… `, so that the prefix repeated on every line stays bounded.
+        let mut keep = 0usize;
+        let mut w = 0usize;
+        for g in first.iter().rev() {
+            if w + g.width() > GUTTER_MAX {
+                break;
+            }
+            w += g.width();
+            keep += 1;
+        }
+        let elide = if keep < first.len() { "\u{2026} " } else { "" };
+        let first_prefix = format!("{elide}{}", first[first.len() - keep..].concat());
+        let cont_prefix = format!("{elide}{}", cont[cont.len() - keep..].concat());
         let avail = opts
             .width
             .map(|w| w.saturating_sub(first_prefix.width()).max(10));
@@ -455,7 +542,7 @@ pub fn print_doc_with(
                 .iter()
                 .map(|t| p.render_line(&styled_line(t, Style::MATH), None).concat())
                 .collect(),
-            SKind::Table { head, rows, .. } => table_lines(&p, head, rows),
+            SKind::Table { head, rows, .. } => table_lines(&p, head, rows, avail),
             SKind::Rule => vec!["\u{2500}".repeat(opts.width.unwrap_or(40).min(80))],
             SKind::Summary { spoiler, line, .. } => {
                 if *spoiler && !opts.reveal_spoilers {
@@ -497,56 +584,120 @@ fn code_line(t: &crate::term::TermText) -> SLine {
     styled_line(t, Style::CODE)
 }
 
-fn table_lines(p: &Printer<'_>, head: &[SLine], rows: &[Vec<SLine>]) -> Vec<String> {
+/// A table, aligned in columns of at most [`TABLE_COLUMN_MAX`] (or `avail`) columns, wider
+/// cells wrapping. When aligning would multiply the output (padding every row to columns that
+/// one long cell made wide), the rows print unaligned instead, so the output stays within a
+/// small multiple of the table's own text.
+fn table_lines(
+    p: &Printer<'_>,
+    head: &[SLine],
+    rows: &[Vec<SLine>],
+    avail: Option<usize>,
+) -> Vec<String> {
     let cols = rows
         .iter()
         .map(Vec::len)
         .chain(std::iter::once(head.len()))
         .max()
         .unwrap_or(0);
-    let render = |l: &SLine| -> (String, usize) {
-        let pieces = p.line_pieces(l);
-        let w: usize = pieces.iter().map(|x| x.width).sum();
-        (
-            pieces
-                .iter()
-                .map(|x| format!("{}{}{}", x.pre, x.text, x.post))
-                .collect(),
-            w,
-        )
-    };
-    let head_r: Vec<(String, usize)> = head.iter().map(render).collect();
-    let rows_r: Vec<Vec<(String, usize)>> = rows
+    let cap = avail
+        .map_or(TABLE_COLUMN_MAX, |a| a.min(TABLE_COLUMN_MAX))
+        .max(1);
+    let all: Vec<&[SLine]> = std::iter::once(head)
+        .chain(rows.iter().map(Vec::as_slice))
+        .collect();
+    let pieces: Vec<Vec<(Vec<Piece>, usize)>> = all
         .iter()
-        .map(|r| r.iter().map(render).collect())
+        .map(|r| {
+            r.iter()
+                .map(|l| {
+                    let ps = p.line_pieces(l);
+                    let w = ps.iter().map(|x| x.width).sum();
+                    (ps, w)
+                })
+                .collect()
+        })
         .collect();
     let mut widths = vec![0usize; cols];
-    for r in std::iter::once(&head_r).chain(rows_r.iter()) {
+    let mut content = 0usize;
+    for r in &pieces {
         for (c, (_, w)) in r.iter().enumerate() {
-            widths[c] = widths[c].max(*w);
+            widths[c] = widths[c].max((*w).min(cap));
+            content += w;
         }
     }
-    let fmt_row = |r: &[(String, usize)]| -> String {
-        let cells: Vec<String> = (0..cols)
-            .map(|c| match r.get(c) {
-                Some((s, w)) => format!("{s}{}", " ".repeat(widths[c] - w)),
-                None => " ".repeat(widths[c]),
-            })
-            .collect();
-        cells.join(" \u{2502} ").trim_end().to_owned()
-    };
-    let mut out = vec![fmt_row(&head_r)];
-    out.push(
-        widths
-            .iter()
-            .map(|w| "\u{2500}".repeat(*w))
-            .collect::<Vec<_>>()
-            .join("\u{2500}\u{253C}\u{2500}"),
-    );
-    for r in &rows_r {
-        out.push(fmt_row(r));
+    let sep = " \u{2502} ";
+    // Lay every cell out within its column.
+    let laid: Vec<Vec<Vec<String>>> = pieces
+        .into_iter()
+        .map(|r| {
+            r.into_iter()
+                .enumerate()
+                .map(|(c, (ps, _))| p.layout(ps, Some(widths[c].max(1))))
+                .collect()
+        })
+        .collect();
+    let line_w: usize = widths.iter().sum::<usize>() + 3 * cols.saturating_sub(1);
+    let height = |r: &Vec<Vec<String>>| r.iter().map(Vec::len).max().unwrap_or(1).max(1);
+    let padded: usize = laid.iter().map(|r| height(r) * line_w).sum();
+    if padded > 8 * content + 4096 {
+        // Unaligned: each row on one line, cells as written.
+        let mut out = Vec::new();
+        for (k, r) in all.iter().enumerate() {
+            let cells: Vec<String> = r
+                .iter()
+                .map(|l| p.layout(p.line_pieces(l), None).concat())
+                .collect();
+            out.push(cells.join(sep).trim_end().to_owned());
+            if k == 0 {
+                out.push(vec!["\u{2500}"; cols.max(1)].join("\u{2500}\u{253C}\u{2500}"));
+            }
+        }
+        return out;
+    }
+    let mut out = Vec::new();
+    for (k, r) in laid.iter().enumerate() {
+        for line in 0..height(r) {
+            let cells: Vec<String> = (0..cols)
+                .map(|c| {
+                    let (text, w) = match r.get(c).and_then(|cell| cell.get(line)) {
+                        Some(t) => (t.as_str(), visible_width(t)),
+                        None => ("", 0),
+                    };
+                    format!("{text}{}", " ".repeat(widths[c].saturating_sub(w)))
+                })
+                .collect();
+            out.push(cells.join(sep).trim_end().to_owned());
+        }
+        if k == 0 {
+            out.push(
+                widths
+                    .iter()
+                    .map(|w| "\u{2500}".repeat(*w))
+                    .collect::<Vec<_>>()
+                    .join("\u{2500}\u{253C}\u{2500}"),
+            );
+        }
     }
     out
+}
+
+/// The display width of printer output (escape sequences excluded).
+fn visible_width(s: &str) -> usize {
+    let mut w = 0usize;
+    let mut rest = s;
+    while let Some(i) = rest.find('\u{1b}') {
+        w += rest[..i].width();
+        let after = &rest[i + 1..];
+        rest = if let Some(csi) = after.strip_prefix('[') {
+            csi.find('m').map_or("", |e| &csi[e + 1..])
+        } else if let Some(osc) = after.strip_prefix(']') {
+            osc.find("\u{1b}\\").map_or("", |e| &osc[e + 2..])
+        } else {
+            after
+        };
+    }
+    w + rest.width()
 }
 
 /// Check that `s` contains no escape sequence other than the SGR and OSC 8 forms of §9.4,

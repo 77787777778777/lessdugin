@@ -4,6 +4,7 @@
 //! tags are dropped. Both writers consume SL, so HTML and `StyledDoc` flatten identically.
 
 use crate::event::{Ev, LinkRes, Tag, TagKind, match_indices, push_text};
+use crate::html::fixed;
 
 /// The maximum output depth.
 pub(crate) const MAX_DEPTH: usize = 64;
@@ -105,7 +106,8 @@ pub(crate) fn limit(evs: Vec<Ev>, base: usize) -> (Vec<Ev>, bool) {
 
 /// `flat(subtree)` (§8.4): text, literal and code payloads as `Text`, math as its TeX, image
 /// alts as `Text`; `SoftBreak` at block boundaries and for soft and hard breaks, never
-/// repeated and never at either end; footnote references and task markers dropped.
+/// repeated and never at either end; footnote references and task markers dropped. A spoiler
+/// flattens to its fixed summary `Spoiler` only: flat HTML cannot hide its content.
 fn flatten(sub: &[Ev]) -> Vec<Ev> {
     fn brk(out: &mut Vec<Ev>) {
         if !out.is_empty() && !matches!(out.last(), Some(Ev::SoftBreak)) {
@@ -114,13 +116,14 @@ fn flatten(sub: &[Ev]) -> Vec<Ev> {
     }
     let mut out: Vec<Ev> = Vec::new();
     let mut i = 0usize;
-    let mut image_depth = 0usize;
+    // Inside an image (its alt was emitted) or a spoiler (skipped): the open tag count.
+    let mut skip_depth = 0usize;
     while i < sub.len() {
         let e = &sub[i];
-        if image_depth > 0 {
+        if skip_depth > 0 {
             match e {
-                Ev::Start(Tag::Image(_)) => image_depth += 1,
-                Ev::End(TagKind::Image) => image_depth -= 1,
+                Ev::Start(_) => skip_depth += 1,
+                Ev::End(_) => skip_depth -= 1,
                 _ => {}
             }
             i += 1;
@@ -132,7 +135,13 @@ fn flatten(sub: &[Ev]) -> Vec<Ev> {
             }
             Ev::Start(Tag::Image(d)) => {
                 push_text(&mut out, &d.alt);
-                image_depth = 1;
+                skip_depth = 1;
+            }
+            Ev::Start(Tag::Spoiler) => {
+                brk(&mut out);
+                push_text(&mut out, fixed::SPOILER);
+                brk(&mut out);
+                skip_depth = 1;
             }
             Ev::Start(t) if t.kind().is_block() => brk(&mut out),
             Ev::End(k) if k.is_block() => brk(&mut out),

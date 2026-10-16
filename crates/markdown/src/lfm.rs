@@ -2,7 +2,7 @@
 //! LFM/1 parsing (`docs/spec/lfm-1.md` §2–§4): the pinned pulldown-cmark profile, pass 0
 //! (normalisation) and post-passes 1–6. Every pass is a forward iteration with explicit stacks.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 use pulldown_cmark::{
     Alignment, BlockQuoteKind, CodeBlockKind, Event, LinkType, Options, Parser, Tag as PTag, TagEnd,
@@ -160,6 +160,7 @@ fn map_tag(t: PTag<'_>) -> Option<Tag> {
             title: norm_nl(&title),
             alt: String::new(),
             res: ImageRes::Pending,
+            fallback_alt: false,
         })),
         // Superscript, Subscript, definition lists and metadata blocks cannot occur under
         // OPTIONS; the tag is dropped and its content kept (§3 step 2). HtmlBlock is handled
@@ -252,7 +253,7 @@ fn pass0(src: &str) -> (Vec<Ev>, bool) {
         }
     }
     // Step 5: dangling footnote references.
-    let defined: HashSet<UniCase<String>> = out
+    let defined: BTreeSet<UniCase<String>> = out
         .iter()
         .filter_map(|e| match e {
             Ev::Start(Tag::FootnoteDef { label, .. }) => Some(UniCase::new(label.clone())),
@@ -663,8 +664,8 @@ pub(crate) fn pass45(s: &mut [Ev], media: &[MediaItem]) {
 pub(crate) fn pass6(s: &mut [Ev]) -> Vec<u32> {
     let m = match_indices(s);
     // Heading ids (github-slugger dedup).
-    let mut seen: HashSet<String> = HashSet::new();
-    let mut counts: HashMap<String, u32> = HashMap::new();
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut counts: BTreeMap<String, u32> = BTreeMap::new();
     for i in 0..s.len() {
         if !matches!(s[i], Ev::Start(Tag::Heading { .. })) {
             continue;
@@ -685,8 +686,8 @@ pub(crate) fn pass6(s: &mut [Ev]) -> Vec<u32> {
     // Footnotes. Owner of an event: the innermost enclosing definition (its start index), or
     // the body.
     const BODY: usize = usize::MAX;
-    let mut first_def: HashMap<UniCase<String>, usize> = HashMap::new();
-    let mut refs_of: HashMap<usize, Vec<UniCase<String>>> = HashMap::new();
+    let mut first_def: BTreeMap<UniCase<String>, usize> = BTreeMap::new();
+    let mut refs_of: BTreeMap<usize, Vec<UniCase<String>>> = BTreeMap::new();
     let mut owner_of_ref: Vec<(usize, usize)> = Vec::new(); // (event index, owner)
     let mut stack: Vec<usize> = Vec::new();
     for (i, e) in s.iter().enumerate() {
@@ -710,7 +711,7 @@ pub(crate) fn pass6(s: &mut [Ev]) -> Vec<u32> {
         }
     }
     // Rendered definitions: reachable from the body through first definitions.
-    let mut rendered: HashSet<usize> = HashSet::new(); // def start indexes
+    let mut rendered: BTreeSet<usize> = BTreeSet::new(); // def start indexes
     let mut queue: Vec<UniCase<String>> = refs_of.get(&BODY).cloned().unwrap_or_default();
     queue.reverse();
     while let Some(label) = queue.pop() {
@@ -724,7 +725,7 @@ pub(crate) fn pass6(s: &mut [Ev]) -> Vec<u32> {
         }
     }
     // Ordinals in event order over rendered references.
-    let mut ord_of: HashMap<UniCase<String>, u32> = HashMap::new();
+    let mut ord_of: BTreeMap<UniCase<String>, u32> = BTreeMap::new();
     let mut refs_per_ord: Vec<u32> = vec![0];
     for (i, owner) in owner_of_ref {
         if owner != BODY && !rendered.contains(&owner) {
@@ -757,37 +758,50 @@ pub(crate) struct Footnote {
     pub ord: u32,
     pub refs: u32,
     pub events: Vec<Ev>,
+    /// The definition is written inside a spoiler: its content renders inside a spoiler of its
+    /// own, so the footnotes section does not reveal it.
+    pub in_spoiler: bool,
 }
 
 /// Split S6 into the body and the rendered footnote definitions (in ordinal order).
 /// Unrendered and duplicate definitions are dropped; nested definitions are extracted too.
 pub(crate) fn split_footnotes(s: Vec<Ev>, refs_per_ord: &[u32]) -> (Vec<Ev>, Vec<Footnote>) {
     let mut body = Vec::with_capacity(s.len());
-    let mut defs: Vec<(Option<u32>, Vec<Ev>)> = Vec::new();
+    let mut defs: Vec<(Option<u32>, bool, Vec<Ev>)> = Vec::new();
     let mut stack: Vec<usize> = Vec::new();
+    // Spoilers open at the current source position, whichever flow they belong to.
+    let mut spoilers = 0usize;
     for e in s {
         match e {
             Ev::Start(Tag::FootnoteDef { ord, .. }) => {
-                defs.push((ord, Vec::new()));
+                defs.push((ord, spoilers > 0, Vec::new()));
                 stack.push(defs.len() - 1);
             }
             Ev::End(TagKind::FootnoteDef) => {
                 stack.pop();
             }
-            e => match stack.last() {
-                Some(&d) => defs[d].1.push(e),
-                None => body.push(e),
-            },
+            e => {
+                match e {
+                    Ev::Start(Tag::Spoiler) => spoilers += 1,
+                    Ev::End(TagKind::Spoiler) => spoilers = spoilers.saturating_sub(1),
+                    _ => {}
+                }
+                match stack.last() {
+                    Some(&d) => defs[d].2.push(e),
+                    None => body.push(e),
+                }
+            }
         }
     }
     let mut notes: Vec<Footnote> = defs
         .into_iter()
-        .filter_map(|(ord, events)| {
+        .filter_map(|(ord, in_spoiler, events)| {
             let ord = ord?;
             Some(Footnote {
                 ord,
                 refs: refs_per_ord.get(ord as usize).copied().unwrap_or(0),
                 events,
+                in_spoiler,
             })
         })
         .collect();

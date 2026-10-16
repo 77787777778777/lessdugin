@@ -20,8 +20,8 @@ use lessdugin_markdown::printer::{PrintOpts, check_printer_output, print_doc};
 use lessdugin_markdown::quote::find_first;
 use lessdugin_markdown::{
     HrefCtx, MathMode, MediaItem, QuoteTarget, RenderOpts, Rendered, TermCtx, TextQuote,
-    plain_projection, qkey, render_with_math_mode, resolve_quote, safe_href, short_did,
-    term_sanitize,
+    derive_metadata, plain_projection, qkey, render_with_math_mode, resolve_quote, safe_href,
+    short_did, term_sanitize,
 };
 use serde_json::{Map, Value, json};
 
@@ -109,9 +109,15 @@ fn actual(
                                 .collect::<String>()
                         )
                     }
-                    "printed" => {
+                    "html_bytes" => json!(r.html.len()),
+                    "printed" | "printed_bytes" | "printed_rle" => {
                         let opts = print_opts(input.get("print").unwrap_or(&Value::Null));
-                        json!(print_doc(&r.styled, &opts))
+                        let p = print_doc(&r.styled, &opts);
+                        match k.as_str() {
+                            "printed" => json!(p),
+                            "printed_bytes" => json!(p.len()),
+                            _ => json!(rle_lines(&p)),
+                        }
                     }
                     k => rv
                         .get(k)
@@ -268,9 +274,28 @@ fn invariants(name: &str, input: &Value, r: &Rendered, t: &Rendered) -> Vec<Stri
     if &render_input(input, MathMode::MathCore) != r {
         errs.push(format!("{name}: render is not deterministic"));
     }
+    // `derive_metadata` (no HTML writer, no math engine) agrees with `render`.
+    if input.get("encoding_error").is_none() {
+        let m = derive_metadata(&input_text(input), &input_media(input));
+        let same = m.text == r.text
+            && m.excerpt == r.excerpt
+            && m.toc == r.toc
+            && m.word_count == r.word_count
+            && m.read_minutes == r.read_minutes
+            && m.links == r.links
+            && m.mentions == r.mentions
+            && m.media_used == r.media_used
+            && m.error == r.error;
+        if !same {
+            errs.push(format!("{name}: derive_metadata differs from render"));
+        }
+    }
     for (label, s) in [("text", &r.text), ("excerpt", &r.excerpt)] {
         if s.chars().any(|c| c.is_whitespace() && c != ' ') {
             errs.push(format!("{name}: {label} contains non-space whitespace"));
+        }
+        if s.chars().any(forbidden_terminal_char) {
+            errs.push(format!("{name}: {label} contains a control character"));
         }
     }
     // StyledDoc text never contains ESC, C0, C1, U+2028/9 or bidi controls.

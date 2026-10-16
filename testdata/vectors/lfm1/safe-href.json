@@ -510,15 +510,119 @@
       }
     },
     {
-      "name": "mailto-query-host",
+      "name": "mailto-cc-rejected",
       "input": {
         "raw": "mailto:a@b.com?cc=c@d.com",
         "ctx": "markdown"
       },
       "expected": {
+        "href": null
+      }
+    },
+    {
+      "name": "mailto-to-rejected",
+      "input": {
+        "raw": "mailto:?to=a@b.com",
+        "ctx": "markdown"
+      },
+      "expected": {
+        "href": null
+      }
+    },
+    {
+      "name": "mailto-to-percent-encoded-rejected",
+      "input": {
+        "raw": "mailto:a@b.com?subject=x&%54O=c@d.com",
+        "ctx": "markdown"
+      },
+      "expected": {
+        "href": null
+      }
+    },
+    {
+      "name": "mailto-bcc-uppercase-rejected",
+      "input": {
+        "raw": "mailto:a@b.com?BCC=c@d.com",
+        "ctx": "markdown"
+      },
+      "expected": {
+        "href": null
+      }
+    },
+    {
+      "name": "mailto-two-addresses",
+      "input": {
+        "raw": "mailto:a@b.com,c@d.com",
+        "ctx": "markdown"
+      },
+      "expected": {
+        "href": null
+      }
+    },
+    {
+      "name": "mailto-encoded-comma",
+      "input": {
+        "raw": "mailto:a@b.com%2Cc@d.com",
+        "ctx": "markdown"
+      },
+      "expected": {
+        "href": null
+      }
+    },
+    {
+      "name": "mailto-non-ascii-host",
+      "input": {
+        "raw": "mailto:a@gооgle.com",
+        "ctx": "markdown"
+      },
+      "expected": {
+        "href": null
+      }
+    },
+    {
+      "name": "mailto-dots-host",
+      "input": {
+        "raw": "mailto:a@..",
+        "ctx": "markdown"
+      },
+      "expected": {
+        "href": null
+      }
+    },
+    {
+      "name": "mailto-empty-local",
+      "input": {
+        "raw": "mailto:@b.com",
+        "ctx": "markdown"
+      },
+      "expected": {
+        "href": null
+      }
+    },
+    {
+      "name": "mailto-encoded-at",
+      "input": {
+        "raw": "mailto:a%40b.com",
+        "ctx": "markdown"
+      },
+      "expected": {
         "href": {
           "type": "mailto",
-          "url": "mailto:a@b.com?cc=c@d.com",
+          "url": "mailto:a%40b.com",
+          "host": "b.com"
+        }
+      }
+    },
+    {
+      "name": "mailto-subject",
+      "input": {
+        "raw": "mailto:a@b.com?subject=x",
+        "ctx": "markdown"
+      },
+      "expected": {
+        "href": {
+          "type": "mailto",
+          "url": "mailto:a@b.com?subject=x",
           "host": "b.com"
         }
       }
@@ -530,11 +634,7 @@
         "ctx": "markdown"
       },
       "expected": {
-        "href": {
-          "type": "mailto",
-          "url": "mailto:nobody",
-          "host": ""
-        }
+        "href": null
       }
     },
     {

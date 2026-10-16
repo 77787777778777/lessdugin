@@ -100,11 +100,20 @@ fn contributes_newline(k: TagKind) -> bool {
     )
 }
 
-/// §10.2: NFC, White_Space runs → one U+0020, strip one leading and one trailing U+0020.
+/// Control characters that P never contains (§10.2): every C0 and C1 control and DEL that is
+/// not White_Space (those collapse to U+0020 instead), and the bidi controls. P feeds excerpts,
+/// search snippets and `post.excerpt`, which third-party clients print as text.
+pub(crate) fn is_removed_control(c: char) -> bool {
+    (c.is_control() && !c.is_whitespace())
+        || matches!(c, '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+}
+
+/// §10.2: remove controls ([`is_removed_control`]), NFC, White_Space runs → one U+0020, strip
+/// one leading and one trailing U+0020.
 pub fn normalize(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
     let mut in_ws = false;
-    for c in raw.nfc() {
+    for c in raw.chars().filter(|&c| !is_removed_control(c)).nfc() {
         if c.is_whitespace() {
             if !in_ws {
                 out.push(' ');
@@ -210,6 +219,24 @@ mod tests {
         assert_eq!(normalize("e\u{301}"), "\u{e9}");
         assert_eq!(normalize(""), "");
         assert_eq!(normalize("   "), "");
+        assert_eq!(
+            normalize("a \u{1b}]0;x\u{7} \u{1b}[2J \u{9b} \u{202e}b\u{7f}\u{1}"),
+            "a ]0;x [2J b"
+        );
+        assert_eq!(normalize("e\u{1}\u{301}"), "\u{e9}");
+    }
+
+    /// Slugs and anchors lowercase with std (`to_lowercase`), whose tables follow the toolchain's
+    /// Unicode version, and then keep only letters and numbers of the pinned
+    /// `unicode-general-category` table. A code point assigned after that table's version is
+    /// dropped (or the anchor refused) whatever std maps it to, so the result only depends on
+    /// std's mappings of characters the table knows, which Unicode keeps stable. That needs a
+    /// toolchain at least as new as the table.
+    #[test]
+    fn toolchain_unicode_not_older_than_tables() {
+        let (a, b, c) = char::UNICODE_VERSION;
+        let std = (u64::from(a), u64::from(b), u64::from(c));
+        assert!(std >= unicode_general_category::UNICODE_VERSION);
     }
 
     #[test]

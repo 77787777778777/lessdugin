@@ -20,16 +20,17 @@ lessdugin-atp.workspace = true
 pulldown-cmark.workspace = true
 math-core = { workspace = true, optional = true }
 ammonia = { workspace = true, optional = true }
-unicode-segmentation.workspace = true
-unicode-normalization.workspace = true
-unicode-width.workspace = true
-unicode-security.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+# Unicode data is part of the frozen `lfm/1` semantics (P, slugs, anchors, excerpts) and of the
+# terminal layout, so these are exact pins: an upgrade changes the vectors and is reviewed as such.
+unicode-segmentation = "=1.13.3"
+unicode-normalization = "=0.1.25"
+unicode-width = "=0.2.2"
 # Footnote label matching must agree with pulldown-cmark, which uses `UniCase` (lfm-1.md §3 step 5).
-unicase = "2.10"
+unicase = "=2.10.0"
 # General_Category for heading slugs and anchors (lfm-1.md §4.6, §5.1; spec open question).
-unicode-general-category = "1.1"
+unicode-general-category = "=1.1.0"
 
 [dev-dependencies]
 proptest.workspace = true

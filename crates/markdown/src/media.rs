@@ -4,6 +4,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::event::{Ev, ImageRes, Tag};
+
 /// `{"$link": cid}`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CidLink {
@@ -71,9 +73,10 @@ impl MediaItem {
         &self.blob.cid.link
     }
 
+    /// The §6.2 class of the declared MIME type, compared exactly as written (no case folding,
+    /// no parameters), like the table in §6.2.
     pub(crate) fn class(&self) -> MediaClass {
-        let mime = self.blob.mime_type.to_ascii_lowercase();
-        let mime = mime.split(';').next().unwrap_or("").trim();
+        let mime = self.blob.mime_type.as_str();
         if matches!(
             mime,
             "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/avif"
@@ -88,13 +91,23 @@ impl MediaItem {
         }
     }
 
-    /// `A` (§6.2): the markdown alt if non-empty after trimming, else `media.alt`, else `""`.
-    pub(crate) fn alt_text(&self, markdown_alt: &str) -> String {
-        if !markdown_alt.trim().is_empty() {
-            markdown_alt.to_owned()
+    /// `A` (§6.2) of one reference: the markdown alt if non-empty after trimming, else
+    /// `media.alt` if this reference may fall back to it (the first rendered reference that
+    /// needs it, see [`assign_alt_fallback`]), else `""`. Always trimmed with [`trim_alt`].
+    pub(crate) fn alt_text(&self, markdown_alt: &str, fallback: bool) -> String {
+        let md = trim_alt(markdown_alt);
+        if !md.is_empty() {
+            md.to_owned()
+        } else if fallback {
+            self.gallery_alt()
         } else {
-            self.alt.clone().unwrap_or_default()
+            String::new()
         }
+    }
+
+    /// `A` of a gallery item (§6.3): `media.alt`, trimmed.
+    pub(crate) fn gallery_alt(&self) -> String {
+        trim_alt(self.alt.as_deref().unwrap_or("")).to_owned()
     }
 
     /// `L` (§6.2): `A` if non-empty, else an acceptable `name`, else `""`.
@@ -126,6 +139,33 @@ impl MediaItem {
     }
 }
 
+/// Trim the white space that DOMPurify strips from attribute values (ECMAScript
+/// `String.prototype.trim`: White_Space plus U+FEFF), so that `alt` survives sanitising
+/// unchanged (§8.3).
+pub(crate) fn trim_alt(s: &str) -> &str {
+    s.trim_matches(|c: char| c.is_whitespace() || c == '\u{FEFF}')
+}
+
+/// Mark, in render order (the body, then the rendered footnotes), the first reference to each
+/// media item whose markdown alt is empty: only that reference shows `media.alt` (§6.2). A
+/// body that references one item many times can then not repeat its (up to 20,000-byte)
+/// `alt` record field in every reference.
+pub(crate) fn assign_alt_fallback<'a>(flows: impl IntoIterator<Item = &'a mut [Ev]>, n: usize) {
+    let mut taken = vec![false; n];
+    for flow in flows {
+        for e in flow.iter_mut() {
+            if let Ev::Start(Tag::Image(d)) = e
+                && let ImageRes::Media(i) = d.res
+                && trim_alt(&d.alt).is_empty()
+                && let Some(t) = taken.get_mut(i)
+            {
+                d.fallback_alt = !*t;
+                *t = true;
+            }
+        }
+    }
+}
+
 /// `data-model.md` §4: no `/`, `\`, C0, C1, U+2028 or U+2029.
 pub(crate) fn name_acceptable(n: &str) -> bool {
     !n.chars().any(|c| {
@@ -135,7 +175,7 @@ pub(crate) fn name_acceptable(n: &str) -> bool {
 
 /// `media_used` (§6.3): every index whose CID equals a resolved `cid:` URL, ascending.
 pub(crate) fn media_used(media: &[MediaItem], resolved: &[usize]) -> Vec<u16> {
-    let cids: std::collections::HashSet<&str> = resolved.iter().map(|&i| media[i].cid()).collect();
+    let cids: std::collections::BTreeSet<&str> = resolved.iter().map(|&i| media[i].cid()).collect();
     media
         .iter()
         .enumerate()

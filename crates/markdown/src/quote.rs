@@ -81,11 +81,16 @@ pub const MAX_TARGET_BYTES: usize = 200_000;
 /// At most this many occurrences are scored.
 pub const MAX_OCCURRENCES: usize = 1000;
 
-/// `norm(x)` (§11): NFC, then White_Space runs → U+0020 (not trimmed).
+/// `norm(x)` (§11): the controls P never contains removed (§10.2), NFC, then White_Space
+/// runs → U+0020 (not trimmed).
 fn norm(x: &str) -> String {
     let mut out = String::with_capacity(x.len());
     let mut ws = false;
-    for c in x.nfc() {
+    for c in x
+        .chars()
+        .filter(|&c| !crate::plain::is_removed_control(c))
+        .nfc()
+    {
         if c.is_whitespace() {
             if !ws {
                 out.push(' ');
