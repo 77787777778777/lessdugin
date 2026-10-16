@@ -73,6 +73,13 @@ fn in_v6(ip: Ipv6Addr, net: Ipv6Addr, prefix: u32) -> bool {
 }
 
 fn is_blocked_v6(ip: Ipv6Addr) -> bool {
+    // On DNS64/NAT64 networks every IPv4-only host resolves into 64:ff9b::/96 (RFC 6052 §2.1),
+    // with the IPv4 address in the last 32 bits; the translator connects to that IPv4 address,
+    // so the IPv4 rules apply to it.
+    if in_v6(ip, Ipv6Addr::new(0x64, 0xff9b, 0, 0, 0, 0, 0, 0), 96) {
+        let [.., a, b, c, d] = ip.octets();
+        return is_blocked_v4(Ipv4Addr::new(a, b, c, d));
+    }
     const fn v6(s: [u16; 8]) -> Ipv6Addr {
         Ipv6Addr::new(s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7])
     }
@@ -82,7 +89,9 @@ fn is_blocked_v6(ip: Ipv6Addr) -> bool {
         (v6([0, 0, 0, 0, 0, 0, 0, 0]), 96),
         (v6([0, 0, 0, 0, 0, 0xffff, 0, 0]), 96), // IPv4-mapped
         (v6([0, 0, 0, 0, 0xffff, 0, 0, 0]), 96), // IPv4-translated (SIIT)
-        (v6([0x64, 0xff9b, 0, 0, 0, 0, 0, 0]), 96), // NAT64 well-known prefix
+        // 64:ff9b::/96 (NAT64 well-known prefix) is decided by its embedded IPv4 address,
+        // below. The local-use prefix leaves the embedding position to the operator, so the
+        // embedded address cannot be checked: blocked.
         (v6([0x64, 0xff9b, 1, 0, 0, 0, 0, 0]), 48), // NAT64 local-use
         (v6([0x100, 0, 0, 0, 0, 0, 0, 0]), 64),  // discard-only
         (v6([0x2001, 0, 0, 0, 0, 0, 0, 0]), 23), // IETF protocol assignments (incl. Teredo)
@@ -416,9 +425,13 @@ mod tests {
             "::ffff:10.0.0.1",
             "::ffff:8.8.8.8",
             "::ffff:0:8.8.8.8",
-            "64:ff9b::8.8.8.8",
             "64:ff9b::a00:1",
+            "64:ff9b::7f00:1",
+            "64:ff9b::c0a8:101",
+            "64:ff9b::a9fe:a9fe",
+            "64:ff9b::",
             "64:ff9b:1::1",
+            "64:ff9b:1:ffff::808:808",
             "100::1",
             "2001::1",
             "2001:0:4136:e378:8000:63bf:3fff:fdd2",
@@ -464,6 +477,9 @@ mod tests {
             "2a00:1450::1",
             "2620:4f:8000::1",
             "64:ff9a::1",
+            // NAT64 well-known prefix embedding a global IPv4 address
+            "64:ff9b::8.8.8.8",
+            "64:ff9b::101:101",
         ];
         for a in allowed {
             assert!(!is_blocked(ip(a)), "{a} must be allowed");

@@ -252,7 +252,9 @@ guard(url, purpose) -> PinnedTarget | Err            // purpose ∈ {PdsRead, Us
 | Family | Ranges |
 |---|---|
 | IPv4 | `0.0.0.0/8`, `10.0.0.0/8`, `100.64.0.0/10`, `127.0.0.0/8`, `169.254.0.0/16`, `172.16.0.0/12`, `192.0.0.0/24`, `192.0.2.0/24`, `192.88.99.0/24`, `192.168.0.0/16`, `198.18.0.0/15`, `198.51.100.0/24`, `203.0.113.0/24`, `224.0.0.0/4`, `240.0.0.0/4` |
-| IPv6 | `::/128`, `::1/128`, `::ffff:0:0/96` (v4-mapped), `64:ff9b::/96` and `64:ff9b:1::/48` (NAT64), `100::/64`, `2001::/23` (includes Teredo `2001::/32`), `2001:db8::/32`, `2002::/16` (6to4), `fc00::/7`, `fe80::/10`, `fec0::/10`, `ff00::/8` |
+| IPv6 | `::/128`, `::1/128`, `::ffff:0:0/96` (v4-mapped), `64:ff9b::/96` (NAT64 well-known prefix) **when its embedded IPv4 address (the last 32 bits) is blocked**, `64:ff9b:1::/48` (NAT64 local-use, whole prefix), `100::/64`, `2001::/23` (includes Teredo `2001::/32`), `2001:db8::/32`, `2002::/16` (6to4), `fc00::/7`, `fe80::/10`, `fec0::/10`, `ff00::/8` |
+
+**NAT64.** On DNS64 networks every IPv4-only host resolves into `64:ff9b::/96`, so blocking the whole prefix would make such networks unusable. The guard instead checks the embedded IPv4 address against the IPv4 rows (RFC 6052 forbids non-global IPv4 addresses behind the well-known prefix anyway). Operator-chosen network-specific prefixes look like ordinary global IPv6 and cannot be recognised; they are out of scope.
 
 **In the browser** the guard cannot see addresses. For URLs that come from data (PDS endpoints in DID documents, did:web hosts, forum endpoints, external images), the SPA applies steps 1–3 and also rejects hostnames that are `localhost`, end in `.localhost`, `.local`, `.internal` or `.home.arpa`, or have a single label. The browser's own private-network protections are the remaining defence.
 
