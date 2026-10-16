@@ -27,15 +27,21 @@ function Sequence({ uri }: { uri: string }) {
         A sequence by <ActorName actor={sequence.author} showIdent /> · {sequence.score.score} karma
       </p>
       {body && <RenderedHtml html={body.html} />}
-      {chapters.map((c, i) => (
-        <section key={c.title ?? i} aria-label={c.title ?? `Chapter ${i + 1}`}>
-          <h2 className={ui.sectionTitle}>{c.title ?? `Chapter ${i + 1}`}</h2>
-          {c.body && <RenderedHtml html={c.body.html} className="lfm-compact" />}
-          {c.posts.map((p) => (
-            <PostListItem key={p.uri} post={p} />
-          ))}
-        </section>
-      ))}
+      {chapters.map((c, i) => {
+        const title = (c.title && cleanName(c.title, 300)) || `Chapter ${i + 1}`;
+        return (
+          // biome-ignore lint/suspicious/noArrayIndexKey: chapters have no identity but their order
+          <section key={i} aria-label={title}>
+            <h2 className={ui.sectionTitle}>
+              <bdi>{title}</bdi>
+            </h2>
+            {c.body && <RenderedHtml html={c.body.html} className="lfm-compact" />}
+            {c.posts.map((p) => (
+              <PostListItem key={p.uri} post={p} />
+            ))}
+          </section>
+        );
+      })}
     </article>
   );
 }

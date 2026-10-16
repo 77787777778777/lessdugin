@@ -948,6 +948,7 @@ export class MockEngine implements EngineApi {
       };
       if (draft.description !== undefined) f.summary.description = draft.description;
       if (draft.about) f.about = draft.about.markdown;
+      if (draft.reportContact !== undefined) f.reportContact = draft.reportContact;
       this.s.forums.set(uri, f);
       this.s.followed.set(uri, undefined);
       this.s.tags.set(uri, new Map());
@@ -964,6 +965,9 @@ export class MockEngine implements EngineApi {
       if (draft.description !== undefined) f.summary.description = draft.description;
       else delete f.summary.description;
       if (draft.about) f.about = draft.about.markdown;
+      else delete f.about;
+      if (draft.reportContact !== undefined) f.reportContact = draft.reportContact;
+      else delete f.reportContact;
       f.membership = draft.membership;
       f.summary.membership = draft.membership;
       f.defaultTier = draft.defaultTier;
@@ -1544,14 +1548,22 @@ export class MockEngine implements EngineApi {
       };
       cid = fakeCid(seq.uri);
     } else if (f) {
-      record = {
+      const r: { [k: string]: Json } = {
         $type: COLL.forum,
         name: f.summary.name,
         membership: f.membership,
         defaultTier: f.defaultTier,
         featuredTags: f.featuredTags,
-        moderators: f.moderators.map((m) => ({ did: m.did, role: m.role })),
+        moderators: f.moderators.map((m) => ({
+          did: m.did,
+          role: m.role,
+          ...(m.title !== undefined ? { title: m.title } : {}),
+        })),
       };
+      if (f.summary.description !== undefined) r.description = f.summary.description;
+      if (f.about !== undefined) r.about = md(f.about);
+      if (f.reportContact !== undefined) r.reportContact = f.reportContact;
+      record = r;
       cid = fakeCid(uri);
     } else {
       throw err("not_found", `No record ${uri}`);
@@ -2205,7 +2217,11 @@ export class MockEngine implements EngineApi {
   }
 
   async saveDraft(draft: Draft): Promise<string> {
-    const id = draft.id ?? this.nextId("draft");
+    let id = draft.id;
+    // A new draft never takes the id of an existing one (the fixture's drafts included).
+    while (id === undefined || (draft.id === undefined && this.s.drafts.has(id))) {
+      id = this.nextId("draft");
+    }
     const entry: DraftEntry = { id, savedAtMs: this.tick(), draft: { ...clone(draft), id } };
     this.s.drafts.set(id, entry);
     this.changed({ kind: "drafts" });

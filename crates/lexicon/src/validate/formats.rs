@@ -49,11 +49,15 @@ pub fn check_format(format: StringFormat, s: &str) -> Result<(), &'static str> {
     }
 }
 
-/// The Lexicon `uri` format: `scheme ":" rest`, where the scheme is `[a-z][a-z.-]{0,80}` and the
-/// rest is one or more printable ASCII characters other than space, at most [`MAX_URI_LEN`]
-/// bytes in total. This is the reference implementations' regex
-/// `^[a-z][a-z.-]{0,80}:[!-~]+$`; it accepts exactly the interop fixtures' valid list.
-/// Non-ASCII IRIs must be percent-encoded.
+/// The Lexicon `uri` format ("following the generic RFC-3986 on URIs"): `scheme ":" rest`, at
+/// most [`MAX_URI_LEN`] bytes, where
+/// - the scheme is RFC 3986's `ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )`, in either case
+///   (schemes are case-insensitive: `HTTPS:`, `git+ssh:` and `h323:` are URIs);
+/// - the rest is one or more printable ASCII characters other than space.
+///
+/// URIs are ASCII (RFC 3986): an IRI with non-ASCII characters must be percent-encoded first.
+/// This accepts exactly the interop fixtures' valid list (`testdata/interop/syntax/uri_*.txt`);
+/// it is more permissive than indigo's `^[a-z][a-z.-]{0,80}:[[:graph:]]+$` only in the scheme.
 pub fn is_valid_uri(s: &str) -> bool {
     if s.len() > MAX_URI_LEN {
         return false;
@@ -63,11 +67,10 @@ pub fn is_valid_uri(s: &str) -> bool {
     };
     let sb = scheme.as_bytes();
     !sb.is_empty()
-        && sb.len() <= 81
-        && sb[0].is_ascii_lowercase()
+        && sb[0].is_ascii_alphabetic()
         && sb[1..]
             .iter()
-            .all(|&b| b.is_ascii_lowercase() || b == b'.' || b == b'-')
+            .all(|&b| b.is_ascii_alphanumeric() || b == b'+' || b == b'-' || b == b'.')
         && !rest.is_empty()
         && rest.bytes().all(|b| (b'!'..=b'~').contains(&b))
 }
@@ -232,16 +235,28 @@ mod tests {
             "at://did:plc:ewvi7nxzyoun6zhxrhs64oiz/a.b.c/x",
             "content-type:text/plan",
             "go://?Mercedes%20Benz",
+            // RFC 3986 schemes: case-insensitive, with digits, "+", "-" and "."
+            "HTTPS://example.com",
+            "Https://example.com/a",
+            "git+ssh://git@example.com/repo.git",
+            "h323:user@example.com",
+            "coap+tcp://example.com",
+            "xn--a.b-c+d:x",
         ] {
             assert!(is_valid_uri(ok), "{ok}");
         }
         for bad in [
             "",
             "https:",
-            "HTTPS://example.com",
             "https://exa mple.com",
+            // non-ASCII must be percent-encoded (RFC 3986)
             "https://例え.jp/",
+            "https://example.com/caf\u{e9}",
             "1http://x",
+            "+http://x",
+            ".http://x",
+            "ht_tp://x",
+            "ht%74p://x",
             ":x",
         ] {
             assert!(!is_valid_uri(bad), "{bad}");

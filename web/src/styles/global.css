@@ -36,6 +36,14 @@ a:hover {
   text-decoration: underline;
 }
 
+/* Links inside running text are underlined, not told apart by colour alone (WCAG 1.4.1; axe
+   link-in-text-block). Button-styled links keep their look. */
+:where(p, dd, figcaption, blockquote) a:not([class*="button"], [class*="ghost"], [class*="chip"]) {
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.15em;
+}
+
 :focus-visible {
   outline: 2px solid var(--color-focus);
   outline-offset: 2px;

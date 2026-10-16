@@ -55,4 +55,19 @@ describe("Badges", () => {
     const { container } = render(<Badges badges={{}} />);
     expect(container.innerHTML).toBe("");
   });
+
+  it("shows [pending] for an own write in flight and [degraded] without moderation data", () => {
+    render(
+      <Badges
+        pending
+        completeness={{ partial: false, reposComplete: 2, reposTotal: 2, degraded: true }}
+      />,
+    );
+    const labels = [...document.querySelectorAll("[data-badge]")].map((b) =>
+      b.textContent?.replace(/^[^[]*/, ""),
+    );
+    expect(labels).toContain("[pending]");
+    expect(labels).toContain("[degraded]");
+    expect(labels).not.toContain("[partial 2/2]");
+  });
 });

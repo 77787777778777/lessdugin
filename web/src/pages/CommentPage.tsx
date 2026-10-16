@@ -8,6 +8,7 @@ import { getRouteApi } from "@tanstack/react-router";
 import type { ThreadContext } from "../components/CommentItem.tsx";
 import { CommentTree } from "../components/CommentTree.tsx";
 import { postTitle } from "../components/PostMeta.tsx";
+import { ParticipantsProvider } from "../components/participants.tsx";
 import { RecordLink } from "../components/RecordLink.tsx";
 import { ErrorView, Loading } from "../components/Status.tsx";
 import { subtree } from "../components/threadRows.ts";
@@ -19,6 +20,11 @@ import { isAuthorityRole } from "./forum/forumContext.tsx";
 
 const route = getRouteApi("/c/$author/$rkey");
 
+/** The thread root the comment record names. The record is author-controlled, so this only
+ * chooses which thread to ask the engine for: the comment is shown only if the engine's own
+ * thread for that root lists it (`subtree` below), otherwise the page says it is not shown.
+ * (A root carried by `CommentNode` / `RawView` would avoid the extra hop; engine-api.md has
+ * none yet.) */
 function rootOf(record: unknown): string | null {
   if (typeof record !== "object" || record === null) return null;
   const root = (record as { root?: { uri?: unknown } }).root;
@@ -74,7 +80,13 @@ function CommentThread({ uri }: { uri: string }) {
           This comment is not shown in its thread (it may be hidden or deleted).
         </p>
       ) : (
-        <CommentTree comments={comments} ctx={ctx} baseDepth={first?.depth ?? 1} />
+        // Mentions resolve eagerly only for forum participants (lfm-1.md §5.4).
+        <ParticipantsProvider
+          forum={forum.data}
+          items={post ? [post, ...thread.data.comments] : thread.data.comments}
+        >
+          <CommentTree comments={comments} ctx={ctx} baseDepth={first?.depth ?? 1} />
+        </ParticipantsProvider>
       )}
     </div>
   );

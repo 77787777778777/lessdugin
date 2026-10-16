@@ -592,11 +592,62 @@ fn compile_doc(v: &Value) -> Result<LexiconDoc, SchemaError> {
         let def = cx.with("defs", |cx| cx.with(name, |cx| compile_def(cx, name, d)))?;
         defs.insert(name.clone(), def);
     }
+    check_local_union_members(&cx, &defs)?;
     Ok(LexiconDoc {
         id: id.clone(),
         file_id: file_id.to_owned(),
         defs,
     })
+}
+
+/// `/specs/lexicon`: "The schema definitions pointed to by a `union` must have type `object` or
+/// `record`." Checked here for members in the same document; members in other documents are
+/// checked when validating (a [`crate::validate::Code::Schema`] violation).
+fn check_local_union_members(cx: &Cx<'_>, defs: &BTreeMap<String, Def>) -> Result<(), SchemaError> {
+    let mut types: Vec<(&str, &TypeDef)> = Vec::new();
+    for (name, def) in defs {
+        match def {
+            Def::Record(r) => {
+                types.extend(r.record.properties.iter().map(|(_, t)| (name.as_str(), t)))
+            }
+            Def::Query(x) | Def::Procedure(x) | Def::Subscription(x) => {
+                if let Some(p) = &x.parameters {
+                    types.extend(p.properties.iter().map(|(_, t)| (name.as_str(), t)));
+                }
+                for b in [&x.input, &x.output].into_iter().flatten() {
+                    types.extend(b.schema.iter().map(|t| (name.as_str(), t)));
+                }
+                types.extend(x.message.iter().map(|t| (name.as_str(), t)));
+            }
+            Def::Type(t) => types.push((name.as_str(), t)),
+            Def::PermissionSet(_) | Def::Token => {}
+        }
+    }
+    let local = format!("{}#", cx.doc);
+    while let Some((at, t)) = types.pop() {
+        match t {
+            TypeDef::Union(u) => {
+                for r in &u.refs {
+                    let Some(target) = r.strip_prefix(&local).and_then(|n| defs.get(n)) else {
+                        continue;
+                    };
+                    if !matches!(target, Def::Record(_) | Def::Type(TypeDef::Object(_))) {
+                        return Err(SchemaError {
+                            doc: cx.doc.to_owned(),
+                            path: format!("defs.{at}"),
+                            message: format!(
+                                "union member {r:?} is not an object or record definition"
+                            ),
+                        });
+                    }
+                }
+            }
+            TypeDef::Array(a) => types.push((at, &a.items)),
+            TypeDef::Object(o) => types.extend(o.properties.iter().map(|(_, t)| (at, t))),
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 fn obj_of<'v>(cx: &Cx<'_>, v: &'v Value) -> Result<&'v Map<String, Value>, SchemaError> {
@@ -740,6 +791,8 @@ fn compile_def(cx: &mut Cx<'_>, name: &str, v: &Value) -> Result<Def, SchemaErro
             opt_str(cx, o, "description")?;
             Def::Token
         }
+        // `/specs/lexicon`: "Unions can not be declared as top-level named types"
+        "union" => return Err(cx.err("a union cannot be a named definition")),
         _ => Def::Type(compile_type(cx, v)?),
     })
 }
@@ -1130,6 +1183,11 @@ mod tests {
             r#"{"lexicon":1,"id":"a.b.c","defs":{"main":{"type":"blob","accept":["image"]}}}"#,
             r#"{"lexicon":1,"id":"a.b.c","defs":{"main":{"type":"array"}}}"#,
             r#"{"lexicon":1,"id":"a.b.c","defs":{"main":{"type":"object","properties":{"a":{"type":"token"}}}}}"#,
+            // a union cannot be a named definition, and its members are objects or records
+            r##"{"lexicon":1,"id":"a.b.c","defs":{"u":{"type":"union","refs":["#u"]}}}"##,
+            r##"{"lexicon":1,"id":"a.b.c","defs":{"main":{"type":"object","properties":{"u":{"type":"union","refs":["#s"]}}},"s":{"type":"string"}}}"##,
+            r##"{"lexicon":1,"id":"a.b.c","defs":{"main":{"type":"object","properties":{"u":{"type":"union","refs":["#r"]}}},"r":{"type":"ref","ref":"#main"}}}"##,
+            r##"{"lexicon":1,"id":"a.b.c","defs":{"main":{"type":"object","properties":{"u":{"type":"array","items":{"type":"union","refs":["#t"]}}}},"t":{"type":"token"}}}"##,
         ] {
             assert!(r.add_json(bad).is_err(), "{bad}");
         }

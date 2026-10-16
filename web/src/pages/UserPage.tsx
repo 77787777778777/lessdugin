@@ -11,6 +11,7 @@ import { ErrorView, Loading } from "../components/Status.tsx";
 import { useEngine } from "../engine/context.tsx";
 import { useCurrentForum } from "../engine/currentForum.ts";
 import { qk, useActiveAccount } from "../engine/queries.ts";
+import { cleanName } from "../lib/text.ts";
 import { shortAge } from "../lib/time.ts";
 import ui from "../styles/ui.module.css";
 import styles from "./pages.module.css";
@@ -105,7 +106,9 @@ function UserProfile({ actor }: { actor: string }) {
         <ul className={ui.list}>
           {u.links.map((l) => (
             <li key={l.uri}>
-              <SafeLink raw={l.uri}>{l.label ?? l.uri}</SafeLink>
+              <SafeLink raw={l.uri}>
+                {l.label ? <bdi>{cleanName(l.label, 100)}</bdi> : l.uri}
+              </SafeLink>
             </li>
           ))}
         </ul>

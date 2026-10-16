@@ -57,14 +57,25 @@
 
 .lfm a {
   color: var(--color-link);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.15em;
 }
 
 .lfm a:hover {
-  text-decoration: underline;
+  text-decoration-thickness: 2px;
 }
 
+/* Internal record links: dotted, so they read differently from external ones. */
 .lfm a.at-link {
-  border-bottom: 1px dotted currentcolor;
+  text-decoration-style: dotted;
+}
+
+/* Mentions have their own background; footnote numbers and back-links are not running text. */
+.lfm a.mention,
+.lfm sup a,
+.lfm a.fn-back {
+  text-decoration: none;
 }
 
 .lfm a.mention {

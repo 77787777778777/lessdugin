@@ -242,15 +242,29 @@ fn unknown_union_members_survive() {
 }
 
 #[test]
-fn integral_floats_are_integers() {
-    let v = json!({"width": 3.0, "height": 4});
-    let a: AspectRatio = serde_json::from_value(v).unwrap();
+fn integers_are_data_model_integers() {
+    let a: AspectRatio = serde_json::from_value(json!({"width": 3, "height": 4})).unwrap();
     assert_eq!((a.width, a.height), (3, 4));
     assert_eq!(
         serde_json::to_value(&a).unwrap(),
         json!({"width": 3, "height": 4})
     );
-    assert!(serde_json::from_value::<AspectRatio>(json!({"width": 3.5, "height": 4})).is_err());
+    // sync.md §5.5: a number with a fraction or exponent is a float, even an integral one, and
+    // integers stay within ±(2^53 − 1)
+    for bad in [
+        r#"{"width": 3.5, "height": 4}"#,
+        r#"{"width": 3.0, "height": 4}"#,
+        r#"{"width": 3e0, "height": 4}"#,
+        r#"{"width": 9007199254740992, "height": 4}"#,
+        r#"{"width": -9007199254740992, "height": 4}"#,
+    ] {
+        assert!(serde_json::from_str::<AspectRatio>(bad).is_err(), "{bad}");
+    }
+    // (the lexicon range is checked by validation, not by deserialisation)
+    let big: AspectRatio =
+        serde_json::from_str(r#"{"width": 9007199254740991, "height": -9007199254740991}"#)
+            .unwrap();
+    assert_eq!(big.height, -9_007_199_254_740_991);
 }
 
 #[test]
@@ -367,6 +381,47 @@ fn qkey_normalisation() {
     // White_Space includes U+00A0 and U+3000
     assert_eq!(qkey(Some(&q("a\u{a0}\u{3000}b"))), "a b");
     assert_eq!(qkey(Some(&q(" \u{2003} "))), "");
+    for (exact, key) in [
+        // trimmed on White_Space, including CR LF and U+2028
+        ("\r\nx\u{2028}", "x"),
+        ("a\r\n\r\nb", "a b"),
+        ("a\u{85}b", "a b"),
+        // U+200B and U+FEFF are not White_Space: kept
+        ("a\u{200b}b\u{feff}", "a\u{200b}b\u{feff}"),
+        // NFC: conjoining jamo compose, singletons are replaced
+        ("\u{1100}\u{1161}", "\u{ac00}"),
+        ("\u{212b}", "\u{c5}"),
+        ("a\u{0323}\u{0307}", "\u{1ea1}\u{307}"),
+        // U+2000 is NFC U+2002, both White_Space: one run
+        ("a\u{2000}\u{2002}b", "a b"),
+        // no case folding, no other normalisation
+        ("A\u{fb01}", "A\u{fb01}"),
+    ] {
+        assert_eq!(qkey(Some(&q(exact))), key, "{exact:?}");
+    }
+}
+
+#[test]
+fn qkey_matches_the_lfm1_vectors() {
+    // `qkey` is defined in lfm-1.md §11; the markdown crate runs the same vectors
+    let p = common::repo_path("testdata/vectors/lfm1/quote.json");
+    let doc: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap();
+    let mut n = 0;
+    for v in doc["vectors"].as_array().unwrap() {
+        let Some(key) = v["expected"]["qkey"].as_str() else {
+            continue;
+        };
+        let quote = v["input"]["quote"]["exact"].as_str().map(|e| {
+            let mut q = TextQuote::new(e);
+            q.prefix = v["input"]["quote"]["prefix"].as_str().map(str::to_owned);
+            q.suffix = v["input"]["quote"]["suffix"].as_str().map(str::to_owned);
+            q
+        });
+        assert_eq!(qkey(quote.as_ref()), key, "{}", v["name"]);
+        n += 1;
+    }
+    assert!(n >= 2, "{n}");
 }
 
 #[test]
@@ -597,4 +652,51 @@ fn constructors_write_type_and_defaults() {
         json!({"$type": "com.atproto.label.defs#selfLabels", "values": [{"val": "porn"}]})
     );
     let _ = Did::parse("did:plc:ewvi7nxzyoun6zhxrhs64oiz").unwrap();
+}
+
+#[test]
+fn opinion_dedupe_scales() {
+    // a fetched (possibly invalid) opinion with 100,000 reacts and tags, half of them repeats:
+    // `apply` keeps the first occurrence of each key, in order, in O(n log n) (not quadratic)
+    let ns = lessdugin_lexicon::ns::NS;
+    let forum = uri(&format!(
+        "at://did:plc:ewvi7nxzyoun6zhxrhs64oiz/{ns}.forum/rationality"
+    ));
+    let subject = uri(&format!(
+        "at://did:plc:ewvi7nxzyoun6zhxrhs64oiz/{ns}.post/uetjixxr3a33-3l2s5xxv2ze2c"
+    ));
+    let t0 = dt("2026-10-16T12:00:00.000Z");
+    let mut current = Opinion::apply(None, &subject, &forum, "bafyreia", &[], &t0);
+    let n = 50_000;
+    let react = |i: usize, stance: &str| React {
+        react: format!("r{i}"),
+        stance: Some(stance.into()),
+        quote: None,
+        extra: Default::default(),
+    };
+    let tag = |i: usize, value: &str| TagVote {
+        tag: format!("t{i}"),
+        value: value.into(),
+        extra: Default::default(),
+    };
+    current.reacts = Some(
+        (0..n)
+            .map(|i| react(i, "for"))
+            .chain((0..n).map(|i| react(i, "against")))
+            .collect(),
+    );
+    current.tags = Some(
+        (0..n)
+            .map(|i| tag(i, "up"))
+            .chain((0..n).map(|i| tag(i, "down")))
+            .collect(),
+    );
+    let next = Opinion::apply(Some(&current), &subject, &forum, "bafyreib", &[], &t0);
+    let reacts = next.reacts.unwrap();
+    assert_eq!(reacts.len(), n);
+    assert!(reacts.iter().all(|r| r.stance.as_deref() == Some("for")));
+    assert_eq!(reacts[n - 1].react, format!("r{}", n - 1));
+    let tags = next.tags.unwrap();
+    assert_eq!(tags.len(), n);
+    assert!(tags.iter().all(|t| t.value == "up"));
 }

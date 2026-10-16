@@ -1,0 +1,458 @@
+{
+  "behaviour": "data-model",
+  "kind": "graphemes",
+  "description": "Grapheme counting for Lexicon maxGraphemes/minGraphemes (docs/spec/data-model.md sec. 2.2): extended grapheme clusters (UAX #29) as computed by the pinned unicode-segmentation (1.13.3, Unicode 17.0). input: {text} or {gen: {prefix, repeat, times, suffix}} meaning prefix + repeat x times + suffix; expected: graphemes (extended grapheme clusters) and bytes (UTF-8 length). Runners also check the boundary through validity rule G2: a post whose title (s(300g/3000b)) is the text is G2-valid iff graphemes <= 300 and bytes <= 3000. Strings are written with \\uXXXX escapes. A new unicode-segmentation version must pass these vectors unchanged.",
+  "vectors": [
+    {
+      "name": "empty",
+      "note": "no clusters",
+      "input": {
+        "text": ""
+      },
+      "expected": {
+        "graphemes": 0,
+        "bytes": 0
+      }
+    },
+    {
+      "name": "ascii",
+      "note": "one cluster per ASCII letter",
+      "input": {
+        "text": "hello"
+      },
+      "expected": {
+        "graphemes": 5,
+        "bytes": 5
+      }
+    },
+    {
+      "name": "crlf",
+      "note": "GB3: CR LF is one cluster",
+      "input": {
+        "text": "a\r\nb"
+      },
+      "expected": {
+        "graphemes": 3,
+        "bytes": 4
+      }
+    },
+    {
+      "name": "lf-cr",
+      "note": "GB4/GB5: LF then CR are two clusters",
+      "input": {
+        "text": "\n\r"
+      },
+      "expected": {
+        "graphemes": 2,
+        "bytes": 2
+      }
+    },
+    {
+      "name": "tab",
+      "note": "GB4/GB5: a control is its own cluster",
+      "input": {
+        "text": "a\tb"
+      },
+      "expected": {
+        "graphemes": 3,
+        "bytes": 3
+      }
+    },
+    {
+      "name": "combining-acute",
+      "note": "GB9: e + COMBINING ACUTE ACCENT",
+      "input": {
+        "text": "e\u0301"
+      },
+      "expected": {
+        "graphemes": 1,
+        "bytes": 3
+      }
+    },
+    {
+      "name": "precomposed",
+      "note": "U+00E9 (NFC of the previous vector); no normalisation is applied",
+      "input": {
+        "text": "\u00e9"
+      },
+      "expected": {
+        "graphemes": 1,
+        "bytes": 2
+      }
+    },
+    {
+      "name": "stacked-marks",
+      "note": "GB9: any number of Extend",
+      "input": {
+        "text": "a\u0301\u0302\u0303\u0304"
+      },
+      "expected": {
+        "graphemes": 1,
+        "bytes": 9
+      }
+    },
+    {
+      "name": "zwj-family",
+      "note": "GB11: emoji ZWJ sequence (man, woman, girl, boy), 25 bytes",
+      "input": {
+        "text": "\ud83d\udc68\u200d\ud83d\udc69\u200d\ud83d\udc67\u200d\ud83d\udc66"
+      },
+      "expected": {
+        "graphemes": 1,
+        "bytes": 25
+      }
+    },
+    {
+      "name": "zwj-after-letter",
+      "note": "GB9 extends a with ZWJ; GB11 needs Extended_Pictographic on both sides",
+      "input": {
+        "text": "a\u200db"
+      },
+      "expected": {
+        "graphemes": 2,
+        "bytes": 5
+      }
+    },
+    {
+      "name": "skin-tone",
+      "note": "GB9: emoji modifier (Extend)",
+      "input": {
+        "text": "\ud83d\udc4d\ud83c\udffd"
+      },
+      "expected": {
+        "graphemes": 1,
+        "bytes": 8
+      }
+    },
+    {
+      "name": "modifier-alone",
+      "note": "a lone emoji modifier",
+      "input": {
+        "text": "\ud83c\udffd"
+      },
+      "expected": {
+        "graphemes": 1,
+        "bytes": 4
+      }
+    },
+    {
+      "name": "variation-selector",
+      "note": "GB9: VS16 is Extend",
+      "input": {
+        "text": "\u2764\ufe0f"
+      },
+      "expected": {
+        "graphemes": 1,
+        "bytes": 6
+      }
+    },
+    {
+      "name": "keycap",
+      "note": "GB9: digit + VS16 + COMBINING ENCLOSING KEYCAP",
+      "input": {
+        "text": "1\ufe0f\u20e3"
+      },
+      "expected": {
+        "graphemes": 1,
+        "bytes": 7
+      }
+    },
+    {
+      "name": "flags",
+      "note": "GB12/GB13: regional indicators pair up (US, GB)",
+      "input": {
+        "text": "\ud83c\uddfa\ud83c\uddf8\ud83c\uddec\ud83c\udde7"
+      },
+      "expected": {
+        "graphemes": 2,
+        "bytes": 16
+      }
+    },
+    {
+      "name": "flags-odd",
+      "note": "GB12/GB13: a third regional indicator starts a new cluster",
+      "input": {
+        "text": "\ud83c\uddfa\ud83c\uddf8\ud83c\uddec"
+      },
+      "expected": {
+        "graphemes": 2,
+        "bytes": 12
+      }
+    },
+    {
+      "name": "hangul-jamo-lvt",
+      "note": "GB6/GB7: conjoining jamo L V T",
+      "input": {
+        "text": "\u1100\u1161\u11a8"
+      },
+      "expected": {
+        "graphemes": 1,
+        "bytes": 9
+      }
+    },
+    {
+      "name": "hangul-syllables",
+      "note": "two precomposed syllables (LVT, LVT)",
+      "input": {
+        "text": "\ud55c\uad6d"
+      },
+      "expected": {
+        "graphemes": 2,
+        "bytes": 6
+      }
+    },
+    {
+      "name": "hangul-lv-t",
+      "note": "GB7: LV syllable + T jamo",
+      "input": {
+        "text": "\uac00\u11a8"
+      },
+      "expected": {
+        "graphemes": 1,
+        "bytes": 6
+      }
+    },
+    {
+      "name": "devanagari-conjunct",
+      "note": "GB9c (Unicode 15.1+): KA + VIRAMA + SSA is one cluster (two under Unicode 15.0)",
+      "input": {
+        "text": "\u0915\u094d\u0937"
+      },
+      "expected": {
+        "graphemes": 1,
+        "bytes": 9
+      }
+    },
+    {
+      "name": "devanagari-conjunct-zwj",
+      "note": "GB9c with ZWJ between the linker and the consonant",
+      "input": {
+        "text": "\u0915\u094d\u200d\u0937"
+      },
+      "expected": {
+        "graphemes": 1,
+        "bytes": 12
+      }
+    },
+    {
+      "name": "devanagari-spacing-mark",
+      "note": "GB9a: KA + VOWEL SIGN I (SpacingMark)",
+      "input": {
+        "text": "\u0915\u093f"
+      },
+      "expected": {
+        "graphemes": 1,
+        "bytes": 6
+      }
+    },
+    {
+      "name": "thai-sara-am",
+      "note": "GB9a: SARA AM is a SpacingMark",
+      "input": {
+        "text": "\u0e01\u0e33"
+      },
+      "expected": {
+        "graphemes": 1,
+        "bytes": 6
+      }
+    },
+    {
+      "name": "prepend",
+      "note": "GB9b: ARABIC NUMBER SIGN is Prepend",
+      "input": {
+        "text": "\u0600\u0661"
+      },
+      "expected": {
+        "graphemes": 1,
+        "bytes": 4
+      }
+    },
+    {
+      "name": "lone-mark",
+      "note": "a combining mark with no base",
+      "input": {
+        "text": "\u0301"
+      },
+      "expected": {
+        "graphemes": 1,
+        "bytes": 2
+      }
+    },
+    {
+      "name": "title-300-flags",
+      "note": "post.title s(300g/3000b) at the grapheme limit: 2,400 bytes",
+      "input": {
+        "gen": {
+          "prefix": "",
+          "repeat": "\ud83c\uddfa\ud83c\uddf8",
+          "times": 300,
+          "suffix": ""
+        }
+      },
+      "expected": {
+        "graphemes": 300,
+        "bytes": 2400
+      }
+    },
+    {
+      "name": "title-301-flags",
+      "note": "one grapheme past the limit",
+      "input": {
+        "gen": {
+          "prefix": "",
+          "repeat": "\ud83c\uddfa\ud83c\uddf8",
+          "times": 301,
+          "suffix": ""
+        }
+      },
+      "expected": {
+        "graphemes": 301,
+        "bytes": 2408
+      }
+    },
+    {
+      "name": "title-300-conjuncts",
+      "note": "at the limit only under GB9c (600 clusters under Unicode 15.0): 2,700 bytes",
+      "input": {
+        "gen": {
+          "prefix": "",
+          "repeat": "\u0915\u094d\u0937",
+          "times": 300,
+          "suffix": ""
+        }
+      },
+      "expected": {
+        "graphemes": 300,
+        "bytes": 2700
+      }
+    },
+    {
+      "name": "title-301-conjuncts",
+      "note": "one grapheme past the limit",
+      "input": {
+        "gen": {
+          "prefix": "",
+          "repeat": "\u0915\u094d\u0937",
+          "times": 301,
+          "suffix": ""
+        }
+      },
+      "expected": {
+        "graphemes": 301,
+        "bytes": 2709
+      }
+    },
+    {
+      "name": "title-300-crlf",
+      "note": "CR LF pairs: 300 clusters, 600 code points",
+      "input": {
+        "gen": {
+          "prefix": "",
+          "repeat": "\r\n",
+          "times": 300,
+          "suffix": ""
+        }
+      },
+      "expected": {
+        "graphemes": 300,
+        "bytes": 600
+      }
+    },
+    {
+      "name": "title-301-crlf",
+      "note": "one grapheme past the limit",
+      "input": {
+        "gen": {
+          "prefix": "",
+          "repeat": "\r\n",
+          "times": 301,
+          "suffix": ""
+        }
+      },
+      "expected": {
+        "graphemes": 301,
+        "bytes": 602
+      }
+    },
+    {
+      "name": "title-300-jamo",
+      "note": "conjoining jamo syllables: 2,700 bytes",
+      "input": {
+        "gen": {
+          "prefix": "",
+          "repeat": "\u1100\u1161\u11a8",
+          "times": 300,
+          "suffix": ""
+        }
+      },
+      "expected": {
+        "graphemes": 300,
+        "bytes": 2700
+      }
+    },
+    {
+      "name": "title-301-jamo",
+      "note": "one grapheme past the limit",
+      "input": {
+        "gen": {
+          "prefix": "",
+          "repeat": "\u1100\u1161\u11a8",
+          "times": 301,
+          "suffix": ""
+        }
+      },
+      "expected": {
+        "graphemes": 301,
+        "bytes": 2709
+      }
+    },
+    {
+      "name": "title-300-combining",
+      "note": "299 decomposed \u00e9 then x",
+      "input": {
+        "gen": {
+          "prefix": "",
+          "repeat": "e\u0301",
+          "times": 299,
+          "suffix": "x"
+        }
+      },
+      "expected": {
+        "graphemes": 300,
+        "bytes": 898
+      }
+    },
+    {
+      "name": "title-120-families",
+      "note": "3,000 bytes: at the byte limit (maxLength)",
+      "input": {
+        "gen": {
+          "prefix": "",
+          "repeat": "\ud83d\udc68\u200d\ud83d\udc69\u200d\ud83d\udc67\u200d\ud83d\udc66",
+          "times": 120,
+          "suffix": ""
+        }
+      },
+      "expected": {
+        "graphemes": 120,
+        "bytes": 3000
+      }
+    },
+    {
+      "name": "title-121-families",
+      "note": "3,025 bytes: over the byte limit with only 121 graphemes",
+      "input": {
+        "gen": {
+          "prefix": "",
+          "repeat": "\ud83d\udc68\u200d\ud83d\udc69\u200d\ud83d\udc67\u200d\ud83d\udc66",
+          "times": 121,
+          "suffix": ""
+        }
+      },
+      "expected": {
+        "graphemes": 121,
+        "bytes": 3025
+      }
+    }
+  ]
+}

@@ -14,8 +14,8 @@
 // After insertion it also substitutes verified handles into mentions (§5.4: eagerly only for
 // the first 16 distinct mentioned DIDs that are forum participants; any other mention only once
 // its identity is in the cache, e.g. after a hover preview resolved it), makes in-content anchor
-// links keyboard-reachable, and, when asked, copies footnotes next to their references as
-// sidenotes for wide screens.
+// links keyboard-reachable, names task-list checkboxes, and, when asked, copies footnotes next to
+// their references as sidenotes for wide screens.
 
 import type { ActorView } from "@lessdugin/engine/types";
 import { useQueryClient } from "@tanstack/react-query";
@@ -100,6 +100,21 @@ function makeAnchorsFocusable(root: Element): void {
   }
 }
 
+/** Task-list checkboxes (`<input type="checkbox" disabled="">` + the item's text) get the
+ * item's text as their accessible name; a bare checkbox would be announced without one. */
+function labelTaskCheckboxes(root: Element): void {
+  for (const input of root.querySelectorAll('input[type="checkbox"]')) {
+    const item = input.parentElement;
+    if (!item) continue;
+    let text = "";
+    for (const n of item.childNodes) {
+      if (n instanceof Element && (n.localName === "ul" || n.localName === "ol")) break;
+      text += n.textContent ?? "";
+    }
+    input.setAttribute("aria-label", text.replace(/\s+/g, " ").trim().slice(0, 200) || "Task");
+  }
+}
+
 /** Copies each footnote next to its first reference, for wide screens. */
 function addSidenotes(root: Element): void {
   for (const sup of root.querySelectorAll("sup[id]")) {
@@ -171,6 +186,7 @@ export function RenderedHtml({
     setSanitizedHtml(el, html);
     addMediaPlaceholders(el);
     makeAnchorsFocusable(el);
+    labelTaskCheckboxes(el);
     if (sidenotes) {
       addSidenotes(el);
       makeAnchorsFocusable(el);

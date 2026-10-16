@@ -61,6 +61,9 @@ export function PublicAckProvider({ children }: { children: ReactNode }) {
   /** Kinds acknowledged in this session, so queued requests need not wait for the settings. */
   const acknowledged = useRef(new Set<PublicActionKind>());
   const [pending, setPending] = useState<Ask | null>(null);
+  /** The request being answered: a second click (or Escape) on the same dialog while the first
+   * answer is still saving must not answer the next queued request. */
+  const answering = useRef<Ask | null>(null);
 
   const request = useCallback<Request>(
     async (kind) => {
@@ -81,7 +84,8 @@ export function PublicAckProvider({ children }: { children: ReactNode }) {
 
   const answer = async (ok: boolean): Promise<void> => {
     const p = queue.current[0];
-    if (!p || p !== pending) return;
+    if (!p || p !== pending || answering.current === p) return;
+    answering.current = p;
     setPending(null);
     if (ok) {
       acknowledged.current.add(p.kind);
@@ -106,6 +110,7 @@ export function PublicAckProvider({ children }: { children: ReactNode }) {
       else rest.push(q);
     }
     queue.current = rest;
+    answering.current = null;
     setPending(rest[0] ?? null);
   };
 

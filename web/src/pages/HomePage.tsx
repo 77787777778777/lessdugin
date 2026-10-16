@@ -1,11 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import type { ForumSummary } from "@lessdugin/engine/types";
+import type { ForumDraft, ForumSummary } from "@lessdugin/engine/types";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link } from "@tanstack/react-router";
+import { Link, useNavigate } from "@tanstack/react-router";
+import { useState } from "react";
 import { ActorName } from "../components/ActorName.tsx";
+import { EMPTY_FORUM_DRAFT, ForumForm } from "../components/ForumForm.tsx";
 import { ErrorView, Loading } from "../components/Status.tsx";
+import { toasts } from "../components/Toast.tsx";
 import { useEngine } from "../engine/context.tsx";
-import { qk, useFollowed } from "../engine/queries.ts";
+import { qk, useActiveAccount, useFollowed } from "../engine/queries.ts";
+import { writeStore } from "../engine/writes.ts";
 import { cleanName } from "../lib/text.ts";
 import { parseAtUri } from "../lib/uri.ts";
 import ui from "../styles/ui.module.css";
@@ -48,6 +52,55 @@ function ForumCard({ forum }: { forum: ForumSummary }) {
   );
 }
 
+/** "Create a forum": the declaration and the owner's membership, in the viewer's repository. */
+function CreateForum() {
+  const engine = useEngine();
+  const navigate = useNavigate();
+  const active = useActiveAccount();
+  const [open, setOpen] = useState(false);
+  if (!active.data) {
+    return active.isPending ? null : (
+      <p className={ui.small}>
+        <Link to="/login">Sign in</Link> to create a forum.
+      </p>
+    );
+  }
+  if (!open) {
+    return (
+      <p>
+        <button type="button" className={ui.button} onClick={() => setOpen(true)}>
+          Create a forum
+        </button>
+      </p>
+    );
+  }
+  const create = async (draft: ForumDraft): Promise<boolean> => {
+    const ticket = await engine.forumCreate(draft);
+    writeStore.track(ticket);
+    const final = await writeStore.wait(ticket.id);
+    if (final.kind === "failed") throw final.error;
+    if (final.kind !== "done") return false;
+    toasts.show({ message: "Forum created (its declaration is public)", tone: "success" });
+    const p = parseAtUri(final.uri);
+    if (p) void navigate({ to: "/f/$owner/$slug", params: { owner: p.did, slug: p.rkey } });
+    return true;
+  };
+  return (
+    <section aria-labelledby="create-forum" className={ui.card}>
+      <h2 id="create-forum" className={ui.sectionTitle}>
+        Create a forum
+      </h2>
+      <ForumForm
+        initial={EMPTY_FORUM_DRAFT}
+        creating
+        submitLabel="Create the forum"
+        onSubmit={create}
+        onCancel={() => setOpen(false)}
+      />
+    </section>
+  );
+}
+
 export function HomePage() {
   const engine = useEngine();
   const followed = useFollowed();
@@ -68,6 +121,7 @@ export function HomePage() {
           <ForumCard key={f.uri} forum={f} />
         ))}
       </div>
+      <CreateForum />
       {others.length > 0 && (
         <>
           <h2 className={ui.sectionTitle}>Discover</h2>

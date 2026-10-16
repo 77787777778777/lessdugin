@@ -7,19 +7,27 @@
 //! G1–G10 first). Every rule that fails is reported, so one defect can fail several rules: a
 //! wrong post key fails PO1 and the generic G5 (and G9 when the fk segment is wrong); a
 //! `textBlob` in a comment body fails CO4 and G7; a disallowed reference collection fails both
-//! G4 and the collection's own rule (CO2, OP1, RV2, MA4, …).
+//! G4 and the collection's own rule (CO2, OP1, RV2, MA4, …). A failing G9 always comes with
+//! G5 (G9 "is part of G5").
+//!
+//! **Bounded output.** At most [`MAX_VIOLATIONS_PER_RULE`] violations are listed per rule; the
+//! others are only counted ([`Validity::omitted`]). Every failing rule is still listed, so
+//! [`Validity::first_rule`], [`Validity::fails`] and [`Validity::rule_ids`] are exact.
 //!
 //! **Valid but without effect.** Some valid records have no effect in v1. They are reported in
 //! [`Validity::no_effect`], never as violations: the reserved modAction key form `{fk}-{tid}`
 //! (MA2), unknown modAction scope, action `$type`, `#access.level`, `#tier.tier` or `#pin.scope`
-//! (MA7), and `#lock` on a forum uri (MA9).
+//! (MA7), and `#lock` on a forum uri (MA9). MA7 makes the record valid, so when it applies the
+//! action-dependent rules MA3–MA6 are not evaluated and the at-uri subject may be in any
+//! collection (§6.7: an unknown action takes "any" subject); G1–G10, MA1, MA2 and MA10–MA12
+//! still apply.
 //!
 //! # Rule coverage
 //!
 //! | Rule | Where | Notes |
 //! |---|---|---|
 //! | G1 | here | `$type` = collection NSID of this build; the collection is one of this build's (another prefix fails) |
-//! | G2 | here | lexicon validation of the embedded schema ([`crate::validate`]) plus the atproto data model (no floats, well-formed `$link`/`$bytes`/blobs, `$type` strings) |
+//! | G2 | here | lexicon validation of the embedded schema ([`crate::validate`]) plus the atproto data model (no floats, integers within ±(2^53−1) written without fraction or exponent as in `sync.md` §5.5, well-formed `$link`/`$bytes`/blobs, `$type` strings) |
 //! | G3 | here | legacy `{cid, mimeType}` blobs at schema blob positions |
 //! | G4 | here | canonical at-uri, allowed collection (§2.3 table; `modAction.subject` per action), NS rkey grammar, in every reference field and array entry, including `markdown.links` of known `md` members |
 //! | G5 | here | reported together with the collection's key rule (FO1, ME1, PO1, CO1, CO2, RV1, RV3, OP2, MA2, WR1, SQ1, PF1) |
@@ -39,14 +47,14 @@
 //! | CO1–CO4 | here | |
 //! | CO5 | **core fold** *(x)* | root post's `forum` = comment `forum` needs the root post |
 //! | CO6 | **core fold** | `moderatorHat` needs the forum's current authorities |
-//! | RV1–RV5 | here | RV5 recomputes the snapshot's CIDv1 (dag-cbor, sha256) |
+//! | RV1–RV5 | here | RV5 recomputes the snapshot's CIDv1 (dag-cbor, sha256), with no cap but depth (as G6) |
 //! | OP1, OP2 | here | |
 //! | OP3 | entry + **core fold** | unknown axis/stance/value: [`crate::records::Opinion::karma`], [`entry::opinion_reacts`], [`entry::opinion_tag_votes`]; the palette check needs the forum policy |
 //! | OP4 | entry | [`entry::opinion_tag_votes`] |
 //! | OP5 | **core fold** | whether an opinion counts (`social.md` §5) |
 //! | MA1–MA5 | here | MA4 also checks the `#pin` subject per pin scope; positive = keep, tier ≥ frontpage, pinned |
 //! | MA6 | here + **core fold** | the action/value allowed in author scope here; "own thread or post" and the author gates in the fold |
-//! | MA7 | here (no effect) | |
+//! | MA7 | here (no effect) | skips MA3–MA6 and the action's subject collections (G4) |
 //! | MA8 | entry | [`entry::restrict_capabilities`] |
 //! | MA9 | here (no effect) + entry | forum-uri lock; [`entry::lock_allowed`] |
 //! | MA10 | here + **core fold** | `NS.wikiRevision` with the forum's fk here; "a revision of the same slug" in the fold |
@@ -78,7 +86,7 @@
 
 pub mod entry;
 
-use lessdugin_atp::datamodel::{Limits, json_to_ipld_with};
+use lessdugin_atp::datamodel::{DataModelError, Limits, json_to_ipld_with, record_cid_with};
 use lessdugin_atp::syntax::{AtUri, Did};
 use serde_json::{Map, Value};
 
@@ -87,7 +95,7 @@ use crate::keys::{self, KeyError, ModActionKey, RkeyInput};
 use crate::limits::{NESTING_MAX_RECORD, RECORD_CBOR_MAX_BYTES};
 use crate::ns::NS;
 use crate::schemas::registry;
-use crate::validate::{Code, Options, Validator, nesting_depth};
+use crate::validate::{Code, Options, Validator, first_non_integer, nesting_depth};
 use crate::values::{AccessLevel, ActionKind, PinScope, PostKind, RevisionOp, Scope, Tier};
 
 macro_rules! rules {
@@ -243,7 +251,14 @@ pub struct Validity {
     pub violations: Vec<Violation>,
     /// Why a valid record has no effect in v1 (MA2 reserved key, MA7, MA9).
     pub no_effect: Vec<Violation>,
+    /// Violations found but not listed in `violations`, because their rule already had
+    /// [`MAX_VIOLATIONS_PER_RULE`] entries.
+    pub omitted: usize,
 }
+
+/// Most violations [`check`] lists per rule; further ones are counted in [`Validity::omitted`].
+/// Bounds the report of adversarial records (for example 200,000 non-slug tags).
+pub const MAX_VIOLATIONS_PER_RULE: usize = 16;
 
 impl Validity {
     /// The first failing rule (the raw-view annotation).
@@ -280,6 +295,8 @@ pub fn check(collection_nsid: &str, uri: &AtUri, value: &Value) -> Validity {
         out: Vec::new(),
         no_effect: Vec::new(),
         key_failed: false,
+        counts: [0; RuleId::ALL.len()],
+        omitted: 0,
     };
     c.run(collection_nsid, value);
     c.finish()
@@ -310,6 +327,9 @@ struct Checker<'a> {
     out: Vec<Violation>,
     no_effect: Vec<Violation>,
     key_failed: bool,
+    /// Violations listed per rule (indexed by `RuleId as usize`).
+    counts: [usize; RuleId::ALL.len()],
+    omitted: usize,
 }
 
 fn s(v: Option<&Value>) -> Option<&str> {
@@ -336,10 +356,22 @@ fn names(cs: &[Collection]) -> String {
 
 impl<'a> Checker<'a> {
     fn v(&mut self, rule: RuleId, path: impl Into<String>, message: impl Into<String>) {
+        self.v_with(rule, || (path.into(), message.into()));
+    }
+
+    /// A violation whose path and message are built only if it is listed.
+    fn v_with(&mut self, rule: RuleId, f: impl FnOnce() -> (String, String)) {
+        let n = &mut self.counts[rule as usize];
+        if *n >= MAX_VIOLATIONS_PER_RULE {
+            self.omitted += 1;
+            return;
+        }
+        *n += 1;
+        let (path, message) = f();
         self.out.push(Violation {
             rule_id: rule,
-            path: path.into(),
-            message: message.into(),
+            path,
+            message,
         });
     }
 
@@ -351,18 +383,20 @@ impl<'a> Checker<'a> {
         });
     }
 
-    /// A key equality of §3.2 failed: the collection's rule, plus G5 once.
+    /// A key equality of §3.2 failed: the collection's rule (or G9), plus G5 once.
     fn key_fail(&mut self, rule: RuleId, message: impl Into<String>) {
         let message = message.into();
+        self.g5_once(rule, &message);
+        self.v(rule, "$", message);
+    }
+
+    /// G5, reported once, naming the first key rule that failed.
+    fn g5_once(&mut self, rule: RuleId, message: &str) {
         if !self.key_failed {
             self.key_failed = true;
-            self.v(
-                RuleId::G5,
-                "$",
-                format!("rkey {:?} is not canonical ({rule}: {message})", self.rkey),
-            );
+            let m = format!("rkey {:?} is not canonical ({rule}: {message})", self.rkey);
+            self.v(RuleId::G5, "$", m);
         }
-        self.v(rule, "$", message);
     }
 
     fn finish(mut self) -> Validity {
@@ -372,6 +406,7 @@ impl<'a> Checker<'a> {
             valid: self.out.is_empty(),
             violations: self.out,
             no_effect: self.no_effect,
+            omitted: self.omitted,
         }
     }
 
@@ -473,9 +508,27 @@ impl<'a> Checker<'a> {
                 "too many lexicon violations; report truncated",
             );
         }
+        // sync.md §5.5: no fraction or exponent, within ±(2^53 − 1), anywhere in the value
+        // (the lexicon walk above only sees schema integer fields)
+        let number = first_non_integer(value);
+        if let Some((path, why)) = &number
+            && !self
+                .out
+                .iter()
+                .any(|x| x.rule_id == RuleId::G2 && &x.path == path)
+        {
+            self.v(
+                RuleId::G2,
+                path.as_str(),
+                format!("not a data-model integer: {why}"),
+            );
+        }
         if depth <= DATA_MODEL_DEPTH_CAP {
             let limits = Limits::uncapped(DATA_MODEL_DEPTH_CAP);
             match json_to_ipld_with(value, &limits) {
+                // already reported at its path
+                Err(DataModelError::Float | DataModelError::IntegerOutOfRange)
+                    if number.is_some() => {}
                 Err(e) => self.v(
                     RuleId::G2,
                     "$",
@@ -503,16 +556,19 @@ impl<'a> Checker<'a> {
 
     /// G4 for one reference string. `allowed = None` allows any collection. Returns the parsed
     /// uri when it is canonical.
+    /// `path` is built only when a violation is listed.
     fn reference(
         &mut self,
-        path: &str,
+        path: impl Fn() -> String,
         uri: &str,
         allowed: Option<&[Collection]>,
     ) -> Option<AtUri> {
         let u = match AtUri::parse(uri) {
             Ok(u) => u,
             Err(e) => {
-                self.v(RuleId::G4, path, format!("not a canonical at-uri: {e}"));
+                self.v_with(RuleId::G4, || {
+                    (path(), format!("not a canonical at-uri: {e}"))
+                });
                 return None;
             }
         };
@@ -520,28 +576,29 @@ impl<'a> Checker<'a> {
         if let Some(allowed) = allowed
             && !coll.is_some_and(|c| allowed.contains(&c))
         {
-            let msg = if allowed.is_empty() {
-                format!("an at-uri ({}) is not allowed here", u.collection())
-            } else {
-                format!(
-                    "collection {} is not allowed here (allowed: {})",
-                    u.collection(),
-                    names(allowed)
-                )
-            };
-            self.v(RuleId::G4, path, msg);
+            self.v_with(RuleId::G4, || {
+                let msg = if allowed.is_empty() {
+                    format!("an at-uri ({}) is not allowed here", u.collection())
+                } else {
+                    format!(
+                        "collection {} is not allowed here (allowed: {})",
+                        u.collection(),
+                        names(allowed)
+                    )
+                };
+                (path(), msg)
+            });
         }
         if let Some(c) = coll
             && !keys::matches_grammar(c, u.rkey().as_str())
         {
-            self.v(
-                RuleId::G4,
-                path,
-                format!(
+            self.v_with(RuleId::G4, || {
+                let m = format!(
                     "rkey {:?} does not match the {c} key grammar",
                     u.rkey().as_str()
-                ),
-            );
+                );
+                (path(), m)
+            });
         }
         Some(u)
     }
@@ -554,7 +611,7 @@ impl<'a> Checker<'a> {
         allowed: &[Collection],
     ) -> Option<&'a str> {
         let uri = s(v?.get("uri"))?;
-        self.reference(&format!("{path}.uri"), uri, Some(allowed));
+        self.reference(|| format!("{path}.uri"), uri, Some(allowed));
         Some(uri)
     }
 
@@ -589,7 +646,7 @@ impl<'a> Checker<'a> {
         if let Some(Value::Array(links)) = m.get("links") {
             for (i, l) in links.iter().enumerate() {
                 if let Some(uri) = l.as_str() {
-                    self.reference(&format!("{path}.links[{i}]"), uri, None);
+                    self.reference(|| format!("{path}.links[{i}]"), uri, None);
                 }
             }
         }
@@ -603,12 +660,12 @@ impl<'a> Checker<'a> {
         })
     }
 
-    /// G8 for one slug value.
-    fn slug(&mut self, path: &str, v: Option<&Value>) {
+    /// G8 for one slug value; `path` is built only when a violation is listed.
+    fn slug(&mut self, path: impl FnOnce() -> String, v: Option<&Value>) {
         if let Some(x) = s(v)
             && !keys::is_slug(x)
         {
-            self.v(RuleId::G8, path, format!("{x:?} is not a slug"));
+            self.v_with(RuleId::G8, || (path(), format!("{x:?} is not a slug")));
         }
     }
 
@@ -616,14 +673,14 @@ impl<'a> Checker<'a> {
     fn slugs(&mut self, path: &str, v: Option<&Value>) {
         if let Some(Value::Array(a)) = v {
             for (i, x) in a.iter().enumerate() {
-                self.slug(&format!("{path}[{i}]"), Some(x));
+                self.slug(|| format!("{path}[{i}]"), Some(x));
             }
         }
     }
 
     fn forum_ref(&mut self) {
         if let Some(f) = self.str_field("forum") {
-            self.reference("$.forum", f, Some(&[Collection::Forum]));
+            self.reference(|| "$.forum".into(), f, Some(&[Collection::Forum]));
         }
     }
 
@@ -636,21 +693,21 @@ impl<'a> Checker<'a> {
         let Some(f) = self.str_field("forum") else {
             return;
         };
+        // G9 is part of G5 (§7.2): a failure is also reported as G5
         match keys::fk(f) {
             Ok(fk) => {
                 if keys::fk_of(self.rkey) != Some(fk.as_str()) {
-                    self.v(
+                    self.key_fail(
                         RuleId::G9,
-                        "$",
                         format!("the rkey's fk segment is not fk(forum) = {fk}"),
                     );
                 }
             }
-            Err(e) => self.v(
-                RuleId::G9,
-                "$.forum",
-                format!("fk(forum) is undefined: {e}"),
-            ),
+            Err(e) => {
+                let m = format!("fk(forum) is undefined: {e}");
+                self.g5_once(RuleId::G9, &m);
+                self.v(RuleId::G9, "$.forum", m);
+            }
         }
     }
 
@@ -821,7 +878,8 @@ impl<'a> Checker<'a> {
                 ),
             }
             let subject_cid = s(subject_v.and_then(|v| v.get("cid")));
-            match lessdugin_atp::datamodel::record_cid(record) {
+            // the same caps as G6 (depth only): a snapshot of any valid record has a CID here
+            match record_cid_with(record, &Limits::uncapped(DATA_MODEL_DEPTH_CAP)) {
                 Err(e) => self.v(
                     RuleId::RV5,
                     "$.record",
@@ -866,12 +924,12 @@ impl<'a> Checker<'a> {
         let subject = self.sref("$.subject", self.get("subject"), ALLOWED);
         if let Some(Value::Array(reacts)) = self.get("reacts") {
             for (i, r) in reacts.iter().enumerate() {
-                self.slug(&format!("$.reacts[{i}].react"), r.get("react"));
+                self.slug(|| format!("$.reacts[{i}].react"), r.get("react"));
             }
         }
         if let Some(Value::Array(tags)) = self.get("tags") {
             for (i, t) in tags.iter().enumerate() {
-                self.slug(&format!("$.tags[{i}].tag"), t.get("tag"));
+                self.slug(|| format!("$.tags[{i}].tag"), t.get("tag"));
             }
         }
         let Some(subject) = subject else {
@@ -931,7 +989,7 @@ impl<'a> Checker<'a> {
                     for (i, a) in allowed.iter().enumerate() {
                         if let Some(uri) = a.as_str() {
                             self.reference(
-                                &format!("$.action.allowed[{i}]"),
+                                || format!("$.action.allowed[{i}]"),
                                 uri,
                                 Some(&[Collection::Comment]),
                             );
@@ -991,41 +1049,42 @@ impl<'a> Checker<'a> {
             None => Some(Scope::Forum),
             Some(x) => Scope::parse(x),
         };
+        let mut no_effect = false;
         if scope.is_some_and(Value::is_string) && scope_known.is_none() {
             self.note(RuleId::MA7, "$.scope", "unknown scope: no effect");
+            no_effect = true;
         }
         if action_type.is_some() && kind.is_none() {
             self.note(RuleId::MA7, "$.action.$type", "unknown action: no effect");
+            no_effect = true;
         }
         let level = s(field("level"));
         let tier = s(field("tier"));
         let pin_scope = s(field("scope"));
-        match kind {
+        let unknown_value = match kind {
             Some(ActionKind::Access) if level.is_some_and(|l| AccessLevel::parse(l).is_none()) => {
-                self.note(
-                    RuleId::MA7,
-                    "$.action.level",
-                    "unknown access level: no effect",
-                );
+                Some(("$.action.level", "unknown access level: no effect"))
             }
             Some(ActionKind::Tier) if tier.is_some_and(|t| Tier::parse(t).is_none()) => {
-                self.note(RuleId::MA7, "$.action.tier", "unknown tier: no effect");
+                Some(("$.action.tier", "unknown tier: no effect"))
             }
             Some(ActionKind::Pin) if pin_scope.is_some_and(|p| PinScope::parse(p).is_none()) => {
-                self.note(
-                    RuleId::MA7,
-                    "$.action.scope",
-                    "unknown pin scope: no effect",
-                );
+                Some(("$.action.scope", "unknown pin scope: no effect"))
             }
-            _ => {}
+            _ => None,
+        };
+        if let Some((path, message)) = unknown_value {
+            self.note(RuleId::MA7, path, message);
+            no_effect = true;
         }
 
-        // MA1 (+ G4 for an at-uri subject, with the action's allowed collections)
+        // MA1 (+ G4 for an at-uri subject, with the action's allowed collections; under MA7 the
+        // record is valid, and like an unknown action it takes any subject)
         let Some(subject) = self.str_field("subject") else {
             return;
         };
         let allowed: Option<&[Collection]> = match kind {
+            _ if no_effect => None,
             Some(ActionKind::Hide) => Some(&[
                 Collection::Post,
                 Collection::Comment,
@@ -1043,7 +1102,7 @@ impl<'a> Checker<'a> {
             None => None,
         };
         let form = if subject.starts_with("at://") {
-            match self.reference("$.subject", subject, allowed) {
+            match self.reference(|| "$.subject".into(), subject, allowed) {
                 Some(u)
                     if Collection::from_nsid(u.collection().as_str())
                         .is_none_or(|c| keys::matches_grammar(c, u.rkey().as_str())) =>
@@ -1099,6 +1158,23 @@ impl<'a> Checker<'a> {
             _ => None,
         };
 
+        // MA9's no-effect annotation
+        if form != SubjectForm::Invalid
+            && kind == Some(ActionKind::Lock)
+            && subject_coll == Some(Collection::Forum)
+        {
+            self.note(
+                RuleId::MA9,
+                "$.subject",
+                "a forum-wide lock is reserved (P2): no effect",
+            );
+        }
+
+        // MA7 makes the record valid: the action-dependent rules MA3–MA6 do not apply
+        if no_effect {
+            return;
+        }
+
         // MA3
         if let SubjectForm::AtUri(u) = &form
             && subject_coll.is_some_and(Collection::is_forum_scoped)
@@ -1112,15 +1188,14 @@ impl<'a> Checker<'a> {
             );
         }
 
-        // MA4 (and MA9's no-effect annotation)
+        // MA4
         if form != SubjectForm::Invalid {
             let ok = match kind {
                 Some(ActionKind::Access | ActionKind::Restrict) => form == SubjectForm::Did,
                 Some(ActionKind::Tag) => form == SubjectForm::Tag,
-                Some(_) => match allowed {
-                    Some(list) => subject_coll.is_some_and(|c| list.contains(&c)),
-                    None => true, // unknown pin scope: no effect (MA7)
-                },
+                Some(_) => {
+                    allowed.is_none_or(|list| subject_coll.is_some_and(|c| list.contains(&c)))
+                }
                 None => true,
             };
             if !ok {
@@ -1131,13 +1206,6 @@ impl<'a> Checker<'a> {
                         "this subject is not allowed for the {} action",
                         kind.map_or("unknown", |k| k.as_str())
                     ),
-                );
-            }
-            if kind == Some(ActionKind::Lock) && subject_coll == Some(Collection::Forum) {
-                self.note(
-                    RuleId::MA9,
-                    "$.subject",
-                    "a forum-wide lock is reserved (P2): no effect",
                 );
             }
         }
@@ -1223,7 +1291,7 @@ impl<'a> Checker<'a> {
     fn wiki_revision(&mut self) {
         self.fk_tid_key(RuleId::WR1);
         self.md("$.body", self.get("body"), true, None);
-        self.slug("$.slug", self.get("slug"));
+        self.slug(|| "$.slug".into(), self.get("slug"));
         self.slugs("$.parentTags", self.get("parentTags"));
         if let Some(Value::Array(parents)) = self.get("parents") {
             let f = self.forum_fk();
@@ -1259,10 +1327,12 @@ impl<'a> Checker<'a> {
                 if let Some(Value::Array(posts)) = ch.get("posts") {
                     for (j, p) in posts.iter().enumerate() {
                         let Some(uri) = p.as_str() else { continue };
-                        let path = format!("$.chapters[{i}].posts[{j}]");
-                        self.reference(&path, uri, Some(&[Collection::Post]));
+                        let path = || format!("$.chapters[{i}].posts[{j}]");
+                        self.reference(path, uri, Some(&[Collection::Post]));
                         if coll_of(uri) != Some(Collection::Post) {
-                            self.v(RuleId::SQ2, path, "chapter entry is not an NS.post uri");
+                            self.v_with(RuleId::SQ2, || {
+                                (path(), "chapter entry is not an NS.post uri".into())
+                            });
                         }
                     }
                 }
@@ -1279,7 +1349,7 @@ impl<'a> Checker<'a> {
             for (i, p) in pinned.iter().enumerate() {
                 if let Some(uri) = p.as_str() {
                     self.reference(
-                        &format!("$.pinned[{i}]"),
+                        || format!("$.pinned[{i}]"),
                         uri,
                         Some(&[Collection::Post, Collection::Comment, Collection::Sequence]),
                     );

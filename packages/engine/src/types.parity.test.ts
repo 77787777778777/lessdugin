@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Drift guard: until tsify generates them, the hand-written DTO types in ./types.ts must keep
 // the field names of the Rust DTOs (`crates/core/src/dto.rs`) and the values of its string enums.
-// This reads the Rust source textually (struct bodies of the `dto!` macro, `rename` attributes,
-// snake_case → camelCase), so it is a coarse check; tagged enums are compared by hand.
+// This reads the Rust source textually (struct bodies of the `dto!` macro, `rename` and
+// `skip_serializing_if` attributes, snake_case → camelCase), so it is a coarse check; tagged
+// enums are compared by hand. A field the Rust side may omit (`skip_serializing_if`) must be
+// optional (`?:`) in TypeScript, and every other field required.
 
 import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -13,21 +15,25 @@ const TYPES_TS = fileURLToPath(new URL("./types.ts", import.meta.url));
 
 const camel = (s: string): string => s.replace(/_([a-z0-9])/g, (_, c: string) => c.toUpperCase());
 
+/** A field name, with `?` appended when it is optional. */
 function rustStructs(rs: string): Map<string, string[]> {
   const out = new Map<string, string[]>();
   for (const m of rs.matchAll(/pub struct (\w+) \{([\s\S]*?)\n {4}\}/g)) {
     const fields: string[] = [];
     let rename: string | null = null;
+    let optional = false;
     for (const line of (m[2] ?? "").split("\n")) {
-      const r = /rename = "(\w+)"/.exec(line);
-      if (r?.[1]) {
-        rename = r[1];
+      if (/^\s*#\[/.test(line)) {
+        const r = /rename = "(\w+)"/.exec(line);
+        if (r?.[1]) rename = r[1];
+        if (line.includes("skip_serializing_if")) optional = true;
         continue;
       }
       const f = /^\s*pub (\w+): .+,/.exec(line);
       if (f?.[1]) {
-        fields.push(rename ?? camel(f[1]));
+        fields.push(`${rename ?? camel(f[1])}${optional ? "?" : ""}`);
         rename = null;
+        optional = false;
       }
     }
     if (m[1]) out.set(m[1], fields);
@@ -51,7 +57,7 @@ function rustStringEnums(rs: string): Map<string, string[]> {
 function tsInterfaces(ts: string): Map<string, string[]> {
   const out = new Map<string, string[]>();
   for (const m of ts.matchAll(/export interface (\w+) \{([\s\S]*?)\n\}/g)) {
-    const fields = [...(m[2] ?? "").matchAll(/^\s+(\w+)\??:/gm)].map((f) => f[1] ?? "");
+    const fields = [...(m[2] ?? "").matchAll(/^\s+(\w+\??):/gm)].map((f) => f[1] ?? "");
     if (m[1]) out.set(m[1], fields);
   }
   return out;
@@ -61,7 +67,7 @@ describe.skipIf(!existsSync(DTO_RS))("DTO parity with crates/core/src/dto.rs", (
   const rs = existsSync(DTO_RS) ? readFileSync(DTO_RS, "utf8") : "";
   const ts = readFileSync(TYPES_TS, "utf8");
 
-  it("has every Rust DTO struct with the same fields", () => {
+  it("has every Rust DTO struct with the same fields and the same optionality", () => {
     const interfaces = tsInterfaces(ts);
     const structs = rustStructs(rs);
     expect(structs.size).toBeGreaterThan(40);

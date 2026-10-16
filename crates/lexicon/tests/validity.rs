@@ -366,11 +366,48 @@ fn g2_lexicon_validation() {
     post()
         .with(&["link"], json!({"uri": "not a uri"}))
         .fails(RuleId::G2);
+    // `uri` follows RFC 3986: case-insensitive schemes with digits and "+"; ASCII only
+    for ok in [
+        "HTTPS://example.com/a",
+        "git+ssh://git@example.com/r.git",
+        "h323:alice@example.com",
+    ] {
+        post()
+            .with(&["kind"], json!("link"))
+            .with(&["link"], json!({ "uri": ok }))
+            .valid();
+        forum().with(&["reportContact"], json!(ok)).valid();
+    }
+    forum()
+        .with(&["reportContact"], json!("https://例え.jp/"))
+        .fails(RuleId::G2);
     // knownValues are not enforced
     post().with(&["kind"], json!("poll")).valid();
     // unknown fields are ignored by the lexicon, but must still be data model (no floats)
     post().with(&["zz"], json!({"a": [1, "b"]})).valid();
     post().with(&["zz"], json!(1.5)).fails(RuleId::G2);
+    // sync.md §5.5, anywhere in the value: no fraction or exponent, within ±(2^53 − 1)
+    for (zz, path) in [
+        (json!(3.0), "$.zz"),
+        (json!({"a": [1, 1e3]}), "$.zz.a[1]"),
+        (json!([9_007_199_254_740_992_u64]), "$.zz[0]"),
+        (json!({"n": -9_007_199_254_740_992_i64}), "$.zz.n"),
+    ] {
+        let v = post().with(&["zz"], zz).fails(RuleId::G2);
+        assert_eq!(v.violations.len(), 1, "{:?}", v.violations);
+        assert_eq!(v.violations[0].path, path);
+    }
+    post()
+        .with(
+            &["zz"],
+            json!([9_007_199_254_740_991_u64, -9_007_199_254_740_991_i64]),
+        )
+        .valid();
+    // a schema integer is reported once, by the lexicon walk
+    let v = forum()
+        .with(&["policy"], json!({"karma": {"pairCap": 3.0}}))
+        .fails(RuleId::G2);
+    assert_eq!(v.violations.len(), 1, "{:?}", v.violations);
     post()
         .with(&["zz"], json!({"$link": "nope"}))
         .fails(RuleId::G2);
@@ -420,7 +457,14 @@ fn g2_interop_data_model_fixtures() {
     let invalid = load("data-model-invalid.json");
     assert!(valid.len() >= 5 && invalid.len() >= 10);
     for f in valid {
-        post().with(&["zz"], f["json"].clone()).valid();
+        let j = f["json"].clone();
+        if f["note"] == "float, but integer-like" {
+            // deliberate deviation from upstream: sync.md §5.5 rejects any number with a
+            // fraction or exponent (`123.0`), even where atproto reads it as an integer
+            post().with(&["zz"], j).fails(RuleId::G2);
+            continue;
+        }
+        post().with(&["zz"], j).valid();
     }
     for f in invalid {
         let j = f["json"].clone();
@@ -609,9 +653,24 @@ fn g9_fk_segment() {
         sequence(),
     ] {
         r.passes(RuleId::G9);
-        r.with(&["forum"], json!(other_forum_uri()))
+        // G9 is part of G5: a G9 failure always comes with G5, reported once
+        let v = r
+            .with(&["forum"], json!(other_forum_uri()))
             .fails(RuleId::G9);
+        assert!(v.fails(RuleId::G5), "{:?}", v.violations);
+        assert_eq!(
+            v.violations
+                .iter()
+                .filter(|x| x.rule_id == RuleId::G5)
+                .count(),
+            1
+        );
     }
+    // fk(forum) undefined (U+001F): G9 and G5
+    let v = post()
+        .with(&["forum"], json!(format!("{}\u{1f}", forum_uri())))
+        .fails(RuleId::G9);
+    assert!(v.fails(RuleId::G5), "{:?}", v.violations);
 }
 
 #[test]
@@ -683,15 +742,23 @@ fn fo3_indexers_entry() {
             {"url": "http://index.example.com"},
             {"url": "https://index.example.com:8443"},
             {"url": "mailto:x@example.com"},
+            {"url": "HTTPS://Index2.example.com/xrpc"},
         ]}),
     );
+    // an uppercase scheme is a valid uri (G2) and a usable indexer url (FO3)
     r.valid();
     let f: Forum = serde_json::from_value(r.v).unwrap();
     let urls: Vec<&str> = entry::usable_indexers(&f)
         .iter()
         .map(|e| e.url.as_str())
         .collect();
-    assert_eq!(urls, ["https://index.example.com"]);
+    assert_eq!(
+        urls,
+        [
+            "https://index.example.com",
+            "HTTPS://Index2.example.com/xrpc"
+        ]
+    );
 }
 
 #[test]
@@ -995,11 +1062,45 @@ fn rv5_snapshot_integrity() {
     revision()
         .with(&["record", "x"], json!(0.5))
         .fails(RuleId::RV5);
+    // the snapshot is a JSON object, not a $link or $bytes (the field is `unknown`)
+    revision()
+        .with(&["record"], json!({ "$link": DAG_CID }))
+        .fails(RuleId::G2);
     // the snapshot is displayable only if it passes its own lexicon
     assert!(lessdugin_lexicon::validity::snapshot_renderable(&post().v));
     assert!(!lessdugin_lexicon::validity::snapshot_renderable(
         &post().without(&["title"]).with(&["createdAt"], json!(1)).v
     ));
+}
+
+/// A revision of `snapshot` (a post value) in Alice's repo, with the snapshot's CID computed with
+/// no cap but depth.
+fn revision_of(snapshot: Value) -> R {
+    let limits = lessdugin_atp::datamodel::Limits::uncapped(64);
+    let cid = lessdugin_atp::datamodel::record_cid_with(&snapshot, &limits).unwrap();
+    let mut r = revision();
+    r.v["subject"]["cid"] = json!(cid.to_string());
+    r.v["record"] = snapshot;
+    r
+}
+
+#[test]
+fn rv5_large_valid_snapshots() {
+    // a valid post over the S-class memory caps of `Limits::DEFAULT` (131,072 elements per
+    // container, 262,144 values): its snapshot has a CID like any other (only G6 bounds size)
+    let wide = post().with(&["zz"], json!(vec![0; 131_073]));
+    wide.valid();
+    revision_of(wide.v.clone()).valid();
+    let many = post().with(
+        &["zz"],
+        json!([vec![0; 100_000], vec![0; 100_000], vec![0; 100_000]]),
+    );
+    many.valid();
+    revision_of(many.v.clone()).valid();
+    // and a wrong CID still fails
+    let mut bad = revision_of(wide.v);
+    bad.v["subject"]["cid"] = json!(DAG_CID);
+    bad.fails(RuleId::RV5);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1164,10 +1265,12 @@ fn ma2_key() {
     let v = reserved.valid();
     assert_eq!(v.no_effect[0].rule_id, RuleId::MA2);
     assert!(!v.is_effective());
-    // ... but its fk must still be the forum's (G9)
-    reserved
+    // ... but its fk must still be the forum's (G9, which is part of G5)
+    let v = reserved
         .at_rkey(&format!("{}-{T1}", keys::fk(&other_forum_uri()).unwrap()))
         .fails(RuleId::G9);
+    assert_eq!(v.rule_ids(), vec![RuleId::G5, RuleId::G9]);
+    assert_eq!(v.first_rule(), Some(RuleId::G5));
 }
 
 #[test]
@@ -1359,6 +1462,66 @@ fn ma7_unknown_values_have_no_effect() {
     )
     .valid();
     hide().valid();
+}
+
+#[test]
+fn ma7_overrides_the_action_rules() {
+    // MA7 makes the record valid: MA3–MA6 do not apply, the subject may be in any collection
+    let other_post = at(
+        ALICE,
+        "post",
+        &format!("{}-{T1}", keys::fk(&other_forum_uri()).unwrap()),
+    );
+    for r in [
+        // unknown pin scope, positive (pinned defaults to true), no subjectCid (MA5)
+        mod_action(None, &post_uri(), action("pin", json!({"scope": "global"}))),
+        // unknown modAction scope with a keep (MA5)
+        mod_action(
+            Some("global"),
+            &post_uri(),
+            action("hide", json!({"hidden": false})),
+        ),
+        // unknown action on another forum's post (MA3; §6.7: "allowed subject: any")
+        mod_action(None, &other_post, action("feature", json!({}))),
+        // unknown action on a profile uri (MA4/G4)
+        mod_action(
+            None,
+            &at(ALICE, "profile", "self"),
+            action("feature", json!({})),
+        ),
+        // unknown scope with a known action on a subject that action does not take (MA4/G4)
+        mod_action(Some("global"), &forum_uri(), action("hide", json!({}))),
+        // unknown tier in author scope (MA6) on a comment (MA4)
+        mod_action(
+            Some("author"),
+            &comment_uri(),
+            action("tier", json!({"tier": "gold"})),
+        ),
+        // unknown access level on an at-uri subject (MA4)
+        mod_action(
+            None,
+            &post_uri(),
+            action("access", json!({"level": "exiled"})),
+        ),
+    ] {
+        let v = r.valid();
+        assert!(
+            v.no_effect.iter().any(|n| n.rule_id == RuleId::MA7),
+            "{:?}",
+            v.no_effect
+        );
+    }
+    // MA1, MA2 and the G rules still apply
+    mod_action(None, "nonsense", action("feature", json!({}))).fails(RuleId::MA1);
+    mod_action(
+        None,
+        &format!("at://{ALICE}/{}/{T1}", nsid("post")),
+        action("feature", json!({})),
+    )
+    .fails(RuleId::G4);
+    mod_action(None, &post_uri(), action("feature", json!({})))
+        .with(&["scope"], json!("global"))
+        .fails(RuleId::MA2);
 }
 
 #[test]
@@ -1561,6 +1724,52 @@ fn pf2_inline_bio() {
     profile().with(&["bio"], md("Hi")).valid();
     let v = profile().with(&["bio"], md_blob()).fails(RuleId::PF2);
     assert!(v.fails(RuleId::G7));
+}
+
+#[test]
+fn violations_are_capped_per_rule() {
+    use lessdugin_lexicon::validity::MAX_VIOLATIONS_PER_RULE;
+    // 200,000 non-slug tags (an 800 KB record): every failing rule is listed, a bounded number
+    // of times, and the rest only counted
+    let tags = vec![json!("A"); 200_000];
+    let r = post()
+        .with(&["tags"], Value::Array(tags))
+        .with(&["body", "links"], json!(vec!["x"; 50]))
+        .without(&["title"]);
+    let v = r.fails(RuleId::G8);
+    assert_eq!(v.first_rule(), Some(RuleId::G2));
+    assert_eq!(
+        v.rule_ids(),
+        vec![RuleId::G2, RuleId::G4, RuleId::G8, RuleId::PO3]
+    );
+    for rule in [RuleId::G2, RuleId::G4, RuleId::G8] {
+        let n = v.violations.iter().filter(|x| x.rule_id == rule).count();
+        assert!(n <= MAX_VIOLATIONS_PER_RULE, "{rule}: {n}");
+    }
+    assert_eq!(
+        v.violations
+            .iter()
+            .filter(|x| x.rule_id == RuleId::G8)
+            .count(),
+        MAX_VIOLATIONS_PER_RULE
+    );
+    assert!(v.violations.len() <= 4 * MAX_VIOLATIONS_PER_RULE);
+    assert!(
+        v.omitted >= 200_000 - MAX_VIOLATIONS_PER_RULE,
+        "{}",
+        v.omitted
+    );
+    // listed violations keep their paths
+    assert_eq!(
+        v.violations
+            .iter()
+            .find(|x| x.rule_id == RuleId::G8)
+            .unwrap()
+            .path,
+        "$.tags[0]"
+    );
+    // a valid record omits nothing
+    assert_eq!(post().valid().omitted, 0);
 }
 
 #[test]

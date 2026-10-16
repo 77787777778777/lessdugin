@@ -9,20 +9,21 @@
 //! | `object` | JSON object; `required` present; `null` only for `nullable` fields; unknown fields allowed and not inspected |
 //! | `record` | object whose `$type` equals the collection NSID; optional record-key type check |
 //! | `string` | JSON string; `const`, `enum` (closed); `minLength`/`maxLength` in UTF-8 bytes; `minGraphemes`/`maxGraphemes` in extended grapheme clusters; `format`. `knownValues` are open and never enforced; `default` is informational |
-//! | `integer` | JSON integer (an integral float such as `3.0` within ±(2^53−1) counts, as in the data model); `const`, `enum`, `minimum`, `maximum` |
+//! | `integer` | JSON integer within ±(2^53−1), written without fraction or exponent (`sync.md` §5.5: `3.0` and `1e3` are floats); `const`, `enum`, `minimum`, `maximum` |
 //! | `boolean` | JSON boolean; `const` |
 //! | `bytes` | `{"$bytes": base64}`, exactly one key; decoded `minLength`/`maxLength` |
-//! | `cid-link` | `{"$link": cid}`, exactly one key, canonical CID string |
-//! | `blob` | typed `{"$type":"blob","ref":{"$link"},"mimeType","size"}`; `accept` globs against the MIME essence; `maxSize` against `size`. The legacy `{"cid","mimeType"}` form is accepted for reading unless [`Options::allow_legacy_blobs`] is off |
+//! | `cid-link` | `{"$link": cid}`, exactly one key, canonical string of a blessed CID (v1, sha2-256, dag-cbor or raw) |
+//! | `blob` | typed `{"$type":"blob","ref":{"$link"},"mimeType","size"}` with a blessed raw-codec `ref` and a `type/subtype` `mimeType` ([`is_valid_mime_type`]); `accept` globs against the MIME essence; `maxSize` against `size`. The legacy `{"cid","mimeType"}` form is accepted for reading unless [`Options::allow_legacy_blobs`] is off |
 //! | `array` | JSON array; `minLength`/`maxLength` (items); each item |
 //! | `ref` | local (`#def`) and cross-document (`nsid#def`) references, resolved in the registry |
-//! | `union` | object with a string `$type`; a known member is validated against its def; an unknown `$type` passes an open union (the default) and fails a closed one |
-//! | `unknown` | any JSON object |
+//! | `union` | object with a string `$type`; a known member is validated against its def, which must be an `object` or `record` (else [`Code::Schema`]); an unknown `$type` passes an open union (the default) and fails a closed one |
+//! | `unknown` | any JSON object that is not a `$link`, `$bytes` or blob object (`/specs/lexicon`: not a compound data type) |
 //!
 //! **Bounded work.** Nesting is limited to [`Options::max_depth`] containers (32, rule G10:
 //! `$link` and `$bytes` objects are leaves, as in the data model, so a value has one depth in JSON
 //! and DAG-CBOR). The value's depth is measured first, iteratively; the walk never descends past
-//! the limit. Chains of `ref` → `ref` are cut after [`MAX_REF_HOPS`] hops, the number of visited
+//! the limit. Chains of `ref` → `ref` are cut after [`MAX_REF_HOPS`] hops (a union member is
+//! always an object or record, so every union step consumes a value level), the number of visited
 //! values is capped by [`Options::max_steps`] and the number of reported violations by
 //! [`Options::max_violations`] (the report says when it was truncated). Validation never panics.
 
@@ -41,8 +42,8 @@ use crate::schemas::{
 /// Maximum consecutive `ref` → `ref` resolutions without consuming a value level.
 pub const MAX_REF_HOPS: usize = 16;
 
-/// The largest integer exactly representable in binary64, the data model's float bound.
-const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+/// 2^53 − 1: the integer bound of `sync.md` §5.5 (the largest integer exact in binary64).
+pub(crate) const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
 /// Validator options.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -320,6 +321,7 @@ impl<'r> Validator<'r> {
     }
 
     fn fill(&self, t: &TypeDef, v: &mut Value, depth: usize, hops: usize) {
+        // every arm either consumes a value level (objects, arrays, union members) or a ref hop
         match t {
             TypeDef::Object(o) => self.fill_object(o, v, depth),
             TypeDef::Ref(r) => self.fill_ref(r, v, depth, hops),
@@ -328,8 +330,12 @@ impl<'r> Validator<'r> {
                     .get("$type")
                     .and_then(Value::as_str)
                     .and_then(|t| u.refs.iter().find(|r| type_matches(t, r)));
-                if let Some(r) = member {
-                    self.fill_ref(r, v, depth, 0);
+                // only object and record members (`/specs/lexicon`, union): a member that is a
+                // `ref` or another union would not consume a value level and could loop
+                match member.and_then(|r| self.registry.def(r)) {
+                    Some(Def::Type(TypeDef::Object(o))) => self.fill_object(o, v, depth),
+                    Some(Def::Record(rd)) => self.fill_object(&rd.record, v, depth),
+                    _ => {}
                 }
             }
             TypeDef::Array(a) => {
@@ -449,21 +455,50 @@ fn boolean_checks(const_value: Option<bool>, v: &Value, out: &mut Vec<(Code, Str
     }
 }
 
-/// A JSON number as a data-model integer.
+/// A JSON number as a data-model integer (`sync.md` §5.5 step 2): written without fraction or
+/// exponent (`3.0` and `1e3` are floats, and there are no floats) and within ±(2^53 − 1).
 pub(crate) fn as_integer(v: &Value) -> Result<i64, String> {
     let Value::Number(n) = v else {
         return Err(format!("expected an integer, found {}", kind(v)));
     };
-    if let Some(i) = n.as_i64() {
-        return Ok(i);
+    match n.as_i64() {
+        Some(i) if i.unsigned_abs() <= MAX_SAFE_INTEGER => Ok(i),
+        Some(_) => Err("integer outside ±(2^53 − 1)".into()),
+        None if n.is_f64() => Err("expected an integer, found a float".into()),
+        None => Err("integer outside ±(2^53 − 1)".into()),
     }
-    if n.as_u64().is_some() {
-        return Err("integer out of the signed 64-bit range".into());
+}
+
+/// The first number in `v` (document order) that is not a data-model integer
+/// ([`as_integer`]), with its JSON path. Iterative; `$link`/`$bytes` leaves hold no numbers.
+pub(crate) fn first_non_integer(v: &Value) -> Option<(String, String)> {
+    let mut stack: Vec<(&Value, usize, Option<Seg<'_>>)> = vec![(v, 0, None)];
+    let mut segs: Vec<Seg<'_>> = Vec::new();
+    while let Some((cur, depth, seg)) = stack.pop() {
+        if let Some(s) = seg {
+            segs.truncate(depth.saturating_sub(1));
+            segs.push(s);
+        }
+        match cur {
+            Value::Number(_) => {
+                if let Err(e) = as_integer(cur) {
+                    return Some((render_path(&segs), e));
+                }
+            }
+            Value::Array(a) => {
+                for (i, x) in a.iter().enumerate().rev() {
+                    stack.push((x, depth + 1, Some(Seg::Index(i))));
+                }
+            }
+            Value::Object(m) => {
+                for (k, x) in m.iter().rev() {
+                    stack.push((x, depth + 1, Some(Seg::Key(k.as_str()))));
+                }
+            }
+            _ => {}
+        }
     }
-    match n.as_f64() {
-        Some(f) if f.is_finite() && f.fract() == 0.0 && f.abs() <= MAX_SAFE_INTEGER => Ok(f as i64),
-        _ => Err("expected an integer, found a float".into()),
-    }
+    None
 }
 
 fn integer_checks(d: &IntegerDef, v: &Value, out: &mut Vec<(Code, String)>) {
@@ -564,6 +599,30 @@ pub(crate) fn kind(v: &Value) -> &'static str {
         Value::Array(_) => "an array",
         Value::Object(_) => "an object",
     }
+}
+
+/// `true` for an RFC 6838 `restricted-name`: 1–127 characters, an ASCII letter or digit then
+/// letters, digits and `!#$&-^_.+`.
+fn mime_name(s: &str) -> bool {
+    let b = s.as_bytes();
+    (1..=127).contains(&b.len())
+        && b[0].is_ascii_alphanumeric()
+        && b[1..]
+            .iter()
+            .all(|&c| c.is_ascii_alphanumeric() || b"!#$&-^_.+".contains(&c))
+}
+
+/// `true` if a declared blob `mimeType` is a MIME type: `type "/" subtype` (RFC 6838
+/// restricted names, no wildcard, no surrounding whitespace), optionally followed by `;`
+/// parameters (not inspected). Rejects `" image/png"`, `image/png/x` and `image/*`.
+pub fn is_valid_mime_type(mime: &str) -> bool {
+    let essence = match mime.split_once(';') {
+        Some((e, _)) => e.trim_end_matches([' ', '\t']),
+        None => mime,
+    };
+    essence
+        .split_once('/')
+        .is_some_and(|(t, s)| mime_name(t) && mime_name(s))
 }
 
 /// The essence (`type/subtype`, lowercase, without parameters) of a MIME type.
@@ -736,11 +795,20 @@ impl<'a> Walker<'a> {
             TypeDef::Object(o) => self.object(o, v, depth),
             TypeDef::Ref(r) => self.reference(r, v, depth, hops),
             TypeDef::Union(u) => self.union(u, v, depth),
-            TypeDef::Unknown => {
-                if !v.is_object() {
-                    out.push((Code::Type, format!("expected an object, found {}", kind(v))));
+            TypeDef::Unknown => match v.as_object() {
+                None => out.push((Code::Type, format!("expected an object, found {}", kind(v)))),
+                // `/specs/lexicon`: the data object must not have the structure of a compound
+                // data type (in the data model an object with `$link` or `$bytes` is a CID or
+                // bytes, or invalid)
+                Some(m) if m.contains_key("$link") || m.contains_key("$bytes") => out.push((
+                    Code::Type,
+                    "expected a data object, found a $link or $bytes object".into(),
+                )),
+                Some(m) if m.get("$type").and_then(Value::as_str) == Some("blob") => {
+                    out.push((Code::Type, "expected a data object, found a blob".into()))
                 }
-            }
+                Some(_) => {}
+            },
         }
         self.push_all(out);
     }
@@ -846,13 +914,28 @@ impl<'a> Walker<'a> {
             }
         };
         match u.refs.iter().find(|r| type_matches(t, r)) {
-            Some(r) => self.reference(r, v, depth, 0),
+            Some(r) => self.member(r, v, depth),
             None if u.closed => self.push_at(
                 "$type",
                 Code::Union,
                 format!("{t:?} is not a member of this closed union"),
             ),
             None => {} // open union: unknown members are left alone
+        }
+    }
+
+    /// A known union member. `/specs/lexicon`: the definitions a union points to are objects or
+    /// records. Anything else (a `ref`, another union, a scalar) is a schema error; this also
+    /// guarantees that every union step consumes a value level, so a union cannot loop.
+    fn member(&mut self, r: &'a str, v: &'a Value, depth: usize) {
+        match self.reg.def(r) {
+            Some(Def::Type(TypeDef::Object(o))) => self.object(o, v, depth),
+            Some(Def::Record(rd)) => self.object(&rd.record, v, depth),
+            Some(_) => self.push(
+                Code::Schema,
+                format!("union member {r:?} is not an object or record definition"),
+            ),
+            None => self.push(Code::Schema, format!("unresolved reference {r:?}")),
         }
     }
 
@@ -902,17 +985,23 @@ impl<'a> Walker<'a> {
             Some(Value::String(t)) if t == "blob" => {
                 let mut problems = Vec::new();
                 match m.get("ref") {
-                    Some(r) => {
-                        if let Err(e) = cid_link(r) {
-                            problems.push(format!("ref: {e}"));
+                    Some(r) => match cid_link(r) {
+                        Err(e) => problems.push(format!("ref: {e}")),
+                        Ok(c) if c.codec() != lessdugin_atp::cid::RAW => {
+                            problems.push("ref must be a CID with the raw codec".to_owned());
                         }
-                    }
+                        Ok(_) => {}
+                    },
                     None => problems.push("missing ref".to_owned()),
                 }
                 let mime = match m.get("mimeType") {
-                    Some(Value::String(s)) if !s.is_empty() => Some(s.as_str()),
+                    Some(Value::String(s)) if is_valid_mime_type(s) => Some(s.as_str()),
+                    Some(Value::String(s)) => {
+                        problems.push(format!("mimeType {s:?} is not a type/subtype MIME type"));
+                        None
+                    }
                     _ => {
-                        problems.push("mimeType must be a non-empty string".to_owned());
+                        problems.push("mimeType must be a string".to_owned());
                         None
                     }
                 };
@@ -973,8 +1062,9 @@ impl<'a> Walker<'a> {
     }
 }
 
-/// Checks a `{"$link": cid}` object.
-fn cid_link(v: &Value) -> Result<(), String> {
+/// Checks a `{"$link": cid}` object: a canonical string of a blessed CID (`/specs/data-model`:
+/// only the blessed CID types are allowed; the same check as the data-model conversion).
+fn cid_link(v: &Value) -> Result<lessdugin_atp::Cid, String> {
     let Some(m) = v.as_object() else {
         return Err(format!("expected a $link object, found {}", kind(v)));
     };
@@ -982,9 +1072,9 @@ fn cid_link(v: &Value) -> Result<(), String> {
         return Err("a $link object must have exactly one key".into());
     }
     match m.get("$link") {
-        Some(Value::String(s)) => lessdugin_atp::cid::parse(s)
-            .map(|_| ())
-            .map_err(|e| format!("$link: {e}")),
+        Some(Value::String(s)) => {
+            lessdugin_atp::cid::parse_blessed(s).map_err(|e| format!("$link: {e}"))
+        }
         Some(_) => Err("$link must be a string".into()),
         None => Err("expected a {\"$link\": …} object".into()),
     }

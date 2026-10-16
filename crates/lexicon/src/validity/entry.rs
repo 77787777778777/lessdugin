@@ -4,7 +4,7 @@
 //! returns what survives. Rules that need other records (the react palette of OP3, CO6, the
 //! "own thread" part of MA6) stay in the core fold.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use lessdugin_atp::syntax::{AtUri, Did};
 
@@ -21,13 +21,12 @@ use crate::values::{Capability, PostKind, Role, Stance, VoteValue};
 /// DID wins (a later entry for the same DID is ignored even if the first one is ignored too);
 /// entries for the owner and entries with an unknown role are ignored.
 pub fn moderators<'a>(forum: &'a Forum, owner: &Did) -> Vec<(&'a Moderator, Role)> {
-    let mut seen: Vec<&Did> = Vec::new();
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
     let mut out = Vec::new();
     for m in forum.moderators.iter().flatten() {
-        if seen.contains(&&m.did) {
+        if !seen.insert(m.did.as_str()) {
             continue;
         }
-        seen.push(&m.did);
         if &m.did == owner {
             continue;
         }
@@ -125,23 +124,24 @@ pub fn post_excerpt(post: &Post) -> Option<&str> {
 
 /// PO7: the author's tags as a set (duplicates collapse; first-occurrence order).
 pub fn post_tags(post: &Post) -> Vec<&str> {
-    let mut out: Vec<&str> = Vec::new();
-    for t in post.tags.iter().flatten() {
-        if !out.contains(&t.as_str()) {
-            out.push(t);
-        }
-    }
-    out
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    post.tags
+        .iter()
+        .flatten()
+        .map(String::as_str)
+        .filter(|t| seen.insert(t))
+        .collect()
 }
 
 /// PO8: the self-label values of the `com.atproto.label.defs#selfLabels` member (other members
 /// are ignored), deduplicated. Which values are *known* is the reader's decision (§6.3 names
 /// `sexual`, `nudity`, `porn`, `graphic-media`; see [`KNOWN_SELF_LABELS`]).
 pub fn self_labels(post: &Post) -> Vec<&str> {
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
     let mut out: Vec<&str> = Vec::new();
     if let Some(sl) = post.labels.as_ref().and_then(|l| l.known()) {
         for v in &sl.values {
-            if !out.contains(&v.val.as_str()) {
+            if seen.insert(&v.val) {
                 out.push(&v.val);
             }
         }
@@ -179,13 +179,18 @@ pub fn opinion_tag_votes(op: &Opinion) -> Vec<(&str, VoteValue)> {
         .flatten()
         .filter_map(|t| t.value().map(|v| (t.tag.as_str(), v)))
         .collect();
+    // per tag: its first value, and whether every entry agrees with it
+    let mut agree: BTreeMap<&str, (VoteValue, bool)> = BTreeMap::new();
+    for &(tag, v) in &known {
+        agree
+            .entry(tag)
+            .and_modify(|(first, same)| *same &= *first == v)
+            .or_insert((v, true));
+    }
     let mut out: Vec<(&str, VoteValue)> = Vec::new();
-    for (tag, v) in &known {
-        if out.iter().any(|(t, _)| t == tag) {
-            continue;
-        }
-        if known.iter().all(|(t, w)| t != tag || w == v) {
-            out.push((tag, *v));
+    for &(tag, _) in &known {
+        if let Some((v, true)) = agree.remove(tag) {
+            out.push((tag, v));
         }
     }
     out

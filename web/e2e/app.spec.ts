@@ -2,36 +2,9 @@
 // End-to-end tests of the built SPA with the mock engine (`?mock`).
 
 import { expect, type Locator, type Page, test } from "@playwright/test";
+import { PRODUCTION_CSP } from "../csp.mjs";
+import { FORUM, WELCOME, watch } from "./helpers.ts";
 import { startStaticServer } from "./serve.mjs";
-
-const FORUM = "LessDugin Test Forum";
-const WELCOME = "Welcome to LessDugin: a tour of the forum";
-
-interface Watch {
-  errors: string[];
-  violations: () => Promise<string[]>;
-}
-
-/** Collects page errors, console errors and `securitypolicyviolation` events. */
-async function watch(page: Page): Promise<Watch> {
-  const errors: string[] = [];
-  page.on("pageerror", (e) => errors.push(`pageerror: ${e.message}`));
-  page.on("console", (m) => {
-    if (m.type() === "error") errors.push(`console: ${m.text()}`);
-  });
-  await page.addInitScript(() => {
-    const w = window as unknown as { __cspViolations: string[] };
-    w.__cspViolations = [];
-    document.addEventListener("securitypolicyviolation", (e) => {
-      w.__cspViolations.push(`${e.violatedDirective} blocked=${e.blockedURI} sample=${e.sample}`);
-    });
-  });
-  return {
-    errors,
-    violations: () =>
-      page.evaluate(() => (window as unknown as { __cspViolations: string[] }).__cspViolations),
-  };
-}
 
 async function scoreOf(group: Locator): Promise<number> {
   const text = await group.locator("span", { hasText: "score" }).first().innerText();
@@ -202,9 +175,9 @@ test.describe("production headers", () => {
   test("no CSP or Trusted Types violation under the production CSP", async ({ page }) => {
     const w = await watch(page);
     const response = await page.goto(`${server.url}/?mock#/`);
-    const csp = response?.headers()["content-security-policy"] ?? "";
-    expect(csp).toContain("require-trusted-types-for 'script'");
-    expect(csp).toContain("style-src 'self'");
+    // Exactly the threat-model §6.1 text (csp.mjs; src/lib/csp.test.ts checks it against the spec).
+    expect(response?.headers()["content-security-policy"]).toBe(PRODUCTION_CSP);
+    expect(response?.headers()["referrer-policy"]).toBe("no-referrer");
 
     await mainFlow(page, server.url);
 

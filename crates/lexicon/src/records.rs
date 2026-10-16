@@ -13,7 +13,8 @@
 //! - Known-value (`kv`) fields are `String`s, so unknown values round-trip; read them through
 //!   [`crate::values`] (for example [`Post::kind`]).
 //! - Open unions ([`OpenUnion`], [`Action`]) keep unknown members verbatim.
-//! - Integers accept the data model's integral floats (`3.0`) on read and are written as integers.
+//! - Integers are read as the data model has them (`sync.md` §5.5): JSON integers within
+//!   ±(2^53 − 1); a float, even an integral one such as `3.0` or `1e3`, fails to deserialise.
 //!
 //! These structs are for **valid** records: a record that fails lexicon validation (G2) or the
 //! canonical-reference rule (G4) may fail to deserialise. Check [`crate::validity`] first, and use
@@ -52,11 +53,13 @@ use serde_json::{Map, Value};
 
 use crate::collection::{Collection, type_matches};
 
-/// Serde helpers for integer fields: accept JSON integers and integral floats within
-/// ±(2^53 − 1), as the data model does.
+/// Serde helpers for integer fields: JSON integers within ±(2^53 − 1), no floats (`sync.md`
+/// §5.5, as [`crate::validate`] checks them).
 pub(crate) mod int {
     use serde::Deserializer;
     use serde::de::{self, Visitor};
+
+    use crate::validate::MAX_SAFE_INTEGER;
 
     struct V;
 
@@ -64,23 +67,27 @@ pub(crate) mod int {
         type Value = i64;
 
         fn expecting(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-            f.write_str("an integer")
+            f.write_str("an integer within ±(2^53 − 1)")
         }
 
         fn visit_i64<E: de::Error>(self, v: i64) -> Result<i64, E> {
-            Ok(v)
+            if v.unsigned_abs() <= MAX_SAFE_INTEGER {
+                Ok(v)
+            } else {
+                Err(E::custom("integer outside ±(2^53 − 1)"))
+            }
         }
 
         fn visit_u64<E: de::Error>(self, v: u64) -> Result<i64, E> {
-            i64::try_from(v).map_err(|_| E::custom("integer out of the signed 64-bit range"))
-        }
-
-        fn visit_f64<E: de::Error>(self, v: f64) -> Result<i64, E> {
-            if v.is_finite() && v.fract() == 0.0 && v.abs() <= 9_007_199_254_740_991.0 {
+            if v <= MAX_SAFE_INTEGER {
                 Ok(v as i64)
             } else {
-                Err(E::custom("expected an integer, found a float"))
+                Err(E::custom("integer outside ±(2^53 − 1)"))
             }
+        }
+
+        fn visit_f64<E: de::Error>(self, _: f64) -> Result<i64, E> {
+            Err(E::custom("expected an integer, found a float"))
         }
     }
 

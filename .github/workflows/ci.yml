@@ -56,3 +56,28 @@ jobs:
       - run: pnpm run check
       - run: pnpm run test
       - run: pnpm run build
+  # The SPA's end-to-end tests (web/e2e): the demo build in Chromium, including the production
+  # CSP and Trusted Types run, axe, the sanitiser vector equality and the keyboard checks. The
+  # Playwright version is pinned in web/package.json; its Chromium is installed here.
+  web-e2e:
+    runs-on: ubuntu-latest
+    env:
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "0"
+      PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.pw-browsers
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: "1.97.0"
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: "22"
+          cache: pnpm
+      - run: cargo install wasm-bindgen-cli --version =0.2.129 --locked
+      - run: pnpm install --frozen-lockfile
+      - run: cargo xtask wasm --budget
+      - run: pnpm --filter @lessdugin/web exec playwright install --with-deps chromium
+      - run: pnpm --filter @lessdugin/web run e2e

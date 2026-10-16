@@ -36,6 +36,7 @@ Each `*.json` file is one object:
 | Directory | Behaviour | Runner |
 |---|---|---|
 | `keys/` | `fk/1`, `sk/1` record keys (`docs/spec/data-model.md` §3) | see `keys/gen_keys.py` |
+| `limits/` | `limits.md` §21 vectors; `graphemes.json`: grapheme counting for `maxGraphemes` (`data-model.md` §2.2) | `graphemes.json`: `crates/lexicon/tests/graphemes.rs` |
 | `lfm1/` | `lfm/1` markdown (`docs/spec/lfm-1.md` §13) | `crates/markdown/tests/vectors.rs` |
 | `xss/` | HTML and MathML XSS / mXSS corpora (`lfm/1`, kind `render`) | same |
 | `terminal/` | terminal escape corpus and printer snapshots (kind `terminal`) | same |

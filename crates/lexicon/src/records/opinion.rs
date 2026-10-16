@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! `opinion` (§6.6) and its deterministic write function `apply` (§8.5).
 
+use std::collections::BTreeSet;
+
 use lessdugin_atp::syntax::{AtUri, Datetime};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -264,31 +266,19 @@ impl Opinion {
         }
     }
 
-    /// Drops later entries whose key repeats an earlier one (first occurrence wins).
+    /// Drops later entries whose key repeats an earlier one (first occurrence wins). O(n log n)
+    /// (ordered sets: no hashing randomness): the current opinion is fetched and may be large.
     fn dedupe(&mut self) {
         if let Some(reacts) = &mut self.reacts {
-            let mut seen: Vec<(String, String)> = Vec::new();
+            let mut seen: BTreeSet<(String, String)> = BTreeSet::new();
             reacts.retain(|r| {
                 let (a, b) = r.key();
-                let k = (a.to_owned(), b);
-                if seen.contains(&k) {
-                    false
-                } else {
-                    seen.push(k);
-                    true
-                }
+                seen.insert((a.to_owned(), b))
             });
         }
         if let Some(tags) = &mut self.tags {
-            let mut seen: Vec<String> = Vec::new();
-            tags.retain(|t| {
-                if seen.contains(&t.tag) {
-                    false
-                } else {
-                    seen.push(t.tag.clone());
-                    true
-                }
-            });
+            let mut seen: BTreeSet<String> = BTreeSet::new();
+            tags.retain(|t| seen.insert(t.tag.clone()));
         }
     }
 

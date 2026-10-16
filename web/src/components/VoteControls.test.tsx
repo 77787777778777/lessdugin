@@ -120,4 +120,27 @@ describe("VoteControls", () => {
     fireEvent.click(up);
     expect(opinion).not.toHaveBeenCalled();
   });
+
+  it("keeps showing the newer of two quick votes when the older one is undone", async () => {
+    const engine = new MockEngine({ holdMs: 1500, sendMs: 10 });
+    const opinion = vi.spyOn(engine, "opinion");
+    const post = await votablePost(engine);
+    renderWithApp(<LiveVotes uri={post.uri} />, { engine });
+    const up = await screen.findByRole("button", { name: "Upvote" });
+    const before = karmaScore();
+    fireEvent.click(up);
+    await acknowledge();
+    await waitFor(() => expect(karmaScore()).toBe(before + 1));
+    fireEvent.click(screen.getByRole("button", { name: /^Downvote/ }));
+    await waitFor(() => expect(opinion).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(karmaScore()).toBe(before - 1));
+    // The first vote's write ends (here: undone) while the second is still shown.
+    const first = await opinion.mock.results[0]?.value;
+    await engine.undo(first.id);
+    await screen.findByText("Vote undone");
+    expect(karmaScore()).toBe(before - 1);
+    expect(screen.getByRole("button", { name: /^Downvote/ }).getAttribute("aria-pressed")).toBe(
+      "true",
+    );
+  });
 });

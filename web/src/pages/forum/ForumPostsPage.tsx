@@ -10,6 +10,7 @@ import { ErrorView, Loading } from "../../components/Status.tsx";
 import { useEngine } from "../../engine/context.tsx";
 import { qk } from "../../engine/queries.ts";
 import { cx } from "../../lib/cx.ts";
+import { cleanName } from "../../lib/text.ts";
 import ui from "../../styles/ui.module.css";
 import styles from "../pages.module.css";
 import { useForumView } from "./forumContext.tsx";
@@ -149,7 +150,7 @@ export function ForumPostsPage() {
               aria-pressed={tag === t.slug}
               onClick={() => setSearch({ tag: tag === t.slug ? undefined : t.slug })}
             >
-              {t.name} <span className={ui.muted}>{t.postCount}</span>
+              <bdi>{cleanName(t.name)}</bdi> <span className={ui.muted}>{t.postCount}</span>
             </button>
           ))}
         </div>

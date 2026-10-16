@@ -166,6 +166,7 @@ export interface ForumRec {
   featuredTags: Slug[];
   defaultTier: "personal" | "frontpage";
   membership: MembershipMode;
+  reportContact?: string;
 }
 
 /** The forum's policy with every default filled in (data-model.md §6.1 `#policy`). */

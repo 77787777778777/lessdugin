@@ -138,6 +138,68 @@ describe("MockEngine writes", () => {
   });
 });
 
+describe("MockEngine local state and declarations", () => {
+  it("never gives a new draft the id of an existing one", async () => {
+    const e = new MockEngine();
+    const before = await e.drafts();
+    expect(before.length).toBeGreaterThan(0);
+    const id = await e.saveDraft({
+      kind: "comment",
+      comment: { root: "at://x", body: { markdown: "new", media: [] } },
+    });
+    expect(before.map((d) => d.id)).not.toContain(id);
+    expect(await e.drafts()).toHaveLength(before.length + 1);
+  });
+
+  it("round-trips a forum declaration through forumCreate, raw and forumUpdate", async () => {
+    vi.useFakeTimers();
+    try {
+      const e = new MockEngine({ sendMs: 1 });
+      const ticket = await e.forumCreate({
+        slug: "new-forum",
+        name: "New forum",
+        description: "Tagline",
+        about: { markdown: "Rules", media: [] },
+        membership: "open",
+        defaultTier: "frontpage",
+        featuredTags: ["ai"],
+        moderators: [],
+        reportContact: "mailto:mods@example.com",
+      });
+      await vi.advanceTimersByTimeAsync(10);
+      const uri = (await e.followed()).find((f) => f.name === "New forum")?.uri ?? "";
+      expect(uri).toMatch(/\/new-forum$/);
+      expect(ticket.state.kind).toBe("pending");
+      const raw = await e.raw(uri);
+      expect(raw.record).toMatchObject({
+        name: "New forum",
+        description: "Tagline",
+        about: { text: "Rules" },
+        membership: "open",
+        defaultTier: "frontpage",
+        featuredTags: ["ai"],
+        reportContact: "mailto:mods@example.com",
+      });
+      await e.forumUpdate(uri, {
+        slug: "new-forum",
+        name: "Renamed",
+        membership: "approval",
+        defaultTier: "personal",
+        featuredTags: [],
+        moderators: [],
+      });
+      await vi.advanceTimersByTimeAsync(10);
+      const after = (await e.raw(uri)).record as Record<string, unknown>;
+      expect(after.name).toBe("Renamed");
+      expect(after.about).toBeUndefined();
+      expect(after.reportContact).toBeUndefined();
+      expect((await e.forumOpen(uri)).forum.membership).toBe("approval");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe("mock safe_href", () => {
   it("accepts only the lfm-1 §5.1 shapes", () => {
     expect(mockSafeHref("https://Example.com/ä", "markdown")).toEqual({

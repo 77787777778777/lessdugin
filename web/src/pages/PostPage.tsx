@@ -28,6 +28,7 @@ import { RecordLink } from "../components/RecordLink.tsx";
 import { RenderedHtml, type RenderedHtmlHandle } from "../components/RenderedHtml.tsx";
 import { SafeLink } from "../components/SafeLink.tsx";
 import { ErrorView, errorMessage, Loading } from "../components/Status.tsx";
+import { TagVotes } from "../components/TagVotes.tsx";
 import { toasts } from "../components/Toast.tsx";
 import { Toc } from "../components/Toc.tsx";
 import { VoteControls } from "../components/VoteControls.tsx";
@@ -299,7 +300,11 @@ function PostBodyView({
           <RenderedHtml html={body.html} sidenotes ref={bodyRef} />
         )}
         {view.sequences.map((s) => (
-          <nav key={s.sequence} className={styles.seqNav} aria-label={`Sequence: ${s.title}`}>
+          <nav
+            key={s.sequence}
+            className={styles.seqNav}
+            aria-label={`Sequence: ${cleanName(s.title, 300)}`}
+          >
             {s.prev ? <RecordLink uri={s.prev}>← Previous</RecordLink> : <span />}
             <RecordLink uri={s.sequence}>
               <bdi>{cleanName(s.title, 300)}</bdi>
@@ -326,6 +331,14 @@ function PostBodyView({
             />
           )}
           <LocalToggles uri={post.uri} />
+          {!own && (
+            <TagVotes
+              post={post.uri}
+              forum={post.forum}
+              applied={post.tags}
+              signedIn={myDid !== null}
+            />
+          )}
           {own && <OwnPostActions uri={post.uri} forum={post.forum} />}
           {ctx.isAuthority && (
             <ModMenu

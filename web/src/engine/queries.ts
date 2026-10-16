@@ -60,6 +60,7 @@ export function keysForTopic(topic: Topic): readonly (readonly unknown[])[] {
     case "forum":
       return [
         ["forum", topic.uri],
+        ["raw", topic.uri],
         ["post"],
         ["forumRef"],
         ["followed"],

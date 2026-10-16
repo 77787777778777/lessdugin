@@ -1,3 +1,7 @@
+[build]
+# Incremental caches grew past the session's disk allowance; full crate rebuilds are cheap here.
+incremental = false
+
 [alias]
 xtask = "run --quiet --package xtask --"
 

@@ -241,7 +241,9 @@ function sourceHref(url: string): Href | null {
 
 /** Moves focus to the new page's heading (or the main landmark) after navigation to another
  * page. Keyed on the path only: a change of search parameters (a sort, a filter chip) keeps the
- * page, so focus stays on the control the user is operating. */
+ * page, so focus stays on the control the user is operating. Pages that load their data first
+ * render their heading later: focus waits on the main landmark and moves to the heading when it
+ * appears, unless the user has moved it meanwhile. */
 function useRouteFocus(mainRef: React.RefObject<HTMLElement | null>): void {
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const first = useRef(true);
@@ -253,13 +255,38 @@ function useRouteFocus(mainRef: React.RefObject<HTMLElement | null>): void {
     }
     const main = mainRef.current;
     if (!main) return;
-    const t = setTimeout(() => {
-      const h1 = main.querySelector("h1");
-      const target = h1 instanceof HTMLElement ? h1 : main;
+    const focus = (target: HTMLElement): void => {
       if (!target.hasAttribute("tabindex")) target.setAttribute("tabindex", "-1");
       target.focus({ preventScroll: true });
+    };
+    const heading = (): HTMLElement | null => {
+      const h1 = main.querySelector("h1");
+      return h1 instanceof HTMLElement ? h1 : null;
+    };
+    let observer: MutationObserver | null = null;
+    let giveUp: ReturnType<typeof setTimeout> | undefined;
+    const t = setTimeout(() => {
+      const h1 = heading();
+      if (h1) {
+        focus(h1);
+        return;
+      }
+      focus(main);
+      observer = new MutationObserver(() => {
+        const h = heading();
+        if (!h) return;
+        observer?.disconnect();
+        const active = document.activeElement;
+        if (active === main || active === document.body || active === null) focus(h);
+      });
+      observer.observe(main, { childList: true, subtree: true });
+      giveUp = setTimeout(() => observer?.disconnect(), 5000);
     }, 0);
-    return () => clearTimeout(t);
+    return () => {
+      clearTimeout(t);
+      clearTimeout(giveUp);
+      observer?.disconnect();
+    };
   }, [pathname, mainRef]);
 }
 

@@ -49,9 +49,15 @@ export function DraftsPage() {
               );
             }
           } else if (draft.kind === "comment") {
+            // The composer for the same place resumes the draft: the post's comment box, or the
+            // reply box of the parent comment (on its own page).
             title = draft.comment.parent ? "Reply" : "Comment";
             text = draft.comment.body.markdown;
-            open = <RecordLink uri={draft.comment.root}>Open the post</RecordLink>;
+            open = draft.comment.parent ? (
+              <RecordLink uri={draft.comment.parent}>Continue on the comment</RecordLink>
+            ) : (
+              <RecordLink uri={draft.comment.root}>Continue on the post</RecordLink>
+            );
           } else {
             title = cleanName(draft.sequence.title, 300) || "Sequence";
             text = draft.sequence.body?.markdown ?? "";

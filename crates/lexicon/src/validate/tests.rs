@@ -211,7 +211,18 @@ fn strings() {
 fn integers() {
     ok("i", json!(0));
     ok("i", json!(10));
-    ok("i", json!(7.0)); // integral float: an integer in the data model
+    // sync.md §5.5: any number with a fraction or exponent is a float, even an integral one
+    bad("i", json!(7.0), Code::Type);
+    let parsed = |s: &str| serde_json::from_str::<Value>(s).unwrap();
+    bad("i", parsed("1e0"), Code::Type);
+    bad("i", parsed("3.0"), Code::Type);
+    ok("i", parsed("3"));
+    // and integers stay within ±(2^53 − 1)
+    ok("rn", json!(9_007_199_254_740_991_i64));
+    ok("rn", json!(-9_007_199_254_740_991_i64));
+    bad("rn", json!(9_007_199_254_740_992_i64), Code::Type);
+    bad("rn", json!(-9_007_199_254_740_992_i64), Code::Type);
+    bad("rn", json!(i64::MIN), Code::Type);
     bad("i", json!(11), Code::Range);
     bad("i", json!(-1), Code::Range);
     bad("i", json!(1.5), Code::Type);
@@ -254,6 +265,9 @@ fn cid_links() {
     bad("l", json!({"$link": DAG_CID, "x": 1}), Code::Link);
     bad("l", json!({"$link": 1}), Code::Link);
     bad("l", json!(DAG_CID), Code::Link);
+    // only blessed CIDs (v1, sha2-256, dag-cbor or raw): here a dag-pb CID
+    let dag_pb = lessdugin_atp::cid::from_sha256_digest(0x70, [7; 32]).to_string();
+    bad("l", json!({ "$link": dag_pb }), Code::Link);
 }
 
 #[test]
@@ -267,6 +281,34 @@ fn blobs() {
     bad("blob", blob("image/png", 101), Code::BlobSize);
     bad("blob", blob("", 1), Code::Blob);
     bad("blob", blob("image/png", -1), Code::Blob);
+    // the declared mimeType is a type/subtype MIME type (RFC 6838 names, no wildcard)
+    ok("blob", blob("text/plain ; charset=utf-8", 1));
+    ok("blob", blob("image/svg+xml", 1));
+    for not_mime in [
+        " image/png",
+        "image/png ",
+        "image/png/x",
+        "image/*",
+        "*/*",
+        "image",
+        "image/",
+        "/png",
+        "image/p ng",
+        "imagé/png",
+    ] {
+        bad("blob", blob(not_mime, 1), Code::Blob);
+    }
+    // the ref is a raw-codec CID (data model: "CID reference to blob, with codec type raw")
+    bad(
+        "blob",
+        json!({"$type": "blob", "ref": {"$link": DAG_CID}, "mimeType": "image/png", "size": 1}),
+        Code::Blob,
+    );
+    bad(
+        "blob",
+        json!({"$type": "blob", "ref": {"$link": CID}, "mimeType": "image/png", "size": 9_007_199_254_740_992_u64}),
+        Code::Blob,
+    );
     bad(
         "blob",
         json!({"$type": "blob", "ref": {"$link": "x"}, "mimeType": "image/png", "size": 1}),
@@ -394,6 +436,56 @@ fn unknown_type() {
     bad("unk", json!([]), Code::Type);
     bad("unk", json!("s"), Code::Type);
     bad("unk", json!(1), Code::Type);
+    // `/specs/lexicon`: not the structure of a compound data type ($link, $bytes, blob)
+    bad("unk", json!({ "$link": DAG_CID }), Code::Type);
+    bad("unk", json!({"$bytes": "AAE"}), Code::Type);
+    bad("unk", json!({"$link": DAG_CID, "x": 1}), Code::Type);
+    bad(
+        "unk",
+        json!({"$type": "blob", "ref": {"$link": CID}, "mimeType": "image/png", "size": 1}),
+        Code::Type,
+    );
+    // nested ones are fine: only the top-level data must be an object
+    ok(
+        "unk",
+        json!({"$type": "x.y.z", "l": {"$link": DAG_CID}, "b": {"$bytes": "AAE"}}),
+    );
+}
+
+#[test]
+fn union_members_are_objects_or_records() {
+    // a member in another document that is not an object or record is a schema error, so a
+    // union step always consumes a value level (no loop through refs)
+    let mut reg = Registry::new();
+    reg.add_json(
+        &json!({"lexicon": 1, "id": "com.example.u", "defs": {"main": {"type": "object",
+            "properties": {"u": {"type": "union", "refs": ["com.example.v#alias", "com.example.v#s", "com.example.v#o", "com.example.v#gone"]}}}}})
+        .to_string(),
+    )
+    .unwrap();
+    reg.add_json(
+        &json!({"lexicon": 1, "id": "com.example.v", "defs": {
+            "alias": {"type": "ref", "ref": "com.example.u"},
+            "s": {"type": "string"},
+            "o": {"type": "object", "properties": {"u": {"type": "ref", "ref": "com.example.u"}}}}})
+        .to_string(),
+    )
+    .unwrap();
+    let v = Validator::new(&reg, Options::default());
+    for member in ["alias", "s", "gone"] {
+        let val = json!({"u": {"$type": format!("com.example.v#{member}")}});
+        let r = v.def("com.example.u", &val);
+        assert!(r.has(Code::Schema), "{member}: {:?}", r.violations);
+        assert_eq!(v.with_defaults("com.example.u", &val), val);
+    }
+    // an object member is validated, and recursion through it is bounded by the depth
+    let mut deep = json!({});
+    for _ in 0..100 {
+        deep = json!({"u": {"$type": "com.example.v#o", "u": deep}});
+    }
+    let r = v.def("com.example.u", &deep);
+    assert!(r.has(Code::Depth), "{:?}", r.violations);
+    let _ = v.with_defaults("com.example.u", &deep);
 }
 
 #[test]
@@ -579,4 +671,16 @@ fn scalar_problems_for_defaults() {
     assert!(scalar_problem(&t, &json!(0)).is_some());
     assert_eq!(as_integer(&json!(-3)), Ok(-3));
     assert!(as_integer(&json!(9_007_199_254_740_992.0_f64)).is_err());
+    assert!(as_integer(&json!(3.0)).is_err());
+    assert!(as_integer(&json!(9_007_199_254_740_992_u64)).is_err());
+    assert_eq!(
+        as_integer(&json!(9_007_199_254_740_991_u64)),
+        Ok(9_007_199_254_740_991)
+    );
+    // the whole-value scan used by validity rule G2
+    assert_eq!(first_non_integer(&json!({"a": [1, {"b": 2}]})), None);
+    let (path, _) = first_non_integer(&json!({"a": [1, {"b": 2.0}], "c": 1.5})).unwrap();
+    assert_eq!(path, "$.a[1].b");
+    let (path, _) = first_non_integer(&json!([{"x": 9_007_199_254_740_992_u64}])).unwrap();
+    assert_eq!(path, "$[0].x");
 }
