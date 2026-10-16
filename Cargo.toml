@@ -123,5 +123,10 @@ lto = "fat"
 codegen-units = 1
 panic = "abort"
 
+[profile.dev]
+# Line tables keep backtraces useful; full debuginfo made target/ outgrow the disk allowance.
+debug = "line-tables-only"
+
 [profile.dev.package."*"]
 opt-level = 1
+debug = false
