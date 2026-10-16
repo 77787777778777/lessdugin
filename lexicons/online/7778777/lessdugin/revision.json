@@ -1,0 +1,51 @@
+{
+  "lexicon": 1,
+  "id": "online.7778777.lessdugin.revision",
+  "description": "Revision snapshot (data-model.md §6.5).",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "A snapshot of a superseded (op update) or removed (op delete, modAction only) version, in the same repo as its subject. Record key: {P}-{tid}, where P = fk(subject) for a forum and rkey(subject) otherwise. Never updated.",
+      "key": "any",
+      "record": {
+        "type": "object",
+        "required": [
+          "subject",
+          "op",
+          "createdAt"
+        ],
+        "properties": {
+          "subject": {
+            "type": "ref",
+            "description": "The superseded version: a post, comment, forum, sequence or modAction record in this repo.",
+            "ref": "com.atproto.repo.strongRef"
+          },
+          "op": {
+            "type": "string",
+            "description": "update, or delete (only when the subject is a modAction). An unknown value makes the revision invalid.",
+            "knownValues": [
+              "update",
+              "delete"
+            ],
+            "maxLength": 64
+          },
+          "record": {
+            "type": "unknown",
+            "description": "The verbatim prior value. Writers MUST include it. An object whose $type MUST be present and equal the subject's collection; its CID MUST equal subject.cid."
+          },
+          "summary": {
+            "type": "string",
+            "description": "Edit summary.",
+            "maxLength": 3000,
+            "maxGraphemes": 300
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "datetime",
+            "description": "Set once at creation by the writer's clock; never changed."
+          }
+        }
+      }
+    }
+  }
+}

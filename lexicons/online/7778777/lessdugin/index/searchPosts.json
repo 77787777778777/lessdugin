@@ -1,0 +1,140 @@
+{
+  "lexicon": 1,
+  "id": "online.7778777.lessdugin.index.searchPosts",
+  "description": "Full-text search of posts (fts5).",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "Full-text search of posts (fts5). Hits are hints; clients search locally by default. Later phase, Reserved (P2): clients call it only if describeIndexer.features lists it.",
+      "parameters": {
+        "type": "params",
+        "required": [
+          "q"
+        ],
+        "properties": {
+          "q": {
+            "type": "string",
+            "description": "Query, at most 16 terms.",
+            "maxLength": 512
+          },
+          "forum": {
+            "type": "string",
+            "format": "at-uri",
+            "description": "Only posts in this forum.",
+            "maxLength": 3000
+          },
+          "author": {
+            "type": "string",
+            "format": "did",
+            "description": "Only posts by this author."
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Page size.",
+            "minimum": 1,
+            "maximum": 50,
+            "default": 25
+          },
+          "cursor": {
+            "type": "string",
+            "description": "Opaque pagination cursor from a previous response.",
+            "maxLength": 512
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": [
+            "hits",
+            "asOf",
+            "indexer"
+          ],
+          "properties": {
+            "hits": {
+              "type": "array",
+              "description": "Hits, best first.",
+              "items": {
+                "type": "ref",
+                "ref": "#hit"
+              },
+              "maxLength": 50
+            },
+            "cursor": {
+              "type": "string",
+              "description": "Cursor for the next page; absent on the last page.",
+              "maxLength": 512
+            },
+            "asOf": {
+              "type": "ref",
+              "description": "Indexer state.",
+              "ref": "online.7778777.lessdugin.index.defs#asOf"
+            },
+            "indexer": {
+              "type": "ref",
+              "description": "Responding indexer.",
+              "ref": "online.7778777.lessdugin.index.defs#indexerInfo"
+            }
+          }
+        }
+      },
+      "errors": [
+        {
+          "name": "NotIndexed",
+          "description": "This indexer does not serve the forum."
+        }
+      ]
+    },
+    "hit": {
+      "type": "object",
+      "description": "A search hit.",
+      "required": [
+        "ref"
+      ],
+      "properties": {
+        "ref": {
+          "type": "ref",
+          "description": "The post.",
+          "ref": "online.7778777.lessdugin.index.defs#recordRef"
+        },
+        "snippet": {
+          "type": "string",
+          "description": "Plain-text snippet.",
+          "maxLength": 1000
+        },
+        "highlights": {
+          "type": "array",
+          "description": "Highlighted ranges in snippet.",
+          "items": {
+            "type": "ref",
+            "ref": "#highlight"
+          },
+          "maxLength": 16
+        }
+      }
+    },
+    "highlight": {
+      "type": "object",
+      "description": "A half-open range of code points in the snippet.",
+      "required": [
+        "start",
+        "end"
+      ],
+      "properties": {
+        "start": {
+          "type": "integer",
+          "description": "First code point.",
+          "minimum": 0,
+          "maximum": 1000
+        },
+        "end": {
+          "type": "integer",
+          "description": "Code point after the last.",
+          "minimum": 0,
+          "maximum": 1000
+        }
+      }
+    }
+  }
+}

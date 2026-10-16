@@ -1,0 +1,138 @@
+{
+  "lexicon": 1,
+  "id": "online.7778777.lessdugin.opinion",
+  "description": "Vote, agreement, reacts and tag votes on one item (data-model.md §6.6).",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "One voter's opinion on one subject. Record key: {fk}-{stid}-{h16(\"opinion\", subject.uri)}. An opinion whose known content is empty is deleted, not written. Public.",
+      "key": "any",
+      "record": {
+        "type": "object",
+        "required": [
+          "subject",
+          "forum",
+          "createdAt"
+        ],
+        "properties": {
+          "subject": {
+            "type": "ref",
+            "description": "The judged item: a post, comment, wikiRevision or sequence record; cid is the version the voter judged.",
+            "ref": "com.atproto.repo.strongRef"
+          },
+          "forum": {
+            "type": "string",
+            "format": "at-uri",
+            "description": "at-uri of the forum declaration.",
+            "maxLength": 3000
+          },
+          "karma": {
+            "type": "string",
+            "description": "Karma axis. An unknown value makes the axis absent.",
+            "knownValues": [
+              "up",
+              "down",
+              "strongUp",
+              "strongDown"
+            ],
+            "maxLength": 64
+          },
+          "agreement": {
+            "type": "string",
+            "description": "Agreement axis; never feeds karma. An unknown value makes the axis absent.",
+            "knownValues": [
+              "agree",
+              "disagree",
+              "strongAgree",
+              "strongDisagree"
+            ],
+            "maxLength": 64
+          },
+          "reacts": {
+            "type": "array",
+            "description": "Reacts; at most one per (react, normalised quote).",
+            "items": {
+              "type": "ref",
+              "ref": "#react"
+            },
+            "maxLength": 32
+          },
+          "tags": {
+            "type": "array",
+            "description": "Tag votes; read only when the subject is a post. At most one per tag.",
+            "items": {
+              "type": "ref",
+              "ref": "#tagVote"
+            },
+            "maxLength": 32
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "datetime",
+            "description": "Set once at creation by the writer's clock; never changed."
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "datetime",
+            "description": "Set on every update."
+          }
+        }
+      }
+    },
+    "react": {
+      "type": "object",
+      "description": "A react, optionally anchored to quoted text.",
+      "required": [
+        "react"
+      ],
+      "properties": {
+        "react": {
+          "type": "string",
+          "description": "React id from the forum's palette; ids outside it are ignored.",
+          "maxLength": 64
+        },
+        "stance": {
+          "type": "string",
+          "description": "for or against. An unknown value discards the entry.",
+          "knownValues": [
+            "for",
+            "against"
+          ],
+          "default": "for",
+          "maxLength": 64
+        },
+        "quote": {
+          "type": "ref",
+          "description": "The text the react applies to.",
+          "ref": "online.7778777.lessdugin.defs#textQuote"
+        }
+      }
+    },
+    "tagVote": {
+      "type": "object",
+      "description": "A vote on the relevance of a tag to the subject post.",
+      "required": [
+        "tag",
+        "value"
+      ],
+      "properties": {
+        "tag": {
+          "type": "string",
+          "description": "Tag slug.",
+          "maxLength": 64
+        },
+        "value": {
+          "type": "string",
+          "description": "Vote strength. An unknown value discards the entry.",
+          "knownValues": [
+            "up",
+            "down",
+            "strongUp",
+            "strongDown"
+          ],
+          "maxLength": 64
+        }
+      }
+    }
+  }
+}

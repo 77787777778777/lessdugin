@@ -107,7 +107,7 @@ The lexicon type of every record key is `any`, except `profile`, which is `liter
 
 **Publishing**
 - CI publishes only at M7, which needs the owner, and only after these pass:
-  - `goat lex lint`;
+  - `goat lex lint -I large-string` (goat warns on strings above 20,480 bytes; the 100,000-byte `markdown.text` of §5.1 is deliberate, and every other lint MUST pass);
   - `goat lex breaking` against the last published tag;
   - `goat lex check-dns`.
 - Lexicons are compiled into every binary and MUST NOT be fetched at runtime.
@@ -142,11 +142,14 @@ The lexicon type of every record key is `any`, except `profile`, which is `liter
 | `atu` | at-uri, at most 3000 bytes | `{"type":"string","format":"at-uri","maxLength":3000}` |
 | `url` | URI, at most 3000 bytes | `{"type":"string","format":"uri","maxLength":3000}` |
 | `int[a..b]` | integer between a and b inclusive | `{"type":"integer","minimum":a,"maximum":b}` |
-| `did`, `cid`, `tid`, `datetime` | format-typed strings | `{"type":"string","format":"did"}` and so on |
+| `did`, `cid`, `tid`, `datetime`, `nsid` | format-typed strings | `{"type":"string","format":"did"}` and so on |
+| `count`, `sint` | integer in `[0..2^53−1]`, or in `[−(2^53−1)..2^53−1]` (indexer responses only, §11) | `{"type":"integer","minimum":0,"maximum":9007199254740991}` and so on |
 | `bool` | boolean; absent means `false` unless a default is given | `{"type":"boolean"}` |
 | `#x` | a def in the same lexicon | `{"type":"ref","ref":"#x"}` |
 
 Lexicon unions are always open (`"closed"` is never set). Patterns, such as the slug grammar and the rkey grammars, cannot be expressed in Lexicon. The core enforces them (§7).
+
+Lexicon does not allow an inline object as an array item or as a property, so every object in this document is a named def: `#moderator`, `#chapter` and so on, and the method-local defs of §11.3. Every lexicon document, def and field carries a short `description`. Descriptions are informative only; this document governs.
 
 ### 2.2 Limits
 
@@ -334,6 +337,19 @@ So any code that selects records by key prefix (thread ranges, revisions of a su
 
 The same `b32s` implementation reproduces the superseded draft vectors (`ncepyaoj3bijw6li` and `q2swgvbea4gb2m6c`). Those used the full NSID as the name, a 10-byte truncation and no fk prefix, and they MUST NOT be used.
 
+**Vector files.** `testdata/vectors/keys/gen_keys.py` generates them (`--check` verifies them); each file is `{"behaviour", "kind", "description", "vectors": [{"name", "input", "expected", "raw"?, "note"?}]}`.
+
+| File | Behaviour | `input` → `expected` |
+|---|---|---|
+| `fk.json` | `fk/1` | `{forumUri}` → `{fk, digest}` |
+| `sk.json` | `sk/1` | `{fn: "b32s", hex, n}` → `{b32s}`; `{fn: "H", tag, parts}` → `{preimage, digest}`; `{fn: "h16", name, parts}` → `{h16, digest}` (hashed parts are `[name, …parts]`) |
+| `rkeys.json` | `sk/1` (uses `fk/1`) | `{fn, ns, …}` for `threadTid`, `stid`, `P`, `actionKey` and `rkey` (by short `collection` name) → the named result, plus intermediates (`fk`, `threadTid`, `stid`, `h16`, `P`, `scopeEff`, `actionKey`) |
+
+- `digest` and `preimage` are lowercase hex. `ns` is the build prefix the runner assumes (§1.3).
+- A failing derivation expects `{"error": code}`: `UnitSeparator` (a hash part contains U+001F), `Undefined` (`threadTid`, `stid` or `P` is undefined, or a comment root is not an `NS.post` uri with key `^FK-TID$`), `InvalidTid` (a `tid` input is not TID syntax). No vector has more than one applicable error.
+- `raw: true` marks inputs that are not canonical v1 values; they test NFC and U+001F handling in `H`. Runners MUST evaluate them with the string-level functions, without at-uri validation.
+- Runners MUST compare the named result or `error`, and SHOULD compare every intermediate they expose. Derivation never checks record validity (G4, G5, OP2, MA1–MA4).
+
 ---
 
 ## 4. Shared definitions (`NS.defs`)
@@ -400,7 +416,7 @@ The same `b32s` implementation reproduces the superseded draft vectors (`ncepyao
 
 1. A spillable field (rule 2 above) MUST be written as `textBlob` when its UTF-8 source exceeds 65,536 bytes (64 KiB).
 2. Before sending, the writer serialises the exact XRPC request body (§8.9). If it exceeds 900,000 bytes, the writer spills the largest remaining inline spillable field of the **new** value and re-measures, repeating until the body fits or nothing is left to spill. If it still does not fit, the write is refused with `TooLarge`; for an edit, the client offers `--no-history`.
-3. A spilled `post.body` requires `post.excerpt` (§6.3). The writer computes it as the LFM/1 excerpt of P.
+3. A spilled `post.body` requires `post.excerpt` (§6.3). The writer computes it as the LFM/1 excerpt (`lfm-1.md` §10.4, computed on the spoiler-free projection P_x).
 4. Non-spillable fields stay inline up to their 100,000-byte limit. A longer source is refused at compose time.
 
 ### 5.4 Derived hint fields and pingbacks
@@ -602,7 +618,7 @@ There is one opinion per (voter, subject). It holds the karma axis, the agreemen
 
 **Writer rules**
 - An opinion whose known content is empty is deleted, not written (§8.5).
-- A writer MUST NOT write two `#react` entries with the same `(react, qkey(quote))`, where `qkey` = NFC(collapse_ws(trim(quote.exact))), or the empty string when there is no quote.
+- A writer MUST NOT write two `#react` entries with the same `(react, qkey(quote))`, where `qkey` is defined in `lfm-1.md` §11 (the `exact` text trimmed, NFC-normalised, with White_Space runs replaced by one U+0020), or the empty string when there is no quote.
 - A writer MUST NOT write two `#tagVote` entries with the same `tag`.
 
 **Reader rules** (entry level; the record stays valid)
@@ -743,6 +759,7 @@ A third-party proof counts as current only if its rev is at least the head retur
 | G7 | Every `md` value whose `$type` is `NS.markdown` satisfies body rules 1 and 2 (§5.2). |
 | G8 | Every `slug`-typed value, including `#react.react` and `#tagVote.tag`, matches `^[a-z0-9]+(-[a-z0-9]+)*$`. |
 | G9 | `forum`-scoped collections (everything except `forum` and `profile`): `fk(value.forum)` equals the key's fk segment. This is part of G5, listed for clarity. |
+| G10 | The value's nesting depth (`limits.md` §1: the root object is depth 1) is at most 32 (`NESTING_MAX_RECORD`). A deeper value that could still be decoded within the response limits (`limits.md` §6) is stored as an invalid version, so it replaces older versions like any other; a response too deep to decode is rejected whole and changes nothing (`sync.md` §5.5). |
 
 ### 7.3 Per-collection rules
 
@@ -816,7 +833,7 @@ A third-party proof counts as current only if its rev is at least the head retur
 | MA5 | Positive assertions (§6.7) carry `subjectCid`. |
 | MA6 | If `scope_eff = author`, the action is allowed in author scope (table in §6.7). Whether the subject is in the actor's own thread or post, and the author gates, are checked by the fold (`social.md`). |
 | MA7 | An unknown `scope` value, an unknown action `$type`, or an unknown `#access.level`, `#tier.tier` or `#pin.scope` makes the record valid but **without effect**. It is shown as "unknown action" in the mod log. |
-| MA8 | *entry.* Unknown `#restrict.capabilities` items are ignored, and duplicates collapse. A `#restrict` with no known capability and no `nullifyVotes: true` has no effect. |
+| MA8 | *entry.* Unknown `#restrict.capabilities` items are ignored, and duplicates collapse. A `#restrict` with no known capability and no `nullifyVotes: true` asserts the empty set and `nullify = false`: it restricts nothing itself, but like any assertion it competes in resolution, so at a higher rank it lifts lower-rank restrictions of the same DID (`social.md` §4.4, §4.7). |
 | MA9 | `#lock` whose subject is an `NS.forum` uri: reserved (P2), valid but without effect. *entry:* `allowed` entries outside the subject post's thread (comment rkey not `{fk}-{T}-…` with `T = threadTid(subject)`) are ignored. |
 | MA10 | `#tag.head`, if present, is an `NS.wikiRevision` uri with `fkOf = fk(forum)`. Whether `head` names a revision of the same slug is checked by the fold. |
 | MA11 | `adopts`, if present, is an `NS.modAction` uri (G4). It is informational only. |
@@ -858,7 +875,8 @@ for each (repo, collection, fk):
 - Excess records are excluded identically by every client, and the view marks that repo `[partial]`.
 - The cap applies to the ranged, forum-scoped collections: post, comment, revision, opinion, modAction, wikiRevision and sequence.
 - `membership` is a single record. `forum` and `profile` are not ranged.
-- Byte caps per range (50 MB) and per response are safety limits in `limits.md`. Hitting one marks the repo `[partial]` and makes no completeness claim.
+- Byte caps per range (50 MiB, or 100 MiB for `opinion`) and per response are safety limits in `limits.md` §5. Hitting one marks the repo `[partial]` and makes no completeness claim.
+- A range with N or more keys is reported as capped (`sync.md` §5.4); the fold input is the same either way.
 
 ### 7.5 Ordering and determinism
 
@@ -889,7 +907,9 @@ for each (repo, collection, fk):
 ### 8.2 Outbox model
 
 ```
-PendingWrite { id, account: did, intent, ops: [Op], base: Option<cid>, state, attempts, createdAt }
+PendingWrite { id, account: did, seq: i64, intent, ops: [Op], base: Option<cid>, state, attempts, createdAt,
+               notBefore: Option<ms> }    // seq: FIFO position per account; notBefore: end of the hold (held)
+                                          // or of the back-off (throttled)
 state ∈ queued | held | sending | done | conflict | failed(reason) | throttled
 ```
 
@@ -944,26 +964,31 @@ edit(target, base, newValue, summary?):          // base = CID the user edited; 
 
 | Operation | Protocol |
 |---|---|
-| Create forum | `applyWrites[#create forum (rkey slug), #create membership (rkey fk)]`. The owner's own membership SHOULD be included. Fails if the slug exists, and the CLI then asks for another slug. Writes the values in §6.1. |
+| Create forum | `applyWrites[#create forum (rkey slug), #create membership (rkey fk)]`. The owner's own membership SHOULD be included. Fails if the slug exists (an HTTP 500 is ambiguous: re-read the declaration, below), and the CLI then asks for another slug. Writes the values in §6.1. |
 | Edit forum (including `mods add`) | Edit protocol, with `P = fk(forum)`. |
 | Remove a moderator (`mods rm`) | §8.6. |
-| Join | `createRecord(NS.membership, rkey = fk)`. If it already exists, re-read; an existing record means success. |
+| Join | Create-if-absent of `NS.membership` with rkey `fk` (below). If it already exists, re-read; an existing record means success. |
 | Leave | `deleteRecord(NS.membership, fk, swapRecord = cid)`. |
-| First content in a forum | `applyWrites[#create membership (only if a fresh getRecord shows it absent), #create post or comment]`. If the batch fails because the membership exists, re-read and retry without it. |
+| First content in a forum | `applyWrites[#create membership (only if a fresh getRecord shows it absent), #create post or comment]` with `swapCommit` = fresh head. If the batch fails (an HTTP 500 is ambiguous), re-read the membership and the head, and retry once without the membership if it now exists. |
 | Create post, comment, sequence or wikiRevision | `createRecord(rkey)` with the rkey fixed per W6. The MVP wiki writes `parents` = [the current head] or [] (§6.8). |
 | Edit content | Edit protocol (§8.3). |
 | Delete content (post, comment, sequence, forum) | Delete protocol (§8.7): removes the target and purges its revisions. |
 | Delete wikiRevision | `deleteRecord`. A wikiRevision has no revisions. |
 | Opinion | §8.5. |
-| Create modAction | `createRecord(rkey)` (create-if-absent). If it already exists, re-read and continue as *update*. |
+| Create modAction | Create-if-absent (below). If it already exists, re-read and continue as *update*. |
 | Update modAction | Edit protocol (`op: update`). |
 | Remove modAction (unhide, unban, unpin, unlock, unrestrict, …) | `applyWrites[#create revision{subject: {uri, cid: cur.cid}, op: "delete", record: cur.value}, #delete modAction]` with `swapCommit` = fresh head, retried as in §8.3. |
 | `mod adopt` | §8.6. |
-| Profile | No record: `createRecord(self)`. Otherwise `putRecord(self, swapRecord = cid)`. Profiles have no revisions. |
+| Profile | No record: create-if-absent of `self`. Otherwise `putRecord(self, swapRecord = cid)`. Profiles have no revisions. |
 | Redact history | `applyWrites[#delete revision …]`, chunked at ≤ 200 ops. |
 | Blob | §8.8. |
 
-`createRecord` with an explicit rkey fails if the record exists, which gives create-if-absent semantics. `putRecord` with `swapRecord` gives compare-and-swap. Spike S12 confirms both, and the error shapes, on the reference PDS.
+**PDS semantics (ADR 0005, spike S12, reference PDS).**
+- **Create-if-absent** is `putRecord{rkey, record, swapRecord: null}`. It succeeds only if the key is absent; if the key exists it fails with the typed `400 InvalidSwap`, which means "exists". A host that answers a null `swapRecord` with any other 400 does not support it: for that host (remembered per host, `sync.md` §7.2) the client falls back to `createRecord(rkey)`, whose failure on an existing key is a generic 500 that is resolved by `getRecord`.
+- `putRecord` and `deleteRecord` with `swapRecord = cid` give compare-and-swap; a mismatch is `400 InvalidSwap`.
+- `InvalidSwap` (on `swapRecord` or `swapCommit`) is the only conflict signal. Its message format is unspecified and is never relied on.
+- `applyWrites` is atomic and strict: a create on an existing key, or an update or delete on an absent key, fails the whole batch with HTTP 500 and writes nothing. Every HTTP 500 on a write is **ambiguous**: the client re-reads the targets (and the head) before deciding, and never resends blindly.
+- `deleteRecord` of an absent key succeeds (`200 {}`). `putRecord` of an identical value returns no `commit` and does not advance the head; writers skip no-op updates by comparing CIDs before sending.
 
 ### 8.5 Opinion writes
 
@@ -974,11 +999,12 @@ opinion_write(subject, intents):                 // after the 4 s hold; intents 
     cur = getRecord(NS.opinion, key)             // fresh; may be absent
     new = apply(cur?.value, intents)             // pure function, below
     if equalIgnoringUpdatedAt(new, cur?.value): return Done
-    if cur absent:      if empty(new): return Done; r = createRecord(key, new)
+    if cur absent:      if empty(new): return Done; r = putRecord(key, new, swapRecord = null)   // create-if-absent (§8.4)
     elif empty(new):    r = deleteRecord(key, swapRecord = cur.cid)
     else:               r = putRecord(key, new, swapRecord = cur.cid)
     if ok(r): return Done
-    if r is swap failure or "already exists": sleep(uniform(200 ms, 800 ms)); continue
+    if r is InvalidSwap (or, on a createRecord-fallback host, a 500 after which getRecord shows the key):
+                        sleep(uniform(200 ms, 800 ms)); continue
   return Failed(TooManySwaps)
 
 apply(v, intents):
@@ -987,6 +1013,7 @@ apply(v, intents):
   react(add, r, quote?, stance): replace or insert the entry with key (r, qkey(quote))
   react(remove, r, quote?):      remove the entry with key (r, qkey(quote))
   tag(set, slug, value | clear): replace, insert or remove the entry with that slug
+  (a replaced entry keeps its array position; an inserted entry is appended; removal keeps the order of the rest)
   subject.cid = the subject's current CID as seen by the user; updatedAt = now if v existed
 empty(v) ⇔ v has no field other than $type, subject, forum, createdAt, updatedAt,
            where an empty reacts or tags array counts as absent
@@ -1012,7 +1039,7 @@ mod_adopt(forum, former):
                                                 #update(k, v with createdAt = mine.createdAt, updatedAt = now)]
      else:                           report "kept own assertion"; continue
   send ops in applyWrites batches of ≤ 200 ops (a revision and its update are never split),
-  each with swapCommit = fresh head; on InvalidSwap re-list own range, recompute the remaining batches (≤ 3 tries)
+  each with swapCommit = fresh head; on InvalidSwap or HTTP 500 re-list own range, recompute the remaining batches (≤ 3 tries)
 ```
 
 **`mods rm <did>`** is run by the owner, since the declaration is in the owner's repo.
@@ -1104,13 +1131,13 @@ These are not written or published until they are final. v1 readers ignore them.
 | `post.event`, `post.poll` | field | P8+ | events (community calendar, same rkey) and polls |
 | `ratelimit/1`, `karma/2`, `magic/2` | behaviour IDs | P2 | advisory rate limits; co-author credit; personalised magic |
 
-**Explicit deferrals with no reserved name.** These can be added later as optional fields or new collections (§13.1):
-- recommendations;
-- shareable drafts and comments on drafts;
-- authorOnly tags;
-- the 10-karma removal of `nofollow`;
-- `lockedToAccountsCreatedAfter` and `repliesBlockedUntil`;
-- karma from votes on tag revisions.
+**Explicit deferrals with no reserved name.** These can be added later as optional fields or new collections (§13.1). Their phases are set by `docs/plan.md` §6.5:
+- recommendations (P8+);
+- shareable drafts and comments on drafts (P8+);
+- authorOnly tags (P2, with `karma/2`);
+- the 10-karma removal of `nofollow` (Never: `rel` is fixed by the `lfm/1` HTML contract);
+- `lockedToAccountsCreatedAfter` and `repliesBlockedUntil` (P2, with `ratelimit/1`);
+- karma from votes on tag revisions (P2, with `karma/2`).
 
 ---
 
@@ -1143,6 +1170,7 @@ This set is meant for lightweight third-party clients. lessdugin's own clients r
 ```
 
 **Rules for both sets**
+- The JSON above omits the `description` strings that every lexicon document and def carries (§2.1); the files in `lexicons/` are otherwise identical to it.
 - Permission sets cannot contain blob permissions, so blob scopes are requested directly (§10.3).
 - A set may cover only its own group and its child groups.
 - Authorization servers re-resolve sets on token refresh, so collections added later reach existing sessions.
@@ -1238,8 +1266,8 @@ The port of a loopback redirect is ignored when matching. The CLI listens on an 
 **Transport**
 - Every method is a `query`: an unauthenticated `GET /xrpc/online.7778777.lessdugin.index.<method>`, with `Access-Control-Allow-Origin: *` and no custom request headers.
 - Errors use XRPC form, `{"error": <name>, "message": …}`.
-  - Every method may return `InvalidRequest` and HTTP 429 `RateLimitExceeded`.
-  - Methods that take `forum` may return `NotIndexed`.
+  - Every method may return `InvalidRequest` and HTTP 429 `RateLimitExceeded`. These are generic XRPC errors and are not declared in the lexicons.
+  - Methods that take `forum` or `forums`, and `getThread` (for the post's forum, or a post the indexer does not know), may return `NotIndexed`. The lexicons declare it, and `CursorTooOld` for `getChanges`.
 - Lists are `Cache-Control: max-age=5` with ETags. Record data is never `immutable`.
 
 **Request parameters**
@@ -1260,24 +1288,24 @@ The port of a loopback redirect is ignored when matching. The CLI listens on an 
 
 **Phases**
 - **First pass (M6):** `describeIndexer`, `listForums`, `listParticipants`, `getRepoHeads`, `getChanges`, `listPosts`, `listRecentDiscussion`, `getThread`, `getRecordProofs`.
-- **Later:** `searchPosts`, `listBacklinks`, `getActivity`, `getKarma`, `getTallies`, `getRecords`.
+- **Later (Reserved (P2), `docs/plan.md` §6.1):** `searchPosts`, `listBacklinks`, `getActivity`, `getKarma`, `getTallies`, `getRecords`. Their lexicons are drafted now so that their shapes are reviewed with the rest; a v1 indexer does not serve them. "later" in the table below means this phase.
 
 An indexer advertises the methods it serves in `describeIndexer.features`. Clients MUST call only advertised methods.
 
 ### 11.2 `index.defs`
 
 ```
-#asOf        { seq!: int[0..9007199254740991], timeUs!: int[0..9007199254740991], lagMs!: int[0..9007199254740991] }
+#asOf        { seq!: count, timeUs!: count, lagMs!: count }
 #indexerInfo { did!: did, coreVersion!: s(64b) }
 #recordRef   { uri!: atu, cid!: cid, firstSeen: datetime, value: unknown /* HINT; present only when hydrate=true */ }
-#tally       { subject!: atu, policy!: s(64b), score!: int, agreement: int, unweighted: int, reacts: [#reactTally]≤64 }
-#reactTally  { react!: slug, for!: int, against: int, quote: defs#textQuote }
+#tally       { subject!: atu, policy!: s(64b), score!: sint, agreement: sint, unweighted: sint, reacts: [#reactTally]≤64 }
+#reactTally  { react!: slug, for!: count, against: count, quote: defs#textQuote }
 #postView    { ref!: #recordRef, tally: #tally, state: kv{visible, hidden, pending, collapsed},
-               tier: kv{personal, frontpage, curated}, tags: [slug]≤32, comments: int, lastCommentAt: datetime,
+               tier: kv{personal, frontpage, curated}, tags: [slug]≤32, comments: count, lastCommentAt: datetime,
                effectiveAt!: datetime, rank: s(64b) }
 #commentView { ref!: #recordRef, parent: atu, depth: int[0..1000], tally: #tally, state: kv{visible, hidden, pending, collapsed} }
 #participant { did!: did, status!: kv{owner, admin, moderator, member, established, newcomer}, rev: tid, lastSeen: datetime }
-#change      { seq!: int, uri!: atu, cid: cid, did!: did, rev!: tid, op!: kv{create, update, delete} }
+#change      { seq!: count, uri!: atu, cid: cid, did!: did, rev!: tid, op!: kv{create, update, delete} }
 #activity    { reason!: kv{reply, mention, quote, react, vote, modAction, newPost, newComment, pingback},
                ref!: #recordRef, subject: atu }
 ```
@@ -1292,21 +1320,37 @@ An indexer advertises the methods it serves in `describeIndexer.features`. Clien
 
 | Method | Phase | Parameters | Output |
 |---|---|---|---|
-| `describeIndexer` | first | – | `{did!, version!: s(64b), coreVersion!: s(64b), policies: [s(64b)]≤64, features: [s(64b)]≤64 (method names), forums: [{uri!, lagMs, backfilled: bool}]≤1000 (by uri; use listForums for more)}` |
-| `listForums` | first | `q?: s(512b)`, `limit?: int[1..100] =50`, `cursor?` | `{forums: [{ref!: #recordRef, participants: int, posts: int}], cursor?}` |
-| `listParticipants` | first | `forum!: atu`, `status?: kv{owner, admin, moderator, member, established, newcomer}`, `limit?: int[1..1000] =500`, `cursor?` | `{participants: [#participant], cursor?}` |
-| `getRepoHeads` | first | `dids!: [did]≤50` | `{heads: [{did!, rev: tid, commit: cid, pds: url, checkedAt: datetime, status: kv{active, takendown, suspended, deleted, deactivated, desynchronized, throttled}}]}` |
-| `getChanges` | first | `forum?: atu`, `since!: int` (exclusive), `limit?: int[1..1000] =500` | `{changes: [#change] (seq ascending), cursor: int (= last seq, the next since)}`; error `CursorTooOld` when `since` is older than the retained log (30 days) |
-| `listPosts` | first | `forum!: atu`, `sort?: kv{magic, top, new, old, recentComments} =magic`, `tier?: kv{personal, frontpage, curated}` (minimum tier; absent = all visible), `tag?: slug`, `author?: did`, `kind?: kv{article, link, question, quickTake}`, `hydrate?: bool`, `limit?: int[1..100] =25`, `cursor?` | `{posts: [#postView], cursor?, policy!: {karma!: s(64b), ranking!: s(64b)}, inputDigest!: s(64b) (hex sha256)}` |
-| `listRecentDiscussion` | first | `forum!: atu`, `limit?: int[1..50] =20`, `cursor?` | `{items: [{post!: #postView, comments: [#commentView]≤3}], cursor?}` |
-| `getThread` | first | `post!: atu`, `sort?: kv{magic, top, new, old, latestReply} =magic`, `hydrate?: bool` | `{post!: #postView, comments: [#commentView]≤10000 (pre-order), truncated!: bool, inputDigest!: s(64b)}` |
+| `describeIndexer` | first | – | `{did!, version!: s(64b), coreVersion!: s(64b), policies!: [s(64b)]≤64, features!: [s(64b)]≤64 (method names), forums!: [#forumStatus]≤1000 (by uri; use listForums for more)}` |
+| `listForums` | first | `q?: s(512b)`, `limit?: int[1..100] =50`, `cursor?` | `{forums!: [#forumSummary]≤100, cursor?}` |
+| `listParticipants` | first | `forum!: atu`, `status?: kv{owner, admin, moderator, member, established, newcomer}`, `limit?: int[1..1000] =500`, `cursor?` | `{participants!: [#participant]≤1000, cursor?}` |
+| `getRepoHeads` | first | `dids!: [did]≤50` | `{heads!: [#repoHead]≤50}` |
+| `getChanges` | first | `forum?: atu`, `since!: count` (exclusive), `limit?: int[1..1000] =500` | `{changes!: [#change]≤1000 (seq ascending), cursor!: count}`; `cursor` is the last returned seq, or `since` when `changes` is empty, and is the next `since`; error `CursorTooOld` when `since` is older than the retained log (30 days) |
+| `listPosts` | first | `forum!: atu`, `sort?: kv{magic, top, new, old, recentComments} =magic`, `tier?: kv{personal, frontpage, curated}` (minimum tier; absent = all visible), `tag?: slug`, `author?: did`, `kind?: kv{article, link, question, quickTake}`, `hydrate?: bool`, `limit?: int[1..100] =25`, `cursor?` | `{posts!: [#postView]≤100, cursor?, policy!: #policyIds, inputDigest!: s(64b) (hex sha256)}` |
+| `listRecentDiscussion` | first | `forum!: atu`, `limit?: int[1..50] =20`, `cursor?` | `{items!: [#discussionItem]≤50, cursor?}` |
+| `getThread` | first | `post!: atu`, `sort?: kv{magic, top, new, old, latestReply} =magic`, `hydrate?: bool` | `{post!: #postView, comments!: [#commentView]≤10000 (pre-order), truncated!: bool, inputDigest!: s(64b)}` |
 | `getRecordProofs` | first | `uris!: [atu]≤25` | `application/vnd.ipld.car`: root = DAG-CBOR manifest `{v: 1, items: [{uri, cid \| null, commit}]}`, then deduplicated blocks (`proofs/1`, `sync.md`); size per `limits.md` |
-| `searchPosts` | later | `q!: s(512b)` (≤ 16 terms), `forum?: atu`, `author?: did`, `limit?: int[1..50] =25`, `cursor?` | `{hits: [{ref!: #recordRef, snippet: s(1000b) (plain text), highlights: [[start, end]]≤16 (code points in snippet)}], cursor?}` |
-| `listBacklinks` | later | `subject!: atu`, `collection!: nsid`, `path?: s(256b)`, `limit?: int[1..100] =50`, `cursor?` | `{records: [#recordRef], cursor?}` |
-| `getActivity` | later | `actor!: did`, `since?: datetime`, `forums?: [atu]≤25`, `limit?: int[1..100] =50`, `cursor?` | `{activity: [#activity], cursor?}`; public data only; rate-limited per actor |
-| `getKarma` | later | `forum!: atu`, `actors!: [did]≤50` | `{karma: [{did!, k1!: int, kp!: int, k!: int}], policy!: s(64b), inputDigest!: s(64b)}` |
-| `getTallies` | later | `subjects!: [atu]≤25` | `{tallies: [#tally]}` |
-| `getRecords` | later | `uris!: [atu]≤25` | `{records: [#recordRef with value]}` (hints) |
+| `searchPosts` | later | `q!: s(512b)` (≤ 16 terms), `forum?: atu`, `author?: did`, `limit?: int[1..50] =25`, `cursor?` | `{hits!: [#hit]≤50, cursor?}` |
+| `listBacklinks` | later | `subject!: atu`, `collection!: nsid`, `path?: s(256b)`, `limit?: int[1..100] =50`, `cursor?` | `{records!: [#recordRef]≤100, cursor?}` |
+| `getActivity` | later | `actor!: did`, `since?: datetime`, `forums?: [atu]≤25`, `limit?: int[1..100] =50`, `cursor?` | `{activity!: [#activity]≤100, cursor?}`; public data only; rate-limited per actor |
+| `getKarma` | later | `forum!: atu`, `actors!: [did]≤50` | `{karma!: [#karmaEntry]≤50, policy!: s(64b), inputDigest!: s(64b)}` |
+| `getTallies` | later | `subjects!: [atu]≤25` | `{tallies!: [#tally]≤25}` |
+| `getRecords` | later | `uris!: [atu]≤25` | `{records!: [#recordRef with value]≤25}` (hints) |
+
+`cursor` is `s(512b)` everywhere except `getChanges`. Every JSON output also has `asOf!` and `indexer!` (§11.1). Every top-level array of an output is required and may be empty. In this section, `#recordRef`, `#postView`, `#commentView`, `#participant`, `#change`, `#activity` and `#tally` name `index.defs` defs.
+
+**Method-local defs** (each in its method's lexicon, for example `NS.index.getRepoHeads#repoHead`):
+
+```
+describeIndexer#forumStatus       { uri!: atu, lagMs: count, backfilled: bool }
+listForums#forumSummary           { ref!: #recordRef, participants: count, posts: count }
+getRepoHeads#repoHead             { did!: did, rev: tid, commit: cid, pds: url, checkedAt: datetime,
+                                    status: kv{active, takendown, suspended, deleted, deactivated, desynchronized, throttled} }
+listPosts#policyIds               { karma!: s(64b), ranking!: s(64b) }
+listRecentDiscussion#discussionItem { post!: #postView, comments: [#commentView]≤3 }
+searchPosts#hit                   { ref!: #recordRef, snippet: s(1000b) /* plain text */, highlights: [#highlight]≤16 }
+searchPosts#highlight             { start!: int[0..1000], end!: int[0..1000] }   // half-open, code points in snippet
+getKarma#karmaEntry               { did!: did, k1!: sint, kp!: sint, k!: sint }
+```
 
 **Semantics**
 - `getRecordProofs` items are verified independently. A failed item is dropped and counted against the source. A `cid: null` item proves absence.
@@ -1434,8 +1478,28 @@ These choices fill gaps or resolve ambiguities in the sources. Each takes the si
       - `getRecordProofs` carries no `asOf`, because proofs carry their own revs.
 18. **Text blobs.** Readers accept any `text/*`, decode as UTF-8 and strip one BOM. Undecodable text shows a placeholder without invalidating the record. Spill measurement uses the exact request body.
 19. **Precedence.** This document overrides the lexicon JSON until M7.
+20. **Lexicon authoring** (made while writing `lexicons/`; this document was amended to match):
+    - **Named defs.** Lexicon forbids inline objects in arrays and properties, so the indexer's inline output objects became method-local defs (§11.3). `searchPosts.highlights` changed from `[[start, end]]` pairs to `[#highlight{start, end}]`, because Lexicon has no arrays of arrays.
+    - **Integer bounds.** The unbounded indexer integers got final bounds: `count` for counts and sequence numbers, `sint` for scores and karma (§2.1). The 2^53−1 limit keeps every value exact in JavaScript.
+    - **Array limits.** Top-level output arrays are capped at the method's maximum page size. They are required and may be empty, so that clients never have to tell "absent" from "empty".
+    - **`getChanges.cursor`** is required. When `changes` is empty it equals `since`.
+    - **Errors.** Only `NotIndexed` and `CursorTooOld` are declared. `InvalidRequest` and `RateLimitExceeded` are generic XRPC errors. `getThread` also returns `NotIndexed`, for an unknown post or a post in a forum the indexer does not serve.
+    - **Permission sets** carry a `description` next to `title` and `detail`.
+    - **Lint.** `goat lex lint` warns `large-string` on `markdown.text` (100,000 bytes against goat's 20,480-byte threshold). The limit is deliberate, so the lint step ignores that rule (§1.4). CI and `xtask lex lint` must pass `-I large-string`.
+21. **Key vectors** (§3.4). Error codes (`UnitSeparator`, `Undefined`, `InvalidTid`), the `raw` flag and the intermediate fields were added so that the Rust and TypeScript runners can share the files. `actionKey` of an unknown `$type` is the `$type` string, including for a foreign NSID. A `#pin` with an unknown `scope` hashes as `"pin:" + scope`. An unknown `scope` hashes as written. All three records then have no effect (MA7).
+
+22. **Consistency review (amendments to this document).**
+    - **Create-if-absent** (§8.4, §8.5, §8.6) now follows accepted ADR 0005: `putRecord{swapRecord: null}` with a typed `InvalidSwap`, a per-host `createRecord` fallback, and every HTTP 500 on a write treated as ambiguous and re-read (formerly README §1.4 K1). Content creates with fresh TID keys keep `createRecord`.
+    - **MA8** now says that an empty `#restrict` competes in resolution like any assertion, so at a higher rank it lifts lower-rank restrictions, as `social.md` §4.2 and §4.7 require (formerly README §1.4 K2).
+    - **G10** (nesting depth ≤ 32) makes the pre-parse limit of `limits.md` §6 a validity rule, so that every client treats a too-deep record identically: it is an invalid version, not a silently dropped or "unreadable" row. This resolves the open question shared by `limits.md`, `sync.md` and `threat-model.md`.
+    - §7.4 states the opinion byte cap (100 MiB, from `limits.md`) and that a range reaching N keys is reported capped (`sync.md` §5.4).
+    - §8.2 `PendingWrite` gains `seq` and `notBefore`, which the pump of `sync.md` §7.2 reads; §8.5 `apply` fixes the array order of inserted and replaced entries, so the written bytes are deterministic.
+    - §9 gives the explicit ForumMagnum deferrals the phases of `docs/plan.md` §6.5; the nofollow gate is Never. §11.1 names the "later" indexer methods Reserved (P2).
+    - `qkey` (§6.6) and the excerpt projection (§5.3) now point at their single definitions in `lfm-1.md`.
 
 **Open questions** for the owner or the other spec authors:
 - confirm item 1 (agreement value names);
 - confirm item 6 (quickTake requires a body);
-- confirm the opt-out in item 11.
+- confirm the opt-out in item 11;
+- `.github/workflows/ci.yml` and `xtask lex lint` still run plain `goat lex lint lexicons`. Until they pass `-I large-string` (item 20), they fail on `markdown.json`;
+- `goat lex validate` rejects every record whose union holds `com.atproto.label.defs#selfLabels` ("NSID syntax didn't validate via regex"), `app.bsky.feed.post` included. This is a goat bug. Spike S4 should record it, and no lessdugin check may rely on `goat lex validate` for `post`.

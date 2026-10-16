@@ -1,0 +1,31 @@
+{
+  "lexicon": 1,
+  "id": "online.7778777.lessdugin.authFull",
+  "description": "Permission set: full lessdugin access (data-model.md §10.1).",
+  "defs": {
+    "main": {
+      "type": "permission-set",
+      "description": "Every lessdugin record collection. Requested by lessdugin's own clients.",
+      "title": "lessdugin (full access)",
+      "detail": "Create, edit and delete your lessdugin forums, memberships, posts, comments, revisions, votes and reactions, wiki edits, sequences, profile and moderation actions.",
+      "permissions": [
+        {
+          "type": "permission",
+          "resource": "repo",
+          "collection": [
+            "online.7778777.lessdugin.forum",
+            "online.7778777.lessdugin.membership",
+            "online.7778777.lessdugin.post",
+            "online.7778777.lessdugin.comment",
+            "online.7778777.lessdugin.revision",
+            "online.7778777.lessdugin.opinion",
+            "online.7778777.lessdugin.modAction",
+            "online.7778777.lessdugin.wikiRevision",
+            "online.7778777.lessdugin.sequence",
+            "online.7778777.lessdugin.profile"
+          ]
+        }
+      ]
+    }
+  }
+}

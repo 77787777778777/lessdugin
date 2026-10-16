@@ -1,0 +1,61 @@
+{
+  "lexicon": 1,
+  "id": "online.7778777.lessdugin.index.getTallies",
+  "description": "Get aggregates for items.",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "Get aggregates for items. Hints. Later phase, Reserved (P2): clients call it only if describeIndexer.features lists it.",
+      "parameters": {
+        "type": "params",
+        "required": [
+          "subjects"
+        ],
+        "properties": {
+          "subjects": {
+            "type": "array",
+            "description": "Items.",
+            "items": {
+              "type": "string",
+              "format": "at-uri",
+              "maxLength": 3000
+            },
+            "maxLength": 25
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": [
+            "tallies",
+            "asOf",
+            "indexer"
+          ],
+          "properties": {
+            "tallies": {
+              "type": "array",
+              "description": "One entry per known item.",
+              "items": {
+                "type": "ref",
+                "ref": "online.7778777.lessdugin.index.defs#tally"
+              },
+              "maxLength": 25
+            },
+            "asOf": {
+              "type": "ref",
+              "description": "Indexer state.",
+              "ref": "online.7778777.lessdugin.index.defs#asOf"
+            },
+            "indexer": {
+              "type": "ref",
+              "description": "Responding indexer.",
+              "ref": "online.7778777.lessdugin.index.defs#indexerInfo"
+            }
+          }
+        }
+      }
+    }
+  }
+}

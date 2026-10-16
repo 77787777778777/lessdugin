@@ -1,0 +1,106 @@
+{
+  "lexicon": 1,
+  "id": "online.7778777.lessdugin.index.describeIndexer",
+  "description": "Describe the indexer: versions, behaviour IDs, served methods and forums.",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "Describe the indexer: versions, behaviour IDs, served methods and forums. First pass (M6).",
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": [
+            "did",
+            "version",
+            "coreVersion",
+            "policies",
+            "features",
+            "forums",
+            "asOf",
+            "indexer"
+          ],
+          "properties": {
+            "did": {
+              "type": "string",
+              "format": "did",
+              "description": "The indexer's DID."
+            },
+            "version": {
+              "type": "string",
+              "description": "Indexer software version.",
+              "maxLength": 64
+            },
+            "coreVersion": {
+              "type": "string",
+              "description": "lessdugin core version.",
+              "maxLength": 64
+            },
+            "policies": {
+              "type": "array",
+              "description": "Behaviour IDs implemented, for example \"karma/1\".",
+              "items": {
+                "type": "string",
+                "maxLength": 64
+              },
+              "maxLength": 64
+            },
+            "features": {
+              "type": "array",
+              "description": "Names of the served methods; clients call no other method.",
+              "items": {
+                "type": "string",
+                "maxLength": 64
+              },
+              "maxLength": 64
+            },
+            "forums": {
+              "type": "array",
+              "description": "Served forums, by uri ascending; use listForums for more.",
+              "items": {
+                "type": "ref",
+                "ref": "#forumStatus"
+              },
+              "maxLength": 1000
+            },
+            "asOf": {
+              "type": "ref",
+              "description": "Indexer state.",
+              "ref": "online.7778777.lessdugin.index.defs#asOf"
+            },
+            "indexer": {
+              "type": "ref",
+              "description": "Responding indexer.",
+              "ref": "online.7778777.lessdugin.index.defs#indexerInfo"
+            }
+          }
+        }
+      }
+    },
+    "forumStatus": {
+      "type": "object",
+      "description": "A served forum.",
+      "required": [
+        "uri"
+      ],
+      "properties": {
+        "uri": {
+          "type": "string",
+          "format": "at-uri",
+          "description": "at-uri of the forum declaration.",
+          "maxLength": 3000
+        },
+        "lagMs": {
+          "type": "integer",
+          "description": "Ingest lag for this forum in milliseconds.",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "backfilled": {
+          "type": "boolean",
+          "description": "Whether the initial backfill is complete."
+        }
+      }
+    }
+  }
+}

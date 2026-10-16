@@ -1,0 +1,87 @@
+{
+  "lexicon": 1,
+  "id": "online.7778777.lessdugin.wikiRevision",
+  "description": "Tag and wiki page revision (data-model.md §6.8).",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "One revision of the wiki page (forum, slug). Record key: {fk}-{tid}. Immutable by convention; never updated. MVP writers write parents as empty (genesis) or exactly one head.",
+      "key": "any",
+      "record": {
+        "type": "object",
+        "required": [
+          "forum",
+          "slug",
+          "name",
+          "createdAt"
+        ],
+        "properties": {
+          "forum": {
+            "type": "string",
+            "format": "at-uri",
+            "description": "at-uri of the forum declaration.",
+            "maxLength": 3000
+          },
+          "slug": {
+            "type": "string",
+            "description": "Page slug; the page identity is (forum, slug).",
+            "maxLength": 64
+          },
+          "parents": {
+            "type": "array",
+            "description": "Parent wikiRevisions; empty or absent means genesis. MVP writers write at most one; readers accept up to 8.",
+            "items": {
+              "type": "ref",
+              "ref": "com.atproto.repo.strongRef"
+            },
+            "maxLength": 8
+          },
+          "name": {
+            "type": "string",
+            "description": "Page display name.",
+            "maxLength": 1000,
+            "maxGraphemes": 100
+          },
+          "description": {
+            "type": "string",
+            "description": "Plain-text summary for hovers and cards.",
+            "maxLength": 3000,
+            "maxGraphemes": 300
+          },
+          "body": {
+            "type": "union",
+            "description": "Page body. MAY spill to textBlob.",
+            "refs": [
+              "online.7778777.lessdugin.markdown"
+            ]
+          },
+          "isTag": {
+            "type": "boolean",
+            "description": "Whether the page can be applied as a post tag.",
+            "default": true
+          },
+          "parentTags": {
+            "type": "array",
+            "description": "Parent tag slugs.",
+            "items": {
+              "type": "string",
+              "maxLength": 64
+            },
+            "maxLength": 16
+          },
+          "summary": {
+            "type": "string",
+            "description": "Edit summary.",
+            "maxLength": 3000,
+            "maxGraphemes": 300
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "datetime",
+            "description": "Set once at creation by the writer's clock; never changed."
+          }
+        }
+      }
+    }
+  }
+}

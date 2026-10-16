@@ -1,0 +1,156 @@
+{
+  "lexicon": 1,
+  "id": "online.7778777.lessdugin.defs",
+  "description": "Shared object definitions used by lessdugin records (data-model.md §4).",
+  "defs": {
+    "media": {
+      "type": "object",
+      "description": "A media attachment (image, video, audio or PDF). Downloads are saved as <cid>.<ext-from-sniffed-type>.",
+      "required": [
+        "blob"
+      ],
+      "properties": {
+        "blob": {
+          "type": "blob",
+          "description": "The blob object returned by uploadBlob, embedded verbatim.",
+          "accept": [
+            "*/*"
+          ]
+        },
+        "alt": {
+          "type": "string",
+          "description": "Accessible description. Writers warn when it is missing.",
+          "maxLength": 20000,
+          "maxGraphemes": 2000
+        },
+        "aspectRatio": {
+          "type": "ref",
+          "description": "Layout hint; display clamps it to between 1:20 and 20:1.",
+          "ref": "#aspectRatio"
+        },
+        "durationMs": {
+          "type": "integer",
+          "description": "Duration in milliseconds (audio and video).",
+          "minimum": 0,
+          "maximum": 86400000
+        },
+        "name": {
+          "type": "string",
+          "description": "Opt-in, display-only basename. Readers ignore a name containing '/', '\\', a C0 or C1 control, U+2028 or U+2029.",
+          "maxLength": 255
+        }
+      }
+    },
+    "aspectRatio": {
+      "type": "object",
+      "description": "Width-to-height ratio in arbitrary units.",
+      "required": [
+        "width",
+        "height"
+      ],
+      "properties": {
+        "width": {
+          "type": "integer",
+          "description": "Relative width.",
+          "minimum": 1,
+          "maximum": 1000000
+        },
+        "height": {
+          "type": "integer",
+          "description": "Relative height.",
+          "minimum": 1,
+          "maximum": 1000000
+        }
+      }
+    },
+    "textQuote": {
+      "type": "object",
+      "description": "Selects text in the plain-text projection P (lfm-1.md) of the target's body. Resolution is deterministic and defined in lfm-1.md.",
+      "required": [
+        "exact"
+      ],
+      "properties": {
+        "exact": {
+          "type": "string",
+          "description": "The quoted text, trimmed so it starts and ends on a non-space.",
+          "maxLength": 10000,
+          "maxGraphemes": 1000
+        },
+        "prefix": {
+          "type": "string",
+          "description": "Verbatim text of P immediately before exact. Writers SHOULD use at most 32 graphemes.",
+          "maxLength": 640,
+          "maxGraphemes": 64
+        },
+        "suffix": {
+          "type": "string",
+          "description": "Verbatim text of P immediately after exact. Writers SHOULD use at most 32 graphemes.",
+          "maxLength": 640,
+          "maxGraphemes": 64
+        },
+        "start": {
+          "type": "integer",
+          "description": "Code-point offset of exact in P of the version the writer saw. Hint only.",
+          "minimum": 0,
+          "maximum": 100000000
+        }
+      }
+    },
+    "externalLink": {
+      "type": "object",
+      "description": "A link card. Writers fill title, description and thumb manually or by a native fetch; the SPA never fetches cards.",
+      "required": [
+        "uri"
+      ],
+      "properties": {
+        "uri": {
+          "type": "string",
+          "format": "uri",
+          "description": "Target URL. Shown as a link only if safe_href accepts it; otherwise shown as text.",
+          "maxLength": 3000
+        },
+        "title": {
+          "type": "string",
+          "description": "Card title, plain text.",
+          "maxLength": 3000,
+          "maxGraphemes": 300
+        },
+        "description": {
+          "type": "string",
+          "description": "Card description, plain text.",
+          "maxLength": 10000,
+          "maxGraphemes": 1000
+        },
+        "thumb": {
+          "type": "blob",
+          "description": "Card thumbnail image.",
+          "accept": [
+            "image/*"
+          ],
+          "maxSize": 1000000
+        }
+      }
+    },
+    "link": {
+      "type": "object",
+      "description": "A labelled URL, shown through safe_href.",
+      "required": [
+        "uri"
+      ],
+      "properties": {
+        "uri": {
+          "type": "string",
+          "format": "uri",
+          "description": "Target URL.",
+          "maxLength": 3000
+        },
+        "label": {
+          "type": "string",
+          "description": "Link text.",
+          "maxLength": 640,
+          "maxGraphemes": 64
+        }
+      }
+    }
+  }
+}

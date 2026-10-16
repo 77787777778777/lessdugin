@@ -1,0 +1,33 @@
+{
+  "lexicon": 1,
+  "id": "online.7778777.lessdugin.index.getRecordProofs",
+  "description": "Get commit proofs for records, as one CAR (proofs/1).",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "Get commit proofs for records, as one CAR (proofs/1). Each item is verified independently; a cid null item proves absence. First pass (M6).",
+      "parameters": {
+        "type": "params",
+        "required": [
+          "uris"
+        ],
+        "properties": {
+          "uris": {
+            "type": "array",
+            "description": "Records to prove.",
+            "items": {
+              "type": "string",
+              "format": "at-uri",
+              "maxLength": 3000
+            },
+            "maxLength": 25
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/vnd.ipld.car",
+        "description": "CAR v1. Root: DAG-CBOR manifest {v: 1, items: [{uri, cid: CID | null, commit: CID}]} (at most 25 items), then deduplicated blocks (sync.md proofs/1). At most 8 MiB."
+      }
+    }
+  }
+}

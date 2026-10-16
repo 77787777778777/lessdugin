@@ -1,0 +1,67 @@
+{
+  "lexicon": 1,
+  "id": "online.7778777.lessdugin.profile",
+  "description": "lessdugin profile (data-model.md §6.10).",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "A user's lessdugin profile. Absent fields displayName and avatar fall back to app.bsky.actor.profile/self read from the user's PDS. No revisions.",
+      "key": "literal:self",
+      "record": {
+        "type": "object",
+        "properties": {
+          "displayName": {
+            "type": "string",
+            "description": "Display name.",
+            "maxLength": 640,
+            "maxGraphemes": 64
+          },
+          "avatar": {
+            "type": "blob",
+            "description": "Avatar image.",
+            "accept": [
+              "image/*"
+            ],
+            "maxSize": 2000000
+          },
+          "bio": {
+            "type": "union",
+            "description": "Biography. Inline only.",
+            "refs": [
+              "online.7778777.lessdugin.markdown"
+            ]
+          },
+          "links": {
+            "type": "array",
+            "description": "Profile links.",
+            "items": {
+              "type": "ref",
+              "ref": "online.7778777.lessdugin.defs#link"
+            },
+            "maxLength": 16
+          },
+          "pinned": {
+            "type": "array",
+            "description": "Pinned items: post, comment or sequence at-uris.",
+            "items": {
+              "type": "string",
+              "format": "at-uri",
+              "maxLength": 3000
+            },
+            "maxLength": 16
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "datetime",
+            "description": "Creation time; optional in a profile."
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "datetime",
+            "description": "Set on every update."
+          }
+        }
+      }
+    }
+  }
+}

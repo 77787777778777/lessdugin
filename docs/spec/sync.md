@@ -170,7 +170,7 @@ The `records` input of the fold (`social.md` §1.1) is built from eligible store
 | `[partial]` | user card, sync status | that repo has a capped or byte-capped range in this forum (§5.4) |
 | `[future-dated]` | item | `future(x)` (`social.md` §2.2) |
 | `[identity unverified]` | item, name | the author's identity level is `hint` |
-| `[edited]` | item | the current version has `updatedAt`, or a valid revision with `subject.uri` = the item is in `records` |
+| `[edited]` | item | a valid `op: update` revision with `subject.uri` = the item is in `records`, or the current version's `updatedAt` is later than its `createdAt` (`social.md` §11) |
 | `[hint]` | placeholder | the row exists only because of a hint |
 | `[pending]` | own item, own opinion | an outbox write for it is not `done` (§7.4) |
 
@@ -559,13 +559,14 @@ sync_repo(did, scopes, reason) -> Clean | Applied | Unstable | Rollback | Failed
 ```
 list_range(did, c, fk) -> {rows, complete, capped, mode}
   N = (c = NS.opinion) ? 100000 : 20000                // data-model §7.4
+  RANGE_MAX(c) = (c = NS.opinion) ? 100 MiB : 50 MiB   // limits.md §5 RANGE_MAX_BYTES(_OPINION)
   P = fk + "-";  B = fk + "."                          // "." (0x2E) is the successor of "-" (0x2D)
   h = host(PDS(did))
   if h.rangeCursor = No ∧ now − h.rcAt < 7 days: goto FULL
   RANGE:
-  rows = []; cursor = B; prev = none; first = true; bytes = 0
+  rows = []; cursor = B; prev = none; first = true; bytes = 0; limit = 100
   loop:
-    r = listRecords(repo = did, collection = c, limit = 100, cursor = cursor)      // reverse unset
+    r = listRecords(repo = did, collection = c, limit = limit, cursor = cursor)    // reverse unset; "Page size" below
     if first ∧ r is HTTP 400: set No; goto FULL
     if r failed: return error (retried per §9.3)
     ks = rkeys of r.records (each uri MUST be at://did/c/<rkey> canonical, else the page fails)
@@ -579,8 +580,8 @@ list_range(did, c, fk) -> {rows, complete, capped, mode}
        if ¬rkey(x).startsWith(P): set Yes; return {rows, complete: true, capped: false, RANGE}
        rows += x
        if |rows| = N: set Yes; return {rows, complete: true, capped: true, RANGE}
-    bytes += decompressed page bytes; if bytes > 50 MB: return {rows, complete: false, capped: false, RANGE}
-    if ks = [] ∨ r.cursor absent ∨ (|ks| < 100 ∧ h.shortPageEnds): set Yes; return {rows, complete: true, capped: false, RANGE}
+    bytes += decompressed page bytes; if bytes > RANGE_MAX(c): return {rows, complete: false, capped: false, RANGE}
+    if ks = [] ∨ r.cursor absent ∨ (|ks| < limit ∧ h.shortPageEnds): set Yes; return {rows, complete: true, capped: false, RANGE}
     prev = last(ks); cursor = r.cursor
   FULL:                                                  // whole collection, filtered by prefix
   all = []; seen = {}; cursor = none; pages = 0; bytes = 0
@@ -589,7 +590,7 @@ list_range(did, c, fk) -> {rows, complete, capped, mode}
     pages += 1; bytes += decompressed page bytes
     all += { x ∈ r.records : rkey(x).startsWith(P) }
     if r.records = [] ∨ r.cursor absent: break
-    if r.cursor ∈ seen ∨ pages > 5,000 ∨ bytes > 200 MB: return {top N of all, complete: false, capped: false, FULL}
+    if r.cursor ∈ seen ∨ pages > 5,000 ∨ bytes > 200 MiB: return {top N of all, complete: false, capped: false, FULL}
     seen += r.cursor; cursor = r.cursor
   if two entries in all share an rkey: return error (the listing is inconsistent; retried)
   sort all by rkey descending
@@ -603,7 +604,8 @@ set No:  h.rangeCursor = No, h.rcAt = now
 - The probe is the first page with `cursor = "{fk}."`. A host that ignores the bound, uses opaque cursors, rejects the cursor (400) or orders differently fails at least one check on its first page (ADR 0004). Every later page of every listing is checked again, and any violation switches the host to `No` and redoes that listing in `FULL` mode.
 - A host that ignores the cursor but whose collection holds only keys below `B` returns exactly the range listing, so the result is still correct.
 - `No` is re-probed after 7 days (*tunable*). `Yes` stays until a violation.
-- **Short pages.** A page with fewer than 100 records ends a `RANGE` listing (both known implementations return SQL-limited pages). `h.shortPageEnds` is `true` by default; `lessdugin doctor` sets it to `false` for a host on which it observes a non-empty page after a short one, and listing then continues until an empty page or a missing cursor. `FULL` mode never uses the short-page rule.
+- **Page size.** `limit` is the `limit` sent with that request: 100 (`LIST_RECORDS_LIMIT`), or, after a page over `LIST_PAGE_MAX_BYTES` (4 MiB), 10 and then 1 when the same cursor is retried (`limits.md` §5, §10.1). A one-record page that is still too large leaves the range incomplete (`[partial]`).
+- **Short pages.** A page with fewer than `limit` records ends a `RANGE` listing (both known implementations return SQL-limited pages). `h.shortPageEnds` is `true` by default; `lessdugin doctor` sets it to `false` for a host on which it observes a non-empty page after a short one, and listing then continues until an empty page or a missing cursor. `FULL` mode never uses the short-page rule.
 - The membership key `{fk}` (no dash) is outside the range and is fetched with `getRecord` (§5.2). Neighbouring fks and `{fk}.…` keys fall outside it too.
 - Ascending listing (`reverse=true&cursor={fk}`) behaves identically and MAY be used for oldest-first replays; it is never used for the normative fetch cap.
 
@@ -621,7 +623,7 @@ for each (repo, collection c ∈ RANGED, fk):
 - `RANGE` mode stops after the N-th key; `FULL` mode sorts and truncates. Both give the same set.
 - A capped range is **complete** for completeness (§4.5) and `repoStatus` (§5.9), because every client excludes the same records. It sets `repo.capped[fk]`, and the user card shows `[partial]`. A range of exactly N keys is reported as capped.
 - Rows below the boundary are removed from the store without a tombstone (§5.2). `ForumModel` applies the cap again over stored rows (§13), so a point-fetched row beyond the boundary never enters the fold.
-- **Byte caps are safety limits, not fold rules:** 50 MB of decompressed listing per `(repo, collection, fk)` range, 4 MB per `listRecords` page, 1 MB per record. A byte-capped range is not complete: it advances no `listed` entry and makes no completeness claim. Honest repos stay far below these caps (100,000 typical opinions are about 35 MB). An authority whose range hits a byte cap keeps the view `degraded` until it was once listed completely, which fails closed.
+- **Byte caps are safety limits, not fold rules:** 50 MiB of decompressed listing per `(repo, collection, fk)` range (100 MiB for `opinion`), 4 MiB per `listRecords` page, 1,000,000 bytes per record (`limits.md` §5). A byte-capped range is not complete: it advances no `listed` entry and makes no completeness claim. Honest repos stay far below these caps (100,000 typical opinions are about 35 MB). An authority whose range hits a byte cap keeps the view `degraded` until it was once listed completely, which fails closed.
 
 ### 5.5 Admission checks
 
@@ -632,7 +634,7 @@ Every record returned by `getRecord` or `listRecords` passes these checks before
    - objects become maps, with keys sorted by DAG-CBOR order (shorter first, then bytewise); duplicate keys are rejected;
    - an object whose only key is `$link` (a string CID) becomes a CID (tag 42); an object whose only key is `$bytes` (base64) becomes a byte string;
    - integers must be within ±(2^53 − 1); any number with a fraction or exponent is rejected (no floats);
-   - nesting depth ≤ 32;
+   - nesting depth is bounded only by the response limit (`NESTING_MAX_DOCUMENT`, `limits.md` §6): a value deeper than 32 is still converted and CID-checked here, then fails validity rule G10 (step 5) and is stored as an invalid version; a response deeper than the document limit is rejected whole (R1), so nothing is admitted, tombstoned or replaced from it;
    - strings, booleans and null map directly.
 3. **CID.** The returned `cid` parses as CIDv1, codec dag-cbor (`0x71`), multihash sha2-256, and equals the CID of the encoding. Comparison is on the binary CID.
 4. On failure of 1–3: the record is dropped, logged with its source, and counted as a strike against the host. It is never stored.
@@ -755,17 +757,17 @@ It is defined for every DID that owns a record in `records` and for every author
 
 | What | Limit |
 |---|---|
-| Record JSON | 1 MB |
-| `listRecords` page | 4 MB, decompressed |
-| Range, per `(repo, collection, fk)` | 50 MB, decompressed (§5.4) |
-| `FULL` listing of one collection | 5,000 pages and 200 MB |
-| Proof CAR (`sync.getRecord`) | 1 MB, ≤ 2,000 blocks |
-| Indexer proof bundle (`getRecordProofs`) | 8 MB, ≤ 20,000 blocks |
+| Record JSON | 1,000,000 bytes |
+| `listRecords` page | 4 MiB, decompressed |
+| Range, per `(repo, collection, fk)` | 50 MiB, decompressed; 100 MiB for `opinion` (§5.4) |
+| `FULL` listing of one collection | 5,000 pages and 200 MiB |
+| Proof CAR (`sync.getRecord`) | 1,000,000 bytes, ≤ 2,000 blocks |
+| Indexer proof bundle (`getRecordProofs`) | 8 MiB, ≤ 50,000 blocks |
 | DID document, `.well-known/atproto-did`, protected-resource metadata | 65,536 / 2,048 / 65,536 bytes |
 | Jetstream and WebSocket message | 1,200,000 bytes |
-| Blob | 300 MB hard limit; 5 MB automatic load (images) |
+| Blob | 300 MiB hard limit; 5 MiB automatic load (images) |
 
-Every response is byte-counted while streaming, after decompression; the host aborts at the cap (§12.1). Cursors must strictly advance (§5.3).
+Every response is byte-counted while streaming, after decompression; the host aborts at the cap (§12.1). Cursors must strictly advance (§5.3). The exact values and their change classes are in `limits.md`, which wins on any difference.
 
 ---
 
@@ -927,21 +929,22 @@ pump(a):
   loop:
     w = the first PendingWrite of a with state ∈ {queued, held, sending, throttled}, by seq
     if none: return
-    if w.state = held ∧ now < w.heldUntil: sleep until then (new intents on the same subject coalesce into w); continue
+    if w.state = held ∧ now < w.notBefore: sleep until then (new intents on the same subject coalesce into w); continue
     if w.state = sending: recover(w) (data-model §8.2: compare each target's current CID with the intended one)
-    if the write budget (§7.3) would be exceeded: w.state = throttled until it fits; continue
+    if w.state = throttled ∧ now < w.notBefore: sleep until then; continue
+    if the write budget (§7.3) would be exceeded: w.state = throttled, w.notBefore = when it fits; continue
     w.state = sending (persisted)
     r = run w's protocol (data-model §8.3–§8.8):
           every swapCommit is the cid of a getLatestCommit sent immediately before that request,
           never a cached head or an earlier write's result
     on success: apply the results to the cache (§5.8); w.state = done
     on InvalidSwap / swap failure: the protocol's own retry (≤ 3, uniform(200 ms, 800 ms)); then conflict or failed
-    on 429: w.state = throttled until max(Retry-After, RateLimit-Reset)
+    on 429: w.state = throttled, w.notBefore = max(Retry-After, RateLimit-Reset)
     on HTTP 500 for a write: Ambiguous → re-read the targets (and the head) before deciding; never resend blindly (ADR 0005)
     persist w; emit Write{id, state}
 ```
 
-**ADR 0005 refinements** (to be folded into `data-model.md` §8):
+**ADR 0005 refinements** (also stated in `data-model.md` §8.4):
 - **Create-if-absent** (opinions, modActions, memberships) uses `putRecord{rkey, swapRecord: null}`, whose `InvalidSwap` is a typed signal. On a host that answers a null swap with a 400 other than `InvalidSwap`, the client falls back to `createRecord(rkey)`, and on a 5xx calls `getRecord` to tell "exists" from "failed". The fallback is remembered per host.
 - **First content in a forum** includes the membership create only when a fresh `getRecord` shows it absent.
 - **No-op updates** are skipped: the client compares the new value's CID with the current one before sending.
@@ -984,7 +987,7 @@ verify_proof(car: bytes, did, collection, rkey, key: PublicKey, now) ->
 
 lessdugin uses its own CARv1 reader:
 
-1. **Caps** (checked before allocation; nothing is preallocated from a declared length): total size ≤ 1,000,000 bytes for a `sync.getRecord` CAR (≤ 8,000,000 for an indexer bundle, §8.6); ≤ 2,000 blocks (≤ 20,000 for a bundle). Exceeding a cap → `CarTooLarge` or `TooManyBlocks`.
+1. **Caps** (checked before allocation; nothing is preallocated from a declared length): total size ≤ 1,000,000 bytes for a `sync.getRecord` CAR (≤ 8,388,608 for an indexer bundle, §8.6); ≤ 2,000 blocks (≤ 50,000 for a bundle). Exceeding a cap → `CarTooLarge` or `TooManyBlocks`. Within a bundle, the blocks that one item's verification reads are also limited to 1,000,000 bytes and 2,000 blocks (`limits.md` §5).
 2. **Header.** An unsigned LEB128 varint length (at most 9 bytes, minimal encoding, not exceeding the remaining bytes), then a DAG-CBOR map `{version: 1, roots: [CID]}` with exactly one root.
 3. **Blocks.** Repeated until the end: a varint length L (minimal, `0 < L ≤` remaining), then a CID and data occupying exactly L bytes. The CID MUST be CIDv1 with codec dag-cbor (`0x71`) or raw (`0x55`) and multihash sha2-256 (`0x12`, length 32). `sha256(data)` MUST equal the multihash digest (`BlockHashMismatch`).
 4. Duplicate blocks are allowed only with identical data. Trailing bytes that do not form a block → `CarMalformed`.
@@ -1056,7 +1059,8 @@ verify_proof(…):
 
 `getRecordProofs(uris ≤ 25)` returns `application/vnd.ipld.car` (`data-model.md` §11.3):
 - the root block is a DAG-CBOR manifest `{v: 1, items: [{uri, cid: CID | null, commit: CID}]}`, followed by deduplicated blocks;
-- the manifest's `v` MUST be 1; unknown keys are ignored; `items` ≤ 25.
+- the manifest's `v` MUST be 1; unknown keys are ignored; `items` ≤ 25;
+- a response over the bundle byte cap is retried with the `uris` list halved, down to one uri; an item still too large is fetched from the author's PDS instead (`limits.md` §5).
 
 ```
 for each item (independently):
@@ -1135,8 +1139,8 @@ Background work may thus use at most 50% of a host's window, and P0 work up to 8
 
 ### 9.3 Retries and timeouts (*tunable*)
 
-- **GET retries:** 3 retries on network errors, timeouts, 5xx and 429, with full-jitter exponential backoff: `delay = max(uniform(0, min(8 s, 250 ms · 2^attempt)), Retry-After)`. Writes are never retried by the transport; the outbox protocols decide (§7.2).
-- **Timeouts:** connect 5 s; request 20 s; CAR responses 60 s; blobs 20 s without progress and 300 s in total.
+- **GET retries:** 3 retries on network errors, timeouts, 5xx and 429, with full-jitter exponential backoff: before retry k (k = 1 for the first retry), `delay = max(uniform(0, min(8 s, 250 ms · 2^(k−1))), Retry-After)` (`limits.md` §7). Writes are never retried by the transport; the outbox protocols decide (§7.2).
+- **Timeouts:** connect 5 s; request 20 s; CAR responses 60 s; blobs 20 s without progress and no total timeout (blob downloads are user-visible and cancellable; `limits.md` §7).
 
 ### 9.4 Breakers and repo backoff (*tunable*)
 
@@ -1274,9 +1278,11 @@ fetch_media(did, blobRef, policy):
   require identity(did) is doc (else click-through only, never automatic)
   size = blobRef.size; cid = blobRef.ref.$link
   require cid is CIDv1, codec raw (0x55), sha2-256                       // else "unsupported media"
-  max  = min(300 MB, policy limit)                                        // images: 5 MB for automatic load
-  if size > max: click-to-load (or refused above 300 MB)
-  h = Host::fetch_blob({pds: PDS(did), did, cid, max_bytes: max, …})      // streamed and hashed by the host
+  max  = min(300 MiB, the field's lexicon maxSize, policy limit)          // images: 5 MiB for automatic load
+  if size > max: click-to-load (or refused above 300 MiB or the field's maxSize)
+  h = Host::fetch_blob({pds: PDS(did), did, cid, max_bytes: min(size, 300 MiB, the field's maxSize), …})
+                                                                          // streamed and hashed by the host; a body
+                                                                          // longer than the declared size is aborted
      CidMismatch → discard; strike against the host; show "media failed verification"
      HTTP 400 "Blob not found" → missing: not retried; purge any cached copy (ADR 0005)
   sniff = sniff_type(Host::blob_read(h.cid, 0, 4096))
@@ -1306,10 +1312,10 @@ fetch_media(did, blobRef, policy):
 
 Media loads automatically only if all of these hold:
 1. the author is in S ∪ E of the forum (`social.md` §3.1);
-2. the item's visibility is `Visible`, or `Collapsed(*)` and expanded by the user;
+2. the item's visibility is `Visible` (a `Collapsed(*)` item's media stay click-to-load even when the user expands it; `threat-model.md` PRIV-1);
 3. the item has no `sexual`, `nudity`, `porn` or `graphic-media` self-label; for a comment, the root post's labels also count;
 4. the PDS host is trusted: it serves at least 5 participants of the forum (by the PDS in their identity rows), or matches `*.host.bsky.network`, or is in `media.hosts`;
-5. it is an inline image type (§11.2) of at most 5 MB.
+5. it is an inline image type (§11.2) of at most 5 MiB.
 
 Otherwise the user clicks through a notice: "loads from <host>, which will see your IP". Avatars and forum icons follow the same rules, with the profile or declaration as the item.
 
@@ -1366,7 +1372,7 @@ pub trait WsStream: MaybeSend {
 
 ```rust
 pub struct BlobRequest { pub pds: url::Url, pub did: Did, pub cid: Cid, pub max_bytes: u64,
-                         pub idle_timeout_ms: u32, pub total_timeout_ms: u32 }
+                         pub idle_timeout_ms: u32, pub total_timeout_ms: u32 }   // total 0 = none (the default, §9.3)
 pub struct BlobHandle  { pub cid: Cid, pub size: u64 }
 pub enum BlobError     { Host(HostError), Status(u16, Option<String>), TooLarge, CidMismatch, UnsupportedCid }
 ```
@@ -1581,7 +1587,7 @@ These choices fill gaps or resolve ambiguities in the sources. Each takes the si
 7. **Version order (§5.6.1).** Order keys `(revLo, sentAt)` replace the bare "rev" of I3, because `getRecord` returns no rev. Point fetches use the last observed head as a lower bound; conflicts are declared only between exact observations.
 8. **Tombstone keys** are lower bounds observed from the PDS, never hint revs. Otherwise a lying Jetstream could suppress a re-created deterministic-key record such as an opinion.
 9. **Unstable listings (§5.2)** (the head moved during the pass) admit records but write no tombstones and advance no `listed` entry.
-10. **Cursor probe (§5.3)** follows ADR 0004: the two-part probe, the short-page rule (disabled per host by `doctor`), a 7-day recheck of `No`, and continuous checking of every page. `FULL` mode gets its own safety caps (5,000 pages, 200 MB).
+10. **Cursor probe (§5.3)** follows ADR 0004: the two-part probe, the short-page rule (disabled per host by `doctor`), a 7-day recheck of `No`, and continuous checking of every page. `FULL` mode gets its own safety caps (5,000 pages, 200 MiB; `limits.md` §5).
 11. **Fetch caps (§5.4).** Every key counts toward N, including invalid ones. A capped range is complete for `repoStatus` and completeness, and is flagged `[partial]` on the user card. A range of exactly N keys is reported as capped.
 12. **`absent` (§5.6.4)** is defined for `social.md`: it requires a tombstone, or a complete listing above the cap boundary.
 13. **`obs` (§5.6.5).** The first local observation from any source, including hints, is used, and the indexer's `firstSeen` is folded in by minimum. A hostile, consented indexer can thus affect only ranking and the `[future-dated]` badge.
@@ -1591,18 +1597,19 @@ These choices fill gaps or resolve ambiguities in the sources. Each takes the si
 17. **Declaration proof at first open (§4.2).** A failure is a warning. The `pds`-level declaration still applies, since TLS from the owner's PDS is already authoritative.
 18. **Per-host budgets (§9.2)** follow ADR 0004 and replace the synthesis's shared "rate domain". The 50%/80% fractions are read as "background stops when half of the host's window is used, P0 when 80% is used".
 19. **Outbox locking (§7.1).** "One in flight per account" is enforced across processes and tabs by a named lock. `Host::lock` is added to the trait for this and for I9's per-repo locks. The `web` bridge takes the native lock.
-20. **ADR 0005** refinements (create-if-absent through `putRecord` with `swapRecord: null`; a 500 means "ambiguous, re-read"; no-op updates skipped) are applied in the pump and flagged for `data-model.md` §8.
+20. **ADR 0005** refinements (create-if-absent through `putRecord` with `swapRecord: null`; a 500 means "ambiguous, re-read"; no-op updates skipped) are applied in the pump; `data-model.md` §8.4–§8.6 now state them too.
 21. **Pending writes** appear only in the viewer's lens, so the fold and parity output never depend on unconfirmed writes.
 22. **`Host` additions (§12).** `redirects`, `sent_at_ms`, `protocols` on `websocket`, `lock`, and blob functions keyed by CID (`fetch_blob`, `blob_open`, `blob_read`, `blob_delete`) in place of a single opaque handle. The completeness fix names `BlobHandle`; here it is `{cid, size}`.
 23. **Blob directory sharding (§11.2)** uses the last two characters of the CID. The first two are always `ba` for base32 CIDv1, which the synthesis's `cid[0..2]` would have used.
 24. **Concrete constants** not given by the sources (*tunable* unless stated): PLC adaptive pacing; DID-document and protected-resource caps of 64 KiB; proof-bundle block caps (2,000 per proof CAR, 20,000 per bundle); blob timeouts (20 s without progress, 300 s total); LRU size 10,000; newcomer ordering; relay defaults; indexer `getChanges` polling every 10 s or 60 s.
-25. **Autoload (§11.3).** Comments inherit their root post's self-labels, and an expanded `Collapsed` item counts as visible.
+25. **Autoload (§11.3).** Comments inherit their root post's self-labels. Only `Visible` items autoload, as `threat-model.md` PRIV-1 requires (an earlier draft also autoloaded expanded `Collapsed` items; changed in the consistency review, because the threat model wins on security measures).
 26. **Audit (§15.4).** The flag is `lessdugin sync <forum> --audit`, and checks A1–A5 make the M6 acceptance criteria ("catches an injected omission and a forged proof") concrete. Automatic sampling and demotion are deferred, per the cut list.
 27. **Closure (§4.3)** follows opinion subjects and comment roots and parents of seed records, one level deep and unbounded. Each DID is confirmed by its membership record before it is synced (F16).
-28. **Badges (§1.6).** `[stale]` also marks items served from cache after a failed sync. `[pending]` (outbox) is added, from the SPA's "pending-write badges". `[edited]` is defined from `updatedAt` or a known revision.
+28. **Badges (§1.6).** `[stale]` also marks items served from cache after a failed sync. `[pending]` (outbox) is added, from the SPA's "pending-write badges". `[edited]` uses `social.md` §11's rule (a valid `op: update` revision, or `updatedAt` later than `createdAt`).
+29. **Consistency review.** Numbers now follow `limits.md`, which wins on values: 100 MiB per `opinion` range (50 MiB otherwise); `FULL` caps stated in MiB; bundle caps of 8 MiB and 50,000 blocks, with the per-item proof limits and the halving retry; the GET retry formula with `2^(k−1)`; no total timeout for blob downloads; MiB for blob caps; the `fetch_blob` byte limit includes the declared size and the field's `maxSize`. The short-page rule compares with the `limit` actually sent, because an oversized page is retried with smaller limits. A record deeper than 32 levels is converted and stored invalid (G10) rather than dropped. The pump's hold and back-off use `PendingWrite.notBefore` (`data-model.md` §8.2).
 
 **Open questions**
-1. `data-model.md` §8.4–§8.5 still specify `createRecord` for create-if-absent. ADR 0005 decides `putRecord` with `swapRecord: null`, and this document follows the ADR. The data model should be amended.
+1. *(Resolved: `data-model.md` §8.4–§8.5 now specify `putRecord` with `swapRecord: null` for create-if-absent, following ADR 0005.)*
 2. **The currency rule makes indexer proofs stale for any author with later activity, including Bluesky activity**, because a repo has only one head. Each reader therefore still contacts each changed author's PDS (with small requests). Is this acceptable for the > 3,000-participant guidance, or should P7 range proofs be pulled forward?
 3. Does Jetstream's DID filter also filter `identity` and `account` events? This document drops unknown DIDs client-side either way. M5 should measure it, because it changes browser bandwidth.
 4. ADR 0004's per-host verdict is statistical (rotating egress IPs). The M1 fixed-IP check may still show a shared budget, which would change §9.2 and §14.

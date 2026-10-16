@@ -1,0 +1,160 @@
+{
+  "lexicon": 1,
+  "id": "online.7778777.lessdugin.index.listPosts",
+  "description": "List a forum's posts in a sort order, with the indexer's fold digest.",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "List a forum's posts in a sort order, with the indexer's fold digest. First pass (M6).",
+      "parameters": {
+        "type": "params",
+        "required": [
+          "forum"
+        ],
+        "properties": {
+          "forum": {
+            "type": "string",
+            "format": "at-uri",
+            "description": "at-uri of the forum declaration.",
+            "maxLength": 3000
+          },
+          "sort": {
+            "type": "string",
+            "description": "Sort order.",
+            "knownValues": [
+              "magic",
+              "top",
+              "new",
+              "old",
+              "recentComments"
+            ],
+            "default": "magic",
+            "maxLength": 64
+          },
+          "tier": {
+            "type": "string",
+            "description": "Minimum tier: frontpage gives tier >= frontpage, curated gives curated only; personal or absent gives all visible posts.",
+            "knownValues": [
+              "personal",
+              "frontpage",
+              "curated"
+            ],
+            "maxLength": 64
+          },
+          "tag": {
+            "type": "string",
+            "description": "Only posts with this tag.",
+            "maxLength": 64
+          },
+          "author": {
+            "type": "string",
+            "format": "did",
+            "description": "Only posts by this author."
+          },
+          "kind": {
+            "type": "string",
+            "description": "Only posts of this kind.",
+            "knownValues": [
+              "article",
+              "link",
+              "question",
+              "quickTake"
+            ],
+            "maxLength": 64
+          },
+          "hydrate": {
+            "type": "boolean",
+            "description": "Include record values (hints) in recordRef.value."
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Page size.",
+            "minimum": 1,
+            "maximum": 100,
+            "default": 25
+          },
+          "cursor": {
+            "type": "string",
+            "description": "Opaque pagination cursor from a previous response.",
+            "maxLength": 512
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": [
+            "posts",
+            "policy",
+            "inputDigest",
+            "asOf",
+            "indexer"
+          ],
+          "properties": {
+            "posts": {
+              "type": "array",
+              "description": "Posts.",
+              "items": {
+                "type": "ref",
+                "ref": "online.7778777.lessdugin.index.defs#postView"
+              },
+              "maxLength": 100
+            },
+            "cursor": {
+              "type": "string",
+              "description": "Cursor for the next page; absent on the last page.",
+              "maxLength": 512
+            },
+            "policy": {
+              "type": "ref",
+              "description": "Behaviour IDs used.",
+              "ref": "#policyIds"
+            },
+            "inputDigest": {
+              "type": "string",
+              "description": "Hex sha256 fold input digest (social.md); compared under --audit.",
+              "maxLength": 64
+            },
+            "asOf": {
+              "type": "ref",
+              "description": "Indexer state.",
+              "ref": "online.7778777.lessdugin.index.defs#asOf"
+            },
+            "indexer": {
+              "type": "ref",
+              "description": "Responding indexer.",
+              "ref": "online.7778777.lessdugin.index.defs#indexerInfo"
+            }
+          }
+        }
+      },
+      "errors": [
+        {
+          "name": "NotIndexed",
+          "description": "This indexer does not serve the forum."
+        }
+      ]
+    },
+    "policyIds": {
+      "type": "object",
+      "description": "Behaviour IDs used for a listing.",
+      "required": [
+        "karma",
+        "ranking"
+      ],
+      "properties": {
+        "karma": {
+          "type": "string",
+          "description": "Karma behaviour ID.",
+          "maxLength": 64
+        },
+        "ranking": {
+          "type": "string",
+          "description": "Ranking behaviour ID.",
+          "maxLength": 64
+        }
+      }
+    }
+  }
+}

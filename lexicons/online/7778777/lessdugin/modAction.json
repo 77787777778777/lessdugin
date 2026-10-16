@@ -1,0 +1,239 @@
+{
+  "lexicon": 1,
+  "id": "online.7778777.lessdugin.modAction",
+  "description": "Moderation assertion (data-model.md §6.7).",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "One moderation assertion per (actor, scope, subject, action key), in the actor's repo. Record key: {fk}-{h16(\"modAction\", scope_eff, subject, actionKey)}; keys of the form {fk}-{tid} are reserved (P2) and ignored. Deleting the record removes the assertion. Updates and removals go through the revision protocol.",
+      "key": "any",
+      "record": {
+        "type": "object",
+        "required": [
+          "forum",
+          "subject",
+          "action",
+          "createdAt"
+        ],
+        "properties": {
+          "forum": {
+            "type": "string",
+            "format": "at-uri",
+            "description": "at-uri of the forum declaration.",
+            "maxLength": 3000
+          },
+          "scope": {
+            "type": "string",
+            "description": "Authority used: forum (owner, admin, moderator) or author (post author in their own thread). Absent means forum. An unknown value: no effect.",
+            "knownValues": [
+              "forum",
+              "author"
+            ],
+            "default": "forum",
+            "maxLength": 64
+          },
+          "subject": {
+            "type": "string",
+            "description": "Exactly one of: a did, a canonical at-uri, or \"tag:\" + slug. Allowed forms depend on the action.",
+            "maxLength": 3000
+          },
+          "subjectCid": {
+            "type": "string",
+            "format": "cid",
+            "description": "CID of the subject version acted on. Required (core rule) for positive assertions: keep, tier frontpage or curated, pinned."
+          },
+          "action": {
+            "type": "union",
+            "description": "The action. An unknown $type has no effect and is shown as an unknown action.",
+            "refs": [
+              "#hide",
+              "#access",
+              "#restrict",
+              "#tier",
+              "#pin",
+              "#lock",
+              "#tag"
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "description": "Public reason; shown if #hide.showReason.",
+            "maxLength": 20000,
+            "maxGraphemes": 2000
+          },
+          "until": {
+            "type": "string",
+            "format": "datetime",
+            "description": "The assertion lapses when until <= now."
+          },
+          "adopts": {
+            "type": "ref",
+            "description": "The former moderator's modAction record re-issued by this record. Informational.",
+            "ref": "com.atproto.repo.strongRef"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "datetime",
+            "description": "Set once at creation by the writer's clock; never changed."
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "datetime",
+            "description": "Set on every update."
+          }
+        }
+      }
+    },
+    "hide": {
+      "type": "object",
+      "description": "Hide or keep an item. Key \"hide\". Subject: at-uri of a post, comment, sequence or wikiRevision. hidden=false (keep) is positive.",
+      "properties": {
+        "hidden": {
+          "type": "boolean",
+          "description": "true hides; false keeps (overrides a ban or restriction for this item).",
+          "default": true
+        },
+        "spam": {
+          "type": "boolean",
+          "description": "Marks the item as spam. Ignored in author scope."
+        },
+        "showReason": {
+          "type": "boolean",
+          "description": "Whether the reason is shown with the placeholder.",
+          "default": true
+        }
+      }
+    },
+    "access": {
+      "type": "object",
+      "description": "Ban or grant membership. Key \"access\". Subject: a did.",
+      "required": [
+        "level"
+      ],
+      "properties": {
+        "level": {
+          "type": "string",
+          "description": "banned or member. An unknown value: no effect.",
+          "knownValues": [
+            "banned",
+            "member"
+          ],
+          "maxLength": 64
+        }
+      }
+    },
+    "restrict": {
+      "type": "object",
+      "description": "Restrict capabilities, retroactively hiding in-forum items of each restricted kind. Key \"restrict\". Subject: a did. Forum scope only.",
+      "properties": {
+        "capabilities": {
+          "type": "array",
+          "description": "Restricted capabilities; unknown items are ignored, duplicates collapse.",
+          "items": {
+            "type": "string",
+            "knownValues": [
+              "post",
+              "comment",
+              "vote",
+              "react",
+              "tag",
+              "wiki",
+              "sequence"
+            ],
+            "maxLength": 64
+          },
+          "maxLength": 16
+        },
+        "nullifyVotes": {
+          "type": "boolean",
+          "description": "Discard all the user's votes in the forum."
+        }
+      }
+    },
+    "tier": {
+      "type": "object",
+      "description": "Set a post's tier. Key \"tier\". Subject: at-uri of a post. frontpage and curated are positive. Forum scope only.",
+      "required": [
+        "tier"
+      ],
+      "properties": {
+        "tier": {
+          "type": "string",
+          "description": "Tier. An unknown value: no effect.",
+          "knownValues": [
+            "personal",
+            "frontpage",
+            "curated"
+          ],
+          "maxLength": 64
+        },
+        "notice": {
+          "type": "union",
+          "description": "Moderator notice shown on the post. Inline only.",
+          "refs": [
+            "online.7778777.lessdugin.markdown"
+          ]
+        }
+      }
+    },
+    "pin": {
+      "type": "object",
+      "description": "Pin an item. Key \"pin:\" + scope. Subject: a post or sequence (scope forum) or a comment (scope thread). pinned=true is positive.",
+      "required": [
+        "scope"
+      ],
+      "properties": {
+        "scope": {
+          "type": "string",
+          "description": "Where the item is pinned. An unknown value: no effect.",
+          "knownValues": [
+            "forum",
+            "thread"
+          ],
+          "maxLength": 64
+        },
+        "pinned": {
+          "type": "boolean",
+          "description": "true pins; false unpins.",
+          "default": true
+        }
+      }
+    },
+    "lock": {
+      "type": "object",
+      "description": "Lock a post's thread. Key \"lock\". Subject: at-uri of a post (a forum at-uri is reserved, P2, and has no effect).",
+      "properties": {
+        "locked": {
+          "type": "boolean",
+          "description": "true locks; false unlocks.",
+          "default": true
+        },
+        "allowed": {
+          "type": "array",
+          "description": "Comment at-uris that stay visible; entries outside the post's thread are ignored.",
+          "items": {
+            "type": "string",
+            "format": "at-uri",
+            "maxLength": 3000
+          },
+          "maxLength": 5000
+        }
+      }
+    },
+    "tag": {
+      "type": "object",
+      "description": "Moderate a tag. Key \"tag\". Subject: \"tag:\" + slug. Forum scope only.",
+      "properties": {
+        "removed": {
+          "type": "boolean",
+          "description": "Removes the tag from the forum."
+        },
+        "head": {
+          "type": "ref",
+          "description": "The wikiRevision chosen as the tag page head.",
+          "ref": "com.atproto.repo.strongRef"
+        }
+      }
+    }
+  }
+}

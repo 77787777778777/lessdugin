@@ -1,0 +1,405 @@
+{
+  "lexicon": 1,
+  "id": "online.7778777.lessdugin.index.defs",
+  "description": "Shared definitions of the lessdugin indexer queries (data-model.md §11.2). Everything is a hint except getRecordProofs.",
+  "defs": {
+    "asOf": {
+      "type": "object",
+      "description": "Indexer state when the response was computed.",
+      "required": [
+        "seq",
+        "timeUs",
+        "lagMs"
+      ],
+      "properties": {
+        "seq": {
+          "type": "integer",
+          "description": "Latest change-log sequence number included.",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "timeUs": {
+          "type": "integer",
+          "description": "Indexer clock, microseconds since the Unix epoch.",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "lagMs": {
+          "type": "integer",
+          "description": "Ingest lag in milliseconds.",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "indexerInfo": {
+      "type": "object",
+      "description": "Identity of the responding indexer.",
+      "required": [
+        "did",
+        "coreVersion"
+      ],
+      "properties": {
+        "did": {
+          "type": "string",
+          "format": "did",
+          "description": "The indexer's DID."
+        },
+        "coreVersion": {
+          "type": "string",
+          "description": "Version of the lessdugin core that computed the response.",
+          "maxLength": 64
+        }
+      }
+    },
+    "recordRef": {
+      "type": "object",
+      "description": "A record known to the indexer.",
+      "required": [
+        "uri",
+        "cid"
+      ],
+      "properties": {
+        "uri": {
+          "type": "string",
+          "format": "at-uri",
+          "description": "Canonical at-uri of the record.",
+          "maxLength": 3000
+        },
+        "cid": {
+          "type": "string",
+          "format": "cid",
+          "description": "CID of the version the indexer holds."
+        },
+        "firstSeen": {
+          "type": "string",
+          "format": "datetime",
+          "description": "When the indexer first saw this version."
+        },
+        "value": {
+          "type": "unknown",
+          "description": "The record value. Hint; present only when hydrate=true (always in getRecords)."
+        }
+      }
+    },
+    "tally": {
+      "type": "object",
+      "description": "Aggregates for one item. Hint; clients recompute displayed values.",
+      "required": [
+        "subject",
+        "policy",
+        "score"
+      ],
+      "properties": {
+        "subject": {
+          "type": "string",
+          "format": "at-uri",
+          "description": "The item.",
+          "maxLength": 3000
+        },
+        "policy": {
+          "type": "string",
+          "description": "Behaviour IDs used, for example \"karma/1\".",
+          "maxLength": 64
+        },
+        "score": {
+          "type": "integer",
+          "description": "Karma score.",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "agreement": {
+          "type": "integer",
+          "description": "Agreement score.",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "unweighted": {
+          "type": "integer",
+          "description": "Unweighted vote total.",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "reacts": {
+          "type": "array",
+          "description": "React counts.",
+          "items": {
+            "type": "ref",
+            "ref": "#reactTally"
+          },
+          "maxLength": 64
+        }
+      }
+    },
+    "reactTally": {
+      "type": "object",
+      "description": "Counts for one react, optionally for one quote.",
+      "required": [
+        "react",
+        "for"
+      ],
+      "properties": {
+        "react": {
+          "type": "string",
+          "description": "React id.",
+          "maxLength": 64
+        },
+        "for": {
+          "type": "integer",
+          "description": "Reacts with stance for.",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "against": {
+          "type": "integer",
+          "description": "Reacts with stance against.",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "quote": {
+          "type": "ref",
+          "description": "The quote the counts apply to; absent for whole-item reacts.",
+          "ref": "online.7778777.lessdugin.defs#textQuote"
+        }
+      }
+    },
+    "postView": {
+      "type": "object",
+      "description": "A post in a listing.",
+      "required": [
+        "ref",
+        "effectiveAt"
+      ],
+      "properties": {
+        "ref": {
+          "type": "ref",
+          "description": "The post.",
+          "ref": "#recordRef"
+        },
+        "tally": {
+          "type": "ref",
+          "description": "Aggregates.",
+          "ref": "#tally"
+        },
+        "state": {
+          "type": "string",
+          "description": "Visibility in the indexer's fold.",
+          "knownValues": [
+            "visible",
+            "hidden",
+            "pending",
+            "collapsed"
+          ],
+          "maxLength": 64
+        },
+        "tier": {
+          "type": "string",
+          "description": "Resolved tier.",
+          "knownValues": [
+            "personal",
+            "frontpage",
+            "curated"
+          ],
+          "maxLength": 64
+        },
+        "tags": {
+          "type": "array",
+          "description": "Resolved tag slugs.",
+          "items": {
+            "type": "string",
+            "maxLength": 64
+          },
+          "maxLength": 32
+        },
+        "comments": {
+          "type": "integer",
+          "description": "Number of visible comments.",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "lastCommentAt": {
+          "type": "string",
+          "format": "datetime",
+          "description": "Time of the latest comment."
+        },
+        "effectiveAt": {
+          "type": "string",
+          "format": "datetime",
+          "description": "t_rank of the post (social.md)."
+        },
+        "rank": {
+          "type": "string",
+          "description": "magic hot value as the shortest round-trip decimal without exponent; only for sort=magic. Informative.",
+          "maxLength": 64
+        }
+      }
+    },
+    "commentView": {
+      "type": "object",
+      "description": "A comment in a thread listing.",
+      "required": [
+        "ref"
+      ],
+      "properties": {
+        "ref": {
+          "type": "ref",
+          "description": "The comment.",
+          "ref": "#recordRef"
+        },
+        "parent": {
+          "type": "string",
+          "format": "at-uri",
+          "description": "Effective parent comment; absent for top-level comments.",
+          "maxLength": 3000
+        },
+        "depth": {
+          "type": "integer",
+          "description": "Depth in the thread; 0 is top-level.",
+          "minimum": 0,
+          "maximum": 1000
+        },
+        "tally": {
+          "type": "ref",
+          "description": "Aggregates.",
+          "ref": "#tally"
+        },
+        "state": {
+          "type": "string",
+          "description": "Visibility in the indexer's fold.",
+          "knownValues": [
+            "visible",
+            "hidden",
+            "pending",
+            "collapsed"
+          ],
+          "maxLength": 64
+        }
+      }
+    },
+    "participant": {
+      "type": "object",
+      "description": "A forum participant.",
+      "required": [
+        "did",
+        "status"
+      ],
+      "properties": {
+        "did": {
+          "type": "string",
+          "format": "did",
+          "description": "The participant."
+        },
+        "status": {
+          "type": "string",
+          "description": "Participation status.",
+          "knownValues": [
+            "owner",
+            "admin",
+            "moderator",
+            "member",
+            "established",
+            "newcomer"
+          ],
+          "maxLength": 64
+        },
+        "rev": {
+          "type": "string",
+          "format": "tid",
+          "description": "Latest repo rev the indexer has seen."
+        },
+        "lastSeen": {
+          "type": "string",
+          "format": "datetime",
+          "description": "When the participant's repo last changed."
+        }
+      }
+    },
+    "change": {
+      "type": "object",
+      "description": "One entry of the indexer's change log.",
+      "required": [
+        "seq",
+        "uri",
+        "did",
+        "rev",
+        "op"
+      ],
+      "properties": {
+        "seq": {
+          "type": "integer",
+          "description": "Sequence number; strictly increasing.",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "uri": {
+          "type": "string",
+          "format": "at-uri",
+          "description": "The changed record.",
+          "maxLength": 3000
+        },
+        "cid": {
+          "type": "string",
+          "format": "cid",
+          "description": "New CID; absent for deletes."
+        },
+        "did": {
+          "type": "string",
+          "format": "did",
+          "description": "The repo."
+        },
+        "rev": {
+          "type": "string",
+          "format": "tid",
+          "description": "Repo rev of the change."
+        },
+        "op": {
+          "type": "string",
+          "description": "Operation.",
+          "knownValues": [
+            "create",
+            "update",
+            "delete"
+          ],
+          "maxLength": 64
+        }
+      }
+    },
+    "activity": {
+      "type": "object",
+      "description": "An activity item for an actor.",
+      "required": [
+        "reason",
+        "ref"
+      ],
+      "properties": {
+        "reason": {
+          "type": "string",
+          "description": "Why the item is listed.",
+          "knownValues": [
+            "reply",
+            "mention",
+            "quote",
+            "react",
+            "vote",
+            "modAction",
+            "newPost",
+            "newComment",
+            "pingback"
+          ],
+          "maxLength": 64
+        },
+        "ref": {
+          "type": "ref",
+          "description": "The record causing the activity.",
+          "ref": "#recordRef"
+        },
+        "subject": {
+          "type": "string",
+          "format": "at-uri",
+          "description": "The actor's item it concerns.",
+          "maxLength": 3000
+        }
+      }
+    }
+  }
+}

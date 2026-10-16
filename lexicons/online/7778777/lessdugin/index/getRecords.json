@@ -1,0 +1,61 @@
+{
+  "lexicon": 1,
+  "id": "online.7778777.lessdugin.index.getRecords",
+  "description": "Get record values held by the indexer.",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "Get record values held by the indexer. Hints; never displayed as attributed text. Later phase, Reserved (P2): clients call it only if describeIndexer.features lists it.",
+      "parameters": {
+        "type": "params",
+        "required": [
+          "uris"
+        ],
+        "properties": {
+          "uris": {
+            "type": "array",
+            "description": "Records.",
+            "items": {
+              "type": "string",
+              "format": "at-uri",
+              "maxLength": 3000
+            },
+            "maxLength": 25
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": [
+            "records",
+            "asOf",
+            "indexer"
+          ],
+          "properties": {
+            "records": {
+              "type": "array",
+              "description": "One entry per known record, with value.",
+              "items": {
+                "type": "ref",
+                "ref": "online.7778777.lessdugin.index.defs#recordRef"
+              },
+              "maxLength": 25
+            },
+            "asOf": {
+              "type": "ref",
+              "description": "Indexer state.",
+              "ref": "online.7778777.lessdugin.index.defs#asOf"
+            },
+            "indexer": {
+              "type": "ref",
+              "description": "Responding indexer.",
+              "ref": "online.7778777.lessdugin.index.defs#indexerInfo"
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "lexicon": 1,
+  "id": "online.7778777.lessdugin.membership",
+  "description": "Forum membership (data-model.md §6.2).",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "Membership in a forum, in the member's repo: the join beacon (open mode) or the application (approval mode). Record key: fk(forum), so one per (member, forum). Leaving deletes it.",
+      "key": "any",
+      "record": {
+        "type": "object",
+        "required": [
+          "forum",
+          "createdAt"
+        ],
+        "properties": {
+          "forum": {
+            "type": "string",
+            "format": "at-uri",
+            "description": "at-uri of the forum declaration. Fixed after creation.",
+            "maxLength": 3000
+          },
+          "note": {
+            "type": "string",
+            "description": "Application text. Public.",
+            "maxLength": 20000,
+            "maxGraphemes": 2000
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "datetime",
+            "description": "Set once at creation by the writer's clock; never changed."
+          }
+        }
+      }
+    }
+  }
+}

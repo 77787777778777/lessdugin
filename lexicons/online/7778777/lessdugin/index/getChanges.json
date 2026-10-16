@@ -1,0 +1,87 @@
+{
+  "lexicon": 1,
+  "id": "online.7778777.lessdugin.index.getChanges",
+  "description": "Page through the indexer's change log, in seq order.",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "Page through the indexer's change log, in seq order. First pass (M6).",
+      "parameters": {
+        "type": "params",
+        "required": [
+          "since"
+        ],
+        "properties": {
+          "forum": {
+            "type": "string",
+            "format": "at-uri",
+            "description": "Only changes to records of this forum.",
+            "maxLength": 3000
+          },
+          "since": {
+            "type": "integer",
+            "description": "Return changes with seq strictly greater than this.",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Page size.",
+            "minimum": 1,
+            "maximum": 1000,
+            "default": 500
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": [
+            "changes",
+            "cursor",
+            "asOf",
+            "indexer"
+          ],
+          "properties": {
+            "changes": {
+              "type": "array",
+              "description": "Changes, seq ascending.",
+              "items": {
+                "type": "ref",
+                "ref": "online.7778777.lessdugin.index.defs#change"
+              },
+              "maxLength": 1000
+            },
+            "cursor": {
+              "type": "integer",
+              "description": "The next since: the seq of the last change returned, or since when changes is empty.",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "asOf": {
+              "type": "ref",
+              "description": "Indexer state.",
+              "ref": "online.7778777.lessdugin.index.defs#asOf"
+            },
+            "indexer": {
+              "type": "ref",
+              "description": "Responding indexer.",
+              "ref": "online.7778777.lessdugin.index.defs#indexerInfo"
+            }
+          }
+        }
+      },
+      "errors": [
+        {
+          "name": "NotIndexed",
+          "description": "This indexer does not serve the forum."
+        },
+        {
+          "name": "CursorTooOld",
+          "description": "since is older than the retained change log (30 days); resynchronise."
+        }
+      ]
+    }
+  }
+}

@@ -171,6 +171,10 @@ nested objects in an unknown collection, but it does find blob refs at any depth
    - **New Opinion and Mod-action rows in §3.5:** no record → `putRecord(rkey, swapRecord: null)`;
      record exists → `putRecord(swapRecord = cid)`; result empty → `deleteRecord(swapRecord = cid)`.
      On `InvalidSwap`, re-read and re-apply the intent (≤ 3 times, with 200–800 ms jitter).
+   - *Amended (completeness review, applied in `data-model.md` §8.4):* for **mod actions** this
+     decision covers only the create. Their updates and removals go through the revision protocol
+     (`applyWrites[create revision, update | delete]` with `swapCommit`), not `putRecord` or
+     `deleteRecord` with `swapRecord`, so that the mod log keeps every prior state.
    - **Compatibility:** the lexicon flags nullable `swapRecord` as possibly problematic for Go
      implementations. Treat a 400 other than `InvalidSwap` on a null swap as "unsupported"; for that
      host, fall back to `createRecord(rkey)`, and on a 5xx call `getRecord` to tell "exists" from
@@ -221,6 +225,8 @@ nested objects in an unknown collection, but it does find blob refs at any depth
      returns.
    - `textBlob` uploads use `text/plain` (stored as such). Readers accept `text/*` and decode as
      UTF-8.
+     *Amended:* `data-model.md` §5.2 and §8.8 have writers declare exactly `text/markdown`, which
+     the probe above shows is also stored unchanged; readers still accept any `text/*`.
    - **Nested refs are tracked at any depth**, including `revision.record.body.media[i].blob`
      inside an `unknown` field. A blob stays alive while any record references it. An edit that
      drops media from the post keeps the media for as long as the revision exists.

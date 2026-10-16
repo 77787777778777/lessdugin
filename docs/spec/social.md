@@ -631,7 +631,7 @@ Revisions exist for modActions because their updates and removals always go thro
 An opinion v **counts** if and only if all of these hold:
 
 ```
-O1  v is valid (data-model.md §7: G1–G9, OP1, OP2) and v.forum = F
+O1  v is valid (data-model.md §7: G1–G10, OP1, OP2) and v.forum = F
                                                       // canonical rkey and subject; subject kind ∈ {post, comment, wikiRevision, sequence};
                                                       // v.forum = F also guards against fk collisions (data-model.md §3.3)
 O2  s = records[v.subject.uri] exists, s is valid, and s.forum = v.forum
@@ -717,7 +717,7 @@ K         = pairsum(Some(KP), E)                            // displayed karma; 
 
 **What K covers**
 - Karma is per forum. There is no cross-forum karma.
-- Votes on wikiRevisions and sequences earn no karma. Karma from votes on tag (wiki) revisions is deferred (§15).
+- Votes on wikiRevisions and sequences earn no karma. Karma from votes on tag (wiki) revisions is deferred to P2 (`karma/2`, §15).
 
 ### 6.3 Properties (each property-tested)
 
@@ -818,7 +818,7 @@ gateValue(g) = decl.policy.gates.g if present, else the karma/1 default below
 - **Authorities bypass every gate.**
 - **Gates use the current K, so they are retroactive.** A react can disappear when its supporters lose karma, which is an intended sybil property.
 - **Who enforces gates.** Readers enforce them in the fold. Writers check them at compose time as UX only.
-- **Deferred gates (§15):** removing `nofollow` at 10 karma, and side-comment margin display.
+- **Not gates in v1 (§15):** removing `nofollow` at 10 karma (Never, `docs/plan.md` §6.5), and side-comment margin display (P2).
 
 ---
 
@@ -970,7 +970,7 @@ The operations are performed exactly in this order. The vectors assert the resul
 
 | Sort | Order (every key ends with `uri asc`) | Includes |
 |---|---|---|
-| `magic` (default) | `pinned desc`, then `b > 0 desc`, then `b > 0 ? hot(b, t_rank) desc (total_cmp) : (b desc, t_rank desc)` | pinned posts, and unpinned posts with `now − t_rank ≤ cutoffDays × 86_400_000_000` |
+| `magic` (default) | `pinned desc`, then `b > 0 desc`, then `b > 0 ? hot(b, t_rank) desc (total_cmp) : (b desc, t_rank desc)` | posts with `now − t_rank ≤ cutoffDays × 86_400_000_000`, plus every forum-pinned post regardless of age |
 | `top` | `score desc`, `t_rank desc` | all |
 | `new` | `t_rank desc` | all |
 | `old` | `t_rank asc` | all |
@@ -1129,12 +1129,12 @@ Sequence scores come from opinions on the sequence. They earn no karma.
 | Co-authors | **Reserved (P2)**: `post.coauthors`, a CID-bound `coauthor` acceptance, and `karma/2` credit. |
 | Dialogues | **Reserved (P8+)**: `turn` records. The UI must warn that drafts are public. |
 | Events, polls | **Reserved (P8+)**: community calendar records (same rkey) and `pollVote`. |
-| Recommendations | Deferred (an extension); no reserved name. |
-| Shareable drafts and comments on drafts | Deferred; drafts are local. |
-| authorOnly tags | Deferred. |
-| Removing `nofollow` at 10 karma | Deferred. External links always carry `nofollow` (`lfm-1.md`). |
-| `lockedToAccountsCreatedAfter`, `repliesBlockedUntil` | Deferred. They need account age (§2.3); P2 or later. |
-| Karma from votes on tag (wiki) revisions | Deferred. It needs `karma/2`. |
+| Recommendations | Deferred to P8+ (`docs/plan.md` §6.5); no reserved name. |
+| Shareable drafts and comments on drafts | Deferred to P8+; drafts are local. |
+| authorOnly tags | Deferred to P2 (with `karma/2`). |
+| Removing `nofollow` at 10 karma | Never (`docs/plan.md` §6.5). External links always carry `nofollow` (`lfm-1.md` §8.2). |
+| `lockedToAccountsCreatedAfter`, `repliesBlockedUntil` | Deferred to P2 (with `ratelimit/1`). They need account age (§2.3). |
+| Karma from votes on tag (wiki) revisions | Deferred to P2. It needs `karma/2`. |
 | Books (`collection`) | **Reserved (P8+)**. |
 
 ---
@@ -1266,7 +1266,7 @@ These choices fill gaps in the sources or resolve ambiguities. Each takes the si
    - `#hide` asserts `spam = hidden ∧ spam`.
    - Positivity belongs to the whole record.
    - Absent fields assert their defaults, except `#tag.head`.
-   - A `#restrict` record states the complete set: a higher rank replaces lower sets, so an empty set lifts them, and equal ranks unite. **This conflicts with `data-model.md` MA8** (see 20.2).
+   - A `#restrict` record states the complete set: a higher rank replaces lower sets, so an empty set lifts them, and equal ranks unite. `data-model.md` MA8 has been amended to say the same (formerly README §1.4 K2).
 7. **Overriding a ban (§4.6).** A higher rank can only write `#access{member}`, which also grants seed status. This is stated rather than adding a new access level.
 8. **Keeps exempt from locks (V7).** A forum-tier keep at rank ≥ the lock's rank exempts a comment from the lock, by analogy with "content-level over user-level". Any forum-tier keep or explicit forum-tier value overrides the author tier.
 9. **Author tier (§4.9).**
@@ -1290,7 +1290,7 @@ These choices fill gaps in the sources or resolve ambiguities. Each takes the si
 16. **Degraded view (§4.11).** Uses the explicit state `Hidden(ModerationUnavailable)`.
 17. **Thread depth cap (§11).** A node beyond depth 1,000 is re-attached to the root as `Orphaned`. `Missing` placeholders sort after comment siblings.
 18. **Ranking (§12).**
-    - The cutoff applies only to *post lists* under magic, and forum-pinned posts are exempt from it.
+    - The cutoff applies only to *post lists* under magic. Forum-pinned posts **are** exempt, as in ForumMagnum (sticky posts stay at the top regardless of age): a pin is an explicit, CID-bound moderator decision, so the cutoff exists to age out unpinned content only. (Changed after the consistency review to match ForumMagnum; the rank vectors include a pinned post beyond the cutoff.)
     - Pins come first only in post magic, and in every comment sort.
     - `recentComments` and Recent Discussion use only `Visible` comments, so collapsed newcomers cannot bump posts.
     - `recentComments` falls back to the post's own `t_rank`.
@@ -1314,7 +1314,7 @@ These choices fill gaps in the sources or resolve ambiguities. Each takes the si
 
 ### 20.2 Open questions
 
-1. **`data-model.md` MA8** says a `#restrict` with no known capability and no `nullifyVotes: true` "has no effect". Under §4.2 and §4.7 such a record, at a higher rank, lifts lower-rank restrictions. That is consistent with `data-model.md` §6.7 "Undoing … writing the opposite value". MA8 should be amended to "no effect except as an override at its rank", or the override semantics dropped.
+1. *(Resolved in the consistency review: `data-model.md` MA8 now says that an empty `#restrict` lifts lower-rank restrictions, as §4.2 and §4.7 require.)*
 2. **The `absent` input (§1.1)** must be produced by `sync.md`, from tombstones and complete listings, and included in the indexer's `inputDigest`.
 3. **Author moderation requires E (§4.9).** This tightens the gate beyond the synthesis. The alternative is to drop it and weaken P7 to exclude visibility inside outsiders' own threads.
-4. **Forum-pinned posts exempt from the magic cutoff (§12.2).** The sources are silent. ForumMagnum keeps sticky posts regardless of age.
+4. *(Resolved: forum-pinned posts are exempt from the magic cutoff, matching ForumMagnum's sticky posts; see 20.1 item 18.)*

@@ -1,0 +1,109 @@
+{
+  "lexicon": 1,
+  "id": "online.7778777.lessdugin.index.getRepoHeads",
+  "description": "Get the indexer's view of repo heads and status.",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "Get the indexer's view of repo heads and status. First pass (M6).",
+      "parameters": {
+        "type": "params",
+        "required": [
+          "dids"
+        ],
+        "properties": {
+          "dids": {
+            "type": "array",
+            "description": "Repos to look up.",
+            "items": {
+              "type": "string",
+              "format": "did"
+            },
+            "maxLength": 50
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": [
+            "heads",
+            "asOf",
+            "indexer"
+          ],
+          "properties": {
+            "heads": {
+              "type": "array",
+              "description": "One entry per known requested DID.",
+              "items": {
+                "type": "ref",
+                "ref": "#repoHead"
+              },
+              "maxLength": 50
+            },
+            "asOf": {
+              "type": "ref",
+              "description": "Indexer state.",
+              "ref": "online.7778777.lessdugin.index.defs#asOf"
+            },
+            "indexer": {
+              "type": "ref",
+              "description": "Responding indexer.",
+              "ref": "online.7778777.lessdugin.index.defs#indexerInfo"
+            }
+          }
+        }
+      }
+    },
+    "repoHead": {
+      "type": "object",
+      "description": "A repo head as last checked by the indexer.",
+      "required": [
+        "did"
+      ],
+      "properties": {
+        "did": {
+          "type": "string",
+          "format": "did",
+          "description": "The repo."
+        },
+        "rev": {
+          "type": "string",
+          "format": "tid",
+          "description": "Latest rev."
+        },
+        "commit": {
+          "type": "string",
+          "format": "cid",
+          "description": "CID of the latest commit."
+        },
+        "pds": {
+          "type": "string",
+          "format": "uri",
+          "description": "The repo's PDS endpoint.",
+          "maxLength": 3000
+        },
+        "checkedAt": {
+          "type": "string",
+          "format": "datetime",
+          "description": "When the head was checked."
+        },
+        "status": {
+          "type": "string",
+          "description": "Repo status, as in com.atproto.sync.getRepoStatus.",
+          "knownValues": [
+            "active",
+            "takendown",
+            "suspended",
+            "deleted",
+            "deactivated",
+            "desynchronized",
+            "throttled"
+          ],
+          "maxLength": 64
+        }
+      }
+    }
+  }
+}

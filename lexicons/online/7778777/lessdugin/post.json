@@ -1,0 +1,89 @@
+{
+  "lexicon": 1,
+  "id": "online.7778777.lessdugin.post",
+  "description": "Forum post (data-model.md §6.3).",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "A post. Record key: {fk}-{tid} with fk = fk(forum). Core rules: title is required unless the effective kind is quickTake; body is required for quickTake; link is required for kind link; excerpt is required when body uses textBlob.",
+      "key": "any",
+      "record": {
+        "type": "object",
+        "required": [
+          "forum",
+          "createdAt"
+        ],
+        "properties": {
+          "forum": {
+            "type": "string",
+            "format": "at-uri",
+            "description": "at-uri of the forum declaration. Fixed after creation.",
+            "maxLength": 3000
+          },
+          "kind": {
+            "type": "string",
+            "description": "Post kind. An unknown value is read as article.",
+            "knownValues": [
+              "article",
+              "link",
+              "question",
+              "quickTake"
+            ],
+            "default": "article",
+            "maxLength": 64
+          },
+          "title": {
+            "type": "string",
+            "description": "Title, plain text. Ignored for quickTake.",
+            "maxLength": 3000,
+            "maxGraphemes": 300
+          },
+          "body": {
+            "type": "union",
+            "description": "Post body. MAY spill to textBlob.",
+            "refs": [
+              "online.7778777.lessdugin.markdown"
+            ]
+          },
+          "excerpt": {
+            "type": "string",
+            "description": "Plain-text LFM/1 excerpt of the body; read only when body uses textBlob.",
+            "maxLength": 5000,
+            "maxGraphemes": 500
+          },
+          "link": {
+            "type": "ref",
+            "description": "Link card; required for kind link, ignored otherwise.",
+            "ref": "online.7778777.lessdugin.defs#externalLink"
+          },
+          "tags": {
+            "type": "array",
+            "description": "The author's own tag slugs (set semantics).",
+            "items": {
+              "type": "string",
+              "maxLength": 64
+            },
+            "maxLength": 32
+          },
+          "labels": {
+            "type": "union",
+            "description": "Self-labels, for example sexual, nudity, porn or graphic-media.",
+            "refs": [
+              "com.atproto.label.defs#selfLabels"
+            ]
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "datetime",
+            "description": "Set once at creation by the writer's clock; never changed."
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "datetime",
+            "description": "Set on every update."
+          }
+        }
+      }
+    }
+  }
+}

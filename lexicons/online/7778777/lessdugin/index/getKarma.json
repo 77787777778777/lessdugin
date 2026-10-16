@@ -1,0 +1,120 @@
+{
+  "lexicon": 1,
+  "id": "online.7778777.lessdugin.index.getKarma",
+  "description": "Get karma/1 values of actors in a forum.",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "Get karma/1 values of actors in a forum. Hints. Later phase, Reserved (P2): clients call it only if describeIndexer.features lists it.",
+      "parameters": {
+        "type": "params",
+        "required": [
+          "forum",
+          "actors"
+        ],
+        "properties": {
+          "forum": {
+            "type": "string",
+            "format": "at-uri",
+            "description": "at-uri of the forum declaration.",
+            "maxLength": 3000
+          },
+          "actors": {
+            "type": "array",
+            "description": "Actors.",
+            "items": {
+              "type": "string",
+              "format": "did"
+            },
+            "maxLength": 50
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": [
+            "karma",
+            "policy",
+            "inputDigest",
+            "asOf",
+            "indexer"
+          ],
+          "properties": {
+            "karma": {
+              "type": "array",
+              "description": "One entry per known actor.",
+              "items": {
+                "type": "ref",
+                "ref": "#karmaEntry"
+              },
+              "maxLength": 50
+            },
+            "policy": {
+              "type": "string",
+              "description": "Karma behaviour ID used.",
+              "maxLength": 64
+            },
+            "inputDigest": {
+              "type": "string",
+              "description": "Hex sha256 fold input digest (social.md).",
+              "maxLength": 64
+            },
+            "asOf": {
+              "type": "ref",
+              "description": "Indexer state.",
+              "ref": "online.7778777.lessdugin.index.defs#asOf"
+            },
+            "indexer": {
+              "type": "ref",
+              "description": "Responding indexer.",
+              "ref": "online.7778777.lessdugin.index.defs#indexerInfo"
+            }
+          }
+        }
+      },
+      "errors": [
+        {
+          "name": "NotIndexed",
+          "description": "This indexer does not serve the forum."
+        }
+      ]
+    },
+    "karmaEntry": {
+      "type": "object",
+      "description": "Karma of one actor.",
+      "required": [
+        "did",
+        "k1",
+        "kp",
+        "k"
+      ],
+      "properties": {
+        "did": {
+          "type": "string",
+          "format": "did",
+          "description": "The actor."
+        },
+        "k1": {
+          "type": "integer",
+          "description": "Seed-weighted karma K1.",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "kp": {
+          "type": "integer",
+          "description": "Provisional karma KP.",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "k": {
+          "type": "integer",
+          "description": "Final karma K.",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        }
+      }
+    }
+  }
+}

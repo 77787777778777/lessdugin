@@ -1,0 +1,96 @@
+{
+  "lexicon": 1,
+  "id": "online.7778777.lessdugin.index.listForums",
+  "description": "List forums known to the indexer.",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "List forums known to the indexer. Each forum is fetched from its owner's PDS before display. First pass (M6).",
+      "parameters": {
+        "type": "params",
+        "properties": {
+          "q": {
+            "type": "string",
+            "description": "Search text over forum names and descriptions.",
+            "maxLength": 512
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Page size.",
+            "minimum": 1,
+            "maximum": 100,
+            "default": 50
+          },
+          "cursor": {
+            "type": "string",
+            "description": "Opaque pagination cursor from a previous response.",
+            "maxLength": 512
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": [
+            "forums",
+            "asOf",
+            "indexer"
+          ],
+          "properties": {
+            "forums": {
+              "type": "array",
+              "description": "Forums.",
+              "items": {
+                "type": "ref",
+                "ref": "#forumSummary"
+              },
+              "maxLength": 100
+            },
+            "cursor": {
+              "type": "string",
+              "description": "Cursor for the next page; absent on the last page.",
+              "maxLength": 512
+            },
+            "asOf": {
+              "type": "ref",
+              "description": "Indexer state.",
+              "ref": "online.7778777.lessdugin.index.defs#asOf"
+            },
+            "indexer": {
+              "type": "ref",
+              "description": "Responding indexer.",
+              "ref": "online.7778777.lessdugin.index.defs#indexerInfo"
+            }
+          }
+        }
+      }
+    },
+    "forumSummary": {
+      "type": "object",
+      "description": "A forum with indexer counts.",
+      "required": [
+        "ref"
+      ],
+      "properties": {
+        "ref": {
+          "type": "ref",
+          "description": "The forum declaration.",
+          "ref": "online.7778777.lessdugin.index.defs#recordRef"
+        },
+        "participants": {
+          "type": "integer",
+          "description": "Number of participants.",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "posts": {
+          "type": "integer",
+          "description": "Number of posts.",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      }
+    }
+  }
+}

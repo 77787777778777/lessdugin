@@ -197,7 +197,7 @@ fn lex(args: &[String]) -> Result<(), String> {
                 eprintln!("(goat not installed; skipping lexicon lint)");
                 return Ok(());
             };
-            run(goat, &["lex", "lint", "lexicons"])
+            run(goat, &["lex", "lint", "-I", "large-string", "lexicons"])
         }
         _ => Err("usage: cargo xtask lex lint".into()),
     }

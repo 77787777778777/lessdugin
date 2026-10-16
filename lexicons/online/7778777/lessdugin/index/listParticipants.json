@@ -1,0 +1,93 @@
+{
+  "lexicon": 1,
+  "id": "online.7778777.lessdugin.index.listParticipants",
+  "description": "List a forum's participants.",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "List a forum's participants. First pass (M6).",
+      "parameters": {
+        "type": "params",
+        "required": [
+          "forum"
+        ],
+        "properties": {
+          "forum": {
+            "type": "string",
+            "format": "at-uri",
+            "description": "at-uri of the forum declaration.",
+            "maxLength": 3000
+          },
+          "status": {
+            "type": "string",
+            "description": "Only participants with this status.",
+            "knownValues": [
+              "owner",
+              "admin",
+              "moderator",
+              "member",
+              "established",
+              "newcomer"
+            ],
+            "maxLength": 64
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Page size.",
+            "minimum": 1,
+            "maximum": 1000,
+            "default": 500
+          },
+          "cursor": {
+            "type": "string",
+            "description": "Opaque pagination cursor from a previous response.",
+            "maxLength": 512
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": [
+            "participants",
+            "asOf",
+            "indexer"
+          ],
+          "properties": {
+            "participants": {
+              "type": "array",
+              "description": "Participants.",
+              "items": {
+                "type": "ref",
+                "ref": "online.7778777.lessdugin.index.defs#participant"
+              },
+              "maxLength": 1000
+            },
+            "cursor": {
+              "type": "string",
+              "description": "Cursor for the next page; absent on the last page.",
+              "maxLength": 512
+            },
+            "asOf": {
+              "type": "ref",
+              "description": "Indexer state.",
+              "ref": "online.7778777.lessdugin.index.defs#asOf"
+            },
+            "indexer": {
+              "type": "ref",
+              "description": "Responding indexer.",
+              "ref": "online.7778777.lessdugin.index.defs#indexerInfo"
+            }
+          }
+        }
+      },
+      "errors": [
+        {
+          "name": "NotIndexed",
+          "description": "This indexer does not serve the forum."
+        }
+      ]
+    }
+  }
+}

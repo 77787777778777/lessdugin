@@ -1,0 +1,98 @@
+{
+  "lexicon": 1,
+  "id": "online.7778777.lessdugin.sequence",
+  "description": "Sequence of posts (data-model.md §6.9).",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "An ordered collection of posts in chapters. Record key: {fk}-{tid}.",
+      "key": "any",
+      "record": {
+        "type": "object",
+        "required": [
+          "forum",
+          "title",
+          "chapters",
+          "createdAt"
+        ],
+        "properties": {
+          "forum": {
+            "type": "string",
+            "format": "at-uri",
+            "description": "at-uri of the forum declaration.",
+            "maxLength": 3000
+          },
+          "title": {
+            "type": "string",
+            "description": "Title, plain text.",
+            "maxLength": 3000,
+            "maxGraphemes": 300
+          },
+          "body": {
+            "type": "union",
+            "description": "Introduction. MAY spill to textBlob.",
+            "refs": [
+              "online.7778777.lessdugin.markdown"
+            ]
+          },
+          "cover": {
+            "type": "ref",
+            "description": "Cover image; displayed only if blob.mimeType is image/*.",
+            "ref": "online.7778777.lessdugin.defs#media"
+          },
+          "chapters": {
+            "type": "array",
+            "description": "Chapters, in order.",
+            "items": {
+              "type": "ref",
+              "ref": "#chapter"
+            },
+            "maxLength": 50
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "datetime",
+            "description": "Set once at creation by the writer's clock; never changed."
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "datetime",
+            "description": "Set on every update."
+          }
+        }
+      }
+    },
+    "chapter": {
+      "type": "object",
+      "description": "A chapter of a sequence.",
+      "required": [
+        "posts"
+      ],
+      "properties": {
+        "title": {
+          "type": "string",
+          "description": "Chapter title.",
+          "maxLength": 3000,
+          "maxGraphemes": 300
+        },
+        "body": {
+          "type": "union",
+          "description": "Chapter introduction. Inline only.",
+          "refs": [
+            "online.7778777.lessdugin.markdown"
+          ]
+        },
+        "posts": {
+          "type": "array",
+          "description": "Entries: post at-uris, always shown at their latest version; entries in another forum are not displayed.",
+          "items": {
+            "type": "string",
+            "format": "at-uri",
+            "maxLength": 3000
+          },
+          "maxLength": 100
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,69 @@
+{
+  "lexicon": 1,
+  "id": "online.7778777.lessdugin.comment",
+  "description": "Threaded comment (data-model.md §6.4).",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "A comment. Record key: {fk}-{rootTid}-{tid}, where rootTid is the TID of the root post's key.",
+      "key": "any",
+      "record": {
+        "type": "object",
+        "required": [
+          "root",
+          "forum",
+          "body",
+          "createdAt"
+        ],
+        "properties": {
+          "root": {
+            "type": "ref",
+            "description": "The thread's post; cid is the version replied to.",
+            "ref": "com.atproto.repo.strongRef"
+          },
+          "parent": {
+            "type": "ref",
+            "description": "The comment replied to (same thread); absent means top-level.",
+            "ref": "com.atproto.repo.strongRef"
+          },
+          "forum": {
+            "type": "string",
+            "format": "at-uri",
+            "description": "at-uri of the forum declaration; MUST equal the root post's forum.",
+            "maxLength": 3000
+          },
+          "body": {
+            "type": "union",
+            "description": "Comment body. Inline only (no textBlob).",
+            "refs": [
+              "online.7778777.lessdugin.markdown"
+            ]
+          },
+          "quote": {
+            "type": "ref",
+            "description": "Quoted text, anchored in parent if present, otherwise in root.",
+            "ref": "online.7778777.lessdugin.defs#textQuote"
+          },
+          "retracted": {
+            "type": "boolean",
+            "description": "Retracted by the author; rendered struck through."
+          },
+          "moderatorHat": {
+            "type": "boolean",
+            "description": "Written as a moderator; shown only if the author is a current authority."
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "datetime",
+            "description": "Set once at creation by the writer's clock; never changed."
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "datetime",
+            "description": "Set on every update."
+          }
+        }
+      }
+    }
+  }
+}

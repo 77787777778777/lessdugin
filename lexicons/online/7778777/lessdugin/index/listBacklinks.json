@@ -1,0 +1,85 @@
+{
+  "lexicon": 1,
+  "id": "online.7778777.lessdugin.index.listBacklinks",
+  "description": "List records that link to a subject.",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "List records that link to a subject. Results are hints. Later phase, Reserved (P2): clients call it only if describeIndexer.features lists it.",
+      "parameters": {
+        "type": "params",
+        "required": [
+          "subject",
+          "collection"
+        ],
+        "properties": {
+          "subject": {
+            "type": "string",
+            "format": "at-uri",
+            "description": "The linked record.",
+            "maxLength": 3000
+          },
+          "collection": {
+            "type": "string",
+            "format": "nsid",
+            "description": "Collection of the linking records."
+          },
+          "path": {
+            "type": "string",
+            "description": "Field path of the link within the linking record.",
+            "maxLength": 256
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Page size.",
+            "minimum": 1,
+            "maximum": 100,
+            "default": 50
+          },
+          "cursor": {
+            "type": "string",
+            "description": "Opaque pagination cursor from a previous response.",
+            "maxLength": 512
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": [
+            "records",
+            "asOf",
+            "indexer"
+          ],
+          "properties": {
+            "records": {
+              "type": "array",
+              "description": "Linking records.",
+              "items": {
+                "type": "ref",
+                "ref": "online.7778777.lessdugin.index.defs#recordRef"
+              },
+              "maxLength": 100
+            },
+            "cursor": {
+              "type": "string",
+              "description": "Cursor for the next page; absent on the last page.",
+              "maxLength": 512
+            },
+            "asOf": {
+              "type": "ref",
+              "description": "Indexer state.",
+              "ref": "online.7778777.lessdugin.index.defs#asOf"
+            },
+            "indexer": {
+              "type": "ref",
+              "description": "Responding indexer.",
+              "ref": "online.7778777.lessdugin.index.defs#indexerInfo"
+            }
+          }
+        }
+      }
+    }
+  }
+}

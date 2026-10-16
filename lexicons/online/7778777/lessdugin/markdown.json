@@ -1,0 +1,63 @@
+{
+  "lexicon": 1,
+  "id": "online.7778777.lessdugin.markdown",
+  "description": "An LFM/1 markdown body (data-model.md §5).",
+  "defs": {
+    "main": {
+      "type": "object",
+      "description": "A markdown body; the only member of every lessdugin md union. Exactly one of text or textBlob MUST be present (core rule G7); textBlob is allowed only in post.body, wikiRevision.body, forum.about and sequence.body.",
+      "properties": {
+        "profile": {
+          "type": "string",
+          "description": "Markdown dialect. An unknown value is rendered as lfm/1 with a badge.",
+          "knownValues": [
+            "lfm/1"
+          ],
+          "default": "lfm/1",
+          "maxLength": 64
+        },
+        "text": {
+          "type": "string",
+          "description": "Inline LFM source.",
+          "maxLength": 100000
+        },
+        "textBlob": {
+          "type": "blob",
+          "description": "Spilled LFM source, UTF-8, uploaded as text/markdown. Readers accept any text/*.",
+          "accept": [
+            "text/*"
+          ],
+          "maxSize": 1000000
+        },
+        "media": {
+          "type": "array",
+          "description": "Media of this body; the only scope for cid: image URLs in it.",
+          "items": {
+            "type": "ref",
+            "ref": "online.7778777.lessdugin.defs#media"
+          },
+          "maxLength": 128
+        },
+        "mentions": {
+          "type": "array",
+          "description": "DIDs mentioned in the body. Derived by the writer; hint only.",
+          "items": {
+            "type": "string",
+            "format": "did"
+          },
+          "maxLength": 128
+        },
+        "links": {
+          "type": "array",
+          "description": "Canonical at-uris linked from the body. Derived by the writer; hint only (pingbacks are computed from rendered bodies).",
+          "items": {
+            "type": "string",
+            "format": "at-uri",
+            "maxLength": 3000
+          },
+          "maxLength": 256
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,417 @@
+{
+  "lexicon": 1,
+  "id": "online.7778777.lessdugin.forum",
+  "description": "Forum declaration (data-model.md §6.1).",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "A forum declaration in the owner's repo. Record key: the forum slug, ^[a-z0-9]+(-[a-z0-9]+)*$, at most 64 bytes (enforced by the core). The owner (repo DID) is an implicit admin of rank 3.",
+      "key": "any",
+      "record": {
+        "type": "object",
+        "required": [
+          "name",
+          "createdAt"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Display name.",
+            "maxLength": 1000,
+            "maxGraphemes": 100
+          },
+          "description": {
+            "type": "string",
+            "description": "Plain-text tagline.",
+            "maxLength": 5000,
+            "maxGraphemes": 500
+          },
+          "about": {
+            "type": "union",
+            "description": "Rules and introduction. MAY spill to textBlob.",
+            "refs": [
+              "online.7778777.lessdugin.markdown"
+            ]
+          },
+          "icon": {
+            "type": "blob",
+            "description": "Forum icon.",
+            "accept": [
+              "image/*"
+            ],
+            "maxSize": 2000000
+          },
+          "moderators": {
+            "type": "array",
+            "description": "Authorities other than the owner. The first entry for a DID wins; entries for the owner or with an unknown role are ignored.",
+            "items": {
+              "type": "ref",
+              "ref": "#moderator"
+            },
+            "maxLength": 64
+          },
+          "membership": {
+            "type": "string",
+            "description": "Membership mode. Writers MUST write it explicitly. open relies on public relay infrastructure; unknown values fall back to approval.",
+            "knownValues": [
+              "open",
+              "approval"
+            ],
+            "default": "approval",
+            "maxLength": 64
+          },
+          "defaultTier": {
+            "type": "string",
+            "description": "Tier of a post with no resolved #tier action.",
+            "knownValues": [
+              "personal",
+              "frontpage"
+            ],
+            "default": "personal",
+            "maxLength": 64
+          },
+          "featuredTags": {
+            "type": "array",
+            "description": "Tag slugs offered as filters.",
+            "items": {
+              "type": "string",
+              "maxLength": 64
+            },
+            "maxLength": 64
+          },
+          "policy": {
+            "type": "ref",
+            "description": "Behaviour IDs and parameters; every absent field takes its default.",
+            "ref": "#policy"
+          },
+          "reportContact": {
+            "type": "string",
+            "format": "uri",
+            "description": "Where to report problems: mailto:, https: or at:// (DM handle); shown via safe_href.",
+            "maxLength": 3000
+          },
+          "discovery": {
+            "type": "ref",
+            "description": "Optional discovery services.",
+            "ref": "#discovery"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "datetime",
+            "description": "Set once at creation by the writer's clock; never changed."
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "datetime",
+            "description": "Set on every update."
+          }
+        }
+      }
+    },
+    "moderator": {
+      "type": "object",
+      "description": "A moderator or admin listed by the owner. Authority comes only from the current declaration.",
+      "required": [
+        "did",
+        "role"
+      ],
+      "properties": {
+        "did": {
+          "type": "string",
+          "format": "did",
+          "description": "The authority's DID."
+        },
+        "role": {
+          "type": "string",
+          "description": "Rank: admin (2) or moderator (1). An unknown role makes the entry ignored.",
+          "knownValues": [
+            "admin",
+            "moderator"
+          ],
+          "maxLength": 64
+        },
+        "title": {
+          "type": "string",
+          "description": "Display title.",
+          "maxLength": 640,
+          "maxGraphemes": 64
+        }
+      }
+    },
+    "policy": {
+      "type": "object",
+      "description": "Forum behaviour selection. Unknown IDs or values take the default, with a banner.",
+      "properties": {
+        "moderation": {
+          "type": "string",
+          "description": "Moderation fold behaviour ID.",
+          "knownValues": [
+            "mod/1"
+          ],
+          "default": "mod/1",
+          "maxLength": 64
+        },
+        "karma": {
+          "type": "ref",
+          "description": "Karma parameters.",
+          "ref": "#karmaP"
+        },
+        "ranking": {
+          "type": "ref",
+          "description": "Ranking parameters.",
+          "ref": "#rankP"
+        },
+        "voting": {
+          "type": "string",
+          "description": "Voting UI: karma axis only, karma plus agreement, or both plus reacts.",
+          "knownValues": [
+            "karmaOnly",
+            "twoAxis",
+            "reacts"
+          ],
+          "default": "reacts",
+          "maxLength": 64
+        },
+        "reactPalette": {
+          "type": "string",
+          "description": "React palette behaviour ID.",
+          "knownValues": [
+            "default/1"
+          ],
+          "default": "default/1",
+          "maxLength": 64
+        },
+        "gates": {
+          "type": "ref",
+          "description": "Karma thresholds; an absent gate uses the karma/1 default.",
+          "ref": "#gates"
+        },
+        "display": {
+          "type": "ref",
+          "description": "Display parameters.",
+          "ref": "#display"
+        },
+        "authorModeration": {
+          "type": "boolean",
+          "description": "Whether post authors may moderate their own threads (author scope).",
+          "default": true
+        },
+        "tagCreation": {
+          "type": "string",
+          "description": "Who may create tags.",
+          "knownValues": [
+            "open",
+            "moderators"
+          ],
+          "default": "open",
+          "maxLength": 64
+        }
+      }
+    },
+    "karmaP": {
+      "type": "object",
+      "description": "karma/1 parameters.",
+      "properties": {
+        "algorithm": {
+          "type": "string",
+          "description": "Karma behaviour ID.",
+          "knownValues": [
+            "karma/1"
+          ],
+          "default": "karma/1",
+          "maxLength": 64
+        },
+        "pairCap": {
+          "type": "integer",
+          "description": "Per-(voter, author) cap.",
+          "minimum": 1,
+          "maximum": 1000000,
+          "default": 25
+        },
+        "establish": {
+          "type": "integer",
+          "description": "K1 needed to become established.",
+          "minimum": 0,
+          "maximum": 1000000,
+          "default": 1
+        },
+        "establishSeeds": {
+          "type": "integer",
+          "description": "Distinct seed upvoters needed to become established.",
+          "minimum": 1,
+          "maximum": 1000,
+          "default": 2
+        }
+      }
+    },
+    "rankP": {
+      "type": "object",
+      "description": "magic/1 parameters.",
+      "properties": {
+        "algorithm": {
+          "type": "string",
+          "description": "Ranking behaviour ID.",
+          "knownValues": [
+            "magic/1"
+          ],
+          "default": "magic/1",
+          "maxLength": 64
+        },
+        "offsetHours": {
+          "type": "integer",
+          "description": "Age offset in hours.",
+          "minimum": 1,
+          "maximum": 10000,
+          "default": 2
+        },
+        "exponentMilli": {
+          "type": "integer",
+          "description": "Gravity exponent times 1000.",
+          "minimum": 0,
+          "maximum": 10000,
+          "default": 1150
+        },
+        "curatedBonus": {
+          "type": "integer",
+          "description": "Score bonus of curated posts.",
+          "minimum": -1000000,
+          "maximum": 1000000,
+          "default": 10
+        },
+        "frontpageBonus": {
+          "type": "integer",
+          "description": "Score bonus of frontpage posts.",
+          "minimum": -1000000,
+          "maximum": 1000000,
+          "default": 0
+        },
+        "cutoffDays": {
+          "type": "integer",
+          "description": "Items older than this are excluded from the magic sort only.",
+          "minimum": 1,
+          "maximum": 36500,
+          "default": 90
+        }
+      }
+    },
+    "gates": {
+      "type": "object",
+      "description": "Karma thresholds (social.md). An absent field means the karma/1 default; authorities bypass every gate.",
+      "properties": {
+        "reactSecond": {
+          "type": "integer",
+          "description": "Karma to add an existing react.",
+          "minimum": -1000000000,
+          "maximum": 1000000000
+        },
+        "reactCreate": {
+          "type": "integer",
+          "description": "Karma to be first with a react on an item.",
+          "minimum": -1000000000,
+          "maximum": 1000000000
+        },
+        "reactAnti": {
+          "type": "integer",
+          "description": "Karma to react with stance against.",
+          "minimum": -1000000000,
+          "maximum": 1000000000
+        },
+        "authorModPersonal": {
+          "type": "integer",
+          "description": "Karma to moderate one's own personal-tier posts.",
+          "minimum": -1000000000,
+          "maximum": 1000000000
+        },
+        "authorModFrontpage": {
+          "type": "integer",
+          "description": "Karma to moderate one's own frontpage posts.",
+          "minimum": -1000000000,
+          "maximum": 1000000000
+        },
+        "createTag": {
+          "type": "integer",
+          "description": "Karma to create a tag.",
+          "minimum": -1000000000,
+          "maximum": 1000000000
+        },
+        "wikiEdit": {
+          "type": "integer",
+          "description": "Karma to edit a wiki page.",
+          "minimum": -1000000000,
+          "maximum": 1000000000
+        },
+        "sequence": {
+          "type": "integer",
+          "description": "Karma to have a sequence listed in the library.",
+          "minimum": -1000000000,
+          "maximum": 1000000000
+        }
+      }
+    },
+    "display": {
+      "type": "object",
+      "description": "Visibility parameters.",
+      "properties": {
+        "collapseBelow": {
+          "type": "integer",
+          "description": "Items whose score is at or below this are collapsed (social.md V9).",
+          "minimum": -1000000,
+          "maximum": 1000000,
+          "default": -5
+        },
+        "newUsers": {
+          "type": "string",
+          "description": "Treatment of content by users not yet established.",
+          "knownValues": [
+            "show",
+            "collapse",
+            "hide"
+          ],
+          "default": "collapse",
+          "maxLength": 64
+        }
+      }
+    },
+    "discovery": {
+      "type": "object",
+      "description": "Discovery services declared by the owner.",
+      "properties": {
+        "indexers": {
+          "type": "array",
+          "description": "Indexers clients MAY use after one-time user consent.",
+          "items": {
+            "type": "ref",
+            "ref": "#endpoint"
+          },
+          "maxLength": 8
+        }
+      }
+    },
+    "endpoint": {
+      "type": "object",
+      "description": "A service endpoint. Ignored unless url is https: with a hostname and no explicit port.",
+      "required": [
+        "url"
+      ],
+      "properties": {
+        "url": {
+          "type": "string",
+          "format": "uri",
+          "description": "Base URL of the service.",
+          "maxLength": 3000
+        },
+        "did": {
+          "type": "string",
+          "format": "did",
+          "description": "The service's DID."
+        },
+        "note": {
+          "type": "string",
+          "description": "Operator note.",
+          "maxLength": 3000,
+          "maxGraphemes": 300
+        }
+      }
+    }
+  }
+}

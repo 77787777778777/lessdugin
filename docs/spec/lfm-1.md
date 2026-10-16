@@ -492,7 +492,7 @@ The pre-scan runs on the raw text, so a disabled word inside `\text{}` or after 
 
 ### 7.2 Engine (default mode)
 
-**Engine.** `math-core` (version pinned exactly by spike S10). It converts each expression independently with `convert_with_local_state`, under this configuration:
+**Engine.** `math-core`, pinned exactly at `=0.9.0` (ADR 0002, spike S10). ADR 0002 also specifies a style-to-class MathML normaliser and three more disabled control words that §7.1 and §7.3 do not yet contain; until they are folded in at M4, see `README.md` §1.4 K3. It converts each expression independently with `convert_with_local_state`, under this configuration:
 - `MathCoreConfig { pretty_print: Never, xml_namespace: false, ignore_unknown_commands: false, annotation: false, allow_unreliable_rendering: false, global_group: false, unicode_substitution: Conventional, max_expansions: 1000, ..Default }`;
 - no custom macros;
 - display mode is `Inline` for `InlineMath` and `Block` for `DisplayMath`.
@@ -539,7 +539,7 @@ A math error renders as `<code class="math-error">TEX</code>`, for inline and di
 
 ### 7.5 Temml fallback mode
 
-If S10 rejects math-core, the release is built with `MATH_MODE = Temml`. This is a release-wide constant included in `RENDERER_VERSION`, and every client of a release MUST use the same mode.
+S10 accepted math-core (ADR 0002), so v1 releases use the default mode. Temml mode is the documented contingency: if a math-core upgrade regresses the `mathml` vectors and cannot be pinned around, the release is built with `MATH_MODE = Temml`. This is a release-wide constant included in `RENDERER_VERSION`, and every client of a release MUST use the same mode.
 
 **What the renderer emits.** Expressions that pass §7.1 render as `<span data-tex="inline">TEX</span>` or `<span data-tex="block">TEX</span>`. Errors render as in §7.4.
 
@@ -598,7 +598,7 @@ The root is `<div class="lfm" dir="auto">` + `"\n"` + body + footnotes + gallery
 | Gallery | `<div class="gallery">` + one item per line + `</div>` |
 | Truncation (`flags.truncated`) | `<p class="notice">[content truncated: too many elements]</p>`, after the body and before the footnotes |
 
-**Links.** External links always carry `rel="nofollow ugc noopener noreferrer"`. Removing `nofollow` for high-karma authors (a ForumMagnum feature) is **Reserved (deferred)**. Internal, anchor and mention links have no `rel`.
+**Links.** External links always carry `rel="nofollow ugc noopener noreferrer"`. Removing `nofollow` for high-karma authors (a ForumMagnum feature) is not planned (Never, `docs/plan.md` §6.5): it would make rendering depend on the fold. Internal, anchor and mention links have no `rel`.
 
 **Direction.** The root gets `dir="auto"`, and so does every `p`, `h1`–`h6`, `li`, `th`, `td`, `summary` and `figcaption`. The SPA stylesheet sets `unicode-bidi: isolate` on them, and wraps names in `<bdi>` outside rendered content.
 
@@ -992,7 +992,7 @@ lcp_prefix(a, b) = length of the longest common prefix of a and b
 
 ## 13. Test vectors (`testdata/vectors/lfm1/`)
 
-**Format.** Each file is a JSON array of `{name, input, expected}` (synthesis §7).
+**Format.** Each file has the common vector-file shape of `README.md` §5.1 (`{behaviour: "lfm/1", kind, vectors}`); each vector is `{name, input, expected}`.
 - `input` is `{text, media?, profile?}` for render vectors, or the arguments of the function under test.
 - `expected` holds only the fields the category asserts: `html`, `html_temml`, `styled`, `text` (P), `text_x` (P_x), `excerpt`, `word_count`, `read_minutes`, `toc`, `links`, `mentions`, `media_used`, `anchors` or `flags`.
 
@@ -1079,7 +1079,7 @@ These resolve ambiguities in the design. Each takes the simplest safe option.
 25. **Media alt** falls back from the markdown alt to `media.alt`. The P projection uses only the markdown alt.
 
 **Open questions**
-- **math-core version.** 0.9.0 was published on 2026-10-12, less than two weeks before this spec was written. S10 must fix the exact pin, measure what stripping `style` and `class` costs visually, and decide between math-core and Temml.
+- **math-core version.** *(Resolved by ADR 0002: math-core `=0.9.0`, Temml only as a contingency.)* ADR 0002's MathML normaliser (a closed set of `style` values mapped to `mc-*` classes, `color` to `mathcolor`) and its extra disabled words `\label`, `\eqref`, `\ref` conflict with §7.1, §7.3 and the current vectors; `README.md` §1.4 K3 records the interim rule.
 - **General_Category data.** The heading-slug charset needs it. The `lessdugin-markdown` dependency list (synthesis §6.2) has no such table, so a small dependency (for example `unicode-general-category`) must be added and pinned with the Unicode version.
 - **HTML serialiser drift.** Escaping `<` and `>` in attributes is recent browser behaviour. The DOMPurify equality vectors must pin Chromium and jsdom, and may need a normalisation shim if jsdom lags.
 - **Shared definitions.** `short_did` (§5.4) and the badge set (§9.1) should be shared with `glossary.md` and the TUI and CLI specs once those exist.

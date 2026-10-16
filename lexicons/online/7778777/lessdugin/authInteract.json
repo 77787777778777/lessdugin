@@ -1,0 +1,25 @@
+{
+  "lexicon": 1,
+  "id": "online.7778777.lessdugin.authInteract",
+  "description": "Permission set: lessdugin interaction (data-model.md §10.2).",
+  "defs": {
+    "main": {
+      "type": "permission-set",
+      "description": "Membership, comments, revisions and opinions. For lightweight third-party clients.",
+      "title": "lessdugin (interact)",
+      "detail": "Join lessdugin forums, write, edit and delete your comments, and vote and react.",
+      "permissions": [
+        {
+          "type": "permission",
+          "resource": "repo",
+          "collection": [
+            "online.7778777.lessdugin.membership",
+            "online.7778777.lessdugin.comment",
+            "online.7778777.lessdugin.revision",
+            "online.7778777.lessdugin.opinion"
+          ]
+        }
+      ]
+    }
+  }
+}

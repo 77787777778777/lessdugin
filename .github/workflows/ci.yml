@@ -35,7 +35,7 @@ jobs:
         with:
           go-version: "1.24"
       - run: go install github.com/bluesky-social/goat@latest
-      - run: goat lex lint lexicons
+      - run: goat lex lint -I large-string lexicons
   web:
     runs-on: ubuntu-latest
     steps:

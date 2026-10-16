@@ -77,7 +77,7 @@ when the engine is dropped or the corresponding stop method is called.
 |---|---|
 | `resolve_actor(input: &str)` | `ActorView` (handle verification state included) |
 | `accounts()` | `Vec<AccountView>` |
-| `add_account(AccountInfo { did, pds, auth: AuthKind })` | called by host-specific login code after a successful login; verifies the login binding (`sync.md` §identity) |
+| `add_account(AccountInfo { did, pds, auth: AuthKind })` | called by host-specific login code after a successful login; verifies the login binding (`sync.md` §3.6) |
 | `remove_account(did, purge: bool)` | – |
 | `set_active_account(did)` / `active_account()` | – |
 | `parse_ref(input, RefContext) -> Ref` | accepts at-uris, SPA URLs (`#/p/…`, `#/c/…`, `#/f/…`, `#/s/…`, `#/u/…`, `#/at/…`), `handle/rkey` (post in the current forum), `did`, `handle`. Listing indices (`3`, `c12`) are resolved by the CLI before calling. |
@@ -104,7 +104,7 @@ when the engine is dropped or the corresponding stop method is called.
 | `sync_thread(post_uri, SyncOpts)` | P0 fetch of the thread's participants' ranges |
 | `live_tail()` | long-lived: Jetstream / polling / indexer `getChanges`, feeds the dirty queue |
 | `outbox_pump()` | long-lived: drains the outbox, one write in flight per account |
-| `background_verify()` | long-lived (P7; no-op in v1 unless `verify = Proof`) |
+| `background_verify()` | long-lived; `verify = Proof` is Reserved (P2) (`sync.md` §2.3), so in v1 it is a no-op |
 
 ```
 SyncReport { dto, forum, reposTotal, reposComplete, reposStale, reposUnavailable,
@@ -203,8 +203,9 @@ HiddenReason  = { kind: "notParticipant" } | { kind: "moderationUnavailable" }
               | { kind: "banned" } | { kind: "restricted" } | { kind: "authorModerated" }
               | { kind: "locked" } | { kind: "newUser" }
 Badges        { verified?: true, edited?: true, futureDated?: true, identityUnverified?: true,
-                stale?: true, hint?: true, inconsistentTimestamps?: true }
-ScoreView     { score: i64, agreement: i64, unweighted: u32, earlierVersionVotes: u32,
+                stale?: true, hint?: true, pending?: true, inconsistentTimestamps?: true }   // sync.md §1.6
+ScoreView     { score: i64, agreement?: i64 /* absent when policy.voting = karmaOnly, social.md §7 */,
+                unweighted: u32, earlierVersionVotes: u32,
                 mine?: { karma?: KarmaValue, agreement?: AgreementValue } }
 ReactTally    { react, label, glyph, for: u32, against: u32, quote?: TextQuote, anchor?: Anchor,
                 creator?: did, mine?: "for"|"against" }

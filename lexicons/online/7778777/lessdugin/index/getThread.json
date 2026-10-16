@@ -1,0 +1,97 @@
+{
+  "lexicon": 1,
+  "id": "online.7778777.lessdugin.index.getThread",
+  "description": "Get a post and its comments in pre-order.",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "Get a post and its comments in pre-order. First pass (M6).",
+      "parameters": {
+        "type": "params",
+        "required": [
+          "post"
+        ],
+        "properties": {
+          "post": {
+            "type": "string",
+            "format": "at-uri",
+            "description": "at-uri of the post.",
+            "maxLength": 3000
+          },
+          "sort": {
+            "type": "string",
+            "description": "Sibling order.",
+            "knownValues": [
+              "magic",
+              "top",
+              "new",
+              "old",
+              "latestReply"
+            ],
+            "default": "magic",
+            "maxLength": 64
+          },
+          "hydrate": {
+            "type": "boolean",
+            "description": "Include record values (hints) in recordRef.value."
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": [
+            "post",
+            "comments",
+            "truncated",
+            "inputDigest",
+            "asOf",
+            "indexer"
+          ],
+          "properties": {
+            "post": {
+              "type": "ref",
+              "description": "The post.",
+              "ref": "online.7778777.lessdugin.index.defs#postView"
+            },
+            "comments": {
+              "type": "array",
+              "description": "Comments in pre-order.",
+              "items": {
+                "type": "ref",
+                "ref": "online.7778777.lessdugin.index.defs#commentView"
+              },
+              "maxLength": 10000
+            },
+            "truncated": {
+              "type": "boolean",
+              "description": "Whether comments were cut at 10,000."
+            },
+            "inputDigest": {
+              "type": "string",
+              "description": "Hex sha256 fold input digest (social.md).",
+              "maxLength": 64
+            },
+            "asOf": {
+              "type": "ref",
+              "description": "Indexer state.",
+              "ref": "online.7778777.lessdugin.index.defs#asOf"
+            },
+            "indexer": {
+              "type": "ref",
+              "description": "Responding indexer.",
+              "ref": "online.7778777.lessdugin.index.defs#indexerInfo"
+            }
+          }
+        }
+      },
+      "errors": [
+        {
+          "name": "NotIndexed",
+          "description": "This indexer does not serve the post's forum, or does not know the post."
+        }
+      ]
+    }
+  }
+}
