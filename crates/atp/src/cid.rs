@@ -9,7 +9,8 @@
 //!   (string must be lowercase base32 `b…`; bytes must contain exactly one CID). CIDv0 is always
 //!   rejected: atproto requires v1 everywhere.
 //! - [`check_blessed`] / [`parse_blessed`]: additionally require sha2-256 and dag-cbor or raw.
-//!   Used for commit, MST node and CAR-root links, where the spec demands the blessed format.
+//!   Used for CAR blocks, followed MST links and data-model (record) links, where the specs demand
+//!   the blessed format.
 //! - [`verify`]: recomputes sha2-256 over bytes; non-sha256 CIDs cannot be verified and fail.
 //! - [`is_valid_cid_syntax`]: the loose Lexicon `cid` string-format check (any multibase).
 

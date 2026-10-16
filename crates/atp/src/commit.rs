@@ -205,7 +205,8 @@ impl UnsignedCommit {
 
     /// The bytes to sign: canonical DAG-CBOR without `sig`.
     pub fn signing_bytes(&self) -> Vec<u8> {
-        crate::dagcbor::encode_with(&Ipld::Map(self.map()), &Limits::uncapped(8)).unwrap_or_default()
+        crate::dagcbor::encode_with(&Ipld::Map(self.map()), &Limits::uncapped(8))
+            .unwrap_or_default()
     }
 
     /// The signed commit block and its CID, given a 64-byte signature over
@@ -213,7 +214,8 @@ impl UnsignedCommit {
     pub fn signed(&self, sig: &[u8]) -> (Cid, Vec<u8>) {
         let mut m = self.map();
         m.insert("sig".to_owned(), Ipld::Bytes(sig.to_vec()));
-        let bytes = crate::dagcbor::encode_with(&Ipld::Map(m), &Limits::uncapped(8)).unwrap_or_default();
+        let bytes =
+            crate::dagcbor::encode_with(&Ipld::Map(m), &Limits::uncapped(8)).unwrap_or_default();
         (crate::cid::for_dag_cbor(&bytes), bytes)
     }
 }
@@ -343,7 +345,10 @@ mod tests {
             Commit::decode(&[0xa0]),
             Err(CommitError::Malformed("did must be a string"))
         );
-        assert_eq!(Commit::decode(&[0x80]), Err(CommitError::Malformed("not a map")));
+        assert_eq!(
+            Commit::decode(&[0x80]),
+            Err(CommitError::Malformed("not a map"))
+        );
         // non-canonical CBOR (unsorted keys) is NonCanonical, not BadCommit
         assert!(matches!(
             Commit::decode(&[0xa2, 0x61, b'b', 0x01, 0x61, b'a', 0x02]),
@@ -352,11 +357,7 @@ mod tests {
     }
 
     /// Signs a commit map with `extra` fields merged in.
-    fn signed_with(
-        sk: &SigningKey,
-        u: &UnsignedCommit,
-        extra: Vec<(&str, Ipld)>,
-    ) -> Vec<u8> {
+    fn signed_with(sk: &SigningKey, u: &UnsignedCommit, extra: Vec<(&str, Ipld)>) -> Vec<u8> {
         let mut m = u.map();
         for (k, v) in extra {
             m.insert(k.to_owned(), v);
@@ -404,7 +405,9 @@ mod tests {
         let bytes = signed_with(&sk, &u, vec![("ext", Ipld::List(vec![deep]))]);
         assert!(matches!(
             Commit::decode(&bytes),
-            Err(CommitError::Decode(DataModelError::DepthExceeded { max: 32 }))
+            Err(CommitError::Decode(DataModelError::DepthExceeded {
+                max: 32
+            }))
         ));
         // `data` and `prev` may be any CID (the walk decides what a non-node `data` means)
         let mut odd = u.clone();
@@ -455,7 +458,8 @@ mod tests {
         let future = Tid::from_parts((NOW + MAX_FUTURE_SKEW_MICROS + 1) as u64, 0).unwrap();
         let bytes = signed_with(&sk, &u, vec![("rev", Ipld::String(future.to_string()))]);
         let c = Commit::decode(&bytes).unwrap();
-        let wrong = PublicKey::Secp256k1(*SigningKey::from_slice(&[1u8; 32]).unwrap().verifying_key());
+        let wrong =
+            PublicKey::Secp256k1(*SigningKey::from_slice(&[1u8; 32]).unwrap().verifying_key());
         assert!(matches!(
             c.verify(&u.did, &wrong, NOW),
             Err(CommitError::FutureRev(_))

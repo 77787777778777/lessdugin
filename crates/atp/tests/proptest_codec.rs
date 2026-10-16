@@ -6,7 +6,8 @@ use std::collections::BTreeMap;
 
 use lessdugin_atp::car::{CarLimits, read_car, write_car};
 use lessdugin_atp::commit::Commit;
-use lessdugin_atp::proof::{ProofCaps, verify_record_proof};
+use lessdugin_atp::datamodel::Limits;
+use lessdugin_atp::proof::{BundleCaps, ProofBundle, ProofCaps, verify_record_proof};
 use lessdugin_atp::syntax::{
     AtIdentifier, AtUri, Datetime, Did, Handle, LooseAtUri, Nsid, RecordKey, Tid,
 };
@@ -79,6 +80,53 @@ proptest! {
         let _ = Commit::decode(&bytes);
         let _ = lessdugin_atp::did_doc::DidDocument::parse(&bytes);
         let _ = cid::from_bytes(&bytes);
+        let _ = ProofBundle::parse(&bytes, &BundleCaps::default());
+        // the raw navigators never panic, even on input that was not validated
+        if let Some(it) = dagcbor::map_entries_raw(&bytes) {
+            for (_, v) in it {
+                let _ = dagcbor::decode_scalar(v);
+            }
+        }
+        if let Some(it) = dagcbor::list_items_raw(&bytes) {
+            for v in it {
+                let _ = dagcbor::decode_scalar(v);
+            }
+        }
+    }
+
+    #[test]
+    fn validate_agrees_with_decode(head in 0x80u8..0xe0, bytes in proptest::collection::vec(any::<u8>(), 0..256)) {
+        let mut b = vec![head];
+        b.extend(bytes);
+        prop_assert_eq!(
+            dagcbor::validate_with(&b, &Limits::default()),
+            dagcbor::decode(&b).map(|_| ())
+        );
+        if dagcbor::decode(&b).is_ok() {
+            prop_assert!(dagcbor::validate_with(&b, &Limits::STRICT).is_ok());
+        }
+    }
+
+    #[test]
+    fn raw_navigation_matches_decode(v in arb_ipld()) {
+        let bytes = dagcbor::encode(&v).unwrap();
+        match &v {
+            Ipld::Map(m) => {
+                let entries: Vec<_> = dagcbor::map_entries_raw(&bytes).unwrap().collect();
+                prop_assert_eq!(entries.len(), m.len());
+                for (k, raw) in entries {
+                    prop_assert_eq!(&dagcbor::decode(raw).unwrap(), &m[k]);
+                }
+            }
+            Ipld::List(l) => {
+                let items: Vec<_> = dagcbor::list_items_raw(&bytes).unwrap().collect();
+                prop_assert_eq!(items.len(), l.len());
+                for (raw, item) in items.into_iter().zip(l) {
+                    prop_assert_eq!(&dagcbor::decode(raw).unwrap(), item);
+                }
+            }
+            scalar => prop_assert_eq!(dagcbor::decode_scalar(&bytes), Some(scalar.clone())),
+        }
     }
 
     #[test]

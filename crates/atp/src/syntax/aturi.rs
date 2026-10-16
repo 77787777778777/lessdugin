@@ -342,7 +342,10 @@ mod tests {
         ] {
             assert!(AtUri::parse(bad).is_err(), "{bad}");
             assert!(bad.parse::<AtUri>().is_err(), "{bad}");
-            assert!(serde_json::from_value::<AtUri>(serde_json::json!(bad)).is_err(), "{bad}");
+            assert!(
+                serde_json::from_value::<AtUri>(serde_json::json!(bad)).is_err(),
+                "{bad}"
+            );
             let loose = LooseAtUri::parse(bad).unwrap();
             assert!(loose.to_strict().is_none(), "{bad}");
         }

@@ -449,6 +449,34 @@ pub fn validate(v: &Ipld) -> Result<()> {
     validate_inner(v, 0, &Limits::default())
 }
 
+/// [`validate`] with an explicit depth limit (`limits.max_depth`).
+pub fn validate_with(v: &Ipld, limits: &Limits) -> Result<()> {
+    validate_inner(v, 0, limits)
+}
+
+/// The nesting depth of a value as `limits.md` §1 counts it, on the data model: the number of
+/// maps and lists on the path from the root to the deepest value (a root map is depth 1, a scalar
+/// root 0). Links and byte strings are leaves, so a `{"$link": …}` or `{"$bytes": …}` object adds
+/// nothing, and a record has the same depth in JSON and in DAG-CBOR. Iterative.
+pub fn nesting_depth(v: &Ipld) -> usize {
+    let mut max = 0;
+    let mut stack = vec![(v, 0usize)];
+    while let Some((v, d)) = stack.pop() {
+        match v {
+            Ipld::List(items) => {
+                max = max.max(d + 1);
+                stack.extend(items.iter().map(|i| (i, d + 1)));
+            }
+            Ipld::Map(map) => {
+                max = max.max(d + 1);
+                stack.extend(map.values().map(|i| (i, d + 1)));
+            }
+            _ => {}
+        }
+    }
+    max
+}
+
 fn validate_inner(v: &Ipld, depth: usize, limits: &Limits) -> Result<()> {
     match v {
         Ipld::Float(_) => Err(DataModelError::Float),
@@ -474,7 +502,18 @@ fn validate_inner(v: &Ipld, depth: usize, limits: &Limits) -> Result<()> {
 
 /// Encodes a JSON record as canonical DAG-CBOR.
 pub fn record_to_cbor(v: &Value) -> Result<Vec<u8>> {
-    dagcbor::encode(&record_json_to_ipld(v)?)
+    record_to_cbor_with(v, &Limits::default())
+}
+
+/// Encodes a JSON record as canonical DAG-CBOR under explicit limits, used for both the
+/// conversion and the encoding. For example, admission (`sync.md` §5.5) converts and CID-checks
+/// records up to `NESTING_MAX_DOCUMENT` (36) deep, and validity rule G10 then rejects a depth
+/// over 32 ([`nesting_depth`]).
+pub fn record_to_cbor_with(v: &Value, limits: &Limits) -> Result<Vec<u8>> {
+    if !v.is_object() {
+        return Err(DataModelError::NotAnObject);
+    }
+    dagcbor::encode_with(&json_to_ipld_with(v, limits)?, limits)
 }
 
 /// The CID of a JSON record: sha2-256 CIDv1 (dag-cbor) of its canonical DAG-CBOR encoding.
@@ -482,13 +521,23 @@ pub fn record_cid(v: &Value) -> Result<Cid> {
     Ok(crate::cid::for_dag_cbor(&record_to_cbor(v)?))
 }
 
+/// [`record_cid`] under explicit limits (see [`record_to_cbor_with`]).
+pub fn record_cid_with(v: &Value, limits: &Limits) -> Result<Cid> {
+    Ok(crate::cid::for_dag_cbor(&record_to_cbor_with(v, limits)?))
+}
+
 /// Decodes a DAG-CBOR record block: strict decode, top-level map, data-model validation.
 pub fn record_from_cbor(bytes: &[u8]) -> Result<Ipld> {
-    let v = dagcbor::decode(bytes)?;
+    record_from_cbor_with(bytes, &Limits::default())
+}
+
+/// [`record_from_cbor`] under explicit limits (decoding and validation).
+pub fn record_from_cbor_with(bytes: &[u8], limits: &Limits) -> Result<Ipld> {
+    let v = dagcbor::decode_with(bytes, limits)?;
     if !matches!(v, Ipld::Map(_)) {
         return Err(DataModelError::NotAnObject);
     }
-    validate(&v)?;
+    validate_with(&v, limits)?;
     Ok(v)
 }
 
@@ -708,6 +757,178 @@ mod tests {
         assert_eq!(
             cids.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
             vec![C, other]
+        );
+    }
+
+    #[test]
+    fn whole_number_floats_are_correctly_rounded() {
+        for (s, want) in [
+            ("9007199254740991.0", 9_007_199_254_740_991i64),
+            ("-9007199254740991.0", -9_007_199_254_740_991),
+            ("9007199254665365.000000", 9_007_199_254_665_365),
+            ("123.000000000000000000000", 123),
+            ("1.23e2", 123),
+            ("100000000000000000000e-18", 100),
+            ("-0.0", 0),
+        ] {
+            let v: Value = serde_json::from_str(s).unwrap();
+            assert_eq!(
+                json_to_ipld(&v).unwrap(),
+                Ipld::Integer(i128::from(want)),
+                "{s}"
+            );
+        }
+        // agrees with the correctly rounded `str::parse::<f64>` (what JavaScript does) on the
+        // inputs that the default serde_json parser got wrong
+        for i in 0..20_000u64 {
+            let n = 9_007_199_254_740_991 - i * 37_813;
+            for suffix in [".0", ".00", ".000000"] {
+                let s = format!("{n}{suffix}");
+                let v: Value = serde_json::from_str(&s).unwrap();
+                assert_eq!(v.as_f64(), Some(s.parse::<f64>().unwrap()), "{s}");
+                assert_eq!(
+                    json_to_ipld(&v).unwrap(),
+                    Ipld::Integer(i128::from(n)),
+                    "{s}"
+                );
+            }
+        }
+        // 2^53 and above are not safe integers
+        for s in ["9007199254740992.0", "9007199254740993.0", "1e16"] {
+            let v: Value = serde_json::from_str(s).unwrap();
+            assert_eq!(json_to_ipld(&v), Err(DataModelError::Float), "{s}");
+        }
+    }
+
+    #[test]
+    fn only_blessed_cids() {
+        // dag-pb (sha2-256) is a valid CIDv1 but not part of the atproto data model
+        let pb = "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi";
+        assert!(crate::cid::parse(pb).is_ok());
+        let v = json!({"$type": "a.b.c", "l": {"$link": pb}});
+        assert!(matches!(
+            record_json_to_ipld(&v),
+            Err(DataModelError::InvalidLink(_))
+        ));
+        assert!(record_cid(&v).is_err());
+        // an identity-hash link inside CBOR: strict DAG-CBOR, but not a valid record
+        let mh = multihash::Multihash::<64>::wrap(0x00, b"hello").unwrap();
+        let id = Cid::new_v1(crate::cid::DAG_CBOR, mh);
+        let m = Ipld::Map([("x".to_owned(), Ipld::Link(id))].into());
+        let b = dagcbor::encode(&m).unwrap();
+        assert_eq!(dagcbor::decode(&b).unwrap(), m);
+        assert!(matches!(
+            record_from_cbor(&b),
+            Err(DataModelError::InvalidLink(_))
+        ));
+        assert!(validate(&m).is_err());
+        assert!(ipld_to_json(&m).is_err());
+        // a blob ref must be a raw-codec CID
+        let cbor_ref = "bafyreie5cvv4h45feadgeuwhbcutmh6t2ceseocckahdoe6uat64zmz454";
+        let blob = json!({"$type": "blob", "ref": {"$link": cbor_ref}, "mimeType": "image/png", "size": 1});
+        assert_eq!(
+            json_to_ipld(&json!({"b": blob})),
+            Err(DataModelError::InvalidBlob(
+                "ref must be a blessed CID with the raw codec"
+            ))
+        );
+        let mut raw_map = BTreeMap::new();
+        raw_map.insert("$type".to_owned(), Ipld::String("blob".into()));
+        raw_map.insert(
+            "ref".to_owned(),
+            Ipld::Link(crate::cid::parse(cbor_ref).unwrap()),
+        );
+        raw_map.insert("mimeType".to_owned(), Ipld::String("image/png".into()));
+        raw_map.insert("size".to_owned(), Ipld::Integer(1));
+        let raw_map = Ipld::Map(raw_map);
+        assert!(blob_refs(&raw_map).is_empty());
+        assert!(validate(&raw_map).is_err());
+        // raw and dag-cbor links elsewhere are fine
+        assert!(json_to_ipld(&json!({"a": {"$link": cbor_ref}, "b": {"$link": C}})).is_ok());
+    }
+
+    #[test]
+    fn bytes_cap_does_not_overflow() {
+        let lim = Limits {
+            max_bytes_len: usize::MAX,
+            ..Limits::default()
+        };
+        assert_eq!(
+            json_to_ipld_with(&json!({"$bytes": "AAAA"}), &lim).unwrap(),
+            Ipld::Bytes(vec![0, 0, 0])
+        );
+    }
+
+    #[test]
+    fn depth_counts_data_model_containers() {
+        let objects = |n: usize| {
+            let mut v = json!(1);
+            for _ in 0..n {
+                v = json!({"a": v});
+            }
+            v
+        };
+        assert!(json_to_ipld(&objects(32)).is_ok());
+        assert_eq!(
+            json_to_ipld(&objects(33)),
+            Err(DataModelError::DepthExceeded { max: 32 })
+        );
+        // alternating maps and lists
+        let mut v = json!(null);
+        for i in 0..32 {
+            v = if i % 2 == 0 {
+                json!([v])
+            } else {
+                json!({"k": v})
+            };
+        }
+        let ipld = json_to_ipld(&v).unwrap();
+        let cbor = dagcbor::encode(&ipld).unwrap();
+        assert_eq!(record_from_cbor(&cbor).unwrap(), ipld);
+        assert!(json_to_ipld(&json!({"top": v})).is_err());
+        // `$link` / `$bytes` objects are leaves, as their DAG-CBOR forms are: 32 containers
+        // around one is the limit in both encodings
+        for leaf in [json!({"$link": C}), json!({"$bytes": "AAE"})] {
+            let mut v = leaf;
+            for _ in 0..31 {
+                v = json!([v]);
+            }
+            let v = json!({"x": v});
+            let ipld = json_to_ipld(&v).unwrap();
+            let cbor = dagcbor::encode(&ipld).unwrap();
+            assert_eq!(record_from_cbor(&cbor).unwrap(), ipld);
+            assert_eq!(record_cbor_to_json(&cbor).unwrap(), v);
+            let deeper = json!([v]);
+            assert!(json_to_ipld(&deeper).is_err());
+            let ipld = Ipld::List(vec![ipld]);
+            assert_eq!(nesting_depth(&ipld), 33);
+            assert!(dagcbor::encode(&ipld).is_err());
+        }
+        assert_eq!(nesting_depth(&Ipld::Integer(1)), 0);
+        assert_eq!(
+            nesting_depth(&json_to_ipld(&json!({"a": [], "b": [[{}]]})).unwrap()),
+            4
+        );
+        // admission converts deeper records under the document limit; G10 then judges the depth
+        let doc = Limits {
+            max_depth: 36,
+            ..Limits::default()
+        };
+        let deep = objects(34);
+        assert!(record_to_cbor(&deep).is_err());
+        let cbor = record_to_cbor_with(&deep, &doc).unwrap();
+        assert_eq!(
+            record_cid_with(&deep, &doc).unwrap(),
+            crate::cid::for_dag_cbor(&cbor)
+        );
+        assert!(record_from_cbor(&cbor).is_err());
+        let back = record_from_cbor_with(&cbor, &doc).unwrap();
+        assert_eq!(nesting_depth(&back), 34);
+        assert_eq!(dagcbor::encode_with(&back, &doc).unwrap(), cbor);
+        assert!(record_to_cbor_with(&objects(37), &doc).is_err());
+        assert_eq!(
+            record_to_cbor_with(&json!([1]), &doc),
+            Err(DataModelError::NotAnObject)
         );
     }
 }

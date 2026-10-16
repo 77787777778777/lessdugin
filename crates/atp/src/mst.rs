@@ -126,9 +126,7 @@ fn decode_entry(raw: &[u8]) -> Result<TreeEntry, MstError> {
     let prefix_len = match p.and_then(decode_scalar) {
         Some(Ipld::Integer(p)) if p >= 0 => usize::try_from(p).unwrap_or(usize::MAX),
         _ => {
-            return Err(MstError::Malformed(
-                "p must be a non-negative integer",
-            ));
+            return Err(MstError::Malformed("p must be a non-negative integer"));
         }
     };
     let Some(Ipld::Bytes(key_suffix)) = k.and_then(decode_scalar) else {
@@ -586,9 +584,22 @@ mod tests {
         assert!(validate_key(b"A0/374913").is_ok());
         // sync.md §8.5 only asks for one '/' and the charset, so these are valid MST keys
         for ok in [&b"/x"[..], b"x/", b"/", b"a/..", b"./a", b"~:-_./."] {
-            assert!(validate_key(ok).is_ok(), "{:?}", String::from_utf8_lossy(ok));
+            assert!(
+                validate_key(ok).is_ok(),
+                "{:?}",
+                String::from_utf8_lossy(ok)
+            );
         }
-        assert!(validate_key(&[b'a'; MAX_KEY_LEN - 2].iter().chain(b"/b").copied().collect::<Vec<_>>()).is_ok());
+        assert!(
+            validate_key(
+                &[b'a'; MAX_KEY_LEN - 2]
+                    .iter()
+                    .chain(b"/b")
+                    .copied()
+                    .collect::<Vec<_>>()
+            )
+            .is_ok()
+        );
         for bad in [
             &b""[..],
             b"noslash",
@@ -763,10 +774,7 @@ mod tests {
             entries: vec![e(0, &ks[0]), e(1, &ks[1][1..])],
         };
         let (r, b) = forged_root(&short_prefix);
-        assert_eq!(
-            prove(&r, ks[1].as_bytes(), &b).unwrap(),
-            Proof::Present(v)
-        );
+        assert_eq!(prove(&r, ks[1].as_bytes(), &b).unwrap(), Proof::Present(v));
         let long_prefix = Node {
             left: None,
             entries: vec![e(0, &ks[0]), e(ks[0].len() + 1, "1")],
@@ -811,10 +819,7 @@ mod tests {
             entries: vec![],
         });
         b.extend(b2);
-        assert!(matches!(
-            prove(&r, b"a/1", &b),
-            Err(MstError::Malformed(_))
-        ));
+        assert!(matches!(prove(&r, b"a/1", &b), Err(MstError::Malformed(_))));
         // wrong field types
         let mut m = BTreeMap::new();
         m.insert("e".to_owned(), Ipld::Integer(1));
@@ -936,7 +941,10 @@ mod tests {
             entries: vec![entry(&h0)],
         });
         blocks.extend(b);
-        assert_eq!(prove(&r, h0.as_bytes(), &blocks).unwrap(), Proof::Present(v));
+        assert_eq!(
+            prove(&r, h0.as_bytes(), &blocks).unwrap(),
+            Proof::Present(v)
+        );
         assert_eq!(prove(&r, low0.as_bytes(), &blocks), Err(MstError::Layer));
         // a child at the same layer as its parent
         let (r, b) = forged_root(&Node {
@@ -970,7 +978,10 @@ mod tests {
             entries: vec![entry(&h2)],
         });
         blocks.extend(b);
-        assert_eq!(prove(&r, low0.as_bytes(), &blocks).unwrap(), Proof::Present(v));
+        assert_eq!(
+            prove(&r, low0.as_bytes(), &blocks).unwrap(),
+            Proof::Present(v)
+        );
         assert_eq!(list_entries(&r, &blocks, 10).unwrap().len(), 2);
 
         // a left subtree holding a key greater than its parent's first key
@@ -1022,7 +1033,10 @@ mod tests {
             }],
         });
         let at_32 = empty_chain(bottom, 32, &mut blocks);
-        assert_eq!(prove(&at_32, k.as_bytes(), &blocks).unwrap(), Proof::Present(v));
+        assert_eq!(
+            prove(&at_32, k.as_bytes(), &blocks).unwrap(),
+            Proof::Present(v)
+        );
         assert_eq!(prove(&at_32, b"a/zzzz", &blocks).unwrap(), Proof::Absent);
         assert_eq!(list_entries(&at_32, &blocks, 100).unwrap().len(), 1);
         let at_33 = empty_chain(bottom, 33, &mut blocks);
@@ -1066,6 +1080,9 @@ mod tests {
             prove(&root, target.as_bytes(), &only_root),
             Err(MstError::MissingBlock(_))
         ));
-        assert_eq!(prove(&root, target.as_bytes(), &blocks).unwrap(), Proof::Absent);
+        assert_eq!(
+            prove(&root, target.as_bytes(), &blocks).unwrap(),
+            Proof::Absent
+        );
     }
 }

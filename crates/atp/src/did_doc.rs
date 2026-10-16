@@ -558,7 +558,8 @@ mod tests {
     const DID: &str = "did:plc:z72i7hdynmk6r22z27h6tvur";
     const KEY: &str = "zQ3shQo6TF2moaqMTrUZEM1jeuYRQXeHEx4evX9751y2qPqRA";
     /// The legacy (uncompressed, no multicodec) encoding of a secp256k1 key, from `/specs/did`.
-    const LEGACY: &str = "zQYEBzXeuTM9UR3rfvNag6L3RNAs5pQZyYPsomTsgQhsxLdEgCrPTLgFna8yqCnxPpNT7DBk6Ym3dgPKNu86vt9GR";
+    const LEGACY: &str =
+        "zQYEBzXeuTM9UR3rfvNag6L3RNAs5pQZyYPsomTsgQhsxLdEgCrPTLgFna8yqCnxPpNT7DBk6Ym3dgPKNu86vt9GR";
 
     fn base() -> Value {
         json!({
@@ -638,7 +639,10 @@ mod tests {
             Err(KeyError::UnsupportedType("JsonWebKey2020".into()))
         );
         v["verificationMethod"] = json!([{"id": "#atproto"}]);
-        assert_eq!(key(&v, &strict), Err(KeyError::UnsupportedType(String::new())));
+        assert_eq!(
+            key(&v, &strict),
+            Err(KeyError::UnsupportedType(String::new()))
+        );
         v["verificationMethod"] = json!([{"id": "#atproto", "type": "Multikey"}]);
         assert_eq!(key(&v, &strict), Err(KeyError::NoMultibase));
         v["verificationMethod"] =
@@ -753,11 +757,15 @@ mod tests {
             assert_eq!(dev.as_str(), ep, "{ep}");
         }
         assert_eq!(
-            ServiceEndpoint::parse("http://127.0.0.1:2583").unwrap().host_kind(),
+            ServiceEndpoint::parse("http://127.0.0.1:2583")
+                .unwrap()
+                .host_kind(),
             HostKind::Ipv4
         );
         assert_eq!(
-            ServiceEndpoint::parse("http://localhost").unwrap().host_kind(),
+            ServiceEndpoint::parse("http://localhost")
+                .unwrap()
+                .host_kind(),
             HostKind::Localhost
         );
     }

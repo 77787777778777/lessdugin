@@ -744,4 +744,168 @@ mod tests {
         assert_eq!(&b[..4], &hex("d82a5825")[..]);
         assert_eq!(decode(&b).unwrap(), Ipld::Link(cid));
     }
+
+    #[test]
+    fn validate_matches_decode() {
+        for h in [
+            "a56161f66163f6626162f6626262f663616161f6",
+            "a263616161f66163f6",
+            "a26161f66161f6",
+            "a101f6",
+            "f93c00",
+            "f7",
+            "9fff",
+            "d9002a4100",
+            "d82a4101",
+            "6161ff",
+            "62c328",
+            "",
+            "8201",
+            "1b8000000000000000",
+            "9b00000000ffffffff",
+            "820182028103",
+        ] {
+            let b = hex(h);
+            assert_eq!(
+                validate_with(&b, &Limits::default()),
+                decode(&b).map(|_| ()),
+                "{h}"
+            );
+        }
+        // STRICT validation is bound by depth only, not by the S-class caps
+        let mut big = vec![0x9a];
+        big.extend_from_slice(&200_000u32.to_be_bytes());
+        big.extend(std::iter::repeat_n(0xf6u8, 200_000));
+        assert!(matches!(
+            decode(&big),
+            Err(DataModelError::ContainerTooLarge { .. })
+        ));
+        assert_eq!(validate_with(&big, &Limits::STRICT), Ok(()));
+        let mut long = vec![0x7a];
+        long.extend_from_slice(&(2u32 << 20).to_be_bytes());
+        long.extend(std::iter::repeat_n(b'x', 2 << 20));
+        assert!(decode(&long).is_err());
+        assert_eq!(validate_with(&long, &Limits::STRICT), Ok(()));
+        let mut deep = vec![0x81u8; 32];
+        deep.push(0x80);
+        assert_eq!(
+            validate_with(&deep, &Limits::STRICT),
+            Err(DataModelError::DepthExceeded { max: 32 })
+        );
+        assert_eq!(validate_with(&deep[1..], &Limits::STRICT), Ok(()));
+    }
+
+    #[test]
+    fn raw_navigation() {
+        let cid = crate::cid::for_dag_cbor(b"x");
+        let inner = Ipld::Map([("b".to_owned(), Ipld::Bytes(vec![0]))].into());
+        let v = Ipld::Map(
+            [
+                ("bb".to_owned(), Ipld::Link(cid)),
+                (
+                    "a".to_owned(),
+                    Ipld::List(vec![Ipld::Integer(1), inner.clone()]),
+                ),
+                (String::new(), Ipld::Null),
+            ]
+            .into(),
+        );
+        let b = encode(&v).unwrap();
+        validate_with(&b, &Limits::STRICT).unwrap();
+        let it = map_entries_raw(&b).unwrap();
+        assert_eq!(it.declared_len(), 3);
+        let entries: Vec<(&str, &[u8])> = it.collect();
+        assert_eq!(
+            entries.iter().map(|e| e.0).collect::<Vec<_>>(),
+            vec!["", "a", "bb"]
+        );
+        assert_eq!(decode_scalar(entries[0].1), Some(Ipld::Null));
+        assert_eq!(decode_scalar(entries[2].1), Some(Ipld::Link(cid)));
+        assert_eq!(decode_scalar(entries[1].1), None);
+        let items: Vec<&[u8]> = list_items_raw(entries[1].1).unwrap().collect();
+        assert_eq!(items.len(), 2);
+        assert_eq!(decode_scalar(items[0]), Some(Ipld::Integer(1)));
+        assert_eq!(decode(items[1]).unwrap(), inner);
+        assert!(map_entries_raw(entries[1].1).is_none());
+        assert!(list_items_raw(&b).is_none());
+        // on garbage the iterators stop and never panic
+        assert_eq!(map_entries_raw(&[0xa5]).unwrap().count(), 0);
+        assert_eq!(map_entries_raw(&[0xa1, 0x61]).unwrap().count(), 0);
+        assert_eq!(map_entries_raw(&[0xa1, 0x01, 0x01]).unwrap().count(), 0);
+        assert!(map_entries_raw(&[]).is_none());
+        assert_eq!(
+            list_items_raw(&hex("9b00000000ffffffff01"))
+                .unwrap()
+                .count(),
+            1
+        );
+        assert_eq!(list_items_raw(&[0x81, 0x5b, 0xff]).unwrap().count(), 0);
+        assert_eq!(
+            list_items_raw(&[0x81, 0x9b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff])
+                .unwrap()
+                .count(),
+            0
+        );
+        assert!(decode_scalar(&[0xff]).is_none());
+    }
+
+    #[test]
+    fn encode_caps_mirror_decode() {
+        // whatever encode_with accepts, decode_with accepts under the same limits, and a value
+        // encode_with rejects would not decode either
+        let lim = Limits {
+            max_depth: 3,
+            max_container_len: 2,
+            max_string_bytes: 3,
+            max_bytes_len: 40,
+            max_total_nodes: 5,
+        };
+        let cid = crate::cid::for_dag_cbor(b"x");
+        let list = |n: i128| Ipld::List((0..n).map(Ipld::Integer).collect());
+        let nest = |n: usize| {
+            let mut v = Ipld::Null;
+            for _ in 0..n {
+                v = Ipld::List(vec![v]);
+            }
+            v
+        };
+        let map = |k: &str| Ipld::Map([(k.to_owned(), Ipld::Null)].into());
+        for (v, ok) in [
+            (list(2), true),
+            (list(3), false),
+            (Ipld::String("abc".into()), true),
+            (Ipld::String("abcd".into()), false),
+            (map("abc"), true),
+            (map("abcd"), false),
+            (Ipld::Bytes(vec![0; 40]), true),
+            (Ipld::Bytes(vec![0; 41]), false),
+            (Ipld::Link(cid), true),
+            (nest(3), true),
+            (nest(4), false),
+            (Ipld::List(vec![list(2), list(2)]), false), // 7 values
+            (Ipld::List(vec![list(2), Ipld::Null]), true), // 5 values
+        ] {
+            let full = encode_with(&v, &Limits::uncapped(64)).unwrap();
+            assert_eq!(encode_with(&v, &lim).is_ok(), ok, "{v:?}");
+            assert_eq!(decode_with(&full, &lim).is_ok(), ok, "{v:?}");
+            if ok {
+                assert_eq!(encode_with(&v, &lim).unwrap(), full);
+            }
+        }
+        // a link is 0x00 ‖ 36 CID bytes
+        let at = Limits {
+            max_bytes_len: 37,
+            ..Limits::default()
+        };
+        let b = encode_with(&Ipld::Link(cid), &at).unwrap();
+        assert!(decode_with(&b, &at).is_ok());
+        let tiny = Limits {
+            max_bytes_len: 36,
+            ..Limits::default()
+        };
+        assert!(encode_with(&Ipld::Link(cid), &tiny).is_err());
+        assert!(decode_with(&b, &tiny).is_err());
+        // the default encoder now refuses what the default decoder could not read back
+        assert!(encode(&Ipld::List((0..131_073).map(|_| Ipld::Null).collect())).is_err());
+    }
 }

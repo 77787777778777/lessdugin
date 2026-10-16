@@ -185,16 +185,20 @@ pub enum ProofError {
         /// The record CID from the MST.
         cid: Cid,
         /// What is wrong.
-        error: DataModelError,
+        error: Box<DataModelError>,
     },
     /// A bundle item claims a CID (or absence) that its proof contradicts.
-    #[error("bundle item claims {claimed:?} but the proof shows {proven:?}")]
-    RecordMismatch {
-        /// The item's `cid` (`None` = claimed absent).
-        claimed: Option<Cid>,
-        /// The proven record CID (`None` = proven absent).
-        proven: Option<Cid>,
-    },
+    #[error("bundle item claims {:?} but the proof shows {:?}", .0.claimed, .0.proven)]
+    RecordMismatch(Box<Mismatch>),
+}
+
+/// What a bundle item claimed, and what its proof showed ([`ProofError::RecordMismatch`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Mismatch {
+    /// The item's `cid` (`None` = claimed absent).
+    pub claimed: Option<Cid>,
+    /// The proven record CID (`None` = proven absent).
+    pub proven: Option<Cid>,
 }
 
 impl ProofError {
@@ -240,7 +244,7 @@ impl ProofError {
                 | MstError::Layer => K::MstInvalid,
             },
             Self::BadRecord { .. } => K::NonCanonical,
-            Self::RecordMismatch { .. } => K::RecordMismatch,
+            Self::RecordMismatch(_) => K::RecordMismatch,
         }
     }
 }
@@ -249,8 +253,8 @@ impl ProofError {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{error}")]
 pub struct ProofFailure {
-    /// The error.
-    pub error: ProofError,
+    /// The error (boxed, so that `Result<_, ProofFailure>` stays small).
+    pub error: Box<ProofError>,
     /// The commit CID, once known (the CAR root, or a bundle item's `commit`).
     pub commit_cid: Option<Cid>,
     /// The commit's rev, once the commit block decoded with a TID `rev`, even if verification
@@ -260,22 +264,36 @@ pub struct ProofFailure {
 
 impl ProofFailure {
     fn new(error: impl Into<ProofError>) -> Self {
+        Self::with(error.into(), None, None)
+    }
+
+    fn with(error: ProofError, commit_cid: Option<Cid>, rev: Option<Tid>) -> Self {
         Self {
-            error: error.into(),
-            commit_cid: None,
-            rev: None,
+            error: Box::new(error),
+            commit_cid,
+            rev,
         }
+    }
+
+    fn replace_error(mut self, error: ProofError) -> Self {
+        *self.error = error;
+        self
     }
 
     /// The `sync.md` §8.1 error kind.
     pub fn kind(&self) -> ProofErrorKind {
         self.error.kind()
     }
+
+    /// The error, without the context.
+    pub fn into_error(self) -> ProofError {
+        *self.error
+    }
 }
 
 impl From<ProofFailure> for ProofError {
     fn from(f: ProofFailure) -> Self {
-        f.error
+        f.into_error()
     }
 }
 
@@ -354,7 +372,8 @@ pub fn verify_record_proof(
     now_micros: i64,
     caps: &ProofCaps,
 ) -> Result<ProofOutcome, ProofError> {
-    verify_proof(car, did, collection, rkey, key, now_micros, caps).map_err(|f| f.error)
+    verify_proof(car, did, collection, rkey, key, now_micros, caps)
+        .map_err(ProofFailure::into_error)
 }
 
 /// Verifies the proof of `uri` under the commit `commit_cid`, reading blocks from `blocks` (for
@@ -380,10 +399,7 @@ pub fn verify_proof_in(
         now_micros,
     );
     match (r, budget.exceeded.get()) {
-        (Err(f), Some(cap)) => Err(ProofFailure {
-            error: cap.error(read).into(),
-            ..f
-        }),
+        (Err(f), Some(cap)) => Err(f.replace_error(cap.error(read).into())),
         (r, _) => r,
     }
 }
@@ -476,15 +492,9 @@ fn verify_blocks(
     key: &PublicKey,
     now_micros: i64,
 ) -> Result<ProofOutcome, ProofFailure> {
-    let mut ctx = ProofFailure {
-        error: ProofError::NoRoot,
-        commit_cid: Some(commit_cid),
-        rev: None,
-    };
-    let fail = |ctx: &ProofFailure, e: ProofError| ProofFailure {
-        error: e,
-        ..ctx.clone()
-    };
+    // What a failure reports besides the error (the rev once the commit decoded).
+    let mut ctx: Option<Tid> = None;
+    let fail = |rev: &Option<Tid>, e: ProofError| ProofFailure::with(e, Some(commit_cid), *rev);
     let commit_bytes = blocks
         .get_block(&commit_cid)
         .ok_or_else(|| fail(&ctx, ProofError::MissingCommit(commit_cid)))?;
@@ -493,7 +503,7 @@ fn verify_blocks(
     }
     checked(&commit_cid, commit_bytes).map_err(|e| fail(&ctx, e))?;
     let commit = Commit::decode(commit_bytes).map_err(|e| fail(&ctx, e.into()))?;
-    ctx.rev = commit.rev_tid();
+    ctx = commit.rev_tid();
     let rev = commit
         .verify(did, key, now_micros)
         .map_err(|e| fail(&ctx, e.into()))?;
@@ -508,9 +518,9 @@ fn verify_blocks(
                     &ctx,
                     ProofError::BadRecord {
                         cid,
-                        error: DataModelError::InvalidLink(
+                        error: Box::new(DataModelError::InvalidLink(
                             "a record CID must be CIDv1 dag-cbor sha2-256".into(),
-                        ),
+                        )),
                     },
                 ));
             }
@@ -518,8 +528,15 @@ fn verify_blocks(
                 .get_block(&cid)
                 .ok_or_else(|| fail(&ctx, ProofError::MissingRecord(cid)))?;
             checked(&cid, bytes).map_err(|e| fail(&ctx, e))?;
-            crate::dagcbor::validate_with(bytes, &Limits::STRICT)
-                .map_err(|error| fail(&ctx, ProofError::BadRecord { cid, error }))?;
+            crate::dagcbor::validate_with(bytes, &Limits::STRICT).map_err(|error| {
+                fail(
+                    &ctx,
+                    ProofError::BadRecord {
+                        cid,
+                        error: Box::new(error),
+                    },
+                )
+            })?;
             Some(ProvenRecord {
                 cid,
                 bytes: bytes.to_vec(),
@@ -607,7 +624,7 @@ impl ProofBundle {
         let bad = |why| ProofError::Car(CarError::Manifest(why));
         let bytes = car
             .get(&manifest)
-            .ok_or(ProofError::MissingCommit(manifest))?;
+            .ok_or(bad("the manifest block is missing"))?;
         crate::dagcbor::validate_with(bytes, &Limits::STRICT)
             .map_err(|_| bad("manifest is not strict DAG-CBOR"))?;
         let fields = map_entries_raw(bytes).ok_or(bad("manifest is not a map"))?;
@@ -665,14 +682,14 @@ impl ProofBundle {
         )?;
         let proven = out.record_cid().copied();
         if proven != item.cid {
-            return Err(ProofFailure {
-                error: ProofError::RecordMismatch {
+            return Err(ProofFailure::with(
+                ProofError::RecordMismatch(Box::new(Mismatch {
                     claimed: item.cid,
                     proven,
-                },
-                commit_cid: Some(out.commit_cid),
-                rev: Some(out.rev),
-            });
+                })),
+                Some(out.commit_cid),
+                Some(out.rev),
+            ));
         }
         Ok(out)
     }
@@ -800,7 +817,10 @@ mod tests {
                 let n = mst::Node::decode(&bytes).unwrap();
                 let keys = n.keys().unwrap();
                 let idx = keys.partition_point(|k| k.as_slice() < path.as_bytes());
-                if keys.get(idx).is_some_and(|k| k.as_slice() == path.as_bytes()) {
+                if keys
+                    .get(idx)
+                    .is_some_and(|k| k.as_slice() == path.as_bytes())
+                {
                     blocks.push(self.records[path].clone());
                     break;
                 }
@@ -841,7 +861,9 @@ mod tests {
     }
 
     fn k256_repo() -> Repo {
-        Repo::new(Sk::K(k256::ecdsa::SigningKey::from_slice(&[3u8; 32]).unwrap()))
+        Repo::new(Sk::K(
+            k256::ecdsa::SigningKey::from_slice(&[3u8; 32]).unwrap(),
+        ))
     }
 
     fn coll() -> Nsid {
@@ -856,7 +878,9 @@ mod tests {
     fn end_to_end_present_k256_and_p256() {
         for repo in [
             k256_repo(),
-            Repo::new(Sk::P(p256::ecdsa::SigningKey::from_slice(&[9u8; 32]).unwrap())),
+            Repo::new(Sk::P(
+                p256::ecdsa::SigningKey::from_slice(&[9u8; 32]).unwrap(),
+            )),
         ] {
             let path = path7();
             let car = repo.proof_car(&path, NOW);
@@ -927,7 +951,7 @@ mod tests {
         let path = format!("{POST}/raw");
         repo.put_block(&path, crate::cid::for_raw(&raw), raw);
         let f = repo.verify(&repo.proof_car(&path, NOW), &path).unwrap_err();
-        assert!(matches!(f.error, ProofError::BadRecord { .. }), "{f:?}");
+        assert!(matches!(*f.error, ProofError::BadRecord { .. }), "{f:?}");
         assert_eq!(f.kind(), ProofErrorKind::NonCanonical);
         assert_eq!(f.rev.unwrap().timestamp_micros(), NOW as u64);
         // a dag-cbor CID over non-canonical CBOR (unsorted keys)
@@ -936,11 +960,8 @@ mod tests {
         repo.put_block(&path, crate::cid::for_dag_cbor(&unsorted), unsorted);
         let f = repo.verify(&repo.proof_car(&path, NOW), &path).unwrap_err();
         assert!(matches!(
-            f.error,
-            ProofError::BadRecord {
-                error: DataModelError::Cbor { .. },
-                ..
-            }
+            &*f.error,
+            ProofError::BadRecord { error, .. } if matches!(**error, DataModelError::Cbor { .. })
         ));
         assert_eq!(f.kind(), ProofErrorKind::NonCanonical);
         // nesting 33 deep
@@ -1003,13 +1024,13 @@ mod tests {
                 &caps,
             );
             assert_eq!(
-                r.unwrap_err().error,
+                *r.unwrap_err().error,
                 ProofError::Car(CarError::Header("a proof CAR must have exactly one root"))
             );
         }
         let car = write_car(&[], built.blocks.iter().map(|(c, b)| (c, b.as_slice())));
         let f = repo.verify(&car, &path).unwrap_err();
-        assert_eq!(f.error, ProofError::NoRoot);
+        assert_eq!(*f.error, ProofError::NoRoot);
         assert_eq!(f.kind(), ProofErrorKind::CarMalformed);
     }
 
@@ -1049,7 +1070,10 @@ mod tests {
         // future rev
         let future = repo.proof_car(&path, NOW + 6 * 60 * 1_000_000);
         let f = run(&future, &repo.did, &repo.key(), NOW).unwrap_err();
-        assert!(matches!(f.error, ProofError::Commit(CommitError::FutureRev(_))));
+        assert!(matches!(
+            *f.error,
+            ProofError::Commit(CommitError::FutureRev(_))
+        ));
         assert_eq!(f.kind(), ProofErrorKind::FutureRev);
         // wrong key: BadSignature, with the commit's rev and CID for the stale-proof rule
         let other = PublicKey::Secp256k1(
@@ -1072,7 +1096,10 @@ mod tests {
         // a key whose path nodes are not included
         let far = format!("{POST}/uetjixxr3a33-3l2s5xxv2z049");
         let f = repo.verify(car, &far).unwrap_err();
-        assert!(matches!(f.error, ProofError::Mst(MstError::MissingBlock(_))));
+        assert!(matches!(
+            *f.error,
+            ProofError::Mst(MstError::MissingBlock(_))
+        ));
         assert_eq!(f.kind(), ProofErrorKind::MissingBlock);
         // every single-byte change fails
         for i in 0..car.len() {
@@ -1091,12 +1118,12 @@ mod tests {
         let f = repo
             .verify(&write_car(&[built.commit], without), &path)
             .unwrap_err();
-        assert_eq!(f.error, ProofError::MissingRecord(rcid));
+        assert_eq!(*f.error, ProofError::MissingRecord(rcid));
         assert_eq!(f.kind(), ProofErrorKind::MissingBlock);
         // commit missing; a raw root (its block present) is not a commit
         let missing = crate::cid::for_dag_cbor(b"\xa0");
         let f = repo.verify(&write_car(&[missing], []), &path).unwrap_err();
-        assert_eq!(f.error, ProofError::MissingCommit(missing));
+        assert_eq!(*f.error, ProofError::MissingCommit(missing));
         assert_eq!(f.kind(), ProofErrorKind::MissingBlock);
         assert_eq!(f.commit_cid, Some(missing));
         let raw_root = crate::cid::for_raw(&built.blocks[0].1);
@@ -1106,7 +1133,7 @@ mod tests {
                 &path,
             )
             .unwrap_err();
-        assert_eq!(f.error, ProofError::BadRoot);
+        assert_eq!(*f.error, ProofError::BadRoot);
         assert_eq!(f.kind(), ProofErrorKind::BadCommit);
         // CAR caps
         let tight = ProofCaps {
@@ -1115,9 +1142,8 @@ mod tests {
                 ..CarLimits::PROOF
             },
         };
-        let f = verify_proof(car, &repo.did, &coll(), &rkey, &repo.key(), NOW, &tight)
-            .unwrap_err();
-        assert_eq!(f.error, ProofError::Car(CarError::TooManyBlocks(2)));
+        let f = verify_proof(car, &repo.did, &coll(), &rkey, &repo.key(), NOW, &tight).unwrap_err();
+        assert_eq!(*f.error, ProofError::Car(CarError::TooManyBlocks(2)));
         assert_eq!(f.kind(), ProofErrorKind::TooManyBlocks);
         let small = ProofCaps {
             car: CarLimits {
@@ -1125,8 +1151,7 @@ mod tests {
                 ..CarLimits::PROOF
             },
         };
-        let f = verify_proof(car, &repo.did, &coll(), &rkey, &repo.key(), NOW, &small)
-            .unwrap_err();
+        let f = verify_proof(car, &repo.did, &coll(), &rkey, &repo.key(), NOW, &small).unwrap_err();
         assert_eq!(f.kind(), ProofErrorKind::CarTooLarge);
         assert_eq!(f.commit_cid, None);
     }
@@ -1149,7 +1174,10 @@ mod tests {
             k(ProofError::Mst(MstError::DepthExceeded(32))),
             ProofErrorKind::MstTooDeep
         );
-        assert_eq!(k(ProofError::Mst(MstError::Layer)), ProofErrorKind::MstInvalid);
+        assert_eq!(
+            k(ProofError::Mst(MstError::Layer)),
+            ProofErrorKind::MstInvalid
+        );
         assert_eq!(
             k(ProofError::Mst(MstError::Decode(DataModelError::Float))),
             ProofErrorKind::NonCanonical
@@ -1171,9 +1199,15 @@ mod tests {
         let built = repo.build(&path, NOW, vec![]);
         let blocks: BTreeMap<Cid, Vec<u8>> = built.blocks.iter().cloned().collect();
         let uri = AtUri::parse(&format!("at://{}/{path}", repo.did)).unwrap();
-        let out =
-            verify_proof_in(&blocks, &built.commit, &uri, &repo.key(), NOW, &ReadCaps::PROOF)
-                .unwrap();
+        let out = verify_proof_in(
+            &blocks,
+            &built.commit,
+            &uri,
+            &repo.key(),
+            NOW,
+            &ReadCaps::PROOF,
+        )
+        .unwrap();
         assert_eq!(out.record_cid(), Some(&repo.records[&path].0));
         let n = built.blocks.len();
         let total: usize = built.blocks.iter().map(|(_, b)| b.len()).sum();
@@ -1195,7 +1229,7 @@ mod tests {
             },
         )
         .unwrap_err();
-        assert_eq!(f.error, ProofError::Car(CarError::TooManyBlocks(n - 1)));
+        assert_eq!(*f.error, ProofError::Car(CarError::TooManyBlocks(n - 1)));
         assert_eq!(f.kind(), ProofErrorKind::TooManyBlocks);
         assert!(f.rev.is_some());
         let f = verify_proof_in(
@@ -1215,13 +1249,27 @@ mod tests {
         let mut bad = blocks.clone();
         let rcid = repo.records[&path].0;
         bad.insert(rcid, b"\xa0".to_vec());
-        let f = verify_proof_in(&bad, &built.commit, &uri, &repo.key(), NOW, &ReadCaps::PROOF)
-            .unwrap_err();
+        let f = verify_proof_in(
+            &bad,
+            &built.commit,
+            &uri,
+            &repo.key(),
+            NOW,
+            &ReadCaps::PROOF,
+        )
+        .unwrap_err();
         assert_eq!(f.kind(), ProofErrorKind::BlockHashMismatch);
         let mut bad = blocks.clone();
         bad.insert(built.commit, b"\xa0".to_vec());
-        let f = verify_proof_in(&bad, &built.commit, &uri, &repo.key(), NOW, &ReadCaps::PROOF)
-            .unwrap_err();
+        let f = verify_proof_in(
+            &bad,
+            &built.commit,
+            &uri,
+            &repo.key(),
+            NOW,
+            &ReadCaps::PROOF,
+        )
+        .unwrap_err();
         assert_eq!(f.kind(), ProofErrorKind::BlockHashMismatch);
     }
 
@@ -1263,13 +1311,13 @@ mod tests {
         let c7 = repo.records[&p7].0;
         let wrong = repo.records[&format!("{POST}/uetjixxr3a33-3l2s5xxv2z008")].0;
         let items = vec![
-            item(&uri(&p7), Some(c7), b7.commit),          // 0: ok, present
-            item(&uri(&absent), None, ba.commit),          // 1: ok, absent
-            item(&uri(&p7), None, b7.commit),              // 2: claims absent, is present
-            item(&uri(&absent), Some(c7), ba.commit),      // 3: claims present, is absent
-            item(&uri(&p7), Some(wrong), b7.commit),       // 4: wrong CID
+            item(&uri(&p7), Some(c7), b7.commit),     // 0: ok, present
+            item(&uri(&absent), None, ba.commit),     // 1: ok, absent
+            item(&uri(&p7), None, b7.commit),         // 2: claims absent, is present
+            item(&uri(&absent), Some(c7), ba.commit), // 3: claims present, is absent
+            item(&uri(&p7), Some(wrong), b7.commit),  // 4: wrong CID
             item("at://alice.test/a.b.c/x", None, b7.commit), // 5: not canonical
-            Ipld::Integer(5),                              // 6: not a map
+            Ipld::Integer(5),                         // 6: not a map
             item(&uri(&p7), Some(c7), crate::cid::for_dag_cbor(b"\xa1")), // 7: commit missing
         ];
         let car = bundle_car(&manifest(items, vec![("note", Ipld::Bool(true))]), &blocks);
@@ -1286,7 +1334,11 @@ mod tests {
         ] {
             let f = b.verify_item(i, &key, NOW).unwrap_err();
             assert_eq!(f.kind(), ProofErrorKind::RecordMismatch, "{i}");
-            assert_eq!(f.error, ProofError::RecordMismatch { claimed, proven }, "{i}");
+            assert_eq!(
+                *f.error,
+                ProofError::RecordMismatch(Box::new(Mismatch { claimed, proven })),
+                "{i}"
+            );
             assert!(f.rev.is_some() && f.commit_cid.is_some());
         }
         for i in [5, 6, 8] {
@@ -1311,7 +1363,8 @@ mod tests {
             ProofErrorKind::TooManyBlocks
         );
         // manifest-level problems
-        let parse = |m: Vec<u8>| ProofBundle::parse(&bundle_car(&m, &blocks), &BundleCaps::default());
+        let parse =
+            |m: Vec<u8>| ProofBundle::parse(&bundle_car(&m, &blocks), &BundleCaps::default());
         let mut m = BTreeMap::new();
         m.insert("v".to_owned(), Ipld::Integer(2));
         m.insert("items".to_owned(), Ipld::List(vec![]));
@@ -1319,25 +1372,31 @@ mod tests {
             parse(crate::dagcbor::encode(&Ipld::Map(m)).unwrap()),
             Err(ProofError::Car(CarError::Manifest("manifest v must be 1")))
         );
-        let many = (0..26).map(|_| item(&uri(&p7), Some(c7), b7.commit)).collect();
+        let many = (0..26)
+            .map(|_| item(&uri(&p7), Some(c7), b7.commit))
+            .collect();
         assert_eq!(
             parse(manifest(many, vec![])).unwrap_err().kind(),
             ProofErrorKind::CarMalformed
         );
-        let ok = (0..25).map(|_| item(&uri(&p7), Some(c7), b7.commit)).collect();
+        let ok = (0..25)
+            .map(|_| item(&uri(&p7), Some(c7), b7.commit))
+            .collect();
         assert_eq!(parse(manifest(ok, vec![])).unwrap().items.len(), 25);
         assert!(parse(crate::dagcbor::encode(&Ipld::List(vec![])).unwrap()).is_err());
         // exactly one root; manifest present
         let mcid = crate::cid::for_dag_cbor(b"\xa0");
         let two = write_car(&[mcid, mcid], [(&mcid, &b"\xa0"[..])]);
         assert_eq!(
-            ProofBundle::parse(&two, &BundleCaps::default()).unwrap_err().kind(),
+            ProofBundle::parse(&two, &BundleCaps::default())
+                .unwrap_err()
+                .kind(),
             ProofErrorKind::CarMalformed
         );
         let none = write_car(&[mcid], []);
         assert_eq!(
             ProofBundle::parse(&none, &BundleCaps::default()).unwrap_err(),
-            ProofError::MissingCommit(mcid)
+            ProofError::Car(CarError::Manifest("the manifest block is missing"))
         );
     }
 }

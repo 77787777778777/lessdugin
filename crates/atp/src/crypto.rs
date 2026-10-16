@@ -251,7 +251,10 @@ mod tests {
         let mut b = K256_PREFIX.to_vec();
         b.extend_from_slice(k.verifying_key().to_encoded_point(false).as_bytes());
         let s = multibase::encode(multibase::Base::Base58Btc, &b);
-        assert_eq!(PublicKey::from_multikey(&s), Err(CryptoError::NotCompressed));
+        assert_eq!(
+            PublicKey::from_multikey(&s),
+            Err(CryptoError::NotCompressed)
+        );
         assert_eq!(
             PublicKey::from_did_key(&format!("did:key:{s}")),
             Err(CryptoError::NotCompressed)
@@ -260,7 +263,10 @@ mod tests {
         let mut b = P256_PREFIX.to_vec();
         b.extend_from_slice(pk.verifying_key().to_encoded_point(false).as_bytes());
         let s = multibase::encode(multibase::Base::Base58Btc, &b);
-        assert_eq!(PublicKey::from_multikey(&s), Err(CryptoError::NotCompressed));
+        assert_eq!(
+            PublicKey::from_multikey(&s),
+            Err(CryptoError::NotCompressed)
+        );
         // the compressed form of the same keys is fine
         let ok = PublicKey::Secp256k1(*k.verifying_key()).multikey();
         assert!(PublicKey::from_multikey(&ok).is_ok());

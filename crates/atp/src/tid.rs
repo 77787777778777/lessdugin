@@ -207,7 +207,10 @@ mod tests {
         let ahead = Tid::from_parts((now + 299_000_000) as u64, 1).unwrap();
         assert!(g.observe(&ahead, now));
         assert!(g.next(1_800_000_000_000_001).unwrap() > ahead);
-        assert_eq!(g.next(-5).unwrap().timestamp_micros(), ahead.timestamp_micros() + 2);
+        assert_eq!(
+            g.next(-5).unwrap().timestamp_micros(),
+            ahead.timestamp_micros() + 2
+        );
         // the timestamp space can still run out at its real end
         let mut end = TidGenerator::new(0);
         let max = MAX_TIMESTAMP_MICROS as i64;
