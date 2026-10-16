@@ -93,16 +93,16 @@ fn is_blocked_v6(ip: Ipv6Addr) -> bool {
         // below. The local-use prefix leaves the embedding position to the operator, so the
         // embedded address cannot be checked: blocked.
         (v6([0x64, 0xff9b, 1, 0, 0, 0, 0, 0]), 48), // NAT64 local-use
-        (v6([0x100, 0, 0, 0, 0, 0, 0, 0]), 64),  // discard-only
-        (v6([0x2001, 0, 0, 0, 0, 0, 0, 0]), 23), // IETF protocol assignments (incl. Teredo)
+        (v6([0x100, 0, 0, 0, 0, 0, 0, 0]), 64),     // discard-only
+        (v6([0x2001, 0, 0, 0, 0, 0, 0, 0]), 23),    // IETF protocol assignments (incl. Teredo)
         (v6([0x2001, 0xdb8, 0, 0, 0, 0, 0, 0]), 32), // documentation
-        (v6([0x2002, 0, 0, 0, 0, 0, 0, 0]), 16), // 6to4
-        (v6([0x3fff, 0, 0, 0, 0, 0, 0, 0]), 20), // documentation (RFC 9637)
-        (v6([0x5f00, 0, 0, 0, 0, 0, 0, 0]), 16), // segment routing SIDs (RFC 9602)
-        (v6([0xfc00, 0, 0, 0, 0, 0, 0, 0]), 7),  // unique local
-        (v6([0xfe80, 0, 0, 0, 0, 0, 0, 0]), 10), // link-local
-        (v6([0xfec0, 0, 0, 0, 0, 0, 0, 0]), 10), // site-local (deprecated)
-        (v6([0xff00, 0, 0, 0, 0, 0, 0, 0]), 8),  // multicast
+        (v6([0x2002, 0, 0, 0, 0, 0, 0, 0]), 16),    // 6to4
+        (v6([0x3fff, 0, 0, 0, 0, 0, 0, 0]), 20),    // documentation (RFC 9637)
+        (v6([0x5f00, 0, 0, 0, 0, 0, 0, 0]), 16),    // segment routing SIDs (RFC 9602)
+        (v6([0xfc00, 0, 0, 0, 0, 0, 0, 0]), 7),     // unique local
+        (v6([0xfe80, 0, 0, 0, 0, 0, 0, 0]), 10),    // link-local
+        (v6([0xfec0, 0, 0, 0, 0, 0, 0, 0]), 10),    // site-local (deprecated)
+        (v6([0xff00, 0, 0, 0, 0, 0, 0, 0]), 8),     // multicast
     ];
     BLOCKED_V6
         .iter()

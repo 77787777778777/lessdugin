@@ -96,8 +96,10 @@ impl TagVote {
     }
 }
 
-/// `qkey(quote)` (`lfm-1.md` §11): `norm(trim_ws(quote.exact))`, where `norm` is NFC followed by
-/// replacing every run of `White_Space` characters with one U+0020; `""` without a quote.
+/// `qkey(quote)` (`lfm-1.md` §11): `norm(trim_ws(quote.exact))`, where `norm` removes the
+/// §10.2 controls, applies NFC and replaces every run of `White_Space` characters with one
+/// U+0020; `""` without a quote. Must stay identical to `lessdugin_markdown::quote::qkey`
+/// (both run `testdata/vectors/lfm1/quote.json`).
 pub fn qkey(quote: Option<&TextQuote>) -> String {
     let Some(q) = quote else {
         return String::new();
@@ -105,7 +107,7 @@ pub fn qkey(quote: Option<&TextQuote>) -> String {
     let trimmed = q.exact.trim_matches(char::is_whitespace);
     let mut out = String::with_capacity(trimmed.len());
     let mut in_ws = false;
-    for c in trimmed.nfc() {
+    for c in trimmed.chars().filter(|&c| !is_removed_control(c)).nfc() {
         if c.is_whitespace() {
             if !in_ws {
                 out.push(' ');
@@ -117,6 +119,13 @@ pub fn qkey(quote: Option<&TextQuote>) -> String {
         }
     }
     out
+}
+
+/// The controls `lfm-1.md` §10.2 removes before normalising: every non-whitespace `Cc`
+/// character and the bidi controls (ALM, LRM, RLM, LRE–RLO, LRI–PDI).
+fn is_removed_control(c: char) -> bool {
+    (c.is_control() && !c.is_whitespace())
+        || matches!(c, '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
 }
 
 /// One opinion intent (§8.5), applied in order by [`Opinion::apply`].

@@ -876,9 +876,10 @@ Footnote definitions contribute at their source position, even when unreferenced
 
 ### 10.2 Normalisation
 
-1. Unicode NFC (`unicode-normalization`; vectors pin the Unicode version).
-2. Replace every maximal run of White_Space code points (the 25-code-point set in §9.1) with one U+0020.
-3. Strip one leading and one trailing U+0020.
+1. Remove controls: every code point of general category `Cc` that is not White_Space, and the bidi controls U+061C, U+200E, U+200F, U+202A–U+202E and U+2066–U+2069. They would otherwise reach excerpts, search and quote keys, where they can reorder or hide text.
+2. Unicode NFC (`unicode-normalization`; vectors pin the Unicode version).
+3. Replace every maximal run of White_Space code points (the 25-code-point set in §9.1) with one U+0020.
+4. Strip one leading and one trailing U+0020.
 
 **Offsets** into P are counted in Unicode scalar values (code points), never in UTF-16 units or bytes.
 
@@ -929,7 +930,7 @@ This covers `comment.quote` and `#react.quote`. It is deterministic. No fuzzy ma
 
 ```
 resolve(quote, T) -> Anchored{start, end} | Orphaned | Pending          // code-point offsets in T
-  q  = norm(trim_ws(quote.exact))  ; norm(x) = NFC, then White_Space runs → U+0020
+  q  = norm(trim_ws(quote.exact))  ; norm(x) = remove §10.2 controls, NFC, then White_Space runs → U+0020
   pf = norm(quote.prefix or "")    ; sf = norm(quote.suffix or "")    // not trimmed
   if q == "" or bytes(q) > 2000: return Orphaned
   T' = longest prefix of T of ≤ 200,000 bytes that ends on a code-point boundary
