@@ -738,6 +738,8 @@ An **invalid** record:
 
 Rules marked *entry* do not invalidate the record: they discard one field, axis or array entry.
 
+**Rule order.** The first failing rule is the first in this order: G1, G2, G3, G4, G5, G6, G7, G8, G9, G10, then the collection's rules in table order (§7.3). G9 and the key equalities of FO1, ME1, PO1, CO1, CO2, RV1, RV3, OP2, MA2, WR1, SQ1 and PF1 are part of G5, so a record that fails one of them also fails G5, which is reported first. The order is that of the rule IDs, not the order in which an implementation checks them (§14 item 23).
+
 ### 7.1 Admission (preconditions, defined in `sync.md`)
 
 A record is considered at all only if it was admitted at trust level `pds` or `proven`:
@@ -758,7 +760,7 @@ A third-party proof counts as current only if its rev is at least the head retur
 | G6 | The record's DAG-CBOR encoding is at most 1,000,000 bytes (`limits.md`). |
 | G7 | Every `md` value whose `$type` is `NS.markdown` satisfies body rules 1 and 2 (§5.2). |
 | G8 | Every `slug`-typed value, including `#react.react` and `#tagVote.tag`, matches `^[a-z0-9]+(-[a-z0-9]+)*$`. |
-| G9 | `forum`-scoped collections (everything except `forum` and `profile`): `fk(value.forum)` equals the key's fk segment. This is part of G5, listed for clarity. |
+| G9 | Collections with a `forum` field (every collection except `forum`, `profile` and `revision`): `fk(value.forum)` equals the key's fk segment. This is part of G5, listed for clarity. A revision has no `forum` field; its key range comes from its subject (RV3). |
 | G10 | The value's nesting depth (`limits.md` §1: the root object is depth 1) is at most 32 (`NESTING_MAX_RECORD`). A deeper value that could still be decoded within the response limits (`limits.md` §6) is stored as an invalid version, so it replaces older versions like any other; a response too deep to decode is rejected whole and changes nothing (`sync.md` §5.5). |
 
 ### 7.3 Per-collection rules
@@ -768,9 +770,9 @@ A third-party proof counts as current only if its rev is at least the head retur
 | ID | Rule |
 |---|---|
 | FO1 | The rkey matches `SLUG`. |
-| FO2 | *entry.* A `moderators` entry is ignored if its `did` equals the repo DID (the owner), if its `role` is unknown, or if its `did` already appeared in an earlier entry (the first entry for a DID wins). |
+| FO2 | *entry.* A `moderators` entry is ignored if its `did` equals the repo DID (the owner), if its `role` is unknown, or if its `did` already appeared in an earlier entry (the first entry for a DID wins). An unknown `role` raises the banner of §13.3 ("this forum uses rules newer than your client"), in any entry, including one that is also ignored for another reason. |
 | FO3 | *entry.* A `discovery.indexers` entry is ignored unless its `url` is `https:` with a hostname and no explicit port. |
-| FO4 | *entry.* A `policy` kv field with an unknown value takes its default, with a banner (§13.3). Integers outside their range fail G2, which invalidates the declaration. The forum then cannot be opened, which fails closed. |
+| FO4 | *entry.* A `policy` kv field with an unknown value takes its default, with a banner (§13.3). An unknown `membership` or `defaultTier` likewise takes its fallback (§13.3: `approval`, `personal`) with the banner. `social.md` §1.6 lists the ten knownValue fields of the declaration that raise the banner. Integers outside their range fail G2, which invalidates the declaration. The forum then cannot be opened, which fails closed. |
 
 **membership**
 
@@ -799,7 +801,7 @@ A third-party proof counts as current only if its rev is at least the head retur
 | CO2 | `root.uri` is an `NS.post` uri whose rkey is `{fk}-{T}` with the same fk, and `rootTid = T`. |
 | CO3 | `parent`, if present, is an `NS.comment` uri. Where the comment is placed is decided by the thread rules in `social.md`, not by validity. |
 | CO4 | `body` is inline (G7). |
-| CO5 *(x)* | If the root post is in the fold input, `root post.forum = comment.forum`. |
+| CO5 *(x)* | If a record with the root uri is in the fold input, valid or not, its `value.forum` equals `comment.forum` (an absent or non-string `forum` fails). |
 | CO6 | *entry.* `moderatorHat` is honoured only if the author is a current authority of `forum`. |
 
 **revision**
@@ -827,14 +829,14 @@ A third-party proof counts as current only if its rev is at least the head retur
 | ID | Rule |
 |---|---|
 | MA1 | `subject` matches exactly one form: a `did` (§2.3 DID grammar), a canonical at-uri (G4 rules apply), or `"tag:" + SLUG`. |
-| MA2 | The rkey matches `^FK-H16$` and equals `fk(forum) + "-" + h16("modAction", scope_eff, subject, actionKey(action))`. A key of the reserved form `^FK-TID$` is not invalid but is **ignored** (no effect) in v1. |
-| MA3 | An at-uri subject has `fkOf(rkey(subject)) = fk(forum)`. |
+| MA2 | The rkey matches `^FK-H16$` and equals `fk(forum) + "-" + h16("modAction", scope_eff, subject, actionKey(action))`. A key of the reserved form `^FK-TID$` is not invalid but is **ignored** (no effect) in v1. Such a record is checked against G1–G10 and MA10–MA12 only: MA1 and MA3–MA7 are not checked, because the P2 actions that will use the key form may take subjects and values that v1 does not know (the reason MA7 skips MA3–MA6). |
+| MA3 | An at-uri subject in a forum-scoped collection (everything except `forum` and `profile`) has `fkOf(rkey(subject)) = fk(forum)`. A `forum` subject is checked by MA4 and MA9 only. |
 | MA4 | The subject form and collection are allowed for the action (table in §6.7). |
 | MA5 | Positive assertions (§6.7) carry `subjectCid`. |
 | MA6 | If `scope_eff = author`, the action is allowed in author scope (table in §6.7). Whether the subject is in the actor's own thread or post, and the author gates, are checked by the fold (`social.md`). |
 | MA7 | An unknown `scope` value, an unknown action `$type`, or an unknown `#access.level`, `#tier.tier` or `#pin.scope` makes the record valid but **without effect**. It is shown as "unknown action" in the mod log. When MA7 applies, MA3–MA6 are not checked (the subject may name any collection, since a future action may target one); G1–G10, MA1, MA2 and MA10–MA12 still apply. |
 | MA8 | *entry.* Unknown `#restrict.capabilities` items are ignored, and duplicates collapse. A `#restrict` with no known capability and no `nullifyVotes: true` asserts the empty set and `nullify = false`: it restricts nothing itself, but like any assertion it competes in resolution, so at a higher rank it lifts lower-rank restrictions of the same DID (`social.md` §4.4, §4.7). |
-| MA9 | `#lock` whose subject is an `NS.forum` uri: reserved (P2), valid but without effect. *entry:* `allowed` entries outside the subject post's thread (comment rkey not `{fk}-{T}-…` with `T = threadTid(subject)`) are ignored. |
+| MA9 | `#lock` whose subject is an `NS.forum` uri: reserved (P2), valid but without effect. *entry:* `allowed` entries outside the subject post's thread (comment rkey not `{fk}-{T}-…` with `T = threadTid(subject)`) are ignored. The filter reads the key only: an entry that names a comment not in the fold input is kept (`social.md` §4.4). |
 | MA10 | `#tag.head`, if present, is an `NS.wikiRevision` uri with `fkOf = fk(forum)`. Whether `head` names a revision of the same slug is checked by the fold. |
 | MA11 | `adopts`, if present, is an `NS.modAction` uri (G4). It is informational only. |
 | MA12 | `#tier.notice` is inline (G7). |
@@ -984,7 +986,7 @@ edit(target, base, newValue, summary?):          // base = CID the user edited; 
 | Blob | §8.8. |
 
 **PDS semantics (ADR 0005, spike S12, reference PDS).**
-- **Create-if-absent** is `putRecord{rkey, record, swapRecord: null}`. It succeeds only if the key is absent; if the key exists it fails with the typed `400 InvalidSwap`, which means "exists". A host that answers a null `swapRecord` with any other 400 does not support it: for that host (remembered per host, `sync.md` §7.2) the client falls back to `createRecord(rkey)`, whose failure on an existing key is a generic 500 that is resolved by `getRecord`.
+- **Create-if-absent** is `putRecord{rkey, record, swapRecord: null}`. It succeeds only if the key is absent; if the key exists it fails with the typed `400 InvalidSwap`, which means "exists". A host that answers a null `swapRecord` with any other 400 may not support it: the client falls back to `createRecord(rkey)` for that write, whose failure on an existing key is a generic 500 that is resolved by `getRecord`. The host is remembered as not supporting null swaps (per host, `sync.md` §7.2) only when that `createRecord` then succeeds with the same value, and only after a 400 whose error name could mean "unsupported": a 400 named for media, size, auth, account status or rate limits (`InvalidMimeType`, `BlobTooLarge`, `PayloadTooLarge`, `AuthRequired`, `AuthMissing`, `ExpiredToken`, `InvalidToken`, `AccountTakedown`, `AccountDeactivated`, `RateLimitExceeded`) is handled as itself and never triggers the fallback. A successful null-swap put records the host as supporting it.
 - `putRecord` and `deleteRecord` with `swapRecord = cid` give compare-and-swap; a mismatch is `400 InvalidSwap`.
 - `InvalidSwap` (on `swapRecord` or `swapCommit`) is the only conflict signal. Its message format is unspecified and is never relied on.
 - `applyWrites` is atomic and strict: a create on an existing key, or an update or delete on an absent key, fails the whole batch with HTTP 500 and writes nothing. Every HTTP 500 on a write is **ambiguous**: the client re-reads the targets (and the head) before deciding, and never resends blindly.

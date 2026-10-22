@@ -264,6 +264,14 @@ impl Runtime {
 }
 
 impl<H: Host> Engine<H> {
+    /// The time views are computed at (ms): the host clock, or the fixed parity-mode time
+    /// ([`EngineConfig::parity_now_ms`](super::EngineConfig::parity_now_ms), test-only).
+    pub(crate) fn view_now_ms(&self) -> i64 {
+        self.config
+            .parity_now_ms
+            .unwrap_or_else(|| self.host.now_ms())
+    }
+
     /// A fresh P0 sync session with its own counters (`max_requests`, `budget_ms`).
     pub(crate) fn p0_session(
         &self,
@@ -319,19 +327,21 @@ impl<H: Host> Engine<H> {
     /// is not cached yet is opened first.
     pub(crate) async fn loaded(&self, key: &ForumKey) -> Result<Loaded, EngineError> {
         let f = key.uri.as_str();
+        // the cache ages by the host clock; the fold runs at the view time (parity mode)
         let now_ms = self.host.now_ms();
         if let Some(l) = self.rt.cached(f, now_ms) {
             return Ok(l);
         }
         let mut gen_before = self.rt.gen_of(f);
         let kv = self.host.cache();
-        let now_us = now_ms.saturating_mul(1000);
-        let model = match ForumModel::build(kv, key, now_us).await {
+        let now_us = self.view_now_ms().saturating_mul(1000);
+        let fixed_obs = self.config.parity_now_ms.map(|t| t.saturating_mul(1000));
+        let model = match ForumModel::build_with(kv, key, now_us, fixed_obs).await {
             Err(ModelError::NoDeclaration(_)) => {
                 self.open_key(key, true).await?;
                 // the open's own invalidation must not keep this build out of the cache
                 gen_before = self.rt.gen_of(f);
-                ForumModel::build(kv, key, now_us).await?
+                ForumModel::build_with(kv, key, now_us, fixed_obs).await?
             }
             r => r?,
         };
@@ -355,23 +365,47 @@ impl<H: Host> Engine<H> {
     /// without a cached document gets a bare view). DIDs without a cached handle state, or
     /// with one older than [`HANDLE_TTL_MS`], are queued for verification by `live_tail`
     /// (`sync.md` §3.3: handles are looked up for authors on screen), which emits `Changed`
-    /// when it is done.
+    /// when it is done. In parity mode (`engine-api.md` §2.1) they are verified here instead,
+    /// before the views are built, so the handle state does not depend on whether (or when) a
+    /// client ran `live_tail`.
     pub(crate) async fn actors<'a>(
         &self,
         dids: impl IntoIterator<Item = &'a str>,
     ) -> (BTreeMap<String, ActorView>, BTreeMap<String, String>) {
         let dids: BTreeSet<&str> = dids.into_iter().collect();
         let parsed: Vec<Did> = dids.iter().filter_map(|d| Did::parse(d).ok()).collect();
-        let found = join_all(parsed.iter().map(|d| self.resolver.cached(d))).await;
+        let now = self.host.now_ms();
+        let is_due = |i: &Option<crate::identity::ResolvedIdentity>| {
+            i.as_ref().is_none_or(|i| {
+                i.handle_at_ms == 0 || now.saturating_sub(i.handle_at_ms) > HANDLE_TTL_MS
+            })
+        };
+        let mut found = join_all(parsed.iter().map(|d| self.resolver.cached(d))).await;
+        if self.config.parity_now_ms.is_some() {
+            let due: Vec<&Did> = parsed
+                .iter()
+                .zip(&found)
+                .filter(|(_, i)| is_due(i))
+                .map(|(d, _)| d)
+                .collect();
+            if !due.is_empty() {
+                for (d, r) in due
+                    .iter()
+                    .zip(join_all(due.iter().map(|d| self.resolver.resolve_did(d))).await)
+                {
+                    if let Err(e) = r {
+                        tracing::debug!(did = %d, error = %e, "handle verification failed");
+                    }
+                }
+                found = join_all(parsed.iter().map(|d| self.resolver.cached(d))).await;
+            }
+        }
         let mut actors = BTreeMap::new();
         let mut pds = BTreeMap::new();
-        let now = self.host.now_ms();
         let mut due = Vec::new();
         for (d, id) in parsed.iter().zip(found) {
             // shown authors get their handle verified in the background (`live_tail`)
-            if id.as_ref().is_none_or(|i| {
-                i.handle_at_ms == 0 || now.saturating_sub(i.handle_at_ms) > HANDLE_TTL_MS
-            }) {
+            if is_due(&id) {
                 due.push(d.as_str());
             }
             let view = id

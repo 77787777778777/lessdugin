@@ -336,6 +336,10 @@ impl ResolvedIdentity {
             did: self.did.to_string(),
             handle: self.handle().map(str::to_owned),
             handle_state: self.handle_state,
+            claimed_handle: match self.handle_state {
+                HandleState::Unverified => self.claimed_handle.clone(),
+                HandleState::Verified | HandleState::Invalid => None,
+            },
             display_name: None,
             avatar: None,
             short_did: short_did(self.did.as_str()),

@@ -139,6 +139,7 @@ fn summary_from_decl(
         followed,
         member,
         alias,
+        report_contact: decl.and_then(|d| d.report_contact.clone()),
     }
 }
 
@@ -226,7 +227,7 @@ impl<H: Host> Engine<H> {
             renders: &self.rt.renders,
             pending: &pending,
             completeness: &l.completeness,
-            now: self.host.now_ms().saturating_mul(1000),
+            now: self.view_now_ms().saturating_mul(1000),
         };
         Ok(f(&v))
     }

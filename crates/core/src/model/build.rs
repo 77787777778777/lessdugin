@@ -8,9 +8,9 @@
 //!         nothing below a listing's recorded cap boundary (below_cap_boundary)
 //! input : records    = eligible rows (§1.5) → skeletons (bodies dropped)
 //!         absent     = §5.6.4 for the opinion subjects
-//!         obs        = t_obs per uri (firstSeenUri)
+//!         obs        = t_obs per uri (firstSeenUri), or the injected parity time
 //!         repoStatus = repoStatus(d, fk) for every record owner and authority
-//!         now        = injected, or the host clock
+//!         now        = injected (tests, parity mode), or the host clock
 //! fold  : crate::social::fold
 //! ```
 
@@ -84,6 +84,18 @@ impl ForumModel {
         key: &ForumKey,
         now_us: i64,
     ) -> Result<Self, ModelError> {
+        Self::build_with(kv, key, now_us, None).await
+    }
+
+    /// [`ForumModel::build`], with every admitted version's (and the declaration's) first-seen
+    /// time replaced by `fixed_obs_us` when it is given (parity mode, `engine-api.md` §2.1):
+    /// two caches holding the same records then fold to the same result whenever they saw them.
+    pub async fn build_with<K: KvStore>(
+        kv: &K,
+        key: &ForumKey,
+        now_us: i64,
+        fixed_obs_us: Option<i64>,
+    ) -> Result<Self, ModelError> {
         let store = RecordStore::new(kv);
         let decl_row = store
             .get(&key.uri)
@@ -125,7 +137,7 @@ impl ForumModel {
             let Ok(value) = r.row.value_json() else {
                 continue;
             };
-            let obs = r.row.first_seen_uri.min(r.row.first_seen);
+            let obs = fixed_obs_us.unwrap_or_else(|| r.row.first_seen_uri.min(r.row.first_seen));
             let sk = Skel::new(
                 NS,
                 &uri,
@@ -179,7 +191,9 @@ impl ForumModel {
             fk: key.fk.clone(),
             decl_cid: decl_row.cid.to_string(),
             decl: decl_value,
-            decl_obs: Some(decl_row.first_seen_uri.min(decl_row.first_seen)),
+            decl_obs: Some(
+                fixed_obs_us.unwrap_or_else(|| decl_row.first_seen_uri.min(decl_row.first_seen)),
+            ),
             records,
             absent,
             repo_status,

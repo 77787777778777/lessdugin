@@ -806,3 +806,72 @@ async fn send_http_adapter_is_guarded() {
     ));
     assert_eq!(env.srv.hits.load(Ordering::SeqCst), 0);
 }
+
+/// `Host::lock` (`sync.md` §7.1, §10.6): with lock files, two hosts over one data directory
+/// (two engines, or two processes) exclude each other on `outbox:<did>`; the lock is the
+/// `fd-lock` file `<data>/locks/outbox-<h(did)>.lock`, released on drop. Without lock files a
+/// host locks in-process, shared by its clones only.
+#[tokio::test]
+async fn host_locks_exclude_across_hosts_on_one_data_dir() {
+    use lessdugin_native::config::{Paths, lock_hash};
+    use lessdugin_native::host::NativeLock;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let paths = Paths::under(tmp.path());
+    paths.ensure_dirs().unwrap();
+    let mk = || {
+        NativeHost::with_parts(
+            MemKv::new(),
+            MemKv::new(),
+            tmp.path().join("blobs"),
+            Net::new(NetPolicy::production()).unwrap(),
+        )
+        .with_lock_files(&paths)
+    };
+    let (h1, h2) = (mk(), mk());
+    let name = "outbox:did:plc:ewvi7nxzyoun6zhxrhs64oiz";
+    let held = h1.lock(name, false).await.unwrap().unwrap();
+    assert!(matches!(&held, NativeLock::File(f)
+    if f.path() == paths.data_locks_dir().join(format!(
+        "outbox-{}.lock",
+        lock_hash("did:plc:ewvi7nxzyoun6zhxrhs64oiz")
+    ))));
+    assert!(h2.lock(name, false).await.unwrap().is_none());
+    assert!(
+        h1.lock(name, false).await.unwrap().is_none(),
+        "not reentrant"
+    );
+    // another account's outbox is independent
+    assert!(
+        h2.lock("outbox:did:plc:other", false)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    // a waiter gets the lock once it is released
+    let waiter = tokio::spawn({
+        let h2 = h2.clone();
+        async move { h2.lock(name, true).await.unwrap().is_some() }
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(!waiter.is_finished());
+    drop(held);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(10), waiter)
+            .await
+            .unwrap()
+            .unwrap()
+    );
+    assert!(h1.lock("unknown-name", false).await.is_err());
+
+    // in-process only: shared by clones, not by another host
+    let mem = NativeHost::with_parts(
+        MemKv::new(),
+        MemKv::new(),
+        tmp.path().join("blobs2"),
+        Net::new(NetPolicy::production()).unwrap(),
+    );
+    let held = mem.lock(name, false).await.unwrap().unwrap();
+    assert!(matches!(held, NativeLock::Process(_)));
+    assert!(mem.clone().lock(name, false).await.unwrap().is_none());
+}

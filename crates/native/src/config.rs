@@ -26,6 +26,10 @@ pub const APP_NAME: &str = "lessdugin";
 pub const DATA_DIR_ENV: &str = "LESSDUGIN_DATA_DIR";
 /// Largest accepted `config.toml`.
 pub const CONFIG_MAX_BYTES: u64 = 1024 * 1024;
+/// Environment variable turning on the engine's **test-only** parity mode
+/// (`engine-api.md` §2.1, `EngineConfig::parity_now_ms`): a fixed view time in ms since the
+/// epoch. Accepted only in devnet mode ([`parity_now_ms`]).
+pub const PARITY_NOW_ENV: &str = "LESSDUGIN_PARITY_NOW_MS";
 
 /// Configuration errors.
 #[derive(Debug, thiserror::Error)]
@@ -624,6 +628,40 @@ impl Config {
     }
 }
 
+/// The parity-mode time from [`PARITY_NOW_ENV`] (`engine-api.md` §2.1), for
+/// `EngineConfig::parity_now_ms`: `None` when the variable is unset or empty. Parity mode is
+/// test-only, so it is an error outside devnet mode (`--dev`), and the value must be a positive
+/// integer (ms since the epoch).
+pub fn parity_now_ms(config: &Config) -> Result<Option<i64>, ConfigError> {
+    parse_parity_now(
+        std::env::var_os(PARITY_NOW_ENV).as_deref(),
+        config.is_devnet(),
+    )
+}
+
+fn parse_parity_now(
+    value: Option<&std::ffi::OsStr>,
+    devnet: bool,
+) -> Result<Option<i64>, ConfigError> {
+    let Some(v) = value.filter(|v| !v.is_empty()) else {
+        return Ok(None);
+    };
+    if !devnet {
+        return Err(ConfigError::Invalid(format!(
+            "{PARITY_NOW_ENV} is test-only and needs devnet mode (--dev)"
+        )));
+    }
+    v.to_str()
+        .and_then(|s| s.trim().parse::<i64>().ok())
+        .filter(|ms| *ms > 0)
+        .map(Some)
+        .ok_or_else(|| {
+            ConfigError::Invalid(format!(
+                "{PARITY_NOW_ENV} must be a time in ms since the epoch"
+            ))
+        })
+}
+
 /// `config.toml` is not secret, and users commonly symlink it from a dotfiles repository, so
 /// a symlink is followed here (secrets use [`fsutil::read_private`] directly, which refuses).
 fn follow_user_symlink(path: &Path, e: io::Error) -> io::Result<Option<Vec<u8>>> {
@@ -640,6 +678,31 @@ fn follow_user_symlink(path: &Path, e: io::Error) -> io::Result<Option<Vec<u8>>>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parity_now_needs_devnet() {
+        use std::ffi::OsStr;
+        assert!(parse_parity_now(None, false).unwrap().is_none());
+        assert!(
+            parse_parity_now(Some(OsStr::new("")), false)
+                .unwrap()
+                .is_none()
+        );
+        assert!(matches!(
+            parse_parity_now(Some(OsStr::new("1760000000000")), false),
+            Err(ConfigError::Invalid(_))
+        ));
+        assert_eq!(
+            parse_parity_now(Some(OsStr::new("1760000000000")), true).unwrap(),
+            Some(1_760_000_000_000)
+        );
+        for bad in ["soon", "-5", "0", "1.5"] {
+            assert!(
+                parse_parity_now(Some(OsStr::new(bad)), true).is_err(),
+                "{bad}"
+            );
+        }
+    }
 
     #[test]
     fn defaults_roundtrip_through_toml() {

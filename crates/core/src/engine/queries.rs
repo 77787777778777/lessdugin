@@ -105,7 +105,7 @@ impl<H: Host> Engine<H> {
             });
         }
         // ordered at the query time (the model may be up to MODEL_MAX_AGE_MS old)
-        let now_us = self.host.now_ms().saturating_mul(1000);
+        let now_us = self.view_now_ms().saturating_mul(1000);
         let ordered = order_posts(keys, q.sort, now_us, p);
         let offset: usize = match q.cursor.as_deref() {
             None | Some("") => 0,
@@ -314,8 +314,18 @@ impl<H: Host> Engine<H> {
         let uri_s = u.to_string();
         let mut assertions: Vec<Value> = Vec::new();
         let mut state = None;
+        let mut root = None;
         if let Some(l) = &loaded {
             let m = &l.model;
+            // a comment's thread: its record's root, if the fold placed it there
+            if let Some(SkelData::Comment { root: Some(r), .. }) = m.skel(&uri_s).map(|x| &x.data)
+                && m.fold
+                    .threads
+                    .get(&r.uri)
+                    .is_some_and(|th| th.placement.parent.contains_key(&uri_s))
+            {
+                root = Some(r.uri.clone());
+            }
             for x in m.input.records.values() {
                 if x.coll != Some(Collection::ModAction) {
                     continue;
@@ -341,6 +351,7 @@ impl<H: Host> Engine<H> {
                     dto: DtoVersion::default(),
                     uri: uri_s,
                     cid: None,
+                    root,
                     level: TrustLevel::Pds,
                     record: None,
                     validity: Vec::new(),
@@ -362,6 +373,7 @@ impl<H: Host> Engine<H> {
             dto: DtoVersion::default(),
             uri: uri_s,
             cid: Some(row.cid.to_string()),
+            root,
             level: match row.level {
                 Level::Pds => TrustLevel::Pds,
                 Level::Proven => TrustLevel::Proven,

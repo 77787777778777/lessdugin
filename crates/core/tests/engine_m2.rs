@@ -12,7 +12,6 @@ mod common;
 use std::sync::{Arc, Mutex};
 
 use common::{assert_send, block_on};
-use lessdugin_core::discovery::state::REJECTED_RECHECK_MS;
 use lessdugin_core::dto::{
     BodyDraft, CommentDraft, CommentSort, DefaultTier, Draft, EditOpts, Event, ForumDraft,
     ForumRole, ItemState, ListPostsQuery, MembersQuery, MembershipMode, PostDraft, PostFilter,
@@ -236,9 +235,9 @@ fn scenario() -> Scenario {
     block_on(bob.engine.delete(&bob_c2)).unwrap();
     bob.flush();
 
-    // bob's first sync confirmed carol before her membership existed: a rejected candidate is
-    // re-checked after a day without a hint (`sync.md` §4.2.1; hints arrive with M5)
-    w.tick(REJECTED_RECHECK_MS);
+    // bob's first sync saw carol (granted) before her membership existed: a granted repo is
+    // synced without the membership gate, so the next explicit sync picks her up at once (no
+    // REJECTED_RECHECK_MS back-off)
     for u in [alice, bob, carol] {
         u.sync(&forum);
     }
@@ -464,18 +463,32 @@ fn events_report_writes_syncs_and_changes() {
     assert!(bob.engine.unsubscribe(id));
 }
 
+/// An engine over `u`'s device in parity mode (`engine-api.md` §2.1) at `now_ms`.
+fn parity_engine(u: &User, now_ms: i64) -> Engine<MemHost> {
+    Engine::new(
+        u.host.clone(),
+        EngineConfig {
+            parity_now_ms: Some(now_ms),
+            ..EngineConfig::default()
+        },
+    )
+}
+
 #[test]
 fn snapshots_are_deterministic() {
     let s = scenario();
-    let carol = &s.w.carol;
-    let list = block_on(carol.engine.list_posts(&ListPostsQuery::new(&s.forum))).unwrap();
-    let thread = block_on(carol.engine.get_thread(&s.welcome, &ThreadOpts::default())).unwrap();
+    // parity mode: the handle state (carol's own is verified on her device since her login)
+    // and the clock do not depend on the device
+    let fixed = s.w.alice.host.now() + MINUTE;
+    let carol = parity_engine(&s.w.carol, fixed);
+    let list = block_on(carol.list_posts(&ListPostsQuery::new(&s.forum))).unwrap();
+    let thread = block_on(carol.get_thread(&s.welcome, &ThreadOpts::default())).unwrap();
     insta::assert_json_snapshot!("list_posts", list);
     insta::assert_json_snapshot!("get_thread", thread);
     // the same bytes from another device after its own sync (cross-client parity)
-    let alice = &s.w.alice;
-    let a_list = block_on(alice.engine.list_posts(&ListPostsQuery::new(&s.forum))).unwrap();
-    let a_thread = block_on(alice.engine.get_thread(&s.welcome, &ThreadOpts::default())).unwrap();
+    let alice = parity_engine(&s.w.alice, fixed);
+    let a_list = block_on(alice.list_posts(&ListPostsQuery::new(&s.forum))).unwrap();
+    let a_thread = block_on(alice.get_thread(&s.welcome, &ThreadOpts::default())).unwrap();
     assert_eq!(
         serde_json::to_string(&a_list).unwrap(),
         serde_json::to_string(&list).unwrap()

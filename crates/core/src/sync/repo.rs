@@ -16,7 +16,9 @@
 //!   h1 = (repo.rev, repo.commit), every scope listed at it, no marks → Clean
 //!   confirm (a candidate, §4.2.1): the membership getRecord first; absent or invalid → Rejected
 //!   colls: repo.colls if ≤ 24 h old, not dirty, not reconcile, and no stored row lies in a
-//!          collection outside it; else describeRepo ∩ (OURS ∪ {app.bsky.actor.profile})
+//!          collection outside it, and (a user-initiated pass) fetched at h1 or holding every
+//!          forum collection (else describeRepo even for a Clean head; a new collection makes
+//!          the pass a full one); else describeRepo ∩ (OURS ∪ {app.bsky.actor.profile})
 //!          (on failure or a malformed `collections`: OURS)
 //!   in parallel: list_range for each (fk scope, c ∈ RANGED ∩ colls, or c with stored rows in
 //!                the range); the membership getRecord; GLOBAL getRecords; OWN full listings
@@ -134,6 +136,11 @@ pub struct SyncRequest {
     /// Report the state of this membership in [`RepoReport::membership`] without gating the
     /// pass on it (a granted participant, `social.md` §3.3).
     pub check: Option<Confirm>,
+    /// A user-initiated pass (`sync_forum`, `sync_thread`): a cached `repo.colls` that lacks a
+    /// forum collection is trusted only at the head it was fetched at (`repo.colls_rev`), and
+    /// is refreshed otherwise, even when the repo would be `Clean`, rather than after
+    /// [`DESCRIBE_REPO_TTL_MS`] (§5.2). Background passes keep the 24 h cache.
+    pub explicit: bool,
 }
 
 impl SyncRequest {
@@ -145,7 +152,15 @@ impl SyncRequest {
             reason,
             confirm: None,
             check: None,
+            explicit: false,
         }
+    }
+
+    /// Marks the pass as user-initiated (see [`SyncRequest::explicit`]).
+    #[must_use]
+    pub fn explicit(mut self) -> Self {
+        self.explicit = true;
+        self
     }
 
     /// Confirms the membership in `forum` first.
@@ -914,11 +929,26 @@ impl<H: Host> Syncer<H> {
                 .all(|sc| repo.listed_rev(sc.name()) == repo.rev)
             && repo.marks.is_empty()
             && !repo.marks_overflow;
+        // A user-initiated pass trusts a cached `colls` that lacks a forum collection only at the
+        // head it was fetched at (§5.2): a collection created since (a member's first content, an
+        // edit's first revision) would otherwise stay unlisted until the daily reconcile, also
+        // after a background pass listed the repo at its new head with the old list. Background
+        // passes keep the 24 h cache.
+        let colls_unsure = req.explicit
+            && doc_level
+            && repo.colls_rev != h1.rev
+            && req.scopes.iter().any(|sc| matches!(sc, Scope::Forum(_)))
+            && ranged()
+                .iter()
+                .map(String::as_str)
+                .chain([nsid::MEMBERSHIP])
+                .any(|c| !repo.colls.iter().any(|x| x == c));
         // A reconcile always refreshes `describeRepo` (§5.2 rules), even at an unchanged head: a
         // collection created while `repo.colls` was reused was not listed at that head. A new
-        // collection makes the pass a full one.
+        // collection makes the pass a full one. So does a user-initiated pass with an unsure
+        // `colls`.
         let mut pre_described: Option<(Vec<String>, i64)> = None;
-        if clean && req.reason == Reason::Reconcile {
+        if clean && (req.reason == Reason::Reconcile || colls_unsure) {
             match describe(&xrpc, &svc, did).await {
                 Ok((cs, at)) => {
                     if cs.iter().any(|c| !repo.colls.contains(c)) {
@@ -933,6 +963,7 @@ impl<H: Host> Syncer<H> {
             if let Some((cs, at)) = pre_described.take() {
                 repo.colls = cs;
                 repo.colls_at = at;
+                repo.colls_rev.clone_from(&h1.rev);
                 repo.colls_dirty = false;
             }
             // the listing at this rev covered the membership: a confirmation is served from the
@@ -1031,7 +1062,8 @@ impl<H: Host> Syncer<H> {
             Reason::Reconcile | Reason::Full | Reason::Resync | Reason::Migration
         ) || repo.colls_at <= 0
             || now.saturating_sub(repo.colls_at) > DESCRIBE_REPO_TTL_MS
-            || repo.colls_dirty;
+            || repo.colls_dirty
+            || colls_unsure;
         if !need_describe {
             'outer: for fk in &fk_scopes {
                 for c in ranged_all
@@ -1462,6 +1494,7 @@ impl<H: Host> Syncer<H> {
             if let Some(at) = described {
                 repo.colls = colls.clone();
                 repo.colls_at = at;
+                repo.colls_rev.clone_from(&h1.rev);
                 repo.colls_dirty = false;
             } else if need_describe {
                 // describeRepo failed: OURS was listed; it is asked again next time
@@ -1821,6 +1854,7 @@ impl<H: Host> Syncer<H> {
                         reason,
                         confirm: None,
                         check: None,
+                        explicit: false,
                     }))
                 }
             };

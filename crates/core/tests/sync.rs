@@ -1091,6 +1091,7 @@ impl Future for YieldOnce {
 impl Host for CountingHost {
     type Kv = <MemHost as Host>::Kv;
     type Ws = <MemHost as Host>::Ws;
+    type Lock = <MemHost as Host>::Lock;
 
     fn cache(&self) -> &Self::Kv {
         self.inner.cache()
@@ -1150,6 +1151,14 @@ impl Host for CountingHost {
         name: String,
     ) -> Result<Option<Vec<String>>, lessdugin_core::host::HostError> {
         self.inner.resolve_txt_system(name).await
+    }
+
+    async fn lock(
+        &self,
+        name: &str,
+        wait: bool,
+    ) -> Result<Option<Self::Lock>, lessdugin_core::host::HostError> {
+        self.inner.lock(name, wait).await
     }
 
     async fn sleep(&self, ms: u64) {
@@ -1877,4 +1886,58 @@ fn an_own_listing_tombstones_records_deleted_elsewhere() {
     assert!(matches!(w.slot(&p.0), Slot::Tomb(_)));
     assert!(is_rec(&w.slot(&keep.0)));
     assert!(is_rec(&w.slot(f.uri.as_str())), "the declaration is listed");
+}
+
+/// `sync.md` §5.2: a granted member's first content (their membership and a comment, in
+/// collections their repo did not have) after this device listed their repo. A background pass
+/// keeps the cached collection list (24 h) and misses it, even at the new head; the next
+/// user-initiated `sync_forum` refreshes the list (the repo is not `Clean` for it) and lists it,
+/// with no `REJECTED_RECHECK_MS` or `DESCRIBE_REPO_TTL_MS` wait.
+#[test]
+fn an_explicit_sync_refreshes_a_stale_collection_list() {
+    let w = World::new();
+    let owner = w.net.add_account("owner.example.com");
+    let carol = w.net.add_account("carol.example.com");
+    let f = w.forum(&owner, "meta", MembershipMode::Approval, &[]);
+    let p = w.post(&owner, &f);
+    w.access(&owner, &f, carol.did(), AccessLevel::Member);
+    let fs = w.sync_forum(&f, &SyncOpts::default());
+    assert!(fs.state.roster.granted.contains(carol.did().as_str()));
+    assert!(!w.repo(&carol).colls.iter().any(|c| c == nsid::MEMBERSHIP));
+    assert!(w.stored(&f, &carol).is_empty());
+
+    // carol's first content: the membership and a comment
+    w.join(&carol, &f);
+    w.comment(&carol, &f, &p);
+    w.host.advance_ms(60_000);
+
+    // a background pass at the new head keeps the cached list: nothing is listed
+    let sy = w.syncer();
+    let r = w.sync_repo(&sy, &carol, &f);
+    assert_eq!(r.outcome, RepoOutcome::Applied, "{r:?}");
+    assert!(w.stored(&f, &carol).is_empty());
+
+    // the explicit sync: the repo would be Clean at this head, but its list is refreshed
+    let describes = |w: &World| {
+        w.net
+            .requests()
+            .iter()
+            .filter(|r| r.did.as_deref() == Some(carol.did().as_str()))
+            .filter(|r| r.nsid.as_deref() == Some("com.atproto.repo.describeRepo"))
+            .count()
+    };
+    let before = describes(&w);
+    let fs = w.sync_forum(&f, &SyncOpts::default());
+    assert_eq!(describes(&w), before + 1);
+    let stored = w.stored(&f, &carol);
+    assert_eq!(stored.len(), 2, "{stored:?}");
+    assert_eq!(
+        fs.state.disc.get(carol.did().as_str()).map(|d| d.state),
+        Some(DiscState::Confirmed)
+    );
+    assert!(w.repo(&carol).colls.iter().any(|c| c == nsid::COMMENT));
+
+    // at an unchanged head the refreshed list is trusted: no further describeRepo
+    w.sync_forum(&f, &SyncOpts::default());
+    assert_eq!(describes(&w), before + 1);
 }

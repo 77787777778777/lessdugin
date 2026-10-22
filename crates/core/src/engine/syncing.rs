@@ -413,6 +413,8 @@ impl<H: Host> Engine<H> {
         let total = u32::try_from(reqs.len() + skipped.len()).unwrap_or(u32::MAX);
         let done = AtomicU32::new(u32::try_from(skipped.len()).unwrap_or(u32::MAX));
         progress.report(done.load(Ordering::SeqCst), total);
+        // user-initiated: stale collection lists are refreshed (`sync.md` §5.2)
+        let reqs: Vec<SyncRequest> = reqs.into_iter().map(SyncRequest::explicit).collect();
         let reports: Vec<RepoReport> = join_all(reqs.iter().map(|r| async {
             let rep = sy.sync_repo(&s, r).await;
             progress.report(done.fetch_add(1, Ordering::SeqCst) + 1, total);

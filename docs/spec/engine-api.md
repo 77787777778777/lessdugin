@@ -60,10 +60,40 @@ EngineConfig {
   indexers: Vec<IndexerConsent>,    // user-configured or consented forum indexers
   user_agent: String,
   platform: Platform,               // Native | Browser (concurrency limits, CORS rules)
+  parity_now_ms: Option<i64>,       // test-only parity mode (§2.1); None in production
 }
 ```
 
 The engine keeps no global state; two engines over two hosts are independent.
+
+### 2.1 Parity mode (test-only, devnet-only)
+
+The parity scenario (`docs/plan.md` §4.2) compares clients that synced the same records at
+different times. Two inputs of the fold would otherwise differ between them: `now` (ordering,
+time windows) and each version's first-seen time `obs` (`social.md` §1, §2: future-dating).
+`EngineConfig.parity_now_ms = Some(t)` injects both:
+
+- every view (`list_posts`, `get_post`, `get_thread`, `recent_discussion`, `history`,
+  `members`, `forum_open`, …) is computed at `now = t`, whatever the host clock says;
+- every admitted version's `obs`, and the declaration's, is taken to be `t` (the stored
+  first-seen times are not changed);
+- the handles of the actors a view shows are verified by the query itself (`sync.md` §3.3),
+  instead of being queued for `live_tail`, so the handle state does not depend on whether a
+  client ran `live_tail`.
+
+Sync, the outbox, record `createdAt` values, caches, TTLs and back-offs keep using the host
+clock. Choose `t` later than every record of the scenario (a record whose `createdAt` is more
+than `FUTURE_SKEW_MS` after `t` would be flagged `futureDated`), e.g. the scenario's start plus
+one day, and give every client the same `t`.
+
+Parity mode is **test-only** and is never enabled in production:
+
+- **Native (CLI, TUI):** `LESSDUGIN_PARITY_NOW_MS=<ms since the epoch>`, read by
+  `lessdugin_native::config::parity_now_ms`, which refuses it unless the configuration is in
+  devnet mode (`--dev`, a devnet-enabled build). The CLI prints a warning when it is on.
+- **SPA:** only an e2e build (a build-time flag, like the demo flag that gates the mock engine)
+  passes `parityNowMs` to the wasm engine's configuration; release builds do not contain the
+  code path.
 
 ## 3. Operations
 
@@ -187,6 +217,18 @@ Event =
 UIs re-query on `Changed` and never move the user's cursor on live updates (TUI banner
 "N new — R"; SPA query invalidation).
 
+### 3.9 Planned operations (not specified yet)
+
+Clients asked for these; they arrive with the milestone that implements the behaviour behind
+them, as compatible additions (`docs/plan.md`):
+
+| Operation / field | Milestone | Notes |
+|---|---|---|
+| `mutes() -> Vec<ActorView>` | M3 | the local mute list behind `mute(did, on)` (§3.6) |
+| `mark_notifications_read(ids)`, or all | M3 | notification read state (`social.md` §16) |
+| viewer's own tag votes and tag relevance on `PostView` | M5 | `applies(p, t)` (`social.md` §13.3); until then a client only knows the votes it made itself |
+| `backlinks(uri)` ("linked from") | M5 | listed posts linking to an item, from rendered bodies (`social.md` §16 Pingbacks) |
+
 ## 4. DTO schema (`dto/1`)
 
 ### 4.1 Common types
@@ -231,7 +273,8 @@ PostSummary   { uri, cid, forum, author: ActorView, kind, title?, excerpt, tags:
 PostList      { dto, forum, sort, filter, items: Vec<PostSummary>, cursor?, completeness }
 PostView      { dto, post: PostSummary, body: RenderedBody, reacts: Vec<ReactTally>,
                 history: { revisions: u32, redacted: bool }, sequences: Vec<SequenceNav> }
-CommentNode   { uri, cid, parent?: uri, depth: u32, author: ActorView, body: RenderedBody,
+CommentNode   { uri, cid, root: uri /* the thread the engine placed it in */, parent?: uri,
+                depth: u32, author: ActorView, body: RenderedBody,
                 quote?: TextQuote, quoteAnchor?: Anchor, createdAtMs, tRankMs, score: ScoreView,
                 reacts: Vec<ReactTally>, state: ItemState, badges: Badges, retracted: bool,
                 moderatorHat: bool, version?: { revision: u32 } | { unavailable: true },
@@ -246,7 +289,8 @@ HistoryView   { dto, uri, versions: Vec<{ n, cid, createdAtMs, summary?, availab
 
 ```
 ForumSummary  { uri, owner: ActorView, name, description?, membership: open|approval,
-                followed: bool, member: bool, alias? }
+                followed: bool, member: bool, alias?,
+                reportContact? /* as written; shown only through safe_href (Field) */ }
 ForumView     { dto, forum: ForumSummary, about?: RenderedBody, moderators: Vec<{ actor, role, title?, shown: bool }>,
                 policy: EffectivePolicy, myRole: owner|admin|moderator|member|established|newcomer|none,
                 myKarma?: i64, banners: Vec<Banner>, completeness }
@@ -260,9 +304,11 @@ SequenceView  { dto, sequence: SequenceSummary, body?: RenderedBody, chapters: V
 SequenceNav   { sequence: uri, title, prev?: uri, next?: uri }
 SearchResults { dto, hits: Vec<{ item: PostSummary | CommentNode, snippet: string, highlights: Vec<[u32,u32]> }> }
 NotificationList { dto, items: Vec<{ id, reason, atMs, subject: uri, actor?: ActorView, read: bool, preview?: string }> }
+                 // reason: reply|mention|quote|pingback|newComment|newPost|reacted|modAction|karmaChange (social.md §16)
 ModQueue      { dto, items: Vec<{ kind, subject, reason, detail }> }
 ModLog        { dto, entries: Vec<{ actor, action, subject, value, reason?, atMs, lapsed: bool, adoptedFrom? }> }
-RawView       { dto, uri, cid?, level: pds|proven|hint, record?: json, validity: Vec<string>,
+RawView       { dto, uri, cid?, root?: uri /* a comment's thread, as placed by the engine */,
+                level: pds|proven|hint, record?: json, validity: Vec<string>,
                 assertions: Vec<…>, state?: ItemState }
 VerifyReport  { dto, uri, result: proven|absent|failed, rev?, commitCid?, keySource, checks: Vec<{ name, ok, detail? }> }
 ```

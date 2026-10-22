@@ -740,6 +740,8 @@ impl<H: Host> Syncer<H> {
         let n = u32::try_from(jobs.len()).unwrap_or(u32::MAX);
         let total = tally.total.fetch_add(n, Ordering::SeqCst).saturating_add(n);
         progress.report(tally.done.load(Ordering::SeqCst), total);
+        // `sync_forum` is user-initiated: its passes refresh stale collection lists (§5.2)
+        let jobs: Vec<SyncRequest> = jobs.iter().cloned().map(SyncRequest::explicit).collect();
         join_all(jobs.iter().map(|r| async move {
             let report = self.sync_repo(s, r).await;
             let done = tally.done.fetch_add(1, Ordering::SeqCst) + 1;

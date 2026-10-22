@@ -12,6 +12,7 @@
 //!   deadline (for driving long-lived futures such as a pump step by step).
 //! - Randomness is deterministic (splitmix64 from a settable seed).
 //! - System DNS answers, blobs and WebSocket scripts are programmable.
+//! - Named locks ([`Host::lock`]) are in-process and shared by clones of the host.
 //!
 //! `Target::UserPds` requests are routed under the pseudo-URL `userpds://<did><path_and_query>`.
 
@@ -22,7 +23,8 @@ use std::task::{Poll, Waker};
 
 use lessdugin_atp::syntax::Did;
 use lessdugin_core::host::{
-    BlobHandle, Host, HostError, HttpRequest, HttpResponse, Redirects, Target, WebSocket, WsMessage,
+    BlobHandle, Host, HostError, HttpRequest, HttpResponse, ProcessLock, ProcessLocks, Redirects,
+    Target, WebSocket, WsMessage,
 };
 use lessdugin_core::store::mem::MemKv;
 
@@ -95,6 +97,8 @@ struct Inner {
     blobs: Mutex<BTreeMap<String, Vec<u8>>>,
     ws: Mutex<Vec<(String, Vec<WsMessage>)>>,
     ws_sent: Arc<Mutex<Vec<String>>>,
+    /// Named locks ([`Host::lock`]), shared by clones (one "machine").
+    locks: ProcessLocks,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -152,6 +156,7 @@ impl MemHost {
                 blobs: Mutex::new(BTreeMap::new()),
                 ws: Mutex::new(Vec::new()),
                 ws_sent: Arc::new(Mutex::new(Vec::new())),
+                locks: ProcessLocks::new(),
             }),
         }
     }
@@ -397,6 +402,7 @@ impl WebSocket for MemWs {
 impl Host for MemHost {
     type Kv = MemKv;
     type Ws = MemWs;
+    type Lock = ProcessLock;
 
     fn cache(&self) -> &MemKv {
         &self.inner.cache
@@ -475,6 +481,12 @@ impl Host for MemHost {
             .get(&name)
             .cloned()
             .unwrap_or_else(|| Err(HostError::Unsupported("system DNS not scripted".into())))
+    }
+
+    /// In-process locks shared by the clones of this host: engines over one `MemHost` exclude
+    /// each other like processes over one data directory; separate hosts are separate machines.
+    async fn lock(&self, name: &str, wait: bool) -> Result<Option<ProcessLock>, HostError> {
+        Ok(self.inner.locks.lock(name, wait).await)
     }
 
     async fn sleep(&self, ms: u64) {

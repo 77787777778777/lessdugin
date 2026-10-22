@@ -12,7 +12,8 @@ expression: thread
       "forum": "at://did:plc:whanakmuiogult5m5wu7xbj4/online.7778777.lessdugin.temp.forum/meta",
       "author": {
         "did": "did:plc:whanakmuiogult5m5wu7xbj4",
-        "handleState": "unverified",
+        "handle": "alice.example.com",
+        "handleState": "verified",
         "shortDid": "did:plc:whanakmu…"
       },
       "kind": "article",
@@ -62,10 +63,12 @@ expression: thread
     {
       "uri": "at://did:plc:2hjzbjveisqcpwgiji7hkgqm/online.7778777.lessdugin.temp.comment/w5cs3cry7ban-3m2qrta53s3hj-3m2qs46bvelzh",
       "cid": "bafyreiewm4lpzhzcd6ucocgyxgpitrn3m5wm4ez2m3ojpolqakcs5k4j3m",
+      "root": "at://did:plc:whanakmuiogult5m5wu7xbj4/online.7778777.lessdugin.temp.post/w5cs3cry7ban-3m2qrta53s3hj",
       "depth": 1,
       "author": {
         "did": "did:plc:2hjzbjveisqcpwgiji7hkgqm",
-        "handleState": "unverified",
+        "handle": "carol.example.com",
+        "handleState": "verified",
         "shortDid": "did:plc:2hjzbjve…"
       },
       "body": {
@@ -105,10 +108,12 @@ expression: thread
     {
       "uri": "at://did:plc:ochphg43iudrrgiqczqt6zeb/online.7778777.lessdugin.temp.comment/w5cs3cry7ban-3m2qrta53s3hj-3m2qryltrulqi",
       "cid": "bafyreic3ogihrlx5ph5orwbfixmimnc2ykhz2zdd46e7ho3e4jpnbmuuum",
+      "root": "at://did:plc:whanakmuiogult5m5wu7xbj4/online.7778777.lessdugin.temp.post/w5cs3cry7ban-3m2qrta53s3hj",
       "depth": 1,
       "author": {
         "did": "did:plc:ochphg43iudrrgiqczqt6zeb",
-        "handleState": "unverified",
+        "handle": "bob.example.com",
+        "handleState": "verified",
         "shortDid": "did:plc:ochphg43…"
       },
       "body": {
@@ -148,11 +153,13 @@ expression: thread
     {
       "uri": "at://did:plc:2hjzbjveisqcpwgiji7hkgqm/online.7778777.lessdugin.temp.comment/w5cs3cry7ban-3m2qrta53s3hj-3m2qs5xix4lzh",
       "cid": "bafyreibh4fr7jisl6drug7xeqouiasoyt2nlshh4kebao5yuqe32cbav4q",
+      "root": "at://did:plc:whanakmuiogult5m5wu7xbj4/online.7778777.lessdugin.temp.post/w5cs3cry7ban-3m2qrta53s3hj",
       "parent": "at://did:plc:ochphg43iudrrgiqczqt6zeb/online.7778777.lessdugin.temp.comment/w5cs3cry7ban-3m2qrta53s3hj-3m2qryltrulqi",
       "depth": 2,
       "author": {
         "did": "did:plc:2hjzbjveisqcpwgiji7hkgqm",
-        "handleState": "unverified",
+        "handle": "carol.example.com",
+        "handleState": "verified",
         "shortDid": "did:plc:2hjzbjve…"
       },
       "body": {

@@ -8,8 +8,12 @@
 //!
 //! Futures are `Send` on native targets and not `Send` in wasm, expressed with [`MaybeSend`].
 
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::ops::Bound;
+use std::sync::{Arc, Mutex, PoisonError};
+
+use futures::lock::{Mutex as AsyncMutex, OwnedMutexGuard};
 
 use lessdugin_atp::syntax::Did;
 
@@ -377,6 +381,8 @@ pub trait Host: MaybeSendSync + 'static {
     type Kv: KvStore;
     /// The WebSocket type.
     type Ws: WebSocket;
+    /// A held named lock ([`Host::lock`]); dropping it releases the lock.
+    type Lock: MaybeSend;
 
     /// The disposable cache store (`sync.md`, invariant I1).
     fn cache(&self) -> &Self::Kv;
@@ -418,6 +424,29 @@ pub trait Host: MaybeSendSync + 'static {
         name: String,
     ) -> impl Future<Output = Result<Option<Vec<String>>, HostError>> + MaybeSend;
 
+    /// Takes the exclusive named lock `name` (`sync.md` §10.6, §12.3). Names: `outbox:<did>`
+    /// (the outbox pump of an account, §7.1: one write in flight per account), `repo:<did>` and
+    /// `sync-leader`. With `wait`, waits until the lock is free; without, returns `Ok(None)`
+    /// when another holder has it.
+    ///
+    /// The lock excludes every other holder of the same name over the same stores: other
+    /// engines (and hosts) in this process, other processes on the same data directory, and
+    /// other tabs of the origin. It is released when the guard is dropped and when its holder
+    /// dies (process exit, tab close), so it is never left stale. Implementations:
+    /// - native: an exclusive `fd-lock` file (`<data dir>/locks/outbox-<h(did)>.lock`, §10.6);
+    /// - browser: the Web Lock `lessdugin-<name>` with `:` replaced by `-` (for example
+    ///   `lessdugin-outbox-<did>`), requested in exclusive mode (`ifAvailable` when `!wait`),
+    ///   held until the guard is dropped;
+    /// - tests (`MemHost`): an in-process lock shared by clones of the host.
+    ///
+    /// Lock names are not reentrant: a holder that asks again for a name it holds waits for
+    /// itself.
+    fn lock(
+        &self,
+        name: &str,
+        wait: bool,
+    ) -> impl Future<Output = Result<Option<Self::Lock>, HostError>> + MaybeSend;
+
     /// Sleep for `ms` milliseconds.
     fn sleep(&self, ms: u64) -> impl Future<Output = ()> + MaybeSend;
 
@@ -428,9 +457,86 @@ pub trait Host: MaybeSendSync + 'static {
     fn fill_random(&self, buf: &mut [u8]);
 }
 
+/// In-process named locks for [`Host::lock`]: every holder of a clone of the registry excludes
+/// the others, in this process only. `MemHost` uses it, and hosts whose stores are not shared
+/// with other processes (native hosts over in-memory stores) or need an in-process layer under
+/// their cross-process lock (a browser host serialising its own tasks before the Web Lock).
+#[derive(Clone, Debug, Default)]
+pub struct ProcessLocks {
+    locks: Arc<Mutex<BTreeMap<String, Arc<AsyncMutex<()>>>>>,
+}
+
+/// A lock held from [`ProcessLocks`]; dropping it releases the lock.
+#[derive(Debug)]
+pub struct ProcessLock {
+    _guard: OwnedMutexGuard<()>,
+    name: String,
+}
+
+impl ProcessLock {
+    /// The lock's name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+impl ProcessLocks {
+    /// An empty registry.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn entry(&self, name: &str) -> Arc<AsyncMutex<()>> {
+        let mut m = self.locks.lock().unwrap_or_else(PoisonError::into_inner);
+        // forget locks nobody holds or waits for (only this map refers to them)
+        m.retain(|_, l| Arc::strong_count(l) > 1);
+        Arc::clone(m.entry(name.to_owned()).or_default())
+    }
+
+    /// [`Host::lock`]: takes `name`, waiting while another holder has it if `wait`, else
+    /// `None` when it is busy.
+    pub async fn lock(&self, name: &str, wait: bool) -> Option<ProcessLock> {
+        let l = self.entry(name);
+        let guard = if wait {
+            l.lock_owned().await
+        } else {
+            l.try_lock_owned()?
+        };
+        Some(ProcessLock {
+            _guard: guard,
+            name: name.to_owned(),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn process_locks_exclude_and_release() {
+        futures::executor::block_on(async {
+            let locks = ProcessLocks::new();
+            let other = locks.clone();
+            let a = locks.lock("outbox:did:plc:a", false).await.unwrap();
+            assert_eq!(a.name(), "outbox:did:plc:a");
+            assert!(other.lock("outbox:did:plc:a", false).await.is_none());
+            // another name is independent
+            let b = other.lock("outbox:did:plc:b", false).await.unwrap();
+            drop(a);
+            assert!(other.lock("outbox:did:plc:a", false).await.is_some());
+            // a waiter gets the lock once it is released
+            let held = locks.lock("repo:x", true).await.unwrap();
+            let waiter = other.lock("repo:x", true);
+            futures::pin_mut!(waiter);
+            assert!(futures::poll!(waiter.as_mut()).is_pending());
+            drop(held);
+            assert!(waiter.await.is_some());
+            drop(b);
+            // a separate registry does not share the locks
+            assert!(ProcessLocks::new().lock("repo:x", false).await.is_some());
+        });
+    }
 
     #[test]
     fn prefix_ranges() {

@@ -18,6 +18,7 @@ const REASON: Record<NotificationReason, { glyph: string; text: string }> = {
   reply: { glyph: "↩", text: "replied to you" },
   mention: { glyph: "@", text: "mentioned you" },
   quote: { glyph: "❝", text: "quoted you" },
+  pingback: { glyph: "🔗", text: "linked to your item" },
   newComment: { glyph: "💬", text: "commented on a post you follow" },
   newPost: { glyph: "📝", text: "posted" },
   reacted: { glyph: "☺", text: "Reacts on your item" },

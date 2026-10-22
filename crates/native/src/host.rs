@@ -19,7 +19,8 @@ use std::sync::{Arc, RwLock};
 use futures::future::BoxFuture;
 use lessdugin_atp::syntax::Did;
 use lessdugin_core::host::{
-    BlobHandle, Host, HostError, HttpRequest, HttpResponse, KvStore, Redirects, Target,
+    BlobHandle, Host, HostError, HttpRequest, HttpResponse, KvStore, ProcessLock, ProcessLocks,
+    Redirects, Target,
 };
 
 pub use blob::BlobStore;
@@ -27,7 +28,7 @@ pub use guard::{DnsBackend, FixedDns, GuardedResolver, NetPolicy, SystemDns, is_
 pub use net::{Net, NetRequest, USER_AGENT, redact_url, user_pds_url};
 pub use ws::NativeWs;
 
-use crate::config::{Config, Paths};
+use crate::config::{Config, FileLock, Paths};
 use crate::kv::{Durability, SqliteKv};
 
 /// An authenticated session for one account, bound at login to one PDS
@@ -60,6 +61,20 @@ pub struct NativeHost<K: KvStore = SqliteKv> {
     net: Net,
     blobs: BlobStore,
     sessions: Arc<RwLock<HashMap<Did, Arc<dyn AuthSession>>>>,
+    /// Where [`Host::lock`] keeps its lock files (`sync.md` §10.6); `None` for a host over
+    /// stores no other process shares, which locks in-process only.
+    lock_paths: Option<Paths>,
+    locks: ProcessLocks,
+}
+
+/// A lock held by [`NativeHost`] ([`Host::lock`]): an exclusive `fd-lock` file, or an
+/// in-process lock for a host without lock files. Dropping it releases the lock.
+#[derive(Debug)]
+pub enum NativeLock {
+    /// `<data dir>/locks/…` or `<cache dir>/…` (`sync.md` §10.6).
+    File(FileLock),
+    /// In-process only.
+    Process(ProcessLock),
 }
 
 impl<K: KvStore> std::fmt::Debug for NativeHost<K> {
@@ -82,7 +97,7 @@ impl NativeHost<SqliteKv> {
         let cache = SqliteKv::open(&paths.cache_db(), Durability::Normal)?;
         let state = SqliteKv::open(&paths.state_db(), Durability::Full)?;
         let net = Net::new(config.net_policy())?;
-        Ok(Self::with_parts(cache, state, paths.blobs_dir(), net))
+        Ok(Self::with_parts(cache, state, paths.blobs_dir(), net).with_lock_files(paths))
     }
 }
 
@@ -95,7 +110,17 @@ impl<K: KvStore> NativeHost<K> {
             net,
             blobs: BlobStore::new(blob_dir),
             sessions: Arc::new(RwLock::new(HashMap::new())),
+            lock_paths: None,
+            locks: ProcessLocks::new(),
         }
+    }
+
+    /// Takes [`Host::lock`]s as `fd-lock` files under `paths` (`sync.md` §10.6), so they
+    /// exclude other processes on the same data directory too. [`NativeHost::open`] does this.
+    #[must_use]
+    pub fn with_lock_files(mut self, paths: &Paths) -> Self {
+        self.lock_paths = Some(paths.clone());
+        self
     }
 
     /// The guarded HTTP client (auth sessions send through it).
@@ -146,6 +171,7 @@ impl<K: KvStore> NativeHost<K> {
 impl<K: KvStore + 'static> Host for NativeHost<K> {
     type Kv = K;
     type Ws = NativeWs;
+    type Lock = NativeLock;
 
     fn cache(&self) -> &K {
         &self.cache
@@ -193,6 +219,21 @@ impl<K: KvStore + 'static> Host for NativeHost<K> {
         Err(HostError::Unsupported(
             "system DNS TXT lookups are not available".into(),
         ))
+    }
+
+    /// An exclusive `fd-lock` file (`Paths::lock_file`: `outbox:<did>` →
+    /// `<data dir>/locks/outbox-<h(did)>.lock`), so engines in this process and other processes
+    /// on the same data directory exclude each other; waiting happens on a blocking thread. A
+    /// host without lock files locks in-process.
+    async fn lock(&self, name: &str, wait: bool) -> Result<Option<NativeLock>, HostError> {
+        match &self.lock_paths {
+            Some(paths) => paths
+                .lock(name, wait)
+                .await
+                .map(|l| l.map(NativeLock::File))
+                .map_err(|e| HostError::Storage(format!("lock {name}: {e}"))),
+            None => Ok(self.locks.lock(name, wait).await.map(NativeLock::Process)),
+        }
     }
 
     async fn sleep(&self, ms: u64) {

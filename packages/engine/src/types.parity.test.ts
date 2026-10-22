@@ -43,7 +43,8 @@ function rustStructs(rs: string): Map<string, string[]> {
 
 function rustStringEnums(rs: string): Map<string, string[]> {
   const out = new Map<string, string[]>();
-  for (const m of rs.matchAll(/pub enum (\w+) \{ ([^}]*) \}/g)) {
+  // the bodies of `string_enum!` (one line or several)
+  for (const m of rs.matchAll(/string_enum! \{[\s\S]*?pub enum (\w+) \{([^}]*)\}/g)) {
     const values = (m[2] ?? "")
       .split(",")
       .map((v) => v.trim())
@@ -84,7 +85,9 @@ describe.skipIf(!existsSync(DTO_RS))("DTO parity with crates/core/src/dto.rs", (
 
   it("has every Rust string enum with the same values", () => {
     const drift: string[] = [];
-    for (const [name, values] of rustStringEnums(rs)) {
+    const enums = rustStringEnums(rs);
+    expect(enums.has("NotificationReason")).toBe(true);
+    for (const [name, values] of enums) {
       const t = new RegExp(`export type ${name} =([^;]*);`).exec(ts);
       const mine = t?.[1] ? [...t[1].matchAll(/"(\w+)"/g)].map((v) => v[1]) : null;
       if (!mine || [...values].sort().join() !== [...mine].sort().join()) drift.push(name);

@@ -75,6 +75,9 @@ pub struct Ctx {
     pub config_problem: Option<String>,
     /// The keyring service of the session store (a devnet's own in devnet mode).
     keyring_service: Option<String>,
+    /// The test-only parity-mode time (`LESSDUGIN_PARITY_NOW_MS`, devnet only;
+    /// `engine-api.md` §2.1).
+    parity_now_ms: Option<i64>,
     engine: OnceLock<Engine<NativeHost>>,
 }
 
@@ -171,6 +174,14 @@ impl Ctx {
                 paths.data_dir.display()
             )));
         }
+        // test-only parity mode (`engine-api.md` §2.1): devnet only
+        let parity_now_ms = lessdugin_native::config::parity_now_ms(&config)
+            .map_err(|e| CliError::usage(e.to_string()))?;
+        if let Some(t) = parity_now_ms {
+            out.warn(tt(&format!(
+                "parity mode: views are computed at the fixed time {t} ms (tests only)"
+            )));
+        }
         Ok(Self {
             g,
             out,
@@ -178,6 +189,7 @@ impl Ctx {
             config,
             config_problem,
             keyring_service,
+            parity_now_ms,
             engine: OnceLock::new(),
         })
     }
@@ -188,7 +200,13 @@ impl Ctx {
             return Ok(e);
         }
         let host = NativeHost::open(&self.paths, &self.config).map_err(EngineError::from)?;
-        let engine = Engine::new(host, engine_config(&self.config));
+        let engine = Engine::new(
+            host,
+            EngineConfig {
+                parity_now_ms: self.parity_now_ms,
+                ..engine_config(&self.config)
+            },
+        );
         Ok(self.engine.get_or_init(|| engine))
     }
 

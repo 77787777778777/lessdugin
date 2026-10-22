@@ -22,7 +22,8 @@ use lessdugin_atp::xrpc::{CreateRecord, CreateSession, Session, WriteRecordOutpu
 use lessdugin_core::dto::{HandleState, VerifyOutcome};
 use lessdugin_core::engine::{AccountInfo, Engine, EngineConfig, PinStatus};
 use lessdugin_core::host::{
-    BlobHandle, Host, HostError, HttpRequest, HttpResponse, Redirects, Target, WebSocket, WsMessage,
+    BlobHandle, Host, HostError, HttpRequest, HttpResponse, ProcessLock, ProcessLocks, Redirects,
+    Target, WebSocket, WsMessage,
 };
 use lessdugin_core::store::mem::MemKv;
 use lessdugin_core::xrpc::{CallOpts, Service};
@@ -47,6 +48,7 @@ struct NetHost {
     redirects: reqwest::Client,
     sessions: Mutex<HashMap<String, (String, String)>>,
     rng: Mutex<u64>,
+    locks: ProcessLocks,
 }
 
 impl NetHost {
@@ -59,6 +61,7 @@ impl NetHost {
             redirects: build(reqwest::redirect::Policy::limited(3)),
             sessions: Mutex::new(HashMap::new()),
             rng: Mutex::new(0x1234_5678),
+            locks: ProcessLocks::new(),
         }
     }
 
@@ -73,6 +76,7 @@ impl NetHost {
 impl Host for NetHost {
     type Kv = MemKv;
     type Ws = NoWs;
+    type Lock = ProcessLock;
 
     fn cache(&self) -> &MemKv {
         &self.cache
@@ -172,6 +176,10 @@ impl Host for NetHost {
         Err(HostError::Unsupported("system DNS".into()))
     }
 
+    async fn lock(&self, name: &str, wait: bool) -> Result<Option<ProcessLock>, HostError> {
+        Ok(self.locks.lock(name, wait).await)
+    }
+
     async fn sleep(&self, ms: u64) {
         tokio::time::sleep(Duration::from_millis(ms)).await;
     }
@@ -219,8 +227,12 @@ impl Devnet {
             return Some(Self { info, child: None });
         }
         let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
+        // One file per devnet: tests of this binary may run in parallel, each with its own
+        // devnet, and must not read (and later kill) another test's.
+        static STARTED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = STARTED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let json =
-            std::env::temp_dir().join(format!("lessdugin-devnet-{}.json", std::process::id()));
+            std::env::temp_dir().join(format!("lessdugin-devnet-{}-{n}.json", std::process::id()));
         let _ = std::fs::remove_file(&json);
         let child = Command::new("node")
             .arg(format!("{root}/packages/e2e/devnet.mjs"))

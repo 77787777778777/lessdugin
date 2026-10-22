@@ -18,6 +18,7 @@ function node(
   const n: CommentNode = {
     uri,
     cid: `cid-${uri}`,
+    root: "at://did:plc:abcdefghijklmnopqrstuvwx/online.7778777.lessdugin.post/p",
     depth,
     author: {
       did: "did:plc:abcdefghijklmnopqrstuvwx",

@@ -20,11 +20,11 @@ import { isAuthorityRole } from "./forum/forumContext.tsx";
 
 const route = getRouteApi("/c/$author/$rkey");
 
-/** The thread root the comment record names. The record is author-controlled, so this only
- * chooses which thread to ask the engine for: the comment is shown only if the engine's own
- * thread for that root lists it (`subtree` below), otherwise the page says it is not shown.
- * (A root carried by `CommentNode` / `RawView` would avoid the extra hop; engine-api.md has
- * none yet.) */
+/** The thread root the comment record names, used only when the engine gives no
+ * `RawView.root` (the thread it placed the comment in). The record is author-controlled, so
+ * this only chooses which thread to ask the engine for: the comment is shown only if the
+ * engine's own thread for that root lists it (`subtree` below), otherwise the page says it is
+ * not shown. */
 function rootOf(record: unknown): string | null {
   if (typeof record !== "object" || record === null) return null;
   const root = (record as { root?: { uri?: unknown } }).root;
@@ -34,7 +34,7 @@ function rootOf(record: unknown): string | null {
 function CommentThread({ uri }: { uri: string }) {
   const engine = useEngine();
   const raw = useQuery({ queryKey: qk.raw(uri), queryFn: () => engine.raw(uri) });
-  const rootUri = raw.data ? rootOf(raw.data.record) : null;
+  const rootUri = raw.data ? (raw.data.root ?? rootOf(raw.data.record)) : null;
   const thread = useQuery({
     queryKey: qk.thread(rootUri ?? "", "magic", false),
     queryFn: () => engine.getThread(rootUri ?? "", { sort: "magic", unreadOnly: false }),

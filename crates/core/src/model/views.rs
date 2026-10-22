@@ -38,6 +38,7 @@ pub fn bare_actor(did: &str) -> ActorView {
         did: did.to_owned(),
         handle: None,
         handle_state: HandleState::Unverified,
+        claimed_handle: None,
         display_name: None,
         avatar: None,
         short_did: short_did(did),
@@ -332,6 +333,7 @@ impl Views<'_> {
         Some(CommentNode {
             uri: uri.to_owned(),
             cid: x.cid.clone(),
+            root: root.to_owned(),
             parent: parent_uri,
             depth: pl.depth.get(uri).copied().unwrap_or(1),
             author: self.actor(&x.did),
@@ -360,11 +362,12 @@ impl Views<'_> {
         })
     }
 
-    fn placeholder_node(&self, uri: &str) -> CommentNode {
+    fn placeholder_node(&self, uri: &str, root: &str) -> CommentNode {
         let did = crate::social::input::split_uri(uri).map_or("", |(d, _, _)| d);
         CommentNode {
             uri: uri.to_owned(),
             cid: String::new(),
+            root: root.to_owned(),
             parent: None,
             depth: 1,
             author: self.actor(did),
@@ -430,7 +433,7 @@ impl Views<'_> {
                         out.push(n);
                     }
                 }
-                Node::Missing(m) => out.push(self.placeholder_node(m)),
+                Node::Missing(m) => out.push(self.placeholder_node(m, root)),
                 Node::Root => {}
             }
             let mut comments: Vec<(CommentKey, Node)> = Vec::new();
@@ -612,6 +615,7 @@ impl Views<'_> {
             followed,
             member: me.is_some_and(|m| self.model.is_member(m)),
             alias,
+            report_contact: d.report_contact.clone(),
         }
     }
 

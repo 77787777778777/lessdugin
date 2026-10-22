@@ -439,6 +439,15 @@ impl<H: Host> Outbox<H> {
         self.shared.generation.load(Ordering::SeqCst)
     }
 
+    /// The host lock `outbox:<account>` (`sync.md` §7.1, §10.6), waiting for it.
+    async fn account_lock(&self, account: &str) -> Result<H::Lock, EngineError> {
+        let name = format!("outbox:{account}");
+        self.host.lock(&name, true).await?.ok_or_else(|| {
+            EngineError::internal(format!("the host did not grant the lock {name}"))
+                .with_retryable(true)
+        })
+    }
+
     fn pump_lock(&self, account: &str) -> Arc<AsyncMutex<()>> {
         Arc::clone(
             lock(&self.shared.pumps)
@@ -1009,6 +1018,9 @@ impl<H: Host> Outbox<H> {
     pub async fn undo(&self, session: &Session, id: &str) -> Result<WriteTicket, EngineError> {
         let seq = Self::own_write_id(session, id)?;
         let account = session.did.as_str();
+        // another process may be picking this write to send it (`sync.md` §7.1); a write being
+        // sent finishes first. Lock order: host lock, then the row lock.
+        let _held = self.account_lock(account).await?;
         let _g = self.shared.rows.lock().await;
         let mut w: PendingWrite = self
             .get_row(model::write_key(account, seq))
@@ -1186,6 +1198,10 @@ impl<H: Host> Outbox<H> {
         let account = session.did.as_str().to_owned();
         let pump = self.pump_lock(&account);
         let _p = pump.lock().await;
+        // One write in flight per account across engines, processes and tabs (`sync.md` §7.1):
+        // the host lock is held from picking the write to saving its outcome, so the pick sees
+        // what another holder saved. Lock order: host lock, then the row lock.
+        let _held = self.account_lock(&account).await?;
         let (w, budget, recovering) = {
             let _g = self.shared.rows.lock().await;
             let Some(mut w) = self.scan_writes(&account, true).await?.pop() else {

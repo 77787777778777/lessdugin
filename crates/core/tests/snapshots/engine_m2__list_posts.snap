@@ -14,7 +14,8 @@ expression: list
       "forum": "at://did:plc:whanakmuiogult5m5wu7xbj4/online.7778777.lessdugin.temp.forum/meta",
       "author": {
         "did": "did:plc:ochphg43iudrrgiqczqt6zeb",
-        "handleState": "unverified",
+        "handle": "bob.example.com",
+        "handleState": "verified",
         "shortDid": "did:plc:ochphg43…"
       },
       "kind": "article",
@@ -45,7 +46,8 @@ expression: list
       "forum": "at://did:plc:whanakmuiogult5m5wu7xbj4/online.7778777.lessdugin.temp.forum/meta",
       "author": {
         "did": "did:plc:whanakmuiogult5m5wu7xbj4",
-        "handleState": "unverified",
+        "handle": "alice.example.com",
+        "handleState": "verified",
         "shortDid": "did:plc:whanakmu…"
       },
       "kind": "article",

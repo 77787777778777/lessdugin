@@ -86,6 +86,13 @@ pub struct EngineConfig {
     pub user_agent: String,
     /// Native or browser.
     pub platform: Platform,
+    /// Parity mode (`engine-api.md` §2.1), **test-only**: when set, every view is computed at
+    /// this fixed time (ms) instead of the host clock, and every admitted version's first-seen
+    /// time (`obs`) is taken to be this time, so clients that synced the same records at
+    /// different times produce byte-identical DTOs. Native clients set it only in devnet mode
+    /// (`LESSDUGIN_PARITY_NOW_MS` with `--dev`), the SPA only in e2e builds; it is never set in
+    /// production. Sync, the outbox, caches and back-offs keep using the host clock.
+    pub parity_now_ms: Option<i64>,
 }
 
 fn url(s: &str) -> url::Url {
@@ -122,6 +129,7 @@ impl Default for EngineConfig {
             indexers: Vec::new(),
             user_agent: default_user_agent(),
             platform: Platform::Native,
+            parity_now_ms: None,
         }
     }
 }

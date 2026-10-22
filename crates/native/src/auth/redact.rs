@@ -168,6 +168,10 @@ fn sensitive_value(s: &[u8], key_start: usize, key_end: usize) -> Option<(usize,
     if j >= s.len() || !(s[j] == b'=' || s[j] == b':') {
         return None;
     }
+    // `app_password::x`: a module path segment, not a field
+    if s[j..].starts_with(b"::") {
+        return None;
+    }
     j += 1;
     while j < s.len() && s[j] == b' ' {
         j += 1;
@@ -218,7 +222,10 @@ pub fn redact_secrets(text: &str) -> String {
             while k < s.len() && (is_word(s[k]) || s[k] == b'-') {
                 k += 1;
             }
-            if let Some((vs, ve)) = sensitive_value(s, i, k) {
+            // the last segment of a module path (`lessdugin_native::auth::app_password: …`, a
+            // log line's target) is not a field name
+            let path_segment = i >= 2 && &s[i - 2..i] == b"::";
+            if !path_segment && let Some((vs, ve)) = sensitive_value(s, i, k) {
                 out.push_str(&text[copied..vs]);
                 out.push_str(REDACTED);
                 i = ve;
@@ -296,5 +303,31 @@ mod tests {
         );
         assert_eq!(redact_secrets("barcode=1 xcode: 2"), "barcode=1 xcode: 2");
         assert_eq!(redact_secrets("ünïcode ok"), "ünïcode ok");
+    }
+
+    #[test]
+    fn module_paths_are_not_fields() {
+        // a log line's target is a module path: its segments are not field names
+        assert_eq!(
+            redact_secrets("DEBUG lessdugin_native::auth::app_password: logging in as alice"),
+            "DEBUG lessdugin_native::auth::app_password: logging in as alice"
+        );
+        assert_eq!(
+            redact_secrets("at lessdugin_native::auth::password::check (x.rs:1)"),
+            "at lessdugin_native::auth::password::check (x.rs:1)"
+        );
+        // real fields on such a line are still redacted
+        assert_eq!(
+            redact_secrets(
+                "lessdugin_native::auth::app_password: login password=hunter2 app_password: p2"
+            ),
+            "lessdugin_native::auth::app_password: login password=<redacted> app_password: \
+             <redacted>"
+        );
+        assert_eq!(
+            redact_secrets("app_password: abcd-efgh-ijkl-mnop"),
+            "app_password: <redacted>"
+        );
+        assert_eq!(redact_secrets("password: s3cret"), "password: <redacted>");
     }
 }

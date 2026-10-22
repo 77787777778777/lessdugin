@@ -78,6 +78,9 @@ export interface ActorView {
   /** Present only if verified in both directions. */
   handle?: string;
   handleState: HandleState;
+  /** The handle the DID document claims, present only while it is `unverified` (sync.md §3.1:
+   * shown struck through next to `shortDid`). Untrusted text. */
+  claimedHandle?: string;
   displayName?: string;
   avatar?: MediaView;
   shortDid: string;
@@ -288,6 +291,9 @@ export type VersionRef = { revision: number } | { unavailable: boolean };
 export interface CommentNode {
   uri: string;
   cid: string;
+  /** The thread's root post: the thread the engine placed the comment in (not the record's
+   * own, author-controlled `root` field). */
+  root: string;
   parent?: string;
   depth: number;
   author: ActorView;
@@ -370,6 +376,9 @@ export interface ForumSummary {
   followed: boolean;
   member: boolean;
   alias?: string;
+  /** The declaration's `reportContact` as written (`mailto:`, `https:` or `at://`): untrusted,
+   * shown only through `safeHref` in `Field` context. */
+  reportContact?: string;
 }
 
 export interface ModeratorView {
@@ -500,6 +509,7 @@ export type NotificationReason =
   | "reply"
   | "mention"
   | "quote"
+  | "pingback"
   | "newComment"
   | "newPost"
   | "reacted"
@@ -560,6 +570,8 @@ export interface RawView {
   dto: DtoVersion;
   uri: string;
   cid?: string;
+  /** For a comment: the root post of the thread the engine placed it in. */
+  root?: string;
   level: TrustLevel;
   record?: Json;
   validity: string[];
@@ -674,6 +686,9 @@ export interface ModeratorDraft {
   title?: string;
 }
 
+/** `forum.defaultTier` values a declaration may write. */
+export type DefaultTier = "personal" | "frontpage";
+
 export interface ForumDraft {
   /** The forum rkey (`forum_create` only; fixed afterwards). */
   slug: Slug;
@@ -681,7 +696,7 @@ export interface ForumDraft {
   description?: string;
   about?: BodyDraft;
   membership: MembershipMode;
-  defaultTier: "personal" | "frontpage";
+  defaultTier: DefaultTier;
   featuredTags: Slug[];
   moderators: ModeratorDraft[];
   reportContact?: string;

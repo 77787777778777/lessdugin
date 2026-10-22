@@ -1019,6 +1019,7 @@ impl<H: Host> NetHost<H> {
 impl<H: Host> Host for NetHost<H> {
     type Kv = H::Kv;
     type Ws = H::Ws;
+    type Lock = H::Lock;
 
     fn cache(&self) -> &Self::Kv {
         self.inner.cache()
@@ -1058,6 +1059,14 @@ impl<H: Host> Host for NetHost<H> {
         name: String,
     ) -> impl Future<Output = Result<Option<Vec<String>>, HostError>> + MaybeSend {
         self.inner.resolve_txt_system(name)
+    }
+
+    fn lock(
+        &self,
+        name: &str,
+        wait: bool,
+    ) -> impl Future<Output = Result<Option<Self::Lock>, HostError>> + MaybeSend {
+        self.inner.lock(name, wait)
     }
 
     /// Sleeps (a retry back-off, a `Retry-After`), but never past the command's time budget:

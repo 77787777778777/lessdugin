@@ -491,6 +491,7 @@ export class MockEngine implements EngineApi {
     const node: CommentNode = {
       uri: c.uri,
       cid: c.cid,
+      root: c.root,
       depth,
       author: this.actor(c.author),
       body: state.kind === "tombstone" ? emptyBody("[removed]") : clone(c.body),
@@ -514,11 +515,12 @@ export class MockEngine implements EngineApi {
     return node;
   }
 
-  private missingNode(uri: AtUri, depth: number): CommentNode {
+  private missingNode(uri: AtUri, root: AtUri, depth: number): CommentNode {
     const author = splitAtUri(uri)?.did ?? "did:plc:unknown";
     return {
       uri,
       cid: "",
+      root,
       depth,
       author: this.actor(author),
       body: emptyBody("[missing]"),
@@ -642,7 +644,7 @@ export class MockEngine implements EngineApi {
       const c = byUri.get(w.uri);
       if (!c) {
         if (hasListed.get(w.uri)) {
-          out.push(this.missingNode(w.uri, w.depth));
+          out.push(this.missingNode(w.uri, rootUri, w.depth));
           pushChildren(w.uri, w.depth + 1);
         }
         continue;
@@ -872,6 +874,7 @@ export class MockEngine implements EngineApi {
     if (f.summary.description !== undefined) summary.description = f.summary.description;
     const alias = this.s.followed.get(f.summary.uri);
     if (alias !== undefined) summary.alias = alias;
+    if (f.reportContact !== undefined) summary.reportContact = f.reportContact;
     return summary;
   }
 
@@ -1585,6 +1588,7 @@ export class MockEngine implements EngineApi {
         })),
     };
     if (cid !== undefined) view.cid = cid;
+    if (c) view.root = c.root;
     if (state !== undefined) view.state = state;
     return view;
   }

@@ -98,6 +98,10 @@ pub struct RepoRow {
     /// When `colls` was fetched (ms).
     #[serde(default)]
     pub colls_at: i64,
+    /// The head rev `colls` was fetched at (`""`: unknown): a user-initiated pass trusts
+    /// `colls` only at this rev (`sync.md` §5.2).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub colls_rev: String,
     /// A hint or own write named a collection not in `colls`.
     #[serde(default)]
     pub colls_dirty: bool,
@@ -165,6 +169,7 @@ impl RepoRow {
             head_seen: None,
             colls: Vec::new(),
             colls_at: 0,
+            colls_rev: String::new(),
             colls_dirty: false,
             listed: BTreeMap::new(),
             capped: BTreeMap::new(),

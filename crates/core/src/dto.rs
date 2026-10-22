@@ -80,6 +80,10 @@ dto! {
         #[serde(skip_serializing_if = "Option::is_none")]
         pub handle: Option<String>,
         pub handle_state: HandleState,
+        /// The handle the DID document claims, present only while it is `unverified`
+        /// (`sync.md` §3.1: shown struck through next to `shortDid`). Untrusted text.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub claimed_handle: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub display_name: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -431,6 +435,9 @@ dto! {
     pub struct CommentNode {
         pub uri: String,
         pub cid: String,
+        /// The thread's root post: the thread the engine placed the comment in (not the
+        /// record's own, author-controlled `root` field).
+        pub root: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub parent: Option<String>,
         pub depth: u32,
@@ -547,6 +554,11 @@ dto! {
         pub member: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub alias: Option<String>,
+        /// The declaration's `reportContact` as written (`mailto:`, `https:` or `at://`;
+        /// `data-model.md` §6.1): untrusted, shown only through `safe_href` in `Field` context
+        /// (`lfm-1.md` §5).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub report_contact: Option<String>,
     }
 }
 
@@ -737,7 +749,7 @@ dto! {
 string_enum! {
     /// Notification reasons (`social.md` §16).
     pub enum NotificationReason {
-        Reply, Mention, Quote, NewComment, NewPost, Reacted, ModAction, KarmaChange,
+        Reply, Mention, Quote, Pingback, NewComment, NewPost, Reacted, ModAction, KarmaChange,
     }
 }
 
@@ -822,6 +834,10 @@ dto! {
         pub uri: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub cid: Option<String>,
+        /// For a comment: the root post of the thread the engine placed it in (absent when the
+        /// comment is not placed in a thread of a loaded forum).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub root: Option<String>,
         pub level: TrustLevel,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub record: Option<serde_json::Value>,

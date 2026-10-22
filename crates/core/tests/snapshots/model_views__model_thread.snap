@@ -60,6 +60,7 @@ expression: thread
     {
       "uri": "at://did:plc:bbbbbbbbbbbbbbbbbbbbbbbb/online.7778777.lessdugin.temp.comment/mn7i7x7lksub-3m2qv4q5d2222-3m2qv6jees222",
       "cid": "bafyreigsjametb4wfnpjhzsrhvzmveb2qo4by4ldiyc73r57ambvqe5vay",
+      "root": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/online.7778777.lessdugin.temp.post/mn7i7x7lksub-3m2qv4q5d2222",
       "depth": 1,
       "author": {
         "did": "did:plc:bbbbbbbbbbbbbbbbbbbbbbbb",
@@ -100,6 +101,7 @@ expression: thread
     {
       "uri": "at://did:plc:eeeeeeeeeeeeeeeeeeeeeeee/online.7778777.lessdugin.temp.comment/mn7i7x7lksub-3m2qv4q5d2222-3m2qvaclgk222",
       "cid": "bafyreig3agznhqluhu5unjqoa3xhye7wrtyuwshlpxlali7tsqezlzm5ge",
+      "root": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/online.7778777.lessdugin.temp.post/mn7i7x7lksub-3m2qv4q5d2222",
       "parent": "at://did:plc:bbbbbbbbbbbbbbbbbbbbbbbb/online.7778777.lessdugin.temp.comment/mn7i7x7lksub-3m2qv4q5d2222-3m2qv6jees222",
       "depth": 2,
       "author": {
@@ -144,6 +146,7 @@ expression: thread
     {
       "uri": "at://did:plc:bbbbbbbbbbbbbbbbbbbbbbbb/online.7778777.lessdugin.temp.comment/mn7i7x7lksub-3m2qv4q5d2222-3m2qvc3sic222",
       "cid": "bafyreibh5vtjct4aexbus5b444lcabve2u6ukf3lbn4k6ukvrwvcr75cfi",
+      "root": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/online.7778777.lessdugin.temp.post/mn7i7x7lksub-3m2qv4q5d2222",
       "parent": "at://did:plc:eeeeeeeeeeeeeeeeeeeeeeee/online.7778777.lessdugin.temp.comment/mn7i7x7lksub-3m2qv4q5d2222-3m2qvaclgk222",
       "depth": 3,
       "author": {
@@ -185,6 +188,7 @@ expression: thread
     {
       "uri": "at://did:plc:bbbbbbbbbbbbbbbbbbbbbbbb/online.7778777.lessdugin.temp.comment/mn7i7x7lksub-3m2qv4q5d2222-3m2qv5mqtw222",
       "cid": "",
+      "root": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/online.7778777.lessdugin.temp.post/mn7i7x7lksub-3m2qv4q5d2222",
       "depth": 1,
       "author": {
         "did": "did:plc:bbbbbbbbbbbbbbbbbbbbbbbb",
@@ -224,6 +228,7 @@ expression: thread
     {
       "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/online.7778777.lessdugin.temp.comment/mn7i7x7lksub-3m2qv4q5d2222-3m2qvduzk2222",
       "cid": "bafyreiapy7yvergkmrpht4oepsfn2czaxgsmm37igs2bcwapf2wh3f52cm",
+      "root": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/online.7778777.lessdugin.temp.post/mn7i7x7lksub-3m2qv4q5d2222",
       "parent": "at://did:plc:bbbbbbbbbbbbbbbbbbbbbbbb/online.7778777.lessdugin.temp.comment/mn7i7x7lksub-3m2qv4q5d2222-3m2qv5mqtw222",
       "depth": 2,
       "author": {

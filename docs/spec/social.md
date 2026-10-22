@@ -147,6 +147,14 @@ Invalid records **are** members. V1 excludes them (§10.1) and the raw view show
 
 A DID that is missing from the map is `Unavailable`.
 
+**Malformed input.** A `FoldInput` that breaks one of the conditions above is malformed, for example:
+- a `decl` that is not admitted or not valid: the forum cannot be opened (§1.6, FO4);
+- a uri in both `records` and `absent`, or an `absent` uri that is not the `subject.uri` of an opinion in `records`;
+- a record outside the sets listed under `records`;
+- `algorithmIds` that differ from the effective IDs derived from `decl` (§1.6).
+
+The fold is not defined for a malformed input. Implementations SHOULD reject it as an input error rather than fold it. The engine never builds one, and no vector contains one (§20.1 item 25).
+
 **`ForumView`** (informative; the serialisation is the engine's versioned DTO schema) contains:
 - **Per user:** authorities and ranks; the sets P, G, B, N, S and E; newcomers; K1, KP and K.
 - **Per item:** score, agreement, unweighted count, votes on earlier versions; react tallies; resolved tier, pins and lock; applied tags; visibility state; `t_rank`; flags.
@@ -221,7 +229,12 @@ PARAMS = membership, defaultTier, voting, authorModeration, tagCreation, pairCap
 ### 1.6 Effective policy
 
 - An absent field takes its lexicon default (`data-model.md` §6.1). An absent `#gates` field takes the `karma/1` default (§8).
-- An unknown knownValue takes the fallback in `data-model.md` §13.3, plus the banner. The fallback for `membership` is `approval`.
+- An unknown value in one of the declaration's knownValue fields takes the fallback in `data-model.md` §13.3 and raises the banner "this forum uses rules newer than your client". Those fields are exactly ten:
+  - `membership` (fallback `approval`) and `defaultTier` (fallback `personal`);
+  - `moderators[].role`, in any entry, including one that FO2 ignores for another reason (the owner's own entry, a later duplicate); the entry itself is ignored (FO2);
+  - `policy.moderation`, `policy.voting`, `policy.reactPalette`, `policy.tagCreation`, `policy.karma.algorithm`, `policy.ranking.algorithm` and `policy.display.newUsers`.
+
+  Unknown values in other records (opinions, modActions, posts) never raise the banner; they take only their own fallbacks in `data-model.md` §13.3 (§20.1 item 26).
 - An integer out of range invalidates the declaration (FO4). The forum then cannot be opened, which fails closed.
 - The fold reads only the **current** declaration. Every policy change, including a change of mode or gates, therefore applies retroactively. This is inherent, and the forum settings UI says so.
 
@@ -232,10 +245,16 @@ PARAMS = membership, defaultTier, voting, authorModeration, tagCreation, pairCap
 ### 2.1 Conversions
 
 ```
-µs(datetime) = parse with the atproto datetime syntax (any UTC offset), convert to UTC, and
-               truncate fractional digits beyond the sixth; None if it does not parse or is < 0
-tidTime(tid) = (the 64-bit integer value of the base32-sortable TID) >> 10     // data-model.md §3.1
+µs(datetime) = parse with the atproto datetime syntax: YYYY-MM-DDTHH:MM:SS[.F](Z|±HH:MM),
+               uppercase T and Z, F of 1 to 20 digits, at most 64 characters, a real calendar
+               date, hour ≤ 23, minute and second ≤ 59 (no leap second), offset not "-00:00";
+               convert to UTC and truncate fraction digits beyond the sixth;
+               None if it does not parse or is < 0
+tidTime(tid) = (the unsigned 64-bit integer value of the base32-sortable TID) >> 10   // data-model.md §3.1
 ```
+
+- **Datetime limits.** These are the limits of the atproto reference implementations (Go indigo, TypeScript `@atproto/syntax`) and of `crates/atp`. A datetime outside them fails G2 (format `datetime`), so it invalidates its record. With 20 fraction digits a datetime has 46 characters, so the length limit never binds. In a valid record, a datetime that is present therefore has µs = `None` only when it is before 1970, which gives "no claimed time".
+- **TIDs are unsigned.** A TID's first character (`[2-7a-j]`) carries 4 bits, so its value ranges up to 2^64 − 1. Implementations MUST NOT parse a TID as a signed 64-bit integer. `tidTime` ranges up to 2^54 − 1, so it fits the signed integers of §0.4.
 
 ### 2.2 Effective time `t_rank`
 
@@ -260,7 +279,7 @@ t_rank(x)  = max(lower(x), t_eff'(x))
 - a comment;
 - or the root post, for top-level comments, for children of a `Missing` placeholder, and for re-attached comments.
 
-If the root post is not in `records`, the lower bound is `t_decl`. Posts are computed first, then comments, top-down through the placed tree.
+If the root post p is not a non-Excluded post in `records` (it is absent, or V1 excludes it), the thread has a `Missing(p)` root (§11 step 1), and the lower bound is `t_decl`. Posts are computed first, then comments, top-down through the placed tree.
 
 ### 2.3 Rules
 
@@ -291,10 +310,12 @@ P          = participants:
                open:      { d : d ∈ A ∨ member(d) }
 S          = (A ∪ G) ∖ (B ∪ N)                                   // seeds
 E          = §6.2; S ⊆ E
-newcomer(d) ⇔ d ∈ P ∖ (S ∪ E)                                    // meaningful in open mode only
+newcomer(d) ⇔ d ∈ P ∖ (S ∪ E)                                    // both modes; affects content only in open mode (V8)
 ```
 
 **How bans interact with participation.** A ban never removes participation by itself. Rule V4 hides a banned user's content, so that an item-level keep (§4.6) can still override the ban in both modes. In approval mode, `access(d) ≠ none` means "granted, or banned".
+
+**Newcomers** are defined literally, in both modes. Banned and nullified participants are therefore newcomers (V4 hides a banned user's content first). In approval mode, where P ∖ S ⊆ B ∪ N, they are the only newcomers, and V8 does not apply.
 
 ### 3.2 Modes
 
@@ -320,7 +341,7 @@ newcomer(d) ⇔ d ∈ P ∖ (S ∪ E)                                    // mean
   - If they were granted, the grant still counts. They remain a seed, and their opinions keep counting until they delete them, so other people's karma survives the departure.
   - An established user who is not a seed leaves E, because §6.2 requires participation, so their votes stop carrying weight.
 - **Moderator badge.** A listed moderator is *shown* as a moderator only if `member(d)`. Their authority does not depend on it.
-- **Applications (approval mode).** A DID with `member(d) ∧ access(d) = none` is an applicant.
+- **Applications (approval mode).** A DID d ∉ A with `member(d) ∧ access(d) = none` is an applicant: `applicants = { d ∉ A : member(d) ∧ access(d) = none }`, in approval mode only (empty in open mode). Authorities are participants already, so the owner's own membership, which `forum create` writes (`data-model.md` §14 item 12), makes no application.
   - Moderators find applications only through CORE+ (Constellation, Jetstream, the indexer) or out of band, and the UI says so.
   - Applicants appear in the mod queue (§4.12).
 - **Changing the mode is retroactive.** Switching from `open` to `approval` hides the content of every non-authority participant who is not granted. An owner who archives a forum this way SHOULD first grant the participants whose content should stay visible. A forum-wide lock is **Reserved (P2)**.
@@ -388,7 +409,7 @@ An assertion m by actor X on subject T **counts at forum tier** only if every co
 2. X ∈ A.
 3. **Rank:** `X = owner ∨ X = subjectAuthor(T) ∨ rank(X) > subjectRank(T)`.
 4. **Role:** the table below allows the action, with its values, for X's role.
-5. **Not lapsed:** `until` is absent, or `µs(until) > now`.
+5. **Not lapsed:** `until` is absent, or `µs(until) > now`. A valid `until` before 1970 has no µs, so it has expired.
 6. **CID binding:** if m is positive, the CID check of §4.5 passes.
 
 | Action | owner | admin | moderator | post author (author scope, §4.9) |
@@ -445,12 +466,13 @@ keepRank(x) = r  if resolve(x.uri, hidden) = Resolved{false, r, _}
 - **Attributes come from the winner.** `reason` and `showReason` come from `winner` of `hidden`; `notice` from `winner` of `tier`. For `restrict`, `winner` is the smallest-uri record at rank r.
 - **Content-level decisions beat user-level ones.** An item-level keep at rank ≥ the rank of a ban, restriction or lock keeps the item visible (V4, V5, V7).
 - **`hidden` alone never touches karma.** Only `spam`, bans, `nullify` and `restrict{vote, react, tag}` change which opinions count (§5).
+- **Allow-list entries.** MA9 keeps the `allowed` entries whose rkey starts with `{fk}-{threadTid(p)}-`, by key alone. An entry that names a comment not in `records` is kept. A comment of another post with the same TID passes the filter but is never consulted, because V7 judges only the comments of p.
 
 ### 4.5 CID-bound positive assertions (F20)
 
-**When a positive assertion counts.** A positive record counts only if `T ∈ records` and `m.subjectCid = cid(records[T])`. A positive assertion on a subject that is not in `records` never counts.
+**When a positive assertion counts.** A positive record counts only if `T ∈ records` and `m.subjectCid = cid(records[T])`. A positive assertion on a subject that is not in `records` never counts. Its mod-log status is `stale`, but it is not a mod-queue item, because nothing was edited (§4.12).
 
-**`#tag.head`** counts only if `records[head.uri]` exists and its CID equals `head.cid`.
+**`#tag.head`** counts only if `records[head.uri]` exists and its CID equals `head.cid`. A head that fails this check excludes only the `tag.head` dimension: the record still asserts `tag.removed`. Its mod-log status is `stale`, and it is a mod-queue item only when `head.uri` is in `records` with another CID.
 
 **A stale positive assertion** (CID mismatch) is excluded from `resolve`. It then:
 - produces a mod-queue item "edited since <action>" (§4.12);
@@ -529,8 +551,12 @@ authorEffective(m) ⇔ m is valid ∧ scope_eff(m) = author ∧ the action is al
 
 authorGate(X, p) ⇔ X ∈ A ∨ K[X] ≥ (effective(p.uri, tier) = personal ? gates.authorModPersonal
                                                                        : gates.authorModFrontpage)
-root(c)          = records[c.root.uri]       // must exist for any author-tier effect on c
+root(c)          = records[c.root.uri]   // for any author-tier effect on c, c must be a comment and
+                                         // root(c) a post, neither excluded by V1 (an Excluded root
+                                         // is a Missing root, §11)
 ```
+
+The subject of an author `#hide` or `#pin` must be a comment c that V1 does not exclude, whose root(c) is a post that V1 does not exclude. The subject of an author `#lock` must be a post that V1 does not exclude. A record whose subject fails this fails the table condition (mod log: `unauthorised`).
 
 | Author-scope action | Subject | Condition | Effect |
 |---|---|---|---|
@@ -540,11 +566,11 @@ root(c)          = records[c.root.uri]       // must exist for any author-tier e
 | `#lock{locked, allowed}` | post p | `author(p) = X`, `authorGate(X, p)` | author lock of p, with `allowed` |
 | any other action, value or subject | | | no effect |
 
-**Precedence.** Author-tier values act at rank 0. For any subject and dimension that has a forum-tier `Resolved` value, the forum tier governs and the author-tier value is ignored:
+**Precedence.** Author-tier values act at rank 0. For hides, locks and thread pins, a forum-tier `Resolved` value for the same subject and dimension (`hidden` of the comment, `locked` of the post, `pin[thread]` of the comment) governs, and the author-tier value is ignored. An author ban is judged per comment: of the forum tier, only the comment's own `hidden` decides it. It applies to c only if `keepRank(c) = 0` (and, like every author-tier effect, `resolve(c, hidden) = Default`). A forum-tier `#access` value on the banned DID, a grant included, does not lift it.
 - **author-hidden** applies only if `resolve(c, hidden) = Default`;
 - **an author lock** applies only if `resolve(p, locked) = Default`;
 - **an author thread pin** applies only if `resolve(c, pin[thread]) = Default`;
-- **an author ban** applies to c only if `keepRank(c) = 0`.
+- **an author ban** applies to c only if `keepRank(c) = 0`. A forum grant does not lift it: otherwise author bans could never act in approval mode, where every non-authority participant who is not banned is granted.
 
 ```
 // p = root(c); X = author(p); "eff" = authorEffective (above, including the table's condition)
@@ -571,6 +597,7 @@ Each (actor, scope, subject, action key) has exactly one record (`data-model.md`
 **Lapse**
 - Assertions whose actor is not in A have no forum-tier effect, starting immediately. This includes grants (`#access member`) made by former moderators.
 - The records remain. The mod log and the raw view show them as "lapsed" ("by former mod").
+- The fold cannot tell a former moderator from a DID that never was one, so every forum-scope assertion by an actor ∉ A is `lapsed` (§4.12).
 
 **Adoption**
 - `lessdugin mod adopt <did>` re-issues a former moderator's non-lapsed forum-scope assertions under the adopting authority, with `adopts` pointing at each original (`data-model.md` §8.6).
@@ -601,14 +628,14 @@ degraded ⇔ ∃ a ∈ A : repoStatus[a] = Unavailable
 
 **Mod log** (CORE, MVP). It lists:
 - every valid modAction in `records` with `forum = F`, of any scope and by any actor;
-- every valid revision whose subject is an `NS.modAction`, with `op = update` (edited) or `op = delete` (removed).
+- every valid revision whose subject is an `NS.modAction`, with `op = update` (edited) or `op = delete` (removed), whether or not the modAction is still in `records` (a `delete` revision usually names a removed record). A revision of any other collection is not a mod-log entry.
 
-Revisions exist for modActions because their updates and removals always go through the revision protocol (`data-model.md` §8.3, §8.4).
-- **Order:** `(time desc, uri asc)`, where time is `µs(updatedAt) ?? µs(createdAt)` for a modAction and `µs(createdAt)` for a revision.
+Revisions exist for modActions because their updates and removals always go through the revision protocol (`data-model.md` §8.3, §8.4). Invalid records are not listed.
+- **Order:** `(time desc, uri asc)`, where time is `µs(updatedAt) ?? µs(createdAt)` for a modAction and `µs(createdAt)` for a revision. Entries without a time (a datetime before 1970, §2.1) sort after all others, then by uri.
 - **Status annotation** on each entry, one of:
   - `effective`;
   - `overridden` (with the winning rank);
-  - `lapsed` (the actor is no longer an authority);
+  - `lapsed` (the actor is not in A, §4.10);
   - `expired` (`until`);
   - `stale` (CID);
   - `unauthorised` (rank, role, gate or author condition);
@@ -616,11 +643,32 @@ Revisions exist for modActions because their updates and removals always go thro
   - `edited`;
   - `removed`.
 
+**Status of a forum-scope modAction.** The first that applies (the assertion test of §4.2, then the conditions of §4.3 in their numbered order):
+1. `reserved/unknown`: a reserved `^FK-TID$` key (MA2), an unknown scope, action or value (MA7), or a `#lock` of a forum uri (MA9);
+2. `lapsed`: the actor is not in A (§4.3 condition 2);
+3. `unauthorised`: §4.3 condition 3 (rank) or 4 (role) fails;
+4. `expired`: condition 5 fails;
+5. `stale`: condition 6 fails (the subject is not in `records`, or has another CID), or the record's `#tag.head` fails the §4.5 head check (the record still asserts `tag.removed`);
+6. `effective`: some dimension the record asserts, other than the derived `spam`, resolves at the actor's rank to the record's value (for `restrict`, to any value, because equal-rank sets unite). So a record that agrees with the winner at the winning rank is `effective` even when another record with a smaller uri is the `winner`, and both sides of an unordered `tag.head` conflict are `effective` through `tag.removed`;
+7. otherwise `overridden`, with the highest rank among the resolutions of the dimensions it asserts (other than `spam`).
+
+**Status of an author-scope modAction.** The first that applies:
+1. `reserved/unknown`: as for forum scope (MA2, MA7, MA9);
+2. `unauthorised`: `authorModeration` is false, X ∉ E, or the table condition of §4.9 fails (subject, own thread or post, author gate, immunity, a live root); a record that violates MA6 is invalid and not listed;
+3. `expired`: `until`;
+4. `stale`: the CID check of a positive author pin;
+5. `overridden`, with the rank of the forum-tier value, when the forum tier has a `Resolved` value for the same subject and dimension (`hidden` for `#hide`, `locked` for `#lock`, `pin[thread]` for `#pin`);
+6. otherwise `effective`, which includes `#lock{locked: false}` and `#pin{pinned: false}` (they lock or pin nothing).
+
+An author ban is never `overridden`, because no forum-tier value of the DID lifts it (§4.9). Its status does not depend on the author gate, which is judged per comment.
+
 **Mod queue** (MVP; local presentation). Each item takes one key to act on, with a reason. It holds:
-- stale positive assertions ("edited since curated, pinned or kept");
-- unordered conflicts (`tag.head`);
+- stale positive assertions: forum-scope records whose status is `stale` and whose subject (or, for `#tag.head`, `head.uri`) is in `records` with a different CID ("edited since curated, pinned or kept"). A stale assertion on a record that is not in `records` is not a queue item, because nothing was edited. Author-scope records are never queue items;
+- unordered conflicts (`tag.head`) at the top rank;
 - applicants (approval mode, §3.3);
 - in open mode, newcomers' recent items (`Collapsed(NewUser)` or `Hidden(NewUser)`).
+
+The fold provides the first three kinds, ordered by (type, then key bytes), with the keys: the modAction uri for a stale item, the `tag:` subject for a conflict, the DID for an applicant. Newcomer items follow from the visibility states (V8), so the fold does not list them separately.
 
 **Raw view.** It shows every record in `records`. Invalid records are annotated with their first failing rule ID. Each item is annotated with every assertion on it, including lapsed, expired, stale, unauthorised and reserved-key records.
 
@@ -634,7 +682,8 @@ An opinion v **counts** if and only if all of these hold:
 O1  v is valid (data-model.md §7: G1–G10, OP1, OP2) and v.forum = F
                                                       // canonical rkey and subject; subject kind ∈ {post, comment, wikiRevision, sequence};
                                                       // v.forum = F also guards against fk collisions (data-model.md §3.3)
-O2  s = records[v.subject.uri] exists, s is valid, and s.forum = v.forum
+O2  s = records[v.subject.uri] exists and is not excluded by V1 (s is valid, including the
+    cross-record rule CO5, and s.forum = F = v.forum)
     — or v.subject.uri ∈ absent (deleted-subject rule, below)
 O3  did(v.uri) ≠ did(v.subject.uri)                   // self-opinions are ignored entirely
 O4  did(v.uri) ∉ B ∪ N
@@ -647,21 +696,24 @@ O5  effective(v.subject.uri, spam) = false
 |---|---|
 | karma | a known value; the voter is not restricted from `vote` |
 | agreement | a known value; not restricted from `vote`; `policy.voting ∈ {twoAxis, reacts}` |
-| reacts | palette id and known stance (OP3); not restricted from `react`; `policy.voting = reacts` |
-| tags | the subject is a post; entries per OP4; not restricted from `tag` |
+| reacts | palette id and known stance (OP3); not restricted from `react`; `policy.voting = reacts`; the subject is not in `absent` |
+| tags | the subject is a post and not in `absent`; entries per OP3, then OP4; not restricted from `tag` |
 
-**Deleted-subject rule (F24).** An opinion whose subject is in `absent` counts **only** toward karma (§6.2), and only if:
-- the subject's kind is post or comment, read from `coll(uri)`;
-- in that stage, at least **2 distinct voters** of the stage's eligible set have counting karma opinions on that uri.
+Axes are resolved per counting opinion. An opinion with no enabled axis still counts, for example one by a voter restricted from `vote`. Restrictions act on the voter's opinions, so item-level keeps do not exempt them.
 
-It never counts toward scores, reacts or tags. O3 and O5 apply to the uri.
+**Deleted-subject rule (F24).** An opinion whose subject is in `absent` counts (O1–O5). The rule limits what it counts toward:
+- only karma (§6.2);
+- only when the subject's kind, read from `coll(uri)`, is post or comment;
+- only in a stage where at least **2 distinct voters** of the stage's eligible set have counting karma opinions on that uri (`included`, §6.2).
+
+It never counts toward scores, reacts or tags. O3 and O5 read the subject uri, so they apply to absent subjects too. A forum-scope `#hide{spam: true}` on a deleted uri is a negative assertion, so it counts without its subject (§4.5) and voids the opinions on it.
 
 **Other rules**
 - **Weight.** An opinion has weight only if its voter is in E (§6, §7). Counting opinions of other voters are shown as "not yet counted".
 - **Hidden subjects** still collect counting opinions. Only `spam` voids them.
 - **Author-tier bans** do not affect opinions.
 - **`subject.cid`** never affects counting. It drives the "earlier version" display (§7).
-- **Never counted:** opinions on subjects that are neither in `records` (valid and in F) nor in `absent`. That covers subjects not yet synced, invalid ones, and ones in another forum.
+- **Never counted:** opinions on subjects that are neither in `records` (and not excluded by V1) nor in `absent`. That covers subjects not yet synced, invalid ones, ones in another forum, and comments whose root post (in the input, valid or not) names another forum (CO5).
 
 ---
 
@@ -708,12 +760,13 @@ pairsum(basis: Option<Map<did, i64>>, Elig: Set<did>) -> Map<did, i64>:
 
 K1        = pairsum(None, S)                                // stage 1: vote counts from seeds
 seedUp[u] = |{ s ∈ S : Σ_{v ∈ V, included(v, S), voter(v) = s, recipient(v) = u} sign(v.karma) > 0 }|
+                                                            // no pair cap; a seed with net 0 does not count
 E         = S ∪ { u ∈ P ∖ S : u ∉ B ∪ N ∧ K1[u] ≥ establish ∧ seedUp[u] ≥ establishSeeds }
 KP        = pairsum(Some(K1), E)                            // power basis
 K         = pairsum(Some(KP), E)                            // displayed karma; gates use K
 ```
 
-**Parameters.** The defaults are `pairCap = 25`, `establish = 1` and `establishSeeds = 2`. In approval mode E = S (§3.2).
+**Parameters.** The defaults are `pairCap = 25`, `establish = 1` and `establishSeeds = 2`. In approval mode E = S (§3.2). That follows from the formula, because P ∖ S ⊆ B ∪ N there, so implementations need not special-case it. Every sum, and the cap `pairCap × strong(·)`, saturates (§0.4).
 
 **What K covers**
 - Karma is per forum. There is no cross-forum karma.
@@ -763,7 +816,7 @@ Then for I' = I ∪ R, all of these are unchanged:
 
 ## 7. Scores and agreement (L3.5, `karma/1`)
 
-For every valid item i in F (post, comment, wikiRevision, sequence), with a = author(i):
+For every candidate item i (post, comment, wikiRevision, sequence) that V1 does not exclude, Hidden items included, with a = author(i):
 
 ```
 self(i)       = a ∈ E ? (kind(i) = post ? strong(max(KP[a], 0)) : small(max(KP[a], 0))) : 0
@@ -790,6 +843,8 @@ earlier(i)    = |{ v ∈ W(i) : karma axis enabled, v.subject.cid ≠ cid(i) }|
 - **Karma only.** Agreement never feeds karma, and neither do reacts.
 - **Implicit self-vote.** Authors never vote on their own items (O3). `self(i)` stands in for ForumMagnum's automatic self-vote.
 - **Hidden items have scores too.** They are shown in the raw view and to moderators.
+- **Voters outside E.** W(i) requires voter(v) ∈ E for both axes. The agreement of a voter outside E is therefore neither weighted nor counted in `unweighted`, which counts karma axes only.
+- **Absent subjects** have no item, so opinions on them contribute to no score (§5).
 - **Consistency (informative).** When no pair cap binds and no absent-subject opinions exist, `K[a] = Σ over a's posts and comments of (score(i) − self(i))`.
 
 ---
@@ -815,7 +870,7 @@ gateValue(g) = decl.policy.gates.g if present, else the karma/1 default below
 
 **Rules**
 - **Tag creation.** `tagCreation = moderators` restricts genesis revisions to authorities, and `createTag` is then ignored.
-- **Authorities bypass every gate.**
+- **Authorities bypass every gate,** even when banned or nullified: `passes` only asks u ∈ A, and a ban or nullification never removes authority (§4.3). Their opinions do not count anyway (O4).
 - **Gates use the current K, so they are retroactive.** A react can disappear when its supporters lose karma, which is an intended sybil property.
 - **Who enforces gates.** Readers enforce them in the fold. Writers check them at compose time as UX only.
 - **Not gates in v1 (§15):** removing `nofollow` at 10 karma (Never, `docs/plan.md` §6.5), and side-comment margin display (P2).
@@ -845,9 +900,10 @@ The `default/1` palette is the 34 ids below, in this order:
 ```
 // Within one counting opinion v on subject s, with the reacts axis enabled (§5):
 entries(v) = [ e ∈ v.reacts : e.react ∈ palette ∧ e.stance ∈ {for, against} ]    // stance default: for
-qkey(e)    = e.quote ? qkey(e.quote) (lfm-1.md §11: NFC, White_Space runs → U+0020, trimmed) : ""
+qkey(e)    = e.quote ? qkey(e.quote) (lfm-1.md §11: norm(trim_ws(exact)), in that order) : ""
 group the entries by (e.react, qkey(e)):
    a group with both stances is dropped (contradiction); otherwise it yields one entry (react, q, stance)
+   // entries with the same (react, q) and the same stance collapse to one
 
 // Per subject s and key (react, q):
 Fv  = { voter(v) : v yields (react, q, for),     voter(v) ∈ E }
@@ -870,6 +926,9 @@ if valid:
 
 **Rules**
 - **Grouping is deterministic.** Aggregation groups by `qkey`, never by resolved range, so the fold never depends on whether a body blob has been fetched.
+- **`qkey` order.** `lfm-1.md` §11 defines `qkey` as `norm(trim_ws(exact))`, and the order matters. A control next to the trimmed edge leaves an edge space after `norm` removes it, so `"teh ‎"` (with U+200E) has qkey `"teh "`, a different react from `"teh"`. A quote of White_Space only has qkey `""` and groups with entries without a quote.
+- **Within one opinion.** An unknown stance or an id outside the palette is discarded before grouping (OP3), so it never creates a contradiction. Duplicate entries with the same (react, qkey, stance) are a writer-rule violation that readers tolerate by collapsing them. A contradiction is decided within one opinion, before E is applied; voters outside E are then dropped before C, `supporters` and `opposers` are formed.
+- **The creator's quote** (display only) is the `quote` of the first entry, in array order, of the creator's group for that (react, q).
 - **Self-reacts.** Reacts on one's own items are ignored (O3), and reacts by voters outside E are never counted.
 - **No side effects.** Reacts never affect karma, scores or visibility.
 - **Display in the MVP.** Anchored reacts are listed under the item. The inline margin UI is **Reserved (P2)**.
@@ -888,7 +947,7 @@ Every candidate item x (a record in `records` whose collection is post, comment,
 | V1 | x is invalid (`data-model.md` §7), `x.forum ≠ F`, or x fails a cross-record rule (CO5) | `Excluded` |
 | V2 | `author(x) ∉ P` | `Hidden(NotParticipant)` |
 | | `degraded ∧ author(x) ∉ S` (§4.11) | `Hidden(ModerationUnavailable)` |
-| V3 | `effective(x.uri, hidden) = true` | `Hidden(Removed{rank, actor, spam, reason if showReason})`, from the winner |
+| V3 | `effective(x.uri, hidden) = true` | `Hidden(Removed{rank, actor, spam, reason if showReason})`: rank, actor, `reason` and `showReason` from the winner of `hidden`; `spam = effective(x.uri, spam)`, the resolved value that also voids opinions (O5) |
 | V4 | `author(x) ∈ B ∧ keepRank(x) < banRank(author(x))` | `Hidden(Banned)` |
 | V5 (rule 4b) | `cap(x) ∈ effective(author(x), restrict) ∧ keepRank(x) < restrictRank(author(x))` | `Hidden(Restricted)` |
 | V6 | x is a comment ∧ `AuthorModerated(x)` (§4.9) | `Hidden(AuthorModerated)` |
@@ -908,6 +967,13 @@ Every candidate item x (a record in `records` whose collection is post, comment,
 
 A `Hidden(reason)` post or comment that has at least one listed descendant in the placed tree (§11) becomes `Tombstone(reason)`, so the thread keeps its shape. A tombstone shows its reason; for `Removed`, the reason text appears only if `showReason`. A hidden node with no listed descendant is not displayed. A `Missing` placeholder is displayed only if it has a listed descendant.
 
+**Details of the pass**
+- Descendants are judged on their states before the pass (`Visible` or `Collapsed`), and the pass changes no other state.
+- The descendants of a node include those reached through `Missing` placeholders. A hidden root post with listed comments under a placeholder becomes a tombstone.
+- `Excluded` comments are not nodes of the placed tree, so they never become tombstones and never count as descendants.
+- A tombstone keeps the `reason` and `Removed{…}` of its Hidden state; as for Hidden, the reason text of `Removed` is carried and shown only if `showReason`.
+- Only posts and comments become tombstones (sequences and wikiRevisions have no thread). A tombstone is not listed: a tombstone post is in no list and not in Recent Discussion, although its comments keep their own states.
+
 ### 10.3 Lens (L7)
 
 The lens is applied after the fold, from local state only. It never changes any fold output: scores, karma, gates and the states of other viewers.
@@ -923,11 +989,11 @@ The lens is applied after the fold, from local state only. It never changes any 
 
 Thread placement for a post uri p:
 
-1. **Nodes.** The thread's nodes are the root p (or a `Missing(p)` root when `p ∉ records`), plus every comment c that is not `Excluded` (V1) with `c.root.uri = p`.
+1. **Nodes.** The thread's nodes are the root p (or a `Missing(p)` root when p is not a non-Excluded post in `records`: p is absent, or V1 excludes it), plus every comment c that is not `Excluded` (V1) with `c.root.uri = p`.
 2. **Parent pointers**, for each comment c:
    - `parent` absent → the root;
    - `parent.uri` is a node of this thread → that comment;
-   - otherwise (missing, invalid, excluded, or under another root) → a `Missing(parent.uri)` placeholder. There is one placeholder per distinct uri, each a child of the root.
+   - otherwise (missing, invalid, excluded, or under another root) → a `Missing(parent.uri)` placeholder. There is one placeholder per distinct parent uri that is not a node, each a child of the root, at depth 1.
 3. **Cycles.** These are possible because `parent` can be edited.
    - Every comment has exactly one parent pointer, so each connected component contains at most one cycle. A comment that names itself as its parent is a cycle of length 1.
    - For each cycle, let m be its member with the greatest uri. Cut m's parent edge, re-attach m to the root, and flag it `Orphaned`.
@@ -941,7 +1007,7 @@ Thread placement for a post uri p:
 
 **Display**
 - **Indentation** is capped at about 6 levels in the TUI and on mobile, then "continue thread →".
-- **Missing roots.** A thread opened for a post that is not in `records` shows its comments under the `Missing(p)` root. Those comments do not appear in lists or in Recent Discussion.
+- **Missing roots.** A thread opened for a post that is not a non-Excluded post in `records` shows its comments under the `Missing(p)` root. Those comments do not appear in lists or in Recent Discussion.
 - **Edited.** An item with valid `op: update` revisions, or with `updatedAt` later than its `createdAt`, gets the `[edited]` badge.
 - **Retracted comments** (`retracted: true`) render struck through and still count.
 
@@ -978,6 +1044,8 @@ The operations are performed exactly in this order. The vectors assert the resul
 
 `cutoffDays` (default 90) affects **only** the `magic` sort.
 
+**Thread activity.** `activity` (above), `latest` (§12.4) and Recent Discussion (§12.5) read the `Visible` state of comments, which the thread pass never changes. They consider every comment of p's placed thread (§11), including comments under `Missing` placeholders and re-attached (`Orphaned`) comments.
+
 ### 12.3 List filters
 
 | Filter | Shows listed posts with |
@@ -1009,9 +1077,14 @@ Sorting applies among the siblings at every level of the placed tree.
 
 `Missing` placeholders sort after all comment siblings, by uri ascending.
 
+**Displayed order.** A thread's comment order is the pre-order of its displayed nodes (§10.2: listed comments, tombstones, and `Missing` placeholders with a listed descendant), with the siblings of every level sorted as above.
+- Thread pins come first among the siblings of every level, in every sort, `latestReply` included.
+- A tombstone sorts by its own score and `t_rank`.
+- A hidden comment that is not displayed has no listed descendant, so leaving it out drops no displayed node.
+
 ### 12.5 Recent Discussion (MVP)
 
-**Which posts.** Listed posts in any tier and of any kind that have at least one `Visible` comment.
+**Which posts.** Listed posts in any tier and of any kind that have at least one `Visible` comment in their placed thread (§12.2, "Thread activity"). The fold lists every such post; §12.5 sets no limit, and clients page the list.
 
 **Order.** `(t_rank of the newest Visible comment desc, uri asc)`.
 
@@ -1037,6 +1110,8 @@ The following are **Reserved (P2)**: `topAdjusted`, personalised magic (`magic/2
 
 ```
 page   = { r ∈ records : r is a valid wikiRevision, r.forum = F, r.slug = slug, r not Hidden by V1–V5 }
+         // V1 does not exclude r and V2–V5 do not hide it (V6 and V7 concern comments only),
+         // so a revision by a non-participant is on no page
          if |page| > 1000: keep the 1000 with the greatest (TID of rkey(r), then smallest uri); flag the page [partial]
 par(r) = { q.uri : q ∈ r.parents } ∩ uris(page)       // a parent of another (forum, slug), or one that is
                                                        // missing, invalid or hidden, gives no edge
@@ -1048,21 +1123,25 @@ Edges = { (r, q) : r ∈ Cand, q ∈ par(r) ∩ Cand }
 cycle cut: while (Cand, Edges) has a cycle:
              for each strongly connected component C with |C| > 1, or with a self-loop:
                remove every edge (m, q) ∈ Edges with q ∈ C, where m is the greatest-uri member of C
+           // the components are computed once per round, from the edges left by the previous round
 depth(r)  = 0 if r has no outgoing edge; else 1 + max{ depth(q) : (r, q) ∈ Edges }
 
 headRef   = effective("tag:" + slug, tag.head)
 canonical = headRef ≠ none ∧ headRef.uri ∈ Cand ∧ headRef.cid = cid(records[headRef.uri])
               ? records[headRef.uri]
               : argmax over Cand of (depth desc, K[author] desc, uri asc)       // none if Cand = ∅
+                                                                               // K: the displayed karma (§6.2)
 exists(slug)     ⇔ canonical ≠ none ∧ effective("tag:" + slug, tag.removed) = false
 applicable(slug) ⇔ exists(slug) ∧ canonical.isTag (default true)
 ```
 
 **Rules**
 - **The head is the latest revision.** In a linear history, the canonical revision is the tip of the longest chain of eligible revisions, unless a moderator's `#tag.head` names a candidate.
-- **A deleted parent gives a flagged root.** A revision r with a non-empty `parents` and `par(r) ∩ Cand = ∅` is flagged `Root(ParentUnavailable)`. Its parents are missing, invalid, hidden, of another page or not candidates. It enters `Cand` only through `genesisOK`, so a fake or deleted parent cannot bypass `createTag` or `tagCreation = moderators`.
-- **Ancestor altered.** An edge (r, q) whose stored `parents` entry has a CID different from `cid(q)` is shown with the note "ancestor altered".
-- **History view.** The history shows the chain from `canonical`, following at each step the edge to the parent with the greatest depth, ties by the smallest uri. Clients SHOULD show the number of other candidates with no incoming edge as "N unmerged edits".
+- **A deleted parent gives a flagged root.** A revision r with a non-empty `parents` and `par(r) ∩ Cand = ∅` is flagged `Root(ParentUnavailable)`. Its parents are missing, invalid, hidden, of another page or not candidates. It enters `Cand` only through `genesisOK`, so a fake or deleted parent cannot bypass `createTag` or `tagCreation = moderators`. The flag is defined for candidates only (r ∈ Cand), because a non-candidate is never displayed.
+- **Candidates follow the definition literally.** `genesisOK(r)` does not look at `parents`, so a revision whose author passes `createTag` (or is an authority under `tagCreation = moderators`) is a candidate whatever its parents.
+- **Ancestor altered.** An edge (r, q) whose stored `parents` entry has a CID different from `cid(q)` is shown with the note "ancestor altered". It applies to the edges that remain after the cycle cut. If a uri appears in `parents` more than once, any entry whose CID differs from `cid(q)` marks the edge.
+- **History view.** The history shows the chain from `canonical`, following at each step the edge to the parent with the greatest depth, ties by the smallest uri. Clients SHOULD show the number of other candidates with no incoming edge as "N unmerged edits": `|{ r ∈ Cand ∖ {canonical} : no edge points to r }|`.
+- **Which slugs have a page (informative).** A slug is known when a wikiRevision of that slug survives V1 (even if every revision is hidden, so the page is empty), or when its `tag:` subject has a forum-tier assertion of `tag.removed` or `tag.head` (resolved or in conflict). A slug that only appears in `post.tags` or tag votes has no page. `exists` stays the only normative predicate.
 - **Reserved (P2):** fork and merge UI, merge revisions, `#tag.aliasOf`, and tag discussion threads anchored to `(forum, slug)`.
 - **No karma.** Opinions on wikiRevisions give them a score (§7), but earn no karma (§15).
 
@@ -1080,6 +1159,9 @@ applies(p, slug) ⇔ applicable(slug) ∧ rel(p, slug) > 0
 
 **Rules**
 - There are no separate tag-relation records. Applying a tag means writing a `post.tags` entry (the author) or a `#tagVote` in one's opinion (anyone else).
+- `rel` is defined for every post that V1 does not exclude, Hidden posts included.
+- `own` does not require author(p) ∈ E, only that the author is not restricted from `tag`; it is 1 unless `KP[author(p)] ≥ 1000`.
+- Tag votes need a counting opinion on a post, voter ∈ E and the tags axis (§5). Their entries are filtered by OP3 (an unknown value is discarded) before OP4 (entries for one slug: equal ones collapse, conflicting ones are all ignored), the order in which `data-model.md` §6.6 lists them. The sum saturates (§0.4).
 - Voters cannot vote on tags of their own posts (O3).
 - Unknown tags (`exists = false`) never apply.
 - **Reserved (P2):** authorOnly tags.
@@ -1210,21 +1292,45 @@ Everything in this section is computed locally from the fold and local state. Th
 
 ## 19. Test vectors and property tests
 
-**Vectors.** Normative vectors live in `testdata/vectors/{time, modfold, karma, reacts, rank, thread, tags, fold}/*.json`.
-- **Format:** `{name, input, expected}`, where `input` is a `FoldInput` (§1.1) plus a `Query`, with `now` and `obs` injected.
-- **Runners:** the Rust testkit, and TypeScript through the wasm `vectors` build. Their results must be equal.
-- **Floats:** `hot` values are written as 16 lowercase hex digits of the binary64 bit pattern.
+**Vectors.** Normative vectors live in `testdata/vectors/{time, modfold, karma, reacts, rank, visibility, thread, fold}/*.json`. An independent reference model (`testdata/vectors/social-ref/`) generates them; `social-ref/NOTES.md` records the readings it takes. All but one are adopted here, and none of the vectors depends on the exception (§20.1 items 25–44).
+
+| File | Behaviour | `kind` | Covers |
+|---|---|---|---|
+| `time/time.json` | `magic/1` | `time` | §2.2–§2.3 `t_rank`, future clamp, lower bounds, flags |
+| `time/conversions.json` | `magic/1` | `conversion` | §2.1 µs(datetime), tidTime |
+| `modfold/forum.json` | `mod/1` | `modfold` | §4.1–§4.8, §4.10–§4.12, forum tier, mod log and mod queue |
+| `modfold/participation.json` | `mod/1` | `modfold` | §3 participation and seeds, FO2 |
+| `modfold/author.json` | `mod/1` | `modfold` | §4.9 author tier |
+| `karma/power.json` | `karma/1` | `power` | §6.1 power(k, x) at every ladder boundary |
+| `karma/staged.json` | `karma/1` | `karma` | §5 opinion validity; §6.2 K1, seedUp, E, KP, K |
+| `karma/scores.json` | `karma/1` | `karma` | §7 score, agreement, unweighted, earlier versions |
+| `karma/gates.json` | `karma/1` | `karma` | §8 gate values and passes(u, g) |
+| `karma/tags.json` | `karma/1` | `tags` | §13 wiki heads, candidates, flags, relevance and application |
+| `reacts/reacts.json` | `karma/1` (palette `default/1`) | `reacts` | §9.2 aggregation, qkey |
+| `rank/rank.json` | `magic/1` | `rank` | §12 hot, sorts, filters, Recent Discussion |
+| `visibility/visibility.json` | `mod/1` | `visibility` | §10.1 V1–V10, §10.2 thread pass |
+| `thread/thread.json`, `thread/depth.json` | `mod/1` | `thread` | §11 placement, steps 1–4 |
+| `fold/digest.json` | `mod/1,karma/1,magic/1,default/1` | `digest` | §1.2 `inputDigest` |
+
+Gates and tags have no kind or directory of their own, because both belong to `karma/1` (§0.3).
+
+- **Format:** each file is `{behaviour, kind, ns, description, vectors}`, and each vector `{name, input, expected, note?}`. `input` is `{fold: FoldInput, query?: Query}`, with `now` and `obs` injected, except for the kinds `conversion` (µs(datetime), tidTime) and `power` (power(k, x)), whose input names the function's arguments. `expected` lists only the fields a vector asserts. `testdata/vectors/README.md`, section "Social fold vectors", defines the JSON form of `FoldInput` and `Query`, and the name and shape of every projected field; implementations project their `ForumView` onto those fields.
+- **Namespace:** vector files carry `ns`, the NS under which keys, CIDs and `inputDigest` were derived. Runners evaluate the fold, record validity and key derivation with NS = `ns`: the fold takes the namespace as a parameter, or the runner is built with that NS (the Rust `final-ns` feature). Rewriting strings does not work, because every `fk`, `h16` and CID hashes the namespace. This is how `.temp` CI builds run vectors written in the final namespace (`data-model.md` §1.3).
+- **Well-formed inputs:** every vector input is well-formed (§1.1), and every record is valid unless the vector's `note` names the rule it breaks. Rule IDs are never asserted. Every integer in a vector file lies within ±(2^53 − 1), so the TypeScript runner reads it exactly.
+- **Runners:** the Rust testkit (`crates/core/tests/social_vectors.rs`), and TypeScript through the wasm `vectors` build. Their results must be equal.
+- **Floats:** `hot` values are written as 16 lowercase hex digits of the binary64 bit pattern. The vectors' `hotBits` are exact for any pow with an error below 0.9 ulp; each is the correctly rounded result.
 
 **Required cases**
 
 | Kind | Cases |
 |---|---|
-| time | future-dated by just under and just over 5 min; comment claimed before its parent; missing or unparseable `createdAt`; declaration lower bound |
-| modfold | owner beats moderator; same-rank hide/keep gives hide; unordered `tag.head` conflict; lapse on removal from the declaration, then adopt; `until` expiry; CID-bound pin, tier and keep after an edit; keep vs ban at equal and lower rank; restrict hides retroactively, overridden by a keep at higher rank; empty restrict at higher rank; `tag:` subject by a moderator; author tier at gate 49/50 and personal/frontpage; author-tier immunity of authorities; forum keep beats author hide; forum unlock beats author lock; author who is also a moderator (both scopes); forum-uri lock has no effect; degraded view |
+| time | future-dated by just under and just over 5 min; comment claimed before its parent; `createdAt` before 1970 (no claimed time); missing or unparseable `createdAt` (G2: the item is Excluded); root missing or Excluded (bounded by the declaration); declaration lower bound |
+| modfold | owner beats moderator; same-rank hide/keep gives hide; unordered `tag.head` conflict; lapse on removal from the declaration, then adopt; `until` expiry; CID-bound pin, tier and keep after an edit; keep vs ban at equal and lower rank; restrict hides retroactively, overridden by a keep at higher rank; empty restrict at higher rank; `tag:` subject by a moderator; author tier at gate 49/50 and personal/frontpage; author-tier immunity of authorities; forum keep beats author hide; forum unlock beats author lock; author who is also a moderator (both scopes); forum-uri lock has no effect; degraded view; mod-log status precedence; author ban of a granted user in approval mode; author tier needs a live root post |
 | karma | power boundaries for k ∈ {−5, 0, 9, 10, 99, 100, 249, 250, …, 499999, 500000, 10⁹} × 4 values; self-vote ignored; strongUp counts 1 in K1; one vs two seeds for establishment; sybil ring with no seed edge; `pairCap` boundary 25/26; deleted subject with 1 vs 2 E voters; nullify; restrict vote; seed with negative K1 stays in E |
 | reacts | supporters {9} invalid; {10, 4} one supporter; {10, 5} two; anti from K 19 ignored and from K 20 counted; for/against contradiction dropped; two quotes with the same `qkey`; creator tie by DID |
 | rank | exact `hot` bit patterns; b ≤ 0 partition; pinned first; 90-day cutoff only in magic (top, new, old unaffected); pinned post beyond the cutoff; uri tie-break |
-| thread | 2-cycle and 3-cycle; missing parent placeholder; cross-root parent; depth 1,001 re-attached |
+| visibility | each rule V1–V10 before the next; `collapseBelow` boundary; newcomer collapse; tombstones for hidden comments with listed replies, along chains, for the root post and under `Missing` placeholders; Excluded comments keep no tombstone |
+| thread | 2-cycle and 3-cycle; missing parent placeholder; cross-root parent; Excluded root; depth 1,001 re-attached |
 | tags | linear chain head; fork by depth, then K, then uri; moderator `#tag.head`; removed tag; deleted parent gives a flagged root gated as genesis; ancestor altered; `tagCreation = moderators`; `isTag = false`; relevance boundaries |
 | fold | `inputDigest` of a fixed input; native == wasm |
 
@@ -1268,7 +1374,7 @@ These choices fill gaps in the sources or resolve ambiguities. Each takes the si
    - Absent fields assert their defaults, except `#tag.head`.
    - A `#restrict` record states the complete set: a higher rank replaces lower sets, so an empty set lifts them, and equal ranks unite. `data-model.md` MA8 has been amended to say the same (formerly README §1.4 K2).
 7. **Overriding a ban (§4.6).** A higher rank can only write `#access{member}`, which also grants seed status. This is stated rather than adding a new access level.
-8. **Keeps exempt from locks (V7).** A forum-tier keep at rank ≥ the lock's rank exempts a comment from the lock, by analogy with "content-level over user-level". Any forum-tier keep or explicit forum-tier value overrides the author tier.
+8. **Keeps exempt from locks (V7).** A forum-tier keep at rank ≥ the lock's rank exempts a comment from the lock, by analogy with "content-level over user-level". Any forum-tier keep or explicit forum-tier value of the same item-level dimension overrides the author tier; a forum-tier `access` value does not lift an author ban (item 33).
 9. **Author tier (§4.9).**
    - The actor must be in E, which makes the restricted sybil property (P7) hold for other users' visibility.
    - Authorities are immune to author-tier hides, bans and locks (the "immunity" vector).
@@ -1309,8 +1415,65 @@ These choices fill gaps in the sources or resolve ambiguities. Each takes the si
     - KarmaChange defaults to daily.
     - Reading sets `lastVisited` to the greatest displayed `t_obs`, not to `now`.
 22. **Mod log (§4.12)** lists every modAction in the forum's input (both scopes, current and former actors) plus modAction revisions, ordered by `(updatedAt ?? createdAt) desc`.
-23. **Forum equality (V1, O1, §3.1, §4.2).** Every fold rule checks `forum = F` explicitly, not only through the key's fk. Records of another forum whose fk collides (60 bits) therefore never leak in.
+23. **Forum equality (V1, O1, §3.1, §4.2).** Every fold rule checks `forum = F` explicitly, not only through the key's fk. Records of another forum whose fk collides (60 bits) therefore never leak in. Without an fk collision these checks never fire: a record in F's key range whose `forum` names another forum is invalid by G9. Vectors therefore exercise G5/G9 (`social-ref/NOTES.md` 60).
 24. **P7 also excludes authorities.** A banned or nullified authority is outside E but its assertions still count, so its records are excluded from the hypothesis.
+
+**Readings adopted from the reference model (M3).** The independent reference model that generates the fold vectors (§19) recorded a numbered reading wherever this document was ambiguous (`testdata/vectors/social-ref/NOTES.md`, cited below as "NOTES n"), and its author proposed wording (`docs/design/social-ref-proposals.md`, items A1–A17, B1–B3, C). Items 25–44 adopt them. Every adopted reading matches the vectors, so none changes a vector. Item 43 is the one reading not adopted; no vector depends on it.
+
+25. **Malformed input (§1.1; NOTES 19).** A `FoldInput` that breaks the §1.1 membership conditions (including an invalid `decl`, and `algorithmIds` that differ from those derived from `decl`) is an input error, not something to fold. Vector inputs are sorted (`records` by uri bytes, `absent` by bytes, `obs` by (uri, cid)); that is a property of the vector format, not of the fold.
+26. **The banner (§1.6, `data-model.md` FO2, FO4; A8, NOTES 25).** Every one of the declaration's ten knownValue fields raises the banner when it falls back, including `membership`, `defaultTier` and `moderators[].role`, which the `data-model.md` §13.3 table lists without it. An unknown role raises it in any entry, even one that FO2 ignores for another reason, because the declaration still holds a value the client does not know. Unknown values in other records never raise it.
+27. **Datetime limits and unsigned TIDs (§2.1; A9, NOTES 16, 17).** µs(datetime) accepts exactly the atproto datetime syntax with the limits of the reference implementations (1–20 fraction digits, at most 64 characters, uppercase `T` and `Z`, real dates, no leap second, no `-00:00`). A TID is an unsigned 64-bit value, so `tidTime` ranges up to 2^54 − 1.
+28. **An Excluded root is a Missing root (§2.2, §11; A2, NOTES 3, 21).** A root post that is in `records` but excluded by V1 is treated like an absent one: the thread gets a `Missing(p)` root, and its comments take `t_decl` as their lower bound. This follows §11 step 2, which treats invalid and excluded parents as missing, and V1, under which Excluded items appear nowhere. A `Missing` placeholder is a child of the root at depth 1, one per distinct parent uri that is not a node.
+29. **Newcomers (§3.1; A16, NOTES 26).** `newcomer(d) ⇔ d ∈ P ∖ (S ∪ E)` is read literally in both modes, so banned and nullified participants are newcomers; in approval mode they are the only ones. V8 still applies in open mode only.
+30. **Applicants exclude authorities (§3.3; A4, NOTES 9).** Authorities are participants already, so neither the owner's own membership nor an authority without a grant is an application.
+31. **Forum-tier details (§4.3–§4.5; NOTES 7, 22, 23, 24).**
+    - A valid `until` before 1970 has no µs, so the assertion has expired.
+    - The MA9 allow-list filter reads keys only: an entry naming a comment not in `records` is kept.
+    - A positive assertion on a subject not in `records` is `stale` in the mod log, and not a mod-queue item.
+    - A `#tag` whose `head` fails the §4.5 check still asserts `tag.removed`; only the head is excluded.
+32. **The author tier needs a live root (§4.9; A3, NOTES 44).** "root(c) must exist" is read as: c is a comment and root(c) a post, neither excluded by V1, consistently with item 28. An author record whose subject fails this fails the table condition (`unauthorised`). Under the literal reading, a comment on an invalid root could be author-hidden by the root's author.
+33. **Author bans yield only to item-level forum decisions (§4.9; A1, NOTES 46).** A forum grant does not lift an author ban; otherwise author bans could never act in approval mode, where every non-authority participant who is not banned is granted. An author ban is judged per comment, with the author gate of that comment's root, and only a forum-tier keep or hide of the comment governs it. The general sentence "the forum tier governs any subject and dimension it resolves" is narrowed to hides, locks and thread pins, which is what the bullet list and the `AuthorModerated` formula already said. Item 8 is worded to match.
+34. **Mod-log status and mod queue (§4.10, §4.12; A5, NOTES 4, 5, 6, 10, 11, 27, 45).**
+    - Statuses follow the numbered conditions of §4.3 (forum scope) and of `authorEffective` (author scope), first match wins.
+    - `lapsed` covers every forum-scope assertion by an actor ∉ A, since the fold cannot tell a former moderator from a DID that never was one.
+    - `effective` means that a dimension the record asserts (other than the derived `spam`) resolves at the record's own rank to the record's value; for `restrict`, to any value, because equal-rank sets unite.
+    - Entries without a time sort last. Revisions of modActions are listed whether or not the modAction is still in `records`.
+    - The fold provides the stale, conflict and applicant queue items, ordered by (type, key bytes). Newcomer items follow from the visibility states.
+35. **Counting versus the deleted-subject rule (§5; A6, NOTES 30).** An opinion on an absent subject counts when O1–O5 hold. The deleted-subject rule limits what it counts toward (karma only, post or comment subjects only, per stage with ≥ 2 eligible voters); it does not stop it from counting.
+36. **O2 and CO5 (§5, `data-model.md` CO5; A7, NOTES 20, 31).** O2's "s is valid and s.forum = v.forum" means "s is not excluded by V1", which includes the cross-record rule CO5. CO5 compares the root's `value.forum` literally even when the root is invalid, because invalid records are fold inputs (§1.1). Without a 60-bit fk collision, an invalid root is the only way CO5 can fail: a valid root in F's key range names F (G9).
+37. **Axes, seedUp, scores and gates (§5–§8; NOTES 32, 33, 34, 40, 41, 42).**
+    - Axes are resolved per counting opinion. An opinion with no enabled axis still counts. Reacts and tags also need a subject that is not absent. Restrictions have no keep exemption.
+    - `seedUp` sums signs without a pair cap; a seed with net 0 does not count. Sums saturate.
+    - Scores exist for every candidate item not excluded by V1, Hidden ones included. W(i) needs voter ∈ E for both axes.
+    - E = S in approval mode follows from the formula.
+    - Authorities pass every gate even when banned or nullified, because only the declaration removes authority (§4.3).
+38. **React keys (§9.2; A13, NOTES 35, 36, 37).** `qkey` is `lfm-1.md` §11's `norm(trim_ws(exact))`, in that order, so a control next to the trimmed edge leaves an edge space. Unknown stances and ids outside the palette are discarded before grouping. Equal entries collapse. A contradiction is decided within one opinion, before E applies. The creator's quote is the first entry of the creator's group.
+39. **`Removed.spam` (§10.1 V3; A14, NOTES 8).** `spam` is the resolved `effective(x.uri, spam)`, the value that also voids opinions, not the winner record's own field. `reason` and `showReason` stay attributes of the winner of `hidden`.
+40. **Thread pass, comment order and activity (§10.2, §12; NOTES 47, 48, 49, 50, 51).**
+    - The pass judges descendants on pre-pass states and walks through `Missing` placeholders. Excluded comments are not nodes. A tombstone keeps its reason. Only posts and comments become tombstones, and a tombstone post is in no list.
+    - The comment order is the pre-order of displayed nodes, with thread pins first in every sort. A tombstone sorts by its own score and `t_rank`.
+    - `recentComments`, `latestReply` and Recent Discussion read `Visible` comments over the whole placed thread, including comments under placeholders and re-attached ones. Recent Discussion has no limit.
+    - The lens (§10.3) is local and appears in no vector.
+41. **Wiki and relevance (§13; B1–B3, NOTES 54–59).**
+    - The page excludes revisions that V1 excludes or V2–V5 hide.
+    - Candidates and the cycle cut follow §13.2 literally; `genesisOK` ignores `parents`.
+    - `Root(ParentUnavailable)` is defined for candidates. "Ancestor altered" applies to the edges left after the cycle cut. "N unmerged edits" counts the candidates other than `canonical` with no incoming edge.
+    - The canonical tie-break uses the displayed K.
+    - `own` relevance does not require author ∈ E. Tag-vote entries pass OP3 before OP4.
+    - Which slugs have a page is informative; `exists` stays the only normative predicate.
+42. **Validity rules (`data-model.md` §7; A10, A11, A12, NOTES 1, 12, 14, 15).**
+    - §7 now fixes the order in which the first failing rule is reported (G1–G10, then the collection's rules in table order; key equalities and G9 are part of G5). That is the order the core's validator reports. The vectors never assert rule IDs, so the order is not pinned.
+    - MA3 applies only to subjects in forum-scoped collections. Otherwise the `#lock` of a forum uri, which MA9 calls "valid but without effect", would be invalid.
+    - G9 excludes `revision`, which has no `forum` field (RV3 gives its key range).
+    - MA10 applies under MA7, as MA7 already says.
+43. **Reserved modAction keys (`data-model.md` MA2; NOTES 13, not adopted).** The reference model checks a record with a reserved `^FK-TID$` key against MA3–MA6. This document does not: such a record is checked against G1–G10 and MA10–MA12 only, as the core's validator already does. The key form is reserved for P2 list actions, whose subjects and values v1 cannot know, which is the reason MA7 skips MA3–MA6. A v1 client should not call such a record invalid. No vector depends on the difference: the two reserved-key records in `modfold/forum.json` (`reserved-tid-key-is-ignored`, `mod-log-status-precedence`) pass MA1 and MA3–MA6. The model should follow this reading when it is next changed.
+44. **Vectors (§19; A17, NOTES 2, 18, 28, 29, 38, 39, 43, 52, 53, 61).**
+    - Vector files carry `ns`, and runners fold under NS = `ns`. That resolves the conflict with `.temp` CI builds (`data-model.md` §1.3).
+    - Integers stay within ±(2^53 − 1).
+    - The participation vectors use kind `modfold`. Gates and tags live under `karma/` (kinds `karma` and `tags`), because both belong to `karma/1`, so §19 no longer names a `tags/` directory.
+    - `power` and `conversion` take the function's arguments, not a fold input.
+    - `hotBits` are exact for any pow with an error below 0.9 ulp.
+    - The cast and builder conventions of the vectors are informative.
 
 ### 20.2 Open questions
 

@@ -277,7 +277,7 @@ handle_state(did) =
 
 **Display**
 - A handle is displayed only if it is `verified`.
-- `unverified`: show `short_did(did)` (`lfm-1.md` §5.4) and the claimed handle struck through.
+- `unverified`: show `short_did(did)` (`lfm-1.md` §5.4) and the claimed handle struck through. The engine passes the claimed handle only in this state (`ActorView.claimedHandle`, `engine-api.md` §3.1), as untrusted text, and never in place of `handle`.
 - `invalid`: show `short_did(did)` only; details say "handle invalid".
 - Stored references are always DIDs (`data-model.md` W7).
 - **Confusables.** A UTS #39 skeleton check compares participants' display names and handles with those of the owner and the moderators. A different DID with an equal skeleton gets a warning marker (`threat-model.md`). Checks against frequent posters: **Reserved (P2)**.
@@ -394,7 +394,8 @@ open_forum(ref):
   candidates =
     approval: A ∪ G
     open:     A ∪ G ∪ Closure (§4.3) ∪ Newcomers (§4.4)
-  for c ∈ candidates ∖ A: confirm(c)                                      // §4.2.1
+  for c ∈ G ∖ A: sync_repo(c, {fk})            // no membership gate (§4.2.1); membership still read
+  for c ∈ candidates ∖ (A ∪ G): confirm(c)                                // §4.2.1
   schedule the confirmed candidates in the order of §4.5
   the fold re-runs as repos complete; aggregates show [partial k/n] until §4.5 holds
 ```
@@ -408,10 +409,12 @@ confirm(d):                                   // per (forum, candidate)
   identity(d) at level doc, else: stays a candidate; retried with the identity backoff
   m = getRecord(PDS(d), NS.membership, fk)    // level pds; usually served from cache after a sync
   valid m (ME1) with m.forum = F → confirmed: sync_repo(d, {fk}, priority per §4.5)
-  RecordNotFound or invalid → rejected (disc row, §10.4); re-checked only when a new hint names d
+  RecordNotFound or invalid → rejected (disc row, §10.4)
+  a rejected d is skipped until: a new hint names d; a `sync --full` pass (every rejection is
+  re-checked); or REJECTED_RECHECK_MS (24 h, `limits.md`) has passed since the rejection
 ```
 
-Authorities need no confirmation: they are always synced. A confirmed candidate becomes a fold participant only through the rules of `social.md` §3.
+Authorities and granted DIDs need no confirmation: they are always synced, with their membership record still read and reported. A grant keeps counting after its holder leaves (`social.md` §3.3: their opinions keep counting), so gating a granted repo by its membership would freeze a leaver's last records on clients that synced them while fresh clients never see them, with both reporting complete (I6). A granted DID is therefore never rejected and is always in C(F) (§4.5). A confirmed candidate becomes a fold participant only through the rules of `social.md` §3.
 
 ### 4.3 Closure (CORE)
 
@@ -515,9 +518,10 @@ sync_repo(did, scopes, reason) -> Clean | Applied | Unstable | Rollback | Failed
   h1   = getLatestCommit(did)                             // record repo.headSeen = {h1.rev, h1.cid, sentAt}
          RepoNotFound | RepoDeactivated | RepoTakendown → §3.3, §3.4; Failed
   if repo.rev ≠ "" ∧ h1.rev < repo.rev: return Rollback   // §5.9
-  if h1 = (repo.rev, repo.commit) ∧ ∀ s ∈ scopes: repo.listed[s] = repo.rev ∧ repo.marks = ∅:
+  unsure = explicit ∧ repo.collsRev ≠ h1.rev ∧ (RANGED ∪ {NS.membership}) ⊄ repo.colls   // fk scopes; rules below
+  if h1 = (repo.rev, repo.commit) ∧ ∀ s ∈ scopes: repo.listed[s] = repo.rev ∧ repo.marks = ∅ ∧ ¬unsure:
      return Clean
-  colls = (now − repo.collsAt ≤ 24 h ∧ reason ≠ reconcile ∧ ¬repo.collsDirty)
+  colls = (now − repo.collsAt ≤ 24 h ∧ reason ≠ reconcile ∧ ¬repo.collsDirty ∧ ¬unsure)
           ? repo.colls
           : describeRepo(did).collections ∩ (OURS ∪ {app.bsky.actor.profile})
   for each s ∈ scopes, c ∈ RANGED ∩ colls:          res[s, c] = list_range(did, c, s)      // §5.3; parallel
@@ -541,7 +545,7 @@ sync_repo(did, scopes, reason) -> Clean | Applied | Unstable | Rollback | Failed
      for each s whose ranges were all complete:
         repo.listed[s] = h1.rev; repo.capped[s] = { c ↦ boundary of res[s, c] : res[s, c].capped }
      remove every mark with rev ≤ h1.rev (§6.5)
-  repo.colls/collsAt/collsDirty updated if describeRepo ran; repo.checkedAt = now; repo.fails = 0; repo.lastOk = now
+  repo.colls/collsAt/collsRev/collsDirty updated if describeRepo ran (collsRev = h1.rev); repo.checkedAt = now; repo.fails = 0; repo.lastOk = now
   KvStore::write(cache, batch ++ [put repo row])                                    // one atomic batch
   if ¬stable: enqueue(did, minRev = h2.rev, P1, "unstable"); return Unstable
   emit Changed; return Applied
@@ -549,7 +553,7 @@ sync_repo(did, scopes, reason) -> Clean | Applied | Unstable | Rollback | Failed
 
 **Rules**
 - An unstable pass (the head moved during listing) still admits what it listed, but writes no tombstones and advances no `listed` entry. After 3 consecutive unstable passes the repo is re-queued at P3 with the repo backoff (§9.4).
-- **`describeRepo` freshness.** `repo.colls` is reused for up to 24 h. It is refreshed early when `repo.collsDirty` is set: a hint or an own write named a collection in `OURS` that is not in `repo.colls`. A collection created less than 24 h ago and named by no hint can therefore be missed until the next reconcile, which always refreshes. If `describeRepo` fails, `colls = OURS`.
+- **`describeRepo` freshness.** `repo.colls` is reused for up to 24 h. It is refreshed early when `repo.collsDirty` is set: a hint or an own write named a collection in `OURS` that is not in `repo.colls`. A background pass can therefore miss a collection created less than 24 h ago and named by no hint until the next reconcile, which always refreshes. A **user-initiated** pass (`sync_forum`, `sync_thread`, `sync --full`; `engine-api.md` §3.3) of a forum scope trusts `repo.colls` only at the head it was described at (`repo.collsRev`): when the head moved and a ranged collection or `NS.membership` is missing from `repo.colls`, it calls `describeRepo` again, even when the pass would otherwise be `Clean`. An explicit refresh therefore sees the first records of a newly granted or newly joined participant at once. If `describeRepo` fails, `colls = OURS`.
 - **Partial results.** A range that failed or hit a byte cap leaves its scope unlisted; the other ranges are still applied.
 
 ### 5.3 Range listing and the cursor-range probe
@@ -652,6 +656,7 @@ Each admitted observation of a uri carries an **order key** `(revLo, sentAt)`:
 | Observation | `revLo` | `sentAt` | exact |
 |---|---|---|---|
 | a row of a listing pass | `h1.rev` of the pass | send time of the page's request | if the pass was stable |
+| any observation under an identity hint (`idHint`, §1.5) | `""` (lowest) | send time | no |
 | `getRecord` (point fetch) | `repo.headSeen.rev` when the request was sent (a lower bound) | send time | no |
 | own write (§5.8) | the response's `commit.rev` (else a fresh head's rev) | send time of the write | yes |
 | proof from the author's PDS | the commit rev | send time of `sync.getRecord` | yes |
@@ -918,6 +923,7 @@ The record-level protocols are `data-model.md` §8 (edit, delete, opinion, moder
 
 - Each `PendingWrite` (`data-model.md` §8.2) is persisted in the `state` store before any network call.
 - **One write in flight per account.** The pump for account `a` runs only while holding the lock `outbox:<a>` (§10.6): native `fd-lock` on `<data dir>/locks/outbox-<h>.lock`, browser Web Lock `lessdugin-outbox-<a>` (with `h` = the first 16 characters of `b32s(sha256(a))`). It processes the account's writes in `seq` order (FIFO). Different accounts run independently.
+- The lock is taken through `Host::lock` (§12.3) and held from picking a write until its outcome is persisted, one write at a time; the in-process pump lock and the outbox rows lock are taken inside it (lock order: pump, host lock, rows). `undo` takes the same lock, so it waits for a send of the same account that is in flight in another engine or process. Two engines on one host or data directory therefore never have two writes of one account in flight.
 - In `lessdugin web`, the bridge takes the same native lock for each `/bridge/xrpc` write, so the CLI, the TUI and the bridged SPA share one serialisation.
 - A browser tab that is not the sync leader persists its `PendingWrite` and notifies the leader over the BroadcastChannel (§10.6); whichever tab holds `outbox:<a>` pumps it.
 
@@ -939,13 +945,13 @@ pump(a):
           never a cached head or an earlier write's result
     on success: apply the results to the cache (§5.8); w.state = done
     on InvalidSwap / swap failure: the protocol's own retry (≤ 3, uniform(200 ms, 800 ms)); then conflict or failed
-    on 429: w.state = throttled, w.notBefore = max(Retry-After, RateLimit-Reset)
+    on 429: w.state = throttled, w.notBefore = max(Retry-After, RateLimit-Reset)   // floor: §9.2
     on HTTP 500 for a write: Ambiguous → re-read the targets (and the head) before deciding; never resend blindly (ADR 0005)
     persist w; emit Write{id, state}
 ```
 
 **ADR 0005 refinements** (also stated in `data-model.md` §8.4):
-- **Create-if-absent** (opinions, modActions, memberships) uses `putRecord{rkey, swapRecord: null}`, whose `InvalidSwap` is a typed signal. On a host that answers a null swap with a 400 other than `InvalidSwap`, the client falls back to `createRecord(rkey)`, and on a 5xx calls `getRecord` to tell "exists" from "failed". The fallback is remembered per host.
+- **Create-if-absent** (opinions, modActions, memberships) uses `putRecord{rkey, swapRecord: null}`, whose `InvalidSwap` is a typed signal. On a host that answers a null swap with a 400 other than `InvalidSwap` (and not named for media, size, auth, account status or rate limits), the client falls back to `createRecord(rkey)`, and on a 5xx calls `getRecord` to tell "exists" from "failed". The fallback is remembered per host only once that `createRecord` succeeds (`data-model.md` §8.4).
 - **First content in a forum** includes the membership create only when a fresh `getRecord` shows it absent.
 - **No-op updates** are skipped: the client compares the new value's CID with the current one before sending.
 
@@ -1132,8 +1138,13 @@ when now ≥ h.resetAt: h.est = h.limit
 without headers: hosts matching *.bsky.network or bsky.social use the static budget 3,000 per 300 s;
                  other hosts have no budget (concurrency and 429 handling only)
 dispatch to h allowed ⇔ h has no budget ∨ (priority = P0 ? h.est > h.limit / 5 : h.est > h.limit / 2)
-on 429: h.est = 0 until max(Retry-After, h.resetAt)
+on 429: h.est = 0 until max(now + wait, h.resetAt)
+        wait = Retry-After, or 1 s when it is missing, zero or in the past
 ```
+
+**429 wait floor.** A 429 never leads to an immediate retry, whatever a fast client clock, `Retry-After: 0` or a past HTTP date says:
+- reads: the host is blocked for at least 1 s and until its budget window resets (above);
+- writes (§7.2): `notBefore = max(Retry-After, RateLimit-Reset)`; with neither header, `now + DEFAULT_RATE_LIMIT_WAIT_MS` (60 s, `limits.md`); a value that is not in the future becomes `now + max(backoff(attempts), DEFAULT_RATE_LIMIT_WAIT_MS)`, so consecutive 429s wait longer. A successful write response whose `RateLimit-Remaining` is 0 blocks the account's writes until `RateLimit-Reset` (else 60 s).
 
 Background work may thus use at most 50% of a host's window, and P0 work up to 80%. The headers are CORS-exposed by Bluesky PDSes, so the SPA reads them too.
 
@@ -1177,7 +1188,7 @@ Native paths: `~/.cache/lessdugin/{cache.sqlite, blobs/}`, `~/.local/share/lessd
 |---|---|
 | I1 | Deleting `cache` loses only time. Nothing in `cache` is needed to recover `state`. |
 | I2 | Every stored record and blob hashes to its CID; stored bytes are immutable. |
-| I3 | Per uri, the current version only moves forward by order key (§5.6.1). The same exact rev with a different CID is a conflict: keep the higher level, log the source (§5.6.2). |
+| I3 | Per uri, the current version only moves forward by order key (§5.6.1). The same exact rev with a different CID is a conflict: keep the higher level, log the source (§5.6.2). An `idHint` row (§1.5) is keyed `("", sentAt)` and never exact: it sorts below every doc-level observation and tombstone of its uri, so it never replaces a doc-level version, never lifts a tombstone and never conflicts, and any doc-level observation supersedes it; between `idHint` observations the send time orders. A pass under an identity hint writes no tombstones and no repo state (§5.2). |
 | I4 | A tombstone with key `t` suppresses every observation with a smaller key, and is kept at least 30 days. |
 | I5 | The record store holds only `pds` and `proven` versions (and `idHint` rows, marked). Hints, `[stale]` proofs and pending writes live only in memory or in the outbox, and are never persisted as records. For the same `(uri, cid)`, the level only increases. |
 | I6 | A completeness claim requires every repo in the completeness set to be `Fresh` for that forum (§4.5, §5.9); otherwise the view shows `[partial k/n]`. |
@@ -1228,7 +1239,7 @@ RecordRow  { cid: CID, cbor: bytes (DAG-CBOR of the value), level: "pds" | "prov
              idHint: bool, valid: bool, rule?: string, firstSeen: µs, firstCid: CID, firstSeenUri: µs, fetchedAt: ms }
 TombRow    { revLo: TID | "", sentAt: ms, at: ms }
 RepoRow    { pds: url, rev: TID | "", commit?: CID, headSeen?: {rev, cid, sentAt},
-             colls: [nsid], collsAt: ms, collsDirty: bool,
+             colls: [nsid], collsAt: ms, collsRev: rev, collsDirty: bool,
              listed: {scope → TID}, capped: {scope → {nsid → boundary rkey}}, byteCapped: {scope → bool},
              marks: {uri → TID} (≤ 1000), marksOverflow: bool,
              checkedAt, lastOk, nextCheck: ms, fails: int, unstable: int, class: string,
