@@ -111,6 +111,20 @@ impl SyncError {
         }
     }
 
+    /// `true` for a request this engine refused to send (`Blocked`: a request cap, a time
+    /// budget, an open breaker, a policy): not the repo's fault, so no repo backoff follows.
+    pub fn is_refusal(&self) -> bool {
+        match self {
+            Self::Xrpc(XrpcCallError::Blocked(_))
+            | Self::List(list::ListError::Xrpc(XrpcCallError::Blocked(_)))
+            | Self::Identity(IdentityError::Fetch {
+                error: XrpcCallError::Blocked(_),
+                ..
+            }) => true,
+            _ => false,
+        }
+    }
+
     /// `true` for transient failures (network, timeout, 5xx, rate limits).
     pub fn is_transient(&self) -> bool {
         match self {

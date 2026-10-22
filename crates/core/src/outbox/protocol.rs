@@ -8,9 +8,13 @@
 //! signal; a 5xx on a write is ambiguous and is resolved by re-reading before anything is sent
 //! again. Swap retries wait `uniform(200 ms, 800 ms)` ([`Runner::jitter`]).
 
+// `CallError` carries an `EngineError` (with its detail object); it is returned on cold paths
+// only, so its size does not matter.
+#![allow(clippy::result_large_err)]
+
 use std::collections::{BTreeMap, BTreeSet};
 
-use lessdugin_atp::syntax::{AtUri, Datetime, Did};
+use lessdugin_atp::syntax::{Datetime, Did};
 use lessdugin_lexicon::collection::nsid;
 use lessdugin_lexicon::keys;
 use lessdugin_lexicon::ns::NS;
@@ -18,7 +22,7 @@ use lessdugin_lexicon::records::{
     Action, Opinion, OpinionIntent, StrongRef, TextQuote, qkey,
 };
 use lessdugin_lexicon::values::{Agreement, RevisionOp, Stance, Tier, VoteValue};
-use serde_json::{Map, Value};
+use serde_json::Value;
 
 use crate::engine::{EngineError, ErrorCode};
 use crate::host::{Host, KvOp, KvStore};
@@ -379,26 +383,39 @@ impl<'a, H: Host> Runner<'a, H> {
             return Ok(false);
         }
         let mut results = Vec::new();
+        let mut recs = Vec::new();
         for i in targets {
             let op = self.w.ops[i].clone();
             let cur = self.pds.get(&op.collection, &op.rkey).await?;
+            let uri = self.op_uri(i);
             match (op.action, cur) {
-                (OpAction::Delete, None) => results.push(OpResult {
-                    uri: self.op_uri(i),
-                    cid: None,
-                }),
+                (OpAction::Delete, None) => {
+                    recs.push(AppliedRecord::Delete { uri: uri.clone() });
+                    results.push(OpResult { uri, cid: None });
+                }
                 (OpAction::Create | OpAction::Update, Some(c))
                     if Some(c.cid.as_str())
                         == records::record_cid(&self.op_value(i)?).ok().as_deref() =>
                 {
+                    recs.push(AppliedRecord::Put {
+                        uri: uri.clone(),
+                        cid: c.cid.clone(),
+                        value: c.value,
+                    });
                     results.push(OpResult {
-                        uri: self.op_uri(i),
+                        uri,
                         cid: Some(c.cid),
                     });
                 }
                 _ => return Ok(false),
             }
         }
+        // applied like a write answered without a commit (the head is read afterwards)
+        let found = Written {
+            sent_at: self.now_ms(),
+            ..Written::default()
+        };
+        self.confirm(&found, recs);
         self.w.results = results;
         Ok(true)
     }
@@ -1571,32 +1588,33 @@ fn role_may_issue(role: &str, v: &Value) -> bool {
 }
 
 /// Splits a blob into chunk rows of ≤ 1 MiB.
-pub(crate) fn chunk_rows(account: &str, seq: i64, index: u32, bytes: &[u8]) -> Vec<KvOp> {
+pub(crate) fn chunk_rows(
+    account: &str,
+    seq: i64,
+    index: u32,
+    bytes: &[u8],
+) -> Result<Vec<KvOp>, row::RowError> {
     bytes
         .chunks(model::BLOB_CHUNK_BYTES)
         .enumerate()
-        .filter_map(|(c, part)| {
-            let row = ChunkRow {
+        .map(|(c, part)| {
+            let r = ChunkRow {
                 v: model::OUTBOX_ROW_VERSION,
                 b: part.to_vec(),
             };
-            row::encode(&row)
-                .ok()
-                .map(|b| KvOp::Put(model::blob_chunk_key(account, seq, index, c as u32), b))
+            let key = model::blob_chunk_key(account, seq, index, u32::try_from(c).unwrap_or(u32::MAX));
+            row::encode(&r).map(|b| KvOp::Put(key, b))
         })
         .collect()
 }
 
 /// Is `rkey` a revision key of exactly `p`?
-#[allow(dead_code)]
+#[cfg(test)]
 fn is_revision_of(rkey: &str, p: &str) -> bool {
     rkey.strip_prefix(p)
         .and_then(|r| r.strip_prefix('-'))
         .is_some_and(keys::is_tid)
 }
-
-#[allow(dead_code)]
-fn _unused(_: &Map<String, Value>, _: &AtUri) {}
 
 #[cfg(test)]
 mod tests {
@@ -1606,8 +1624,11 @@ mod tests {
     fn inverse_restores_prior() {
         let prior: Opinion = serde_json::from_value(serde_json::json!({
             "$type": nsid::OPINION,
-            "subject": {"uri": "at://did:plc:ewvi7nxzyoun6zhxrhs64oiz/x/y", "cid": "c"},
-            "forum": "at://did:plc:ewvi7nxzyoun6zhxrhs64oiz/x/f",
+            "subject": {
+                "uri": format!("at://did:plc:ewvi7nxzyoun6zhxrhs64oiz/{}/3l2s5xxv2ze2c", nsid::POST),
+                "cid": "bafyreie5737gdxlw5i64vzichcalba3z2v5n6icifvx5xytvske7mr3hpm",
+            },
+            "forum": format!("at://did:plc:ewvi7nxzyoun6zhxrhs64oiz/{}/f", nsid::FORUM),
             "karma": "down",
             "reacts": [{"react": "funny", "stance": "against"}],
             "createdAt": "2026-01-01T00:00:00.000Z",

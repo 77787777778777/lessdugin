@@ -111,6 +111,9 @@ proptest = "1"
 insta = { version = "1", features = ["json"] }
 assert_cmd = "2"
 flate2 = "1"
+# wasm32 test harness (`cargo xtask test-wasm`); its version moves in lockstep with `wasm-bindgen`
+# (0.3.79 <-> 0.2.129) and with the `wasm-bindgen-test-runner` from `wasm-bindgen-cli`.
+wasm-bindgen-test = "=0.3.79"
 
 [profile.release]
 lto = "thin"

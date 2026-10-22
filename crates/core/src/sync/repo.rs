@@ -201,6 +201,10 @@ pub struct RepoReport {
     pub membership: BTreeMap<String, MembershipCheck>,
     /// Admission and listing strikes against the PDS.
     pub strikes: u32,
+    /// Some request was refused locally (request cap, time budget, open breaker): the pass is
+    /// incomplete but no repo backoff was applied.
+    pub refused: bool,
+    hard_issues: usize,
 }
 
 impl RepoReport {
@@ -215,10 +219,17 @@ impl RepoReport {
             pds: None,
             membership: BTreeMap::new(),
             strikes: 0,
+            refused: false,
+            hard_issues: 0,
         }
     }
 
     fn issue(&mut self, e: &SyncError) {
+        if e.is_refusal() {
+            self.refused = true;
+        } else {
+            self.hard_issues += 1;
+        }
         self.issues.push((e.code().to_owned(), e.to_string()));
     }
 }
@@ -365,6 +376,32 @@ pub(crate) fn membership_check(f: &Fetched, forum: &AtUri) -> MembershipCheck {
     }
 }
 
+/// The membership state the store shows for `c` (exact for a repo listed at its head).
+pub(crate) async fn stored_membership<K: crate::host::KvStore>(
+    store: &RecordStore<'_, K>,
+    did: &Did,
+    c: &Confirm,
+) -> Result<MembershipCheck, SyncError> {
+    let k = schema::RecKey::new(nsid::MEMBERSHIP, did.as_str(), &c.fk);
+    Ok(match store.slot(&k).await? {
+        Slot::Rec(row) => {
+            if !row.valid {
+                return Ok(MembershipCheck::Invalid(row.rule.unwrap_or_default()));
+            }
+            match row
+                .value_json()
+                .ok()
+                .and_then(|v| serde_json::from_value::<Membership>(v).ok())
+            {
+                Some(m) if m.forum == c.forum => MembershipCheck::Valid,
+                Some(_) => MembershipCheck::WrongForum,
+                None => MembershipCheck::Invalid("membership: undecodable".into()),
+            }
+        }
+        _ => MembershipCheck::Absent,
+    })
+}
+
 fn account_status_of(active: bool, status: Option<&str>) -> AccountStatus {
     if active {
         return AccountStatus::Active;
@@ -393,6 +430,7 @@ impl<H: Host> Syncer<H> {
             Ok(outcome) => rep.outcome = outcome,
             Err(e) => {
                 rep.outcome = RepoOutcome::Failed;
+                rep.refused |= e.is_refusal();
                 rep.error = Some(e);
             }
         }
@@ -658,6 +696,10 @@ impl<H: Host> Syncer<H> {
         let h1 = match get_head(&xrpc, &svc, did).await {
             Ok(h) => h,
             Err(e) => {
+                if matches!(e, XrpcCallError::Blocked(_)) {
+                    // refused locally: not the repo's fault
+                    return Err(e.into());
+                }
                 if e.is_repo_status() {
                     self.on_repo_status_error(s, did, &mut repo).await;
                 }
@@ -696,7 +738,6 @@ impl<H: Host> Syncer<H> {
 
         // Clean
         let clean = !full
-            && req.confirm.is_none()
             && repo.rev == h1.rev
             && repo.commit == Some(h1.cid)
             && req
@@ -706,13 +747,23 @@ impl<H: Host> Syncer<H> {
             && repo.marks.is_empty()
             && !repo.marks_overflow;
         if clean {
+            // the listing at this rev covered the membership: a confirmation is served from the
+            // cache (§4.2.1)
+            let mut outcome = RepoOutcome::Clean;
+            if let Some(c) = &req.confirm {
+                let check = stored_membership(&store, did, c).await?;
+                if check.rejects() {
+                    outcome = RepoOutcome::Rejected;
+                }
+                rep.membership.insert(c.fk.clone(), check);
+            }
             repo.succeed(now);
             if req.reason == Reason::Reconcile {
                 repo.last_reconcile = now;
             }
             self.write_repo_only(&store, did, &repo, &origin, &mut host_row)
                 .await?;
-            return Ok(RepoOutcome::Clean);
+            return Ok(outcome);
         }
 
         // confirm a candidate (§4.2.1): the membership first
@@ -728,7 +779,9 @@ impl<H: Host> Syncer<H> {
                     }
                     rep.membership
                         .insert(c.fk.clone(), MembershipCheck::Unknown(e.to_string()));
-                    repo.fail(now, self.random());
+                    if !e.is_refusal() {
+                        repo.fail(now, self.random());
+                    }
                     self.write_repo_only(&store, did, &repo, &origin, &mut host_row)
                         .await?;
                     return Err(e);
@@ -1151,9 +1204,12 @@ impl<H: Host> Syncer<H> {
             // describeRepo failed: OURS was listed; it is asked again next time
             repo.colls = colls.clone();
         }
-        let failed = !rep.issues.is_empty();
+        let failed = rep.hard_issues > 0;
         if failed || (!stable && repo.unstable >= UNSTABLE_MAX) {
             repo.fail(now, self.random());
+        } else if rep.refused {
+            // incomplete through a local refusal: neither a failure nor a success
+            repo.checked_at = now;
         } else {
             repo.succeed(now);
             if req.reason == Reason::Reconcile {

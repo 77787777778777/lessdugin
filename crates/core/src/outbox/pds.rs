@@ -274,7 +274,7 @@ impl<'h, H: Host> PdsClient<'h, H> {
         if let XrpcCallError::RateLimited { retry_after_ms } = &e {
             let wait = retry_after_ms
                 .map_or(budget::DEFAULT_RATE_LIMIT_WAIT_MS, |ms| {
-                    i64::try_from(*ms).unwrap_or(i64::MAX)
+                    i64::try_from(ms).unwrap_or(i64::MAX)
                 });
             return CallError::RateLimited {
                 until: self.host.now_ms().saturating_add(wait),

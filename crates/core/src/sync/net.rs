@@ -145,12 +145,19 @@ enum Class {
     Other,
 }
 
+/// The `Blocked` message of a request refused by the request cap.
+pub const REQUEST_LIMIT_REACHED: &str = "request limit reached";
+/// The `Blocked` message of a request refused by the time budget.
+pub const TIME_BUDGET_SPENT: &str = "time budget spent";
+
 /// Requests sent and bytes received by one command (`SyncReport.requests`, `.bytes`), with an
-/// optional cap on requests (`--max-requests`).
+/// optional cap on requests (`--max-requests`) and an optional deadline (`--time-budget`).
 #[derive(Debug, Default)]
 pub struct Stats {
     inner: Mutex<StatsInner>,
     max_requests: Option<u32>,
+    /// No request is sent at or after this time (ms): the command's time budget.
+    deadline: Option<i64>,
 }
 
 #[derive(Debug, Default)]
@@ -171,7 +178,25 @@ impl Stats {
         Self {
             inner: Mutex::new(StatsInner::default()),
             max_requests: max,
+            deadline: None,
         }
+    }
+
+    /// Refuses requests at or after `deadline_ms` (a command's time budget, `--time-budget`):
+    /// work in flight finishes, nothing new is sent, and the command reports `[partial]`.
+    pub fn with_deadline(mut self, deadline_ms: Option<i64>) -> Self {
+        self.deadline = deadline_ms;
+        self
+    }
+
+    /// The deadline, if any.
+    pub fn deadline(&self) -> Option<i64> {
+        self.deadline
+    }
+
+    /// `true` once the time budget is spent at `now_ms`.
+    pub fn expired(&self, now_ms: i64) -> bool {
+        self.deadline.is_some_and(|d| now_ms >= d)
     }
 
     fn lock(&self) -> MutexGuard<'_, StatsInner> {
@@ -649,9 +674,13 @@ impl Net {
             }
         }
         let _permit = Acquire::new(self, &origin, class, prio).await;
+        if stats.expired(host.now_ms()) {
+            self.record_outcome(&origin, None, probe, host.now_ms());
+            return Err(HostError::Blocked(TIME_BUDGET_SPENT.into()));
+        }
         if !stats.take(&origin) {
             self.record_outcome(&origin, None, probe, host.now_ms());
-            return Err(HostError::Blocked("request limit reached".into()));
+            return Err(HostError::Blocked(REQUEST_LIMIT_REACHED.into()));
         }
         let sent_at = host.now_ms();
         self.on_send(&origin, sent_at);

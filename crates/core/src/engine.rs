@@ -20,9 +20,10 @@ pub use config::{
 };
 pub use error::{EngineError, ErrorCode};
 
-use crate::dto::{ActorView, VerifyReport};
+use crate::dto::{ActorView, SyncReport, VerifyReport};
 use crate::host::Host;
 use crate::identity::{ResolvedActor, Resolver};
+use crate::sync::{SyncConfig, SyncShared, Syncer};
 use crate::xrpc::Xrpc;
 
 /// The engine.
@@ -30,6 +31,8 @@ pub struct Engine<H: Host> {
     host: Arc<H>,
     config: Arc<EngineConfig>,
     resolver: Resolver<H>,
+    /// Sync state shared by every clone (scheduler, dirty queue).
+    sync: Arc<SyncShared>,
 }
 
 impl<H: Host> Clone for Engine<H> {
@@ -38,6 +41,7 @@ impl<H: Host> Clone for Engine<H> {
             host: Arc::clone(&self.host),
             config: Arc::clone(&self.config),
             resolver: self.resolver.clone(),
+            sync: Arc::clone(&self.sync),
         }
     }
 }
@@ -51,10 +55,12 @@ impl<H: Host> Engine<H> {
     /// An engine over a shared host.
     pub fn with_shared_host(host: Arc<H>, config: EngineConfig) -> Self {
         let resolver = Resolver::new(Arc::clone(&host), config.identity_config());
+        let sync = Arc::new(SyncShared::new(SyncConfig::from_engine(&config)));
         Self {
             host,
             config: Arc::new(config),
             resolver,
+            sync,
         }
     }
 
@@ -81,6 +87,21 @@ impl<H: Host> Engine<H> {
     /// An XRPC client over the host.
     pub fn xrpc(&self) -> Xrpc<'_, H> {
         Xrpc::new(&self.host)
+    }
+
+    /// The sync entry point (`sync.md` §4–§6, §9), sharing this engine's scheduler and queue.
+    pub fn syncer(&self) -> Syncer<H> {
+        Syncer::with_shared(Arc::clone(&self.host), Arc::clone(&self.sync))
+    }
+
+    /// `sync_forum(uri, SyncOpts)` (`engine-api.md` §3.3): opens the forum and syncs its
+    /// authorities and confirmed participants in the order of `sync.md` §4.5.
+    pub async fn sync_forum(
+        &self,
+        forum: &str,
+        opts: &crate::discovery::SyncOpts,
+    ) -> Result<SyncReport, EngineError> {
+        Ok(self.syncer().sync_forum(forum, opts).await?.report)
     }
 
     /// Resolves a handle, DID, `@handle` or `at://…` actor to an [`ActorView`] (the handle is

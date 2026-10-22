@@ -3,6 +3,11 @@
 
 mod common;
 
+// Natively these are libtest tests; on wasm32 (`cargo xtask test-wasm`) the same bodies run
+// under wasm-bindgen-test in node.
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen_test::wasm_bindgen_test as test;
+
 use lessdugin_atp::commit::{Commit, CommitError, MAX_FUTURE_SKEW_MICROS};
 use lessdugin_atp::did_doc::DidDocument;
 use lessdugin_atp::proof::{ProofCaps, ProofError, verify_record_proof};
