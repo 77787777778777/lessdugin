@@ -73,7 +73,7 @@ def mod_state(view, uri: str):
         w = l1.mods[res.winner]
         action = w.value["action"]
         reason = w.value.get("reason") if action.get("showReason", True) else None
-        spam = l1.effective(uri, "spam")                                      # NOTES.md 7
+        spam = l1.effective(uri, "spam")                                      # NOTES.md 8
         return State("Hidden", "Removed", (res.rank, w.actor, spam, reason))
     keep = l1.keep_rank(uri)
     br = l1.ban_rank(a)                                                       # V4

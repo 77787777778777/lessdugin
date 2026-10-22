@@ -1418,7 +1418,8 @@
           "did:plc:adam22222222222222222222": 2,
           "did:plc:mike22222222222222222222": 1,
           "did:plc:owner2222222222222222222": 3
-        }
+        },
+        "newerRulesBanner": true
       },
       "input": {
         "fold": {
@@ -1492,7 +1493,7 @@
         }
       },
       "name": "moderators-entry-rules",
-      "note": "FO2: the owner's own entry and an unknown role are ignored, and the first entry for a DID wins even when it is itself ignored (mona's 'superuser' entry), so mona is no authority; adam's later 'moderator' entry is ignored"
+      "note": "FO2: the owner's own entry and an unknown role are ignored, and the first entry for a DID wins even when it is itself ignored (mona's 'superuser' entry), so mona is no authority; adam's later 'moderator' entry is ignored. The unknown role is an unknown knownValue of the declaration, so it raises the 'rules newer than your client' banner (\u00a71.6; NOTES.md 25)"
     },
     {
       "expected": {
@@ -1645,7 +1646,7 @@
         }
       },
       "name": "unknown-membership-falls-back-to-approval",
-      "note": "an unknown membership value falls back to approval with the 'rules newer than your client' banner (data-model.md \u00a713.3)"
+      "note": "an unknown membership value falls back to approval (data-model.md \u00a713.3) with the 'rules newer than your client' banner (social.md \u00a71.6; NOTES.md 25)"
     },
     {
       "expected": {

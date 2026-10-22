@@ -13,7 +13,12 @@ TypeScript implementations must pass them. File formats and projection fields ar
 python3 -I -B testdata/vectors/social-ref/gen_social.py           # regenerate every file
 python3 -I -B testdata/vectors/social-ref/gen_social.py --check   # exit 1 if a file differs
 python3 -I -B testdata/vectors/social-ref/gen_social.py --list    # files and vector counts
+python3 -I -B testdata/vectors/social-ref/gen_social.py --emit-shared DIR   # see "thread/" below
 ```
+
+Always pass `-B` (or set `sys.dont_write_bytecode` before importing `lessdugin_ref`): Python
+writes a package's own `__init__` bytecode before the package can switch caching off, so an
+import without it leaves `lessdugin_ref/__pycache__/` behind.
 
 Only the Python 3 standard library is used. Keys come from `testdata/vectors/keys/gen_keys.py`,
 imported by path. Every record in a vector has its genuine DAG-CBOR CID. The DAG-CBOR encoder
@@ -23,7 +28,9 @@ generation.
 
 Where the spec is ambiguous, the model takes the reading that the spec's own decisions
 (`social.md` §20, `data-model.md` §14) support. Those readings are listed below and are open to
-review, like §20.
+review, like §20. Where a reading departs from the literal text or fills a gap, the review of
+this stage proposed normative wording for the spec owner to fold into `social.md` §20 and
+`data-model.md` §14; a decision that a vector pins says which vector.
 
 ## Decisions
 
@@ -32,17 +39,24 @@ review, like §20.
    G3 (lexicon); G4; G5, which includes G9 and the key equalities of FO1, ME1, PO1, CO1/CO2,
    RV1/RV3, OP2, MA2, WR1 and SQ1; G6, G7, G8 and G10; then the remaining per-collection rules
    in numeric order. A vector with a deliberately invalid record names the rule it breaks in
-   `note`, and asserts only the consequence (for example `Excluded`).
+   `note`, and asserts only the consequence (for example `Excluded`). `data-model.md` §14 item 23
+   says the first failing rule is exact, so §7 should state this order (proposed).
 2. **Namespace.** Vectors use the final namespace `online.7778777.lessdugin`, recorded as the
    file-level field `ns`. Every `fk`, `h16` and CID depends on the namespace (`data-model.md`
    §1.3), so a runner cannot map prefixes by rewriting strings. It evaluates the fold with
-   NS = `ns`, the same convention as `keys/rkeys.json` (`input.ns`).
+   NS = `ns`, the same convention as `keys/rkeys.json` (`input.ns`). A `.temp` build cannot do
+   that while NS is only a build-time constant: the Rust runner either runs these vectors in a
+   build whose NS is the file's `ns` (the `final-ns` feature) or gives the fold and validity
+   the namespace as a runtime parameter, as the key functions already take it.
 3. **An Excluded root is a Missing root.** §11 step 1 makes the root `Missing(p)` "when
    p ∉ records". A root post that is in `records` but Excluded by V1 (invalid, or another
    forum) is treated the same way. The thread gets a `Missing(p)` root (`rootMissing: true`),
    and its comments take `t_decl` as their time lower bound (§2.2, "if the root post is not in
    records"). This follows §11 step 2, which treats invalid and excluded parents as missing, and
-   V1, under which Excluded items appear nowhere.
+   V1, under which Excluded items appear nowhere. It departs from the literal "p ∉ records" of
+   §11 step 1 and §2.2. Pinned by `time/time.json` `root-excluded-bounded-by-decl` (T0 + 1 h,
+   not T0 + 5 h), `thread/thread.json` `root-excluded` (`rootMissing`) and, through decision 44,
+   `modfold/author.json` `author-tier-needs-the-root-post`.
 4. **`lapsed` covers every non-authority actor.** §4.10 says that assertions by actors not in A
    have no forum-tier effect, and §4.12 defines `lapsed` as "the actor is no longer an
    authority". The fold cannot tell a former moderator from a user who never was one, so every
@@ -51,7 +65,8 @@ review, like §20.
    §4.3: `reserved/unknown` (MA2 reserved key, MA7, MA9), then `lapsed` (condition 2), then
    `unauthorised` (rank and role, conditions 3–4), then `expired` (`until`, condition 5), then
    `stale` (CID, condition 6), then `effective` or `overridden`. The first one that applies is
-   the status.
+   the status. The README spells it out, and `modfold/forum.json` `mod-log-status-precedence`
+   pins it (each record there fails two or three conditions).
 6. **`effective` versus `overridden`.** A counting forum-scope record is `effective` if at least
    one dimension it asserts (other than the derived `spam`) resolves at the record's own rank to
    the record's value. For `restrict`, any value counts, because equal-rank sets unite.
@@ -61,17 +76,24 @@ review, like §20.
      another record (with a smaller uri) is the winner.
    - In an unordered `tag.head` conflict, both records are `effective` through `tag.removed`.
      The conflict itself surfaces as a mod-queue item.
+
+   Pinned by `modfold/forum.json` `equal-rank-winner-is-the-smallest-uri`,
+   `restrict-equal-rank-sets-unite`, `empty-restrict-at-higher-rank-lifts`,
+   `tag-head-conflict-at-equal-rank`, `tag-head-equal-values-agree` and
+   `lock-allow-lists-intersect-at-equal-rank`.
 7. **A stale `#tag.head` excludes only the head.** §4.5 says the head "counts only if…". A
    `#tag` record whose head fails that check still asserts `tag.removed`. Its mod-log status is
    `stale`. It becomes a mod-queue item when `head.uri` is in `records` with another CID, and
-   not when the revision is absent.
+   not when the revision is absent. Pinned by `tag-head-bound-by-its-cid`.
 8. **`Removed.spam` is `effective(x.uri, spam)`**, not the winner record's own `spam`. `spam`
    is a resolved dimension (it voids opinions, O5). `reason` and `showReason` are attributes of
-   the winner of `hidden` (§4.4).
+   the winner of `hidden` (§4.4). The readings differ only when equal-rank hides disagree on
+   `spam`; `modfold/forum.json` `removed-spam-is-the-resolved-spam` pins this one.
 9. **Applicants exclude authorities.** Read literally, §3.3's "member(d) ∧ access(d) = none"
    includes the owner, whose membership `forum create` writes (`data-model.md` §14 item 12), and
    any authority without a grant. Authorities are already participants, so
-   applicants = { d ∈ members ∖ A : access(d) = none }, in approval mode only.
+   applicants = { d ∈ members ∖ A : access(d) = none }, in approval mode only. Pinned by
+   `modfold/participation.json` `approval-mode-sets` (`applicants`, `modQueue`).
 10. **Mod-log time `None`.** µs(createdAt) is `None` for a valid datetime before 1970. Such an
     entry sorts after every entry that has a time, then by uri. No vector exercises this.
 11. **The mod-queue projection** holds three kinds of item:
@@ -81,11 +103,14 @@ review, like §20.
     - `applicant`.
 
     Items are sorted by (type, key bytes). Open-mode newcomer items are not projected, because
-    they follow from the visibility states (§4.12; the queue is local presentation).
+    they follow from the visibility states (§4.12; the queue is local presentation). A stale
+    assertion whose subject (or `head.uri`) is not in `records` is not a queue item: nothing was
+    edited (decision 23).
 12. **MA3 exempts forum-uri subjects.** A `#lock` on the forum uri, which MA9 makes valid but
     without effect, has a slug key, so `fkOf(rkey(subject)) = fk(forum)` cannot hold for it.
     MA3 therefore applies only to subjects in forum-scoped collections. Otherwise MA9's "valid
-    but without effect" could never be reached.
+    but without effect" could never be reached. This corrects `data-model.md` MA3 (proposed);
+    pinned by `modfold/forum.json` `forum-uri-lock-has-no-effect`.
 13. **Reserved keys** (MA2, `^FK-TID$`) are still checked against MA3–MA6. Only MA7 skips those
     rules. Such a record is valid and has no effect.
 14. **MA10 applies under MA7.** MA7 says MA10–MA12 still apply, so a `#tag` with an unknown
@@ -93,20 +118,27 @@ review, like §20.
     skipped this; fixed in this stage.)
 15. **A revision has no `forum` field.** The G4 `forum` check and G9 do not apply to it; its key
     range comes from `P(subject)` (RV3). (The earlier partial model failed on revisions; fixed.)
+    `data-model.md` G9 lists `revision` among the forum-scoped collections, which is an error
+    (proposed: exclude it and point to RV3).
 16. **TID values are unsigned.** A TID has 13 characters, and its first character
     (`[2-7a-j]`) carries 4 bits, so its value ranges up to 2^64 − 1 and `tidTime = value >> 10`
     up to 2^54 − 1. Implementations MUST NOT parse TIDs as i64. Vectors carry tidTimes only up
     to 2^53 − 1 (decision 18).
 17. **µs(datetime)** accepts exactly the atproto datetime syntax of `testdata/interop/syntax`:
+    - at most 64 characters, and 1 to 20 fraction digits when there is a `.`: the limits of the
+      atproto reference implementations (Go and TypeScript) and of `crates/atp`. With 20
+      fraction digits a datetime has 46 characters, so the length limit never binds. A longer
+      fraction makes the datetime invalid, and so the record (G2);
     - uppercase `T` and `Z`;
-    - at least one fraction digit when there is a `.`;
     - real calendar dates;
     - no `-00:00` offset;
     - no leap second (second ≤ 59). The fixtures reject `:61` and do not test `:60`; the
       reference implementations reject `:60`, and no vector uses it.
 
     Fraction digits beyond the sixth are truncated, and an instant before 1970 gives `None`.
-    `time/conversions.json` pins all of this. CIDv0 strings (`Qmb…`) are not CIDs.
+    `time/conversions.json` pins all of this (`twenty-fraction-digits`,
+    `twenty-one-fraction-digits`). `social.md` §2.1 should state the limits (proposed). CIDv0
+    strings (`Qmb…`) are not CIDs.
 18. **JSON-safe integers.** Every integer in a vector file lies within ±(2^53 − 1), so the
     TypeScript runner reads it exactly. The generator enforces this. Floats are never written:
     `hot` values appear as bit patterns.
@@ -121,23 +153,38 @@ review, like §20.
     - an invalid `decl` is an input error, because the forum cannot be opened (§1.6, FO4).
 20. **CO5 with an invalid root.** If the root post is in `records`, its `value.forum` is
     compared literally with the comment's `forum`, even when the root is invalid, so an absent
-    field fails. No vector exercises this.
+    field fails. Invalid records are fold inputs (§1.1), and CO5 says "in the fold input". This
+    is also the only way CO5 can fail without a 60-bit fk collision: a valid root in F's key
+    range names a forum with F's fk (G9), so it names F. Pinned by `visibility/visibility.json`
+    `v1-before-v2-and-v3` and `karma/staged.json` `opinions-that-never-count` (a root post whose
+    `forum` names another forum is invalid by G9, and its comment is Excluded by CO5).
 21. **A Missing placeholder** is a child of the root, at depth 1. The `parent` map points a
     comment at the placeholder's uri, and `missing` lists placeholder uris. One placeholder
     exists per distinct parent uri that is not a node of the thread.
 22. **`until` before 1970.** A valid datetime before 1970 has µs = `None`, so `µs(until) > now`
     is false and the assertion has expired.
 23. **A positive assertion on a subject that is not in `records`** has status `stale`, because
-    §4.5 says it "never counts". It is not a mod-queue item, since nothing was edited.
+    §4.5 says it "never counts". It is not a mod-queue item, since nothing was edited. Pinned by
+    `positive-assertion-on-a-subject-not-in-records-never-counts`.
 24. **The `allowed(p)` entry filter** keeps entries whose rkey starts with
     `{fk}-{threadTid(p)}-` (MA9's wording). An entry that names a comment not in `records` is
     kept. A comment of another post with the same TID passes the filter but is never consulted,
     because V7 only looks at comments of p.
-25. **The banner.** Every knownValue that falls back sets `newerRulesBanner` (§1.6: "an unknown
-    knownValue takes the fallback … plus the banner"). This includes `membership` and
-    `defaultTier`, for which the `data-model.md` §13.3 table does not mention the banner.
-26. **Newcomers follow §3.1 literally**: P ∖ (S ∪ E). In open mode a banned participant is
-    therefore a newcomer (V4 hides their content first).
+25. **The banner.** Every knownValue of the declaration that falls back sets
+    `newerRulesBanner` (§1.6: "an unknown knownValue takes the fallback … plus the banner").
+    The declaration has exactly ten knownValue fields: `membership`, `defaultTier`,
+    `moderators[].role`, `policy.moderation`, `policy.voting`, `policy.reactPalette`,
+    `policy.tagCreation`, `policy.karma.algorithm`, `policy.ranking.algorithm` and
+    `policy.display.newUsers`. This includes `membership`, `defaultTier` and the moderator
+    role, for which the `data-model.md` §13.3 table does not mention the banner. An unknown
+    role raises it in any `moderators` entry, also one that FO2 ignores for another reason (the
+    owner's own entry, a later duplicate). Unknown values in other records (opinions,
+    modActions, posts) never raise it. Pinned by `modfold/participation.json`
+    `unknown-membership-falls-back-to-approval` and `moderators-entry-rules`, and by
+    `fold/digest.json` `unknown-known-values-fall-back`.
+26. **Newcomers follow §3.1 literally**: P ∖ (S ∪ E). A banned or nullified participant is
+    therefore a newcomer, in open mode and in approval mode alike (V4 hides a banned user's
+    content first). In approval mode those are the only newcomers, since P ∖ S ⊆ B ∪ N there.
 27. **Mod-log revisions.** A revision is listed when it is valid and its subject's collection
     is `modAction`. The subject need not be in `records`, and a `delete` revision usually names
     a removed record. A revision of a post is not a mod-log entry.
@@ -156,7 +203,10 @@ review, like §20.
     then gives it no effect: a wikiRevision or sequence subject, or fewer than 2 eligible
     voters in a stage. The rule limits what such an opinion counts toward (karma only, per
     stage); it does not stop it from counting. V (§6.2) is the subset with an enabled karma
-    axis and a post or comment subject.
+    axis and a post or comment subject. This departs from §5's "counts **only** toward karma,
+    and only if" read as a condition on counting; pinned by `karma/staged.json`
+    `deleted-subject-one-vs-two-voters` (`counting` lists mike's and mona's opinions on a
+    deleted wikiRevision, and mona's opinion on dora's deleted post, its only voter).
 31. **O2 "s is valid … and s.forum = v.forum"** means that s is a candidate item not Excluded
     by V1. That includes the cross-record rule CO5, which `data-model.md` §7.3 lists among the
     validity rules: an opinion on a comment whose root post (in the input) names another forum
@@ -256,7 +306,9 @@ Three injected faults were caught: seedUp counted from all voters (P7), K1 from 
     not exclude (decision 3: an Excluded root is a Missing root), and c to be a comment that V1
     does not exclude. An author-scope `#hide` or `#pin` whose subject has no such root, and a
     `#lock` whose subject is not such a post, fail the table condition and are `unauthorised`
-    (vector `author-tier-needs-the-root-post`).
+    (vector `author-tier-needs-the-root-post`; under the literal "must exist" the comment on the
+    invalid root would be `Hidden(AuthorModerated)` and the hide `effective`). Wording for §4.9
+    is proposed.
 45. **Author tier: mod-log status.** authorEffective is checked in the order of §4.3's numbered
     conditions, as decision 5 does for forum scope:
     - `unauthorised`: authorModeration = false, the actor ∉ E, or the table condition fails
@@ -278,6 +330,12 @@ Three injected faults were caught: seedUp counted from all voters (P7), K1 from 
     needs resolve(c, hidden) = Default. A forum-tier `#access` on d does not lift an author ban.
     If a grant did, author bans could never act in approval mode, where every non-authority
     participant who is not banned is granted. An author ban is therefore never `overridden`.
+    §4.9's general sentence ("for any subject and dimension that has a forum-tier Resolved
+    value, the forum tier governs") contradicts this for the `access` dimension; the bullet list
+    and the formula support the reading taken here, and wording is proposed. Pinned by
+    `modfold/author.json` `author-ban-of-a-granted-user-in-approval-mode` (a granted user, whose
+    `access` resolves to `member` at rank 3, is author-banned; a forum keep still exempts a
+    comment).
 47. **Thread pass.**
     - Listed descendants are judged on the states before the pass (Visible or Collapsed).
     - Excluded comments are not nodes of the placed tree, so they never keep a Tombstone.
@@ -302,28 +360,92 @@ Three injected faults were caught: seedUp counted from all voters (P7), K1 from 
     re-attached comments. Recent Discussion lists every qualifying post, since §12.5 gives no
     limit. Posts whose newest Visible comments have equal t_rank are ordered by post uri.
 51. **Rank queries.** The vectors always give `sort` and `filter`, so the default filter
-    (frontpage) is never relied on. The `tag` filter reads §13.3 `applies`, which `tags.py` does
-    not model yet, so no vector uses it.
+    (frontpage) is never relied on. The `tag` filter keeps the posts with applies(p, t)
+    (§13.3, `tags.py`); `rank/rank.json` `tag-filter` exercises it.
 52. **Author vectors set the gates** (informative). Without opinions K = 0, so most author
     vectors set `gates.authorModPersonal` and `authorModFrontpage` to 0 (passes) or 1 (fails).
     `author-gate-49-50-personal-and-frontpage` uses the karma/1 defaults (50, 2000) with real
     karma from seed votes.
 
+### Tags and wiki (`karma/1` §13)
+
+53. **Where the tags vectors live.** §19 lists `testdata/vectors/tags/`, which was not among the
+    directories this generator may write. The vectors are `karma/tags.json`, kind `tags`: §13
+    belongs to `karma/1` (§0.3), the precedent of `karma/gates.json` (decision 38). Moving the
+    file is a one-line change of its path in `cases/tags_cases.py` and of the README table.
+54. **The page** of a slug holds the wikiRevisions with that slug that V1 does not exclude and
+    V2–V5 do not hide (`visibility.mod_state` is `None`; V6 and V7 concern comments only). A
+    revision by a non-participant is therefore on no page (V2). The 1,000-revision cap keeps the
+    greatest (TID of the rkey desc, uri asc) and sets `partial`; no vector reaches it (the model
+    was checked by hand with 1,001 revisions).
+55. **Candidates and the cycle cut** follow §13.2 literally. `genesisOK(r)` does not look at
+    `parents`, so a revision whose author passes `createTag` (or is an authority under
+    `tagCreation = moderators`) is a candidate whatever its parents. The cut is recomputed until
+    no cycle remains; in each round every cyclic SCC (size > 1, or a self-loop) loses the edges
+    from its greatest-uri member into the SCC.
+56. **Flags and display values** (projected by `wiki`):
+    - `parentUnavailable(r)` ⇔ r ∈ Cand, r has a non-empty `parents` field, and
+      par(r) ∩ Cand = ∅ (§13.2 "a deleted parent gives a flagged root"); only candidates are
+      projected, because a non-candidate is never displayed;
+    - `altered` lists, per candidate, the parents along its edges *after* the cycle cut whose
+      stored `parents` entry has a CID ≠ cid(q); when one uri is listed twice with different
+      CIDs, any differing entry marks the edge (no vector has a duplicate);
+    - `history` is the chain from `canonical`, each step to the parent with the greatest depth,
+      ties by the smallest uri; `unmerged` = |{ r ∈ Cand ∖ {canonical} : no edge into r }|.
+57. **Which slugs `wiki` lists**: every slug of a wikiRevision that V1 does not exclude (even if
+    every revision is hidden, so the page is empty), and every slug whose `tag:` subject has a
+    forum-tier assertion of `tag.removed` or `tag.head` (resolved or in conflict). A slug that
+    only appears in `post.tags` or tag votes is not listed; its relevance is in `tagRel`.
+58. **Relevance.** `own` does not require author(p) ∈ E: §13.3 asks only that the author is not
+    restricted from `tag` (own = max(1, small(max(KP, 0))), which is 1 unless KP ≥ 1000). Tag
+    votes need a counting opinion on a post, voter ∈ E and the tags axis (§5: not restricted
+    from `tag`); OP3 is applied before OP4 (the order in which `data-model.md` §6.6 lists
+    them: an unknown value is discarded first, then equal entries for one slug collapse and
+    conflicting ones are all ignored). The sum uses saturating i64 arithmetic. `tagRel` lists
+    the non-zero rel of every post that V1 does not exclude, hidden posts included; `applies`
+    lists the slugs with applicable(slug) ∧ rel > 0.
+59. **The canonical tie-break uses K** (the displayed karma, §6.2) of the revision's author, as
+    §13.2 writes `K[author]`.
+
+### Other review findings
+
+60. **V1's `x.forum ≠ F` and O1's `v.forum = F`** can only fail through a 60-bit fk collision:
+    every record in `{fk}-` ranges names a forum with that fk (G9) or is invalid (G5). They are
+    defence in depth (§20.1 item 23). The vectors that put another forum in `value.forum`
+    therefore test G5/G9 and say so in their notes.
+61. **`hotBits` are portable.** For every `hotBits` value the rank case module checks, with
+    exact rational arithmetic, that the exact pow(base, e) lies within 0.1 ulp of the double
+    `math.pow` returned, so any pow whose error is below 0.9 ulp returns the same double (the
+    `libm` crate's pow, a port of the fdlibm/musl routine, is nearly correctly rounded); the
+    remaining operations are exact or correctly rounded IEEE arithmetic. The review confirmed
+    every value is the correctly rounded result (at most 0.075 ulp from the exact pow). The
+    file keeps `"hotBitsSource": "python-math.pow"` until the Rust side blesses the bits, and a
+    runner MAY compare exactly already.
+
 ## Cross-check of `testdata/vectors/thread/`
 
-When this stage ran, `testdata/vectors/thread/` did not exist. This stage therefore wrote
-`thread/thread.json` and `thread/depth.json`, the latter holding the 1,002-comment depth-cap
-vector in its own file. If the Rust engine agent adds vectors there, cross-check every one with
-`threads.py` and record the disagreements here. `gen_social.py --check` does not sweep
-`thread/` for files it does not produce.
+An earlier stage wrote `thread/thread.json` and `thread/depth.json` (the 1,002-comment depth-cap
+vector in its own file) when `testdata/vectors/thread/` did not exist. That directory is shared
+with the Rust engine agent, and who owns it is still to be decided, so the generator now treats
+it as read-only:
+- `cases/thread_cases.py` exposes its cases as `SHARED`; they are built and their hand
+  expectations asserted on every run, but written only with `--emit-shared DIR` (for example
+  into the scratch directory, for the directory's owner to adopt);
+- every run cross-checks **every** vector of every `thread/*.json` file, whoever wrote it: it
+  folds the vector's input with the model and compares each listed `expected` field with the
+  model's projection. A disagreement fails the run (including `--check`); a field or input the
+  model does not model is reported and skipped;
+- the run also says whether each shared file is identical to the model's own rendering.
+
+Last cross-check (this stage): `thread/thread.json` (11 vectors, 57 fields) and
+`thread/depth.json` (1 vector, 4 fields) agree with the model, and both files are identical to
+the model's own cases. No other file exists there yet.
 
 ## TODO (next stages)
 
-**Other kinds.** These stubs and vector kinds remain (`karma` and `reacts` are done: decisions
-30–43; the author tier, `visibility` and `rank`: decisions 44–52):
-- `tags` (§13), including the `tag` post filter of §12.3 (decision 51). A `tags/` directory is
-  not among this stage's directories; decide where it goes;
-- `sequences` (§14), the sequence library; it has no vector kind yet.
+**Other kinds.** `karma` and `reacts` are done (decisions 30–43); the author tier,
+`visibility` and `rank` (44–52); `tags` with the `tag` post filter (53–59). One stub remains:
+- `sequences` (§14), the sequence library; it has no vector kind yet (§19 requires none).
 
 The interfaces are in each stub module's docstring and in `fold.py`. The projection field names
 and shapes are already fixed in `projections.py` and the README.
@@ -332,7 +454,5 @@ and shapes are already fixed in `projections.py` and the README.
 karma stage ran a one-off randomized check of §6.3 P1–P7 (see "Property self-check" above);
 the Rust proptests remain the normative ones.
 
-**Tag votes.** `opinions.axis_enabled(view, c, "tags")` implements the §5 axis condition;
-`tags.py` still has to apply OP3 and OP4 to the entries. Read OP3 first (an entry with an
-unknown value is discarded), then OP4 (the remaining entries for one slug collapse if equal,
-else all are ignored), which is the order `data-model.md` §6.6 lists them in.
+**Ownership of `thread/` and `tags/`** is for the orchestrator or spec owner to decide
+(decision 53 and the cross-check section above).

@@ -303,6 +303,30 @@ def author_vectors() -> list:
     assert v["expected"]["B"] == [] and status(v, ban) == ("effective", None)
     out.append(v)
 
+    f = F(membership="approval")
+    p = f.post("alice", T0 + HOUR)
+    c1 = f.comment("carol", p, T0 + 2 * HOUR)
+    c2 = f.comment("dave", p, T0 + 3 * HOUR)
+    pc = f.post("carol", T0 + 4 * HOUR)
+    bc = am(f, "alice", "access", did("carol"), level="banned", t=T0 + 5 * HOUR)
+    bd = am(f, "alice", "access", did("dave"), level="banned", t=T0 + 5 * HOUR)
+    k2 = f.modaction("mona", "hide", c2, hidden=False, t=T0 + 6 * HOUR)
+    gs = grant(f, "alice", "carol", "dave")
+    v = V("author-ban-of-a-granted-user-in-approval-mode", f,
+          [*mem(f, "alice", "carol", "dave"), *gs, p, c1, c2, pc, bc, bd, k2],
+          "approval mode: carol and dave are granted (the owner's #access{member}, resolved at rank 3), as "
+          "every non-authority participant there must be. alice's author bans still apply: a forum-tier "
+          "#access value on the banned DID does not lift an author ban, which is judged per comment and "
+          "yields only to a forum-tier keep (keepRank(c) = 0) or any forum-tier hidden value. carol's "
+          "comment is author-banned; dave's is kept by mona (rank 1); carol's own post is untouched. Both "
+          "bans are effective, never overridden (NOTES.md 46)", extra=("G", "S"))
+    assert [st(v, x) for x in (c1, c2, pc)] == [AM, None, None]
+    assert v["expected"]["resolved"][did("carol")]["access"]["value"] == "member"
+    assert v["expected"]["resolved"][did("carol")]["access"]["rank"] == 3
+    assert did("carol") in v["expected"]["G"] and did("carol") in v["expected"]["S"]
+    assert status(v, bc) == ("effective", None) and status(v, bd) == ("effective", None)
+    out.append(v)
+
     # ------------------------------------------------------------------ pins
     f = F()
     p = f.post("alice", T0 + HOUR)

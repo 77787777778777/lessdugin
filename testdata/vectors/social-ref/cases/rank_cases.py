@@ -412,6 +412,26 @@ def rank_vectors() -> list:
     assert po(v) == us([pa, pd])
     out.append(v)
 
+    f = F()
+    page = f.wiki("owner", ago(30), "t")
+    off = f.wiki("owner", ago(30), "off", isTag=False)
+    pa = f.post("alice", ago(6), tags=["t"])
+    pb = f.post("bob", ago(5), tags=["u", "off"])
+    pc = f.post("carol", ago(4))
+    pd = f.post("dave", ago(3), tags=["t"])
+    pe = f.post("erin", ago(2), tags=["t"])
+    tv = f.opinion("mona", pc, t=ago(1), tags=[{"tag": "t", "value": "up"}])
+    dn = f.opinion("mike", pe, t=ago(1), tags=[{"tag": "t", "value": "down"}])
+    hd = f.modaction("mona", "hide", pd, t=ago(1))
+    recs = [*base_records(f, "alice", "bob", "carol", "dave", "erin"), page, off, pa, pb, pc, pd, pe, tv, dn, hd]
+    v = V("tag-filter", f, recs, PQ("new", tag="t"),
+          "the tag filter keeps listed posts with applies(p, t) (§13.3): alice's own tag (relevance 1) "
+          "and mona's tag vote on carol's untagged post (1) apply; erin's own tag is cancelled by "
+          "mike's down vote (0); dave's tagged post is hidden; bob's tags name a page that does not "
+          "exist (u) and one that is not a tag (off, isTag = false)")
+    assert po(v) == us([pc, pa])
+    out.append(v)
+
     # ------------------------------------------------------------------ comments (§12.4)
     f = F(gates=GATES_0)
     p = f.post("alice", ago(20))
@@ -517,7 +537,7 @@ FILES = [
         "social.md §12: hot (§12.1), post sorts magic/top/new/old/recentComments with the b ≤ 0 "
         "partition, forum pins and the magic-only cutoff (§12.2), list filters (§12.3), comment sorts "
         "with thread pins and Missing placeholders (§12.4), and Recent Discussion (§12.5). input: "
-        "{fold: FoldInput, query: {posts: {sort, filter, kind?, author?}} | {comments: {thread, sort}} "
+        "{fold: FoldInput, query: {posts: {sort, filter, tag?, kind?, author?}} | {comments: {thread, sort}} "
         "| {}}. expected: postOrder (listed post uris), hotBits ({post uri: 16 lowercase hex digits of "
         "the binary64 hot value} for each post in postOrder with b > 0, magic only), commentOrder "
         "(displayed node uris in pre-order), recentDiscussion ([{post, comments}]). hotBits come from "

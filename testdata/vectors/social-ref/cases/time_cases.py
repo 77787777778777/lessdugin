@@ -335,6 +335,12 @@ def conversion_vectors() -> list:
     assert us("nine-nines-truncated", "2026-01-01T00:00:00.999999999Z", "truncation, not rounding") \
         == T0 + 999_999
     assert us("thirteen-fraction-digits", "1985-04-12T23:20:50.1235678912345Z") is not None
+    assert us("twenty-fraction-digits", "2026-01-01T00:00:00.12345678901234567890Z",
+              "20 fraction digits, the most the atproto datetime syntax allows (46 characters): valid, "
+              "truncated after the sixth") == T0 + 123456
+    assert us("twenty-one-fraction-digits", "2026-01-01T00:00:00.123456789012345678901Z",
+              "21 fraction digits: not an atproto datetime (the reference implementations and "
+              "crates/atp allow 1 to 20 fraction digits and 64 characters; NOTES.md 17): None") is None
     assert us("positive-offset", "2026-01-01T05:30:00.000+05:30") == T0
     assert us("negative-offset", "2025-12-31T19:00:00.000-05:00") == T0
     assert us("offset-minutes", "2026-01-01T01:45:00.000+01:45") == T0
@@ -393,8 +399,8 @@ FILES = [
     ("time/conversions.json", lambda: file_doc(
         "magic/1", "conversion",
         "social.md §2.1 conversions. input: {fn: \"us\", datetime} -> expected {us: µs or null} "
-        "(µs(datetime): any UTC offset, fraction truncated after 6 digits, null if it does not parse "
-        "as an atproto datetime or is before 1970); {fn: \"tidTime\", tid} -> expected {us} "
+        "(µs(datetime): any UTC offset, 1 to 20 fraction digits truncated after the sixth, at most 64 "
+        "characters, null if it does not parse as an atproto datetime or is before 1970); {fn: \"tidTime\", tid} -> expected {us} "
         "(the TID's 64-bit value >> 10).",
         conversion_vectors())),
 ]

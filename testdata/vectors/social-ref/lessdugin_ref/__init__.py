@@ -22,7 +22,7 @@ Modules (bottom-up; "stub" = exact only where its subject matter is absent, else
     gates                     L4 (§8); registers the gateValues and passes fields
     authormod                 L5 author tier (§4.9)
     reacts                    L5 (§9.2), qkey (lfm-1.md §11)
-    tags                      L5 (§13)                     stub
+    tags                      L5 (§13): wiki heads, relevance, applies
     sequences                 L5 (§14)                     stub
     threads                   §11 placement, steps 1–4
     visibility                L6 V1–V10 and the thread pass (§10.1–§10.2); L7 lens (§10.3)
@@ -34,4 +34,8 @@ Modules (bottom-up; "stub" = exact only where its subject matter is absent, else
 
 import sys
 
+# Keep the repository free of __pycache__: this stops the submodules' bytecode, but Python
+# writes this file's own .pyc before running it. gen_social.py sets the flag before its first
+# import; any other importer must run with -B (`python3 -I -B`) or set
+# sys.dont_write_bytecode = True itself before importing lessdugin_ref.
 sys.dont_write_bytecode = True

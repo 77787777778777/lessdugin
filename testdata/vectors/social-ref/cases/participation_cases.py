@@ -146,8 +146,11 @@ def participation_vectors() -> list:
     v = V("moderators-entry-rules", f, [f.membership("mona")],
           "FO2: the owner's own entry and an unknown role are ignored, and the first entry for a DID wins "
           "even when it is itself ignored (mona's 'superuser' entry), so mona is no authority; adam's "
-          "later 'moderator' entry is ignored", fields=("authorities", "P", "S"))
+          "later 'moderator' entry is ignored. The unknown role is an unknown knownValue of the "
+          "declaration, so it raises the 'rules newer than your client' banner (§1.6; NOTES.md 25)",
+          fields=("authorities", "P", "S", "newerRulesBanner"))
     assert v["expected"]["authorities"] == {did("owner"): 3, did("adam"): 2, did("mike"): 1}
+    assert v["expected"]["newerRulesBanner"] is True
     assert v["expected"]["S"] == ds("owner", "adam", "mike")
     out.append(v)
 
@@ -160,8 +163,8 @@ def participation_vectors() -> list:
 
     f = Forum(membership="invite", moderators=MODS)
     v = V("unknown-membership-falls-back-to-approval", f, [f.membership("alice")],
-          "an unknown membership value falls back to approval with the 'rules newer than your client' "
-          "banner (data-model.md §13.3)", fields=("mode", "P", "applicants", "newerRulesBanner"))
+          "an unknown membership value falls back to approval (data-model.md §13.3) with the 'rules newer "
+          "than your client' banner (social.md §1.6; NOTES.md 25)", fields=("mode", "P", "applicants", "newerRulesBanner"))
     assert v["expected"]["mode"] == "approval" and v["expected"]["newerRulesBanner"] is True
     out.append(v)
 

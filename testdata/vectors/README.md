@@ -98,7 +98,7 @@ python3 -I -B testdata/vectors/social-ref/gen_social.py --check   # exit 1 if an
 ```
 
 Do not edit these files by hand. Change a case module (`social-ref/cases/*_cases.py`) or the
-model, then regenerate.
+model, then regenerate. Run Python with `-B` so that no `__pycache__` lands in the repository.
 
 | File | Behaviour | `kind` | Covers |
 |---|---|---|---|
@@ -106,7 +106,7 @@ model, then regenerate.
 | `time/conversions.json` | `magic/1` | `conversion` | §2.1 µs(datetime), tidTime |
 | `modfold/forum.json` | `mod/1` | `modfold` | §4.1–§4.8, §4.10–§4.12, forum tier |
 | `modfold/participation.json` | `mod/1` | `modfold` | §3 participation and seeds, FO2 |
-| `thread/thread.json`, `thread/depth.json` | `mod/1` | `thread` | §11 placement, steps 1–4 |
+| `thread/thread.json`, `thread/depth.json` | `mod/1` | `thread` | §11 placement, steps 1–4 (shared directory: cross-checked, never written; see below) |
 | `fold/digest.json` | `mod/1,karma/1,magic/1,default/1` | `digest` | §1.2 `inputDigest` |
 | `modfold/author.json` | `mod/1` | `modfold` | §4.9 author tier (L5) |
 | `visibility/visibility.json` | `mod/1` | `visibility` | §10.1 V1–V10, §10.2 thread pass |
@@ -116,12 +116,22 @@ model, then regenerate.
 | `karma/scores.json` | `karma/1` | `karma` | §7 score, agreement, unweighted, earlier versions |
 | `karma/gates.json` | `karma/1` | `karma` | §8 gate values and passes(u, g) |
 | `reacts/reacts.json` | `karma/1` (palette `default/1`) | `reacts` | §9.2 aggregation, qkey (`lfm-1.md` §11) (the §19 reacts cases) |
+| `karma/tags.json` | `karma/1` | `tags` | §13 wiki heads, candidates, flags, relevance and application (the §19 tags cases; §19 names a `tags/` directory, see `social-ref/NOTES.md` 53) |
+
+**`thread/` is shared** with the Rust engine agent, so the generator never writes it. Every run
+(and `--check`) folds every vector of every `thread/*.json` file with the model and compares
+each listed `expected` field; a disagreement fails the run. The model's own thread cases are
+written only with `--emit-shared DIR`.
 
 ### File and vector shape
 
 Each file is `{behaviour, kind, ns, description, vectors}`, plus `hotBitsSource` in `rank/`.
-- `ns` is the NSID prefix the fold is evaluated under. Keys and CIDs depend on it, so a runner
-  evaluates the fold with NS = `ns`; rewriting strings does not work.
+- `ns` is the NSID prefix the fold is evaluated under (`online.7778777.lessdugin` in every
+  file). Every key, CID and `inputDigest` depends on it, so a runner evaluates the fold, record
+  validity and key derivation with NS = `ns`; rewriting strings does not work. A build whose
+  NS is the `.temp` constant cannot run these vectors as they are: run them in a build with
+  NS = `ns` (the `final-ns` feature), or give the fold the namespace as a runtime parameter, as
+  the key functions already take it (`keys/rkeys.json` `input.ns`).
 - Each vector is `{name, input, expected, note?}`.
 - `note` explains the case. When the case contains a deliberately invalid record, `note` names
   the rule it breaks; rule IDs themselves are never asserted.
@@ -163,6 +173,13 @@ A fold vector's `input` is `{fold: FoldInput, query?: Query}`. `FoldInput` mirro
 - DID and uri sets are arrays sorted by UTF-8 bytes.
 - Integer maps keyed by DID list exactly the non-zero entries.
 - Every integer in these files is within ±(2^53 − 1).
+- A field that a kind's table below does not list is never asserted in a file of that kind,
+  except `degraded` and `newerRulesBanner`, which any kind may list.
+- A runner dispatches on the file's `kind`: the fold kinds (`time`, `modfold`, `thread`,
+  `digest`, `visibility`, `rank`, `karma`, `reacts`, `tags`) parse `input.fold` into a
+  `FoldInput`, run the fold once with `input.query` (or an empty query) under NS = `ns`, and
+  compute only the fields `expected` lists; `conversion` and `power` call the function named
+  by `input` directly. Rejecting an input is a failure: every vector input is well-formed.
 
 **Shared types**
 
@@ -181,7 +198,7 @@ A fold vector's `input` is `{fold: FoldInput, query?: Query}`. `FoldInput` mirro
 | Field | Shape and meaning |
 |---|---|
 | `degraded` | bool (§4.11) |
-| `newerRulesBanner` | bool: some knownValue or behaviour ID fell back (§1.6) |
+| `newerRulesBanner` | bool: an unknown value in one of the declaration's ten knownValue fields fell back (§1.6): `membership`, `defaultTier`, `moderators[].role` (any entry, also one FO2 ignores), `policy.moderation`, `policy.voting`, `policy.reactPalette`, `policy.tagCreation`, `policy.karma.algorithm`, `policy.ranking.algorithm`, `policy.display.newUsers`. Unknown values in other records never raise it |
 
 **`time` fields**
 
@@ -191,7 +208,9 @@ A fold vector's `input` is `{fold: FoldInput, query?: Query}`. `FoldInput` mirro
 | `times` | `{uri: {tRank, futureDated, inconsistentTimestamps}}` for every candidate item (post, comment, wikiRevision, sequence) not Excluded by V1 |
 
 **`conversion`.** The input is `{fn: "us", datetime}` or `{fn: "tidTime", tid}`. Expected is
-`{us}`, which is µs or `null`.
+`{us}`, which is µs or `null`. A datetime has at most 64 characters and 1 to 20 fraction
+digits (the atproto reference implementations); more fraction digits do not parse, which also
+makes a record holding such a datetime invalid (G2).
 
 **`modfold` fields**
 
@@ -199,12 +218,12 @@ A fold vector's `input` is `{fold: FoldInput, query?: Query}`. `FoldInput` mirro
 |---|---|
 | `authorities` | `{did: 3 \| 2 \| 1}` |
 | `mode` | `approval` \| `open` |
-| `members`, `P`, `G`, `B`, `N`, `S`, `applicants`, `newcomers` | DID sets (§3.1; applicants exclude authorities) |
+| `members`, `P`, `G`, `B`, `N`, `S`, `applicants`, `newcomers` | DID sets (§3.1). `applicants` = members ∖ A with access none, approval mode only (empty in open mode). `newcomers` = P ∖ (S ∪ E) literally, in both modes, so banned and nullified participants are newcomers (in approval mode the only ones) |
 | `resolved` | `{subject: {dimension: {value, rank, winner, allowed?}}}` for every Resolved (subject, dimension); absent means Default, including an unordered `tag.head` conflict |
 | `tiers` | `{post uri: effective tier}` for every post not Excluded |
 | `modStates` | `{uri: State \| null}` for every candidate item: the state of the first matching rule among V1–V7, or `null` when none matches (V8–V10 decide) |
 | `modLog` | `[{uri, status, rank?}]` in order (time desc, uri asc) |
-| `modQueue` | `[{type: "stale", uri} \| {type: "conflict", subject} \| {type: "applicant", did}]` sorted by (type, key) |
+| `modQueue` | `[{type: "stale", uri} \| {type: "conflict", subject} \| {type: "applicant", did}]` sorted by (type, then key bytes); see below |
 
 `resolved` values:
 - `value` is a bool or string; for `restrict`, a sorted array of capabilities; for `tag.head`,
@@ -217,12 +236,46 @@ A fold vector's `input` is `{fold: FoldInput, query?: Query}`. `FoldInput` mirro
 - `status` is one of `effective`, `overridden`, `lapsed`, `expired`, `stale`, `unauthorised`,
   `reserved/unknown`, `edited`, `removed`.
 - `rank` is present only for `overridden`.
-- An author-scope record (§4.9) is `unauthorised` (authorModeration off, actor ∉ E, or the
-  table condition: subject, thread, gate, immunity), else `expired`, else `stale`, else
-  `overridden` when the forum tier has a Resolved value for its subject and dimension (`hidden`
-  for `#hide`, `locked` for `#lock`, `pin.thread` for `#pin`), with that value's rank, else
-  `effective`. An author ban is never `overridden`. A no-effect record (MA2, MA7, MA9) is
+- Every valid modAction with `forum = F` is listed, of either scope and by any actor; so is
+  every valid revision whose subject is a modAction (`edited` for `op = update`, `removed` for
+  `op = delete`), whether or not the subject is still in `records`. Invalid records are not
+  listed. Time is µs(updatedAt) ?? µs(createdAt) for a modAction and µs(createdAt) for a
+  revision; an entry without a time (a datetime before 1970) sorts after every timed entry.
+- A **forum-scope** record takes the first status that applies:
+  1. `reserved/unknown`: a reserved `^FK-TID$` key (MA2), an unknown scope, action or value
+     (MA7), or a `#lock` of the forum uri (MA9);
+  2. `lapsed`: the actor ∉ A (a former moderator and a user who never was one alike);
+  3. `unauthorised`: the rank rule or the role table of §4.3 (conditions 3–4) fails;
+  4. `expired`: `until` is present and µs(until) ≤ now (a valid `until` before 1970 has no µs
+     and counts as expired);
+  5. `stale`: a positive record whose subject is not in `records` or has another CID
+     (condition 6), or a `#tag` whose `head` fails the §4.5 check (the record still asserts
+     `tag.removed`);
+  6. `effective`: some dimension the record asserts, other than the derived `spam`, resolves
+     at the record's own rank to the record's value (for `restrict`, to any value, because
+     equal-rank sets unite). So a record that agrees with the winner at the winning rank is
+     `effective` even when another record with a smaller uri is the `winner`, and both sides
+     of an unordered `tag.head` conflict are `effective` through `tag.removed`;
+  7. otherwise `overridden`, with `rank` = the highest rank among the resolutions of the
+     dimensions it asserts (other than `spam`).
+- An **author-scope** record (§4.9) is `unauthorised` (authorModeration off, actor ∉ E, or the
+  table condition: subject, thread, gate, immunity; the root post must be in `records` and
+  not Excluded), else `expired`, else `stale`, else `overridden` when the forum tier has a
+  Resolved value for its subject and dimension (`hidden` for `#hide`, `locked` for `#lock`,
+  `pin.thread` for `#pin`), with that value's rank, else `effective`. An author ban is never
+  `overridden`: a forum-tier `access` value on the banned DID does not lift it, only a
+  forum-tier keep or hide of the comment does. A no-effect record (MA2, MA7, MA9) is
   `reserved/unknown` in either scope.
+
+`modQueue` items (forum scope only):
+- `stale` (key `uri`, the modAction): a forum-scope record whose status is `stale` and whose
+  subject, or whose `head.uri` for a stale `#tag` head, **is** in `records` with another CID.
+  A stale record whose subject or head is not in `records` is not a queue item;
+- `conflict` (key `subject`): an unordered `tag.head` conflict at the top rank;
+- `applicant` (key `did`): every applicant, approval mode only.
+
+Items are sorted by type (`applicant`, `conflict`, `stale`, in byte order), then by key bytes.
+Open-mode newcomer items are not projected; they follow from the visibility states.
 
 **`thread` fields** (query `{thread: p}`)
 
@@ -256,9 +309,9 @@ not items, so they appear in neither field; `commentOrder` shows which are displ
 
 **`rank` fields.** Query members: `posts: {sort, filter, tag?, kind?, author?}`, where `sort` is
 `magic`, `top`, `new`, `old` or `recentComments`, `filter` is `frontpage`, `all` or `curated`
-(both always present in the vectors), `kind` is compared with the effective kind (PO2) and
-`author` is a DID; `comments: {thread, sort}`, where `sort` is `magic`, `top`, `new`, `old` or
-`latestReply`.
+(both always present in the vectors), `tag` keeps the posts with applies(p, tag) (§13.3; see
+the `tags` kind), `kind` is compared with the effective kind (PO2) and `author` is a DID;
+`comments: {thread, sort}`, where `sort` is `magic`, `top`, `new`, `old` or `latestReply`.
 
 | Field | Shape and meaning |
 |---|---|
@@ -298,6 +351,33 @@ quote: trim White_Space, remove the §10.2 controls, NFC, then replace White_Spa
 U+0020. A control next to the trimmed edge can therefore leave an edge space
 (`social-ref/NOTES.md` 35).
 
+**`tags` fields** (`karma/tags.json`; input `{fold: FoldInput}`)
+
+| Field | Shape and meaning |
+|---|---|
+| `wiki` | `{slug: {canonical, exists, applicable, partial, history, unmerged, candidates}}` (§13.2) for every slug of a wikiRevision that V1 does not exclude and every slug whose `tag:` subject has a forum-tier `tag.removed` or `tag.head` assertion (resolved or in conflict) |
+| `tagRel` | `{post uri: {slug: rel}}` (§13.3): the non-zero rel(p, slug) of every post that V1 does not exclude (hidden posts included); posts without one are not listed |
+| `applies` | `{post uri: [slug]}`: the slugs with applicable(slug) ∧ rel(p, slug) > 0, sorted; posts without one are not listed |
+
+`wiki` members:
+- `canonical`: a wikiRevision uri or `null` (no candidate). The moderator `#tag.head` when it
+  names a candidate with its current CID, else the candidate with the greatest depth, then the
+  greatest K of its author, then the smallest uri;
+- `exists` = canonical ≠ null ∧ effective(`tag:`slug, tag.removed) = false;
+  `applicable` = exists ∧ the canonical revision's `isTag` (default true);
+- `partial`: the page held more than 1,000 revisions (§13.2 cap);
+- `history`: from `canonical`, each step to the parent (along the edges after the cycle cut)
+  with the greatest depth, ties by the smallest uri; `[]` without a canonical revision;
+- `unmerged`: the number of candidates other than `canonical` with no incoming edge;
+- `candidates`: `{uri: {depth, parents, altered, parentUnavailable}}` for every candidate
+  (Cand); `parents` are the edge targets after the cycle cut (sorted uris), `depth` the §13.2
+  depth over them, `altered` the subset whose stored `parents` CID differs from the parent's
+  current CID ("ancestor altered"), and `parentUnavailable` the flag Root(ParentUnavailable): a
+  non-empty `parents` field with no candidate among the parents on the page.
+
+A page holds the slug's wikiRevisions that V1 does not exclude and V2–V5 do not hide, so a
+revision by a non-participant is on no page.
+
 ### Floats
 
 `hot()` (§12.1) is the only float in the fold. Rust computes it with `libm::pow`, and Python's
@@ -305,12 +385,14 @@ U+0020. A control next to the trimmed edge can therefore leave an edge space
 `"hotBitsSource": "python-math.pow"`:
 - `hotBits` values are binary64 bit patterns written as 16 lowercase hex digits.
 - Until the Rust side blesses exact bits (and changes `hotBitsSource`), the Rust runner accepts
-  a `hotBits` value within 1 ulp, comparing the bit patterns as integers of the same sign.
+  a `hotBits` value within 1 ulp, comparing the bit patterns as integers of the same sign. The
+  values are in fact exact for any pow with an error below 0.9 ulp (next point), so a runner
+  MAY compare them exactly already.
 - Orderings (`postOrder`) are always compared exactly.
 - Ordering vectors use inputs whose hot values are exactly representable or far from rounding
   boundaries.
 - The generator checks both with exact arithmetic. For every `hotBits` value, the exact
   pow(base, e) lies within 0.1 ulp of the double `math.pow` returned, so that double is the
-  correctly rounded result, and the division by b is exact IEEE arithmetic. In every `magic`
+  correctly rounded result, and b / pow is a correctly rounded IEEE division. In every `magic`
   order, hot values from different (b, t_rank) differ by more than 64 ulps, unless
   `exponentMilli` is 0 or 1000 (then pow is exact).

@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: CC0-1.0
-"""thread/thread.json (kind "thread"): thread placement, social.md §11 steps 1–4.
+"""thread/thread.json and thread/depth.json (kind "thread"): thread placement, social.md §11
+steps 1–4.
 
-Written here because testdata/vectors/thread/ did not exist when this stage ran (the Rust engine
-agent may own that directory later; see NOTES.md).
+testdata/vectors/thread/ is shared with the Rust engine agent, so gen_social.py never writes it:
+these cases are exposed as SHARED, built and self-checked on every run, and written only with
+`--emit-shared DIR`. Every vector in thread/ is cross-checked against the model instead
+(NOTES.md, "Cross-check of testdata/vectors/thread/").
 """
 
 from __future__ import annotations
@@ -195,7 +198,7 @@ def depth_vectors() -> list:
     return out
 
 
-FILES = [
+SHARED = [
     ("thread/thread.json", lambda: file_doc(
         "mod/1", "thread",
         "social.md §11 thread placement, steps 1–4: nodes (non-Excluded comments with root.uri = p), "

@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: CC0-1.0
 """modfold/forum.json (kind "modfold"): forum-tier moderation, social.md §4.1–§4.8, §4.10–§4.12.
 
-Author-tier cases (§4.9) belong to the next stage (NOTES.md, TODO list).
+Author-tier cases (§4.9) are in author_cases.py (modfold/author.json); participation cases (§3)
+in participation_cases.py.
 """
 
 from __future__ import annotations
@@ -150,6 +151,21 @@ def forum_vectors() -> list:
     assert rs(v, p2, "spam") == res(False, 1, k2) and st(v, p2) is None
     assert rs(v, p3, "spam") == res(False, 2, h3) and st(v, p3) == removed(2, "adam")
     assert status(v, s3) == ("overridden", 2)
+    out.append(v)
+
+    f = F()
+    p = f.post("alice", T0 + HOUR)
+    hm = f.modaction("mike", "hide", p, reason="off-topic", t=T0 + 2 * HOUR)
+    hs = f.modaction("mona", "hide", p, spam=True, reason="spam", t=T0 + 2 * HOUR)
+    v = V("removed-spam-is-the-resolved-spam", f, [*mem(f, "alice"), p, hm, hs],
+          "two rank-1 hides disagree on spam: hidden resolves to true with winner mike's record (the "
+          "smallest uri), whose own spam is false; spam resolves to true (the safest value; winner "
+          "mona's record). Removed takes rank, actor and reason from the winner of hidden, and spam = "
+          "effective(x, spam) = true, the value that voids opinions (O5) (NOTES.md 8)")
+    assert u(hm) < u(hs)
+    assert rs(v, p, "hidden") == res(True, 1, hm) and rs(v, p, "spam") == res(True, 1, hs)
+    assert st(v, p) == removed(1, "mike", spam=True, reason="off-topic")
+    assert status(v, hm) == ("effective", None) and status(v, hs) == ("effective", None)
     out.append(v)
 
     f = F()
@@ -676,6 +692,30 @@ def forum_vectors() -> list:
           "MA2: a modAction key of the form ^FK-TID$ is reserved for P2 list actions; such a record is not "
           "invalid but has no effect in v1")
     assert v["expected"]["resolved"] == {} and status(v, x) == ("reserved/unknown", None)
+    out.append(v)
+
+    f = F()
+    p = f.post("alice", T0 + HOUR)
+    q = f.post("adam", T0 + 2 * HOUR)
+    past = NOW - HOUR
+    x1 = f.modaction("zed", "hide", p, until=past, t=T0 + 3 * HOUR)
+    x2 = f.modaction("mona", "hide", q, until=past, t=T0 + 4 * HOUR)
+    x3 = f.modaction("mona", "hide", p, hidden=False, subject_cid=q["cid"], until=past, t=T0 + 5 * HOUR)
+    x4 = f.modaction("mona", "tier", p, tier="curated", subject_cid=q["cid"], t=T0 + 6 * HOUR)
+    x5 = f.modaction("zed", "hide", p, until=past, rkey=f"{f.fk}-{tid(T0 + 7 * HOUR, 5)}", t=T0 + 7 * HOUR)
+    x6 = f.modaction("mike", "hide", p, hidden=False, subject_cid=q["cid"], t=T0 + 8 * HOUR)
+    v = V("mod-log-status-precedence", f, [*mem(f, "alice"), p, q, x1, x2, x3, x4, x5, x6],
+          "each record fails several §4.3 conditions; the status is the first that applies, in the order "
+          "reserved/unknown, lapsed, unauthorised, expired, stale (README, social section): zed (no "
+          "authority) with an expired until is lapsed; mona's expired hide of the admin's post is "
+          "unauthorised (rank); mona's expired keep with a wrong subjectCid is expired; her curation with "
+          "a wrong subjectCid is unauthorised (role); zed's expired record under a reserved ^FK-TID$ key "
+          "is reserved/unknown; mike's keep with a wrong subjectCid is stale, and the only mod-queue item "
+          "because its subject is in records", extra=("modQueue",))
+    assert [status(v, x) for x in (x1, x2, x3, x4, x5, x6)] == [
+        ("lapsed", None), ("unauthorised", None), ("expired", None), ("unauthorised", None),
+        ("reserved/unknown", None), ("stale", None)]
+    assert v["expected"]["modQueue"] == [{"type": "stale", "uri": u(x6)}] and v["expected"]["resolved"] == {}
     out.append(v)
 
     f = F()

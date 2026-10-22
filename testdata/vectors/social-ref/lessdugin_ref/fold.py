@@ -19,19 +19,17 @@ it only (§1.3 rule 8, §1.4). A vector that projects only L0–L2 fields never 
     passes(u, g)    L4     gates.py          §8                                              final
     l5_author       L5     authormod.py      author tier (§4.9)                              final
     l5_reacts       L5     reacts.py         react aggregation (§9.2)                        final
-    l5_tags         L5     tags.py           tags and wiki (§13)                             STUB
+    l5_tags         L5     tags.py           tags and wiki (§13)                             final
     l5_sequences    L5     sequences.py      sequence library (§14)                          STUB
     excluded        V1     visibility.py     per candidate item                              final
     threads         –      threads.py        §11 placement (steps 1–4), per post uri         final
     times           –      time.py           §2 t_decl, per-item times, t_rank               final
     states          L6     visibility.py     V1–V10 per candidate item (before the pass)     final
     displayed       L6     visibility.py     after the thread pass (§10.2)                   final
-    (rank.py)       L6     rank.py           §12 sorts, filters, hot, Recent Discussion      final*
+    (rank.py)       L6     rank.py           §12 sorts, filters, hot, Recent Discussion      final
     mod_log         L1+L5  (here)            §4.12                                           final
     mod_queue       L1+L2  (here)            §4.12 (stale, conflict, applicant)              final
     input_digest    –      digest.py         §1.2                                            final
-
-    * final, except the `tag` post filter (§12.3), which reads the tags stub (L5).
 
 L7 (the lens, §10.3) is local presentation: visibility.lens() applies mutes to `displayed` and
 never changes a fold output; no vector asserts it.

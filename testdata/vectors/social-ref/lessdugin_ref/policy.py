@@ -4,7 +4,10 @@
 Absent fields take their lexicon default (data-model.md §6.1 and lexicons/…/forum.json); an
 absent `#gates` field takes the karma/1 default (social.md §8). An unknown knownValue takes the
 data-model.md §13.3 fallback and raises the banner "this forum uses rules newer than your
-client". Out-of-range integers make the declaration invalid (G2/FO4), so they never reach here.
+client" (§1.6). The declaration's knownValue fields are exactly BANNER_FIELDS; an unknown
+`#moderator.role` raises the banner in any `moderators` entry, whatever FO2 then does with the
+entry (NOTES.md 25). Out-of-range integers make the declaration invalid (G2/FO4), so they never
+reach here.
 """
 
 from __future__ import annotations
@@ -25,6 +28,15 @@ GATE_DEFAULTS = {
     "reactSecond": 5, "reactCreate": 10, "reactAnti": 20, "authorModPersonal": 50,
     "authorModFrontpage": 2000, "createTag": 10, "wikiEdit": 5, "sequence": 1000,
 }
+
+# Every knownValue field of the declaration (lexicons/…/forum.json); an unknown value in any of
+# them raises the banner (NOTES.md 25).
+BANNER_FIELDS = (
+    "membership", "defaultTier", "moderators[].role", "policy.moderation", "policy.voting",
+    "policy.reactPalette", "policy.tagCreation", "policy.karma.algorithm",
+    "policy.ranking.algorithm", "policy.display.newUsers",
+)
+MODERATOR_ROLES = ("admin", "moderator")
 
 # Known behaviour IDs (social.md §0.3); v1 knows exactly one of each, which is the default.
 ALG_DEFAULTS = {"moderation": "mod/1", "karma": "karma/1", "ranking": "magic/1",
@@ -111,6 +123,9 @@ def effective_policy(decl_value: dict) -> Policy:
     )
     for g, d in GATE_DEFAULTS.items():
         vals[g] = gates.get(g, d)
+    for i, m in enumerate(decl_value.get("moderators", [])):
+        if m.get("role") not in MODERATOR_ROLES:             # FO2 ignores the entry (L0)
+            fb.append(f"moderators[{i}].role")
     return Policy(**vals, algorithm_ids=algs, newer_rules_banner=bool(fb), fallbacks=tuple(fb))
 
 

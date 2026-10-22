@@ -321,7 +321,7 @@ def _check(uri: str, value: dict) -> Validity:
         if not is_canonical_at_uri(u, allowed):
             raise _Invalid("G4", what)
 
-    if coll not in ("forum", "profile", "revision"):      # a revision has no forum field (NOTES.md)
+    if coll not in ("forum", "profile", "revision"):      # a revision has no forum field (NOTES.md 15)
         ref(v["forum"], {"forum"}, "forum")
     if coll == "comment":
         ref(v["root"]["uri"], {"post"}, "root")
@@ -471,7 +471,7 @@ def _check_modaction(v: dict, rkey: str) -> Validity:
         no_effect = no_effect or "MA7"
     else:
         # MA3: an at-uri subject in a forum-scoped collection carries the forum's fk.
-        # A forum-uri subject (#lock, reserved) has a slug key and is exempt (NOTES.md 4).
+        # A forum-uri subject (#lock, reserved) has a slug key and is exempt (NOTES.md 12).
         if form == "uri":
             scoll = coll_name(split_uri(subj)[1])
             if scoll != "forum" and split_uri(subj)[2][:12] != fk(F):

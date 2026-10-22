@@ -12,9 +12,15 @@ from .common import (FK_RE, H16_RE, SLUG_RE, TID_RE, coll_name, split_uri)
 
 # --------------------------------------------------------------------------- datetime
 
+# 1–20 fraction digits and at most 64 characters: the limits of the atproto reference
+# implementations (Go indigo and TypeScript @atproto/syntax) and of crates/atp (NOTES.md 17).
+# With at most 20 fraction digits the longest datetime has 46 characters, so the length limit
+# never binds; it is checked anyway.
+DATETIME_MAX_LEN = 64
+DATETIME_MAX_FRACTION_DIGITS = 20
 _DT_RE = re.compile(
     r"([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})"
-    r"(?:\.([0-9]+))?"
+    rf"(?:\.([0-9]{{1,{DATETIME_MAX_FRACTION_DIGITS}}}))?"
     r"(Z|[+-][0-9]{2}:[0-9]{2})"
 )
 
@@ -42,13 +48,13 @@ _YEAR0_US = _days_from_civil(0, 1, 1) * 86_400_000_000
 def datetime_parts(s):
     """Parse an atproto datetime; return its UTC instant in µs (may be negative), or None.
 
-    Accepted: YYYY-MM-DDTHH:MM:SS[.fraction](Z|±HH:MM), uppercase T and Z, any number (≥ 1)
-    of fraction digits, real calendar dates, hour ≤ 23, minute and second ≤ 59 (no leap
-    second: NOTES.md), offset hour ≤ 23 and minute ≤ 59, never "-00:00", and an instant not
-    before 0000-01-01T00:00:00Z (testdata/interop/syntax/datetime_*.txt).
+    Accepted: YYYY-MM-DDTHH:MM:SS[.fraction](Z|±HH:MM), at most 64 characters, uppercase T
+    and Z, 1 to 20 fraction digits, real calendar dates, hour ≤ 23, minute and second ≤ 59
+    (no leap second), offset hour ≤ 23 and minute ≤ 59, never "-00:00", and an instant not
+    before 0000-01-01T00:00:00Z (testdata/interop/syntax/datetime_*.txt; NOTES.md 17).
     Fraction digits beyond the sixth are truncated.
     """
-    if not isinstance(s, str):
+    if not isinstance(s, str) or len(s) > DATETIME_MAX_LEN:
         return None
     m = _DT_RE.fullmatch(s)
     if not m:

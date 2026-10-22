@@ -207,7 +207,7 @@ def _params(view):
     return params_line(view.policy)
 
 
-# =========================================================================== kind "karma" (next stage)
+# =========================================================================== kind "karma"
 
 @field("karma", "counting")
 def _counting(view):
@@ -238,7 +238,7 @@ def _scores(view):
     return out
 
 
-# =========================================================================== kind "reacts" (next stage)
+# =========================================================================== kind "reacts"
 
 @field("reacts", "reacts")
 def _reacts(view):
@@ -250,7 +250,7 @@ def _reacts(view):
     return out
 
 
-# =========================================================================== kind "visibility" (next stage)
+# =========================================================================== kind "visibility"
 
 @field("visibility", "states")
 def _states(view):
@@ -262,7 +262,7 @@ def _displayed(view):
     return {u: view.displayed[u].to_json() for u in view.items}
 
 
-# =========================================================================== kind "rank" (next stage)
+# =========================================================================== kind "rank"
 
 @field("rank", "postOrder")
 def _post_order(view):
@@ -286,6 +286,46 @@ def _recent_discussion(view):
     return [{"post": p, "comments": list(cs)} for p, cs in _rank.recent_discussion(view)]
 
 
+# =========================================================================== kind "tags"
+
+@field("tags", "wiki")
+def _wiki(view):
+    t = view.l5_tags
+    out = {}
+    for slug in t.slugs:
+        pg = t.page(slug)
+        out[slug] = {
+            "canonical": pg.canonical,
+            "exists": pg.exists,
+            "applicable": pg.applicable,
+            "partial": pg.partial,
+            "history": list(pg.history),
+            "unmerged": pg.unmerged,
+            "candidates": {r: {"depth": pg.depth[r], "parents": list(pg.edges[r]),
+                               "altered": list(pg.altered.get(r, ())),
+                               "parentUnavailable": r in pg.parent_unavailable}
+                           for r in pg.candidates},
+        }
+    return out
+
+
+@field("tags", "tagRel")
+def _tag_rel(view):
+    t = view.l5_tags
+    return {p: t.rels(p) for p in _sorted(t.rel_map)}
+
+
+@field("tags", "applies")
+def _applies(view):
+    t = view.l5_tags
+    out = {}
+    for p in _sorted(t.rel_map):
+        slugs = [s for s in t.rels(p) if t.applies(p, s)]
+        if slugs:
+            out[p] = _sorted(slugs)
+    return out
+
+
 # =========================================================================== kinds
 
 DEFAULT_FIELDS = {
@@ -297,6 +337,7 @@ DEFAULT_FIELDS = {
     "reacts": ("reacts",),
     "visibility": ("states", "displayed"),
     "rank": ("postOrder",),
+    "tags": ("wiki", "tagRel", "applies"),
 }
 
 
