@@ -3,12 +3,20 @@
 //!
 //! M1 provides identity (`resolve_actor`), verification (`verify`) and the local account list
 //! (`accounts`, `add_account` with the login binding, `remove_account`, `set_active_account`,
-//! `active_account`). The engine keeps no global state: two engines over two hosts are
-//! independent. Cloning an engine shares its host.
+//! `active_account`). M2 adds forums and membership (`forums`), sync (`syncing`), the queries
+//! over the forum model (`queries`), writes through the outbox (`writes`) and events
+//! (`events`). The engine keeps no global state: two engines over two hosts are independent.
+//! Cloning an engine shares its host, outbox, event subscribers and model cache.
 
 mod accounts;
 mod config;
 mod error;
+mod events;
+mod forums;
+mod models;
+mod queries;
+mod syncing;
+mod writes;
 
 use std::sync::Arc;
 
@@ -19,10 +27,13 @@ pub use config::{
     EngineConfig, IndexerConsent, Network, Platform, Sources, VerifyMode, default_user_agent,
 };
 pub use error::{EngineError, ErrorCode};
+pub use events::{EventCallback, SubscriptionId};
+pub use syncing::ForumSyncOpts;
 
-use crate::dto::{ActorView, SyncReport, VerifyReport};
+use crate::dto::{ActorView, VerifyReport};
 use crate::host::Host;
 use crate::identity::{ResolvedActor, Resolver};
+use crate::outbox::Outbox;
 use crate::sync::{SyncConfig, SyncShared, Syncer};
 use crate::xrpc::Xrpc;
 
@@ -33,6 +44,10 @@ pub struct Engine<H: Host> {
     resolver: Resolver<H>,
     /// Sync state shared by every clone (scheduler, dirty queue).
     sync: Arc<SyncShared>,
+    /// Event bus, forum models, render cache (shared by every clone).
+    rt: Arc<models::Runtime>,
+    /// The durable outbox, reporting to the event bus.
+    outbox: Outbox<H>,
 }
 
 impl<H: Host> Clone for Engine<H> {
@@ -42,6 +57,8 @@ impl<H: Host> Clone for Engine<H> {
             config: Arc::clone(&self.config),
             resolver: self.resolver.clone(),
             sync: Arc::clone(&self.sync),
+            rt: Arc::clone(&self.rt),
+            outbox: self.outbox.clone(),
         }
     }
 }
@@ -53,14 +70,25 @@ impl<H: Host> Engine<H> {
     }
 
     /// An engine over a shared host.
+    // In wasm the runtime is not `Send` (callbacks are `MaybeSendSync`); the core is
+    // single-threaded there.
+    #[allow(clippy::arc_with_non_send_sync)]
     pub fn with_shared_host(host: Arc<H>, config: EngineConfig) -> Self {
         let resolver = Resolver::new(Arc::clone(&host), config.identity_config());
         let sync = Arc::new(SyncShared::new(SyncConfig::from_engine(&config)));
+        let rt = Arc::new(models::Runtime::new());
+        let listener = Arc::new(events::EngineListener {
+            rt: Arc::clone(&rt),
+        });
+        let outbox = Outbox::with_listener(Arc::clone(&host), listener)
+            .with_syncer(Syncer::with_shared(Arc::clone(&host), Arc::clone(&sync)));
         Self {
             host,
             config: Arc::new(config),
             resolver,
             sync,
+            rt,
+            outbox,
         }
     }
 
@@ -94,14 +122,27 @@ impl<H: Host> Engine<H> {
         Syncer::with_shared(Arc::clone(&self.host), Arc::clone(&self.sync))
     }
 
-    /// `sync_forum(uri, SyncOpts)` (`engine-api.md` §3.3): opens the forum and syncs its
-    /// authorities and confirmed participants in the order of `sync.md` §4.5.
-    pub async fn sync_forum(
-        &self,
-        forum: &str,
-        opts: &crate::discovery::SyncOpts,
-    ) -> Result<SyncReport, EngineError> {
-        Ok(self.syncer().sync_forum(forum, opts).await?.report)
+    /// The outbox (shared by every clone; its listener feeds the event bus).
+    pub fn outbox(&self) -> &Outbox<H> {
+        &self.outbox
+    }
+
+    /// `subscribe(cb)` (`engine-api.md` §3.8): `cb` receives every event, in order and never
+    /// re-entrantly, on the thread (task) that emitted it or another emitter's.
+    // In wasm callbacks are not `Send`; the core is single-threaded there.
+    #[allow(clippy::arc_with_non_send_sync)]
+    pub fn subscribe(&self, cb: impl EventCallback + 'static) -> SubscriptionId {
+        self.rt.bus.subscribe(Arc::new(cb))
+    }
+
+    /// [`Engine::subscribe`] with a boxed callback (bindings).
+    pub fn subscribe_boxed(&self, cb: Box<dyn EventCallback>) -> SubscriptionId {
+        self.rt.bus.subscribe(Arc::from(cb))
+    }
+
+    /// Removes a subscription; `false` if it was not subscribed.
+    pub fn unsubscribe(&self, id: SubscriptionId) -> bool {
+        self.rt.bus.unsubscribe(id)
     }
 
     /// Resolves a handle, DID, `@handle` or `at://…` actor to an [`ActorView`] (the handle is

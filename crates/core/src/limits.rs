@@ -128,3 +128,10 @@ pub const RENDER_CACHE_ENTRIES: usize = 512;
 pub const LIST_PAGE_DEFAULT: u32 = 30;
 /// Largest page size of `list_posts` (*tunable*).
 pub const LIST_PAGE_MAX: u32 = 500;
+/// A cached forum model older than this is rebuilt on the next query, so that `now` (ranking,
+/// future-dated badges) follows the clock (ms, *tunable*).
+pub const MODEL_MAX_AGE_MS: i64 = 60_000;
+/// Forum models kept in memory (*tunable*).
+pub const MODEL_CACHE_ENTRIES: usize = 16;
+/// Pages of own `membership` records read when seeding the followed list (`sync.md` §4.8).
+pub const FOLLOW_SEED_PAGES: u32 = 10;

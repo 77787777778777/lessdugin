@@ -139,10 +139,7 @@ fn compare(c: &Case, actual: &Map<String, Value>) -> Vec<String> {
                 "{} / {}: field {k}\n  want {want}\n  got  {got}",
                 c.file, c.name
             )),
-            None => out.push(format!(
-                "{} / {}: field {k} not produced",
-                c.file, c.name
-            )),
+            None => out.push(format!("{} / {}: field {k} not produced", c.file, c.name)),
         }
     }
     out

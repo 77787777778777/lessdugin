@@ -121,13 +121,19 @@ mod tests {
         assert_eq!(us("2026-01-01T00:00:00.000Z"), Some(1_767_225_600_000_000));
         assert_eq!(us("1970-01-01T01:00:00+01:00"), Some(0));
         assert_eq!(us("1969-12-31T23:59:59.999999Z"), None);
-        assert_eq!(us("2026-01-01T00:00:00.1234567Z"), Some(1_767_225_600_123_456));
+        assert_eq!(
+            us("2026-01-01T00:00:00.1234567Z"),
+            Some(1_767_225_600_123_456)
+        );
         assert_eq!(us("2026-01-01"), None);
         assert_eq!(tid_time("2222222222222"), Some(0));
         assert_eq!(tid_time("3mbd3542k22zz"), Some(1_767_225_600_000_000));
         assert_eq!(tid_time("bzzzzzzzzzzzz"), Some(9_007_199_254_740_991));
         assert_eq!(tid_time("nope"), None);
-        assert_eq!(rkey_tid("aaaaaaaaaaaa-3mbd3542k2222-3mbd3542k22zz"), Some("3mbd3542k22zz"));
+        assert_eq!(
+            rkey_tid("aaaaaaaaaaaa-3mbd3542k2222-3mbd3542k22zz"),
+            Some("3mbd3542k22zz")
+        );
         assert_eq!(ms(-1), -1);
         assert_eq!(ms(1999), 1);
     }
@@ -153,7 +159,10 @@ mod tests {
         assert!(!i.future());
         assert_eq!(i.eff(), Some(0));
         assert_eq!(t_decl(Some(o + FUTURE_SKEW_US + 1), Some(o)), o);
-        assert_eq!(t_decl(Some(o + FUTURE_SKEW_US), Some(o)), o + FUTURE_SKEW_US);
+        assert_eq!(
+            t_decl(Some(o + FUTURE_SKEW_US), Some(o)),
+            o + FUTURE_SKEW_US
+        );
         assert_eq!(t_decl(None, None), 0);
     }
 }

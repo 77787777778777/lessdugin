@@ -1,0 +1,83 @@
+---
+source: crates/core/tests/engine_m2.rs
+expression: list
+---
+{
+  "dto": 1,
+  "forum": "at://did:plc:whanakmuiogult5m5wu7xbj4/online.7778777.lessdugin.temp.forum/meta",
+  "sort": "magic",
+  "filter": "frontpage",
+  "items": [
+    {
+      "uri": "at://did:plc:ochphg43iudrrgiqczqt6zeb/online.7778777.lessdugin.temp.post/w5cs3cry7ban-3m2qrwsmq4lqi",
+      "cid": "bafyreialv2x4viycjxeaqgcka7mr6qbuq332ord5tvn72dqnwbkg3xvobi",
+      "forum": "at://did:plc:whanakmuiogult5m5wu7xbj4/online.7778777.lessdugin.temp.forum/meta",
+      "author": {
+        "did": "did:plc:ochphg43iudrrgiqczqt6zeb",
+        "handleState": "unverified",
+        "shortDid": "did:plc:ochphg43…"
+      },
+      "kind": "article",
+      "title": "Hello from bob",
+      "excerpt": "My first post, with a link.",
+      "tags": [],
+      "tier": "frontpage",
+      "pinned": false,
+      "locked": false,
+      "createdAtMs": 1760000180050,
+      "tRankMs": 1760000180050,
+      "commentCount": 0,
+      "score": {
+        "score": 0,
+        "agreement": 0,
+        "unweighted": 0,
+        "earlierVersionVotes": 0
+      },
+      "state": {
+        "kind": "visible"
+      },
+      "badges": {},
+      "labels": []
+    },
+    {
+      "uri": "at://did:plc:whanakmuiogult5m5wu7xbj4/online.7778777.lessdugin.temp.post/w5cs3cry7ban-3m2qrta53s3hj",
+      "cid": "bafyreicn2rnqobesrmlszmllurpixq4ztezwgvkewl5sdpg6l6fuhojkpa",
+      "forum": "at://did:plc:whanakmuiogult5m5wu7xbj4/online.7778777.lessdugin.temp.forum/meta",
+      "author": {
+        "did": "did:plc:whanakmuiogult5m5wu7xbj4",
+        "handleState": "unverified",
+        "shortDid": "did:plc:whanakmu…"
+      },
+      "kind": "article",
+      "title": "Welcome!",
+      "excerpt": "Hello everyone. Read the rules.",
+      "tags": [],
+      "tier": "frontpage",
+      "pinned": false,
+      "locked": false,
+      "createdAtMs": 1760000060000,
+      "tRankMs": 1760000060000,
+      "commentCount": 3,
+      "lastCommentAtMs": 1760000420050,
+      "score": {
+        "score": 0,
+        "agreement": 0,
+        "unweighted": 0,
+        "earlierVersionVotes": 0
+      },
+      "state": {
+        "kind": "visible"
+      },
+      "badges": {
+        "edited": true
+      },
+      "labels": []
+    }
+  ],
+  "completeness": {
+    "partial": false,
+    "reposComplete": 3,
+    "reposTotal": 3,
+    "degraded": false
+  }
+}

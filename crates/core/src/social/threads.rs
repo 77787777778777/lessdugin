@@ -298,14 +298,15 @@ mod tests {
         assert_eq!(p.parent["e"], Parent::Comment("f".into()));
         assert_eq!(p.parent["g"], Parent::Root);
         assert_eq!(p.depth["h"], 3);
-        assert_eq!(
-            p.orphaned,
-            BTreeSet::from(["f".to_owned(), "g".to_owned()])
-        );
+        assert_eq!(p.orphaned, BTreeSet::from(["f".to_owned(), "g".to_owned()]));
         assert_eq!(p.max_depth(), 3);
         assert_eq!(p.tree_parent("d"), None);
         assert_eq!(p.tree_parent("h"), Some("e"));
-        let order: Vec<_> = p.top_down().iter().filter_map(|n| n.uri().map(str::to_owned)).collect();
+        let order: Vec<_> = p
+            .top_down()
+            .iter()
+            .filter_map(|n| n.uri().map(str::to_owned))
+            .collect();
         assert_eq!(order[..4], ["a", "f", "g", "x"].map(String::from));
     }
 

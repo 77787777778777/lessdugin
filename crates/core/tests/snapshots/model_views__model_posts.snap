@@ -1,0 +1,69 @@
+---
+source: crates/core/tests/model_views.rs
+expression: posts
+---
+[
+  {
+    "uri": "at://did:plc:bbbbbbbbbbbbbbbbbbbbbbbb/online.7778777.lessdugin.temp.post/mn7i7x7lksub-3m2qyhzem2222",
+    "cid": "bafyreiewks4k45ufaxentrsoz3eut3hdgdm3dt6dqktyo77k27lj3fflfy",
+    "forum": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/online.7778777.lessdugin.temp.forum/meta",
+    "author": {
+      "did": "did:plc:bbbbbbbbbbbbbbbbbbbbbbbb",
+      "handleState": "unverified",
+      "shortDid": "did:plc:bbbbbbbb…"
+    },
+    "kind": "article",
+    "title": "Second",
+    "excerpt": "Another post.",
+    "tags": [],
+    "tier": "frontpage",
+    "pinned": false,
+    "locked": false,
+    "createdAtMs": 1760007200000,
+    "tRankMs": 1760007200000,
+    "commentCount": 0,
+    "score": {
+      "score": 0,
+      "agreement": 0,
+      "unweighted": 0,
+      "earlierVersionVotes": 0
+    },
+    "state": {
+      "kind": "visible"
+    },
+    "badges": {},
+    "labels": []
+  },
+  {
+    "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/online.7778777.lessdugin.temp.post/mn7i7x7lksub-3m2qv4q5d2222",
+    "cid": "bafyreifgexm6pokwptlfvjvepouxjpxfx27b6rartbh74vruioaenp2zki",
+    "forum": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/online.7778777.lessdugin.temp.forum/meta",
+    "author": {
+      "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "handleState": "unverified",
+      "shortDid": "did:plc:aaaaaaaa…"
+    },
+    "kind": "article",
+    "title": "Hello",
+    "excerpt": "The first post.",
+    "tags": [],
+    "tier": "frontpage",
+    "pinned": false,
+    "locked": false,
+    "createdAtMs": 1760003600000,
+    "tRankMs": 1760003600000,
+    "commentCount": 3,
+    "lastCommentAtMs": 1760003840000,
+    "score": {
+      "score": 0,
+      "agreement": 0,
+      "unweighted": 0,
+      "earlierVersionVotes": 0
+    },
+    "state": {
+      "kind": "visible"
+    },
+    "badges": {},
+    "labels": []
+  }
+]

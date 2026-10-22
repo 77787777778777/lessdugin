@@ -50,12 +50,7 @@ pub struct PostKey {
     pub activity: i64,
 }
 
-fn magic(
-    a: (bool, i64, i64),
-    b: (bool, i64, i64),
-    now: i64,
-    policy: &EffectivePolicy,
-) -> Ordering {
+fn magic(a: (bool, i64, i64), b: (bool, i64, i64), now: i64, policy: &EffectivePolicy) -> Ordering {
     let (pa, ba, ta) = a;
     let (pb, bb, tb) = b;
     pb.cmp(&pa)
@@ -215,7 +210,7 @@ mod tests {
             pinned,
             latest: t,
         };
-        let mut v = vec![k("a", 1, false), k("b", 3, false), k("c", 2, true)];
+        let mut v = [k("a", 1, false), k("b", 3, false), k("c", 2, true)];
         v.sort_by(|a, b| cmp_comments(a, b, CommentSort::Old, 10, &p));
         assert_eq!(
             v.iter().map(|c| c.uri.as_str()).collect::<Vec<_>>(),

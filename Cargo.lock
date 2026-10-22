@@ -3184,6 +3184,7 @@ dependencies = [
  "http",
  "imagesize",
  "img-parts",
+ "insta",
  "lessdugin-atp",
  "lessdugin-lexicon",
  "lessdugin-markdown",

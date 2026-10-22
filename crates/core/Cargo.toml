@@ -37,5 +37,6 @@ wasm-bindgen = { workspace = true, optional = true }
 
 [dev-dependencies]
 proptest.workspace = true
+insta.workspace = true
 # Integration tests (tests/) run the engine over the in-memory host.
 lessdugin-testkit.workspace = true

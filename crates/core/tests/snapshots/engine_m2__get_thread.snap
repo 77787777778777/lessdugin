@@ -1,0 +1,197 @@
+---
+source: crates/core/tests/engine_m2.rs
+expression: thread
+---
+{
+  "dto": 1,
+  "post": {
+    "dto": 1,
+    "post": {
+      "uri": "at://did:plc:whanakmuiogult5m5wu7xbj4/online.7778777.lessdugin.temp.post/w5cs3cry7ban-3m2qrta53s3hj",
+      "cid": "bafyreicn2rnqobesrmlszmllurpixq4ztezwgvkewl5sdpg6l6fuhojkpa",
+      "forum": "at://did:plc:whanakmuiogult5m5wu7xbj4/online.7778777.lessdugin.temp.forum/meta",
+      "author": {
+        "did": "did:plc:whanakmuiogult5m5wu7xbj4",
+        "handleState": "unverified",
+        "shortDid": "did:plc:whanakmu…"
+      },
+      "kind": "article",
+      "title": "Welcome!",
+      "excerpt": "Hello everyone. Read the rules.",
+      "tags": [],
+      "tier": "frontpage",
+      "pinned": false,
+      "locked": false,
+      "createdAtMs": 1760000060000,
+      "tRankMs": 1760000060000,
+      "commentCount": 3,
+      "lastCommentAtMs": 1760000420050,
+      "score": {
+        "score": 0,
+        "agreement": 0,
+        "unweighted": 0,
+        "earlierVersionVotes": 0
+      },
+      "state": {
+        "kind": "visible"
+      },
+      "badges": {
+        "edited": true
+      },
+      "labels": []
+    },
+    "body": {
+      "html": "<div class=\"lfm\" dir=\"auto\">\n<p dir=\"auto\">Hello <strong>everyone</strong>. Read the rules.</p>\n</div>\n",
+      "text": "Hello everyone. Read the rules.",
+      "toc": [],
+      "wordCount": 5,
+      "readMinutes": 1,
+      "media": [],
+      "excerpt": "Hello everyone. Read the rules.",
+      "notices": [],
+      "rendererVersion": "2"
+    },
+    "reacts": [],
+    "history": {
+      "revisions": 1,
+      "redacted": false
+    },
+    "sequences": []
+  },
+  "comments": [
+    {
+      "uri": "at://did:plc:2hjzbjveisqcpwgiji7hkgqm/online.7778777.lessdugin.temp.comment/w5cs3cry7ban-3m2qrta53s3hj-3m2qs46bvelzh",
+      "cid": "bafyreiewm4lpzhzcd6ucocgyxgpitrn3m5wm4ez2m3ojpolqakcs5k4j3m",
+      "depth": 1,
+      "author": {
+        "did": "did:plc:2hjzbjveisqcpwgiji7hkgqm",
+        "handleState": "unverified",
+        "shortDid": "did:plc:2hjzbjve…"
+      },
+      "body": {
+        "html": "<div class=\"lfm\" dir=\"auto\">\n<p dir=\"auto\">Glad to be here.</p>\n</div>\n",
+        "text": "Glad to be here.",
+        "toc": [],
+        "wordCount": 4,
+        "readMinutes": 1,
+        "media": [],
+        "excerpt": "Glad to be here.",
+        "notices": [],
+        "rendererVersion": "2"
+      },
+      "createdAtMs": 1760000360050,
+      "tRankMs": 1760000360050,
+      "score": {
+        "score": 0,
+        "agreement": 0,
+        "unweighted": 0,
+        "earlierVersionVotes": 0
+      },
+      "reacts": [],
+      "state": {
+        "kind": "visible"
+      },
+      "badges": {},
+      "retracted": false,
+      "moderatorHat": false,
+      "version": {
+        "revision": 1
+      },
+      "orphaned": false,
+      "missing": false,
+      "unread": false,
+      "pinned": false
+    },
+    {
+      "uri": "at://did:plc:ochphg43iudrrgiqczqt6zeb/online.7778777.lessdugin.temp.comment/w5cs3cry7ban-3m2qrta53s3hj-3m2qryltrulqi",
+      "cid": "bafyreic3ogihrlx5ph5orwbfixmimnc2ykhz2zdd46e7ho3e4jpnbmuuum",
+      "depth": 1,
+      "author": {
+        "did": "did:plc:ochphg43iudrrgiqczqt6zeb",
+        "handleState": "unverified",
+        "shortDid": "did:plc:ochphg43…"
+      },
+      "body": {
+        "html": "<div class=\"lfm\" dir=\"auto\">\n<p dir=\"auto\">Thanks for the forum!</p>\n</div>\n",
+        "text": "Thanks for the forum!",
+        "toc": [],
+        "wordCount": 4,
+        "readMinutes": 1,
+        "media": [],
+        "excerpt": "Thanks for the forum!",
+        "notices": [],
+        "rendererVersion": "2"
+      },
+      "createdAtMs": 1760000240050,
+      "tRankMs": 1760000240050,
+      "score": {
+        "score": 0,
+        "agreement": 0,
+        "unweighted": 0,
+        "earlierVersionVotes": 0
+      },
+      "reacts": [],
+      "state": {
+        "kind": "visible"
+      },
+      "badges": {},
+      "retracted": false,
+      "moderatorHat": false,
+      "version": {
+        "revision": 1
+      },
+      "orphaned": false,
+      "missing": false,
+      "unread": false,
+      "pinned": false
+    },
+    {
+      "uri": "at://did:plc:2hjzbjveisqcpwgiji7hkgqm/online.7778777.lessdugin.temp.comment/w5cs3cry7ban-3m2qrta53s3hj-3m2qs5xix4lzh",
+      "cid": "bafyreibh4fr7jisl6drug7xeqouiasoyt2nlshh4kebao5yuqe32cbav4q",
+      "parent": "at://did:plc:ochphg43iudrrgiqczqt6zeb/online.7778777.lessdugin.temp.comment/w5cs3cry7ban-3m2qrta53s3hj-3m2qryltrulqi",
+      "depth": 2,
+      "author": {
+        "did": "did:plc:2hjzbjveisqcpwgiji7hkgqm",
+        "handleState": "unverified",
+        "shortDid": "did:plc:2hjzbjve…"
+      },
+      "body": {
+        "html": "<div class=\"lfm\" dir=\"auto\">\n<p dir=\"auto\">Agreed!</p>\n</div>\n",
+        "text": "Agreed!",
+        "toc": [],
+        "wordCount": 1,
+        "readMinutes": 1,
+        "media": [],
+        "excerpt": "Agreed!",
+        "notices": [],
+        "rendererVersion": "2"
+      },
+      "createdAtMs": 1760000420050,
+      "tRankMs": 1760000420050,
+      "score": {
+        "score": 0,
+        "agreement": 0,
+        "unweighted": 0,
+        "earlierVersionVotes": 0
+      },
+      "reacts": [],
+      "state": {
+        "kind": "visible"
+      },
+      "badges": {},
+      "retracted": false,
+      "moderatorHat": false,
+      "orphaned": false,
+      "missing": false,
+      "unread": false,
+      "pinned": false
+    }
+  ],
+  "sort": "magic",
+  "completeness": {
+    "partial": false,
+    "reposComplete": 3,
+    "reposTotal": 3,
+    "degraded": false
+  }
+}

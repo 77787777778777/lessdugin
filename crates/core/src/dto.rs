@@ -1181,7 +1181,11 @@ dto! {
 
 impl CommentDraft {
     /// A reply to `parent` (or a top-level comment) in the thread of `root`.
-    pub fn new(root: impl Into<String>, parent: Option<String>, markdown: impl Into<String>) -> Self {
+    pub fn new(
+        root: impl Into<String>,
+        parent: Option<String>,
+        markdown: impl Into<String>,
+    ) -> Self {
         Self {
             root: root.into(),
             parent,
@@ -1274,7 +1278,6 @@ dto! {
         },
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -1412,10 +1415,9 @@ mod tests {
 
     #[test]
     fn request_shapes() {
-        let q: ListPostsQuery = serde_json::from_str(
-            r#"{"forum":"at://f","sort":"new","filter":"all","limit":5}"#,
-        )
-        .unwrap();
+        let q: ListPostsQuery =
+            serde_json::from_str(r#"{"forum":"at://f","sort":"new","filter":"all","limit":5}"#)
+                .unwrap();
         assert_eq!(q.sort, PostSort::New);
         let d: Draft = serde_json::from_str(
             r#"{"kind":"comment","comment":{"root":"at://p","body":{"markdown":"hi"}}}"#,

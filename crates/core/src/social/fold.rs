@@ -225,12 +225,16 @@ pub fn fold(input: &ForumInput) -> Result<FoldResult, FoldError> {
             .collect(),
         MembershipMode::Open => roster.members.iter().chain(a.keys()).cloned().collect(),
     };
-    let degraded = a
-        .keys()
-        .any(|d| input.status(d) == RepoStatus::Unavailable);
+    let degraded = a.keys().any(|d| input.status(d) == RepoStatus::Unavailable);
 
     let t_decl = time::t_decl(
-        time::us(input.decl.get("createdAt").and_then(|v| v.as_str()).unwrap_or("")),
+        time::us(
+            input
+                .decl
+                .get("createdAt")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
+        ),
         input.decl_obs,
     );
 

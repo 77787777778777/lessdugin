@@ -1,0 +1,274 @@
+---
+source: crates/core/tests/model_views.rs
+expression: thread
+---
+{
+  "dto": 1,
+  "post": {
+    "dto": 1,
+    "post": {
+      "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/online.7778777.lessdugin.temp.post/mn7i7x7lksub-3m2qv4q5d2222",
+      "cid": "bafyreifgexm6pokwptlfvjvepouxjpxfx27b6rartbh74vruioaenp2zki",
+      "forum": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/online.7778777.lessdugin.temp.forum/meta",
+      "author": {
+        "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+        "handleState": "unverified",
+        "shortDid": "did:plc:aaaaaaaa…"
+      },
+      "kind": "article",
+      "title": "Hello",
+      "excerpt": "The first post.",
+      "tags": [],
+      "tier": "frontpage",
+      "pinned": false,
+      "locked": false,
+      "createdAtMs": 1760003600000,
+      "tRankMs": 1760003600000,
+      "commentCount": 3,
+      "lastCommentAtMs": 1760003840000,
+      "score": {
+        "score": 0,
+        "agreement": 0,
+        "unweighted": 0,
+        "earlierVersionVotes": 0
+      },
+      "state": {
+        "kind": "visible"
+      },
+      "badges": {},
+      "labels": []
+    },
+    "body": {
+      "html": "<div class=\"lfm\" dir=\"auto\">\n<p dir=\"auto\">The <em>first</em> post.</p>\n</div>\n",
+      "text": "The first post.",
+      "toc": [],
+      "wordCount": 3,
+      "readMinutes": 1,
+      "media": [],
+      "excerpt": "The first post.",
+      "notices": [],
+      "rendererVersion": "2"
+    },
+    "reacts": [],
+    "history": {
+      "revisions": 0,
+      "redacted": false
+    },
+    "sequences": []
+  },
+  "comments": [
+    {
+      "uri": "at://did:plc:bbbbbbbbbbbbbbbbbbbbbbbb/online.7778777.lessdugin.temp.comment/mn7i7x7lksub-3m2qv4q5d2222-3m2qv6jees222",
+      "cid": "bafyreigsjametb4wfnpjhzsrhvzmveb2qo4by4ldiyc73r57ambvqe5vay",
+      "depth": 1,
+      "author": {
+        "did": "did:plc:bbbbbbbbbbbbbbbbbbbbbbbb",
+        "handleState": "unverified",
+        "shortDid": "did:plc:bbbbbbbb…"
+      },
+      "body": {
+        "html": "<div class=\"lfm\" dir=\"auto\">\n<p dir=\"auto\">A reply.</p>\n</div>\n",
+        "text": "A reply.",
+        "toc": [],
+        "wordCount": 2,
+        "readMinutes": 1,
+        "media": [],
+        "excerpt": "A reply.",
+        "notices": [],
+        "rendererVersion": "2"
+      },
+      "createdAtMs": 1760003660000,
+      "tRankMs": 1760003660000,
+      "score": {
+        "score": 0,
+        "agreement": 0,
+        "unweighted": 0,
+        "earlierVersionVotes": 0
+      },
+      "reacts": [],
+      "state": {
+        "kind": "visible"
+      },
+      "badges": {},
+      "retracted": false,
+      "moderatorHat": false,
+      "orphaned": false,
+      "missing": false,
+      "unread": false,
+      "pinned": false
+    },
+    {
+      "uri": "at://did:plc:eeeeeeeeeeeeeeeeeeeeeeee/online.7778777.lessdugin.temp.comment/mn7i7x7lksub-3m2qv4q5d2222-3m2qvaclgk222",
+      "cid": "bafyreig3agznhqluhu5unjqoa3xhye7wrtyuwshlpxlali7tsqezlzm5ge",
+      "parent": "at://did:plc:bbbbbbbbbbbbbbbbbbbbbbbb/online.7778777.lessdugin.temp.comment/mn7i7x7lksub-3m2qv4q5d2222-3m2qv6jees222",
+      "depth": 2,
+      "author": {
+        "did": "did:plc:eeeeeeeeeeeeeeeeeeeeeeee",
+        "handleState": "unverified",
+        "shortDid": "did:plc:eeeeeeee…"
+      },
+      "body": {
+        "html": "",
+        "text": "",
+        "toc": [],
+        "wordCount": 0,
+        "readMinutes": 0,
+        "media": [],
+        "excerpt": "",
+        "notices": [],
+        "rendererVersion": "2"
+      },
+      "createdAtMs": 1760003720000,
+      "tRankMs": 1760003720000,
+      "score": {
+        "score": 0,
+        "agreement": 0,
+        "unweighted": 0,
+        "earlierVersionVotes": 0
+      },
+      "reacts": [],
+      "state": {
+        "kind": "tombstone",
+        "reason": {
+          "kind": "notParticipant"
+        }
+      },
+      "badges": {},
+      "retracted": false,
+      "moderatorHat": false,
+      "orphaned": false,
+      "missing": false,
+      "unread": false,
+      "pinned": false
+    },
+    {
+      "uri": "at://did:plc:bbbbbbbbbbbbbbbbbbbbbbbb/online.7778777.lessdugin.temp.comment/mn7i7x7lksub-3m2qv4q5d2222-3m2qvc3sic222",
+      "cid": "bafyreibh5vtjct4aexbus5b444lcabve2u6ukf3lbn4k6ukvrwvcr75cfi",
+      "parent": "at://did:plc:eeeeeeeeeeeeeeeeeeeeeeee/online.7778777.lessdugin.temp.comment/mn7i7x7lksub-3m2qv4q5d2222-3m2qvaclgk222",
+      "depth": 3,
+      "author": {
+        "did": "did:plc:bbbbbbbbbbbbbbbbbbbbbbbb",
+        "handleState": "unverified",
+        "shortDid": "did:plc:bbbbbbbb…"
+      },
+      "body": {
+        "html": "<div class=\"lfm\" dir=\"auto\">\n<p dir=\"auto\">Hi eve.</p>\n</div>\n",
+        "text": "Hi eve.",
+        "toc": [],
+        "wordCount": 2,
+        "readMinutes": 1,
+        "media": [],
+        "excerpt": "Hi eve.",
+        "notices": [],
+        "rendererVersion": "2"
+      },
+      "createdAtMs": 1760003780000,
+      "tRankMs": 1760003780000,
+      "score": {
+        "score": 0,
+        "agreement": 0,
+        "unweighted": 0,
+        "earlierVersionVotes": 0
+      },
+      "reacts": [],
+      "state": {
+        "kind": "visible"
+      },
+      "badges": {},
+      "retracted": false,
+      "moderatorHat": false,
+      "orphaned": false,
+      "missing": false,
+      "unread": false,
+      "pinned": false
+    },
+    {
+      "uri": "at://did:plc:bbbbbbbbbbbbbbbbbbbbbbbb/online.7778777.lessdugin.temp.comment/mn7i7x7lksub-3m2qv4q5d2222-3m2qv5mqtw222",
+      "cid": "",
+      "depth": 1,
+      "author": {
+        "did": "did:plc:bbbbbbbbbbbbbbbbbbbbbbbb",
+        "handleState": "unverified",
+        "shortDid": "did:plc:bbbbbbbb…"
+      },
+      "body": {
+        "html": "",
+        "text": "",
+        "toc": [],
+        "wordCount": 0,
+        "readMinutes": 0,
+        "media": [],
+        "excerpt": "",
+        "notices": [],
+        "rendererVersion": "2"
+      },
+      "createdAtMs": 0,
+      "tRankMs": 0,
+      "score": {
+        "score": 0,
+        "agreement": 0,
+        "unweighted": 0,
+        "earlierVersionVotes": 0
+      },
+      "reacts": [],
+      "state": {
+        "kind": "visible"
+      },
+      "badges": {},
+      "retracted": false,
+      "moderatorHat": false,
+      "orphaned": false,
+      "missing": true,
+      "unread": false,
+      "pinned": false
+    },
+    {
+      "uri": "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/online.7778777.lessdugin.temp.comment/mn7i7x7lksub-3m2qv4q5d2222-3m2qvduzk2222",
+      "cid": "bafyreiapy7yvergkmrpht4oepsfn2czaxgsmm37igs2bcwapf2wh3f52cm",
+      "parent": "at://did:plc:bbbbbbbbbbbbbbbbbbbbbbbb/online.7778777.lessdugin.temp.comment/mn7i7x7lksub-3m2qv4q5d2222-3m2qv5mqtw222",
+      "depth": 2,
+      "author": {
+        "did": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+        "handleState": "unverified",
+        "shortDid": "did:plc:aaaaaaaa…"
+      },
+      "body": {
+        "html": "<div class=\"lfm\" dir=\"auto\">\n<p dir=\"auto\">Replying to a lost one.</p>\n</div>\n",
+        "text": "Replying to a lost one.",
+        "toc": [],
+        "wordCount": 5,
+        "readMinutes": 1,
+        "media": [],
+        "excerpt": "Replying to a lost one.",
+        "notices": [],
+        "rendererVersion": "2"
+      },
+      "createdAtMs": 1760003840000,
+      "tRankMs": 1760003840000,
+      "score": {
+        "score": 0,
+        "agreement": 0,
+        "unweighted": 0,
+        "earlierVersionVotes": 0
+      },
+      "reacts": [],
+      "state": {
+        "kind": "visible"
+      },
+      "badges": {},
+      "retracted": false,
+      "moderatorHat": false,
+      "orphaned": false,
+      "missing": false,
+      "unread": false,
+      "pinned": false
+    }
+  ],
+  "sort": "old",
+  "completeness": {
+    "partial": false,
+    "reposComplete": 0,
+    "reposTotal": 0,
+    "degraded": false
+  }
+}
