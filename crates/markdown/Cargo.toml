@@ -33,6 +33,18 @@ unicase = "=2.10.0"
 unicode-general-category = "=1.1.0"
 
 [dev-dependencies]
-proptest.workspace = true
 insta.workspace = true
 serde_json.workspace = true
+
+# The vector runner and the property tests also run on wasm32 under node (`cargo xtask test-wasm`).
+# proptest's default `fork`/`timeout` features spawn processes, so the wasm32 build takes it without
+# them; its seed comes from `getrandom` 0.4 (`crypto.getRandomValues` through `wasm_js`).
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+proptest.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+proptest = { version = "1", default-features = false, features = ["std", "bit-set"] }
+getrandom = { version = "0.4", features = ["wasm_js"] }
+wasm-bindgen-test.workspace = true
+# the timing tests read node's clock (`Date.now()`): wasm32-unknown-unknown has no `Instant`
+js-sys.workspace = true

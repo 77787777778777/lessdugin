@@ -82,6 +82,8 @@ A milestone is done when all of the following hold:
 
 ### M0 — Spec, scaffold, spikes
 
+**Status:** done (2026-10-16).
+
 **Scope**
 1. Commit the spec in `docs/spec/` (`README.md`, `data-model.md`, `lfm-1.md`, `social.md`, `sync.md`, `engine-api.md`, `threat-model.md`, `limits.md`, `glossary.md`, `reacts-default-1.json`) with every completeness fix applied. Commit this plan, ADR 0000 (template), ADR 0001 (decision log) and one ADR per spike.
 2. Draft the lexicons with their **final** NSIDs in `lexicons/online/7778777/lessdugin/`: the ten records, `defs`, `markdown`, `authFull`, `authInteract` and `index/*`. Every limit is final. `membership` defaults to `approval`. `revision.record` has type `unknown` with a mandatory `$type`. The code maps the prefix to `NS.temp`.
@@ -99,6 +101,8 @@ A milestone is done when all of the following hold:
 - [auto] The spec is reviewed and frozen for `.temp`. From then on, changes follow §2.2 item 3.
 
 ### M1 — Protocol foundations
+
+**Status:** done (2026-10-22). Every [auto] criterion passes: the interop, `keys` and `lexicon` vectors run natively and on wasm32 under node (`cargo xtask test-wasm`, 158 tests with the same per-file counts as native); `verify` proves a live bsky record and rejects the tampered fixtures; devnet login works with app passwords and OAuth; eight parallel CLI processes sharing one expired session refresh it exactly once, offline (`crates/cli/tests/concurrent_refresh.rs`, single-use refresh tokens with replay revocation) and on the devnet for both auth kinds; the entryway login binding is tested. [user] S1 is pending user run (§8).
 
 **Scope**
 - **`lessdugin-atp`:** syntax types (Did, Handle, Nsid, AtUri, Rkey, Tid, Datetime) plus the Jetstream `NsidPattern` type (ADR 0003); JSON ⇄ DAG-CBOR; CID with our own base32-lower code (ADR 0002); a CARv1 reader with caps; the MST proof walk; commit verification (k256 and p256, low-S); did:key; DID documents; XRPC request and response structs.

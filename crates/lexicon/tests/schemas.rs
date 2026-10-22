@@ -5,15 +5,25 @@
 
 mod common;
 
+// Natively these are libtest tests; on wasm32 (`cargo xtask test-wasm`) the same bodies run
+// under wasm-bindgen-test in node.
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen_test::wasm_bindgen_test as test;
+
+#[cfg(not(target_arch = "wasm32"))]
 use std::collections::BTreeSet;
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 
-use common::{nsid, repo_path, sample_def};
+#[cfg(not(target_arch = "wasm32"))]
+use common::repo_path;
+use common::{nsid, sample_def};
 use lessdugin_atp::syntax::RecordKeyType;
 use lessdugin_lexicon::ns::{NS, NS_FINAL, to_build_nsid};
 use lessdugin_lexicon::schemas::{Def, EXTERNAL, LESSDUGIN, Registry, TypeDef, registry};
 use lessdugin_lexicon::validate::{Options, Validator};
 
+#[cfg(not(target_arch = "wasm32"))]
 fn walk(dir: &Path, base: &Path, out: &mut BTreeSet<String>) {
     for e in std::fs::read_dir(dir).unwrap() {
         let p = e.unwrap().path();
@@ -30,6 +40,8 @@ fn walk(dir: &Path, base: &Path, out: &mut BTreeSet<String>) {
     }
 }
 
+// reads `lexicons/` from disk, so native only
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn embedded_list_matches_the_directory() {
     let base = repo_path("lexicons");

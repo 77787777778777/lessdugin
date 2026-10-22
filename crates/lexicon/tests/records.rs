@@ -6,6 +6,11 @@
 
 mod common;
 
+// Natively these are libtest tests; on wasm32 (`cargo xtask test-wasm`) the same bodies run
+// under wasm-bindgen-test in node.
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen_test::wasm_bindgen_test as test;
+
 use common::{add_unknown_fields, nsid, sample_def, sample_record};
 use lessdugin_atp::syntax::{AtUri, Datetime, Did};
 use lessdugin_lexicon::Collection;
@@ -404,9 +409,8 @@ fn qkey_normalisation() {
 #[test]
 fn qkey_matches_the_lfm1_vectors() {
     // `qkey` is defined in lfm-1.md §11; the markdown crate runs the same vectors
-    let p = common::repo_path("testdata/vectors/lfm1/quote.json");
     let doc: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap();
+        serde_json::from_str(&common::text("testdata/vectors/lfm1/quote.json")).unwrap();
     let mut n = 0;
     for v in doc["vectors"].as_array().unwrap() {
         let Some(key) = v["expected"]["qkey"].as_str() else {

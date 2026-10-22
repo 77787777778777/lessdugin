@@ -4,6 +4,11 @@
 
 mod common;
 
+// Natively these are libtest tests; on wasm32 (`cargo xtask test-wasm`) the same properties run
+// under wasm-bindgen-test in node.
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen_test::wasm_bindgen_test as test;
+
 use common::{nsid, sample_record};
 use lessdugin_atp::syntax::AtUri;
 use lessdugin_lexicon::Collection;

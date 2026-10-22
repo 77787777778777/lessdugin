@@ -11,8 +11,15 @@
 //!    failed redirect is pasted back → `whoami` (DPoP) → a write through the stored OAuth
 //!    session (DPoP `putRecord`) → `verify` → refresh → `logout` (revocation).
 //! 3. OAuth, loopback: the browser's redirect reaches the CLI's listener on 127.0.0.1.
+//!
+//! `e2e_concurrent_refresh_against_devnet` is the M1 acceptance test "parallel CLI processes
+//! refreshing one session never invalidate it" against the reference PDS, for an app-password
+//! and an OAuth session (the offline variant is `concurrent_refresh.rs`).
 
 #![allow(clippy::disallowed_methods)] // a real clock and real sleeps for a real network
+
+#[path = "support/race.rs"]
+mod race;
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -23,7 +30,7 @@ use lessdugin_atp::syntax::Did;
 use lessdugin_core::host::{HttpRequest, Target};
 use lessdugin_native::auth::oauth::OAuthSession;
 use lessdugin_native::auth::{SecretStore, StoredSession};
-use lessdugin_native::config::{DevnetProfile, Paths};
+use lessdugin_native::config::{DevnetProfile, FileLock, Paths};
 use lessdugin_native::host::{AuthSession, Net, NetPolicy};
 use serde_json::{Value, json};
 
@@ -54,8 +61,14 @@ impl Devnet {
             return Some(Self { info, child: None });
         }
         let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
-        let json =
-            std::env::temp_dir().join(format!("lessdugin-cli-devnet-{}.json", std::process::id()));
+        // One file per devnet: the tests of this binary run in parallel, each with its own
+        // devnet, and must not read (and later kill) another test's.
+        static STARTED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = STARTED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let json = std::env::temp_dir().join(format!(
+            "lessdugin-cli-devnet-{}-{n}.json",
+            std::process::id()
+        ));
         let _ = std::fs::remove_file(&json);
         let child = Command::new("node")
             .arg(format!("{root}/packages/e2e/devnet.mjs"))
@@ -535,4 +548,261 @@ fn e2e_cli_against_devnet() {
         "bob whoami",
     );
     assert_eq!(me["did"], bob_did.as_str());
+}
+
+// ---- M1 acceptance: concurrent refresh -------------------------------------------------------
+
+/// How many `lessdugin` processes race for one refresh.
+const RACERS: usize = 8;
+
+/// Races [`RACERS`] `whoami`s sharing `data` and its stored session of `did`, and checks that
+/// all succeeded, exactly one process sent the refresh (`refresh`, the request's log line; at
+/// most `max_requests` of them: an OAuth token request may be retried once with a fresh DPoP
+/// nonce, which spends nothing), every other one adopted the session it saved, and the stored
+/// `token_field` changed.
+///
+/// A refresh on the devnet takes milliseconds, so a process that starts late would simply load
+/// the refreshed session and never race. The test therefore holds the account's refresh lock
+/// until every process is waiting for it (each has loaded the old session and needs a refresh),
+/// then lets them all go at once.
+fn refresh_race(
+    devnet: &Devnet,
+    data: &Path,
+    did: &str,
+    what: &str,
+    (refresh, max_requests): (&str, usize),
+    token_field: &str,
+) {
+    let before = read_session(data)[token_field].clone();
+    let lock_path = devnet
+        .paths(data)
+        .lock_file(&format!("refresh:{did}"))
+        .unwrap();
+    let held = FileLock::acquire(&lock_path).unwrap();
+    let mut waiting = None;
+    let r = race::race_with(
+        (0..RACERS)
+            .map(|_| {
+                let mut c = devnet.cli(data);
+                c.args(["--json", "whoami"]);
+                c
+            })
+            .collect(),
+        || {
+            waiting = race::wait_for_lock_waiters(&lock_path, RACERS, Duration::from_secs(30));
+            drop(held);
+        },
+    );
+    let summary = r.summary(refresh);
+    eprintln!("{what}: {summary} ({waiting:?} waited for the held refresh lock)");
+    for me in r.all_ok_json(what) {
+        assert_eq!(me["did"], did, "{what}");
+    }
+    let (refreshers, requests) = r.count(refresh);
+    assert!(
+        refreshers == 1 && requests <= max_requests,
+        "{what}: exactly one process refreshes: {summary}\n{}",
+        r.logs()
+    );
+    assert!(
+        waiting.is_none_or(|n| n == RACERS),
+        "{what}: {waiting:?} of {RACERS} processes waited for the refresh lock"
+    );
+    assert_eq!(
+        r.count(race::ADOPTED).0,
+        RACERS - 1,
+        "{what}: every other process adopted the refreshed session: {summary}\n{}",
+        r.logs()
+    );
+    assert_ne!(
+        read_session(data)[token_field],
+        before,
+        "{what}: refreshed and saved"
+    );
+}
+
+/// After a race the session still works: a `whoami` with the stored tokens as they are (no
+/// refresh), then another refresh with the stored refresh token (which the reference PDS
+/// refuses for an OAuth session whose refresh token was replayed: the whole session is revoked).
+fn still_works(
+    devnet: &Devnet,
+    data: &Path,
+    did: &str,
+    what: &str,
+    expiry_field: &str,
+    token_field: &str,
+) {
+    let before = read_session(data);
+    let me = ok_json(
+        &run(devnet.cli(data).args(["--json", "whoami"]), None),
+        what,
+    );
+    assert_eq!(me["did"], did, "{what}");
+    assert_eq!(
+        read_session(data)[token_field],
+        before[token_field],
+        "{what}: no refresh"
+    );
+    edit_session(data, |v| v[expiry_field] = json!(1));
+    let me = ok_json(
+        &run(devnet.cli(data).args(["--json", "whoami"]), None),
+        what,
+    );
+    assert_eq!(me["did"], did, "{what}");
+    assert_ne!(
+        read_session(data)[token_field],
+        before[token_field],
+        "{what}: refreshed again"
+    );
+}
+
+/// M1 acceptance (`docs/plan.md` §3 M1) against the reference PDS: parallel `lessdugin`
+/// processes refreshing one stored session never invalidate it. For an app-password session
+/// and then an OAuth session (DPoP; single-use refresh tokens, replay revokes the session), two
+/// races of [`RACERS`] `whoami`s sharing one data directory and its 0600 session file:
+///
+/// - proactive: the stored access token is marked expired (its expiry rewritten in the file);
+/// - reactive: the stored access token is replaced by one the PDS refuses, its expiry far off.
+///
+/// Each race (all processes released together from the held refresh lock, see [`refresh_race`]):
+/// every process succeeds, exactly one sends the refresh, the others adopt its session, and the
+/// session still works afterwards, including one more refresh.
+#[test]
+fn e2e_concurrent_refresh_against_devnet() {
+    let Some(devnet) = Devnet::start() else {
+        return;
+    };
+    let pds = devnet.pds();
+    let did = devnet.s(&["accounts", "carol", "did"]);
+
+    // ---- App password ----------------------------------------------------------------------
+    let a = tempfile::tempdir().unwrap();
+    let data = a.path();
+    let out = run(
+        devnet
+            .cli(data)
+            .args(["--json", "login", "carol.test", "--password-stdin"]),
+        Some(&format!(
+            "{}\n",
+            devnet.s(&["accounts", "carol", "appPassword"])
+        )),
+    );
+    assert_eq!(ok_json(&out, "app-password login")["did"], did.as_str());
+    let refresh = race::request_line(
+        "POST",
+        &format!("{pds}/xrpc/com.atproto.server.refreshSession"),
+    );
+    edit_session(data, |v| v["accessExpMs"] = json!(1));
+    refresh_race(
+        &devnet,
+        data,
+        &did,
+        "app password, proactive",
+        (&refresh, 1),
+        "refreshJwt",
+    );
+    still_works(
+        &devnet,
+        data,
+        &did,
+        "app password, after the proactive race",
+        "accessExpMs",
+        "refreshJwt",
+    );
+    edit_session(data, |v| {
+        v["accessJwt"] = json!("eyJhbGciOiJIUzI1NiJ9.eyJleHAiOjQwMDAwMDAwMDB9.invalid");
+        v["accessExpMs"] = json!(4_000_000_000_000i64);
+    });
+    refresh_race(
+        &devnet,
+        data,
+        &did,
+        "app password, reactive",
+        (&refresh, 1),
+        "refreshJwt",
+    );
+    still_works(
+        &devnet,
+        data,
+        &did,
+        "app password, after the reactive race",
+        "accessExpMs",
+        "refreshJwt",
+    );
+    let bye = ok_json(
+        &run(devnet.cli(data).args(["--json", "logout"]), None),
+        "logout",
+    );
+    assert_eq!(bye["revoked"], true);
+
+    // ---- OAuth -----------------------------------------------------------------------------
+    let b = tempfile::tempdir().unwrap();
+    let data = b.path();
+    let (mut child, _stderr, url) = start_oauth_login(
+        devnet
+            .cli(data)
+            .args(["--json", "login", "carol.test", "--no-browser"]),
+        &pds,
+    );
+    let pw_out = playwright(
+        &url,
+        &devnet.s(&["accounts", "carol", "password"]),
+        "capture",
+    );
+    let redirect = pw_out
+        .lines()
+        .find_map(|l| l.strip_prefix("REDIRECT "))
+        .expect("redirect")
+        .to_owned();
+    {
+        let mut si = child.stdin.take().unwrap();
+        si.write_all(format!("{redirect}\n").as_bytes()).unwrap();
+    }
+    let account = ok_json(&child.wait_with_output().unwrap(), "oauth login");
+    assert_eq!(account["authKind"], "oauth");
+    let stored = read_session(data);
+    assert_eq!(stored["kind"], "oauth");
+    let refresh = race::request_line("POST", stored["tokenEndpoint"].as_str().unwrap());
+    edit_session(data, |v| v["expiresAtMs"] = json!(1));
+    refresh_race(
+        &devnet,
+        data,
+        &did,
+        "OAuth, proactive",
+        (&refresh, 2),
+        "refreshToken",
+    );
+    still_works(
+        &devnet,
+        data,
+        &did,
+        "OAuth, after the proactive race",
+        "expiresAtMs",
+        "refreshToken",
+    );
+    edit_session(data, |v| {
+        v["accessToken"] = json!("eyJhbGciOiJIUzI1NiJ9.eyJleHAiOjQwMDAwMDAwMDB9.invalid");
+        v["expiresAtMs"] = json!(4_000_000_000_000i64);
+    });
+    refresh_race(
+        &devnet,
+        data,
+        &did,
+        "OAuth, reactive",
+        (&refresh, 2),
+        "refreshToken",
+    );
+    still_works(
+        &devnet,
+        data,
+        &did,
+        "OAuth, after the reactive race",
+        "expiresAtMs",
+        "refreshToken",
+    );
+    let bye = ok_json(
+        &run(devnet.cli(data).args(["--json", "logout"]), None),
+        "oauth logout",
+    );
+    assert_eq!(bye["revoked"], true);
 }

@@ -5,6 +5,11 @@
 
 mod common;
 
+// Natively these are libtest tests; on wasm32 (`cargo xtask test-wasm`) the same bodies run
+// under wasm-bindgen-test in node.
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen_test::wasm_bindgen_test as test;
+
 use common::nsid;
 use lessdugin_atp::syntax::AtUri;
 use lessdugin_lexicon::keys;
@@ -54,8 +59,8 @@ fn unicode_version_is_pinned() {
 
 #[test]
 fn grapheme_vectors() {
-    let p = common::repo_path("testdata/vectors/limits/graphemes.json");
-    let doc: Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+    let doc: Value =
+        serde_json::from_str(&common::text("testdata/vectors/limits/graphemes.json")).unwrap();
     assert_eq!(doc["behaviour"], "data-model");
     assert_eq!(doc["kind"], "graphemes");
     let vectors = doc["vectors"].as_array().unwrap();

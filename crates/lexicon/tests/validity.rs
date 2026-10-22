@@ -5,6 +5,11 @@
 
 mod common;
 
+// Natively these are libtest tests; on wasm32 (`cargo xtask test-wasm`) the same bodies run
+// under wasm-bindgen-test in node.
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen_test::wasm_bindgen_test as test;
+
 use common::{DAG_CID, RAW_CID, nsid};
 use lessdugin_atp::syntax::{AtUri, Did};
 use lessdugin_lexicon::Collection;
@@ -450,8 +455,10 @@ fn g2_interop_data_model_fixtures() {
     // testdata/interop/data-model: valid values stay valid inside an unknown field; invalid
     // ones (floats, bad $type, malformed blobs, $bytes and $link objects) fail G2
     let load = |name: &str| -> Vec<Value> {
-        let p = common::repo_path("testdata/interop/data-model").join(name);
-        serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap()
+        serde_json::from_str(&common::text(&format!(
+            "testdata/interop/data-model/{name}"
+        )))
+        .unwrap()
     };
     let valid = load("data-model-valid.json");
     let invalid = load("data-model-invalid.json");

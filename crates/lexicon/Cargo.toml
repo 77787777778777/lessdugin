@@ -28,5 +28,13 @@ thiserror.workspace = true
 unicode-segmentation = "=1.13.3"
 unicode-normalization.workspace = true
 
-[dev-dependencies]
+# The integration tests also run on wasm32 under node (`cargo xtask test-wasm`). proptest's default
+# `fork`/`timeout` features spawn processes, so the wasm32 build takes it without them; its seed
+# comes from `getrandom` 0.4 (`crypto.getRandomValues` through `wasm_js`).
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 proptest.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+proptest = { version = "1", default-features = false, features = ["std", "bit-set"] }
+getrandom = { version = "0.4", features = ["wasm_js"] }
+wasm-bindgen-test.workspace = true

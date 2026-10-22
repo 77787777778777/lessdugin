@@ -27,6 +27,22 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo clippy --target wasm32-unknown-unknown -p lessdugin-atp -p lessdugin-lexicon -p lessdugin-markdown -p lessdugin-core -p lessdugin-wasm -- -D warnings
       - run: cargo test --workspace
+  # The interop, vector and property tests of atp, lexicon and markdown on wasm32-unknown-unknown,
+  # in node through wasm-bindgen-test-runner (same version as the workspace wasm-bindgen pin).
+  wasm-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: "1.97.0"
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: "22"
+      - run: cargo install wasm-bindgen-cli --version =0.2.129 --locked
+      - run: cargo xtask test-wasm
   lexicons:
     runs-on: ubuntu-latest
     steps:

@@ -4,6 +4,11 @@
 
 mod common;
 
+// Natively these are libtest tests; on wasm32 (`cargo xtask test-wasm`) the same bodies run
+// under wasm-bindgen-test in node.
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen_test::wasm_bindgen_test as test;
+
 use common::interop_lines;
 use lessdugin_lexicon::schemas::{Registry, StringFormat};
 use lessdugin_lexicon::validate::formats::{check_format, is_valid_language};

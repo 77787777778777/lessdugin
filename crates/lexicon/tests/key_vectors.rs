@@ -4,17 +4,18 @@
 //! intermediate the vector lists (the runner exposes all of them, so the sets must match). The
 //! `ns` of each rkey vector is passed explicitly, so both prefixes run in every build.
 
-use std::path::PathBuf;
+mod common;
+
+// Natively these are libtest tests; on wasm32 (`cargo xtask test-wasm`) the same bodies run
+// under wasm-bindgen-test in node.
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen_test::wasm_bindgen_test as test;
 
 use lessdugin_lexicon::keys::{self, Derivation, KeyError, RkeyInput};
 use serde_json::{Map, Value, json};
 
 fn load(name: &str) -> Value {
-    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../testdata/vectors/keys")
-        .join(name);
-    let text = std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display()));
-    serde_json::from_str(&text).unwrap()
+    serde_json::from_str(&common::text(&format!("testdata/vectors/keys/{name}"))).unwrap()
 }
 
 fn hex(b: &[u8]) -> String {

@@ -1,8 +1,13 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! Shared helpers for the integration tests: fixture paths and a schema-driven generator of
 //! maximal valid sample values (every property present).
+//!
+//! Most of these tests also run on wasm32 under node (`cargo xtask test-wasm`), where there is no
+//! filesystem: there the fixtures are embedded at compile time (`EMBEDDED`), natively they are
+//! read from the repository.
 #![allow(dead_code)]
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
 
 use lessdugin_lexicon::ns::NS;
@@ -15,16 +20,77 @@ pub const RAW_CID: &str = "bafkreiccldh766hwcnuxnf2wh6jgzepf2nlu2lvcllt63eww5p6c
 pub const DAG_CID: &str = "bafyreie5737gdxlw5i64vzichcalba3z2v5n6icifvx5xytvske7mr3hpm";
 
 /// `<repo>/<rel>`.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn repo_path(rel: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .join(rel)
 }
 
+/// The text of the repository file `<repo>/<rel>`.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn text(rel: &str) -> String {
+    let p = repo_path(rel);
+    std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display()))
+}
+
+/// The text of the repository file `<repo>/<rel>` (the copy embedded at compile time).
+#[cfg(target_arch = "wasm32")]
+pub fn text(rel: &str) -> String {
+    EMBEDDED
+        .iter()
+        .find(|(p, _)| *p == rel)
+        .unwrap_or_else(|| panic!("{rel} is not embedded (crates/lexicon/tests/common/mod.rs)"))
+        .1
+        .to_owned()
+}
+
+/// Every fixture the tests read, embedded for wasm32 (a missing entry fails with a clear panic).
+#[cfg(target_arch = "wasm32")]
+macro_rules! embed {
+    ($($rel:literal),* $(,)?) => {
+        &[$(($rel, include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../", $rel)))),*]
+    };
+}
+
+#[cfg(target_arch = "wasm32")]
+static EMBEDDED: &[(&str, &str)] = embed![
+    "testdata/interop/data-model/data-model-invalid.json",
+    "testdata/interop/data-model/data-model-valid.json",
+    "testdata/interop/syntax/atidentifier_syntax_invalid.txt",
+    "testdata/interop/syntax/atidentifier_syntax_valid.txt",
+    "testdata/interop/syntax/aturi_syntax_invalid.txt",
+    "testdata/interop/syntax/aturi_syntax_valid.txt",
+    "testdata/interop/syntax/cid_syntax_invalid.txt",
+    "testdata/interop/syntax/cid_syntax_valid.txt",
+    "testdata/interop/syntax/datetime_parse_invalid.txt",
+    "testdata/interop/syntax/datetime_syntax_invalid.txt",
+    "testdata/interop/syntax/datetime_syntax_valid.txt",
+    "testdata/interop/syntax/did_syntax_invalid.txt",
+    "testdata/interop/syntax/did_syntax_valid.txt",
+    "testdata/interop/syntax/handle_syntax_invalid.txt",
+    "testdata/interop/syntax/handle_syntax_valid.txt",
+    "testdata/interop/syntax/language_parse_invalid.txt",
+    "testdata/interop/syntax/language_syntax_invalid.txt",
+    "testdata/interop/syntax/language_syntax_valid.txt",
+    "testdata/interop/syntax/nsid_syntax_invalid.txt",
+    "testdata/interop/syntax/nsid_syntax_valid.txt",
+    "testdata/interop/syntax/recordkey_syntax_invalid.txt",
+    "testdata/interop/syntax/recordkey_syntax_valid.txt",
+    "testdata/interop/syntax/tid_syntax_invalid.txt",
+    "testdata/interop/syntax/tid_syntax_valid.txt",
+    "testdata/interop/syntax/uri_syntax_invalid.txt",
+    "testdata/interop/syntax/uri_syntax_valid.txt",
+    "testdata/vectors/keys/fk.json",
+    "testdata/vectors/keys/rkeys.json",
+    "testdata/vectors/keys/sk.json",
+    "testdata/vectors/lfm1/quote.json",
+    "testdata/vectors/limits/graphemes.json",
+];
+
 /// Test lines of an interop `.txt` list: skips blank lines and `#` comments, keeps whitespace.
 pub fn interop_lines(rel: &str) -> Vec<String> {
-    let p = repo_path("testdata/interop").join(rel);
-    let text = std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display()));
+    let text = text(&format!("testdata/interop/{rel}"));
     text.split('\n')
         .filter(|l| !l.trim().is_empty() && !l.starts_with('#'))
         .map(str::to_owned)

@@ -3186,6 +3186,7 @@ dependencies = [
  "img-parts",
  "lessdugin-atp",
  "lessdugin-lexicon",
+ "lessdugin-markdown",
  "lessdugin-testkit",
  "libm",
  "proptest",
@@ -3213,6 +3214,7 @@ dependencies = [
 name = "lessdugin-lexicon"
 version = "0.0.1"
 dependencies = [
+ "getrandom 0.4.3",
  "lessdugin-atp",
  "proptest",
  "serde",
@@ -3221,6 +3223,7 @@ dependencies = [
  "thiserror 2.0.21",
  "unicode-normalization",
  "unicode-segmentation",
+ "wasm-bindgen-test",
 ]
 
 [[package]]
@@ -3228,7 +3231,9 @@ name = "lessdugin-markdown"
 version = "0.0.1"
 dependencies = [
  "ammonia",
+ "getrandom 0.4.3",
  "insta",
+ "js-sys",
  "lessdugin-atp",
  "math-core",
  "proptest",
@@ -3241,6 +3246,7 @@ dependencies = [
  "unicode-normalization",
  "unicode-segmentation",
  "unicode-width 0.2.2",
+ "wasm-bindgen-test",
 ]
 
 [[package]]

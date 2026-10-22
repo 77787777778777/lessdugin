@@ -11,6 +11,40 @@ use lessdugin_markdown::{
     render, render_with_math_mode,
 };
 use proptest::prelude::*;
+// Natively these are libtest tests; on wasm32 (`cargo xtask test-wasm`) the same bodies run
+// under wasm-bindgen-test in node.
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen_test::wasm_bindgen_test as test;
+
+/// A wall clock for the timing tests. wasm32-unknown-unknown has no `Instant`, so there it reads
+/// node's `Date.now()`.
+struct Stopwatch(
+    #[cfg(not(target_arch = "wasm32"))] std::time::Instant,
+    #[cfg(target_arch = "wasm32")] f64,
+);
+
+impl Stopwatch {
+    #[cfg(not(target_arch = "wasm32"))]
+    #[allow(clippy::disallowed_methods)] // timing a test is fine; the crate itself never reads clocks
+    fn start() -> Self {
+        Self(std::time::Instant::now())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn elapsed(&self) -> std::time::Duration {
+        self.0.elapsed()
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn start() -> Self {
+        Self(js_sys::Date::now())
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn elapsed(&self) -> std::time::Duration {
+        std::time::Duration::from_secs_f64((js_sys::Date::now() - self.0).max(0.0) / 1000.0)
+    }
+}
 
 const CID: &str = "bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku";
 
@@ -296,7 +330,6 @@ fn output_is_bounded() {
 
 /// The red-team math inputs that took seconds to hours in math-core 0.9 are refused at once.
 #[test]
-#[allow(clippy::disallowed_methods)] // timing a test is fine; the crate itself never reads clocks
 fn math_engine_is_fast() {
     let n = |s: &str, k: usize| s.repeat(k);
     let cases = [
@@ -318,7 +351,7 @@ fn math_engine_is_fast() {
         format!("$\\sqrt[{}x]{{y}}$", n("(", 40)),
     ];
     for c in &cases {
-        let t = std::time::Instant::now();
+        let t = Stopwatch::start();
         let r = render(
             c,
             &[],
@@ -336,7 +369,8 @@ fn math_engine_is_fast() {
     }
 }
 
-/// Deep-nesting inputs (§8.4, F8) on a small stack, as in wasm (1 MiB default).
+/// Deep-nesting inputs (§8.4, F8) on a small stack, as in wasm (1 MiB default). On wasm32 they
+/// run on the module's own stack, which is that default.
 #[test]
 fn deep_nesting_is_stack_safe() {
     let cases: Vec<String> = vec![
@@ -380,25 +414,27 @@ fn deep_nesting_is_stack_safe() {
         format!("${}x$", "\\sin ".repeat(800)),
         format!("${}x$", "\\begingroup ".repeat(95)),
     ];
-    let h = std::thread::Builder::new()
+    let run = move || {
+        for c in &cases {
+            let r = render(c, &[], &RenderOpts::ALL);
+            check_html(&r.html).unwrap_or_else(|e| panic!("{e} for {:?}", &c[..c.len().min(40)]));
+            let t = render_with_math_mode(c, &[], None, &RenderOpts::ALL, MathMode::Temml);
+            check_html(&t.html).unwrap_or_else(|e| panic!("{e}"));
+        }
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    std::thread::Builder::new()
         .stack_size(1 << 20)
-        .spawn(move || {
-            for c in &cases {
-                let r = render(c, &[], &RenderOpts::ALL);
-                check_html(&r.html)
-                    .unwrap_or_else(|e| panic!("{e} for {:?}", &c[..c.len().min(40)]));
-                let t = render_with_math_mode(c, &[], None, &RenderOpts::ALL, MathMode::Temml);
-                check_html(&t.html).unwrap_or_else(|e| panic!("{e}"));
-            }
-        })
-        .expect("thread");
-    h.join()
+        .spawn(run)
+        .expect("thread")
+        .join()
         .expect("deep nesting must not overflow a 1 MiB stack");
+    #[cfg(target_arch = "wasm32")]
+    run();
 }
 
 /// Deep nesting finishes quickly (linear work; generous bound for debug builds).
 #[test]
-#[allow(clippy::disallowed_methods)] // timing a test is fine; the crate itself never reads clocks
 fn deep_nesting_is_fast() {
     let cases = [
         ">".repeat(10_000) + " x",
@@ -412,7 +448,7 @@ fn deep_nesting_is_fast() {
         "x[^a]\n\n[^a]: ".repeat(5_000),
     ];
     for c in &cases {
-        let t = std::time::Instant::now();
+        let t = Stopwatch::start();
         let r = render(c, &[], &RenderOpts::ALL);
         let el = t.elapsed();
         assert!(el.as_secs() < 20, "{:?}… took {el:?}", &c[..20]);

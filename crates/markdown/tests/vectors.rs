@@ -11,9 +11,17 @@
 //!
 //! The expected `html` values are the math-core output, so this runner needs the default
 //! `math` feature; `html_temml` is checked in the same run through `render_with_math_mode`.
+//!
+//! The same runner also runs on wasm32 under node (`cargo xtask test-wasm`). There is no
+//! filesystem there, so the vector files are embedded at compile time from `FILES`, which
+//! `wasm_embeds_every_vector_file` keeps equal to the directory listing.
 #![cfg(feature = "math")]
 
 use std::path::{Path, PathBuf};
+
+// Natively this is a libtest test; on wasm32 the same body runs under wasm-bindgen-test in node.
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen_test::wasm_bindgen_test as test;
 
 use lessdugin_markdown::allowlist::check_html;
 use lessdugin_markdown::printer::{PrintOpts, check_printer_output, print_doc};
@@ -29,7 +37,96 @@ fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/vectors")
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 const DIRS: &[&str] = &["lfm1", "xss", "terminal", "mathml"];
+
+/// `FILES`: every vector file under `testdata/vectors/{DIRS}`, in run order (`DIRS` order, then by
+/// name); on wasm32 also `EMBEDDED`, their text.
+macro_rules! vector_files {
+    ($($rel:literal),* $(,)?) => {
+        const FILES: &[&str] = &[$($rel),*];
+        #[cfg(target_arch = "wasm32")]
+        const EMBEDDED: &[&str] = &[$(
+            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata/vectors/", $rel))
+        ),*];
+    };
+}
+
+vector_files![
+    "lfm1/at-links.json",
+    "lfm1/autolink.json",
+    "lfm1/blocks.json",
+    "lfm1/excerpt.json",
+    "lfm1/figure.json",
+    "lfm1/footnotes.json",
+    "lfm1/gallery.json",
+    "lfm1/ids.json",
+    "lfm1/images.json",
+    "lfm1/limits.json",
+    "lfm1/links.json",
+    "lfm1/math.json",
+    "lfm1/mention.json",
+    "lfm1/normalise.json",
+    "lfm1/options.json",
+    "lfm1/projection.json",
+    "lfm1/quote.json",
+    "lfm1/raw-html.json",
+    "lfm1/safe-href.json",
+    "lfm1/serialise.json",
+    "lfm1/short-did.json",
+    "lfm1/spoiler-details.json",
+    "lfm1/styled.json",
+    "lfm1/term-sanitize.json",
+    "xss/html.json",
+    "xss/mathml.json",
+    "terminal/escapes.json",
+    "mathml/math-core-0.9.json",
+];
+
+/// The vector files in run order as `(dir/name, path, text)`, read from disk.
+#[cfg(not(target_arch = "wasm32"))]
+fn vector_files() -> Vec<(String, PathBuf, String)> {
+    let mut out = Vec::new();
+    for dir in DIRS {
+        let d = root().join(dir);
+        let Ok(rd) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        let mut files: Vec<PathBuf> = rd
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "json"))
+            .collect();
+        files.sort();
+        for path in files {
+            let raw = std::fs::read_to_string(&path).expect("read");
+            let file = format!("{dir}/{}", path.file_name().unwrap().to_string_lossy());
+            out.push((file, path, raw));
+        }
+    }
+    out
+}
+
+/// The vector files in run order as `(dir/name, path, text)`, embedded at compile time.
+#[cfg(target_arch = "wasm32")]
+fn vector_files() -> Vec<(String, PathBuf, String)> {
+    FILES
+        .iter()
+        .zip(EMBEDDED)
+        .map(|(f, raw)| ((*f).to_owned(), root().join(f), (*raw).to_owned()))
+        .collect()
+}
+
+/// The wasm32 run sees exactly the files the native run reads.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn wasm_embeds_every_vector_file() {
+    let on_disk: Vec<String> = vector_files().into_iter().map(|(f, ..)| f).collect();
+    assert_eq!(
+        on_disk, FILES,
+        "tests/vectors.rs FILES (embedded for the wasm32 run) must list every vector file"
+    );
+}
 
 fn input_text(input: &Value) -> String {
     if let Some(t) = input.get("text").and_then(Value::as_str) {
@@ -388,76 +485,67 @@ fn vectors() {
     let bless = std::env::var("LESSDUGIN_BLESS").is_ok_and(|v| v == "1");
     let mut failures: Vec<String> = Vec::new();
     let mut counts: Vec<(String, usize)> = Vec::new();
-    for dir in DIRS {
-        let d = root().join(dir);
-        let Ok(rd) = std::fs::read_dir(&d) else {
-            continue;
-        };
-        let mut files: Vec<PathBuf> = rd
-            .filter_map(Result::ok)
-            .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|x| x == "json"))
-            .collect();
-        files.sort();
-        for path in files {
-            let raw = std::fs::read_to_string(&path).expect("read");
-            let mut doc: Value =
-                serde_json::from_str(&raw).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-            assert_eq!(doc["behaviour"], "lfm/1", "{}", path.display());
-            let kind = doc["kind"].as_str().expect("kind").to_owned();
-            let file = format!("{dir}/{}", path.file_name().unwrap().to_string_lossy());
-            let vectors = doc["vectors"].as_array_mut().expect("vectors");
-            counts.push((file.clone(), vectors.len()));
-            let mut changed = false;
-            let mut names = std::collections::HashSet::new();
-            for v in vectors.iter_mut() {
-                let name = format!("{file}#{}", v["name"].as_str().expect("name"));
-                assert!(names.insert(name.clone()), "duplicate vector name {name}");
-                let input = v["input"].clone();
-                let keys: Vec<String> = v["expected"]
-                    .as_object()
-                    .expect("expected")
-                    .keys()
-                    .cloned()
-                    .collect();
-                let renders = matches!(kind.as_str(), "render" | "terminal").then(|| {
-                    (
-                        render_input(&input, MathMode::MathCore),
-                        render_input(&input, MathMode::Temml),
-                    )
-                });
-                let got = actual(&kind, &input, &keys, renders.as_ref());
-                let exp = v["expected"].as_object_mut().expect("expected");
-                for k in &keys {
-                    if exp[k] != got[k] {
-                        if bless {
-                            exp.insert(k.clone(), got[k].clone());
-                            changed = true;
-                        } else {
-                            failures.push(format!(
-                                "{name}: field {k}\n  expected: {}\n  actual:   {}",
-                                exp[k], got[k]
-                            ));
-                        }
+    for (file, path, raw) in vector_files() {
+        let mut doc: Value =
+            serde_json::from_str(&raw).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        assert_eq!(doc["behaviour"], "lfm/1", "{}", path.display());
+        let kind = doc["kind"].as_str().expect("kind").to_owned();
+        let vectors = doc["vectors"].as_array_mut().expect("vectors");
+        counts.push((file.clone(), vectors.len()));
+        let mut changed = false;
+        let mut names = std::collections::HashSet::new();
+        for v in vectors.iter_mut() {
+            let name = format!("{file}#{}", v["name"].as_str().expect("name"));
+            assert!(names.insert(name.clone()), "duplicate vector name {name}");
+            let input = v["input"].clone();
+            let keys: Vec<String> = v["expected"]
+                .as_object()
+                .expect("expected")
+                .keys()
+                .cloned()
+                .collect();
+            let renders = matches!(kind.as_str(), "render" | "terminal").then(|| {
+                (
+                    render_input(&input, MathMode::MathCore),
+                    render_input(&input, MathMode::Temml),
+                )
+            });
+            let got = actual(&kind, &input, &keys, renders.as_ref());
+            let exp = v["expected"].as_object_mut().expect("expected");
+            for k in &keys {
+                if exp[k] != got[k] {
+                    if bless {
+                        exp.insert(k.clone(), got[k].clone());
+                        changed = true;
+                    } else {
+                        failures.push(format!(
+                            "{name}: field {k}\n  expected: {}\n  actual:   {}",
+                            exp[k], got[k]
+                        ));
                     }
                 }
-                if let Some((r, t)) = &renders {
-                    failures.extend(invariants(&name, &input, r, t));
-                }
             }
-            let _ = changed;
-            if bless {
-                let mut s = escape_invisibles(&serde_json::to_string_pretty(&doc).expect("json"));
-                s.push('\n');
-                std::fs::write(&path, s).expect("write");
+            if let Some((r, t)) = &renders {
+                failures.extend(invariants(&name, &input, r, t));
             }
+        }
+        let _ = changed;
+        if bless {
+            let mut s = escape_invisibles(&serde_json::to_string_pretty(&doc).expect("json"));
+            s.push('\n');
+            std::fs::write(&path, s).expect("write");
         }
     }
     let total: usize = counts.iter().map(|(_, n)| n).sum();
-    eprintln!("{total} vectors:");
+    let mut report = format!("{total} vectors:");
     for (f, n) in &counts {
-        eprintln!("  {f}: {n}");
+        report.push_str(&format!("\n  {f}: {n}"));
     }
+    // wasm32-unknown-unknown has no stderr; the runner shows console output (`--nocapture`)
+    #[cfg(not(target_arch = "wasm32"))]
+    eprintln!("{report}");
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::console_log!("{report}");
     assert!(
         failures.is_empty(),
         "{} failure(s):\n{}",
