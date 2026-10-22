@@ -10,6 +10,9 @@ repository.workspace = true
 [features]
 default = ["verify"]
 verify = []
+# This build reads and writes the published namespace (`lessdugin-lexicon/final-ns`); the social
+# vector runner then checks record validity exactly.
+final-ns = ["lessdugin-lexicon/final-ns"]
 # Generate TypeScript types for the DTOs (used by lessdugin-wasm). tsify's derives expand to
 # `wasm_bindgen` items, so the feature brings that crate in too.
 tsify = ["dep:tsify", "dep:wasm-bindgen"]
@@ -17,6 +20,7 @@ tsify = ["dep:tsify", "dep:wasm-bindgen"]
 [dependencies]
 lessdugin-atp.workspace = true
 lessdugin-lexicon.workspace = true
+lessdugin-markdown.workspace = true
 futures.workspace = true
 http.workspace = true
 url.workspace = true

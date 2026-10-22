@@ -11,18 +11,25 @@
 //! - `repo.headSeen` is updated (`repo.rev` and `repo.listed` are not), and a write into a
 //!   collection not in `repo.colls` sets `repo.collsDirty`.
 //!
-//! Marking the own repo dirty at P1 and scheduling the P0 fetches belongs to the sync module:
-//! the outbox reports every [`AppliedWrite`] to its [`super::OutboxListener`].
-// TODO(E3): when `sync` has its own-write helper (dirty queue, P0 point fetches), the engine
-// connects it through `OutboxListener::on_applied`, or replaces `apply_own_write` with it.
+//! An outbox built with a [`Syncer`] ([`super::Outbox::with_syncer`]) applies through the sync
+//! module's helper ([`apply_with_syncer`]: [`Syncer::apply_own_writes`]), which also takes the
+//! in-process repo lock, marks the own repo dirty at P1 and queues P0 point fetches of the
+//! mismatched uris. Without one (a standalone outbox, tests) [`apply_own_write`] writes the store
+//! directly and the [`super::OutboxListener`] is told what is left to schedule.
+
+use std::sync::Arc;
 
 use lessdugin_atp::syntax::{AtUri, Did};
+use lessdugin_atp::xrpc::CommitMeta;
 use serde_json::Value;
 
-use crate::host::KvStore;
+use crate::engine::EngineError;
+use crate::host::{Host, KvStore};
 use crate::store::admit::{self, LexiconValidator, Observation};
 use crate::store::records::{Delete, DeleteEvidence, OrderKey, RecordStore, StoreError};
 use crate::store::repo::RepoRow;
+use crate::sync::queue::{DirtyItem, Reason, ready_time};
+use crate::sync::{OwnWrite, Priority, Stats, Syncer};
 
 /// One record of a confirmed write.
 #[derive(Clone, Debug, PartialEq)]
@@ -85,9 +92,15 @@ pub async fn apply_own_write<K: KvStore>(
     w: &AppliedWrite,
     now_ms: i64,
 ) -> Result<ApplyReport, StoreError> {
+    let mut report = ApplyReport::default();
+    if w.rev.is_empty() {
+        // No commit and no head read afterwards: there is no order key to admit under, so the
+        // uris are left to a point fetch.
+        report.mismatched = w.records.iter().map(|r| r.uri().to_owned()).collect();
+        return Ok(report);
+    }
     let store = RecordStore::new(cache);
     let mut batch = store.batch();
-    let mut report = ApplyReport::default();
     let mut colls: Vec<String> = Vec::new();
     for r in &w.records {
         let Ok(uri) = AtUri::parse(r.uri()) else {
@@ -144,4 +157,84 @@ pub async fn apply_own_write<K: KvStore>(
         .filter(|u| w.records.iter().any(|r| r.uri() == u))
         .collect();
     Ok(report)
+}
+
+/// Applies a confirmed own write through the sync module (`sync.md` §5.8,
+/// [`Syncer::apply_own_writes`]): admission at level `pds`, source `own`, tombstones, `headSeen`,
+/// `collsDirty`, the P1 dirty mark of the own repo and P0 point fetches of mismatched uris, all
+/// under the repo lock. If that fails (say the own DID document cannot be resolved right now),
+/// the write is applied directly under the same lock and the dirty marks are queued here.
+pub async fn apply_with_syncer<H: Host>(
+    syncer: &Syncer<H>,
+    w: &AppliedWrite,
+) -> Result<ApplyReport, EngineError> {
+    let s = syncer.session(Priority::P0, Arc::new(Stats::new()));
+    let commit = w
+        .commit
+        .as_ref()
+        .filter(|_| !w.rev.is_empty())
+        .map(|cid| CommitMeta {
+            cid: cid.clone(),
+            rev: w.rev.clone(),
+        });
+    let writes: Vec<OwnWrite> = w
+        .records
+        .iter()
+        .filter_map(|r| {
+            let uri = AtUri::parse(r.uri()).ok()?;
+            Some(match r {
+                AppliedRecord::Put { cid, value, .. } => OwnWrite {
+                    uri,
+                    value: Some(value.clone()),
+                    cid: Some(cid.clone()).filter(|c| !c.is_empty()),
+                },
+                AppliedRecord::Delete { .. } => OwnWrite {
+                    uri,
+                    value: None,
+                    cid: None,
+                },
+            })
+        })
+        .collect();
+    match syncer
+        .apply_own_writes(&s, &w.account, w.sent_at, commit.as_ref(), &writes)
+        .await
+    {
+        Ok(r) => {
+            let mut changed = r.stored;
+            changed.extend(r.tombstoned);
+            Ok(ApplyReport {
+                changed,
+                mismatched: r.refetch,
+            })
+        }
+        Err(e) => {
+            tracing::warn!(account = %w.account, error = %e, "own write: sync path failed; applying directly");
+            let now = syncer.host().now_ms();
+            let report = {
+                let _guard = syncer.net().repo_lock(&w.account).await;
+                apply_own_write(syncer.host().cache(), w, now)
+                    .await
+                    .map_err(|e| EngineError::internal(format!("applying an own write: {e}")))?
+            };
+            let did = w.account.as_str();
+            for u in &report.mismatched {
+                let at = ready_time(Priority::P0, now, random(syncer.host()), None);
+                syncer.enqueue(DirtyItem::point(did, u, Priority::P0, at));
+            }
+            let at = ready_time(Priority::P1, now, random(syncer.host()), None);
+            let mut item = DirtyItem::new(did, Priority::P1, Reason::OwnWrite, at);
+            if !w.rev.is_empty() {
+                item = item.with_min_rev(w.rev.clone());
+            }
+            syncer.enqueue(item);
+            Ok(report)
+        }
+    }
+}
+
+fn random<H: Host>(host: &H) -> u64 {
+    let mut b = [0u8; 8];
+    host.fill_random(&mut b);
+    u64::from_le_bytes(b)
 }

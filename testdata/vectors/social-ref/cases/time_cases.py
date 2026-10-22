@@ -18,11 +18,11 @@ def V(name, f, records, note=None, **kw):
 
 
 def tr(vec, r):
-    return vec["expected"]["items"][r["uri"]]["tRank"]
+    return vec["expected"]["times"][r["uri"]]["tRank"]
 
 
 def flags(vec, r):
-    e = vec["expected"]["items"][r["uri"]]
+    e = vec["expected"]["times"][r["uri"]]
     return e["futureDated"], e["inconsistentTimestamps"]
 
 
@@ -140,7 +140,7 @@ def time_vectors() -> list:
           note="createdAt '2026-01-01' is not a datetime, so the comment fails G2 and is Excluded (no "
                "t_rank); its reply hangs under a Missing placeholder and is bounded by the root post",
           invalid={bad["uri"]: "G2"})
-    assert bad["uri"] not in v["expected"]["items"] and tr(v, child) == T0 + HOUR
+    assert bad["uri"] not in v["expected"]["times"] and tr(v, child) == T0 + HOUR
     out.append(v)
 
     # --- causal lower bound ---------------------------------------------------------------
@@ -224,13 +224,14 @@ def time_vectors() -> list:
     assert all(tr(v, x) == T0 + 10 * DAY for x in (p, w, s))
     out.append(v)
 
-    for label, delta, clamped in (("just-under", SKEW, False), ("just-over", SKEW + 1, True)):
+    for label, delta, clamped in (("just-under", SKEW - 1, False), ("exactly", SKEW, False),
+                                  ("just-over", SKEW + 1, True)):
         f = Forum(created=T0 + delta)
         f.obs_override[(f.decl["uri"], f.decl["cid"])] = T0
         p = f.post("alice", T0 + 2 * MIN)
         v = V(f"declaration-future-dated-{label}", f, [p],
               note=f"decl.createdAt = t_obs(decl) + {delta} µs; t_decl falls back to t_obs(decl) only "
-                   f"beyond 5 minutes")
+                   f"beyond 5 minutes (c > o + 300000000)")
         assert v["expected"]["tDecl"] == (T0 if clamped else T0 + delta)
         assert tr(v, p) == max(v["expected"]["tDecl"], T0 + 2 * MIN)
         out.append(v)
@@ -249,8 +250,43 @@ def time_vectors() -> list:
     f.uri = f.decl["uri"]
     p = f.post("alice", T0)
     v = V("declaration-pre-epoch", f, [p],
-          note="µs(decl.createdAt) = None gives c = 0; t_obs(decl) is also before c + 5 min, so t_decl = 0")
+          note="µs(decl.createdAt) = None (before 1970) gives c = 0, and the declaration has no obs "
+               "entry, so t_decl = 0")
     assert v["expected"]["tDecl"] == 0 and tr(v, p) == T0
+    out.append(v)
+
+    # --- missing createdAt; future-dated through the TID alone; moderation is irrelevant ---
+    f = Forum()
+    p = f.post("alice", T0 + HOUR)
+    bad = f.post("bob", T0 + 2 * HOUR)
+    bad["value"].pop("createdAt")
+    from lessdugin_ref.build import rec as _rec
+    bad = _rec(bad["uri"], bad["value"])
+    at_us(f, bad, T0 + 2 * HOUR)
+    v = V("missing-createdAt-excludes-the-item", f, [p, bad],
+          note="createdAt is required: the post without it fails G2, is Excluded (V1) and has no t_rank",
+          invalid={bad["uri"]: "G2"})
+    assert bad["uri"] not in v["expected"]["times"] and tr(v, p) == T0 + HOUR
+    out.append(v)
+
+    f = Forum()
+    p = f.post("alice", T0 + 2 * DAY, created="1969-12-31T23:59:59.000Z")
+    at_us(f, p, T0 + HOUR)
+    v = V("future-dated-through-the-tid-alone", f, [p],
+          note="createdAt is before 1970 (t_claim = None), so t_eff = t_tid = T0+2d, which is more than "
+               "5 minutes after t_obs = T0+1h: future-dated, ranked at first-seen")
+    assert tr(v, p) == T0 + HOUR and flags(v, p) == (True, False)
+    out.append(v)
+
+    f = Forum(moderators=[("mona", "moderator")])
+    p = f.post("alice", T0 + 2 * HOUR)
+    c = f.comment("bob", p, T0 + HOUR)
+    at_us(f, c, T0 + 3 * HOUR)
+    hide = f.modaction("owner", "hide", p, t=T0 + 4 * HOUR)
+    v = V("hidden-items-keep-their-time", f, [p, c, hide],
+          note="t_rank reads only validity, obs, decl and placement: the owner's hide of the post changes "
+               "nothing, and the reply is still bounded below by the hidden post")
+    assert tr(v, p) == T0 + 2 * HOUR and tr(v, c) == T0 + 2 * HOUR
     out.append(v)
 
     # --- t_obs is the first-seen time of the record (any version) --------------------------
@@ -304,7 +340,9 @@ def conversion_vectors() -> list:
     assert us("offset-minutes", "2026-01-01T01:45:00.000+01:45") == T0
     assert us("leap-day", "2024-02-29T12:00:00.000Z") is not None
     assert us("year-0000", "0000-01-01T00:00:00.000Z", "valid syntax, before 1970") is None
-    assert us("far-future", "9999-12-31T23:59:59.999999Z") == 253402300799999999
+    assert us("largest-json-safe", "2255-06-05T23:47:34.740991Z",
+              "2^53 − 1 µs, the largest value a JSON number carries exactly (README); later instants "
+              "are valid but not in vectors") == 2 ** 53 - 1
     for name, s in (
         ("lowercase-z", "2026-01-01T00:00:00.000z"),
         ("lowercase-t", "2026-01-01t00:00:00.000Z"),
@@ -337,7 +375,10 @@ def conversion_vectors() -> list:
     assert tt("tid-of-T0-clock-1023", tid(T0, 1023), "the low 10 bits are the clock id") == T0
     assert tt("tid-keys-example", "3l2s5xxv2ze2c") > 0
     assert tt("tid-interop-example", "3jzfcijpj2z2a") > 0
-    assert tt("tid-max", "jzzzzzzzzzzzz", "the largest TID (top bit 0)") == (2 ** 63 - 1) >> 10
+    assert tt("tid-2-pow-63-minus-1", "bzzzzzzzzzzzz",
+              "value 2^63 − 1, tidTime 2^53 − 1. TIDs from 'c' up to 'j' in the first character have "
+              "bit 63 set (unsigned 64-bit values, NOTES.md) and times beyond 2^53 − 1, which JSON "
+              "vectors do not carry") == 2 ** 53 - 1
     return out
 
 
@@ -346,7 +387,7 @@ FILES = [
         "magic/1", "time",
         "social.md §2: t_obs, t_eff, the 5-minute future clamp, the declaration lower bound t_decl, the "
         "causal lower bound through the placed thread, and the inconsistent-timestamps flag. input: "
-        "{fold: FoldInput}. expected: tDecl (µs), items: {uri: {tRank, futureDated, "
+        "{fold: FoldInput}. expected: tDecl (µs), times: {uri: {tRank, futureDated, "
         "inconsistentTimestamps}} for every candidate item that V1 does not exclude.",
         time_vectors())),
     ("time/conversions.json", lambda: file_doc(

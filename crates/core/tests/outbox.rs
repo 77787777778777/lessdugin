@@ -62,7 +62,12 @@ fn world() -> World {
 
 impl World {
     fn forum(&self) -> AtUri {
-        AtUri::parse(&format!("at://{}/{}/rationality", self.bob.did(), nsid::FORUM)).unwrap()
+        AtUri::parse(&format!(
+            "at://{}/{}/rationality",
+            self.bob.did(),
+            nsid::FORUM
+        ))
+        .unwrap()
     }
 
     fn now(&self) -> Datetime {
@@ -100,10 +105,11 @@ impl World {
 
     /// Publishes a post and runs the outbox; `(uri, cid)`.
     fn seed_post(&self, title: &str) -> (String, String) {
-        let t = block_on(
-            self.ob
-                .create_post(&self.session, &self.post(title), ContentOpts::default()),
-        )
+        let t = block_on(self.ob.create_post(
+            &self.session,
+            &self.post(title),
+            ContentOpts::default(),
+        ))
         .unwrap();
         self.run();
         done(&self.ticket(&t))
@@ -146,13 +152,16 @@ fn tid(ms_ago: u64, n: u64) -> String {
 #[test]
 fn first_content_includes_membership_only_when_absent() {
     let w = world();
-    let t = block_on(
-        w.ob
-            .create_post(&w.session, &w.post("one"), ContentOpts::default()),
-    )
-    .unwrap();
+    let t = block_on(w.ob.create_post(&w.session, &w.post("one"), ContentOpts::default())).unwrap();
     // persisted before any network call
-    assert_eq!(t.state, WriteState::Pending { not_before_ms: None, held: false, throttled: false });
+    assert_eq!(
+        t.state,
+        WriteState::Pending {
+            not_before_ms: None,
+            held: false,
+            throttled: false
+        }
+    );
     assert_eq!(w.net.count(APPLY), 0);
     let stored = block_on(w.ob.get(&t.id)).unwrap().unwrap();
     assert_eq!(stored.intent, Intent::FirstContent);
@@ -161,7 +170,10 @@ fn first_content_includes_membership_only_when_absent() {
     let heads_before = w.net.count(HEAD);
     w.run();
     let (uri, cid) = done(&w.ticket(&t));
-    assert_eq!(w.alice.cid(nsid::POST, &rkey_of(&uri)).unwrap().to_string(), cid);
+    assert_eq!(
+        w.alice.cid(nsid::POST, &rkey_of(&uri)).unwrap().to_string(),
+        cid
+    );
     assert!(w.alice.get(nsid::MEMBERSHIP, &w.fk()).is_some());
     let bodies = w.bodies(APPLY);
     assert_eq!(bodies.len(), 1);
@@ -170,18 +182,18 @@ fn first_content_includes_membership_only_when_absent() {
     assert_eq!(writes[0]["collection"], nsid::MEMBERSHIP);
     assert_eq!(writes[1]["collection"], nsid::POST);
     assert!(bodies[0]["swapCommit"].is_string());
-    assert!(w.net.count(HEAD) > heads_before, "a fresh head per applyWrites");
+    assert!(
+        w.net.count(HEAD) > heads_before,
+        "a fresh head per applyWrites"
+    );
     // applied optimistically to the record store
     assert!(w.cached(&uri));
     let membership = format!("at://{}/{}/{}", w.alice.did(), nsid::MEMBERSHIP, w.fk());
     assert!(w.cached(&membership));
 
     // the store now shows the membership: a plain createRecord
-    let t2 = block_on(
-        w.ob
-            .create_post(&w.session, &w.post("two"), ContentOpts::default()),
-    )
-    .unwrap();
+    let t2 =
+        block_on(w.ob.create_post(&w.session, &w.post("two"), ContentOpts::default())).unwrap();
     w.run();
     done(&w.ticket(&t2));
     assert_eq!(w.net.count(CREATE), 1);
@@ -194,11 +206,7 @@ fn first_content_skips_a_membership_the_pds_has() {
     // made on another device: the PDS has it, the local store does not
     let m = records::membership(&w.forum(), None, &w.now()).unwrap();
     w.alice.put(nsid::MEMBERSHIP, &m.rkey, &m.value);
-    let t = block_on(
-        w.ob
-            .create_post(&w.session, &w.post("one"), ContentOpts::default()),
-    )
-    .unwrap();
+    let t = block_on(w.ob.create_post(&w.session, &w.post("one"), ContentOpts::default())).unwrap();
     w.run();
     done(&w.ticket(&t));
     let bodies = w.bodies(APPLY);
@@ -227,11 +235,7 @@ fn first_content_500_retries_once_without_the_membership() {
             net.request(req, "default")
         });
     }
-    let t = block_on(
-        w.ob
-            .create_post(&w.session, &w.post("one"), ContentOpts::default()),
-    )
-    .unwrap();
+    let t = block_on(w.ob.create_post(&w.session, &w.post("one"), ContentOpts::default())).unwrap();
     w.run();
     let (uri, _) = done(&w.ticket(&t));
     assert!(w.alice.get(nsid::POST, &rkey_of(&uri)).is_some());
@@ -240,19 +244,17 @@ fn first_content_500_retries_once_without_the_membership() {
     assert_eq!(bodies[0]["writes"].as_array().unwrap().len(), 2);
     assert_eq!(bodies[1]["writes"].as_array().unwrap().len(), 1);
     assert_eq!(bodies[1]["writes"][0]["collection"], nsid::POST);
-    assert_ne!(bodies[0]["swapCommit"], bodies[1]["swapCommit"], "re-read head");
+    assert_ne!(
+        bodies[0]["swapCommit"], bodies[1]["swapCommit"],
+        "re-read head"
+    );
 }
 
 #[test]
 fn ambiguous_500_backs_off_then_completes() {
     let w = world();
-    w.net
-        .inject(Fault::status(500).on_nsid(APPLY).once());
-    let t = block_on(
-        w.ob
-            .create_post(&w.session, &w.post("one"), ContentOpts::default()),
-    )
-    .unwrap();
+    w.net.inject(Fault::status(500).on_nsid(APPLY).once());
+    let t = block_on(w.ob.create_post(&w.session, &w.post("one"), ContentOpts::default())).unwrap();
     let r = block_on(w.ob.run_due(&w.session)).unwrap();
     assert_eq!(r.throttled, 1);
     let pending = w.ticket(&t);
@@ -298,23 +300,30 @@ fn crash_after_send_resumes_without_resending() {
             panic!("simulated crash after the PDS applied the write");
         });
     }
-    let t = block_on(
-        w.ob
-            .create_post(&w.session, &w.post("one"), ContentOpts::default()),
-    )
-    .unwrap();
+    let t = block_on(w.ob.create_post(&w.session, &w.post("one"), ContentOpts::default())).unwrap();
     crash(&w);
     assert_eq!(w.net.count(APPLY), 1);
     let stored = block_on(w.ob.get(&t.id)).unwrap().unwrap();
-    assert_eq!(stored.state, WriteStage::Sending, "persisted before the send");
+    assert_eq!(
+        stored.state,
+        WriteStage::Sending,
+        "persisted before the send"
+    );
     assert_eq!(stored.attempts, 1);
 
     let ob = restart(&w);
     block_on(ob.run_until_idle(&w.session)).unwrap();
     let t = block_on(ob.ticket(&t.id)).unwrap().unwrap();
     let (uri, cid) = done(&t);
-    assert_eq!(w.net.count(APPLY), 1, "recognised by its CID, not sent again");
-    assert_eq!(w.alice.cid(nsid::POST, &rkey_of(&uri)).unwrap().to_string(), cid);
+    assert_eq!(
+        w.net.count(APPLY),
+        1,
+        "recognised by its CID, not sent again"
+    );
+    assert_eq!(
+        w.alice.cid(nsid::POST, &rkey_of(&uri)).unwrap().to_string(),
+        cid
+    );
     assert!(w.cached(&uri));
 }
 
@@ -324,11 +333,7 @@ fn crash_before_send_resends_after_restart() {
     w.host.on_post(&w.userpds(APPLY), move |_| {
         panic!("simulated crash before the request left");
     });
-    let t = block_on(
-        w.ob
-            .create_post(&w.session, &w.post("one"), ContentOpts::default()),
-    )
-    .unwrap();
+    let t = block_on(w.ob.create_post(&w.session, &w.post("one"), ContentOpts::default())).unwrap();
     crash(&w);
     assert_eq!(w.net.count(APPLY), 0);
     let ob = restart(&w);
@@ -371,8 +376,14 @@ fn edit_retries_invalid_swap_with_jitter() {
     .unwrap();
     w.run();
     let (_, cid) = done(&w.ticket(&t));
-    assert_eq!(w.alice.cid(nsid::POST, &rkey_of(&uri)).unwrap().to_string(), cid);
-    assert_eq!(w.alice.get(nsid::POST, &rkey_of(&uri)).unwrap()["title"], "one, edited");
+    assert_eq!(
+        w.alice.cid(nsid::POST, &rkey_of(&uri)).unwrap().to_string(),
+        cid
+    );
+    assert_eq!(
+        w.alice.get(nsid::POST, &rkey_of(&uri)).unwrap()["title"],
+        "one, edited"
+    );
     // two attempts, each after a fresh head, with one jittered wait between them
     let bodies = w.bodies(APPLY);
     assert_eq!(bodies.len(), 2);
@@ -411,13 +422,18 @@ fn edit_of_a_changed_record_is_a_conflict() {
     w.run();
     let t = w.ticket(&t);
     assert_eq!(failed_code(&t), ErrorCode::Conflict);
-    let WriteState::Failed { error } = &t.state else { unreachable!() };
+    let WriteState::Failed { error } = &t.state else {
+        unreachable!()
+    };
     assert_eq!(
         error.detail.as_ref().unwrap()["currentCid"],
         w.alice.cid(nsid::POST, &rkey).unwrap().to_string()
     );
     assert_eq!(w.net.count(APPLY), applies, "nothing sent");
-    assert_eq!(w.alice.get(nsid::POST, &rkey).unwrap()["title"], "edited elsewhere");
+    assert_eq!(
+        w.alice.get(nsid::POST, &rkey).unwrap()["title"],
+        "edited elsewhere"
+    );
 }
 
 #[test]
@@ -446,7 +462,11 @@ fn edit_racing_another_write_ends_in_conflict_not_overwrite() {
     w.run();
     assert_eq!(failed_code(&w.ticket(&t)), ErrorCode::Conflict);
     assert_eq!(w.alice.get(nsid::POST, &rkey).unwrap()["title"], "raced");
-    assert_eq!(w.bodies(APPLY).len(), 1, "the swap failed; the re-read found the change");
+    assert_eq!(
+        w.bodies(APPLY).len(),
+        1,
+        "the swap failed; the re-read found the change"
+    );
 }
 
 #[test]
@@ -467,6 +487,10 @@ fn no_history_edit_is_a_compare_and_swap_put() {
     assert_eq!(puts.len(), 1);
     assert_eq!(puts[0]["swapRecord"], base);
     assert!(w.alice.list(nsid::REVISION).is_empty());
+    // W5: an update sets updatedAt and keeps createdAt
+    let now = w.alice.get(nsid::POST, &rkey).unwrap();
+    assert!(now["updatedAt"].is_string());
+    assert_eq!(now["createdAt"], new["createdAt"]);
     // a stale base is a conflict
     new["title"] = json!("stale");
     let t = block_on(w.ob.edit(&w.session, &uri, &new, &base, opts)).unwrap();
@@ -481,7 +505,9 @@ fn no_history_edit_is_a_compare_and_swap_put() {
 fn subject(w: &World) -> (String, String) {
     let rkey = format!("{}-{}", w.fk(), tid(60_000, 0));
     let v = Post::article(w.forum(), "bob's", "hi", w.now());
-    let cid = w.bob.put(nsid::POST, &rkey, &serde_json::to_value(v).unwrap());
+    let cid = w
+        .bob
+        .put(nsid::POST, &rkey, &serde_json::to_value(v).unwrap());
     (w.bob.uri(nsid::POST, &rkey), cid.to_string())
 }
 
@@ -542,7 +568,11 @@ fn opinions_are_held_coalesced_and_written_once() {
     assert_eq!(t4.id, t1.id);
     w.run();
     done(&w.ticket(&t1));
-    assert_eq!(w.net.count(PUT) + w.net.count(CREATE), 1, "one write for four intents");
+    assert_eq!(
+        w.net.count(PUT) + w.net.count(CREATE),
+        1,
+        "one write for four intents"
+    );
     let v = w.alice.get(nsid::OPINION, &opinion_rkey(&w, &s)).unwrap();
     assert_eq!(react_ids(&v), vec!["wise"]);
     assert_eq!(v["karma"], "up");
@@ -564,7 +594,10 @@ fn undo_within_the_window_removes_the_write() {
     assert_eq!(w.net.count(PUT) + w.net.count(CREATE), 0);
     assert!(w.alice.get(nsid::OPINION, &opinion_rkey(&w, &s)).is_none());
     // undoing again is idempotent
-    assert_eq!(block_on(w.ob.undo(&w.session, &t.id)).unwrap().state, WriteState::Undone);
+    assert_eq!(
+        block_on(w.ob.undo(&w.session, &t.id)).unwrap().state,
+        WriteState::Undone
+    );
 }
 
 #[test]
@@ -627,8 +660,8 @@ fn opinions_from_two_devices_merge() {
     let rkey = opinion_rkey(&w, &s);
 
     let ta = block_on(w.ob.opinion(&w.session, f.as_str(), &s, &scid, karma("up"))).unwrap();
-    let tb = block_on(ob_b.opinion(&w.session, f.as_str(), &s, &scid, react("funny", false)))
-        .unwrap();
+    let tb =
+        block_on(ob_b.opinion(&w.session, f.as_str(), &s, &scid, react("funny", false))).unwrap();
     w.run();
     block_on(ob_b.run_until_idle(&w.session)).unwrap();
     done(&w.ticket(&ta));
@@ -655,12 +688,22 @@ fn opinions_from_two_devices_merge() {
     }
     let sleeps = w.host.sleeps().len();
     w.host.clear_requests();
-    let ta = block_on(w.ob.opinion(&w.session, f.as_str(), &s, &scid, react("insightful", false)))
-        .unwrap();
+    let ta = block_on(w.ob.opinion(
+        &w.session,
+        f.as_str(),
+        &s,
+        &scid,
+        react("insightful", false),
+    ))
+    .unwrap();
     w.run();
     done(&w.ticket(&ta));
     let v = w.alice.get(nsid::OPINION, &rkey).unwrap();
-    assert_eq!(react_ids(&v), vec!["funny", "wise", "insightful"], "deterministic order");
+    assert_eq!(
+        react_ids(&v),
+        vec!["funny", "wise", "insightful"],
+        "deterministic order"
+    );
     assert_eq!(v["karma"], "up");
     assert_eq!(w.bodies(PUT).len(), 2);
     assert!(
@@ -688,7 +731,9 @@ fn delete_sends_the_target_first_in_chunks_of_200() {
             "createdAt": "2026-01-01T00:00:00.000Z",
         })
     };
-    let revs: Vec<String> = (0..450).map(|i| format!("{p}-{}", tid(3_600_000, i))).collect();
+    let revs: Vec<String> = (0..450)
+        .map(|i| format!("{p}-{}", tid(3_600_000, i)))
+        .collect();
     let spoof = format!("{p}-{}", tid(3_600_000, 999));
     let nested = format!("{p}-{}-{}", tid(3_600_000, 1_000), tid(3_600_000, 1_001));
     w.alice.batch(|wr| {
@@ -751,7 +796,8 @@ fn a_partial_delete_keeps_retrying_the_orphans() {
         }
     });
     // the second chunk fails ambiguously
-    w.net.inject(Fault::status(502).on_nsid(APPLY).after(1).once());
+    w.net
+        .inject(Fault::status(502).on_nsid(APPLY).after(1).once());
     let t = block_on(w.ob.delete(&w.session, &uri)).unwrap();
     w.run();
     done(&w.ticket(&t));
@@ -766,11 +812,7 @@ fn a_partial_delete_keeps_retrying_the_orphans() {
 fn a_429_throttles_until_retry_after() {
     let w = world();
     w.net.inject(Fault::rate_limited(30).on_nsid(APPLY).once());
-    let t = block_on(
-        w.ob
-            .create_post(&w.session, &w.post("one"), ContentOpts::default()),
-    )
-    .unwrap();
+    let t = block_on(w.ob.create_post(&w.session, &w.post("one"), ContentOpts::default())).unwrap();
     let start = w.host.now();
     let r = block_on(w.ob.run_due(&w.session)).unwrap();
     assert_eq!(r.throttled, 1);
@@ -808,12 +850,11 @@ fn the_write_budget_throttles_before_sending() {
         row::encode(&row).unwrap(),
     )]))
     .unwrap();
-    let t = block_on(
-        w.ob
-            .create_post(&w.session, &w.post("one"), ContentOpts::default()),
-    )
-    .unwrap();
-    assert!(matches!(block_on(w.ob.step(&w.session)).unwrap(), Step::Wait(_)));
+    let t = block_on(w.ob.create_post(&w.session, &w.post("one"), ContentOpts::default())).unwrap();
+    assert!(matches!(
+        block_on(w.ob.step(&w.session)).unwrap(),
+        Step::Wait(_)
+    ));
     let WriteState::Pending {
         throttled: true,
         not_before_ms: Some(until),
@@ -823,7 +864,10 @@ fn the_write_budget_throttles_before_sending() {
         panic!()
     };
     let hour = lessdugin_core::outbox::budget::HOUR_MS;
-    assert_eq!(until, bucket + lessdugin_core::outbox::budget::BUCKET_MS + hour);
+    assert_eq!(
+        until,
+        bucket + lessdugin_core::outbox::budget::BUCKET_MS + hour
+    );
     assert_eq!(w.net.count(APPLY), 0);
     w.run();
     done(&w.ticket(&t));
@@ -846,7 +890,10 @@ fn join_falls_back_to_create_record_on_hosts_without_null_swap() {
     w.run();
     done(&w.ticket(&t));
     assert_eq!((w.net.count(PUT), w.net.count(CREATE)), (1, 1));
-    assert_eq!(w.alice.get(nsid::MEMBERSHIP, &w.fk()).unwrap()["note"], "hello");
+    assert_eq!(
+        w.alice.get(nsid::MEMBERSHIP, &w.fk()).unwrap()["note"],
+        "hello"
+    );
     // remembered for the host; an existing record (createRecord 500) is success
     let t = block_on(w.ob.join(&w.session, &w.forum(), None)).unwrap();
     w.run();
@@ -878,7 +925,11 @@ fn long_bodies_spill_to_markdown_blobs_uploaded_at_send() {
     let stored = block_on(w.ob.get(&t.id)).unwrap().unwrap();
     assert_eq!(stored.blobs.len(), 1);
     assert_eq!(stored.blobs[0].mime, "text/markdown");
-    assert_eq!(w.net.count("com.atproto.repo.uploadBlob"), 0, "uploaded only when sent");
+    assert_eq!(
+        w.net.count("com.atproto.repo.uploadBlob"),
+        0,
+        "uploaded only when sent"
+    );
     w.run();
     let (uri, _) = done(&w.ticket(&t));
     assert_eq!(w.net.count("com.atproto.repo.uploadBlob"), 1);
@@ -898,11 +949,47 @@ fn long_bodies_spill_to_markdown_blobs_uploaded_at_send() {
 }
 
 #[test]
+fn blobs_are_uploaded_again_after_a_long_wait() {
+    use lessdugin_core::outbox::BlobData;
+    use lessdugin_lexicon::records::Profile;
+
+    let w = world();
+    let png = BlobData::media(b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR avatar".to_vec()).unwrap();
+    let profile = Profile {
+        display_name: Some("Alice".into()),
+        avatar: Some(serde_json::from_value(png.placeholder()).unwrap()),
+        ..Profile::default()
+    };
+    // the record write is rate limited for an hour, after the blob went up
+    w.net.inject(Fault::rate_limited(3_600).on_nsid(PUT).once());
+    let t = block_on(w.ob.put_profile(&w.session, &profile, None, vec![png.clone()])).unwrap();
+    assert_eq!(block_on(w.ob.run_due(&w.session)).unwrap().throttled, 1);
+    assert_eq!(w.net.count("com.atproto.repo.uploadBlob"), 1);
+    // meanwhile the PDS collects the unreferenced blob
+    assert_eq!(w.net.gc_blobs(), 1);
+    w.run();
+    done(&w.ticket(&t));
+    assert_eq!(
+        w.net.count("com.atproto.repo.uploadBlob"),
+        2,
+        "uploaded again"
+    );
+    let v = w.alice.get(nsid::PROFILE, "self").unwrap();
+    assert_eq!(v["avatar"]["ref"]["$link"], png.cid);
+    assert_eq!(v["displayName"], "Alice");
+}
+
+#[test]
 fn mod_assertions_continue_as_updates_and_removals_snapshot() {
     let w = world();
     let (target, tcid) = subject(&w);
     let mk = |reason: &str| {
-        let mut m = ModAction::new(w.forum(), target.as_str(), Action::Hide(HideAction::hide()), w.now());
+        let mut m = ModAction::new(
+            w.forum(),
+            target.as_str(),
+            Action::Hide(HideAction::hide()),
+            w.now(),
+        );
         m.subject_cid = Some(tcid.clone());
         m.reason = Some(reason.into());
         m
@@ -910,7 +997,11 @@ fn mod_assertions_continue_as_updates_and_removals_snapshot() {
     // an older assertion with the same key exists
     let old = records::mod_action(&mk("old")).unwrap();
     w.alice.put(nsid::MOD_ACTION, &old.rkey, &old.value);
-    let old_cid = w.alice.cid(nsid::MOD_ACTION, &old.rkey).unwrap().to_string();
+    let old_cid = w
+        .alice
+        .cid(nsid::MOD_ACTION, &old.rkey)
+        .unwrap()
+        .to_string();
     w.host.advance_ms(60_000);
     let t = block_on(w.ob.mod_assert(&w.session, &mk("new"))).unwrap();
     w.run();
@@ -934,7 +1025,12 @@ fn mod_assertions_continue_as_updates_and_removals_snapshot() {
         .alice
         .list(nsid::REVISION)
         .iter()
-        .map(|(k, _)| w.alice.get(nsid::REVISION, k).unwrap()["op"].as_str().unwrap().to_owned())
+        .map(|(k, _)| {
+            w.alice.get(nsid::REVISION, k).unwrap()["op"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
         .collect();
     assert_eq!(ops.len(), 2);
     assert!(ops.contains(&"delete".to_owned()));
@@ -960,6 +1056,83 @@ fn mod_assertions_continue_as_updates_and_removals_snapshot() {
     );
     let e = block_on(w.ob.mod_assert(&w.session, &lock)).unwrap_err();
     assert_eq!(e.code, ErrorCode::InvalidInput);
+}
+
+#[test]
+fn mod_adopt_reissues_the_former_moderators_assertions() {
+    use lessdugin_lexicon::records::TierAction;
+    use lessdugin_lexicon::values::Tier;
+
+    let w = world();
+    let carol = w.net.add_account("carol.example.com");
+    let (target, tcid) = subject(&w);
+    let assertion = |action: Action, reason: &str| {
+        let mut m = ModAction::new(w.forum(), target.as_str(), action, w.now());
+        m.subject_cid = Some(tcid.clone());
+        m.reason = Some(reason.into());
+        records::mod_action(&m).unwrap()
+    };
+    let hide = assertion(Action::Hide(HideAction::hide()), "spam");
+    let curated = assertion(Action::Tier(TierAction::new(Tier::Curated)), "great");
+    carol.put(nsid::MOD_ACTION, &hide.rkey, &hide.value);
+    carol.put(nsid::MOD_ACTION, &curated.rkey, &curated.value);
+    let adopt = || {
+        let t = block_on(w.ob.mod_adopt(
+            &w.session,
+            &w.forum(),
+            carol.did(),
+            &carol.pds_base(),
+            "moderator",
+        ))
+        .unwrap();
+        w.run();
+        done(&w.ticket(&t));
+        block_on(w.ob.get(&t.id)).unwrap().unwrap()
+    };
+    w.host.advance_ms(60_000);
+    let first = adopt();
+    let mine = w.alice.get(nsid::MOD_ACTION, &hide.rkey).unwrap();
+    assert_eq!(
+        mine["adopts"],
+        json!({
+            "uri": carol.uri(nsid::MOD_ACTION, &hide.rkey),
+            "cid": carol.cid(nsid::MOD_ACTION, &hide.rkey).unwrap().to_string(),
+        })
+    );
+    assert_eq!(mine["reason"], "spam");
+    assert_ne!(
+        mine["createdAt"], hide.value["createdAt"],
+        "createdAt = now"
+    );
+    assert!(mine.get("updatedAt").is_none());
+    // a moderator may not issue a curated tier
+    assert!(w.alice.get(nsid::MOD_ACTION, &curated.rkey).is_none());
+    let Intent::Adopt { report, .. } = first.intent else {
+        panic!("{:?}", first.intent)
+    };
+    assert_eq!(report.len(), 1);
+    assert!(report[0].starts_with("cannot adopt"), "{report:?}");
+
+    // the original changes: the adopted copy is updated with a revision snapshot
+    let mut changed = hide.value.clone();
+    changed["reason"] = json!("spam, really");
+    carol.put(nsid::MOD_ACTION, &hide.rkey, &changed);
+    w.host.advance_ms(60_000);
+    adopt();
+    let mine2 = w.alice.get(nsid::MOD_ACTION, &hide.rkey).unwrap();
+    assert_eq!(mine2["reason"], "spam, really");
+    assert_eq!(mine2["createdAt"], mine["createdAt"]);
+    assert!(mine2["updatedAt"].is_string());
+    let revs = w.alice.list(nsid::REVISION);
+    assert_eq!(revs.len(), 1);
+    let r = w.alice.get(nsid::REVISION, &revs[0].0).unwrap();
+    assert_eq!(r["op"], "update");
+    assert_eq!(r["record"], mine);
+
+    // nothing new: nothing is sent
+    let applies = w.net.count(APPLY);
+    adopt();
+    assert_eq!(w.net.count(APPLY), applies);
 }
 
 #[test]
@@ -1003,7 +1176,11 @@ fn writes_are_never_sent_for_another_account() {
     // a generic write with an invalid value is refused before it is persisted
     let bad = NewWrite::new(
         Intent::Create,
-        vec![Op::create(nsid::POST, "not-a-key", &json!({"$type": nsid::POST}))],
+        vec![Op::create(
+            nsid::POST,
+            "not-a-key",
+            &json!({"$type": nsid::POST}),
+        )],
     );
     assert_eq!(
         block_on(w.ob.enqueue(&w.session, bad)).unwrap_err().code,
@@ -1093,6 +1270,68 @@ fn the_long_lived_pump_drains_and_stops() {
     let t = block_on(ob.create_post(&w.session, &w.post("one"), ContentOpts::default())).unwrap();
     block_on(ob.pump(&w.session));
     done(&block_on(ob.ticket(&t.id)).unwrap().unwrap());
+}
+
+#[test]
+fn a_lost_response_is_recognised_by_its_cid_and_cached() {
+    let w = world();
+    // the membership is known locally: a plain createRecord
+    let (first, _) = w.seed_post("one");
+    assert!(w.cached(&first));
+    {
+        let net = w.net.clone();
+        let calls = Arc::new(AtomicU32::new(0));
+        w.host.on_post(&w.userpds(CREATE), move |req| {
+            let r = net.request(req, "default");
+            if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                // applied, but the answer is lost
+                return Ok(lessdugin_testkit::resp::xrpc_error(
+                    502,
+                    "UpstreamFailure",
+                    "Bad Gateway",
+                ));
+            }
+            r
+        });
+    }
+    let t = block_on(w.ob.create_post(&w.session, &w.post("two"), ContentOpts::default())).unwrap();
+    w.run();
+    let (uri, cid) = done(&w.ticket(&t));
+    // (the seed was first content: an applyWrites)
+    assert_eq!(w.net.count(CREATE), 1, "sent once, never resent");
+    assert_eq!(
+        w.alice.cid(nsid::POST, &rkey_of(&uri)).unwrap().to_string(),
+        cid
+    );
+    assert!(w.cached(&uri), "the re-read value is applied to the store");
+}
+
+#[test]
+fn with_a_syncer_own_writes_queue_the_own_repo() {
+    use lessdugin_core::engine::EngineConfig;
+    use lessdugin_core::sync::{Priority, Reason, SyncConfig, Syncer};
+
+    let w = world();
+    let sy = Syncer::new(
+        Arc::new(w.host.clone()),
+        SyncConfig::from_engine(&EngineConfig::default()),
+    );
+    let ob = Outbox::new(Arc::new(w.host.clone())).with_syncer(sy.clone());
+    let t = block_on(ob.create_post(&w.session, &w.post("one"), ContentOpts::default())).unwrap();
+    block_on(ob.run_until_idle(&w.session)).unwrap();
+    let (uri, _) = done(&block_on(ob.ticket(&t.id)).unwrap().unwrap());
+    assert!(w.cached(&uri));
+    let membership = format!("at://{}/{}/{}", w.alice.did(), nsid::MEMBERSHIP, w.fk());
+    assert!(w.cached(&membership));
+    let q = sy.queue_snapshot();
+    let item = q.get(w.alice.did().as_str()).expect("own repo queued");
+    assert!(item.reasons.contains(&Reason::OwnWrite));
+    assert_eq!(item.priority, Priority::P1);
+    assert!(item.min_rev.is_some());
+    let repo = block_on(RecordStore::new(w.host.cache_kv()).repo(w.alice.did().as_str()))
+        .unwrap()
+        .unwrap();
+    assert!(repo.head_seen.is_some(), "headSeen follows the commit");
 }
 
 /// The outbox's futures are `Send` on native targets (the engine runs them on any executor).

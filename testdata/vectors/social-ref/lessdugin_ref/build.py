@@ -150,8 +150,14 @@ class Forum:
         return rec(at(did(who), "sequence", rk), value)
 
     def modaction(self, actor, action, subject, *, scope=None, subject_cid=None, t=T0, until=None,
-                  reason=None, adopts=None, rkey=None, updated=None, **fields):
-        """action: short name (hide, access, …) or a full $type; subject: DID, uri, tag:slug or a record."""
+                  reason=None, adopts=None, rkey=None, updated=None, pin_scope=None, **fields):
+        """action: short name (hide, access, …) or a full $type; subject: DID, uri, tag:slug or a record.
+
+        scope is the record's scope field (absent = forum); pin_scope is #pin.scope; other keyword
+        arguments are action fields. subject_cid=False omits subjectCid for a record subject.
+        """
+        if pin_scope is not None:
+            fields["scope"] = pin_scope
         if isinstance(subject, dict):
             if subject_cid is None:
                 subject_cid = subject["cid"]

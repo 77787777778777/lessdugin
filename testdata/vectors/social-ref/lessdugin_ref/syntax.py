@@ -126,7 +126,8 @@ def is_rkey(s) -> bool:
 
 
 def is_cid(s) -> bool:
-    return isinstance(s, str) and _CID_RE.fullmatch(s) is not None
+    """The atproto `cid` string syntax; CIDv0 (`Qmb…`) is not allowed (interop fixtures)."""
+    return isinstance(s, str) and _CID_RE.fullmatch(s) is not None and not s.startswith("Qmb")
 
 
 def is_uri(s) -> bool:

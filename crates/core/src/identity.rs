@@ -910,6 +910,13 @@ impl<H: Host> Resolver<H> {
     // -----------------------------------------------------------------------------------------
     // DIDs
 
+    /// The cached identity of `did`, whatever its age, without any request (views label authors
+    /// from the cache; the handle shows only if its cached state is `verified`).
+    pub async fn cached(&self, did: &Did) -> Option<ResolvedIdentity> {
+        let r = self.read_row::<IdentityRow>(&did_key(did)).await?;
+        (r.v == ROW_VERSION && (r.src == DocSource::Devnet) == self.devnet()).then(|| r.identity(did))
+    }
+
     /// The identity of `did`, from a document at most [`DID_DOC_TTL_MS`] old.
     pub async fn resolve_did(&self, did: &Did) -> Result<ResolvedIdentity, IdentityError> {
         self.resolve_did_fresh(did, DID_DOC_TTL_MS).await

@@ -25,6 +25,7 @@
 //! ```
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use futures::future::join_all;
 use lessdugin_atp::Cid;
@@ -39,7 +40,9 @@ use crate::host::{Dir, Host};
 use crate::identity::{DID_DOC_TTL_MS, IdentityLevel};
 use crate::limits;
 use crate::store::admit::{self, AdmittedRecord, Expect, LexiconValidator};
-use crate::store::records::{Admission, Batch, Delete, DeleteEvidence, OrderKey, RecordStore, Slot};
+use crate::store::records::{
+    Admission, Batch, Delete, DeleteEvidence, OrderKey, RecordStore, Slot,
+};
 use crate::store::repo::{AccountStatus, HostRow, RangeCursor, RepoRow};
 use crate::store::{Observation, schema};
 use crate::sync::list::{self, ListError, Lister, RangeListing, RangeVerdict};
@@ -58,7 +61,10 @@ pub const BSKY_PROFILE: &str = "app.bsky.actor.profile";
 
 /// The ten record collections of this build (`OURS`).
 pub fn ours() -> Vec<String> {
-    Collection::ALL.iter().map(|c| c.nsid().to_owned()).collect()
+    Collection::ALL
+        .iter()
+        .map(|c| c.nsid().to_owned())
+        .collect()
 }
 
 /// The `RANGED` collections of this build.
@@ -245,8 +251,13 @@ pub(crate) struct Head {
 /// A `getRecord` answer.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Fetched {
-    Found { rec: AdmittedRecord, sent_at: i64 },
-    NotFound { sent_at: i64 },
+    Found {
+        rec: Box<AdmittedRecord>,
+        sent_at: i64,
+    },
+    NotFound {
+        sent_at: i64,
+    },
 }
 
 /// What a point fetch did.
@@ -356,7 +367,10 @@ async fn describe<H: Host>(
         .filter(|c| wanted.contains(*c))
         .map(str::to_owned)
         .collect();
-    Ok((colls.into_iter().collect(), net::sent_at(&resp).unwrap_or_default()))
+    Ok((
+        colls.into_iter().collect(),
+        net::sent_at(&resp).unwrap_or_default(),
+    ))
 }
 
 /// The membership state a fetch shows for forum `forum`.
@@ -497,7 +511,10 @@ impl<H: Host> Syncer<H> {
                     rkey: Some(rkey),
                 };
                 match admit::admit_get_record(&resp.body, &expect, &LexiconValidator) {
-                    Ok(rec) => Ok(Fetched::Found { rec, sent_at }),
+                    Ok(rec) => Ok(Fetched::Found {
+                        rec: Box::new(rec),
+                        sent_at,
+                    }),
                     // a strike against the host: counted by the caller
                     Err(e) => Err(SyncError::Admission(e.to_string())),
                 }
@@ -529,7 +546,7 @@ impl<H: Host> Syncer<H> {
                     Observation::point_fetch(head_rev, sent_at, now).with_id_hint(id_hint),
                     &rec,
                 );
-                let r = batch.put_version(rec.into_version(obs)).await?;
+                let r = batch.put_version((*rec).into_version(obs)).await?;
                 Ok((r.changed, Some(r.admission)))
             }
             Fetched::NotFound { sent_at } => {
@@ -565,6 +582,19 @@ impl<H: Host> Syncer<H> {
             let at = ready_time(Priority::P1, now, self.random(), None);
             self.enqueue(DirtyItem::new(did.as_str(), Priority::P1, Reason::Hint, at));
         }
+    }
+
+    async fn write_host_only(
+        &self,
+        store: &RecordStore<'_, H::Kv>,
+        origin: &str,
+        host_row: &mut HostRow,
+    ) -> Result<(), SyncError> {
+        self.snapshot_host(origin, host_row);
+        let mut b = store.batch();
+        b.put_host_caps(origin, host_row)?;
+        b.commit().await?;
+        Ok(())
     }
 
     async fn write_repo_only(
@@ -697,7 +727,9 @@ impl<H: Host> Syncer<H> {
             Ok(h) => h,
             Err(e) => {
                 if matches!(e, XrpcCallError::Blocked(_)) {
-                    // refused locally: not the repo's fault
+                    // refused locally: not the repo's fault (the host state is kept: earlier
+                    // attempts of this request may have opened the breaker)
+                    self.write_host_only(&store, &origin, &mut host_row).await?;
                     return Err(e.into());
                 }
                 if e.is_repo_status() {
@@ -717,6 +749,7 @@ impl<H: Host> Syncer<H> {
         }
 
         // rollback (§5.9)
+        let mut accept_rollback = false;
         if !repo.rev.is_empty() && h1.rev < repo.rev {
             if !full {
                 repo.rollback_since.get_or_insert(now);
@@ -725,10 +758,14 @@ impl<H: Host> Syncer<H> {
                     .await?;
                 return Ok(RepoOutcome::Rollback);
             }
-            // `sync --full` accepts the PDS state: the PDS is the database
+            // `sync --full` discards the repo's cached state (of the requested scopes) and lists
+            // it again, which accepts the PDS state: the PDS is the database.
             repo.rev.clear();
             repo.commit = None;
             repo.rollback_since = None;
+            repo.marks.clear();
+            repo.marks_overflow = false;
+            accept_rollback = true;
         }
         if full {
             for sc in &req.scopes {
@@ -737,7 +774,7 @@ impl<H: Host> Syncer<H> {
         }
 
         // Clean
-        let clean = !full
+        let mut clean = !full
             && repo.rev == h1.rev
             && repo.commit == Some(h1.cid)
             && req
@@ -746,7 +783,27 @@ impl<H: Host> Syncer<H> {
                 .all(|sc| repo.listed_rev(sc.name()) == repo.rev)
             && repo.marks.is_empty()
             && !repo.marks_overflow;
+        // A reconcile always refreshes `describeRepo` (§5.2 rules), even at an unchanged head: a
+        // collection created while `repo.colls` was reused was not listed at that head. A new
+        // collection makes the pass a full one.
+        let mut pre_described: Option<(Vec<String>, i64)> = None;
+        if clean && req.reason == Reason::Reconcile {
+            match describe(&xrpc, &svc, did).await {
+                Ok((cs, at)) => {
+                    if cs.iter().any(|c| !repo.colls.contains(c)) {
+                        clean = false;
+                    }
+                    pre_described = Some((cs, at));
+                }
+                Err(e) => tracing::debug!(did = %did, error = %e, "reconcile: describeRepo failed"),
+            }
+        }
         if clean {
+            if let Some((cs, at)) = pre_described.take() {
+                repo.colls = cs;
+                repo.colls_at = at;
+                repo.colls_dirty = false;
+            }
             // the listing at this rev covered the membership: a confirmation is served from the
             // cache (§4.2.1)
             let mut outcome = RepoOutcome::Clean;
@@ -805,7 +862,12 @@ impl<H: Host> Syncer<H> {
                     )
                     .await?;
                 if let Some(a) = &adm {
-                    self.note_conflict(did, &format!("at://{did}/{}/{}", nsid::MEMBERSHIP, c.fk), a, now);
+                    self.note_conflict(
+                        did,
+                        &format!("at://{did}/{}/{}", nsid::MEMBERSHIP, c.fk),
+                        a,
+                        now,
+                    );
                 }
                 repo.succeed(now);
                 if changed {
@@ -839,7 +901,10 @@ impl<H: Host> Syncer<H> {
             || repo.colls_dirty;
         if !need_describe {
             'outer: for fk in &fk_scopes {
-                for c in ranged_all.iter().chain([nsid::MEMBERSHIP.to_owned()].iter()) {
+                for c in ranged_all
+                    .iter()
+                    .chain([nsid::MEMBERSHIP.to_owned()].iter())
+                {
                     if repo.colls.contains(c) {
                         continue;
                     }
@@ -856,7 +921,10 @@ impl<H: Host> Syncer<H> {
             }
         }
         let mut described: Option<i64> = None;
-        let colls: Vec<String> = if need_describe {
+        let colls: Vec<String> = if let Some((cs, at)) = pre_described {
+            described = Some(at);
+            cs
+        } else if need_describe {
             match describe(&xrpc, &svc, did).await {
                 Ok((cs, at)) => {
                     described = Some(at);
@@ -946,7 +1014,7 @@ impl<H: Host> Syncer<H> {
             .iter()
             .map(|(c, k)| self.fetch(s, &svc, did, c, k));
         // OWN
-        let own = req.scopes.iter().any(|sc| *sc == Scope::Own);
+        let own = req.scopes.contains(&Scope::Own);
         let own_jobs: Vec<String> = if own {
             ours().into_iter().filter(|c| has(c)).collect()
         } else {
@@ -995,6 +1063,31 @@ impl<H: Host> Syncer<H> {
                 )
             })
             .collect();
+        if accept_rollback {
+            for sc in &req.scopes {
+                match sc {
+                    Scope::Forum(fk) => {
+                        for c in ranged_all
+                            .iter()
+                            .map(String::as_str)
+                            .chain([nsid::MEMBERSHIP])
+                        {
+                            batch.forget_range(did.as_str(), c, fk).await?;
+                        }
+                    }
+                    Scope::Global { .. } => {
+                        for (c, k) in &global_jobs {
+                            batch
+                                .forget(&schema::RecKey::new(c, did.as_str(), k))
+                                .await?;
+                        }
+                    }
+                    // the own repo's rows live in every forum's scope; its forum scopes are
+                    // forgotten with them
+                    Scope::Own => {}
+                }
+            }
+        }
         let mut verdicts: Vec<RangeVerdict> = Vec::new();
         let mut strikes = 0u32;
         let mut conflicts: Vec<(String, Admission)> = Vec::new();
@@ -1006,6 +1099,12 @@ impl<H: Host> Syncer<H> {
                 Ok(l) => {
                     verdicts.extend(l.verdict);
                     strikes += l.strikes;
+                    if let Some(why) = &l.stop {
+                        rep.issue(&SyncError::List(ListError::Stopped {
+                            collection: c.clone(),
+                            why: why.clone(),
+                        }));
+                    }
                     let mut versions = Vec::new();
                     for (rec, sent_at) in l.admitted() {
                         let obs = Observation::listing(&h1.rev, sent_at, stable, now)
@@ -1017,8 +1116,7 @@ impl<H: Host> Syncer<H> {
                         };
                         versions.push(rec.clone().into_version(obs));
                     }
-                    let uris: Vec<String> =
-                        versions.iter().map(|v| v.uri.to_string()).collect();
+                    let uris: Vec<String> = versions.iter().map(|v| v.uri.to_string()).collect();
                     for (u, r) in uris.into_iter().zip(batch.put_versions(versions).await?) {
                         if matches!(r.admission, Admission::Conflict(_)) {
                             conflicts.push((u, r.admission));
@@ -1049,7 +1147,10 @@ impl<H: Host> Syncer<H> {
                     }
                 }
                 Err(e) => {
-                    if matches!(e, SyncError::List(ListError::BadPage(_) | ListError::Duplicate(_))) {
+                    if matches!(
+                        e,
+                        SyncError::List(ListError::BadPage(_) | ListError::Duplicate(_))
+                    ) {
                         strikes += 1;
                     }
                     st.complete = false;
@@ -1064,15 +1165,7 @@ impl<H: Host> Syncer<H> {
                 for c in &ranged_all {
                     if !has(c) {
                         batch
-                            .reconcile_range(
-                                did.as_str(),
-                                c,
-                                fk,
-                                &BTreeSet::new(),
-                                &key,
-                                None,
-                                now,
-                            )
+                            .reconcile_range(did.as_str(), c, fk, &BTreeSet::new(), &key, None, now)
                             .await?;
                     }
                 }
@@ -1093,7 +1186,8 @@ impl<H: Host> Syncer<H> {
             match res {
                 Ok(f) => {
                     if let Some(forum) = forum_of_fk.get(fk.as_str()) {
-                        rep.membership.insert(fk.clone(), membership_check(&f, forum));
+                        rep.membership
+                            .insert(fk.clone(), membership_check(&f, forum));
                     } else if matches!(f, Fetched::NotFound { .. }) {
                         rep.membership.insert(fk.clone(), MembershipCheck::Absent);
                     }
@@ -1151,10 +1245,16 @@ impl<H: Host> Syncer<H> {
         }
         // OWN: admitted; deletes reach the store through own-write tombstones and the forum
         // scopes' listings
-        for (_, res) in own_jobs.iter().zip(owns) {
+        for (c, res) in own_jobs.iter().zip(owns) {
             match res {
                 Ok(l) => {
                     strikes += l.strikes;
+                    if let Some(why) = &l.stop {
+                        rep.issue(&SyncError::List(ListError::Stopped {
+                            collection: c.clone(),
+                            why: why.clone(),
+                        }));
+                    }
                     let versions: Vec<_> = l
                         .admitted()
                         .map(|(rec, sent_at)| {
@@ -1164,11 +1264,11 @@ impl<H: Host> Syncer<H> {
                         })
                         .collect();
                     batch.put_versions(versions).await?;
-                    if !l.complete {
-                        if let Some(st) = scopes.get_mut("own") {
-                            st.complete = false;
-                            st.byte_capped |= l.byte_capped;
-                        }
+                    if !l.complete
+                        && let Some(st) = scopes.get_mut("own")
+                    {
+                        st.complete = false;
+                        st.byte_capped |= l.byte_capped;
                     }
                 }
                 Err(e) => {
@@ -1239,7 +1339,12 @@ impl<H: Host> Syncer<H> {
 
         if !stable {
             let item = if repo.unstable >= UNSTABLE_MAX {
-                DirtyItem::new(did.as_str(), Priority::P3, Reason::Unstable, repo.next_check)
+                DirtyItem::new(
+                    did.as_str(),
+                    Priority::P3,
+                    Reason::Unstable,
+                    repo.next_check,
+                )
             } else {
                 let at = ready_time(Priority::P1, now, self.random(), None);
                 DirtyItem::new(did.as_str(), Priority::P1, Reason::Unstable, at)
@@ -1283,8 +1388,7 @@ impl<H: Host> Syncer<H> {
             Ok(f) => f,
             Err(e) => {
                 if matches!(e, SyncError::Admission(_)) {
-                    self.net()
-                        .strike(&service_origin(&svc), s.host().now_ms());
+                    self.net().strike(&service_origin(&svc), s.host().now_ms());
                 }
                 if let SyncError::Xrpc(x) = &e
                     && x.is_repo_status()
@@ -1318,7 +1422,9 @@ impl<H: Host> Syncer<H> {
             }
         };
         let (changed, adm) = self
-            .apply_fetched(&mut batch, did, coll, rkey, fetched, &head_rev, id_hint, now, true)
+            .apply_fetched(
+                &mut batch, did, coll, rkey, fetched, &head_rev, id_hint, now, true,
+            )
             .await?;
         if changed {
             repo.last_change_at = now;
@@ -1383,6 +1489,27 @@ impl<H: Host> Syncer<H> {
         Ok(follow)
     }
 
+    /// Runs due polls (§6.7, [`schedule::due_polls`]): one `getLatestCommit` each, concurrently
+    /// within the scheduler's limits; a head that differs from the synced one queues the repo
+    /// (P1, or P2 for `cold`). Returns each DID's result, in the order given.
+    pub async fn run_polls(
+        &self,
+        s: &Session<H>,
+        due: &[schedule::PollDue],
+    ) -> Vec<(String, Result<Option<Priority>, SyncError>)> {
+        let futs = due.iter().map(|p| async move {
+            let r = match Did::parse(&p.did) {
+                Ok(did) => {
+                    self.head_check(s, &did, p.class == crate::store::repo::RepoClass::Authority)
+                        .await
+                }
+                Err(e) => Err(SyncError::Admission(format!("bad DID {:?}: {e}", p.did))),
+            };
+            (p.did.clone(), r)
+        });
+        join_all(futs).await
+    }
+
     /// Applies a successful write's results (§5.8): each created or updated record is admitted
     /// with the exact value sent (level `pds`, source `own`, key `(commit.rev, sentAt)`) if its
     /// CID equals the returned one (otherwise it gets a P0 point fetch); each delete gets a
@@ -1435,10 +1562,8 @@ impl<H: Host> Syncer<H> {
                 (Some(v), Some(cid)) => {
                     match admit::admit_own_write(&w.uri, v, cid, &LexiconValidator) {
                         Ok(rec) => {
-                            let obs = self.observation(
-                                Observation::own_write(&rev, head_sent_at, now),
-                                &rec,
-                            );
+                            let obs = self
+                                .observation(Observation::own_write(&rev, head_sent_at, now), &rec);
                             batch.put_version(rec.into_version(obs)).await?;
                             out.stored.push(w.uri.to_string());
                         }
@@ -1476,53 +1601,71 @@ impl<H: Host> Syncer<H> {
         Ok(out)
     }
 
-    /// Serves up to `max` ready queue items (§6.1): point fetches for uri-only items, else
-    /// `sync_repo` with the scopes `scopes_of(did)` gives. Returns the `sync_repo` reports.
+    /// Serves up to `max` ready queue items (§6.1), concurrently within the scheduler's limits
+    /// and each at its own priority (counted in `s`'s stats): point fetches for uri-only items,
+    /// else `sync_repo` with the scopes `scopes_of(did)` gives (an item without scopes is
+    /// dropped). Returns the `sync_repo` reports, in dispatch order.
     pub async fn run_ready(
         &self,
         s: &Session<H>,
         max: usize,
         scopes_of: impl Fn(&str) -> Vec<Scope>,
     ) -> Vec<RepoReport> {
-        let mut out = Vec::new();
-        for _ in 0..max {
-            let now = s.host().now_ms();
+        enum Job {
+            Point(Vec<AtUri>),
+            Sync(SyncRequest),
+        }
+        let now = s.host().now_ms();
+        let mut jobs: Vec<(Session<H>, Job)> = Vec::new();
+        while jobs.len() < max {
             let Some(item) = self.pop_ready(now) else {
                 break;
             };
             let Ok(did) = Did::parse(&item.did) else {
                 continue;
             };
-            match item.action() {
+            let job = match item.action() {
                 crate::sync::queue::Action::PointFetch(uris) => {
-                    for u in uris {
-                        if let Ok(uri) = AtUri::parse(&u)
-                            && let Err(e) = self.point_fetch(s, &uri, None).await
-                        {
-                            tracing::debug!(uri = %u, error = %e, "point fetch failed");
-                        }
-                    }
+                    Job::Point(uris.iter().filter_map(|u| AtUri::parse(u).ok()).collect())
                 }
                 crate::sync::queue::Action::Sync => {
                     let scopes = scopes_of(&item.did);
                     if scopes.is_empty() {
                         continue;
                     }
-                    let reason = [Reason::Full, Reason::Reconcile, Reason::Resync, Reason::Migration]
-                        .into_iter()
-                        .find(|r| item.reasons.contains(r))
-                        .unwrap_or_else(|| *item.reasons.iter().next().unwrap_or(&Reason::Hint));
-                    let req = SyncRequest {
+                    let reason = [
+                        Reason::Full,
+                        Reason::Reconcile,
+                        Reason::Resync,
+                        Reason::Migration,
+                    ]
+                    .into_iter()
+                    .find(|r| item.reasons.contains(r))
+                    .unwrap_or_else(|| *item.reasons.iter().next().unwrap_or(&Reason::Hint));
+                    Job::Sync(SyncRequest {
                         did,
                         scopes,
                         reason,
                         confirm: None,
-                    };
-                    out.push(self.sync_repo(s, &req).await);
+                    })
                 }
-            }
+            };
+            jobs.push((self.session(item.priority, Arc::clone(s.stats())), job));
         }
-        out
+        let futs = jobs.iter().map(|(sess, job)| async move {
+            match job {
+                Job::Point(uris) => {
+                    for uri in uris {
+                        if let Err(e) = self.point_fetch(sess, uri, None).await {
+                            tracing::debug!(uri = %uri, error = %e, "point fetch failed");
+                        }
+                    }
+                    None
+                }
+                Job::Sync(req) => Some(self.sync_repo(sess, req).await),
+            }
+        });
+        join_all(futs).await.into_iter().flatten().collect()
     }
 }
 

@@ -74,8 +74,13 @@ pub struct SyncOpts {
     pub full: bool,
     /// Step 2: DIDs of the authors on screen (P0, confirmed unless authorities).
     pub on_screen: Vec<String>,
+    /// Step 3: recently active authors from hints (assisted mode: Constellation backlinks of
+    /// posts, a Jetstream replay; M5), most recent first. Synced at P1 and confirmed: in approval
+    /// mode only those in G; in open mode any, those outside A ∪ G counting toward the
+    /// newcomer budget.
+    pub recently_active: Vec<String>,
     /// Step 6: newcomer candidates from hints, most recent first, as `(did, source)` (§4.4);
-    /// used in open mode only, at most [`NEWCOMER_BUDGET`].
+    /// used in open mode only, at most [`NEWCOMER_BUDGET`] (with step 3's).
     pub newcomers: Vec<(String, String)>,
 }
 
@@ -148,9 +153,7 @@ impl From<SyncError> for EngineError {
     fn from(e: SyncError) -> Self {
         match e {
             SyncError::Identity(e) => e.into(),
-            SyncError::Xrpc(e) | SyncError::List(crate::sync::list::ListError::Xrpc(e)) => {
-                e.into()
-            }
+            SyncError::Xrpc(e) | SyncError::List(crate::sync::list::ListError::Xrpc(e)) => e.into(),
             SyncError::Store(e) => EngineError::internal(e.to_string()),
             e => EngineError::new(crate::engine::ErrorCode::Network, e.to_string())
                 .with_retryable(true),
@@ -320,7 +323,11 @@ impl<H: Host> Syncer<H> {
         let opts =
             CallOpts::capped(limits::PROOF_CAR_MAX_BYTES).with_timeout_ms(limits::CAR_TIMEOUT_MS);
         let before = s.host().now_ms();
-        let resp = match s.xrpc().query_raw(&Service::Anon(pds), &params, &opts).await {
+        let resp = match s
+            .xrpc()
+            .query_raw(&Service::Anon(pds), &params, &opts)
+            .await
+        {
             Ok(r) => r,
             Err(e) => return fail(e.to_string()),
         };
@@ -347,8 +354,7 @@ impl<H: Host> Syncer<H> {
                 rec.cid, row.cid
             ));
         }
-        let admitted = match admit::admit_block(&key.uri, &rec.cid, &rec.bytes, &LexiconValidator)
-        {
+        let admitted = match admit::admit_block(&key.uri, &rec.cid, &rec.bytes, &LexiconValidator) {
             Ok(a) => a,
             Err(e) => return fail(e.to_string()),
         };
@@ -409,14 +415,15 @@ impl<H: Host> Syncer<H> {
         done.extend(a.keys().cloned());
         let mut disc = state::disc_rows(kv, fk).await?;
         let mut touched: BTreeSet<String> = BTreeSet::new();
-        let view: Vec<Candidate> = parse_dids(opts.on_screen.iter().filter(|d| !a.contains_key(*d)))
-            .into_iter()
-            .map(|did| Candidate {
-                did,
-                src: "view".into(),
-                hinted: true,
-            })
-            .collect();
+        let view: Vec<Candidate> =
+            parse_dids(opts.on_screen.iter().filter(|d| !a.contains_key(*d)))
+                .into_iter()
+                .map(|did| Candidate {
+                    did,
+                    src: "view".into(),
+                    hinted: true,
+                })
+                .collect();
         jobs.extend(self.candidate_jobs(&key, &view, &mut done, &disc, reason(Reason::View)));
         let reports = self.run_jobs(&p0, &jobs).await;
         self.note_candidates(&key, &view, &reports, &mut disc, &mut touched);
@@ -426,7 +433,43 @@ impl<H: Host> Syncer<H> {
         let now_us = self.host().now_ms().saturating_mul(1000);
         let st = ForumState::load(kv, &key, &forum.decl, now_us).await?;
         let r = &st.roster;
-        let hinted: BTreeSet<&str> = opts.newcomers.iter().map(|(d, _)| d.as_str()).collect();
+        let hinted: BTreeSet<&str> = opts
+            .newcomers
+            .iter()
+            .map(|(d, _)| d.as_str())
+            .chain(opts.recently_active.iter().map(String::as_str))
+            .collect();
+        let mut budget = NEWCOMER_BUDGET;
+
+        // 3. recently active authors at P1: approval mode, those in G; open mode, any (outside
+        //    A ∪ G they are newcomers and count toward the budget)
+        let mut active: Vec<Candidate> = Vec::new();
+        for did in parse_dids(&opts.recently_active) {
+            let d = did.as_str();
+            if a.contains_key(d) || done.contains(d) || active.iter().any(|c| c.did == did) {
+                continue;
+            }
+            let granted = r.granted.contains(d);
+            if !granted && !r.is_open() {
+                continue;
+            }
+            if !granted {
+                if budget == 0 {
+                    continue;
+                }
+                budget -= 1;
+            }
+            active.push(Candidate {
+                did,
+                src: if granted { "grant" } else { "hint:active" }.into(),
+                hinted: true,
+            });
+        }
+        let jobs =
+            self.candidate_jobs(&key, &active, &mut done, &disc, reason(Reason::Participant));
+        let reports = self.run_jobs(&p1, &jobs).await;
+        self.note_candidates(&key, &active, &reports, &mut disc, &mut touched);
+        repos.extend(reports);
 
         // 4. G ∖ A at P1 (seeds first, then banned or nullified grants)
         let mut granted: Vec<&String> = r.granted.iter().filter(|d| r.seeds.contains(*d)).collect();
@@ -439,7 +482,8 @@ impl<H: Host> Syncer<H> {
                 src: "grant".into(),
             })
             .collect();
-        let jobs = self.candidate_jobs(&key, &grants, &mut done, &disc, reason(Reason::Participant));
+        let jobs =
+            self.candidate_jobs(&key, &grants, &mut done, &disc, reason(Reason::Participant));
         let reports = self.run_jobs(&p1, &jobs).await;
         self.note_candidates(&key, &grants, &reports, &mut disc, &mut touched);
         repos.extend(reports);
@@ -455,8 +499,13 @@ impl<H: Host> Syncer<H> {
                     src: "closure".into(),
                 })
                 .collect();
-            let jobs =
-                self.candidate_jobs(&key, &closure, &mut done, &disc, reason(Reason::Participant));
+            let jobs = self.candidate_jobs(
+                &key,
+                &closure,
+                &mut done,
+                &disc,
+                reason(Reason::Participant),
+            );
             let reports = self.run_jobs(&p1, &jobs).await;
             self.note_candidates(&key, &closure, &reports, &mut disc, &mut touched);
             repos.extend(reports);
@@ -475,9 +524,14 @@ impl<H: Host> Syncer<H> {
                     })
                 })
                 .collect();
-            let (now_list, later) = newcomers.split_at(newcomers.len().min(NEWCOMER_BUDGET));
-            let jobs =
-                self.candidate_jobs(&key, now_list, &mut done, &disc, reason(Reason::Participant));
+            let (now_list, later) = newcomers.split_at(newcomers.len().min(budget));
+            let jobs = self.candidate_jobs(
+                &key,
+                now_list,
+                &mut done,
+                &disc,
+                reason(Reason::Participant),
+            );
             let reports = self.run_jobs(&p2, &jobs).await;
             self.note_candidates(&key, now_list, &reports, &mut disc, &mut touched);
             repos.extend(reports);
@@ -670,7 +724,6 @@ impl<H: Host> Syncer<H> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::discovery::state::REJECTED_RECHECK_MS;
     use crate::xrpc::XrpcCallError;
 
     #[test]
@@ -693,6 +746,5 @@ mod tests {
         })
         .into();
         assert_eq!(e.code, ErrorCode::RateLimited);
-        assert!(REJECTED_RECHECK_MS > 0);
     }
 }

@@ -6,7 +6,7 @@ validity) and the lexicons, to generate the normative vectors in testdata/vector
 standard library only; run with `python3 -I`. Ambiguities and the readings chosen are listed
 in ../NOTES.md.
 
-Modules:
+Modules (bottom-up; "stub" = exact only where its subject matter is absent, else NotModelled):
     common, syntax, dagcbor   primitives (keys come from testdata/vectors/keys/gen_keys.py)
     input                     FoldInput parsing (social.md §1.1)
     policy                    effective policy (§1.6)
@@ -16,15 +16,20 @@ Modules:
     authorities               L0 (§4.1)
     modfold                   L1 (§4.2–§4.8, §4.10–§4.12)
     participation             L2 (§3)
-    threads                   §11 placement
-    visibility                V1–V10 and the thread pass (§10.1–§10.2)
-    karma, scores             L3, L3.5            (stubs)
-    gates                     L4
-    authormod, l5_stubs       L5                  (stubs)
-    rank                      L6 ranking          (stub)
-    fold                      orchestration: ForumView
-    projections               vector projections per kind
-    build                     builders for vector inputs
+    opinions                  L3 opinion validity (§5)
+    karma                     L3 vote power, karma/1 (§6)
+    scores                    L3.5 (§7)
+    gates                     L4 (§8); registers the gateValues and passes fields
+    authormod                 L5 author tier (§4.9)
+    reacts                    L5 (§9.2), qkey (lfm-1.md §11)
+    tags                      L5 (§13)                     stub
+    sequences                 L5 (§14)                     stub
+    threads                   §11 placement, steps 1–4
+    visibility                L6 V1–V10 and the thread pass (§10.1–§10.2); L7 lens (§10.3)
+    rank                      L6 ranking, sorts, filters, Recent Discussion (§12)
+    fold                      orchestration: ForumView (see its docstring for the layer table)
+    projections               vector projection fields (one global namespace)
+    build                     builders for vector inputs (valid records, canonical keys, real CIDs)
 """
 
 import sys

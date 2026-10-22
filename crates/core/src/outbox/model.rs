@@ -378,6 +378,19 @@ pub struct PendingBlob {
     /// Set once uploaded (the placeholders were replaced by the returned object).
     #[serde(default)]
     pub uploaded: bool,
+    /// When it was last uploaded (ms).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uploaded_at: Option<i64>,
+}
+
+impl PendingBlob {
+    /// `true` if the blob has to be uploaded (again) before the record write at `now`.
+    pub fn needs_upload(&self, now: i64) -> bool {
+        !self.uploaded
+            || self.uploaded_at.is_none_or(|t| {
+                now.saturating_sub(t) >= crate::outbox::protocol::BLOB_REUPLOAD_AFTER_MS
+            })
+    }
 }
 
 /// The result of one target once the write is done.
@@ -544,9 +557,7 @@ impl PendingWrite {
         let ops: u32 = self.ops.iter().map(|o| o.action.cost()).sum();
         match &self.intent {
             // + the revision create
-            Intent::Edit { .. } | Intent::RemoveModAction { .. } => {
-                ops + OpAction::Create.cost()
-            }
+            Intent::Edit { .. } | Intent::RemoveModAction { .. } => ops + OpAction::Create.cost(),
             // the opinion op is a create, an update or a delete
             Intent::Opinion { .. } => OpAction::Create.cost(),
             _ => ops.max(1),
@@ -636,6 +647,7 @@ mod tests {
                 size: 69,
                 chunks: 1,
                 uploaded: false,
+                uploaded_at: None,
             }],
             state: WriteStage::Held,
             attempts: 2,
@@ -680,21 +692,24 @@ mod tests {
                 report: vec!["x".into()],
             },
         ] {
-            let w = PendingWrite { intent, ..w.clone() };
+            let w = PendingWrite {
+                intent,
+                ..w.clone()
+            };
             let bytes = row::encode(&w).unwrap();
             assert_eq!(row::decode::<PendingWrite>(&bytes).unwrap(), w);
         }
         let m = MetaRow { v: 1, last_tid: 7 };
-        assert_eq!(row::decode::<MetaRow>(&row::encode(&m).unwrap()).unwrap(), m);
+        assert_eq!(
+            row::decode::<MetaRow>(&row::encode(&m).unwrap()).unwrap(),
+            m
+        );
     }
 
     #[test]
     fn ids_and_status() {
         let w = sample();
-        assert_eq!(
-            parse_write_id(&w.id()),
-            Some((w.account.clone(), w.seq))
-        );
+        assert_eq!(parse_write_id(&w.id()), Some((w.account.clone(), w.seq)));
         assert_eq!(parse_write_id("x/1"), None);
         assert!(matches!(
             w.status(),

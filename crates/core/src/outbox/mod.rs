@@ -9,10 +9,15 @@
 //!   single-record validity rules and the reserved names, store the blob bytes, and persist the
 //!   write in one atomic batch. They return a [`WriteTicket`] at once.
 //! - **Pump.** [`Outbox::pump`] (long-lived, driven by the host), [`Outbox::run_due`] and
-//!   [`Outbox::run_until_idle`] run the write protocols ([`protocol`]): fresh swap heads, swap
+//!   [`Outbox::run_until_idle`] run the write protocols (`protocol.rs`): fresh swap heads, swap
 //!   retries with jitter, CID-based recovery of a write found in `sending`, the write budget and
-//!   rate-limit back-off. Confirmed writes are applied to the record store at once
-//!   ([`apply::apply_own_write`], `sync.md` §5.8) and reported to the [`OutboxListener`].
+//!   rate-limit back-off. Confirmed writes are applied to the record store at once (`sync.md`
+//!   §5.8): through the sync module when the outbox has a [`Syncer`] ([`Outbox::with_syncer`],
+//!   which also queues the own repo at P1), else directly ([`apply::apply_own_write`]); either
+//!   way they are reported to the [`OutboxListener`].
+//! - **Wiring (engine).** `Outbox::with_listener(host, listener).with_syncer(engine.syncer())`,
+//!   one per engine (clones share the pump locks, wakers and TID clock); the listener maps
+//!   [`OutboxListener::on_write`] to `Event::Write { id, state }`.
 //! - **Undo.** Opinion intents are held 4 s and coalesced per subject; [`Outbox::undo`] removes a
 //!   write that was not sent, or issues the inverse opinion write once it was.
 //!
@@ -52,16 +57,17 @@ use crate::host::{Dir, Host, KeyRange, KvOp, KvStore, MaybeSendSync};
 use crate::limits;
 use crate::store::records::RecordStore;
 use crate::store::row;
+use crate::sync::Syncer;
 
-pub use apply::{AppliedRecord, AppliedWrite, ApplyReport, apply_own_write};
+pub use apply::{AppliedRecord, AppliedWrite, ApplyReport, apply_own_write, apply_with_syncer};
 pub use blob::BlobData;
 pub use budget::BudgetRow;
 pub use model::{
-    Intent, OnExists, Op, OpAction, OpResult, OpinionStep, PendingBlob, PendingWrite,
-    StoredError, WriteStage, parse_write_id, write_id,
+    Intent, OnExists, Op, OpAction, OpResult, OpinionStep, PendingBlob, PendingWrite, StoredError,
+    WriteStage, parse_write_id, write_id,
 };
 pub use pds::Session;
-pub use protocol::{BACKOFF_BASE_MS, BACKOFF_MAX_MS, MAX_ATTEMPTS};
+pub use protocol::{BACKOFF_BASE_MS, BACKOFF_MAX_MS, BLOB_REUPLOAD_AFTER_MS, MAX_ATTEMPTS};
 
 use protocol::{Outcome, Runner};
 
@@ -69,6 +75,8 @@ use protocol::{Outcome, Runner};
 pub const IDLE_POLL_MS: i64 = 60_000;
 /// How long the pump waits after a storage error (ms, *tunable*).
 pub const ERROR_WAIT_MS: i64 = 5_000;
+/// Done and undone writes are kept this long, then pruned by the idle pump (ms, *tunable*).
+pub const DONE_KEEP_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 /// Rows per scan page.
 const SCAN_PAGE: u32 = 256;
 /// The largest estimate charged against the budget before a write starts (a write that
@@ -80,9 +88,10 @@ pub trait OutboxListener: MaybeSendSync {
     /// A write's state changed (`Write { id, state }`, `engine-api.md` §3.8).
     fn on_write(&self, _ticket: &WriteTicket) {}
 
-    /// A confirmed write was applied to the record store. The engine marks the own repo dirty
-    /// at P1 and schedules a P0 point fetch of `report.mismatched` (`sync.md` §5.8).
-    // TODO(E3): the engine connects `sync`'s own-write helper here.
+    /// A confirmed write was applied to the record store (`sync.md` §5.8). With a
+    /// [`Syncer`] ([`Outbox::with_syncer`]) the own repo is already marked
+    /// dirty at P1 and `report.mismatched` queued for P0 point fetches; without one, scheduling
+    /// them is the listener's job.
     fn on_applied(&self, _write: &AppliedWrite, _report: &ApplyReport) {}
 }
 
@@ -260,6 +269,8 @@ struct Shared {
 pub struct Outbox<H: Host> {
     host: Arc<H>,
     shared: Arc<Shared>,
+    /// Applies confirmed writes through the sync module (repo lock, dirty marks), if set.
+    sync: Option<Syncer<H>>,
 }
 
 impl<H: Host> Clone for Outbox<H> {
@@ -267,6 +278,7 @@ impl<H: Host> Clone for Outbox<H> {
         Self {
             host: Arc::clone(&self.host),
             shared: Arc::clone(&self.shared),
+            sync: self.sync.clone(),
         }
     }
 }
@@ -314,7 +326,16 @@ impl<H: Host> Outbox<H> {
                 clock_id,
                 stopped: AtomicBool::new(false),
             }),
+            sync: None,
         }
+    }
+
+    /// Applies confirmed writes through `syncer` ([`apply_with_syncer`], `sync.md` §5.8): under
+    /// the repo lock, with the own repo marked dirty at P1 and mismatched uris queued for P0
+    /// point fetches in the engine's dirty queue. Set it before cloning the outbox.
+    pub fn with_syncer(mut self, syncer: Syncer<H>) -> Self {
+        self.sync = Some(syncer);
+        self
     }
 
     /// The host.
@@ -396,7 +417,11 @@ impl<H: Host> Outbox<H> {
     // Enqueue
 
     /// Persists the write `build` returns (built under the row lock with a [`WriteCtx`]).
-    pub async fn enqueue_with<F>(&self, session: &Session, build: F) -> Result<WriteTicket, EngineError>
+    pub async fn enqueue_with<F>(
+        &self,
+        session: &Session,
+        build: F,
+    ) -> Result<WriteTicket, EngineError>
     where
         F: FnOnce(&mut WriteCtx<'_>) -> Result<NewWrite, EngineError> + crate::host::MaybeSend,
     {
@@ -409,11 +434,19 @@ impl<H: Host> Outbox<H> {
     }
 
     /// Persists `w`.
-    pub async fn enqueue(&self, session: &Session, w: NewWrite) -> Result<WriteTicket, EngineError> {
+    pub async fn enqueue(
+        &self,
+        session: &Session,
+        w: NewWrite,
+    ) -> Result<WriteTicket, EngineError> {
         self.enqueue_with(session, move |_| Ok(w)).await
     }
 
-    async fn enqueue_locked<F>(&self, session: &Session, build: F) -> Result<PendingWrite, EngineError>
+    async fn enqueue_locked<F>(
+        &self,
+        session: &Session,
+        build: F,
+    ) -> Result<PendingWrite, EngineError>
     where
         F: FnOnce(&mut WriteCtx<'_>) -> Result<NewWrite, EngineError>,
     {
@@ -462,7 +495,10 @@ impl<H: Host> Outbox<H> {
         else {
             return false;
         };
-        matches!(RecordStore::new(self.host.cache()).get(&uri).await, Ok(Some(_)))
+        matches!(
+            RecordStore::new(self.host.cache()).get(&uri).await,
+            Ok(Some(_))
+        )
     }
 
     /// Content in a forum: `createRecord`, or the first-content batch with the membership when
@@ -571,8 +607,10 @@ impl<H: Host> Outbox<H> {
                 op = op.with_excerpt(e);
             }
             let membership = records::membership(&uri, None, &ctx.now()?)?;
-            Ok(NewWrite::new(Intent::CreateForum, vec![op, membership.create_op()])
-                .with_blobs(opts.blobs))
+            Ok(
+                NewWrite::new(Intent::CreateForum, vec![op, membership.create_op()])
+                    .with_blobs(opts.blobs),
+            )
         })
         .await
     }
@@ -600,7 +638,11 @@ impl<H: Host> Outbox<H> {
 
     /// Leaves a forum: `deleteRecord(membership, swapRecord = cid)` with the CID the record
     /// store holds.
-    pub async fn leave(&self, session: &Session, forum: &AtUri) -> Result<WriteTicket, EngineError> {
+    pub async fn leave(
+        &self,
+        session: &Session,
+        forum: &AtUri,
+    ) -> Result<WriteTicket, EngineError> {
         let rkey = lessdugin_lexicon::keys::membership_rkey(forum.as_str())
             .map_err(|e| EngineError::invalid_ref(format!("{forum}: {e}")))?;
         let uri = records::at_uri(&format!("at://{}/{}/{rkey}", session.did, nsid::MEMBERSHIP))?;
@@ -633,8 +675,8 @@ impl<H: Host> Outbox<H> {
         let u = own_uri(session, uri)?;
         let collection = u.collection().as_str().to_owned();
         let rkey = u.rkey().as_str().to_owned();
-        let content = [nsid::POST, nsid::COMMENT, nsid::SEQUENCE, nsid::FORUM]
-            .contains(&collection.as_str());
+        let content =
+            [nsid::POST, nsid::COMMENT, nsid::SEQUENCE, nsid::FORUM].contains(&collection.as_str());
         if !content && collection != nsid::MOD_ACTION {
             return Err(EngineError::invalid_input(format!(
                 "{collection} records are not edited with the edit protocol"
@@ -649,6 +691,14 @@ impl<H: Host> Outbox<H> {
         let base = base.to_owned();
         let uri = uri.to_owned();
         self.enqueue_with(session, move |ctx| {
+            // W5: updatedAt is set on every update
+            let mut value = value;
+            if let Some(m) = value.as_object_mut() {
+                m.insert(
+                    "updatedAt".into(),
+                    Value::String(ctx.now()?.as_str().to_owned()),
+                );
+            }
             let mut op = Op::update(&collection, &rkey, &value);
             if let Some(e) = opts.excerpt {
                 op = op.with_excerpt(e);
@@ -693,19 +743,26 @@ impl<H: Host> Outbox<H> {
     }
 
     /// Redacts own revision records (`applyWrites[#delete revision …]`, chunked at ≤ 200).
-    pub async fn redact(&self, session: &Session, uris: &[String]) -> Result<WriteTicket, EngineError> {
+    pub async fn redact(
+        &self,
+        session: &Session,
+        uris: &[String],
+    ) -> Result<WriteTicket, EngineError> {
         let mut ops = Vec::with_capacity(uris.len());
         for uri in uris {
             let u = own_uri(session, uri)?;
             if u.collection().as_str() != nsid::REVISION {
-                return Err(EngineError::invalid_input(format!("{uri} is not a revision")));
+                return Err(EngineError::invalid_input(format!(
+                    "{uri} is not a revision"
+                )));
             }
             ops.push(Op::delete(nsid::REVISION, u.rkey().as_str()));
         }
         if ops.is_empty() {
             return Err(EngineError::invalid_input("nothing to redact"));
         }
-        self.enqueue(session, NewWrite::new(Intent::Redact, ops)).await
+        self.enqueue(session, NewWrite::new(Intent::Redact, ops))
+            .await
     }
 
     /// Writes the own profile: create-if-absent without `base` (an existing profile is a
@@ -718,16 +775,33 @@ impl<H: Host> Outbox<H> {
         blobs: Vec<BlobData>,
     ) -> Result<WriteTicket, EngineError> {
         let built = records::profile(profile)?;
-        let w = match base {
-            None => NewWrite::new(
-                Intent::CreateIfAbsent {
-                    on_exists: OnExists::Conflict,
-                },
-                vec![built.create_op()],
-            ),
-            Some(b) => NewWrite::new(Intent::Put { base: b.to_owned() }, vec![built.update_op()]),
-        };
-        self.enqueue(session, w.with_blobs(blobs)).await
+        let base = base.map(str::to_owned);
+        self.enqueue_with(session, move |ctx| {
+            let w = match base {
+                None => NewWrite::new(
+                    Intent::CreateIfAbsent {
+                        on_exists: OnExists::Conflict,
+                    },
+                    vec![built.create_op()],
+                ),
+                Some(base) => {
+                    // W5: updatedAt is set on every update
+                    let mut v = built.value;
+                    if let Some(m) = v.as_object_mut() {
+                        m.insert(
+                            "updatedAt".into(),
+                            Value::String(ctx.now()?.as_str().to_owned()),
+                        );
+                    }
+                    NewWrite::new(
+                        Intent::Put { base },
+                        vec![Op::update(built.collection, &built.rkey, &v)],
+                    )
+                }
+            };
+            Ok(w.with_blobs(blobs))
+        })
+        .await
     }
 
     /// Creates a moderation assertion (§8.4: create-if-absent; an existing record continues as
@@ -740,7 +814,9 @@ impl<H: Host> Outbox<H> {
     ) -> Result<WriteTicket, EngineError> {
         if let Action::Lock(l) = &action.action
             && l.locked()
-            && l.allowed.as_ref().is_some_and(|a| a.len() > limits::LOCK_ALLOWED_MAX)
+            && l.allowed
+                .as_ref()
+                .is_some_and(|a| a.len() > limits::LOCK_ALLOWED_MAX)
         {
             return Err(EngineError::invalid_input(
                 "a lock may keep at most 5,000 comments visible; hide the thread instead",
@@ -774,7 +850,9 @@ impl<H: Host> Outbox<H> {
         role: &str,
     ) -> Result<WriteTicket, EngineError> {
         if !["owner", "admin", "moderator"].contains(&role) {
-            return Err(EngineError::invalid_input(format!("{role:?} may not adopt")));
+            return Err(EngineError::invalid_input(format!(
+                "{role:?} may not adopt"
+            )));
         }
         Session::parse(former.as_str(), former_pds)?;
         let forum = forum.as_str().to_owned();
@@ -811,6 +889,8 @@ impl<H: Host> Outbox<H> {
         protocol::lexicon_intent(&step)?;
         let rkey = records::opinion_rkey(forum, subject)?;
         records::at_uri(subject)?;
+        lessdugin_atp::Cid::try_from(subject_cid)
+            .map_err(|e| EngineError::invalid_input(format!("subject CID {subject_cid:?}: {e}")))?;
         let account = session.did.as_str();
         let _g = self.shared.rows.lock().await;
         let now = self.host.now_ms();
@@ -1207,7 +1287,13 @@ impl<H: Host> Outbox<H> {
         w.updated_at = now;
         // Confirmed requests are facts whatever the outcome (a partial delete): apply them.
         for a in &applied {
-            match apply_own_write(host.cache(), a, now).await {
+            let report = match &self.sync {
+                Some(syncer) => apply_with_syncer(syncer, a).await,
+                None => apply_own_write(host.cache(), a, now)
+                    .await
+                    .map_err(|e| EngineError::internal(e.to_string())),
+            };
+            match report {
                 Ok(report) => self.shared.listener.on_applied(a, &report),
                 Err(e) => tracing::warn!(error = %e, "could not apply an own write to the store"),
             }
@@ -1261,7 +1347,13 @@ impl<H: Host> Outbox<H> {
             let wait = match self.step(session).await {
                 Ok(Step::Processed(_)) => continue,
                 Ok(Step::Wait(t)) => (t - self.host.now_ms()).clamp(1, IDLE_POLL_MS),
-                Ok(Step::Idle) => IDLE_POLL_MS,
+                Ok(Step::Idle) => {
+                    let before = self.host.now_ms().saturating_sub(DONE_KEEP_MS);
+                    if let Err(e) = self.prune(&account, before).await {
+                        tracing::warn!(account = %account, error = %e, "outbox prune failed");
+                    }
+                    IDLE_POLL_MS
+                }
                 Err(e) => {
                     tracing::warn!(account = %account, error = %e, "outbox pump step failed");
                     ERROR_WAIT_MS
@@ -1311,7 +1403,9 @@ fn classify<H: Host>(r: &Runner<'_, H>, e: pds::CallError, now: i64) -> Outcome 
             at: until.max(now + 1),
             error,
         },
-        CallError::Rejected { error, .. } if error.code == ErrorCode::AuthRequired => backoff(error),
+        CallError::Rejected { error, .. } if error.code == ErrorCode::AuthRequired => {
+            backoff(error)
+        }
         CallError::Rejected { error, .. } => Outcome::Failed(error),
         CallError::Read(error) if error.retryable => backoff(error),
         CallError::Read(error) => Outcome::Failed(error),
@@ -1338,17 +1432,27 @@ fn prepare(
             if matches!(new.intent, Intent::Opinion { .. }) {
                 continue;
             }
-            return Err(EngineError::invalid_input("a create or update needs a value"));
+            return Err(EngineError::invalid_input(
+                "a create or update needs a value",
+            ));
         };
         if !v.is_object() {
-            return Err(EngineError::invalid_input("a record value is a JSON object"));
+            return Err(EngineError::invalid_input(
+                "a record value is a JSON object",
+            ));
         }
         let spilled = blob::spill_oversized(&mut v, &op.collection, op.excerpt.as_deref())?;
         if !spilled.is_empty() {
             op.set_value(&v);
             blobs.extend(spilled);
         }
-        records::check(did, &op.collection, &op.rkey, &v, op.action == OpAction::Create)?;
+        records::check(
+            did,
+            &op.collection,
+            &op.rkey,
+            &v,
+            op.action == OpAction::Create,
+        )?;
     }
     let referenced: BTreeSet<String> = ops
         .iter()
@@ -1370,6 +1474,7 @@ fn prepare(
             size: b.bytes.len() as u64,
             chunks: u32::try_from(rows.len()).map_err(storage)?,
             uploaded: false,
+            uploaded_at: None,
         });
         chunks.extend(rows);
     }

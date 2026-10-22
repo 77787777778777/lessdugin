@@ -190,9 +190,7 @@ impl DirtyQueue {
     /// Every item, in dispatch order.
     pub fn ordered(&self) -> Vec<&DirtyItem> {
         let mut v: Vec<&DirtyItem> = self.items.values().collect();
-        v.sort_by(|a, b| {
-            (a.priority, a.ready_at, &a.did).cmp(&(b.priority, b.ready_at, &b.did))
-        });
+        v.sort_by(|a, b| (a.priority, a.ready_at, &a.did).cmp(&(b.priority, b.ready_at, &b.did)));
         v
     }
 
@@ -203,9 +201,7 @@ impl DirtyQueue {
             .items
             .values()
             .filter(|i| i.ready_at <= now_ms)
-            .min_by(|a, b| {
-                (a.priority, a.ready_at, &a.did).cmp(&(b.priority, b.ready_at, &b.did))
-            })?
+            .min_by(|a, b| (a.priority, a.ready_at, &a.did).cmp(&(b.priority, b.ready_at, &b.did)))?
             .did
             .clone();
         self.items.remove(&did)
@@ -255,7 +251,12 @@ mod tests {
         q.enqueue(DirtyItem::new("did:z", Priority::P1, Reason::Poll, 10));
         q.enqueue(DirtyItem::new("did:y", Priority::P1, Reason::Poll, 10));
         q.enqueue(DirtyItem::new("did:x", Priority::P2, Reason::Poll, 0));
-        q.enqueue(DirtyItem::point("did:w", "at://did:w/c/k", Priority::P0, 20));
+        q.enqueue(DirtyItem::point(
+            "did:w",
+            "at://did:w/c/k",
+            Priority::P0,
+            20,
+        ));
         let order: Vec<&str> = q.ordered().iter().map(|i| i.did.as_str()).collect();
         assert_eq!(order, ["did:w", "did:y", "did:z", "did:x"]);
         assert_eq!(
@@ -275,7 +276,10 @@ mod tests {
             let t = ready_time(Priority::P2, 1_000, r, None);
             assert!((31_000..=601_000).contains(&t));
         }
-        assert_eq!(ready_time(Priority::P3, 1_000, 7, Some(86_400_000)), 86_400_000);
+        assert_eq!(
+            ready_time(Priority::P3, 1_000, 7, Some(86_400_000)),
+            86_400_000
+        );
         assert_eq!(ready_time(Priority::P3, 1_000, 7, None), 1_000);
         assert_eq!(uniform(5, 5, 99), 5);
     }

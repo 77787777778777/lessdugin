@@ -157,13 +157,14 @@ impl Roster {
                 continue;
             }
             match &m.action {
-                Action::Access(x) => match x.level() {
-                    Some(level) => access
-                        .entry(t.to_owned())
-                        .or_default()
-                        .add(rx, level == AccessLevel::Banned),
-                    None => {}
-                },
+                Action::Access(x) => {
+                    if let Some(level) = x.level() {
+                        access
+                            .entry(t.to_owned())
+                            .or_default()
+                            .add(rx, level == AccessLevel::Banned);
+                    }
+                }
                 Action::Restrict(x) => nullify
                     .entry(t.to_owned())
                     .or_default()
@@ -263,7 +264,11 @@ mod tests {
     }
 
     fn decl(mode: MembershipMode) -> Forum {
-        let mut f = Forum::create("Meta", Datetime::parse("2026-01-01T00:00:00Z").unwrap(), mode);
+        let mut f = Forum::create(
+            "Meta",
+            Datetime::parse("2026-01-01T00:00:00Z").unwrap(),
+            mode,
+        );
         let m = |d: &str, role: &str| Moderator {
             did: Did::parse(d).unwrap(),
             role: role.into(),
@@ -343,7 +348,9 @@ mod tests {
         let k = key();
         let d = decl(MembershipMode::Approval);
         let u = |n: u8| format!("did:plc:user{}{}", (b'a' + n) as char, "2".repeat(19));
-        let now = Datetime::parse("2026-06-01T00:00:00Z").unwrap().timestamp_micros();
+        let now = Datetime::parse("2026-06-01T00:00:00Z")
+            .unwrap()
+            .timestamp_micros();
         let recs = vec![
             grant(MODR, &u(1)),
             grant(ADMIN, &u(2)),
@@ -351,8 +358,8 @@ mod tests {
             grant(MODR, &u(3)),
             ban(MODR, &u(3)), // equal rank: banned wins
             grant("did:plc:rando2222222222222222222", &u(4)), // not an authority
-            ban(MODR, ADMIN),  // a moderator cannot ban an admin
-            ban(MODR, MODR),   // own DID: allowed
+            ban(MODR, ADMIN), // a moderator cannot ban an admin
+            ban(MODR, MODR),  // own DID: allowed
             action(
                 OWNER,
                 &u(5),

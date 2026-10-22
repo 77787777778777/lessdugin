@@ -12,15 +12,15 @@ use lessdugin_atp::syntax::{AtUri, Datetime, Did};
 use lessdugin_core::discovery::{DeclProof, DiscState, ForumKey, ForumSync, SyncOpts};
 use lessdugin_core::engine::{Engine, EngineConfig};
 use lessdugin_core::host::Host;
+use lessdugin_core::store::repo::BreakerState;
 use lessdugin_core::store::repo::RangeCursor;
 use lessdugin_core::store::{RecKey, RecordStore, RepoRow, Slot};
-use lessdugin_core::sync::net::BreakerState;
 use lessdugin_core::sync::{
     Priority, Reason, RepoOutcome, RepoReport, Session, Stats, SyncConfig, SyncRequest, Syncer,
 };
 use lessdugin_lexicon::keys;
-use lessdugin_lexicon::nsid;
 use lessdugin_lexicon::ns::NS;
+use lessdugin_lexicon::nsid;
 use lessdugin_lexicon::records::{
     AccessAction, Action, Forum, Markdown, Md, Membership, ModAction, Moderator, Opinion, Post,
     StrongRef,
@@ -49,6 +49,9 @@ impl World {
     fn new() -> Self {
         let host = MemHost::new();
         let net = FakeNet::on(&host);
+        // accounts made with `add_account` live on the first PDS: make it the default one even
+        // when a test adds another PDS before its first account
+        let _ = net.default_pds();
         let engine = Engine::new(host.clone(), EngineConfig::default());
         Self {
             host,
@@ -114,7 +117,12 @@ impl World {
 
     fn join(&self, a: &AccountHandle, f: &ForumKey) {
         let m = Membership::new(f.uri.clone(), self.dt());
-        self.put(a, nsid::MEMBERSHIP, &f.fk, &serde_json::to_value(&m).unwrap());
+        self.put(
+            a,
+            nsid::MEMBERSHIP,
+            &f.fk,
+            &serde_json::to_value(&m).unwrap(),
+        );
     }
 
     fn access(&self, actor: &AccountHandle, f: &ForumKey, subject: &Did, level: AccessLevel) {
@@ -187,7 +195,9 @@ impl World {
     }
 
     fn repo(&self, a: &AccountHandle) -> RepoRow {
-        block_on(self.store().repo(a.did().as_str())).unwrap().unwrap()
+        block_on(self.store().repo(a.did().as_str()))
+            .unwrap()
+            .unwrap()
     }
 
     fn slot(&self, uri: &str) -> Slot {
@@ -287,7 +297,10 @@ fn cursor_range_listing_is_bounded_and_probed() {
     // key — and never a full listing
     assert!(lists.len() <= 3, "{}", lists.len());
     assert!(lists.iter().all(|l| l.params.contains_key("cursor")));
-    assert_eq!(host_row(&w, &owner.pds_base()).range_cursor, RangeCursor::Yes);
+    assert_eq!(
+        host_row(&w, &owner.pds_base()).range_cursor,
+        RangeCursor::Yes
+    );
 }
 
 fn fallback_case(mode: CursorMode) {
@@ -380,7 +393,7 @@ fn a_rollback_keeps_the_cache_until_a_full_sync() {
     let repo = w.repo(&owner);
     assert!(repo.rev < rev);
     assert!(repo.rollback_since.is_none());
-    assert!(matches!(w.slot(&p.0), Slot::Tomb(_)));
+    assert!(!is_rec(&w.slot(&p.0)), "the cached state was discarded");
 }
 
 #[test]
@@ -398,11 +411,13 @@ fn deletes_apply_only_after_a_complete_stable_listing() {
     // the head moves during the listing: rows admitted, no tombstone, re-queued
     let moved = tid_at_ms(w.host.now() + 1_000).to_string();
     w.net.inject(
-        Fault::respond(resp::ok_json(&json!({"cid": cid.to_string(), "rev": moved})))
-            .on_repo(owner.did().as_str())
-            .on_nsid(HEAD)
-            .after(1)
-            .once(),
+        Fault::respond(resp::ok_json(
+            &json!({"cid": cid.to_string(), "rev": moved}),
+        ))
+        .on_repo(owner.did().as_str())
+        .on_nsid(HEAD)
+        .after(1)
+        .once(),
     );
     let r = w.sync_repo(&sy, &owner, &f);
     assert_eq!(r.outcome, RepoOutcome::Unstable, "{r:?}");
@@ -503,7 +518,11 @@ fn rate_limits_back_off_and_succeed() {
     let r = w.sync_repo(&sy, &owner, &f);
     assert_eq!(r.outcome, RepoOutcome::Applied, "{r:?}");
     assert!(w.host.now() - t0 >= 3_000, "waited for Retry-After");
-    assert!(w.host.sleeps().iter().any(|s| *s >= 3_000), "{:?}", w.host.sleeps());
+    assert!(
+        w.host.sleeps().iter().any(|s| *s >= 3_000),
+        "{:?}",
+        w.host.sleeps()
+    );
     assert_eq!(w.net.requests_for(LIST).len(), 2, "one 429, one retry");
     // a 429 does not count toward the breaker
     let b = sy.net().breaker(&owner.pds_base());
@@ -523,7 +542,7 @@ fn a_failing_host_opens_its_breaker() {
     for a in &accts {
         w.join(a, &f);
     }
-    w.net.inject(Fault::status(503).on_host(&pds2.base().to_owned()));
+    w.net.inject(Fault::status(503).on_host(pds2.base()));
     let sy = w.syncer();
     let mut reports = Vec::new();
     for a in &accts {
@@ -561,9 +580,14 @@ fn point_fetch_and_own_writes() {
     let out = block_on(sy.point_fetch(&s, &uri, None)).unwrap();
     assert!(matches!(
         out,
-        lessdugin_core::sync::PointOutcome::Admitted { valid: true, changed: true, .. }
+        lessdugin_core::sync::PointOutcome::Admitted {
+            valid: true,
+            changed: true,
+            ..
+        }
     ));
     owner.delete(nsid::POST, uri.rkey().as_str());
+    w.host.advance_ms(1); // a later request (equal keys keep the version)
     let out = block_on(sy.point_fetch(&s, &uri, None)).unwrap();
     assert_eq!(
         out,
@@ -574,7 +598,9 @@ fn point_fetch_and_own_writes() {
     // an own write: stored with the exact value sent, then confirmed by a listing (P1)
     let (uri2, cid2) = w.post(&owner, &f);
     let (_, rev) = owner.head();
-    let value = owner.get(nsid::POST, uri2.rsplit('/').next().unwrap()).unwrap();
+    let value = owner
+        .get(nsid::POST, uri2.rsplit('/').next().unwrap())
+        .unwrap();
     let commit = lessdugin_atp::xrpc::CommitMeta {
         cid: owner.head().0.to_string(),
         rev: rev.to_string(),
@@ -610,6 +636,12 @@ fn head_checks_queue_changed_repos() {
         block_on(sy.head_check(&s, owner.did(), false)).unwrap(),
         None
     );
+    assert_eq!(
+        w.repo(&owner).class_at(w.host.now(), false),
+        lessdugin_core::store::repo::RepoClass::Hot,
+        "the sync just changed rows"
+    );
+    w.host.advance_ms(31 * 86_400_000);
     w.post(&owner, &f);
     assert_eq!(
         block_on(sy.head_check(&s, owner.did(), false)).unwrap(),
@@ -641,7 +673,12 @@ fn approval_mode_syncs_authorities_and_confirmed_grants() {
     let bob = w.net.add_account("bob.example.com");
     let carol = w.net.add_account("carol.example.com");
     let dave = w.net.add_account("dave.example.com");
-    let f = w.forum(&owner, "meta", MembershipMode::Approval, &[(&admin, "admin")]);
+    let f = w.forum(
+        &owner,
+        "meta",
+        MembershipMode::Approval,
+        &[(&admin, "admin")],
+    );
     for a in [&admin, &alice, &carol, &dave] {
         w.join(a, &f);
     }
@@ -653,7 +690,11 @@ fn approval_mode_syncs_authorities_and_confirmed_grants() {
     w.opinion(&admin, &f, &pa);
 
     let fs = w.sync_forum(&f, &SyncOpts::default());
-    assert!(matches!(fs.forum.proof, DeclProof::Proven { .. }), "{:?}", fs.forum.proof);
+    assert!(
+        matches!(fs.forum.proof, DeclProof::Proven { .. }),
+        "{:?}",
+        fs.forum.proof
+    );
     assert_eq!(fs.forum.authorities.len(), 2);
     let r = &fs.state.roster;
     let set = |xs: &[&AccountHandle]| -> BTreeSet<String> {
@@ -672,7 +713,11 @@ fn approval_mode_syncs_authorities_and_confirmed_grants() {
     );
     assert!(!fs.state.disc.contains_key(carol.did().as_str()));
     assert_eq!(w.requests_about(carol.did()), 0, "carol is not a candidate");
-    assert_eq!(w.requests_about(dave.did()), 0, "dave is banned, not granted");
+    assert_eq!(
+        w.requests_about(dave.did()),
+        0,
+        "dave is banned, not granted"
+    );
     assert!(w.stored(&f, &alice).contains(&pa.0));
     // C(F) = A ∪ G without the rejected bob
     assert_eq!(fs.completeness.repos_total, 3);
@@ -700,7 +745,12 @@ fn an_unavailable_authority_degrades_the_view() {
     let pds2 = w.net.add_pds("https://pds2.example.com");
     let owner = w.net.add_account("owner.example.com");
     let modr = pds2.add_account("mod.example.com");
-    let f = w.forum(&owner, "meta", MembershipMode::Approval, &[(&modr, "moderator")]);
+    let f = w.forum(
+        &owner,
+        "meta",
+        MembershipMode::Approval,
+        &[(&modr, "moderator")],
+    );
     w.join(&modr, &f);
     w.net.inject(Fault::disconnect().on_host(pds2.base()));
     let fs = w.sync_forum(&f, &SyncOpts::default());
@@ -751,9 +801,15 @@ fn an_owner_with_a_hint_identity_cannot_be_opened() {
     );
     w.net.clear_faults();
     let missing = ForumKey::new(owner.did(), "nope").unwrap();
-    let e = block_on(w.syncer().sync_forum(missing.uri.as_str(), &SyncOpts::default()))
-        .unwrap_err();
-    assert!(matches!(e, lessdugin_core::discovery::DiscoveryError::NotFound(_)));
+    let e = block_on(
+        w.syncer()
+            .sync_forum(missing.uri.as_str(), &SyncOpts::default()),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        e,
+        lessdugin_core::discovery::DiscoveryError::NotFound(_)
+    ));
 }
 
 #[test]
@@ -835,6 +891,49 @@ fn time_and_request_budgets_end_the_command_partial() {
     assert!(!fs.report.partial, "{:?}", fs.report);
 }
 
+#[test]
+fn a_time_budget_also_bounds_waiting() {
+    let w = World::new();
+    let owner = w.net.add_account("owner.example.com");
+    let f = w.forum(&owner, "meta", MembershipMode::Approval, &[]);
+    let members: Vec<_> = (0..4)
+        .map(|i| w.net.add_account(&format!("m{i}.example.com")))
+        .collect();
+    for m in &members {
+        w.join(m, &f);
+        w.post(m, &f);
+        w.access(&owner, &f, m.did(), AccessLevel::Member);
+    }
+    assert!(!w.sync_forum(&f, &SyncOpts::default()).report.partial);
+    // a host asking for 30 s back-offs does not hold a 10 s command longer than 10 s
+    for m in &members {
+        w.post(m, &f);
+    }
+    w.net.inject(Fault::rate_limited(30).on_nsid(LIST));
+    let t0 = w.host.now();
+    let fs = w.sync_forum(
+        &f,
+        &SyncOpts {
+            budget_ms: Some(10_000),
+            ..SyncOpts::default()
+        },
+    );
+    assert!(w.host.now() - t0 <= 10_000, "{}", w.host.now() - t0);
+    assert!(fs.report.partial);
+    // the first listing's 429 holds the whole host back (§9.2); repos whose new head was seen
+    // are stale, the others were not even asked
+    assert!(fs.report.repos_stale >= 1, "{:?}", fs.report);
+    assert!(
+        fs.report.errors.iter().any(|e| e.code == "time_budget"),
+        "{:?}",
+        fs.report.errors
+    );
+    // nothing was failed or backed off for it
+    for m in &members {
+        assert_eq!(w.repo(m).fails, 0);
+    }
+}
+
 /// `sync.md` §14.1: a cold sync costs PLC + 2 heads + describeRepo + one listing per present
 /// RANGED collection + the membership `getRecord` per participant: 8 with three collections.
 /// (The task's "≤ ~6" is the synthesis's figure, which §14.1 corrects: it omitted the head
@@ -904,4 +1003,305 @@ fn engine_sync_forum_returns_the_report() {
     let e = block_on(w.engine.sync_forum("not a ref", &SyncOpts::default())).unwrap_err();
     assert_eq!(e.code, lessdugin_core::engine::ErrorCode::InvalidRef);
     assert!(w.host.now() > 0);
+}
+
+#[test]
+fn recently_active_authors_come_first_within_the_mode() {
+    let w = World::new();
+    let owner = w.net.add_account("owner.example.com");
+    let ivy = w.net.add_account("ivy.example.com");
+    let jon = w.net.add_account("jon.example.com");
+    // approval mode: a recently active author who is not granted is never synced
+    let f = w.forum(&owner, "appr", MembershipMode::Approval, &[]);
+    w.join(&ivy, &f);
+    w.join(&jon, &f);
+    w.access(&owner, &f, jon.did(), AccessLevel::Member);
+    w.post(&ivy, &f);
+    let opts = SyncOpts {
+        recently_active: vec![ivy.did().to_string(), jon.did().to_string()],
+        ..SyncOpts::default()
+    };
+    let fs = w.sync_forum(&f, &opts);
+    assert_eq!(w.requests_about(ivy.did()), 0, "ivy is an applicant");
+    assert_eq!(
+        fs.state.disc.get(jon.did().as_str()).map(|d| d.state),
+        Some(DiscState::Confirmed)
+    );
+    assert_eq!((fs.report.repos_total, fs.report.repos_complete), (2, 2));
+
+    // open mode: any recently active author is confirmed and synced at once
+    let g = w.forum(&owner, "open", MembershipMode::Open, &[]);
+    w.join(&ivy, &g);
+    let pi = w.post(&ivy, &g);
+    let opts = SyncOpts {
+        recently_active: vec![ivy.did().to_string()],
+        ..SyncOpts::default()
+    };
+    let fs = w.sync_forum(&g, &opts);
+    let row = &fs.state.disc[ivy.did().as_str()];
+    assert_eq!(row.state, DiscState::Confirmed);
+    assert_eq!(row.src, vec!["hint:active".to_owned()]);
+    assert!(w.stored(&g, &ivy).contains(&pi.0));
+}
+
+// ---------------------------------------------------------------------------------------------
+// scheduler (§9)
+
+/// Counts requests in flight per origin; each request yields to the executor twice before it is
+/// answered, so concurrent jobs really overlap.
+#[derive(Clone)]
+struct CountingHost {
+    inner: MemHost,
+    counts: Arc<std::sync::Mutex<InFlight>>,
+}
+
+#[derive(Default)]
+struct InFlight {
+    now: std::collections::BTreeMap<String, usize>,
+    max: std::collections::BTreeMap<String, usize>,
+    global: usize,
+    max_global: usize,
+}
+
+struct YieldOnce(bool);
+
+impl Future for YieldOnce {
+    type Output = ();
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<()> {
+        if self.0 {
+            std::task::Poll::Ready(())
+        } else {
+            self.0 = true;
+            cx.waker().wake_by_ref();
+            std::task::Poll::Pending
+        }
+    }
+}
+
+impl Host for CountingHost {
+    type Kv = <MemHost as Host>::Kv;
+    type Ws = <MemHost as Host>::Ws;
+
+    fn cache(&self) -> &Self::Kv {
+        self.inner.cache()
+    }
+
+    fn state(&self) -> &Self::Kv {
+        self.inner.state()
+    }
+
+    async fn http(
+        &self,
+        req: lessdugin_core::host::HttpRequest,
+    ) -> Result<lessdugin_core::host::HttpResponse, lessdugin_core::host::HostError> {
+        let origin = match &req.target {
+            lessdugin_core::host::Target::Anon(u) => u.origin().ascii_serialization(),
+            lessdugin_core::host::Target::UserPds { account, .. } => account.to_string(),
+        };
+        {
+            let mut c = self.counts.lock().unwrap();
+            let n = c.now.entry(origin.clone()).or_default();
+            *n += 1;
+            let n = *n;
+            let m = c.max.entry(origin.clone()).or_default();
+            *m = (*m).max(n);
+            c.global += 1;
+            c.max_global = c.max_global.max(c.global);
+        }
+        YieldOnce(false).await;
+        YieldOnce(false).await;
+        let r = self.inner.http(req).await;
+        let mut c = self.counts.lock().unwrap();
+        *c.now.get_mut(&origin).unwrap() -= 1;
+        c.global -= 1;
+        r
+    }
+
+    async fn fetch_blob(
+        &self,
+        pds: url::Url,
+        did: Did,
+        cid: String,
+        max_bytes: u64,
+    ) -> Result<lessdugin_core::host::BlobHandle, lessdugin_core::host::HostError> {
+        self.inner.fetch_blob(pds, did, cid, max_bytes).await
+    }
+
+    async fn websocket(
+        &self,
+        url: url::Url,
+        max_message_bytes: u32,
+    ) -> Result<Self::Ws, lessdugin_core::host::HostError> {
+        self.inner.websocket(url, max_message_bytes).await
+    }
+
+    async fn resolve_txt_system(
+        &self,
+        name: String,
+    ) -> Result<Option<Vec<String>>, lessdugin_core::host::HostError> {
+        self.inner.resolve_txt_system(name).await
+    }
+
+    async fn sleep(&self, ms: u64) {
+        self.inner.sleep(ms).await;
+    }
+
+    fn now_ms(&self) -> i64 {
+        self.inner.now_ms()
+    }
+
+    fn fill_random(&self, buf: &mut [u8]) {
+        self.inner.fill_random(buf);
+    }
+}
+
+#[test]
+fn the_limiter_caps_requests_in_flight() {
+    let w = World::new();
+    let owner = w.net.add_account("owner.example.com");
+    let pds2 = w.net.add_pds("https://pds2.example.com");
+    let f = w.forum(&owner, "meta", MembershipMode::Approval, &[]);
+    let members: Vec<_> = (0..8)
+        .map(|i| pds2.add_account(&format!("m{i}.example.com")))
+        .collect();
+    for m in &members {
+        w.join(m, &f);
+        w.post(m, &f);
+        w.access(&owner, &f, m.did(), AccessLevel::Member);
+    }
+    let host = CountingHost {
+        inner: w.host.clone(),
+        counts: Arc::default(),
+    };
+    let mut config = SyncConfig::from_engine(w.engine.config());
+    config.limits = lessdugin_core::sync::NetLimits {
+        global: 3,
+        per_host: 2,
+        plc: 8,
+        doh: 8,
+    };
+    let sy = Syncer::new(Arc::new(host.clone()), config);
+    let fs = block_on(sy.sync_forum(f.uri.as_str(), &SyncOpts::default())).unwrap();
+    assert!(!fs.report.partial, "{:?}", fs.report);
+    assert_eq!(fs.report.repos_complete, 9);
+    let c = host.counts.lock().unwrap();
+    let origin = pds2.base().trim_end_matches('/');
+    assert_eq!(c.max[origin], 2, "per-host cap, reached: {:?}", c.max);
+    assert_eq!(c.max_global, 3, "global cap, reached");
+    assert!(c.max.values().all(|m| *m <= 2), "{:?}", c.max);
+    assert_eq!(c.global, 0);
+    assert_eq!(sy.net().inflight(), 0, "every permit released");
+}
+
+#[test]
+fn read_budgets_hold_background_work_below_half_the_window() {
+    let w = World::new();
+    let owner = w.net.add_account("owner.example.com");
+    let pds2 = w.net.add_pds("https://pds2.example.com");
+    let f = w.forum(&owner, "meta", MembershipMode::Approval, &[]);
+    let members: Vec<_> = (0..4)
+        .map(|i| pds2.add_account(&format!("m{i}.example.com")))
+        .collect();
+    for m in &members {
+        w.join(m, &f);
+        w.post(m, &f);
+        w.access(&owner, &f, m.did(), AccessLevel::Member);
+    }
+    pds2.set_rate_limit(Some(lessdugin_testkit::fake_pds::RateLimit {
+        limit: 20,
+        window_ms: 60_000,
+    }));
+    let t0 = w.host.now();
+    let fs = w.sync_forum(&f, &SyncOpts::default());
+    assert!(!fs.report.partial, "{:?}", fs.report);
+    let origin = pds2.base().trim_end_matches('/').to_owned();
+    let sent: Vec<_> = w
+        .net
+        .requests()
+        .into_iter()
+        .filter(|r| r.host == origin)
+        .collect();
+    assert_eq!(
+        sent.len(),
+        4 * 5,
+        "head, describeRepo, posts, membership, head"
+    );
+    assert!(
+        sent.iter().all(|r| r.status != 429),
+        "the PDS never had to refuse"
+    );
+    let first_window = sent.iter().filter(|r| r.at_ms < t0 + 60_000).count();
+    assert_eq!(
+        first_window, 10,
+        "background work uses at most half the window"
+    );
+    assert!(w.host.now() >= t0 + 60_000, "it waited for the reset");
+    let b = w.syncer().net().budget(&origin).unwrap();
+    assert_eq!(b.limit, 20);
+}
+
+#[test]
+fn a_host_without_range_cursors_is_probed_again_after_seven_days() {
+    let w = World::new();
+    let owner = w.net.add_account("owner.example.com");
+    let f = w.forum(&owner, "meta", MembershipMode::Approval, &[]);
+    w.post(&owner, &f);
+    owner.pds().set_cursor_mode(CursorMode::Opaque);
+    let sy = w.syncer();
+    assert_eq!(w.sync_repo(&sy, &owner, &f).outcome, RepoOutcome::Applied);
+    let pds = owner.pds_base();
+    assert_eq!(host_row(&w, &pds).range_cursor, RangeCursor::No);
+    let probe = format!("{}.", f.fk);
+    let probes = |w: &World| {
+        w.net
+            .requests_for(LIST)
+            .iter()
+            .filter(|l| l.params.get("cursor") == Some(&probe))
+            .count()
+    };
+    // within 7 days: FULL mode, no probe
+    owner.pds().set_cursor_mode(CursorMode::Bound);
+    w.host.advance_ms(6 * 86_400_000);
+    w.post(&owner, &f);
+    w.net.clear_requests();
+    assert_eq!(w.sync_repo(&sy, &owner, &f).outcome, RepoOutcome::Applied);
+    assert_eq!(probes(&w), 0);
+    assert_eq!(host_row(&w, &pds).range_cursor, RangeCursor::No);
+    // after 7 days: probed again, and the host now passes
+    w.host.advance_ms(86_400_000 + 1);
+    w.post(&owner, &f);
+    w.net.clear_requests();
+    assert_eq!(w.sync_repo(&sy, &owner, &f).outcome, RepoOutcome::Applied);
+    assert_eq!(probes(&w), 1);
+    assert_eq!(host_row(&w, &pds).range_cursor, RangeCursor::Yes);
+    assert_eq!(
+        w.stored(&f, &owner).len(),
+        4,
+        "three posts and the membership"
+    );
+}
+
+#[test]
+fn a_reconcile_refreshes_collections_even_at_an_unchanged_head() {
+    let w = World::new();
+    let owner = w.net.add_account("owner.example.com");
+    let f = w.forum(&owner, "meta", MembershipMode::Approval, &[]);
+    let sy = w.syncer();
+    assert_eq!(w.sync_repo(&sy, &owner, &f).outcome, RepoOutcome::Applied);
+    assert!(!w.repo(&owner).colls.iter().any(|c| c == nsid::POST));
+    // a first post: `repo.colls` (< 24 h old) is reused, so the post collection is not listed
+    let p = w.post(&owner, &f);
+    assert_eq!(w.sync_repo(&sy, &owner, &f).outcome, RepoOutcome::Applied);
+    assert!(!is_rec(&w.slot(&p.0)));
+    // the reconcile asks describeRepo again and lists the new collection
+    let r = w.sync_repo_for(&sy, &owner, &f, Reason::Reconcile);
+    assert_eq!(r.outcome, RepoOutcome::Applied, "{r:?}");
+    assert!(is_rec(&w.slot(&p.0)));
+    assert!(w.repo(&owner).colls.iter().any(|c| c == nsid::POST));
+    // and at an unchanged head with unchanged collections it stays clean
+    let r = w.sync_repo_for(&sy, &owner, &f, Reason::Reconcile);
+    assert_eq!(r.outcome, RepoOutcome::Clean);
 }

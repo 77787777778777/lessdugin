@@ -194,17 +194,29 @@ mod tests {
     #[test]
     fn rate_limit_headers() {
         let now = 1_000_000_000_000;
-        assert_eq!(rate_limited_until(&resp(&[("retry-after", "30")]), now), now + 30_000);
         assert_eq!(
-            rate_limited_until(&resp(&[("retry-after", "30"), ("ratelimit-reset", "90")]), now),
+            rate_limited_until(&resp(&[("retry-after", "30")]), now),
+            now + 30_000
+        );
+        assert_eq!(
+            rate_limited_until(
+                &resp(&[("retry-after", "30"), ("ratelimit-reset", "90")]),
+                now
+            ),
             now + 90_000
         );
         assert_eq!(
             rate_limited_until(&resp(&[("ratelimit-reset", "1000000120")]), now),
             1_000_000_120_000
         );
-        assert_eq!(rate_limited_until(&resp(&[]), now), now + DEFAULT_RATE_LIMIT_WAIT_MS);
-        assert_eq!(exhausted_until(&resp(&[("ratelimit-remaining", "3")]), now), None);
+        assert_eq!(
+            rate_limited_until(&resp(&[]), now),
+            now + DEFAULT_RATE_LIMIT_WAIT_MS
+        );
+        assert_eq!(
+            exhausted_until(&resp(&[("ratelimit-remaining", "3")]), now),
+            None
+        );
         assert_eq!(
             exhausted_until(
                 &resp(&[("ratelimit-remaining", "0"), ("ratelimit-reset", "10")]),

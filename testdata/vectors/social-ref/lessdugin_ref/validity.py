@@ -321,7 +321,7 @@ def _check(uri: str, value: dict) -> Validity:
         if not is_canonical_at_uri(u, allowed):
             raise _Invalid("G4", what)
 
-    if coll not in ("forum", "profile"):
+    if coll not in ("forum", "profile", "revision"):      # a revision has no forum field (NOTES.md)
         ref(v["forum"], {"forum"}, "forum")
     if coll == "comment":
         ref(v["root"]["uri"], {"post"}, "root")
@@ -502,8 +502,8 @@ def _check_modaction(v: dict, rkey: str) -> Validity:
         # MA9
         if name == "lock" and scoll == "forum":
             no_effect = no_effect or "MA9"
-    # MA10
-    if name == "tag" and not unknown and "head" in a:
+    # MA10 (still checked when MA7 applies: MA7 skips only MA3–MA6)
+    if name == "tag" and "head" in a:
         if split_uri(a["head"]["uri"])[2][:12] != fk(F):
             raise _Invalid("MA10", "head fk")
     # MA11, MA12: G4 and G7 above

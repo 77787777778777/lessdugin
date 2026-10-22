@@ -147,6 +147,9 @@ dto! {
         pub hint: bool,
         #[serde(default, skip_serializing_if = "is_false")]
         pub inconsistent_timestamps: bool,
+        /// An own item with an outbox write that is not `done` (`sync.md` §1.6).
+        #[serde(default, skip_serializing_if = "is_false")]
+        pub pending: bool,
     }
 }
 
@@ -944,6 +947,335 @@ dto! {
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// §3 Operation inputs (request types; shapes adopted from `packages/engine/src/types.ts`)
+
+dto! {
+    /// A moderator entry of a [`ForumDraft`].
+    pub struct ModeratorDraft {
+        pub did: String,
+        pub role: ModRole,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub title: Option<String>,
+    }
+}
+
+string_enum! {
+    /// `forum.defaultTier` values a declaration may write.
+    pub enum DefaultTier { Personal, Frontpage }
+}
+
+dto! {
+    /// `forum_create` / `forum_update` input (`data-model.md` §6.1).
+    pub struct ForumDraft {
+        /// The forum rkey (`forum_create` only; fixed afterwards).
+        pub slug: String,
+        pub name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub description: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub about: Option<BodyDraft>,
+        pub membership: MembershipMode,
+        pub default_tier: DefaultTier,
+        #[serde(default)]
+        pub featured_tags: Vec<String>,
+        #[serde(default)]
+        pub moderators: Vec<ModeratorDraft>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub report_contact: Option<String>,
+    }
+}
+
+impl ForumDraft {
+    /// A draft with the defaults `forum create` writes (`approval`, `personal`).
+    pub fn new(slug: impl Into<String>, name: impl Into<String>) -> Self {
+        Self {
+            slug: slug.into(),
+            name: name.into(),
+            description: None,
+            about: None,
+            membership: MembershipMode::Approval,
+            default_tier: DefaultTier::Personal,
+            featured_tags: Vec::new(),
+            moderators: Vec::new(),
+            report_contact: None,
+        }
+    }
+}
+
+dto! {
+    /// `members` filter.
+    #[derive(Default)]
+    pub struct MembersQuery {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub status: Option<ForumRole>,
+        /// Applicants only (approval mode: a membership record and no grant).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub pending: Option<bool>,
+    }
+}
+
+dto! {
+    /// `sync_forum` / `sync_thread` options (`engine-api.md` §3.3).
+    #[derive(Default)]
+    pub struct SyncOpts {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub budget_ms: Option<i64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub max_requests: Option<u32>,
+        #[serde(default)]
+        pub full: bool,
+    }
+}
+
+dto! {
+    /// `list_posts` input (`social.md` §12).
+    pub struct ListPostsQuery {
+        pub forum: String,
+        pub sort: PostSort,
+        pub filter: PostFilter,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub tag: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub kind: Option<PostKind>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub author: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub cursor: Option<String>,
+        pub limit: u32,
+    }
+}
+
+impl ListPostsQuery {
+    /// The default view of `forum`: `magic` over `frontpage`, one page.
+    pub fn new(forum: impl Into<String>) -> Self {
+        Self {
+            forum: forum.into(),
+            sort: PostSort::Magic,
+            filter: PostFilter::Frontpage,
+            tag: None,
+            kind: None,
+            author: None,
+            cursor: None,
+            limit: crate::limits::LIST_PAGE_DEFAULT,
+        }
+    }
+}
+
+dto! {
+    /// `get_thread` options.
+    pub struct ThreadOpts {
+        pub sort: CommentSort,
+        #[serde(default)]
+        pub unread_only: bool,
+    }
+}
+
+impl Default for ThreadOpts {
+    fn default() -> Self {
+        Self {
+            sort: CommentSort::Magic,
+            unread_only: false,
+        }
+    }
+}
+
+dto! {
+    /// A local, not yet uploaded blob (`prepare_media`, M4).
+    pub struct MediaRef {
+        pub id: String,
+        pub cid: String,
+        pub mime: String,
+        pub size_bytes: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub alt: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub aspect_ratio: Option<AspectRatio>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub duration_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub name: Option<String>,
+    }
+}
+
+dto! {
+    /// A markdown body to write.
+    #[derive(Default)]
+    pub struct BodyDraft {
+        pub markdown: String,
+        #[serde(default)]
+        pub media: Vec<MediaRef>,
+    }
+}
+
+impl BodyDraft {
+    /// A markdown-only body.
+    pub fn text(markdown: impl Into<String>) -> Self {
+        Self {
+            markdown: markdown.into(),
+            media: Vec::new(),
+        }
+    }
+}
+
+dto! {
+    /// A link post's card.
+    pub struct ExternalLinkDraft {
+        pub uri: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub title: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub description: Option<String>,
+    }
+}
+
+dto! {
+    /// `publish` input.
+    pub struct PostDraft {
+        pub forum: String,
+        pub kind: PostKind,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub title: Option<String>,
+        pub body: BodyDraft,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub link: Option<ExternalLinkDraft>,
+        #[serde(default)]
+        pub tags: Vec<String>,
+        #[serde(default)]
+        pub labels: Vec<String>,
+    }
+}
+
+impl PostDraft {
+    /// An article.
+    pub fn article(
+        forum: impl Into<String>,
+        title: impl Into<String>,
+        markdown: impl Into<String>,
+    ) -> Self {
+        Self {
+            forum: forum.into(),
+            kind: PostKind::Article,
+            title: Some(title.into()),
+            body: BodyDraft::text(markdown),
+            link: None,
+            tags: Vec::new(),
+            labels: Vec::new(),
+        }
+    }
+}
+
+dto! {
+    /// `comment` input.
+    pub struct CommentDraft {
+        /// The thread's post.
+        pub root: String,
+        /// The comment replied to.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub parent: Option<String>,
+        pub body: BodyDraft,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub quote: Option<TextQuote>,
+    }
+}
+
+impl CommentDraft {
+    /// A reply to `parent` (or a top-level comment) in the thread of `root`.
+    pub fn new(root: impl Into<String>, parent: Option<String>, markdown: impl Into<String>) -> Self {
+        Self {
+            root: root.into(),
+            parent,
+            body: BodyDraft::text(markdown),
+            quote: None,
+        }
+    }
+}
+
+dto! {
+    /// A draft for `edit` and for the local draft store, tagged by what is drafted.
+    pub enum Draft {
+        Post {
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            id: Option<String>,
+            post: PostDraft,
+        },
+        Comment {
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            id: Option<String>,
+            comment: CommentDraft,
+        },
+    }
+}
+
+dto! {
+    /// `edit` options (`engine-api.md` §3.5).
+    pub struct EditOpts {
+        /// Snapshot the old version in a revision (`false`: `--no-history`).
+        pub history: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub summary: Option<String>,
+    }
+}
+
+impl Default for EditOpts {
+    fn default() -> Self {
+        Self {
+            history: true,
+            summary: None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// §3.8 Events
+
+dto! {
+    /// What changed (`engine-api.md` §3.8): UIs re-query the views of a topic.
+    #[derive(Eq, PartialOrd, Ord)]
+    pub enum Topic {
+        Forum { uri: String },
+        Thread { uri: String },
+        User { did: String },
+        Notifications,
+        Outbox,
+        Drafts,
+        Accounts,
+    }
+}
+
+dto! {
+    /// The state of an account's session.
+    pub enum AuthState {
+        Ok,
+        #[serde(rename_all = "camelCase")]
+        Expiring { in_ms: i64 },
+        Expired,
+    }
+}
+
+string_enum! {
+    /// Warning kinds.
+    pub enum WarningKind { Equivocation, IndexerContradiction, Degraded, RenderFailure, Other }
+}
+
+dto! {
+    /// An engine event (`engine-api.md` §3.8), delivered in order and never re-entrantly.
+    pub enum Event {
+        Changed { topics: Vec<Topic> },
+        SyncProgress { forum: String, done: u32, total: u32 },
+        Write { id: String, state: WriteState },
+        Auth { did: String, state: AuthState },
+        /// `Warning { kind, source?, message }`: the warning's own kind travels as `warning`.
+        Warning {
+            warning: WarningKind,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            source: Option<String>,
+            message: String,
+        },
+    }
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1033,6 +1365,67 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&AuthKind::Oauth).unwrap(),
             r#""oauth""#
+        );
+    }
+
+    #[test]
+    fn event_shapes() {
+        let e = Event::Changed {
+            topics: vec![
+                Topic::Forum {
+                    uri: "at://x/y/z".into(),
+                },
+                Topic::Outbox,
+            ],
+        };
+        assert_eq!(
+            serde_json::to_string(&e).unwrap(),
+            r#"{"kind":"changed","topics":[{"kind":"forum","uri":"at://x/y/z"},{"kind":"outbox"}]}"#
+        );
+        let p = Event::SyncProgress {
+            forum: "f".into(),
+            done: 1,
+            total: 2,
+        };
+        assert_eq!(
+            serde_json::to_string(&p).unwrap(),
+            r#"{"kind":"syncProgress","forum":"f","done":1,"total":2}"#
+        );
+        let w = Event::Warning {
+            warning: WarningKind::Degraded,
+            source: None,
+            message: "m".into(),
+        };
+        assert_eq!(
+            serde_json::to_string(&w).unwrap(),
+            r#"{"kind":"warning","warning":"degraded","message":"m"}"#
+        );
+        let a = Event::Auth {
+            did: "d".into(),
+            state: AuthState::Expiring { in_ms: 5 },
+        };
+        assert_eq!(
+            serde_json::to_string(&a).unwrap(),
+            r#"{"kind":"auth","did":"d","state":{"kind":"expiring","inMs":5}}"#
+        );
+    }
+
+    #[test]
+    fn request_shapes() {
+        let q: ListPostsQuery = serde_json::from_str(
+            r#"{"forum":"at://f","sort":"new","filter":"all","limit":5}"#,
+        )
+        .unwrap();
+        assert_eq!(q.sort, PostSort::New);
+        let d: Draft = serde_json::from_str(
+            r#"{"kind":"comment","comment":{"root":"at://p","body":{"markdown":"hi"}}}"#,
+        )
+        .unwrap();
+        assert!(matches!(d, Draft::Comment { id: None, .. }));
+        let f = ForumDraft::new("meta", "Meta");
+        assert_eq!(
+            serde_json::to_string(&f).unwrap(),
+            r#"{"slug":"meta","name":"Meta","membership":"approval","defaultTier":"personal","featuredTags":[],"moderators":[]}"#
         );
     }
 

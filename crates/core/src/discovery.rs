@@ -19,9 +19,7 @@ pub mod forum_ref;
 pub mod roster;
 pub mod state;
 
-pub use forum::{
-    DeclProof, DiscoveryError, ForumSync, NEWCOMER_BUDGET, OpenedForum, SyncOpts,
-};
+pub use forum::{DeclProof, DiscoveryError, ForumSync, NEWCOMER_BUDGET, OpenedForum, SyncOpts};
 pub use forum_ref::{ForumKey, ForumRef, ForumRefError, parse_forum_ref};
 pub use roster::{Roster, RosterRecord, authorities};
 pub use state::{DiscRow, DiscState, ForumState, StatusCounts};

@@ -219,8 +219,7 @@ impl ForumState {
         let roster = Roster::compute(key, decl, &recs, now_us);
         let closure = if roster.is_open() {
             let seeds = &roster.seeds;
-            let mut refs =
-                forum_records(kv, &key.fk, nsid::OPINION, |d| seeds.contains(d)).await?;
+            let mut refs = forum_records(kv, &key.fk, nsid::OPINION, |d| seeds.contains(d)).await?;
             refs.extend(forum_records(kv, &key.fk, nsid::COMMENT, |d| seeds.contains(d)).await?);
             roster.closure(key, &refs)
         } else {

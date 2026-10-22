@@ -662,6 +662,37 @@ fn reconcile_tombstones_unlisted_rows_and_drops_beyond_the_cap() {
 }
 
 #[test]
+fn forget_range_discards_rows_and_tombstones_of_one_repo() {
+    let kv = MemKv::new();
+    let uris = seed_forum(&kv);
+    block_on(async {
+        let store = RecordStore::new(&kv);
+        // a tombstone in the same range
+        let mut b = store.batch();
+        b.tombstone(&uris[1], del("3l2z", 99)).await.unwrap();
+        b.commit().await.unwrap();
+        let mut b = store.batch();
+        let gone = b.forget_range(DID, &coll("post"), FK).await.unwrap();
+        assert_eq!(gone, vec![uris[0].to_string(), uris[1].to_string()]);
+        // the membership, another repo, another fk and global rows are kept
+        assert!(!b.forget(&RecKey::of_uri(&uris[0])).await.unwrap());
+        b.commit().await.unwrap();
+        assert!(store.get(&uris[0]).await.unwrap().is_none());
+        assert!(store.tombstone_of(&uris[1]).await.unwrap().is_none());
+        for u in [&uris[2], &uris[3], &uris[4], &uris[5], &uris[6]] {
+            assert!(store.get(u).await.unwrap().is_some(), "{u}");
+        }
+        // a forgotten uri admits any later observation, even an older one
+        let mut b = store.batch();
+        let r = b
+            .put_version(version(&uris[0], 0, "3l2a", 1))
+            .await
+            .unwrap();
+        assert_eq!(r.admission, Admission::Inserted);
+    });
+}
+
+#[test]
 fn absent_requires_a_tombstone_or_a_complete_listing() {
     let kv = MemKv::new();
     let p = |did: &str, k: &str| uri_in(did, "post", &format!("{FK}-{k}")).to_string();

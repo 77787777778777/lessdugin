@@ -253,17 +253,20 @@ mod tests {
 
     #[test]
     fn mime_table() {
-        assert_eq!(normalise_mime(&[0xFF, 0xD8, 0xFF, 0xE0]), Some("image/jpeg"));
         assert_eq!(
-            normalise_mime(b"\x89PNG\r\n\x1a\n...."),
-            Some("image/png")
+            normalise_mime(&[0xFF, 0xD8, 0xFF, 0xE0]),
+            Some("image/jpeg")
         );
+        assert_eq!(normalise_mime(b"\x89PNG\r\n\x1a\n...."), Some("image/png"));
         assert_eq!(normalise_mime(b"GIF89a.."), Some("image/gif"));
         assert_eq!(normalise_mime(b"RIFF\0\0\0\0WEBPVP8 "), Some("image/webp"));
         assert_eq!(normalise_mime(b"\0\0\0\x20ftypM4A \0\0"), Some("audio/mp4"));
         assert_eq!(normalise_mime(b"\0\0\0\x20ftypM4B \0\0"), Some("audio/mp4"));
         assert_eq!(normalise_mime(b"\0\0\0\x20ftypisom\0\0"), Some("video/mp4"));
-        assert_eq!(normalise_mime(&[0x1A, 0x45, 0xDF, 0xA3, 1]), Some("video/webm"));
+        assert_eq!(
+            normalise_mime(&[0x1A, 0x45, 0xDF, 0xA3, 1]),
+            Some("video/webm")
+        );
         assert_eq!(normalise_mime(b"ID3\x04"), Some("audio/mpeg"));
         assert_eq!(normalise_mime(&[0xFF, 0xFB, 0x90]), Some("audio/mpeg"));
         assert_eq!(normalise_mime(b"OggS\0"), Some("audio/ogg"));
@@ -298,8 +301,13 @@ mod tests {
         );
         assert_eq!(blob_links(&post), vec![blobs[0].cid.clone()]);
         // under the threshold nothing spills
-        let mut seq = json!({"$type": nsid::SEQUENCE, "body": {"$type": nsid::MARKDOWN, "text": small}});
-        assert!(spill_oversized(&mut seq, nsid::SEQUENCE, None).unwrap().is_empty());
+        let mut seq =
+            json!({"$type": nsid::SEQUENCE, "body": {"$type": nsid::MARKDOWN, "text": small}});
+        assert!(
+            spill_oversized(&mut seq, nsid::SEQUENCE, None)
+                .unwrap()
+                .is_empty()
+        );
         // comments never spill
         let c = json!({"$type": nsid::COMMENT, "body": {"$type": nsid::MARKDOWN, "text": "z".repeat(70_000)}});
         assert!(largest_inline(&[(nsid::COMMENT, &c)]).is_none());

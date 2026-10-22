@@ -5,14 +5,17 @@
 //! |---|---|
 //! | [`net`] | [`Net`]: concurrency limits, per-host budgets, breakers, PLC pacing; [`NetHost`] |
 //! | [`list`] | `list_range`: the cursor-range probe, `FULL` fallback, fetch caps, safety caps (§5.3–§5.4) |
-//! | [`repo`] | `sync_repo` (§5.2), point fetches (§5.7), own writes (§5.8), head checks, account status |
+//! | [`repo`] | `sync_repo` (§5.2), point fetches (§5.7), own writes (§5.8), head checks and polls, account status, serving the queue (`run_ready`) |
 //! | [`queue`] | the dirty queue with priorities and coalescing (§6.1) |
-//! | [`schedule`] | polling and reconcile schedules (§6.7, §6.8) |
+//! | [`schedule`] | polling and reconcile schedules (§6.7, §6.8): `due_polls`, `due_reconciles` |
 //!
 //! A [`Syncer`] holds the state shared by every job of an engine ([`SyncShared`]: the scheduler
 //! and the dirty queue). Each job runs in a [`Session`]: a [`NetHost`] at the job's priority with
 //! the command's request counters, and an identity resolver over it, so that PLC and DoH
 //! requests are scheduled and counted like the rest.
+//!
+//! Repo locks are in-process ([`Net::repo_lock`]); the cross-process locks and the sync leader of
+//! §10.6 belong to the host.
 //!
 //! Records enter the store only through admission (`crate::store::admit`) and the record store's
 //! [`crate::store::Batch`]; repo state, host capabilities and the records of a pass are written
@@ -114,15 +117,15 @@ impl SyncError {
     /// `true` for a request this engine refused to send (`Blocked`: a request cap, a time
     /// budget, an open breaker, a policy): not the repo's fault, so no repo backoff follows.
     pub fn is_refusal(&self) -> bool {
-        match self {
+        matches!(
+            self,
             Self::Xrpc(XrpcCallError::Blocked(_))
-            | Self::List(list::ListError::Xrpc(XrpcCallError::Blocked(_)))
-            | Self::Identity(IdentityError::Fetch {
-                error: XrpcCallError::Blocked(_),
-                ..
-            }) => true,
-            _ => false,
-        }
+                | Self::List(list::ListError::Xrpc(XrpcCallError::Blocked(_)))
+                | Self::Identity(IdentityError::Fetch {
+                    error: XrpcCallError::Blocked(_),
+                    ..
+                })
+        )
     }
 
     /// `true` for transient failures (network, timeout, 5xx, rate limits).
@@ -281,11 +284,7 @@ impl<H: Host> Syncer<H> {
         let e = h.entry((uri.to_owned(), cid.to_owned())).or_insert(t_us);
         *e = (*e).min(t_us);
         while h.len() > HINT_FIRST_SEEN_MAX {
-            let Some(k) = h
-                .iter()
-                .min_by_key(|(_, t)| **t)
-                .map(|(k, _)| k.clone())
-            else {
+            let Some(k) = h.iter().min_by_key(|(_, t)| **t).map(|(k, _)| k.clone()) else {
                 break;
             };
             h.remove(&k);

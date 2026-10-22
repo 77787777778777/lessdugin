@@ -19,7 +19,7 @@
 
 use crate::store::repo::{RepoClass, RepoRow};
 use crate::sync::net::Priority;
-use crate::sync::queue::uniform;
+use crate::sync::queue::{DirtyItem, Reason, uniform};
 
 /// `POLL_AUTHORITY_MS`.
 pub const POLL_AUTHORITY_MS: i64 = 120_000;
@@ -150,12 +150,40 @@ pub fn next_reconcile(repo: &RepoRow, role: ReconcileRole, random: u64) -> (i64,
             Priority::P1,
         ),
         ReconcileRole::Participant => (
-            repo.last_reconcile.saturating_add(
-                RECONCILE_PARTICIPANT_MS / 1000 * uniform(900, 1100, random),
-            ),
+            repo.last_reconcile
+                .saturating_add(RECONCILE_PARTICIPANT_MS / 1000 * uniform(900, 1100, random)),
             Priority::P3,
         ),
     }
+}
+
+/// The reconciles due at `now`, as dirty-queue items (reason `Reconcile`; P1 for authorities,
+/// P3 for participants), by ready time then DID. `repos` is `(did, row, role)`, `None` for a
+/// repo never synced (due at once); `random(did)` gives each repo's jitter (stable per DID and
+/// period, as for [`due_polls`]). Queueing them coalesces with anything already queued (§6.1).
+pub fn due_reconciles<'a>(
+    repos: impl IntoIterator<Item = (&'a str, Option<&'a RepoRow>, ReconcileRole)>,
+    now_ms: i64,
+    random: impl Fn(&str) -> u64,
+) -> Vec<DirtyItem> {
+    let mut out: Vec<DirtyItem> = repos
+        .into_iter()
+        .filter_map(|(did, row, role)| {
+            let (at, prio) = match row {
+                Some(r) => next_reconcile(r, role, random(did)),
+                None => (
+                    now_ms,
+                    match role {
+                        ReconcileRole::Authority => Priority::P1,
+                        ReconcileRole::Participant => Priority::P3,
+                    },
+                ),
+            };
+            (at <= now_ms).then(|| DirtyItem::new(did, prio, Reason::Reconcile, at))
+        })
+        .collect();
+    out.sort_by(|a, b| (a.ready_at, &a.did).cmp(&(b.ready_at, &b.did)));
+    out
 }
 
 /// `true` if the account status of a repo is due for its daily check (§3.4).
@@ -166,7 +194,6 @@ pub fn account_status_due(repo: &RepoRow, now_ms: i64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::repo::HOT_MS;
 
     fn cid() -> lessdugin_atp::Cid {
         lessdugin_atp::cid::for_dag_cbor(b"\xa0")
@@ -207,7 +234,6 @@ mod tests {
         // backoff holds polls back
         hot.next_check = now + 1;
         assert!(due_polls([("did:hot", &hot, false)], now, |_| 200).is_empty());
-        assert!(HOT_MS > 0);
     }
 
     #[test]
@@ -241,6 +267,26 @@ mod tests {
         let (at, _) = next_reconcile(&r, ReconcileRole::Participant, 200);
         assert_eq!(at, 1_000 + 95_040_000);
         assert!(account_status_due(&r, ACCOUNT_STATUS_MS));
+        // due items: an authority after an hour, a participant after ~a day, a new repo at once
+        let now = 1_000 + RECONCILE_AUTHORITY_MS;
+        let due = due_reconciles(
+            [
+                ("did:a", Some(&r), ReconcileRole::Authority),
+                ("did:p", Some(&r), ReconcileRole::Participant),
+                ("did:n", None, ReconcileRole::Participant),
+            ],
+            now,
+            |_| 0,
+        );
+        let got: Vec<(&str, Priority, i64)> = due
+            .iter()
+            .map(|d| (d.did.as_str(), d.priority, d.ready_at))
+            .collect();
+        assert_eq!(
+            got,
+            [("did:a", Priority::P1, now), ("did:n", Priority::P3, now)]
+        );
+        assert!(due.iter().all(|d| d.reasons.contains(&Reason::Reconcile)));
         r.status_at = 10;
         assert!(!account_status_due(&r, ACCOUNT_STATUS_MS));
     }

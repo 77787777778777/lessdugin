@@ -119,3 +119,12 @@ pub const WRITE_COST_UPDATE: u32 = 2;
 pub const WRITE_COST_DELETE: u32 = 1;
 /// `#lock.allowed` entries; a longer computed allow-list is refused.
 pub const LOCK_ALLOWED_MAX: usize = 5_000;
+/// A comment whose depth would exceed this is re-attached to the thread root and flagged
+/// `Orphaned` (`social.md` §11 step 4).
+pub const THREAD_DEPTH_MAX: u32 = 1_000;
+/// Render-cache entries kept in memory (`sync.md` §13, *tunable*).
+pub const RENDER_CACHE_ENTRIES: usize = 512;
+/// Default page size of `list_posts` (*tunable*).
+pub const LIST_PAGE_DEFAULT: u32 = 30;
+/// Largest page size of `list_posts` (*tunable*).
+pub const LIST_PAGE_MAX: u32 = 500;

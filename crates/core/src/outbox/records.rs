@@ -69,11 +69,7 @@ pub fn at_uri(s: &str) -> Result<AtUri, EngineError> {
 }
 
 /// `membership` (rkey `fk(forum)`).
-pub fn membership(
-    forum: &AtUri,
-    note: Option<&str>,
-    now: &Datetime,
-) -> Result<Built, EngineError> {
+pub fn membership(forum: &AtUri, note: Option<&str>, now: &Datetime) -> Result<Built, EngineError> {
     let mut m = Membership::new(forum.clone(), now.clone());
     m.note = note.map(str::to_owned);
     Ok(Built {
@@ -160,14 +156,8 @@ pub fn mod_action(m: &ModAction) -> Result<Built, EngineError> {
         .get("action")
         .and_then(Value::as_object)
         .ok_or_else(|| EngineError::invalid_input("modAction.action is not an object"))?;
-    let rkey = keys::mod_action_rkey(
-        NS,
-        m.forum.as_str(),
-        m.scope.as_deref(),
-        &m.subject,
-        action,
-    )
-    .map_err(key_err)?;
+    let rkey = keys::mod_action_rkey(NS, m.forum.as_str(), m.scope.as_deref(), &m.subject, action)
+        .map_err(key_err)?;
     Ok(Built {
         collection: nsid::MOD_ACTION,
         rkey,
@@ -314,14 +304,29 @@ mod tests {
         assert!(o.rkey.starts_with(&format!("{fk}-{tid}-")));
         check(&did, o.collection, &o.rkey, &o.value, true).unwrap();
 
-        let mut ma = ModAction::new(f.clone(), root.uri.as_str(), Action::Hide(HideAction::hide()), now());
+        let mut ma = ModAction::new(
+            f.clone(),
+            root.uri.as_str(),
+            Action::Hide(HideAction::hide()),
+            now(),
+        );
         ma.reason = Some("spam".into());
         let ma = mod_action(&ma).unwrap();
         check(&did, ma.collection, &ma.rkey, &ma.value, true).unwrap();
 
-        let fo = forum("rationality", &Forum::create("R", now(), lessdugin_lexicon::values::MembershipMode::Open)).unwrap();
+        let fo = forum(
+            "rationality",
+            &Forum::create("R", now(), lessdugin_lexicon::values::MembershipMode::Open),
+        )
+        .unwrap();
         check(&did, fo.collection, &fo.rkey, &fo.value, true).unwrap();
-        assert!(forum("Bad Slug", &Forum::create("R", now(), lessdugin_lexicon::values::MembershipMode::Open)).is_err());
+        assert!(
+            forum(
+                "Bad Slug",
+                &Forum::create("R", now(), lessdugin_lexicon::values::MembershipMode::Open)
+            )
+            .is_err()
+        );
 
         let pr = profile(&Profile {
             bio: Some(Md::Known(Markdown::inline("me"))),
@@ -338,7 +343,14 @@ mod tests {
         let f = forum_uri();
         let p = post(&Post::article(f, "Title", "body", now()), "3l2s5xxv2ze2c").unwrap();
         // a wrong key fails PO1/G5
-        let e = check(&did, p.collection, "aaaaaaaaaaaa-3l2s5xxv2ze2c", &p.value, true).unwrap_err();
+        let e = check(
+            &did,
+            p.collection,
+            "aaaaaaaaaaaa-3l2s5xxv2ze2c",
+            &p.value,
+            true,
+        )
+        .unwrap_err();
         assert_eq!(e.code, crate::engine::ErrorCode::InvalidInput);
         assert!(e.detail.unwrap()["rules"].to_string().contains("G5"));
         // a float is not in the data model

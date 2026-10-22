@@ -30,9 +30,7 @@ use std::task::{Context, Poll, Waker};
 
 use lessdugin_atp::syntax::Did;
 
-use crate::host::{
-    BlobHandle, Host, HostError, HttpRequest, HttpResponse, MaybeSend, Target,
-};
+use crate::host::{BlobHandle, Host, HostError, HttpRequest, HttpResponse, MaybeSend, Target};
 use crate::limits;
 use crate::store::repo::{Breaker, BreakerState, Budget};
 
@@ -660,6 +658,10 @@ impl Net {
                 }
                 Gate::Wait(at) => {
                     let wait = at.saturating_sub(now).max(1);
+                    if stats.deadline().is_some_and(|d| at >= d) {
+                        // the budget frees up only after the command's time budget
+                        return Err(HostError::Blocked(TIME_BUDGET_SPENT.into()));
+                    }
                     if wait as u64 > limits::RETRY_AFTER_MAX_WAIT_MS {
                         return Ok(local_429(wait));
                     }
@@ -668,8 +670,13 @@ impl Net {
             }
         };
         if class == Class::Plc {
-            let wait = self.lock().plc_pacing.slot(host.now_ms());
+            let now = host.now_ms();
+            let wait = self.lock().plc_pacing.slot(now);
             if wait > 0 {
+                if stats.expired(now.saturating_add(wait)) {
+                    self.record_outcome(&origin, None, probe, now);
+                    return Err(HostError::Blocked(TIME_BUDGET_SPENT.into()));
+                }
                 host.sleep(wait as u64).await;
             }
         }
@@ -702,9 +709,7 @@ impl Net {
             }
             Err(e) => {
                 let failure = match &e {
-                    HostError::Network(_) | HostError::Timeout | HostError::TooLarge => {
-                        Some(true)
-                    }
+                    HostError::Network(_) | HostError::Timeout | HostError::TooLarge => Some(true),
                     _ => None,
                 };
                 self.record_outcome(&origin, failure, probe, now);
@@ -1049,7 +1054,13 @@ impl<H: Host> Host for NetHost<H> {
         self.inner.resolve_txt_system(name)
     }
 
+    /// Sleeps (a retry back-off, a `Retry-After`), but never past the command's time budget:
+    /// once it is spent every request is refused anyway.
     fn sleep(&self, ms: u64) -> impl Future<Output = ()> + MaybeSend {
+        let ms = match self.stats.deadline() {
+            Some(d) => ms.min(u64::try_from(d.saturating_sub(self.inner.now_ms())).unwrap_or(0)),
+            None => ms,
+        };
         self.inner.sleep(ms)
     }
 
@@ -1180,7 +1191,10 @@ mod tests {
         };
         net.on_response(o, &resp, 1_000);
         // 50 ≤ 100/2: background waits for the reset; P0 may still go (50 > 20)
-        assert!(matches!(net.gate(o, Priority::P1, 1_000), Gate::Wait(31_000)));
+        assert!(matches!(
+            net.gate(o, Priority::P1, 1_000),
+            Gate::Wait(31_000)
+        ));
         assert!(matches!(net.gate(o, Priority::P0, 1_000), Gate::Go { .. }));
         assert!(matches!(net.gate(o, Priority::P1, 31_000), Gate::Go { .. }));
         // other hosts have no budget
@@ -1220,7 +1234,9 @@ mod tests {
     #[test]
     fn static_budget_hosts() {
         assert!(has_static_budget("https://bsky.social"));
-        assert!(has_static_budget("https://puffball.us-east.host.bsky.network"));
+        assert!(has_static_budget(
+            "https://puffball.us-east.host.bsky.network"
+        ));
         assert!(!has_static_budget("https://pds.example.com"));
         assert!(!has_static_budget("https://evilbsky.network.example"));
     }

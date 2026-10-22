@@ -4,6 +4,10 @@
 mod_state() is rules V1–V7: V1–V5 read only validity and L0–L2, V7 reads L1 and A, and V6
 asks the L5 author tier (authormod.py). state() continues with V8–V10, which read E (L3) and
 score (L3.5). thread_pass() turns hidden nodes with a listed descendant into tombstones.
+
+lens() is L7 (§10.3): local presentation applied after the fold, from local state only. It
+returns a new map and never changes a fold output; the vectors never assert it (the case
+modules only check that applying it leaves every projected field unchanged).
 """
 
 from __future__ import annotations
@@ -135,4 +139,19 @@ def thread_pass(view, states: dict) -> dict:
     return out
 
 
-__all__ = ["State", "mod_state", "state", "thread_pass", "v1_excluded", "NS"]
+MUTED = State("Collapsed", "Muted")
+
+
+def lens(view, displayed: dict, mutes=frozenset()) -> dict:
+    """L7 mutes (§10.3): a listed item by a muted author becomes Collapsed(Muted).
+
+    `mutes` is the viewer's local mute list (blocks treated as mutes are the same set). Pure:
+    reads only the given displayed states and record authors, returns a new map.
+    """
+    out = {}
+    for u, s in displayed.items():
+        out[u] = MUTED if s.listed and view.input.records[u].did in mutes else s
+    return out
+
+
+__all__ = ["State", "mod_state", "state", "thread_pass", "v1_excluded", "lens", "NS"]

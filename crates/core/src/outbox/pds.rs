@@ -228,7 +228,9 @@ impl CallError {
     /// The engine error.
     pub fn engine_error(&self) -> EngineError {
         match self {
-            Self::InvalidSwap => EngineError::conflict("the record or the repo changed (InvalidSwap)"),
+            Self::InvalidSwap => {
+                EngineError::conflict("the record or the repo changed (InvalidSwap)")
+            }
             Self::Ambiguous(e) | Self::Read(e) => e.clone(),
             Self::RateLimited { error, .. } | Self::Rejected { error, .. } => error.clone(),
         }
@@ -272,10 +274,9 @@ impl<'h, H: Host> PdsClient<'h, H> {
 
     fn read_error(&self, e: XrpcCallError) -> CallError {
         if let XrpcCallError::RateLimited { retry_after_ms } = &e {
-            let wait = retry_after_ms
-                .map_or(budget::DEFAULT_RATE_LIMIT_WAIT_MS, |ms| {
-                    i64::try_from(ms).unwrap_or(i64::MAX)
-                });
+            let wait = retry_after_ms.map_or(budget::DEFAULT_RATE_LIMIT_WAIT_MS, |ms| {
+                i64::try_from(ms).unwrap_or(i64::MAX)
+            });
             return CallError::RateLimited {
                 until: self.host.now_ms().saturating_add(wait),
                 error: EngineError::from(e),
@@ -302,7 +303,11 @@ impl<'h, H: Host> PdsClient<'h, H> {
     }
 
     /// `com.atproto.repo.getRecord`, fresh and admitted; `None` if absent.
-    pub async fn get(&mut self, collection: &str, rkey: &str) -> Result<Option<Current>, CallError> {
+    pub async fn get(
+        &mut self,
+        collection: &str,
+        rkey: &str,
+    ) -> Result<Option<Current>, CallError> {
         self.requests += 1;
         let (Ok(coll), Ok(key)) = (Nsid::parse(collection), RecordKey::parse(rkey)) else {
             return Err(CallError::Rejected {
@@ -319,7 +324,10 @@ impl<'h, H: Host> PdsClient<'h, H> {
         };
         let path = lessdugin_atp::xrpc::query_path(&params);
         let opts = CallOpts::capped(limits::RECORD_RESPONSE_MAX_BYTES);
-        let resp = match Xrpc::new(self.host).get(&self.service(), &path, &opts).await {
+        let resp = match Xrpc::new(self.host)
+            .get(&self.service(), &path, &opts)
+            .await
+        {
             Ok(r) => r,
             Err(XrpcCallError::RecordNotFound) => return Ok(None),
             Err(e) => return Err(self.read_error(e)),
@@ -331,8 +339,11 @@ impl<'h, H: Host> PdsClient<'h, H> {
         };
         let a = admit::admit_get_record(&resp.body, &expect, &NoValidator).map_err(|e| {
             CallError::Read(
-                EngineError::new(ErrorCode::Network, format!("own PDS returned a bad record: {e}"))
-                    .with_retryable(true),
+                EngineError::new(
+                    ErrorCode::Network,
+                    format!("own PDS returned a bad record: {e}"),
+                )
+                .with_retryable(true),
             )
         })?;
         Ok(Some(Current {
@@ -403,7 +414,9 @@ impl<'h, H: Host> PdsClient<'h, H> {
         let mut seen = std::collections::BTreeSet::new();
         let mut cursor: Option<String> = None;
         for _ in 0..FULL_MAX_PAGES {
-            let page = self.list_page(collection, cursor.as_deref(), validator).await?;
+            let page = self
+                .list_page(collection, cursor.as_deref(), validator)
+                .await?;
             let empty = page.rows.is_empty();
             for (k, entry) in page.rows {
                 if k.starts_with(prefix)
@@ -571,7 +584,12 @@ impl<'h, H: Host> PdsClient<'h, H> {
         })
     }
 
-    async fn write_json(&mut self, nsid: &str, body: &Value, cost: u32) -> Result<(Value, i64), CallError> {
+    async fn write_json(
+        &mut self,
+        nsid: &str,
+        body: &Value,
+        cost: u32,
+    ) -> Result<(Value, i64), CallError> {
         let bytes = serde_json::to_vec(body).map_err(|e| CallError::Rejected {
             status: 0,
             name: None,
@@ -581,11 +599,16 @@ impl<'h, H: Host> PdsClient<'h, H> {
             return Err(CallError::Rejected {
                 status: 0,
                 name: None,
-                error: EngineError::new(ErrorCode::TooLarge, "the write is larger than 900,000 bytes")
-                    .with_detail("bytes", bytes.len()),
+                error: EngineError::new(
+                    ErrorCode::TooLarge,
+                    "the write is larger than 900,000 bytes",
+                )
+                .with_detail("bytes", bytes.len()),
             });
         }
-        let (resp, at) = self.send_write(nsid, bytes, "application/json", cost).await?;
+        let (resp, at) = self
+            .send_write(nsid, bytes, "application/json", cost)
+            .await?;
         let v = crate::xrpc::decode_json::<Value>(&resp.body).unwrap_or(Value::Null);
         Ok((v, at))
     }
@@ -611,7 +634,11 @@ impl<'h, H: Host> PdsClient<'h, H> {
         }
         let sent_at = self.host.now_ms();
         let (out, _) = self
-            .write_json("com.atproto.repo.putRecord", &body, limits::WRITE_COST_UPDATE)
+            .write_json(
+                "com.atproto.repo.putRecord",
+                &body,
+                limits::WRITE_COST_UPDATE,
+            )
             .await?;
         Ok(written(&out, sent_at))
     }
@@ -631,7 +658,11 @@ impl<'h, H: Host> PdsClient<'h, H> {
         });
         let sent_at = self.host.now_ms();
         let (out, _) = self
-            .write_json("com.atproto.repo.createRecord", &body, limits::WRITE_COST_CREATE)
+            .write_json(
+                "com.atproto.repo.createRecord",
+                &body,
+                limits::WRITE_COST_CREATE,
+            )
             .await?;
         Ok(written(&out, sent_at))
     }
@@ -653,7 +684,11 @@ impl<'h, H: Host> PdsClient<'h, H> {
         }
         let sent_at = self.host.now_ms();
         let (out, _) = self
-            .write_json("com.atproto.repo.deleteRecord", &body, limits::WRITE_COST_DELETE)
+            .write_json(
+                "com.atproto.repo.deleteRecord",
+                &body,
+                limits::WRITE_COST_DELETE,
+            )
             .await?;
         Ok(written(&out, sent_at))
     }

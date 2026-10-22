@@ -154,6 +154,8 @@ pub struct RangeListing {
     /// Entries that failed admission, and pages that broke a listing rule (strikes, `limits.md`
     /// R4).
     pub strikes: u32,
+    /// Why an incomplete listing stopped (a safety cap, a cursor that did not advance).
+    pub stop: Option<String>,
 }
 
 impl RangeListing {
@@ -167,7 +169,13 @@ impl RangeListing {
             first_sent_at: None,
             verdict: None,
             strikes: 0,
+            stop: None,
         }
+    }
+
+    fn stopped(&mut self, why: String) {
+        self.byte_capped = true;
+        self.stop = Some(why);
     }
 
     /// Every listed rkey.
@@ -204,6 +212,15 @@ pub enum ListError {
     /// A full listing returned one rkey twice (an inconsistent listing).
     #[error("inconsistent listing: rkey {0:?} returned twice")]
     Duplicate(String),
+    /// A listing stopped at a safety cap or at a cursor that did not advance (`sync.md` §5.10):
+    /// its range stays unlisted.
+    #[error("listing of {collection} stopped: {why}")]
+    Stopped {
+        /// The collection.
+        collection: String,
+        /// Why.
+        why: String,
+    },
 }
 
 /// One fetched page.
@@ -348,7 +365,10 @@ impl<H: Host> Lister<'_, H> {
                 }
                 Err(PageError::Xrpc(e)) => return Err(e.into()),
                 Err(PageError::TooLarge) => {
-                    out.byte_capped = true;
+                    out.stopped(format!(
+                        "a one-record page is over {} bytes",
+                        self.tuning.page_max_bytes
+                    ));
                     return Ok(RangeOutcome::Done(out));
                 }
                 Err(PageError::Bad(why)) => return Err(ListError::BadPage(why)),
@@ -388,7 +408,7 @@ impl<H: Host> Lister<'_, H> {
             }
             bytes = bytes.saturating_add(page.bytes);
             if bytes > max_bytes {
-                out.byte_capped = true;
+                out.stopped(format!("the range is over {max_bytes} bytes"));
                 return Ok(RangeOutcome::Done(out));
             }
             let short = (ks.len() as u32) < page.limit && short_page_ends;
@@ -421,7 +441,10 @@ impl<H: Host> Lister<'_, H> {
                 Ok(p) => p,
                 Err(PageError::Xrpc(e)) => return Err(e.into()),
                 Err(PageError::TooLarge) => {
-                    out.byte_capped = true;
+                    out.stopped(format!(
+                        "a one-record page is over {} bytes",
+                        self.tuning.page_max_bytes
+                    ));
                     break;
                 }
                 Err(PageError::Bad(why)) => return Err(ListError::BadPage(why)),
@@ -433,7 +456,10 @@ impl<H: Host> Lister<'_, H> {
             bytes = bytes.saturating_add(page.bytes);
             let empty = page.rkeys.is_empty();
             for (entry, rkey) in page.page.entries.into_iter().zip(page.rkeys.iter()) {
-                if prefix.as_ref().is_some_and(|p| !rkey.starts_with(p.as_str())) {
+                if prefix
+                    .as_ref()
+                    .is_some_and(|p| !rkey.starts_with(p.as_str()))
+                {
                     continue;
                 }
                 if entry.result.is_err() {
@@ -452,12 +478,18 @@ impl<H: Host> Lister<'_, H> {
                     break;
                 }
             };
-            if seen.contains(&next)
-                || pages >= self.tuning.full_max_pages
-                || bytes > self.tuning.full_max_bytes
-            {
-                out.byte_capped = true;
-                out.strikes += u32::from(seen.contains(&next));
+            if seen.contains(&next) {
+                // cursors must strictly advance (§5.10): a host misbehaviour
+                out.strikes += 1;
+                out.stopped(format!("the cursor {next:?} repeated"));
+                break;
+            }
+            if pages >= self.tuning.full_max_pages {
+                out.stopped(format!("over {} pages", self.tuning.full_max_pages));
+                break;
+            }
+            if bytes > self.tuning.full_max_bytes {
+                out.stopped(format!("over {} bytes", self.tuning.full_max_bytes));
                 break;
             }
             seen.insert(next.clone());
@@ -508,7 +540,10 @@ mod tests {
         let ns = lessdugin_lexicon::ns::NS;
         assert_eq!(t.cap(&format!("{ns}.opinion")), 100_000);
         assert_eq!(t.cap(&format!("{ns}.post")), 20_000);
-        assert_eq!(t.range_max(&format!("{ns}.opinion")), RANGE_MAX_BYTES_OPINION);
+        assert_eq!(
+            t.range_max(&format!("{ns}.opinion")),
+            RANGE_MAX_BYTES_OPINION
+        );
         assert_eq!(t.range_max(&format!("{ns}.comment")), RANGE_MAX_BYTES);
         let t = ListTuning {
             fetch_cap: Some(3),

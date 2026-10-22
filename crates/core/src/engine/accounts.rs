@@ -505,11 +505,8 @@ impl<H: Host> Engine<H> {
             ops.push(KvOp::Delete(active_key()));
         }
         if purge {
-            ops.push(KvOp::DeleteRange(KeyRange::prefix(&crate::key!(
-                "out",
-                did.as_str()
-            ))));
-            ops.push(KvOp::Delete(crate::key!("out.budget", did.as_str())));
+            // writes, blob chunks, the write budget and the TID meta row
+            ops.extend(crate::outbox::purge_ops(did.as_str()));
             ops.push(KvOp::DeleteRange(KeyRange::prefix(&crate::key!(
                 "notif",
                 did.as_str()

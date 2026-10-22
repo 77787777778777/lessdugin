@@ -1435,6 +1435,41 @@ impl<'k, K: KvStore> Batch<'k, K> {
         Ok(diff)
     }
 
+    /// Forgets every stored row and tombstone of `did` under `(scope, coll)`: `sync --full`
+    /// after a rollback discards the repo's cached state before listing it again, which accepts
+    /// the PDS state (`sync.md` §5.9). Returns the uris removed.
+    pub async fn forget_range(
+        &mut self,
+        did: &str,
+        coll: &str,
+        scope: &str,
+    ) -> Result<Vec<String>, StoreError> {
+        let mut keys: BTreeSet<RecKey> = BTreeSet::new();
+        for t in [tag::REC, tag::TOMB] {
+            let rows = self
+                .scan_merged(&schema::prefix(t, &[scope, coll, did]))
+                .await?;
+            keys.extend(rows.keys().filter_map(|kb| RecKey::parse(kb, t)));
+        }
+        let mut out = Vec::with_capacity(keys.len());
+        for k in keys {
+            if self.forget(&k).await? {
+                out.push(k.uri());
+            }
+        }
+        Ok(out)
+    }
+
+    /// Forgets the stored row or tombstone of one uri (see [`Batch::forget_range`]). Returns
+    /// `true` if something was removed.
+    pub async fn forget(&mut self, k: &RecKey) -> Result<bool, StoreError> {
+        if matches!(self.slot(k).await?, Slot::Empty) {
+            return Ok(false);
+        }
+        self.write_slot(k, &Slot::Empty)?;
+        Ok(true)
+    }
+
     /// The repo state as this batch sees it.
     pub async fn repo(&mut self, did: &str) -> Result<Option<RepoRow>, StoreError> {
         self.get_decoded(schema::repo_key(did), |b| {

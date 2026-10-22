@@ -2,41 +2,46 @@
 """The fold (social.md §1): ForumView = fold(FoldInput, Query).
 
 ForumView computes its layers lazily (functools.cached_property), each from the layers below
-it only (§1.3 rule 8, §1.4):
+it only (§1.3 rule 8, §1.4). A vector that projects only L0–L2 fields never touches a stub.
 
-    attribute       layer  module            computes
-    ---------       -----  ------            --------
-    validity        –      validity.py       data-model.md §7, per record
-    policy          –      policy.py         §1.6 effective policy and algorithm IDs
-    l0              L0     authorities.py    A and ranks (§4.1)
-    l1              L1     modfold.py        forum-tier resolution (§4.2–§4.8, §4.10)
-    degraded        L1     modfold.py        §4.11
-    l2              L2     participation.py  P, G, B, N, S, members, applicants (§3)
-    l3              L3     karma.py          counting opinions, K1, seedUp, E, KP, K (§5–§6)   STUB
-    newcomers       L3     (here)            P ∖ (S ∪ E) (§3.1)
-    l35             L3.5   scores.py         score, agreement, unweighted, earlier (§7)        STUB
-    passes(u, g)    L4     gates.py          §8
-    l5_author       L5     authormod.py      author tier (§4.9)                                STUB
-    l5_reacts       L5     l5_stubs.py       react aggregation (§9.2)                          STUB
-    l5_tags         L5     l5_stubs.py       tags and wiki (§13)                               STUB
-    l5_sequences    L5     l5_stubs.py       sequence library (§14)                            STUB
-    excluded        V1     visibility.py     per candidate item
-    threads         –      threads.py        §11 placement, per post uri
-    times           –      time.py           §2 t_decl, per-item times, t_rank
-    states          L6     visibility.py     V1–V10 per candidate item (before the thread pass)
-    displayed       L6     visibility.py     after the thread pass (§10.2)
-    mod_log         L1+L5  (here)            §4.12
-    mod_queue       L1+L2  (here)            §4.12 (stale, conflict, applicant)
-    input_digest    –      digest.py         §1.2
+    attribute       layer  module            computes                                        state
+    ---------       -----  ------            --------                                        -----
+    validity        –      validity.py       data-model.md §7, per record                    final
+    policy          –      policy.py         §1.6 effective policy and algorithm IDs         final
+    l0              L0     authorities.py    A and ranks (§4.1)                              final
+    l1              L1     modfold.py        forum-tier resolution (§4.2–§4.8, §4.10)        final
+    degraded        L1     modfold.py        §4.11                                           final
+    l2              L2     participation.py  P, G, B, N, S, members, applicants (§3)         final
+    l3              L3     karma.py          counting opinions (opinions.py), K1, seedUp, E,  final
+                                             KP, K (§5–§6)
+    newcomers       L3     (here)            P ∖ (S ∪ E) (§3.1)                              final
+    l35             L3.5   scores.py         score, agreement, unweighted, earlier (§7)      final
+    passes(u, g)    L4     gates.py          §8                                              final
+    l5_author       L5     authormod.py      author tier (§4.9)                              final
+    l5_reacts       L5     reacts.py         react aggregation (§9.2)                        final
+    l5_tags         L5     tags.py           tags and wiki (§13)                             STUB
+    l5_sequences    L5     sequences.py      sequence library (§14)                          STUB
+    excluded        V1     visibility.py     per candidate item                              final
+    threads         –      threads.py        §11 placement (steps 1–4), per post uri         final
+    times           –      time.py           §2 t_decl, per-item times, t_rank               final
+    states          L6     visibility.py     V1–V10 per candidate item (before the pass)     final
+    displayed       L6     visibility.py     after the thread pass (§10.2)                   final
+    (rank.py)       L6     rank.py           §12 sorts, filters, hot, Recent Discussion      final*
+    mod_log         L1+L5  (here)            §4.12                                           final
+    mod_queue       L1+L2  (here)            §4.12 (stale, conflict, applicant)              final
+    input_digest    –      digest.py         §1.2                                            final
 
-Ranking (L6, rank.py) is a stub; L7 (lens) is local and not modelled.
+    * final, except the `tag` post filter (§12.3), which reads the tags stub (L5).
+
+L7 (the lens, §10.3) is local presentation: visibility.lens() applies mutes to `displayed` and
+never changes a fold output; no vector asserts it.
 """
 
 from __future__ import annotations
 
 from functools import cached_property
 
-from . import authormod, digest, gates, karma, l5_stubs, scores, validity
+from . import authormod, digest, gates, karma, reacts, scores, sequences, tags, validity
 from .authorities import compute_authorities
 from .common import ITEM_COLLECTIONS, InputError, coll_of, fk, ubytes
 from .input import parse_vector_input
@@ -80,7 +85,7 @@ class ForumView:
         return compute_participation(self.input.records, self.validity, self.l0, self.l1,
                                      self.policy, self.F)
 
-    # ---------------------------------------------------------------- L3–L5 (stubs)
+    # ---------------------------------------------------------------- L3–L5
     @cached_property
     def l3(self):
         return karma.compute_karma(self)
@@ -102,15 +107,15 @@ class ForumView:
 
     @cached_property
     def l5_reacts(self):
-        return l5_stubs.compute_reacts(self)
+        return reacts.compute_reacts(self)
 
     @cached_property
     def l5_tags(self):
-        return l5_stubs.compute_tags(self)
+        return tags.compute_tags(self)
 
     @cached_property
     def l5_sequences(self):
-        return l5_stubs.compute_sequences(self)
+        return sequences.compute_sequences(self)
 
     # ---------------------------------------------------------------- items, threads, time
     @cached_property

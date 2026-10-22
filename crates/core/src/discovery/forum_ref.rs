@@ -77,7 +77,10 @@ pub fn parse_forum_ref(input: &str) -> Result<ForumRef, ForumRefError> {
         let (Some(owner), Some(coll), Some(slug), None) =
             (parts.next(), parts.next(), parts.next(), parts.next())
         else {
-            return Err(err(input, "expected at://<owner>/<forum collection>/<slug>"));
+            return Err(err(
+                input,
+                "expected at://<owner>/<forum collection>/<slug>",
+            ));
         };
         if coll != nsid::FORUM {
             return Err(err(input, &format!("{coll} is not {}", nsid::FORUM)));
@@ -168,7 +171,10 @@ mod tests {
         for s in [
             format!("at://{DID}/{f}/rationality"),
             format!("https://lessdugin.example/#/f/{DID}/rationality"),
-            format!("https://x/#/f/{}/rationality/p/3l2a?sort=new", DID.replace(':', "%3A")),
+            format!(
+                "https://x/#/f/{}/rationality/p/3l2a?sort=new",
+                DID.replace(':', "%3A")
+            ),
             format!("{DID}/rationality"),
             format!("  @{DID}/rationality "),
         ] {

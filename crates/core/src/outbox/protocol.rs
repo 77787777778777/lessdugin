@@ -18,9 +18,7 @@ use lessdugin_atp::syntax::{Datetime, Did};
 use lessdugin_lexicon::collection::nsid;
 use lessdugin_lexicon::keys;
 use lessdugin_lexicon::ns::NS;
-use lessdugin_lexicon::records::{
-    Action, Opinion, OpinionIntent, StrongRef, TextQuote, qkey,
-};
+use lessdugin_lexicon::records::{Action, Opinion, OpinionIntent, StrongRef, TextQuote, qkey};
 use lessdugin_lexicon::values::{Agreement, RevisionOp, Stance, Tier, VoteValue};
 use serde_json::Value;
 
@@ -30,7 +28,8 @@ use crate::limits;
 use crate::outbox::apply::{AppliedRecord, AppliedWrite};
 use crate::outbox::blob::{self, BlobData};
 use crate::outbox::model::{
-    self, ChunkRow, Intent, OnExists, Op, OpAction, OpResult, OpinionStep, PendingWrite,
+    self, ChunkRow, Intent, OnExists, Op, OpAction, OpResult, OpinionStep, PendingBlob,
+    PendingWrite,
 };
 use crate::outbox::pds::{BatchOp, CallError, Current, PdsClient, Session, Swap, Written};
 use crate::outbox::records;
@@ -62,6 +61,9 @@ pub const MAX_ATTEMPTS: u32 = 10;
 pub const BACKOFF_BASE_MS: i64 = 2_000;
 /// Back-off cap (ms, *tunable*).
 pub const BACKOFF_MAX_MS: i64 = 5 * 60 * 1000;
+/// A blob uploaded this long before its record write is sent is uploaded again (ms, *tunable*;
+/// the PDS garbage-collects unreferenced blobs after about an hour, `data-model.md` §8.8).
+pub const BLOB_REUPLOAD_AFTER_MS: i64 = 30 * 60 * 1000;
 
 fn invalid(msg: impl Into<String>) -> CallError {
     CallError::Rejected {
@@ -80,9 +82,7 @@ fn rejected(error: EngineError) -> CallError {
 }
 
 fn storage(e: impl std::fmt::Display) -> CallError {
-    CallError::Read(
-        EngineError::internal(format!("outbox storage: {e}")).with_retryable(true),
-    )
+    CallError::Read(EngineError::internal(format!("outbox storage: {e}")).with_retryable(true))
 }
 
 fn too_many_swaps() -> Outcome {
@@ -175,16 +175,19 @@ impl<'a, H: Host> Runner<'a, H> {
 
     /// Persists the write (still `sending`).
     pub(crate) async fn persist(&mut self) -> Result<(), CallError> {
+        self.persist_with(Vec::new()).await
+    }
+
+    /// Persists the write and `extra` rows in one batch.
+    async fn persist_with(&mut self, extra: Vec<KvOp>) -> Result<(), CallError> {
         self.w.updated_at = self.now_ms();
         let bytes = row::encode(&self.w).map_err(storage)?;
-        self.host
-            .state()
-            .write(vec![KvOp::Put(
-                model::write_key(&self.w.account, self.w.seq),
-                bytes,
-            )])
-            .await
-            .map_err(storage)
+        let mut batch = extra;
+        batch.push(KvOp::Put(
+            model::write_key(&self.w.account, self.w.seq),
+            bytes,
+        ));
+        self.host.state().write(batch).await.map_err(storage)
     }
 
     fn op_uri(&self, i: usize) -> String {
@@ -203,7 +206,11 @@ impl<'a, H: Host> Runner<'a, H> {
         self.applied.push(AppliedWrite {
             account: self.did().clone(),
             pds: self.session.pds.as_str().trim_end_matches('/').to_owned(),
-            rev: wr.commit.as_ref().map(|c| c.rev.clone()).unwrap_or_default(),
+            rev: wr
+                .commit
+                .as_ref()
+                .map(|c| c.rev.clone())
+                .unwrap_or_default(),
             commit: wr.commit.as_ref().map(|c| c.cid.clone()),
             sent_at: wr.sent_at,
             records,
@@ -222,6 +229,24 @@ impl<'a, H: Host> Runner<'a, H> {
         self.w.results = vec![OpResult { uri, cid }];
     }
 
+    /// Op `i`'s target was found holding `cur` on the PDS (a write whose answer was lost, a
+    /// crash, another device): it is the result, and it is applied to the store like a write
+    /// answered without a commit (the head is read afterwards).
+    fn found(&mut self, i: usize, cur: &Current) {
+        let uri = self.op_uri(i);
+        let rec = AppliedRecord::Put {
+            uri: uri.clone(),
+            cid: cur.cid.clone(),
+            value: cur.value.clone(),
+        };
+        let wr = Written {
+            sent_at: self.now_ms(),
+            ..Written::default()
+        };
+        self.confirm(&wr, vec![rec]);
+        self.set_result(uri, Some(cur.cid.clone()));
+    }
+
     // -----------------------------------------------------------------------------------------
     // Host capabilities (cache)
 
@@ -238,7 +263,12 @@ impl<'a, H: Host> Runner<'a, H> {
         let store = RecordStore::new(self.host.cache());
         let mut b = store.batch();
         let origin = self.session.origin();
-        let mut h = b.host_caps(&origin).await.ok().flatten().unwrap_or_default();
+        let mut h = b
+            .host_caps(&origin)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default();
         if h.null_swap == Some(supported) {
             return;
         }
@@ -296,12 +326,16 @@ impl<'a, H: Host> Runner<'a, H> {
 
     /// Uploads the write's pending blobs (just before its record write, §8.8), then persists
     /// the substituted values so that recovery compares the right CIDs.
+    /// A blob uploaded longer ago than [`BLOB_REUPLOAD_AFTER_MS`] (a write that waited out a
+    /// back-off or the write budget) is uploaded again: the PDS drops unreferenced blobs after
+    /// about an hour (§8.8).
     pub(crate) async fn upload_blobs(&mut self) -> Result<(), CallError> {
-        if self.w.blobs.iter().all(|b| b.uploaded) {
+        let now = self.now_ms();
+        if !self.w.blobs.iter().any(|b| b.needs_upload(now)) {
             return Ok(());
         }
         for i in 0..self.w.blobs.len() {
-            if self.w.blobs[i].uploaded {
+            if !self.w.blobs[i].needs_upload(now) {
                 continue;
             }
             let bytes = self.chunks(i).await?;
@@ -312,6 +346,7 @@ impl<'a, H: Host> Runner<'a, H> {
             };
             self.upload(&data).await?;
             self.w.blobs[i].uploaded = true;
+            self.w.blobs[i].uploaded_at = Some(self.now_ms());
         }
         self.persist().await
     }
@@ -346,7 +381,19 @@ impl<'a, H: Host> Runner<'a, H> {
             };
             self.w.ops[i].set_value(&v);
             self.upload(&data).await?;
-            self.persist().await?;
+            // kept like the write's other blobs, so that it can be uploaded again (§8.8)
+            let index = u32::try_from(self.w.blobs.len()).map_err(storage)?;
+            let rows =
+                chunk_rows(&self.w.account, self.w.seq, index, &data.bytes).map_err(storage)?;
+            self.w.blobs.push(PendingBlob {
+                cid: data.cid.clone(),
+                mime: data.mime.clone(),
+                size: data.bytes.len() as u64,
+                chunks: u32::try_from(rows.len()).map_err(storage)?,
+                uploaded: true,
+                uploaded_at: Some(self.now_ms()),
+            });
+            self.persist_with(rows).await?;
         }
     }
 
@@ -485,7 +532,7 @@ impl<'a, H: Host> Runner<'a, H> {
                 // The key may have been written: re-read before deciding.
                 match self.pds.get(&op.collection, &op.rkey).await? {
                     Some(c) if c.cid == intended => {
-                        self.set_result(self.op_uri(0), Some(c.cid));
+                        self.found(0, &c);
                         Ok(Outcome::Done)
                     }
                     Some(c) => Ok(conflict_with("the record key is taken", Some(&c))),
@@ -514,7 +561,7 @@ impl<'a, H: Host> Runner<'a, H> {
             // fresh reads: the content (recovery, taken slug) and the membership
             match self.pds.get(&content.collection, &content.rkey).await? {
                 Some(c) if c.cid == intended => {
-                    self.set_result(self.op_uri(0), Some(c.cid));
+                    self.found(0, &c);
                     return Ok(Outcome::Done);
                 }
                 Some(c) if forum => {
@@ -691,21 +738,24 @@ impl<'a, H: Host> Runner<'a, H> {
         cur: Current,
     ) -> Result<Outcome, CallError> {
         if cur.cid == intended {
-            self.set_result(self.op_uri(0), Some(cur.cid));
+            self.found(0, &cur);
             return Ok(Outcome::Done);
         }
         match on_exists {
             OnExists::Succeed => {
-                self.set_result(self.op_uri(0), Some(cur.cid));
+                self.found(0, &cur);
                 Ok(Outcome::Done)
             }
             OnExists::Conflict => Ok(conflict_with("the record exists", Some(&cur))),
             OnExists::Update { revision_rkey } => {
                 // Continue as an update through the edit protocol (modAction create, §8.4):
-                // the existing record keeps its createdAt.
+                // the existing record keeps its createdAt. The same assertion is a no-op.
                 let mut v = self.op_value(0)?;
-                if let (Some(m), Some(created)) = (v.as_object_mut(), cur.value.get("createdAt"))
-                {
+                if without_timestamps(&v) == without_timestamps(&cur.value) {
+                    self.found(0, &cur);
+                    return Ok(Outcome::Done);
+                }
+                if let (Some(m), Some(created)) = (v.as_object_mut(), cur.value.get("createdAt")) {
                     m.insert("createdAt".into(), created.clone());
                     m.insert(
                         "updatedAt".into(),
@@ -745,7 +795,7 @@ impl<'a, H: Host> Runner<'a, H> {
             };
             let new_cid = records::record_cid(&self.op_value(0)?).map_err(rejected)?;
             if cur.cid == new_cid {
-                self.set_result(target.clone(), Some(cur.cid));
+                self.found(0, &cur);
                 return Ok(Outcome::Done);
             }
             if cur.cid != base {
@@ -854,18 +904,16 @@ impl<'a, H: Host> Runner<'a, H> {
                 self.set_result(self.op_uri(0), wr.cid);
                 Ok(Outcome::Done)
             }
-            Err(CallError::InvalidSwap) => {
-                match self.pds.get(&op.collection, &op.rkey).await? {
-                    Some(c) if c.cid == new_cid => {
-                        self.set_result(self.op_uri(0), Some(c.cid));
-                        Ok(Outcome::Done)
-                    }
-                    c => Ok(conflict_with(
-                        "the record changed since it was edited",
-                        c.as_ref(),
-                    )),
+            Err(CallError::InvalidSwap) => match self.pds.get(&op.collection, &op.rkey).await? {
+                Some(c) if c.cid == new_cid => {
+                    self.found(0, &c);
+                    Ok(Outcome::Done)
                 }
-            }
+                c => Ok(conflict_with(
+                    "the record changed since it was edited",
+                    c.as_ref(),
+                )),
+            },
             Err(e) => Err(e),
         }
     }
@@ -959,16 +1007,11 @@ impl<'a, H: Host> Runner<'a, H> {
     /// prefix alone is not enough, §3.2), ascending.
     async fn own_revisions_of(&mut self, p: &str, subject: &str) -> Result<Vec<String>, CallError> {
         let prefix = format!("{p}-");
-        let rows = self
-            .pds
-            .list_prefix(nsid::REVISION, &prefix, None)
-            .await?;
+        let rows = self.pds.list_prefix(nsid::REVISION, &prefix, None).await?;
         let mut out: Vec<String> = rows
             .into_iter()
             .filter(|r| {
-                r.rkey
-                    .strip_prefix(&prefix)
-                    .is_some_and(keys::is_tid)
+                keys::split_revision_key(&r.rkey).is_some_and(|(rp, _)| rp == p)
                     && r.value
                         .get("subject")
                         .and_then(|s| s.get("uri"))
@@ -991,7 +1034,7 @@ impl<'a, H: Host> Runner<'a, H> {
             .collect();
         let prefixes: BTreeSet<String> = wanted
             .iter()
-            .filter_map(|k| k.rsplit_once('-').map(|(p, _)| format!("{p}-")))
+            .filter_map(|k| keys::split_revision_key(k).map(|(p, _)| format!("{p}-")))
             .collect();
         let mut ambiguous = 0;
         loop {
@@ -1131,6 +1174,7 @@ impl<'a, H: Host> Runner<'a, H> {
         let uri = self.op_uri(0);
         let mut null_swap = self.null_swap().await;
         let mut tries = 0;
+        let mut last_ambiguous: Option<EngineError> = None;
         while tries < limits::SWAP_RETRY_MAX {
             tries += 1;
             let cur = self.pds.get(nsid::OPINION, &rkey).await?;
@@ -1154,7 +1198,7 @@ impl<'a, H: Host> Runner<'a, H> {
             );
             match (&cur, &cur_op) {
                 (Some(c), Some(co)) if new.eq_ignoring_updated_at(co) => {
-                    self.set_result(uri, Some(c.cid.clone()));
+                    self.found(0, c);
                     return Ok(Outcome::Done);
                 }
                 (None, _) if new.is_empty() => {
@@ -1164,8 +1208,14 @@ impl<'a, H: Host> Runner<'a, H> {
                 _ => {}
             }
             let built = records::opinion(&new).map_err(rejected)?;
-            records::check(self.did(), built.collection, &built.rkey, &built.value, false)
-                .map_err(rejected)?;
+            records::check(
+                self.did(),
+                built.collection,
+                &built.rkey,
+                &built.value,
+                false,
+            )
+            .map_err(rejected)?;
             let (r, fallback) = match &cur {
                 None if null_swap != Some(false) => (
                     self.pds
@@ -1211,7 +1261,10 @@ impl<'a, H: Host> Runner<'a, H> {
                     self.set_result(uri, if deleted { None } else { wr.cid });
                     return Ok(Outcome::Done);
                 }
-                Err(CallError::InvalidSwap) => self.jitter().await,
+                Err(CallError::InvalidSwap) => {
+                    last_ambiguous = None;
+                    self.jitter().await;
+                }
                 Err(CallError::Rejected { status: 400, .. })
                     if cur.is_none() && !fallback && null_swap.is_none() =>
                 {
@@ -1224,14 +1277,22 @@ impl<'a, H: Host> Runner<'a, H> {
                     if self.pds.get(nsid::OPINION, &rkey).await?.is_none() {
                         return Err(CallError::Ambiguous(e));
                     }
+                    last_ambiguous = None;
                     self.jitter().await;
                 }
                 // re-read and re-apply (the function is idempotent)
-                Err(CallError::Ambiguous(_)) => self.jitter().await,
+                Err(CallError::Ambiguous(e)) => {
+                    last_ambiguous = Some(e);
+                    self.jitter().await;
+                }
                 Err(e) => return Err(e),
             }
         }
-        Ok(too_many_swaps())
+        // ambiguous to the end: back off (the write may yet have landed); else the swaps lost
+        match last_ambiguous {
+            Some(e) => Err(CallError::Ambiguous(e)),
+            None => Ok(too_many_swaps()),
+        }
     }
 
     /// Records the opinion before this write (the base of `undo` after sending), once.
@@ -1336,7 +1397,8 @@ impl<'a, H: Host> Runner<'a, H> {
                             m.insert("updatedAt".into(), Value::String(now.as_str().to_owned()));
                         }
                         let mine_uri = format!("at://{}/{}/{}", self.did(), nsid::MOD_ACTION, k);
-                        let rk = records::revision_rkey(&mine_uri, &revision_tid).map_err(rejected)?;
+                        let rk =
+                            records::revision_rkey(&mine_uri, &revision_tid).map_err(rejected)?;
                         let rev = records::revision(
                             StrongRef::new(
                                 records::at_uri(&mine_uri).map_err(rejected)?,
@@ -1434,9 +1496,14 @@ fn body_len(v: &Value) -> usize {
 
 /// Maps a persisted step to the lexicon intent (unknown values are refused).
 pub(crate) fn lexicon_intent(s: &OpinionStep) -> Result<OpinionIntent, EngineError> {
-    fn known<T>(v: Option<&str>, parse: fn(&str) -> Option<T>, what: &str) -> Result<Option<T>, EngineError> {
+    fn known<T>(
+        v: Option<&str>,
+        parse: fn(&str) -> Option<T>,
+        what: &str,
+    ) -> Result<Option<T>, EngineError> {
         v.map(|x| {
-            parse(x).ok_or_else(|| EngineError::invalid_input(format!("unknown {what} value {x:?}")))
+            parse(x)
+                .ok_or_else(|| EngineError::invalid_input(format!("unknown {what} value {x:?}")))
         })
         .transpose()
     }
@@ -1462,7 +1529,9 @@ pub(crate) fn lexicon_intent(s: &OpinionStep) -> Result<OpinionIntent, EngineErr
             remove,
         } => {
             if !keys::is_slug(id) {
-                return Err(EngineError::invalid_input(format!("react id {id:?} is not a slug")));
+                return Err(EngineError::invalid_input(format!(
+                    "react id {id:?} is not a slug"
+                )));
             }
             if *remove {
                 OpinionIntent::RemoveReact {
@@ -1481,7 +1550,9 @@ pub(crate) fn lexicon_intent(s: &OpinionStep) -> Result<OpinionIntent, EngineErr
         }
         OpinionStep::Tag { slug, value } => {
             if !keys::is_slug(slug) {
-                return Err(EngineError::invalid_input(format!("tag {slug:?} is not a slug")));
+                return Err(EngineError::invalid_input(format!(
+                    "tag {slug:?} is not a slug"
+                )));
             }
             OpinionIntent::Tag {
                 tag: slug.clone(),
@@ -1501,7 +1572,8 @@ pub(crate) fn inverse_steps(steps: &[OpinionStep], prior: Option<&Opinion>) -> V
             OpinionStep::Karma { .. } => "karma".to_owned(),
             OpinionStep::Agreement { .. } => "agreement".to_owned(),
             OpinionStep::React { id, quote, .. } => {
-                let q: Option<TextQuote> = quote.as_deref().and_then(|j| serde_json::from_str(j).ok());
+                let q: Option<TextQuote> =
+                    quote.as_deref().and_then(|j| serde_json::from_str(j).ok());
                 format!("react\u{1f}{id}\u{1f}{}", qkey(q.as_ref()))
             }
             OpinionStep::Tag { slug, .. } => format!("tag\u{1f}{slug}"),
@@ -1519,19 +1591,18 @@ pub(crate) fn inverse_steps(steps: &[OpinionStep], prior: Option<&Opinion>) -> V
             OpinionStep::React {
                 id, quote, stance, ..
             } => {
-                let q: Option<TextQuote> = quote.as_deref().and_then(|j| serde_json::from_str(j).ok());
+                let q: Option<TextQuote> =
+                    quote.as_deref().and_then(|j| serde_json::from_str(j).ok());
                 let k = qkey(q.as_ref());
-                let before = prior
-                    .and_then(|p| p.reacts.as_ref())
-                    .and_then(|rs| rs.iter().find(|r| r.react == *id && qkey(r.quote.as_ref()) == k));
+                let before = prior.and_then(|p| p.reacts.as_ref()).and_then(|rs| {
+                    rs.iter()
+                        .find(|r| r.react == *id && qkey(r.quote.as_ref()) == k)
+                });
                 match before {
                     Some(r) => OpinionStep::React {
                         id: id.clone(),
                         stance: r.stance.clone().unwrap_or_else(|| "for".to_owned()),
-                        quote: r
-                            .quote
-                            .as_ref()
-                            .and_then(|q| serde_json::to_string(q).ok()),
+                        quote: r.quote.as_ref().and_then(|q| serde_json::to_string(q).ok()),
                         remove: false,
                     },
                     None => OpinionStep::React {
@@ -1602,18 +1673,11 @@ pub(crate) fn chunk_rows(
                 v: model::OUTBOX_ROW_VERSION,
                 b: part.to_vec(),
             };
-            let key = model::blob_chunk_key(account, seq, index, u32::try_from(c).unwrap_or(u32::MAX));
+            let key =
+                model::blob_chunk_key(account, seq, index, u32::try_from(c).unwrap_or(u32::MAX));
             row::encode(&r).map(|b| KvOp::Put(key, b))
         })
         .collect()
-}
-
-/// Is `rkey` a revision key of exactly `p`?
-#[cfg(test)]
-fn is_revision_of(rkey: &str, p: &str) -> bool {
-    rkey.strip_prefix(p)
-        .and_then(|r| r.strip_prefix('-'))
-        .is_some_and(keys::is_tid)
 }
 
 #[cfg(test)]
@@ -1685,21 +1749,26 @@ mod tests {
             inverse_steps(&steps[..1], None),
             vec![OpinionStep::Karma { value: None }]
         );
-        assert!(lexicon_intent(&OpinionStep::Karma {
-            value: Some("sideways".into())
-        })
-        .is_err());
-        assert!(lexicon_intent(&OpinionStep::Tag {
-            slug: "Bad Slug".into(),
-            value: None
-        })
-        .is_err());
+        assert!(
+            lexicon_intent(&OpinionStep::Karma {
+                value: Some("sideways".into())
+            })
+            .is_err()
+        );
+        assert!(
+            lexicon_intent(&OpinionStep::Tag {
+                slug: "Bad Slug".into(),
+                value: None
+            })
+            .is_err()
+        );
     }
 
     #[test]
     fn adopt_rules() {
         let hide = serde_json::json!({"action": {"$type": nsid::MOD_ACTION_HIDE}});
-        let curated = serde_json::json!({"action": {"$type": nsid::MOD_ACTION_TIER, "tier": "curated"}});
+        let curated =
+            serde_json::json!({"action": {"$type": nsid::MOD_ACTION_TIER, "tier": "curated"}});
         let unknown = serde_json::json!({"action": {"$type": "x.y#z"}});
         assert!(role_may_issue("moderator", &hide));
         assert!(!role_may_issue("moderator", &curated));
@@ -1708,10 +1777,16 @@ mod tests {
         let k = "uetjixxr3a33-ckjbz7a2pjeplbao";
         assert!(is_adoptable(k, &serde_json::json!({}), 0));
         assert!(!is_adoptable(k, &serde_json::json!({"scope": "author"}), 0));
-        assert!(!is_adoptable("uetjixxr3a33-3l2s5xxv2ze2c", &serde_json::json!({}), 0));
+        assert!(!is_adoptable(
+            "uetjixxr3a33-3l2s5xxv2ze2c",
+            &serde_json::json!({}),
+            0
+        ));
         let lapsed = serde_json::json!({"until": "2020-01-01T00:00:00.000Z"});
         assert!(!is_adoptable(k, &lapsed, 1_700_000_000_000_000));
-        assert!(is_revision_of("abc-3l2s5xxv2ze2c", "abc"));
-        assert!(!is_revision_of("abc-3l2s5xxv2ze2c-3l2s5xxv2ze2c", "abc"));
+        let p = "uetjixxr3a33-3l2s5xxv2ze2c";
+        let of_p = |k: &str| keys::split_revision_key(k).is_some_and(|(rp, _)| rp == p);
+        assert!(of_p(&format!("{p}-3l2s6aaaaaaa2")));
+        assert!(!of_p(&format!("{p}-3l2s6aaaaaaa2-3l2s6aaaaaaa2")));
     }
 }
