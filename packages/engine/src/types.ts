@@ -110,6 +110,8 @@ export interface Badges {
   stale?: boolean;
   hint?: boolean;
   inconsistentTimestamps?: boolean;
+  /** An own item with an outbox write that is not `done` (sync.md §1.6). */
+  pending?: boolean;
 }
 
 export type KarmaValue = "up" | "down" | "strongUp" | "strongDown";
@@ -122,7 +124,8 @@ export interface MyOpinion {
 
 export interface ScoreView {
   score: number;
-  agreement: number;
+  /** Absent when the forum's `policy.voting` is `karmaOnly` (social.md §7). */
+  agreement?: number;
   unweighted: number;
   earlierVersionVotes: number;
   mine?: MyOpinion;
@@ -862,9 +865,12 @@ export type ModActionIntent =
 /** `Pending → Sending → Done { uri, cid } | Failed { error } | Undone` (engine-api.md §3.5).
  * Opinion writes stay `pending` for the undo window. */
 export type WriteState =
-  | { kind: "pending" }
+  /** `held`: in the undo window; `throttled`: waiting for the write budget, a rate limit or a
+   * back-off; `notBeforeMs`: until when. */
+  | { kind: "pending"; notBeforeMs?: Ms; held?: boolean; throttled?: boolean }
   | { kind: "sending" }
-  | { kind: "done"; uri: AtUri; cid: Cid }
+  /** `cid` is absent for deletes. */
+  | { kind: "done"; uri: AtUri; cid?: Cid }
   | { kind: "failed"; error: EngineError }
   | { kind: "undone" };
 

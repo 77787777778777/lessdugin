@@ -60,6 +60,19 @@ struct AliasRow {
     alias: String,
 }
 
+/// `("loc", "seeded", did)`: the followed list was seeded from the account's memberships since
+/// its login (`sync.md` §4.8).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct SeededRow {
+    v: u32,
+    at: i64,
+}
+
+/// The key of an account's [`SeededRow`] (deleted at login, so the list is seeded again).
+pub(crate) fn seeded_key(did: &str) -> Vec<u8> {
+    crate::key!("loc", "seeded", did)
+}
+
 fn follow_key(f: &str) -> Vec<u8> {
     crate::key!("loc", "follow", f)
 }
@@ -213,6 +226,7 @@ impl<H: Host> Engine<H> {
             renders: &self.rt.renders,
             pending: &pending,
             completeness: &l.completeness,
+            now: self.host.now_ms().saturating_mul(1000),
         };
         Ok(f(&v))
     }
@@ -223,11 +237,15 @@ impl<H: Host> Engine<H> {
     }
 
     /// `forum_open(ref)` (`engine-api.md` §3.2): resolves the reference, fetches the
-    /// declaration (with a proof on first open) and returns the header. Authorities and members
-    /// are synced by [`Engine::sync_forum`].
+    /// declaration (with a proof on first open; an open within [`limits::FORUM_REOPEN_MS`] of
+    /// the last one reuses it) and returns the header. It schedules the authority sync:
+    /// authorities never synced are synced now (P0, within
+    /// [`limits::FORUM_OPEN_SYNC_BUDGET_MS`]), so the header is not degraded; stale ones are
+    /// queued for `live_tail`. Members are synced by [`Engine::sync_forum`].
     pub async fn forum_open(&self, forum: &str) -> Result<ForumView, EngineError> {
         let key = self.forum_key(forum).await?;
-        let opened = self.open_key(&key).await?;
+        let opened = self.open_key(&key, false).await?;
+        self.sync_authorities(&opened).await;
         let l = self.loaded(&key).await?;
         let me = self.me().await?;
         let (followed, alias) = self.follow_state(key.uri.as_str()).await?;
@@ -414,25 +432,58 @@ impl<H: Host> Engine<H> {
         Ok(())
     }
 
-    /// `followed()` (`engine-api.md` §3.2): the local followed list, seeded once per account
-    /// and engine from the account's own membership records (a failed read is retried on the
-    /// next call). Sorted by name, then uri.
-    pub async fn followed(&self) -> Result<Vec<ForumSummary>, EngineError> {
+    /// The keys of the followed forums, by uri.
+    pub(crate) async fn followed_keys(&self) -> Result<Vec<ForumKey>, EngineError> {
+        Ok(self
+            .loc_scan("follow")
+            .await?
+            .into_iter()
+            .filter_map(|(f, _)| ForumKey::of_uri(&AtUri::parse(&f).ok()?).ok())
+            .collect())
+    }
+
+    /// Seeds the followed list from the memberships of `did` and records that it did.
+    pub(crate) async fn seed_account(&self, did: &Did) -> Result<(), EngineError> {
+        self.seed_follows(did).await?;
+        let row = SeededRow {
+            v: ROW_V,
+            at: self.host.now_ms(),
+        };
+        self.host
+            .state()
+            .write(vec![encode(seeded_key(did.as_str()), &row)?])
+            .await?;
+        Ok(())
+    }
+
+    /// Seeds the followed list of every account not seeded since its login (`sync.md` §4.8:
+    /// on login; `live_tail` also re-seeds after each sync of the own repo). A failed read is
+    /// logged and retried next time.
+    pub(crate) async fn seed_pending(&self) -> Result<(), EngineError> {
         for a in self.accounts().await? {
-            let pending = !super::models::lock(&self.rt.seeded).contains(&a.did);
-            if !pending {
+            if self
+                .loc_get::<SeededRow>(seeded_key(&a.did))
+                .await?
+                .is_some()
+            {
                 continue;
             }
             let Ok(did) = Did::parse(&a.did) else {
                 continue;
             };
-            match self.seed_follows(&did).await {
-                Ok(()) => {
-                    super::models::lock(&self.rt.seeded).insert(a.did.clone());
-                }
-                Err(e) => tracing::warn!(account = %a.did, error = %e, "seeding followed forums"),
+            if let Err(e) = self.seed_account(&did).await {
+                tracing::warn!(account = %a.did, error = %e, "seeding followed forums");
             }
         }
+        Ok(())
+    }
+
+    /// `followed()` (`engine-api.md` §3.2): the local followed list, seeded from the accounts'
+    /// own membership records once after each login ([`Engine::seed_pending`]). A forum added
+    /// by seeding counts as joined until the cache holds the membership (or its tombstone).
+    /// Sorted by name, then uri.
+    pub async fn followed(&self) -> Result<Vec<ForumSummary>, EngineError> {
+        self.seed_pending().await?;
         let me = self.me().await?;
         let aliases: BTreeMap<String, String> = self
             .loc_scan("alias")
@@ -442,7 +493,8 @@ impl<H: Host> Engine<H> {
             .collect();
         let store = RecordStore::new(self.host.cache());
         let mut out = Vec::new();
-        for (f, _) in self.loc_scan("follow").await? {
+        for (f, follow) in self.loc_scan("follow").await? {
+            let seeded = row::decode::<FollowRow>(&follow).is_ok_and(|r| r.seeded);
             let Ok(u) = AtUri::parse(&f) else { continue };
             let Ok(key) = ForumKey::of_uri(&u) else {
                 continue;
@@ -458,11 +510,14 @@ impl<H: Host> Engine<H> {
                 Some(me) => {
                     let m = format!("at://{me}/{}/{}", nsid::MEMBERSHIP, key.fk);
                     match AtUri::parse(&m) {
-                        Ok(m) => store
-                            .get(&m)
-                            .await
-                            .map_err(store_error)?
-                            .is_some_and(|r| r.valid),
+                        Ok(m) => match store.get(&m).await.map_err(store_error)? {
+                            Some(r) => r.valid,
+                            // seeded from the own PDS listing, not synced yet
+                            None => {
+                                seeded
+                                    && store.tombstone_of(&m).await.map_err(store_error)?.is_none()
+                            }
+                        },
                         Err(_) => false,
                     }
                 }

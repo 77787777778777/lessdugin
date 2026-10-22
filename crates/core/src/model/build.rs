@@ -4,7 +4,8 @@
 //! ```text
 //! rows  = scan(cache, ("rec", fk))                     // one prefix scan
 //!       ∪ the declaration row ("rec", "_", NS.forum, owner, slug)
-//! caps  : fold_rows_capped (the first N(coll) keys by rkey descending per (did, coll))
+//! caps  : fold_rows_capped (the first N(coll) keys by rkey descending per (did, coll)), and
+//!         nothing below a listing's recorded cap boundary (below_cap_boundary)
 //! input : records    = eligible rows (§1.5) → skeletons (bodies dropped)
 //!         absent     = §5.6.4 for the opinion subjects
 //!         obs        = t_obs per uri (firstSeenUri)
@@ -24,7 +25,9 @@ use crate::discovery::roster;
 use crate::host::KvStore;
 use crate::social::fold::{FoldError, FoldResult, fold};
 use crate::social::input::{ForumInput, Skel, SkelData};
-use crate::store::records::{Level, RecordStore, StoreError, eligible, fold_rows_capped};
+use crate::store::records::{
+    Level, RecordStore, StoreError, below_cap_boundary, eligible, fold_rows_capped,
+};
 use crate::store::repo::{RepoRow, RepoStatus};
 
 /// Why a model could not be built.
@@ -114,7 +117,8 @@ impl ForumModel {
         let mut records: BTreeMap<String, Skel> = BTreeMap::new();
         let mut meta: BTreeMap<String, RowMeta> = BTreeMap::new();
         for r in &rows {
-            if !eligible(&r.row, repos.get(&r.key.did)) {
+            let repo = repos.get(&r.key.did);
+            if !eligible(&r.row, repo) || below_cap_boundary(&key.fk, &r.key, repo) {
                 continue;
             }
             let uri = r.uri();

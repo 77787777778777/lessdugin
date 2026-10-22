@@ -70,6 +70,10 @@ pub struct AppliedWrite {
     pub rev: String,
     /// The commit CID, when known.
     pub commit: Option<String>,
+    /// `rev` is this write's own commit rev. `false` when it is the rev of a head read
+    /// afterwards (a no-op write, a record found by a re-read): only a lower bound, since
+    /// another device may have changed the record in between, so it is stored as not exact.
+    pub exact: bool,
     /// When the write request was sent (ms).
     pub sent_at: i64,
     /// The records.
@@ -113,6 +117,7 @@ pub async fn apply_own_write<K: KvStore>(
                 match admit::admit_own_write(&uri, value, cid, &LexiconValidator) {
                     Ok(a) => {
                         let obs = Observation::own_write(&w.rev, w.sent_at, now_ms);
+                        let obs = if w.exact { obs } else { obs.inexact() };
                         batch.put_version(a.into_version(obs)).await?;
                     }
                     Err(e) => {
@@ -172,7 +177,9 @@ pub async fn apply_with_syncer<H: Host>(
     let commit = w
         .commit
         .as_ref()
-        .filter(|_| !w.rev.is_empty())
+        // a rev read afterwards is not passed: the syncer reads the head itself and stores the
+        // records as not exact
+        .filter(|_| !w.rev.is_empty() && w.exact)
         .map(|cid| CommitMeta {
             cid: cid.clone(),
             rev: w.rev.clone(),

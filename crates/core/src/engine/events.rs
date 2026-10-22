@@ -8,9 +8,10 @@
 //! the events in emission order. A callback may call back into the engine (its writes enqueue
 //! events; they are delivered after it returns).
 //!
-//! The outbox reports through [`EngineListener`]: `on_write` becomes `Write { id, state }`;
-//! `on_applied` drops the cached models of the forums the write touched, then emits
-//! `Changed { topics }` (forum, thread, user).
+//! The outbox reports through [`EngineListener`]: `on_write` becomes `Write { id, state }`
+//! followed by `Changed [Outbox]`; `on_applied` (called after the write's final state is saved
+//! and reported) drops the cached models of the forums the write touched, then emits
+//! `Changed { topics }` (forum, thread, user). Account changes emit `Changed [Accounts]`.
 
 use std::collections::{BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -191,6 +192,8 @@ impl OutboxListener for EngineListener {
             id: ticket.id.clone(),
             state: ticket.state.clone(),
         });
+        // the outbox list changed (a new write, or a write's state)
+        self.rt.bus.changed([Topic::Outbox]);
     }
 
     fn on_applied(&self, write: &AppliedWrite, _report: &ApplyReport) {

@@ -26,7 +26,7 @@ use crate::discovery::roster::{Roster, RosterRecord};
 use crate::dto::Completeness;
 use crate::host::{Dir, KeyRange, KvOp, KvStore};
 use crate::store::key::{self, Part};
-use crate::store::records::{RecordStore, eligible, fold_rows_capped};
+use crate::store::records::{RecordStore, below_cap_boundary, eligible, fold_rows_capped};
 use crate::store::repo::{RepoRow, RepoStatus};
 use crate::store::row::{self, ROW_VERSION};
 use crate::store::{StoreError, schema};
@@ -183,7 +183,10 @@ pub async fn forum_records<K: KvStore>(
         .collect();
     Ok(rows
         .iter()
-        .filter(|r| eligible(&r.row, repos.get(r.key.did.as_str())))
+        .filter(|r| {
+            let repo = repos.get(r.key.did.as_str());
+            eligible(&r.row, repo) && !below_cap_boundary(fk, &r.key, repo)
+        })
         .filter_map(|r| {
             Some(RosterRecord {
                 did: r.key.did.clone(),
@@ -232,15 +235,10 @@ impl ForumState {
         })
     }
 
-    fn rejected(&self, d: &str) -> bool {
-        !self.roster.authorities.contains_key(d)
-            && self
-                .disc
-                .get(d)
-                .is_some_and(|r| r.state == DiscState::Rejected)
-    }
-
-    /// C(F) (§4.5), without rejected candidates.
+    /// C(F) (§4.5): A ∪ G (approval mode) or A ∪ S plus the confirmed closure (open mode). A
+    /// granted DID counts whatever its membership says (`social.md` §3.3: the grant still counts
+    /// after its holder leaves), so its repo is synced and counted like an authority's; only
+    /// closure members need a confirmed membership.
     pub fn completeness_set(&self) -> BTreeSet<String> {
         let r = &self.roster;
         let mut set: BTreeSet<String> = r.authorities.keys().cloned().collect();
@@ -259,7 +257,6 @@ impl ForumState {
         } else {
             set.extend(r.granted.iter().cloned());
         }
-        set.retain(|d| !self.rejected(d));
         set
     }
 }

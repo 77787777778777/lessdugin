@@ -135,3 +135,20 @@ pub const MODEL_MAX_AGE_MS: i64 = 60_000;
 pub const MODEL_CACHE_ENTRIES: usize = 16;
 /// Pages of own `membership` records read when seeding the followed list (`sync.md` §4.8).
 pub const FOLLOW_SEED_PAGES: u32 = 10;
+/// A forum opened again within this time reuses its last `open_forum` result (no declaration
+/// refetch; ms, *tunable*).
+pub const FORUM_REOPEN_MS: i64 = 300_000;
+/// Time budget of the P0 sync `forum_open` runs for authorities never synced (ms, *tunable*).
+pub const FORUM_OPEN_SYNC_BUDGET_MS: i64 = 10_000;
+/// Longest sleep of `live_tail` between rounds (ms, *tunable*).
+pub const LIVE_TAIL_IDLE_MS: i64 = 60_000;
+/// Dirty-queue items served per `live_tail` round (*tunable*).
+pub const LIVE_TAIL_BATCH: usize = 16;
+/// Author handles verified per `live_tail` round (`sync.md` §3.3, *tunable*).
+pub const HANDLE_VERIFY_BATCH: usize = 32;
+/// Authors waiting for handle verification, at most (*tunable*).
+pub const HANDLE_VERIFY_QUEUE_MAX: usize = 1_000;
+/// How often `live_tail` drops expired tombstones (ms).
+pub const TOMBSTONE_GC_EVERY_MS: i64 = 86_400_000;
+/// Latest comments shown per post by `recent_discussion` (*tunable*).
+pub const DISCUSSION_COMMENTS: usize = 3;

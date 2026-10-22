@@ -620,7 +620,10 @@ impl Net {
             });
         }
         if resp.status == 429 {
-            let wait = crate::xrpc::retry_after_ms(resp, now).unwrap_or(1_000);
+            // a wait of 0 (a past reset or date) still waits 1 s
+            let wait = crate::xrpc::retry_after_ms(resp, now)
+                .filter(|w| *w > 0)
+                .unwrap_or(1_000);
             let until = now.saturating_add(i64::try_from(wait).unwrap_or(i64::MAX));
             let reset = h.budget.as_ref().map_or(0, |b| b.reset_at);
             if let Some(b) = &mut h.budget {
@@ -703,6 +706,9 @@ impl Net {
                     _ => Some(false),
                 };
                 self.record_outcome(&origin, failure, probe, now);
+                // the internal headers are ours alone: a server's copy is dropped before the
+                // send time is stamped (it would otherwise be the first match)
+                resp.headers.retain(|(k, _)| !is_internal_header(k));
                 resp.headers
                     .push((SENT_AT_HEADER.to_owned(), sent_at.to_string()));
                 Ok(resp)
@@ -1072,6 +1078,17 @@ impl<H: Host> Host for NetHost<H> {
         self.inner.fill_random(buf);
     }
 }
+
+/// `true` for a header name of the `x-lessdugin-` family, which only this engine sets on
+/// responses ([`SENT_AT_HEADER`], [`LOCAL_HEADER`]); the same names from the network are removed.
+pub fn is_internal_header(name: &str) -> bool {
+    name.len() >= INTERNAL_HEADER_PREFIX.len()
+        && name.as_bytes()[..INTERNAL_HEADER_PREFIX.len()]
+            .eq_ignore_ascii_case(INTERNAL_HEADER_PREFIX.as_bytes())
+}
+
+/// The prefix of the internal response headers.
+pub const INTERNAL_HEADER_PREFIX: &str = "x-lessdugin-";
 
 /// The send time a [`Net`] stamped on a response, if any.
 pub fn sent_at(resp: &HttpResponse) -> Option<i64> {

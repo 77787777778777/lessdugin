@@ -14,15 +14,29 @@
 //!   blindly); everything else is a refusal.
 
 use lessdugin_atp::syntax::{AtIdentifier, Did, Nsid, RecordKey};
-use lessdugin_atp::xrpc::{CommitMeta, GetLatestCommit, GetRecord, ListRecords, XrpcError};
+use lessdugin_atp::xrpc::{CommitMeta, GetLatestCommit, GetRecord, XrpcError};
 use serde_json::{Value, json};
 
 use crate::engine::{EngineError, ErrorCode};
 use crate::host::{Host, HostError, HttpRequest, HttpResponse, Target};
 use crate::limits;
 use crate::outbox::budget::{self, BudgetRow};
+use crate::store::RecordStore;
 use crate::store::admit::{self, Expect, NoValidator, RecordValidator};
+use crate::sync::list::{ListError, ListTuning, Lister};
 use crate::xrpc::{CallOpts, Service, Xrpc, XrpcCallError};
+
+/// `EngineError.detail` key set on a read that failed in transport (offline, DNS, timeout).
+pub const OFFLINE_DETAIL: &str = "offline";
+
+/// `true` for a read error that failed in transport (see [`OFFLINE_DETAIL`]).
+pub fn is_offline(e: &EngineError) -> bool {
+    e.detail
+        .as_ref()
+        .and_then(|d| d.get(OFFLINE_DETAIL))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
 
 /// The account a pump writes for: its DID and the PDS bound at login.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -127,6 +141,20 @@ pub enum BatchOp {
 }
 
 impl BatchOp {
+    /// The record key.
+    pub fn rkey(&self) -> &str {
+        match self {
+            Self::Create { rkey, .. } | Self::Update { rkey, .. } | Self::Delete { rkey, .. } => {
+                rkey
+            }
+        }
+    }
+
+    /// The bytes this op adds to an `applyWrites` body (its JSON and a separator).
+    pub fn body_bytes(&self) -> usize {
+        serde_json::to_vec(&self.json()).map_or(usize::MAX, |b| b.len().saturating_add(1))
+    }
+
     fn json(&self) -> Value {
         match self {
             Self::Create {
@@ -282,7 +310,14 @@ impl<'h, H: Host> PdsClient<'h, H> {
                 error: EngineError::from(e),
             };
         }
-        CallError::Read(EngineError::from(e).context("reading the own repo"))
+        // a transport failure (offline, DNS, timeout): the write waits for the network
+        let offline = matches!(e, XrpcCallError::Network(_) | XrpcCallError::Timeout);
+        let error = EngineError::from(e).context("reading the own repo");
+        CallError::Read(if offline {
+            error.with_detail(OFFLINE_DETAIL, true)
+        } else {
+            error
+        })
     }
 
     // -----------------------------------------------------------------------------------------
@@ -354,142 +389,94 @@ impl<'h, H: Host> PdsClient<'h, H> {
         }))
     }
 
-    /// Every record of `collection` whose rkey starts with `prefix`, fresh and admitted, rkey
-    /// descending. Uses the cursor-range listing (`sync.md` §5.3, ADR 0004) and falls back to a
-    /// full listing of the collection when the host does not honour the bound.
-    // TODO(E3): share `sync::list_range` and its per-host cursor flag once it exists.
+    /// Every record of `collection` whose rkey starts with `prefix` (which ends in `-`), fresh
+    /// and admitted, rkey descending. Uses the sync listing (`sync::list::Lister`, `sync.md`
+    /// §5.3, ADR 0004): the cursor-range probe with the host's cached cursor capability, the
+    /// `FULL` fallback and the oversized-page retry (limits 100, 10, 1). Without a fetch cap. A
+    /// listing that is not complete (a cursor that does not advance, a safety cap) is a
+    /// non-retryable error: a delete, a redaction or an adopt never works from a partial list.
     pub async fn list_prefix(
         &mut self,
         collection: &str,
         prefix: &str,
         validator: Option<&dyn RecordValidator>,
     ) -> Result<Vec<Current>, CallError> {
-        let Some(bound) = prefix_bound(prefix) else {
-            return self.list_full(collection, prefix, validator).await;
+        let Some(stem) = prefix.strip_suffix('-') else {
+            return Err(CallError::Read(EngineError::internal(format!(
+                "listing prefix {prefix:?} does not end in '-'"
+            ))));
         };
-        let mut rows = Vec::new();
-        let mut cursor = bound.clone();
-        let mut prev: Option<String> = None;
-        loop {
-            let page = match self.list_page(collection, Some(&cursor), validator).await {
-                Ok(p) => p,
-                Err(CallError::Read(_)) if prev.is_none() => {
-                    return self.list_full(collection, prefix, validator).await;
-                }
-                Err(e) => return Err(e),
-            };
-            let keys: Vec<String> = page.iter().map(|(k, _)| k.clone()).collect();
-            let violation = keys.iter().any(|k| *k >= bound)
-                || keys.windows(2).any(|w| w[0] <= w[1])
-                || matches!((&prev, keys.first()), (Some(p), Some(k)) if k >= p)
-                || matches!((&page.cursor, keys.last()), (Some(c), Some(k)) if c != k);
-            if violation {
-                return self.list_full(collection, prefix, validator).await;
-            }
-            for (k, entry) in page.rows {
-                if !k.starts_with(prefix) {
-                    return Ok(rows);
-                }
-                if let Some(c) = entry {
-                    rows.push(c);
-                }
-            }
-            match (page.cursor, keys.last()) {
-                (Some(c), Some(_)) if keys.len() >= LIST_LIMIT as usize => {
-                    prev = keys.last().cloned();
-                    cursor = c;
-                }
-                _ => return Ok(rows),
-            }
-        }
-    }
-
-    async fn list_full(
-        &mut self,
-        collection: &str,
-        prefix: &str,
-        validator: Option<&dyn RecordValidator>,
-    ) -> Result<Vec<Current>, CallError> {
-        let mut all: Vec<Current> = Vec::new();
-        let mut seen = std::collections::BTreeSet::new();
-        let mut cursor: Option<String> = None;
-        for _ in 0..FULL_MAX_PAGES {
-            let page = self
-                .list_page(collection, cursor.as_deref(), validator)
-                .await?;
-            let empty = page.rows.is_empty();
-            for (k, entry) in page.rows {
-                if k.starts_with(prefix)
-                    && let Some(c) = entry
-                {
-                    all.push(c);
-                }
-            }
-            match page.cursor {
-                Some(c) if !empty && seen.insert(c.clone()) => cursor = Some(c),
-                _ => break,
-            }
-        }
-        all.sort_by(|a, b| b.rkey.cmp(&a.rkey));
-        all.dedup_by(|a, b| a.rkey == b.rkey);
-        Ok(all)
-    }
-
-    async fn list_page(
-        &mut self,
-        collection: &str,
-        cursor: Option<&str>,
-        validator: Option<&dyn RecordValidator>,
-    ) -> Result<Page, CallError> {
-        self.requests += 1;
         let coll = Nsid::parse(collection).map_err(|e| {
             CallError::Read(EngineError::invalid_input(format!("{collection:?}: {e}")))
         })?;
-        let params = ListRecords {
-            repo: AtIdentifier::Did(self.session.did.clone()),
-            collection: coll,
-            limit: Some(LIST_LIMIT),
-            cursor: cursor.map(str::to_owned),
-            reverse: None,
-        };
-        let path = lessdugin_atp::xrpc::query_path(&params);
-        let opts = CallOpts::capped(limits::LIST_PAGE_MAX_BYTES);
-        let resp = Xrpc::new(self.host)
-            .get(&self.service(), &path, &opts)
+        let service = self.service();
+        let origin = self.session.origin();
+        let caps = RecordStore::new(self.host.cache())
+            .host_caps(&origin)
             .await
-            .map_err(|e| self.read_error(e))?;
-        let expect = Expect {
-            did: &self.session.did,
-            collection,
-            rkey: None,
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        let now = self.host.now_ms();
+        let tuning = ListTuning {
+            fetch_cap: Some(u32::MAX),
+            ..ListTuning::default()
         };
-        let v: &dyn RecordValidator = validator.unwrap_or(&NoValidator);
-        let page = admit::admit_list_page(&resp.body, &expect, v).map_err(|e| {
-            CallError::Read(EngineError::new(
-                ErrorCode::Network,
-                format!("own PDS returned a bad page: {e}"),
-            ))
-        })?;
-        let mut rows = Vec::with_capacity(page.entries.len());
-        for e in page.entries {
-            let Some(k) = e.rkey().map(str::to_owned) else {
-                return Err(CallError::Read(EngineError::new(
+        let xrpc = Xrpc::new(self.host);
+        let lister = Lister {
+            xrpc: &xrpc,
+            service: &service,
+            origin: &origin,
+            did: &self.session.did,
+            validator: validator.unwrap_or(&NoValidator),
+            tuning: &tuning,
+            keep_values: true,
+        };
+        let res = lister
+            .list_range(&coll, stem, caps.use_range(now), caps.short_page_ends)
+            .await;
+        let listing = match res {
+            Ok(l) => l,
+            Err(ListError::Xrpc(e)) => return Err(self.read_error(e)),
+            Err(e) => {
+                return Err(CallError::Read(
+                    EngineError::new(
+                        ErrorCode::Network,
+                        format!("own PDS returned a bad listing: {e}"),
+                    )
+                    .with_retryable(true),
+                ));
+            }
+        };
+        self.requests += listing.requests;
+        if !listing.complete || listing.capped {
+            let why = listing
+                .stop
+                .clone()
+                .unwrap_or_else(|| "the listing did not complete".to_owned());
+            // the PDS's own behaviour (a cursor that does not advance, a safety cap): failing
+            // is better than acting on a partial list or retrying for ever
+            return Err(CallError::Read(
+                EngineError::new(
                     ErrorCode::Network,
-                    "own PDS listed a non-canonical uri",
-                )));
-            };
-            let cur = e.result.ok().map(|a| Current {
-                rkey: k.clone(),
-                cid: a.cid.to_string(),
-                valid: a.validity.is_valid(),
-                value: a.value,
-            });
-            rows.push((k, cur));
+                    format!("incomplete listing of {collection} {prefix}*: {why}"),
+                )
+                .with_retryable(false),
+            ));
         }
-        Ok(Page {
-            cursor: page.cursor,
-            rows,
-        })
+        Ok(listing
+            .entries
+            .into_iter()
+            .filter_map(|e| {
+                let a = e.record.ok()?;
+                Some(Current {
+                    rkey: e.rkey,
+                    cid: a.cid.to_string(),
+                    valid: a.validity.is_valid(),
+                    value: a.value,
+                })
+            })
+            .collect())
     }
 
     // -----------------------------------------------------------------------------------------
@@ -751,30 +738,6 @@ impl<'h, H: Host> PdsClient<'h, H> {
     }
 }
 
-/// Page size of outbox listings.
-const LIST_LIMIT: u32 = 100;
-/// A full listing stops after this many pages (`sync.md` §5.3).
-const FULL_MAX_PAGES: usize = 5_000;
-
-struct Page {
-    cursor: Option<String>,
-    /// `(rkey, admitted record)`; `None` for an entry that failed admission.
-    rows: Vec<(String, Option<Current>)>,
-}
-
-impl Page {
-    fn iter(&self) -> impl Iterator<Item = &(String, Option<Current>)> {
-        self.rows.iter()
-    }
-}
-
-/// The exclusive upper bound of a prefix ending in `-`: the prefix with its last `-` (0x2D)
-/// replaced by `.` (0x2E), as in ADR 0004.
-fn prefix_bound(prefix: &str) -> Option<String> {
-    let stem = prefix.strip_suffix('-')?;
-    Some(format!("{stem}."))
-}
-
 fn written(out: &Value, sent_at: i64) -> Written {
     let commit = out.get("commit").and_then(|c| {
         Some(Head {
@@ -796,8 +759,6 @@ mod tests {
 
     #[test]
     fn bounds() {
-        assert_eq!(prefix_bound("abc-").as_deref(), Some("abc."));
-        assert_eq!(prefix_bound("abc"), None);
         let w = written(
             &json!({"uri": "at://x", "cid": "bafy", "commit": {"cid": "c", "rev": "r"}}),
             5,

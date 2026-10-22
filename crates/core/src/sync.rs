@@ -98,6 +98,13 @@ pub enum SyncError {
     /// A response failed admission (`sync.md` §5.5).
     #[error("admission: {0}")]
     Admission(String),
+    /// The DID's identity is only a hint (`sync.md` §1.5): its PDS can neither confirm nor
+    /// reject a membership, so a candidate stays a candidate.
+    #[error("the identity of {did} is only a hint: its membership cannot be confirmed")]
+    IdentityHint {
+        /// The DID.
+        did: String,
+    },
 }
 
 impl SyncError {
@@ -111,6 +118,7 @@ impl SyncError {
             Self::List(_) => "listing",
             Self::Store(_) => "store",
             Self::Admission(_) => "admission",
+            Self::IdentityHint { .. } => "identity_hint",
         }
     }
 

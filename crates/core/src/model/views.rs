@@ -90,6 +90,10 @@ pub struct Views<'a> {
     pub pending: &'a BTreeSet<String>,
     /// Completeness of the forum.
     pub completeness: &'a Completeness,
+    /// The query time (µs) for time-dependent ordering (`magic`, `hot`); the fold's own states
+    /// are as of the model's build ([`ForumModel::now`], at most
+    /// [`crate::limits::MODEL_MAX_AGE_MS`] old in the engine).
+    pub now: i64,
 }
 
 impl Views<'_> {
@@ -121,7 +125,7 @@ impl Views<'_> {
     fn score(i: &ItemFold) -> ScoreView {
         ScoreView {
             score: i.score.score,
-            agreement: i.score.agreement.unwrap_or(0),
+            agreement: i.score.agreement,
             unweighted: i.score.unweighted,
             earlier_version_votes: i.score.earlier,
             mine: None,
@@ -191,7 +195,10 @@ impl Views<'_> {
             return None;
         }
         let kind = post_kind(LexPostKind::effective(kind.as_deref()).value);
-        let excerpt = if !i.state.listed() {
+        // a hidden or tombstoned post shows none of its author's content (title, link, tags and
+        // labels included), like its body
+        let listed = i.state.listed();
+        let excerpt = if !listed {
             String::new()
         } else if *spilled {
             excerpt.clone().unwrap_or_default()
@@ -206,13 +213,13 @@ impl Views<'_> {
             author: self.actor(&x.did),
             post_kind: kind,
             // a quickTake's title is ignored (PO4)
-            title: if kind == PostKind::QuickTake {
+            title: if kind == PostKind::QuickTake || !listed {
                 None
             } else {
                 title.clone()
             },
             excerpt,
-            tags: tags.clone(),
+            tags: if listed { tags.clone() } else { Vec::new() },
             tier: i.tier,
             pinned: i.pinned,
             locked: i.locked,
@@ -224,7 +231,7 @@ impl Views<'_> {
             state: Self::state(i),
             badges: self.badges(x, i),
             unread_comments: None,
-            link: if kind == PostKind::Link {
+            link: if kind == PostKind::Link && listed {
                 link.as_ref().map(|l| ExternalLinkView {
                     uri: l.uri.clone(),
                     host: host_of(&l.uri),
@@ -234,7 +241,7 @@ impl Views<'_> {
             } else {
                 None
             },
-            labels: labels.clone(),
+            labels: if listed { labels.clone() } else { Vec::new() },
         })
     }
 
@@ -295,7 +302,8 @@ impl Views<'_> {
         })
     }
 
-    fn comment_node(&self, uri: &str, root: &str) -> Option<CommentNode> {
+    /// The node of comment `uri` in the thread of `root` (`None` unless it is placed there).
+    pub fn comment_node(&self, uri: &str, root: &str) -> Option<CommentNode> {
         let x = self.model.skel(uri)?;
         let i = self.model.fold.item(uri)?;
         let th = self.model.fold.threads.get(root)?;
@@ -410,7 +418,7 @@ impl Views<'_> {
             }
             visible.insert(node.clone(), own_visible.max(below));
         }
-        let now = self.model.now();
+        let now = self.now;
         let policy = &self.model.fold.policy;
         let mut out = Vec::new();
         let mut stack: Vec<Node> = vec![Node::Root];
@@ -511,6 +519,14 @@ impl Views<'_> {
             at = Self::created_ms(r);
             summary = s;
         }
+        // an edit without a revision (`--no-history`, a redaction) dates the current version
+        // by its later `updatedAt`
+        let updated = x
+            .updated_at
+            .as_deref()
+            .and_then(crate::social::time::us)
+            .map(ms);
+        let at = updated.filter(|u| *u > at).unwrap_or(at);
         versions.push(VersionEntry {
             n: revs.len() as u32 + 1,
             cid: x.cid.clone(),

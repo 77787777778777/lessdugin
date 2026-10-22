@@ -312,9 +312,23 @@ impl Observation {
         o
     }
 
-    /// Marks the author's identity as a hint.
+    /// Marks the author's identity as a hint (§1.5). The rev of a PDS that no DID document
+    /// names is never an order key: the observation gets the key `("", sentAt)` and is not
+    /// exact, so it sorts below every doc-level observation and tombstone of the uri (it never
+    /// replaces a doc-level row nor lifts a tombstone, and never conflicts), and any doc-level
+    /// observation supersedes it. Between identity-hint observations the send time orders.
     pub fn with_id_hint(mut self, id_hint: bool) -> Self {
         self.id_hint = id_hint;
+        if id_hint {
+            self.exact = false;
+            self.key = OrderKey::new("", self.key.sent_at);
+        }
+        self
+    }
+
+    /// Marks the key's rev as a lower bound only (not exact).
+    pub fn inexact(mut self) -> Self {
+        self.exact = false;
         self
     }
 
@@ -586,6 +600,18 @@ pub fn admit_list_page(
     expect: &Expect<'_>,
     validator: &dyn RecordValidator,
 ) -> Result<ListPage, AdmitError> {
+    admit_list_page_capped(body, expect, validator, usize::MAX)
+}
+
+/// [`admit_list_page`] for a request sent with `limit = max_entries`: a page with more records
+/// than that breaks the listing protocol and is rejected whole, before any record is converted.
+/// Linear in the page size: the scan's spans and issues are indexed by record once.
+pub fn admit_list_page_capped(
+    body: &[u8],
+    expect: &Expect<'_>,
+    validator: &dyn RecordValidator,
+    max_entries: usize,
+) -> Result<ListPage, AdmitError> {
     let scan = scan_response(body)?;
     if let Some(i) = scan.issues.iter().find(|i| i.path.is_empty()) {
         return Err(AdmitError::Malformed(format!("page envelope: {}", i.kind)));
@@ -605,26 +631,49 @@ pub fn admit_list_page(
     let Some(Value::Array(records)) = m.get("records") else {
         return Err(AdmitError::Malformed("records is not an array".into()));
     };
-    let mut entries = Vec::with_capacity(records.len());
+    if records.len() > max_entries {
+        return Err(AdmitError::Malformed(format!(
+            "the page has {} records, more than the limit {max_entries} it was asked for",
+            records.len()
+        )));
+    }
+    // one pass over the scan: the first issue and the `value` span of each record
+    let n = records.len();
+    let mut first_issue: Vec<Option<&Issue>> = vec![None; n];
+    for issue in &scan.issues {
+        if let [Seg::Key(k), Seg::Index(i), ..] = issue.path.as_slice()
+            && k == "records"
+            && let Some(slot) = first_issue.get_mut(*i)
+            && slot.is_none()
+        {
+            *slot = Some(issue);
+        }
+    }
+    let mut value_len: Vec<Option<usize>> = vec![None; n];
+    for span in &scan.spans {
+        if let [Seg::Key(k), Seg::Index(i), Seg::Key(v)] = span.path.as_slice()
+            && k == "records"
+            && v == "value"
+            && let Some(slot) = value_len.get_mut(*i)
+            && slot.is_none()
+        {
+            *slot = Some(span.len());
+        }
+    }
+    let mut entries = Vec::with_capacity(n);
     for (i, rec) in records.iter().enumerate() {
-        let at = [Seg::key("records"), Seg::Index(i)];
         let raw_uri = rec.get("uri").and_then(Value::as_str).map(str::to_owned);
         let uri = raw_uri.as_deref().and_then(|s| AtUri::parse(s).ok());
-        let result = match scan.issues_under(&at).next() {
+        let result = match first_issue[i] {
             Some(issue) => Err(issue_error(issue)),
-            None => {
-                let len = scan
-                    .span(&[Seg::key("records"), Seg::Index(i), Seg::key("value")])
-                    .map_or(0, |s| s.len());
-                admit_value(
-                    raw_uri.as_deref(),
-                    rec.get("cid").and_then(Value::as_str),
-                    rec.get("value"),
-                    len,
-                    expect,
-                    validator,
-                )
-            }
+            None => admit_value(
+                raw_uri.as_deref(),
+                rec.get("cid").and_then(Value::as_str),
+                rec.get("value"),
+                value_len[i].unwrap_or(0),
+                expect,
+                validator,
+            ),
         };
         entries.push(PageEntry {
             raw_uri,

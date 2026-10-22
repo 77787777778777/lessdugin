@@ -386,6 +386,25 @@ Blobs are uploaded in the `sending` step of the `PendingWrite` that references t
 
 `INACTIVE_RETENTION_MS` is in §11, `RENDER_CACHE_MAX_BYTES` in §13.1, `JETSTREAM_DEDUP_LRU` in §10.3.
 
+**Engine runtime** (`engine-api.md`; all *tunable*):
+
+| Constant | Value | Class | Applies to | Defined in |
+|---|---|---|---|---|
+| `RENDER_CACHE_ENTRIES` | 512 | O | rendered bodies kept in memory (with `RENDER_CACHE_MAX_BYTES`) | `sync.md` §13 |
+| `LIST_PAGE_DEFAULT` | 30 | O | `list_posts` page size when the query gives none | `engine-api.md` §3.4 |
+| `LIST_PAGE_MAX` | 500 | O | largest `list_posts` page; a larger `limit` is clamped | `engine-api.md` §3.4 |
+| `MODEL_MAX_AGE_MS` | 60,000 (1 min) | O | a cached forum model older than this is rebuilt on the next query (the fold's time-dependent states follow the clock); orderings always use the query time | here |
+| `MODEL_CACHE_ENTRIES` | 16 | O | forum models kept in memory, least recently built evicted first | here |
+| `FOLLOW_SEED_PAGES` | 10 | O | `listRecords` pages of own `membership` records read when seeding the followed list | `sync.md` §4.8 |
+| `FORUM_REOPEN_MS` | 300,000 (5 min) | O | `forum_open` within this time of the last open reuses its result (no declaration refetch) | `engine-api.md` §3.2 |
+| `FORUM_OPEN_SYNC_BUDGET_MS` | 10,000 (10 s) | O | time budget of the P0 sync `forum_open` runs for authorities with no synced range | `engine-api.md` §3.2 |
+| `LIVE_TAIL_IDLE_MS` | 60,000 (1 min) | O | longest sleep of `live_tail` between rounds | `engine-api.md` §3.3 |
+| `LIVE_TAIL_BATCH` | 16 | O | dirty-queue items served per `live_tail` round | `sync.md` §6.1 |
+| `HANDLE_VERIFY_BATCH` | 32 | O | author handles verified per `live_tail` round | `sync.md` §3.3 |
+| `HANDLE_VERIFY_QUEUE_MAX` | 1,000 | O | authors waiting for handle verification; later ones wait for the next view | `sync.md` §3.3 |
+| `TOMBSTONE_GC_EVERY_MS` | 86,400,000 (1 day) | O | how often `live_tail` drops tombstones past `TOMBSTONE_MIN_RETENTION_MS` | `sync.md` I4 |
+| `DISCUSSION_COMMENTS` | 3 | O | latest Visible comments shown per post by `recent_discussion` | `engine-api.md` §3.4 |
+
 ---
 
 ## 16. Authentication and sessions

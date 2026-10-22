@@ -405,6 +405,54 @@ fn list_page_envelope_errors_reject_the_page() {
     assert!(admit_list_page(br#"{"records":[],"x":1.5}"#, &expect, &NoValidator).is_ok());
 }
 
+/// A page with more records than its request's `limit` is rejected whole before any record is
+/// converted; within the limit, issues and value sizes are attributed per record (in one pass
+/// over the scan, so a page the size of the 4 MiB cap costs linear time).
+#[test]
+fn list_pages_over_the_limit_are_rejected_and_attribution_is_per_record() {
+    let did = did();
+    let p = post();
+    let expect = Expect {
+        did: &did,
+        collection: &p,
+        rkey: None,
+    };
+    let good = json!({"$type": post(), "n": 1});
+    let good_text = serde_json::to_string(&good).unwrap();
+    let c0 = cid_of(&good);
+    let n = 3_000usize;
+    let mut recs = Vec::with_capacity(n);
+    for i in (0..n).rev() {
+        let value = if i % 1_000 == 7 {
+            format!(r#"{{"$type":"{p}","n":1.5}}"#)
+        } else {
+            good_text.clone()
+        };
+        recs.push(format!(
+            r#"{{"uri":"at://{DID}/{p}/{FK}-k{i:06}","cid":"{c0}","value":{value}}}"#
+        ));
+    }
+    let body = format!(r#"{{"records":[{}]}}"#, recs.join(","));
+    let err = admit_list_page_capped(body.as_bytes(), &expect, &NoValidator, 100).unwrap_err();
+    assert!(err.rejects_response(), "{err}");
+    let page = admit_list_page_capped(body.as_bytes(), &expect, &NoValidator, n).unwrap();
+    assert_eq!(page.entries.len(), n);
+    let bad: Vec<usize> = page
+        .entries
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| e.result.is_err())
+        .map(|(i, _)| n - 1 - i)
+        .collect();
+    assert_eq!(bad, [2_007, 1_007, 7]);
+    assert!(
+        page.entries
+            .iter()
+            .filter_map(|e| e.result.as_ref().ok())
+            .all(|r| r.cid.to_string() == c0)
+    );
+}
+
 #[test]
 fn own_writes_and_observations() {
     let u = AtUri::parse(&uri()).unwrap();

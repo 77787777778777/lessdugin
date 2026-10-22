@@ -36,7 +36,7 @@ pub mod records;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use futures::StreamExt;
@@ -77,6 +77,9 @@ pub const IDLE_POLL_MS: i64 = 60_000;
 pub const ERROR_WAIT_MS: i64 = 5_000;
 /// Done and undone writes are kept this long, then pruned by the idle pump (ms, *tunable*).
 pub const DONE_KEEP_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+
+/// The waker key of the all-account waiters (no DID is empty).
+const WAKE_ALL: &str = "";
 /// Rows per scan page.
 const SCAN_PAGE: u32 = 256;
 /// The largest estimate charged against the budget before a write starts (a write that
@@ -88,7 +91,8 @@ pub trait OutboxListener: MaybeSendSync {
     /// A write's state changed (`Write { id, state }`, `engine-api.md` §3.8).
     fn on_write(&self, _ticket: &WriteTicket) {}
 
-    /// A confirmed write was applied to the record store (`sync.md` §5.8). With a
+    /// A confirmed write was applied to the record store (`sync.md` §5.8). Called after the
+    /// write's resulting state is saved and reported through [`OutboxListener::on_write`]. With a
     /// [`Syncer`] ([`Outbox::with_syncer`]) the own repo is already marked
     /// dirty at P1 and `report.mismatched` queued for P0 point fetches; without one, scheduling
     /// them is the listener's job.
@@ -258,11 +262,12 @@ struct Shared {
     rows: AsyncMutex<()>,
     /// One pump lock per account.
     pumps: StdMutex<BTreeMap<String, Arc<AsyncMutex<()>>>>,
-    /// Wakers of running pumps, per account.
+    /// Wakers of running pumps, per account ([`WAKE_ALL`]: woken for every account).
     wakers: StdMutex<BTreeMap<String, Vec<mpsc::UnboundedSender<()>>>>,
     /// This process's TID clock id.
     clock_id: u16,
-    stopped: AtomicBool,
+    /// Incremented by `stop`: a pump runs while the generation it started in is current.
+    generation: AtomicU64,
 }
 
 /// The outbox over a host. Cloning shares it.
@@ -324,7 +329,7 @@ impl<H: Host> Outbox<H> {
                 pumps: StdMutex::new(BTreeMap::new()),
                 wakers: StdMutex::new(BTreeMap::new()),
                 clock_id,
-                stopped: AtomicBool::new(false),
+                generation: AtomicU64::new(0),
             }),
             sync: None,
         }
@@ -398,11 +403,40 @@ impl<H: Host> Outbox<H> {
         self.shared.listener.on_write(&w.ticket());
     }
 
+    /// Wakes the pumps of `account` and every all-account waiter ([`Outbox::waker`]).
     fn wake(&self, account: &str) {
         let mut wakers = lock(&self.shared.wakers);
-        if let Some(list) = wakers.get_mut(account) {
+        for key in [account, WAKE_ALL] {
+            if let Some(list) = wakers.get_mut(key) {
+                list.retain(|tx| tx.unbounded_send(()).is_ok());
+            }
+        }
+        wakers.retain(|_, list| !list.is_empty());
+    }
+
+    /// Wakes every running pump and waiter (an account was added or removed).
+    pub fn wake_all(&self) {
+        let mut wakers = lock(&self.shared.wakers);
+        for list in wakers.values_mut() {
             list.retain(|tx| tx.unbounded_send(()).is_ok());
         }
+        wakers.retain(|_, list| !list.is_empty());
+    }
+
+    /// A receiver woken by every new or re-queued write of any account, by
+    /// [`Outbox::wake_all`] and by [`Outbox::stop`] (the engine's all-account pump).
+    pub fn waker(&self) -> mpsc::UnboundedReceiver<()> {
+        let (tx, rx) = mpsc::unbounded();
+        lock(&self.shared.wakers)
+            .entry(WAKE_ALL.to_owned())
+            .or_default()
+            .push(tx);
+        rx
+    }
+
+    /// The pump generation: a pump started now runs until [`Outbox::stop`] changes it.
+    pub fn generation(&self) -> u64 {
+        self.shared.generation.load(Ordering::SeqCst)
     }
 
     fn pump_lock(&self, account: &str) -> Arc<AsyncMutex<()>> {
@@ -1183,6 +1217,9 @@ impl<H: Host> Outbox<H> {
             let cost = w.estimated_cost().min(PRECHECK_COST_MAX);
             if !budget.fits(now, cost) {
                 let until = budget.next_fit(now, cost);
+                // a row left `sending` (a crash mid-send) may have been sent: keep that through
+                // the wait, so undo never "removes" a write that is live
+                w.sent |= w.state == WriteStage::Sending;
                 w.state = WriteStage::Throttled;
                 w.not_before = Some(until);
                 w.error = Some(StoredError::from(
@@ -1235,12 +1272,19 @@ impl<H: Host> Outbox<H> {
         recovering: bool,
     ) -> Result<WriteTicket, EngineError> {
         let host: &H = &self.host;
+        let loaded = budget.clone();
         let mut r = Runner::new(host, session, w, budget);
+        // A recovery whose check fails (offline, a bad answer) leaves the earlier attempt
+        // possibly sent; a check that finds the write absent clears that doubt.
+        let mut unknown = false;
         let res = if recovering {
             match r.already_applied().await {
                 Ok(true) => Ok(Outcome::Done),
                 Ok(false) => r.run().await,
-                Err(e) => Err(e),
+                Err(e) => {
+                    unknown = true;
+                    Err(e)
+                }
             }
         } else {
             r.run().await
@@ -1263,7 +1307,7 @@ impl<H: Host> Outbox<H> {
         let applied = std::mem::take(&mut r.applied);
         let budget = r.pds.budget.clone();
         let mut w = r.w;
-        w.sent |= sent;
+        w.sent |= sent || unknown;
         match outcome {
             Outcome::Done => {
                 w.state = WriteStage::Done;
@@ -1285,7 +1329,11 @@ impl<H: Host> Outbox<H> {
             }
         }
         w.updated_at = now;
-        // Confirmed requests are facts whatever the outcome (a partial delete): apply them.
+        // Confirmed requests are facts whatever the outcome (a partial delete): apply them
+        // before the write is saved as finished (a crash in between is recovered by
+        // `already_applied`), and report them after it is saved and its state emitted, so a
+        // view re-queried on `Changed` no longer shows the write as pending.
+        let mut reports = Vec::with_capacity(applied.len());
         for a in &applied {
             let report = match &self.sync {
                 Some(syncer) => apply_with_syncer(syncer, a).await,
@@ -1294,15 +1342,24 @@ impl<H: Host> Outbox<H> {
                     .map_err(|e| EngineError::internal(e.to_string())),
             };
             match report {
-                Ok(report) => self.shared.listener.on_applied(a, &report),
+                Ok(report) => reports.push((a, report)),
                 Err(e) => tracing::warn!(error = %e, "could not apply an own write to the store"),
             }
         }
         {
             let _g = self.shared.rows.lock().await;
-            self.save(session.did.as_str(), &w, Some(&budget)).await?;
+            let account = session.did.as_str();
+            let mut merged: BudgetRow = self
+                .get_row(model::budget_key(account))
+                .await?
+                .unwrap_or_default();
+            merged.merge_run(&loaded, &budget, now);
+            self.save(account, &w, Some(&merged)).await?;
         }
         self.emit(&w);
+        for (a, report) in &reports {
+            self.shared.listener.on_applied(a, report);
+        }
         Ok(w.ticket())
     }
 
@@ -1343,7 +1400,10 @@ impl<H: Host> Outbox<H> {
             .entry(account.clone())
             .or_default()
             .push(tx);
-        while !self.shared.stopped.load(Ordering::SeqCst) {
+        // a later `stop` ends this pump; a pump started after a `stop` runs (generations)
+        let generation = self.shared.generation.load(Ordering::SeqCst);
+        let stopped = || self.shared.generation.load(Ordering::SeqCst) != generation;
+        while !stopped() {
             let wait = match self.step(session).await {
                 Ok(Step::Processed(_)) => continue,
                 Ok(Step::Wait(t)) => (t - self.host.now_ms()).clamp(1, IDLE_POLL_MS),
@@ -1359,7 +1419,7 @@ impl<H: Host> Outbox<H> {
                     ERROR_WAIT_MS
                 }
             };
-            if self.shared.stopped.load(Ordering::SeqCst) {
+            if stopped() {
                 break;
             }
             let sleep = self.host.sleep(u64::try_from(wait).unwrap_or(1));
@@ -1370,13 +1430,11 @@ impl<H: Host> Outbox<H> {
         }
     }
 
-    /// Stops every running pump of this outbox (they return after their current step).
+    /// Stops every running pump of this outbox (they return after their current step). A pump
+    /// started afterwards runs normally.
     pub fn stop(&self) {
-        self.shared.stopped.store(true, Ordering::SeqCst);
-        let accounts: Vec<String> = lock(&self.shared.wakers).keys().cloned().collect();
-        for a in accounts {
-            self.wake(&a);
-        }
+        self.shared.generation.fetch_add(1, Ordering::SeqCst);
+        self.wake_all();
     }
 }
 
@@ -1399,14 +1457,33 @@ fn classify<H: Host>(r: &Runner<'_, H>, e: pds::CallError, now: i64) -> Outcome 
     match e {
         CallError::InvalidSwap => Outcome::Conflict(CallError::InvalidSwap.engine_error()),
         CallError::Ambiguous(error) => backoff(error),
+        // A reset that is already past (a fast client clock, `Retry-After: 0`, a past HTTP
+        // date) still waits: at least the default rate-limit wait, growing with the attempts
+        // (consecutive 429s), never a retry every millisecond.
         CallError::RateLimited { until, error } => Outcome::Retry {
-            at: until.max(now + 1),
+            at: if until > now {
+                until
+            } else {
+                now + r
+                    .backoff_ms(attempts)
+                    .max(budget::DEFAULT_RATE_LIMIT_WAIT_MS)
+            },
             error,
         },
         CallError::Rejected { error, .. } if error.code == ErrorCode::AuthRequired => {
             backoff(error)
         }
         CallError::Rejected { error, .. } => Outcome::Failed(error),
+        // a read that failed in transport (offline) before anything was sent never makes the
+        // write fail: nothing can have landed, so it waits for the network and tries again
+        CallError::Read(error)
+            if error.retryable && pds::is_offline(&error) && !r.pds.sent_any && !r.w.sent =>
+        {
+            Outcome::Retry {
+                at: now + r.backoff_ms(attempts),
+                error,
+            }
+        }
         CallError::Read(error) if error.retryable => backoff(error),
         CallError::Read(error) => Outcome::Failed(error),
     }

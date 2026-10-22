@@ -496,6 +496,10 @@ fn fetch_caps_are_complete_and_byte_caps_partial() {
     assert_eq!(repo.listed_rev(&f.fk), "");
     assert_eq!(repo.byte_capped.get(&f.fk), Some(&true));
     assert_eq!(
+        repo.fails, 0,
+        "a safety cap is no repo failure (no backoff)"
+    );
+    assert_eq!(
         repo.repo_status(&f.fk),
         lessdugin_core::store::RepoStatus::Unavailable
     );
@@ -665,7 +669,7 @@ fn head_checks_queue_changed_repos() {
 // discovery
 
 #[test]
-fn approval_mode_syncs_authorities_and_confirmed_grants() {
+fn approval_mode_syncs_authorities_and_grants() {
     let w = World::new();
     let owner = w.net.add_account("owner.example.com");
     let admin = w.net.add_account("admin.example.com");
@@ -707,10 +711,13 @@ fn approval_mode_syncs_authorities_and_confirmed_grants() {
         fs.state.disc.get(alice.did().as_str()).map(|d| d.state),
         Some(DiscState::Confirmed)
     );
+    // bob is granted without a membership: synced like an authority, never rejected
+    // (social.md §3.3: the grant counts whatever the membership says)
     assert_eq!(
         fs.state.disc.get(bob.did().as_str()).map(|d| d.state),
-        Some(DiscState::Rejected)
+        Some(DiscState::Candidate)
     );
+    assert!(w.requests_about(bob.did()) > 0, "bob's repo is listed");
     assert!(!fs.state.disc.contains_key(carol.did().as_str()));
     assert_eq!(w.requests_about(carol.did()), 0, "carol is not a candidate");
     assert_eq!(
@@ -719,24 +726,24 @@ fn approval_mode_syncs_authorities_and_confirmed_grants() {
         "dave is banned, not granted"
     );
     assert!(w.stored(&f, &alice).contains(&pa.0));
-    // C(F) = A ∪ G without the rejected bob
-    assert_eq!(fs.completeness.repos_total, 3);
-    assert_eq!(fs.completeness.repos_complete, 3);
+    // C(F) = A ∪ G, bob included
+    assert_eq!(fs.completeness.repos_total, 4);
+    assert_eq!(fs.completeness.repos_complete, 4);
     assert!(!fs.completeness.partial);
     assert!(!fs.completeness.degraded);
     let rep = &fs.report;
-    assert_eq!((rep.repos_total, rep.repos_complete), (3, 3));
+    assert_eq!((rep.repos_total, rep.repos_complete), (4, 4));
     assert!(rep.errors.is_empty(), "{:?}", rep.errors);
     assert_eq!(rep.requests as usize, w.net.requests().len());
 
-    // a second sync: the proof is cached, bob is not re-checked, nothing changes
+    // a second sync: the proof is cached, nothing changes
     w.net.clear_requests();
     let fs2 = w.sync_forum(&f, &SyncOpts::default());
     assert!(matches!(fs2.forum.proof, DeclProof::Cached { .. }));
     assert_eq!(fs2.report.changed, 0);
-    assert_eq!(w.requests_about(bob.did()), 0);
+    assert_eq!(w.requests_about(bob.did()), 1, "one head check");
     // warm: the declaration, then one head per synced repo
-    assert_eq!(fs2.report.requests, 1 + 3, "{:?}", w.net.requests());
+    assert_eq!(fs2.report.requests, 1 + 4, "{:?}", w.net.requests());
 }
 
 #[test]
@@ -1304,4 +1311,570 @@ fn a_reconcile_refreshes_collections_even_at_an_unchanged_head() {
     // and at an unchanged head with unchanged collections it stays clean
     let r = w.sync_repo_for(&sy, &owner, &f, Reason::Reconcile);
     assert_eq!(r.outcome, RepoOutcome::Clean);
+}
+
+// ---------------------------------------------------------------------------------------------
+// M2 review regressions (store and sync)
+
+const DESCRIBE: &str = "com.atproto.repo.describeRepo";
+
+fn origin_of(a: &AccountHandle) -> String {
+    a.pds_base().trim_end_matches('/').to_owned()
+}
+
+/// H1: a granted member who leaves is still a seed (social.md §3.3), so their repo stays synced
+/// and counted: a deleted opinion is tombstoned, and a fresh client agrees.
+#[test]
+fn a_granted_member_who_leaves_stays_synced() {
+    let w = World::new();
+    let owner = w.net.add_account("owner.example.com");
+    let bob = w.net.add_account("bob.example.com");
+    let f = w.forum(&owner, "meta", MembershipMode::Approval, &[]);
+    let p = w.post(&owner, &f);
+    w.access(&owner, &f, bob.did(), AccessLevel::Member);
+    w.join(&bob, &f);
+    w.opinion(&bob, &f, &p);
+    let op_rkey = keys::opinion_rkey(NS, f.uri.as_str(), &p.0).unwrap();
+    let op = bob.uri(nsid::OPINION, &op_rkey);
+    let fs = w.sync_forum(&f, &SyncOpts::default());
+    assert!(is_rec(&w.slot(&op)));
+    assert_eq!(
+        fs.state.disc.get(bob.did().as_str()).map(|d| d.state),
+        Some(DiscState::Confirmed)
+    );
+
+    // bob leaves, then deletes his opinion
+    bob.delete(nsid::MEMBERSHIP, &f.fk);
+    let fs = w.sync_forum(&f, &SyncOpts::default());
+    assert!(fs.state.roster.seeds.contains(bob.did().as_str()));
+    assert_ne!(
+        fs.state.disc.get(bob.did().as_str()).map(|d| d.state),
+        Some(DiscState::Rejected)
+    );
+    bob.delete(nsid::OPINION, &op_rkey);
+    w.host.advance_ms(2 * 86_400_000);
+    let fs = w.sync_forum(&f, &SyncOpts::default());
+    assert!(
+        matches!(w.slot(&op), Slot::Tomb(_)),
+        "the deleted opinion is tombstoned"
+    );
+    assert!(fs.state.completeness_set().contains(bob.did().as_str()));
+    assert_eq!(
+        (fs.completeness.repos_total, fs.completeness.partial),
+        (2, false)
+    );
+
+    // a fresh client of the same network has no opinion either, and counts bob too
+    let host2 = MemHost::new();
+    host2.set_now_ms(w.host.now());
+    w.net.install(&host2);
+    let e2 = Engine::new(host2.clone(), EngineConfig::default());
+    let fs2 = block_on(e2.syncer().sync_forum(f.uri.as_str(), &SyncOpts::default())).unwrap();
+    let k = RecKey::of_uri(&AtUri::parse(&op).unwrap());
+    let s2 = block_on(RecordStore::new(host2.cache()).slot(&k)).unwrap();
+    assert!(!is_rec(&s2));
+    assert_eq!(
+        (fs2.completeness.repos_total, fs2.completeness.partial),
+        (2, false)
+    );
+}
+
+/// H2: a `describeRepo` answer without `collections` is a failed `describeRepo` (OURS is listed
+/// instead), never "no collections"; and a collection missing from `describeRepo` while rows of
+/// it are stored is listed, not wiped.
+#[test]
+fn describe_repo_never_empties_a_range_without_a_listing() {
+    let w = World::new();
+    let owner = w.net.add_account("owner.example.com");
+    let f = w.forum(&owner, "meta", MembershipMode::Approval, &[]);
+    let posts: Vec<_> = (0..3).map(|_| w.post(&owner, &f)).collect();
+    let sy = w.syncer();
+    assert_eq!(w.sync_repo(&sy, &owner, &f).outcome, RepoOutcome::Applied);
+    let describe = |colls: Option<Vec<&str>>| {
+        let mut v = json!({
+            "handle": "owner.example.com",
+            "did": owner.did().as_str(),
+            "handleIsCorrect": true,
+        });
+        if let Some(c) = colls {
+            v["collections"] = json!(c);
+        }
+        Fault::respond(resp::ok_json(&v))
+            .on_repo(owner.did().as_str())
+            .on_nsid(DESCRIBE)
+    };
+
+    w.post(&owner, &f);
+    w.net.inject(describe(None));
+    w.net.clear_requests();
+    let r = w.sync_repo_for(&sy, &owner, &f, Reason::Reconcile);
+    assert_eq!(r.outcome, RepoOutcome::Applied, "{r:?}");
+    assert!(
+        r.issues.iter().any(|(_, m)| m.contains("collections")),
+        "{:?}",
+        r.issues
+    );
+    assert!(w.net.count(LIST) > 0, "OURS is listed instead");
+    assert!(posts.iter().all(|p| is_rec(&w.slot(&p.0))));
+    let repo = w.repo(&owner);
+    assert!(repo.colls.iter().any(|c| c == nsid::POST));
+    assert_eq!(
+        repo.fails, 0,
+        "a failed describeRepo alone is no repo failure"
+    );
+    assert_eq!(
+        repo.repo_status(&f.fk),
+        lessdugin_core::store::RepoStatus::Fresh
+    );
+
+    // a describeRepo that omits the post collection: its stored range is listed anyway
+    w.net.clear_faults();
+    w.net
+        .inject(describe(Some(vec![nsid::FORUM, nsid::MEMBERSHIP])));
+    w.post(&owner, &f);
+    w.net.clear_requests();
+    let r = w.sync_repo_for(&sy, &owner, &f, Reason::Reconcile);
+    assert_eq!(r.outcome, RepoOutcome::Applied, "{r:?}");
+    assert!(
+        w.net
+            .requests_for(LIST)
+            .iter()
+            .any(|l| l.params.get("collection").map(String::as_str) == Some(nsid::POST))
+    );
+    assert!(posts.iter().all(|p| is_rec(&w.slot(&p.0))), "nothing wiped");
+}
+
+/// M1: records that fail admission are strikes one by one (`HostRow.strikes`), but a response
+/// counts at most one failure toward the host's breaker (R4): one hostile page cannot shut out
+/// the other users of a shared PDS.
+#[test]
+fn bad_records_count_once_per_response_toward_the_breaker() {
+    let w = World::new();
+    let mallory = w.net.add_account("mallory.example.com");
+    let bob = w.net.add_account("bob.example.com");
+    let f = w.forum(&mallory, "meta", MembershipMode::Approval, &[]);
+    w.post(&mallory, &f);
+    w.join(&bob, &f);
+    w.post(&bob, &f);
+    let recs: Vec<Value> = (0..10)
+        .rev()
+        .map(|i| {
+            let rkey = format!("{}-3l2a2a2a2a2{i:02}", f.fk);
+            json!({
+                "uri": mallory.uri(nsid::POST, &rkey),
+                "cid": "bafyreie5737gdxlw5i64vzichcalba3z2v5n6icifviqyqutqpnr7tvpya",
+                "value": {"$type": nsid::POST, "x": i}
+            })
+        })
+        .collect();
+    w.net.inject(
+        Fault::respond(resp::ok_json(&json!({ "records": recs })))
+            .on_repo(mallory.did().as_str())
+            .on_nsid(LIST),
+    );
+    let sy = w.syncer();
+    let r = w.sync_repo(&sy, &mallory, &f);
+    assert_eq!(r.strikes, 10, "{r:?}");
+    let origin = origin_of(&mallory);
+    let b = sy.net().breaker(&origin);
+    assert_eq!(b.state, BreakerState::Closed, "{b:?}");
+    assert_eq!(b.failures, 1);
+    assert_eq!(host_row(&w, &origin).strikes, 10);
+    let r = w.sync_repo(&sy, &bob, &f);
+    assert_eq!(r.outcome, RepoOutcome::Applied, "{r:?}");
+}
+
+/// M2: a response header named like the engine's internal send-time header is dropped, so a
+/// server cannot pin `headSeen` (and stop polls) with a far-future send time.
+#[test]
+fn a_server_cannot_set_the_send_time() {
+    let w = World::new();
+    let owner = w.net.add_account("owner.example.com");
+    let f = w.forum(&owner, "meta", MembershipMode::Approval, &[]);
+    w.post(&owner, &f);
+    let sy = w.syncer();
+    assert_eq!(w.sync_repo(&sy, &owner, &f).outcome, RepoOutcome::Applied);
+    let (cid, rev) = owner.head();
+    let body = json!({"cid": cid.to_string(), "rev": rev.to_string()});
+    w.net.inject(
+        Fault::respond(resp::with_header(
+            resp::ok_json(&body),
+            "X-Lessdugin-Sent-At",
+            "9000000000000000000",
+        ))
+        .on_repo(owner.did().as_str())
+        .on_nsid(HEAD)
+        .once(),
+    );
+    let s = w.session(&sy);
+    block_on(sy.head_check(&s, owner.did(), false)).unwrap();
+    let seen = w.repo(&owner).head_seen.unwrap();
+    assert!(seen.sent_at <= w.host.now(), "{seen:?}");
+    // a later head is still taken
+    w.host.advance_ms(1_000);
+    w.post(&owner, &f);
+    let (_, rev2) = owner.head();
+    block_on(sy.head_check(&s, owner.did(), false)).unwrap();
+    assert_eq!(w.repo(&owner).head_seen.unwrap().rev, rev2.to_string());
+}
+
+const SLINGSHOT_MINIDOC: &str =
+    "https://slingshot.microcosm.blue/xrpc/com.bad-example.identity.resolveMiniDoc";
+const EVIL: &str = "https://evil.example.com";
+
+/// A `getRecord`-shaped entry `{uri, cid, value}` with its true CID.
+fn entry(did: &Did, coll: &str, rkey: &str, v: &Value) -> (String, Value) {
+    let ipld = lessdugin_atp::datamodel::json_to_ipld(v).unwrap();
+    let cid = lessdugin_atp::cid::for_dag_cbor(&lessdugin_atp::dagcbor::encode(&ipld).unwrap());
+    let uri = format!("at://{did}/{coll}/{rkey}");
+    (
+        uri.clone(),
+        json!({"uri": uri, "cid": cid.to_string(), "value": v}),
+    )
+}
+
+/// M3: under an identity hint (a did:web whose document is CORS-blocked, resolved through
+/// Slingshot) the PDS is named by no DID document: its rows are stored as idHint with the key
+/// `("", sentAt)`, it writes no tombstones, changes no repo state, never replaces a doc-level
+/// row and cannot confirm a membership; a doc-level delete supersedes its rows.
+#[test]
+fn an_identity_hint_never_changes_doc_level_state() {
+    use lessdugin_core::host::HostError;
+    use lessdugin_core::store::admit::{self, Expect, LexiconValidator};
+    use lessdugin_core::store::{Delete, DeleteEvidence, Observation, OrderKey};
+    use lessdugin_testkit::FakeIdentity;
+
+    let host = MemHost::new();
+    let engine = Engine::new(host.clone(), EngineConfig::default());
+    let id = FakeIdentity::web("web.example.com", "web.example.com", EVIL);
+    let did = id.did.clone();
+    let f = ForumKey::new(&did, "meta").unwrap();
+    let now = host.now();
+    let at = Datetime::from_millis(now - 3_600_000).unwrap();
+    let post = |n: i64, body: &str| {
+        let rkey =
+            keys::post_rkey(f.uri.as_str(), tid_at_ms(now - 3_600_000 + n).as_ref()).unwrap();
+        let v = serde_json::to_value(Post::article(f.uri.clone(), "A title", body, at.clone()))
+            .unwrap();
+        (rkey, v)
+    };
+    let (ka, va) = post(1, "Honest text.");
+    let (kb, vb) = post(2, "More honest text.");
+    let (kc, vc) = post(3, "Only on the hinted PDS.");
+    let vm = serde_json::to_value(Membership::new(f.uri.clone(), at.clone())).unwrap();
+
+    // doc-level state from an earlier pass at r1
+    let r1 = tid_at_ms(now - 60_000).to_string();
+    let store = RecordStore::new(host.cache());
+    let mut batch = store.batch();
+    let mut doc_cids = Vec::new();
+    for (coll, rkey, v) in [
+        (nsid::POST, &ka, &va),
+        (nsid::POST, &kb, &vb),
+        (nsid::MEMBERSHIP, &f.fk, &vm),
+    ] {
+        let (_, e) = entry(&did, coll, rkey, v);
+        let body = serde_json::to_vec(&e).unwrap();
+        let expect = Expect {
+            did: &did,
+            collection: coll,
+            rkey: Some(rkey),
+        };
+        let rec = admit::admit_get_record(&body, &expect, &LexiconValidator).unwrap();
+        doc_cids.push(rec.cid);
+        let obs = Observation::listing(&r1, now - 60_000, true, now - 60_000);
+        block_on(batch.put_version(rec.into_version(obs))).unwrap();
+    }
+    let head_cid = doc_cids[0];
+    let mut repo = RepoRow::new("https://honest.example.com");
+    repo.observe_head(&r1, head_cid, now - 60_000);
+    repo.apply_stable_pass(
+        &r1,
+        head_cid,
+        [(f.fk.as_str(), std::collections::BTreeMap::new())],
+    );
+    repo.colls = vec![
+        nsid::FORUM.to_owned(),
+        nsid::MEMBERSHIP.to_owned(),
+        nsid::POST.to_owned(),
+    ];
+    repo.colls_at = now - 60_000;
+    batch.put_repo(did.as_str(), &repo).unwrap();
+    block_on(batch.commit()).unwrap();
+
+    // the document is CORS-blocked; Slingshot names a hostile PDS that serves a far-future
+    // head, another version of `a`, a new `c`, and no `b` and no membership
+    host.fail(
+        "https://web.example.com/.well-known/did.json",
+        HostError::Cors,
+    );
+    host.respond_get(
+        SLINGSHOT_MINIDOC,
+        resp::ok_json(&json!({
+            "did": did.as_str(),
+            "handle": "web.example.com",
+            "pds": EVIL,
+            "signing_key": id.multikey(),
+        })),
+    );
+    let future = tid_at_ms(now + 10 * 365 * 86_400_000).to_string();
+    host.respond_get(
+        &format!("{EVIL}/xrpc/{HEAD}"),
+        resp::ok_json(&json!({"cid": head_cid.to_string(), "rev": future})),
+    );
+    host.respond_get(
+        &format!("{EVIL}/xrpc/{DESCRIBE}"),
+        resp::ok_json(&json!({
+            "did": did.as_str(),
+            "handle": "web.example.com",
+            "handleIsCorrect": true,
+            "collections": [nsid::POST],
+        })),
+    );
+    let (_, ea) = entry(&did, nsid::POST, &ka, &json!({"$type": nsid::POST, "x": 1}));
+    let (uc, ec) = entry(&did, nsid::POST, &kc, &vc);
+    let mut page = vec![(ka.clone(), ea), (kc.clone(), ec)];
+    page.sort_by(|a, b| b.0.cmp(&a.0));
+    let records: Vec<Value> = page.into_iter().map(|(_, e)| e).collect();
+    host.respond_get(
+        &format!("{EVIL}/xrpc/{LIST}"),
+        resp::ok_json(&json!({ "records": records })),
+    );
+    host.respond_get(
+        &format!("{EVIL}/xrpc/com.atproto.repo.getRecord"),
+        resp::xrpc_error(400, "RecordNotFound", "no such record"),
+    );
+
+    let sy = engine.syncer();
+    let s = sy.session(Priority::P1, Arc::new(Stats::new()));
+    let rep = block_on(sy.sync_repo(
+        &s,
+        &SyncRequest::forum(did.clone(), &f.fk, Reason::Participant),
+    ));
+    assert!(rep.id_hint, "{rep:?}");
+    assert_eq!(rep.outcome, RepoOutcome::Applied, "{rep:?}");
+    let uri = |coll: &str, rkey: &str| format!("at://{did}/{coll}/{rkey}");
+    let slot = |u: &str| block_on(store.slot(&RecKey::of_uri(&AtUri::parse(u).unwrap()))).unwrap();
+    // doc-level rows: untouched, none tombstoned
+    let Slot::Rec(a) = slot(&uri(nsid::POST, &ka)) else {
+        panic!("a is gone")
+    };
+    assert_eq!(
+        a.cid, doc_cids[0],
+        "a hint version never replaces a doc-level one"
+    );
+    assert!(!a.id_hint);
+    assert!(
+        is_rec(&slot(&uri(nsid::POST, &kb))),
+        "no tombstone from a hint"
+    );
+    assert!(is_rec(&slot(&uri(nsid::MEMBERSHIP, &f.fk))));
+    // the new row is a hint row, keyed below every doc-level key
+    let Slot::Rec(c) = slot(&uc) else {
+        panic!("c not stored")
+    };
+    assert!(c.id_hint && !c.exact);
+    assert_eq!(c.rev_lo, "");
+    // no repo state from the hint
+    let after = block_on(store.repo(did.as_str())).unwrap().unwrap();
+    assert_eq!(after.rev, r1);
+    assert_eq!(after.listed_rev(&f.fk), r1);
+    assert_eq!(after.head_seen.as_ref().unwrap().rev, r1);
+    assert_eq!(after.colls, repo.colls);
+    assert_eq!(after.pds, repo.pds);
+
+    // a membership cannot be confirmed under a hint: the candidate stays a candidate
+    let rep = block_on(
+        sy.sync_repo(
+            &s,
+            &SyncRequest::forum(did.clone(), &f.fk, Reason::Participant)
+                .confirming(f.uri.clone(), &f.fk),
+        ),
+    );
+    assert_eq!(rep.outcome, RepoOutcome::Failed);
+    assert!(
+        matches!(
+            rep.error,
+            Some(lessdugin_core::sync::SyncError::IdentityHint { .. })
+        ),
+        "{rep:?}"
+    );
+
+    // a doc-level delete supersedes the hint row
+    let mut batch = store.batch();
+    let d = Delete {
+        key: OrderKey::new(&r1, now),
+        evidence: DeleteEvidence::CompleteListing,
+        at_ms: now,
+    };
+    block_on(batch.tombstone(&AtUri::parse(&uc).unwrap(), d)).unwrap();
+    block_on(batch.commit()).unwrap();
+    assert!(matches!(slot(&uc), Slot::Tomb(_)));
+}
+
+/// L1: `sync --full` after a rollback forgets the DID's rows in every scope, not only the
+/// requested one, and the scopes it does not list read `Unavailable` until they are listed.
+#[test]
+fn a_full_sync_after_a_rollback_forgets_every_scope() {
+    let w = World::new();
+    let owner = w.net.add_account("owner.example.com");
+    let f1 = w.forum(&owner, "meta", MembershipMode::Approval, &[]);
+    let f2 = w.forum(&owner, "other", MembershipMode::Approval, &[]);
+    let p1 = w.post(&owner, &f1);
+    let p2 = w.post(&owner, &f2);
+    let sy = w.syncer();
+    assert_eq!(w.sync_repo(&sy, &owner, &f1).outcome, RepoOutcome::Applied);
+    assert_eq!(w.sync_repo(&sy, &owner, &f2).outcome, RepoOutcome::Applied);
+    assert!(is_rec(&w.slot(&p2.0)));
+    owner.delete(nsid::POST, p1.0.rsplit('/').next().unwrap());
+    owner.delete(nsid::POST, p2.0.rsplit('/').next().unwrap());
+    owner.commit_at(tid_at_ms(w.host.now() - 86_400_000));
+    let r = w.sync_repo_for(&sy, &owner, &f1, Reason::Full);
+    assert_eq!(r.outcome, RepoOutcome::Applied, "{r:?}");
+    assert!(!is_rec(&w.slot(&p1.0)));
+    assert!(
+        matches!(w.slot(&p2.0), Slot::Empty),
+        "the other forum's rows are forgotten too"
+    );
+    let repo = w.repo(&owner);
+    assert_eq!(
+        repo.repo_status(&f1.fk),
+        lessdugin_core::store::RepoStatus::Fresh
+    );
+    assert_eq!(
+        repo.repo_status(&f2.fk),
+        lessdugin_core::store::RepoStatus::Unavailable
+    );
+}
+
+/// L2: a row below the cap boundary a listing recorded (a point fetch beyond the fetch cap)
+/// never enters the model, even though fewer than N rows are stored.
+#[test]
+fn rows_below_a_cap_boundary_stay_out_of_the_model() {
+    let w = World::new();
+    let owner = w.net.add_account("owner.example.com");
+    let f = w.forum(&owner, "meta", MembershipMode::Approval, &[]);
+    let mut posts: Vec<_> = (0..5).map(|_| w.post(&owner, &f)).collect();
+    posts.sort();
+    let sy = w.syncer_with(|c| c.tuning.fetch_cap = Some(3));
+    assert_eq!(w.sync_repo(&sy, &owner, &f).outcome, RepoOutcome::Applied);
+    let s = w.session(&sy);
+    for u in [&posts[0].0, &f.uri.to_string()] {
+        block_on(sy.point_fetch(&s, &AtUri::parse(u).unwrap(), None)).unwrap();
+    }
+    assert!(is_rec(&w.slot(&posts[0].0)), "stored by the point fetch");
+    let m = block_on(lessdugin_core::model::ForumModel::build(
+        w.host.cache(),
+        &f,
+        w.host.now() * 1000,
+    ))
+    .unwrap();
+    assert!(!m.rows.contains_key(&posts[0].0), "below the boundary");
+    for (u, _) in &posts[2..] {
+        assert!(m.rows.contains_key(u));
+    }
+}
+
+/// L3: a pass merges what it learned about its host into the stored row inside its batch,
+/// instead of writing back the copy it loaded at its start (which would lose what concurrent
+/// passes and the outbox stored meanwhile).
+#[test]
+fn a_pass_merges_its_host_row() {
+    use futures::FutureExt;
+    let w = World::new();
+    let owner = w.net.add_account("owner.example.com");
+    let f = w.forum(&owner, "meta", MembershipMode::Approval, &[]);
+    w.post(&owner, &f);
+    let origin = origin_of(&owner);
+    let h = w.host.clone();
+    let o2 = origin.clone();
+    let did = owner.did().to_string();
+    // another writer updates the host row while the pass runs (here: during describeRepo)
+    w.host
+        .on_get(&format!("{origin}/xrpc/{DESCRIBE}"), move |_| {
+            let store = RecordStore::new(h.cache());
+            let mut b = store.batch();
+            let mut row = b
+                .host_caps(&o2)
+                .now_or_never()
+                .unwrap()
+                .unwrap()
+                .unwrap_or_default();
+            row.null_swap = Some(false);
+            row.strikes += 7;
+            b.put_host_caps(&o2, &row).unwrap();
+            b.commit().now_or_never().unwrap().unwrap();
+            Ok(resp::ok_json(&json!({
+                "did": did,
+                "handle": "owner.example.com",
+                "handleIsCorrect": true,
+                "collections": [nsid::FORUM, nsid::MEMBERSHIP, nsid::POST],
+            })))
+        });
+    let sy = w.syncer();
+    assert_eq!(w.sync_repo(&sy, &owner, &f).outcome, RepoOutcome::Applied);
+    let row = host_row(&w, &origin);
+    assert_eq!(row.null_swap, Some(false));
+    assert_eq!(row.strikes, 7);
+    assert_eq!(
+        row.range_cursor,
+        RangeCursor::Yes,
+        "and the pass's own verdict"
+    );
+}
+
+/// L7: an own write without a commit (a no-op) is keyed by a later head's rev, so it is stored
+/// as a lower bound (not exact).
+#[test]
+fn a_no_op_own_write_is_not_exact() {
+    let w = World::new();
+    let owner = w.net.add_account("owner.example.com");
+    let f = w.forum(&owner, "meta", MembershipMode::Approval, &[]);
+    let (uri, cid) = w.post(&owner, &f);
+    let value = owner
+        .get(nsid::POST, uri.rsplit('/').next().unwrap())
+        .unwrap();
+    let sy = w.syncer();
+    let s = w.session(&sy);
+    let applied = block_on(sy.apply_own_writes(
+        &s,
+        owner.did(),
+        w.host.now(),
+        None,
+        &[lessdugin_core::sync::OwnWrite {
+            uri: AtUri::parse(&uri).unwrap(),
+            value: Some(value),
+            cid: Some(cid),
+        }],
+    ))
+    .unwrap();
+    assert_eq!(applied.stored, vec![uri.clone()]);
+    let Slot::Rec(r) = w.slot(&uri) else {
+        panic!("not stored")
+    };
+    assert!(!r.exact);
+}
+
+/// L9: a complete, stable full listing of the own repo tombstones the stored rows it lacks
+/// (deletes made on another device).
+#[test]
+fn an_own_listing_tombstones_records_deleted_elsewhere() {
+    let w = World::new();
+    let owner = w.net.add_account("owner.example.com");
+    let f = w.forum(&owner, "meta", MembershipMode::Approval, &[]);
+    let p = w.post(&owner, &f);
+    let keep = w.post(&owner, &f);
+    let sy = w.syncer();
+    let s = w.session(&sy);
+    let mut req = SyncRequest::forum(owner.did().clone(), &f.fk, Reason::Participant);
+    req.scopes = vec![lessdugin_core::sync::Scope::Own];
+    let r = block_on(sy.sync_repo(&s, &req));
+    assert_eq!(r.outcome, RepoOutcome::Applied, "{r:?}");
+    assert!(is_rec(&w.slot(&p.0)));
+    owner.delete(nsid::POST, p.0.rsplit('/').next().unwrap());
+    let r = block_on(sy.sync_repo(&s, &req));
+    assert_eq!(r.outcome, RepoOutcome::Applied, "{r:?}");
+    assert!(matches!(w.slot(&p.0), Slot::Tomb(_)));
+    assert!(is_rec(&w.slot(&keep.0)));
+    assert!(is_rec(&w.slot(f.uri.as_str())), "the declaration is listed");
 }

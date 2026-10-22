@@ -200,6 +200,12 @@ pub struct PdsConfig {
     /// `listRecords` cursor behaviour.
     pub cursor_mode: CursorMode,
     /// Caps every `listRecords` page (a server with a smaller page size than asked).
+    ///
+    /// **Not a conforming PDS model.** Real PDSes return a short page only at the end of a
+    /// listing (ADR 0004), and `list_range` in `RANGE` mode ends a listing at a short page when
+    /// `HostRow.short_page_ends` is set (the default). A RANGE-mode sync test against a capped
+    /// server therefore ends early and tombstones the rest: use it only for `FULL`-mode tests,
+    /// tests that turn `short_page_ends` off, or tests of that early end itself.
     pub max_page: Option<u32>,
     /// `uploadBlob` size limit (bytes; larger: `413 PayloadTooLarge`). Default 5 MiB, the
     /// reference PDS default.

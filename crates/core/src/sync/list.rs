@@ -20,6 +20,12 @@
 //! Every key counts toward N, including keys of records that fail admission, so the cap boundary
 //! depends only on the repo's key set. A listing returns every key it saw within the cap (the
 //! tombstone step must not delete records that exist but were dropped at admission).
+//!
+//! A page with more records than its request's `limit` is malformed (the page fails). Records
+//! that fail admission are strikes against the host one by one (`HostRow.strikes`), but a
+//! response counts as at most one breaker failure (`limits.md` R4): [`RangeListing::bad_responses`].
+//! The listing keeps each admitted record's DAG-CBOR only, unless [`Lister::keep_values`] asks for
+//! the parsed JSON too (the outbox reads values; sync stores the bytes).
 
 use std::collections::BTreeSet;
 
@@ -31,7 +37,7 @@ use crate::limits;
 use crate::store::admit::{self, AdmitError, AdmittedRecord, Expect, ListPage, RecordValidator};
 use crate::store::repo::HostRow;
 use crate::store::schema;
-use crate::sync::net::{self, NetHost};
+use crate::sync::net;
 use crate::xrpc::{CallOpts, Service, Xrpc, XrpcCallError};
 
 /// `limit` of every `listRecords` call (`LIST_RECORDS_LIMIT`).
@@ -151,11 +157,15 @@ pub struct RangeListing {
     pub first_sent_at: Option<i64>,
     /// What the listing taught about the host's cursors.
     pub verdict: Option<RangeVerdict>,
-    /// Entries that failed admission, and pages that broke a listing rule (strikes, `limits.md`
-    /// R4).
+    /// Entries that failed admission, and pages that broke a listing rule (`HostRow.strikes`).
     pub strikes: u32,
+    /// Responses with at least one strike: each is one failure toward the host's breaker
+    /// (`limits.md` R4).
+    pub bad_responses: u32,
     /// Why an incomplete listing stopped (a safety cap, a cursor that did not advance).
     pub stop: Option<String>,
+    /// Requests sent (including oversized-page retries).
+    pub requests: u32,
 }
 
 impl RangeListing {
@@ -169,7 +179,16 @@ impl RangeListing {
             first_sent_at: None,
             verdict: None,
             strikes: 0,
+            bad_responses: 0,
             stop: None,
+            requests: 0,
+        }
+    }
+
+    fn strike_page(&mut self, strikes: u32) {
+        if strikes > 0 {
+            self.strikes = self.strikes.saturating_add(strikes);
+            self.bad_responses = self.bad_responses.saturating_add(1);
         }
     }
 
@@ -197,6 +216,15 @@ impl RangeListing {
         self.entries
             .iter()
             .filter_map(|e| e.record.as_ref().ok().map(|r| (r, e.sent_at)))
+    }
+
+    /// Moves the entries that passed admission out of the listing (the keys stay available
+    /// through [`RangeListing::keys`] computed before).
+    pub fn take_admitted(&mut self) -> Vec<(AdmittedRecord, i64)> {
+        std::mem::take(&mut self.entries)
+            .into_iter()
+            .filter_map(|e| e.record.ok().map(|r| (r, e.sent_at)))
+            .collect()
     }
 }
 
@@ -241,8 +269,9 @@ enum PageError {
 
 /// The listing context of one repo.
 pub struct Lister<'a, H: Host> {
-    /// The XRPC client (over the job's [`NetHost`]).
-    pub xrpc: &'a Xrpc<'a, NetHost<H>>,
+    /// The XRPC client (sync: over the job's [`net::NetHost`], which stamps send times; the
+    /// outbox: over the host itself).
+    pub xrpc: &'a Xrpc<'a, H>,
     /// The repo's PDS.
     pub service: &'a Service,
     /// The PDS origin.
@@ -253,11 +282,19 @@ pub struct Lister<'a, H: Host> {
     pub validator: &'a dyn RecordValidator,
     /// Parameters.
     pub tuning: &'a ListTuning,
+    /// Keep the parsed JSON value of admitted records (otherwise only their DAG-CBOR is kept,
+    /// which bounds the memory a listing holds).
+    pub keep_values: bool,
 }
 
 impl<H: Host> Lister<'_, H> {
     /// One page at `cursor`, retrying an oversized page with smaller limits.
-    async fn page(&self, coll: &Nsid, cursor: Option<&str>) -> Result<Page, PageError> {
+    async fn page(
+        &self,
+        coll: &Nsid,
+        cursor: Option<&str>,
+        requests: &mut u32,
+    ) -> Result<Page, PageError> {
         let mut limits_seq = vec![self.tuning.limit];
         limits_seq.extend(
             LIST_PAGE_RETRY_LIMITS
@@ -274,6 +311,7 @@ impl<H: Host> Lister<'_, H> {
                 reverse: None,
             };
             let opts = CallOpts::capped(self.tuning.page_max_bytes);
+            *requests = requests.saturating_add(1);
             let resp = match self.xrpc.query_raw(self.service, &params, &opts).await {
                 Ok(r) => r,
                 Err(XrpcCallError::TooLarge) => continue,
@@ -285,10 +323,16 @@ impl<H: Host> Lister<'_, H> {
                 collection: coll.as_str(),
                 rkey: None,
             };
-            let page = admit::admit_list_page(&resp.body, &expect, self.validator)
-                .map_err(|e| PageError::Bad(e.to_string()))?;
+            let mut page =
+                admit::admit_list_page_capped(&resp.body, &expect, self.validator, limit as usize)
+                    .map_err(|e| PageError::Bad(e.to_string()))?;
             let mut rkeys = Vec::with_capacity(page.entries.len());
-            for e in &page.entries {
+            for e in &mut page.entries {
+                if let Ok(r) = &mut e.result
+                    && !self.keep_values
+                {
+                    r.value = serde_json::Value::Null;
+                }
                 match &e.uri {
                     Some(u) if u.did() == self.did && u.collection() == coll => {
                         rkeys.push(u.rkey().as_str().to_owned());
@@ -324,10 +368,12 @@ impl<H: Host> Lister<'_, H> {
         if use_range {
             match self.range_mode(coll, fk, short_page_ends).await? {
                 RangeOutcome::Done(l) => return Ok(l),
-                RangeOutcome::Fallback(strikes) => {
+                RangeOutcome::Fallback(probe) => {
                     let mut l = self.full_mode(coll, Some(fk)).await?;
                     l.verdict = Some(RangeVerdict::No);
-                    l.strikes += strikes;
+                    l.strikes = l.strikes.saturating_add(probe.strikes);
+                    l.bad_responses = l.bad_responses.saturating_add(probe.bad_responses);
+                    l.requests = l.requests.saturating_add(probe.requests);
                     return Ok(l);
                 }
             }
@@ -356,12 +402,12 @@ impl<H: Host> Lister<'_, H> {
         let mut first = true;
         let mut bytes = 0u64;
         loop {
-            let page = match self.page(coll, Some(&cursor)).await {
+            let page = match self.page(coll, Some(&cursor), &mut out.requests).await {
                 Ok(p) => p,
                 Err(PageError::Xrpc(e))
                     if first && e.status() == Some(400) && !e.is_repo_status() =>
                 {
-                    return Ok(RangeOutcome::Fallback(out.strikes));
+                    return Ok(RangeOutcome::Fallback(out));
                 }
                 Err(PageError::Xrpc(e)) => return Err(e.into()),
                 Err(PageError::TooLarge) => {
@@ -379,20 +425,23 @@ impl<H: Host> Lister<'_, H> {
                 || matches!((&prev, ks.first()), (Some(pv), Some(k0)) if k0 >= pv)
                 || matches!((ks.last(), &page.page.cursor), (Some(last), Some(c)) if c != last);
             if violation {
-                return Ok(RangeOutcome::Fallback(out.strikes + 1));
+                // the rows are discarded; the page is one strike (and one breaker failure)
+                out.strike_page(1);
+                return Ok(RangeOutcome::Fallback(out));
             }
             if first {
                 out.first_sent_at = Some(page.sent_at);
             }
             first = false;
+            let mut page_strikes = 0u32;
+            let mut done: Option<bool> = None;
             for (entry, rkey) in page.page.entries.into_iter().zip(ks.iter()) {
                 if !rkey.starts_with(&p) {
-                    out.complete = true;
-                    out.verdict = Some(RangeVerdict::Yes);
-                    return Ok(RangeOutcome::Done(out));
+                    done = Some(false);
+                    break;
                 }
                 if entry.result.is_err() {
-                    out.strikes += 1;
+                    page_strikes += 1;
                 }
                 out.entries.push(Listed {
                     rkey: rkey.clone(),
@@ -400,11 +449,16 @@ impl<H: Host> Lister<'_, H> {
                     sent_at: page.sent_at,
                 });
                 if out.entries.len() >= n {
-                    out.complete = true;
-                    out.capped = true;
-                    out.verdict = Some(RangeVerdict::Yes);
-                    return Ok(RangeOutcome::Done(out));
+                    done = Some(true);
+                    break;
                 }
+            }
+            out.strike_page(page_strikes);
+            if let Some(capped) = done {
+                out.complete = true;
+                out.capped = capped;
+                out.verdict = Some(RangeVerdict::Yes);
+                return Ok(RangeOutcome::Done(out));
             }
             bytes = bytes.saturating_add(page.bytes);
             if bytes > max_bytes {
@@ -437,7 +491,7 @@ impl<H: Host> Lister<'_, H> {
         let mut bytes = 0u64;
         let mut complete = false;
         loop {
-            let page = match self.page(coll, cursor.as_deref()).await {
+            let page = match self.page(coll, cursor.as_deref(), &mut out.requests).await {
                 Ok(p) => p,
                 Err(PageError::Xrpc(e)) => return Err(e.into()),
                 Err(PageError::TooLarge) => {
@@ -455,6 +509,7 @@ impl<H: Host> Lister<'_, H> {
             pages += 1;
             bytes = bytes.saturating_add(page.bytes);
             let empty = page.rkeys.is_empty();
+            let mut page_strikes = 0u32;
             for (entry, rkey) in page.page.entries.into_iter().zip(page.rkeys.iter()) {
                 if prefix
                     .as_ref()
@@ -463,7 +518,7 @@ impl<H: Host> Lister<'_, H> {
                     continue;
                 }
                 if entry.result.is_err() {
-                    out.strikes += 1;
+                    page_strikes += 1;
                 }
                 all.push(Listed {
                     rkey: rkey.clone(),
@@ -471,6 +526,7 @@ impl<H: Host> Lister<'_, H> {
                     sent_at: page.sent_at,
                 });
             }
+            out.strike_page(page_strikes);
             let next = match page.page.cursor {
                 Some(c) if !empty => c,
                 _ => {
@@ -480,7 +536,7 @@ impl<H: Host> Lister<'_, H> {
             };
             if seen.contains(&next) {
                 // cursors must strictly advance (§5.10): a host misbehaviour
-                out.strikes += 1;
+                out.strike_page(1);
                 out.stopped(format!("the cursor {next:?} repeated"));
                 break;
             }
@@ -512,8 +568,9 @@ impl<H: Host> Lister<'_, H> {
 
 enum RangeOutcome {
     Done(RangeListing),
-    /// The host failed a check: redo the listing in `FULL` mode (with these strikes).
-    Fallback(u32),
+    /// The host failed a check: redo the listing in `FULL` mode (keeping the probe's strikes and
+    /// request count; its rows are discarded).
+    Fallback(RangeListing),
 }
 
 #[cfg(test)]

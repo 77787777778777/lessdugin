@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Queries (`engine-api.md` §3.4): `list_posts`, `get_post`, `get_thread`, `history`, `raw`.
+//! Queries (`engine-api.md` §3.4): `list_posts`, `recent_discussion`, `get_post`,
+//! `get_thread`, `history`, `raw`.
 //! They read the cache only (a forum whose declaration is not cached is opened first) and
 //! return `dto/1` objects that are byte-identical for the same cache, local state and clock.
 //!
@@ -8,12 +9,13 @@
 
 use lessdugin_atp::syntax::AtUri;
 use lessdugin_lexicon::Collection;
+use lessdugin_lexicon::collection::nsid;
 use lessdugin_lexicon::values::PostKind as LexPostKind;
 use serde_json::Value;
 
 use crate::dto::{
-    CommentSort, DtoVersion, HistoryView, ListPostsQuery, PostFilter, PostKind, PostList, PostView,
-    RawView, ThreadOpts, ThreadView, Tier, TrustLevel,
+    CommentSort, DiscussionItem, DiscussionList, DtoVersion, HistoryView, ListPostsQuery,
+    PostFilter, PostKind, PostList, PostView, RawView, ThreadOpts, ThreadView, Tier, TrustLevel,
 };
 use crate::host::Host;
 use crate::limits;
@@ -26,6 +28,10 @@ use crate::store::records::{Level, RecordStore};
 
 use super::models::store_error;
 use super::{Engine, EngineError};
+
+/// A `recent_discussion` entry: the latest comment `t_rank`, the post, and its latest Visible
+/// comments as `(t_rank, uri)`.
+type Discussion = (i64, String, Vec<(i64, String)>);
 
 fn parse_uri(uri: &str) -> Result<AtUri, EngineError> {
     AtUri::parse(uri).map_err(|e| EngineError::invalid_ref(format!("{uri:?}: {e}")))
@@ -98,7 +104,9 @@ impl<H: Host> Engine<H> {
                 activity,
             });
         }
-        let ordered = order_posts(keys, q.sort, m.now(), p);
+        // ordered at the query time (the model may be up to MODEL_MAX_AGE_MS old)
+        let now_us = self.host.now_ms().saturating_mul(1000);
+        let ordered = order_posts(keys, q.sort, now_us, p);
         let offset: usize = match q.cursor.as_deref() {
             None | Some("") => 0,
             Some(c) => c
@@ -154,6 +162,12 @@ impl<H: Host> Engine<H> {
         opts: &ThreadOpts,
     ) -> Result<ThreadView, EngineError> {
         let u = parse_uri(uri)?;
+        let coll = u.collection().as_str();
+        if coll != nsid::POST && coll != nsid::COMMENT {
+            return Err(EngineError::invalid_ref(format!(
+                "{u} is not a post or a comment"
+            )));
+        }
         let key = self.forum_of(&u).await?;
         let l = self.loaded(&key).await?;
         let m = &l.model;
@@ -162,6 +176,13 @@ impl<H: Host> Engine<H> {
             Some(SkelData::Comment { root: Some(r), .. }) => r.uri.clone(),
             _ => u.to_string(),
         };
+        if m.skel(&uri)
+            .is_some_and(|x| !matches!(x.data, SkelData::Post { .. }))
+        {
+            return Err(EngineError::invalid_ref(format!(
+                "{uri} is not a thread root (a post)"
+            )));
+        }
         let th = m.fold.threads.get(&uri);
         if th.is_none() && m.fold.item(&uri).is_none() {
             return Err(EngineError::not_found(format!(
@@ -187,6 +208,85 @@ impl<H: Host> Engine<H> {
         let sort: CommentSort = opts.sort;
         self.with_views(&l, &bodies, &people, |v| v.thread_view(&uri, sort))
             .await
+    }
+
+    /// `recent_discussion(forum, cursor?, limit)` (`engine-api.md` §3.4): the listed posts
+    /// with Visible comments, most recently commented first (by the greatest comment
+    /// `t_rank`, then uri), each with its latest [`limits::DISCUSSION_COMMENTS`] Visible
+    /// comments (newest first). Paged like `list_posts` (`limit` 0: the default page size).
+    pub async fn recent_discussion(
+        &self,
+        forum: &str,
+        cursor: Option<&str>,
+        limit: u32,
+    ) -> Result<DiscussionList, EngineError> {
+        let key = self.forum_key(forum).await?;
+        let l = self.loaded(&key).await?;
+        let m = &l.model;
+        let f = &m.fold;
+        let mut entries: Vec<Discussion> = Vec::new();
+        for x in m.input.records.values() {
+            if !matches!(x.data, SkelData::Post { .. }) {
+                continue;
+            }
+            if !f.item(&x.uri).is_some_and(|i| i.state.listed()) {
+                continue;
+            }
+            let Some(th) = f.threads.get(&x.uri) else {
+                continue;
+            };
+            let mut comments: Vec<(i64, String)> = th
+                .placement
+                .parent
+                .keys()
+                .filter_map(|c| {
+                    let i = f.item(c)?;
+                    (i.state == State::Visible).then(|| (i.t_rank.unwrap_or(i64::MIN), c.clone()))
+                })
+                .collect();
+            if comments.is_empty() {
+                continue;
+            }
+            comments.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+            comments.truncate(limits::DISCUSSION_COMMENTS);
+            entries.push((comments[0].0, x.uri.clone(), comments));
+        }
+        entries.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        let offset: usize = match cursor {
+            None | Some("") => 0,
+            Some(c) => c
+                .parse()
+                .map_err(|_| EngineError::invalid_input(format!("bad cursor {c:?}")))?,
+        };
+        let limit = match limit {
+            0 => limits::LIST_PAGE_DEFAULT,
+            n => n.min(limits::LIST_PAGE_MAX),
+        } as usize;
+        let page: Vec<&Discussion> = entries.iter().skip(offset).take(limit).collect();
+        let end = offset.saturating_add(page.len());
+        let cursor = (end < entries.len()).then(|| end.to_string());
+        let uris: Vec<String> = page
+            .iter()
+            .flat_map(|(_, p, cs)| std::iter::once(p.clone()).chain(cs.iter().map(|c| c.1.clone())))
+            .collect();
+        let items = self
+            .with_views(&l, &uris, &uris, |v| {
+                page.iter()
+                    .filter_map(|(_, p, cs)| {
+                        Some(DiscussionItem {
+                            post: v.post_summary(p)?,
+                            comments: cs.iter().filter_map(|c| v.comment_node(&c.1, p)).collect(),
+                        })
+                    })
+                    .collect()
+            })
+            .await?;
+        Ok(DiscussionList {
+            dto: DtoVersion::default(),
+            items,
+            cursor,
+            completeness: l.completeness.clone(),
+        })
     }
 
     /// `history(uri)` (basic): the versions known from the item's revision records.

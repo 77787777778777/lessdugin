@@ -10,6 +10,7 @@
 //! refused until M4 (`unsupported`). TODO(M3): `at://handle` mention rewriting (W7) and the
 //! quote's derived `prefix`/`suffix`/`start` (W8).
 
+use futures::StreamExt;
 use futures::future::join_all;
 use lessdugin_atp::syntax::AtUri;
 use lessdugin_lexicon::collection::nsid;
@@ -20,7 +21,7 @@ use serde_json::{Map, Value};
 
 use crate::dto::{CommentDraft, Draft, EditOpts, PostDraft, PostKind, TextQuote, WriteTicket};
 use crate::host::Host;
-use crate::outbox::{self, ContentOpts, PumpReport, Session, parse_write_id, records};
+use crate::outbox::{self, ContentOpts, PumpReport, Session, Step, parse_write_id, records};
 use crate::store::records::RecordStore;
 
 use super::forums::{excerpt_of, markdown_body};
@@ -134,8 +135,9 @@ impl<H: Host> Engine<H> {
     }
 
     /// `comment(CommentDraft)`: a comment in the thread of `root` (replying to `parent` if
-    /// given) by the active account. The root and parent must be cached; the comment refers to
-    /// their cached versions.
+    /// given) by the active account. The root and parent must be cached, and the parent must be
+    /// a comment of the same thread (`invalid_ref` otherwise); the comment refers to their
+    /// cached versions.
     pub async fn comment(&self, draft: &CommentDraft) -> Result<WriteTicket, EngineError> {
         let session = self.active_session().await?;
         let root = records::at_uri(&draft.root)?;
@@ -154,7 +156,17 @@ impl<H: Host> Engine<H> {
                 if p.collection().as_str() != nsid::COMMENT {
                     return Err(EngineError::invalid_ref(format!("{p} is not a comment")));
                 }
-                let (cid, _) = self.current(&p).await?;
+                let (cid, value) = self.current(&p).await?;
+                // a parent in another thread would put the comment under a Missing placeholder
+                let parent_root = value
+                    .get("root")
+                    .and_then(|r| r.get("uri"))
+                    .and_then(Value::as_str);
+                if parent_root != Some(root.as_str()) {
+                    return Err(EngineError::invalid_ref(format!(
+                        "{p} is not a comment in the thread of {root}"
+                    )));
+                }
                 Some(StrongRef::new(p, cid))
             }
             None => None,
@@ -294,26 +306,82 @@ impl<H: Host> Engine<H> {
         Ok(out)
     }
 
-    /// `outbox_pump()` (long-lived, `engine-api.md` §3.3): drains the outbox of every account
-    /// logged in when it starts, one write in flight per account, until
-    /// [`Engine::outbox_stop`]. The host drives the future (`tokio::spawn` /
-    /// `spawn_local`); start it again after adding an account.
+    /// `outbox_pump()` (long-lived, `engine-api.md` §3.3): drains the outbox of every
+    /// logged-in account, one write in flight per account, until [`Engine::outbox_stop`].
+    ///
+    /// Each round re-reads the accounts (an account added or removed later is picked up) and
+    /// runs at most one write per account, concurrently; when nothing is due it sleeps (with
+    /// the host) until the earliest hold or back-off ends, at most [`outbox::IDLE_POLL_MS`],
+    /// and is woken early by new writes, retries and account changes. Start it once, before or
+    /// after login; the host drives the future (`tokio::spawn` / `spawn_local`). A pump started
+    /// after a stop runs normally. Errors are logged and retried, never returned.
     pub async fn outbox_pump(&self) -> Result<(), EngineError> {
-        let sessions = self.sessions().await?;
-        join_all(sessions.iter().map(|s| self.outbox.pump(s))).await;
+        let generation = self.outbox.generation();
+        let mut woken = self.outbox.waker();
+        let running = || self.outbox.generation() == generation;
+        let mut pruned_at: Option<i64> = None;
+        while running() {
+            // wakes before this round are covered by its scans
+            while woken.try_recv().is_ok() {}
+            let sessions = match self.accounts().await {
+                Ok(accounts) => accounts
+                    .iter()
+                    .filter_map(|a| Session::parse(&a.did, &a.pds).ok())
+                    .collect(),
+                Err(e) => {
+                    tracing::warn!(error = %e, "outbox pump: reading the accounts");
+                    Vec::new()
+                }
+            };
+            let steps = join_all(sessions.iter().map(|s| self.outbox.step(s))).await;
+            let now = self.host.now_ms();
+            let mut wait = outbox::IDLE_POLL_MS;
+            let mut idle = Vec::new();
+            for (s, step) in sessions.iter().zip(steps) {
+                match step {
+                    Ok(Step::Processed(_)) => wait = 0,
+                    Ok(Step::Wait(t)) => wait = wait.min(t.saturating_sub(now).max(1)),
+                    Ok(Step::Idle) => idle.push(s.did.as_str()),
+                    Err(e) => {
+                        tracing::warn!(account = %s.did, error = %e, "outbox pump step failed");
+                        wait = wait.min(outbox::ERROR_WAIT_MS);
+                    }
+                }
+            }
+            if !idle.is_empty() && pruned_at.is_none_or(|t| now - t >= outbox::IDLE_POLL_MS) {
+                pruned_at = Some(now);
+                let before = now.saturating_sub(outbox::DONE_KEEP_MS);
+                for account in idle {
+                    if let Err(e) = self.outbox.prune(account, before).await {
+                        tracing::warn!(account = %account, error = %e, "outbox prune failed");
+                    }
+                }
+            }
+            if wait == 0 || !running() {
+                continue;
+            }
+            let sleep = self.host.sleep(u64::try_from(wait).unwrap_or(1));
+            futures::pin_mut!(sleep);
+            futures::future::select(sleep, woken.next()).await;
+        }
         Ok(())
     }
 
-    /// Stops the running pumps (they return after their current step).
+    /// Stops the running pumps (they return after their current round).
     pub fn outbox_stop(&self) {
         self.outbox.stop();
     }
 
     /// Runs every account's outbox until no write is pending, sleeping (with the host)
-    /// through holds and back-offs (the CLI's one-shot commands; tests).
+    /// through holds and back-offs (the CLI's one-shot commands; tests). Finished writes older
+    /// than [`outbox::DONE_KEEP_MS`] are pruned first, as the long-lived pump does.
     pub async fn outbox_flush(&self) -> Result<PumpReport, EngineError> {
         let mut total = PumpReport::default();
         for s in self.sessions().await? {
+            let before = self.host.now_ms().saturating_sub(outbox::DONE_KEEP_MS);
+            if let Err(e) = self.outbox.prune(s.did.as_str(), before).await {
+                tracing::warn!(account = %s.did, error = %e, "outbox prune failed");
+            }
             let r = self.outbox.run_until_idle(&s).await?;
             total.processed += r.processed;
             total.done += r.done;

@@ -1346,3 +1346,372 @@ fn futures_are_send(ob: &Outbox<MemHost>, s: &Session, p: &Post) {
     send(ob.undo(s, ""));
     send(ob.edit(s, "", &Value::Null, "", EditOpts::default()));
 }
+
+// ---------------------------------------------------------------------------------------------
+// M2 review regressions
+
+/// A route that applies the write on the fake network, then crashes the process.
+fn crash_after_apply(w: &World) {
+    let net = w.net.clone();
+    w.host.on_post(&w.userpds(APPLY), move |req| {
+        let _ = net.request(req, "default");
+        panic!("simulated crash after the PDS applied the write");
+    });
+}
+
+fn exhaust_budget(w: &World) {
+    let did = w.alice.did().as_str().to_owned();
+    let now = w.host.now();
+    let bucket = now - now.rem_euclid(lessdugin_core::outbox::budget::BUCKET_MS);
+    let row = BudgetRow {
+        spent: vec![(bucket, 5_000)],
+        ..BudgetRow::default()
+    };
+    block_on(w.host.state_kv().write(vec![KvOp::Put(
+        model::budget_key(&did),
+        row::encode(&row).unwrap(),
+    )]))
+    .unwrap();
+}
+
+/// 1: a row left `sending` by a crash keeps its "may have been sent" mark through a budget
+/// wait, so undo refuses to "remove" a write that is live.
+#[test]
+fn a_crash_then_a_budget_wait_keeps_the_sent_mark() {
+    let w = world();
+    crash_after_apply(&w);
+    let t = block_on(w.ob.create_post(&w.session, &w.post("one"), ContentOpts::default())).unwrap();
+    crash(&w);
+    assert_eq!(w.alice.list(nsid::POST).len(), 1, "the post landed");
+    let ob = restart(&w);
+    exhaust_budget(&w);
+    assert!(matches!(
+        block_on(ob.step(&w.session)).unwrap(),
+        Step::Wait(_)
+    ));
+    let row = block_on(ob.get(&t.id)).unwrap().unwrap();
+    assert_eq!(row.state, WriteStage::Throttled);
+    assert!(row.sent, "the mark survives the wait");
+    assert!(block_on(ob.undo(&w.session, &t.id)).is_err());
+    assert_eq!(w.alice.list(nsid::POST).len(), 1);
+}
+
+/// 1 (variant): a recovery check that fails (offline restart) keeps the mark too; once the
+/// network is back the write is recognised by its CID and never sent again.
+#[test]
+fn a_crash_then_an_offline_restart_keeps_the_sent_mark() {
+    let w = world();
+    crash_after_apply(&w);
+    let t = block_on(w.ob.create_post(&w.session, &w.post("one"), ContentOpts::default())).unwrap();
+    crash(&w);
+    let ob = restart(&w);
+    w.net.inject(
+        Fault::disconnect()
+            .on_nsid("com.atproto.repo.getRecord")
+            .times(20),
+    );
+    block_on(ob.run_due(&w.session)).unwrap();
+    let row = block_on(ob.get(&t.id)).unwrap().unwrap();
+    assert_eq!(row.state, WriteStage::Throttled);
+    assert!(row.sent);
+    assert!(block_on(ob.undo(&w.session, &t.id)).is_err());
+    w.net.clear_faults();
+    block_on(ob.run_until_idle(&w.session)).unwrap();
+    done(&block_on(ob.ticket(&t.id)).unwrap().unwrap());
+    assert_eq!(w.net.count(APPLY), 1, "never sent again");
+}
+
+/// 2: a 429 whose reset is already past still waits (at least the default rate-limit wait,
+/// growing with consecutive 429s) instead of retrying every millisecond.
+#[test]
+fn a_429_with_a_past_reset_waits() {
+    let w = world();
+    let past = (w.host.now() / 1000 - 120).to_string();
+    let resp = lessdugin_core::host::HttpResponse {
+        status: 429,
+        headers: vec![
+            ("ratelimit-limit".into(), "5000".into()),
+            ("ratelimit-remaining".into(), "0".into()),
+            ("ratelimit-reset".into(), past),
+        ],
+        body: br#"{"error":"RateLimitExceeded","message":"Rate Limit Exceeded"}"#.to_vec(),
+    };
+    w.net.inject(Fault::respond(resp).on_nsid(APPLY).times(3));
+    let t = block_on(w.ob.create_post(&w.session, &w.post("one"), ContentOpts::default())).unwrap();
+    let start = w.host.now();
+    w.run();
+    done(&w.ticket(&t));
+    assert_eq!(w.net.count(APPLY), 4);
+    let wait = lessdugin_core::outbox::budget::DEFAULT_RATE_LIMIT_WAIT_MS;
+    assert!(w.host.now() - start >= 3 * wait, "{}", w.host.now() - start);
+}
+
+/// 3: `stop` ends the running pumps only; a pump started afterwards runs.
+#[test]
+fn a_pump_started_after_stop_runs() {
+    use std::sync::OnceLock;
+
+    struct StopWhenDone(OnceLock<Outbox<MemHost>>);
+    impl lessdugin_core::outbox::OutboxListener for StopWhenDone {
+        fn on_write(&self, t: &WriteTicket) {
+            if matches!(t.state, WriteState::Done { .. })
+                && let Some(ob) = self.0.get()
+            {
+                ob.stop();
+            }
+        }
+    }
+    let w = world();
+    let l = Arc::new(StopWhenDone(OnceLock::new()));
+    let ob = Outbox::with_listener(Arc::new(w.host.clone()), l.clone());
+    assert!(l.0.set(ob.clone()).is_ok());
+    ob.stop();
+    let t = block_on(ob.create_post(&w.session, &w.post("one"), ContentOpts::default())).unwrap();
+    block_on(ob.pump(&w.session));
+    done(&block_on(ob.ticket(&t.id)).unwrap().unwrap());
+    // and again after that stop
+    let t = block_on(ob.create_post(&w.session, &w.post("two"), ContentOpts::default())).unwrap();
+    block_on(ob.pump(&w.session));
+    done(&block_on(ob.ticket(&t.id)).unwrap().unwrap());
+}
+
+/// 4: the delete protocol lists the own revision range with the sync listing, whose
+/// oversized-page retry handles large revisions.
+#[test]
+fn a_post_with_large_revisions_can_be_deleted() {
+    let w = world();
+    let (uri, cid) = w.seed_post("one");
+    let rkey = rkey_of(&uri);
+    let pad = "x".repeat(60_000);
+    for i in 0..75 {
+        let rk = format!("{rkey}-{}", tid(10_000, 100 + i));
+        let v = json!({
+            "$type": nsid::REVISION,
+            "subject": {"uri": uri, "cid": cid},
+            "op": "update",
+            "record": {"$type": nsid::POST, "pad": pad},
+            "createdAt": w.now().as_str(),
+        });
+        w.alice.put(nsid::REVISION, &rk, &v);
+    }
+    let d = block_on(w.ob.delete(&w.session, &uri)).unwrap();
+    w.run();
+    done(&w.ticket(&d));
+    assert!(w.alice.get(nsid::POST, &rkey).is_none());
+    assert!(w.alice.list(nsid::REVISION).is_empty(), "revisions deleted");
+}
+
+/// 8: a listing that does not complete (a cursor that never advances) fails the delete instead
+/// of reporting it done with revisions left.
+#[test]
+fn a_delete_never_works_from_an_incomplete_listing() {
+    let w = world();
+    let (uri, cid) = w.seed_post("one");
+    let rkey = rkey_of(&uri);
+    for i in 0..150 {
+        let rk = format!("{rkey}-{}", tid(10_000, 100 + i));
+        let v = json!({
+            "$type": nsid::REVISION,
+            "subject": {"uri": uri, "cid": cid},
+            "op": "update",
+            "record": {"$type": nsid::POST, "n": i},
+            "createdAt": w.now().as_str(),
+        });
+        w.alice.put(nsid::REVISION, &rk, &v);
+    }
+    w.alice
+        .set_cursor_mode(Some(lessdugin_testkit::fake_pds::CursorMode::Stuck));
+    let d = block_on(w.ob.delete(&w.session, &uri)).unwrap();
+    w.run();
+    let _ = failed_code(&w.ticket(&d));
+    assert!(w.alice.get(nsid::POST, &rkey).is_some(), "nothing deleted");
+}
+
+/// 5: adopt batches are cut by body size (≤ 900,000 bytes) as well as by op count.
+#[test]
+fn adopt_batches_respect_the_body_size_limit() {
+    let w = world();
+    let carol = w.net.add_account("carol.example.com");
+    let reason: String = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466}".repeat(790);
+    assert!(reason.len() <= 20_000);
+    for i in 0..50 {
+        let subject = format!(
+            "at://{}/{}/{}-{}",
+            w.bob.did(),
+            nsid::POST,
+            w.fk(),
+            tid(10_000, i)
+        );
+        let mut m = ModAction::new(
+            w.forum(),
+            &subject,
+            Action::Hide(HideAction::hide()),
+            w.now(),
+        );
+        m.reason = Some(reason.clone());
+        let b = records::mod_action(&m).unwrap();
+        carol.put(nsid::MOD_ACTION, &b.rkey, &b.value);
+    }
+    w.host.advance_ms(60_000);
+    let t = block_on(w.ob.mod_adopt(
+        &w.session,
+        &w.forum(),
+        carol.did(),
+        &carol.pds_base(),
+        "owner",
+    ))
+    .unwrap();
+    w.run();
+    done(&w.ticket(&t));
+    assert!(w.net.count(APPLY) >= 2, "split by size");
+    for r in w.host.requests_to(&w.userpds(APPLY)) {
+        assert!(r.body.as_deref().unwrap().len() <= 900_000);
+    }
+    assert_eq!(w.alice.list(nsid::MOD_ACTION).len(), 50);
+}
+
+/// 6: a 400 that says nothing about null swaps (a media error) never marks the host, and a
+/// generic 400 marks it only once `createRecord` succeeds with the same value.
+#[test]
+fn only_a_working_fallback_marks_a_host_without_null_swap() {
+    let w = world();
+    let caps = |w: &World| {
+        block_on(RecordStore::new(w.host.cache_kv()).host_caps(&w.session.origin()))
+            .unwrap()
+            .and_then(|h| h.null_swap)
+    };
+    w.net.inject(
+        Fault::error(
+            400,
+            "InvalidMimeType",
+            "Referenced Mimetype does not match stored blob",
+        )
+        .times(2),
+    );
+    let p = lessdugin_lexicon::records::Profile {
+        display_name: Some("Alice".into()),
+        ..Default::default()
+    };
+    let t = block_on(w.ob.put_profile(&w.session, &p, None, Vec::new())).unwrap();
+    w.run();
+    let _ = failed_code(&w.ticket(&t));
+    assert_eq!(caps(&w), None);
+    // a 400 to both the null-swap put and createRecord: about the record, not the host
+    w.net.clear_faults();
+    w.net
+        .inject(Fault::error(400, "InvalidRequest", "bad record").times(2));
+    let t = block_on(w.ob.put_profile(&w.session, &p, None, Vec::new())).unwrap();
+    w.run();
+    let _ = failed_code(&w.ticket(&t));
+    assert_eq!(caps(&w), None);
+    // a host that works: the null swap is recorded as supported
+    w.net.clear_faults();
+    let t = block_on(w.ob.join(&w.session, &w.forum(), None)).unwrap();
+    w.run();
+    done(&w.ticket(&t));
+    assert_eq!(caps(&w), Some(true));
+}
+
+/// 9: an edit (with or without history) that changes nothing but `updatedAt` is a no-op.
+#[test]
+fn an_unchanged_edit_writes_nothing() {
+    let w = world();
+    let (uri, cid) = w.seed_post("one");
+    let value = w.alice.get(nsid::POST, &rkey_of(&uri)).unwrap();
+    let (apply, put) = (w.net.count(APPLY), w.net.count(PUT));
+    let t = block_on(w.ob.edit(&w.session, &uri, &value, &cid, EditOpts::default())).unwrap();
+    w.run();
+    assert_eq!(done(&w.ticket(&t)).1, cid);
+    let opts = EditOpts {
+        history: false,
+        ..EditOpts::default()
+    };
+    let t = block_on(w.ob.edit(&w.session, &uri, &value, &cid, opts)).unwrap();
+    w.run();
+    assert_eq!(done(&w.ticket(&t)).1, cid);
+    assert_eq!((w.net.count(APPLY), w.net.count(PUT)), (apply, put));
+    assert!(w.alice.list(nsid::REVISION).is_empty(), "no revision");
+}
+
+/// 10: a record recognised by a re-read is keyed by a head read afterwards: stored, but not
+/// as exact.
+#[test]
+fn a_record_found_by_a_re_read_is_not_exact() {
+    let w = world();
+    w.seed_post("seed");
+    {
+        let net = w.net.clone();
+        let calls = Arc::new(AtomicU32::new(0));
+        w.host.on_post(&w.userpds(CREATE), move |req| {
+            let r = net.request(req, "default");
+            if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Ok(lessdugin_testkit::resp::xrpc_error(
+                    502,
+                    "UpstreamFailure",
+                    "Bad Gateway",
+                ));
+            }
+            r
+        });
+    }
+    let t = block_on(w.ob.create_post(&w.session, &w.post("two"), ContentOpts::default())).unwrap();
+    w.run();
+    let (uri, _) = done(&w.ticket(&t));
+    let row = block_on(RecordStore::new(w.host.cache_kv()).get(&AtUri::parse(&uri).unwrap()))
+        .unwrap()
+        .unwrap();
+    assert!(!row.exact);
+}
+
+/// 7 (mitigation): a run adds its spent points to the budget row as stored when it saves,
+/// instead of writing back the copy it loaded (another pump's points are kept).
+#[test]
+fn a_run_keeps_points_another_pump_spent() {
+    use futures::FutureExt;
+    let w = world();
+    let did = w.alice.did().as_str().to_owned();
+    let other_bucket = {
+        let now = w.host.now() - 10 * 60_000;
+        now - now.rem_euclid(lessdugin_core::outbox::budget::BUCKET_MS)
+    };
+    {
+        let net = w.net.clone();
+        let host = w.host.clone();
+        let key = model::budget_key(&did);
+        w.host.on_post(&w.userpds(APPLY), move |req| {
+            // another process charges 100 points while this write is in flight
+            let row = BudgetRow {
+                spent: vec![(other_bucket, 100)],
+                ..BudgetRow::default()
+            };
+            host.state_kv()
+                .write(vec![KvOp::Put(key.clone(), row::encode(&row).unwrap())])
+                .now_or_never()
+                .unwrap()
+                .unwrap();
+            net.request(req, "default")
+        });
+    }
+    let t = block_on(w.ob.create_post(&w.session, &w.post("one"), ContentOpts::default())).unwrap();
+    w.run();
+    done(&w.ticket(&t));
+    let b = block_on(w.ob.budget(&did)).unwrap();
+    let hour = lessdugin_core::outbox::budget::HOUR_MS;
+    assert!(
+        b.spent.iter().any(|(k, p)| *k == other_bucket && *p == 100),
+        "{b:?}"
+    );
+    assert!(b.window_points(w.host.now(), hour) > 100);
+}
+
+/// Minor: reads that fail before anything is sent (offline) never make a write fail, however
+/// long it lasts.
+#[test]
+fn an_offline_device_keeps_its_writes_pending() {
+    let w = world();
+    w.net.inject(Fault::disconnect().on_nsid(HEAD).times(30));
+    let t = block_on(w.ob.create_post(&w.session, &w.post("one"), ContentOpts::default())).unwrap();
+    w.run();
+    done(&w.ticket(&t));
+    assert!(w.net.count(HEAD) >= 12, "{} head reads", w.net.count(HEAD));
+}

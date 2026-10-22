@@ -4,7 +4,8 @@
 //! M1 provides identity (`resolve_actor`), verification (`verify`) and the local account list
 //! (`accounts`, `add_account` with the login binding, `remove_account`, `set_active_account`,
 //! `active_account`). M2 adds forums and membership (`forums`), sync (`syncing`), the queries
-//! over the forum model (`queries`), writes through the outbox (`writes`) and events
+//! over the forum model (`queries`), `parse_ref` (`refs`), writes through the outbox
+//! (`writes`), the long-lived `live_tail` and `background_verify` (`live`) and events
 //! (`events`). The engine keeps no global state: two engines over two hosts are independent.
 //! Cloning an engine shares its host, outbox, event subscribers and model cache.
 
@@ -13,8 +14,10 @@ mod config;
 mod error;
 mod events;
 mod forums;
+mod live;
 mod models;
 mod queries;
+mod refs;
 mod syncing;
 mod writes;
 
@@ -28,6 +31,7 @@ pub use config::{
 };
 pub use error::{EngineError, ErrorCode};
 pub use events::{EventCallback, SubscriptionId};
+pub use live::LiveRound;
 pub use syncing::ForumSyncOpts;
 
 use crate::dto::{ActorView, VerifyReport};

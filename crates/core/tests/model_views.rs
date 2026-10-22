@@ -202,6 +202,7 @@ fn views_of_an_injected_input() {
         renders: &renders,
         pending: &BTreeSet::new(),
         completeness: &Completeness::default(),
+        now: model.now(),
     };
 
     let thread = v.thread_view(&p1, CommentSort::Old);
@@ -247,4 +248,128 @@ fn views_of_an_injected_input() {
     )
     .unwrap();
     assert_eq!(again, model);
+}
+
+fn build(decl: &Value, i: &Input, now: i64) -> ForumModel {
+    let key = ForumKey::new(&OWNER.parse().unwrap(), "meta").unwrap();
+    let contract = i.contract(decl, now);
+    let input = ForumInput::from_contract(&contract, NS, validity).unwrap();
+    ForumModel::from_input(key, input, Level::Pds, BTreeMap::new(), BTreeSet::new()).unwrap()
+}
+
+fn base(mode: lessdugin_lexicon::values::MembershipMode) -> (String, Value, Input) {
+    let key = ForumKey::new(&OWNER.parse().unwrap(), "meta").unwrap();
+    let forum = key.uri.to_string();
+    let mut decl = serde_json::to_value(lessdugin_lexicon::records::Forum::create(
+        "Meta",
+        Datetime::from_millis(T0).unwrap(),
+        mode,
+    ))
+    .unwrap();
+    decl["defaultTier"] = json!("frontpage");
+    let mut i = Input {
+        forum: forum.clone(),
+        records: Vec::new(),
+        obs: Vec::new(),
+    };
+    i.membership(OWNER, T0);
+    (forum, decl, i)
+}
+
+fn views<'a>(
+    model: &'a ForumModel,
+    values: &'a BTreeMap<String, Value>,
+    renders: &'a RenderCache,
+    pending: &'a BTreeSet<String>,
+    actors: &'a BTreeMap<String, lessdugin_core::dto::ActorView>,
+    completeness: &'a Completeness,
+) -> Views<'a> {
+    Views {
+        model,
+        actors,
+        pds: actors_pds(),
+        values,
+        renders,
+        pending,
+        completeness,
+        now: model.now(),
+    }
+}
+
+fn actors_pds() -> &'static BTreeMap<String, String> {
+    static EMPTY: std::sync::OnceLock<BTreeMap<String, String>> = std::sync::OnceLock::new();
+    EMPTY.get_or_init(BTreeMap::new)
+}
+
+/// M5 of the engine review: a hidden or tombstoned post shows none of its author's content —
+/// title, link, tags and labels are blank like the body.
+#[test]
+fn a_hidden_post_shows_no_title_link_tags_or_labels() {
+    let (forum, decl, mut i) = base(lessdugin_lexicon::values::MembershipMode::Approval);
+    i.membership(EVE, T0 + 3);
+    let v = json!({
+        "$type": nsid::POST, "forum": forum, "kind": "link", "title": "BUY CHEAP PILLS",
+        "link": {"uri": "https://spam.example/pills"}, "tags": ["spam-tag"],
+        "labels": {"$type": "com.atproto.label.defs#selfLabels", "values": [{"val": "spam"}]},
+        "body": md("spam body"), "createdAt": dt(T0 + HOUR),
+    });
+    let rkey = keys::post_rkey(&forum, tid_at_ms(T0 + HOUR).as_str()).unwrap();
+    let p = i.add(EVE, nsid::POST, &rkey, v, T0 + HOUR);
+    // the owner answers under it, so the post stays in the thread as a tombstone
+    i.comment(OWNER, &p, None, "Removed, sorry.", T0 + 2 * HOUR);
+    let model = build(&decl, &i, T0 + 3 * HOUR);
+    let values: BTreeMap<String, Value> = i.records.iter().cloned().collect();
+    let (renders, pending, actors, c) = (
+        RenderCache::default(),
+        BTreeSet::new(),
+        BTreeMap::new(),
+        Completeness::default(),
+    );
+    let v = views(&model, &values, &renders, &pending, &actors, &c);
+    let pv = v.post_view(&p).unwrap();
+    assert!(
+        matches!(
+            pv.post.state,
+            ItemState::Tombstone { .. } | ItemState::Hidden { .. }
+        ),
+        "{:?}",
+        pv.post.state
+    );
+    assert_eq!(pv.post.title, None);
+    assert_eq!(pv.post.link, None);
+    assert!(pv.post.tags.is_empty() && pv.post.labels.is_empty());
+    assert!(pv.body.html.is_empty() && pv.post.excerpt.is_empty());
+    let thread = serde_json::to_string(&v.thread_view(&p, CommentSort::Old)).unwrap();
+    assert!(
+        !thread.contains("PILLS") && !thread.contains("spam"),
+        "{thread}"
+    );
+}
+
+/// M3 of the engine review: under `voting = karmaOnly` the score carries no `agreement`
+/// (`engine-api.md` §4.1); otherwise it does.
+#[test]
+fn karma_only_scores_have_no_agreement() {
+    for (voting, present) in [(Some("karmaOnly"), false), (None, true)] {
+        let (_, mut decl, mut i) = base(lessdugin_lexicon::values::MembershipMode::Open);
+        if let Some(v) = voting {
+            decl["policy"] = json!({ "voting": v });
+        }
+        let p = i.post(OWNER, "Hello", "x", T0 + HOUR);
+        let model = build(&decl, &i, T0 + 3 * HOUR);
+        let values: BTreeMap<String, Value> = i.records.iter().cloned().collect();
+        let (renders, pending, actors, c) = (
+            RenderCache::default(),
+            BTreeSet::new(),
+            BTreeMap::new(),
+            Completeness::default(),
+        );
+        let v = views(&model, &values, &renders, &pending, &actors, &c);
+        let s = serde_json::to_value(v.post_summary(&p).unwrap()).unwrap();
+        assert_eq!(
+            s["score"].get("agreement").is_some(),
+            present,
+            "{voting:?}: {s}"
+        );
+    }
 }

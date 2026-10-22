@@ -108,6 +108,32 @@ impl BudgetRow {
     pub fn block_until(&mut self, until: i64) {
         self.blocked_until = self.blocked_until.max(until);
     }
+
+    /// Adds what a run spent (`after` minus `before`, the row it loaded) and its block to this
+    /// row, re-read just before saving: a run never writes back the copy it loaded, which would
+    /// drop points another pump spent meanwhile.
+    pub fn merge_run(&mut self, before: &BudgetRow, after: &BudgetRow, now: i64) {
+        for (bucket, points) in &after.spent {
+            let was = before
+                .spent
+                .iter()
+                .find(|(b, _)| b == bucket)
+                .map_or(0, |(_, p)| *p);
+            let delta = points.saturating_sub(was);
+            if delta == 0 {
+                continue;
+            }
+            match self.spent.iter_mut().find(|(b, _)| b == bucket) {
+                Some((_, p)) => *p = p.saturating_add(delta),
+                None => {
+                    self.spent.push((*bucket, delta));
+                    self.spent.sort_unstable();
+                }
+            }
+        }
+        self.spent.retain(|(b, _)| b + BUCKET_MS + DAY_MS > now);
+        self.block_until(after.blocked_until);
+    }
 }
 
 /// `RateLimit-Reset` as an absolute time (ms): epoch seconds above 10^9, otherwise seconds from

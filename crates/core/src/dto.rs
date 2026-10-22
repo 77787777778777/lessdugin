@@ -179,7 +179,9 @@ dto! {
     #[derive(Default)]
     pub struct ScoreView {
         pub score: i64,
-        pub agreement: i64,
+        /// Absent when the forum's `policy.voting` is `karmaOnly` (`social.md` §7).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub agreement: Option<i64>,
         pub unweighted: u32,
         pub earlier_version_votes: u32,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -907,6 +909,29 @@ dto! {
         pub pds: String,
         pub auth_kind: AuthKind,
         pub active: bool,
+    }
+}
+
+dto! {
+    /// What `parse_ref` found (`engine-api.md` §3.1): a forum, post, comment or sequence uri,
+    /// another record's uri, or an actor's DID.
+    pub enum Ref {
+        Forum { uri: String },
+        Post { uri: String },
+        Comment { uri: String },
+        Sequence { uri: String },
+        Record { uri: String },
+        Actor { did: String },
+    }
+}
+
+dto! {
+    /// The context of `parse_ref`.
+    #[derive(Default)]
+    pub struct RefContext {
+        /// The current forum, for `handle/rkey` post references.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub forum: Option<String>,
     }
 }
 

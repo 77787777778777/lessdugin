@@ -10,7 +10,7 @@
 //!                 A = {owner} ∪ moderators (FO2)
 //! sync_forum(F):  1. A at P0 (+ 2. authors on screen at P0, confirmed)
 //!                 roster (G, B, N, S) from the authorities' records
-//!                 4. G ∖ A at P1, confirmed (seeds first)
+//!                 4. G ∖ A at P1, not gated by a membership (seeds first)
 //!                 open mode: 5. the closure of S at P1, confirmed;
 //!                            6. newcomers from hints at P2, confirmed, at most 500
 //!                 completeness (C(F), k/n, degraded) → SyncReport
@@ -26,12 +26,20 @@
 //! Rejected candidates get a `rejected` disc row and are skipped until a new hint names them (or
 //! [`state::REJECTED_RECHECK_MS`] passes).
 //!
+//! **Grants are not gated.** `sync.md` §4.2.1 confirms every participant outside A, but
+//! `social.md` §3.3 keeps a grant counting after its holder leaves (their opinions keep
+//! counting), so a granted repo is synced like an authority's: without the membership gate,
+//! never held back by a rejection, and always in C(F). Gating it would freeze a leaver's last
+//! records on clients that synced them while fresh clients never see them, with both reporting
+//! complete (I6). The tension between the two sections is for the spec owner.
+//!
 //! **Budgets.** `max_requests` and `budget_ms` are enforced per request by the command's
 //! [`Stats`]: once spent, nothing new is sent, work in flight ends, the report is `[partial]`
 //! and carries one `time_budget` / `request_limit` issue. Nothing here sleeps or spawns.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use futures::future::join_all;
 use lessdugin_atp::Cid;
@@ -45,7 +53,7 @@ use crate::discovery::roster;
 use crate::discovery::state::{self, DiscRow, DiscState, ForumState, put_disc_rows};
 use crate::dto::{Completeness, DtoVersion, SyncIssue, SyncReport};
 use crate::engine::EngineError;
-use crate::host::Host;
+use crate::host::{Host, MaybeSendSync};
 use crate::identity::{DID_DOC_TTL_MS, IdentityError, IdentityLevel, ResolvedIdentity};
 use crate::limits;
 use crate::store::admit::{self, LexiconValidator};
@@ -61,6 +69,59 @@ use crate::xrpc::{CallOpts, Service};
 
 /// Newcomer candidates confirmed and synced per forum and command (§4.4, *tunable*).
 pub const NEWCOMER_BUDGET: usize = 500;
+
+/// A progress callback of [`Syncer::sync_forum`]: `(done, total)`, the repos synced so far and
+/// the repos planned so far (the total grows as each step plans its candidates). Called as each
+/// repo finishes, on the task that drives the sync.
+#[derive(Clone, Default)]
+pub struct Progress(Option<Arc<dyn ProgressFn>>);
+
+/// A progress callback (`Fn(done, total)`; `Send + Sync` on native targets).
+pub trait ProgressFn: Fn(u32, u32) + MaybeSendSync {}
+
+impl<F: Fn(u32, u32) + MaybeSendSync + ?Sized> ProgressFn for F {}
+
+impl Progress {
+    /// A callback.
+    // In wasm callbacks are not `Send`; the core is single-threaded there.
+    #[allow(clippy::arc_with_non_send_sync)]
+    pub fn new(f: impl ProgressFn + 'static) -> Self {
+        Self(Some(Arc::new(f)))
+    }
+
+    /// Reports `(done, total)`.
+    pub fn report(&self, done: u32, total: u32) {
+        if let Some(f) = &self.0 {
+            f(done, total);
+        }
+    }
+}
+
+impl std::fmt::Debug for Progress {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.0.is_some() {
+            "Progress(callback)"
+        } else {
+            "Progress(none)"
+        })
+    }
+}
+
+/// Options compare equal whatever their callbacks.
+impl PartialEq for Progress {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for Progress {}
+
+/// Repos planned and done during one sync (for [`Progress`]).
+#[derive(Default)]
+struct Tally {
+    done: AtomicU32,
+    total: AtomicU32,
+}
 
 /// Settings of [`Syncer::sync_forum`] (`engine-api.md` §3.3 `SyncOpts`, plus the inputs of the
 /// view and CORE+ steps).
@@ -82,6 +143,8 @@ pub struct SyncOpts {
     /// Step 6: newcomer candidates from hints, most recent first, as `(did, source)` (§4.4);
     /// used in open mode only, at most [`NEWCOMER_BUDGET`] (with step 3's).
     pub newcomers: Vec<(String, String)>,
+    /// Progress reports while the sync runs.
+    pub progress: Progress,
 }
 
 /// How the declaration's proof went.
@@ -199,6 +262,9 @@ struct Candidate {
     src: String,
     /// Named by a new hint: a rejected disc row does not hold it back.
     hinted: bool,
+    /// In G: synced like an authority, without the membership gate, whatever its disc row says
+    /// (`social.md` §3.3: a grant still counts after its holder leaves).
+    granted: bool,
 }
 
 fn parse_dids<'a>(it: impl IntoIterator<Item = &'a String>) -> Vec<Did> {
@@ -405,6 +471,7 @@ impl<H: Host> Syncer<H> {
         let reason = |r: Reason| if opts.full { Reason::Full } else { r };
         let mut repos: Vec<RepoReport> = Vec::new();
         let mut done: BTreeSet<String> = BTreeSet::new();
+        let tally = Tally::default();
 
         // 1. authorities at P0; 2. authors on screen at P0
         let a = &forum.authorities;
@@ -422,10 +489,11 @@ impl<H: Host> Syncer<H> {
                     did,
                     src: "view".into(),
                     hinted: true,
+                    granted: false,
                 })
                 .collect();
         jobs.extend(self.candidate_jobs(&key, &view, &mut done, &disc, reason(Reason::View)));
-        let reports = self.run_jobs(&p0, &jobs).await;
+        let reports = self.run_jobs(&p0, &jobs, &tally, &opts.progress).await;
         self.note_candidates(&key, &view, &reports, &mut disc, &mut touched);
         repos.extend(reports);
 
@@ -440,6 +508,18 @@ impl<H: Host> Syncer<H> {
             .chain(opts.recently_active.iter().map(String::as_str))
             .collect();
         let mut budget = NEWCOMER_BUDGET;
+        // a granted author on screen was gated by its membership at step 2 (the roster was not
+        // known yet): a rejection there does not stop the ungated grant sync below
+        let gated_out: BTreeSet<String> = repos
+            .iter()
+            .filter(|r| r.outcome == RepoOutcome::Rejected)
+            .map(|r| r.did.clone())
+            .collect();
+        for d in &gated_out {
+            if r.granted.contains(d) {
+                done.remove(d);
+            }
+        }
 
         // 3. recently active authors at P1: approval mode, those in G; open mode, any (outside
         //    A ∪ G they are newcomers and count toward the budget)
@@ -463,11 +543,12 @@ impl<H: Host> Syncer<H> {
                 did,
                 src: if granted { "grant" } else { "hint:active" }.into(),
                 hinted: true,
+                granted,
             });
         }
         let jobs =
             self.candidate_jobs(&key, &active, &mut done, &disc, reason(Reason::Participant));
-        let reports = self.run_jobs(&p1, &jobs).await;
+        let reports = self.run_jobs(&p1, &jobs, &tally, &opts.progress).await;
         self.note_candidates(&key, &active, &reports, &mut disc, &mut touched);
         repos.extend(reports);
 
@@ -480,11 +561,12 @@ impl<H: Host> Syncer<H> {
                 hinted: hinted.contains(did.as_str()),
                 did,
                 src: "grant".into(),
+                granted: true,
             })
             .collect();
         let jobs =
             self.candidate_jobs(&key, &grants, &mut done, &disc, reason(Reason::Participant));
-        let reports = self.run_jobs(&p1, &jobs).await;
+        let reports = self.run_jobs(&p1, &jobs, &tally, &opts.progress).await;
         self.note_candidates(&key, &grants, &reports, &mut disc, &mut touched);
         repos.extend(reports);
 
@@ -497,6 +579,7 @@ impl<H: Host> Syncer<H> {
                     hinted: hinted.contains(did.as_str()),
                     did,
                     src: "closure".into(),
+                    granted: false,
                 })
                 .collect();
             let jobs = self.candidate_jobs(
@@ -506,7 +589,7 @@ impl<H: Host> Syncer<H> {
                 &disc,
                 reason(Reason::Participant),
             );
-            let reports = self.run_jobs(&p1, &jobs).await;
+            let reports = self.run_jobs(&p1, &jobs, &tally, &opts.progress).await;
             self.note_candidates(&key, &closure, &reports, &mut disc, &mut touched);
             repos.extend(reports);
 
@@ -521,6 +604,7 @@ impl<H: Host> Syncer<H> {
                         did: Did::parse(d).ok()?,
                         src: format!("hint:{src}"),
                         hinted: true,
+                        granted: false,
                     })
                 })
                 .collect();
@@ -532,7 +616,7 @@ impl<H: Host> Syncer<H> {
                 &disc,
                 reason(Reason::Participant),
             );
-            let reports = self.run_jobs(&p2, &jobs).await;
+            let reports = self.run_jobs(&p2, &jobs, &tally, &opts.progress).await;
             self.note_candidates(&key, now_list, &reports, &mut disc, &mut touched);
             repos.extend(reports);
             // the rest stay candidates
@@ -566,7 +650,10 @@ impl<H: Host> Syncer<H> {
         })
     }
 
-    /// Sync requests for the candidates not yet handled and not held back by a rejection.
+    /// Sync requests for the candidates not yet handled and not held back by a rejection. A
+    /// granted candidate is synced without the membership gate and never held back (H1 of the
+    /// M2 review: `social.md` §3.3 keeps a grant counting after its holder leaves, so its repo
+    /// must stay synced, like an authority's).
     fn candidate_jobs(
         &self,
         key: &ForumKey,
@@ -580,6 +667,14 @@ impl<H: Host> Syncer<H> {
         for c in cands {
             let d = c.did.to_string();
             if done.contains(&d) {
+                continue;
+            }
+            if c.granted {
+                done.insert(d);
+                out.push(
+                    SyncRequest::forum(c.did.clone(), &key.fk, reason)
+                        .checking(key.uri.clone(), &key.fk),
+                );
                 continue;
             }
             let held = reason != Reason::Full
@@ -621,6 +716,8 @@ impl<H: Host> Syncer<H> {
             };
             match rep.membership.get(&key.fk) {
                 Some(MembershipCheck::Valid) => row.set(DiscState::Confirmed, now),
+                // a grant is never rejected: its repo is synced without the gate
+                _ if c.granted => {}
                 Some(m) if m.rejects() => row.set(DiscState::Rejected, now),
                 _ if rep.outcome == RepoOutcome::Rejected => row.set(DiscState::Rejected, now),
                 _ => {}
@@ -628,9 +725,28 @@ impl<H: Host> Syncer<H> {
         }
     }
 
-    /// Runs `sync_repo` for each request, concurrently (bounded by the scheduler).
-    async fn run_jobs(&self, s: &Session<H>, jobs: &[SyncRequest]) -> Vec<RepoReport> {
-        join_all(jobs.iter().map(|r| self.sync_repo(s, r))).await
+    /// Runs `sync_repo` for each request, concurrently (bounded by the scheduler), reporting
+    /// progress as each one finishes.
+    async fn run_jobs(
+        &self,
+        s: &Session<H>,
+        jobs: &[SyncRequest],
+        tally: &Tally,
+        progress: &Progress,
+    ) -> Vec<RepoReport> {
+        if jobs.is_empty() {
+            return Vec::new();
+        }
+        let n = u32::try_from(jobs.len()).unwrap_or(u32::MAX);
+        let total = tally.total.fetch_add(n, Ordering::SeqCst).saturating_add(n);
+        progress.report(tally.done.load(Ordering::SeqCst), total);
+        join_all(jobs.iter().map(|r| async move {
+            let report = self.sync_repo(s, r).await;
+            let done = tally.done.fetch_add(1, Ordering::SeqCst) + 1;
+            progress.report(done, tally.total.load(Ordering::SeqCst));
+            report
+        }))
+        .await
     }
 
     fn report(

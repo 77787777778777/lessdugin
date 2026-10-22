@@ -5,22 +5,29 @@
 //! ```text
 //! sync_repo(did, scopes, reason):
 //!   repo lock; identity (document only, level doc, else every row is idHint); PDS
+//!     identity hint: rows idHint, keyed ("", sentAt), inexact; no tombstones; no repo state
+//!     (rev, commit, listed, capped, colls, headSeen, marks, status); a confirmation fails, so
+//!     the candidate stays a candidate
 //!   h1 = getLatestCommit                                   headSeen = {h1.rev, h1.cid, sentAt}
 //!     RepoNotFound | RepoDeactivated | RepoTakendown | RepoSuspended → re-fetch the document:
 //!       another PDS → migration (P1); else getRepoStatus; Failed
-//!   h1.rev < repo.rev → Rollback (cache kept, backoff, rollbackSince)  [sync --full accepts it]
+//!   h1.rev < repo.rev → Rollback (cache kept, backoff, rollbackSince)  [sync --full accepts it:
+//!                        every cached row of the DID, in every scope, is forgotten]
 //!   h1 = (repo.rev, repo.commit), every scope listed at it, no marks → Clean
 //!   confirm (a candidate, §4.2.1): the membership getRecord first; absent or invalid → Rejected
 //!   colls: repo.colls if ≤ 24 h old, not dirty, not reconcile, and no stored row lies in a
 //!          collection outside it; else describeRepo ∩ (OURS ∪ {app.bsky.actor.profile})
-//!          (on failure: OURS)
-//!   in parallel: list_range for each (fk scope, c ∈ RANGED ∩ colls); the membership getRecord;
-//!                GLOBAL getRecords; OWN full listings
+//!          (on failure or a malformed `collections`: OURS)
+//!   in parallel: list_range for each (fk scope, c ∈ RANGED ∩ colls, or c with stored rows in
+//!                the range); the membership getRecord; GLOBAL getRecords; OWN full listings
 //!   h2 = getLatestCommit; stable ⇔ h2 = h1
 //!   one batch: admit every listed row (key (h1.rev, page sentAt), exact ⇔ stable); for stable,
-//!   complete ranges, tombstone unlisted rows above the cap boundary and drop those below it;
+//!   complete ranges, tombstone unlisted rows above the cap boundary and drop those below it
+//!   (a collection is emptied only by a listing, never by its absence from describeRepo);
+//!   OWN: complete full listings tombstone unlisted rows of the collection in every scope;
 //!   memberships (RecordNotFound → tombstone); if stable: rev, commit, listed, capped, marks;
-//!   colls; host capabilities; repo row — one KvStore::write
+//!   colls; host capabilities (re-read and merged in the batch); repo row — one KvStore::write
+//!   strikes: one per bad record (HostRow.strikes), one breaker failure per bad response (R4)
 //!   ¬stable → queue (minRev h2.rev) at P1, or P3 with the backoff after 3 unstable passes
 //! ```
 
@@ -124,6 +131,9 @@ pub struct SyncRequest {
     pub reason: Reason,
     /// Confirm this membership first, and stop if it is absent or invalid.
     pub confirm: Option<Confirm>,
+    /// Report the state of this membership in [`RepoReport::membership`] without gating the
+    /// pass on it (a granted participant, `social.md` §3.3).
+    pub check: Option<Confirm>,
 }
 
 impl SyncRequest {
@@ -134,12 +144,22 @@ impl SyncRequest {
             scopes: vec![Scope::Forum(fk.to_owned())],
             reason,
             confirm: None,
+            check: None,
         }
     }
 
     /// Confirms the membership in `forum` first.
     pub fn confirming(mut self, forum: AtUri, fk: &str) -> Self {
         self.confirm = Some(Confirm {
+            forum,
+            fk: fk.to_owned(),
+        });
+        self
+    }
+
+    /// Reports the membership in `forum` without gating the pass on it.
+    pub fn checking(mut self, forum: AtUri, fk: &str) -> Self {
+        self.check = Some(Confirm {
             forum,
             fk: fk.to_owned(),
         });
@@ -235,6 +255,16 @@ impl RepoReport {
             self.refused = true;
         } else {
             self.hard_issues += 1;
+        }
+        self.issues.push((e.code().to_owned(), e.to_string()));
+    }
+
+    /// A partial problem that is not the repo's failure (a failed `describeRepo` with OURS
+    /// listed instead, a safety cap that stopped a listing): reported, but no repo backoff
+    /// follows; the affected scope stays below `Fresh` on its own.
+    fn soft_issue(&mut self, e: &SyncError) {
+        if e.is_refusal() {
+            self.refused = true;
         }
         self.issues.push((e.code().to_owned(), e.to_string()));
     }
@@ -358,15 +388,24 @@ async fn describe<H: Host>(
         .into_iter()
         .chain([BSKY_PROFILE.to_owned()])
         .collect();
-    let colls: BTreeSet<String> = v
-        .get("collections")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .filter(|c| wanted.contains(*c))
-        .map(str::to_owned)
-        .collect();
+    // A missing or malformed `collections` is a failed `describeRepo` (the caller falls back to
+    // OURS, §5.2), never "no collections": that would read every range as listed and empty.
+    let Some(listed) = v.get("collections").and_then(Value::as_array) else {
+        return Err(XrpcCallError::Decode(
+            "describeRepo: `collections` is missing or not an array".into(),
+        ));
+    };
+    let mut colls = BTreeSet::new();
+    for c in listed {
+        let Some(c) = c.as_str() else {
+            return Err(XrpcCallError::Decode(
+                "describeRepo: `collections` holds a non-string".into(),
+            ));
+        };
+        if wanted.contains(c) {
+            colls.insert(c.to_owned());
+        }
+    }
     Ok((
         colls.into_iter().collect(),
         net::sent_at(&resp).unwrap_or_default(),
@@ -435,6 +474,15 @@ struct ScopeState {
     capped: BTreeMap<String, String>,
 }
 
+/// What one pass learned about its host (see [`Syncer::put_host`]).
+#[derive(Debug, Default)]
+struct HostDelta {
+    verdicts: Vec<RangeVerdict>,
+    /// The 7-day re-probe of a `No` ran (§5.3).
+    reprobe: bool,
+    strikes: u32,
+}
+
 impl<H: Host> Syncer<H> {
     /// `sync_repo` (§5.2). Never panics; failures are reported in the [`RepoReport`].
     pub async fn sync_repo(&self, s: &Session<H>, req: &SyncRequest) -> RepoReport {
@@ -481,6 +529,37 @@ impl<H: Host> Syncer<H> {
         let (breaker, budget) = self.net().host_snapshot(origin);
         row.breaker = breaker;
         row.budget = budget;
+    }
+
+    /// Merges what a pass learned about its host into the stored `HostRow`, re-read inside the
+    /// pass's batch: concurrent passes on one origin each load the row when they start, so
+    /// writing that copy back whole would lose the other passes' verdicts and strikes.
+    async fn put_host(
+        &self,
+        batch: &mut Batch<'_, H::Kv>,
+        origin: &str,
+        d: &HostDelta,
+        now: i64,
+    ) -> Result<(), SyncError> {
+        let mut row = batch.host_caps(origin).await?.unwrap_or_default();
+        if d.reprobe && row.range_cursor == RangeCursor::No && row.use_range(now) {
+            row.range_cursor = RangeCursor::Unknown;
+        }
+        list::apply_verdicts(&mut row, &d.verdicts, now);
+        row.strikes = row.strikes.saturating_add(d.strikes);
+        self.snapshot_host(origin, &mut row);
+        batch.put_host_caps(origin, &row)?;
+        Ok(())
+    }
+
+    /// Counts admission strikes: each one in `HostRow.strikes`, but at most one breaker failure
+    /// per response (`limits.md` R4), so one hostile repo cannot open a shared host's breaker
+    /// with a single page of bad records.
+    fn strike(&self, d: &mut HostDelta, origin: &str, strikes: u32, responses: u32, now: i64) {
+        d.strikes = d.strikes.saturating_add(strikes);
+        for _ in 0..responses {
+            self.net().strike(origin, now);
+        }
     }
 
     /// `getRecord(did, coll, rkey)` at `svc`, admitted (§5.5). An admission failure is a strike
@@ -550,6 +629,10 @@ impl<H: Host> Syncer<H> {
                 Ok((r.changed, Some(r.admission)))
             }
             Fetched::NotFound { sent_at } => {
+                if id_hint {
+                    // a tombstone is doc-level evidence: a hint PDS's RecordNotFound is not
+                    return Ok((false, None));
+                }
                 let k = schema::RecKey::new(coll, did.as_str(), rkey);
                 if !tomb_always && !matches!(batch.slot(&k).await?, Slot::Rec(_)) {
                     return Ok((false, None));
@@ -588,27 +671,30 @@ impl<H: Host> Syncer<H> {
         &self,
         store: &RecordStore<'_, H::Kv>,
         origin: &str,
-        host_row: &mut HostRow,
+        d: &HostDelta,
+        now: i64,
     ) -> Result<(), SyncError> {
-        self.snapshot_host(origin, host_row);
         let mut b = store.batch();
-        b.put_host_caps(origin, host_row)?;
+        self.put_host(&mut b, origin, d, now).await?;
         b.commit().await?;
         Ok(())
     }
 
+    /// Writes the repo row (unless the identity is a hint: a PDS that no document names never
+    /// changes repo state, §1.5) and the host delta.
+    #[allow(clippy::too_many_arguments)]
     async fn write_repo_only(
         &self,
         store: &RecordStore<'_, H::Kv>,
         did: &Did,
         repo: &RepoRow,
         origin: &str,
-        host_row: &mut HostRow,
+        d: &HostDelta,
+        now: i64,
     ) -> Result<(), SyncError> {
-        self.snapshot_host(origin, host_row);
         let mut b = store.batch();
         b.put_repo(did.as_str(), repo)?;
-        b.put_host_caps(origin, host_row)?;
+        self.put_host(&mut b, origin, d, now).await?;
         b.commit().await?;
         Ok(())
     }
@@ -712,14 +798,29 @@ impl<H: Host> Syncer<H> {
         let (svc, pds, id_hint) = self.pds_of(s, did).await?;
         rep.id_hint = id_hint;
         rep.pds = Some(pds.clone());
+        if id_hint && req.confirm.is_some() {
+            // a PDS that no DID document names can neither confirm nor reject a membership: the
+            // candidate stays a candidate (§1.5)
+            return Err(SyncError::IdentityHint {
+                did: did.to_string(),
+            });
+        }
+        // Under an identity hint (§1.5) the PDS is named by no DID document at level `doc`: its
+        // rows are admitted as idHint and inexact, and it writes no tombstones and changes no
+        // repo state (rev, commit, listed, capped, colls, headSeen, marks, status), so a wrong
+        // or hostile hint cannot pin `repo.rev`, suppress honest data or fake completeness.
+        let doc_level = !id_hint;
         let origin = service_origin(&svc);
         let mut repo = store
             .repo(did.as_str())
             .await?
             .unwrap_or_else(|| RepoRow::new(&pds));
-        // a migration keeps the cached rows (§3.3)
-        repo.pds.clone_from(&pds);
-        let mut host_row = self.load_host_row(&store, &origin).await?;
+        if doc_level {
+            // a migration keeps the cached rows (§3.3)
+            repo.pds.clone_from(&pds);
+        }
+        let host_row = self.load_host_row(&store, &origin).await?;
+        let mut host_delta = HostDelta::default();
         let xrpc = s.xrpc();
 
         // h1
@@ -729,37 +830,41 @@ impl<H: Host> Syncer<H> {
                 if matches!(e, XrpcCallError::Blocked(_)) {
                     // refused locally: not the repo's fault (the host state is kept: earlier
                     // attempts of this request may have opened the breaker)
-                    self.write_host_only(&store, &origin, &mut host_row).await?;
+                    self.write_host_only(&store, &origin, &host_delta, now)
+                        .await?;
                     return Err(e.into());
                 }
-                if e.is_repo_status() {
+                if doc_level && e.is_repo_status() {
                     self.on_repo_status_error(s, did, &mut repo).await;
                 }
                 repo.fail(now, self.random());
-                self.write_repo_only(&store, did, &repo, &origin, &mut host_row)
+                self.write_repo_only(&store, did, &repo, &origin, &host_delta, now)
                     .await?;
                 return Err(e.into());
             }
         };
-        repo.observe_head(&h1.rev, h1.cid, h1.sent_at);
-        if repo.status != AccountStatus::Active && repo.status_detail.is_some() {
-            // the PDS answers for the repo again: it is active (a status check confirms later)
-            repo.status = AccountStatus::Active;
-            repo.status_detail = None;
+        if doc_level {
+            repo.observe_head(&h1.rev, h1.cid, h1.sent_at);
+            if repo.status != AccountStatus::Active && repo.status_detail.is_some() {
+                // the PDS answers for the repo again: it is active (a status check confirms
+                // later)
+                repo.status = AccountStatus::Active;
+                repo.status_detail = None;
+            }
         }
 
-        // rollback (§5.9)
+        // rollback (§5.9); a hint PDS's head says nothing about the repo's synced rev
         let mut accept_rollback = false;
-        if !repo.rev.is_empty() && h1.rev < repo.rev {
+        if doc_level && !repo.rev.is_empty() && h1.rev < repo.rev {
             if !full {
                 repo.rollback_since.get_or_insert(now);
                 repo.fail(now, self.random());
-                self.write_repo_only(&store, did, &repo, &origin, &mut host_row)
+                self.write_repo_only(&store, did, &repo, &origin, &host_delta, now)
                     .await?;
                 return Ok(RepoOutcome::Rollback);
             }
-            // `sync --full` discards the repo's cached state (of the requested scopes) and lists
-            // it again, which accepts the PDS state: the PDS is the database.
+            // `sync --full` discards the repo's cached state and lists it again, which accepts
+            // the PDS state: the PDS is the database.
             repo.rev.clear();
             repo.commit = None;
             repo.rollback_since = None;
@@ -767,9 +872,35 @@ impl<H: Host> Syncer<H> {
             repo.marks_overflow = false;
             accept_rollback = true;
         }
-        if full {
+        // The scopes whose rows a rollback acceptance forgets: every scope this repo was ever
+        // listed for, every known forum and the requested ones, so that no row or tombstone
+        // keyed above the new revs survives in a scope this pass does not list (each of them
+        // reads `Unavailable` until it is listed again).
+        let mut forgotten_fks: BTreeSet<String> = BTreeSet::new();
+        if accept_rollback {
+            forgotten_fks.extend(repo.listed.keys().cloned());
+            forgotten_fks.extend(repo.capped.keys().cloned());
+            forgotten_fks.extend(repo.byte_capped.keys().cloned());
+            forgotten_fks.extend(store.batch().forum_fks().await?);
+            let names: Vec<String> = repo
+                .listed
+                .keys()
+                .chain(repo.capped.keys())
+                .chain(repo.byte_capped.keys())
+                .cloned()
+                .collect();
+            for n in names {
+                repo.reset_scope(&n);
+            }
+        }
+        if full && doc_level {
             for sc in &req.scopes {
                 repo.reset_scope(sc.name());
+                if let Scope::Forum(fk) = sc
+                    && accept_rollback
+                {
+                    forgotten_fks.insert(fk.clone());
+                }
             }
         }
 
@@ -818,7 +949,11 @@ impl<H: Host> Syncer<H> {
             if req.reason == Reason::Reconcile {
                 repo.last_reconcile = now;
             }
-            self.write_repo_only(&store, did, &repo, &origin, &mut host_row)
+            if let Some(c) = &req.check {
+                rep.membership
+                    .insert(c.fk.clone(), stored_membership(&store, did, c).await?);
+            }
+            self.write_repo_only(&store, did, &repo, &origin, &host_delta, now)
                 .await?;
             return Ok(outcome);
         }
@@ -830,8 +965,7 @@ impl<H: Host> Syncer<H> {
                 Ok(f) => f,
                 Err(e) => {
                     if matches!(e, SyncError::Admission(_)) {
-                        host_row.strike();
-                        self.net().strike(&origin, now);
+                        self.strike(&mut host_delta, &origin, 1, 1, now);
                         rep.strikes += 1;
                     }
                     rep.membership
@@ -839,7 +973,7 @@ impl<H: Host> Syncer<H> {
                     if !e.is_refusal() {
                         repo.fail(now, self.random());
                     }
-                    self.write_repo_only(&store, did, &repo, &origin, &mut host_row)
+                    self.write_repo_only(&store, did, &repo, &origin, &host_delta, now)
                         .await?;
                     return Err(e);
                 }
@@ -874,9 +1008,8 @@ impl<H: Host> Syncer<H> {
                     repo.last_change_at = now;
                 }
                 rep.changed = batch.changed().len();
-                self.snapshot_host(&origin, &mut host_row);
                 batch.put_repo(did.as_str(), &repo)?;
-                batch.put_host_caps(&origin, &host_row)?;
+                self.put_host(&mut batch, &origin, &host_delta, now).await?;
                 batch.commit().await?;
                 return Ok(RepoOutcome::Rejected);
             }
@@ -931,7 +1064,8 @@ impl<H: Host> Syncer<H> {
                     cs
                 }
                 Err(e) => {
-                    rep.issue(&SyncError::Xrpc(e));
+                    // OURS is listed instead: the pass can still complete (no repo backoff)
+                    rep.soft_issue(&SyncError::Xrpc(e));
                     ours()
                 }
             }
@@ -941,10 +1075,8 @@ impl<H: Host> Syncer<H> {
         let has = |c: &str| colls.iter().any(|x| x == c);
 
         // listings, memberships, global records, own listings: in parallel
-        if host_row.range_cursor == RangeCursor::No && host_row.use_range(now) {
-            // the 7-day re-probe: a clean probe may set Yes again
-            host_row.range_cursor = RangeCursor::Unknown;
-        }
+        // the 7-day re-probe: a clean probe may set Yes again
+        host_delta.reprobe = host_row.range_cursor == RangeCursor::No && host_row.use_range(now);
         let use_range = host_row.use_range(now);
         let short_page_ends = host_row.short_page_ends;
         let tuning = self.config().tuning.clone();
@@ -955,11 +1087,22 @@ impl<H: Host> Syncer<H> {
             did,
             validator: &LexiconValidator,
             tuning: &tuning,
+            keep_values: false,
         };
+        // Each RANGED collection in `colls`, and each one outside it that still holds stored
+        // rows of this range: a collection is only ever emptied by a listing, never by its
+        // absence from `describeRepo` (an empty listing costs one request).
         let mut range_jobs: Vec<(String, String)> = Vec::new();
         for fk in &fk_scopes {
             for c in &ranged_all {
-                if has(c) {
+                let listed = has(c)
+                    || !store
+                        .scan_repo_range(did.as_str(), c, fk, Dir::Forward)
+                        .with_page_size(1)
+                        .take(1)
+                        .await?
+                        .is_empty();
+                if listed {
                     range_jobs.push(((*fk).to_owned(), c.clone()));
                 }
             }
@@ -989,6 +1132,10 @@ impl<H: Host> Syncer<H> {
             );
             if has(nsid::MEMBERSHIP) || stored {
                 mem_jobs.push((*fk).to_owned());
+            } else {
+                // the collection does not exist and nothing is stored
+                rep.membership
+                    .insert((*fk).to_owned(), MembershipCheck::Absent);
             }
         }
         let mem_futs = mem_jobs
@@ -1037,7 +1184,9 @@ impl<H: Host> Syncer<H> {
         // h2: the head re-check before the atomic write
         let (stable, h2) = match get_head(&xrpc, &svc, did).await {
             Ok(h2) => {
-                repo.observe_head(&h2.rev, h2.cid, h2.sent_at);
+                if doc_level {
+                    repo.observe_head(&h2.rev, h2.cid, h2.sent_at);
+                }
                 (h2.rev == h1.rev && h2.cid == h1.cid, Some(h2))
             }
             Err(e) => {
@@ -1064,57 +1213,51 @@ impl<H: Host> Syncer<H> {
             })
             .collect();
         if accept_rollback {
-            for sc in &req.scopes {
-                match sc {
-                    Scope::Forum(fk) => {
-                        for c in ranged_all
-                            .iter()
-                            .map(String::as_str)
-                            .chain([nsid::MEMBERSHIP])
-                        {
-                            batch.forget_range(did.as_str(), c, fk).await?;
-                        }
-                    }
-                    Scope::Global { .. } => {
-                        for (c, k) in &global_jobs {
-                            batch
-                                .forget(&schema::RecKey::new(c, did.as_str(), k))
-                                .await?;
-                        }
-                    }
-                    // the own repo's rows live in every forum's scope; its forum scopes are
-                    // forgotten with them
-                    Scope::Own => {}
-                }
-            }
+            let fk_colls: Vec<String> = ranged_all
+                .iter()
+                .cloned()
+                .chain([nsid::MEMBERSHIP.to_owned()])
+                .collect();
+            let global_colls: Vec<String> = ours()
+                .into_iter()
+                .chain([BSKY_PROFILE.to_owned()])
+                .collect();
+            batch
+                .forget_repo(did.as_str(), &forgotten_fks, &fk_colls, &global_colls)
+                .await?;
         }
-        let mut verdicts: Vec<RangeVerdict> = Vec::new();
+        // rows of a stable pass are exact only under a doc-level identity
+        let exact = stable && doc_level;
         let mut strikes = 0u32;
+        let mut bad_responses = 0u32;
         let mut conflicts: Vec<(String, Admission)> = Vec::new();
         let any_hints = !self.shared.hints().is_empty();
 
         for ((fk, c), res) in range_jobs.iter().zip(lists) {
             let st = scopes.get_mut(fk.as_str()).expect("scope of a range job");
             match res {
-                Ok(l) => {
-                    verdicts.extend(l.verdict);
+                Ok(mut l) => {
+                    host_delta.verdicts.extend(l.verdict);
                     strikes += l.strikes;
+                    bad_responses += l.bad_responses;
                     if let Some(why) = &l.stop {
-                        rep.issue(&SyncError::List(ListError::Stopped {
+                        rep.soft_issue(&SyncError::List(ListError::Stopped {
                             collection: c.clone(),
                             why: why.clone(),
                         }));
                     }
+                    let keys = l.keys();
+                    let boundary = l.boundary().map(str::to_owned);
                     let mut versions = Vec::new();
-                    for (rec, sent_at) in l.admitted() {
-                        let obs = Observation::listing(&h1.rev, sent_at, stable, now)
+                    for (rec, sent_at) in l.take_admitted() {
+                        let obs = Observation::listing(&h1.rev, sent_at, exact, now)
                             .with_id_hint(id_hint);
                         let obs = if any_hints {
-                            self.observation(obs, rec)
+                            self.observation(obs, &rec)
                         } else {
                             obs
                         };
-                        versions.push(rec.clone().into_version(obs));
+                        versions.push(rec.into_version(obs));
                     }
                     let uris: Vec<String> = versions.iter().map(|v| v.uri.to_string()).collect();
                     for (u, r) in uris.into_iter().zip(batch.put_versions(versions).await?) {
@@ -1122,16 +1265,16 @@ impl<H: Host> Syncer<H> {
                             conflicts.push((u, r.admission));
                         }
                     }
-                    if stable && l.complete {
+                    if exact && l.complete {
                         let key = OrderKey::new(&h1.rev, l.first_sent_at.unwrap_or(h1.sent_at));
                         batch
                             .reconcile_range(
                                 did.as_str(),
                                 c,
                                 fk,
-                                &l.keys(),
+                                &keys,
                                 &key,
-                                l.boundary(),
+                                boundary.as_deref(),
                                 now,
                             )
                             .await?;
@@ -1142,8 +1285,8 @@ impl<H: Host> Syncer<H> {
                     if l.byte_capped {
                         st.byte_capped = true;
                     }
-                    if let Some(b) = l.boundary() {
-                        st.capped.insert(c.clone(), b.to_owned());
+                    if let Some(b) = boundary {
+                        st.capped.insert(c.clone(), b);
                     }
                 }
                 Err(e) => {
@@ -1152,22 +1295,10 @@ impl<H: Host> Syncer<H> {
                         SyncError::List(ListError::BadPage(_) | ListError::Duplicate(_))
                     ) {
                         strikes += 1;
+                        bad_responses += 1;
                     }
                     st.complete = false;
                     rep.issue(&e);
-                }
-            }
-        }
-        // collections that do not exist (a fresh describeRepo): their stored rows are gone
-        if stable && let Some(at) = described {
-            let key = OrderKey::new(&h1.rev, at);
-            for fk in &fk_scopes {
-                for c in &ranged_all {
-                    if !has(c) {
-                        batch
-                            .reconcile_range(did.as_str(), c, fk, &BTreeSet::new(), &key, None, now)
-                            .await?;
-                    }
                 }
             }
         }
@@ -1180,6 +1311,7 @@ impl<H: Host> Syncer<H> {
         let forum_of_fk: BTreeMap<&str, &AtUri> = req
             .confirm
             .iter()
+            .chain(req.check.iter())
             .map(|c| (c.fk.as_str(), &c.forum))
             .collect();
         for (fk, res) in mem_results {
@@ -1211,6 +1343,7 @@ impl<H: Host> Syncer<H> {
                 Err(e) => {
                     if matches!(e, SyncError::Admission(_)) {
                         strikes += 1;
+                        bad_responses += 1;
                     }
                     rep.membership
                         .insert(fk.clone(), MembershipCheck::Unknown(e.to_string()));
@@ -1235,6 +1368,7 @@ impl<H: Host> Syncer<H> {
                 Err(e) => {
                     if matches!(e, SyncError::Admission(_)) {
                         strikes += 1;
+                        bad_responses += 1;
                     }
                     if let Some(st) = scopes.get_mut("global") {
                         st.complete = false;
@@ -1243,27 +1377,55 @@ impl<H: Host> Syncer<H> {
                 }
             }
         }
-        // OWN: admitted; deletes reach the store through own-write tombstones and the forum
-        // scopes' listings
+        // OWN: admitted; a complete, stable full listing of a collection also tombstones the
+        // stored rows it lacks (deletes made on another device), in every fk scope known here:
+        // forum rows, scopes this repo was listed for, the requested ones and the fks of every
+        // listed own record. (Rows have no per-DID index: rows left in an fk none of these
+        // name are cleared by that forum's own listing.)
+        let own_fks: BTreeSet<String> = if own_jobs.is_empty() || !exact {
+            BTreeSet::new()
+        } else {
+            let mut f: BTreeSet<String> = batch.forum_fks().await?.into_iter().collect();
+            f.extend(repo.listed.keys().cloned());
+            f.extend(fk_scopes.iter().map(|s| (*s).to_owned()));
+            for l in owns.iter().flatten() {
+                f.extend(
+                    l.entries
+                        .iter()
+                        .filter_map(|e| schema::fk_prefix(&e.rkey))
+                        .map(str::to_owned),
+                );
+            }
+            f
+        };
         for (c, res) in own_jobs.iter().zip(owns) {
             match res {
-                Ok(l) => {
+                Ok(mut l) => {
                     strikes += l.strikes;
+                    bad_responses += l.bad_responses;
                     if let Some(why) = &l.stop {
-                        rep.issue(&SyncError::List(ListError::Stopped {
+                        rep.soft_issue(&SyncError::List(ListError::Stopped {
                             collection: c.clone(),
                             why: why.clone(),
                         }));
                     }
+                    let keys = l.keys();
                     let versions: Vec<_> = l
-                        .admitted()
+                        .take_admitted()
+                        .into_iter()
                         .map(|(rec, sent_at)| {
-                            let obs = Observation::listing(&h1.rev, sent_at, stable, now)
+                            let obs = Observation::listing(&h1.rev, sent_at, exact, now)
                                 .with_id_hint(id_hint);
-                            rec.clone().into_version(obs)
+                            rec.into_version(obs)
                         })
                         .collect();
                     batch.put_versions(versions).await?;
+                    if exact && l.complete {
+                        let key = OrderKey::new(&h1.rev, l.first_sent_at.unwrap_or(h1.sent_at));
+                        batch
+                            .reconcile_collection(did.as_str(), c, &own_fks, &keys, &key, now)
+                            .await?;
+                    }
                     if !l.complete
                         && let Some(st) = scopes.get_mut("own")
                     {
@@ -1280,8 +1442,8 @@ impl<H: Host> Syncer<H> {
             }
         }
 
-        // repo state
-        if stable {
+        // repo state (never from a hint PDS)
+        if exact {
             let done: Vec<(&str, BTreeMap<String, String>)> = scopes
                 .iter()
                 .filter(|(_, st)| st.complete && !st.byte_capped)
@@ -1293,16 +1455,18 @@ impl<H: Host> Syncer<H> {
                     repo.set_byte_capped(name, true);
                 }
             }
-        } else {
+        } else if !stable {
             repo.unstable = repo.unstable.saturating_add(1);
         }
-        if let Some(at) = described {
-            repo.colls = colls.clone();
-            repo.colls_at = at;
-            repo.colls_dirty = false;
-        } else if need_describe {
-            // describeRepo failed: OURS was listed; it is asked again next time
-            repo.colls = colls.clone();
+        if doc_level {
+            if let Some(at) = described {
+                repo.colls = colls.clone();
+                repo.colls_at = at;
+                repo.colls_dirty = false;
+            } else if need_describe {
+                // describeRepo failed: OURS was listed; it is asked again next time
+                repo.colls = colls.clone();
+            }
         }
         let failed = rep.hard_issues > 0;
         if failed || (!stable && repo.unstable >= UNSTABLE_MAX) {
@@ -1316,21 +1480,16 @@ impl<H: Host> Syncer<H> {
                 repo.last_reconcile = now;
             }
         }
-        list::apply_verdicts(&mut host_row, &verdicts, now);
         if strikes > 0 {
             rep.strikes += strikes;
-            for _ in 0..strikes {
-                host_row.strike();
-                self.net().strike(&origin, now);
-            }
+            self.strike(&mut host_delta, &origin, strikes, bad_responses, now);
         }
-        self.snapshot_host(&origin, &mut host_row);
         let changed = batch.changed().len();
         if changed > 0 {
             repo.last_change_at = now;
         }
         batch.put_repo(did.as_str(), &repo)?;
-        batch.put_host_caps(&origin, &host_row)?;
+        self.put_host(&mut batch, &origin, &host_delta, now).await?;
         batch.commit().await?;
         rep.changed = changed;
         for (u, a) in &conflicts {
@@ -1376,7 +1535,11 @@ impl<H: Host> Syncer<H> {
             .repo(did.as_str())
             .await?
             .unwrap_or_else(|| RepoRow::new(&pds));
-        repo.pds.clone_from(&pds);
+        // under an identity hint the answer changes no repo state (marks, colls, pds; §1.5)
+        let doc_level = !id_hint;
+        if doc_level {
+            repo.pds.clone_from(&pds);
+        }
         let head_rev = repo
             .head_seen
             .as_ref()
@@ -1406,16 +1569,19 @@ impl<H: Host> Syncer<H> {
         let found = match &fetched {
             Fetched::Found { rec, .. } => {
                 let ok_mark = hint.is_some_and(|h| h.cid.as_ref() == Some(&rec.cid));
-                if ok_mark {
+                if ok_mark && doc_level {
                     repo.marks.remove(uri.as_str());
                 }
-                if ours().iter().any(|c| c == coll) && !repo.colls.iter().any(|c| c == coll) {
+                if doc_level
+                    && ours().iter().any(|c| c == coll)
+                    && !repo.colls.iter().any(|c| c == coll)
+                {
                     repo.colls_dirty = true;
                 }
                 Some((rec.cid, rec.validity.is_valid()))
             }
             Fetched::NotFound { .. } => {
-                if hint.is_some_and(|h| h.cid.is_none()) {
+                if doc_level && hint.is_some_and(|h| h.cid.is_none()) {
                     repo.marks.remove(uri.as_str());
                 }
                 None
@@ -1455,7 +1621,7 @@ impl<H: Host> Syncer<H> {
         authority: bool,
     ) -> Result<Option<Priority>, SyncError> {
         let _guard = self.net().repo_lock(did).await;
-        let (svc, pds, _) = self.pds_of(s, did).await?;
+        let (svc, pds, id_hint) = self.pds_of(s, did).await?;
         let store = RecordStore::new(s.host().cache());
         let mut repo = store
             .repo(did.as_str())
@@ -1465,7 +1631,7 @@ impl<H: Host> Syncer<H> {
         let h = match get_head(&s.xrpc(), &svc, did).await {
             Ok(h) => h,
             Err(e) => {
-                if e.is_repo_status() {
+                if !id_hint && e.is_repo_status() {
                     self.on_repo_status_error(s, did, &mut repo).await;
                 }
                 repo.checked_at = now;
@@ -1475,7 +1641,10 @@ impl<H: Host> Syncer<H> {
                 return Err(e.into());
             }
         };
-        repo.observe_head(&h.rev, h.cid, h.sent_at);
+        if !id_hint {
+            // a hint PDS's head is never `headSeen` (§1.5): it could pin it far ahead
+            repo.observe_head(&h.rev, h.cid, h.sent_at);
+        }
         repo.checked_at = now;
         let class = repo.class_at(now, authority);
         let follow = schedule::poll_followup(&repo, class);
@@ -1531,17 +1700,20 @@ impl<H: Host> Syncer<H> {
             .repo(account.as_str())
             .await?
             .unwrap_or_else(|| RepoRow::new(&pds));
-        let (rev, head_sent_at) = match commit {
+        // Without a commit (a no-op write) the rev is a later head's: another device may have
+        // changed the record in between, so the key is only a lower bound (not exact) and an
+        // exact listing at that rev replaces it rather than conflicting with it.
+        let (rev, head_sent_at, exact) = match commit {
             Some(c) => {
                 if let Ok(cid) = Cid::try_from(c.cid.as_str()) {
                     repo.observe_head(&c.rev, cid, sent_at);
                 }
-                (c.rev.clone(), sent_at)
+                (c.rev.clone(), sent_at, true)
             }
             None => {
                 let h = get_head(&s.xrpc(), &svc, account).await?;
                 repo.observe_head(&h.rev, h.cid, h.sent_at);
-                (h.rev, sent_at)
+                (h.rev, sent_at, false)
             }
         };
         let now = s.host().now_ms();
@@ -1562,8 +1734,9 @@ impl<H: Host> Syncer<H> {
                 (Some(v), Some(cid)) => {
                     match admit::admit_own_write(&w.uri, v, cid, &LexiconValidator) {
                         Ok(rec) => {
-                            let obs = self
-                                .observation(Observation::own_write(&rev, head_sent_at, now), &rec);
+                            let own = Observation::own_write(&rev, head_sent_at, now);
+                            let own = if exact { own } else { own.inexact() };
+                            let obs = self.observation(own, &rec);
                             batch.put_version(rec.into_version(obs)).await?;
                             out.stored.push(w.uri.to_string());
                         }
@@ -1613,7 +1786,7 @@ impl<H: Host> Syncer<H> {
     ) -> Vec<RepoReport> {
         enum Job {
             Point(Vec<AtUri>),
-            Sync(SyncRequest),
+            Sync(Box<SyncRequest>),
         }
         let now = s.host().now_ms();
         let mut jobs: Vec<(Session<H>, Job)> = Vec::new();
@@ -1642,12 +1815,13 @@ impl<H: Host> Syncer<H> {
                     .into_iter()
                     .find(|r| item.reasons.contains(r))
                     .unwrap_or_else(|| *item.reasons.iter().next().unwrap_or(&Reason::Hint));
-                    Job::Sync(SyncRequest {
+                    Job::Sync(Box::new(SyncRequest {
                         did,
                         scopes,
                         reason,
                         confirm: None,
-                    })
+                        check: None,
+                    }))
                 }
             };
             jobs.push((self.session(item.priority, Arc::clone(s.stats())), job));

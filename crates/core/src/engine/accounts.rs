@@ -33,7 +33,7 @@ use serde::{Deserialize, Serialize};
 use lessdugin_atp::syntax::Did;
 
 use super::{Engine, EngineError};
-use crate::dto::{AccountView, AuthKind};
+use crate::dto::{AccountView, AuthKind, Topic};
 use crate::engine::ErrorCode;
 use crate::host::{Dir, Host, KeyRange, KvOp, KvStore};
 use crate::identity::IdentityLevel;
@@ -359,7 +359,9 @@ impl<H: Host> Engine<H> {
     }
 
     /// Records the account of a binding that [`Engine::bind_login`] verified for `info` (without
-    /// checking it a second time), and makes it the active account.
+    /// checking it a second time), and makes it the active account. Emits
+    /// `Changed [Accounts]`; the followed list is seeded from the account's memberships at the
+    /// next `followed()` or `live_tail` round (`sync.md` §4.8).
     pub async fn record_account(
         &self,
         info: &AccountInfo,
@@ -397,9 +399,23 @@ impl<H: Host> Engine<H> {
         self.state_write(vec![
             KvOp::Put(account_key(&binding.did), Self::encode_row(&row)?),
             KvOp::Put(active_key(), Self::encode_row(&active)?),
+            // a login re-seeds the followed list (`sync.md` §4.8)
+            KvOp::Delete(super::forums::seeded_key(&binding.did)),
         ])
         .await?;
+        self.accounts_changed(false);
         Ok(row.view(Some(&binding.did)))
+    }
+
+    /// `Changed [Accounts]` (plus `Outbox` after a purge), and wakes the outbox pump so it
+    /// picks up the new account set.
+    fn accounts_changed(&self, purged: bool) {
+        let mut topics = vec![Topic::Accounts];
+        if purged {
+            topics.push(Topic::Outbox);
+        }
+        self.rt.bus.changed(topics);
+        self.outbox.wake_all();
     }
 
     /// Re-checks a recorded account against its DID document (the cached one, at most 24 h old):
@@ -488,8 +504,9 @@ impl<H: Host> Engine<H> {
             .map(|r| r.view(active.as_deref())))
     }
 
-    /// Forgets an account. With `purge`, also deletes its outbox, write budget and notification
-    /// state (`threat-model.md` AUTH-11). The authorization-server pin is kept. Deleting the
+    /// Forgets an account (emits `Changed [Accounts]`, plus `Outbox` with `purge`). With
+    /// `purge`, also deletes its outbox, write budget and notification state
+    /// (`threat-model.md` AUTH-11). The authorization-server pin is kept. Deleting the
     /// session secret is the host's job.
     pub async fn remove_account(&self, did: &str, purge: bool) -> Result<(), EngineError> {
         let did = parse_did(did)?;
@@ -512,10 +529,13 @@ impl<H: Host> Engine<H> {
                 did.as_str()
             ))));
         }
-        self.state_write(ops).await
+        ops.push(KvOp::Delete(super::forums::seeded_key(did.as_str())));
+        self.state_write(ops).await?;
+        self.accounts_changed(purge);
+        Ok(())
     }
 
-    /// Makes a recorded account the active one.
+    /// Makes a recorded account the active one (emits `Changed [Accounts]`).
     pub async fn set_active_account(&self, did: &str) -> Result<(), EngineError> {
         let did = parse_did(did)?;
         if self
@@ -530,7 +550,9 @@ impl<H: Host> Engine<H> {
             did: did.to_string(),
         };
         self.state_write(vec![KvOp::Put(active_key(), Self::encode_row(&active)?)])
-            .await
+            .await?;
+        self.accounts_changed(false);
+        Ok(())
     }
 
     /// The active account, if any.

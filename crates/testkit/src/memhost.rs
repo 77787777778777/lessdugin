@@ -7,15 +7,18 @@
 //!   registration). Every request is recorded for assertions. An unrouted request gets a 404 and
 //!   is marked unmatched. Response caps (`max_bytes`) are enforced like a real host.
 //! - The clock is fake: [`MemHost::advance_ms`] moves it, and [`Host::sleep`] advances it by the
-//!   requested time and returns immediately (sleeps are recorded).
+//!   requested time and returns immediately (sleeps are recorded). With
+//!   [`MemHost::park_sleeps`], a sleep instead waits until the test moves the clock past its
+//!   deadline (for driving long-lived futures such as a pump step by step).
 //! - Randomness is deterministic (splitmix64 from a settable seed).
 //! - System DNS answers, blobs and WebSocket scripts are programmable.
 //!
 //! `Target::UserPds` requests are routed under the pseudo-URL `userpds://<did><path_and_query>`.
 
 use std::collections::{BTreeMap, VecDeque};
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::task::{Poll, Waker};
 
 use lessdugin_atp::syntax::Did;
 use lessdugin_core::host::{
@@ -83,6 +86,10 @@ struct Inner {
     requests: Mutex<Vec<RecordedRequest>>,
     now: AtomicI64,
     sleeps: Mutex<Vec<u64>>,
+    /// Sleeps wait for the clock instead of moving it.
+    park: AtomicBool,
+    /// Wakers of parked sleeps (woken when the clock moves).
+    parked: Mutex<Vec<Waker>>,
     rng: Mutex<u64>,
     txt: Mutex<BTreeMap<String, TxtAnswer>>,
     blobs: Mutex<BTreeMap<String, Vec<u8>>>,
@@ -138,6 +145,8 @@ impl MemHost {
                 requests: Mutex::new(Vec::new()),
                 now: AtomicI64::new(DEFAULT_NOW_MS),
                 sleeps: Mutex::new(Vec::new()),
+                park: AtomicBool::new(false),
+                parked: Mutex::new(Vec::new()),
                 rng: Mutex::new(0),
                 txt: Mutex::new(BTreeMap::new()),
                 blobs: Mutex::new(BTreeMap::new()),
@@ -287,11 +296,27 @@ impl MemHost {
     /// Sets the fake time.
     pub fn set_now_ms(&self, ms: i64) {
         self.inner.now.store(ms, Ordering::SeqCst);
+        self.wake_parked();
     }
 
     /// Moves the fake time forward.
     pub fn advance_ms(&self, ms: i64) {
         self.inner.now.fetch_add(ms, Ordering::SeqCst);
+        self.wake_parked();
+    }
+
+    /// With `true`, [`Host::sleep`] no longer moves the clock: it returns once the clock (moved
+    /// by the test) reaches its deadline, and is pending until then.
+    pub fn park_sleeps(&self, park: bool) {
+        self.inner.park.store(park, Ordering::SeqCst);
+        self.wake_parked();
+    }
+
+    fn wake_parked(&self) {
+        let wakers = std::mem::take(&mut *lock(&self.inner.parked));
+        for w in wakers {
+            w.wake();
+        }
     }
 
     /// Reseeds the random generator.
@@ -454,7 +479,22 @@ impl Host for MemHost {
 
     async fn sleep(&self, ms: u64) {
         lock(&self.inner.sleeps).push(ms);
-        self.advance_ms(i64::try_from(ms).unwrap_or(i64::MAX));
+        let ms = i64::try_from(ms).unwrap_or(i64::MAX);
+        if !self.inner.park.load(Ordering::SeqCst) {
+            self.advance_ms(ms);
+            return;
+        }
+        let deadline = self.now().saturating_add(ms);
+        std::future::poll_fn(|cx| {
+            // registered before the check, so a clock move in between still wakes this task
+            lock(&self.inner.parked).push(cx.waker().clone());
+            if self.now() >= deadline || !self.inner.park.load(Ordering::SeqCst) {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        })
+        .await;
     }
 
     fn now_ms(&self) -> i64 {

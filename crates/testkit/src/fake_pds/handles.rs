@@ -73,7 +73,8 @@ impl PdsHandle {
         self.configure(|c| c.cursor_mode = mode);
     }
 
-    /// Caps every `listRecords` page.
+    /// Caps every `listRecords` page. Not a conforming PDS model: see
+    /// [`super::PdsConfig::max_page`].
     pub fn set_max_page(&self, max: Option<u32>) {
         self.configure(|c| c.max_page = max);
     }

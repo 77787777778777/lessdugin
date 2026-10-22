@@ -206,7 +206,6 @@ expression: thread
       "tRankMs": 0,
       "score": {
         "score": 0,
-        "agreement": 0,
         "unweighted": 0,
         "earlierVersionVotes": 0
       },

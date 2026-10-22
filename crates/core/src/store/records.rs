@@ -47,6 +47,7 @@ use crate::host::{Dir, HostError, KeyRange, KvOp, KvStore};
 use crate::limits;
 use crate::store::admit::{RECORD_LIMITS, Validity};
 use crate::store::blob::{BlobRow, CursorRow, ForumRow};
+use crate::store::key::{self, Part};
 use crate::store::repo::{AccountStatus, HostRow, RepoRow};
 use crate::store::row::{self, ROW_VERSION, RowError};
 use crate::store::schema::{self, RecKey, tag};
@@ -534,6 +535,13 @@ fn new_row(v: Version, carry: Option<(Cid, i64)>) -> RecordRow {
 
 /// Admits `v` into the state `slot` of its uri (§5.6.2). Returns the new state, what happened,
 /// and whether the state changed.
+///
+/// **Identity hints.** An observation made under an identity hint carries the key
+/// `("", sentAt)` (see [`crate::store::Observation::with_id_hint`]): the revs of a PDS that no
+/// DID document names are never order keys. So it is never exact, it sorts below every
+/// doc-level observation and tombstone (it never replaces a doc-level row nor lifts a
+/// tombstone), and any doc-level observation or confirmed delete supersedes it, with the usual
+/// monotone rules.
 pub fn admit_version(slot: Slot, v: Version) -> (Slot, Admission, bool) {
     match slot {
         Slot::Empty => (Slot::Rec(new_row(v, None)), Admission::Inserted, true),
@@ -581,7 +589,9 @@ pub fn admit_version(slot: Slot, v: Version) -> (Slot, Admission, bool) {
     }
 }
 
-/// Applies a confirmed delete to the state `slot` of its uri (§5.6.3).
+/// Applies a confirmed delete to the state `slot` of its uri (§5.6.3). No delete is applied
+/// under an identity hint; a doc-level delete always supersedes an identity-hint row, whose key
+/// has an empty rev (see [`admit_version`]).
 pub fn apply_delete(slot: Slot, d: &Delete) -> (Slot, TombOutcome, bool) {
     match slot {
         Slot::Empty => (
@@ -1097,6 +1107,18 @@ pub fn fold_rows_capped(fk: &str, rows: Vec<StoredRecord>) -> Vec<StoredRecord> 
     fold_rows(fk, rows, |c| schema::fetch_cap(c) as usize)
 }
 
+/// `true` if the stored key `k` lies below the cap boundary its repo's last complete listing of
+/// `fk` recorded (`repo.capped[fk][coll]`, the smallest listed rkey, §5.4): such a row (a point
+/// fetch beyond the cap) never enters the fold, even when keys above the boundary that failed
+/// admission leave fewer than N stored rows above it (`data-model.md` §7.4).
+pub fn below_cap_boundary(fk: &str, k: &RecKey, repo: Option<&RepoRow>) -> bool {
+    schema::is_ranged(&k.collection)
+        && schema::in_range(fk, &k.rkey)
+        && repo
+            .and_then(|r| r.cap_boundary(fk, &k.collection))
+            .is_some_and(|b| k.rkey.as_str() < b)
+}
+
 /// The fold's `obs` entries of one stored version (§5.6.5): `(uri, cid) → firstSeen` and
 /// `(uri, firstCid) → firstSeenUri`.
 pub fn obs_entries(uri: &str, row: &RecordRow) -> [((String, String), i64); 2] {
@@ -1435,6 +1457,50 @@ impl<'k, K: KvStore> Batch<'k, K> {
         Ok(diff)
     }
 
+    /// The tombstone step of a complete, stable full listing of `did`'s collection `coll` (the
+    /// `OWN` scope, `sync.md` §5.1): every stored row of the collection in the fk scopes `fks`
+    /// and in the global scope whose rkey is not in `listed` is tombstoned with `key`. A full
+    /// listing has no cap, so there is no boundary. Returns the uris tombstoned or raised.
+    pub async fn reconcile_collection(
+        &mut self,
+        did: &str,
+        coll: &str,
+        fks: &BTreeSet<String>,
+        listed: &BTreeSet<String>,
+        key: &OrderKey,
+        at_ms: i64,
+    ) -> Result<Vec<String>, StoreError> {
+        let scopes = fks
+            .iter()
+            .map(String::as_str)
+            .filter(|f| schema::is_fk(f))
+            .chain([schema::GLOBAL_SCOPE]);
+        let mut out = Vec::new();
+        for scope in scopes {
+            let rows = self
+                .scan_merged(&schema::prefix(tag::REC, &[scope, coll, did]))
+                .await?;
+            for kb in rows.keys() {
+                let Some(rk) = RecKey::parse(kb, tag::REC) else {
+                    continue;
+                };
+                if listed.contains(&rk.rkey) {
+                    continue;
+                }
+                let d = Delete {
+                    key: key.clone(),
+                    evidence: DeleteEvidence::CompleteListing,
+                    at_ms,
+                };
+                let uri = rk.uri();
+                if self.tombstone_key(&rk, d).await?.changed {
+                    out.push(uri);
+                }
+            }
+        }
+        Ok(out)
+    }
+
     /// Forgets every stored row and tombstone of `did` under `(scope, coll)`: `sync --full`
     /// after a rollback discards the repo's cached state before listing it again, which accepts
     /// the PDS state (`sync.md` §5.9). Returns the uris removed.
@@ -1456,6 +1522,41 @@ impl<'k, K: KvStore> Batch<'k, K> {
             if self.forget(&k).await? {
                 out.push(k.uri());
             }
+        }
+        Ok(out)
+    }
+
+    /// The fks of every forum row (`("forum", fk)`) as this batch sees them.
+    pub async fn forum_fks(&mut self) -> Result<Vec<String>, StoreError> {
+        let rows = self.scan_merged(&schema::prefix(tag::FORUM, &[])).await?;
+        Ok(rows
+            .keys()
+            .filter_map(|k| match key::decode(k).ok()?.into_iter().nth(1)? {
+                Part::Bytes(b) => String::from_utf8(b).ok(),
+                _ => None,
+            })
+            .collect())
+    }
+
+    /// Forgets every stored row and tombstone of `did` in the fk scopes `fks` (collections
+    /// `fk_colls`: the `RANGED` ones and the membership) and in the global scope
+    /// (`global_colls`: declarations, profiles and keys outside any fk). Returns the uris
+    /// removed.
+    pub async fn forget_repo(
+        &mut self,
+        did: &str,
+        fks: &BTreeSet<String>,
+        fk_colls: &[String],
+        global_colls: &[String],
+    ) -> Result<Vec<String>, StoreError> {
+        let mut out = Vec::new();
+        for fk in fks.iter().filter(|fk| schema::is_fk(fk)) {
+            for c in fk_colls {
+                out.extend(self.forget_range(did, c, fk).await?);
+            }
+        }
+        for c in global_colls {
+            out.extend(self.forget_range(did, c, schema::GLOBAL_SCOPE).await?);
         }
         Ok(out)
     }

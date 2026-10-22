@@ -64,6 +64,29 @@ pub const BACKOFF_MAX_MS: i64 = 5 * 60 * 1000;
 /// A blob uploaded this long before its record write is sent is uploaded again (ms, *tunable*;
 /// the PDS garbage-collects unreferenced blobs after about an hour, `data-model.md` §8.8).
 pub const BLOB_REUPLOAD_AFTER_MS: i64 = 30 * 60 * 1000;
+/// Bytes reserved for the `applyWrites` envelope (`repo`, `swapCommit`, brackets) when adopt
+/// batches are sized.
+const ADOPT_BODY_ENVELOPE: usize = 1_000;
+
+/// `false` for 400 error names that say nothing about `swapRecord: null` (media, auth, size):
+/// those never mark a host as not supporting null swaps (§8.4, ADR 0005).
+fn may_refuse_null_swap(name: Option<&str>) -> bool {
+    !matches!(
+        name,
+        Some(
+            "InvalidMimeType"
+                | "BlobTooLarge"
+                | "PayloadTooLarge"
+                | "AuthRequired"
+                | "AuthMissing"
+                | "ExpiredToken"
+                | "InvalidToken"
+                | "AccountTakedown"
+                | "AccountDeactivated"
+                | "RateLimitExceeded"
+        )
+    )
+}
 
 fn invalid(msg: impl Into<String>) -> CallError {
     CallError::Rejected {
@@ -99,6 +122,16 @@ fn conflict_with(message: &str, current: Option<&Current>) -> Outcome {
         e = e.with_detail("currentCid", c.cid.clone());
     }
     Outcome::Conflict(e)
+}
+
+/// Strips `updatedAt`: an update that changes nothing else is a no-op (W5 stamps `updatedAt`
+/// when the write is queued, so the CIDs always differ).
+fn without_updated_at(v: &Value) -> Value {
+    let mut v = v.clone();
+    if let Some(m) = v.as_object_mut() {
+        m.remove("updatedAt");
+    }
+    v
 }
 
 /// Strips `createdAt` and `updatedAt` (comparisons "ignoring timestamps").
@@ -212,6 +245,7 @@ impl<'a, H: Host> Runner<'a, H> {
                 .map(|c| c.rev.clone())
                 .unwrap_or_default(),
             commit: wr.commit.as_ref().map(|c| c.cid.clone()),
+            exact: wr.commit.is_some(),
             sent_at: wr.sent_at,
             records,
         });
@@ -231,7 +265,7 @@ impl<'a, H: Host> Runner<'a, H> {
 
     /// Op `i`'s target was found holding `cur` on the PDS (a write whose answer was lost, a
     /// crash, another device): it is the result, and it is applied to the store like a write
-    /// answered without a commit (the head is read afterwards).
+    /// answered without a commit (the head is read afterwards, and the key is not exact).
     fn found(&mut self, i: usize, cur: &Current) {
         let uri = self.op_uri(i);
         let rec = AppliedRecord::Put {
@@ -683,6 +717,9 @@ impl<'a, H: Host> Runner<'a, H> {
         let value = self.op_value(0)?;
         let intended = records::record_cid(&value).map_err(rejected)?;
         let mut tries = 0;
+        // a 400 to the null-swap put: the host is recorded as not supporting null swaps only
+        // once `createRecord` succeeds with the same value
+        let mut refused_null_swap = false;
         while tries < limits::SWAP_RETRY_MAX {
             tries += 1;
             let use_put = null_swap != Some(false);
@@ -699,6 +736,8 @@ impl<'a, H: Host> Runner<'a, H> {
                 Ok(wr) => {
                     if use_put && null_swap.is_none() {
                         self.set_null_swap(true).await;
+                    } else if !use_put && refused_null_swap {
+                        self.set_null_swap(false).await;
                     }
                     let rec = self.put_record(0, value.clone(), wr.cid.clone());
                     self.confirm(&wr, vec![rec]);
@@ -712,10 +751,13 @@ impl<'a, H: Host> Runner<'a, H> {
                         Some(c) => return self.exists(on_exists, &intended, c).await,
                     }
                 }
-                // A host that answers a null swap with another 400 does not support it.
-                Err(CallError::Rejected { status: 400, .. }) if use_put && null_swap.is_none() => {
+                // A host that answers a null swap with another 400 may not support it (§8.4):
+                // try `createRecord` (recorded only if that succeeds)
+                Err(CallError::Rejected {
+                    status: 400, name, ..
+                }) if use_put && null_swap.is_none() && may_refuse_null_swap(name.as_deref()) => {
                     null_swap = Some(false);
-                    self.set_null_swap(false).await;
+                    refused_null_swap = true;
                     tries -= 1;
                 }
                 Err(CallError::Ambiguous(e)) => {
@@ -793,8 +835,12 @@ impl<'a, H: Host> Runner<'a, H> {
             let Some(cur) = self.pds.get(&op.collection, &op.rkey).await? else {
                 return Ok(conflict_with("the record no longer exists", None));
             };
-            let new_cid = records::record_cid(&self.op_value(0)?).map_err(rejected)?;
-            if cur.cid == new_cid {
+            let new_value = self.op_value(0)?;
+            let new_cid = records::record_cid(&new_value).map_err(rejected)?;
+            let unchanged =
+                cur.cid == base && without_updated_at(&cur.value) == without_updated_at(&new_value);
+            if cur.cid == new_cid || unchanged {
+                // applied already, or a no-op: no revision, no update
                 self.found(0, &cur);
                 return Ok(Outcome::Done);
             }
@@ -891,6 +937,14 @@ impl<'a, H: Host> Runner<'a, H> {
         if new_cid == base {
             // a no-op update is skipped (ADR 0005)
             self.set_result(self.op_uri(0), Some(new_cid));
+            return Ok(Outcome::Done);
+        }
+        // the same value but for `updatedAt` is a no-op too
+        if let Some(cur) = self.pds.get(&op.collection, &op.rkey).await?
+            && cur.cid == base
+            && without_updated_at(&cur.value) == without_updated_at(&value)
+        {
+            self.found(0, &cur);
             return Ok(Outcome::Done);
         }
         match self
@@ -1104,6 +1158,8 @@ impl<'a, H: Host> Runner<'a, H> {
                 revision_rkey,
             )
             .map_err(rejected)?;
+            records::check(self.did(), rev.collection, &rev.rkey, &rev.value, true)
+                .map_err(rejected)?;
             let ops = vec![
                 BatchOp::Create {
                     collection: rev.collection.to_owned(),
@@ -1173,6 +1229,7 @@ impl<'a, H: Host> Runner<'a, H> {
         }
         let uri = self.op_uri(0);
         let mut null_swap = self.null_swap().await;
+        let mut refused_null_swap = false;
         let mut tries = 0;
         let mut last_ambiguous: Option<EngineError> = None;
         while tries < limits::SWAP_RETRY_MAX {
@@ -1256,6 +1313,8 @@ impl<'a, H: Host> Runner<'a, H> {
                     };
                     if cur.is_none() && !fallback && null_swap.is_none() {
                         self.set_null_swap(true).await;
+                    } else if cur.is_none() && fallback && refused_null_swap {
+                        self.set_null_swap(false).await;
                     }
                     self.confirm(&wr, vec![rec]);
                     self.set_result(uri, if deleted { None } else { wr.cid });
@@ -1265,11 +1324,15 @@ impl<'a, H: Host> Runner<'a, H> {
                     last_ambiguous = None;
                     self.jitter().await;
                 }
-                Err(CallError::Rejected { status: 400, .. })
-                    if cur.is_none() && !fallback && null_swap.is_none() =>
+                Err(CallError::Rejected {
+                    status: 400, name, ..
+                }) if cur.is_none()
+                    && !fallback
+                    && null_swap.is_none()
+                    && may_refuse_null_swap(name.as_deref()) =>
                 {
                     null_swap = Some(false);
-                    self.set_null_swap(false).await;
+                    refused_null_swap = true;
                     tries -= 1;
                 }
                 // createRecord fallback: a 5xx after which the key exists means "exists"
@@ -1411,6 +1474,8 @@ impl<'a, H: Host> Runner<'a, H> {
                             &rk,
                         )
                         .map_err(rejected)?;
+                        records::check(self.did(), rev.collection, &rev.rkey, &rev.value, true)
+                            .map_err(rejected)?;
                         records::check(self.did(), nsid::MOD_ACTION, &k, &v, false)
                             .map_err(rejected)?;
                         groups.push(vec![
@@ -1429,12 +1494,36 @@ impl<'a, H: Host> Runner<'a, H> {
                     Some(_) => report.push(format!("kept own assertion for {o_uri}")),
                 }
             }
-            // batches of ≤ 200 ops; a revision and its update are never split
+            // batches of ≤ 200 ops and ≤ 900,000 body bytes (§8.9); a revision and its update
+            // are never split; an assertion too large for any batch is skipped and reported
             let mut batches: Vec<Vec<BatchOp>> = Vec::new();
+            let mut sizes: Vec<usize> = Vec::new();
             for g in groups {
-                match batches.last_mut() {
-                    Some(b) if b.len() + g.len() <= limits::APPLYWRITES_MAX_OPS => b.extend(g),
-                    _ => batches.push(g),
+                let size = g
+                    .iter()
+                    .map(BatchOp::body_bytes)
+                    .fold(0usize, usize::saturating_add);
+                if size.saturating_add(ADOPT_BODY_ENVELOPE) > limits::WRITE_BODY_MAX_BYTES {
+                    let k = g.last().map(BatchOp::rkey).unwrap_or_default();
+                    report.push(format!(
+                        "cannot adopt at://{former}/{}/{k}: larger than {} bytes",
+                        nsid::MOD_ACTION,
+                        limits::WRITE_BODY_MAX_BYTES
+                    ));
+                    continue;
+                }
+                match (batches.last_mut(), sizes.last_mut()) {
+                    (Some(b), Some(bs))
+                        if b.len() + g.len() <= limits::APPLYWRITES_MAX_OPS
+                            && *bs + size + ADOPT_BODY_ENVELOPE <= limits::WRITE_BODY_MAX_BYTES =>
+                    {
+                        b.extend(g);
+                        *bs += size;
+                    }
+                    _ => {
+                        batches.push(g);
+                        sizes.push(size);
+                    }
                 }
             }
             let mut retry = false;
