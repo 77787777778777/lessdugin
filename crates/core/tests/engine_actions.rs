@@ -1197,7 +1197,11 @@ fn reacts_moderation_and_subscriptions_notify() {
     let again = notes(bob, false);
     assert_eq!(again.items.len(), 2, "{again:?}");
     // mark one read, then all
-    block_on(bob.engine.mark_notifications_read(std::slice::from_ref(&r.id))).unwrap();
+    block_on(
+        bob.engine
+            .mark_notifications_read(std::slice::from_ref(&r.id)),
+    )
+    .unwrap();
     assert_eq!(notes(bob, false).unread, 1);
     block_on(bob.engine.mark_all_notifications_read()).unwrap();
     assert_eq!(notes(bob, false).unread, 0);

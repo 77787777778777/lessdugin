@@ -48,6 +48,11 @@ jobs:
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: "22"
+          # this job only needs node to run wasm-bindgen-test-runner; it does not
+          # install pnpm, so disable setup-node's package-manager cache probing
+          # (which would otherwise try to locate pnpm from package.json's
+          # packageManager field and fail).
+          package-manager-cache: false
       - run: cargo install wasm-bindgen-cli --version =0.2.129 --locked
       - run: cargo xtask test-wasm
   lexicons:
@@ -56,7 +61,8 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version: "1.24"
+          # goat v0.2.6 requires go >= 1.27 (its go.mod declares `go 1.27`)
+          go-version: "1.27"
       # pinned (plan §4.3): the version spike S4 checked (ADR 0003)
       - run: go install github.com/bluesky-social/goat@v0.2.6
       - run: goat lex lint -I large-string lexicons
