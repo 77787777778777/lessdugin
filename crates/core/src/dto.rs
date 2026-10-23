@@ -956,8 +956,10 @@ dto! {
 
 dto! {
     /// The state of a write (`engine-api.md` §3.5): `pending → sending → done | failed | undone`.
-    /// `pending` may say why it waits (held for the undo window, or throttled by the write budget,
-    /// a rate limit or a back-off) and until when; a conflict is `failed` with code `conflict`.
+    /// `pending` may say why it waits (held for the undo window, throttled by the write budget,
+    /// a rate limit or a back-off, or `needsLogin`: the account's session was refused and the
+    /// write waits until the account logs in again), until when, and the `error` that caused
+    /// the wait; a conflict is `failed` with code `conflict`.
     pub enum WriteState {
         #[serde(rename_all = "camelCase")]
         Pending {
@@ -967,6 +969,10 @@ dto! {
             held: bool,
             #[serde(default, skip_serializing_if = "is_false")]
             throttled: bool,
+            #[serde(default, skip_serializing_if = "is_false")]
+            needs_login: bool,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            error: Option<crate::engine::EngineError>,
         },
         Sending,
         /// `cid` is absent for deletes.
@@ -1332,6 +1338,8 @@ mod tests {
                 not_before_ms: None,
                 held: false,
                 throttled: false,
+                needs_login: false,
+                error: None,
             },
         };
         assert_eq!(
@@ -1342,11 +1350,31 @@ mod tests {
             not_before_ms: Some(5),
             held: true,
             throttled: false,
+            needs_login: false,
+            error: None,
         };
         assert_eq!(
             serde_json::to_string(&held).unwrap(),
             r#"{"kind":"pending","notBeforeMs":5,"held":true}"#
         );
+        let login = WriteState::Pending {
+            not_before_ms: None,
+            held: false,
+            throttled: false,
+            needs_login: true,
+            error: Some(crate::engine::EngineError::new(
+                crate::engine::ErrorCode::AuthRequired,
+                "expired",
+            )),
+        };
+        let json = serde_json::to_string(&login).unwrap();
+        assert!(
+            json.starts_with(
+                r#"{"kind":"pending","needsLogin":true,"error":{"code":"auth_required""#
+            ),
+            "{json}"
+        );
+        assert_eq!(serde_json::from_str::<WriteState>(&json).unwrap(), login);
         let done = WriteState::Done {
             uri: "at://x/y/z".into(),
             cid: None,

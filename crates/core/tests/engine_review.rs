@@ -844,3 +844,168 @@ fn an_applicants_post_is_hidden_in_an_approval_forum() {
     .unwrap();
     assert!(l.items.iter().all(|i| i.uri != spam));
 }
+
+// ---------------------------------------------------------------------------------------------
+// M2 client review (robustness H1, M3): a refused session holds the writes until the next
+// login; "send now" ends a back-off
+
+const WRITE_NSIDS: [&str; 4] = [
+    "com.atproto.repo.applyWrites",
+    "com.atproto.repo.createRecord",
+    "com.atproto.repo.putRecord",
+    "com.atproto.repo.deleteRecord",
+];
+
+fn write_requests(net: &FakeNet) -> usize {
+    WRITE_NSIDS.iter().map(|n| net.count(n)).sum()
+}
+
+#[test]
+fn a_refused_session_holds_writes_until_the_account_logs_in_again() {
+    let f = forum();
+    let engine = &f.alice.engine;
+    let events = record(engine);
+    for n in WRITE_NSIDS {
+        f.net
+            .inject(Fault::error(401, "ExpiredToken", "Token has expired").on_nsid(n));
+    }
+    let t = block_on(engine.publish(&PostDraft::article(&f.forum, "Later", "Body"))).unwrap();
+    let r = block_on(engine.outbox_flush()).unwrap();
+    assert_eq!((r.failed, r.needs_login), (0, 1), "{r:?}");
+    let state = block_on(engine.write_status(&t.id)).unwrap().unwrap().state;
+    let WriteState::Pending {
+        needs_login: true,
+        throttled: false,
+        not_before_ms: None,
+        error: Some(e),
+        ..
+    } = &state
+    else {
+        panic!("{state:?}")
+    };
+    assert_eq!(e.code, ErrorCode::AuthRequired);
+    let did = f.alice_acct.did().to_string();
+    assert!(
+        events.lock().unwrap().iter().any(|e| matches!(
+            e,
+            Event::Auth { did: d, state: lessdugin_core::dto::AuthState::Expired } if *d == did
+        )),
+        "Auth Expired is emitted"
+    );
+    // Nothing is retried while the session is refused, however often the outbox runs, and
+    // the hold is not a failed attempt.
+    let sent = write_requests(&f.net);
+    for _ in 0..3 {
+        f.alice.host.advance_ms(60 * MINUTE);
+        let r = block_on(engine.outbox_flush()).unwrap();
+        assert_eq!(r.needs_login, 1);
+    }
+    assert_eq!(write_requests(&f.net), sent);
+    // A new login (the session works again) releases the hold, and the write is sent.
+    f.net.clear_faults();
+    login(engine, &f.alice_acct);
+    assert!(matches!(
+        block_on(engine.write_status(&t.id)).unwrap().unwrap().state,
+        WriteState::Pending {
+            needs_login: false,
+            ..
+        }
+    ));
+    let r = block_on(engine.outbox_flush()).unwrap();
+    assert_eq!((r.done, r.needs_login), (1, 0), "{r:?}");
+    done_uri(engine, &t);
+}
+
+#[test]
+fn send_now_ends_a_back_off_but_not_a_rate_limit() {
+    let f = forum();
+    let engine = &f.alice.engine;
+    // An ambiguous failure (a 500) backs the write off.
+    let fault = f.net.inject(
+        Fault::status(500)
+            .on_nsid("com.atproto.repo.createRecord")
+            .once(),
+    );
+    let fault2 = f.net.inject(
+        Fault::status(500)
+            .on_nsid("com.atproto.repo.putRecord")
+            .once(),
+    );
+    let fault3 = f.net.inject(
+        Fault::status(500)
+            .on_nsid("com.atproto.repo.applyWrites")
+            .once(),
+    );
+    let t = block_on(engine.publish(&PostDraft::article(&f.forum, "Retry", "Body"))).unwrap();
+    let step = lessdugin_core::outbox::Session::new(
+        f.alice_acct.did().clone(),
+        url::Url::parse(&f.alice_acct.pds_base()).unwrap(),
+    );
+    let r = block_on(engine.outbox().run_due(&step)).unwrap();
+    assert_eq!(r.throttled, 1, "{r:?}");
+    let WriteState::Pending {
+        throttled: true,
+        not_before_ms: Some(_),
+        error: Some(cause),
+        ..
+    } = block_on(engine.write_status(&t.id)).unwrap().unwrap().state
+    else {
+        panic!("backing off")
+    };
+    assert_ne!(
+        cause.code,
+        ErrorCode::RateLimited,
+        "the pending state says why"
+    );
+    for id in [fault, fault2, fault3] {
+        f.net.remove_fault(id);
+    }
+    // Without "send now" the next run waits for the back-off.
+    let r = block_on(engine.outbox().run_due(&step)).unwrap();
+    assert_eq!(r.processed, 0);
+    assert_eq!(block_on(engine.outbox_expedite()).unwrap(), 1);
+    let r = block_on(engine.outbox().run_due(&step)).unwrap();
+    assert_eq!(r.done, 1, "{r:?}");
+    done_uri(engine, &t);
+
+    // `retry` on a backing-off write is "send now" too; a PDS rate limit is left alone.
+    let pds = f.net.default_pds();
+    pds.set_rate_limit(Some(lessdugin_testkit::fake_pds::RateLimit {
+        limit: 0,
+        window_ms: 10 * MINUTE,
+    }));
+    let t = block_on(engine.publish(&PostDraft::article(&f.forum, "Limited", "Body"))).unwrap();
+    let r = block_on(engine.outbox().run_due(&step)).unwrap();
+    assert_eq!(r.throttled, 1);
+    assert_eq!(block_on(engine.outbox_expedite()).unwrap(), 0);
+    let e = block_on(engine.retry_write(&t.id)).unwrap_err();
+    assert_eq!(e.code, ErrorCode::InvalidInput);
+    pds.set_rate_limit(None);
+}
+
+// ---------------------------------------------------------------------------------------------
+// M2 client review (robustness H2): a hung owner PDS does not block a view of cached content
+
+#[test]
+fn a_hung_pds_does_not_block_opening_a_cached_forum() {
+    let f = forum();
+    let engine = &f.alice.engine;
+    block_on(engine.sync_forum(&f.forum, &SyncOpts::default())).unwrap();
+    block_on(engine.forum_open(&f.forum)).unwrap();
+    // Past the reopen window, the PDS accepts requests but answers after two minutes.
+    f.alice.host.advance_ms(10 * MINUTE);
+    f.net
+        .inject(Fault::latency(120_000).on_host(&f.alice_acct.pds_base()));
+    let started = f.alice.host.now();
+    let view = block_on(engine.forum_open(&f.forum)).unwrap();
+    let took = f.alice.host.now() - started;
+    assert_eq!(view.forum.uri, f.forum);
+    assert!(
+        took <= lessdugin_core::limits::FORUM_DECL_CACHED_BUDGET_MS
+            + lessdugin_core::limits::FORUM_OPEN_SYNC_BUDGET_MS,
+        "forum_open took {took} ms of (fake) time with a hung PDS"
+    );
+    // The cached thread is still readable.
+    let thread = block_on(engine.get_thread(&f.post, &ThreadOpts::default())).unwrap();
+    assert!(matches!(&thread.post, ThreadRoot::Post(p) if p.post.uri == f.post));
+}

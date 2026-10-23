@@ -10,6 +10,7 @@ import { ErrorView, Loading } from "../../components/Status.tsx";
 import { useEngine } from "../../engine/context.tsx";
 import { qk } from "../../engine/queries.ts";
 import { cx } from "../../lib/cx.ts";
+import { DEFAULT_POST_FILTER, DEFAULT_POST_SORT } from "../../lib/listDefaults.ts";
 import { cleanName } from "../../lib/text.ts";
 import ui from "../../styles/ui.module.css";
 import styles from "../pages.module.css";
@@ -38,8 +39,8 @@ export function ForumPostsPage() {
   const params = route.useParams();
   const search = route.useSearch();
   const navigate = route.useNavigate();
-  const sort = search.sort ?? "magic";
-  const filter = search.filter ?? "frontpage";
+  const sort = search.sort ?? DEFAULT_POST_SORT;
+  const filter = search.filter ?? DEFAULT_POST_FILTER;
   const tag = search.tag;
   const base: ListPostsQuery = {
     forum: view.forum.uri,
@@ -67,8 +68,8 @@ export function ForumPostsPage() {
     const next = { ...search, ...patch };
     void navigate({
       search: {
-        ...(next.sort && next.sort !== "magic" ? { sort: next.sort } : {}),
-        ...(next.filter && next.filter !== "frontpage" ? { filter: next.filter } : {}),
+        ...(next.sort && next.sort !== DEFAULT_POST_SORT ? { sort: next.sort } : {}),
+        ...(next.filter && next.filter !== DEFAULT_POST_FILTER ? { filter: next.filter } : {}),
         ...(next.tag ? { tag: next.tag } : {}),
       },
     });

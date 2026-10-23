@@ -272,7 +272,9 @@ impl Printer {
 
     /// A progress or hint line on stderr (suppressed by `-q`).
     pub fn note(&self, spans: &[Span]) {
-        if self.quiet {
+        // `--json`: stderr carries only JSON lines (warnings and the error), so a script can
+        // parse every line of it; notes are for people.
+        if self.quiet || self.json {
             return;
         }
         self.err_line(spans);
@@ -288,9 +290,21 @@ impl Printer {
         let _ = writeln!(err, "{s}");
     }
 
-    /// `warning: …` on stderr.
+    /// `warning: …` on stderr; with `--json`, one JSON line `{"dto": 1, "warning": "…"}`
+    /// (stderr then holds only JSON lines: warnings, then the error if any).
     pub fn warn(&self, msg: TermText) {
         if self.quiet {
+            return;
+        }
+        if self.json {
+            let v = serde_json::json!({"dto": DTO_VERSION, "warning": msg.to_plain_string()});
+            let text = v.to_string();
+            let text = if std::io::stderr().is_terminal() {
+                escape_json_for_tty(&text)
+            } else {
+                text
+            };
+            let _ = writeln!(std::io::stderr().lock(), "{text}");
             return;
         }
         self.err_line(&[(lit("warning: "), Style::Warn), (msg, Style::Plain)]);
@@ -332,15 +346,35 @@ impl Printer {
     }
 }
 
-/// Pipes `text` through `less -R -F -X` (`-F`: no paging when it fits on one screen); `false`
-/// if `less` could not be started.
+/// The pager command: `$LESSDUGIN_PAGER`, else `$PAGER`, else `less -R -F -X`, split into
+/// words without a shell (as `$EDITOR` is). `None`: do not page (an empty value, or `cat`).
+pub fn pager_command(var: impl Fn(&str) -> Option<String>) -> Option<Vec<String>> {
+    let chosen = var("LESSDUGIN_PAGER")
+        .or_else(|| var("PAGER"))
+        .unwrap_or_else(|| "less -R -F -X".to_owned());
+    let words: Vec<String> = chosen.split_whitespace().map(str::to_owned).collect();
+    match words.first().map(String::as_str) {
+        None | Some("cat") => None,
+        Some(_) => Some(words),
+    }
+}
+
+/// Pipes `text` through the pager ([`pager_command`]; `LESS=FRX` when `LESS` is unset, as git
+/// does); `false` if it could not be started. While the pager runs, Ctrl-C and Ctrl-\ go to
+/// the pager only: this process ignores them (as git does), so it never exits under the pager
+/// and leaves it running in the background with the shell prompt drawn over it.
 fn spawn_pager(text: &str) -> bool {
     use std::process::{Command, Stdio};
-    let child = Command::new("less")
-        .args(["-R", "-F", "-X"])
-        .stdin(Stdio::piped())
-        .spawn();
-    let Ok(mut child) = child else {
+    let Some(words) = pager_command(|k| std::env::var(k).ok()) else {
+        return false;
+    };
+    let mut cmd = Command::new(&words[0]);
+    cmd.args(&words[1..]).stdin(Stdio::piped());
+    if std::env::var_os("LESS").is_none() {
+        cmd.env("LESS", "FRX");
+    }
+    let _ignored = IgnoreInterrupts::new();
+    let Ok(mut child) = cmd.spawn() else {
         return false;
     };
     if let Some(mut stdin) = child.stdin.take() {
@@ -349,6 +383,35 @@ fn spawn_pager(text: &str) -> bool {
     }
     let _ = child.wait();
     true
+}
+
+/// While alive, SIGINT and SIGQUIT do not end this process: they are caught by (tokio's)
+/// handlers that nobody reads. Outside a tokio runtime, or off Unix, it does nothing.
+struct IgnoreInterrupts {
+    #[cfg(unix)]
+    _signals: Vec<tokio::signal::unix::Signal>,
+}
+
+impl IgnoreInterrupts {
+    fn new() -> Self {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{SignalKind, signal};
+            let signals = if tokio::runtime::Handle::try_current().is_ok() {
+                [SignalKind::interrupt(), SignalKind::quit()]
+                    .into_iter()
+                    .filter_map(|k| signal(k).ok())
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            Self { _signals: signals }
+        }
+        #[cfg(not(unix))]
+        {
+            Self {}
+        }
+    }
 }
 
 fn hint_for(e: &EngineError) -> Option<&'static str> {
@@ -417,5 +480,32 @@ mod tests {
             redact_app_passwords("a abcd-1234-efgh-5678, b-c 1234-5678"),
             "a <redacted>, b-c 1234-5678"
         );
+    }
+
+    #[test]
+    fn pager_choice() {
+        let none = |_: &str| None;
+        assert_eq!(
+            pager_command(none),
+            Some(vec!["less".into(), "-R".into(), "-F".into(), "-X".into()])
+        );
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |k: &str| {
+                pairs
+                    .iter()
+                    .find(|(n, _)| *n == k)
+                    .map(|(_, v)| (*v).to_owned())
+            }
+        };
+        assert_eq!(
+            pager_command(env(&[("PAGER", "most -s")])),
+            Some(vec!["most".into(), "-s".into()])
+        );
+        assert_eq!(
+            pager_command(env(&[("PAGER", "most"), ("LESSDUGIN_PAGER", "less")])),
+            Some(vec!["less".into()])
+        );
+        assert_eq!(pager_command(env(&[("PAGER", "")])), None);
+        assert_eq!(pager_command(env(&[("PAGER", "cat")])), None);
     }
 }

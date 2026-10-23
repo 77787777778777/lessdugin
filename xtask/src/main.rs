@@ -169,6 +169,21 @@ fn ci() -> Result<(), String> {
             "social_query",
         ],
     )?;
+    // M2 acceptance: the 50-member cold sync in under 5 s, on an optimised build (the debug
+    // run above asserts it only off CI; a release build has devnet mode only with `devnet`)
+    run(
+        "cargo",
+        &[
+            "test",
+            "--release",
+            "-p",
+            "lessdugin",
+            "--features",
+            "devnet",
+            "--test",
+            "cold_sync",
+        ],
+    )?;
     if have(TEST_RUNNER) && have("node") {
         test_wasm(&[])?;
     } else {

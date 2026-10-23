@@ -439,6 +439,11 @@ Blobs are uploaded in the `sending` step of the `PendingWrite` that references t
 | `BRIDGE_JSON_MAX_BODY_BYTES` | 1,048,576 (1 MiB) | S | JSON bodies of `/bridge/session`, `/bridge/login` and `/bridge/xrpc` (a conforming write body is ≤ 900,000 bytes). Larger: 413 | `threat-model.md` §7.3 |
 | `BRIDGE_KV_MAX_BODY_BYTES` | 67,108,864 (64 MiB) | S | one `/bridge/kv` request (binary values are base64). Larger: 413 | `threat-model.md` §7.3 |
 | – | `BLOB_HARD_MAX_BYTES` | S | `/bridge/xrpc/com.atproto.repo.uploadBlob` bodies | `threat-model.md` §7.4 |
+| `BRIDGE_CAPABILITY_TTL_MS` | 300,000 (5 min) | S | an unused capability (a printed or opened link) expires this long after it was minted | `threat-model.md` §7.2 |
+| `BRIDGE_LOGIN_CONFIRM_MS` | 300,000 (5 min) | S | a browser-started sign-in waits this long for `y` in the `web` terminal, then is refused | `threat-model.md` §7.4 |
+| `BRIDGE_LOCK_WAIT_MS` | 20,000 (20 s) | O | the longest one `/bridge/lock` request waits for a busy lock before answering `{"held": false}` | `threat-model.md` §7.4 |
+| `BRIDGE_LOCK_HEARTBEAT_MS` | 1,000 (1 s) | O | a held `/bridge/lock` body sends a newline this often, so a closed connection releases the lock within about two beats | `threat-model.md` §7.4 |
+| `WEB_SHUTDOWN_GRACE_MS` | 3,000 (3 s) | O | after Ctrl-C, open connections get this long before `lessdugin web` stops anyway (a second Ctrl-C stops it at once) | – |
 
 `OAUTH_LOGIN_TTL_MS` (§16) bounds the pending bridge login.
 

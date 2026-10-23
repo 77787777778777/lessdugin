@@ -3,6 +3,16 @@ source: crates/cli/tests/content.rs
 expression: "std::fs::read_to_string(alice.devnet_dir().join(format!(\"drafts/{id}.md\"))).unwrap()"
 ---
 ---
+# A lessdugin draft: the fields below, then the text after the closing `---`.
+# Lines starting with # are ignored here.
+#
+#
 title: Later
 ---
 Not yet.
+# ------------------------ >8 ------------------------
+# Everything from the line above down is ignored.
+#
+#
+#
+# lessdugin

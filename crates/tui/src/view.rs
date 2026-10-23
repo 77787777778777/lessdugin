@@ -15,10 +15,12 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use crate::app::{
     ForumScreen, HomeScreen, LIST_ROWS, Screen, ScreenKind, State, SyncStatus, ThreadScreen, Tone,
+    status_text,
 };
 use crate::keys::HELP;
 use crate::text::{
     TermText, actor, cat, clock, joined, line, lit, name, pad, post_meta, post_title, spans, tt,
+    wrapped,
 };
 
 fn dim() -> Style {
@@ -51,7 +53,7 @@ pub fn draw(state: &State, f: &mut Frame<'_>) {
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Min(1),
-        Constraint::Length(1),
+        Constraint::Length(state.status_rows()),
     ])
     .areas(area);
     f.render_widget(
@@ -63,7 +65,7 @@ pub fn draw(state: &State, f: &mut Frame<'_>) {
         let lines = content_lines(state, top, usize::from(content.height));
         f.render_widget(Paragraph::new(Text::from(lines)), content);
     }
-    f.render_widget(Paragraph::new(status_line(state)), status);
+    f.render_widget(Paragraph::new(status_lines(state)), status);
     if state.help {
         help(f, area);
     }
@@ -101,6 +103,13 @@ fn header_line(state: &State) -> Line<'static> {
         right.push(cat([
             crate::text::count(n, "write", "writes"),
             lit(" queued"),
+        ]));
+    }
+    if !state.failed.is_empty() {
+        let n = u32::try_from(state.failed.len()).unwrap_or(u32::MAX);
+        right.push(cat([
+            crate::text::count(n, "write", "writes"),
+            lit(" failed"),
         ]));
     }
     right.push(match &state.account {
@@ -274,7 +283,8 @@ fn forum_name(state: &State, uri: &str) -> Option<TermText> {
     })
 }
 
-fn status_line(state: &State) -> Line<'static> {
+/// The status message (wrapped to [`State::status_rows`] rows), or the keys.
+fn status_lines(state: &State) -> Text<'static> {
     if let Some(s) = &state.status {
         let style = match s.tone {
             Tone::Info => Style::default(),
@@ -282,7 +292,9 @@ fn status_line(state: &State) -> Line<'static> {
             Tone::Warn => Style::default().fg(Color::Yellow),
             Tone::Error => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         };
-        return line([(lit(" "), Style::default()), (s.text.clone(), style)]);
+        let mut lines = wrapped(&status_text(s), style, usize::from(state.width));
+        lines.truncate(usize::from(state.status_rows()));
+        return Text::from(lines);
     }
     let hints = match state.top().map(|s| &s.kind) {
         Some(ScreenKind::Home(_)) => {
@@ -296,7 +308,7 @@ fn status_line(state: &State) -> Line<'static> {
         }
         None => "",
     };
-    line([(tt(hints), dim())])
+    Text::from(line([(tt(hints), dim())]))
 }
 
 fn message(lines: &mut Vec<Line<'static>>, t: TermText, style: Style) {

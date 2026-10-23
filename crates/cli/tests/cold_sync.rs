@@ -11,10 +11,11 @@
 //! process (start-up included) must stay under [`ACCEPTANCE`] (5 s).
 //!
 //! The time is always recorded: printed, written to `LESSDUGIN_TIMINGS_FILE` (JSON lines) when
-//! that is set, and added to the GitHub Actions job summary. On CI (`CI` set) the assertion is
-//! generous, [`CI_SLACK`] × 5 s, since shared runners are slow and `cargo test` builds without
-//! optimisation (the workspace crates, the fake PDS included, run at opt-level 0); a time over
-//! 5 s there is a warning annotation. `LESSDUGIN_COLD_SYNC_BUDGET_MS` sets the bound
+//! that is set, and added to the GitHub Actions job summary. An optimised build (`cargo test
+//! --release --features devnet`, a step of CI's rust job) always asserts 5 s: that is the
+//! acceptance check. A debug build on CI (`CI` set) asserts only [`CI_SLACK`] × 5 s, since
+//! `cargo test` builds without optimisation (the workspace crates, the fake PDS included, run
+//! at opt-level 0); a time over 5 s there is a warning annotation. `LESSDUGIN_COLD_SYNC_BUDGET_MS` sets the bound
 //! explicitly (never below 5 s).
 
 #![allow(clippy::disallowed_methods)] // a real clock for a real process
@@ -238,7 +239,7 @@ fn a_fifty_member_forum_cold_syncs_natively_within_five_seconds() {
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .map(|ms| Duration::from_millis(ms).max(ACCEPTANCE))
-        .unwrap_or(if ci {
+        .unwrap_or(if ci && cfg!(debug_assertions) {
             ACCEPTANCE * CI_SLACK
         } else {
             ACCEPTANCE

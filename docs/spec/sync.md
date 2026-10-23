@@ -1235,7 +1235,9 @@ The key of a tuple is the concatenation of its elements. A prefix scan over `(e1
 | cache | `("meta", "schema")` | integer | a mismatch drops the whole cache (I1) |
 | state | `("out", account, seq)` | `PendingWrite` | `seq` is an i64 increasing per account |
 | state | `("out.budget", account)` | `BudgetRow` | spent write points with timestamps, for the two sliding windows |
-| state | `("loc", kind, key…)` | per kind | kinds: `draft`, `read`, `sub`, `follow`, `unfollow`, `bookmark`, `mute`, `setting`, `alias`, `last_listing`, `consent`, `media_host`, `as_pin`, `quarantine` |
+| state | `("out.meta", account)` | `MetaRow` | the last TID handed out to this account's writes (W6) |
+| state | `("out.blob", account, seq, index, chunk)` | bytes | ≤ 1 MiB chunks of a blob uploaded when write `seq` is sent (`data-model.md` §8.8) |
+| state | `("loc", kind, key…)` | per kind | kinds: `draft`, `read`, `sub`, `follow`, `unfollow`, `bookmark`, `mute`, `setting`, `alias`, `last_listing`, `consent`, `media_host`, `as_pin`, `quarantine`, `account`, `active_account`, `seeded` |
 | state | `("notif", account, ts, id)` | notification | |
 | state | `("meta", "schema")` | integer | `state` is migrated, never dropped |
 
@@ -1272,7 +1274,7 @@ HostRow    { rangeCursor: "unknown" | "yes" | "no", rcAt: ms, shortPageEnds: boo
 |---|---|---|---|
 | sync leader | exclusive `fd-lock` on `<cache dir>/cache.lock`, tried without waiting | Web Lock `lessdugin-sync-leader`, requested once and held for the tab's lifetime | live sources, polling, reconcile, discovery, P1–P3 sync, eviction |
 | repo `d` | `fd-lock` on `<cache dir>/locks/repo-<h(d)>.lock` | Web Lock `lessdugin-repo-<d>` | the read-diff-write of `sync_repo`, point fetches and admissions for d |
-| outbox `a` | `fd-lock` on `<data dir>/locks/outbox-<h(a)>.lock` | Web Lock `lessdugin-outbox-<a>` | the pump for account a (§7.1) |
+| outbox `a` | `fd-lock` on `<data dir>/locks/outbox-<h(a)>.lock` | Web Lock `lessdugin-outbox-<a>`; in `lessdugin web`, whose `state` is the native one, then also the native lock through `POST /bridge/lock` (`threat-model.md` §7.4) | the pump for account a (§7.1) |
 
 `h(x)` = the first 16 characters of `b32s(sha256(UTF8(x)))` (`data-model.md` §3.1).
 

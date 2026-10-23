@@ -8,6 +8,7 @@ import { toasts } from "./components/Toast.tsx";
 import { EngineProvider } from "./engine/context.tsx";
 import type { EngineHandle } from "./engine/handle.ts";
 import { invalidateTopics } from "./engine/queries.ts";
+import { endedSessions } from "./engine/sessions.ts";
 import { startEngineTasks, syncProgress } from "./engine/sync.ts";
 import { writeStore } from "./engine/writes.ts";
 import { createAppRouter } from "./router.tsx";
@@ -47,7 +48,9 @@ export function App({ engine }: { engine: EngineHandle }) {
             if (event.state.kind === "expiring") {
               toasts.show({ message: "Your session expires soon; sign in again to keep posting." });
             } else if (event.state.kind === "expired") {
-              toasts.show({ message: "Your session has expired. Sign in again.", tone: "error" });
+              endedSessions.end(event.did);
+            } else {
+              endedSessions.clear(event.did);
             }
             break;
           case "syncProgress":
@@ -60,6 +63,15 @@ export function App({ engine }: { engine: EngineHandle }) {
 
   // The engine's long-lived tasks (live tail, outbox pump) run for the app's lifetime.
   useEffect(() => startEngineTasks(engine.api), [engine]);
+
+  // Writes queued before this page loaded (an earlier visit, another tab) show in the header
+  // and the outbox page, not only the ones this page makes (robustness review H3).
+  useEffect(() => {
+    engine.api.writes().then(
+      (t) => writeStore.seed(t),
+      () => {},
+    );
+  }, [engine]);
 
   return (
     <EngineProvider engine={engine}>

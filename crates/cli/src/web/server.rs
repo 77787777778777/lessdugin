@@ -5,11 +5,11 @@
 //! framework answer (a 405 from a method router, a 404) can come before the Host check.
 //!
 //! ```text
-//! every request:  Host ∉ {127.0.0.1:<port>, [::1]:<port>}  → 403, empty body   (WEB-3)
+//! every request:  Host ≠ 127.0.0.1:<port>                  → 403, empty body   (WEB-3)
 //!                 OPTIONS                                   → 405              (WEB-4)
-//! /bridge/…:      not session|login|kv|xrpc/<nsid>          → 404 (/bridge/fetch is reserved)
+//! /bridge/…:      not session|login|kv|lock|xrpc/<nsid>     → 404 (/bridge/fetch is reserved)
 //!                 method ≠ POST                             → 405              (§7.3 #2)
-//!                 Origin ≠ http://127.0.0.1:<port> | http://[::1]:<port>  → 403 (#3)
+//!                 Origin ≠ http://127.0.0.1:<port>           → 403              (#3)
 //!                 no live `Authorization: Bearer <token>` (not /bridge/session) → 401 (#4)
 //!                 Content-Type ≠ application/json (uploadBlob: a §8.8 type)    → 415 (#5)
 //!                 body over its limit                       → 413              (#6)
@@ -35,11 +35,11 @@ use serde_json::json;
 
 use super::assets::Assets;
 use super::caps::{Caps, Exchange};
-use super::login::LoginSlot;
+use super::login::{LoginSlot, Prompt};
 use super::policy::{
     self, BRIDGE_BLOB_MAX_BODY_BYTES, BRIDGE_JSON_MAX_BODY_BYTES, BRIDGE_KV_MAX_BODY_BYTES,
 };
-use super::{kv, login, xrpc};
+use super::{kv, lock, login, xrpc};
 use crate::out::{Printer, Style, lit};
 
 /// The body of `/lessdugin-config.json` (WEB-5).
@@ -65,23 +65,22 @@ pub struct Web {
     pub out: Printer,
     /// The pending browser login, if any.
     pub login: LoginSlot,
+    /// Questions to the terminal (a browser sign-in's confirmation).
+    pub prompt: Prompt,
+    /// Set to `true` when the server stops (held `/bridge/lock` bodies end).
+    pub shutdown: tokio::sync::watch::Sender<bool>,
 }
 
 impl Web {
-    /// The two allowed `Host` values (WEB-3).
-    fn hosts(&self) -> [String; 2] {
-        [
-            format!("127.0.0.1:{}", self.port),
-            format!("[::1]:{}", self.port),
-        ]
+    /// The allowed `Host` values (WEB-3): the listener is bound to 127.0.0.1 only (WEB-1), so
+    /// no browser reaches it under `[::1]`.
+    fn hosts(&self) -> [String; 1] {
+        [format!("127.0.0.1:{}", self.port)]
     }
 
-    /// The two allowed `Origin` values (§7.3 #3).
-    fn origins(&self) -> [String; 2] {
-        [
-            format!("http://127.0.0.1:{}", self.port),
-            format!("http://[::1]:{}", self.port),
-        ]
+    /// The allowed `Origin` values (§7.3 #3).
+    fn origins(&self) -> [String; 1] {
+        [self.origin()]
     }
 
     /// The bridge's own origin, for links and redirects.
@@ -97,9 +96,15 @@ impl Web {
         b
     }
 
+    /// The wall clock (ms).
+    pub fn now_ms(&self) -> i64 {
+        use lessdugin_core::host::Host as _;
+        self.engine.host().now_ms()
+    }
+
     /// Mints a fresh single-use link (§7.2).
     pub fn mint_link(&self) -> String {
-        let cap = self.caps.mint(&self.random32());
+        let cap = self.caps.mint(&self.random32(), self.now_ms());
         format!("{}/#lessdugin-cap={cap}", self.origin())
     }
 }
@@ -237,6 +242,7 @@ enum Route {
     Session,
     Login,
     Kv,
+    Lock,
     Xrpc(String),
 }
 
@@ -246,6 +252,7 @@ impl Route {
             "/bridge/session" => Some(Self::Session),
             "/bridge/login" => Some(Self::Login),
             "/bridge/kv" => Some(Self::Kv),
+            "/bridge/lock" => Some(Self::Lock),
             p => p
                 .strip_prefix("/bridge/xrpc/")
                 .filter(|n| !n.is_empty())
@@ -310,16 +317,16 @@ async fn bridge(web: &Arc<Web>, req: Request) -> Response {
         return error(StatusCode::FORBIDDEN, "blocked", "wrong or missing Origin");
     }
     // #4 session token
-    if route != Route::Session {
-        let token =
-            single(&parts.headers, header::AUTHORIZATION).and_then(|v| v.strip_prefix("Bearer "));
-        if !token.is_some_and(|t| web.caps.is_session(t)) {
-            return error(
-                StatusCode::UNAUTHORIZED,
-                "auth_required",
-                "no live bridge session: open a fresh link from the terminal",
-            );
-        }
+    let token = single(&parts.headers, header::AUTHORIZATION)
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .unwrap_or("")
+        .to_owned();
+    if route != Route::Session && !web.caps.is_session(&token) {
+        return error(
+            StatusCode::UNAUTHORIZED,
+            "auth_required",
+            "no live bridge session: open a fresh link from the terminal",
+        );
     }
     // #5 Content-Type
     let content_type = single(&parts.headers, header::CONTENT_TYPE).map(media_type);
@@ -357,8 +364,9 @@ async fn bridge(web: &Arc<Web>, req: Request) -> Response {
     };
     match route {
         Route::Session => session(web, &bytes),
-        Route::Login => login::start(web, &bytes).await,
+        Route::Login => login::start(web, &token, &bytes).await,
         Route::Kv => kv::handle(web, &bytes).await,
+        Route::Lock => lock::handle(web, &token, &bytes).await,
         Route::Xrpc(nsid) => {
             xrpc::forward(
                 web,
@@ -436,7 +444,7 @@ fn session(web: &Web, body: &[u8]) -> Response {
             "expected {\"cap\": \"…\"}",
         );
     };
-    match web.caps.exchange(&req.cap, &web.random32()) {
+    match web.caps.exchange(&req.cap, &web.random32(), web.now_ms()) {
         Exchange::Token(token) => json_response(StatusCode::OK, &json!({"token": token})),
         Exchange::Reused => {
             web.out.err_line(&[
@@ -446,6 +454,9 @@ fn session(web: &Web, body: &[u8]) -> Response {
                     Style::Plain,
                 ),
             ]);
+            // A sign-in the revoked session started dies with it (F27: whoever raced the
+            // link must not finish a login the legitimate tab never asked for).
+            web.login.cancel_if_revoked(web);
             expired()
         }
         Exchange::Refused => expired(),
@@ -474,10 +485,10 @@ mod tests {
 
     #[test]
     fn host_check() {
-        let allowed = ["127.0.0.1:47778".to_owned(), "[::1]:47778".to_owned()];
+        let allowed = ["127.0.0.1:47778".to_owned()];
         assert!(host_ok(&req(Some("127.0.0.1:47778"), "/"), &allowed));
-        assert!(host_ok(&req(Some("[::1]:47778"), "/"), &allowed));
         for bad in [
+            "[::1]:47778",
             "localhost:47778",
             "127.0.0.1",
             "127.0.0.1:80",
@@ -511,6 +522,7 @@ mod tests {
     #[test]
     fn routes() {
         assert_eq!(Route::parse("/bridge/session"), Some(Route::Session));
+        assert_eq!(Route::parse("/bridge/lock"), Some(Route::Lock));
         assert_eq!(
             Route::parse("/bridge/xrpc/com.atproto.repo.putRecord"),
             Some(Route::Xrpc("com.atproto.repo.putRecord".into()))

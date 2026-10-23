@@ -91,6 +91,10 @@ pub trait OutboxListener: MaybeSendSync {
     /// A write's state changed (`Write { id, state }`, `engine-api.md` §3.8).
     fn on_write(&self, _ticket: &WriteTicket) {}
 
+    /// The PDS (or the host) refused `account`'s session: its writes wait for a new login
+    /// (`Auth { did, state: Expired }`, `engine-api.md` §3.8).
+    fn on_session_refused(&self, _account: &str) {}
+
     /// A confirmed write was applied to the record store (`sync.md` §5.8). Called after the
     /// write's resulting state is saved and reported through [`OutboxListener::on_write`]. With a
     /// [`Syncer`] ([`Outbox::with_syncer`]) the own repo is already marked
@@ -222,6 +226,9 @@ pub enum Step {
     Idle,
     /// The first pending write waits until this time (ms): held, throttled or backing off.
     Wait(i64),
+    /// The first pending write waits until the account logs in again (its session was
+    /// refused); nothing of the account is sent before that.
+    NeedsLogin(WriteTicket),
     /// A write was run; its new state.
     Processed(WriteTicket),
 }
@@ -239,6 +246,8 @@ pub struct PumpReport {
     pub conflicts: u32,
     /// Runs that ended throttled or backing off.
     pub throttled: u32,
+    /// Accounts whose writes wait for a new login (their session was refused).
+    pub needs_login: u32,
 }
 
 impl PumpReport {
@@ -1108,10 +1117,27 @@ impl<H: Host> Outbox<H> {
             .get_row(model::write_key(account, seq))
             .await?
             .ok_or_else(|| EngineError::not_found(format!("no write {id}")))?;
-        if !matches!(w.state, WriteStage::Failed | WriteStage::Conflict) {
+        let now = self.host.now_ms();
+        let waiting = is_back_off(&w, now) || (w.needs_login && w.state == WriteStage::Throttled);
+        if !matches!(w.state, WriteStage::Failed | WriteStage::Conflict) && !waiting {
             return Err(EngineError::invalid_input(format!(
-                "write {id} is not failed"
+                "write {id} is neither failed nor backing off"
             )));
+        }
+        if waiting {
+            // "send now": the attempts so far still count towards MAX_ATTEMPTS
+            w.state = WriteStage::Queued;
+            w.needs_login = false;
+            w.not_before = None;
+            w.updated_at = now;
+            self.host
+                .state()
+                .write(vec![Self::put_op(model::write_key(account, seq), &w)?])
+                .await?;
+            drop(_g);
+            self.emit(&w);
+            self.wake(account);
+            return Ok(w.ticket());
         }
         w.state = WriteStage::Queued;
         w.attempts = 0;
@@ -1208,6 +1234,9 @@ impl<H: Host> Outbox<H> {
                 return Ok(Step::Idle);
             };
             let now = self.host.now_ms();
+            if w.needs_login && w.state == WriteStage::Throttled {
+                return Ok(Step::NeedsLogin(w.ticket()));
+            }
             if let (WriteStage::Held | WriteStage::Throttled, Some(t)) = (w.state, w.not_before)
                 && t > now
             {
@@ -1343,6 +1372,14 @@ impl<H: Host> Outbox<H> {
                 w.not_before = Some(at);
                 w.error = Some(StoredError::from(&error));
             }
+            Outcome::NeedsLogin(error) => {
+                // not an attempt: the write was never judged, only the session
+                w.state = WriteStage::Throttled;
+                w.needs_login = true;
+                w.not_before = None;
+                w.attempts = w.attempts.saturating_sub(1);
+                w.error = Some(StoredError::from(&error));
+            }
         }
         w.updated_at = now;
         // Confirmed requests are facts whatever the outcome (a partial delete): apply them
@@ -1373,10 +1410,70 @@ impl<H: Host> Outbox<H> {
             self.save(account, &w, Some(&merged)).await?;
         }
         self.emit(&w);
+        if w.needs_login {
+            self.shared.listener.on_session_refused(account_of(session));
+        }
         for (a, report) in &reports {
             self.shared.listener.on_applied(a, report);
         }
         Ok(w.ticket())
+    }
+
+    /// Releases the writes of `account` that wait for a new login (`Step::NeedsLogin`): they
+    /// are queued again and the pump is woken. Called when the account logs in. Returns how
+    /// many were released.
+    pub async fn release_login_holds(&self, account: &str) -> Result<u32, EngineError> {
+        let _g = self.shared.rows.lock().await;
+        let now = self.host.now_ms();
+        let mut released = Vec::new();
+        for mut w in self.scan_writes(account, true).await? {
+            if !(w.needs_login && w.state == WriteStage::Throttled) {
+                continue;
+            }
+            w.needs_login = false;
+            w.state = WriteStage::Queued;
+            w.not_before = None;
+            w.error = None;
+            w.updated_at = now;
+            self.save(account, &w, None).await?;
+            released.push(w);
+        }
+        drop(_g);
+        for w in &released {
+            self.emit(w);
+        }
+        if !released.is_empty() {
+            self.wake(account);
+        }
+        Ok(u32::try_from(released.len()).unwrap_or(u32::MAX))
+    }
+
+    /// "Send now" (`lessdugin outbox flush`, `retry`): ends the back-off of `account`'s writes
+    /// that wait after an ambiguous or transient failure, so the next step tries them at once.
+    /// Holds that are not ours to shorten stay: the undo window (`held`), the write budget and
+    /// a PDS rate limit (`rate_limited`), and a refused session (`needsLogin`). Returns how
+    /// many were expedited.
+    pub async fn expedite(&self, account: &str) -> Result<u32, EngineError> {
+        let _g = self.shared.rows.lock().await;
+        let now = self.host.now_ms();
+        let mut expedited = Vec::new();
+        for mut w in self.scan_writes(account, true).await? {
+            if !is_back_off(&w, now) {
+                continue;
+            }
+            w.not_before = None;
+            w.updated_at = now;
+            self.save(account, &w, None).await?;
+            expedited.push(w);
+        }
+        drop(_g);
+        for w in &expedited {
+            self.emit(w);
+        }
+        if !expedited.is_empty() {
+            self.wake(account);
+        }
+        Ok(u32::try_from(expedited.len()).unwrap_or(u32::MAX))
     }
 
     /// Runs the account's due writes; returns when none is due (or the first waits).
@@ -1386,6 +1483,10 @@ impl<H: Host> Outbox<H> {
             match self.step(session).await? {
                 Step::Processed(t) => report.count(&t),
                 Step::Idle | Step::Wait(_) => return Ok(report),
+                Step::NeedsLogin(_) => {
+                    report.needs_login += 1;
+                    return Ok(report);
+                }
             }
         }
     }
@@ -1398,6 +1499,10 @@ impl<H: Host> Outbox<H> {
             match self.step(session).await? {
                 Step::Processed(t) => report.count(&t),
                 Step::Idle => return Ok(report),
+                Step::NeedsLogin(_) => {
+                    report.needs_login += 1;
+                    return Ok(report);
+                }
                 Step::Wait(t) => {
                     let ms = (t - self.host.now_ms()).max(1);
                     self.host.sleep(u64::try_from(ms).unwrap_or(1)).await;
@@ -1423,6 +1528,8 @@ impl<H: Host> Outbox<H> {
             let wait = match self.step(session).await {
                 Ok(Step::Processed(_)) => continue,
                 Ok(Step::Wait(t)) => (t - self.host.now_ms()).clamp(1, IDLE_POLL_MS),
+                // woken by the login (`release_login_holds`, account changes)
+                Ok(Step::NeedsLogin(_)) => IDLE_POLL_MS,
                 Ok(Step::Idle) => {
                     let before = self.host.now_ms().saturating_sub(DONE_KEEP_MS);
                     if let Err(e) = self.prune(&account, before).await {
@@ -1452,6 +1559,21 @@ impl<H: Host> Outbox<H> {
         self.shared.generation.fetch_add(1, Ordering::SeqCst);
         self.wake_all();
     }
+}
+
+fn account_of(session: &Session) -> &str {
+    session.did.as_str()
+}
+
+/// `true` for a write that backs off after an ambiguous or transient failure (not the undo
+/// window, the write budget, a rate limit or a refused session).
+fn is_back_off(w: &PendingWrite, now: i64) -> bool {
+    w.state == WriteStage::Throttled
+        && !w.needs_login
+        && w.not_before.is_some_and(|t| t > now)
+        && w.error
+            .as_ref()
+            .is_some_and(|e| e.code != ErrorCode::RateLimited)
 }
 
 /// Maps a protocol error to an outcome (`data-model.md` §8.2): `InvalidSwap` is a conflict, an
@@ -1486,8 +1608,10 @@ fn classify<H: Host>(r: &Runner<'_, H>, e: pds::CallError, now: i64) -> Outcome 
             },
             error,
         },
+        // The session was refused (expired, revoked, logged out): retrying cannot help until
+        // the account logs in again, and backing off would hide why nothing is sent.
         CallError::Rejected { error, .. } if error.code == ErrorCode::AuthRequired => {
-            backoff(error)
+            Outcome::NeedsLogin(error)
         }
         CallError::Rejected { error, .. } => Outcome::Failed(error),
         // a read that failed in transport (offline) before anything was sent never makes the
@@ -1587,6 +1711,7 @@ fn prepare(
         created_at: now,
         updated_at: now,
         not_before,
+        needs_login: false,
         sent: false,
         results: Vec::new(),
         error: None,

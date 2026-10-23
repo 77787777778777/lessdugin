@@ -124,6 +124,15 @@ async fn tui(ctx: &Ctx, a: args::TuiArgs) -> Result<(), CliError> {
             out::Style::Dim,
         )]);
     }
+    if report.failed_writes > 0 {
+        ctx.out.note(&[(
+            out::lit(
+                "Some writes failed: `lessdugin outbox` lists them, and `lessdugin outbox retry \
+                 <id>` sends one again.",
+            ),
+            out::Style::Dim,
+        )]);
+    }
     Ok(())
 }
 

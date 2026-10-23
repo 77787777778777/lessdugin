@@ -10,6 +10,7 @@
       "!target",
       "!docs/design",
       "!lexicons",
+      "!crates/lexicon/lexicons",
       "!testdata"
     ]
   },

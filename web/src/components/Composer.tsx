@@ -14,8 +14,10 @@ import { markdown } from "@codemirror/lang-markdown";
 import { EditorSelection, EditorState } from "@codemirror/state";
 import { EditorView, keymap, placeholder as placeholderExt } from "@codemirror/view";
 import type { Draft, RenderedBody } from "@lessdugin/engine/types";
+import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { useEngine } from "../engine/context.tsx";
+import { qk } from "../engine/queries.ts";
 import { cx } from "../lib/cx.ts";
 import ui from "../styles/ui.module.css";
 import styles from "./Composer.module.css";
@@ -129,6 +131,8 @@ export function Composer({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [savedAt, setSavedAt] = useState<number | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const qc = useQueryClient();
   const submitRef = useRef<() => void>(() => {});
   // The editor is created once; these only seed it.
   const mountOptions = useRef({ initial, placeholder, autoFocus, label });
@@ -239,14 +243,20 @@ export function Composer({
             return;
           }
           draftIdRef.current = id;
+          setSaveError(null);
           setSavedAt(Date.now());
+          // a composer mounted again (a reply box scrolled back into a long thread, a reload)
+          // resumes from the drafts list
+          void qc.invalidateQueries({ queryKey: qk.drafts() });
         },
-        () => {},
+        (e: unknown) => {
+          if (generation.current === gen) setSaveError(errorMessage(e));
+        },
       );
       pendingSave.current = save;
     }, DRAFT_DEBOUNCE_MS);
     return () => clearTimeout(t);
-  }, [text, autosave, engine, initial]);
+  }, [text, autosave, engine, initial, qc]);
 
   const submit = async (): Promise<void> => {
     const value = viewRef.current?.state.doc.toString() ?? text;
@@ -334,7 +344,11 @@ export function Composer({
           </button>
         )}
         <span className={styles.status}>
-          {savedAt !== null ? "Draft saved locally" : "Ctrl/⌘ + Enter to submit"}
+          {saveError !== null
+            ? `Draft not saved: ${saveError}`
+            : savedAt !== null
+              ? "Draft saved locally"
+              : "Ctrl/⌘ + Enter to submit"}
         </span>
       </div>
     </div>

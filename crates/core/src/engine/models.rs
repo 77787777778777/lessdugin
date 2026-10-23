@@ -312,9 +312,22 @@ impl<H: Host> Engine<H> {
         if !force && let Some(o) = self.rt.opened(f, now) {
             return Ok(o);
         }
+        // A P0 deadline: with the declaration cached, a slow or hung owner PDS falls back to
+        // the cache after FORUM_DECL_CACHED_BUDGET_MS (`open_forum` uses the cached row on a
+        // transient failure) instead of retrying for minutes.
+        let cached = crate::store::RecordStore::new(self.host.cache())
+            .get(&key.uri)
+            .await
+            .map_err(store_error)?
+            .is_some();
+        let budget = if cached {
+            limits::FORUM_DECL_CACHED_BUDGET_MS
+        } else {
+            limits::FORUM_DECL_FIRST_BUDGET_MS
+        };
         let opened = self
             .syncer()
-            .open_forum(&self.p0_session(None, None), key)
+            .open_forum(&self.p0_session(None, Some(budget)), key)
             .await?;
         self.rt.register(key);
         if self.rt.note_opened(&opened, self.host.now_ms()) {

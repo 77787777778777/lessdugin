@@ -224,6 +224,13 @@ impl OutboxListener for EngineListener {
         self.rt.bus.changed([Topic::Outbox]);
     }
 
+    fn on_session_refused(&self, account: &str) {
+        self.rt.bus.emit(Event::Auth {
+            did: account.to_owned(),
+            state: crate::dto::AuthState::Expired,
+        });
+    }
+
     fn on_applied(&self, write: &AppliedWrite, _report: &ApplyReport) {
         let mut forums: BTreeSet<String> = BTreeSet::new();
         let mut topics = vec![Topic::User {

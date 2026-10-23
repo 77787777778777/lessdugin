@@ -26,6 +26,11 @@ pub const VERIFY_HANDLES: usize = 256;
 /// The most posts a forum screen lists.
 pub const LIST_LIMIT: u32 = 200;
 
+/// The page the parity scenario compares (`docs/plan.md` §4.2): the CLI's `ls -n` default and
+/// the SPA's page size. The Forum screen lists up to [`LIST_LIMIT`]; its first posts are this
+/// page.
+pub const PARITY_LIST_LIMIT: u32 = 30;
+
 /// The time budget of the syncs a screen runs when it opens (as the CLI's implicit syncs).
 pub const IMPLICIT_SYNC_MS: i64 = 20_000;
 
@@ -93,6 +98,7 @@ pub async fn run<H: Host>(engine: &Engine<H>, effect: Effect, opts: ExecOpts) ->
             },
             result: engine.publish(&draft).await,
         },
+        Effect::LoadWrites => Action::WritesLoaded(engine.writes().await),
         Effect::Editor(_) | Effect::Quit => return None,
     })
 }
@@ -124,16 +130,7 @@ pub async fn load_forum<H: Host>(
     opts: ExecOpts,
 ) -> Result<ForumData, EngineError> {
     let view = engine.forum_open(forum).await?;
-    let q = ListPostsQuery {
-        forum: forum.to_owned(),
-        sort,
-        filter: PostFilter::All,
-        tag: None,
-        kind: None,
-        author: None,
-        cursor: None,
-        limit: LIST_LIMIT,
-    };
+    let q = posts_query(forum, sort, LIST_LIMIT);
     let mut list = engine.list_posts(&q).await?;
     if !opts.offline
         && unverified(list.items.iter().map(|p| &p.author))
@@ -142,6 +139,21 @@ pub async fn load_forum<H: Host>(
         list = engine.list_posts(&q).await?;
     }
     Ok(ForumData { view, list })
+}
+
+/// The query of the Forum screen (`filter: all`, the M2 default of every client,
+/// `engine-api.md` §3.4), at most `limit` posts.
+pub fn posts_query(forum: &str, sort: PostSort, limit: u32) -> ListPostsQuery {
+    ListPostsQuery {
+        forum: forum.to_owned(),
+        sort,
+        filter: PostFilter::All,
+        tag: None,
+        kind: None,
+        author: None,
+        cursor: None,
+        limit,
+    }
 }
 
 /// `get_thread` and the bodies of its items.

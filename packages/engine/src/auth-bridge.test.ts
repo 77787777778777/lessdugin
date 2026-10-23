@@ -338,17 +338,29 @@ describe("AuthBridge", () => {
     expect(e.kind).toBe("timeout");
   });
 
-  it("checks against its configured namespace", async () => {
+  it("checks against this build's namespace only, which nothing can change", async () => {
     const s = fakeSession(ALICE, () => new Response("{}"));
-    const bridge = new AuthBridge(sessions(s), { namespace: "online.7778777.lessdugin" });
-    expect((await fails(bridge.request(create))).kind).toBe("blocked");
-    await bridge.request(
-      write("com.atproto.repo.createRecord", {
-        repo: ALICE,
-        collection: "online.7778777.lessdugin.post",
-      }),
+    const bridge = new AuthBridge(sessions(s));
+    const profile = write("com.atproto.repo.putRecord", {
+      repo: ALICE,
+      collection: "app.bsky.actor.profile",
+      rkey: "self",
+    });
+    expect((await fails(bridge.request(profile))).kind).toBe("blocked");
+    // no property of the bridge widens the allowlist (security review #1)
+    const b = bridge as unknown as Record<string, unknown>;
+    b.namespace = "app.bsky.actor";
+    expect((await fails(bridge.request(profile))).kind).toBe("blocked");
+    expect(s.sent).toHaveLength(0);
+    // the pure check takes another prefix (the final namespace of release 0.1)
+    const finalNs = write("com.atproto.repo.createRecord", {
+      repo: ALICE,
+      collection: "online.7778777.lessdugin.post",
+    });
+    expect(checkRequest(finalNs, "online.7778777.lessdugin").nsid).toBe(
+      "com.atproto.repo.createRecord",
     );
-    expect(s.sent).toHaveLength(1);
+    expect(blocked(() => checkRequest(finalNs))).toContain("collection");
   });
 });
 
@@ -376,6 +388,7 @@ describe("sessions", () => {
       expect(h.get("content-type")).toBe("application/json");
       expect(c.init.credentials).toBe("omit");
       expect(c.init.cache).toBe("no-store");
+      expect(c.init.redirect).toBe("error");
     }
     // getSession goes as POST {} (the bridge takes POST only)
     expect(new TextDecoder().decode(calls[1]?.init.body as Uint8Array)).toBe("{}");
@@ -435,5 +448,20 @@ describe("sessions", () => {
     expect(calls[0]?.path).toBe("/xrpc/com.atproto.repo.createRecord");
     expect(calls[0]?.init.method).toBe("POST");
     expect(new Headers(calls[0]?.init.headers).get("authorization")).toBeNull();
+    // AUTH-8: never follow a redirect; sync.md §12.1: no HTTP cache
+    expect(calls[0]?.init.redirect).toBe("manual");
+    expect(calls[0]?.init.cache).toBe("no-store");
+    expect(calls[0]?.init.credentials).toBe("omit");
+  });
+
+  it("oauthSession: a redirect reaches the bridge as an opaque answer and is refused", async () => {
+    // what fetch returns for a 307 under `redirect: "manual"`
+    const opaque = { type: "opaqueredirect", status: 0, body: null, headers: new Headers() };
+    const s = oauthSession(ALICE, async (_path, init) => {
+      expect(init.redirect).toBe("manual");
+      return opaque as unknown as Response;
+    });
+    const e = await fails(new AuthBridge(sessions(s)).request(create));
+    expect(e.kind).toBe("blocked");
   });
 });

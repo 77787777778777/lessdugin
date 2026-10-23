@@ -2,12 +2,20 @@
 //
 // `Host::fetch_blob` for the browser (threat-model §5.6.1, sync.md §12.2): the blob is fetched
 // from `<pds>/xrpc/com.atproto.sync.getBlob` without redirects, streamed in JS with the byte cap,
-// assembled into one `Blob`, hashed with `crypto.subtle.digest("SHA-256", …)` and compared with
-// the CID's multihash; only on a match is it stored (keyed by CID) and a handle returned. No
-// blob byte enters wasm memory (INFRA-6). An already stored CID returns its handle without a
-// request.
+// its chunks assembled into one `Blob` (no intermediate copy), hashed with
+// `crypto.subtle.digest("SHA-256", …)` and compared with the CID's multihash; only on a match is
+// it stored (keyed by CID) and a handle returned. No blob byte enters wasm memory (INFRA-6). An
+// already stored CID returns its handle without a request.
+//
+// Timeouts (limits.md §7): no total timeout (a download is user-visible and cancellable), but
+// it is aborted after `BLOB_IDLE_TIMEOUT_MS` without a byte, waiting for the answer included.
 
 import { checkUrl, type FetchDeps, readCapped } from "./fetch.ts";
+import { Connection, openDatabase, storageError } from "./idb.ts";
+
+/** limits.md §7 `BLOB_IDLE_TIMEOUT_MS`. */
+export const BLOB_IDLE_TIMEOUT_MS = 20_000;
+
 import { hostError, isHostError } from "./protocol.ts";
 
 // ---------------------------------------------------------------------------------------------
@@ -99,32 +107,34 @@ export class MemoryBlobStore implements BlobStore {
 }
 
 /** Verified blobs in an IndexedDB object store (`Blob` values; the browser keeps them on
- * disk). */
+ * disk). The connection recovers like `IdbKv`'s (idb.ts `Connection`). */
 export class IdbBlobStore implements BlobStore {
-  private constructor(private readonly db: IDBDatabase) {}
+  private constructor(private readonly conn: Connection) {}
 
   static async open(name: string, factory: IDBFactory = indexedDB): Promise<IdbBlobStore> {
-    const open = factory.open(name, 1);
-    open.onupgradeneeded = () => {
-      if (!open.result.objectStoreNames.contains("blobs")) open.result.createObjectStore("blobs");
-    };
-    const db = await new Promise<IDBDatabase>((resolve, reject) => {
-      open.onsuccess = () => resolve(open.result);
-      open.onerror = () => reject(hostError("storage", `IndexedDB ${name}: ${open.error}`));
-    });
-    db.onversionchange = () => db.close();
-    return new IdbBlobStore(db);
+    const connect = () => openDatabase(factory, name, "blobs");
+    return new IdbBlobStore(new Connection(await connect(), connect));
   }
 
   close(): void {
-    this.db.close();
+    this.conn.close();
   }
 
-  private run<T>(mode: IDBTransactionMode, f: (s: IDBObjectStore) => IDBRequest<T>): Promise<T> {
+  private async run<T>(
+    mode: IDBTransactionMode,
+    f: (s: IDBObjectStore) => IDBRequest<T>,
+  ): Promise<T> {
+    const tx = await this.conn.transaction("blobs", mode);
     return new Promise((resolve, reject) => {
-      const r = f(this.db.transaction("blobs", mode).objectStore("blobs"));
+      let r: IDBRequest<T>;
+      try {
+        r = f(tx.objectStore("blobs"));
+      } catch (e) {
+        reject(storageError(e));
+        return;
+      }
       r.onsuccess = () => resolve(r.result);
-      r.onerror = () => reject(hostError("storage", `blob store: ${r.error}`));
+      r.onerror = () => reject(storageError(r.error));
     });
   }
 
@@ -160,9 +170,34 @@ function equal(a: Uint8Array, b: Uint8Array): boolean {
   return a.length === b.length && a.every((x, i) => x === b[i]);
 }
 
-/** `Host::fetch_blob(pds, did, cid, maxBytes)`. */
+/** Streams `body` into a list of chunks, failing with `tooLarge` past `max` bytes and calling
+ * `progress()` after each chunk (the idle timer). */
+async function readChunks(
+  body: ReadableStream<Uint8Array> | null,
+  max: number,
+  progress: () => void,
+): Promise<{ chunks: Uint8Array[]; size: number }> {
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  if (body === null) return { chunks, size };
+  const reader = body.getReader();
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    progress();
+    size += value.byteLength;
+    if (size > max) {
+      await reader.cancel().catch(() => {});
+      throw hostError("tooLarge", `blob larger than ${max} bytes`);
+    }
+    chunks.push(value);
+  }
+  return { chunks, size };
+}
+
+/** `Host::fetch_blob(pds, did, cid, maxBytes)`. `idleMs` defaults to `BLOB_IDLE_TIMEOUT_MS`. */
 export async function fetchBlob(
-  deps: FetchDeps & { store: BlobStore; timeoutMs?: number },
+  deps: FetchDeps & { store: BlobStore; idleMs?: number },
   pds: string,
   did: string,
   cid: string,
@@ -176,9 +211,20 @@ export async function fetchBlob(
   const u = new URL("/xrpc/com.atproto.sync.getBlob", base);
   u.searchParams.set("did", did);
   u.searchParams.set("cid", cid);
+  const idleMs = deps.idleMs ?? BLOB_IDLE_TIMEOUT_MS;
   const ctl = new AbortController();
-  const timer =
-    deps.timeoutMs !== undefined ? setTimeout(() => ctl.abort(), deps.timeoutMs) : undefined;
+  let idle = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const progress = (): void => {
+    if (timer !== undefined) clearTimeout(timer);
+    timer = setTimeout(() => {
+      idle = true;
+      ctl.abort();
+    }, idleMs);
+  };
+  const stalled = () =>
+    hostError("timeout", `getBlob from ${u.host}: no data for ${Math.round(idleMs / 1000)} s`);
+  progress();
   try {
     let resp: Response;
     try {
@@ -191,11 +237,10 @@ export async function fetchBlob(
         signal: ctl.signal,
       });
     } catch (e) {
-      if (e instanceof DOMException && e.name === "AbortError") {
-        throw hostError("timeout", `getBlob from ${u.host} timed out`);
-      }
+      if (idle || (e instanceof DOMException && e.name === "AbortError")) throw stalled();
       throw hostError("network", `getBlob from ${u.host}: ${e instanceof Error ? e.message : e}`);
     }
+    progress();
     if (resp.type === "opaqueredirect") {
       throw hostError("blocked", `getBlob from ${u.host} redirected (not followed)`);
     }
@@ -213,14 +258,19 @@ export async function fetchBlob(
         ...(name !== undefined ? { name } : {}),
       });
     }
-    let bytes: Uint8Array;
+    let read: { chunks: Uint8Array[]; size: number };
     try {
-      bytes = await readCapped(resp.body, maxBytes);
+      read = await readChunks(resp.body, maxBytes, progress);
     } catch (e) {
       if (isHostError(e)) throw e;
+      if (idle) throw stalled();
       throw hostError("network", `getBlob from ${u.host}: ${e instanceof Error ? e.message : e}`);
     }
-    const blob = new Blob([bytes as BlobPart]);
+    if (timer !== undefined) clearTimeout(timer);
+    // one Blob straight from the chunks (the list is dropped right after); the digest needs
+    // one contiguous copy, as WebCrypto has no streaming digest
+    const blob = new Blob(read.chunks as BlobPart[]);
+    read.chunks.length = 0;
     const got = new Uint8Array(await crypto.subtle.digest("SHA-256", await blob.arrayBuffer()));
     if (!equal(got, digest)) throw hostError("cidMismatch", `${cid}: the bytes do not match`);
     await deps.store.put(cid, blob);

@@ -473,6 +473,10 @@ pub struct PendingWrite {
     /// End of the hold (`held`) or of the back-off (`throttled`), ms.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub not_before: Option<i64>,
+    /// `throttled` because the account's session was refused (`error` says how): the write is
+    /// not tried again until the account logs in again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub needs_login: bool,
     /// A write request of this write may have reached the PDS (undo is no longer a removal).
     #[serde(default)]
     pub sent: bool,
@@ -505,16 +509,22 @@ impl PendingWrite {
                 not_before_ms: None,
                 held: false,
                 throttled: false,
+                needs_login: false,
+                error: None,
             },
             WriteStage::Held => WriteState::Pending {
                 not_before_ms: self.not_before,
                 held: true,
                 throttled: false,
+                needs_login: false,
+                error: None,
             },
             WriteStage::Throttled => WriteState::Pending {
                 not_before_ms: self.not_before,
                 held: false,
-                throttled: true,
+                throttled: !self.needs_login,
+                needs_login: self.needs_login,
+                error: self.error.as_ref().map(StoredError::to_engine_error),
             },
             WriteStage::Sending => WriteState::Sending,
             WriteStage::Done => {
@@ -654,6 +664,7 @@ mod tests {
             created_at: 5,
             updated_at: 6,
             not_before: Some(4_005),
+            needs_login: false,
             sent: false,
             results: vec![OpResult {
                 uri: "at://x/y/z".into(),

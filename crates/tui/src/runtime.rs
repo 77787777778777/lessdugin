@@ -8,11 +8,15 @@
 //! - `$EDITOR` runs with the terminal suspended: the input reader is parked first (so it cannot
 //!   take the editor's keys), then the alternate screen is left and raw mode switched off; both
 //!   are restored afterwards and the screen redrawn.
-//! - The terminal is restored on exit, on errors and on panics.
+//! - The terminal is restored on exit, on errors and on a panic of the UI thread. A panic in
+//!   an effect task does not touch the terminal from that thread (the UI would go on drawing
+//!   in cooked mode): the task reports it, and the UI loop ends with an error, restoring the
+//!   terminal as on any error.
 
 use std::collections::VecDeque;
 use std::io::{IsTerminal, Stdout};
 use std::sync::{Arc, Condvar, Mutex, Once};
+use std::thread::ThreadId;
 use std::time::Duration;
 
 use crossterm::event::{self, Event as TermEvent};
@@ -20,6 +24,7 @@ use crossterm::terminal::{
     Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use crossterm::{cursor, execute};
+use futures::FutureExt as _;
 use lessdugin_core::dto::AccountView;
 use lessdugin_core::engine::Engine;
 use lessdugin_core::host::Host;
@@ -51,6 +56,8 @@ pub struct Options {
 pub struct Report {
     /// Writes still queued at exit (sent by the next command that writes).
     pub queued_writes: usize,
+    /// Writes that failed (sent again only by `lessdugin outbox retry`).
+    pub failed_writes: usize,
 }
 
 /// Runs the TUI until the user quits. Needs a terminal on stdin and stdout.
@@ -104,6 +111,8 @@ async fn ui<H: Host>(
         offline: opts.offline,
     };
     let mut queue: VecDeque<Effect> = state.start(opts.forum.clone()).into();
+    // effect tasks that panicked report here; the UI then stops (see the module docs)
+    let (panicked_tx, mut panicked) = unbounded_channel::<String>();
     let outcome: anyhow::Result<()> = async {
         'main: loop {
             while let Some(effect) = queue.pop_front() {
@@ -116,7 +125,7 @@ async fn ui<H: Host>(
                         let template = req.template.clone();
                         let result = tokio::task::spawn_blocking(move || cfg.edit(&template))
                             .await
-                            .unwrap_or_else(|e| Err(format!("the editor task failed: {e}")));
+                            .unwrap_or_else(|e| Err(format!("the editor task failed: {e}").into()));
                         term.resume()?;
                         input.resume();
                         if let Ok((w, h)) = crossterm::terminal::size() {
@@ -130,9 +139,18 @@ async fn ui<H: Host>(
                     other => {
                         let engine = engine.clone();
                         let tx = tx.clone();
+                        let panicked = panicked_tx.clone();
                         tokio::spawn(async move {
-                            if let Some(a) = exec::run(&engine, other, exec_opts).await {
-                                let _ = tx.send(a);
+                            let run =
+                                std::panic::AssertUnwindSafe(exec::run(&engine, other, exec_opts));
+                            match run.catch_unwind().await {
+                                Ok(Some(a)) => {
+                                    let _ = tx.send(a);
+                                }
+                                Ok(None) => {}
+                                Err(payload) => {
+                                    let _ = panicked.send(panic_message(payload.as_ref()));
+                                }
                             }
                         });
                     }
@@ -142,7 +160,13 @@ async fn ui<H: Host>(
                 break;
             }
             term.terminal.draw(|f| crate::view::draw(&state, f))?;
-            let Some(a) = rx.recv().await else {
+            let a = tokio::select! {
+                a = rx.recv() => a,
+                Some(why) = panicked.recv() => {
+                    anyhow::bail!("an internal task failed: {why}");
+                }
+            };
+            let Some(a) = a else {
                 break;
             };
             queue.extend(state.update(a));
@@ -159,7 +183,29 @@ async fn ui<H: Host>(
     outcome?;
     Ok(Report {
         queued_writes: state.writes.len(),
+        failed_writes: state.failed.len(),
     })
+}
+
+/// The message of a panic payload.
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|s| (*s).to_owned())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "a panic".to_owned())
+}
+
+/// The thread that owns the terminal while a [`Term`] is active: only a panic there restores
+/// it from the panic hook.
+static UI_THREAD: Mutex<Option<ThreadId>> = Mutex::new(None);
+
+fn is_ui_thread() -> bool {
+    UI_THREAD
+        .lock()
+        .ok()
+        .and_then(|t| *t)
+        .is_some_and(|t| t == std::thread::current().id())
 }
 
 /// Restores the terminal (best effort).
@@ -180,10 +226,15 @@ impl Term {
         HOOK.call_once(|| {
             let previous = std::panic::take_hook();
             std::panic::set_hook(Box::new(move |info| {
-                restore();
+                if is_ui_thread() {
+                    restore();
+                }
                 previous(info);
             }));
         });
+        if let Ok(mut t) = UI_THREAD.lock() {
+            *t = Some(std::thread::current().id());
+        }
         enable_raw_mode()?;
         let terminal = match Self::fresh() {
             Ok(t) => t,
@@ -229,6 +280,9 @@ impl Drop for Term {
     fn drop(&mut self) {
         if self.active {
             restore();
+        }
+        if let Ok(mut t) = UI_THREAD.lock() {
+            *t = None;
         }
     }
 }

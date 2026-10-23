@@ -910,10 +910,13 @@ for each (repo, collection, fk):
 
 ```
 PendingWrite { id, account: did, seq: i64, intent, ops: [Op], base: Option<cid>, state, attempts, createdAt,
-               notBefore: Option<ms> }    // seq: FIFO position per account; notBefore: end of the hold (held)
+               notBefore: Option<ms>,     // seq: FIFO position per account; notBefore: end of the hold (held)
                                           // or of the back-off (throttled)
+               needsLogin: bool }         // throttled because the session was refused (below)
 state ∈ queued | held | sending | done | conflict | failed(reason) | throttled
 ```
+
+**Refused session.** A write request refused with `auth_required` (the PDS answers 401, or the host has no usable session: expired, revoked, logged out) is not an attempt and is not retried: the write becomes `throttled` with `needsLogin` and no `notBefore`, the pump sends nothing else of that account (FIFO), and `Auth { did, Expired }` is emitted (`engine-api.md` §3.5, §3.8). The account's next login queues every such write again.
 
 **Durability**
 - A `PendingWrite` is persisted in the `state` store before any network call.

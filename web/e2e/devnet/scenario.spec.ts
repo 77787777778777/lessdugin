@@ -9,6 +9,11 @@
 //      CLI's `login` stored): opens the forum and the post, presses `c`, writes in $EDITOR;
 //   6. bob, SPA: edits the post, which creates a revision.
 //
+// Alice also writes one post straight to her PDS whose TID and `createdAt` are an hour ahead of
+// the real clock (the parity canary, conformance review M3): a client that ignored parity mode
+// would mark it `futureDated` and rank it by when it first saw it; under the injected `now`
+// and `obs` it is neither, in all three clients.
+//
 // Then each client reads as an anonymous reader on a fresh data directory or browser profile,
 // syncing the forum as it does when a forum is opened: the CLI's `ls --json` and
 // `read <post> --json`, the TUI's Forum and Thread screens (the PostList and ThreadView they
@@ -45,6 +50,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, type Page, type TestInfo, test } from "@playwright/test";
+import { login as atpLogin, createPostAt, fk } from "./atp.mjs";
 import { e2eState, route, signIn, watchStrict, withDevnet } from "./state.ts";
 
 const s = e2eState();
@@ -61,6 +67,7 @@ const BODY = "Does this read the **same** everywhere?";
 const EDITED_TITLE = "Bob's question (edited)";
 const EDIT_TAIL = "Edited in the browser.";
 const REPLY = "Carol answers from the TUI: it should.";
+const CANARY_TITLE = "Dated an hour ahead";
 
 interface Run {
   code: number | null;
@@ -269,6 +276,7 @@ test("M2 parity scenario: alice (CLI), bob (SPA) and carol (TUI); the three clie
   let forum = "";
   let post = "";
   let reply = "";
+  let canary = "";
   const total0 = Date.now();
 
   try {
@@ -303,6 +311,21 @@ test("M2 parity scenario: alice (CLI), bob (SPA) and carol (TUI); the three clie
       expect(approved.writes.map((w) => w.state.kind)).toEqual(["done", "done"]);
       // carol signs in with the CLI; the TUI uses that stored session (as `lessdugin tui`)
       await carol.login();
+    });
+
+    // the parity canary: alice's post dated an hour ahead of the real clock (well before `t`)
+    await step("1b. alice (PDS API): a post dated an hour ahead", async () => {
+      const session = await atpLogin(s.devnet.pds, s.devnet.accounts.alice);
+      const r = await createPostAt(
+        session,
+        { uri: forum, fk: fk(forum) },
+        {
+          title: CANARY_TITLE,
+          body: "Its TID and createdAt are an hour ahead.",
+          atMs: Date.now() + 3_600_000,
+        },
+      );
+      canary = r.uri;
     });
 
     // 2. bob, SPA: signs in (OAuth), joins, posts
@@ -446,8 +469,20 @@ test("M2 parity scenario: alice (CLI), bob (SPA) and carol (TUI); the three clie
       reposTotal: 3,
       degraded: false,
     });
-    const list = JSON.parse(tuiOut.list.compact);
-    expect(list.items.map((p: { uri: string }) => p.uri)).toEqual([post]);
+    const list = JSON.parse(tuiOut.list.compact) as {
+      items: {
+        uri: string;
+        createdAtMs: number;
+        tRankMs: number;
+        badges: Record<string, unknown>;
+      }[];
+    };
+    expect(list.items.map((p) => p.uri).sort()).toEqual([post, canary].sort());
+    // parity mode reached every client: under the injected `now` and `obs` the canary is not
+    // future-dated and ranks by its own date (byte equality above holds it for all three)
+    const c = list.items.find((p) => p.uri === canary);
+    expect(c?.badges.futureDated).toBeUndefined();
+    expect(c?.tRankMs).toBe(c?.createdAtMs);
   } finally {
     timings.push({ step: "total", ms: Date.now() - total0 });
     const table = timings.map((x) => `| ${x.step} | ${x.ms} |`).join("\n");

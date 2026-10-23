@@ -12,6 +12,9 @@
 //   database (`@atproto-oauth-client`), AUTH-6. The library refreshes tokens under its own Web
 //   Lock (`@atproto-oauth-client-<did>`), which serialises refreshes across tabs as AUTH-6
 //   requires; its name is not configurable.
+// - An ended session (refresh refused, revoked, signed out in another tab) is dropped from the
+//   cache and reported through `onSessionEnded`, and the request that found it rejects with
+//   `authRequired` (sessionEnd.ts), so the outbox waits for a sign-in instead of retrying.
 // - Scopes: data-model.md §10.3 (host/scopes.ts), never `transition:generic`.
 // - Client: on the hosted site, the web client metadata next to the app
 //   (`oauth/client-metadata.json`, redirect to the app's directory); on a loopback http origin
@@ -23,10 +26,23 @@ import {
   BrowserOAuthClient,
   type HandleResolver,
   type OAuthSession,
+  TokenInvalidError,
+  TokenRefreshError,
+  TokenRevokedError,
 } from "@atproto/oauth-client-browser";
 import type { PdsSession, SessionProvider } from "@lessdugin/engine/client";
-import { NS, oauthSession } from "@lessdugin/engine/client";
+import { NS } from "@lessdugin/engine/client";
 import { scopeCandidates, supersetScope } from "./scopes.ts";
+import { endAwareSession } from "./sessionEnd.ts";
+
+/** The library's errors for a session that is gone (not for a network failure). */
+function isSessionGone(e: unknown): boolean {
+  return (
+    e instanceof TokenRefreshError ||
+    e instanceof TokenRevokedError ||
+    e instanceof TokenInvalidError
+  );
+}
 
 type RedirectUri = NonNullable<AuthorizeOptions["redirect_uri"]>;
 
@@ -79,6 +95,9 @@ const NO_HANDLE_RESOLUTION: HandleResolver = { resolve: async () => null };
 export interface HostedOAuthOptions {
   /** Devnet (e2e builds only): http authorization servers and this PLC directory. */
   devnet?: { plc: string } | undefined;
+  /** A session ended without a sign-out in this tab (refresh refused, revoked, or signed out
+   * in another tab). */
+  onSessionEnded?: ((did: string) => void) | undefined;
 }
 
 /** What a finished callback yields for `addAccount`. */
@@ -121,9 +140,13 @@ function parseAppState(s: string | null | undefined): AppState {
 export class HostedOAuth implements SessionProvider {
   private readonly sessions = new Map<string, Promise<OAuthSession>>();
 
+  /** DIDs this tab is signing out itself (their deletion is not "ended"). */
+  private readonly signingOut = new Set<string>();
+  private client!: BrowserOAuthClient;
+
   private constructor(
-    private readonly client: BrowserOAuthClient,
     readonly choice: ClientChoice,
+    private readonly onSessionEnded: ((did: string) => void) | undefined,
   ) {}
 
   static async create(
@@ -131,16 +154,25 @@ export class HostedOAuth implements SessionProvider {
     base = document.baseURI,
   ): Promise<HostedOAuth> {
     const choice = chooseClient(base);
-    const client = await BrowserOAuthClient.load({
+    const self = new HostedOAuth(choice, opts.onSessionEnded);
+    self.client = await BrowserOAuthClient.load({
       clientId: choice.clientId,
       responseMode: "query",
       handleResolver: NO_HANDLE_RESOLUTION,
+      // the library deleted a session (here, or in another tab of this origin)
+      onSessionDeleted: (sub: string) => self.ended(sub),
       // Only e2e builds may talk http to an authorization server (the devnet).
       ...(opts.devnet && import.meta.env.VITE_E2E === "1"
         ? { allowHttp: true, plcDirectoryUrl: opts.devnet.plc }
         : {}),
     });
-    return new HostedOAuth(client, choice);
+    return self;
+  }
+
+  /** The session of `did` is gone: forget it, and tell the app unless this tab signed out. */
+  private ended(did: string): void {
+    this.sessions.delete(did);
+    if (!this.signingOut.has(did)) this.onSessionEnded?.(did);
   }
 
   /** Starts a login as `did`: the authorization URL to navigate to (after PAR). */
@@ -192,15 +224,27 @@ export class HostedOAuth implements SessionProvider {
     try {
       s = await p;
     } catch {
-      this.sessions.delete(did);
+      if (this.sessions.get(did) === p) this.sessions.delete(did);
       return null;
     }
-    return oauthSession(did, (path, init) => s.fetchHandler(path, init));
+    return endAwareSession(
+      did,
+      (path, init) => s.fetchHandler(path, init),
+      isSessionGone,
+      (d) => {
+        if (this.sessions.get(d) === p) this.ended(d);
+      },
+    );
   }
 
   /** Revokes the session at the authorization server and deletes it (AUTH-11). */
   async revoke(did: string): Promise<void> {
     this.sessions.delete(did);
-    await this.client.revoke(did);
+    this.signingOut.add(did);
+    try {
+      await this.client.revoke(did);
+    } finally {
+      this.signingOut.delete(did);
+    }
   }
 }

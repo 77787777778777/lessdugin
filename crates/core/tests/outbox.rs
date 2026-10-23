@@ -159,7 +159,9 @@ fn first_content_includes_membership_only_when_absent() {
         WriteState::Pending {
             not_before_ms: None,
             held: false,
-            throttled: false
+            throttled: false,
+            needs_login: false,
+            error: None,
         }
     );
     assert_eq!(w.net.count(APPLY), 0);
@@ -1157,6 +1159,7 @@ fn writes_are_never_sent_for_another_account() {
         created_at: 0,
         updated_at: 0,
         not_before: None,
+        needs_login: false,
         sent: false,
         results: Vec::new(),
         error: None,

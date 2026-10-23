@@ -11,6 +11,7 @@ import { toasts } from "../../components/Toast.tsx";
 import { useEngine } from "../../engine/context.tsx";
 import { setCurrentForum } from "../../engine/currentForum.ts";
 import { useActiveAccount, useForum } from "../../engine/queries.ts";
+import { useAnnounceQueued } from "../../engine/queued.ts";
 import { useForumSync, useSyncProgress } from "../../engine/sync.ts";
 import { usePendingWrite, writeStore } from "../../engine/writes.ts";
 import { cleanName } from "../../lib/text.ts";
@@ -25,6 +26,7 @@ export function ForumLayout() {
   const { owner, slug } = route.useParams();
   const forum = useForum(`#/f/${owner}/${slug}`);
   const engine = useEngine();
+  const announceQueued = useAnnounceQueued();
   const qc = useQueryClient();
   const navigate = useNavigate();
   const requestAck = usePublicAck();
@@ -55,9 +57,11 @@ export function ForumLayout() {
     try {
       const ticket = await engine.join(f.uri);
       writeStore.track(ticket, f.uri);
-      const final = await writeStore.wait(ticket.id);
+      const final = await writeStore.settle(ticket.id);
       if (final.kind === "failed") throw final.error;
-      if (final.kind === "done") {
+      if (final.kind === "queued") {
+        announceQueued("Your membership", final.state);
+      } else if (final.kind === "done") {
         toasts.show({ message: "Joined (your membership is public)", tone: "success" });
       } else {
         toasts.show({ message: "Join undone" });

@@ -4,13 +4,14 @@
 //!
 //! - every response, static or bridge, carries the §6.1 CSP (the §6.2 policy under `--dev`)
 //!   and the §6.3 headers, and no `Access-Control-*` header; `OPTIONS` is 405;
-//! - a `Host` other than `127.0.0.1:<port>` / `[::1]:<port>` gets an empty 403 before routing
+//! - a `Host` other than `127.0.0.1:<port>` gets an empty 403 before routing
 //!   (DNS rebinding), also without a Host or with an absolute-form target;
 //! - every row of the §7.3 table, in its order: method (405), Origin (403), bearer token (401),
 //!   Content-Type (415), body limit (413); `/bridge/fetch` is 404;
 //! - a capability is single use, and using it twice revokes its session;
-//! - `/bridge/kv` reaches only the `out`, `out.budget`, `loc`, `notif` and `meta` scopes of the
-//!   native `state` store, atomically, and persists across restarts;
+//! - `/bridge/kv` reaches only the `out`, `out.budget`, `out.meta`, `out.blob`, `loc`, `notif`
+//!   and `meta` scopes of the native `state` store, atomically, and persists across restarts;
+//!   the account rows, the active account, the pins and `meta` are read-only there;
 //! - `/bridge/xrpc` forwards only the AUTH-4 methods, collections and own repo through the
 //!   CLI's session (against a tiny PLC + PDS in devnet mode), passing through only the status,
 //!   body, `Content-Type`, `Retry-After` and `RateLimit-*`;
@@ -734,6 +735,8 @@ fn foreign_hosts_are_refused_before_routing() {
         format!("127.0.0.1.nip.io:{p}"),
         format!("127.0.0.1:{p}.evil.example"),
         "[::1]".to_owned(),
+        // the listener is on 127.0.0.1 only (WEB-1), so [::1] is never a legitimate Host
+        format!("[::1]:{p}"),
         format!("0.0.0.0:{p}"),
     ];
     for host in &hosts {
@@ -759,12 +762,6 @@ fn foreign_hosts_are_refused_before_routing() {
             r.assert_policy(&csp, host);
         }
     }
-    // [::1]:<port> is the other allowed Host.
-    let r = http.send(
-        http.request(Method::GET, &web.url("/lessdugin-config.json"))
-            .header("host", format!("[::1]:{p}")),
-    );
-    assert_eq!(r.status, 200);
     // No Host at all (HTTP/1.0), an absolute-form target naming another host, two Hosts.
     let (status, text) = raw(p, "GET / HTTP/1.0\r\n\r\n");
     assert_eq!(status, 403, "{text}");
@@ -853,11 +850,6 @@ fn bridge_checks_run_in_the_order_of_the_7_3_table() {
         // Passing every check.
         good("all checks pass", "/bridge/kv", &empty_get, 200),
         Case {
-            what: "the [::1] origin is allowed",
-            origin: vec![format!("http://[::1]:{p}")],
-            ..good("", "/bridge/kv", &empty_get, 200)
-        },
-        Case {
             what: "a charset parameter is fine",
             content_type: Some("application/json; charset=utf-8"),
             ..good("", "/bridge/kv", &empty_get, 200)
@@ -901,6 +893,11 @@ fn bridge_checks_run_in_the_order_of_the_7_3_table() {
         Case {
             what: "#3 null Origin",
             origin: vec!["null".into()],
+            ..good("", "/bridge/kv", &empty_get, 403)
+        },
+        Case {
+            what: "#3 the [::1] origin (the listener is on 127.0.0.1 only)",
+            origin: vec![format!("http://[::1]:{p}")],
             ..good("", "/bridge/kv", &empty_get, 403)
         },
         Case {
@@ -1194,6 +1191,23 @@ fn kv_reaches_only_its_scopes_and_persists() {
         json!({"op": "scan", "start": {"included": key(&["out"])}, "end": {"excluded": succ(&["out"])}, "dir": "reverse", "limit": 10}),
     );
     assert_eq!(r.json()["entries"].as_array().unwrap().len(), 1);
+    // Every scope the outbox writes (W6 meta rows, blob chunks, the budget) is writable: without
+    // them every write from a tab is refused.
+    let r = call(
+        &web,
+        json!({"op": "write", "batch": [
+            {"put": [key(&["out.meta", DID]), value]},
+            {"put": [key(&["out.blob", DID, "x"]), value]},
+            {"put": [key(&["out.budget", DID]), value]},
+            {"deleteRange": [{"included": key(&["out.blob", DID])}, {"excluded": succ(&["out.blob", DID])}]},
+        ]}),
+    );
+    assert_eq!(r.status, 200, "{}", String::from_utf8_lossy(&r.body));
+    let r = call(
+        &web,
+        json!({"op": "get_many", "keys": [key(&["out.meta", DID]), key(&["out.blob", DID, "x"])]}),
+    );
+    assert_eq!(r.json(), json!({"values": [value, null]}));
 
     // Out of scope: the cache's records, made-up scopes, prefixes of a scope, open ranges,
     // ranges across scopes. A batch with one bad operation applies nothing.
@@ -1208,6 +1222,12 @@ fn kv_reaches_only_its_scopes_and_persists() {
         // the authorization-server pins are readable but never written from the tab
         json!({"op": "write", "batch": [{"put": [key(&["loc", "as_pin", DID]), value]}]}),
         json!({"op": "write", "batch": [{"delete": key(&["loc", "as_pin", DID])}]}),
+        // nor are the account rows, the active account and the schema (native state only)
+        json!({"op": "write", "batch": [{"put": [key(&["loc", "active_account"]), value]}]}),
+        json!({"op": "write", "batch": [{"put": [key(&["loc", "account", DID]), value]}]}),
+        json!({"op": "write", "batch": [{"delete": key(&["loc", "account", DID])}]}),
+        json!({"op": "write", "batch": [{"deleteRange": [{"included": key(&["loc", "account"])}, {"excluded": succ(&["loc", "account"])}]}]}),
+        json!({"op": "write", "batch": [{"put": [key(&["meta", "schema"]), value]}]}),
         json!({"op": "write", "batch": [{"deleteRange": [{"included": key(&["loc"])}, {"excluded": succ(&["loc"])}]}]}),
         json!({"op": "write", "batch": [{"deleteRange": [{"included": key(&["loc"])}, {"excluded": succ(&["out"])}]}]}),
         json!({"op": "scan", "start": {"included": ""}, "end": {"excluded": succ(&["meta"])}, "dir": "forward", "limit": 10}),
@@ -1592,4 +1612,55 @@ fn the_port_comes_from_the_flag_or_web_port_and_a_busy_port_is_an_error() {
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(2));
+}
+
+/// Ctrl-C stops the server even while a client stalls mid-request (graceful shutdown waits at
+/// most `WEB_SHUTDOWN_GRACE_MS`), and a second Ctrl-C stops it at once.
+#[test]
+fn ctrl_c_stops_the_server_despite_a_stalled_client() {
+    for twice in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut web, _) = Web::start(dir.path(), &[], Some(free_port()));
+        // A client that sends half a request and then nothing.
+        let mut stalled = TcpStream::connect(("127.0.0.1", web.port)).unwrap();
+        stalled
+            .write_all(format!("GET / HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n", web.port).as_bytes())
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        let interrupt = || {
+            let ok = Command::new("kill")
+                .args(["-INT", &web.child.id().to_string()])
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok);
+        };
+        let started = std::time::Instant::now();
+        interrupt();
+        if twice {
+            std::thread::sleep(Duration::from_millis(300));
+            interrupt();
+        }
+        let status = loop {
+            if let Some(s) = web.child.try_wait().unwrap() {
+                break s;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "lessdugin web still runs {:?} after Ctrl-C: {}",
+                started.elapsed(),
+                web.stderr()
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        assert!(status.success(), "{status:?}: {}", web.stderr());
+        if twice {
+            assert!(
+                started.elapsed() < Duration::from_millis(2_500),
+                "the second Ctrl-C stops it at once ({:?})",
+                started.elapsed()
+            );
+        }
+        drop(stalled);
+    }
 }

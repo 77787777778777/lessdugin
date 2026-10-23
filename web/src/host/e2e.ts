@@ -18,6 +18,9 @@ export interface E2EOptions {
   devnet?: { plc: string; pds: string };
   /** Parity mode: the fixed `now` of every view (ms since the epoch). */
   parityNowMs?: number;
+  /** The engine worker runs one blocked `eval` after starting (WorkerInit `cspProbe`), so a
+   * suite can check that worker violations reach its watcher. */
+  cspProbe?: boolean;
 }
 
 export interface E2EDebug {
@@ -58,7 +61,11 @@ function loopbackHttp(u: unknown): string | null {
 /** The harness's options (validated: devnet endpoints must be loopback http). */
 export function e2eOptions(raw: unknown = globalThis.window?.__LESSDUGIN_E2E__): E2EOptions {
   if (typeof raw !== "object" || raw === null) return {};
-  const v = raw as { devnet?: { plc?: unknown; pds?: unknown }; parityNowMs?: unknown };
+  const v = raw as {
+    devnet?: { plc?: unknown; pds?: unknown };
+    parityNowMs?: unknown;
+    cspProbe?: unknown;
+  };
   const out: E2EOptions = {};
   const plc = loopbackHttp(v.devnet?.plc);
   const pds = loopbackHttp(v.devnet?.pds);
@@ -66,6 +73,7 @@ export function e2eOptions(raw: unknown = globalThis.window?.__LESSDUGIN_E2E__):
   if (typeof v.parityNowMs === "number" && Number.isSafeInteger(v.parityNowMs)) {
     out.parityNowMs = v.parityNowMs;
   }
+  if (v.cspProbe === true) out.cspProbe = true;
   return out;
 }
 

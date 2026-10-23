@@ -35,6 +35,7 @@ import { VoteControls } from "../components/VoteControls.tsx";
 import { useEngine } from "../engine/context.tsx";
 import { useCommentDraft } from "../engine/drafts.ts";
 import { qk, useActiveAccount, useForum, useParsedRef } from "../engine/queries.ts";
+import { useAnnounceQueued } from "../engine/queued.ts";
 import { useThreadSync } from "../engine/sync.ts";
 import { usePendingWrite, writeStore } from "../engine/writes.ts";
 import { votingMode } from "../lib/policy.ts";
@@ -364,6 +365,7 @@ function PostBodyView({
 
 export function PostThread({ uri }: { uri: string }) {
   const engine = useEngine();
+  const announceQueued = useAnnounceQueued();
   const [sort, setSort] = useState<CommentSort>("magic");
   const [unreadOnly, setUnreadOnly] = useState(false);
   const headingId = useId();
@@ -425,8 +427,12 @@ export function PostThread({ uri }: { uri: string }) {
   const submitComment = async (markdown: string): Promise<boolean> => {
     const ticket = await engine.comment({ root: uri, body: { markdown, media: [] } });
     writeStore.track(ticket);
-    const final = await writeStore.wait(ticket.id);
+    const final = await writeStore.settle(ticket.id);
     if (final.kind === "failed") throw final.error;
+    if (final.kind === "queued") {
+      announceQueued("Your comment", final.state);
+      return true;
+    }
     if (final.kind !== "done") return false;
     toasts.show({ message: "Comment published", tone: "success" });
     return true;

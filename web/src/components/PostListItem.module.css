@@ -12,8 +12,11 @@
   background: var(--color-surface);
 }
 
+/* A collapsed post (below the forum's threshold) is marked without lowering its text
+   contrast (WCAG 1.4.3; the default "all" filter lists them): a tinted row with a rule. */
 .collapsed {
-  opacity: 0.6;
+  background: var(--color-surface);
+  box-shadow: inset 3px 0 0 var(--color-border-strong);
 }
 
 .score {

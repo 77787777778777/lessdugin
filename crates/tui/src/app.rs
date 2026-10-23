@@ -111,6 +111,27 @@ impl Compose {
             Compose::Post { .. } => "post",
         }
     }
+
+    /// The key that opens the editor for it again.
+    fn again(&self) -> &'static str {
+        match self {
+            Compose::Comment {
+                parent: Some(_), ..
+            } => "r",
+            Compose::Comment { parent: None, .. } => "c",
+            Compose::Post { .. } => "P",
+        }
+    }
+}
+
+/// A write queued from this TUI, until it is sent (or fails).
+#[derive(Clone, Debug)]
+struct OwnWrite {
+    /// The screen on top when it was queued: its next change is the write, shown at once.
+    screen: ScreenId,
+    /// What was written, and the text (offered again if the write fails).
+    compose: Compose,
+    text: String,
 }
 
 /// An `$EDITOR` session to run.
@@ -171,6 +192,9 @@ pub enum Effect {
         /// The draft.
         draft: PostDraft,
     },
+    /// `writes()`: the outbox as it is at start (writes queued or failed before this
+    /// session).
+    LoadWrites,
     /// Leave the TUI.
     Quit,
 }
@@ -227,8 +251,10 @@ pub enum Action {
         /// What was written.
         compose: Compose,
         /// The file's whole text.
-        result: Result<String, String>,
+        result: Result<String, editor::EditError>,
     },
+    /// [`Effect::LoadWrites`] finished.
+    WritesLoaded(Result<Vec<WriteTicket>, EngineError>),
     /// [`Effect::Comment`] or [`Effect::Publish`] finished.
     Queued {
         /// What was written.
@@ -644,19 +670,34 @@ pub struct State {
     pub sync: BTreeMap<String, SyncStatus>,
     /// Outbox writes not finished yet, by id.
     pub writes: BTreeMap<String, WriteState>,
+    /// Outbox writes that failed (sent again only by `lessdugin outbox retry`), by id.
+    pub failed: BTreeSet<String>,
     /// The writes queued from this TUI.
-    own: BTreeSet<String>,
-    /// One of them is done: the next change of the top screen is shown at once (the user's own
-    /// write is what they expect to see, not a banner).
-    follow_own: bool,
+    own: BTreeMap<String, OwnWrite>,
+    /// Writes an event finished before the result of queuing them arrived (the runtime runs
+    /// the call as a task, and the pump may send the write first).
+    finished: BTreeSet<String>,
+    /// One of them is done, queued from this screen: its next change is shown at once (the
+    /// user's own write is what they expect to see, not a banner). Cleared when the stack
+    /// changes, so it never applies to another screen.
+    follow_own: Option<ScreenId>,
     /// Text kept after a failed attempt, offered again by the next editor session for it.
     kept: Option<(Compose, String)>,
     /// The user asked to quit.
     pub quit: bool,
 }
 
-/// The rows the frame takes outside the content: the header, the info line and the status line.
+/// The rows the frame takes outside the content: the header, the info line and the status line
+/// (one row; a long message takes up to [`MAX_STATUS_ROWS`]).
 pub const CHROME_ROWS: u16 = 3;
+
+/// The most rows a status message wraps to.
+pub const MAX_STATUS_ROWS: u16 = 3;
+
+/// A status message as the status line draws it (after a one-column margin).
+pub fn status_text(s: &Status) -> TermText {
+    cat([lit(" "), s.text.clone()])
+}
 
 impl State {
     /// A new state for a terminal of `width` × `height`.
@@ -673,16 +714,22 @@ impl State {
             auto_sync: !offline,
             sync: BTreeMap::new(),
             writes: BTreeMap::new(),
-            own: BTreeSet::new(),
-            follow_own: false,
+            failed: BTreeSet::new(),
+            own: BTreeMap::new(),
+            finished: BTreeSet::new(),
+            follow_own: None,
             kept: None,
             quit: false,
         }
     }
 
-    /// Opens Home, and the forum `forum` on top of it when given.
+    /// Opens Home, and the forum `forum` on top of it when given; loads the outbox of earlier
+    /// sessions when an account writes.
     pub fn start(&mut self, forum: Option<String>) -> Vec<Effect> {
         let mut fx = Vec::new();
+        if self.account.is_some() {
+            fx.push(Effect::LoadWrites);
+        }
         self.push(ScreenKind::Home(HomeScreen::default()), &mut fx);
         if let Some(f) = forum {
             self.push_forum(f, &mut fx);
@@ -692,7 +739,26 @@ impl State {
 
     /// The content rows (the frame minus header, info and status lines).
     pub fn content_height(&self) -> usize {
-        usize::from(self.height.saturating_sub(CHROME_ROWS).max(1))
+        let chrome = CHROME_ROWS - 1 + self.status_rows();
+        usize::from(self.height.saturating_sub(chrome).max(1))
+    }
+
+    /// The rows of the status line: a long message wraps, up to [`MAX_STATUS_ROWS`] (and
+    /// never taking the last content row).
+    pub fn status_rows(&self) -> u16 {
+        let Some(s) = &self.status else {
+            return 1;
+        };
+        let need = crate::text::wrapped(
+            &status_text(s),
+            ratatui::style::Style::default(),
+            usize::from(self.width),
+        )
+        .len();
+        let room = self.height.saturating_sub(CHROME_ROWS).max(1);
+        u16::try_from(need)
+            .unwrap_or(u16::MAX)
+            .clamp(1, MAX_STATUS_ROWS.min(room))
     }
 
     /// The top screen.
@@ -748,6 +814,7 @@ impl State {
                 results,
             } => self.synced(&target, user, at_ms, results, &mut fx),
             Action::Edited { compose, result } => self.edited(compose, result, &mut fx),
+            Action::WritesLoaded(result) => self.writes_loaded(result),
             Action::Queued {
                 compose,
                 text,
@@ -788,6 +855,7 @@ impl State {
     // screens
 
     fn push(&mut self, kind: ScreenKind, fx: &mut Vec<Effect>) -> usize {
+        self.follow_own = None;
         let id = self.next_id;
         self.next_id += 1;
         self.stack.push(Screen {
@@ -861,6 +929,7 @@ impl State {
         if self.stack.len() <= 1 {
             return;
         }
+        self.follow_own = None;
         self.stack.pop();
         let i = self.stack.len() - 1;
         if self.stack[i].stale {
@@ -1203,11 +1272,30 @@ impl State {
         fx.push(Effect::Editor(EditorRequest { compose, template }));
     }
 
-    fn edited(&mut self, compose: Compose, result: Result<String, String>, fx: &mut Vec<Effect>) {
+    fn edited(
+        &mut self,
+        compose: Compose,
+        result: Result<String, editor::EditError>,
+        fx: &mut Vec<Effect>,
+    ) {
         let raw = match result {
             Ok(raw) => raw,
             Err(e) => {
-                self.say(Tone::Error, tt(&e));
+                // an editor that failed after the user wrote something: keep the text
+                match e.text.as_deref().and_then(editor::strip_template) {
+                    Some(text) => {
+                        let again = compose.again();
+                        self.kept = Some((compose, text));
+                        self.say(
+                            Tone::Error,
+                            tt(&format!(
+                                "{}. Your text is kept; press {again} to edit it again.",
+                                e.message
+                            )),
+                        );
+                    }
+                    None => self.say(Tone::Error, tt(&e.message)),
+                }
                 return;
             }
         };
@@ -1251,13 +1339,37 @@ impl State {
     ) {
         let noun = compose.noun();
         match result {
+            Ok(t) if self.failed.contains(&t.id) => {
+                // it failed before this result arrived: the text comes back to the editor
+                let again = compose.again();
+                self.kept = Some((compose, text));
+                self.say(
+                    Tone::Error,
+                    tt(&format!(
+                        "Your {noun} could not be sent. Press {again} to edit the text and send \
+                         it again, or run `lessdugin outbox retry {}`.",
+                        t.id
+                    )),
+                );
+            }
             Ok(t) => {
                 self.kept = None;
-                self.own.insert(t.id.clone());
                 if !matches!(
                     t.state,
                     WriteState::Done { .. } | WriteState::Failed { .. } | WriteState::Undone
-                ) {
+                ) && !self.failed.contains(&t.id)
+                    && !self.finished.remove(&t.id)
+                {
+                    // (an event may already have finished it: then it is not tracked again)
+                    let screen = self.top().map_or(0, |s| s.id);
+                    self.own.insert(
+                        t.id.clone(),
+                        OwnWrite {
+                            screen,
+                            compose: compose.clone(),
+                            text: text.clone(),
+                        },
+                    );
                     self.writes.insert(t.id.clone(), t.state.clone());
                 }
                 let msg = if self.offline {
@@ -1271,14 +1383,8 @@ impl State {
                 }
             }
             Err(e) => {
-                self.kept = Some((compose.clone(), text));
-                let again = match compose {
-                    Compose::Comment {
-                        parent: Some(_), ..
-                    } => "r",
-                    Compose::Comment { parent: None, .. } => "c",
-                    Compose::Post { .. } => "P",
-                };
+                let again = compose.again();
+                self.kept = Some((compose, text));
                 self.say(
                     Tone::Error,
                     tt(&format!(
@@ -1419,6 +1525,28 @@ impl State {
         }
     }
 
+    /// The outbox at start: writes still queued or failed from earlier sessions (states that
+    /// events already reported are kept).
+    fn writes_loaded(&mut self, result: Result<Vec<WriteTicket>, EngineError>) {
+        let Ok(tickets) = result else {
+            return;
+        };
+        for t in tickets {
+            if self.writes.contains_key(&t.id) || self.own.contains_key(&t.id) {
+                continue;
+            }
+            match t.state {
+                WriteState::Pending { .. } | WriteState::Sending => {
+                    self.writes.insert(t.id, t.state);
+                }
+                WriteState::Failed { .. } => {
+                    self.failed.insert(t.id);
+                }
+                WriteState::Done { .. } | WriteState::Undone => {}
+            }
+        }
+    }
+
     fn event(&mut self, e: Event, fx: &mut Vec<Effect>) {
         match e {
             Event::Changed { topics } => {
@@ -1437,7 +1565,8 @@ impl State {
                         continue;
                     }
                     if i == top {
-                        let origin = if std::mem::take(&mut self.follow_own) {
+                        let origin = if self.follow_own == Some(self.stack[i].id) {
+                            self.follow_own = None;
                             Origin::User
                         } else {
                             Origin::Live
@@ -1453,27 +1582,48 @@ impl State {
             }
             Event::Write { id, state } => match state {
                 WriteState::Pending { .. } | WriteState::Sending => {
+                    self.failed.remove(&id);
                     self.writes.insert(id, state);
                 }
                 WriteState::Done { .. } => {
                     self.writes.remove(&id);
-                    if self.own.remove(&id) {
-                        self.follow_own = true;
-                        self.say(Tone::Good, lit("Sent."));
+                    self.failed.remove(&id);
+                    match self.own.remove(&id) {
+                        Some(w) => {
+                            if self.top().is_some_and(|s| s.id == w.screen) {
+                                self.follow_own = Some(w.screen);
+                            }
+                            self.say(Tone::Good, lit("Sent."));
+                        }
+                        None => {
+                            self.finished.insert(id);
+                        }
                     }
                 }
                 WriteState::Failed { error } => {
                     self.writes.remove(&id);
-                    if self.own.remove(&id) {
+                    self.failed.insert(id.clone());
+                    if let Some(w) = self.own.remove(&id) {
+                        // the text comes back to the editor; the write stays in the outbox
+                        let noun = w.compose.noun();
+                        let again = w.compose.again();
+                        self.kept = Some((w.compose, w.text));
                         self.say(
                             Tone::Error,
-                            cat([lit("Could not send: "), tt(&error.message)]),
+                            tt(&format!(
+                                "Could not send your {noun}: {}. Press {again} to edit the text \
+                                 and send it again, or run `lessdugin outbox retry {id}`.",
+                                error.message
+                            )),
                         );
                     }
                 }
                 WriteState::Undone => {
                     self.writes.remove(&id);
-                    self.own.remove(&id);
+                    self.failed.remove(&id);
+                    if self.own.remove(&id).is_none() {
+                        self.finished.insert(id);
+                    }
                 }
             },
             Event::Auth { state, .. } => {
@@ -1505,6 +1655,216 @@ enum Loaded {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn queued(st: &mut State, id: &str, root: &str) -> Vec<Effect> {
+        st.update(Action::Queued {
+            compose: Compose::Comment {
+                root: root.into(),
+                parent: None,
+            },
+            text: "my reply".into(),
+            result: Ok(WriteTicket {
+                id: id.into(),
+                state: WriteState::Pending {
+                    not_before_ms: None,
+                    held: false,
+                    throttled: false,
+                    needs_login: false,
+                    error: None,
+                },
+            }),
+        })
+    }
+
+    fn done(st: &mut State, id: &str) -> Vec<Effect> {
+        st.update(Action::Engine(Event::Write {
+            id: id.into(),
+            state: WriteState::Done {
+                uri: "at://did:plc:x/c/1".into(),
+                cid: None,
+            },
+        }))
+    }
+
+    fn changed(st: &mut State, topic: Topic) -> Vec<Effect> {
+        st.update(Action::Engine(Event::Changed {
+            topics: vec![topic],
+        }))
+    }
+
+    fn user_loads(fx: &[Effect]) -> usize {
+        fx.iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    Effect::LoadForum {
+                        origin: Origin::User,
+                        ..
+                    } | Effect::LoadThread {
+                        origin: Origin::User,
+                        ..
+                    }
+                )
+            })
+            .count()
+    }
+
+    /// An own write shows at once on the screen it was written from, and only there: when it
+    /// finishes under another screen, that screen's next live update is not applied at once.
+    #[test]
+    fn own_writes_are_followed_only_on_their_screen() {
+        let mut st = State::new(80, 24, None, true);
+        st.start(None);
+        st.open_forum("at://f".into());
+        st.open_thread("at://t".into());
+        queued(&mut st, "w1", "at://t");
+        done(&mut st, "w1");
+        let fx = changed(
+            &mut st,
+            Topic::Thread {
+                uri: "at://t".into(),
+            },
+        );
+        assert_eq!(user_loads(&fx), 1, "the own write is shown at once: {fx:?}");
+        // the flag is spent
+        let fx = changed(
+            &mut st,
+            Topic::Thread {
+                uri: "at://t".into(),
+            },
+        );
+        assert_eq!(user_loads(&fx), 0, "{fx:?}");
+
+        // queued on the thread, finished after going back to the forum
+        queued(&mut st, "w2", "at://t");
+        st.update(Action::Key(keys::parse_key("h").unwrap()));
+        done(&mut st, "w2");
+        let fx = changed(
+            &mut st,
+            Topic::Forum {
+                uri: "at://f".into(),
+            },
+        );
+        assert_eq!(
+            user_loads(&fx),
+            0,
+            "the forum's live update is not forced: {fx:?}"
+        );
+        assert_eq!(
+            st.status
+                .as_ref()
+                .map(|s| s.text.to_plain_string())
+                .as_deref(),
+            Some("Sent.")
+        );
+    }
+
+    /// A failed own write gives its text back to the editor and names the write; a long status
+    /// message wraps (up to three rows), taking rows from the content.
+    #[test]
+    fn a_failed_write_keeps_its_text_and_the_status_wraps() {
+        let mut st = State::new(40, 12, None, true);
+        st.start(None);
+        st.open_thread("at://t".into());
+        queued(&mut st, "did:plc:x/42", "at://t");
+        st.update(Action::Engine(Event::Write {
+            id: "did:plc:x/42".into(),
+            state: WriteState::Failed {
+                error: EngineError::invalid_input("InvalidRequest (HTTP 400)"),
+            },
+        }));
+        let compose = Compose::Comment {
+            root: "at://t".into(),
+            parent: None,
+        };
+        assert_eq!(st.prefill(&compose), "my reply");
+        let msg = st.status.as_ref().unwrap().text.to_plain_string();
+        assert!(
+            msg.contains("`lessdugin outbox retry did:plc:x/42`"),
+            "{msg}"
+        );
+        assert!(msg.contains("Press c"), "{msg}");
+        assert!(st.failed.contains("did:plc:x/42") && st.writes.is_empty());
+        assert_eq!(st.status_rows(), MAX_STATUS_ROWS);
+        assert_eq!(st.content_height(), 7);
+        // a short message takes one row; a tiny terminal keeps a content row
+        st.say(Tone::Info, lit("ok"));
+        assert_eq!(st.status_rows(), 1);
+        st.say(Tone::Error, tt(&msg));
+        st.update(Action::Resize(10, 4));
+        assert_eq!(st.status_rows(), 1);
+        assert_eq!(st.content_height(), 1);
+    }
+
+    /// An editor that failed after the user wrote: the text is offered again.
+    #[test]
+    fn a_failed_editor_keeps_the_text() {
+        let mut st = State::new(80, 24, None, true);
+        st.start(None);
+        let compose = Compose::Post {
+            forum: "at://f".into(),
+        };
+        st.update(Action::Edited {
+            compose: compose.clone(),
+            result: Err(editor::EditError {
+                message: "the editor (vi) exited with exit status: 1; nothing was sent".into(),
+                text: Some(editor::post_template("Title\n\nWritten", "Meta")),
+            }),
+        });
+        assert_eq!(st.prefill(&compose), "Title\n\nWritten");
+        let msg = st.status.as_ref().unwrap().text.to_plain_string();
+        assert!(
+            msg.ends_with("Your text is kept; press P to edit it again."),
+            "{msg}"
+        );
+        // nothing written: nothing kept
+        let other = Compose::Post {
+            forum: "at://g".into(),
+        };
+        st.update(Action::Edited {
+            compose: other.clone(),
+            result: Err(editor::EditError {
+                message: "aborted".into(),
+                text: Some(editor::post_template("", "Meta")),
+            }),
+        });
+        assert_eq!(st.prefill(&other), "");
+    }
+
+    /// Writes from earlier sessions are counted at start (queued and failed).
+    #[test]
+    fn the_outbox_of_earlier_sessions_is_loaded() {
+        let mut st = State::new(80, 24, None, true);
+        st.start(None);
+        let pending = WriteState::Pending {
+            not_before_ms: None,
+            held: false,
+            throttled: false,
+            needs_login: false,
+            error: None,
+        };
+        st.update(Action::WritesLoaded(Ok(vec![
+            WriteTicket {
+                id: "a/1".into(),
+                state: pending,
+            },
+            WriteTicket {
+                id: "a/2".into(),
+                state: WriteState::Failed {
+                    error: EngineError::invalid_input("x"),
+                },
+            },
+            WriteTicket {
+                id: "a/3".into(),
+                state: WriteState::Done {
+                    uri: "at://x".into(),
+                    cid: None,
+                },
+            },
+        ])));
+        assert_eq!(st.writes.keys().collect::<Vec<_>>(), ["a/1"]);
+        assert_eq!(st.failed.iter().collect::<Vec<_>>(), ["a/2"]);
+    }
 
     #[test]
     fn list_cursor_scrolls_the_least() {

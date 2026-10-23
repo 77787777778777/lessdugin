@@ -3,8 +3,9 @@
 //! (`threat-model.md` §7.4), so that drafts, the outbox and read marks never live in the
 //! browser's storage for the bridge's origin.
 //!
-//! Only keys whose first tuple element (`sync.md` §10.3–§10.4) is `out`, `out.budget`, `loc`,
-//! `notif` or `meta` are reachable. Sessions are never stored in `state`, so they are not
+//! Only keys whose first tuple element (`sync.md` §10.3–§10.4) is `out`, `out.budget`,
+//! `out.meta`, `out.blob`, `loc`, `notif` or `meta` are reachable (the outbox keeps its rows
+//! under the four `out*` elements, `crates/core/src/outbox/model.rs`). Sessions are never stored in `state`, so they are not
 //! reachable here. A request is one operation (keys and values are standard base64, RFC 4648
 //! §4, with padding):
 //!
@@ -17,9 +18,16 @@
 //! B = {"included": k} | {"excluded": k}
 //! ```
 //!
-//! The authorization-server pins, `("loc", "as_pin", did)` (`sync.md` §3.6), can be read but
-//! not written or deleted here: only a native login writes them, so a script in the tab cannot
-//! clear a pin to make the next login trust a new authorization server.
+//! Some keys can be read but not written or deleted here, because only the native client
+//! writes them:
+//! - the authorization-server pins, `("loc", "as_pin", did)` (`sync.md` §3.6), so a script in
+//!   the tab cannot clear a pin to make the next login trust a new authorization server;
+//! - the account rows and the active account, `("loc", "account", did)` and
+//!   `("loc", "active_account")`, so a script in the tab cannot switch the account the CLI
+//!   writes as, forge or delete account rows, or purge an account's outbox through
+//!   `remove_account`;
+//! - `("meta", …)`, the `state` schema version, so the tab cannot make the native client
+//!   migrate or reset its store.
 //!
 //! A key outside the scope, or a range not inside one scope, refuses the whole request (403);
 //! a batch is applied atomically or not at all.
@@ -38,7 +46,15 @@ use serde_json::{Value, json};
 use super::server::{Web, engine_error, error, json_response};
 
 /// The first tuple elements the SPA may reach.
-pub const SCOPES: [&str; 5] = ["out", "out.budget", "loc", "notif", "meta"];
+pub const SCOPES: [&str; 7] = [
+    "out",
+    "out.budget",
+    "out.meta",
+    "out.blob",
+    "loc",
+    "notif",
+    "meta",
+];
 
 /// The encoded one-element prefix of each scope.
 fn scope_prefixes() -> Vec<Vec<u8>> {
@@ -119,9 +135,14 @@ enum Refusal {
     ReadOnly,
 }
 
-/// The encoded prefix of the keys that are read-only here.
-fn read_only_prefix() -> Vec<u8> {
-    encode(&[Part::from("loc"), Part::from("as_pin")])
+/// The encoded prefixes of the keys that are read-only here.
+fn read_only_prefixes() -> [Vec<u8>; 4] {
+    [
+        encode(&[Part::from("loc"), Part::from("as_pin")]),
+        encode(&[Part::from("loc"), Part::from("account")]),
+        encode(&[Part::from("loc"), Part::from("active_account")]),
+        encode(&[Part::from("meta")]),
+    ]
 }
 
 /// True if some key with prefix `p` may lie in the range (conservative).
@@ -143,12 +164,12 @@ fn intersects(range: &KeyRange, p: &[u8]) -> bool {
 
 /// True if a write may touch `key`.
 pub fn write_key_allowed(key: &[u8]) -> bool {
-    key_allowed(key) && !key.starts_with(&read_only_prefix())
+    key_allowed(key) && !read_only_prefixes().iter().any(|p| key.starts_with(p))
 }
 
 /// True if a `deleteRange` may cover `range`.
 pub fn write_range_allowed(range: &KeyRange) -> bool {
-    range_allowed(range) && !intersects(range, &read_only_prefix())
+    range_allowed(range) && !read_only_prefixes().iter().any(|p| intersects(range, p))
 }
 
 fn b64(s: &str) -> Result<Vec<u8>, Refusal> {
@@ -209,12 +230,14 @@ fn refused(r: Refusal) -> Response {
         Refusal::ReadOnly => error(
             StatusCode::FORBIDDEN,
             "blocked",
-            "authorization-server pins are written only by a native login",
+            "accounts, the active account, authorization-server pins and the schema are written \
+             only by the native client",
         ),
         Refusal::OutOfScope => error(
             StatusCode::FORBIDDEN,
             "blocked",
-            "the bridge store reaches only out, out.budget, loc, notif and meta keys",
+            "the bridge store reaches only out, out.budget, out.meta, out.blob, loc, notif and \
+             meta keys",
         ),
     }
 }
@@ -307,6 +330,8 @@ mod tests {
     fn keys_in_scope() {
         assert!(key_allowed(&k(&["out", "did:plc:x"])));
         assert!(key_allowed(&k(&["out.budget", "did:plc:x"])));
+        assert!(key_allowed(&k(&["out.meta", "did:plc:x"])));
+        assert!(key_allowed(&k(&["out.blob", "did:plc:x"])));
         assert!(key_allowed(&k(&["loc", "draft", "1"])));
         assert!(key_allowed(&k(&["notif", "did:plc:x"])));
         assert!(key_allowed(&k(&["meta", "schema"])));
@@ -315,6 +340,8 @@ mod tests {
             k(&["rec", "x"]),
             k(&["outx", "a"]),
             k(&["out.budgetx"]),
+            k(&["out.metax"]),
+            k(&["out.blo"]),
             k(&["session", "did:plc:x"]),
             k(&["lo"]),
             Vec::new(),
@@ -324,12 +351,56 @@ mod tests {
         }
     }
 
+    /// The keys every outbox row lives under (`crates/core/src/outbox/model.rs`) are writable:
+    /// without them every write from a tab fails.
+    #[test]
+    fn outbox_rows_are_writable() {
+        use lessdugin_core::outbox::model;
+        let did = "did:plc:x";
+        for key in [
+            model::write_key(did, 7),
+            model::budget_key(did),
+            model::meta_key(did),
+            model::blob_chunk_key(did, 7, 0, 0),
+        ] {
+            assert!(write_key_allowed(&key), "{key:?}");
+        }
+        for prefix in [model::writes_prefix(did), model::blob_prefix(did, 7)] {
+            assert!(range_allowed(&KeyRange::prefix(&prefix)));
+            assert!(write_range_allowed(&KeyRange::prefix(&prefix)));
+        }
+    }
+
+    #[test]
+    fn native_only_keys_are_read_only() {
+        for key in [
+            k(&["loc", "as_pin", "did:plc:x"]),
+            k(&["loc", "account", "did:plc:x"]),
+            k(&["loc", "active_account"]),
+            k(&["meta", "schema"]),
+            k(&["meta"]),
+        ] {
+            assert!(key_allowed(&key), "{key:?}");
+            assert!(!write_key_allowed(&key), "{key:?}");
+        }
+        for range in [
+            KeyRange::prefix(&k(&["loc", "account"])),
+            KeyRange::prefix(&k(&["meta"])),
+        ] {
+            assert!(range_allowed(&range));
+            assert!(!write_range_allowed(&range));
+        }
+        assert!(write_key_allowed(&k(&["loc", "accountx"])));
+        assert!(write_key_allowed(&k(&["loc", "seeded", "did:plc:x"])));
+        assert!(write_key_allowed(&k(&["loc", "follow", "at://x"])));
+    }
+
     #[test]
     fn pins_are_read_only() {
         let pin = k(&["loc", "as_pin", "did:plc:x"]);
         assert!(key_allowed(&pin));
         assert!(!write_key_allowed(&pin));
-        assert!(write_key_allowed(&k(&["loc", "account", "did:plc:x"])));
+        assert!(write_key_allowed(&k(&["loc", "draft", "1"])));
         assert!(write_key_allowed(&k(&["loc", "as_pinx"])));
         assert!(!write_range_allowed(&KeyRange::prefix(&k(&["loc"]))));
         assert!(!write_range_allowed(&KeyRange::prefix(&k(&[
@@ -341,12 +412,17 @@ mod tests {
         assert!(write_range_allowed(&KeyRange::prefix(&k(&["out"]))));
         // A range that ends exactly where the pins start does not reach them.
         assert!(write_range_allowed(&KeyRange {
-            start: Bound::Included(k(&["loc", "a"])),
+            start: Bound::Included(k(&["loc", "ad"])),
             end: Bound::Excluded(k(&["loc", "as_pin"])),
         }));
         assert!(!write_range_allowed(&KeyRange {
-            start: Bound::Included(k(&["loc", "a"])),
+            start: Bound::Included(k(&["loc", "ad"])),
             end: Bound::Included(k(&["loc", "as_pin"])),
+        }));
+        // From "a" on, the range covers the account rows.
+        assert!(!write_range_allowed(&KeyRange {
+            start: Bound::Included(k(&["loc", "a"])),
+            end: Bound::Excluded(k(&["loc", "as_pin"])),
         }));
     }
 

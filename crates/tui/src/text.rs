@@ -75,6 +75,36 @@ pub fn line(parts: impl IntoIterator<Item = (TermText, Style)>) -> Line<'static>
     Line::from(v)
 }
 
+/// `t` in `style`, wrapped by character at `width` columns (a status message, which has no
+/// layout of its own); at least one line.
+pub fn wrapped(t: &TermText, style: Style, width: usize) -> Vec<Line<'static>> {
+    use unicode_width::UnicodeWidthChar;
+    let width = width.max(1);
+    let mut lines = Vec::new();
+    let mut cur: Vec<Span<'static>> = Vec::new();
+    let mut used = 0usize;
+    for sp in spans(t, style) {
+        let mut buf = String::new();
+        for c in sp.content.chars() {
+            let w = c.width().unwrap_or(0);
+            if used > 0 && used + w > width {
+                if !buf.is_empty() {
+                    cur.push(Span::styled(std::mem::take(&mut buf), sp.style));
+                }
+                lines.push(Line::from(std::mem::take(&mut cur)));
+                used = 0;
+            }
+            buf.push(c);
+            used += w;
+        }
+        if !buf.is_empty() {
+            cur.push(Span::styled(buf, sp.style));
+        }
+    }
+    lines.push(Line::from(cur));
+    lines
+}
+
 /// `n` spaces (an indent).
 pub fn pad(n: usize) -> TermText {
     tt(&" ".repeat(n))

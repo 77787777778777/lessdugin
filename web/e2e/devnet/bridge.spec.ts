@@ -45,7 +45,12 @@ interface Web {
   dir: string;
   /** The next link printed on stdout. */
   nextLink(): Promise<string>;
+  /** Waits for the terminal's `Accept this sign-in? [y/N]` (crates/cli/src/web/login.rs) and
+   * answers `y` on stdin; resolves with what the terminal said about the sign-in. */
+  acceptSignIn(): Promise<string>;
 }
+
+const SIGN_IN_PROMPT = "Accept this sign-in? [y/N]";
 
 async function startWeb(): Promise<Web> {
   const port = await freePort();
@@ -80,7 +85,15 @@ async function startWeb(): Promise<Web> {
       else links.push(line);
     }
   });
-  child.stderr?.on("data", (d: Buffer) => stderr.push(d.toString("utf8")));
+  let prompted: (() => void) | null = null;
+  child.stderr?.on("data", (d: Buffer) => {
+    stderr.push(d.toString("utf8"));
+    if (prompted && stderr.join("").includes(SIGN_IN_PROMPT)) {
+      const go = prompted;
+      prompted = null;
+      go();
+    }
+  });
   const web: Web = {
     origin: `http://127.0.0.1:${port}`,
     links,
@@ -99,6 +112,20 @@ async function startWeb(): Promise<Web> {
           clearTimeout(t);
           ok(x);
         });
+      });
+    },
+    acceptSignIn() {
+      const before = stderr.join("").length;
+      return new Promise((ok, ko) => {
+        const t = setTimeout(
+          () => ko(new Error(`no sign-in prompt from lessdugin web: ${stderr.join("")}`)),
+          60_000,
+        );
+        prompted = () => {
+          clearTimeout(t);
+          child.stdin?.write("y\n");
+          ok(stderr.join("").slice(before));
+        };
       });
     },
   };
@@ -160,6 +187,11 @@ test("lessdugin web: capability link, anonymous read, sign-in through the CLI, a
   if (!web) return;
   const w = await watchStrict(page);
   await withDevnet(page, s);
+  // the engine worker's requests for the native outbox lock (conformance review M1)
+  const locks: string[] = [];
+  page.context().on("request", (r) => {
+    if (new URL(r.url()).pathname === "/bridge/lock") locks.push(r.postData() ?? "");
+  });
   const link = await web.nextLink();
   expect(link).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/#lessdugin-cap=[A-Za-z0-9_-]{43}$/);
   const resp = await page.goto(link);
@@ -186,14 +218,17 @@ test("lessdugin web: capability link, anonymous read, sign-in through the CLI, a
   ).toBeVisible();
   await expect(page.getByText("A first comment from alice.")).toBeVisible();
 
-  // Sign-in: /bridge/login starts the CLI's loopback OAuth; the CLI's callback sends the tab
-  // back to the bridge origin, whose sessionStorage still holds the token.
+  // Sign-in: /bridge/login starts the CLI's loopback OAuth; the terminal confirms the account
+  // (`Accept this sign-in? [y/N]`), then the CLI's callback sends the tab back to the bridge
+  // origin, whose sessionStorage still holds the token.
   const carol = s.devnet.accounts.carol;
   await page.goto(`${web.origin}/#/login`);
   await page.getByLabel("Your handle or DID").fill(carol.handle);
   await page.getByRole("button", { name: "Continue" }).click();
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
+  const accepted = web.acceptSignIn();
   await approveAtPds(page, carol.password, web.origin);
+  expect(await accepted).toContain(carol.did);
   await expect(page.getByRole("button", { name: new RegExp(carol.handle) })).toBeVisible();
   expect(await page.evaluate(() => sessionStorage.getItem("lessdugin-bridge-token"))).toBe(token);
   // The browser holds no OAuth state of its own in this mode (threat-model AUTH-12).
@@ -228,6 +263,11 @@ test("lessdugin web: capability link, anonymous read, sign-in through the CLI, a
         return records.filter((x) => x.value.root?.uri === s.post.uri).length;
       })
       .toBeGreaterThan(0);
+    // the tab sent it holding the native `outbox:<did>` lock too, so a native client pumping
+    // the same `state.sqlite` could not send it as well (threat-model §7.4)
+    expect(locks.map((b) => JSON.parse(b) as { name: string })).toContainEqual(
+      expect.objectContaining({ name: `outbox:${carol.did}` }),
+    );
   }
 
   expect(await w.problems()).toEqual([]);

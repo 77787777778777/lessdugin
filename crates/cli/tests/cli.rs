@@ -397,7 +397,12 @@ fn devnet_mode_is_explicit_and_announced() {
         .output()
         .unwrap();
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("warning: devnet mode"), "{err}");
+    // with --json every stderr line is JSON: the warning, then the error
+    assert!(err.contains("\"warning\":\"devnet mode"), "{err}");
+    for line in err.lines() {
+        serde_json::from_str::<serde_json::Value>(line)
+            .unwrap_or_else(|e| panic!("not a JSON line ({e}): {line}"));
+    }
     assert!(out.stdout.is_empty());
     let out = bin(dir.path())
         .args(DEAD)

@@ -9,6 +9,7 @@ import { useNavigate } from "@tanstack/react-router";
 import { type FocusEvent, type KeyboardEvent, useRef } from "react";
 import { useEngine } from "../engine/context.tsx";
 import { useCommentDraft } from "../engine/drafts.ts";
+import { useAnnounceQueued } from "../engine/queued.ts";
 import { usePendingWrite, writeStore } from "../engine/writes.ts";
 import { cx } from "../lib/cx.ts";
 import type { VotingMode } from "../lib/policy.ts";
@@ -133,6 +134,7 @@ export function CommentItem({
   /** Expands every comment of this author hidden by the per-author limit. */
   onShowAuthor?: ((did: string) => void) | undefined;
 }) {
+  const announceQueued = useAnnounceQueued();
   const engine = useEngine();
   const navigate = useNavigate();
   const bodyRef = useRef<RenderedHtmlHandle>(null);
@@ -209,8 +211,13 @@ export function CommentItem({
       body: { markdown, media: [] },
     });
     writeStore.track(ticket);
-    const final = await writeStore.wait(ticket.id);
+    const final = await writeStore.settle(ticket.id);
     if (final.kind === "failed") throw final.error;
+    if (final.kind === "queued") {
+      announceQueued("Your reply", final.state);
+      onReply(null);
+      return true;
+    }
     if (final.kind !== "done") return false;
     toasts.show({ message: "Reply published", tone: "success" });
     onReply(null);

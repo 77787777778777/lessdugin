@@ -63,7 +63,8 @@ pub fn command(k: &KeyEvent) -> Option<Cmd> {
         KeyCode::PageDown => Cmd::HalfDown,
         KeyCode::PageUp => Cmd::HalfUp,
         KeyCode::Enter | KeyCode::Char('l') | KeyCode::Right => Cmd::Open,
-        KeyCode::Char('h') | KeyCode::Left | KeyCode::Esc | KeyCode::Backspace => Cmd::Back,
+        // Backspace is kept free: synthesis §6.11 gives it to undoing the pending write (M3).
+        KeyCode::Char('h') | KeyCode::Left | KeyCode::Esc => Cmd::Back,
         KeyCode::Char('q') => Cmd::BackOrQuit,
         KeyCode::Char(' ') => Cmd::Collapse,
         KeyCode::Char('p') => Cmd::Parent,
@@ -166,6 +167,8 @@ mod tests {
         assert_eq!(c("R"), Some(Cmd::Sync));
         assert_eq!(c("Space"), Some(Cmd::Collapse));
         assert_eq!(c("Esc"), Some(Cmd::Back));
+        // reserved for undoing the pending write (synthesis §6.11, M3)
+        assert_eq!(c("Backspace"), None);
         assert_eq!(c("Ctrl-x"), None);
         assert_eq!(c("x"), None);
         assert!(parse_key("Ctrl-").is_none());

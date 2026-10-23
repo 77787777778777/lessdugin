@@ -140,6 +140,13 @@ pub const FOLLOW_SEED_PAGES: u32 = 10;
 pub const FORUM_REOPEN_MS: i64 = 300_000;
 /// Time budget of the P0 sync `forum_open` runs for authorities never synced (ms, *tunable*).
 pub const FORUM_OPEN_SYNC_BUDGET_MS: i64 = 10_000;
+/// The time budget (ms) of a forum open's declaration fetch when the declaration is cached:
+/// past it the cached declaration is used (`sync.md` §4.2), so a hung owner PDS never blocks a
+/// view of cached content for longer (*tunable*).
+pub const FORUM_DECL_CACHED_BUDGET_MS: i64 = 5_000;
+/// The time budget (ms) of a forum open's declaration fetch when nothing is cached (one full
+/// request and a retry, *tunable*).
+pub const FORUM_DECL_FIRST_BUDGET_MS: i64 = 30_000;
 /// Longest sleep of `live_tail` between rounds (ms, *tunable*).
 pub const LIVE_TAIL_IDLE_MS: i64 = 60_000;
 /// Dirty-queue items served per `live_tail` round (*tunable*).

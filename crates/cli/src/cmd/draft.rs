@@ -21,6 +21,14 @@
 //! starts a comment line. Validation errors are written back as single-line `# error: …`
 //! comments under the opening `---`, so the next editor session shows them.
 //!
+//! **Editor safety (`threat-model.md` TERM-8).** A draft file is opened in `$EDITOR`, and its
+//! fields and body may hold text from the network (an edited record, an error message quoting
+//! a server). The file never lets that text configure the editor: the `# error:` lines are
+//! sanitised (`term_sanitize(Prose)`, one line) and their modelines neutralised; four fixed
+//! comment lines follow them, so no field is in the first five lines; and the body is followed
+//! by the [`SCISSORS`] line and five fixed lines, so it is never in the last five (vim reads
+//! modelines there). Everything from the scissors line down is ignored when the file is read.
+//!
 //! The editor is the first of `$VISUAL`, `$EDITOR`, `editor`, `nano`, `vi` that can be started
 //! (`notepad` on Windows); `$VISUAL`/`$EDITOR` may carry arguments (`code --wait`).
 
@@ -30,6 +38,7 @@ use lessdugin_core::dto::{BodyDraft, ExternalLinkDraft, PostDraft, PostKind};
 use lessdugin_core::engine::EngineError;
 use lessdugin_core::host::Host;
 use lessdugin_native::fsutil::{ensure_private_dir, read_private, write_private_atomic};
+use lessdugin_native::template::{SCISSORS, neutralise_modelines};
 use serde::Serialize;
 
 use crate::args::{DraftAction, DraftArgs};
@@ -43,6 +52,25 @@ use crate::render;
 const DRAFT_MAX_BYTES: u64 = 2 * 1024 * 1024;
 
 const ERROR_PREFIX: &str = "# error: ";
+
+/// The fixed lines under the opening `---` (after any `# error:` lines): with them no field is
+/// in the first five lines of the file.
+const HEAD: [&str; 4] = [
+    "# A lessdugin draft: the fields below, then the text after the closing `---`.",
+    "# Lines starting with # are ignored here.",
+    "#",
+    "#",
+];
+
+/// The fixed lines after the body: the scissors line and five more, so the body is never in
+/// the last five lines of the file.
+const TAIL: [&str; 5] = [
+    "# Everything from the line above down is ignored.",
+    "#",
+    "#",
+    "#",
+    "# lessdugin",
+];
 
 /// What a draft is for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -118,8 +146,28 @@ fn parse_list(v: &str) -> Result<Vec<String>, String> {
         .collect()
 }
 
+/// One `# error:` line: sanitised for the terminal (no controls, line or paragraph separators
+/// or bidi controls), on one line, with editor modelines neutralised.
+fn error_line(e: &str) -> String {
+    let one_line = tt(e).to_plain_string().replace(['\n', '\r'], " ");
+    neutralise_modelines(&one_line)
+}
+
+/// `body` without the scissors line and everything after it.
+fn without_tail(body: &str) -> String {
+    let mut at = 0;
+    for line in body.split_inclusive('\n') {
+        if line.trim_end() == SCISSORS {
+            return body[..at].to_owned();
+        }
+        at += line.len();
+    }
+    body.to_owned()
+}
+
 impl Doc {
-    /// Parses a document; a file that does not start with `---` is all body.
+    /// Parses a document; a file that does not start with `---` is all body. The scissors line
+    /// and everything after it are not part of the body.
     pub fn parse(text: &str) -> Result<Self, String> {
         let text = text.strip_prefix('\u{feff}').unwrap_or(text);
         let mut lines = text.split_inclusive('\n');
@@ -127,7 +175,7 @@ impl Doc {
         if first.trim_end() != "---" {
             return Ok(Self {
                 fields: Vec::new(),
-                body: text.to_owned(),
+                body: without_tail(text),
             });
         }
         lines.next();
@@ -169,20 +217,21 @@ impl Doc {
         }
         Ok(Self {
             fields,
-            body: text[consumed..].to_owned(),
+            body: without_tail(&text[consumed..]),
         })
     }
 
-    /// The text of the document, with `errors` as comments under the opening `---`.
+    /// The text of the document, with `errors` as comments under the opening `---` (see the
+    /// module docs on editor safety).
     pub fn render(&self, errors: &[String]) -> String {
         let mut s = String::from("---\n");
         for e in errors {
-            let one_line: String = e
-                .chars()
-                .map(|c| if c.is_control() { ' ' } else { c })
-                .collect();
             s.push_str(ERROR_PREFIX);
-            s.push_str(&one_line);
+            s.push_str(&error_line(e));
+            s.push('\n');
+        }
+        for l in HEAD {
+            s.push_str(l);
             s.push('\n');
         }
         for (k, v) in &self.fields {
@@ -202,6 +251,15 @@ impl Doc {
         }
         s.push_str("---\n");
         s.push_str(&self.body);
+        if !s.ends_with('\n') {
+            s.push('\n');
+        }
+        s.push_str(SCISSORS);
+        s.push('\n');
+        for l in TAIL {
+            s.push_str(l);
+            s.push('\n');
+        }
         s
     }
 
@@ -472,14 +530,7 @@ impl Drafts {
 /// Reads a text file (`-`: standard input).
 pub fn read_file(path: &Path) -> Result<String, CliError> {
     if path.as_os_str() == "-" {
-        use std::io::Read;
-        let mut s = String::new();
-        std::io::stdin()
-            .lock()
-            .take(DRAFT_MAX_BYTES)
-            .read_to_string(&mut s)
-            .map_err(|e| io_error("reading", path, &e))?;
-        return Ok(s);
+        return read_limited(std::io::stdin().lock(), path);
     }
     let bytes = read_private(path, DRAFT_MAX_BYTES, false)
         .map_err(|e| io_error("reading", path, &e))?
@@ -489,6 +540,34 @@ pub fn read_file(path: &Path) -> Result<String, CliError> {
                 path.display()
             )))
         })?;
+    String::from_utf8(bytes).map_err(|_| {
+        CliError::Engine(EngineError::invalid_input(format!(
+            "{} is not UTF-8 text",
+            path.display()
+        )))
+    })
+}
+
+/// Reads at most [`DRAFT_MAX_BYTES`] of UTF-8 text from `r`; more is an error (never a
+/// silently cut text).
+fn read_limited(r: impl std::io::Read, path: &Path) -> Result<String, CliError> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    r.take(DRAFT_MAX_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| io_error("reading", path, &e))?;
+    if bytes.len() as u64 > DRAFT_MAX_BYTES {
+        return Err(CliError::Engine(
+            EngineError::new(
+                lessdugin_core::engine::ErrorCode::TooLarge,
+                format!(
+                    "{} is larger than {DRAFT_MAX_BYTES} bytes; nothing was read",
+                    path.display()
+                ),
+            )
+            .with_detail("maxBytes", DRAFT_MAX_BYTES),
+        ));
+    }
     String::from_utf8(bytes).map_err(|_| {
         CliError::Engine(EngineError::invalid_input(format!(
             "{} is not UTF-8 text",
@@ -527,8 +606,7 @@ pub fn edit_file(path: &Path) -> Result<(), CliError> {
             Ok(s) if s.success() => return Ok(()),
             Ok(s) => {
                 return Err(CliError::usage(format!(
-                    "the editor ({program}) exited with {s}; the draft is kept in {}",
-                    path.display()
+                    "the editor ({program}) exited with {s}"
                 )));
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -542,6 +620,17 @@ pub fn edit_file(path: &Path) -> Result<(), CliError> {
     Err(CliError::usage(
         "no editor found; set $VISUAL or $EDITOR, or pass a file",
     ))
+}
+
+/// Runs the editor on draft `id`, which stays where it is if the editor fails (the error says
+/// so).
+fn edit_kept(drafts: &Drafts, id: &str) -> Result<(), CliError> {
+    edit_file(&drafts.path(id)).map_err(|e| match e {
+        CliError::Usage(m) => CliError::Usage(format!(
+            "{m}; the draft is kept (`lessdugin draft edit {id}`)"
+        )),
+        e => e,
+    })
 }
 
 /// What to do after the publish summary.
@@ -637,7 +726,7 @@ pub async fn publish_post(ctx: &Ctx, mut src: PostSource, yes: bool) -> Result<(
             Err(errors) => {
                 let id = keep(ctx, &drafts, &mut src, &errors)?;
                 if interactive && prompt::confirm("The draft has errors. Edit it?") {
-                    edit_file(&drafts.path(&id))?;
+                    edit_kept(&drafts, &id)?;
                     src.doc = drafts.load(&id)?;
                     continue;
                 }
@@ -663,7 +752,7 @@ pub async fn publish_post(ctx: &Ctx, mut src: PostSource, yes: bool) -> Result<(
                 Answer::Yes => {}
                 Answer::Edit => {
                     let id = keep(ctx, &drafts, &mut src, &[])?;
-                    edit_file(&drafts.path(&id))?;
+                    edit_kept(&drafts, &id)?;
                     src.doc = drafts.load(&id)?;
                     continue;
                 }
@@ -813,7 +902,7 @@ pub async fn run(ctx: &Ctx, args: DraftArgs) -> Result<(), CliError> {
                 }
                 e => Err(e),
             })?;
-            edit_file(&drafts.path(&id))
+            edit_kept(&drafts, &id)
         }
         DraftAction::Rm { id } => {
             if !drafts.path(&id).exists() {
@@ -891,5 +980,66 @@ mod tests {
         )
         .unwrap_err();
         assert!(errs[0].contains("poem"), "{errs:?}");
+    }
+
+    /// TERM-8: no text from the network in the first or last five lines of a draft unless it
+    /// is neutralised, error lines are terminal-safe, and the tail is never part of the body.
+    #[test]
+    fn rendered_drafts_are_editor_safe() {
+        use lessdugin_native::template::MODELINE_LINES;
+        let mut doc =
+            Doc::parse("---\ntitle: \"vim: set ft=sh:\"\n---\nvim: set shell=evil:\n").unwrap();
+        doc.set("forum", Value::Str("ex: x".into()));
+        let errors = [
+            "vi: set foo=bar: -*- mode: x -*-\nLocal Variables:".to_owned(),
+            "bad\u{2028}line\u{202e}gnp.exe\u{1b}[2J".to_owned(),
+        ];
+        let text = doc.render(&errors);
+        let lines: Vec<&str> = text.lines().collect();
+        for l in lines
+            .iter()
+            .take(MODELINE_LINES)
+            .chain(lines.iter().rev().take(MODELINE_LINES))
+        {
+            assert!(
+                *l == "---" || *l == "#" || l.starts_with("# "),
+                "only fixed or neutralised lines at the ends: {l:?}"
+            );
+            assert_eq!(*l, neutralise_modelines(l), "{l:?}");
+        }
+        // two errors, two lines (a newline or U+2028 in an error does not start a line)
+        assert_eq!(
+            lines.iter().filter(|l| l.starts_with(ERROR_PREFIX)).count(),
+            2
+        );
+        for c in ['\u{2028}', '\u{202e}', '\u{1b}'] {
+            assert!(!text.contains(c), "{c:?} in {text:?}");
+        }
+        assert!(
+            !lines[1].contains("vi:") && !lines[1].contains("-*-"),
+            "{}",
+            lines[1]
+        );
+        // the fields and the body sit between the fixed lines, and come back unchanged
+        let back = Doc::parse(&text).unwrap();
+        assert_eq!(back, doc);
+        assert_eq!(back.body, "vim: set shell=evil:\n");
+        // text added under the scissors line is ignored; a file without it is all body
+        let edited = text.replace(SCISSORS, &format!("{SCISSORS}\nadded below"));
+        assert_eq!(Doc::parse(&edited).unwrap(), doc);
+        assert_eq!(Doc::parse("a\nb\n").unwrap().body, "a\nb\n");
+    }
+
+    #[test]
+    fn standard_input_over_the_limit_is_refused() {
+        let path = Path::new("-");
+        let max = usize::try_from(DRAFT_MAX_BYTES).unwrap();
+        let ok = read_limited(&vec![b'a'; max][..], path).unwrap();
+        assert_eq!(ok.len(), max);
+        let Err(CliError::Engine(e)) = read_limited(&vec![b'a'; max + 1][..], path) else {
+            panic!("a text over the limit must be refused");
+        };
+        assert_eq!(e.code, lessdugin_core::engine::ErrorCode::TooLarge);
+        assert!(read_limited(&[0xff, 0xfe][..], path).is_err());
     }
 }

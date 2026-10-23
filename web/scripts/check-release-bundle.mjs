@@ -30,6 +30,10 @@ export const MOCK_MARKERS = [
   "pds.example.test",
 ];
 
+/** The `build-info.json` modes a release binary may embed (crates/cli/release_markers.rs
+ * `RELEASE_MODES`; vite.config.ts `buildMode`). */
+export const RELEASE_MODES = ["release", "production", "pages"];
+
 const SCANNED = /\.(js|mjs|html|json|css|wasm|txt)$/;
 
 function files(dir) {
@@ -44,7 +48,8 @@ function files(dir) {
 
 /**
  * Problems in the build at `dir`: `{ file, marker }` for every marker string found in an
- * emitted file (source maps aside).
+ * emitted file (source maps aside), and for a `build-info.json` whose `mode` is not a release
+ * mode (`demo` for `--demo`).
  */
 export function scanDist(dir, { demo = false } = {}) {
   const markers = demo ? E2E_MARKERS : [...E2E_MARKERS, ...MOCK_MARKERS];
@@ -52,6 +57,17 @@ export function scanDist(dir, { demo = false } = {}) {
   const list = files(dir);
   if (!list.some((f) => f.endsWith(`${sep}index.html`) || f.endsWith("/index.html"))) {
     problems.push({ file: dir, marker: "(no index.html: not a build)" });
+  }
+  const info = list.find((f) => relative(dir, f) === "build-info.json");
+  if (info) {
+    let mode;
+    try {
+      mode = JSON.parse(readFileSync(info, "utf8")).mode;
+    } catch {
+      mode = "(unreadable)";
+    }
+    const ok = demo ? mode === "demo" : RELEASE_MODES.includes(mode);
+    if (!ok) problems.push({ file: "build-info.json", marker: `mode ${JSON.stringify(mode)}` });
   }
   for (const file of list) {
     // latin1 keeps every byte as one char, so strings inside the wasm match too

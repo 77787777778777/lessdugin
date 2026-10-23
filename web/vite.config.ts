@@ -4,12 +4,23 @@ import react from "@vitejs/plugin-react";
 import { defineConfig, type Plugin } from "vite";
 import { injectMetaCsp } from "./csp.mjs";
 
+/** What kind of build this is, recorded in `build-info.json`: `release` and `pages` are the
+ * builds a release `lessdugin` binary may embed (crates/cli/build.rs, `RELEASE_MODES`);
+ * `e2e` (`VITE_E2E=1`) and `demo` (`VITE_DEMO=1`, the mock engine) never are (WEB-5, SUP-3). */
+export function buildMode(viteMode: string, env: NodeJS.ProcessEnv = process.env): string {
+  if (env.VITE_E2E === "1") return "e2e";
+  if (env.VITE_DEMO === "1") return "demo";
+  if (viteMode === "pages") return "pages";
+  return viteMode === "production" ? "release" : viteMode;
+}
+
 /**
- * Emits `build-info.json` with the SHA-256 of every emitted file and an aggregate hash, so
- * Settings → About can show which build is running (threat-model.md SUP-4). The hash of a
- * file cannot be embedded in that file, hence a separate asset fetched at runtime.
+ * Emits `build-info.json` with the build's `mode` (first), the SHA-256 of every emitted file
+ * and an aggregate hash, so Settings → About can show which build is running (threat-model.md
+ * SUP-4). The hash of a file cannot be embedded in that file, hence a separate asset fetched
+ * at runtime.
  */
-function buildInfo(): Plugin {
+function buildInfo(mode: string): Plugin {
   return {
     name: "lessdugin-build-info",
     apply: "build",
@@ -28,7 +39,7 @@ function buildInfo(): Plugin {
       this.emitFile({
         type: "asset",
         fileName: "build-info.json",
-        source: `${JSON.stringify({ sha256: total.digest("hex"), files }, null, 2)}\n`,
+        source: `${JSON.stringify({ mode, sha256: total.digest("hex"), files }, null, 2)}\n`,
       });
     },
   };
@@ -49,7 +60,7 @@ function pagesMetaCsp(): Plugin {
 export default defineConfig(({ mode }) => ({
   // Relative base so the static build works from any path (static hosts, IPFS, `lessdugin web`).
   base: "./",
-  plugins: [react(), buildInfo(), ...(mode === "pages" ? [pagesMetaCsp()] : [])],
+  plugins: [react(), buildInfo(buildMode(mode)), ...(mode === "pages" ? [pagesMetaCsp()] : [])],
   worker: { format: "es" },
   build: {
     target: "es2023",

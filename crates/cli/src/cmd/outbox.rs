@@ -2,8 +2,11 @@
 //! `outbox [ls|flush|retry|undo]`: the durable write queue (`engine-api.md` §3.5).
 //!
 //! Every writing command sends its account's queued writes before it reports; `outbox flush`
-//! does only that (after a crash, a `kill -9` or `--offline` writes), `retry` queues a failed
-//! write again, `undo` removes a write not sent yet.
+//! does only that (after a crash, a `kill -9` or `--offline` writes) and is "send now": a write
+//! that backs off after a failure is tried at once (`outbox_expedite`; the undo window, the
+//! write budget and a PDS rate limit still apply). `retry` queues a failed write again, or
+//! sends a backing-off one now; `undo` removes a write not sent yet. The listing says why a
+//! pending write waits.
 
 use lessdugin_core::dto::{DTO_VERSION, WriteState, WriteTicket};
 use lessdugin_core::engine::EngineError;
@@ -23,15 +26,46 @@ struct WriteList<'a> {
 }
 
 fn state_text(s: &WriteState) -> (TermText, Style) {
+    let cause = |e: &Option<EngineError>| match e {
+        Some(e) => cat([
+            lit(" ("),
+            tt(e.code.as_str()),
+            lit(": "),
+            tt(&lessdugin_native::auth::redact::redact_secrets(&e.message)),
+            lit(")"),
+        ]),
+        None => lit(""),
+    };
     match s {
         WriteState::Pending {
-            not_before_ms: Some(at),
+            needs_login: true,
+            error,
             ..
         } => (
-            cat([lit("pending until "), tt(&render::time(*at))]),
+            cat([
+                lit("waiting for `lessdugin login` (the session was refused)"),
+                cause(error),
+            ]),
+            Style::Bad,
+        ),
+        WriteState::Pending {
+            not_before_ms: Some(at),
+            held,
+            error,
+            ..
+        } => (
+            cat([
+                lit(if *held {
+                    "pending (undo window) until "
+                } else {
+                    "pending until "
+                }),
+                tt(&render::time(*at)),
+                cause(error),
+            ]),
             Style::Warn,
         ),
-        WriteState::Pending { .. } => (lit("pending"), Style::Warn),
+        WriteState::Pending { error, .. } => (cat([lit("pending"), cause(error)]), Style::Warn),
         WriteState::Sending => (lit("sending"), Style::Warn),
         WriteState::Done { uri, .. } => (cat([lit("done "), tt(uri)]), Style::Good),
         WriteState::Failed { error } => (
@@ -83,6 +117,8 @@ pub async fn run(ctx: &Ctx, args: OutboxArgs) -> Result<(), CliError> {
                 return Err(CliError::usage("flush needs the network; drop --offline"));
             }
             let w = ctx.writer().await?;
+            // "send now": back-offs end; holds that are not ours to shorten stay
+            w.engine.outbox().expedite(&w.account.did).await?;
             let run = write::drive_all(ctx, &w).await?;
             let list: Vec<WriteTicket> = w
                 .engine

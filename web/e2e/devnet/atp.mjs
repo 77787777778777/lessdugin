@@ -51,6 +51,14 @@ export function tid() {
   return out;
 }
 
+/** The TID of the time `ms` (clock id 9), for records dated on purpose. */
+export function tidAt(ms) {
+  const v = ((BigInt(ms) * 1000n) << 10n) | 9n;
+  let out = "";
+  for (let i = 12; i >= 0; i--) out += B32[Number((v >> BigInt(i * 5)) & 31n)];
+  return out;
+}
+
 /** RFC 3339 UTC with milliseconds (data-model.md §2.4). */
 export function now() {
   return new Date().toISOString();
@@ -154,6 +162,20 @@ export async function createPost(session, forum, { title, body }) {
     title,
     body: markdown(body),
     createdAt: now(),
+  });
+  return { ...r, rkey };
+}
+
+/** Writes a post whose TID and `createdAt` are both the time `atMs` (a future-dated post when
+ * `atMs` is ahead of the reader's clock); returns `{ uri, cid, rkey }`. */
+export async function createPostAt(session, forum, { title, body, atMs }) {
+  const rkey = `${forum.fk}-${tidAt(atMs)}`;
+  const r = await put(session, "post", rkey, {
+    forum: forum.uri,
+    kind: "article",
+    title,
+    body: markdown(body),
+    createdAt: new Date(atMs).toISOString(),
   });
   return { ...r, rkey };
 }

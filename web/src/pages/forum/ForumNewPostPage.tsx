@@ -16,6 +16,7 @@ import { ErrorView, Loading } from "../../components/Status.tsx";
 import { toasts } from "../../components/Toast.tsx";
 import { useEngine } from "../../engine/context.tsx";
 import { qk, useActiveAccount } from "../../engine/queries.ts";
+import { useAnnounceQueued } from "../../engine/queued.ts";
 import { writeStore } from "../../engine/writes.ts";
 import {
   markdownOf,
@@ -76,6 +77,7 @@ function PostForm({
   const engine = useEngine();
   const { forum } = useForumView();
   const navigate = useNavigate();
+  const announceQueued = useAnnounceQueued();
   const [kind, setKind] = useState<PostKind>(initial?.kind ?? "article");
   const [title, setTitle] = useState(initial?.title ?? "");
   const [link, setLink] = useState(initial?.link?.uri ?? "");
@@ -132,8 +134,13 @@ function PostForm({
         )
       : await engine.publish(draftFor(markdown));
     writeStore.track(ticket, editing);
-    const final = await writeStore.wait(ticket.id);
+    const final = await writeStore.settle(ticket.id);
     if (final.kind === "failed") throw final.error;
+    if (final.kind === "queued") {
+      announceQueued(editing ? "Your edit" : "Your post", final.state);
+      void navigate({ to: "/outbox" });
+      return true;
+    }
     if (final.kind !== "done") return false;
     toasts.show({ message: editing ? "Post updated" : "Published", tone: "success" });
     const p = parseAtUri(final.uri);

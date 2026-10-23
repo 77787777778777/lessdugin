@@ -38,16 +38,7 @@ const COLLECTION: &str = "online.7778777.lessdugin.temp.post";
 
 struct Devnet {
     info: Value,
-    child: Option<Child>,
-}
-
-impl Drop for Devnet {
-    fn drop(&mut self) {
-        if let Some(c) = &mut self.child {
-            let _ = c.kill();
-            let _ = c.wait();
-        }
-    }
+    _child: Option<lessdugin_testkit::node_devnet::NodeDevnet>,
 }
 
 impl Devnet {
@@ -58,42 +49,15 @@ impl Devnet {
         }
         if let Ok(path) = std::env::var("LESSDUGIN_DEVNET_JSON") {
             let info = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
-            return Some(Self { info, child: None });
+            return Some(Self { info, _child: None });
         }
-        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
-        // One file per devnet: the tests of this binary run in parallel, each with its own
-        // devnet, and must not read (and later kill) another test's.
-        static STARTED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-        let n = STARTED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let json = std::env::temp_dir().join(format!(
-            "lessdugin-cli-devnet-{}-{n}.json",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_file(&json);
-        let child = Command::new("node")
-            .arg(format!("{root}/packages/e2e/devnet.mjs"))
-            .arg("--json")
-            .arg(&json)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("node");
-        let mut devnet = Self {
-            info: Value::Null,
-            child: Some(child),
-        };
-        for _ in 0..600 {
-            let parsed = std::fs::read_to_string(&json)
-                .ok()
-                .and_then(|text| serde_json::from_str::<Value>(&text).ok());
-            if let Some(v) = parsed {
-                devnet.info = v;
-                let _ = std::fs::remove_file(&json);
-                return Some(devnet);
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        panic!("the devnet did not start within 60 s");
+        let root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
+        // one devnet per test: the tests of a binary run in parallel
+        let (child, info) = lessdugin_testkit::node_devnet::NodeDevnet::start(root, "cli");
+        Some(Self {
+            info,
+            _child: Some(child),
+        })
     }
 
     fn s(&self, path: &[&str]) -> String {
@@ -334,7 +298,8 @@ fn e2e_cli_against_devnet() {
     assert_eq!(account["handle"], "alice.test");
     assert_eq!(account["authKind"], "appPassword");
     assert_eq!(account["active"], true);
-    assert!(String::from_utf8_lossy(&out.stderr).contains("warning: devnet mode"));
+    // under --json the warning is a JSON line
+    assert!(String::from_utf8_lossy(&out.stderr).contains("\"warning\":\"devnet mode"));
     assert_eq!(devnet_data(data), devnet.paths(data).data_dir);
     assert!(!String::from_utf8_lossy(&out.stderr).contains(&alice_app_pw));
     #[cfg(unix)]

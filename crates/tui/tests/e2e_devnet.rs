@@ -16,9 +16,6 @@
 
 mod common;
 
-use std::process::{Child, Command, Stdio};
-use std::time::Duration;
-
 use lessdugin_core::dto::{
     DefaultTier, ForumDraft, MembershipMode, PostDraft, SyncOpts, ThreadRoot, WriteState,
 };
@@ -32,16 +29,7 @@ use serde_json::Value;
 
 struct Devnet {
     info: Value,
-    child: Option<Child>,
-}
-
-impl Drop for Devnet {
-    fn drop(&mut self) {
-        if let Some(c) = &mut self.child {
-            let _ = c.kill();
-            let _ = c.wait();
-        }
-    }
+    _child: Option<lessdugin_testkit::node_devnet::NodeDevnet>,
 }
 
 impl Devnet {
@@ -52,36 +40,15 @@ impl Devnet {
         }
         if let Ok(path) = std::env::var("LESSDUGIN_DEVNET_JSON") {
             let info = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
-            return Some(Self { info, child: None });
+            return Some(Self { info, _child: None });
         }
-        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
-        let json =
-            std::env::temp_dir().join(format!("lessdugin-tui-devnet-{}.json", std::process::id()));
-        let _ = std::fs::remove_file(&json);
-        let child = Command::new("node")
-            .arg(format!("{root}/packages/e2e/devnet.mjs"))
-            .arg("--json")
-            .arg(&json)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("node");
-        let mut devnet = Self {
-            info: Value::Null,
-            child: Some(child),
-        };
-        for _ in 0..600 {
-            let parsed = std::fs::read_to_string(&json)
-                .ok()
-                .and_then(|text| serde_json::from_str::<Value>(&text).ok());
-            if let Some(v) = parsed {
-                devnet.info = v;
-                let _ = std::fs::remove_file(&json);
-                return Some(devnet);
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        panic!("the devnet did not start within 60 s");
+        let root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
+        // one devnet per test: the tests of a binary run in parallel
+        let (child, info) = lessdugin_testkit::node_devnet::NodeDevnet::start(root, "tui");
+        Some(Self {
+            info,
+            _child: Some(child),
+        })
     }
 
     fn s(&self, path: &[&str]) -> String {

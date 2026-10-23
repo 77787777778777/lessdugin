@@ -419,7 +419,7 @@ fn drafts_and_the_editor() {
     // an editor that fills in the title and the body
     let editor = alice.file(
         "editor.sh",
-        "#!/bin/sh\nsed -i 's/^title: .*/title: \"From the editor\"/' \"$1\"\nprintf 'Written in the editor.\\n' >> \"$1\"\n",
+        "#!/bin/sh\nsed -i 's/^title: .*/title: \"From the editor\"/' \"$1\"\nsed -i '/ >8 /i Written in the editor.' \"$1\"\n",
     );
     make_executable(&editor);
     let mut c = alice.cmd();
@@ -472,7 +472,7 @@ fn drafts_and_the_editor() {
     alice.ok(&["ls"]);
     let comment_editor = alice.file(
         "c.sh",
-        "#!/bin/sh\nprintf 'From the comment editor.\\n' >> \"$1\"\n",
+        "#!/bin/sh\nsed -i '/ >8 /i From the comment editor.' \"$1\"\n",
     );
     make_executable(&comment_editor);
     let mut c = alice.cmd();

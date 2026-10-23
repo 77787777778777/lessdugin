@@ -50,7 +50,9 @@ export interface StrictWatch {
   problems(): Promise<string[]>;
 }
 
-/** Records page errors, console errors and `securitypolicyviolation` events. Chromium logs a
+/** Records page errors, console errors and `securitypolicyviolation` events. A violation inside
+ * the engine worker fires only on the worker's global, which reports it as a console error
+ * (`csp-violation …`, packages/engine/src/worker.ts), so it is counted too. Chromium logs a
  * console error for every HTTP error status a request gets ("Failed to load resource"); the
  * OAuth client expects some (`use_dpop_nonce` 400/401 before its retry), so those network
  * lines are not app errors and are left out. */
@@ -84,7 +86,7 @@ export async function watchStrict(page: Page): Promise<StrictWatch> {
 export async function withDevnet(
   page: Page,
   s: E2EState,
-  extra: { parityNowMs?: number } = {},
+  extra: { parityNowMs?: number; cspProbe?: boolean } = {},
 ): Promise<void> {
   await page.addInitScript(
     (o) => {

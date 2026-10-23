@@ -10,7 +10,9 @@
 //!   `lessdugin-config.json` (`{"oauth":"bridge"}`), `POST /bridge/session`;
 //! - [`xrpc`]: `POST /bridge/xrpc/<nsid>?account=<did>`, the allowlisted writes;
 //! - [`kv`]: `POST /bridge/kv`, the SPA's `state` store in native `state.sqlite`;
-//! - [`login`]: `POST /bridge/login`, native loopback OAuth for a tab;
+//! - [`lock`]: `POST /bridge/lock`, the native `outbox:<did>` lock held for a tab;
+//! - [`login`]: `POST /bridge/login`, native loopback OAuth for a tab, confirmed in this
+//!   terminal;
 //! - [`caps`]: capabilities and sessions; [`policy`]: headers and limits; [`assets`]: the SPA
 //!   compiled in by `build.rs`; [`config`]: `web.port`.
 //!
@@ -20,6 +22,7 @@ mod assets;
 mod caps;
 mod config;
 mod kv;
+mod lock;
 mod login;
 mod policy;
 mod server;
@@ -30,6 +33,7 @@ mod tests;
 
 use std::net::Ipv4Addr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::Router;
 use lessdugin_core::dto::DTO_VERSION;
@@ -38,7 +42,7 @@ use serde_json::json;
 
 use self::assets::Assets;
 use self::caps::Caps;
-use self::login::LoginSlot;
+use self::login::{LoginSlot, Prompt};
 use self::server::Web;
 use crate::ctx::{CliError, Ctx};
 use crate::out::{Style, cat, lit, tt};
@@ -91,8 +95,10 @@ async fn announce_link(web: &Web, url: String, open: bool) {
     }
 }
 
-/// Reads lines from stdin on a thread: each Enter asks for a fresh link (§7.2).
-fn stdin_lines() -> tokio::sync::mpsc::UnboundedReceiver<()> {
+/// Reads lines from stdin on a thread. A line answers the question the terminal asks (a
+/// browser sign-in's confirmation); otherwise each Enter asks for a fresh link (§7.2). The
+/// channel closes at the end of stdin.
+fn stdin_lines() -> tokio::sync::mpsc::UnboundedReceiver<String> {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     std::thread::spawn(move || {
         let mut line = String::new();
@@ -101,7 +107,7 @@ fn stdin_lines() -> tokio::sync::mpsc::UnboundedReceiver<()> {
             match std::io::stdin().read_line(&mut line) {
                 Ok(0) | Err(_) => break,
                 Ok(_) => {
-                    if tx.send(()).is_err() {
+                    if tx.send(line.clone()).is_err() {
                         break;
                     }
                 }
@@ -129,6 +135,8 @@ pub async fn run(ctx: &Ctx, args: WebArgs) -> Result<(), CliError> {
         paths: ctx.paths.clone(),
         out: ctx.out.clone(),
         login: LoginSlot::default(),
+        prompt: Prompt::default(),
+        shutdown: tokio::sync::watch::channel(false).0,
     });
     let out = &ctx.out;
     out.note(&[
@@ -158,23 +166,49 @@ pub async fn run(ctx: &Ctx, args: WebArgs) -> Result<(), CliError> {
     let app = Router::new()
         .fallback(server::handle)
         .with_state(web.clone());
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
     let server = axum::serve(listener, app).with_graceful_shutdown(async {
-        let _ = tokio::signal::ctrl_c().await;
+        let _ = stop_rx.await;
     });
-    let server = tokio::spawn(async move { server.await });
+    let mut server = tokio::spawn(async move { server.await });
 
     announce_link(&web, web.mint_link(), !args.no_open).await;
-    let mut enter = stdin_lines();
+    let mut lines = stdin_lines();
     let minting = {
         let web = web.clone();
         let open = !args.no_open;
         tokio::spawn(async move {
-            while enter.recv().await.is_some() {
-                announce_link(&web, web.mint_link(), open).await;
+            while let Some(line) = lines.recv().await {
+                if web.prompt.offer(line).is_some() {
+                    announce_link(&web, web.mint_link(), open).await;
+                }
             }
+            web.prompt.close();
         })
     };
-    let result = server.await;
+    // Ctrl-C stops accepting connections and gives open ones WEB_SHUTDOWN_GRACE_MS to finish
+    // (held /bridge/lock bodies end at once); a second Ctrl-C, or the grace running out, stops
+    // the server regardless (a stalled client cannot keep it alive).
+    let result = tokio::select! {
+        r = &mut server => r,
+        _ = tokio::signal::ctrl_c() => {
+            let _ = stop_tx.send(());
+            web.shutdown.send_replace(true);
+            web.login.cancel();
+            let grace = tokio::time::sleep(Duration::from_millis(policy::WEB_SHUTDOWN_GRACE_MS));
+            tokio::select! {
+                r = &mut server => r,
+                () = grace => {
+                    server.abort();
+                    Ok(Ok(()))
+                }
+                _ = tokio::signal::ctrl_c() => {
+                    server.abort();
+                    Ok(Ok(()))
+                }
+            }
+        }
+    };
     minting.abort();
     web.login.cancel();
     match result {

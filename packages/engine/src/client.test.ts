@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // The main-thread client over Comlink, against a stand-in worker on a MessageChannel: lazy
-// start, method forwarding, events, and the AuthBridge proxy the worker calls back into.
+// start, method forwarding, events, and the AuthBridge port the worker calls back into.
 import * as Comlink from "comlink";
 import { afterEach, describe, expect, it } from "vitest";
 import { NS } from "./auth-bridge.ts";
+import { connectBridgePort } from "./bridge-port.ts";
 import { type EngineClient, startEngine } from "./client.ts";
 import type { AuthBridgePort, WorkerInit } from "./protocol.ts";
 
@@ -12,17 +13,36 @@ interface FakeWorker {
   calls: [string, unknown[]][];
   bridge: AuthBridgePort | null;
   emit: ((json: string) => void) | null;
+  /** The raw port the worker got (to send what a compromised worker could). */
+  port: MessagePort | null;
   closed: boolean;
 }
 
-function fakeWorker(): { worker: () => Worker; state: FakeWorker } {
-  const state: FakeWorker = { inits: [], calls: [], bridge: null, emit: null, closed: false };
+function fakeWorker(opts: { failInits?: number } = {}): {
+  worker: () => Worker;
+  state: FakeWorker;
+} {
+  let failInits = opts.failInits ?? 0;
+  const state: FakeWorker = {
+    inits: [],
+    calls: [],
+    bridge: null,
+    emit: null,
+    port: null,
+    closed: false,
+  };
   const api = {
     version: async () => "0.0.1",
-    async init(init: WorkerInit, bridge: AuthBridgePort, onEvent: (json: string) => void) {
+    async init(init: WorkerInit, port: MessagePort) {
       state.inits.push(init);
-      state.bridge = bridge;
-      state.emit = onEvent;
+      if (failInits > 0) {
+        failInits--;
+        throw { code: "internal", message: "storage: IndexedDB is blocked", retryable: true };
+      }
+      const link = connectBridgePort(port);
+      state.port = port;
+      state.bridge = link.bridge;
+      state.emit = (json) => link.emit(json);
       return { version: "0.0.1", namespace: init.namespace, id: "w" };
     },
     async call(op: string, args: unknown[]) {
@@ -136,6 +156,58 @@ describe("startEngine", () => {
     expect(b).toEqual([ev1, ev2]);
   });
 
+  it("exposes no main-thread object to the worker (security review #1)", async () => {
+    const { worker, state } = fakeWorker();
+    const sent: string[] = [];
+    const c = start({
+      worker,
+      sessions: {
+        session: async (did) => ({
+          did,
+          fetch: async (path) => {
+            sent.push(path);
+            return Response.json({});
+          },
+        }),
+      },
+    });
+    await c.ready;
+    const port = state.port as MessagePort;
+    // what Comlink would send to a proxied AuthBridge: SET namespace, SET along __proto__, APPLY
+    port.postMessage({
+      id: "x1",
+      type: "SET",
+      path: ["namespace"],
+      value: { type: "RAW", value: "app.bsky.actor" },
+    });
+    port.postMessage({
+      id: "x2",
+      type: "SET",
+      path: ["__proto__", "__proto__", "pollutedFromWorker"],
+      value: { type: "RAW", value: "yes" },
+    });
+    port.postMessage({ id: "x3", type: "APPLY", path: ["request"], argumentList: [] });
+    port.postMessage({ t: "req", id: 1, req: { __proto__: { account: "did:plc:a" } } });
+    port.postMessage({ t: "event", json: { not: "a string" } });
+    await tick();
+    expect(({} as Record<string, unknown>).pollutedFromWorker).toBeUndefined();
+    const bridge = state.bridge as AuthBridgePort;
+    await expect(
+      bridge.request({
+        account: "did:plc:a",
+        method: "POST",
+        path: "/xrpc/com.atproto.repo.putRecord",
+        headers: [["content-type", "application/json"]],
+        body: new TextEncoder().encode(
+          JSON.stringify({ repo: "did:plc:a", collection: "app.bsky.actor.profile", rkey: "self" }),
+        ),
+        maxBytes: 1024,
+        timeoutMs: 1000,
+      }),
+    ).rejects.toMatchObject({ kind: "blocked" });
+    expect(sent).toEqual([]);
+  });
+
   it("hands the worker an AuthBridge over the SPA's sessions", async () => {
     const { worker, state } = fakeWorker();
     const sent: string[] = [];
@@ -173,6 +245,28 @@ describe("startEngine", () => {
       }),
     ).rejects.toMatchObject({ kind: "blocked" });
     expect(sent).toEqual(["/xrpc/com.atproto.server.getSession"]);
+  });
+
+  it("tries the start again after a failed one (robustness review L6)", async () => {
+    const { worker, state } = fakeWorker({ failInits: 1 });
+    const c = start({ worker });
+    await expect(c.accounts()).rejects.toMatchObject({
+      message: expect.stringContaining("blocked"),
+    });
+    expect(await c.accounts()).toEqual({ op: "accounts" });
+    expect(state.inits).toHaveLength(2);
+    // the second start got a working bridge port
+    const r = await (state.bridge as AuthBridgePort)
+      .request({
+        account: "did:plc:a",
+        method: "GET",
+        path: "/xrpc/com.atproto.server.getSession",
+        headers: [],
+        maxBytes: 1024,
+        timeoutMs: 1000,
+      })
+      .catch((e: unknown) => e);
+    expect(r).toMatchObject({ kind: "authRequired" });
   });
 
   it("closes the worker's engine on terminate", async () => {

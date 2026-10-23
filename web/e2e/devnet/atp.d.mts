@@ -3,6 +3,7 @@ export const NS: string;
 export function b32s(bytes: Uint8Array, n: number): string;
 export function fk(forumUri: string): string;
 export function tid(): string;
+export function tidAt(ms: number): string;
 export function now(): string;
 export function xrpc(
   pds: string,
@@ -42,6 +43,11 @@ export function createPost(
   session: Session,
   forum: ForumRef,
   opts: { title: string; body: string },
+): Promise<Written & { rkey: string }>;
+export function createPostAt(
+  session: Session,
+  forum: ForumRef,
+  opts: { title: string; body: string; atMs: number },
 ): Promise<Written & { rkey: string }>;
 export function createComment(
   session: Session,

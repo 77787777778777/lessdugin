@@ -403,6 +403,8 @@ impl<H: Host> Engine<H> {
             KvOp::Delete(super::forums::seeded_key(&binding.did)),
         ])
         .await?;
+        // writes held because the old session was refused are sent with the new one
+        self.outbox.release_login_holds(&binding.did).await?;
         self.accounts_changed(false);
         Ok(row.view(Some(&binding.did)))
     }

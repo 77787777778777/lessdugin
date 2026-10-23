@@ -24,6 +24,21 @@ pub const BRIDGE_BLOB_MAX_BODY_BYTES: usize = lessdugin_core::limits::BLOB_HARD_
 pub const OAUTH_LOGIN_TTL_MS: u64 = 600_000;
 /// Unused capabilities kept at most (older ones are dropped when more links are minted).
 pub const MAX_UNUSED_CAPABILITIES: usize = 64;
+/// `BRIDGE_CAPABILITY_TTL_MS`: an unused capability (link) expires this long after it was
+/// minted (§7.2).
+pub const BRIDGE_CAPABILITY_TTL_MS: u64 = 300_000;
+/// `BRIDGE_LOGIN_CONFIRM_MS`: how long a browser-started sign-in waits for the terminal's
+/// confirmation before it is refused (§7.4).
+pub const BRIDGE_LOGIN_CONFIRM_MS: u64 = 300_000;
+/// `BRIDGE_LOCK_WAIT_MS`: the longest one `/bridge/lock` request waits for a busy lock before
+/// answering `{"held": false}` (the tab asks again).
+pub const BRIDGE_LOCK_WAIT_MS: u64 = 20_000;
+/// `BRIDGE_LOCK_HEARTBEAT_MS`: a held `/bridge/lock` writes a byte this often, so a closed
+/// connection releases the lock within about this time (§7.4).
+pub const BRIDGE_LOCK_HEARTBEAT_MS: u64 = 1_000;
+/// `WEB_SHUTDOWN_GRACE_MS`: after Ctrl-C, open connections get this long to finish before
+/// the server stops anyway (a second Ctrl-C stops it at once).
+pub const WEB_SHUTDOWN_GRACE_MS: u64 = 3_000;
 
 /// The §6.1 production policy, one line.
 pub const PRODUCTION_CSP: &str = "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; \

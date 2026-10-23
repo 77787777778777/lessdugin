@@ -15,6 +15,13 @@
 //! release build refuses to embed the placeholder (release binaries MUST embed the real SPA)
 //! unless `LESSDUGIN_WEB_PLACEHOLDER=1` says that is intended. Symbolic links are not followed,
 //! and file names must be UTF-8 without `\` (they become URL paths).
+//!
+//! A release build also refuses a test build of the SPA (WEB-5, SUP-3): the mock e2e suite
+//! leaves a demo build in `web/dist`, and `cargo xtask e2e` embeds `web/dist-e2e`. Every
+//! scanned file (not the source maps) must be free of the e2e and mock markers that
+//! `web/scripts/check-release-bundle.mjs` checks (`release_markers.rs`), and a `mode` in
+//! `build-info.json`, when present, must be a release mode. `LESSDUGIN_WEB_ALLOW_TEST_BUILD=1`
+//! overrides this (a deliberate local release build of a test SPA).
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -23,6 +30,42 @@ use std::path::{Path, PathBuf};
 const DIST_ENV: &str = "LESSDUGIN_WEB_DIST";
 /// Allows a release build without the SPA.
 const PLACEHOLDER_ENV: &str = "LESSDUGIN_WEB_PLACEHOLDER";
+/// Allows a release build that embeds a test build of the SPA.
+const TEST_BUILD_ENV: &str = "LESSDUGIN_WEB_ALLOW_TEST_BUILD";
+
+#[allow(dead_code)] // `RELEASE_MODES` etc. are shared with src/web/assets.rs
+mod markers {
+    include!("release_markers.rs");
+}
+
+/// Panics if a release build is about to embed a test build of the SPA.
+fn check_release_bundle(dist: &Path, files: &[(String, PathBuf)]) {
+    let mut problems = Vec::new();
+    for (rel, path) in files {
+        if !markers::scanned(rel) {
+            continue;
+        }
+        let body = std::fs::read(path).expect("web/dist is readable");
+        for m in markers::markers_in(&body) {
+            problems.push(format!("{rel}: test-only code {m:?}"));
+        }
+        if rel == "build-info.json"
+            && let Some(mode) = markers::build_info_mode(&String::from_utf8_lossy(&body))
+            && !markers::RELEASE_MODES.contains(&mode.as_str())
+        {
+            problems.push(format!("build-info.json: a {mode:?} build"));
+        }
+    }
+    if !problems.is_empty() {
+        panic!(
+            "{} is a test build of the web app, which a release binary must not embed \
+             (threat-model.md WEB-5, SUP-3):\n  {}\nBuild the release SPA (pnpm --filter \
+             @lessdugin/web build) or set {TEST_BUILD_ENV}=1 if this is intended.",
+            dist.display(),
+            problems.join("\n  ")
+        );
+    }
+}
 
 fn collect(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) -> std::io::Result<()> {
     let mut entries: Vec<_> = std::fs::read_dir(dir)?.collect::<Result<_, _>>()?;
@@ -58,6 +101,8 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed={DIST_ENV}");
     println!("cargo:rerun-if-env-changed={PLACEHOLDER_ENV}");
+    println!("cargo:rerun-if-env-changed={TEST_BUILD_ENV}");
+    println!("cargo:rerun-if-changed=release_markers.rs");
     let manifest = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("cargo sets it"));
     let dist = std::env::var_os(DIST_ENV)
         .filter(|v| !v.is_empty())
@@ -70,12 +115,15 @@ fn main() {
     // Without the `web` feature there is no `lessdugin web`, so nothing is embedded.
     let web = std::env::var_os("CARGO_FEATURE_WEB").is_some();
     let real = dist.join("index.html").is_file();
+    let release = std::env::var("PROFILE").is_ok_and(|p| p == "release");
     if web && real {
         let root = dist.canonicalize().expect("web/dist is readable");
         collect(&root, &root, &mut files).expect("web/dist is readable");
         files.sort();
+        if release && !std::env::var(TEST_BUILD_ENV).is_ok_and(|v| v == "1") {
+            check_release_bundle(&dist, &files);
+        }
     } else if web {
-        let release = std::env::var("PROFILE").is_ok_and(|p| p == "release");
         let allowed = std::env::var(PLACEHOLDER_ENV).is_ok_and(|v| v == "1");
         if release && !allowed {
             panic!(

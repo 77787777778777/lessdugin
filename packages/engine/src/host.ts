@@ -4,14 +4,15 @@
 // core's `Host` trait (crates/wasm/src/host.rs `JsHostImports`, sync.md §12). The pieces:
 //
 // - `http(...)`: `Target::Anon` requests through `fetchAnon` (fetch.ts); `Target::UserPds`
-//   requests through `userPds` (the worker: public reads of the account's own repo go
-//   anonymously to its PDS, everything else to the main thread's AuthBridge);
+//   requests through `userPds` (the worker: the main thread's AuthBridge);
 // - `fetchBlob(...)`: blobs.ts;
-// - `lock(name, wait)`: Web Locks (locks.ts);
+// - `lock(name, wait)`: Web Locks (locks.ts); in `lessdugin web` mode an `outbox:<did>` lock is
+//   then also the native one (bridge-lock.ts), Web Lock first;
 // - `sleep(ms)`, `now()`, `random(n)`: `setTimeout`, `Date.now()`, `crypto.getRandomValues`;
 // - `cache`, `state`: `KvBackend`s (idb.ts, bridge-kv.ts).
 
 import { type BlobHandleValue, type BlobStore, fetchBlob } from "./blobs.ts";
+import { type BridgeLockOptions, isBridgedLock, takeBridgeLock } from "./bridge-lock.ts";
 import { type FetchDeps, fetchAnon } from "./fetch.ts";
 import type { KvBackend } from "./idb.ts";
 import { acquireLock, type LockHandle, type LockManagerLike } from "./locks.ts";
@@ -53,6 +54,8 @@ export interface HostDeps {
   userPds(req: PdsRequest): Promise<HttpResult>;
   blobs: BlobStore;
   locks: LockManagerLike;
+  /** `lessdugin web` mode: `outbox:<did>` locks are also taken natively (`POST /bridge/lock`). */
+  bridgeLock?: BridgeLockOptions | undefined;
   /** Default `Date.now`. */
   now?: () => number;
 }
@@ -114,7 +117,26 @@ export function createJsHost(deps: HostDeps): JsHostImports {
     },
     async lock(name, wait) {
       try {
-        return await acquireLock(deps.locks, name, wait);
+        const tab = await acquireLock(deps.locks, name, wait);
+        if (!tab || !deps.bridgeLock || !isBridgedLock(name)) return tab;
+        let native: LockHandle | null;
+        try {
+          native = await takeBridgeLock(deps.bridgeLock, name, wait);
+        } catch (e) {
+          tab.release();
+          throw e;
+        }
+        if (!native) {
+          tab.release();
+          return null;
+        }
+        const held = native;
+        return {
+          release() {
+            held.release();
+            tab.release();
+          },
+        };
       } catch (e) {
         throw asHostError(e);
       }

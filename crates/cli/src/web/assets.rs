@@ -170,6 +170,65 @@ mod tests {
         assert!(a.get("/does-not-exist").is_none());
     }
 
+    mod markers {
+        include!("../../release_markers.rs");
+    }
+
+    /// The JS string array `name` of `web/scripts/check-release-bundle.mjs`.
+    fn js_markers(js: &str, name: &str) -> Vec<String> {
+        let start = js.find(&format!("export const {name} = [")).expect(name);
+        let body = &js[start..];
+        let body = &body[body.find('[').unwrap() + 1..body.find("];").unwrap()];
+        body.split('"')
+            .skip(1)
+            .step_by(2)
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// build.rs refuses to embed a test SPA build into a release binary with the same markers
+    /// the web package's release check uses.
+    #[test]
+    fn release_markers_match_the_web_check() {
+        let js = include_str!("../../../../web/scripts/check-release-bundle.mjs");
+        assert_eq!(js_markers(js, "E2E_MARKERS"), markers::E2E_MARKERS);
+        assert_eq!(js_markers(js, "MOCK_MARKERS"), markers::MOCK_MARKERS);
+    }
+
+    #[test]
+    fn release_marker_scan() {
+        assert!(markers::markers_in(b"const x = 1; export default x;").is_empty());
+        assert_eq!(
+            markers::markers_in(b"..window.__lessduginE2E = hook; pds.example.test"),
+            ["__lessduginE2E", "pds.example.test"]
+        );
+        assert!(markers::scanned("assets/index-abc.js"));
+        assert!(markers::scanned("index.html"));
+        assert!(markers::scanned("assets/engine_bg.wasm"));
+        assert!(!markers::scanned("assets/index-abc.js.map"));
+        assert_eq!(
+            markers::build_info_mode("{\n  \"sha256\": \"ab\",\n  \"mode\" : \"e2e\"\n}")
+                .as_deref(),
+            Some("e2e")
+        );
+        assert_eq!(markers::build_info_mode("{\"sha256\": \"ab\"}"), None);
+        assert!(markers::RELEASE_MODES.contains(&"release"));
+        assert!(!markers::RELEASE_MODES.contains(&"demo"));
+    }
+
+    /// A release binary never carries a test build (build.rs refused it).
+    #[test]
+    fn release_binaries_embed_no_test_build() {
+        if cfg!(debug_assertions) {
+            return;
+        }
+        for (path, body) in embedded::FILES {
+            if markers::scanned(path) {
+                assert!(markers::markers_in(body).is_empty(), "{path}");
+            }
+        }
+    }
+
     #[test]
     fn content_types() {
         assert_eq!(content_type("index.html"), "text/html; charset=utf-8");

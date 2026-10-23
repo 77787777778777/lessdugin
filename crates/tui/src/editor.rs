@@ -20,10 +20,35 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::text::tt;
 
 /// The scissors line (as git writes it).
-pub const SCISSORS: &str = "# ------------------------ >8 ------------------------";
+pub use lessdugin_native::template::SCISSORS;
 
 /// The largest file read back from the editor.
 pub const MAX_TEXT_BYTES: u64 = 1 << 20;
+
+/// Why the editor gave no text back.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EditError {
+    /// What happened.
+    pub message: String,
+    /// The file's text, when the editor failed after it was written (kept, so the user's text
+    /// is not lost).
+    pub text: Option<String>,
+}
+
+impl From<String> for EditError {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            text: None,
+        }
+    }
+}
+
+impl From<&str> for EditError {
+    fn from(message: &str) -> Self {
+        Self::from(message.to_owned())
+    }
+}
 
 /// How the editor is found and where its files go.
 #[derive(Clone, Debug)]
@@ -56,10 +81,27 @@ impl EditorConfig {
     }
 
     /// Writes `template` to a new private file, runs the editor on it and returns the file's
-    /// text (the file is removed). An editor that exits with an error is a cancellation.
-    pub fn edit(&self, template: &str) -> Result<String, String> {
+    /// text (the file is removed). An editor that exits with an error is a cancellation, but
+    /// what was written is returned with the error ([`EditError::text`]) so it is not lost. A
+    /// text that cannot be read back (too long, not UTF-8) stays in its file, which the error
+    /// names.
+    pub fn edit(&self, template: &str) -> Result<String, EditError> {
         let path = self.create(template)?;
-        let result = self.run(&path).and_then(|()| read_back(&path));
+        let result = match self.run(&path) {
+            Ok(()) => match read_back(&path) {
+                Ok(text) => Ok(text),
+                Err(message) => {
+                    return Err(EditError::from(format!(
+                        "{message}; it is kept in {}",
+                        path.display()
+                    )));
+                }
+            },
+            Err(message) => Err(EditError {
+                message,
+                text: read_back(&path).ok(),
+            }),
+        };
         let _ = std::fs::remove_file(&path);
         result
     }
@@ -191,52 +233,7 @@ pub fn split_words(s: &str) -> Option<Vec<String>> {
     Some(words)
 }
 
-/// Neutralises editor modelines in a line of remote text (TERM-8): a space before the `:` of
-/// every `(?i)(^|\s)(vi|vim|ex)([<=>]?[0-9]*)?:` and `(?i)local variables:`, and `-*-` becomes
-/// `- * -`.
-pub fn neutralise_modelines(line: &str) -> String {
-    let s = line.replace("-*-", "- * -");
-    let chars: Vec<char> = s.chars().collect();
-    let mut colons = Vec::new(); // char indices of colons to push right
-    let lower: Vec<char> = chars.iter().map(|c| c.to_ascii_lowercase()).collect();
-    let at = |i: usize, w: &str| -> bool {
-        w.chars()
-            .enumerate()
-            .all(|(k, c)| lower.get(i + k) == Some(&c))
-    };
-    for i in 0..chars.len() {
-        if at(i, "local variables:") {
-            colons.push(i + "local variables".len());
-        }
-        if i > 0 && !chars[i - 1].is_whitespace() {
-            continue;
-        }
-        for word in ["vim", "vi", "ex"] {
-            if !at(i, word) {
-                continue;
-            }
-            let mut j = i + word.len();
-            if matches!(chars.get(j), Some('<' | '=' | '>')) {
-                j += 1;
-            }
-            while chars.get(j).is_some_and(char::is_ascii_digit) {
-                j += 1;
-            }
-            if chars.get(j) == Some(&':') {
-                colons.push(j);
-                break;
-            }
-        }
-    }
-    let mut out = String::with_capacity(s.len() + colons.len());
-    for (i, c) in chars.iter().enumerate() {
-        if colons.contains(&i) {
-            out.push(' ');
-        }
-        out.push(*c);
-    }
-    out
-}
+pub use lessdugin_native::template::neutralise_modelines;
 
 /// One line of remote text for a template: sanitised, on one line, modelines neutralised.
 fn remote(s: &str) -> String {
@@ -448,5 +445,47 @@ mod tests {
                 0
             );
         }
+    }
+
+    /// An editor that fails after the user wrote: the text comes back with the error. One
+    /// that writes a text too long to read back: the file stays, and the error names it.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_editor_does_not_lose_the_text() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let cfg_for = |script: &str| {
+            let path = dir.path().join(format!("ed{}.sh", script.len()));
+            std::fs::write(&path, script).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            EditorConfig::from_vars(dir.path().join("tmp"), |k| {
+                (k == "EDITOR").then(|| path.display().to_string())
+            })
+        };
+        let failing = cfg_for(
+            "#!/bin/sh\nprintf 'half a reply\\n' | cat - \"$1\" > \"$1.new\" && mv \"$1.new\" \"$1\"\nexit 3\n",
+        );
+        let e = failing.edit(&comment_template("", &[], None)).unwrap_err();
+        assert!(e.message.contains("exited with"), "{e:?}");
+        let text = e.text.expect("the text written before the failure");
+        assert_eq!(strip_template(&text).as_deref(), Some("half a reply"));
+        assert_eq!(
+            std::fs::read_dir(dir.path().join("tmp")).unwrap().count(),
+            0
+        );
+
+        let huge = cfg_for(&format!(
+            "#!/bin/sh\nyes | head -c {} >> \"$1\"\n",
+            MAX_TEXT_BYTES + 1
+        ));
+        let e = huge.edit(&comment_template("", &[], None)).unwrap_err();
+        assert!(
+            e.message.contains("too long") && e.message.contains("kept in"),
+            "{e:?}"
+        );
+        assert_eq!(
+            std::fs::read_dir(dir.path().join("tmp")).unwrap().count(),
+            1
+        );
     }
 }

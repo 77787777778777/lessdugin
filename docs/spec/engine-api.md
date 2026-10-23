@@ -33,8 +33,13 @@ Normative details of the underlying behaviour live in `data-model.md` (records, 
   query returns byte-identical JSON on every platform (`social.md` §1.3). Local-only fields
   (read marks, mutes, "mine") are computed from the local `state` store and are part of the
   parity scenario's injected state.
-- **Versioning.** Every top-level response carries `"dto": 1`. Adding optional fields or enum
-  variants is compatible; anything else bumps the version.
+- **Versioning.** Every top-level view DTO (§4: `PostList`, `ThreadView`, `ForumView`, …)
+  carries `"dto": 1`. Operation results that are not views, such as a `WriteTicket`, a
+  `Vec<…>` list (`accounts()`, `writes()`, `drafts()`, …) or a bare value, are serialised
+  without it, exactly as `dto.rs` serialises them; the engine and the wasm binding (§5) pass
+  them on unchanged, and the CLI's `--json` wraps every object it prints in its own
+  `{ "dto": 1, … }` envelope (`crates/cli/src/out.rs`). Adding optional fields or enum variants
+  is compatible; anything else bumps the version.
 - **Errors.** Operations return `Result<T, EngineError>`; `EngineError` serialises as
   `{ "code": <string>, "message": <string>, "retryable": bool, "detail"?: object }` with codes:
   `auth_required`, `not_found`, `invalid_ref`, `invalid_input`, `conflict`, `rate_limited`,
@@ -139,7 +144,8 @@ when the engine is dropped or the corresponding stop method is called.
 | `verify_handles(n) -> usize` | verifies the handles of up to `n` shown authors queued by views (`sync.md` §3.3); emits `Changed` when a handle state changed; `live_tail` calls it each round |
 | `outbox_pump()` | long-lived: drains the outbox of every logged-in account, one write in flight per account (`sync.md` §7.1, across processes and tabs through `Host::lock`); picks up account changes; never returns an error; ends on `outbox_stop()` |
 | `outbox_stop()` | sync; stops every running pump after its current round; a pump started later runs |
-| `outbox_flush() -> PumpReport` | one-shot (CLI, tests): prunes finished writes older than `DONE_KEEP_MS`, then runs every account's outbox until nothing is pending, sleeping through holds and back-offs. `PumpReport { processed, done, failed, conflicts, throttled }` is a Rust value, not a DTO |
+| `outbox_flush() -> PumpReport` | one-shot (CLI, tests): prunes finished writes older than `DONE_KEEP_MS`, then runs every account's outbox until nothing is pending, sleeping through holds and back-offs; an account whose writes wait for a new login (below) is skipped. `PumpReport { processed, done, failed, conflicts, throttled, needsLogin }` is a Rust value, not a DTO |
+| `outbox_expedite() -> u32` | "send now" (`lessdugin outbox flush`): ends the back-off of every write that waits after an ambiguous or transient failure, so the next step tries it at once. The undo window, the write budget, a PDS rate limit and a refused session are not shortened. Returns how many writes it expedited |
 | `background_verify()` | long-lived; `verify = Proof` is Reserved (P2) (`sync.md` §2.3), so in v1 it returns at once |
 | `external_change(topics)` | sync; another engine over the same stores (another browser tab, `sync.md` §10.6) emitted `Changed { topics }`: drops the cached models those topics touch (a `Thread` or `User` topic drops every cached forum model). Emits nothing; the caller forwards the event to its own subscribers |
 
@@ -172,12 +178,29 @@ SyncReport { dto, forum, reposTotal, reposComplete, reposStale, reposUnavailable
 `sort`/`filter` values are exactly those of `social.md` §12 (`magic | top | new | old | recentComments`;
 `frontpage | all | curated`; comment sorts `magic | top | new | old | latestReply`).
 
+**Default list view (M2).** Until votes and curation exist (M3), every client opens a forum's
+post list with `sort = new`, `filter = all` (the CLI's `ls`, the TUI's forum screen, the SPA's
+`web/src/lib/listDefaults.ts`), so the three show the same posts for the same forum; the
+parity scenario lists with these values and compares one page of 30 posts (the CLI's `ls -n`
+default and the SPA's page size; the TUI's forum screen lists up to 200, and its parity driver
+checks that they start with that page, `crates/tui/src/exec.rs` `PARITY_LIST_LIMIT`). The
+defaults change together when M3 lands.
+
 ### 3.5 Writes
 
 Writes go through the durable outbox (`data-model.md` §8). Each returns a `WriteTicket
 { id, state }` immediately after the operation is persisted; `state` progresses through
 `Pending → Sending → Done { uri, cid } | Failed { error } | Undone` and is reported by
 `Write` events.
+
+`Pending { notBeforeMs?, held?, throttled?, needsLogin?, error? }` says why a write waits:
+`held` (the undo window), `throttled` (the write budget, a rate limit, or a back-off after an
+ambiguous or transient failure), or `needsLogin`; `error` is the failure that caused a
+`throttled` or `needsLogin` wait. **`needsLogin`:** the PDS or the host refused the account's
+session (`auth_required`: expired, revoked, logged out). The write is not retried and does not
+count as an attempt; nothing else of that account is sent (writes stay in order), the engine
+emits `Auth { did, state: Expired }`, and the next login of the account (`add_account`,
+`record_account`) queues the held writes again.
 
 | Operation | Notes |
 |---|---|
@@ -193,7 +216,7 @@ Writes go through the durable outbox (`data-model.md` §8). Each returns a `Writ
 | `redact_revision(uri)` | deletes revision records |
 | `prepare_media(MediaInput) -> MediaRef` | sniff, strip, orient (native), CID; upload happens at publish |
 | `undo(write_id)` | within the undo window |
-| `retry_write(write_id)` | queues a `failed` (or conflicting) write again; returns its ticket |
+| `retry_write(write_id)` | queues a `failed` (or conflicting) write again with its attempts reset; on a write that backs off after a failure, or waits for a login, it is "send now" (queued at once, attempts kept). A write held by the undo window, the write budget or a rate limit is refused (`invalid_input`). Returns its ticket |
 | `write_status(write_id) -> Option<WriteTicket>` | `None`: unknown or pruned |
 | `writes() -> Vec<WriteTicket>` | every write in the outbox, by account then `seq` (the CLI's `outbox` listing, the SPA's pending badges) |
 
@@ -240,6 +263,9 @@ UIs re-query on `Changed` and never move the user's cursor on live updates (TUI 
   re-query no longer shows the item as pending.
 - **Accounts.** `add_account`, `record_account`, `set_active_account` and `remove_account` emit
   `Changed [Accounts]` (plus `Outbox` when a purge dropped writes).
+- **`Auth`.** `Auth { did, state: Expired }` is emitted when the outbox finds the account's
+  session refused (its writes then wait with `needsLogin`, §3.5). Clients show "session
+  expired, log in again" (the CLI exits 3 with that hint). `Ok` and `Expiring` are Reserved.
 - **Handles.** Handle verification (`verify_handles`, `live_tail`) emits `Changed` for the users
   whose handle state changed and for the cached forums.
 
@@ -362,18 +388,24 @@ VerifyReport  { dto, uri, result: proven|absent|failed, rev?, commitCid?, keySou
   only in development and e2e builds and `parityNowMs` only in e2e builds (`VITE_E2E=1`).
 - **Host.** The worker implements the core `Host` in JS (`host.ts`) and passes it to the
   constructor: `Target::Anon` requests through `fetch` with the browser URL policy, streaming
-  byte caps and `cache: "no-store"` (`fetch.ts`); `Target::UserPds` requests to the main
-  thread's AuthBridge, except anonymous GETs of the account's own public records, which go
-  to the account's PDS directly (`worker-core.ts`); `fetch_blob` streamed and hashed in JS with
+  byte caps and `cache: "no-store"` (`fetch.ts`); `Target::UserPds` requests (writes and
+  `getSession` only; the core reads public records, the account's own included, as
+  `Target::Anon`) to the main thread's AuthBridge; `fetch_blob` streamed and hashed in JS with
   the CID check, stored in IndexedDB, never copied into wasm (`blobs.ts`); `lock` as the Web
-  Lock `lessdugin-<name>` (`locks.ts`); `sleep`, `now_ms`, `fill_random` from the platform;
+  Lock `lessdugin-<name>` (`locks.ts`), where the leader's own `sync-leader` request is answered
+  at once (it holds that Web Lock, which is not re-entrant), and in `lessdugin web` mode an
+  `outbox:<did>` lock is the Web Lock and then the native lock through `POST /bridge/lock`
+  (`bridge-lock.ts`, threat-model §7.4); `sleep`, `now_ms`, `fill_random` from the platform;
   WebSockets are `unsupported` until M5. The two `KvStore`s are IndexedDB databases
   (`<prefix>-cache` relaxed, `<prefix>-state` strict; `idb.ts`), or in `lessdugin web` mode
   the state store is the native one behind `POST /bridge/kv` (`bridge-kv.ts`). The IndexedDB
   store passes the core KV conformance suites in CI (`kv-conformance.test.ts`, with the test
   module of `cargo xtask wasm --kv-test`).
-- **Threads.** The engine runs in a Web Worker (`worker.ts`, Comlink); the main thread holds
-  the session and serves `Target::UserPds` requests through the AuthBridge allowlist
+- **Threads.** The engine runs in a Web Worker (`worker.ts`; the main thread calls it through
+  Comlink); the main thread holds the session and serves `Target::UserPds` requests over a
+  dedicated `MessagePort` with a fixed message schema (`bridge-port.ts`: requests are rebuilt
+  field by field, no main-thread object is exposed to the worker) through the AuthBridge
+  allowlist
   (`auth-bridge.ts`, threat-model AUTH-4, AUTH-8), with a pluggable session: hosted OAuth
   (`oauthSession(did, fetchHandler)`) or the `lessdugin web` bridge
   (`bridgeSession({ did, token })`). `@lessdugin/engine/client` (`startEngine`) wraps the

@@ -9,3 +9,4 @@ pub mod engine;
 pub mod fsutil;
 pub mod host;
 pub mod kv;
+pub mod template;

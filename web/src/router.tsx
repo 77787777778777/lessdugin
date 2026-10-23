@@ -25,6 +25,7 @@ import { HomePage } from "./pages/HomePage.tsx";
 import { LoginPage } from "./pages/LoginPage.tsx";
 import { NotFoundPage } from "./pages/NotFoundPage.tsx";
 import { NotificationsPage } from "./pages/NotificationsPage.tsx";
+import { OutboxPage } from "./pages/OutboxPage.tsx";
 import { PostPage } from "./pages/PostPage.tsx";
 import { SearchPage } from "./pages/SearchPage.tsx";
 import { SequencePage } from "./pages/SequencePage.tsx";
@@ -149,6 +150,11 @@ const draftsRoute = createRoute({
   path: "/drafts",
   component: DraftsPage,
 });
+const outboxRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/outbox",
+  component: OutboxPage,
+});
 const bookmarksRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/bookmarks",
@@ -199,6 +205,7 @@ export const routeTree = rootRoute.addChildren([
   atRoute,
   notificationsRoute,
   draftsRoute,
+  outboxRoute,
   bookmarksRoute,
   searchRoute,
   settingsRoute,

@@ -4,6 +4,7 @@
 import { IDBFactory, IDBKeyRange } from "fake-indexeddb";
 import { describe, expect, it } from "vitest";
 import {
+  Connection,
   compareBytes,
   type IDBFactoryLike,
   IdbKv,
@@ -12,6 +13,7 @@ import {
   OP_DELETE,
   OP_DELETE_RANGE,
   OP_PUT,
+  storageError,
 } from "./idb.ts";
 import { isHostError } from "./protocol.ts";
 
@@ -281,5 +283,64 @@ describe("IdbKv", () => {
       (e: unknown) => e,
     );
     expect(isHostError(err) && err.kind).toBe("storage");
+  });
+});
+
+describe("IndexedDB recovery (robustness review L6)", () => {
+  function open(factory: IDBFactory, name: string, version: number): Promise<IDBDatabase> {
+    return new Promise((resolve, reject) => {
+      const r = factory.open(name, version);
+      r.onupgradeneeded = () => {
+        if (!r.result.objectStoreNames.contains("kv")) r.result.createObjectStore("kv");
+      };
+      r.onsuccess = () => resolve(r.result);
+      r.onerror = () => reject(r.error);
+      r.onblocked = () => reject(new Error("blocked"));
+    });
+  }
+
+  it("lets another tab delete or upgrade the database, then opens it again", async () => {
+    const idb = fakeIdb();
+    const s = await IdbKv.open("state", "strict", idb);
+    await s.write([OP_PUT, b(0x01), b(1)]);
+    // another tab deletes it (the versionchange closes this connection, so it is not blocked)
+    await new Promise<void>((resolve, reject) => {
+      const r = idb.factory.deleteDatabase("state");
+      r.onsuccess = () => resolve();
+      r.onerror = () => reject(r.error);
+      r.onblocked = () => reject(new Error("the delete was blocked"));
+    });
+    // the next operation reopens a fresh database
+    expect(await scanKeys(s)).toEqual([]);
+    await s.write([OP_PUT, b(0x02), b(2)]);
+    expect(await scanKeys(s)).toEqual(["02"]);
+    // a newer build upgrades the schema: this one asks for a reload
+    const newer = await open(idb.factory, "state", 2);
+    const err = await s.getMany([b(0x02)]).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(isHostError(err) && err.message).toContain("reload this page");
+    newer.close();
+  });
+
+  it("opens a connection the browser closed again", async () => {
+    const idb = fakeIdb();
+    const db = await open(idb.factory, "c", 1);
+    const conn = new Connection(db, () => open(idb.factory, "c", 1));
+    db.close(); // as the browser does on "clear site data" (its close event may come later)
+    const tx = await conn.transaction("kv", "readwrite");
+    tx.objectStore("kv").put(b(1), b(0x01) as Uint8Array<ArrayBuffer>);
+    await new Promise<void>((resolve, reject) => {
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+    conn.close();
+    await expect(conn.transaction("kv", "readonly")).rejects.toMatchObject({ kind: "storage" });
+  });
+
+  it("names a full disk", () => {
+    const e = storageError(new DOMException("quota", "QuotaExceededError"));
+    expect(isHostError(e) && e.message).toContain("storage for this site is full");
   });
 });

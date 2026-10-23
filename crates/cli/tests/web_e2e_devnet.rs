@@ -12,7 +12,7 @@
 
 #![allow(clippy::disallowed_methods)] // a real clock and real sleeps for a real network
 
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{Receiver, channel};
@@ -24,16 +24,7 @@ use serde_json::{Value, json};
 
 struct Devnet {
     info: Value,
-    child: Option<Child>,
-}
-
-impl Drop for Devnet {
-    fn drop(&mut self) {
-        if let Some(c) = &mut self.child {
-            let _ = c.kill();
-            let _ = c.wait();
-        }
-    }
+    _child: Option<lessdugin_testkit::node_devnet::NodeDevnet>,
 }
 
 impl Devnet {
@@ -44,36 +35,15 @@ impl Devnet {
         }
         if let Ok(path) = std::env::var("LESSDUGIN_DEVNET_JSON") {
             let info = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
-            return Some(Self { info, child: None });
+            return Some(Self { info, _child: None });
         }
-        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
-        let json =
-            std::env::temp_dir().join(format!("lessdugin-web-devnet-{}.json", std::process::id()));
-        let _ = std::fs::remove_file(&json);
-        let child = Command::new("node")
-            .arg(format!("{root}/packages/e2e/devnet.mjs"))
-            .arg("--json")
-            .arg(&json)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("node");
-        let mut devnet = Self {
-            info: Value::Null,
-            child: Some(child),
-        };
-        for _ in 0..600 {
-            let parsed = std::fs::read_to_string(&json)
-                .ok()
-                .and_then(|text| serde_json::from_str::<Value>(&text).ok());
-            if let Some(v) = parsed {
-                devnet.info = v;
-                let _ = std::fs::remove_file(&json);
-                return Some(devnet);
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        panic!("the devnet did not start within 60 s");
+        let root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
+        // one devnet per test: the tests of a binary run in parallel
+        let (child, info) = lessdugin_testkit::node_devnet::NodeDevnet::start(root, "web");
+        Some(Self {
+            info,
+            _child: Some(child),
+        })
     }
 
     fn s(&self, path: &[&str]) -> String {
@@ -156,6 +126,26 @@ impl Web {
         }
     }
 
+    /// Types `answer` on the process's stdin once `needle` shows on its stderr (the terminal's
+    /// confirmation of a browser sign-in), from a thread, so a blocking step can run meanwhile.
+    fn answer_when(&mut self, needle: &'static str, answer: &'static str) {
+        let mut stdin = self.child.stdin.take().expect("stdin is piped");
+        let stderr = self.stderr.clone();
+        std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(120);
+            while Instant::now() < deadline {
+                if stderr.lock().unwrap().contains(needle) {
+                    let _ = stdin.write_all(answer.as_bytes());
+                    let _ = stdin.flush();
+                    // keep stdin open: its end would refuse later questions
+                    std::thread::sleep(Duration::from_secs(120));
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        });
+    }
+
     fn wait_for_stderr(&self, needle: &str) {
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
@@ -211,7 +201,7 @@ fn e2e_browser_sign_in_and_oauth_writes_through_the_bridge() {
         .port();
     let mut cmd = devnet.cli(dir.path());
     cmd.args(["web", "--no-open", "--port", &port.to_string()]);
-    let web = Web::start(cmd);
+    let mut web = Web::start(cmd);
     let link = web
         .links
         .recv_timeout(Duration::from_secs(60))
@@ -267,6 +257,8 @@ fn e2e_browser_sign_in_and_oauth_writes_through_the_bridge() {
     let url = v["url"].as_str().unwrap().to_owned();
     assert!(url.starts_with(&format!("{pds}/oauth/authorize?")), "{url}");
     web.wait_for_stderr("A browser tab started a sign-in as @alice.test");
+    // The terminal confirms the sign-in before the session is stored (F27).
+    web.answer_when("Accept this sign-in? [y/N]", "y\n");
     let out = approve(&url, &devnet.s(&["accounts", "alice", "password"]), &origin);
     assert!(out.contains(&format!("FINAL {origin}/#/\n")), "{out}");
     let via = out

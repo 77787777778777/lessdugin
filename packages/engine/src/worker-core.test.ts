@@ -11,7 +11,7 @@ import type { ChannelLike } from "./leader.ts";
 import { LocalLocks } from "./locks.ts";
 import type { AuthBridgePort, PdsRequest, WorkerInit } from "./protocol.ts";
 import type { EngineError } from "./types.ts";
-import { isPublicOwnRead, type WasmModule, WorkerEngine, type WorkerEnv } from "./worker-core.ts";
+import { type WasmModule, WorkerEngine, type WorkerEnv } from "./worker-core.ts";
 
 const PKG = new URL("../pkg/", import.meta.url);
 const WASM = new URL("lessdugin_engine_bg.wasm", PKG);
@@ -264,37 +264,5 @@ describe.runIf(present)("WorkerEngine over the real wasm", () => {
     expect(names).toEqual(["p-blobs", "p-cache", "p-state"]);
     const mem = await tab(origin(), { elect: false, state: { kind: "memory" }, dbPrefix: "m" });
     expect(await mem.engine.callJson("accounts", "[]")).toBe("[]");
-  });
-});
-
-describe("isPublicOwnRead", () => {
-  const base = {
-    account: "did:plc:a",
-    method: "GET" as const,
-    headers: [],
-    maxBytes: 1,
-    timeoutMs: 1,
-  };
-  it("passes only GET reads of the account's own repo", () => {
-    expect(
-      isPublicOwnRead({
-        ...base,
-        path: "/xrpc/com.atproto.repo.listRecords?repo=did%3Aplc%3Aa&collection=x",
-      }),
-    ).toBe(true);
-    expect(
-      isPublicOwnRead({ ...base, path: "/xrpc/com.atproto.sync.getLatestCommit?did=did:plc:a" }),
-    ).toBe(true);
-    expect(
-      isPublicOwnRead({ ...base, path: "/xrpc/com.atproto.repo.listRecords?repo=did:plc:b" }),
-    ).toBe(false);
-    expect(isPublicOwnRead({ ...base, path: "/xrpc/com.atproto.server.getSession" })).toBe(false);
-    expect(
-      isPublicOwnRead({
-        ...base,
-        method: "POST",
-        path: "/xrpc/com.atproto.repo.getRecord?repo=did:plc:a",
-      }),
-    ).toBe(false);
   });
 });

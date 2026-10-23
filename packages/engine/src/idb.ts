@@ -12,7 +12,12 @@
 //   order), with durability `strict` for `state` and `relaxed` for `cache`. Forward scans use
 //   `getAllKeys` + `getAll` over the same range in one transaction; reverse scans a `prev`
 //   cursor.
-// - `MemKv`: the same contract in memory (tests, previews, a failed IndexedDB open).
+// - `MemKv`: the same contract in memory (tests, previews, and the `cache` store when IndexedDB
+//   cannot be opened: the cache can always be rebuilt; `state` never falls back, worker-core.ts).
+// - Recovery: when another tab upgrades the schema (`versionchange`) or the browser closes the
+//   connection (storage cleared, a disk error: `close`), the connection is dropped and the next
+//   operation opens it again. A newer schema than this build knows (`VersionError`) asks for a
+//   reload. A full disk (`QuotaExceededError`) is reported as such.
 //
 // Empty and inverted ranges select nothing (IndexedDB would throw `DataError`), and a limit
 // of 0 returns nothing (IndexedDB's `getAll(range, 0)` would return everything). `IdbKv`
@@ -224,11 +229,126 @@ function req<T>(r: IDBRequest<T>): Promise<T> {
   });
 }
 
-function storageError(e: unknown): unknown {
+export function storageError(e: unknown): unknown {
   if (isHostError(e)) return e;
   const name = e instanceof DOMException ? e.name : "Error";
   const message = e instanceof Error ? e.message : String(e);
+  if (name === "QuotaExceededError") {
+    return hostError(
+      "storage",
+      "the browser's storage for this site is full (QuotaExceededError): free disk space, or clear this site's cached data",
+    );
+  }
+  if (name === "VersionError") {
+    return hostError(
+      "storage",
+      "a newer version of lessdugin is open in another tab: reload this page (IndexedDB VersionError)",
+    );
+  }
   return hostError("storage", `IndexedDB ${name}: ${message}`);
+}
+
+/** Opens (creating or upgrading) the database `name` at `version` with the object store
+ * `store`. */
+export function openDatabase(
+  factory: IDBFactory,
+  name: string,
+  store: string,
+  version = 1,
+): Promise<IDBDatabase> {
+  return new Promise<IDBDatabase>((resolve, reject) => {
+    let open: IDBOpenDBRequest;
+    try {
+      open = factory.open(name, version);
+    } catch (e) {
+      reject(storageError(e));
+      return;
+    }
+    open.onupgradeneeded = () => {
+      if (!open.result.objectStoreNames.contains(store)) open.result.createObjectStore(store);
+    };
+    open.onsuccess = () => resolve(open.result);
+    open.onerror = () => reject(storageError(open.error));
+    open.onblocked = () => reject(hostError("storage", `IndexedDB ${name} is blocked`));
+  });
+}
+
+/** One IndexedDB connection that is dropped when another tab upgrades the schema or the
+ * browser closes it, and opened again on the next use. */
+export class Connection {
+  private db: IDBDatabase | null;
+  private opening: Promise<IDBDatabase> | null = null;
+  private closed = false;
+
+  constructor(
+    db: IDBDatabase,
+    private readonly reopen: () => Promise<IDBDatabase>,
+  ) {
+    this.db = db;
+    this.watch(db);
+  }
+
+  private watch(db: IDBDatabase): void {
+    // another tab upgraded the schema: close so it can proceed; the next use reopens
+    db.onversionchange = () => {
+      db.close();
+      if (this.db === db) this.db = null;
+    };
+    // the browser closed it (storage cleared, a disk failure)
+    db.onclose = () => {
+      if (this.db === db) this.db = null;
+    };
+  }
+
+  /** The open connection, reopening it if it was dropped. */
+  async get(): Promise<IDBDatabase> {
+    if (this.closed) throw hostError("storage", "the store is closed");
+    if (this.db) return this.db;
+    this.opening ??= this.reopen().then(
+      (db) => {
+        this.opening = null;
+        if (this.closed) {
+          db.close();
+          throw hostError("storage", "the store is closed");
+        }
+        this.db = db;
+        this.watch(db);
+        return db;
+      },
+      (e: unknown) => {
+        this.opening = null;
+        throw storageError(e);
+      },
+    );
+    return this.opening;
+  }
+
+  /** Starts a transaction; a connection that closed under us is reopened once. */
+  async transaction(
+    store: string,
+    mode: IDBTransactionMode,
+    options?: IDBTransactionOptions,
+  ): Promise<IDBTransaction> {
+    const db = await this.get();
+    try {
+      return db.transaction(store, mode, options);
+    } catch (e) {
+      if (!(e instanceof DOMException && e.name === "InvalidStateError")) throw storageError(e);
+      // closed between the check and the call (a `close` not yet delivered)
+      if (this.db === db) this.db = null;
+      try {
+        return (await this.get()).transaction(store, mode, options);
+      } catch (e2) {
+        throw storageError(e2);
+      }
+    }
+  }
+
+  close(): void {
+    this.closed = true;
+    this.db?.close();
+    this.db = null;
+  }
 }
 
 function done(tx: IDBTransaction): Promise<void> {
@@ -274,7 +394,7 @@ export type Durability = "strict" | "relaxed";
 /** A `KvBackend` over one IndexedDB database. */
 export class IdbKv implements KvBackend {
   private constructor(
-    private readonly db: IDBDatabase,
+    private readonly conn: Connection,
     private readonly idb: IDBFactoryLike,
     private readonly durability: Durability,
   ) {}
@@ -282,28 +402,18 @@ export class IdbKv implements KvBackend {
   /** Opens (creating if needed) the database `name`. */
   static async open(name: string, durability: Durability, idb = globalIdb()): Promise<IdbKv> {
     if (!idb) throw hostError("storage", "IndexedDB is not available");
-    const open = idb.factory.open(name, 1);
-    open.onupgradeneeded = () => {
-      if (!open.result.objectStoreNames.contains(STORE)) open.result.createObjectStore(STORE);
-    };
-    const db = await new Promise<IDBDatabase>((resolve, reject) => {
-      open.onsuccess = () => resolve(open.result);
-      open.onerror = () => reject(storageError(open.error));
-      open.onblocked = () => reject(hostError("storage", `IndexedDB ${name} is blocked`));
-    });
-    // another tab upgraded the schema: close so it can proceed; this worker restarts
-    db.onversionchange = () => db.close();
-    return new IdbKv(db, idb, durability);
+    const connect = () => openDatabase(idb.factory, name, STORE);
+    return new IdbKv(new Connection(await connect(), connect), idb, durability);
   }
 
   close(): void {
-    this.db.close();
+    this.conn.close();
   }
 
   async getMany(keys: Uint8Array[]): Promise<(Uint8Array | undefined)[]> {
     if (keys.length === 0) return [];
     try {
-      const tx = this.db.transaction(STORE, "readonly");
+      const tx = await this.conn.transaction(STORE, "readonly");
       const store = tx.objectStore(STORE);
       const got = await Promise.all(
         keys.map((k) => (k.length === 0 ? undefined : req(store.get(idbKey(k))))),
@@ -326,7 +436,7 @@ export class IdbKv implements KvBackend {
     if (limit <= 0 || r === null) return [];
     try {
       const range = idbRange(this.idb, r);
-      const tx = this.db.transaction(STORE, "readonly");
+      const tx = await this.conn.transaction(STORE, "readonly");
       const store = tx.objectStore(STORE);
       const out: Uint8Array[] = [];
       if (!reverse) {
@@ -362,7 +472,7 @@ export class IdbKv implements KvBackend {
     if (decoded.length === 0) return;
     let tx: IDBTransaction;
     try {
-      tx = this.db.transaction(STORE, "readwrite", { durability: this.durability });
+      tx = await this.conn.transaction(STORE, "readwrite", { durability: this.durability });
     } catch (e) {
       throw storageError(e);
     }

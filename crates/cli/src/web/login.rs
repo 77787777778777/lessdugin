@@ -19,6 +19,19 @@
 //! At most one login is pending: a new `/bridge/login` cancels the previous one, and a pending
 //! login expires after `OAUTH_LOGIN_TTL_MS` (10 minutes).
 //!
+//! **Bound to the tab that started it (F27).** The pending login remembers the bridge session
+//! token of the `/bridge/login` request. When that session is revoked (its link was used a
+//! second time, §7.2) the login is cancelled at once, and the callback refuses to finish a
+//! login whose session is gone. Someone who raced the link and started a sign-in as their own
+//! account therefore cannot finish it once the legitimate tab revokes them.
+//!
+//! **Confirmed in the terminal.** After the code exchange and before the session is stored or
+//! the account becomes active, the terminal asks `Accept this sign-in? [y/N]` (naming the
+//! account and its authorization server) and waits up to `BRIDGE_LOGIN_CONFIRM_MS` for a line
+//! on stdin; anything but `y`/`yes`, a closed stdin or the timeout refuses it (the tab lands on
+//! `/#/login?error=auth_required`). A login nobody at this terminal accepted never becomes the
+//! account the CLI writes as.
+//!
 //! **Deviation (M2).** §7.4 names the bridge's own port as the redirect target. The native
 //! OAuth facade (`lessdugin_native::auth::oauth::begin`) reserves its own ephemeral loopback
 //! port for the redirect URI, so the redirect goes to that port, which this process serves
@@ -42,39 +55,130 @@ use lessdugin_native::auth::resolve_login_target;
 use serde_json::json;
 use tokio::sync::Notify;
 
-use super::policy::{self, OAUTH_LOGIN_TTL_MS};
+use super::policy::{self, BRIDGE_LOGIN_CONFIRM_MS, OAUTH_LOGIN_TTL_MS};
 use super::server::{Web, empty, engine_error, error, host_ok, json_response};
 use crate::out::{Style, cat, lit, name, tt};
 
-/// The pending browser login.
+/// The pending browser login and the bridge session token that started it.
 #[derive(Default)]
 pub struct LoginSlot {
-    task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    task: Mutex<Option<(tokio::task::JoinHandle<()>, String)>>,
 }
 
 impl LoginSlot {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Option<(tokio::task::JoinHandle<()>, String)>> {
+        self.task.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// Replaces the pending login (the previous one is cancelled).
-    fn replace(&self, task: tokio::task::JoinHandle<()>) {
-        let old = self
-            .task
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .replace(task);
-        if let Some(old) = old {
+    fn replace(&self, task: tokio::task::JoinHandle<()>, token: &str) {
+        let old = self.lock().replace((task, token.to_owned()));
+        if let Some((old, _)) = old {
             old.abort();
         }
     }
 
+    /// [`LoginSlot::replace`] for tests.
+    #[cfg(test)]
+    pub fn test_replace(&self, task: tokio::task::JoinHandle<()>, token: &str) {
+        self.replace(task, token);
+    }
+
     /// Cancels the pending login, if any.
     pub fn cancel(&self) {
-        if let Some(t) = self.task.lock().unwrap_or_else(|e| e.into_inner()).take() {
+        if let Some((t, _)) = self.lock().take() {
             t.abort();
         }
     }
+
+    /// Cancels the pending login if the session that started it is no longer live (§7.2
+    /// revoke-on-reuse); says so on the terminal. Returns `true` if it cancelled one.
+    pub fn cancel_if_revoked(&self, web: &Web) -> bool {
+        let mut slot = self.lock();
+        let revoked = slot
+            .as_ref()
+            .is_some_and(|(t, token)| !t.is_finished() && !web.caps.is_session(token));
+        if !revoked {
+            return false;
+        }
+        if let Some((t, _)) = slot.take() {
+            t.abort();
+        }
+        drop(slot);
+        web.out.err_line(&[
+            (lit("warning: "), Style::Warn),
+            (
+                lit("the pending browser sign-in was cancelled: the tab that started it lost its session"),
+                Style::Plain,
+            ),
+        ]);
+        true
+    }
 }
 
-/// `POST /bridge/login`.
-pub async fn start(web: &Arc<Web>, body: &[u8]) -> Response {
+/// Questions to the `web` terminal. Lines typed there go to the question that waits for one;
+/// with no question waiting, a line asks for a fresh link (§7.2).
+#[derive(Default)]
+pub struct Prompt {
+    inner: Mutex<PromptState>,
+}
+
+#[derive(Default)]
+struct PromptState {
+    waiting: Option<tokio::sync::oneshot::Sender<String>>,
+    /// stdin reached its end: no question can be answered.
+    closed: bool,
+}
+
+impl Prompt {
+    fn state(&self) -> std::sync::MutexGuard<'_, PromptState> {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Waits for the next line typed in the terminal, at most `timeout`; `None` on a timeout,
+    /// when stdin is closed, or when another question replaced this one.
+    pub async fn ask(&self, timeout: Duration) -> Option<String> {
+        let rx = {
+            let mut st = self.state();
+            if st.closed {
+                return None;
+            }
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            st.waiting = Some(tx);
+            rx
+        };
+        let answer = tokio::time::timeout(timeout, rx).await.ok()?.ok();
+        if answer.is_none() {
+            self.state().waiting = None;
+        }
+        answer
+    }
+
+    /// Routes a typed line: to the waiting question (`None`), or back to the caller when none
+    /// waits (`Some(line)`).
+    pub fn offer(&self, line: String) -> Option<String> {
+        let waiting = self.state().waiting.take();
+        match waiting {
+            Some(tx) => tx.send(line).err(),
+            None => Some(line),
+        }
+    }
+
+    /// stdin reached its end.
+    pub fn close(&self) {
+        let mut st = self.state();
+        st.closed = true;
+        st.waiting = None;
+    }
+}
+
+/// True if a typed answer accepts.
+fn accepts(line: &str) -> bool {
+    matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+}
+
+/// `POST /bridge/login`, from the bridge session `token`.
+pub async fn start(web: &Arc<Web>, token: &str, body: &[u8]) -> Response {
     #[derive(serde::Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Req {
@@ -90,13 +194,13 @@ pub async fn start(web: &Arc<Web>, body: &[u8]) -> Response {
             );
         }
     };
-    match begin(web, &actor).await {
+    match begin(web, token, &actor).await {
         Ok(url) => json_response(StatusCode::OK, &json!({"url": url})),
         Err(e) => engine_error(&e),
     }
 }
 
-async fn begin(web: &Arc<Web>, actor: &str) -> Result<String, EngineError> {
+async fn begin(web: &Arc<Web>, token: &str, actor: &str) -> Result<String, EngineError> {
     if lessdugin_core::engine::is_app_password_shape(actor) {
         return Err(EngineError::invalid_input(
             "that looks like an app password, not a handle or DID",
@@ -143,11 +247,13 @@ async fn begin(web: &Arc<Web>, actor: &str) -> Result<String, EngineError> {
     let cb = Arc::new(Callback {
         web: web.clone(),
         port,
+        token: token.to_owned(),
+        target: target.display_name(),
         pending: Mutex::new(Some(pending)),
         done: Notify::new(),
     });
     let task = tokio::spawn(serve_callback(cb, listener));
-    web.login.replace(task);
+    web.login.replace(task, token);
     Ok(url)
 }
 
@@ -155,6 +261,10 @@ async fn begin(web: &Arc<Web>, actor: &str) -> Result<String, EngineError> {
 struct Callback {
     web: Arc<Web>,
     port: u16,
+    /// The bridge session that started the login.
+    token: String,
+    /// Who the tab asked to sign in as (for the terminal).
+    target: String,
     pending: Mutex<Option<PendingAuthorization>>,
     done: Notify,
 }
@@ -201,10 +311,7 @@ fn page(status: StatusCode, text: &'static str) -> Response {
 }
 
 async fn callback(cb: &Callback, req: Request) -> Response {
-    let allowed = [
-        format!("127.0.0.1:{}", cb.port),
-        format!("[::1]:{}", cb.port),
-    ];
+    let allowed = [format!("127.0.0.1:{}", cb.port)];
     if !host_ok(&req, &allowed) {
         return empty(StatusCode::FORBIDDEN);
     }
@@ -250,6 +357,16 @@ async fn callback(cb: &Callback, req: Request) -> Response {
     let Some(pending) = cb.pending.lock().unwrap_or_else(|e| e.into_inner()).take() else {
         return page(StatusCode::NOT_FOUND, "This sign-in is already finished.");
     };
+    if !cb.web.caps.is_session(&cb.token) {
+        // The tab that started it was revoked (§7.2): never finish its login.
+        cb.done.notify_one();
+        let e = EngineError::new(
+            ErrorCode::AuthRequired,
+            "the tab that started this sign-in lost its bridge session",
+        );
+        report_failure(cb, &e);
+        return redirect(&format!("{origin}/#/login?error={}", e.code.as_str()));
+    }
     let result = finish(cb, pending, code).await;
     cb.done.notify_one();
     match result {
@@ -267,7 +384,12 @@ async fn finish(
     code: oauth::AuthorizationCode,
 ) -> Result<(), EngineError> {
     let web = &cb.web;
+    let as_host = pending.authorization_server_host();
     let grant = pending.exchange(code).await?;
+    if let Err(e) = confirm(cb, grant.did(), &as_host).await {
+        grant.abandon().await;
+        return Err(e);
+    }
     match grant
         .finish(&web.engine, &web.store, &web.paths, false)
         .await
@@ -297,6 +419,44 @@ async fn finish(
     }
 }
 
+/// Asks the terminal to accept the sign-in of `did` at `as_host` before its session is stored
+/// or made active.
+async fn confirm(cb: &Callback, did: &str, as_host: &str) -> Result<(), EngineError> {
+    let web = &cb.web;
+    web.out.err_line(&[
+        (lit("A browser tab finished a sign-in as "), Style::Plain),
+        (name(&cb.target), Style::Bold),
+        (lit(" ("), Style::Plain),
+        (tt(did), Style::Plain),
+        (lit(") at "), Style::Plain),
+        (tt(as_host), Style::Bold),
+        (lit("."), Style::Plain),
+    ]);
+    web.out.err_line(&[(
+        lit(
+            "lessdugin will keep this session and write as this account. Accept this sign-in? \
+             [y/N]",
+        ),
+        Style::Bold,
+    )]);
+    let answer = web
+        .prompt
+        .ask(Duration::from_millis(BRIDGE_LOGIN_CONFIRM_MS))
+        .await;
+    match answer {
+        Some(a) if accepts(&a) => Ok(()),
+        Some(_) => Err(EngineError::new(
+            ErrorCode::AuthRequired,
+            "the sign-in was refused in the terminal",
+        )),
+        None => Err(EngineError::new(
+            ErrorCode::AuthRequired,
+            "the sign-in was not confirmed in the terminal (no answer, or stdin is closed); \
+             `lessdugin login` signs in from a terminal",
+        )),
+    }
+}
+
 fn detail_str(e: &EngineError, key: &str) -> String {
     e.detail
         .as_ref()
@@ -321,5 +481,42 @@ fn report_failure(cb: &Callback, e: &EngineError) {
             ),
             Style::Dim,
         )]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_yes_accepts() {
+        for yes in ["y", "Y", "yes", " YES \n", "y\r\n"] {
+            assert!(accepts(yes), "{yes:?}");
+        }
+        for no in ["", "\n", "n", "no", "yy", "yes please", "ja", "1"] {
+            assert!(!accepts(no), "{no:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn prompt_routes_lines_to_the_waiting_question() {
+        let p = Arc::new(Prompt::default());
+        // No question: the line is the caller's (a fresh link).
+        assert_eq!(p.offer("x".into()), Some("x".into()));
+        let asking = {
+            let p = p.clone();
+            tokio::spawn(async move { p.ask(Duration::from_secs(5)).await })
+        };
+        while p.state().waiting.is_none() {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(p.offer("y".into()), None);
+        assert_eq!(asking.await.unwrap().as_deref(), Some("y"));
+        // A timeout answers None and frees the slot.
+        assert_eq!(p.ask(Duration::from_millis(1)).await, None);
+        assert_eq!(p.offer("z".into()), Some("z".into()));
+        // A closed stdin answers every later question at once.
+        p.close();
+        assert_eq!(p.ask(Duration::from_secs(5)).await, None);
     }
 }

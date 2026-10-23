@@ -10,7 +10,8 @@ import { useEffect, useRef, useState } from "react";
 import { useEngine, useEngineHandle } from "../engine/context.tsx";
 import { useCurrentForum } from "../engine/currentForum.ts";
 import { qk, useActiveAccount, useFollowed, useUnreadNotifications } from "../engine/queries.ts";
-import { useWritesInFlight } from "../engine/writes.ts";
+import { useSessionEnded } from "../engine/sessions.ts";
+import { useFailedWrites, useWritesInFlight } from "../engine/writes.ts";
 import { cleanName } from "../lib/text.ts";
 import { parseAtUri } from "../lib/uri.ts";
 import { useAccountActor } from "./AccountName.tsx";
@@ -71,6 +72,7 @@ function AccountMenu() {
   }, [open]);
   const account = active.data;
   const actor = useAccountActor(account);
+  const ended = useSessionEnded(account?.did);
   if (!account || !actor) {
     return (
       <Link to="/login" className={styles.signIn}>
@@ -80,6 +82,14 @@ function AccountMenu() {
   }
   return (
     <div className={styles.account} ref={ref}>
+      {ended && (
+        <Link to="/login" className={styles.signIn} aria-describedby="session-ended-hint">
+          Sign in again
+          <span id="session-ended-hint" className="visually-hidden">
+            : your session ended; unsent writes wait in the outbox
+          </span>
+        </Link>
+      )}
       <button
         type="button"
         className={styles.accountButton}
@@ -288,6 +298,7 @@ export function AppShell() {
   const mainRef = useRef<HTMLElement>(null);
   const source = sourceHref(SOURCE_URL);
   const inFlight = useWritesInFlight();
+  const failed = useFailedWrites();
   useRouteFocus(mainRef);
   // Keep the active account warm for components that need "mine".
   const engine = useEngine();
@@ -319,11 +330,20 @@ export function AppShell() {
               Drafts
             </Link>
           </nav>
-          {inFlight > 0 && (
-            <span className={styles.saving} role="status">
-              Saving…
-            </span>
-          )}
+          {/* one live region that is always there, so a change is announced; the links in it
+              keep their link role and name */}
+          <span role="status" className={styles.outboxStatus}>
+            {inFlight > 0 && (
+              <Link to="/outbox" className={styles.saving}>
+                Saving… ({inFlight})
+              </Link>
+            )}
+            {failed > 0 && (
+              <Link to="/outbox" className={styles.unsent}>
+                {failed} not sent
+              </Link>
+            )}
+          </span>
           <AccountMenu />
         </div>
       </header>

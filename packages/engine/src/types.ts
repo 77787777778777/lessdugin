@@ -890,8 +890,17 @@ export type ModActionIntent =
  * Opinion writes stay `pending` for the undo window. */
 export type WriteState =
   /** `held`: in the undo window; `throttled`: waiting for the write budget, a rate limit or a
-   * back-off; `notBeforeMs`: until when. */
-  | { kind: "pending"; notBeforeMs?: Ms; held?: boolean; throttled?: boolean }
+   * back-off; `needsLogin`: the account's session was refused, the write waits for the next
+   * login of the account; `notBeforeMs`: until when; `error`: the failure that caused a
+   * `throttled` or `needsLogin` wait. */
+  | {
+      kind: "pending";
+      notBeforeMs?: Ms;
+      held?: boolean;
+      throttled?: boolean;
+      needsLogin?: boolean;
+      error?: EngineError;
+    }
   | { kind: "sending" }
   /** `cid` is absent for deletes. */
   | { kind: "done"; uri: AtUri; cid?: Cid }

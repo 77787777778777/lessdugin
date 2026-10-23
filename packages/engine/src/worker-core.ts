@@ -9,15 +9,13 @@
 // through `callJson(op, argsJson)` (dto/1 text, exactly as `dto.rs` serialises it) or
 // `call(op, args)` (parsed). Failures reject with an `EngineError` object.
 //
-// `Target::UserPds` requests: GETs of the public records of the account's own repo
-// (`com.atproto.repo.{listRecords, getRecord, describeRepo}`, `com.atproto.sync.{getLatestCommit,
-// getRecord}` with `repo`/`did` = the account) are sent anonymously from here to the PDS bound
-// at login (the engine's account row); every other request goes to the main thread's
-// AuthBridge, which allows only the AUTH-4 writes and `getSession`.
+// `Target::UserPds` requests all go to the main thread's AuthBridge, which allows only the
+// AUTH-4 writes and `getSession` (the core reads public records, an account's own included,
+// anonymously: `Target::Anon`).
 
 import { type BlobStore, IdbBlobStore, MemoryBlobStore } from "./blobs.ts";
 import { BridgeKv } from "./bridge-kv.ts";
-import { checkUrl, type FetchDeps, fetchAnon } from "./fetch.ts";
+import type { FetchDeps } from "./fetch.ts";
 import { createJsHost, type JsHostImports } from "./host.ts";
 import { type IDBFactoryLike, IdbKv, type KvBackend, MemKv } from "./idb.ts";
 import { ChangeRelay, type ChannelLike, LeaderElection } from "./leader.ts";
@@ -26,11 +24,13 @@ import {
   type AuthBridgePort,
   CHANGES_CHANNEL,
   type HttpResult,
+  isHostError,
+  LEADER_LOCK,
   type PdsRequest,
   type WorkerInfo,
   type WorkerInit,
 } from "./protocol.ts";
-import type { AccountView, EngineError, EngineErrorCode, EngineEvent } from "./types.ts";
+import type { EngineError, EngineErrorCode, EngineEvent } from "./types.ts";
 
 /** The wasm-bindgen exports the worker uses (`pkg/lessdugin_engine.js`). */
 export interface WasmModule {
@@ -58,6 +58,9 @@ export interface WorkerEnv {
   channel?: ((name: string) => ChannelLike) | null;
   /** Logs a failure of a background task. */
   warn?: (message: string, error: unknown) => void;
+  /** Calls `cb` when the device comes back online (`online` on the worker's global); returns
+   * the unsubscribe function. */
+  onOnline?: (cb: () => void) => () => void;
 }
 
 export function engineError(code: EngineErrorCode, message: string): EngineError {
@@ -76,26 +79,13 @@ export function toEngineError(e: unknown): EngineError {
     return engineError("internal", e);
   }
   if (typeof e === "object" && e !== null && "code" in e && "message" in e) return e as EngineError;
+  if (isHostError(e)) {
+    // a host failure outside the engine (opening a store): storage problems may pass
+    const code: EngineErrorCode = e.kind === "blocked" ? "blocked" : "internal";
+    return { code, message: `${e.kind}: ${e.message}`, retryable: e.kind === "storage" };
+  }
   // a trap (RuntimeError) or another JS exception
   return engineError("internal", e instanceof Error ? `${e.name}: ${e.message}` : String(e));
-}
-
-/** Public reads of an account's own repo: the method and its repo parameter. */
-const PUBLIC_OWN_READS: Record<string, string> = {
-  "com.atproto.repo.listRecords": "repo",
-  "com.atproto.repo.getRecord": "repo",
-  "com.atproto.repo.describeRepo": "repo",
-  "com.atproto.sync.getLatestCommit": "did",
-  "com.atproto.sync.getRecord": "did",
-};
-
-/** True for a `GET` public read of `req.account`'s own repo. */
-export function isPublicOwnRead(req: PdsRequest): boolean {
-  if (req.method !== "GET" || req.body !== undefined) return false;
-  const m = /^\/xrpc\/([A-Za-z0-9.-]+)(?:\?(.*))?$/.exec(req.path);
-  const param = m?.[1] ? PUBLIC_OWN_READS[m[1]] : undefined;
-  if (!param) return false;
-  return new URLSearchParams(m?.[2] ?? "").get(param) === req.account;
 }
 
 function randomId(): string {
@@ -109,8 +99,8 @@ export class WorkerEngine {
   private subscription: number | null = null;
   private leader: LeaderElection | null = null;
   private relay: ChangeRelay | null = null;
-  private readonly pds = new Map<string, string>();
   private stores: { close?: () => void }[] = [];
+  private offOnline: (() => void) | null = null;
   readonly id = randomId();
 
   constructor(
@@ -139,12 +129,24 @@ export class WorkerEngine {
     let cache: KvBackend;
     let blobs: BlobStore;
     if (idb) {
-      const c = await IdbKv.open(`${prefix}-cache`, "relaxed", idb);
-      this.stores.push(c);
-      cache = c;
-      const b = await IdbBlobStore.open(`${prefix}-blobs`, idb.factory);
-      this.stores.push(b);
-      blobs = b;
+      // The cache and the blobs can always be fetched again: if IndexedDB refuses them (a
+      // private window, a full disk), this tab keeps them in memory. `state` never falls back.
+      try {
+        const c = await IdbKv.open(`${prefix}-cache`, "relaxed", idb);
+        this.stores.push(c);
+        cache = c;
+      } catch (e) {
+        this.warn("the cache store could not be opened: it is kept in memory", e);
+        cache = new MemKv();
+      }
+      try {
+        const b = await IdbBlobStore.open(`${prefix}-blobs`, idb.factory);
+        this.stores.push(b);
+        blobs = b;
+      } catch (e) {
+        this.warn("the blob store could not be opened: blobs are kept in memory", e);
+        blobs = new MemoryBlobStore();
+      }
     } else {
       cache = new MemKv();
       blobs = new MemoryBlobStore();
@@ -166,16 +168,6 @@ export class WorkerEngine {
     return { cache, state, blobs };
   }
 
-  /** The PDS bound at login to `did` (from the engine's accounts). */
-  private async pdsOf(did: string): Promise<string | undefined> {
-    if (!this.pds.has(did)) {
-      const accounts = JSON.parse(await this.callJson("accounts", "[]")) as AccountView[];
-      this.pds.clear();
-      for (const a of accounts) this.pds.set(a.did, a.pds);
-    }
-    return this.pds.get(did);
-  }
-
   async init(
     init: WorkerInit,
     bridge: AuthBridgePort,
@@ -195,37 +187,52 @@ export class WorkerEngine {
       policy: { devnet },
       ...(this.env.onLine ? { onLine: this.env.onLine } : {}),
     };
-    const { cache, state, blobs } = await this.openStores(init);
+    let stores: Awaited<ReturnType<WorkerEngine["openStores"]>>;
+    try {
+      stores = await this.openStores(init);
+    } catch (e) {
+      this.closeStores();
+      throw toEngineError(e);
+    }
+    const { cache, state, blobs } = stores;
     let locks = this.env.locks;
     if (!locks) {
       this.warn("Web Locks are unavailable: locks hold within this worker only", null);
       locks = new LocalLocks();
     }
-    const userPds = async (req: PdsRequest): Promise<HttpResult> => {
-      if (isPublicOwnRead(req)) {
-        const pds = await this.pdsOf(req.account);
-        if (pds) {
-          const url = new URL(req.path, checkUrl(pds, fetchDeps.policy)).href;
-          return fetchAnon(
-            {
-              method: "GET",
-              url,
-              headers: req.headers,
-              maxBytes: req.maxBytes,
-              timeoutMs: req.timeoutMs,
-              redirects: 0,
-            },
-            fetchDeps,
-          );
-        }
-      }
-      return bridge.request(req);
+    const userPds = (req: PdsRequest): Promise<HttpResult> => bridge.request(req);
+    // The host lock `sync-leader` is the leader's Web Lock (sync.md §10.6). Web Locks are not
+    // re-entrant, so the leader's own engine would wait for itself: it already holds it.
+    const shared = locks;
+    const hostLocks: LockManagerLike = {
+      request: (name, options, callback) =>
+        name === LEADER_LOCK && this.isLeader
+          ? Promise.resolve().then(() => callback({ name, mode: "exclusive" }))
+          : shared.request(name, options, callback),
     };
-    const host = createJsHost({ cache, state, fetch: fetchDeps, userPds, blobs, locks });
+    const host = createJsHost({
+      cache,
+      state,
+      fetch: fetchDeps,
+      userPds,
+      blobs,
+      locks: hostLocks,
+      bridgeLock:
+        init.state?.kind === "bridge"
+          ? {
+              endpoint: init.state.lockEndpoint ?? "/bridge/lock",
+              token: init.state.token,
+              fetch: this.env.fetch,
+              onLost: (name) =>
+                this.warn(`the native ${name} lock ended before it was released`, null),
+            }
+          : undefined,
+    });
     let engine: WasmEngineLike;
     try {
       engine = new this.wasm.WasmEngine(JSON.stringify(init.config), host);
     } catch (e) {
+      this.closeStores();
       throw toEngineError(e);
     }
     this.engine = engine;
@@ -246,15 +253,18 @@ export class WorkerEngine {
       } catch {
         return;
       }
-      if (event.kind === "changed" && event.topics.some((t) => t.kind === "accounts")) {
-        this.pds.clear();
-      }
       this.relay?.publish(event);
     });
     if (init.elect !== false) {
       this.leader = new LeaderElection({ locks, onLead: () => this.lead() });
       this.leader.start();
     }
+    // Back online: the leader's pump looks at its queue again at once (robustness review H3).
+    this.offOnline =
+      this.env.onOnline?.(() => {
+        if (!this.isLeader) return;
+        this.callJson("outboxWake", "[]").catch((e: unknown) => this.warn("outboxWake failed", e));
+      }) ?? null;
     return { version: this.wasm.engineVersion(), namespace: ns, id: this.id };
   }
 
@@ -267,7 +277,6 @@ export class WorkerEngine {
 
   private async remoteEvent(event: EngineEvent, onEvent: (json: string) => void): Promise<void> {
     if (event.kind === "changed") {
-      if (event.topics.some((t) => t.kind === "accounts")) this.pds.clear();
       try {
         await this.callJson("externalChange", JSON.stringify([event.topics]));
       } catch (e) {
@@ -301,10 +310,16 @@ export class WorkerEngine {
     const engine = this.engine;
     if (!engine) return;
     await Promise.allSettled([this.callJson("outboxStop", "[]"), this.callJson("liveStop", "[]")]);
+    this.offOnline?.();
+    this.offOnline = null;
     await this.leader?.stop();
     this.relay?.close();
     if (this.subscription !== null) engine.unsubscribe(this.subscription);
-    for (const s of this.stores) s.close?.();
+    this.closeStores();
     this.engine = null;
+  }
+
+  private closeStores(): void {
+    for (const s of this.stores.splice(0)) s.close?.();
   }
 }

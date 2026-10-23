@@ -128,7 +128,14 @@ export type StateStoreConfig =
   /** IndexedDB on this origin (hosted site). */
   | { kind: "indexeddb" }
   /** `lessdugin web`: the native `state.sqlite` through `POST /bridge/kv` (threat-model §7.4). */
-  | { kind: "bridge"; endpoint: string; token: string }
+  | {
+      kind: "bridge";
+      endpoint: string;
+      token: string;
+      /** `POST /bridge/lock` (default): the native `outbox:<did>` lock, taken after the tab's
+       * Web Lock (threat-model §7.4). */
+      lockEndpoint?: string;
+    }
   /** In memory, lost with the worker (tests, previews). */
   | { kind: "memory" };
 
@@ -145,6 +152,9 @@ export interface WorkerInit {
   /** Default `true`: take part in the leader election (only the leader runs `outboxPump` and
    * `liveTail`). `false`: never lead (embedded or test workers). */
   elect?: boolean;
+  /** E2E builds only (ignored elsewhere): after starting, the worker runs one `eval`, which the
+   * CSP blocks, so a suite can check that a violation inside the worker reaches its watcher. */
+  cspProbe?: boolean;
 }
 
 /** What `init` reports. */
@@ -161,7 +171,10 @@ export interface WorkerInfo {
 
 /** BroadcastChannel name for engine events between tabs. */
 export const CHANGES_CHANNEL = "lessdugin-changes";
-/** The Web Lock held by the leader tab for its lifetime. */
+/** The Web Lock held by the leader tab for its lifetime. It is also the Web Lock of the host
+ * lock name `sync-leader` (`webLockName("sync-leader")`, sync.md §10.6): one leader per
+ * origin, whichever asks. The worker answers its own engine's `sync-leader` request at once
+ * while it leads (Web Locks are not re-entrant, worker-core.ts). */
 export const LEADER_LOCK = "lessdugin-sync-leader";
 
 export type ChannelMessage =

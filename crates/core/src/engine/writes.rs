@@ -341,6 +341,8 @@ impl<H: Host> Engine<H> {
                 match step {
                     Ok(Step::Processed(_)) => wait = 0,
                     Ok(Step::Wait(t)) => wait = wait.min(t.saturating_sub(now).max(1)),
+                    // the login wakes the pump (`record_account` releases the hold)
+                    Ok(Step::NeedsLogin(_)) => {}
                     Ok(Step::Idle) => idle.push(s.did.as_str()),
                     Err(e) => {
                         tracing::warn!(account = %s.did, error = %e, "outbox pump step failed");
@@ -388,7 +390,20 @@ impl<H: Host> Engine<H> {
             total.failed += r.failed;
             total.conflicts += r.conflicts;
             total.throttled += r.throttled;
+            total.needs_login += r.needs_login;
         }
         Ok(total)
+    }
+
+    /// "Send now": ends the back-off of every account's writes that wait after an ambiguous
+    /// or transient failure (not the undo window, the write budget, a rate limit or a refused
+    /// session), so the next pump step or [`Engine::outbox_flush`] tries them at once. Returns
+    /// how many writes were expedited.
+    pub async fn outbox_expedite(&self) -> Result<u32, EngineError> {
+        let mut n = 0;
+        for s in self.sessions().await? {
+            n += self.outbox.expedite(s.did.as_str()).await?;
+        }
+        Ok(n)
     }
 }

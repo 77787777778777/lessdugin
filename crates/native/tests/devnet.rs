@@ -7,9 +7,7 @@
 #![allow(clippy::disallowed_methods)]
 
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use futures::future::BoxFuture;
 use lessdugin_atp::syntax::Did;
@@ -25,46 +23,18 @@ fn e2e_enabled() -> bool {
 
 /// The devnet process, killed on drop.
 struct Devnet {
-    child: Child,
+    _child: lessdugin_testkit::node_devnet::NodeDevnet,
     state: Value,
 }
 
-impl Drop for Devnet {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
 impl Devnet {
-    fn start(dir: &Path) -> Self {
+    fn start(_dir: &Path) -> Self {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let json = dir.join("devnet.json");
-        let child = Command::new("node")
-            .arg(root.join("packages/e2e/devnet.mjs"))
-            .arg("--json")
-            .arg(&json)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("start node packages/e2e/devnet.mjs");
-        let mut net = Devnet {
-            child,
-            state: Value::Null,
-        };
-        let deadline = Instant::now() + Duration::from_secs(120);
-        loop {
-            if let Ok(bytes) = std::fs::read(&json)
-                && let Ok(v) = serde_json::from_slice::<Value>(&bytes)
-            {
-                net.state = v;
-                return net;
-            }
-            assert!(Instant::now() < deadline, "the devnet did not start");
-            if let Ok(Some(status)) = net.child.try_wait() {
-                panic!("the devnet exited early: {status}");
-            }
-            std::thread::sleep(Duration::from_millis(200));
+        // fails at once, with the devnet's output, when node exits or it does not come up
+        let (child, state) = lessdugin_testkit::node_devnet::NodeDevnet::start(&root, "native");
+        Devnet {
+            _child: child,
+            state,
         }
     }
 

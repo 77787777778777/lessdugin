@@ -196,3 +196,50 @@ fn a_write_killed_before_it_was_sent_is_sent_once() {
     alice.ok(&["outbox", "flush"]);
     assert_eq!(count(&net, "com.atproto.repo.applyWrites", &did, before), 0);
 }
+
+/// A comment draft killed while its write is in flight: the write is in the outbox, so the
+/// draft is gone and cannot be published a second time (each publish would send a new comment
+/// with a new rkey).
+#[test]
+fn a_draft_whose_write_is_queued_is_not_published_twice() {
+    let net = Net::new();
+    let alice = net.user("alice.test", true);
+    alice.json(&["forum", "create", "meta"]);
+    let did = alice.did();
+    let f = alice.file("p.md", "---\ntitle: Comment here\n---\nBody.\n");
+    let t = alice.json(&["post", s(&f), "--yes"]);
+    let post = t["state"]["uri"].as_str().unwrap().to_owned();
+    alice.ok(&["read", &post]);
+    let drafts = alice.devnet_dir().join("drafts");
+    std::fs::create_dir_all(&drafts).unwrap();
+    std::fs::write(
+        drafts.join("kill-1.md"),
+        format!("---\ntype: comment\nroot: \"{post}\"\n---\nOnly once.\n"),
+    )
+    .unwrap();
+
+    alice.account.inject(
+        Fault::latency(120_000)
+            .on_nsid("com.atproto.repo.createRecord")
+            .once(),
+    );
+    let before = last_seq(&net);
+    let mut child = spawn(&alice, &["draft", "publish", "kill-1", "--yes"]);
+    wait_for(
+        &net,
+        "com.atproto.repo.createRecord",
+        &did,
+        before,
+        &mut child,
+    );
+    kill_9(child);
+
+    // the draft went away once the write was queued
+    let d = alice.json(&["draft", "ls"]);
+    assert_eq!(d["drafts"], serde_json::json!([]), "{d}");
+    let e = alice.fails(4, &["draft", "publish", "kill-1", "--yes"]);
+    assert_eq!(e["code"], "not_found");
+    // and the outbox finishes the one comment
+    alice.ok(&["outbox", "flush"]);
+    assert_eq!(alice.account.list(nsid::COMMENT).len(), 1);
+}

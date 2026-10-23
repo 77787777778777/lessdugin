@@ -12,6 +12,7 @@
 //! | [`fake_pds`] | [`FakeNet`]: multi-repo PDS hosts with real repos, PLC, relays, DoH, writes, sessions, faults (feature `http`: real HTTP) |
 //! | [`kv`] | the shared `KvStore` contract suite |
 //! | [`store`] | the shared record-store scenario, run over any `KvStore` |
+//! | [`node_devnet`] | the node devnet process for the `LESSDUGIN_E2E=1` tests (native only) |
 
 #![forbid(unsafe_code)]
 
@@ -19,6 +20,8 @@ pub mod fake_pds;
 pub mod identity;
 pub mod kv;
 pub mod memhost;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod node_devnet;
 pub mod pds;
 pub mod repo;
 pub mod resp;

@@ -9,7 +9,10 @@
 //
 // The main thread keeps the session: `options.sessions` (hosted OAuth or the `lessdugin web`
 // bridge, see auth-bridge.ts) backs the `AuthBridge` the worker sends its authenticated requests
-// to. Engine events reach `subscribe` listeners in order, never re-entrantly.
+// to. The worker reaches it, and sends its events, only through a dedicated `MessagePort` with a
+// fixed message schema (bridge-port.ts): no main-thread object is exposed to the worker, which
+// parses network data and is therefore untrusted (threat-model SPA-13, AUTH-4). Engine events
+// reach `subscribe` listeners in order, never re-entrantly.
 //
 // `outboxPump()` and `liveTail()` resolve at once here: the worker runs them itself in the
 // leader tab only (leader.ts). `grant`/`revoke` write one record per actor and resolve with
@@ -18,6 +21,7 @@
 import * as Comlink from "comlink";
 import type { EngineApi } from "./api.ts";
 import { AuthBridge, NS, type SessionProvider } from "./auth-bridge.ts";
+import { serveBridgePort } from "./bridge-port.ts";
 import type { WorkerInfo, WorkerInit } from "./protocol.ts";
 import type { EngineEvent, EventListener, Unsubscribe, WriteTicket } from "./types.ts";
 import type { EngineWorkerApi } from "./worker.ts";
@@ -33,7 +37,14 @@ export {
   RECORD_COLLECTIONS,
   UPLOAD_TYPES,
 } from "./auth-bridge.ts";
-export type { EngineConfigInput, StateStoreConfig, WorkerInfo, WorkerInit } from "./protocol.ts";
+export type {
+  EngineConfigInput,
+  HostErrorValue,
+  StateStoreConfig,
+  WorkerInfo,
+  WorkerInit,
+} from "./protocol.ts";
+export { hostError } from "./protocol.ts";
 export type * from "./types.ts";
 
 export interface StartEngineOptions {
@@ -116,12 +127,27 @@ export function startEngine(options: StartEngineOptions = {}): EngineClient {
     }
   };
   let started: Promise<WorkerInfo> | null = null;
+  let stopServing: (() => void) | null = null;
   const start = (): Promise<WorkerInfo> => {
-    started ??= remote.init(
-      { config: {}, ...options.init, namespace: NS },
-      Comlink.proxy(bridge),
-      Comlink.proxy(deliver),
-    );
+    if (!started) {
+      // The worker's only way to the AuthBridge: one port, fixed messages (bridge-port.ts).
+      const { port1, port2 } = new MessageChannel();
+      stopServing = serveBridgePort(port1, {
+        request: (req) => bridge.request(req),
+        event: deliver,
+      });
+      const init: WorkerInit = { config: {}, ...options.init, namespace: NS };
+      const p = remote.init(init, Comlink.transfer(port2, [port2]));
+      started = p;
+      // A failed start (IndexedDB blocked or over quota, …) is not cached: the next call tries
+      // again on a fresh port.
+      p.catch(() => {
+        if (started !== p) return;
+        started = null;
+        stopServing?.();
+        stopServing = null;
+      });
+    }
     return started;
   };
   const call = async (op: string, args: unknown[]): Promise<unknown> => {
@@ -143,6 +169,7 @@ export function startEngine(options: StartEngineOptions = {}): EngineClient {
       try {
         if (started) await remote.close();
       } finally {
+        stopServing?.();
         remote[Comlink.releaseProxy]();
         worker.terminate();
       }

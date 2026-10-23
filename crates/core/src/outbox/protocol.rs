@@ -53,6 +53,9 @@ pub(crate) enum Outcome {
         /// Why.
         error: EngineError,
     },
+    /// The PDS (or the host) refused the account's session: wait, without retrying, until the
+    /// account logs in again (`Engine::record_account` releases the hold).
+    NeedsLogin(EngineError),
 }
 
 /// Protocol runs after which an ambiguous or transient failure becomes final (*tunable*).

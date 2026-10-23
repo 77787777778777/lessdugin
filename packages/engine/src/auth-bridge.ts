@@ -23,8 +23,8 @@
 // - `lessdugin web` mode: `bridgeSession({ did, token })`, which forwards to
 //   `POST /bridge/xrpc/<nsid>?account=<did>` with the tab's bearer token (threat-model §7.4).
 //
-// The worker reads the public records of an account's own repo (`listRecords` and friends)
-// anonymously from the account's PDS (worker-core.ts); those never reach this bridge.
+// Public records, an account's own included, are read anonymously (`Target::Anon`, the
+// worker's fetch); only the account's writes and `getSession` reach this bridge.
 
 import { flatHeaders, readCapped } from "./fetch.ts";
 import {
@@ -211,6 +211,11 @@ export function oauthSession(
         method: init.method,
         headers: init.headers,
         ...(init.body !== undefined ? { body: init.body as BodyInit } : {}),
+        // AUTH-8: a redirect is never followed (the bridge refuses the opaque answer), so the
+        // body and the DPoP proof never reach another URL; sync.md §12.1: no HTTP cache.
+        redirect: "manual",
+        cache: "no-store",
+        credentials: "omit",
         signal: init.signal,
       }),
   };
@@ -285,6 +290,8 @@ export function bridgeSession(opts: BridgeSessionOptions): PdsSession {
         body: (init.body ?? new TextEncoder().encode("{}")) as BodyInit,
         cache: "no-store",
         credentials: "omit",
+        // the bridge never redirects; a redirect is refused rather than followed (AUTH-8)
+        redirect: "error",
         signal: init.signal,
       });
       if (resp.status >= 400 && resp.headers.get(BRIDGE_UPSTREAM_HEADER) !== "pds") {
@@ -299,26 +306,20 @@ export function bridgeSession(opts: BridgeSessionOptions): PdsSession {
 // The bridge
 // ---------------------------------------------------------------------------------------------
 
-export interface AuthBridgeOptions {
-  /** The NSID prefix (default: this build's `NS`). */
-  namespace?: string;
-}
-
-/** Performs the worker's `Target::UserPds` requests through the allowlist. Expose it to the
- * worker with `Comlink.proxy(bridge)` (client.ts does). */
+/** Performs the worker's `Target::UserPds` requests through the allowlist of this build's `NS`
+ * (a module constant: nothing at run time can widen it). Never expose it to the worker as an
+ * object (a Comlink proxy lets the other side set properties): client.ts serves only its
+ * `request` over a fixed-schema port (bridge-port.ts). */
 export class AuthBridge implements AuthBridgePort {
-  readonly namespace: string;
+  readonly #sessions: SessionProvider;
 
-  constructor(
-    private readonly sessions: SessionProvider,
-    opts: AuthBridgeOptions = {},
-  ) {
-    this.namespace = opts.namespace ?? NS;
+  constructor(sessions: SessionProvider) {
+    this.#sessions = sessions;
   }
 
   async request(req: PdsRequest): Promise<HttpResult> {
-    const checked = checkRequest(req, this.namespace);
-    const session = await this.sessions.session(req.account);
+    const checked = checkRequest(req, NS);
+    const session = await this.#sessions.session(req.account);
     if (!session) throw hostError("authRequired", `${req.account} has no session on this device`);
     if (session.did !== req.account) {
       // AUTH-8: never another account's session

@@ -372,10 +372,14 @@ impl<H: Host> Engine<H> {
     }
 
     /// Adds the forums of `did`'s valid own `membership` records to the followed list, except
-    /// those unfollowed locally (`sync.md` §4.8). Reads the own PDS (`listRecords`).
+    /// those unfollowed locally (`sync.md` §4.8). Reads the own repo's public `listRecords`
+    /// anonymously from the PDS bound at login, as the outbox's fresh reads do: an
+    /// authenticated session is for writes only (`threat-model.md` AUTH-4), so every host
+    /// behaves the same here.
     async fn seed_follows(&self, did: &Did) -> Result<(), EngineError> {
         let xrpc = Xrpc::new(&*self.host);
-        let svc = Service::UserPds(did.clone());
+        let session = self.session_for(did.as_str()).await?;
+        let svc = Service::Anon(session.pds);
         let coll = Nsid::parse(nsid::MEMBERSHIP)
             .map_err(|e| EngineError::internal(format!("membership NSID: {e}")))?;
         let mut cursor: Option<String> = None;

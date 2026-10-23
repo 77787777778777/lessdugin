@@ -287,4 +287,59 @@ describe("blobs", () => {
       "unsupported",
     );
   });
+
+  /** A body that sends `parts` with `gapMs` between them, then (optionally) stalls. */
+  function trickle(
+    parts: Uint8Array[],
+    gapMs: number,
+    stall: boolean,
+    signal?: AbortSignal | null,
+  ) {
+    let i = 0;
+    return new ReadableStream<Uint8Array>({
+      async pull(c) {
+        if (i < parts.length) {
+          await new Promise((r) => setTimeout(r, gapMs));
+          c.enqueue(parts[i++] as Uint8Array);
+          return;
+        }
+        if (!stall) return c.close();
+        await new Promise<void>((_, reject) =>
+          signal?.addEventListener("abort", () =>
+            reject(new DOMException("aborted", "AbortError")),
+          ),
+        );
+      },
+    });
+  }
+
+  it("aborts a download after the idle timeout without a byte, but has no total timeout (limits.md §7)", async () => {
+    const policy = { devnet: false };
+    const pds = "https://pds.example.com";
+    // no answer at all
+    const silent = fakeFetch(
+      (_u, init) =>
+        new Promise<Response>((_, reject) =>
+          init.signal?.addEventListener("abort", () =>
+            reject(new DOMException("aborted", "AbortError")),
+          ),
+        ),
+    );
+    const store = new MemoryBlobStore();
+    expect(
+      await kind(fetchBlob({ fetch: silent.f, policy, store, idleMs: 30 }, pds, did, cid, 1024)),
+    ).toBe("timeout");
+    // an answer whose body stops half-way
+    const half = [data.slice(0, 4)];
+    const stalls = fakeFetch((_u, init) => new Response(trickle(half, 0, true, init.signal)));
+    expect(
+      await kind(fetchBlob({ fetch: stalls.f, policy, store, idleMs: 30 }, pds, did, cid, 1024)),
+    ).toBe("timeout");
+    // slow but steady: longer in total than the idle timeout, every gap shorter
+    const parts = Array.from(data, (b) => Uint8Array.of(b));
+    const steady = fakeFetch(() => new Response(trickle(parts, 10, false)));
+    const h = await fetchBlob({ fetch: steady.f, policy, store, idleMs: 60 }, pds, did, cid, 1024);
+    expect(h.size).toBe(data.length);
+    expect(await (await store.get(cid))?.text()).toBe("hello blob");
+  });
 });

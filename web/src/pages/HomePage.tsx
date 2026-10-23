@@ -9,6 +9,7 @@ import { ErrorView, Loading } from "../components/Status.tsx";
 import { toasts } from "../components/Toast.tsx";
 import { useEngine } from "../engine/context.tsx";
 import { qk, useActiveAccount, useFollowed } from "../engine/queries.ts";
+import { useAnnounceQueued } from "../engine/queued.ts";
 import { writeStore } from "../engine/writes.ts";
 import { cleanName } from "../lib/text.ts";
 import { parseAtUri } from "../lib/uri.ts";
@@ -55,6 +56,7 @@ function ForumCard({ forum }: { forum: ForumSummary }) {
 /** "Create a forum": the declaration and the owner's membership, in the viewer's repository. */
 function CreateForum() {
   const engine = useEngine();
+  const announceQueued = useAnnounceQueued();
   const navigate = useNavigate();
   const active = useActiveAccount();
   const [open, setOpen] = useState(false);
@@ -77,8 +79,13 @@ function CreateForum() {
   const create = async (draft: ForumDraft): Promise<boolean> => {
     const ticket = await engine.forumCreate(draft);
     writeStore.track(ticket);
-    const final = await writeStore.wait(ticket.id);
+    const final = await writeStore.settle(ticket.id);
     if (final.kind === "failed") throw final.error;
+    if (final.kind === "queued") {
+      announceQueued("Your new forum", final.state);
+      setOpen(false);
+      return true;
+    }
     if (final.kind !== "done") return false;
     toasts.show({ message: "Forum created (its declaration is public)", tone: "success" });
     const p = parseAtUri(final.uri);

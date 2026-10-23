@@ -42,10 +42,35 @@ pub async fn sync_forum_quietly(ctx: &Ctx, engine: &Engine<NativeHost>, forum: &
         full: false,
     };
     let res = engine.sync_forum(forum, &opts).await;
-    if res.as_ref().is_ok_and(|r| !r.partial) {
+    // Only a sync that reached every repository counts as fresh: one whose repositories failed
+    // (a hung or broken PDS) is retried by the next command instead of skipped for minutes.
+    if res
+        .as_ref()
+        .is_ok_and(|r| !r.partial && r.errors.is_empty())
+    {
         let _ = ctx.state.mark_synced(forum);
     }
     match res {
+        Ok(r) if !r.errors.is_empty() => {
+            let first = &r.errors[0];
+            ctx.out.warn(cat([
+                lit("the sync failed for "),
+                render::count(
+                    u32::try_from(r.errors.len()).unwrap_or(u32::MAX),
+                    "repository",
+                    "repositories",
+                ),
+                lit(", showing the cache (first: "),
+                tt(first
+                    .did
+                    .as_deref()
+                    .or(first.host.as_deref())
+                    .unwrap_or("?")),
+                lit(": "),
+                tt(&first.message),
+                lit(")"),
+            ]));
+        }
         Ok(r) if r.partial => ctx.out.note(&[(
             cat([
                 lit("note: showing what was synced in time ("),

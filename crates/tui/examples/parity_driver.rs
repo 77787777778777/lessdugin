@@ -17,7 +17,8 @@
 //! parity_driver read <forum-uri> <post-uri> <out-dir>
 //!     Read-only (a fresh data directory is an anonymous reader): opens the forum (which syncs
 //!     it), then the post's thread (which syncs it). Writes to <out-dir>: list.json and
-//!     thread.json (the Forum screen's PostList and the Thread screen's ThreadView, dto/1 JSON
+//!     thread.json (the Forum screen's query with the other clients' page size,
+//!     `exec::PARITY_LIST_LIMIT`, checked against the screen, and the Thread screen's ThreadView, dto/1 JSON
 //!     exactly as dto.rs serialises it, the bytes the wasm boundary carries), list.pretty.json
 //!     and thread.pretty.json (the same, as `lessdugin --json` prints them to a pipe), and the
 //!     screens as text (forum-screen.txt, thread-screen.txt, thread-document.txt).
@@ -39,6 +40,7 @@ use lessdugin_native::config::{Config, DevnetProfile, NetworkProfile, Paths};
 use lessdugin_native::engine::open_engine;
 use lessdugin_native::host::NativeHost;
 use lessdugin_tui::app::ScreenKind;
+use lessdugin_tui::exec;
 use lessdugin_tui::{CaptureOpts, EditorConfig, Headless, HeadlessOpts, capture_thread};
 
 type Res<T> = Result<T, String>;
@@ -197,7 +199,26 @@ async fn read(forum: &str, post: &str, out: &Path, size: (u16, u16)) -> Res<()> 
     .map_err(|e| e.message)?;
     h.start(Some(forum.to_owned())).await;
     h.state.show_pending();
-    let list = forum_list(&h)?;
+    let screen = forum_list(&h)?;
+    let sort = match h.state.top().map(|s| &s.kind) {
+        Some(ScreenKind::Forum(f)) => f.sort,
+        _ => return Err("the forum is not on top".into()),
+    };
+    // The page the other clients compare: the screen's query with their page size. The
+    // screen lists more (LIST_LIMIT); its first posts must be this page, in this order.
+    let list = d
+        .engine
+        .list_posts(&exec::posts_query(forum, sort, exec::PARITY_LIST_LIMIT))
+        .await
+        .map_err(|e| e.message)?;
+    let uris = |l: &PostList| l.items.iter().map(|p| p.uri.clone()).collect::<Vec<_>>();
+    let shown = uris(&screen);
+    if !shown.starts_with(&uris(&list)) || (list.cursor.is_none() && shown != uris(&list)) {
+        return Err(format!(
+            "the Forum screen does not start with the compared page:\nscreen {shown:?}\npage {:?}",
+            uris(&list)
+        ));
+    }
     write(out, "forum-screen.txt", &h.render())?;
     drop(h);
     // the Thread screen through the parity hook: opening it syncs the thread

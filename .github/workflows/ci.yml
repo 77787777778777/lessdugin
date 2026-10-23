@@ -27,6 +27,9 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo clippy --target wasm32-unknown-unknown -p lessdugin-atp -p lessdugin-lexicon -p lessdugin-markdown -p lessdugin-core -p lessdugin-wasm -- -D warnings
       - run: cargo test --workspace
+      # M2 acceptance: the 50-member cold sync in under 5 s, asserted on an optimised build
+      # (the debug run above only warns between 5 and 15 s)
+      - run: cargo test --release -p lessdugin --features devnet --test cold_sync
       # the social-fold vectors again at the final namespace (as `cargo xtask ci`)
       - run: cargo test -p lessdugin-core --features final-ns --test social_vectors --test social_fold --test social_query
   # The interop, vector and property tests of atp, lexicon and markdown on wasm32-unknown-unknown,
@@ -52,7 +55,8 @@ jobs:
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version: "1.24"
-      - run: go install github.com/bluesky-social/goat@latest
+      # pinned (plan §4.3): the version spike S4 checked (ADR 0003)
+      - run: go install github.com/bluesky-social/goat@v0.2.6
       - run: goat lex lint -I large-string lexicons
   web:
     runs-on: ubuntu-latest
@@ -71,7 +75,8 @@ jobs:
       - run: cargo install wasm-bindgen-cli --version =0.2.129 --locked
       - run: pnpm install --frozen-lockfile
       # the engine wasm (packages/engine/pkg) and its size report in the job summary; over the
-      # budget (ADR 0002) the job fails in the last step, after the web checks have run
+      # tripwire (ADR 0008, which replaces ADR 0002's budget: fails above 2.5 MB gzipped, warns
+      # above 1.5 MB) the job fails in the last step, after the web checks have run
       - id: wasm-size
         run: cargo xtask wasm --budget --report
         continue-on-error: true
@@ -93,6 +98,9 @@ jobs:
     env:
       PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "0"
       PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.pw-browsers
+      # the KV conformance spec in real Chromium IndexedDB (e2e/kv-idb.spec.ts) fails instead of
+      # skipping when its module is missing; it is built below
+      LESSDUGIN_KV_TEST: "1"
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
@@ -109,5 +117,6 @@ jobs:
       - run: pnpm install --frozen-lockfile
       # the size budget is enforced by the web job
       - run: cargo xtask wasm
+      - run: cargo xtask wasm --kv-test
       - run: pnpm --filter @lessdugin/web exec playwright install --with-deps chromium
       - run: pnpm --filter @lessdugin/web run e2e

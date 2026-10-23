@@ -693,6 +693,13 @@ impl Net {
             return Err(HostError::Blocked(REQUEST_LIMIT_REACHED.into()));
         }
         let sent_at = host.now_ms();
+        // A request never outlives the command's time budget: a hung server costs at most
+        // what is left of it, not a full `REQUEST_TIMEOUT_MS` per retry.
+        let mut req = req;
+        if let Some(d) = stats.deadline() {
+            let left = u32::try_from(d.saturating_sub(sent_at).max(1)).unwrap_or(u32::MAX);
+            req.timeout_ms = req.timeout_ms.min(left);
+        }
         self.on_send(&origin, sent_at);
         let result = host.http(req).await;
         let now = host.now_ms();

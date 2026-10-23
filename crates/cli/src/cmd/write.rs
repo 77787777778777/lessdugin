@@ -56,7 +56,7 @@ pub async fn drive(ctx: &Ctx, w: &Writer, ticket: WriteTicket) -> Result<WriteTi
         match w.engine.outbox().step(&w.session).await? {
             Step::Processed(t) if t.id == ticket.id && finished(&t.state) => return Ok(t),
             Step::Processed(_) => {}
-            Step::Idle => break,
+            Step::Idle | Step::NeedsLogin(_) => break,
             Step::Wait(at) => {
                 let now = host.now_ms();
                 if at >= deadline || now >= deadline {
@@ -86,6 +86,13 @@ pub async fn drive_all(ctx: &Ctx, w: &Writer) -> Result<Vec<WriteTicket>, CliErr
                 None => run.push(t),
             },
             Step::Idle => return Ok(run),
+            Step::NeedsLogin(t) => {
+                match run.iter_mut().find(|x| x.id == t.id) {
+                    Some(x) => *x = t,
+                    None => run.push(t),
+                }
+                return Ok(run);
+            }
             Step::Wait(at) => {
                 let now = host.now_ms();
                 if at >= deadline || now >= deadline {
@@ -98,18 +105,94 @@ pub async fn drive_all(ctx: &Ctx, w: &Writer) -> Result<Vec<WriteTicket>, CliErr
     }
 }
 
-/// The error of the first write in `run` that failed.
+/// The error of the first write in `run` that failed, or waits for a new login.
 pub fn first_failure(run: &[WriteTicket]) -> Option<EngineError> {
     run.iter().find_map(|t| match &t.state {
         WriteState::Failed { error } => Some(error.clone()),
-        _ => None,
+        _ => needs_login_error(t),
     })
 }
 
-/// Prints a write's outcome; a failed write is returned as its error (the exit code).
+/// The error a write that waits for a new login is reported as (exit code 3).
+pub fn needs_login_error(t: &WriteTicket) -> Option<EngineError> {
+    let WriteState::Pending {
+        needs_login: true,
+        error,
+        ..
+    } = &t.state
+    else {
+        return None;
+    };
+    let why = error
+        .as_ref()
+        .map(|e| lessdugin_native::auth::redact::redact_secrets(&e.message))
+        .unwrap_or_default();
+    let account = t.id.rsplit_once('/').map_or("", |(a, _)| a);
+    let mut e = EngineError::new(
+        ErrorCode::AuthRequired,
+        format!(
+            "the session of {account} was refused{}; run `lessdugin login` again. Write {} \
+             stays queued and is sent after the login",
+            if why.is_empty() {
+                String::new()
+            } else {
+                format!(" ({why})")
+            },
+            t.id
+        ),
+    )
+    .with_detail("kind", "sessionExpired")
+    .with_detail("write", t.id.as_str());
+    e.retryable = true;
+    Some(e)
+}
+
+/// Why a pending write waits, for humans: ` (offline)`, ` (waiting until 12:09 UTC: <cause>)`.
+pub fn waiting_reason(ctx: &Ctx, state: &WriteState) -> crate::out::TermText {
+    let WriteState::Pending {
+        not_before_ms,
+        held,
+        error,
+        ..
+    } = state
+    else {
+        return lit("");
+    };
+    if ctx.offline() {
+        return lit(" (offline)");
+    }
+    let cause = error.as_ref().map(|e| {
+        cat([
+            lit(": "),
+            tt(e.code.as_str()),
+            lit(", "),
+            tt(&lessdugin_native::auth::redact::redact_secrets(&e.message)),
+        ])
+    });
+    match (not_before_ms, cause) {
+        (Some(at), cause) => cat([
+            lit(if *held {
+                " (undo window until "
+            } else {
+                " (waiting until "
+            }),
+            tt(&render::time(*at)),
+            cause.unwrap_or_else(|| lit("")),
+            lit(")"),
+        ]),
+        (None, Some(cause)) => cat([lit(" (waiting"), cause, lit(")")]),
+        (None, None) => lit(""),
+    }
+}
+
+/// Prints a write's outcome; a failed write is returned as its error (the exit code), and so
+/// is a write that waits for a new login (`auth_required`, exit 3).
 pub fn report(ctx: &Ctx, t: &WriteTicket, done: &'static str) -> Result<(), CliError> {
     if ctx.out.is_json() {
         ctx.out.json(&dto(t));
+    }
+    if let Some(e) = needs_login_error(t) {
+        return Err(CliError::Engine(e));
     }
     match &t.state {
         WriteState::Failed { error } => return Err(CliError::Engine(error.clone())),
@@ -121,14 +204,7 @@ pub fn report(ctx: &Ctx, t: &WriteTicket, done: &'static str) -> Result<(), CliE
         ]),
         WriteState::Undone => ctx.out.line(&[(lit("Undone."), Style::Plain)]),
         WriteState::Sending | WriteState::Pending { .. } => {
-            let why = match &t.state {
-                _ if ctx.offline() => lit(" (offline)"),
-                WriteState::Pending {
-                    not_before_ms: Some(at),
-                    ..
-                } => cat([lit(" (waiting until "), tt(&render::time(*at)), lit(")")]),
-                _ => lit(""),
-            };
+            let why = waiting_reason(ctx, &t.state);
             ctx.out.line(&[
                 (lit("Queued"), Style::Warn),
                 (why, Style::Plain),
@@ -236,7 +312,7 @@ pub async fn post(ctx: &Ctx, args: PostArgs) -> Result<(), CliError> {
         let id = drafts.new_id(ctx.engine()?.host());
         let path = drafts.save(&id, &doc, &[])?;
         if !args.draft {
-            draft::edit_file(&path)?;
+            edit_draft_file(ctx, &drafts, &id, &path)?;
             doc = drafts.load(&id)?;
         }
         draft_id = Some(id);
@@ -311,6 +387,65 @@ async fn send_comment(ctx: &Ctx, w: &Writer, d: &CommentDraft) -> Result<(), Cli
     report(ctx, &t, "Commented")
 }
 
+/// Queues the write `queue` makes from draft `id`, and removes the draft as soon as the write
+/// is in the outbox: the outbox sends it from then on (also after Ctrl-C or `kill -9` during
+/// the send), so the draft must not be published a second time. A write that could not be
+/// queued keeps the draft, and says so.
+async fn queue_from_draft<F>(
+    ctx: &Ctx,
+    w: &Writer,
+    id: &str,
+    queue: F,
+    done: &'static str,
+) -> Result<(), CliError>
+where
+    F: std::future::Future<Output = Result<WriteTicket, EngineError>>,
+{
+    let ticket = match queue.await {
+        Ok(t) => t,
+        Err(e) => {
+            kept_note(ctx, id);
+            return Err(e.into());
+        }
+    };
+    Drafts::new(ctx).remove(id)?;
+    let t = drive(ctx, w, ticket).await?;
+    report(ctx, &t, done)
+}
+
+fn kept_note(ctx: &Ctx, id: &str) {
+    ctx.out.note(&[(
+        cat([
+            lit("The text is kept as draft "),
+            tt(id),
+            lit(" (`lessdugin draft edit "),
+            tt(id),
+            lit("`)."),
+        ]),
+        Style::Dim,
+    )]);
+}
+
+/// Runs the editor on the new draft `id`. If the editor fails, a draft it did not change is
+/// removed (an aborted editor leaves no empty draft behind); a changed one is kept, and the
+/// note names it.
+fn edit_draft_file(
+    ctx: &Ctx,
+    drafts: &Drafts,
+    id: &str,
+    path: &std::path::Path,
+) -> Result<(), CliError> {
+    let before = drafts.load(id)?;
+    let Err(e) = draft::edit_file(path) else {
+        return Ok(());
+    };
+    match drafts.load(id) {
+        Ok(doc) if doc == before => drafts.remove(id)?,
+        _ => kept_note(ctx, id),
+    }
+    Err(e)
+}
+
 /// `lessdugin comment <ref> [file|-] [-m text]`.
 pub async fn comment(ctx: &Ctx, args: CommentArgs) -> Result<(), CliError> {
     let w = ctx.writer().await?;
@@ -332,18 +467,14 @@ pub async fn comment(ctx: &Ctx, args: CommentArgs) -> Result<(), CliError> {
             doc.set_opt("parent", parent.as_deref());
             let id = drafts.new_id(w.engine.host());
             let path = drafts.save(&id, &doc, &[])?;
-            draft::edit_file(&path)?;
+            edit_draft_file(ctx, &drafts, &id, &path)?;
             let doc = drafts.load(&id)?;
             if doc.body_is_empty() {
                 drafts.remove(&id)?;
                 return Err(CliError::usage("the comment is empty; nothing was posted"));
             }
             let d = CommentDraft::new(root, parent, doc.body_text());
-            let r = send_comment(ctx, &w, &d).await;
-            if r.is_ok() {
-                drafts.remove(&id)?;
-            }
-            return r;
+            return queue_from_draft(ctx, &w, &id, w.engine.comment(&d), "Commented").await;
         }
     };
     if text.trim().is_empty() {
@@ -364,8 +495,7 @@ pub async fn publish_comment_draft(ctx: &Ctx, id: &str, doc: Doc) -> Result<(), 
     }
     read::sync_thread_quietly(ctx, &w.engine, doc.get("parent").unwrap_or(&root)).await;
     let d = CommentDraft::new(root, doc.get("parent").map(str::to_owned), doc.body_text());
-    send_comment(ctx, &w, &d).await?;
-    Drafts::new(ctx).remove(id)
+    queue_from_draft(ctx, &w, id, w.engine.comment(&d), "Commented").await
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -564,26 +694,23 @@ pub async fn edit(ctx: &Ctx, args: EditArgs) -> Result<(), CliError> {
             let drafts = Drafts::new(ctx);
             let id = drafts.new_id(w.engine.host());
             let path = drafts.save(&id, &edit_doc(&uri, &c), &[])?;
-            draft::edit_file(&path)?;
+            edit_draft_file(ctx, &drafts, &id, &path)?;
             let doc = drafts.load(&id)?;
             if opts.summary.is_none() {
                 opts.summary = doc.get("summary").map(str::to_owned);
             }
             let body = doc.body_text();
-            let mut d = edit_draft(&c, &doc, Some(body))?;
+            let mut d = match edit_draft(&c, &doc, Some(body)) {
+                Ok(d) => d,
+                Err(e) => {
+                    kept_note(ctx, &id);
+                    return Err(e);
+                }
+            };
             if let (Some(t), Draft::Post { post, .. }) = (&args.title, &mut d) {
                 post.title = Some(t.clone());
             }
-            let r = send_edit(ctx, &w, &uri, &d, &opts).await;
-            if r.is_ok() {
-                drafts.remove(&id)?;
-            } else {
-                ctx.out.note(&[(
-                    cat([lit("The edit is kept as draft "), tt(&id), lit(".")]),
-                    Style::Dim,
-                )]);
-            }
-            return r;
+            return queue_from_draft(ctx, &w, &id, w.engine.edit(&uri, &d, &opts), "Edited").await;
         }
     };
     let mut d = edit_draft(&c, &doc, body)?;
@@ -612,8 +739,7 @@ pub async fn publish_edit_draft(ctx: &Ctx, id: &str, doc: Doc) -> Result<(), Cli
         history: doc.get("history") != Some("false"),
         summary: doc.get("summary").map(str::to_owned),
     };
-    send_edit(ctx, &w, &uri, &d, &opts).await?;
-    Drafts::new(ctx).remove(id)
+    queue_from_draft(ctx, &w, id, w.engine.edit(&uri, &d, &opts), "Edited").await
 }
 
 // ---------------------------------------------------------------------------------------------

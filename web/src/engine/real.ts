@@ -31,8 +31,9 @@ import { loginNotice } from "../host/loginNotice.ts";
 import { type HostMode, loadHostMode } from "../host/mode.ts";
 import { consumeBridgeCapability, consumeOAuthCallback } from "../lib/bootParams.ts";
 import { goToSignIn } from "../lib/navigate.ts";
-import { withFallbacks } from "./fallbacks.ts";
+import { memoryDrafts, pageStorage, storageDrafts, withFallbacks } from "./fallbacks.ts";
 import type { EngineHandle, LoginProvider } from "./handle.ts";
+import { endedSessions } from "./sessions.ts";
 
 /** Replaced by a literal at build time: release builds drop every e2e code path. */
 const E2E_BUILD: boolean = import.meta.env.VITE_E2E === "1";
@@ -117,6 +118,7 @@ async function finishOAuth(
         issuer: String(detail.issuer ?? login.issuer),
         async confirm() {
           await api.addAccount({ ...info, confirmIssuerChange: true });
+          endedSessions.clear(login.did);
           loginNotice.set(null);
         },
         async cancel() {
@@ -133,20 +135,26 @@ async function finishOAuth(
     startAt("#/login");
     return;
   }
+  endedSessions.clear(login.did);
   toasts.show({ message: "Signed in", tone: "success" });
   startAt(login.returnTo ?? "#/");
 }
 
+/** E2E builds only: extra worker start-up options (host/e2e.ts). */
+type InitExtra = { cspProbe?: boolean };
+
 async function hostedEngine(
   config: EngineConfigInput,
   oauthOpts: HostedOAuthOptions,
+  extra: InitExtra,
 ): Promise<Built> {
-  const oauth = lazyOAuth(oauthOpts);
+  const oauth = lazyOAuth({ ...oauthOpts, onSessionEnded: (did) => endedSessions.end(did) });
   const sessions: SessionProvider = {
     session: async (did) => (await oauth()).session(did),
   };
-  const client = startEngine({ init: { config }, sessions });
-  const api = withFallbacks(client);
+  const client = startEngine({ init: { config, ...extra }, sessions });
+  const storage = pageStorage();
+  const api = withFallbacks(client, { drafts: storage ? storageDrafts(storage) : memoryDrafts() });
   const callback = consumeOAuthCallback();
   if (callback) await finishOAuth(callback as Record<string, string>, api, oauth);
   const login: LoginProvider = {
@@ -164,6 +172,7 @@ async function hostedEngine(
         // already gone at the server, or never on this browser: remove it here anyway
       }
       await api.removeAccount(did, false);
+      endedSessions.clear(did);
     },
   };
   return { client, handle: { kind: "wasm", api, login, version: () => client.version() } };
@@ -171,13 +180,23 @@ async function hostedEngine(
 
 // ------------------------------------------------------------------------- lessdugin web
 
-async function bridgeEngine(config: EngineConfigInput): Promise<Built> {
+async function bridgeEngine(config: EngineConfigInput, extra: InitExtra): Promise<Built> {
   const token = await bridgeToken(consumeBridgeCapability());
   const client = startEngine({
-    init: { config, state: { kind: "bridge", endpoint: "/bridge/kv", token } },
+    init: {
+      config,
+      ...extra,
+      state: {
+        kind: "bridge",
+        endpoint: "/bridge/kv",
+        lockEndpoint: "/bridge/lock",
+        token,
+      },
+    },
     sessions: bridgeSessions(token),
   });
-  const api = withFallbacks(client);
+  // No drafts in this browser (threat-model §7): this tab's memory only.
+  const api = withFallbacks(client, { drafts: memoryDrafts() });
   const login: LoginProvider = {
     description:
       "Sign in through the lessdugin command-line client that serves this page: it opens your server's sign-in page and keeps the session. This tab never holds it.",
@@ -221,10 +240,15 @@ export async function createRealEngine(opts: RealEngineOptions = {}): Promise<En
   const e2eOpts = e2e ? e2e.e2eOptions() : {};
   const config: EngineConfigInput = e2e ? e2e.e2eEngineConfig(e2eOpts) : {};
   const mode = opts.mode ?? (await loadHostMode());
+  const extra: InitExtra = e2e && e2eOpts.cspProbe ? { cspProbe: true } : {};
   const built =
     mode === "bridge"
-      ? await bridgeEngine(config)
-      : await hostedEngine(config, e2eOpts.devnet ? { devnet: { plc: e2eOpts.devnet.plc } } : {});
+      ? await bridgeEngine(config, extra)
+      : await hostedEngine(
+          config,
+          e2eOpts.devnet ? { devnet: { plc: e2eOpts.devnet.plc } } : {},
+          extra,
+        );
   if (!e2e) return built.handle;
   e2e.installDebugHook(built.client, e2eOpts);
   const what = [

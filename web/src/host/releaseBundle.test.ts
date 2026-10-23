@@ -7,7 +7,7 @@
 // release check pass vacuously.
 
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -44,17 +44,24 @@ function build(flags: Record<string, string>): string {
 }
 
 const markersOf = (problems: Problem[]) => [...new Set(problems.map((p) => p.marker))].sort();
+const modeOf = (dir: string): unknown =>
+  (JSON.parse(readFileSync(join(dir, "build-info.json"), "utf8")) as { mode?: unknown }).mode;
 
 describe.runIf(existsSync(VITE))("release bundle", () => {
   it("has no e2e or mock code; the e2e and demo builds show every marker", () => {
     const release = build({});
     expect(scanDist(release)).toEqual([]);
+    expect(modeOf(release)).toBe("release");
 
+    // build-info.json names the mode, which a release `lessdugin` refuses unless it is a
+    // release one (crates/cli/build.rs; security review #7)
     const e2e = build({ VITE_E2E: "1" });
-    expect(markersOf(scanDist(e2e))).toEqual([...E2E_MARKERS].sort());
+    expect(modeOf(e2e)).toBe("e2e");
+    expect(markersOf(scanDist(e2e))).toEqual([...E2E_MARKERS, 'mode "e2e"'].sort());
 
     const demo = build({ VITE_DEMO: "1" });
+    expect(modeOf(demo)).toBe("demo");
     expect(scanDist(demo, { demo: true })).toEqual([]);
-    expect(markersOf(scanDist(demo))).toEqual([...MOCK_MARKERS].sort());
+    expect(markersOf(scanDist(demo))).toEqual([...MOCK_MARKERS, 'mode "demo"'].sort());
   }, 300_000);
 });
