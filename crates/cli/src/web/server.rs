@@ -314,6 +314,9 @@ async fn bridge(web: &Arc<Web>, req: Request) -> Response {
     let origin_ok = single(&parts.headers, header::ORIGIN)
         .is_some_and(|o| web.origins().iter().any(|a| a == o));
     if !origin_ok {
+        // Not drained: the Origin is unvalidated here, so this may be a cross-site
+        // request to the loopback server, and refusing it without reading the body
+        // keeps such a request from making the server read anything.
         return error(StatusCode::FORBIDDEN, "blocked", "wrong or missing Origin");
     }
     // #4 session token
@@ -322,6 +325,7 @@ async fn bridge(web: &Arc<Web>, req: Request) -> Response {
         .unwrap_or("")
         .to_owned();
     if route != Route::Session && !web.caps.is_session(&token) {
+        drain_body(body).await;
         return error(
             StatusCode::UNAUTHORIZED,
             "auth_required",
@@ -338,6 +342,10 @@ async fn bridge(web: &Arc<Web>, req: Request) -> Response {
         content_type.as_deref() == Some("application/json")
     };
     if !type_ok {
+        // The rejection answers before the body is read (#5 before #6), but a client
+        // still writing it must see the answer rather than a reset connection, so the
+        // body is drained (the reason `read_body` drains over-limit bodies).
+        drain_body(body).await;
         return error(
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
             "invalid_input",
@@ -419,6 +427,27 @@ async fn read_body(body: Body, limit: usize, declared: Option<u64>) -> Result<By
         Err(BodyError::TooLarge)
     } else {
         Ok(Bytes::from(buf))
+    }
+}
+
+/// Reads and discards an incoming body of at most [`DRAIN_EXTRA_BYTES`] before an early
+/// rejection (#3–#5), so that a client still writing sees the answer rather than a reset
+/// connection. The bridge server is loopback-only, so the read is not a remote
+/// amplification concern.
+async fn drain_body(body: Body) {
+    use futures::StreamExt as _;
+    let mut stream = body.into_data_stream();
+    let mut total = 0usize;
+    while let Some(chunk) = stream.next().await {
+        match chunk {
+            Ok(c) => {
+                total += c.len();
+                if total > DRAIN_EXTRA_BYTES {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
     }
 }
 
