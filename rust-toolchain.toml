@@ -1,4 +1,9 @@
 [toolchain]
-channel = "stable"
+# Pinned, not "stable": this file outranks the rustup default, so a floating
+# channel made CI (which installs exactly 1.97.0 via dtolnay/rust-toolchain)
+# silently run whatever stable the runner had — every push on this branch
+# failed on new lints in a toolchain the project does not target. 1.97.0 is
+# the version of docs/plan.md §M0, .github/workflows/*.yml and the nix flake.
+channel = "1.97.0"
 components = ["rustfmt", "clippy"]
 targets = ["wasm32-unknown-unknown"]
