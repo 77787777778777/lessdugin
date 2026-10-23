@@ -16,7 +16,7 @@
 //
 // `outboxPump()` and `liveTail()` resolve at once here: the worker runs them itself in the
 // leader tab only (leader.ts). `grant`/`revoke` write one record per actor and resolve with
-// the first actor's ticket.
+// the first actor's ticket (`approve`/`reject` resolve with all of them).
 
 import * as Comlink from "comlink";
 import type { EngineApi } from "./api.ts";
@@ -88,7 +88,7 @@ export const OP_ARITY: Readonly<Record<string, number>> = Object.freeze({
   edit: 3,
   render: 3,
   verify: 2,
-  modLog: 2,
+  modLog: 3,
   user: 2,
 });
 

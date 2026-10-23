@@ -489,6 +489,12 @@ pub struct PendingWrite {
     /// For an inverse write made by `undo` after sending: the undone write's id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub undo_of: Option<String>,
+    /// The `seq` of an earlier write of the same account this one depends on: it is sent only
+    /// once that write is done, and fails without being sent if that write failed, conflicted
+    /// or was undone (`mods rm` runs only after its `mod adopt` completed, `data-model.md`
+    /// §8.6).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<i64>,
 }
 
 impl PendingWrite {
@@ -674,6 +680,7 @@ mod tests {
                 &EngineError::conflict("x").with_detail("current", "bafy"),
             )),
             undo_of: None,
+            after: Some(1_792_151_363_000_122),
         }
     }
 

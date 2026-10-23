@@ -18,7 +18,7 @@
 //! | `comment_versions_*` | §11 step 6 "on revision n" / "on an unavailable version" |
 //! | `digest_*`, `created_before_1970_*` | §1.2 what the digest leaves out; §11 the `[edited]` badge |
 //! | `malformed_*`, `reserved_key_*` | §1.1 malformed inputs are rejected; §20.1 item 43 |
-//! | `co5_*` | the CO5 reading of §20.1 item 36 (an open question, §20.2) |
+//! | `co5_*` | CO5 compares only a valid root (§20.1 item 51) |
 //! | `hot_bits_*` | §1.3 rule 3: `libm::pow` bit patterns are pinned |
 //!
 //! Any namespace build: `cargo test -p lessdugin-core --test social_cases`.
@@ -37,6 +37,7 @@ use lessdugin_core::social::full::view::{
 };
 use lessdugin_core::social::full::{ForumView, Query, State, fold_view, project_fold};
 use lessdugin_core::social::input::FoldInput;
+use lessdugin_core::social::threads::Parent;
 use lessdugin_lexicon::keys;
 use lessdugin_lexicon::ns::NS;
 use lessdugin_lexicon::values::Tier;
@@ -1170,16 +1171,16 @@ fn reserved_key_record_skips_ma3() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// CO5 (§20.1 item 36; open question, §20.2)
+// CO5 (§20.1 item 51)
 
-/// The CO5 reading of §20.1 item 36, pinned by `visibility/visibility.json` and
-/// `karma/staged.json`: when the author of a root post edits its `forum` to name another forum
-/// (invalid by G9), CO5 excludes every comment of the thread, and the karma their votes carried
-/// with them, although no moderator acted and the post's author is an outsider (outside E ∪ A,
-/// so §4.9 would not let them moderate the thread). §20.2 records the proposal to compare only a
-/// valid root; these assertions change with the vectors when the spec resolves it.
+/// §20.1 item 51 (pinned by `visibility/visibility.json` `co5-invalid-root-is-a-missing-root`,
+/// `karma/staged.json` `co5-invalid-root-opinions-count`, `thread/thread.json`
+/// `root-names-another-forum`): when the author of a root post edits its `forum` to name another
+/// forum (invalid by G9), CO5 does not compare it. The post is Excluded and becomes a `Missing`
+/// root; its comments stay in the thread under the placeholder, keep their own states and
+/// scores, and the votes on them keep counting. The outsider author cannot remove the thread.
 #[test]
-fn co5_edit_of_the_root_forum_excludes_the_thread() {
+fn co5_edit_of_the_root_forum_keeps_the_thread() {
     let mut f = forum("open", json!({"display": {"newUsers": "collapse"}}));
     let (owner, admin, moder, member, outsider) = (user(0), user(1), user(2), user(4), user(9));
     grant(&mut f, &member);
@@ -1203,11 +1204,64 @@ fn co5_edit_of_the_root_forum_excludes_the_thread() {
     f.update(&p, invalid);
     f.recs.iter_mut().find(|r| r.uri == p).unwrap().valid = false;
     let after = run(&f, &Query::default());
-    assert_eq!(states(&after)[&c4], State::Excluded);
-    assert_eq!(states(&after)[&c2], State::Excluded);
+    assert_eq!(states(&after)[&p], State::Excluded);
+    assert_eq!(states(&after)[&c4], State::Visible);
+    assert_eq!(states(&after)[&c2], State::Visible);
     let k = after.karma.as_ref().unwrap();
+    assert_eq!(k.counting.len(), 2);
+    assert_eq!((k.k_of(&member), k.k_of(&moder)), (1, 1));
+    let (was, scores) = (
+        before.scores.as_ref().unwrap(),
+        after.scores.as_ref().unwrap(),
+    );
+    assert_eq!(scores[&c4], was[&c4]);
+    assert_eq!(scores[&c2], was[&c2]);
+    assert_eq!((scores[&c4].weighted, scores[&c2].weighted), (1, 1));
+    assert!(!scores.contains_key(&p));
+    let t = &after.threads[&p];
+    assert!(t.root_missing);
+    assert_eq!(t.parent[&c4], Parent::Root);
+    assert_eq!(t.parent[&c2], Parent::Root);
+    // the comments' lower bound is now t_decl (a Missing root's thread), not the post
+    assert!(after.times.contains_key(&c4) && !after.times.contains_key(&p));
+}
+
+/// CO5 still compares a **valid** root: a valid root whose `forum` is not the comment's (which
+/// needs a 60-bit fk collision, simulated here by a validity function that accepts the edited
+/// root) excludes the thread's comments (V1), and the votes on them do not count (O2).
+#[test]
+fn co5_a_valid_root_naming_another_forum_excludes_its_comments() {
+    use lessdugin_core::social::full::cx::lexicon_validity;
+    use lessdugin_core::social::full::fold_view_with;
+    let mut f = forum("open", json!({}));
+    let (owner, member, author) = (user(0), user(4), user(5));
+    grant(&mut f, &member);
+    grant(&mut f, &author);
+    let p = post(&mut f, &author, 10);
+    let c = comment(&mut f, &member, &p, None, 20);
+    vote(&mut f, &owner, &c, "up");
+    let other = f.post_value(10, 0, 0, 2, "A post");
+    f.update(&p, other);
+    f.recs.iter_mut().find(|r| r.uri == p).unwrap().valid = false;
+    let input = f.input();
+    let collide = |u: &str, v: &Value| {
+        if u == p {
+            (true, None)
+        } else {
+            lexicon_validity(u, v)
+        }
+    };
+    let v = fold_view_with(&input, NS, &collide, &Query::default()).unwrap();
+    // the root itself is Excluded by V1 (x.forum ≠ F), and CO5 excludes the comment
+    assert_eq!(states(&v)[&p], State::Excluded);
+    assert_eq!(states(&v)[&c], State::Excluded);
+    let k = v.karma.as_ref().unwrap();
     assert!(k.counting.is_empty());
-    assert!(k.k.values().all(|x| *x == 0));
+    assert_eq!(k.k_of(&member), 0);
+    // with the lexicon's validity the same root is invalid, a Missing root: the comment stays
+    let v = run(&f, &Query::default());
+    assert_eq!(states(&v)[&c], State::Visible);
+    assert_eq!(v.karma.as_ref().unwrap().k_of(&member), 1);
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -220,4 +220,5 @@ export interface MockState {
   nextId: number;
 }
 
-export type ModLogEntryRec = Omit<ModLogEntry, "actor"> & { actor: Did };
+/** A mod-log entry as the mock stores it; `uri` and `status` are derived when served. */
+export type ModLogEntryRec = Omit<ModLogEntry, "actor" | "uri" | "status"> & { actor: Did };

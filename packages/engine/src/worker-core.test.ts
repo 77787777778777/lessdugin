@@ -154,9 +154,44 @@ describe.runIf(present)("WorkerEngine over the real wasm", () => {
     expect(await engine.call("safeHref", ["javascript:alert(1)", "markdown"])).toBeNull();
   });
 
+  it("answers the M3 local operations and checks the social writes' arguments", async () => {
+    const { engine } = await tab(origin(), { elect: false });
+    // without an account: nothing to notify, nothing acknowledged
+    expect(await engine.callJson("notifications", JSON.stringify([{ limit: 5 }]))).toBe(
+      '{"dto":1,"items":[],"unread":0}',
+    );
+    expect(await engine.callJson("unreadCounts", "[]")).toBe(
+      '{"dto":1,"notifications":0,"forums":[]}',
+    );
+    expect(await engine.call("acknowledgedPublicActions", [])).toEqual([]);
+    expect(await engine.call("karmaNotifications", [])).toBe("daily");
+    await engine.call("setKarmaNotifications", ["weekly"]);
+    expect(await engine.call("karmaNotifications", [])).toBe("weekly");
+    expect(await engine.call("mutes", [])).toEqual([]);
+    expect(await engine.call("bookmarks", [])).toEqual([]);
+    expect(await engine.call("subscriptions", [])).toEqual([]);
+    expect(await engine.call("outboxExpedite", [])).toBe(0);
+    const post = `at://did:plc:ewvi7nxzyoun6zhxrhs64oiz/${NS}.post/3l2s5xxv2zaa2`;
+    for (const [op, args] of [
+      ["opinion", [post, { kind: "react", id: "insightful", stance: "for" }]],
+      [
+        "modAction",
+        [{ kind: "remove", forum: post, scope: "forum", subject: post, actionKey: "hide" }],
+      ],
+      ["acknowledgePublicAction", ["vote"]],
+    ] as const) {
+      expect((await rejects(engine.call(op, [...args]))).code, op).toBe("auth_required");
+    }
+    expect((await rejects(engine.call("opinion", [post, { kind: "vote" }]))).code).toBe(
+      "invalid_input",
+    );
+  });
+
   it("rejects with EngineError objects", async () => {
     const { engine } = await tab(origin(), { elect: false });
-    expect((await rejects(engine.call("search", [{}]))).code).toBe("unsupported");
+    const search = await rejects(engine.call("search", [{}]));
+    expect(search.code).toBe("unsupported");
+    expect(search.detail).toEqual({ milestone: "M5" });
     expect((await rejects(engine.call("noSuchOp", []))).code).toBe("unsupported");
     expect((await rejects(engine.callJson("accounts", "[1]"))).code).toBe("invalid_input");
     const join = await rejects(

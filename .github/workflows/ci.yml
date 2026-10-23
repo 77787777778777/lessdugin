@@ -31,7 +31,9 @@ jobs:
       # (the debug run above only warns between 5 and 15 s)
       - run: cargo test --release -p lessdugin --features devnet --test cold_sync
       # the social-fold vectors again at the final namespace (as `cargo xtask ci`)
-      - run: cargo test -p lessdugin-core --features final-ns --test social_vectors --test social_fold --test social_query
+      - run: cargo test -p lessdugin-core --features final-ns --test social_vectors --test social_fold --test social_query --test model_reorder
+      # testdata/dto/dto-1.d.ts is what the Rust DTOs generate (types.parity.test.ts compares types.ts with it)
+      - run: cargo test -p lessdugin-wasm --features dto-decl --test dto_decl
   # The interop, vector and property tests of atp, lexicon and markdown on wasm32-unknown-unknown,
   # in node through wasm-bindgen-test-runner (same version as the workspace wasm-bindgen pin).
   wasm-tests:

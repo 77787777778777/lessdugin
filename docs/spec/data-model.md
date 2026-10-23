@@ -801,7 +801,7 @@ A third-party proof counts as current only if its rev is at least the head retur
 | CO2 | `root.uri` is an `NS.post` uri whose rkey is `{fk}-{T}` with the same fk, and `rootTid = T`. |
 | CO3 | `parent`, if present, is an `NS.comment` uri. Where the comment is placed is decided by the thread rules in `social.md`, not by validity. |
 | CO4 | `body` is inline (G7). |
-| CO5 *(x)* | If a record with the root uri is in the fold input, valid or not, its `value.forum` equals `comment.forum` (an absent or non-string `forum` fails). Open question: `social.md` §20.2 item 5 proposes comparing only a valid root. |
+| CO5 *(x)* | If a **valid** record with the root uri is in the fold input, its `value.forum` equals `comment.forum`. An invalid root is not compared: the fold treats it as a `Missing` root, so its comments stay in the thread under the placeholder (`social.md` §11, §20.1 items 28 and 51). A valid root in F's key range names F (G9), so CO5 fails only on a 60-bit fk collision, like the other forum checks. |
 | CO6 | *entry.* `moderatorHat` is honoured only if the author is a current authority of `forum`. |
 
 **revision**

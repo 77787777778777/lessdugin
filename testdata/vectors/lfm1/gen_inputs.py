@@ -31,6 +31,12 @@ def V(name, inp, *fields):
     return {"name": name, "input": inp, "expected": {f: None for f in fields}}
 
 
+def b32(i, n=4):
+    """i as n characters of the did:plc / TID alphabet [a-z2-7]."""
+    a = "abcdefghijklmnopqrstuvwxyz234567"
+    return "".join(a[(i >> (5 * k)) & 31] for k in reversed(range(n)))
+
+
 def R(name, text, *fields, media=None, profile=None):
     inp = {"text": text}
     if media is not None:
@@ -167,6 +173,9 @@ F("lfm1/normalise.json", "render", [
     R("text-coalescing-brackets", "a [b] c [!x] d\n", "html", "text"),
     R("text-and-literal-not-merged", "a<b>c\n"),
     R("nul-replaced", "a\u0000b\n"),
+    R("source-cr-in-code-span-and-quote", "a`b\rc`\r> q\r> r\r"),
+    R("character-reference-cr-and-nul", "a&#13;b &#0; `c&#13;d`\n"),
+    R("nul-in-code-and-link-destination", "`a\u0000b` [x](https://e.example/\u0000)\n"),
     G("event-cap-exact", {"prefix": "x\n\n" * 10 + cap_hdr, "repeat": cap_row, "times": 3471}, "flags", "word_count", "anchors"),
     G("event-cap-plus-one-closes-tags", {"prefix": "x\n\n" * 7 + "*x*\n\n" * 2 + cap_hdr, "repeat": cap_row, "times": 3471}, "flags", "word_count", "html_tail"),
     G("event-cap-at-definition-start", {"prefix": "a[^n] b[^m]\n\n[^m]: kept\n\n" + "x\n\n" * 6 + cap_hdr, "repeat": cap_row, "times": 3471, "suffix": "\n[^n]: lost\n"}, "flags", "anchors", "html_tail"),
@@ -183,6 +192,8 @@ F("lfm1/autolink.json", "render", [
     R("no-boundary", "xwww.a.com ahttp://b.com\n"),
     R("start-of-text-event", "**bold**www.example.com\n"),
     R("trailing-punctuation", "www.a.com. www.b.com! www.c.com? www.d.com, www.e.com: www.f.com*\n"),
+    R("trailing-dots-and-underscores", "www.a.com... www.b.com_ www.c.com./x http://d.e.? (www.f.com.)\n"),
+    R("sentence-final-period", "Visit www.example.com. Or https://example.org/path.\n"),
     R("trailing-quotes", "\"www.a.com\" 'www.b.com'\n"),
     R("entity-suffix", "www.a.com/x&amp; www.b.com/y&hellip; www.c.com/z;\n"),
     R("unbalanced-parens", "www.a.com/x(y) www.b.com/x) (www.c.com/x(y))\n"),
@@ -224,6 +235,8 @@ F("lfm1/spoiler-details.json", "render", [
     R("marker-not-first-paragraph", "> intro\n>\n> [!spoiler]\n> x\n", *SD),
     R("leading-spoiler-excerpt", "> [!spoiler]\n> secret words\n\nvisible words\n", *SD),
     R("details-summary-trailing-nbsp", "> [!details] Sum\u00a0\n> body\n", *SD),
+    R("spoiler-and-alert-in-list-items", "- > [!TIP]\n  > in list\n- > [!spoiler]\n  > in item\n", *SD),
+    R("spoiler-inside-alert", "> [!NOTE]\n> > [!spoiler]\n> > hidden\n", *SD),
 ])
 
 # ------------------------------------------------------------------ figure.json
@@ -238,6 +251,11 @@ F("lfm1/figure.json", "render", [
     R("caption-trimmed-not-markdown", "![a](https://x.example/1.png \"  *not em* <b>  \")\n"),
     R("figure-alt-only-scheme", "![alt text](ftp://x.example/a \"Cap\")\n"),
     R("figure-in-list", "- ![a](https://x.example/1.png \"Cap\")\n"),
+    R("figure-in-loose-list", "- ![a](https://x.example/1.png \"Cap\")\n\n- b\n"),
+    R("figure-in-blockquote", "> ![a](https://x.example/1.png \"Cap\")\n"),
+    R("nbsp-title-not-figure", "![a](https://x.example/1.png \"\u00a0\")\n"),
+    R("figure-cid-miss", "![gone](cid:" + CID2 + " \"Cap\")\n", "html", "text", "styled", "media_used", media=[media(CID1)]),
+    R("figure-video", "![](cid:" + CID1 + " \"Clip\")\n", "html", "styled", "media_used", media=[media(CID1, "video/mp4", name="clip.mp4")]),
 ])
 
 # ------------------------------------------------------------------ mention.json
@@ -257,6 +275,9 @@ F("lfm1/mention.json", "render", [
     R("did-plc-wrong-length", "[@x](at://did:plc:abc)\n", *MN),
     R("did-plc-uppercase", "[@x](at://did:plc:ABCDEFGHIJKLMNOPQRSTUVWX)\n", *MN),
     R("did-web-port-rejected", "[@x](at://did:web:example.com%3A8080)\n", *MN),
+    R("inner-replaced-p-keeps-source", f"[@alice **extra**](at://{DID}) end\n", *MN),
+    R("mention-in-summary-and-spoiler", f"> [!details] ask [@a](at://{DID})\n> body\n\n> [!spoiler]\n> [@b](at://{DID2})\n", *MN),
+    R("mentions-cap-128", "".join(f"[@m](at://did:plc:{'q' * 20}{b32(i)}) " for i in range(130)) + "\n", "mentions"),
 ])
 F("lfm1/short-did.json", "short_did", [
     V("plc", {"did": DID}, "out"),
@@ -284,6 +305,12 @@ F("lfm1/links.json", "render", [
     R("path-percent-encoding", "[a](https://example.com/ä/ö?q=ü#ß)\n[b](<https://example.com/a b>)\n[c](https://example.com/%41%zz)\n", *LK),
     R("port", "[a](https://example.com:8443/x) [b](https://example.com:99999/) [c](https://example.com:/)\n", *LK),
     R("ipv6", "[a](http://[2001:db8::1]:8080/x) [b](http://[zz]/)\n", *LK),
+    # Hosts the WHATWG URL parser (browsers, ammonia) rejects or rewrites are not linked; the
+    # first is the fuzz reproducer fuzz/regressions/render/invalid-punycode-host.
+    R("punycode-invalid-dropped", "[b](https://xn--exmple-cuattps2)\n[c](https://xn--.com) [d](https://xn--abc-.com) [e](https://xn--0ug.com)\n", *LK),
+    R("punycode-valid-kept-undecoded", "[a](https://xn--bcher-kva.example/x) [b](https://a.xn--p1ai)\n", *LK),
+    R("ipv4-dotted-quad-only", "[a](https://1.2.3.4/) [b](https://256.1.1.1/) [c](https://a.123/) [d](https://0x7f.1/) [e](https://1.2.3/) [f](https://2130706433/) [g](https://01.2.3.4/)\n", *LK),
+    R("ipv6-must-parse", "[a](http://[::ffff:1.2.3.4]/) [b](http://[1.2.3.4]/) [c](http://[1::2::3]/) [d](http://[1]/)\n", *LK),
     G("length-3000-accepted", {"prefix": "[a](https://example.com/", "repeat": "a", "times": 3000 - len("https://example.com/"), "suffix": ")\n"}, "text", "anchors", "html_tail"),
     G("length-3001-dropped", {"prefix": "[a](https://example.com/", "repeat": "a", "times": 3001 - len("https://example.com/"), "suffix": ")\n"}, "html"),
     R("mailto", "[mail](mailto:Bob@Example.COM?subject=grüße)\n", *LK),
@@ -334,7 +361,13 @@ F("lfm1/at-links.json", "render", [
     R("autolink-at-uri", f"<at://{DID}>\n", *AL),
     R("unreferenced-footnote-not-derived", f"x\n\n[^x]: [@v](at://{DID}) [r]({P})\n", *AL),
     R("referenced-footnote-derived", f"x[^x]\n\n[^x]: [@v](at://{DID}) [r]({P})\n", *AL),
-    G("depth-flattened-not-derived", {"prefix": "", "repeat": ">", "times": 70, "suffix": f" [@v](at://{DID}) [r]({P})\n"}, "html_rle", "links", "mentions"),
+    G("depth-flattened-still-derived", {"prefix": "", "repeat": ">", "times": 70, "suffix": f" [@v](at://{DID}) [r]({P})\n"}, "html_rle", "links", "mentions"),
+    R("duplicate-definition-not-derived", f"x[^x]\n\n[^x]: a\n\n[^x]: [@v](at://{DID}) [r]({P})\n", *AL),
+    R("link-in-image-alt-not-derived", f"![[@v](at://{DID}) [r]({P})](https://x.example/i.png)\n", *AL),
+    R("spoiler-content-derived", f"> [!spoiler]\n> [@v](at://{DID}) [r]({P})\n", *AL),
+    R("record-canonical-data-at-uri", f"[a](AT://{DID}/{NS}.post/3kabc2def)\n", *AL),
+    R("every-collection-gets-data-at-uri", f"[p](at://{DID}/{NS}.post/a) [c](at://{DID}/{NS}.comment/b) [s](at://{DID}/{NS}.sequence/c) [w](at://{DID}/{NS}.wikiRevision/d) [f](at://{DID}/{NS}.forum/self) [v](at://{DID}/{NS}.vote/e)\n", *AL),
+    R("links-cap-256", "".join(f"[r](at://{DID}/{NS}.post/{b32(i)}) " for i in range(260)) + "\n", "links"),
 ])
 
 # ------------------------------------------------------------------ images.json
@@ -369,6 +402,8 @@ F("lfm1/images.json", "render", [
     R("cid-alt-fallback-body-before-footnotes", f"x[^1]\n\n[^1]: ![](cid:{CID1})\n\n![](cid:{CID1}) ![](cid:{CID2})\n", *IM, media=[M1, media(CID2, alt="two")]),
     G("media-alt-amplification-bounded", {"prefix": "", "repeat": f"![](cid:{CID5}) ", "times": 1470}, "html_bytes", "html_head", "flags", media=[media(CID5, alt='"' * 20000)]),
     G("media-alt-amplification-video-bounded", {"prefix": "", "repeat": f"![](cid:{CID5}) ", "times": 1470}, "html_bytes", "flags", media=[media(CID5, "video/mp4", alt="&" * 20000)]),
+    R("cid-link-not-image-dropped", f"[x](cid:{CID1})\n", *IM, media=[M1]),
+    R("nested-cid-image-takes-no-alt-fallback", f"![outer ![](cid:{CID1})](https://img.example/x.png) ![](cid:{CID1})\n", *IM, media=[M1]),
     R("alt-trimmed", f"![ \u00a0\ufeffshown\t ](cid:{CID1}) ![ ](cid:{CID2})\n", *IM, media=[media(CID1), media(CID2, alt="  spaced  "), media(CID3, alt="\u00a0\ngallery\u3000\ufeff")]),
     R("mime-exact-match", f"![a](cid:{CID1}) ![b](cid:{CID2}) ![c](cid:{CID3}) ![d](cid:{CID4})\n", *IM, media=[media(CID1, "IMAGE/PNG"), media(CID2, "image/png; x=y"), media(CID3, " image/png"), media(CID4, "Video/MP4")]),
 ])
@@ -384,6 +419,9 @@ F("lfm1/gallery.json", "render", [
     R("gallery-invalid-cid", "x\n", *GA, media=[media("QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG", alt="v0")]),
     R("gallery-styled", "x\n", "styled", media=[media(CID1, alt="one"), media(CID2, "audio/ogg", name="a.ogg")]),
     R("miss-does-not-use", f"![x](cid:{CID2})\n", *GA, media=[media(CID1)]),
+    R("image-only-in-unreferenced-footnote", f"x\n\n[^u]: ![a](cid:{CID1})\n", *GA, media=[media(CID1, alt="one")]),
+    R("image-in-referenced-footnote-used", f"x[^n]\n\n[^n]: ![a](cid:{CID1})\n", *GA, media=[media(CID1, alt="one")]),
+    R("image-only-inside-alt-not-used", f"![outer ![](cid:{CID1})](https://img.example/x.png)\n", *GA, media=[media(CID1, alt="g")]),
 ])
 
 # ------------------------------------------------------------------ ids.json
@@ -424,6 +462,13 @@ F("lfm1/footnotes.json", "render", [
     R("footnote-styled", "x[^1]\n\n[^1]: note\n", "styled"),
     R("definition-inside-spoiler", "> [!spoiler]\n> secret[^1]\n>\n> [^1]: footnote secret\n", "html", "text", "text_x", "styled"),
     R("definition-inside-details-and-quoted-spoiler", "x[^a] y[^b]\n\n> [!details] d\n> [^a]: in details\n\n> [!spoiler]\n> > [^b]: in quote in spoiler\n", "html", "text_x"),
+    R("unicase-labels", "x[^\u00c4] y[^ss]\n\n[^\u00e4]: umlaut\n[^SS]: double s\n[^\u00df]: eszett\n", *FN),
+    R("nested-definition-extracted", "[^a]: A\n\n    [^b]: nested B\n\nx[^a] y[^b]\n", *FN),
+    R("nested-definition-unreferenced", "x[^a]\n\n[^a]: A\n\n    [^b]: nested B\n", *FN),
+    R("reference-in-heading-and-table", "# Title[^1]\n\n| h[^1] |\n|---|\n| c |\n\n[^1]: note\n", "html", "anchors", "toc"),
+    R("empty-definition", "x[^e]\n\n[^e]:\n", *FN),
+    R("definitions-inside-quote-and-list", "x[^q] y[^l]\n\n> [^q]: in quote\n\n- [^l]: in list\n", *FN),
+    R("eleven-references-back-links", "x" + "[^n]" * 11 + "\n\n[^n]: N\n", "html"),
 ])
 
 # ------------------------------------------------------------------ blocks.json
@@ -444,6 +489,11 @@ F("lfm1/blocks.json", "render", [
     R("code-block-empty", "```\n```\n"),
     R("rule-in-list", "- a\n\n  ***\n"),
     R("code-language-ascii-whitespace-only", "```a\u00a0b\nx\n```\n\n```c\u3000d e\ny\n```\n\n```f\u2003g\th\nz\n```\n\n```k\tl\nw\n```\n"),
+    R("alert-with-block-content", "> [!NOTE]\n> - item\n> ```\n> code\n> ```\n> > nested\n"),
+    R("alert-empty", "> [!WARNING]\n"),
+    R("alert-lazy-continuation", "> [!NOTE]\nlazy line\n"),
+    R("alert-in-list-and-in-quote", "- > [!TIP]\n  > in list\n\n> > [!CAUTION]\n> > nested in quote\n"),
+    R("list-item-empty-styled", "- \n- x\n", "html", "styled"),
 ])
 
 # ------------------------------------------------------------------ math.json
@@ -473,10 +523,13 @@ F("lfm1/math.json", "render", [
     R("escaped-braces-not-groups", "$\\{x\\}$\n", *MA),
     R("unknown-command-error", "$\\notacommand x$\n", *MA),
     R("engine-error-ampersand", "$a & b$\n", *MA),
-    R("filter-style-color", "$\\color{red}{x}$\n", *MA),
-    R("filter-class-cancel", "$\\cancel{x}$\n", *MA),
-    R("filter-id-align-tag", "$$\\begin{align} a &= b \\label{eq} \\end{align}$$\n", *MA),
-    R("filter-text-styles-unwrapped", "$\\textbf{bold} \\texttt{mono} \\textit{it} \\emph{e}$\n", *MA),
+    R("disabled-label-eqref-ref", "$$\\begin{align} a &= b \\label{eq} \\end{align}$$\n\n$\\eqref{eq}$ $\\ref{eq}$ $\\text{\\label{x}}$\n", *MA),
+    R("normalise-color-mathcolor", "$\\color{red}{x}$ $\\textcolor{Periwinkle}{y}$ $\\textcolor{#1A2b3C}{z}$\n", *MA),
+    R("normalise-menclose-class", "$\\cancel{x}$\n", *MA),
+    R("normalise-tag-no-id", "$$\\begin{equation} E = mc^2 \\tag{1} \\end{equation}$$\n", *MA),
+    R("normalise-table-classes", "$$|x| = \\begin{cases} x & x \\ge 0 \\\\ -x & \\text{else} \\end{cases} \\begin{array}{l|r} a & b \\\\ \\hline c & d \\end{array}$$\n", *MA),
+    R("normalise-spacing-classes", "$a\\!b \\negmedspace c \\hspace{2pt} d \\kern-1em e$\n", *MA),
+    R("normalise-text-style-classes", "$\\textbf{bold} \\texttt{mono} \\textit{it} \\emph{e} \\textsf{s} \\textsc{c} \\text{\\large L}$\n", *MA),
     R("filter-mspace-no-self-closing", "$a\\,b\\quad c$\n", *MA),
     R("filter-mathvariant-and-entities", "$\\mathrm{d}x \\sin x < y > z \\& w$\n", *MA),
     R("output-depth-64-ok", "$" + "\\left(" * 62 + "x" + "\\right)" * 62 + "$\n", "flags", "html_temml"),
@@ -495,6 +548,10 @@ F("lfm1/math.json", "render", [
     R("guard-delimiter-nesting-65", "$" + "(" * 65 + "x" + ")" * 65 + "$\n", "html", "flags"),
     R("guard-balanced-accepted", "$" + ("[0, 1) \\cup " * 40).strip() + "$ $" + ("f(\\pi) + " * 40).strip() + "$ $" + ("n! + " * 40).strip() + "$ $\\begin{pmatrix} (a) & [b] \\\\ \\{c\\} & \\langle d \\rangle \\end{pmatrix}$\n", "flags", "html_temml"),
     G("mathml-document-budget", {"prefix": "", "repeat": "$" + "\\," * 1720 + "$ ", "times": 280}, "flags", "html_bytes", "html_tail"),
+    # Engine budget (§7.2): a 4096-byte expression with 8 unmatched delimiters costs 1 << 20
+    # (`len << unmatched`), four of them the whole budget; the cheap expression after them is a
+    # math error.
+    G("engine-document-budget", {"prefix": "", "repeat": "$" + "(" * 8 + "x+" * 2044 + "$\n\n", "times": 4, "suffix": "$x$\n"}, "flags", "html_bytes", "html_tail"),
     R("math-in-heading-and-link", "# $x^2$\n\n[$y$](https://example.com)\n", *MA),
     R("matrix", "$$\\begin{pmatrix} 1 & 2 \\\\ 3 & 4 \\end{pmatrix}$$\n", *MA),
     R("display-math-styled", "a $b$\n\n$$c\nd$$\n", "styled"),
@@ -521,6 +578,9 @@ F("lfm1/limits.json", "render", [
     G("leaf-exemption", {"prefix": "", "repeat": ">", "times": 63, "suffix": " `code` ![i](https://x.example/i.png) $x$ [^1]\n\n[^1]: n\n"}, "html_rle", "flags"),
     G("link-dropped-at-boundary", {"prefix": "", "repeat": ">", "times": 63, "suffix": " [a](https://example.com) [b](#x)\n"}, "html_rle", "flags"),
     G("footnote-base-depth", {"prefix": "x[^1]\n\n[^1]: ", "repeat": ">", "times": 61, "suffix": " deep *e*\n"}, "html_rle", "flags"),
+    G("footnote-in-spoiler-base-depth", {"prefix": "x[^1]\n\n> [!spoiler]\n> [^1]: ", "repeat": ">", "times": 60, "suffix": " deep\n"}, "html_rle", "flags"),
+    G("flattened-keeps-footnote-reference-and-image", {"prefix": "", "repeat": ">", "times": 70, "suffix": f" para[^1] ![i](cid:{CID1})\n\n[^1]: n\n"}, "html_rle", "flags", "anchors", "media_used", media=[media(CID1)]),
+    G("flattened-empty-emits-nothing", {"prefix": "", "repeat": ">", "times": 63, "suffix": " ```\n" + ">" * 63 + " ```\n"}, "html_rle", "flags"),
     G("too-large-1000001", {"prefix": "", "repeat": "a", "times": 1000001}, "html", "text", "flags", "error", "styled", "anchors"),
     G("exactly-1000000-ok", {"prefix": "", "repeat": "a ", "times": 500000}, "flags", "error", "word_count", "read_minutes"),
     V("encoding-error", {"text": "", "encoding_error": True}, "html", "text", "flags", "error", "styled"),
@@ -569,6 +629,7 @@ F("lfm1/projection.json", "render", [
     R("control-chars-removed", "a\u0001b\u007fc\u0085d\n", *PJ),
     R("terminal-escapes-removed", "hello \u001b]0;pwned\u0007 \u001b[2J \u009b \u202eevil\n", "text", "text_x", "excerpt", "word_count"),
     R("unreferenced-footnote-in-p", "x\n\n[^u]: u text\n", *PJ),
+    R("alert-marker-not-in-p", "> [!NOTE]\n> body\n", *PJ),
 ])
 
 # ------------------------------------------------------------------ excerpt.json
@@ -585,6 +646,7 @@ F("lfm1/excerpt.json", "render", [
     G("word-count-374-one-minute", {"prefix": "", "repeat": "w ", "times": 374}, "word_count", "read_minutes"),
     G("word-count-375-two-minutes", {"prefix": "", "repeat": "w ", "times": 375}, "word_count", "read_minutes"),
     R("toc-top-level-only", "# A\n\n> # B\n\n## C\n\n- # D\n\n[^1]: # E\n", "toc"),
+    R("toc-excludes-containers-and-normalises", "Title *x*\nline `two`\u00a0 \n===\n\n# A\n\n> [!spoiler]\n> # S\n\n> [!details] d\n> # D\n\n> [!NOTE]\n> # N\n\n| # T |\n|---|\n", "toc", "anchors"),
     R("first-cluster-is-space-cut-rule", "a" + " b" * 300 + "\n", *EX),
 ])
 
@@ -674,6 +736,17 @@ F("lfm1/safe-href.json", "safe_href", [
     S("ipv6-port", "http://[::1]:8080/x"),
     S("ipv6-zone-id-rejected", "http://[fe80::1%25en0]:80/"),
     S("ipv6-bad-char", "http://[::g]/"),
+    S("ipv6-not-an-address", "http://[1.2.3.4]/"),
+    S("ipv6-embedded-ipv4", "http://[::ffff:1.2.3.4]/"),
+    S("ipv4", "https://1.2.3.4/"),
+    S("ipv4-out-of-range", "https://256.1.1.1/"),
+    S("ipv4-hex-rewritten", "https://0x7f.1/"),
+    S("ipv4-integer-rewritten", "https://2130706433/"),
+    S("ends-in-number", "https://a.123/"),
+    S("punycode", "https://xn--bcher-kva.example/"),
+    S("punycode-invalid", "https://xn--exmple-cuattps2/"),
+    S("punycode-empty", "https://xn--.com/"),
+    S("punycode-leading-joiner", "https://xn--0ug.com/"),
     S("pct-path-unicode", "https://e.com/ü?ö=ä#ß"),
     S("pct-keeps-percent-and-reserved", "https://e.com/%2F%zz/[]!$&'()*+,;=:@~"),
     S("pct-encodes-quote-angle-backtick", "https://e.com/\"<>`{}|^"),
@@ -709,6 +782,8 @@ F("lfm1/safe-href.json", "safe_href", [
     S("at-did-web", f"at://{DIDWEB}"),
     S("at-did-web-uppercase", "at://did:web:Example.com"),
     S("at-did-web-single-label", "at://did:web:localhost"),
+    S("at-did-web-digit-tld", "at://did:web:example.123"),
+    S("at-did-web-percent-port", "at://did:web:example.com%3A8080"),
     S("at-did-key", "at://did:key:zQ3sh"),
     S("at-handle-markdown", "at://alice.bsky.social"),
     S("at-handle-field", "at://Alice.Bsky.Social", "field"),
@@ -739,6 +814,9 @@ F("lfm1/term-sanitize.json", "term_sanitize", [
     TS("prose-bidi-removed", "a\u202eb\u2066c\u061cd", "prose"),
     TS("prose-zero-width-kept", "a\u200bb\ufeffc", "prose"),
     TS("prose-badges-kept", "ok \u2705 \u2713", "prose"),
+    TS("prose-vt-ff-escaped", "a\u000bb\u000cc", "prose"),
+    TS("code-vt-ff-escaped", "a\u000bb\u000cc", "code"),
+    TS("name-vt-ff-spaces", "a\u000b\u000cb", "name"),
     TS("code-tab-stops", "a\tb\tcd\te", "code"),
     TS("code-tab-after-wide", "日\tx", "code"),
     TS("code-bidi-visible", "a\u202eb\u2069", "code"),
@@ -773,6 +851,8 @@ F("lfm1/styled.json", "render", [
     R("figure-media-caption", f"![a](cid:{CID1} \"Cap\")\n", *ST, media=[media(CID1)]),
     R("plain-paragraph", "x\n", *ST),
     R("raw-html-and-escapes", "<b>\u001b[31m</b> \u202e\n", *ST),
+    R("single-line-contexts", "a  \nb\n===\n\n> [!details] s $$x$$ t\n> body\n\n| $$y$$ |\n|---|\n| z |\n", *ST),
+    R("ext-image-in-link-and-standalone", "[![cat](https://img.example/c.png)](https://e.com) ![](https://img.example/d.png)\n", *ST),
 ])
 
 # ------------------------------------------------------------------ xss
@@ -834,7 +914,11 @@ F("xss/mathml.json", "render", desc="MathML XSS/mXSS corpus: disabled macros, hr
     R("math-raw-mathml-literal", "<math><maction actiontype=\"statusline\" xlink:href=\"javascript:alert(1)\">x</maction></math>", "html"),
     R("math-raw-annotation-xml", "<math><annotation-xml encoding=\"text/html\"><img src=x onerror=alert(1)></annotation-xml></math>", "html"),
     R("math-raw-mglyph", "<math><mtext><table><mglyph><style><img src=x onerror=alert(1)></style></mglyph></table></mtext></math>", "html"),
-    R("math-color-style-stripped", "$\\color{red}{x} \\textcolor{blue}{y}$", "html", "flags"),
+    R("math-color-to-mathcolor", "$\\color{red}{x} \\textcolor{blue}{y}$", "html", "flags"),
+    R("math-color-injection", "$\\color{red\" onmouseover=\"alert(1)}{x}$ $\\textcolor{#ff0000;background:url(javascript:alert(1))}{y}$ $\\color{red;x:y}z$", "html", "flags"),
+    R("math-eqref-ref-href", "$\\eqref{javascript:alert(1)}$ $\\ref{\"><img src=x onerror=alert(1)>}$", "html", "flags"),
+    R("math-raw-class-style-mathcolor-literal", "<math><mrow class=\"mc-al\" mathcolor=\"red\" style=\"background:url(x)\"><mtext class=\"mc-tb\">x</mtext></mrow></math>", "html"),
+    R("math-text-style-wrappers-text-only", "$\\textbf{<b onclick=x>a</b>} \\textsf{<span style=x>b</span>} \\texttt{</mtext><img src=x onerror=alert(1)>}$", "html", "flags"),
     R("math-operatorname-entities", "$\\operatorname{evil}\\,x$", "html", "flags"),
     R("math-def-macro", "$\\def\\x{\\href{javascript:alert(1)}{y}}\\x$", "html", "flags"),
     R("math-newcommand", "$\\newcommand{\\x}{\\url{a}}\\x$", "html", "flags"),
@@ -903,31 +987,7 @@ F("terminal/escapes.json", "terminal", [
     T("mailto-real-host", "[support@google.com](mailto:?to=attacker@evil.com) [google.com](mailto:a@evil.com,b@google.com) [ok](mailto:a@evil.com)", NEVER, "printed"),
 ])
 
-# ------------------------------------------------------------------ mathml (engine snapshots)
-def MM(name, tex, display=False):
-    return V(name, {"tex": tex, "display": display}, "html", "math_errors")
-F("mathml/math-core-0.9.json", "mathml", [
-    MM("frac", "\\frac{a}{b}"),
-    MM("sqrt-root", "\\sqrt{x} + \\sqrt[3]{y}"),
-    MM("scripts", "x_i^2 + \\sum_{k=0}^{n} k"),
-    MM("integral-display", "\\int_0^\\infty e^{-x}\\,dx", True),
-    MM("greek-and-symbols", "\\alpha\\beta\\Gamma \\le \\ne \\infty"),
-    MM("matrix", "\\begin{pmatrix} a & b \\\\ c & d \\end{pmatrix}", True),
-    MM("cases", "f(x)=\\begin{cases} 0 & x<0 \\\\ 1 & x \\ge 0 \\end{cases}", True),
-    MM("aligned", "\\begin{aligned} a &= b \\\\ c &= d \\end{aligned}", True),
-    MM("accents", "\\hat{x} \\bar{y} \\vec{v} \\dot{a} \\tilde{n}"),
-    MM("operators", "\\sin x \\log y \\lim_{n\\to\\infty} a_n \\operatorname{rank} A"),
-    MM("delimiters", "\\left( \\frac{1}{2} \\right] \\big( x \\Big)"),
-    MM("fonts", "\\mathbb{R} \\mathcal{F} \\mathfrak{g} \\mathbf{v} \\mathrm{d}"),
-    MM("text", "\\text{if } x > 0"),
-    MM("binom", "\\binom{n}{k}"),
-    MM("overbrace", "\\overbrace{a+b}^{n}"),
-    MM("cancel-enclose", "\\cancel{x} \\boxed{y}"),
-    MM("phantom", "\\phantom{x} a"),
-    MM("primes", "f'(x) + g''(y)"),
-    MM("spacing", "a\\,b\\;c\\quad d\\qquad e\\!f"),
-    MM("colour-dropped", "\\color{red} x"),
-])
+# mathml/*.json (engine snapshots, the S10 corpus and probes): mathml/gen_mathml.py
 
 
 def merge(path, new):

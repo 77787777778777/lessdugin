@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
-from . import dagcbor
+from . import cids, dagcbor
 from .common import (FK_RE, NS, TID_RE, H16_RE, KeyDerivationError, NotModelled, P, action_key,
                      coll_name, fk, h16, is_slug, nsid, split_uri, stid, thread_tid)
 from .syntax import (has_non_white_space, is_canonical_at_uri, is_canonical_did, is_cid, is_datetime,
@@ -445,7 +445,7 @@ def _check(uri: str, value: dict) -> Validity:
             rec = v["record"]
             if not isinstance(rec, dict) or rec.get("$type") != nsid(scoll):
                 raise _Invalid("RV5", "record $type")
-            if dagcbor.cid_of(rec) != sub["cid"]:
+            if not cids.same(sub["cid"], dagcbor.cid_of(rec)):       # CIDs, not strings
                 raise _Invalid("RV5", "record CID")
     if coll == "wikiRevision":
         for p in v.get("parents", []):
@@ -458,17 +458,21 @@ def _check(uri: str, value: dict) -> Validity:
 
 def _check_modaction(v: dict, rkey: str) -> Validity:
     subj = v["subject"]
-    form = subject_form(subj)
-    if form is None:
-        raise _Invalid("MA1", "subject form")
     reserved_key = re.fullmatch(rf"{FK_RE}-{TID_RE}", rkey) is not None and \
         re.fullmatch(rf"{FK_RE}-{H16_RE}", rkey) is None
     scope, name, unknown = _modaction_known(v)
     a = v["action"]
     F = v["forum"]
+    # MA2: a reserved ^FK-TID$ key is checked against G1–G10 and MA10–MA12 only; MA1 and
+    # MA3–MA7 are skipped (social.md §20.1 item 43, NOTES.md 13).
+    form = None if reserved_key else subject_form(subj)
+    if not reserved_key and form is None:
+        raise _Invalid("MA1", "subject form")
     no_effect = "MA2" if reserved_key else None
-    if unknown:
-        no_effect = no_effect or "MA7"
+    if reserved_key:
+        pass
+    elif unknown:
+        no_effect = "MA7"
     else:
         # MA3: an at-uri subject in a forum-scoped collection carries the forum's fk.
         # A forum-uri subject (#lock, reserved) has a slug key and is exempt (NOTES.md 12).

@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from lessdugin_ref.build import DAY, HOUR, MIN, SEC, T0, Forum, dt, tid
+from lessdugin_ref.build import DAY, HOUR, MIN, SEC, T0, Forum, cid, dt, tid
 from lessdugin_ref.syntax import datetime_us
 from lessdugin_ref.time import tid_time
 
@@ -198,18 +198,56 @@ def time_vectors() -> list:
     out.append(v)
 
     f = Forum()
-    p = f.post("alice", T0 + 4 * HOUR)
-    c1 = f.comment("bob", p, T0 + HOUR, clock=1)
-    c2 = f.comment("carol", p, T0 + 6 * HOUR, clock=2)
+    p = f.post("alice", T0 + 100 * MIN)
+    c1 = f.comment("bob", p, T0 + 10 * MIN, clock=1)
+    c2 = f.comment("carol", p, T0 + 12 * MIN, clock=2)
     # make a 2-cycle: c1 -> c2 -> c1 (c2 is rebuilt with parent c1; c1 rebuilt with parent c2)
-    c1 = f.comment("bob", p, T0 + HOUR, clock=1, parent=(c2["uri"], c2["cid"]))
-    c2 = f.comment("carol", p, T0 + 6 * HOUR, clock=2, parent=(c1["uri"], c1["cid"]))
-    at_us(f, c1, T0 + 7 * HOUR)
+    c1 = f.comment("bob", p, T0 + 10 * MIN, clock=1, parent=(c2["uri"], c2["cid"]))
+    c2 = f.comment("carol", p, T0 + 12 * MIN, clock=2, parent=(c1["uri"], c1["cid"]))
     v = V("orphaned-comment-bounded-by-root", f, [p, c1, c2],
-          note="c1 and c2 name each other as parent; the greater uri (carol's) is re-attached to the root "
-               "(Orphaned), so it is bounded by the post and the other by it")
-    big, small = (c2, c1) if c2["uri"] > c1["uri"] else (c1, c2)
-    assert tr(v, big) == max(T0 + 4 * HOUR, T0 + 6 * HOUR if big is c2 else T0 + HOUR)
+          note="c1 (bob) and c2 (carol) name each other as parent and are claimed and keyed before the post "
+               "(T0 + 10 and 12 min; the post T0 + 100 min). The greater uri, carol's, is re-attached to the "
+               "root (Orphaned), so its lower bound is the post's t_rank, and bob's comment, now its child, is "
+               "bounded by it: all three rank at T0 + 100 min")
+    assert c2["uri"].encode() > c1["uri"].encode()
+    assert tr(v, p) == tr(v, c2) == tr(v, c1) == T0 + 100 * MIN
+    out.append(v)
+
+    # --- t_decl reads t_obs(decl), which the digest leaves out (§1.2, §20.1 item 47) ---------
+    for label, decl_obs in (("decl-seen-at-creation", T0), ("decl-seen-before-creation", T0 - 10 * MIN)):
+        f = Forum()
+        p = f.post("adam", T0 - 5 * MIN)
+        at_us(f, p, T0 + MIN)
+        at_us(f, f.decl, decl_obs)
+        v = V(f"decl-obs-moves-a-non-future-item-{label}", f, [p],
+              note="adam's post is claimed and keyed at T0 − 5 min and first seen at T0 + 1 min (not "
+                   "future-dated). The declaration's createdAt is T0; " +
+                   ("first seen at T0, so t_decl = T0 and the post ranks at T0" if decl_obs == T0 else
+                    "first seen at T0 − 10 min, so its createdAt is more than 5 min after t_obs and is "
+                    "clamped: t_decl = T0 − 10 min, and the post ranks at its own T0 − 5 min") +
+                   ". t_obs(decl) is outside inputDigest, so the two vectors of this pair have equal "
+                   "digests (fold/digest.json) and different t_rank values")
+        assert v["expected"]["tDecl"] == decl_obs
+        assert tr(v, p) == max(decl_obs, T0 - 5 * MIN) and flags(v, p) == (False, False)
+        out.append(v)
+
+    # --- the edited badge (§11 "Edited", §20.1 item 46) -------------------------------------
+    f = Forum()
+    pre = "1969-12-31T00:00:00.000Z"
+    p1 = f.post("alice", T0 + 10 * MIN, created=pre, updatedAt=dt(T0 + 20 * MIN))
+    p2 = f.post("alice", T0 + 11 * MIN, created=pre)
+    p3 = f.post("bob", T0 + 12 * MIN, updatedAt=dt(T0 + 12 * MIN))
+    p4 = f.post("bob", T0 + 13 * MIN, updatedAt=pre)
+    old_c = f.comment("carol", p3, T0 + 14 * MIN, text="first wording")
+    new_value = {**old_c["value"], "body": {**old_c["value"]["body"], "text": "second wording"}}
+    c = {"uri": old_c["uri"], "cid": cid(new_value), "value": new_value}
+    rv = f.revision(old_c, "update", T0 + 15 * MIN, record=old_c["value"])
+    v = V("edited-badge", f, [p1, p2, p3, p4, c, rv], fields=("edited",),
+          note="the [edited] badge: p1 was created before 1970 (no µs) and updated at T0 + 20 min, which "
+               "counts as later (§20.1 item 46); p2 has the same createdAt and no updatedAt; p3's updatedAt "
+               "equals its createdAt; p4's updatedAt is before 1970 (no µs) and never makes an item edited; "
+               "carol's comment has a valid op: update revision (its createdAt is unchanged)")
+    assert v["expected"]["edited"] == sorted([p1["uri"], c["uri"]], key=str.encode)
     out.append(v)
 
     # --- declaration lower bound ------------------------------------------------------------

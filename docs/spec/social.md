@@ -717,7 +717,7 @@ It never counts toward scores, reacts or tags. O3 and O5 read the subject uri, s
 - **Hidden subjects** still collect counting opinions. Only `spam` voids them.
 - **Author-tier bans** do not affect opinions.
 - **`subject.cid`** never affects counting. It drives the "earlier version" display (§7).
-- **Never counted:** opinions on subjects that are neither in `records` (and not excluded by V1) nor in `absent`. That covers subjects not yet synced, invalid ones, ones in another forum, and comments whose root post (in the input, valid or not) names another forum (CO5).
+- **Never counted:** opinions on subjects that are neither in `records` (and not excluded by V1) nor in `absent`. That covers subjects not yet synced, invalid ones, ones in another forum, and comments whose valid root post names another forum (CO5, which needs a 60-bit fk collision). A comment whose root post is invalid is not excluded by CO5: it sits under a `Missing` root, and opinions on it count (§20.1 item 51).
 
 ---
 
@@ -792,8 +792,9 @@ K         = pairsum(Some(KP), E)                            // displayed karma; 
 
 **P7, sybil bound.** Let I be a fold input, and R a set of records with uris not in I, each authored by a DID ∉ E(I) ∪ A, such that:
 - (a) no record in R is the subject (by uri) of an opinion in I whose voter is in E(I);
-- (b) R contains no membership record of a DID u with `K1(I)[u] ≥ establish ∧ seedUp(I)[u] ≥ establishSeeds`;
-- (c) no record in R has the `root.uri` of a comment in I as its uri and a `forum` other than F. Such a record is invalid (G9), but under CO5 as adopted (§20.1 item 36) it excludes every comment of the thread, and with them their scores and the karma their votes carried (§20.1 item 49; §20.2 item 5).
+- (b) R contains no membership record of a DID u with `K1(I)[u] ≥ establish ∧ seedUp(I)[u] ≥ establishSeeds`.
+
+(An earlier hypothesis (c), about a record at a comment's `root.uri` that names another forum, is withdrawn: CO5 compares only a valid root, so such a record is a `Missing` root and excludes nothing; §20.1 item 51.)
 
 Then for I' = I ∪ R, all of these are unchanged:
 - K1, `seedUp`, E, KP and K;
@@ -1397,7 +1398,7 @@ These choices fill gaps in the sources or resolve ambiguities. Each takes the si
     - Restrictions apply per axis rather than voiding the whole opinion.
 11. **`unweighted` counts** only counting opinions that carry a karma value (§7).
 12. **Pair bound (P5)** is stated per stage, with a corollary. Read literally for K, the synthesis claim is false, because removing a voter changes others' KP and therefore their vote power.
-13. **Sybil bound (P7)** gets precise hypotheses. Without (a) and (b), adding an outsider's voted-on content, or a returning user's membership record, legitimately changes E. Hypothesis (c) is item 49.
+13. **Sybil bound (P7)** gets precise hypotheses. Without (a) and (b), adding an outsider's voted-on content, or a returning user's membership record, legitimately changes E. A hypothesis (c) was added by item 49 and withdrawn by item 51.
 14. **The deleted-subject threshold** ("≥ 2 distinct voters") uses each stage's eligible set (S for K1, E for KP and K), which keeps the stages acyclic.
 15. **React aggregation (§9.2).**
     - Groups by `(react, qkey)`, not by resolved range, so the fold never depends on whether a spilled body blob has been fetched (`lfm-1.md` "Pending"). Anchors are display-only.
@@ -1449,7 +1450,7 @@ These choices fill gaps in the sources or resolve ambiguities. Each takes the si
     - Entries without a time sort last. Revisions of modActions are listed whether or not the modAction is still in `records`.
     - The fold provides the stale, conflict and applicant queue items, ordered by (type, key bytes). Newcomer items follow from the visibility states.
 35. **Counting versus the deleted-subject rule (§5; A6, NOTES 30).** An opinion on an absent subject counts when O1–O5 hold. The deleted-subject rule limits what it counts toward (karma only, post or comment subjects only, per stage with ≥ 2 eligible voters); it does not stop it from counting.
-36. **O2 and CO5 (§5, `data-model.md` CO5; A7, NOTES 20, 31).** O2's "s is valid and s.forum = v.forum" means "s is not excluded by V1", which includes the cross-record rule CO5. CO5 compares the root's `value.forum` literally even when the root is invalid, because invalid records are fold inputs (§1.1). Without a 60-bit fk collision, an invalid root is the only way CO5 can fail: a valid root in F's key range names F (G9).
+36. **O2 and CO5 (§5, `data-model.md` CO5; A7, NOTES 20, 31).** O2's "s is valid and s.forum = v.forum" means "s is not excluded by V1", which includes the cross-record rule CO5. *(Amended by item 51: CO5 compares only a valid root. As first adopted, it compared the root's `value.forum` even when the root was invalid, which let a post author exclude a whole thread.)* A valid root in F's key range names F (G9), so CO5 now fails only on a 60-bit fk collision.
 37. **Axes, seedUp, scores and gates (§5–§8; NOTES 32, 33, 34, 40, 41, 42).**
     - Axes are resolved per counting opinion. An opinion with no enabled axis still counts. Reacts and tags also need a subject that is not absent. Restrictions have no keep exemption.
     - `seedUp` sums signs without a pair cap; a seed with net 0 does not count. Sums saturate.
@@ -1484,14 +1485,22 @@ These choices fill gaps in the sources or resolve ambiguities. Each takes the si
     - `hotBits` are exact for any pow with an error below 0.9 ulp.
     - The cast and builder conventions of the vectors are informative.
 
-**Decisions from the M3 fold reviews.** The two reviews of the Rust fold found no vector it disagrees with. Items 45–50 settle the gaps they found; none changes a vector. §20.2 item 5 records the one defect that needs the reference model.
+**Decisions from the M3 fold reviews.** The two reviews of the Rust fold found no vector it disagrees with. Items 45–50 settle the gaps they found; none changes a vector. The one defect that needed the reference model (formerly §20.2 item 5) is settled by item 51.
 
 45. **CIDs in records compare by canonical form (§0.4).** G2's `cid` format accepts any multibase and letter case, and `data-model.md` RV5 already compares CIDs rather than strings. The fold therefore converts a CID written in a record before comparing it with a version's CID: in the CID check of positive assertions and `#tag.head` (§4.5), `earlier` (§7), "ancestor altered" (§13.2) and versions (§11 step 6). Two `#tag.head` values that name one revision with differently spelled CIDs are equal (no conflict). A string that is not a CIDv1 names no version, so a positive assertion carrying one is `stale`.
 46. **Versions and the edited badge (§11).** "On revision n" takes the greatest i when several snapshots share the referenced CID, and needs a non-Excluded target in `records`. The `[edited]` badge compares µs values; a `createdAt` before 1970 has none and counts as earlier than any `updatedAt` that has one.
 47. **What the digest leaves out (§1.2).** `t_decl`'s future clamp (§2.2) reads `t_obs(decl)`, which is outside the digest, so equal digests can give different `t_rank` values to items that are not future-dated. §1.2's list of exceptions now says so.
 48. **P4 (§6.3)** lists L5–L7-only *inputs*, not only records: the `reacts` and `tags` entries are parts of an opinion, and an opinion that carries nothing else is a whole L5–L7-only record. The property holds for changes that keep the input well-formed and the other records valid (removing a record that an opinion names may change `absent`; a malformed entry may invalidate its opinion).
-49. **P7 hypothesis (c) (§6.3).** Under CO5 as adopted (item 36), an outsider who owns the root uri of a thread whose root post is missing from I (deleted, or not yet synced) can publish a record there whose `forum` names another forum. It is invalid by G9 and still a fold input, so CO5 excludes every comment of the thread, with its scores and the karma its votes carried. The same holds for an edit of an existing root post. Hypothesis (c) leaves this out of P7. §20.2 item 5 proposes removing the lever.
+49. **P7 hypothesis (c) (§6.3).** Under CO5 as adopted (item 36), an outsider who owns the root uri of a thread whose root post is missing from I (deleted, or not yet synced) can publish a record there whose `forum` names another forum. It is invalid by G9 and still a fold input, so CO5 excludes every comment of the thread, with its scores and the karma its votes carried. The same holds for an edit of an existing root post. Hypothesis (c) left this out of P7. *(Superseded by item 51, which removes the lever; hypothesis (c) is withdrawn.)*
 50. **The wiki cycle cut (§13.2)** may be computed per component (informative). It is the same cut as the round-based definition, because components only split; the per-component form costs O(|C| + |E_C|) per cut instead of a pass over the whole page (SOC-10, "bounded walks"; a hostile 1,000-revision page whose one component is cut 999 times).
+
+**Decision from the M3 integration.** Item 51 changes two vectors; it was made in the order spec, reference model, vectors, Rust fold.
+
+51. **CO5 compares only a valid root (§5, §6.3 P7, §10.1 V1, §11; `data-model.md` CO5; formerly §20.2 item 5; NOTES 20).** As first adopted (item 36), CO5 compared the root's `forum` even when the root was invalid. Any post author could then remove a whole thread: editing the post so that its `forum` names another forum (invalid by G9) excluded every comment in it, with the scores and the karma the votes on them carried, and no moderator action could bring them back. That bypassed everything §4.9 requires of author moderation (an actor in E, the author gate, `authorModeration`, the immunity of authorities), and P7 needed hypothesis (c) for it (item 49).
+    - CO5 now compares only a root that is valid (`data-model.md` §7). An invalid root is a `Missing` root (item 28): its comments stay in the thread under the placeholder, take `t_decl` as their time lower bound, keep their own V2–V10 states, and the opinions on them count. Author-tier actions on them have no effect, because the author tier needs a live root (item 32).
+    - A valid root in F's key range names F (G9), so CO5 fails only on a 60-bit fk collision, like the other forum checks (item 23).
+    - P7 holds without hypothesis (c), which is withdrawn.
+    - Vectors: `visibility/visibility.json` `v1-before-v2-and-v3` and `karma/staged.json` `opinions-that-never-count` were regenerated (the comment under a root whose `forum` names another forum is no longer Excluded, and the opinion on it counts), and `visibility/visibility.json` `co5-invalid-root-is-a-missing-root`, `karma/staged.json` `co5-invalid-root-opinions-count` and `thread/thread.json` `root-names-another-forum` pin the edit-the-root case.
 
 ### 20.2 Open questions
 
@@ -1499,6 +1508,4 @@ These choices fill gaps in the sources or resolve ambiguities. Each takes the si
 2. **The `absent` input (§1.1)** must be produced by `sync.md`, from tombstones and complete listings, and included in the indexer's `inputDigest`.
 3. **Author moderation requires E (§4.9).** This tightens the gate beyond the synthesis. The alternative is to drop it and weaken P7 to exclude visibility inside outsiders' own threads.
 4. *(Resolved: forum-pinned posts are exempt from the magic cutoff, matching ForumMagnum's sticky posts; see 20.1 item 18.)*
-5. **CO5 on invalid roots (§20.1 items 36 and 49; `data-model.md` CO5).** As adopted, CO5 compares the root's `forum` even when the root is invalid. Any post author can then remove their whole thread: editing the post so that its `forum` names another forum (invalid by G9) excludes every comment in it, with the scores and the karma the votes on them carried, and no moderator action brings them back. This bypasses everything §4.9 requires of author moderation (an actor in E, the author gate, `authorModeration`, the immunity of authorities), and it is why P7 needs hypothesis (c).
-   - **Proposed:** CO5 compares only a *valid* root. An invalid root is already a `Missing` root (item 28), so its comments stay in the thread under the placeholder, and CO5 then fails only on a 60-bit fk collision, like the other forum checks (item 23). P7 would hold without (c).
-   - **Order of change:** `data-model.md` CO5 and item 36 first, then the reference model, which regenerates `visibility/visibility.json` `v1-before-v2-and-v3` and `karma/staged.json` `opinions-that-never-count` (the only vectors that pin the current reading), then the Rust fold (`crates/core/src/social/full/cx.rs`, V1: also require the root to be valid) and the tests that pin the current reading (`social_props.rs` `p7_counterexample_co5_invalid_root`, `social_cases.rs` `co5_edit_of_the_root_forum_excludes_the_thread`).
+5. *(Resolved: CO5 compares only a valid root; see 20.1 item 51.)*

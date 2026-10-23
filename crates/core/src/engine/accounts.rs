@@ -44,6 +44,7 @@ use crate::xrpc::{CallOpts, XrpcCallError};
 
 /// What host login code reports after obtaining a session.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 #[serde(rename_all = "camelCase")]
 pub struct AccountInfo {
     /// The session's DID (the token's `sub`, or `createSession`'s `did`).

@@ -164,6 +164,46 @@
       }
     },
     {
+      "name": "punycode-invalid-dropped",
+      "input": {
+        "text": "[b](https://xn--exmple-cuattps2)\n[c](https://xn--.com) [d](https://xn--abc-.com) [e](https://xn--0ug.com)\n"
+      },
+      "expected": {
+        "html": "<div class=\"lfm\" dir=\"auto\">\n<p dir=\"auto\">b\nc d e</p>\n</div>\n",
+        "text": "b c d e"
+      }
+    },
+    {
+      "name": "punycode-valid-kept-undecoded",
+      "input": {
+        "text": "[a](https://xn--bcher-kva.example/x) [b](https://a.xn--p1ai)\n"
+      },
+      "expected": {
+        "html": "<div class=\"lfm\" dir=\"auto\">\n<p dir=\"auto\"><a href=\"https://xn--bcher-kva.example/x\" rel=\"nofollow ugc noopener noreferrer\">a</a> <a href=\"https://a.xn--p1ai\" rel=\"nofollow ugc noopener noreferrer\">b</a></p>\n</div>\n",
+        "text": "a b"
+      }
+    },
+    {
+      "name": "ipv4-dotted-quad-only",
+      "input": {
+        "text": "[a](https://1.2.3.4/) [b](https://256.1.1.1/) [c](https://a.123/) [d](https://0x7f.1/) [e](https://1.2.3/) [f](https://2130706433/) [g](https://01.2.3.4/)\n"
+      },
+      "expected": {
+        "html": "<div class=\"lfm\" dir=\"auto\">\n<p dir=\"auto\"><a href=\"https://1.2.3.4/\" rel=\"nofollow ugc noopener noreferrer\">a</a> b c d e f g</p>\n</div>\n",
+        "text": "a b c d e f g"
+      }
+    },
+    {
+      "name": "ipv6-must-parse",
+      "input": {
+        "text": "[a](http://[::ffff:1.2.3.4]/) [b](http://[1.2.3.4]/) [c](http://[1::2::3]/) [d](http://[1]/)\n"
+      },
+      "expected": {
+        "html": "<div class=\"lfm\" dir=\"auto\">\n<p dir=\"auto\"><a href=\"http://[::ffff:1.2.3.4]/\" rel=\"nofollow ugc noopener noreferrer\">a</a> b c d</p>\n</div>\n",
+        "text": "a b c d"
+      }
+    },
+    {
       "name": "length-3000-accepted",
       "input": {
         "gen": {

@@ -44,13 +44,18 @@ EXCLUDED = State("Excluded")
 
 
 def v1_excluded(view, uri: str) -> bool:
-    """V1: invalid, x.forum ≠ F, or CO5 (the root post, if in the input, has the same forum)."""
+    """V1: invalid, x.forum ≠ F, or CO5 (a valid root post in the input has the same forum).
+
+    CO5 compares only a valid root (social.md §20.1 item 51, NOTES.md 20): an invalid root is
+    a Missing root (NOTES.md 3), and its comments stay in the thread.
+    """
     rec = view.input.records[uri]
     if not view.validity[uri].valid or rec.value.get("forum") != view.F:
         return True
     if rec.coll == "comment":
-        root = view.input.records.get(rec.value["root"]["uri"])
-        if root is not None and root.value.get("forum") != rec.value["forum"]:
+        r = rec.value["root"]["uri"]
+        root = view.input.records.get(r)
+        if root is not None and view.validity[r].valid and root.value.get("forum") != rec.value["forum"]:
             return True
     return False
 

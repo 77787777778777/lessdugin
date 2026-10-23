@@ -129,7 +129,7 @@ struct OwnGroup {
 
 /// The entries of one opinion (OP3, then grouping by (react, qkey)): `(react, q) → (stance,
 /// first quote)`, contradictions dropped.
-fn entries(value: &Value, ids: &[&str]) -> BTreeMap<(String, String), (Stance, Option<Quote>)> {
+pub fn entries(value: &Value, ids: &[&str]) -> BTreeMap<(String, String), (Stance, Option<Quote>)> {
     let mut groups: BTreeMap<(String, String), OwnGroup> = BTreeMap::new();
     for e in value
         .get("reacts")

@@ -49,16 +49,25 @@ pub(crate) fn parse_to_s3(src: &str) -> S3 {
 // ---------------------------------------------------------------------------------------------
 // Pass 0 (§3)
 
-/// §3 step 3: `"\r\n"` → `"\n"`, then `"\r"` → `"\n"`. U+0000 also becomes U+FFFD, as
-/// CommonMark 0.31.2 §2.3 requires and pulldown-cmark 0.13.4 does not do (implementation
-/// decision, see `testdata/vectors/lfm1/NOTES.md`).
+/// §3 steps 0 and 3: `"\r\n"` → `"\n"`, then `"\r"` → `"\n"`, and U+0000 → U+FFFD, as
+/// CommonMark 0.31.2 §2.3 requires and pulldown-cmark 0.13.4 does not do.
 fn norm_nl(s: &str) -> String {
+    norm_src(s).into_owned()
+}
+
+/// §3 step 0: [`norm_nl`] over the whole source before it is parsed (borrowed when there is
+/// nothing to replace). pulldown-cmark 0.13.4 turns a CRLF inside a code span into two spaces
+/// and keeps the indentation of lone-CR continuation lines in indented code; with only LF line
+/// endings it follows CommonMark.
+fn norm_src(s: &str) -> std::borrow::Cow<'_, str> {
     if !s.contains(['\r', '\0']) {
-        return s.to_owned();
+        return std::borrow::Cow::Borrowed(s);
     }
-    s.replace("\r\n", "\n")
-        .replace('\r', "\n")
-        .replace('\0', "\u{FFFD}")
+    std::borrow::Cow::Owned(
+        s.replace("\r\n", "\n")
+            .replace('\r', "\n")
+            .replace('\0', "\u{FFFD}"),
+    )
 }
 
 /// `lines(s)` (§3 step 2): `SoftBreak` between pieces, `Literal` for non-empty pieces.
@@ -186,7 +195,8 @@ fn push_ev(out: &mut Vec<Ev>, e: Ev) {
 
 /// Pass 0: E → S0. Returns the stream and whether the event cap truncated it.
 fn pass0(src: &str) -> (Vec<Ev>, bool) {
-    let mut parser = Parser::new_ext(src, OPTIONS);
+    let src = norm_src(src);
+    let mut parser = Parser::new_ext(&src, OPTIONS);
     let mut out: Vec<Ev> = Vec::new();
     let mut open: Vec<Open> = Vec::new();
     let mut html: Option<String> = None;
@@ -391,7 +401,13 @@ fn autolink(text: &str, out: &mut Vec<Ev>) {
                     break;
                 }
             }
-            if d1 - d0 <= 253 && valid_domain(&t[d0..d1]) {
+            // The domain is checked without the trailing `.` and `_` that `trim_trailing`
+            // drops, so `www.example.com.` at the end of a sentence links `www.example.com`.
+            let mut d1t = d1;
+            while d1t > d0 && matches!(t[d1t - 1], '.' | '_') {
+                d1t -= 1;
+            }
+            if d1 - d0 <= 253 && valid_domain(&t[d0..d1t]) {
                 let mut e = d1;
                 while e < n && !t[e].is_whitespace() && t[e] != '<' {
                     e += 1;
@@ -872,6 +888,36 @@ mod tests {
             autolink(s, &mut out);
             assert_eq!(out, vec![Ev::Text(s.into())], "{s}");
         }
+    }
+
+    #[test]
+    fn autolink_trailing_dots() {
+        for (s, want) in [
+            ("www.a.com.", "www.a.com"),
+            ("www.a.com...", "www.a.com"),
+            ("www.a.com_", "www.a.com"),
+            ("http://a.b.c.?", "http://a.b.c"),
+        ] {
+            let mut out = Vec::new();
+            autolink(s, &mut out);
+            assert_eq!(out[1], Ev::Text(want.into()), "{s}");
+        }
+        // A domain followed by a path may not end in a dot; the cap counts the whole run.
+        for s in [
+            "www.a.com./x",
+            &format!("http://{}.com.{}", "a".repeat(240), "b".repeat(20)),
+        ] {
+            let mut out = Vec::new();
+            autolink(s, &mut out);
+            assert_eq!(out, vec![Ev::Text(s.into())], "{s}");
+        }
+    }
+
+    #[test]
+    fn source_line_endings() {
+        let s0 = pass0("`a\r\nb`\r\n\r\n    x\r    y\r").0;
+        assert!(s0.contains(&Ev::Code("a b".into())), "{s0:?}");
+        assert!(s0.contains(&Ev::Text("x\ny\n".into())), "{s0:?}");
     }
 
     #[test]

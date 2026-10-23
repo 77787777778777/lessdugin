@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import hashlib
 
-from lessdugin_ref.build import HOUR, NOW, T0, Forum, did, rec
+from lessdugin_ref.build import HOUR, MIN, NOW, T0, Forum, did, rec
 
 from .util import file_doc, vector
 
@@ -164,6 +164,24 @@ def digest_vectors() -> list:
                  "the revision of the post (rkey {fk}-{T}-{t}) is a prefix of the revision of the comment "
                  "{fk}-{T}-{t} (rkey {fk}-{T}-{t}-{tid}): the 0x00 separator sorts the shorter uri first, "
                  "as uri order does", params=open_params))
+
+    # t_obs(decl) is outside the digest (§1.2, §20.1 item 47): the pair of time/time.json
+    # decl-obs-moves-a-non-future-item-* has equal digests but different t_rank values.
+    pair = []
+    for label, decl_obs in (("decl-seen-at-creation", T0), ("decl-seen-before-creation", T0 - 10 * MIN)):
+        f = Forum()
+        p = f.post("adam", T0 - 5 * MIN)
+        f.obs_override[(p["uri"], p["cid"])] = T0 + MIN
+        f.obs_override[(f.decl["uri"], f.decl["cid"])] = decl_obs
+        v = V(f"decl-obs-is-outside-the-digest-{label}", f, [p],
+              "the same input as time/time.json decl-obs-moves-a-non-future-item-" + label + ": only "
+              "t_obs(decl) differs between the two vectors of this pair, and obs is not covered by the "
+              "digest, so both have the same inputDigest although t_decl, and with it the post's t_rank, "
+              "differs (§1.2 lists t_obs(decl) among the exceptions)", params=open_params)
+        pair.append(v)
+        out.append(v)
+    assert pair[0]["expected"]["inputDigest"] == pair[1]["expected"]["inputDigest"]
+    assert pair[0]["input"]["fold"]["obs"] != pair[1]["input"]["fold"]["obs"]
     return out
 
 

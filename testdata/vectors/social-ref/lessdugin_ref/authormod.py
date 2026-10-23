@@ -49,6 +49,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from . import cids
 from .common import KeyDerivationError, did_of, split_uri, thread_tid
 from .syntax import datetime_us
 from .validity import is_positive
@@ -146,7 +147,7 @@ def compute_author_tier(view) -> AuthorTier:
             continue
         if is_positive(a):
             r = records.get(T)
-            if r is None or m.value.get("subjectCid") != r.cid:
+            if r is None or not cids.same(m.value.get("subjectCid"), r.cid):      # §0.4
                 statuses[m.uri] = ("stale", None)
                 continue
         dim = {"hide": "hidden", "lock": "locked", "pin": "pin.thread"}.get(name)

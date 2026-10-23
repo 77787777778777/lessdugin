@@ -183,9 +183,9 @@ pub fn decode_text_blob(bytes: &[u8]) -> Result<String, BodyError> {
     Ok(s.strip_prefix('\u{FEFF}').unwrap_or(s).to_owned())
 }
 
-/// Everything both [`render`] and [`derive_metadata`] compute: P, P_x, the ToC, `media_used`,
-/// and SL (the body and the rendered footnotes after the limit stage and the output budget)
-/// with the links and mentions it contains.
+/// Everything both [`render`] and [`derive_metadata`] compute: P, P_x, the ToC, the links,
+/// mentions and `media_used` of the rendered content of S6, and SL (the body and the rendered
+/// footnotes after the limit stage and the output budget).
 struct Document {
     p: String,
     px: String,
@@ -207,22 +207,45 @@ fn document(src: &str, media: &[MediaItem]) -> Document {
 
     pass45(&mut s, media);
     let refs = pass6(&mut s);
-
-    // `media_used` from S6 (§6.3).
-    let resolved: Vec<usize> = s
-        .iter()
-        .filter_map(|e| match e {
-            Ev::Start(Tag::Image(d)) => match d.res {
-                ImageRes::Media(i) => Some(i),
-                _ => None,
-            },
-            _ => None,
-        })
-        .collect();
-    let used = media_used(media, &resolved);
     let toc = toc(&s);
-
     let (body, notes) = split_footnotes(s, &refs);
+
+    // `links`, `mentions` (§12) and `media_used` (§6.3) come from the rendered content of S6:
+    // the body, then the rendered footnote definitions. A link or image in an unreferenced
+    // footnote definition, or inside an image's alt, is never shown, so it must not notify
+    // anyone, count as a pingback or keep a media item out of the gallery. They are `lfm/1`
+    // values, so they do not depend on the limit stage or the output budget (presentation).
+    let mut links: Vec<AtUri> = Vec::new();
+    let mut mentions: Vec<Did> = Vec::new();
+    let mut resolved: Vec<usize> = Vec::new();
+    for flow in std::iter::once(&body[..]).chain(notes.iter().map(|n| &n.events[..])) {
+        let mut in_image = 0usize;
+        for e in flow {
+            match e {
+                Ev::Start(Tag::Image(d)) => {
+                    if in_image == 0
+                        && let ImageRes::Media(i) = d.res
+                    {
+                        resolved.push(i);
+                    }
+                    in_image += 1;
+                }
+                Ev::End(TagKind::Image) => in_image = in_image.saturating_sub(1),
+                Ev::Start(Tag::Link(d)) if in_image == 0 => match &d.res {
+                    LinkRes::Record(u) if links.len() < 256 && !links.contains(u) => {
+                        links.push(u.clone())
+                    }
+                    LinkRes::Mention(did) if mentions.len() < 128 && !mentions.contains(did) => {
+                        mentions.push(did.clone())
+                    }
+                    _ => {}
+                },
+                _ => {}
+            }
+        }
+    }
+    let used = media_used(media, &resolved);
+
     let (mut body, mut depth_limited) = limit(body, 0);
     let mut notes: Vec<Footnote> = notes
         .into_iter()
@@ -240,28 +263,6 @@ fn document(src: &str, media: &[MediaItem]) -> Document {
         media.len(),
     );
     let cut = budget::apply(&mut body, &mut notes, media, &used, budget::OUTPUT_BUDGET);
-
-    // Links and mentions of what is rendered (§12): the body, then the rendered footnotes.
-    // An unreferenced footnote definition or a link the limit stage removed is invisible, so
-    // it must not notify anyone or count as a pingback.
-    let mut links: Vec<AtUri> = Vec::new();
-    let mut mentions: Vec<Did> = Vec::new();
-    for e in body
-        .iter()
-        .chain(notes.iter().flat_map(|n| n.events.iter()))
-    {
-        if let Ev::Start(Tag::Link(d)) = e {
-            match &d.res {
-                LinkRes::Record(u) if links.len() < 256 && !links.contains(u) => {
-                    links.push(u.clone())
-                }
-                LinkRes::Mention(did) if mentions.len() < 128 && !mentions.contains(did) => {
-                    mentions.push(did.clone())
-                }
-                _ => {}
-            }
-        }
-    }
 
     Document {
         p,
@@ -292,8 +293,8 @@ fn render_impl(
     let wc = word_count(&d.p);
 
     // The HTML writer also yields `anchors` and `flags.math_errors`, so it always runs; the
-    // math engine is bounded by the guard of `math::engine_guard`. Callers that need neither
-    // the HTML nor those two fields use `derive_metadata`, which never runs the engine.
+    // math engine is bounded by the engine guard and budget of `math` (§7.2). Callers that need
+    // neither the HTML nor those two fields use `derive_metadata`, which never runs the engine.
     let mut math = MathRenderer::new(mode);
     let out = write_document(&d.body, &d.notes, d.truncated, media, &d.used, &mut math);
     let styled = if opts.styled {

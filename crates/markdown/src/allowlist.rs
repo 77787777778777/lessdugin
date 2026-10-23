@@ -4,7 +4,7 @@
 //! attribute, attribute order, class token and value grammar (`docs/spec/lfm-1.md` §8.2).
 
 use crate::html::EXTERNAL_REL;
-use crate::math::{MATHML_ATTRIBUTES, MATHML_ELEMENTS, mathml_attr_ok};
+use crate::math::{MATHML_ATTRIBUTES, MATHML_CLASSES, MATHML_ELEMENTS, mathml_attr_ok};
 use crate::plain::is_letter_or_number;
 
 /// HTML elements and their attributes, in serialisation order (§8.2).
@@ -504,8 +504,9 @@ fn json_list<'a>(items: impl Iterator<Item = &'a str>) -> String {
 /// - `SAFE_FOR_XML: false`: that mode drops any attribute whose value merely contains
 ///   `</script`, `-->` and similar text (an `img` `alt` may), and the output is only ever
 ///   parsed as HTML, with no raw-text element or comment allowed;
-/// - `LFM_CLASSES` (class tokens per element), for the hook that enforces class tokens and
-///   value grammars; strip it before passing the object to DOMPurify.
+/// - `LFM_CLASSES` (class tokens per HTML element) and `LFM_MATHML_CLASSES` (the §7.3 tokens a
+///   MathML `class` may list), for the hook that enforces class tokens and value grammars; strip
+///   them before passing the object to DOMPurify.
 ///
 /// Deterministic (table order).
 pub fn dompurify_config_json() -> String {
@@ -527,12 +528,13 @@ pub fn dompurify_config_json() -> String {
         .collect();
     let uri_safe: Vec<&str> = attrs.iter().copied().filter(|a| *a != "href").collect();
     format!(
-        "{{\"ALLOWED_TAGS\":{},\"ALLOWED_ATTR\":{},\"ALLOW_DATA_ATTR\":false,\"ALLOW_ARIA_ATTR\":false,\"ADD_URI_SAFE_ATTR\":{},\"SAFE_FOR_XML\":false,\"ALLOWED_URI_REGEXP\":{},\"LFM_CLASSES\":{{{}}}}}",
+        "{{\"ALLOWED_TAGS\":{},\"ALLOWED_ATTR\":{},\"ALLOW_DATA_ATTR\":false,\"ALLOW_ARIA_ATTR\":false,\"ADD_URI_SAFE_ATTR\":{},\"SAFE_FOR_XML\":false,\"ALLOWED_URI_REGEXP\":{},\"LFM_CLASSES\":{{{}}},\"LFM_MATHML_CLASSES\":{}}}",
         json_list(tags.into_iter()),
         json_list(attrs.iter().copied()),
         json_list(uri_safe.into_iter()),
         json_str(ALLOWED_URI_REGEXP),
-        classes.join(",")
+        classes.join(","),
+        json_list(MATHML_CLASSES.iter().copied())
     )
 }
 
@@ -553,10 +555,21 @@ pub fn ammonia_clean(html: &str) -> String {
     for (t, a) in HTML_ALLOWLIST {
         attrs.insert(t, a.iter().copied().filter(|a| *a != "class").collect());
     }
+    // MathML `class` goes through `allowed_classes` (the §7.3 tokens), like HTML `class`.
     for t in MATHML_ELEMENTS {
-        attrs.insert(t, MATHML_ATTRIBUTES.iter().copied().collect());
+        attrs.insert(
+            t,
+            MATHML_ATTRIBUTES
+                .iter()
+                .copied()
+                .filter(|a| *a != "class")
+                .collect(),
+        );
     }
     let mut classes: HashMap<&str, HashSet<&str>> = HashMap::new();
+    for t in MATHML_ELEMENTS {
+        classes.insert(t, MATHML_CLASSES.iter().copied().collect());
+    }
     for (t, cs) in CLASS_ALLOWLIST {
         classes.insert(t, cs.iter().copied().collect());
     }
@@ -580,6 +593,30 @@ pub fn ammonia_clean(html: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// §7.3 (ADR 0002 decision 2): the normaliser's classes and `mathcolor` survive ammonia,
+    /// anything else on MathML does not.
+    #[cfg(feature = "ammonia")]
+    #[test]
+    fn ammonia_mathml_classes() {
+        let ours = crate::render(
+            "$$\\color{red} \\begin{cases} a & b \\end{cases} \\cancel{x} \\textbf{t}$$\n",
+            &[],
+            &crate::RenderOpts::ALL,
+        )
+        .html;
+        assert!(ours.contains("class=\"mc-al mc-pl1 mc-pr0\"") && ours.contains("mathcolor"));
+        assert_eq!(ammonia_clean(&ours), ours);
+        let evil = "<div class=\"lfm\" dir=\"auto\">\n<p dir=\"auto\"><math><mrow class=\"mc-al evil\" style=\"x\" id=\"y\"><mi>x</mi></mrow></math></p>\n</div>\n";
+        let cleaned = ammonia_clean(evil);
+        assert!(
+            cleaned.contains("<mrow class=\"mc-al\"><mi>")
+                && !cleaned.contains("evil")
+                && !cleaned.contains("style")
+                && !cleaned.contains("id="),
+            "{cleaned}"
+        );
+    }
 
     #[cfg(feature = "ammonia")]
     #[test]
@@ -630,6 +667,14 @@ mod tests {
                 .any(|t| t == "data-at-uri")
         );
         assert_eq!(v["LFM_CLASSES"]["details"][0], "spoiler");
+        assert_eq!(v["LFM_MATHML_CLASSES"][0], "mc-al");
+        assert!(
+            v["ALLOWED_ATTR"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|t| t == "mathcolor")
+        );
         assert_eq!(v["ALLOW_ARIA_ATTR"], false);
         assert_eq!(v["SAFE_FOR_XML"], false);
         let safe = v["ADD_URI_SAFE_ATTR"].as_array().unwrap();

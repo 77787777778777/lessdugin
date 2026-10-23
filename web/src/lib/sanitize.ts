@@ -3,7 +3,8 @@
 // The SPA's single HTML sink (threat-model.md SPA-2, SPA-3; lfm-1.md §8.5).
 //
 // - `LFM_CONFIG` is DOMPurify configured with exactly the renderer's allowlist (lfm-1.md §8.2
-//   and the MathML filter of §7.3): the allowed tags and attributes, `ALLOW_DATA_ATTR: false`,
+//   and the MathML normaliser of §7.3, whose `class` tokens and `mathcolor` replace math-core's
+//   inline styles): the allowed tags and attributes, `ALLOW_DATA_ATTR: false`,
 //   the URI regexp, and hooks that enforce per-element attributes, class tokens, value grammars
 //   and whole-element shapes. `ALLOW_ARIA_ATTR: false` and `ADD_URI_SAFE_ATTR` keep it exact:
 //   without the latter DOMPurify would test every non-URL attribute value (`dir="auto"`, `rel`,
@@ -152,7 +153,66 @@ const MATHML_ATTRS = [
   "columnspan",
   "rowspan",
   "notation",
+  "class",
+  "mathcolor",
 ] as const;
+
+/**
+ * lfm-1.md §7.3 MathML class tokens: the `mc-*` classes of the style normaliser (ADR 0002
+ * decision 2; styled by `crates/markdown/assets/mathml.css`) and math-core's `menclose-*`
+ * polyfill classes (`mathmlfixes.css`). The same list as `lessdugin_markdown::math::MATHML_CLASSES`.
+ */
+export const MATHML_CLASSES: ReadonlySet<string> = new Set([
+  "mc-al",
+  "mc-ar",
+  "mc-bl-dashed",
+  "mc-bl-solid",
+  "mc-br-dashed",
+  "mc-br-solid",
+  "mc-bt-dashed",
+  "mc-bt-solid",
+  "mc-cramped",
+  "mc-fs100",
+  "mc-fs120",
+  "mc-fs140",
+  "mc-fs170",
+  "mc-fs200",
+  "mc-fs250",
+  "mc-fs50",
+  "mc-fs60",
+  "mc-fs70",
+  "mc-fs80",
+  "mc-fs90",
+  "mc-negmed",
+  "mc-negthick",
+  "mc-negthin",
+  "mc-pl0",
+  "mc-pl1",
+  "mc-pl3mu",
+  "mc-pl4mu",
+  "mc-pl5mu",
+  "mc-pr0",
+  "mc-pr3mu",
+  "mc-pr4mu",
+  "mc-pr5mu",
+  "mc-pt3mu",
+  "mc-px01",
+  "mc-py0",
+  "mc-tb",
+  "mc-ti",
+  "mc-trm",
+  "mc-ts",
+  "mc-tsc",
+  "mc-tsf",
+  "mc-tt",
+  "mc-tu",
+  "mc-w100",
+  "mc-w50",
+  "mc-w7-5",
+  "menclose-downdiagonalstrike",
+  "menclose-phasorangle",
+  "menclose-updiagonalstrike",
+]);
 
 const ALLOWED_ATTR = [...new Set<string>([...HTML_ATTRS, ...MATHML_ATTRS])];
 
@@ -244,6 +304,14 @@ const isMathBoolean = (v: string): boolean => v === "true" || v === "false";
 const isMathLength = (v: string): boolean =>
   v.length <= 32 && /^[+-]?[0-9]*\.?[0-9]+([a-z]{1,3}|%)?$/.test(v);
 
+/** One or more §7.3 class tokens, ascending (code-unit order), unique, one space apart. */
+function isMathClassList(v: string): boolean {
+  const tokens = v.split(" ");
+  return tokens.every(
+    (t, i) => MATHML_CLASSES.has(t) && (i === 0 || (tokens[i - 1] as string) < t),
+  );
+}
+
 function mathAttrAllowed(tag: string, name: string, value: string): boolean {
   if (name === "display") return tag === "math" && value === "block";
   if ((MATH_BOOLEAN_ATTRS as readonly string[]).includes(name)) return isMathBoolean(value);
@@ -254,6 +322,8 @@ function mathAttrAllowed(tag: string, name: string, value: string): boolean {
   if (name === "columnspan" || name === "rowspan")
     return tag === "mtd" && /^[1-9][0-9]{0,2}$/.test(value);
   if (name === "notation") return tag === "menclose" && /^[a-z ]{1,128}$/.test(value);
+  if (name === "class") return isMathClassList(value);
+  if (name === "mathcolor") return /^#[0-9a-f]{6}$/.test(value);
   return false;
 }
 

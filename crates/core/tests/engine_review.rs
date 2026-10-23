@@ -650,7 +650,8 @@ fn leave_undo_retry_and_the_pending_badge() {
     block_on(bob.engine.join(&f.forum, None)).unwrap();
     bob.flush();
     let role = |e: &Engine<MemHost>| block_on(e.forum_open(&f.forum)).unwrap().my_role;
-    assert_eq!(role(&bob.engine), ForumRole::Member);
+    // open mode, no grant: a participant who is neither a seed nor established
+    assert_eq!(role(&bob.engine), ForumRole::Newcomer);
 
     // a sent post cannot be undone
     let t = block_on(

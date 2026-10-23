@@ -11,7 +11,9 @@ matter. The reacts projection cannot list karma fields; the K of every reactor i
 from __future__ import annotations
 
 from lessdugin_ref.build import MIN, T0, Forum, did
+from lessdugin_ref.fold import fold_vector_input
 
+from . import kcast
 from .util import file_doc, vector
 
 BOOST = tuple(f"bst{c}" for c in "abcdefghijklmnopqrst")
@@ -335,6 +337,21 @@ def react_vectors() -> list:
                  "alice's karma came from 10 boosters, but the owner nullified one of them: that vote no longer "
                  "counts (O4), so K[alice] = 9 < reactCreate and her react disappears (§8: gates use the "
                  "current K). mona's `seen` is a control", {u(s): [tally("seen", "mona", ["mona"])]}))
+
+    # The creator is chosen by K, not KP (cases/kcast.py: K wes 2 > K abe 1; KP 1 = 1)
+    f = kcast.forum(policy={"gates": {"reactCreate": 0, "reactSecond": 0}})
+    kc = kcast.cast(f)
+    tp = kc["posts"]["tess"]
+    recs = [*kc["records"], f.opinion("wes", tp, t=T0 + 20 * MIN, reacts=[{"react": "insightful"}]),
+            f.opinion("abe", tp, t=T0 + 20 * MIN, reacts=[{"react": "insightful"}])]
+    v = vector("reacts", "creator-by-k", f.fold_input(recs), fields=("reacts",),
+               note="the K ≠ KP cast (approval mode, every user granted): wes has K 2 and KP 1, abe K 1 and "
+                    "KP 1, and did(abe) < did(wes). Both react insightful on tess's post with the gates "
+                    "reactCreate and reactSecond at 0. The creator is the supporter with the greatest K "
+                    "(§9.2), so wes; by KP they would tie and abe, the smaller DID, would be the creator",
+               expect={"reacts": {u(tp): [tally("insightful", "wes", ["wes", "abe"])]}})
+    kcast.check(fold_vector_input(v["input"]))
+    out.append(v)
     return out
 
 

@@ -248,17 +248,39 @@ proptest! {
     }
 }
 
-/// Every mention and record link in `links`/`mentions` is visible in the HTML (§12): nothing
-/// unrendered (an unreferenced footnote, a link removed by the limit stage) notifies anyone.
+// Hosts the WHATWG URL parser rejects or rewrites are never linked (§5.1 `host_ok`), so ammonia,
+// which parses every `href` with the `url` crate, never strips one. Found by the `render` fuzz
+// target (`fuzz/regressions/render/invalid-punycode-host`); the strategy aims at the edges: IPv4
+// forms, IPv6 literals and Punycode labels.
+#[cfg(feature = "ammonia")]
+proptest! {
+    #[test]
+    fn linked_hosts_survive_ammonia(
+        host in "(xn--)?[a-z0-9_-]{0,10}(\\.(xn--)?[a-z0-9x-]{0,6}){0,3}|[0-9x.]{1,16}|\\[[0-9a-f:.]{0,24}\\]"
+    ) {
+        let src = format!("[a](https://{host}/x)");
+        let r = render(&src, &[], &RenderOpts::ALL);
+        prop_assert_eq!(
+            lessdugin_markdown::allowlist::ammonia_clean(&r.html),
+            r.html.clone(),
+            "{}",
+            src
+        );
+    }
+}
+
+/// `links`/`mentions` (§12) come from the rendered content of S6: nothing that is never shown
+/// (an unreferenced footnote definition, a link inside an image's alt) notifies anyone. They
+/// are `lfm/1` values, so the limit stage (presentation) does not change them: a flattened
+/// link still shows its text.
 #[test]
-fn links_and_mentions_are_rendered() {
+fn links_and_mentions_of_rendered_content() {
     let did = "did:plc:abcdefghijklmnopqrstuvwx";
     let uri = format!("at://{did}/online.7778777.lessdugin.post/3k2a");
     let hidden = [
         format!("x\n\n[^x]: [@v](at://{did}) [r]({uri})"),
-        format!("{}[@v](at://{did}) [r]({uri})", "> ".repeat(70)),
-        format!("{}[@v](at://{did}) [r]({uri})", "- ".repeat(70)),
-        format!("{}*[@v](at://{did}) [r]({uri})*", "> ".repeat(63)),
+        format!("x[^x]\n\n[^x]: a\n\n[^x]: [@v](at://{did}) [r]({uri})"),
+        format!("![[@v](at://{did}) [r]({uri})](https://x.example/i.png)"),
     ];
     for src in &hidden {
         let r = render(src, &[], &RenderOpts::ALL);
@@ -268,10 +290,17 @@ fn links_and_mentions_are_rendered() {
         );
         assert!(!r.html.contains("data-did") && !r.html.contains("data-at-uri"));
     }
-    let shown = format!("x[^x]\n\n[^x]: [@v](at://{did}) [r]({uri})");
-    let r = render(&shown, &[], &RenderOpts::ALL);
-    assert_eq!(r.mentions.len(), 1);
-    assert_eq!(r.links.len(), 1);
+    let shown = [
+        format!("x[^x]\n\n[^x]: [@v](at://{did}) [r]({uri})"),
+        format!("{}[@v](at://{did}) [r]({uri})", "> ".repeat(70)),
+        format!("{}[@v](at://{did}) [r]({uri})", "- ".repeat(70)),
+        format!("{}*[@v](at://{did}) [r]({uri})*", "> ".repeat(63)),
+    ];
+    for src in &shown {
+        let r = render(src, &[], &RenderOpts::ALL);
+        assert_eq!((r.mentions.len(), r.links.len()), (1, 1), "{src:?}");
+        assert!(r.text.contains("@v r"), "{src:?}");
+    }
 }
 
 /// Output stays proportionate to the input (red-team amplification inputs): a `media.alt`

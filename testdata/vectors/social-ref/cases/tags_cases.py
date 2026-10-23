@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: CC0-1.0
 """karma/tags.json (kind "tags"): tags and wiki, social.md §13 (behaviour karma/1).
 
-The file lives in karma/ because §13 belongs to karma/1 (§0.3) and testdata/vectors/tags/ was
-not among the directories this generator may write (NOTES.md 53); moving it there is a change of
-the path below only.
+The files live in karma/ because §13 belongs to karma/1 (§0.3; social.md §20.1 item 44, NOTES.md
+53). karma/tags-large.json holds the cases whose inputs have about 1,000 records.
 
 Wiki authors are participants (open mode, with a membership), because V2 hides a revision by a
 non-participant and a hidden revision is on no page. Without opinions K = 0 for everyone, so the
@@ -15,8 +14,10 @@ votes with power 1.
 from __future__ import annotations
 
 from lessdugin_ref.build import MIN, T0, Forum, did, rec
+from lessdugin_ref.cids import upper_spelling
 from lessdugin_ref.fold import fold_vector_input
 
+from . import kcast
 from .util import file_doc, vector
 
 MODS = (("adam", "admin"), ("mona", "moderator"), ("mike", "moderator"))
@@ -307,6 +308,174 @@ def tag_vectors() -> list:
     assert v["expected"]["applies"] == {k: ["t"] for k in us(p1, p3, p8)}
     out.append(v)
 
+    out += m3_tag_vectors()
+    return out
+
+
+def tv(*pairs):
+    return [{"tag": s, "value": x} for s, x in pairs]
+
+
+def m3_tag_vectors() -> list:
+    """Cases proposed by the M3 fold reviews (social.md §13, §20.1 items 41, 45)."""
+    out = []
+
+    def m(k):
+        return T0 + k * MIN
+
+    # A head whose CID is spelled differently still names the current version (item 45)
+    f = F(membership="approval", moderators=MODS + (("abby", "admin"),), policy={"tagCreation": "open"})
+    r1 = f.wiki("owner", m(30), "w")
+    r2 = f.wiki("owner", m(31), "w", parents=[(u(r1), upper_spelling(r1["cid"]))])
+    ha = f.modaction("adam", "tag", "tag:w", head={"uri": u(r1), "cid": upper_spelling(r1["cid"])}, t=m(40))
+    hb = f.modaction("abby", "tag", "tag:w", head={"uri": u(r1), "cid": r1["cid"]}, t=m(41))
+    v = V("tag-head-spellings-agree", f, [r1, r2, ha, hb],
+          "the owner writes genesis r1 of slug w and r2 on top of it, citing r1's CID in base32 upper case "
+          "(multibase B); two admins set the head of tag:w to r1, one with that spelling and one in "
+          "canonical form. CIDs written in records compare by canonical form (social.md §0.4, §20.1 item "
+          "45): the heads agree, so r1 is canonical although r2 is deeper, and the edge r2 → r1 is not "
+          "altered")
+    w = W(v, "w")
+    assert w["canonical"] == u(r1) and w["candidates"][u(r2)]["altered"] == [] and w["history"] == [u(r1)]
+    out.append(v)
+
+    # The canonical tie-break reads K (cases/kcast.py: K wes 2 > K abe 1; KP 1 = 1)
+    f = kcast.forum(policy={"tagCreation": "open", "gates": {"createTag": 0, "wikiEdit": 0}})
+    kc = kcast.cast(f)
+    rz = f.wiki("abe", m(30), "t")
+    rw = f.wiki("wes", m(30), "t")
+    v = V("canonical-tie-by-k", f, [*kc["records"], rz, rw],
+          "the K ≠ KP cast (approval mode, every user granted): abe and wes each write a genesis revision of "
+          "slug t at the same time (depth 0 both). The tie-break after depth is the author's K (§13.2): "
+          "wes has K 2 and abe K 1, so wes's revision is canonical; by KP (1 and 1) the smaller uri, abe's, "
+          "would be")
+    kcast.check(fold_vector_input(v["input"]))
+    assert u(rz).encode() < u(rw).encode() and W(v, "t")["canonical"] == u(rw)
+    out.append(v)
+
+    # Tag votes weigh by KP (§13.3)
+    f = kcast.forum(policy={"tagCreation": "open", "gates": {"createTag": 0, "wikiEdit": 0}})
+    kc = kcast.cast(f)
+    bp = kc["posts"]["boosterl"]
+    page = f.wiki("owner", m(30), "t")
+    vote = f.opinion("vera", bp, t=m(31), tags=tv(("t", "strongUp")))
+    v = V("tag-vote-power-kp", f, [*kc["records"], page, vote],
+          "the K ≠ KP cast: vera (K1 9, KP 10, K 9) votes strongUp for tag t on boosterl's post, with an "
+          "opinion that carries only that tag vote. A tag vote weighs power(KP[voter], value) (§13.3): "
+          "strong(10) = 2; reading K would give strong(9) = 1")
+    kcast.check(fold_vector_input(v["input"]))
+    assert v["expected"]["tagRel"] == {u(bp): {"t": 2}} and v["expected"]["applies"] == {u(bp): ["t"]}
+    out.append(v)
+
+    # History steps to the deepest parent, ties by the smallest uri (§13.2)
+    f = F()
+    r1 = f.wiki("owner", m(10), "h")
+    r2 = f.wiki("owner", m(11), "h")
+    r3 = f.wiki("owner", m(12), "h", parents=[r2, r1])
+    v = V("history-tie-smallest-uri", f, [r1, r2, r3],
+          "two genesis revisions r1 and r2, and r3 naming both (the greater uri first). r3 is canonical "
+          "(depth 1); its parents have equal depth 0, so the history steps to the smaller uri, r1. Both "
+          "parents have an incoming edge, so nothing is unmerged")
+    w = W(v, "h")
+    assert u(r1).encode() < u(r2).encode()
+    assert w["canonical"] == u(r3) and w["history"] == [u(r3), u(r1)] and w["unmerged"] == 0
+    assert w["candidates"][u(r3)]["depth"] == 1
+    out.append(v)
+
+    # Duplicate parent entries: any entry with another CID marks the edge altered (NOTES 56)
+    f = F()
+    r1 = f.wiki("owner", m(10), "d")
+    foreign = f.wiki("owner", m(9), "elsewhere")["cid"]
+    r2 = f.wiki("owner", m(11), "d", parents=[(u(r1), foreign), (u(r1), r1["cid"])])
+    r3 = f.wiki("owner", m(12), "d", parents=[(u(r1), r1["cid"]), (u(r1), r1["cid"])])
+    v = V("duplicate-parent-entries", f, [r1, r2, r3],
+          "r2 lists r1 twice, once with the CID of another record and once with r1's own; r3 lists r1 twice "
+          "with r1's CID. Duplicate parents collapse to one edge (WR2), and the edge is altered when any of "
+          "its entries carries another CID: r2 → r1 is altered, r3 → r1 is not")
+    w = W(v, "d")
+    assert w["candidates"][u(r2)]["parents"] == [u(r1)] and w["candidates"][u(r2)]["altered"] == [u(r1)]
+    assert w["candidates"][u(r3)]["altered"] == []
+    out.append(v)
+
+    # OP3 before OP4 (§13.3, item 41)
+    f = F(membership="approval")
+    page = f.wiki("owner", m(5), "t")
+    p = f.post("adam", m(10))
+    o = f.opinion("owner", p, t=m(20), tags=tv(("t", "up"), ("t", "superUp")))
+    v = V("tag-votes-op3-before-op4", f, [page, p, o],
+          "the owner's opinion on adam's post carries two entries for tag t, up and the unknown superUp. OP3 "
+          "discards the unknown value first, then OP4 sees a single entry, so the vote counts: rel 1 "
+          "(applying OP4 first would drop both conflicting entries)")
+    assert v["expected"]["tagRel"] == {u(p): {"t": 1}}
+    out.append(v)
+    return out
+
+
+def large_vectors() -> list:
+    """Inputs of about 1,000 records: the page cap (§13.2, limits.md WIKI_WALK_MAX) and own-tag
+    weight at KP 1,000."""
+    out = []
+
+    def m(k):
+        return T0 + k * MIN
+
+    # The page cap keeps the 1,000 revisions with the greatest TIDs, ties by the smallest uri
+    for n_low in (1, 2):
+        f = F()
+        recs = [f.wiki("owner", m(10 + i), "cap", clock=1) for i in range(999)]
+        low = [f.wiki(w, m(1), "cap", clock=1) for w in ("adam", "mona")[:n_low]]
+        total = len(recs) + len(low)
+        v = vector("tags", f"page-cap-{total}", f.fold_input([*recs, *low], obs={}),
+                   note=(f"{total} genesis revisions of slug cap: 999 by the owner at T0 + 10 … 1008 min, and "
+                         + ("adam's at T0 + 1 min. The page holds exactly 1,000 revisions, so it is not partial"
+                            if n_low == 1 else
+                            "adam's and mona's with the same TID at T0 + 1 min. The page keeps the 1,000 "
+                            "revisions with the greatest (TID desc, uri asc): adam's is kept, mona's (the "
+                            "greater uri at the same TID) is dropped, and the page is partial")
+                         + ". Every revision is a candidate of depth 0; the canonical one is the smallest uri "
+                           "(K 0 for everyone), adam's. obs is empty: the page does not read it"),
+                   fields=("wiki",))
+        w = v["expected"]["wiki"]["cap"]
+        assert len(w["candidates"]) == 1000 and w["partial"] is (total == 1001)
+        assert u(low[0]) in w["candidates"] and w["canonical"] == u(low[0])
+        if n_low == 2:
+            assert u(low[1]) not in w["candidates"] and u(low[0]).split("/")[-1] == u(low[1]).split("/")[-1]
+        out.append(v)
+
+    # own relevance reads KP: small() changes at 1,000 (§13.3)
+    boosters = [f"bst{a}{b}" for a in "abcd" for b in "abcdefghij"]
+    assert len(boosters) == 40
+    f = kcast.forum(policy={"gates": {"createTag": 0, "wikiEdit": 0}})
+    names = (*boosters, "tess", "sid", "ari")
+    recs = []
+    for n in names:
+        recs += [f.membership(n), f.modaction("owner", "access", did(n), level="member", t=m(1))]
+    tp = f.post("tess", m(2))
+    sp = f.post("sid", m(3))
+    ap = [f.post("ari", m(10 + i), **({"tags": ["t"]} if i == 0 else {})) for i in range(25)]
+    recs += [tp, sp, *ap]
+    recs += [f.opinion(b, tp, t=m(50), karma="up") for b in boosters[:10]]
+    recs += [f.opinion(b, sp, t=m(50), karma="up") for b in boosters[:11]]
+    recs.append(f.opinion("tess", sp, t=m(50), karma="strongDown"))
+    ups = 0
+    for b in boosters:
+        for p in ap:
+            if ups == 998:
+                break
+            recs.append(f.opinion(b, p, t=m(60), karma="up"))
+            ups += 1
+    recs.append(f.opinion("sid", ap[1], t=m(60), karma="strongUp"))
+    v = vector("tags", "own-tag-weight-kp", f.fold_input(recs, obs={}),
+               note="approval mode, every user granted, pairCap 25. 40 boosters (K 0) cast 998 ups on ari's 25 "
+                    "posts (at most one per post, so 25 per booster); tess gets 10 ups (K1 = KP = 10); sid "
+                    "gets 11 ups and tess's strongDown (K1 10, KP 9, K 9) and votes strongUp on ari's second "
+                    "post, which weighs strong(K1 sid 10) = 2 in KP and strong(KP sid 9) = 1 in K. So ari has "
+                    "KP 1000 and K 999. ari's first post has the own tag t: own = max(1, small(KP)) = "
+                    "small(1000) = 2; reading K would give small(999) = 1. obs is empty: no time is read")
+    view = fold_vector_input(v["input"])
+    assert view.l3.KP[did("ari")] == 1000 and view.l3.K[did("ari")] == 999 and view.l3.K1[did("ari")] == 999
+    assert v["expected"]["tagRel"] == {u(ap[0]): {"t": 2}}
+    out.append(v)
     return out
 
 
@@ -322,4 +491,10 @@ FILES = [
         "({post uri: {slug: rel}}, non-zero only) and applies ({post uri: [slug]}) "
         "(testdata/vectors/README.md, social section).",
         tag_vectors())),
+    ("karma/tags-large.json", lambda: file_doc(
+        "karma/1", "tags",
+        "social.md §13 vectors whose inputs hold about 1,000 records, in a file of their own: the wiki page "
+        "cap of 1,000 revisions (§13.2, limits.md WIKI_WALK_MAX) at 1,000 and 1,001 revisions, and the own-tag "
+        "weight small(KP) at KP 1,000 (§13.3). Same kind and shapes as karma/tags.json.",
+        large_vectors())),
 ]

@@ -909,6 +909,116 @@
       },
       "name": "line-order-with-nested-revision-keys",
       "note": "the revision of the post (rkey {fk}-{T}-{t}) is a prefix of the revision of the comment {fk}-{T}-{t} (rkey {fk}-{T}-{t}-{tid}): the 0x00 separator sorts the shorter uri first, as uri order does"
+    },
+    {
+      "expected": {
+        "algs": "mod/1,karma/1,magic/1,default/1",
+        "digestPreimage": "at://did:plc:adam22222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd2u5xbc223\u0000bafyreig6a4wxnr7b7mjdc7vzho3kedtlsn5e475uulu6ur6fajpodmyu6y\ndecl\u0000bafyreif7ve7w3t3dwxyv76izp6t5rw4c3apghvt2hzvleizm2n25h53w2u\nalgs\u0000mod/1,karma/1,magic/1,default/1\nparams\u0000membership=open,defaultTier=personal,voting=reacts,authorModeration=true,tagCreation=open,pairCap=25,establish=1,establishSeeds=2,offsetHours=2,exponentMilli=1150,curatedBonus=10,frontpageBonus=0,cutoffDays=90,reactSecond=5,reactCreate=10,reactAnti=20,authorModPersonal=50,authorModFrontpage=2000,createTag=10,wikiEdit=5,sequence=1000,collapseBelow=-5,newUsers=collapse\n",
+        "inputDigest": "36221c755ab3c37a212ec751fa52bcba154f2a6fadf6cc9039410f5a22411f0e",
+        "newerRulesBanner": false,
+        "params": "membership=open,defaultTier=personal,voting=reacts,authorModeration=true,tagCreation=open,pairCap=25,establish=1,establishSeeds=2,offsetHours=2,exponentMilli=1150,curatedBonus=10,frontpageBonus=0,cutoffDays=90,reactSecond=5,reactCreate=10,reactAnti=20,authorModPersonal=50,authorModFrontpage=2000,createTag=10,wikiEdit=5,sequence=1000,collapseBelow=-5,newUsers=collapse"
+      },
+      "input": {
+        "fold": {
+          "absent": [],
+          "decl": {
+            "cid": "bafyreif7ve7w3t3dwxyv76izp6t5rw4c3apghvt2hzvleizm2n25h53w2u",
+            "uri": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+            "value": {
+              "$type": "online.7778777.lessdugin.forum",
+              "createdAt": "2026-01-01T00:00:00.000Z",
+              "membership": "open",
+              "name": "Test forum"
+            }
+          },
+          "now": 1769817600000000,
+          "obs": [
+            {
+              "cid": "bafyreig6a4wxnr7b7mjdc7vzho3kedtlsn5e475uulu6ur6fajpodmyu6y",
+              "uri": "at://did:plc:adam22222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd2u5xbc223",
+              "us": 1767225660000000
+            },
+            {
+              "cid": "bafyreif7ve7w3t3dwxyv76izp6t5rw4c3apghvt2hzvleizm2n25h53w2u",
+              "uri": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+              "us": 1767225600000000
+            }
+          ],
+          "records": [
+            {
+              "cid": "bafyreig6a4wxnr7b7mjdc7vzho3kedtlsn5e475uulu6ur6fajpodmyu6y",
+              "uri": "at://did:plc:adam22222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd2u5xbc223",
+              "value": {
+                "$type": "online.7778777.lessdugin.post",
+                "createdAt": "2025-12-31T23:55:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "title": "A post"
+              }
+            }
+          ],
+          "repoStatus": {
+            "did:plc:adam22222222222222222222": "fresh",
+            "did:plc:owner2222222222222222222": "fresh"
+          }
+        }
+      },
+      "name": "decl-obs-is-outside-the-digest-decl-seen-at-creation",
+      "note": "the same input as time/time.json decl-obs-moves-a-non-future-item-decl-seen-at-creation: only t_obs(decl) differs between the two vectors of this pair, and obs is not covered by the digest, so both have the same inputDigest although t_decl, and with it the post's t_rank, differs (\u00a71.2 lists t_obs(decl) among the exceptions)"
+    },
+    {
+      "expected": {
+        "algs": "mod/1,karma/1,magic/1,default/1",
+        "digestPreimage": "at://did:plc:adam22222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd2u5xbc223\u0000bafyreig6a4wxnr7b7mjdc7vzho3kedtlsn5e475uulu6ur6fajpodmyu6y\ndecl\u0000bafyreif7ve7w3t3dwxyv76izp6t5rw4c3apghvt2hzvleizm2n25h53w2u\nalgs\u0000mod/1,karma/1,magic/1,default/1\nparams\u0000membership=open,defaultTier=personal,voting=reacts,authorModeration=true,tagCreation=open,pairCap=25,establish=1,establishSeeds=2,offsetHours=2,exponentMilli=1150,curatedBonus=10,frontpageBonus=0,cutoffDays=90,reactSecond=5,reactCreate=10,reactAnti=20,authorModPersonal=50,authorModFrontpage=2000,createTag=10,wikiEdit=5,sequence=1000,collapseBelow=-5,newUsers=collapse\n",
+        "inputDigest": "36221c755ab3c37a212ec751fa52bcba154f2a6fadf6cc9039410f5a22411f0e",
+        "newerRulesBanner": false,
+        "params": "membership=open,defaultTier=personal,voting=reacts,authorModeration=true,tagCreation=open,pairCap=25,establish=1,establishSeeds=2,offsetHours=2,exponentMilli=1150,curatedBonus=10,frontpageBonus=0,cutoffDays=90,reactSecond=5,reactCreate=10,reactAnti=20,authorModPersonal=50,authorModFrontpage=2000,createTag=10,wikiEdit=5,sequence=1000,collapseBelow=-5,newUsers=collapse"
+      },
+      "input": {
+        "fold": {
+          "absent": [],
+          "decl": {
+            "cid": "bafyreif7ve7w3t3dwxyv76izp6t5rw4c3apghvt2hzvleizm2n25h53w2u",
+            "uri": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+            "value": {
+              "$type": "online.7778777.lessdugin.forum",
+              "createdAt": "2026-01-01T00:00:00.000Z",
+              "membership": "open",
+              "name": "Test forum"
+            }
+          },
+          "now": 1769817600000000,
+          "obs": [
+            {
+              "cid": "bafyreig6a4wxnr7b7mjdc7vzho3kedtlsn5e475uulu6ur6fajpodmyu6y",
+              "uri": "at://did:plc:adam22222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd2u5xbc223",
+              "us": 1767225660000000
+            },
+            {
+              "cid": "bafyreif7ve7w3t3dwxyv76izp6t5rw4c3apghvt2hzvleizm2n25h53w2u",
+              "uri": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+              "us": 1767225000000000
+            }
+          ],
+          "records": [
+            {
+              "cid": "bafyreig6a4wxnr7b7mjdc7vzho3kedtlsn5e475uulu6ur6fajpodmyu6y",
+              "uri": "at://did:plc:adam22222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd2u5xbc223",
+              "value": {
+                "$type": "online.7778777.lessdugin.post",
+                "createdAt": "2025-12-31T23:55:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "title": "A post"
+              }
+            }
+          ],
+          "repoStatus": {
+            "did:plc:adam22222222222222222222": "fresh",
+            "did:plc:owner2222222222222222222": "fresh"
+          }
+        }
+      },
+      "name": "decl-obs-is-outside-the-digest-decl-seen-before-creation",
+      "note": "the same input as time/time.json decl-obs-moves-a-non-future-item-decl-seen-before-creation: only t_obs(decl) differs between the two vectors of this pair, and obs is not covered by the digest, so both have the same inputDigest although t_decl, and with it the post's t_rank, differs (\u00a71.2 lists t_obs(decl) among the exceptions)"
     }
   ]
 }

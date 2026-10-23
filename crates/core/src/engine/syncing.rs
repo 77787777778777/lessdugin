@@ -377,10 +377,9 @@ impl<H: Host> Engine<H> {
         let mut dids: BTreeSet<String> = BTreeSet::new();
         dids.insert(root.did().to_string());
         dids.insert(target.did().to_string());
-        if let Some(th) = m.fold.threads.get(root.as_str()) {
+        if let Some(pl) = m.view.threads.get(root.as_str()) {
             dids.extend(
-                th.placement
-                    .parent
+                pl.parent
                     .keys()
                     .filter_map(|c| m.skel(c))
                     .map(|x| x.did.clone()),
@@ -392,14 +391,13 @@ impl<H: Host> Engine<H> {
             Reason::View
         };
         let planned: BTreeSet<String> = reqs.iter().map(|r| r.did.to_string()).collect();
-        let fresh_authority = |d: &str| m.fold.is_authority(d) && !planned.contains(d);
+        let fresh_authority = |d: &str| m.is_authority(d) && !planned.contains(d);
         reqs.extend(
             dids.iter()
                 .filter(|d| !planned.contains(*d) && !fresh_authority(d))
                 .filter_map(|d| Did::parse(d).ok())
                 .map(|d| {
-                    let known =
-                        m.fold.is_authority(d.as_str()) || m.fold.participants.contains(d.as_str());
+                    let known = m.is_authority(d.as_str()) || m.participants().contains(d.as_str());
                     let r = SyncRequest::forum(d, &key.fk, reason);
                     if known {
                         r

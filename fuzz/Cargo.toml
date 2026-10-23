@@ -1,0 +1,84 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# cargo-fuzz targets for the untrusted-input surfaces of lessdugin (docs/plan.md M4: "a 10-minute
+# fuzz run (CAR, CBOR, MST, lexicon validator, renderer) without panics"). See README.md.
+#
+# This is a workspace of its own, outside the main one: cargo-fuzz needs a nightly toolchain and
+# sanitizer flags, and its lock file (seeded from the main Cargo.lock, so the shared crates resolve
+# to the same versions) is separate. Run it with `cargo xtask fuzz`.
+
+[package]
+name = "lessdugin-fuzz"
+version = "0.0.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+members = [".", "seeds"]
+
+[features]
+default = ["ammonia"]
+# The render target also checks `ammonia(html) == html` (lfm-1.md §8.5, M4 acceptance).
+ammonia = ["lessdugin-markdown/ammonia"]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+lessdugin-atp = { path = "../crates/atp" }
+lessdugin-lexicon = { path = "../crates/lexicon" }
+lessdugin-markdown = { path = "../crates/markdown" }
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
+# Signs the commits of the structured repo inputs (the `mst` target) and re-signs decoded commits
+# (the `commit` target), so that verification gets past the signature check.
+k256 = { version = "0.13", default-features = false, features = ["ecdsa", "alloc"] }
+# The excerpt bound is in grapheme clusters (lfm-1.md §10.4); same pin as the renderer.
+unicode-segmentation = "=1.13.3"
+
+[[bin]]
+name = "car"
+path = "fuzz_targets/car.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dagcbor"
+path = "fuzz_targets/dagcbor.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mst"
+path = "fuzz_targets/mst.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "commit"
+path = "fuzz_targets/commit.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "lexicon"
+path = "fuzz_targets/lexicon.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "render"
+path = "fuzz_targets/render.rs"
+test = false
+doc = false
+bench = false
+
+[profile.release]
+# Line tables keep crash backtraces readable; full debuginfo would outgrow the disk allowance.
+debug = "line-tables-only"

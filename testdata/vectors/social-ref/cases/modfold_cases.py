@@ -8,7 +8,8 @@ in participation_cases.py.
 from __future__ import annotations
 
 from lessdugin_ref.build import DAY, HOUR, MIN, NOW, T0, Forum, at, did, dt, rec, tid
-from lessdugin_ref.common import NS
+from lessdugin_ref.cids import base58btc_spelling, upper_spelling
+from lessdugin_ref.common import NS, fk
 
 from .util import file_doc, vector
 
@@ -789,6 +790,117 @@ def forum_vectors() -> list:
     assert v["expected"]["degraded"] is True and st(v, pa) == hidden("ModerationUnavailable")
     out.append(v)
 
+    out += m3_forum_vectors()
+    return out
+
+
+def m3_forum_vectors() -> list:
+    """Cases proposed by the M3 fold reviews (social.md §4.3–§4.5, §4.12, §20.1 items 31, 34, 43, 45)."""
+    out = []
+
+    def m(k):
+        return T0 + k * MIN
+
+    def grant(f, *names):
+        return [f.modaction("owner", "access", did(n), level="member", t=m(1)) for n in names]
+
+    # until before 1970 has expired (§4.3 condition 5, item 31)
+    f = F(membership="approval")
+    p = f.post("adam", m(10))
+    h = f.modaction("owner", "hide", p, until="1969-12-31T00:00:00.000Z", t=m(20))
+    v = V("until-before-1970-has-expired", f, [p, h],
+          "the owner's hide has a valid `until` before 1970, which has no µs: µs(until) > now cannot hold, "
+          "so the assertion has expired and asserts nothing", extra=("modLog",))
+    assert status(v, h) == ("expired", None) and rs(v, p) == {} and st(v, p) is None
+    out.append(v)
+
+    # allowed(p) intersects only the locking records at the winning rank (§4.4)
+    f = F(membership="approval")
+    p = f.post("alice", m(10))
+    c1 = f.comment("bob", p, m(20))
+    c2 = f.comment("bob", p, m(21))
+    lk = f.modaction("mona", "lock", p, allowed=[u(c1)], t=m(30))
+    un = f.modaction("mike", "lock", p, locked=False, t=m(31))
+    v = V("lock-allowed-only-from-locking-records", f, [*mem(f, "alice", "bob"), *grant(f, "alice", "bob"), p, c1,
+                                                          c2, lk, un],
+          "mona locks alice's post allowing c1, and mike (also rank 1) writes #lock{locked: false}: equal ranks "
+          "resolve `locked` to true, and allowed(p) intersects the allow lists of the records that assert "
+          "true only, so c1 stays allowed (mike's record has no list, which would otherwise empty the "
+          "intersection); c2 is locked out. mike's record is overridden at rank 1", extra=("modLog",))
+    assert rs(v, p, "locked") == res(True, 1, lk, allowed=[u(c1)])
+    assert st(v, c1) is None and st(v, c2) == hidden("Locked")
+    assert status(v, lk) == ("effective", None) and status(v, un) == ("overridden", 1)
+    out.append(v)
+
+    # Mod-log entries without a time sort after every timed entry (§4.12, item 34)
+    f = F(membership="approval")
+    p = f.post("owner", m(5))
+    c1 = f.comment("adam", p, m(10))
+    c2 = f.comment("mona", p, m(11))
+    c3 = f.comment("mona", p, m(12))
+    h1 = f.modaction("owner", "hide", c1, t=m(20))
+    h2 = f.modaction("owner", "hide", c2, t=m(21))
+    h2 = rec(u(h2), {**h2["value"], "createdAt": "1969-12-31T00:00:00.000Z"})
+    h3 = f.modaction("owner", "hide", c3, t=m(22))
+    v = V("mod-log-untimed-entries-last", f, [p, c1, c2, c3, h1, h2, h3],
+          "the mod log is ordered by time desc, then uri; the hide of c2 has a valid createdAt before 1970, "
+          "which has no µs, so it sorts after every entry that has a time", fields=("modLog",))
+    assert [e[0] for e in log(v)] == [u(h3), u(h1), u(h2)]
+    out.append(v)
+
+    # A reserved ^FK-TID$ key skips MA1 and MA3–MA7 (data-model.md MA2, social.md §20.1 item 43)
+    f = F(membership="approval")
+    elsewhere = at(did("owner"), "forum", "elsewhere")
+    foreign = at(did("ulla"), "post", f"{fk(elsewhere)}-{tid(m(5))}")
+    r1 = f.modaction("owner", "hide", foreign, rkey=f"{f.fk}-{tid(m(30), 1)}", t=m(30))
+    r2 = f.modaction("owner", "hide", "not a subject", rkey=f"{f.fk}-{tid(m(31), 1)}", t=m(31))
+    v = V("reserved-key-skips-ma3", f, [r1, r2],
+          "two modActions under the reserved key form {fk}-{tid}: a #hide whose subject is a post in another "
+          "forum's key range (it would fail MA3) and a #hide whose subject is no DID, at-uri or tag (it would "
+          "fail MA1). A reserved-key record is checked against G1–G10 and MA10–MA12 only (data-model.md MA2, "
+          "social.md §20.1 item 43), so both are valid, listed as reserved/unknown, and assert nothing",
+          fields=("resolved", "modLog", "modQueue"))
+    assert [st_ for _, st_, _ in log(v)] == ["reserved/unknown", "reserved/unknown"]
+    assert v["expected"]["resolved"] == {}
+    out.append(v)
+
+    # Positive assertions compare CIDs by canonical form (§0.4, item 45)
+    f = F(membership="approval")
+    p = f.post("alice", m(10))
+    z = base58btc_spelling(p["cid"])
+    tier = f.modaction("owner", "tier", p, tier="frontpage", subject_cid=upper_spelling(p["cid"]), t=m(20))
+    pin = f.modaction("adam", "pin", p, pin_scope="forum", subject_cid=z, t=m(21))
+    keep = f.modaction("mona", "hide", p, hidden=False, subject_cid="bafyreinotacid", t=m(22))
+    v = V("positive-assertion-cid-spelling", f, [*mem(f, "alice"), *grant(f, "alice"), p, tier, pin, keep],
+          "every positive assertion names alice's post with its subjectCid spelled differently: the owner's "
+          "#tier{frontpage} in base32 upper case (multibase B), adam's forum pin in base58btc (multibase z), "
+          "mona's keep with a string that is not a CIDv1. CIDs written in records compare by canonical form "
+          "(social.md §0.4, §20.1 item 45): the first two name the current version and are effective; the "
+          "third names no version, so it is stale and a stale queue item",
+          extra=("tiers", "modQueue"))
+    assert v["expected"]["tiers"] == {u(p): "frontpage"}
+    assert status(v, tier) == ("effective", None) and status(v, pin) == ("effective", None)
+    assert status(v, keep) == ("stale", None)
+    assert v["expected"]["modQueue"] == [{"type": "stale", "uri": u(keep)}]
+    out.append(v)
+
+    # Two #tag.head values naming one revision with differently spelled CIDs agree (item 45)
+    f = F(membership="approval", moderators=MODS + (("abby", "admin"),),
+          policy={"tagCreation": "open", "gates": {"createTag": 0, "wikiEdit": 0}})
+    r1 = f.wiki("owner", m(30), "w")
+    r2 = f.wiki("owner", m(31), "w", parents=[(u(r1), upper_spelling(r1["cid"]))])
+    ha = f.modaction("adam", "tag", "tag:w", head={"uri": u(r1), "cid": upper_spelling(r1["cid"])}, t=m(40))
+    hb = f.modaction("abby", "tag", "tag:w", head={"uri": u(r1), "cid": r1["cid"]}, t=m(41))
+    v = V("tag-head-spellings-agree", f, [r1, r2, ha, hb],
+          "two admins (rank 2) set the head of tag:w to r1, adam with the CID in base32 upper case and abby in "
+          "canonical form. They name the same version (social.md §0.4, §20.1 item 45), so `tag.head` resolves "
+          "to r1 with the canonical CID (no unordered conflict, no conflict queue item) and both records are "
+          "effective", extra=("modQueue",))
+    win = min((ha, hb), key=lambda r: u(r).encode())
+    assert rs(v, "tag:w", "tag.head") == res({"uri": u(r1), "cid": r1["cid"]}, 2, win)
+    assert v["expected"]["modQueue"] == []
+    assert status(v, ha) == ("effective", None) and status(v, hb) == ("effective", None)
+    out.append(v)
     return out
 
 

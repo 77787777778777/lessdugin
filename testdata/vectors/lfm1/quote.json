@@ -209,7 +209,7 @@
         "quote": {
           "exact": "Cafe\u0301"
         },
-        "target": "a Café b"
+        "target": "a Caf\u00e9 b"
       },
       "expected": {
         "result": {
@@ -242,7 +242,7 @@
         "quote": {
           "exact": "x"
         },
-        "target": "😀😀 x"
+        "target": "\ud83d\ude00\ud83d\ude00 x"
       },
       "expected": {
         "result": {
@@ -340,13 +340,13 @@
       "name": "target-cut-on-char-boundary",
       "input": {
         "quote": {
-          "exact": "é"
+          "exact": "\u00e9"
         },
         "target_gen": {
           "prefix": "",
           "repeat": "y",
           "times": 199999,
-          "suffix": "é"
+          "suffix": "\u00e9"
         }
       },
       "expected": {

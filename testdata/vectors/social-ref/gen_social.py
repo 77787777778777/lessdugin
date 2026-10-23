@@ -6,7 +6,7 @@
     python3 -I -B testdata/vectors/social-ref/gen_social.py --check         # exit 1 if a file differs
     python3 -I -B testdata/vectors/social-ref/gen_social.py --list          # files and vector counts
     python3 -I -B testdata/vectors/social-ref/gen_social.py --emit-shared DIR
-        # also write the model's own cases for the shared directories (thread/) under DIR
+        # also write the model's own cases for the shared directories (none at present) under DIR
 
 Every case module cases/<topic>_cases.py exposes FILES = [(path relative to testdata/vectors/,
 thunk returning the file document)], and may expose SHARED in the same form for a directory
@@ -16,8 +16,8 @@ this generator does not own. Output is deterministic: sorted keys, 2-space inden
 --check also reports stale *.json files in the directories this generator owns that no case
 module produces.
 
-Shared directories (thread/) are read-only here: they may be written by another agent (the Rust
-engine). Every mode cross-checks every vector of every *.json file there: it evaluates the
+Shared directories (SHARED_DIRS; none at present, thread/ was one until M3) are read-only here:
+they may be written by another producer. Every mode cross-checks every vector of every *.json file there: it evaluates the
 vector's input with the model and compares each listed `expected` field with the model's
 projection. A disagreement fails the run; a field or input the model does not model is reported
 and skipped. The model's own cases for those directories are built (and self-checked) on every
@@ -39,10 +39,12 @@ HERE = Path(__file__).resolve().parent
 VECTORS = HERE.parent
 sys.path.insert(0, str(HERE))          # -I does not add the script directory
 
-# Directories whose *.json files are all produced here.
-OWNED_DIRS = ("time", "modfold", "karma", "reacts", "rank", "fold", "visibility")
+# Directories whose *.json files are all produced here. thread/ was shared with the Rust engine
+# agent until M3; its files were always the model's own cases, and the generator owns it now.
+OWNED_DIRS = ("time", "modfold", "karma", "reacts", "rank", "fold", "visibility", "thread")
 # Directories this generator never writes; their vectors are cross-checked against the model.
-SHARED_DIRS = ("thread",)
+# None at present; the mechanism stays for a directory another producer may share.
+SHARED_DIRS = ()
 
 
 JSON_SAFE = 2 ** 53 - 1      # every integer in a vector file is exact as a JavaScript number
@@ -76,8 +78,9 @@ def case_modules() -> list:
 
 
 def selftest() -> None:
-    from lessdugin_ref import dagcbor
+    from lessdugin_ref import cids, dagcbor
     dagcbor.selftest(VECTORS.parent / "interop" / "data-model" / "data-model-fixtures.json")
+    cids.selftest()
 
 
 def cross_check(path: Path) -> tuple:

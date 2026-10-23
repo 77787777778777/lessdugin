@@ -1,19 +1,17 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// TypeScript mirror of the engine's `dto/1` schema (docs/spec/engine-api.md §2–§4).
+// TypeScript mirror of the engine's `dto/1` schema (docs/spec/engine-api.md §2–§4; engine API
+// v0, frozen at M3: only compatible changes from here on).
 //
-// THESE TYPES ARE TEMPORARY. They will be replaced by the tsify-generated declarations that
-// `lessdugin-wasm` emits into `pkg/lessdugin_engine.d.ts`, and until then they MUST stay
-// identical to the Rust DTOs: same field names (camelCase, `#[serde(rename_all = "camelCase")]`),
-// enums internally tagged with `"kind"` (`#[serde(tag = "kind")]`, variant names camelCased),
-// optional fields omitted when `None` (hence `field?: T`, never `T | null`), integer
-// milliseconds for every `…Ms` field, and `dto: 1` on every top-level response.
-//
-// The view DTOs (§4) and `AccountView`/`AuthKind` mirror `crates/core/src/dto.rs` one-to-one,
-// type names included; `types.parity.test.ts` fails on drift. The request types, `Href` and the
-// events have no Rust definition yet: where engine-api.md names such a type without spelling out
-// its fields, the shape below is derived from data-model.md, social.md and lfm-1.md and marked
-// "derived", so the Rust side can adopt it verbatim or the two can be reconciled in one commit.
+// Every type with a Rust definition (`crates/core/src/dto.rs`, `EngineError`, `ErrorCode`,
+// `AccountInfo`) mirrors it exactly: the same type names, field names (camelCase), optionality
+// (`field?: T`, never `T | null`: a field the serialiser may omit, or the deserialiser may go
+// without, as `#[serde(default)]` request fields), field types and variants (enums internally
+// tagged with `"kind"`, variant names camelCased); integer milliseconds for every `…Ms` field,
+// and `dto: 1` on every top-level view. `types.parity.test.ts` compares this file with
+// `testdata/dto/dto-1.d.ts`, which the Rust types generate (crates/wasm/tests/dto_decl.rs), and
+// fails on any drift. The few types without a Rust counterpart (aliases, `Href`, the inputs of
+// operations of later milestones) are listed there with the reason.
 
 // ---------------------------------------------------------------------------------------------
 // Scalars
@@ -120,17 +118,28 @@ export interface Badges {
 export type KarmaValue = "up" | "down" | "strongUp" | "strongDown";
 export type AgreementValue = "agree" | "disagree" | "strongAgree" | "strongDisagree";
 
+/** The viewer's own opinion on an item, as stored in the cache (their public opinion record). */
 export interface MyOpinion {
   karma?: KarmaValue;
   agreement?: AgreementValue;
+  /** A write of this opinion is in the outbox and not done (held for the undo window, or not
+   * sent yet): the values above are the stored ones. */
+  pending?: boolean;
+  /** Recorded but carrying no weight (social.md §5–§7): "recorded; will count once you're
+   * established". */
+  notYetCounted?: boolean;
 }
 
 export interface ScoreView {
   score: number;
   /** Absent when the forum's `policy.voting` is `karmaOnly` (social.md §7). */
   agreement?: number;
+  /** "n votes not yet counted": counting karma votes by voters outside E. */
   unweighted: number;
+  /** N of "N of M votes were cast on an earlier version". */
   earlierVersionVotes: number;
+  /** M of "N of M": the weighted karma votes (omitted when 0). */
+  weightedVotes?: number;
   mine?: MyOpinion;
 }
 
@@ -156,7 +165,11 @@ export interface ReactTally {
   quote?: TextQuote;
   anchor?: Anchor;
   creator?: string;
+  /** The viewer's stance, as their opinion record states it. */
   mine?: Stance;
+  /** The viewer's own react, which forms no valid react (no creator passes `reactCreate`, or
+   * the viewer's opinion does not count). */
+  uncounted?: boolean;
 }
 
 export interface TocEntry {
@@ -261,6 +274,9 @@ export interface PostList {
   items: PostSummary[];
   cursor?: string;
   completeness: Completeness;
+  /** `moderationUnavailable` (a degraded view, social.md §4.11), `newerRules`; omitted when
+   * empty. */
+  banners?: Banner[];
 }
 
 export interface HistorySummary {
@@ -325,6 +341,7 @@ export interface ThreadView {
   comments: CommentNode[];
   sort: CommentSort;
   completeness: Completeness;
+  banners?: Banner[];
 }
 
 export interface DiscussionItem {
@@ -337,6 +354,7 @@ export interface DiscussionList {
   items: DiscussionItem[];
   cursor?: string;
   completeness: Completeness;
+  banners?: Banner[];
 }
 
 export interface VersionEntry {
@@ -413,6 +431,42 @@ export interface ForumView {
   myKarma?: number;
   banners: Banner[];
   completeness: Completeness;
+  /** What the viewer may do (absent without an active account). */
+  viewer?: ViewerCaps;
+}
+
+/** What the viewer (the active account) may do in a forum, from the fold (social.md §4.9, §5,
+ * §8): clients enable or disable actions with it. Writers check gates as UX only; the fold
+ * decides what counts. */
+export interface ViewerCaps {
+  /** Karma votes count (not banned or nullified; not restricted from `vote`). */
+  vote: boolean;
+  strongVote: boolean;
+  /** Agreement votes count: `vote` and `policy.voting` ≠ `karmaOnly`. */
+  agree: boolean;
+  /** The viewer is an eligible voter (E); otherwise votes are "recorded; will count once
+   * you're established". */
+  weighted: boolean;
+  /** Reacts count (`policy.voting = reacts`, not restricted, in E). */
+  react: boolean;
+  reactCreate: boolean;
+  reactSecond: boolean;
+  reactAnti: boolean;
+  /** The viewer's posts are listed (V2–V5, V8). */
+  post: boolean;
+  comment: boolean;
+  /** Open mode: the viewer's content is collapsed or hidden as a new user (V8). */
+  newcomer: boolean;
+  /** Approval mode: a membership record and no grant. */
+  applicant: boolean;
+  /** Forum-tier moderation (an authority). */
+  moderate: boolean;
+  /** 1 moderator, 2 admin, 3 owner. */
+  rank?: number;
+  /** `#tier{curated}`: an admin or the owner. */
+  curate: boolean;
+  authorModPersonal: boolean;
+  authorModFrontpage: boolean;
 }
 
 export interface KarmaView {
@@ -447,6 +501,14 @@ export interface MemberView {
   granted: boolean;
   membershipNote?: string;
   joinedAtMs: number;
+  /** K (omitted when 0). */
+  karma?: number;
+  /** Approval mode: a membership without a grant. */
+  applicant?: boolean;
+  banned?: boolean;
+  nullified?: boolean;
+  /** Restricted capabilities (`vote`, `comment`, …). */
+  restricted?: string[];
 }
 
 export interface TagSummary {
@@ -519,8 +581,11 @@ export type NotificationReason =
 export interface NotificationView {
   id: string;
   reason: NotificationReason;
+  /** When the item was first seen (never its `createdAt`), or when a change was noticed. */
   atMs: number;
   subject: string;
+  /** The forum the notification belongs to. */
+  forum?: AtUri;
   actor?: ActorView;
   read: boolean;
   /** Plain text. */
@@ -530,6 +595,23 @@ export interface NotificationView {
 export interface NotificationList {
   dto: DtoVersion;
   items: NotificationView[];
+  /** Every unread notification (the badge), not only those in `items`. */
+  unread: number;
+}
+
+/** Unread state of one followed forum (social.md §16). */
+export interface ForumUnread {
+  forum: AtUri;
+  posts: number;
+  comments: number;
+  notifications: number;
+}
+
+/** `unreadCounts()`: the notification badge and every followed forum's unread state. */
+export interface UnreadCounts {
+  dto: DtoVersion;
+  notifications: number;
+  forums: ForumUnread[];
 }
 
 export interface ModQueueItem {
@@ -539,6 +621,12 @@ export interface ModQueueItem {
   subject: string;
   reason: string;
   detail?: string;
+  /** The modAction a `stale` item is about. */
+  uri?: string;
+  /** The applicant, or the newcomer item's author. */
+  actor?: ActorView;
+  /** When the applicant joined, or the newcomer item's `t_rank`. */
+  atMs?: number;
 }
 
 export interface ModQueue {
@@ -546,14 +634,36 @@ export interface ModQueue {
   items: ModQueueItem[];
 }
 
+/** The status of a mod-log entry (social.md §4.12). */
+export type ModLogStatus =
+  | "effective"
+  | "overridden"
+  | "lapsed"
+  | "expired"
+  | "stale"
+  | "unauthorised"
+  | "reservedUnknown"
+  | "edited"
+  | "removed";
+
+/** A mod-log entry: a modAction (any scope, any actor) or a revision that edited or removed one.
+ * `reason` of a `#hide` with `showReason: false` is shown to the forum's authorities only. */
 export interface ModLogEntry {
+  /** The modAction or revision uri. */
+  uri: string;
   actor: ActorView;
   action: string;
   subject: string;
   value: string;
   reason?: string;
+  /** `updatedAt ?? createdAt` (0: a time before 1970). */
   atMs: number;
+  status: ModLogStatus;
   lapsed: boolean;
+  /** The winning rank of an `overridden` entry. */
+  rank?: number;
+  /** An author-scope assertion (social.md §4.9). */
+  authorScope?: boolean;
   adoptedFrom?: string;
 }
 
@@ -575,8 +685,12 @@ export interface RawView {
   level: TrustLevel;
   record?: Json;
   validity: string[];
+  /** Every modAction naming the item, valid or not: `{uri, cid, valid, record, rule?,
+   * status?}` (`status`: its mod-log status). */
   assertions: Json[];
   state?: ItemState;
+  /** The fold's score (hidden items have scores too). */
+  score?: ScoreView;
 }
 
 export type VerifyOutcome = "proven" | "absent" | "failed";
@@ -706,8 +820,10 @@ export interface ForumDraft {
   about?: BodyDraft;
   membership: MembershipMode;
   defaultTier: DefaultTier;
-  featuredTags: Slug[];
-  moderators: ModeratorDraft[];
+  /** Default none. */
+  featuredTags?: Slug[];
+  /** Default none (`forum_update`: keep them; change them with `modsSet`). */
+  moderators?: ModeratorDraft[];
   reportContact?: string;
 }
 
@@ -718,7 +834,9 @@ export interface MembersQuery {
 
 export type ModsChange =
   | { kind: "add"; did: Did; role: ModRole; title?: string }
-  | { kind: "remove"; did: Did; skipAdopt: boolean };
+  /** `skipAdopt` (default false): let the moderator's assertions lapse at once instead of
+   * adopting them first; clients offer it only after a confirmation. */
+  | { kind: "remove"; did: Did; skipAdopt?: boolean };
 
 // ---------------------------------------------------------------------------------------------
 // §3.3 Sync
@@ -727,7 +845,8 @@ export type ModsChange =
 export interface SyncOpts {
   budgetMs?: number;
   maxRequests?: number;
-  full: boolean;
+  /** Default false. */
+  full?: boolean;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -747,7 +866,8 @@ export interface ListPostsQuery {
 
 export interface ThreadOpts {
   sort: CommentSort;
-  unreadOnly: boolean;
+  /** Default false. */
+  unreadOnly?: boolean;
 }
 
 export interface SearchQuery {
@@ -758,8 +878,8 @@ export interface SearchQuery {
 }
 
 export interface NotificationsQuery {
-  /** `false`: unread only; `true`: everything. */
-  all: boolean;
+  /** `false` (the default): unread only; `true`: everything. */
+  all?: boolean;
   limit: number;
 }
 
@@ -788,7 +908,8 @@ export interface MediaInput {
 
 export interface BodyDraft {
   markdown: string;
-  media: MediaRef[];
+  /** Default none. */
+  media?: MediaRef[];
 }
 
 export interface ExternalLinkDraft {
@@ -803,8 +924,10 @@ export interface PostDraft {
   title?: string;
   body: BodyDraft;
   link?: ExternalLinkDraft;
-  tags: Slug[];
-  labels: string[];
+  /** Default none. */
+  tags?: Slug[];
+  /** Default none. */
+  labels?: string[];
 }
 
 export interface CommentDraft {
@@ -836,11 +959,11 @@ export interface WikiDraft {
   summary?: string;
 }
 
-/** A draft for `edit` and for the local draft store (derived; tagged by what is drafted). */
+/** A draft for `edit` and for the local draft store, tagged by what is drafted (sequence
+ * drafts arrive with sequences, M5). */
 export type Draft =
   | { kind: "post"; id?: string; post: PostDraft }
-  | { kind: "comment"; id?: string; comment: CommentDraft }
-  | { kind: "sequence"; id?: string; sequence: SequenceDraft };
+  | { kind: "comment"; id?: string; comment: CommentDraft };
 
 export interface EditOpts {
   history: boolean;
@@ -854,19 +977,24 @@ export type TagVoteValue = "up" | "down" | "strongUp" | "strongDown";
 export type OpinionIntent =
   | { kind: "karma"; value?: KarmaValue }
   | { kind: "agreement"; value?: AgreementValue }
-  | { kind: "react"; id: string; stance: Stance; quote?: TextQuote; remove: boolean }
+  | { kind: "react"; id: string; stance: Stance; quote?: TextQuote; remove?: boolean }
   | { kind: "tag"; slug: Slug; value?: TagVoteValue };
 
 /** Restrictable capabilities (data-model.md §6.7 `#restrict`). */
 export type Capability = "post" | "comment" | "vote" | "react" | "tag" | "wiki" | "sequence";
 
-/** A modAction `action` union member (data-model.md §6.7). */
+export type AccessLevel = "banned" | "member";
+
+export type PinScope = "forum" | "thread";
+
+/** A modAction `action` as a client asks for it (data-model.md §6.7): the complete desired state
+ * of its action key. Defaults: `spam` false, `showReason` true, `nullifyVotes` false. */
 export type ModActionValue =
-  | { kind: "hide"; hidden: boolean; spam: boolean; showReason: boolean }
-  | { kind: "access"; level: "banned" | "member" }
-  | { kind: "restrict"; capabilities: Capability[]; nullifyVotes: boolean }
+  | { kind: "hide"; hidden: boolean; spam?: boolean; showReason?: boolean }
+  | { kind: "access"; level: AccessLevel }
+  | { kind: "restrict"; capabilities: Capability[]; nullifyVotes?: boolean }
   | { kind: "tier"; tier: Tier; notice?: BodyDraft }
-  | { kind: "pin"; scope: "forum" | "thread"; pinned: boolean }
+  | { kind: "pin"; scope: PinScope; pinned: boolean }
   | { kind: "lock"; locked: boolean }
   | { kind: "tag"; removed: boolean; head?: AtUri };
 
@@ -910,6 +1038,22 @@ export type WriteState =
 export interface WriteTicket {
   id: string;
   state: WriteState;
+}
+
+export type NoticeCode = "notEstablished" | "retroactive" | "adoptedFirst";
+
+/** A notice to show with an action's result, e.g. "recorded; will count once you're
+ * established". */
+export interface ActionNotice {
+  code: NoticeCode;
+  message: string;
+}
+
+/** What `opinion`, `modAction` and `modsSet` resolve with: a `WriteTicket` plus notices. */
+export interface ActionTicket {
+  id: string;
+  state: WriteState;
+  notices?: ActionNotice[];
 }
 
 /** Arguments of `derive_rkey(...)` (derived from data-model.md §3.2). */
@@ -972,12 +1116,14 @@ export interface Settings {
   externalImagesForums: AtUri[];
   /** Hosts whose media may load automatically. */
   mediaAutoloadHosts: string[];
-  karmaNotifications: "realtime" | "daily" | "weekly";
+  karmaNotifications: KarmaCadence;
   /** Public-action interstitials already acknowledged (social.md §17). */
   acknowledgedPublicActions: PublicActionKind[];
 }
 
 export type SettingKey = keyof Settings;
+
+export type KarmaCadence = "realtime" | "daily" | "weekly";
 
 export type PublicActionKind = "vote" | "react" | "tagVote" | "join" | "modAction";
 

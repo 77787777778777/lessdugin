@@ -37,7 +37,8 @@ use crate::social::full::scores::Score;
 use crate::social::full::view::{ItemTime, Stage};
 use crate::social::full::visibility::Visibility;
 use crate::social::full::wiki::Wiki;
-use crate::social::input::SkelData;
+use crate::social::input::{ForumInput, Skel, SkelData};
+use crate::social::policy::EffectivePolicy;
 use crate::social::rank::{self, CommentKey, PostKey};
 use crate::social::threads::{Node, Placement};
 
@@ -86,9 +87,11 @@ fn comment_sort(s: CommentSort) -> dto::CommentSort {
     }
 }
 
-/// What the orderings read.
-struct Rank<'c, 'a> {
-    cx: &'c Cx<'a>,
+/// What the orderings read: the skeletons (items, kinds, authors, `now`), the policy and the
+/// cached layers.
+struct Rank<'c> {
+    skel: &'c ForumInput,
+    policy: &'c EffectivePolicy,
     l1: &'c Moderation,
     times: &'c BTreeMap<String, ItemTime>,
     threads: &'c BTreeMap<String, Placement>,
@@ -96,7 +99,12 @@ struct Rank<'c, 'a> {
     scores: &'c BTreeMap<String, Score>,
 }
 
-impl Rank<'_, '_> {
+impl Rank<'_> {
+    /// The candidate items (post, comment, wikiRevision, sequence), Excluded ones included.
+    fn items(&self) -> impl Iterator<Item = &Skel> {
+        self.skel.records.values().filter(|x| x.is_item())
+    }
+
     /// `t_rank(x)` of a non-Excluded item.
     fn t(&self, uri: &str) -> i64 {
         self.times.get(uri).map_or(0, |t| t.t_rank)
@@ -122,7 +130,7 @@ impl Rank<'_, '_> {
     /// `b(p)` (§12.2).
     fn b(&self, post: &str) -> i64 {
         let tier = self.l1.tier(post);
-        let p = &self.cx.policy;
+        let p = self.policy;
         let curated = if tier == Tier::Curated {
             p.curated_bonus
         } else {
@@ -140,8 +148,7 @@ impl Rank<'_, '_> {
 
     /// The listed posts, by uri.
     fn listed_posts(&self) -> impl Iterator<Item = &str> {
-        self.cx
-            .items()
+        self.items()
             .filter(|x| x.coll == Some(Collection::Post) && self.vis.listed(&x.uri))
             .map(|x| x.uri.as_str())
     }
@@ -164,8 +171,8 @@ impl Rank<'_, '_> {
                     .fold(self.t(p), i64::max),
             })
             .collect();
-        let now = self.cx.now();
-        let policy = &self.cx.policy;
+        let now = self.skel.now;
+        let policy = self.policy;
         let ordered = rank::order_posts(keys, post_sort(q.sort), now, policy);
         let hot_bits = if q.sort == PostSort::Magic {
             ordered
@@ -190,7 +197,7 @@ impl Rank<'_, '_> {
 
     /// The list filter (§12.3) and the tag, kind and author filters of `q`.
     fn passes(&self, post: &str, q: &PostQuery, wiki: Option<&Wiki>) -> bool {
-        let Some(x) = self.cx.skel(post) else {
+        let Some(x) = self.skel.records.get(post) else {
             return false;
         };
         let kind = match &x.data {
@@ -252,8 +259,8 @@ impl Rank<'_, '_> {
             latest: below.get(c).copied().unwrap_or(i64::MIN).max(self.t(c)),
         };
         let sort = comment_sort(q.sort);
-        let now = self.cx.now();
-        let policy = &self.cx.policy;
+        let now = self.skel.now;
+        let policy = self.policy;
         let sorted_children = |node: &Node| -> Vec<Node> {
             let kids = pl.children_of(node);
             let mut comments: Vec<CommentKey> = kids
@@ -333,10 +340,32 @@ pub fn orderings(
     wiki: &Stage<Wiki>,
     author: &Stage<AuthorTier>,
 ) -> Stage<Orderings> {
+    orderings_in(
+        &cx.skel, &cx.policy, query, l1, times, threads, visibility, scores, wiki, author,
+    )
+}
+
+/// [`orderings`] over the skeletons `skel` (items, kinds, authors, `now`) and the effective
+/// `policy` alone, so a cached fold can be re-ranked for another query without a [`Cx`]
+/// ([`crate::social::full::reorder`]).
+#[allow(clippy::too_many_arguments)]
+pub fn orderings_in(
+    skel: &ForumInput,
+    policy: &EffectivePolicy,
+    query: &Query,
+    l1: &Moderation,
+    times: &BTreeMap<String, ItemTime>,
+    threads: &BTreeMap<String, Placement>,
+    visibility: &Stage<Visibility>,
+    scores: &Stage<BTreeMap<String, Score>>,
+    wiki: &Stage<Wiki>,
+    author: &Stage<AuthorTier>,
+) -> Stage<Orderings> {
     let vis = visibility.as_ref().map_err(|p| *p)?;
     let scores = scores.as_ref().map_err(|p| *p)?;
     let r = Rank {
-        cx,
+        skel,
+        policy,
         l1,
         times,
         threads,

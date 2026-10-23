@@ -1164,6 +1164,7 @@ fn writes_are_never_sent_for_another_account() {
         results: Vec::new(),
         error: None,
         undo_of: None,
+        after: None,
     };
     block_on(w.host.state_kv().write(vec![KvOp::Put(
         model::write_key(did, 1),

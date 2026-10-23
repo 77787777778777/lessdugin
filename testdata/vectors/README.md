@@ -40,14 +40,14 @@ Each `*.json` file is one object:
 | `lfm1/` | `lfm/1` markdown (`docs/spec/lfm-1.md` §13) | `crates/markdown/tests/vectors.rs` |
 | `xss/` | HTML and MathML XSS / mXSS corpora (`lfm/1`, kind `render`) | same |
 | `terminal/` | terminal escape corpus and printer snapshots (kind `terminal`) | same |
-| `mathml/` | engine-specific MathML snapshots (kind `mathml`, math-core 0.9) | same |
+| `mathml/` | engine-specific MathML (kind `mathml`, math-core 0.9): normaliser snapshots (`math-core-0.9.json`), the ADR 0002 S10 corpus (`s10-corpus.json`) and probes (`s10-probes.json`), each with its output or math error; the runner also asserts no unknown engine style and `ammonia(html) == html` | same |
 
 ## `lfm/1` kinds
 
 | `kind` | `input` | `expected` fields |
 |---|---|---|
 | `render` | `text` (or `gen`), `media?` (`defs#media` JSON), `profile?`, `encoding_error?` | any `Rendered` field (`html`, `styled`, `text`, `excerpt`, `toc`, `word_count`, `read_minutes`, `links`, `mentions`, `media_used`, `anchors`, `flags`, `error`) and the derived fields below |
-| `terminal` | as `render`, plus `print: {color, hyperlinks, reveal_spoilers, width}` | as `render`, plus `printed` (the plain-stdout printer output) |
+| `terminal` | as `render`, plus `print: {color, hyperlinks, reveal_spoilers, width}` | as `render`, plus the derived `terminal` fields below (`printed`, `printed_bytes`, `printed_rle`) |
 | `safe_href` | `raw` (or `raw_gen`), `ctx`: `markdown` \| `field` | `href`: the `Href` as `{type, …}`, or `null` |
 | `quote` | `quote: {exact, prefix?, suffix?, start?}`, `target` (or `target_gen`; absent = pending body) | `result`, `qkey`, `first` |
 | `term_sanitize` | `text`, `ctx`: `prose` \| `code` \| `name`, `max?` | `out`: a string if every run is plain, else `[{"plain"\|"escaped": text}, …]` |
@@ -57,17 +57,30 @@ Each `*.json` file is one object:
 **Generated inputs.** Large inputs are given as `gen: {prefix, repeat, times, suffix}`, meaning
 `prefix + repeat × times + suffix` (also `raw_gen`, `target_gen`).
 
-**Derived `render` fields:**
+**Derived `render` fields** (computed by the runner from the `Rendered` of the input; a vector
+lists only the ones it asserts):
 
 - `html_temml`: the HTML in Temml mode (`lfm-1.md` §7.5), checked in the same run;
 - `text_x`: P_x (§10.3);
-- `html_head` / `html_tail`: the first / last 400 characters of `html` (for huge outputs);
+- `html_head` / `html_tail`: the first / last 400 characters (Unicode scalar values) of `html`
+  (for huge outputs);
 - `html_rle`: `html` split on `"\n"`, each run of N > 1 identical consecutive lines written once
-  as `"<line> ×N"` (U+00D7), for deep-nesting vectors.
+  as `"<line> ×N"` (U+00D7), for deep-nesting vectors;
+- `html_bytes`: the length of `html` in UTF-8 bytes (for amplification vectors, where only the
+  bound matters).
+
+**Derived `terminal` fields** (the `print` options select the printer: `color`, `hyperlinks`,
+`reveal_spoilers` default to `false`, `width` to no wrapping):
+
+- `printed`: the plain-stdout printer output (`printer::print_doc`, §9.4) for the vector's
+  `StyledDoc`;
+- `printed_bytes`: the length of `printed` in UTF-8 bytes;
+- `printed_rle`: `printed` split on `"\n"`, runs of identical lines written as in `html_rle`.
 
 **Invariants** checked over every `render` and `terminal` vector, whatever `expected` lists:
 the §8.2/§7.3 allowlist checker accepts `html` and `html_temml`; rendering twice is
-byte-identical; P and the excerpt contain no whitespace other than U+0020; no `StyledDoc`
+byte-identical; `derive_metadata` (§1.6) equals the `render` fields of the same name; P and the
+excerpt contain no whitespace other than U+0020 and no control or bidi character; no `StyledDoc`
 text contains C0, DEL, C1, U+2028/U+2029 or a bidi control; printer output contains no escape
 sequence other than the §9.4 SGR and OSC 8 forms (and none at all without color); with the
 `ammonia` feature, `ammonia(html) == html`.
@@ -76,14 +89,19 @@ sequence other than the §9.4 SGR and OSC 8 forms (and none at all without color
 
 ```sh
 cargo test -p lessdugin-markdown --test vectors                       # check
+cargo test -p lessdugin-markdown --features ammonia --test vectors    # also ammonia(html) == html
+cargo xtask test-wasm                                                 # the same runner on wasm32
 LESSDUGIN_BLESS=1 cargo test -p lessdugin-markdown --test vectors     # rewrite expected values
+LESSDUGIN_BLESS=1 LESSDUGIN_BLESS_ONLY=lfm1/footnotes.json,xss/html.json \
+  cargo test -p lessdugin-markdown --test vectors                     # rewrite only these files
 python3 -I testdata/vectors/lfm1/gen_inputs.py                        # (re)generate lfm/1 inputs
+python3 -I testdata/vectors/mathml/gen_mathml.py                      # (re)generate mathml inputs
 ```
 
 Bless mode rewrites every expected field with the current output (and normalises the file
-formatting); review the diff before committing. `gen_inputs.py` keeps the expected values of
-vectors whose input did not change, so adding vectors is: edit the generator, run it, bless,
-review.
+formatting); review the diff before committing. `gen_inputs.py` and `gen_mathml.py` keep the
+expected values of vectors whose input did not change, so adding vectors is: edit the
+generator, run it, bless, review.
 
 ## Social fold vectors (`mod/1`, `karma/1`, `magic/1`, `default/1`)
 
@@ -102,11 +120,11 @@ model, then regenerate. Run Python with `-B` so that no `__pycache__` lands in t
 
 | File | Behaviour | `kind` | Covers |
 |---|---|---|---|
-| `time/time.json` | `magic/1` | `time` | §2.2–§2.3 `t_rank`, future clamp, lower bounds, flags |
+| `time/time.json` | `magic/1` | `time` | §2.2–§2.3 `t_rank`, future clamp, lower bounds, flags; §11 the edited badge |
 | `time/conversions.json` | `magic/1` | `conversion` | §2.1 µs(datetime), tidTime |
 | `modfold/forum.json` | `mod/1` | `modfold` | §4.1–§4.8, §4.10–§4.12, forum tier |
 | `modfold/participation.json` | `mod/1` | `modfold` | §3 participation and seeds, FO2 |
-| `thread/thread.json`, `thread/depth.json` | `mod/1` | `thread` | §11 placement, steps 1–4 (shared directory: cross-checked, never written; see below) |
+| `thread/thread.json`, `thread/depth.json` | `mod/1` | `thread` | §11 placement, steps 1–4, and step 6 versions (the depth cap in a file of its own, because its input is large) |
 | `fold/digest.json` | `mod/1,karma/1,magic/1,default/1` | `digest` | §1.2 `inputDigest` |
 | `modfold/author.json` | `mod/1` | `modfold` | §4.9 author tier (L5) |
 | `visibility/visibility.json` | `mod/1` | `visibility` | §10.1 V1–V10, §10.2 thread pass |
@@ -116,12 +134,13 @@ model, then regenerate. Run Python with `-B` so that no `__pycache__` lands in t
 | `karma/scores.json` | `karma/1` | `karma` | §7 score, agreement, unweighted, earlier versions |
 | `karma/gates.json` | `karma/1` | `karma` | §8 gate values and passes(u, g) |
 | `reacts/reacts.json` | `karma/1` (palette `default/1`) | `reacts` | §9.2 aggregation, qkey (`lfm-1.md` §11) (the §19 reacts cases) |
-| `karma/tags.json` | `karma/1` | `tags` | §13 wiki heads, candidates, flags, relevance and application (the §19 tags cases; §19 names a `tags/` directory, see `social-ref/NOTES.md` 53) |
+| `karma/tags.json` | `karma/1` | `tags` | §13 wiki heads, candidates, flags, relevance and application (the §19 tags cases; they live under `karma/` because §13 belongs to `karma/1`, `social.md` §20.1 item 44) |
+| `karma/tags-large.json` | `karma/1` | `tags` | §13 cases with about 1,000 records each: the 1,000-revision page cap at 1,000 and 1,001 revisions, own-tag weight at KP 1,000 |
 
-**`thread/` is shared** with the Rust engine agent, so the generator never writes it. Every run
-(and `--check`) folds every vector of every `thread/*.json` file with the model and compares
-each listed `expected` field; a disagreement fails the run. The model's own thread cases are
-written only with `--emit-shared DIR`.
+**`thread/`** was shared with the Rust engine agent until M3: the generator only cross-checked
+it. Its files were always identical to the model's own cases, and the generator now owns the
+directory like the others. The cross-check (`SHARED_DIRS` in `gen_social.py`) remains for a
+directory another producer may share; there is none at present.
 
 ### File and vector shape
 
@@ -156,8 +175,11 @@ A fold vector's `input` is `{fold: FoldInput, query?: Query}`. `FoldInput` mirro
 - A DID missing from `repoStatus` is Unavailable.
 - `algorithmIds` is optional. When present, it equals the effective IDs derived from `decl`.
 - Every record is valid per `data-model.md` §7 unless the vector's `note` says otherwise.
-- Every CID is the record's genuine CIDv1 (dag-cbor, sha256), although the fold treats CIDs as
-  opaque.
+- Every record's `cid` (and `decl.cid`) is its genuine CIDv1 (dag-cbor, sha256) in canonical
+  form (multibase `b`, base32 lowercase). A few vectors write a CID inside a record
+  (`subjectCid`, `subject.cid`, `root.cid`, `parent.cid`, `head.cid`, `parents[].cid`) in
+  another spelling (multibase `B` or `z`) or as a string that is no CIDv1; the fold compares
+  such CIDs by canonical form (`social.md` §0.4, §20.1 item 45), and the note says so.
 
 `Query` members, each used only by the fields that need it:
 - `thread`: a post uri.
@@ -206,6 +228,7 @@ A fold vector's `input` is `{fold: FoldInput, query?: Query}`. `FoldInput` mirro
 |---|---|
 | `tDecl` | µs |
 | `times` | `{uri: {tRank, futureDated, inconsistentTimestamps}}` for every candidate item (post, comment, wikiRevision, sequence) not Excluded by V1 |
+| `edited` | sorted uris of the candidate items not Excluded by V1 that get the `[edited]` badge (§11 "Edited", §20.1 item 46): a valid `op: update` revision names the item, or µs(updatedAt) is later than µs(createdAt). A `createdAt` without µs (before 1970) counts as earlier than any `updatedAt` that has one; an `updatedAt` without µs never makes an item edited |
 
 **`conversion`.** The input is `{fn: "us", datetime}` or `{fn: "tidTime", tid}`. Expected is
 `{us}`, which is µs or `null`. A datetime has at most 64 characters and 1 to 20 fraction
@@ -287,6 +310,7 @@ Open-mode newcomer items are not projected; they follow from the visibility stat
 | `depth` | `{comment or placeholder uri: depth}`; root children have depth 1 |
 | `orphaned` | sorted comment uris re-attached by the cycle cut or the depth cap |
 | `maxDepth` | int (0 without comments) |
+| `versions` | `{comment uri: {root?: n \| "unavailable", parent?: n \| "unavailable"}}` (§11 step 6, §20.1 items 45–46) for every comment in `records` not Excluded by V1 (whatever its thread; it does not depend on the query) with a reference whose CID names another version than the target's current one. The target is the root post (`root`) or the parent comment (`parent`), and must be in `records` and not Excluded by V1; otherwise the reference is not listed. Versions 1 … k are the snapshots `Ri.subject.cid` of the target's valid `op: update` revisions in (TID of the rkey, uri) order; n is the greatest i whose CID equals the referenced one, compared by canonical form; none → `"unavailable"`. A reference naming the current version (in any spelling) is not listed. No vector names a parent comment under another root (`social-ref/NOTES.md` 63) |
 
 **`digest` fields**
 
@@ -380,14 +404,14 @@ revision by a non-participant is on no page.
 
 ### Floats
 
-`hot()` (§12.1) is the only float in the fold. Rust computes it with `libm::pow`, and Python's
-`math.pow` may differ in the last bit. Rank files therefore carry
-`"hotBitsSource": "python-math.pow"`:
+`hot()` (§12.1) is the only float in the fold. Rust computes it with the `libm` crate's `pow`
+(pinned to `=0.2.16`), the model with Python's `math.pow`. Rank files carry
+`"hotBitsSource": "rust-libm-0.2.16"`:
 - `hotBits` values are binary64 bit patterns written as 16 lowercase hex digits.
-- Until the Rust side blesses exact bits (and changes `hotBitsSource`), the Rust runner accepts
-  a `hotBits` value within 1 ulp, comparing the bit patterns as integers of the same sign. The
-  values are in fact exact for any pow with an error below 0.9 ulp (next point), so a runner
-  MAY compare them exactly already.
+- Every `hotBits` value equals hot() computed with libm 0.2.16's `pow` (checked at M3 for all 19
+  values of `rank/rank.json` by a scratch program that calls the crate directly, outside the
+  repository), so runners compare the bits exactly. A change of the `libm` version needs the
+  same check before `hotBitsSource` names it.
 - Orderings (`postOrder`) are always compared exactly.
 - Ordering vectors use inputs whose hot values are exactly representable or far from rounding
   boundaries.

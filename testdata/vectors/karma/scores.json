@@ -2637,6 +2637,135 @@
       },
       "name": "scores-have-no-pair-cap",
       "note": "pairCap 2: mona upvotes three of pat's posts. Each post's score counts mona's vote (no pair cap in scores) while K[pat] is clamped to 2, so here K \u2260 \u03a3 (score \u2212 self) = 3"
+    },
+    {
+      "expected": {
+        "scores": {
+          "at://did:plc:alice2222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd36vbls223": {
+            "agreement": 0,
+            "earlier": 1,
+            "score": 3,
+            "unweighted": 0,
+            "weighted": 2
+          }
+        }
+      },
+      "input": {
+        "fold": {
+          "absent": [],
+          "decl": {
+            "cid": "bafyreibhij4ouyjrniqsdeuyf6dei5ifb3fj7epn2mvncmhee7joqigxha",
+            "uri": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+            "value": {
+              "$type": "online.7778777.lessdugin.forum",
+              "createdAt": "2026-01-01T00:00:00.000Z",
+              "membership": "open",
+              "moderators": [
+                {
+                  "did": "did:plc:adam22222222222222222222",
+                  "role": "admin"
+                },
+                {
+                  "did": "did:plc:mona22222222222222222222",
+                  "role": "moderator"
+                },
+                {
+                  "did": "did:plc:mike22222222222222222222",
+                  "role": "moderator"
+                }
+              ],
+              "name": "Test forum"
+            }
+          },
+          "now": 1769817600000000,
+          "obs": [
+            {
+              "cid": "bafyreihvavbxki6bgt6nvohjhbjzlxwvgff4juciv4rzh3cow5ygpy4gxe",
+              "uri": "at://did:plc:alice2222222222222222222/online.7778777.lessdugin.membership/rwsqt7ry6buy",
+              "us": 1767225600000000
+            },
+            {
+              "cid": "bafyreifgzqramvx6kf2fvlovhlrhndk6hq6z2ydgejymde6rbvpk46ckyy",
+              "uri": "at://did:plc:alice2222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd36vbls223",
+              "us": 1767225720000000
+            },
+            {
+              "cid": "bafyreie2zna46m6zzasibvyy422uiqd7maz5qckcg5gjx4jfgezmuketh4",
+              "uri": "at://did:plc:mona22222222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd36vbls223-rfohvfa5goeong3a",
+              "us": 1767225600000000
+            },
+            {
+              "cid": "bafyreibhij4ouyjrniqsdeuyf6dei5ifb3fj7epn2mvncmhee7joqigxha",
+              "uri": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+              "us": 1767225600000000
+            },
+            {
+              "cid": "bafyreihcupsfbk7yulxlm5q236lhrrm7chm2qtliposqevdljsto24g3ri",
+              "uri": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd36vbls223-rfohvfa5goeong3a",
+              "us": 1767225600000000
+            }
+          ],
+          "records": [
+            {
+              "cid": "bafyreihvavbxki6bgt6nvohjhbjzlxwvgff4juciv4rzh3cow5ygpy4gxe",
+              "uri": "at://did:plc:alice2222222222222222222/online.7778777.lessdugin.membership/rwsqt7ry6buy",
+              "value": {
+                "$type": "online.7778777.lessdugin.membership",
+                "createdAt": "2026-01-01T00:00:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test"
+              }
+            },
+            {
+              "cid": "bafyreifgzqramvx6kf2fvlovhlrhndk6hq6z2ydgejymde6rbvpk46ckyy",
+              "uri": "at://did:plc:alice2222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd36vbls223",
+              "value": {
+                "$type": "online.7778777.lessdugin.post",
+                "createdAt": "2026-01-01T00:01:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "title": "Second title",
+                "updatedAt": "2026-01-01T00:02:00.000Z"
+              }
+            },
+            {
+              "cid": "bafyreie2zna46m6zzasibvyy422uiqd7maz5qckcg5gjx4jfgezmuketh4",
+              "uri": "at://did:plc:mona22222222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd36vbls223-rfohvfa5goeong3a",
+              "value": {
+                "$type": "online.7778777.lessdugin.opinion",
+                "createdAt": "2026-01-01T00:00:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "karma": "up",
+                "subject": {
+                  "cid": "BAFYREIBY3EFCPBHJPDPTHEF5WEVW2JXQ2HSFMHYDYFTVXS4TLVLZ3B6NUI",
+                  "uri": "at://did:plc:alice2222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd36vbls223"
+                }
+              }
+            },
+            {
+              "cid": "bafyreihcupsfbk7yulxlm5q236lhrrm7chm2qtliposqevdljsto24g3ri",
+              "uri": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd36vbls223-rfohvfa5goeong3a",
+              "value": {
+                "$type": "online.7778777.lessdugin.opinion",
+                "createdAt": "2026-01-01T00:00:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "karma": "up",
+                "subject": {
+                  "cid": "BAFYREIFGZQRAMVX6KF2FVLOVHLRHNDK6HQ6Z2YDGEJYMDE6RBVPK46CKYY",
+                  "uri": "at://did:plc:alice2222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd36vbls223"
+                }
+              }
+            }
+          ],
+          "repoStatus": {
+            "did:plc:adam22222222222222222222": "fresh",
+            "did:plc:alice2222222222222222222": "fresh",
+            "did:plc:mike22222222222222222222": "fresh",
+            "did:plc:mona22222222222222222222": "fresh",
+            "did:plc:owner2222222222222222222": "fresh"
+          }
+        }
+      },
+      "name": "earlier-ignores-cid-spelling",
+      "note": "alice edited her post. The owner's up cites the current version with its CID in base32 upper case (multibase B), mona's cites the first version, also in upper case. CIDs written in records compare by canonical form (\u00a70.4, \u00a720.1 item 45): only mona's vote was cast on an earlier version (1 of 2). The two seed votes also establish alice, so her self(i) is 1 and the score 3"
     }
   ]
 }

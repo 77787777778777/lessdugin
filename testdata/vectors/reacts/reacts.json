@@ -10095,6 +10095,1401 @@
       },
       "name": "gates-are-retroactive",
       "note": "alice's karma came from 10 boosters, but the owner nullified one of them: that vote no longer counts (O4), so K[alice] = 9 < reactCreate and her react disappears (\u00a78: gates use the current K). mona's `seen` is a control"
+    },
+    {
+      "expected": {
+        "reacts": {
+          "at://did:plc:tess22222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3aoink223": [
+            {
+              "creator": "did:plc:wes222222222222222222222",
+              "opposers": [],
+              "qkey": "",
+              "react": "insightful",
+              "supporters": [
+                "did:plc:abe222222222222222222222",
+                "did:plc:wes222222222222222222222"
+              ]
+            }
+          ]
+        }
+      },
+      "input": {
+        "fold": {
+          "absent": [],
+          "decl": {
+            "cid": "bafyreif22nwdfjaogj5hadfv6vtnc4kq45zmkltrqi7u743a2yn75qcimm",
+            "uri": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+            "value": {
+              "$type": "online.7778777.lessdugin.forum",
+              "createdAt": "2026-01-01T00:00:00.000Z",
+              "membership": "approval",
+              "name": "Test forum",
+              "policy": {
+                "gates": {
+                  "reactCreate": 0,
+                  "reactSecond": 0
+                }
+              }
+            }
+          },
+          "now": 1769817600000000,
+          "obs": [
+            {
+              "cid": "bafyreihvavbxki6bgt6nvohjhbjzlxwvgff4juciv4rzh3cow5ygpy4gxe",
+              "uri": "at://did:plc:abe222222222222222222222/online.7778777.lessdugin.membership/rwsqt7ry6buy",
+              "us": 1767225600000000
+            },
+            {
+              "cid": "bafyreiboqutca7nbtjbkzq6446euesl3y5vnwkt72p4klfqq67augwypi4",
+              "uri": "at://did:plc:abe222222222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3aoink223-vi2to7h5gl5y2zql",
+              "us": 1767226800000000
+            },
+            {
+              "cid": "bafyreicjclvwaqq4mqu6lzswo2yv4lf7wcn5hvkcvwqii3hv6v5q6s6uou",
+              "uri": "at://did:plc:abe222222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3hteuk227",
+              "us": 1767225960000000
+            },
+            {
+              "cid": "bafyreihvavbxki6bgt6nvohjhbjzlxwvgff4juciv4rzh3cow5ygpy4gxe",
+              "uri": "at://did:plc:boostera2222222222222222/online.7778777.lessdugin.membership/rwsqt7ry6buy",
+              "us": 1767225600000000
+            },
+            {
+              "cid": "bafyreicrbthw66ql4lzkq34fjdht6r6pp3otrhqpdz37733ldhyqjzjvom",
+              "uri": "at://did:plc:boostera2222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3aoink223-vi2to7h5gl5y2zql",
+              "us": 1767226200000000
+            },
+            {
+              "cid": "bafyreienslcvq7azthkobho5ln3ko6rnvbpdi5a5ituezz2vnkkd33k7ym",
+              "uri": "at://did:plc:boostera2222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3chppc224-3wdfhf4depsnj7cl",
+              "us": 1767226200000000
+            },
+            {
+              "cid": "bafyreiahkz6sb2kabtqewpzmbtpnaxsya6c3lt4fhdcw6hh7mhrsjdthkq",
+              "uri": "at://did:plc:boostera2222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3eawr2225-dlg4tf42ohyitdvq",
+              "us": 1767226200000000
+            },
+            {
+              "cid": "bafyreihvavbxki6bgt6nvohjhbjzlxwvgff4juciv4rzh3cow5ygpy4gxe",
+              "uri": "at://did:plc:boosterb2222222222222222/online.7778777.lessdugin.membership/rwsqt7ry6buy",
+              "us": 1767225600000000
+            },
+            {
+              "cid": "bafyreicrbthw66ql4lzkq34fjdht6r6pp3otrhqpdz37733ldhyqjzjvom",
+              "uri": "at://did:plc:boosterb2222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3aoink223-vi2to7h5gl5y2zql",
+              "us": 1767226200000000
+            },
+            {
+              "cid": "bafyreienslcvq7azthkobho5ln3ko6rnvbpdi5a5ituezz2vnkkd33k7ym",
+              "uri": "at://did:plc:boosterb2222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3chppc224-3wdfhf4depsnj7cl",
+              "us": 1767226200000000
+            },
+            {
+              "cid": "bafyreiahkz6sb2kabtqewpzmbtpnaxsya6c3lt4fhdcw6hh7mhrsjdthkq",
+              "uri": "at://did:plc:boosterb2222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3eawr2225-dlg4tf42ohyitdvq",
+              "us": 1767226200000000
+            },
+            {
+              "cid": "bafyreihvavbxki6bgt6nvohjhbjzlxwvgff4juciv4rzh3cow5ygpy4gxe",
+              "uri": "at://did:plc:boosterc2222222222222222/online.7778777.lessdugin.membership/rwsqt7ry6buy",
+              "us": 1767225600000000
+            },
+            {
+              "cid": "bafyreicrbthw66ql4lzkq34fjdht6r6pp3otrhqpdz37733ldhyqjzjvom",
+              "uri": "at://did:plc:boosterc2222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3aoink223-vi2to7h5gl5y2zql",
+              "us": 1767226200000000
+            },
+            {
+              "cid": "bafyreienslcvq7azthkobho5ln3ko6rnvbpdi5a5ituezz2vnkkd33k7ym",
+              "uri": "at://did:plc:boosterc2222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3chppc224-3wdfhf4depsnj7cl",
+              "us": 1767226200000000
+            },
+            {
+              "cid": "bafyreiahkz6sb2kabtqewpzmbtpnaxsya6c3lt4fhdcw6hh7mhrsjdthkq",
+              "uri": "at://did:plc:boosterc2222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3eawr2225-dlg4tf42ohyitdvq",
+              "us": 1767226200000000
+            },
+            {
+              "cid": "bafyreihvavbxki6bgt6nvohjhbjzlxwvgff4juciv4rzh3cow5ygpy4gxe",
+              "uri": "at://did:plc:boosterd2222222222222222/online.7778777.lessdugin.membership/rwsqt7ry6buy",
+              "us": 1767225600000000
+            },
+            {
+              "cid": "bafyreicrbthw66ql4lzkq34fjdht6r6pp3otrhqpdz37733ldhyqjzjvom",
+              "uri": "at://did:plc:boosterd2222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3aoink223-vi2to7h5gl5y2zql",
+              "us": 1767226200000000
+            },
+            {
+              "cid": "bafyreienslcvq7azthkobho5ln3ko6rnvbpdi5a5ituezz2vnkkd33k7ym",
+              "uri": "at://did:plc:boosterd2222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3chppc224-3wdfhf4depsnj7cl",
+              "us": 1767226200000000
+            },
+            {
+              "cid": "bafyreiahkz6sb2kabtqewpzmbtpnaxsya6c3lt4fhdcw6hh7mhrsjdthkq",
+              "uri": "at://did:plc:boosterd2222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3eawr2225-dlg4tf42ohyitdvq",
+              "us": 1767226200000000
+            },
+            {
+              "cid": "bafyreihvavbxki6bgt6nvohjhbjzlxwvgff4juciv4rzh3cow5ygpy4gxe",
+              "uri": "at://did:plc:boostere2222222222222222/online.7778777.lessdugin.membership/rwsqt7ry6buy",
+              "us": 1767225600000000
+            },
+            {
+              "cid": "bafyreicrbthw66ql4lzkq34fjdht6r6pp3otrhqpdz37733ldhyqjzjvom",
+              "uri": "at://did:plc:boostere2222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3aoink223-vi2to7h5gl5y2zql",
+              "us": 1767226200000000
+            },
+            {
+              "cid": "bafyreienslcvq7azthkobho5ln3ko6rnvbpdi5a5ituezz2vnkkd33k7ym",
+              "uri": "at://did:plc:boostere2222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3chppc224-3wdfhf4depsnj7cl",
+              "us": 1767226200000000
+            },
+            {
+              "cid": "bafyreiahkz6sb2kabtqewpzmbtpnaxsya6c3lt4fhdcw6hh7mhrsjdthkq",
+              "uri": "at://did:plc:boostere2222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3eawr2225-dlg4tf42ohyitdvq",
+              "us": 1767226200000000
+            },
+            {
+              "cid": "bafyreihvavbxki6bgt6nvohjhbjzlxwvgff4juciv4rzh3cow5ygpy4gxe",
+              "uri": "at://did:plc:boosterf2222222222222222/online.7778777.lessdugin.membership/rwsqt7ry6buy",
+              "us": 1767225600000000
+            },
+            {
+              "cid": "bafyreicrbthw66ql4lzkq34fjdht6r6pp3otrhqpdz37733ldhyqjzjvom",
+              "uri": "at://did:plc:boosterf2222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3aoink223-vi2to7h5gl5y2zql",
+              "us": 1767226200000000
+            },
+            {
+              "cid": "bafyreienslcvq7azthkobho5ln3ko6rnvbpdi5a5ituezz2vnkkd33k7ym",
+              "uri": "at://did:plc:boosterf2222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3chppc224-3wdfhf4depsnj7cl",
+              "us": 1767226200000000
+            },
+            {
+              "cid": "bafyreiahkz6sb2kabtqewpzmbtpnaxsya6c3lt4fhdcw6hh7mhrsjdthkq",
+              "uri": "at://did:plc:boosterf2222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3eawr2225-dlg4tf42ohyitdvq",
+              "us": 1767226200000000
+            },
+            {
+              "cid": "bafyreihvavbxki6bgt6nvohjhbjzlxwvgff4juciv4rzh3cow5ygpy4gxe",
+              "uri": "at://did:plc:boosterg2222222222222222/online.7778777.lessdugin.membership/rwsqt7ry6buy",
+              "us": 1767225600000000
+            },
+            {
+              "cid": "bafyreicrbthw66ql4lzkq34fjdht6r6pp3otrhqpdz37733ldhyqjzjvom",
+              "uri": "at://did:plc:boosterg2222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3aoink223-vi2to7h5gl5y2zql",
+              "us": 1767226200000000
+            },
+            {
+              "cid": "bafyreienslcvq7azthkobho5ln3ko6rnvbpdi5a5ituezz2vnkkd33k7ym",
+              "uri": "at://did:plc:boosterg2222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3chppc224-3wdfhf4depsnj7cl",
+              "us": 1767226200000000
+            },
+            {
+              "cid": "bafyreiahkz6sb2kabtqewpzmbtpnaxsya6c3lt4fhdcw6hh7mhrsjdthkq",
+              "uri": "at://did:plc:boosterg2222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3eawr2225-dlg4tf42ohyitdvq",
+              "us": 1767226200000000
+            },
+            {
+              "cid": "bafyreihvavbxki6bgt6nvohjhbjzlxwvgff4juciv4rzh3cow5ygpy4gxe",
+              "uri": "at://did:plc:boosterh2222222222222222/online.7778777.lessdugin.membership/rwsqt7ry6buy",
+              "us": 1767225600000000
+            },
+            {
+              "cid": "bafyreicrbthw66ql4lzkq34fjdht6r6pp3otrhqpdz37733ldhyqjzjvom",
+              "uri": "at://did:plc:boosterh2222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3aoink223-vi2to7h5gl5y2zql",
+              "us": 1767226200000000
+            },
+            {
+              "cid": "bafyreienslcvq7azthkobho5ln3ko6rnvbpdi5a5ituezz2vnkkd33k7ym",
+              "uri": "at://did:plc:boosterh2222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3chppc224-3wdfhf4depsnj7cl",
+              "us": 1767226200000000
+            },
+            {
+              "cid": "bafyreiahkz6sb2kabtqewpzmbtpnaxsya6c3lt4fhdcw6hh7mhrsjdthkq",
+              "uri": "at://did:plc:boosterh2222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3eawr2225-dlg4tf42ohyitdvq",
+              "us": 1767226200000000
+            },
+            {
+              "cid": "bafyreihvavbxki6bgt6nvohjhbjzlxwvgff4juciv4rzh3cow5ygpy4gxe",
+              "uri": "at://did:plc:boosteri2222222222222222/online.7778777.lessdugin.membership/rwsqt7ry6buy",
+              "us": 1767225600000000
+            },
+            {
+              "cid": "bafyreicrbthw66ql4lzkq34fjdht6r6pp3otrhqpdz37733ldhyqjzjvom",
+              "uri": "at://did:plc:boosteri2222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3aoink223-vi2to7h5gl5y2zql",
+              "us": 1767226200000000
+            },
+            {
+              "cid": "bafyreienslcvq7azthkobho5ln3ko6rnvbpdi5a5ituezz2vnkkd33k7ym",
+              "uri": "at://did:plc:boosteri2222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3chppc224-3wdfhf4depsnj7cl",
+              "us": 1767226200000000
+            },
+            {
+              "cid": "bafyreihvavbxki6bgt6nvohjhbjzlxwvgff4juciv4rzh3cow5ygpy4gxe",
+              "uri": "at://did:plc:boosterj2222222222222222/online.7778777.lessdugin.membership/rwsqt7ry6buy",
+              "us": 1767225600000000
+            },
+            {
+              "cid": "bafyreicrbthw66ql4lzkq34fjdht6r6pp3otrhqpdz37733ldhyqjzjvom",
+              "uri": "at://did:plc:boosterj2222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3aoink223-vi2to7h5gl5y2zql",
+              "us": 1767226200000000
+            },
+            {
+              "cid": "bafyreienslcvq7azthkobho5ln3ko6rnvbpdi5a5ituezz2vnkkd33k7ym",
+              "uri": "at://did:plc:boosterj2222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3chppc224-3wdfhf4depsnj7cl",
+              "us": 1767226200000000
+            },
+            {
+              "cid": "bafyreihvavbxki6bgt6nvohjhbjzlxwvgff4juciv4rzh3cow5ygpy4gxe",
+              "uri": "at://did:plc:boosterk2222222222222222/online.7778777.lessdugin.membership/rwsqt7ry6buy",
+              "us": 1767225600000000
+            },
+            {
+              "cid": "bafyreienslcvq7azthkobho5ln3ko6rnvbpdi5a5ituezz2vnkkd33k7ym",
+              "uri": "at://did:plc:boosterk2222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3chppc224-3wdfhf4depsnj7cl",
+              "us": 1767226200000000
+            },
+            {
+              "cid": "bafyreihvavbxki6bgt6nvohjhbjzlxwvgff4juciv4rzh3cow5ygpy4gxe",
+              "uri": "at://did:plc:boosterl2222222222222222/online.7778777.lessdugin.membership/rwsqt7ry6buy",
+              "us": 1767225600000000
+            },
+            {
+              "cid": "bafyreiaksbzv6sken6f3mcyi2d3n2mczqazakmdsqc6qwabzmkwb7pxmbi",
+              "uri": "at://did:plc:boosterl2222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3n6zzs22a",
+              "us": 1767226140000000
+            },
+            {
+              "cid": "bafyreif22nwdfjaogj5hadfv6vtnc4kq45zmkltrqi7u743a2yn75qcimm",
+              "uri": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+              "us": 1767225600000000
+            },
+            {
+              "cid": "bafyreigg5a3wdh2pzoxeprgf3k757kkmrh7xhun2z6svsd3h2dtwajosj4",
+              "uri": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.modAction/rwsqt7ry6buy-2awdqivknzdx4xzt",
+              "us": 1767225660000000
+            },
+            {
+              "cid": "bafyreictrsjw36bpb44bj4kvpc6xjbfpnbblfym4bz442s43st2hhmyita",
+              "uri": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.modAction/rwsqt7ry6buy-3mccpnztjum5hnbq",
+              "us": 1767225660000000
+            },
+            {
+              "cid": "bafyreifyikdc3qkevlpwiwuqxrancy675h4a3azcj3kzq7mbvayp7bql6a",
+              "uri": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.modAction/rwsqt7ry6buy-4cp66p7tse6f3inh",
+              "us": 1767225660000000
+            },
+            {
+              "cid": "bafyreidmulo42kuhriwnyj6vvilrujs4h3tlec2w5xb3767mc6hqlmxbgi",
+              "uri": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.modAction/rwsqt7ry6buy-4e24a3hzyui6yshz",
+              "us": 1767225660000000
+            },
+            {
+              "cid": "bafyreif7rsu7upfetcvu6jdy6gxpkghem45qlulmnzwuvcdvojcutehlny",
+              "uri": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.modAction/rwsqt7ry6buy-7ctktg3ymoobkx5z",
+              "us": 1767225660000000
+            },
+            {
+              "cid": "bafyreicqyv34faeybgnpbepz6oi3u6vmi236j67dht5wkjhgm5pnxwe22i",
+              "uri": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.modAction/rwsqt7ry6buy-bzbdvdnu7scpalvg",
+              "us": 1767225660000000
+            },
+            {
+              "cid": "bafyreicbbm66i4yevebtqykzjjcml5umpj4tmtmgbjt7md4spwflklsrba",
+              "uri": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.modAction/rwsqt7ry6buy-fbawfmvmt44aeclu",
+              "us": 1767225660000000
+            },
+            {
+              "cid": "bafyreicangqwbr2h5hky4nheabiz5yanrycrx3zairowy4qm4jewduvmdm",
+              "uri": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.modAction/rwsqt7ry6buy-jv24ynrlfullvizn",
+              "us": 1767225660000000
+            },
+            {
+              "cid": "bafyreiai2v5tp534ceggbli5ujxg32zchnoz7mjqvwxepn4fksa5gndc7m",
+              "uri": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.modAction/rwsqt7ry6buy-srcjowfutdiu5fif",
+              "us": 1767225660000000
+            },
+            {
+              "cid": "bafyreieedmmib2iherk2gtpgdhhwksp7qwwtfcwnm6eeq45l3vy24nu5gq",
+              "uri": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.modAction/rwsqt7ry6buy-sroyw6jxlp2bgx7g",
+              "us": 1767225660000000
+            },
+            {
+              "cid": "bafyreibw5v7xdbrvgcji2u4pj7c4mxwcadsz7tp67fdt272ujjzdlwsyqy",
+              "uri": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.modAction/rwsqt7ry6buy-tekorzktyarnj4ns",
+              "us": 1767225660000000
+            },
+            {
+              "cid": "bafyreiaetx66n44gliqo4zxupovsbpuukmyv4xsd7fxnzjpxuiwikunta4",
+              "uri": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.modAction/rwsqt7ry6buy-tiemw5bsrbxgkoel",
+              "us": 1767225660000000
+            },
+            {
+              "cid": "bafyreiamvdpvxxcwfxsngi6cudb2uctxlxelvkptk5ycb3m4leplvfayl4",
+              "uri": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.modAction/rwsqt7ry6buy-ua7rornegsg2v2sp",
+              "us": 1767225660000000
+            },
+            {
+              "cid": "bafyreidgccewj2z54rap2xmhxvr6qr4virnsghbbd2ifkuyravjqzyz3yi",
+              "uri": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.modAction/rwsqt7ry6buy-vgsgvq76t47akthx",
+              "us": 1767225660000000
+            },
+            {
+              "cid": "bafyreibxuf37sanh6gef4tbfitwkb7fyi47hhn2ebqpoyrudao5si75utm",
+              "uri": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.modAction/rwsqt7ry6buy-xiygsl552vaxj2ov",
+              "us": 1767225660000000
+            },
+            {
+              "cid": "bafyreicoyngmlpucya3ggj46dbuow4cqu5tgrmbbi4kaal223q3quoz6ca",
+              "uri": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.modAction/rwsqt7ry6buy-xx7qvr3eeswnv2fh",
+              "us": 1767225660000000
+            },
+            {
+              "cid": "bafyreih5dnddynjawfkefwpohy5rlztswdkbfamdtzlicxqbgxp4eghmve",
+              "uri": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.modAction/rwsqt7ry6buy-y4ehqovzto3cmkji",
+              "us": 1767225660000000
+            },
+            {
+              "cid": "bafyreihvavbxki6bgt6nvohjhbjzlxwvgff4juciv4rzh3cow5ygpy4gxe",
+              "uri": "at://did:plc:sid222222222222222222222/online.7778777.lessdugin.membership/rwsqt7ry6buy",
+              "us": 1767225600000000
+            },
+            {
+              "cid": "bafyreigo5qbsucq5roxyhihvcg4jwhvlfl2tlsvagykqrwfq2mwhdxcaiy",
+              "uri": "at://did:plc:sid222222222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3eawr2225-dlg4tf42ohyitdvq",
+              "us": 1767226200000000
+            },
+            {
+              "cid": "bafyreicowegkjlv7aatv5k7xmcsdz4bfnwhckehfcrac2ntgufyy6jdati",
+              "uri": "at://did:plc:sid222222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3chppc224",
+              "us": 1767225780000000
+            },
+            {
+              "cid": "bafyreihvavbxki6bgt6nvohjhbjzlxwvgff4juciv4rzh3cow5ygpy4gxe",
+              "uri": "at://did:plc:tess22222222222222222222/online.7778777.lessdugin.membership/rwsqt7ry6buy",
+              "us": 1767225600000000
+            },
+            {
+              "cid": "bafyreih4saq4qxfzmo2bavzx7u3o2jaqvs5gfaibigzbbqvqhgyzj7vpfe",
+              "uri": "at://did:plc:tess22222222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3chppc224-3wdfhf4depsnj7cl",
+              "us": 1767226200000000
+            },
+            {
+              "cid": "bafyreiaplotrtaqg2ggdr36cf4bpjygbp3vhjcsvtlmadwmzj7gcvlr4oe",
+              "uri": "at://did:plc:tess22222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3aoink223",
+              "us": 1767225720000000
+            },
+            {
+              "cid": "bafyreihvavbxki6bgt6nvohjhbjzlxwvgff4juciv4rzh3cow5ygpy4gxe",
+              "uri": "at://did:plc:vera22222222222222222222/online.7778777.lessdugin.membership/rwsqt7ry6buy",
+              "us": 1767225600000000
+            },
+            {
+              "cid": "bafyreibndhs775qai3d6z42gmix4frnfknlboqo2j5txfrmmodyv4xy5nu",
+              "uri": "at://did:plc:vera22222222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3g25ss226-epolxf57hy5l26ok",
+              "us": 1767226200000000
+            },
+            {
+              "cid": "bafyreigl53medf3cmgz4h7gqnf2v756upkmgiswpcu5xmnmsnqxpz7kjz4",
+              "uri": "at://did:plc:vera22222222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3hteuk227-xcyjvhdoqkmxagfj",
+              "us": 1767226200000000
+            },
+            {
+              "cid": "bafyreigjqqukjf35n35c3iilsybn2nybepe6g2wovzjyacnhh4xea7vqya",
+              "uri": "at://did:plc:vera22222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3eawr2225",
+              "us": 1767225840000000
+            },
+            {
+              "cid": "bafyreihvavbxki6bgt6nvohjhbjzlxwvgff4juciv4rzh3cow5ygpy4gxe",
+              "uri": "at://did:plc:wes222222222222222222222/online.7778777.lessdugin.membership/rwsqt7ry6buy",
+              "us": 1767225600000000
+            },
+            {
+              "cid": "bafyreiboqutca7nbtjbkzq6446euesl3y5vnwkt72p4klfqq67augwypi4",
+              "uri": "at://did:plc:wes222222222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3aoink223-vi2to7h5gl5y2zql",
+              "us": 1767226800000000
+            },
+            {
+              "cid": "bafyreiaox7segrk5ofteeoqh7n74l3seuuqmnqriixljgh3fyiokg43tdq",
+              "uri": "at://did:plc:wes222222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3g25ss226",
+              "us": 1767225900000000
+            }
+          ],
+          "records": [
+            {
+              "cid": "bafyreihvavbxki6bgt6nvohjhbjzlxwvgff4juciv4rzh3cow5ygpy4gxe",
+              "uri": "at://did:plc:abe222222222222222222222/online.7778777.lessdugin.membership/rwsqt7ry6buy",
+              "value": {
+                "$type": "online.7778777.lessdugin.membership",
+                "createdAt": "2026-01-01T00:00:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test"
+              }
+            },
+            {
+              "cid": "bafyreiboqutca7nbtjbkzq6446euesl3y5vnwkt72p4klfqq67augwypi4",
+              "uri": "at://did:plc:abe222222222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3aoink223-vi2to7h5gl5y2zql",
+              "value": {
+                "$type": "online.7778777.lessdugin.opinion",
+                "createdAt": "2026-01-01T00:20:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "reacts": [
+                  {
+                    "react": "insightful"
+                  }
+                ],
+                "subject": {
+                  "cid": "bafyreiaplotrtaqg2ggdr36cf4bpjygbp3vhjcsvtlmadwmzj7gcvlr4oe",
+                  "uri": "at://did:plc:tess22222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3aoink223"
+                }
+              }
+            },
+            {
+              "cid": "bafyreicjclvwaqq4mqu6lzswo2yv4lf7wcn5hvkcvwqii3hv6v5q6s6uou",
+              "uri": "at://did:plc:abe222222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3hteuk227",
+              "value": {
+                "$type": "online.7778777.lessdugin.post",
+                "createdAt": "2026-01-01T00:06:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "title": "abe's post"
+              }
+            },
+            {
+              "cid": "bafyreihvavbxki6bgt6nvohjhbjzlxwvgff4juciv4rzh3cow5ygpy4gxe",
+              "uri": "at://did:plc:boostera2222222222222222/online.7778777.lessdugin.membership/rwsqt7ry6buy",
+              "value": {
+                "$type": "online.7778777.lessdugin.membership",
+                "createdAt": "2026-01-01T00:00:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test"
+              }
+            },
+            {
+              "cid": "bafyreicrbthw66ql4lzkq34fjdht6r6pp3otrhqpdz37733ldhyqjzjvom",
+              "uri": "at://did:plc:boostera2222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3aoink223-vi2to7h5gl5y2zql",
+              "value": {
+                "$type": "online.7778777.lessdugin.opinion",
+                "createdAt": "2026-01-01T00:10:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "karma": "up",
+                "subject": {
+                  "cid": "bafyreiaplotrtaqg2ggdr36cf4bpjygbp3vhjcsvtlmadwmzj7gcvlr4oe",
+                  "uri": "at://did:plc:tess22222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3aoink223"
+                }
+              }
+            },
+            {
+              "cid": "bafyreienslcvq7azthkobho5ln3ko6rnvbpdi5a5ituezz2vnkkd33k7ym",
+              "uri": "at://did:plc:boostera2222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3chppc224-3wdfhf4depsnj7cl",
+              "value": {
+                "$type": "online.7778777.lessdugin.opinion",
+                "createdAt": "2026-01-01T00:10:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "karma": "up",
+                "subject": {
+                  "cid": "bafyreicowegkjlv7aatv5k7xmcsdz4bfnwhckehfcrac2ntgufyy6jdati",
+                  "uri": "at://did:plc:sid222222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3chppc224"
+                }
+              }
+            },
+            {
+              "cid": "bafyreiahkz6sb2kabtqewpzmbtpnaxsya6c3lt4fhdcw6hh7mhrsjdthkq",
+              "uri": "at://did:plc:boostera2222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3eawr2225-dlg4tf42ohyitdvq",
+              "value": {
+                "$type": "online.7778777.lessdugin.opinion",
+                "createdAt": "2026-01-01T00:10:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "karma": "up",
+                "subject": {
+                  "cid": "bafyreigjqqukjf35n35c3iilsybn2nybepe6g2wovzjyacnhh4xea7vqya",
+                  "uri": "at://did:plc:vera22222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3eawr2225"
+                }
+              }
+            },
+            {
+              "cid": "bafyreihvavbxki6bgt6nvohjhbjzlxwvgff4juciv4rzh3cow5ygpy4gxe",
+              "uri": "at://did:plc:boosterb2222222222222222/online.7778777.lessdugin.membership/rwsqt7ry6buy",
+              "value": {
+                "$type": "online.7778777.lessdugin.membership",
+                "createdAt": "2026-01-01T00:00:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test"
+              }
+            },
+            {
+              "cid": "bafyreicrbthw66ql4lzkq34fjdht6r6pp3otrhqpdz37733ldhyqjzjvom",
+              "uri": "at://did:plc:boosterb2222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3aoink223-vi2to7h5gl5y2zql",
+              "value": {
+                "$type": "online.7778777.lessdugin.opinion",
+                "createdAt": "2026-01-01T00:10:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "karma": "up",
+                "subject": {
+                  "cid": "bafyreiaplotrtaqg2ggdr36cf4bpjygbp3vhjcsvtlmadwmzj7gcvlr4oe",
+                  "uri": "at://did:plc:tess22222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3aoink223"
+                }
+              }
+            },
+            {
+              "cid": "bafyreienslcvq7azthkobho5ln3ko6rnvbpdi5a5ituezz2vnkkd33k7ym",
+              "uri": "at://did:plc:boosterb2222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3chppc224-3wdfhf4depsnj7cl",
+              "value": {
+                "$type": "online.7778777.lessdugin.opinion",
+                "createdAt": "2026-01-01T00:10:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "karma": "up",
+                "subject": {
+                  "cid": "bafyreicowegkjlv7aatv5k7xmcsdz4bfnwhckehfcrac2ntgufyy6jdati",
+                  "uri": "at://did:plc:sid222222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3chppc224"
+                }
+              }
+            },
+            {
+              "cid": "bafyreiahkz6sb2kabtqewpzmbtpnaxsya6c3lt4fhdcw6hh7mhrsjdthkq",
+              "uri": "at://did:plc:boosterb2222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3eawr2225-dlg4tf42ohyitdvq",
+              "value": {
+                "$type": "online.7778777.lessdugin.opinion",
+                "createdAt": "2026-01-01T00:10:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "karma": "up",
+                "subject": {
+                  "cid": "bafyreigjqqukjf35n35c3iilsybn2nybepe6g2wovzjyacnhh4xea7vqya",
+                  "uri": "at://did:plc:vera22222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3eawr2225"
+                }
+              }
+            },
+            {
+              "cid": "bafyreihvavbxki6bgt6nvohjhbjzlxwvgff4juciv4rzh3cow5ygpy4gxe",
+              "uri": "at://did:plc:boosterc2222222222222222/online.7778777.lessdugin.membership/rwsqt7ry6buy",
+              "value": {
+                "$type": "online.7778777.lessdugin.membership",
+                "createdAt": "2026-01-01T00:00:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test"
+              }
+            },
+            {
+              "cid": "bafyreicrbthw66ql4lzkq34fjdht6r6pp3otrhqpdz37733ldhyqjzjvom",
+              "uri": "at://did:plc:boosterc2222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3aoink223-vi2to7h5gl5y2zql",
+              "value": {
+                "$type": "online.7778777.lessdugin.opinion",
+                "createdAt": "2026-01-01T00:10:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "karma": "up",
+                "subject": {
+                  "cid": "bafyreiaplotrtaqg2ggdr36cf4bpjygbp3vhjcsvtlmadwmzj7gcvlr4oe",
+                  "uri": "at://did:plc:tess22222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3aoink223"
+                }
+              }
+            },
+            {
+              "cid": "bafyreienslcvq7azthkobho5ln3ko6rnvbpdi5a5ituezz2vnkkd33k7ym",
+              "uri": "at://did:plc:boosterc2222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3chppc224-3wdfhf4depsnj7cl",
+              "value": {
+                "$type": "online.7778777.lessdugin.opinion",
+                "createdAt": "2026-01-01T00:10:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "karma": "up",
+                "subject": {
+                  "cid": "bafyreicowegkjlv7aatv5k7xmcsdz4bfnwhckehfcrac2ntgufyy6jdati",
+                  "uri": "at://did:plc:sid222222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3chppc224"
+                }
+              }
+            },
+            {
+              "cid": "bafyreiahkz6sb2kabtqewpzmbtpnaxsya6c3lt4fhdcw6hh7mhrsjdthkq",
+              "uri": "at://did:plc:boosterc2222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3eawr2225-dlg4tf42ohyitdvq",
+              "value": {
+                "$type": "online.7778777.lessdugin.opinion",
+                "createdAt": "2026-01-01T00:10:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "karma": "up",
+                "subject": {
+                  "cid": "bafyreigjqqukjf35n35c3iilsybn2nybepe6g2wovzjyacnhh4xea7vqya",
+                  "uri": "at://did:plc:vera22222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3eawr2225"
+                }
+              }
+            },
+            {
+              "cid": "bafyreihvavbxki6bgt6nvohjhbjzlxwvgff4juciv4rzh3cow5ygpy4gxe",
+              "uri": "at://did:plc:boosterd2222222222222222/online.7778777.lessdugin.membership/rwsqt7ry6buy",
+              "value": {
+                "$type": "online.7778777.lessdugin.membership",
+                "createdAt": "2026-01-01T00:00:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test"
+              }
+            },
+            {
+              "cid": "bafyreicrbthw66ql4lzkq34fjdht6r6pp3otrhqpdz37733ldhyqjzjvom",
+              "uri": "at://did:plc:boosterd2222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3aoink223-vi2to7h5gl5y2zql",
+              "value": {
+                "$type": "online.7778777.lessdugin.opinion",
+                "createdAt": "2026-01-01T00:10:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "karma": "up",
+                "subject": {
+                  "cid": "bafyreiaplotrtaqg2ggdr36cf4bpjygbp3vhjcsvtlmadwmzj7gcvlr4oe",
+                  "uri": "at://did:plc:tess22222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3aoink223"
+                }
+              }
+            },
+            {
+              "cid": "bafyreienslcvq7azthkobho5ln3ko6rnvbpdi5a5ituezz2vnkkd33k7ym",
+              "uri": "at://did:plc:boosterd2222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3chppc224-3wdfhf4depsnj7cl",
+              "value": {
+                "$type": "online.7778777.lessdugin.opinion",
+                "createdAt": "2026-01-01T00:10:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "karma": "up",
+                "subject": {
+                  "cid": "bafyreicowegkjlv7aatv5k7xmcsdz4bfnwhckehfcrac2ntgufyy6jdati",
+                  "uri": "at://did:plc:sid222222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3chppc224"
+                }
+              }
+            },
+            {
+              "cid": "bafyreiahkz6sb2kabtqewpzmbtpnaxsya6c3lt4fhdcw6hh7mhrsjdthkq",
+              "uri": "at://did:plc:boosterd2222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3eawr2225-dlg4tf42ohyitdvq",
+              "value": {
+                "$type": "online.7778777.lessdugin.opinion",
+                "createdAt": "2026-01-01T00:10:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "karma": "up",
+                "subject": {
+                  "cid": "bafyreigjqqukjf35n35c3iilsybn2nybepe6g2wovzjyacnhh4xea7vqya",
+                  "uri": "at://did:plc:vera22222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3eawr2225"
+                }
+              }
+            },
+            {
+              "cid": "bafyreihvavbxki6bgt6nvohjhbjzlxwvgff4juciv4rzh3cow5ygpy4gxe",
+              "uri": "at://did:plc:boostere2222222222222222/online.7778777.lessdugin.membership/rwsqt7ry6buy",
+              "value": {
+                "$type": "online.7778777.lessdugin.membership",
+                "createdAt": "2026-01-01T00:00:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test"
+              }
+            },
+            {
+              "cid": "bafyreicrbthw66ql4lzkq34fjdht6r6pp3otrhqpdz37733ldhyqjzjvom",
+              "uri": "at://did:plc:boostere2222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3aoink223-vi2to7h5gl5y2zql",
+              "value": {
+                "$type": "online.7778777.lessdugin.opinion",
+                "createdAt": "2026-01-01T00:10:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "karma": "up",
+                "subject": {
+                  "cid": "bafyreiaplotrtaqg2ggdr36cf4bpjygbp3vhjcsvtlmadwmzj7gcvlr4oe",
+                  "uri": "at://did:plc:tess22222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3aoink223"
+                }
+              }
+            },
+            {
+              "cid": "bafyreienslcvq7azthkobho5ln3ko6rnvbpdi5a5ituezz2vnkkd33k7ym",
+              "uri": "at://did:plc:boostere2222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3chppc224-3wdfhf4depsnj7cl",
+              "value": {
+                "$type": "online.7778777.lessdugin.opinion",
+                "createdAt": "2026-01-01T00:10:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "karma": "up",
+                "subject": {
+                  "cid": "bafyreicowegkjlv7aatv5k7xmcsdz4bfnwhckehfcrac2ntgufyy6jdati",
+                  "uri": "at://did:plc:sid222222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3chppc224"
+                }
+              }
+            },
+            {
+              "cid": "bafyreiahkz6sb2kabtqewpzmbtpnaxsya6c3lt4fhdcw6hh7mhrsjdthkq",
+              "uri": "at://did:plc:boostere2222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3eawr2225-dlg4tf42ohyitdvq",
+              "value": {
+                "$type": "online.7778777.lessdugin.opinion",
+                "createdAt": "2026-01-01T00:10:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "karma": "up",
+                "subject": {
+                  "cid": "bafyreigjqqukjf35n35c3iilsybn2nybepe6g2wovzjyacnhh4xea7vqya",
+                  "uri": "at://did:plc:vera22222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3eawr2225"
+                }
+              }
+            },
+            {
+              "cid": "bafyreihvavbxki6bgt6nvohjhbjzlxwvgff4juciv4rzh3cow5ygpy4gxe",
+              "uri": "at://did:plc:boosterf2222222222222222/online.7778777.lessdugin.membership/rwsqt7ry6buy",
+              "value": {
+                "$type": "online.7778777.lessdugin.membership",
+                "createdAt": "2026-01-01T00:00:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test"
+              }
+            },
+            {
+              "cid": "bafyreicrbthw66ql4lzkq34fjdht6r6pp3otrhqpdz37733ldhyqjzjvom",
+              "uri": "at://did:plc:boosterf2222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3aoink223-vi2to7h5gl5y2zql",
+              "value": {
+                "$type": "online.7778777.lessdugin.opinion",
+                "createdAt": "2026-01-01T00:10:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "karma": "up",
+                "subject": {
+                  "cid": "bafyreiaplotrtaqg2ggdr36cf4bpjygbp3vhjcsvtlmadwmzj7gcvlr4oe",
+                  "uri": "at://did:plc:tess22222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3aoink223"
+                }
+              }
+            },
+            {
+              "cid": "bafyreienslcvq7azthkobho5ln3ko6rnvbpdi5a5ituezz2vnkkd33k7ym",
+              "uri": "at://did:plc:boosterf2222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3chppc224-3wdfhf4depsnj7cl",
+              "value": {
+                "$type": "online.7778777.lessdugin.opinion",
+                "createdAt": "2026-01-01T00:10:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "karma": "up",
+                "subject": {
+                  "cid": "bafyreicowegkjlv7aatv5k7xmcsdz4bfnwhckehfcrac2ntgufyy6jdati",
+                  "uri": "at://did:plc:sid222222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3chppc224"
+                }
+              }
+            },
+            {
+              "cid": "bafyreiahkz6sb2kabtqewpzmbtpnaxsya6c3lt4fhdcw6hh7mhrsjdthkq",
+              "uri": "at://did:plc:boosterf2222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3eawr2225-dlg4tf42ohyitdvq",
+              "value": {
+                "$type": "online.7778777.lessdugin.opinion",
+                "createdAt": "2026-01-01T00:10:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "karma": "up",
+                "subject": {
+                  "cid": "bafyreigjqqukjf35n35c3iilsybn2nybepe6g2wovzjyacnhh4xea7vqya",
+                  "uri": "at://did:plc:vera22222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3eawr2225"
+                }
+              }
+            },
+            {
+              "cid": "bafyreihvavbxki6bgt6nvohjhbjzlxwvgff4juciv4rzh3cow5ygpy4gxe",
+              "uri": "at://did:plc:boosterg2222222222222222/online.7778777.lessdugin.membership/rwsqt7ry6buy",
+              "value": {
+                "$type": "online.7778777.lessdugin.membership",
+                "createdAt": "2026-01-01T00:00:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test"
+              }
+            },
+            {
+              "cid": "bafyreicrbthw66ql4lzkq34fjdht6r6pp3otrhqpdz37733ldhyqjzjvom",
+              "uri": "at://did:plc:boosterg2222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3aoink223-vi2to7h5gl5y2zql",
+              "value": {
+                "$type": "online.7778777.lessdugin.opinion",
+                "createdAt": "2026-01-01T00:10:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "karma": "up",
+                "subject": {
+                  "cid": "bafyreiaplotrtaqg2ggdr36cf4bpjygbp3vhjcsvtlmadwmzj7gcvlr4oe",
+                  "uri": "at://did:plc:tess22222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3aoink223"
+                }
+              }
+            },
+            {
+              "cid": "bafyreienslcvq7azthkobho5ln3ko6rnvbpdi5a5ituezz2vnkkd33k7ym",
+              "uri": "at://did:plc:boosterg2222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3chppc224-3wdfhf4depsnj7cl",
+              "value": {
+                "$type": "online.7778777.lessdugin.opinion",
+                "createdAt": "2026-01-01T00:10:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "karma": "up",
+                "subject": {
+                  "cid": "bafyreicowegkjlv7aatv5k7xmcsdz4bfnwhckehfcrac2ntgufyy6jdati",
+                  "uri": "at://did:plc:sid222222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3chppc224"
+                }
+              }
+            },
+            {
+              "cid": "bafyreiahkz6sb2kabtqewpzmbtpnaxsya6c3lt4fhdcw6hh7mhrsjdthkq",
+              "uri": "at://did:plc:boosterg2222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3eawr2225-dlg4tf42ohyitdvq",
+              "value": {
+                "$type": "online.7778777.lessdugin.opinion",
+                "createdAt": "2026-01-01T00:10:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "karma": "up",
+                "subject": {
+                  "cid": "bafyreigjqqukjf35n35c3iilsybn2nybepe6g2wovzjyacnhh4xea7vqya",
+                  "uri": "at://did:plc:vera22222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3eawr2225"
+                }
+              }
+            },
+            {
+              "cid": "bafyreihvavbxki6bgt6nvohjhbjzlxwvgff4juciv4rzh3cow5ygpy4gxe",
+              "uri": "at://did:plc:boosterh2222222222222222/online.7778777.lessdugin.membership/rwsqt7ry6buy",
+              "value": {
+                "$type": "online.7778777.lessdugin.membership",
+                "createdAt": "2026-01-01T00:00:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test"
+              }
+            },
+            {
+              "cid": "bafyreicrbthw66ql4lzkq34fjdht6r6pp3otrhqpdz37733ldhyqjzjvom",
+              "uri": "at://did:plc:boosterh2222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3aoink223-vi2to7h5gl5y2zql",
+              "value": {
+                "$type": "online.7778777.lessdugin.opinion",
+                "createdAt": "2026-01-01T00:10:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "karma": "up",
+                "subject": {
+                  "cid": "bafyreiaplotrtaqg2ggdr36cf4bpjygbp3vhjcsvtlmadwmzj7gcvlr4oe",
+                  "uri": "at://did:plc:tess22222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3aoink223"
+                }
+              }
+            },
+            {
+              "cid": "bafyreienslcvq7azthkobho5ln3ko6rnvbpdi5a5ituezz2vnkkd33k7ym",
+              "uri": "at://did:plc:boosterh2222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3chppc224-3wdfhf4depsnj7cl",
+              "value": {
+                "$type": "online.7778777.lessdugin.opinion",
+                "createdAt": "2026-01-01T00:10:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "karma": "up",
+                "subject": {
+                  "cid": "bafyreicowegkjlv7aatv5k7xmcsdz4bfnwhckehfcrac2ntgufyy6jdati",
+                  "uri": "at://did:plc:sid222222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3chppc224"
+                }
+              }
+            },
+            {
+              "cid": "bafyreiahkz6sb2kabtqewpzmbtpnaxsya6c3lt4fhdcw6hh7mhrsjdthkq",
+              "uri": "at://did:plc:boosterh2222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3eawr2225-dlg4tf42ohyitdvq",
+              "value": {
+                "$type": "online.7778777.lessdugin.opinion",
+                "createdAt": "2026-01-01T00:10:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "karma": "up",
+                "subject": {
+                  "cid": "bafyreigjqqukjf35n35c3iilsybn2nybepe6g2wovzjyacnhh4xea7vqya",
+                  "uri": "at://did:plc:vera22222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3eawr2225"
+                }
+              }
+            },
+            {
+              "cid": "bafyreihvavbxki6bgt6nvohjhbjzlxwvgff4juciv4rzh3cow5ygpy4gxe",
+              "uri": "at://did:plc:boosteri2222222222222222/online.7778777.lessdugin.membership/rwsqt7ry6buy",
+              "value": {
+                "$type": "online.7778777.lessdugin.membership",
+                "createdAt": "2026-01-01T00:00:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test"
+              }
+            },
+            {
+              "cid": "bafyreicrbthw66ql4lzkq34fjdht6r6pp3otrhqpdz37733ldhyqjzjvom",
+              "uri": "at://did:plc:boosteri2222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3aoink223-vi2to7h5gl5y2zql",
+              "value": {
+                "$type": "online.7778777.lessdugin.opinion",
+                "createdAt": "2026-01-01T00:10:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "karma": "up",
+                "subject": {
+                  "cid": "bafyreiaplotrtaqg2ggdr36cf4bpjygbp3vhjcsvtlmadwmzj7gcvlr4oe",
+                  "uri": "at://did:plc:tess22222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3aoink223"
+                }
+              }
+            },
+            {
+              "cid": "bafyreienslcvq7azthkobho5ln3ko6rnvbpdi5a5ituezz2vnkkd33k7ym",
+              "uri": "at://did:plc:boosteri2222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3chppc224-3wdfhf4depsnj7cl",
+              "value": {
+                "$type": "online.7778777.lessdugin.opinion",
+                "createdAt": "2026-01-01T00:10:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "karma": "up",
+                "subject": {
+                  "cid": "bafyreicowegkjlv7aatv5k7xmcsdz4bfnwhckehfcrac2ntgufyy6jdati",
+                  "uri": "at://did:plc:sid222222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3chppc224"
+                }
+              }
+            },
+            {
+              "cid": "bafyreihvavbxki6bgt6nvohjhbjzlxwvgff4juciv4rzh3cow5ygpy4gxe",
+              "uri": "at://did:plc:boosterj2222222222222222/online.7778777.lessdugin.membership/rwsqt7ry6buy",
+              "value": {
+                "$type": "online.7778777.lessdugin.membership",
+                "createdAt": "2026-01-01T00:00:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test"
+              }
+            },
+            {
+              "cid": "bafyreicrbthw66ql4lzkq34fjdht6r6pp3otrhqpdz37733ldhyqjzjvom",
+              "uri": "at://did:plc:boosterj2222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3aoink223-vi2to7h5gl5y2zql",
+              "value": {
+                "$type": "online.7778777.lessdugin.opinion",
+                "createdAt": "2026-01-01T00:10:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "karma": "up",
+                "subject": {
+                  "cid": "bafyreiaplotrtaqg2ggdr36cf4bpjygbp3vhjcsvtlmadwmzj7gcvlr4oe",
+                  "uri": "at://did:plc:tess22222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3aoink223"
+                }
+              }
+            },
+            {
+              "cid": "bafyreienslcvq7azthkobho5ln3ko6rnvbpdi5a5ituezz2vnkkd33k7ym",
+              "uri": "at://did:plc:boosterj2222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3chppc224-3wdfhf4depsnj7cl",
+              "value": {
+                "$type": "online.7778777.lessdugin.opinion",
+                "createdAt": "2026-01-01T00:10:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "karma": "up",
+                "subject": {
+                  "cid": "bafyreicowegkjlv7aatv5k7xmcsdz4bfnwhckehfcrac2ntgufyy6jdati",
+                  "uri": "at://did:plc:sid222222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3chppc224"
+                }
+              }
+            },
+            {
+              "cid": "bafyreihvavbxki6bgt6nvohjhbjzlxwvgff4juciv4rzh3cow5ygpy4gxe",
+              "uri": "at://did:plc:boosterk2222222222222222/online.7778777.lessdugin.membership/rwsqt7ry6buy",
+              "value": {
+                "$type": "online.7778777.lessdugin.membership",
+                "createdAt": "2026-01-01T00:00:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test"
+              }
+            },
+            {
+              "cid": "bafyreienslcvq7azthkobho5ln3ko6rnvbpdi5a5ituezz2vnkkd33k7ym",
+              "uri": "at://did:plc:boosterk2222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3chppc224-3wdfhf4depsnj7cl",
+              "value": {
+                "$type": "online.7778777.lessdugin.opinion",
+                "createdAt": "2026-01-01T00:10:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "karma": "up",
+                "subject": {
+                  "cid": "bafyreicowegkjlv7aatv5k7xmcsdz4bfnwhckehfcrac2ntgufyy6jdati",
+                  "uri": "at://did:plc:sid222222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3chppc224"
+                }
+              }
+            },
+            {
+              "cid": "bafyreihvavbxki6bgt6nvohjhbjzlxwvgff4juciv4rzh3cow5ygpy4gxe",
+              "uri": "at://did:plc:boosterl2222222222222222/online.7778777.lessdugin.membership/rwsqt7ry6buy",
+              "value": {
+                "$type": "online.7778777.lessdugin.membership",
+                "createdAt": "2026-01-01T00:00:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test"
+              }
+            },
+            {
+              "cid": "bafyreiaksbzv6sken6f3mcyi2d3n2mczqazakmdsqc6qwabzmkwb7pxmbi",
+              "uri": "at://did:plc:boosterl2222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3n6zzs22a",
+              "value": {
+                "$type": "online.7778777.lessdugin.post",
+                "createdAt": "2026-01-01T00:09:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "title": "boosterl's post"
+              }
+            },
+            {
+              "cid": "bafyreigg5a3wdh2pzoxeprgf3k757kkmrh7xhun2z6svsd3h2dtwajosj4",
+              "uri": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.modAction/rwsqt7ry6buy-2awdqivknzdx4xzt",
+              "value": {
+                "$type": "online.7778777.lessdugin.modAction",
+                "action": {
+                  "$type": "online.7778777.lessdugin.modAction#access",
+                  "level": "member"
+                },
+                "createdAt": "2026-01-01T00:01:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "subject": "did:plc:boosterh2222222222222222"
+              }
+            },
+            {
+              "cid": "bafyreictrsjw36bpb44bj4kvpc6xjbfpnbblfym4bz442s43st2hhmyita",
+              "uri": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.modAction/rwsqt7ry6buy-3mccpnztjum5hnbq",
+              "value": {
+                "$type": "online.7778777.lessdugin.modAction",
+                "action": {
+                  "$type": "online.7778777.lessdugin.modAction#access",
+                  "level": "member"
+                },
+                "createdAt": "2026-01-01T00:01:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "subject": "did:plc:boosterk2222222222222222"
+              }
+            },
+            {
+              "cid": "bafyreifyikdc3qkevlpwiwuqxrancy675h4a3azcj3kzq7mbvayp7bql6a",
+              "uri": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.modAction/rwsqt7ry6buy-4cp66p7tse6f3inh",
+              "value": {
+                "$type": "online.7778777.lessdugin.modAction",
+                "action": {
+                  "$type": "online.7778777.lessdugin.modAction#access",
+                  "level": "member"
+                },
+                "createdAt": "2026-01-01T00:01:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "subject": "did:plc:boosteri2222222222222222"
+              }
+            },
+            {
+              "cid": "bafyreidmulo42kuhriwnyj6vvilrujs4h3tlec2w5xb3767mc6hqlmxbgi",
+              "uri": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.modAction/rwsqt7ry6buy-4e24a3hzyui6yshz",
+              "value": {
+                "$type": "online.7778777.lessdugin.modAction",
+                "action": {
+                  "$type": "online.7778777.lessdugin.modAction#access",
+                  "level": "member"
+                },
+                "createdAt": "2026-01-01T00:01:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "subject": "did:plc:boosterj2222222222222222"
+              }
+            },
+            {
+              "cid": "bafyreif7rsu7upfetcvu6jdy6gxpkghem45qlulmnzwuvcdvojcutehlny",
+              "uri": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.modAction/rwsqt7ry6buy-7ctktg3ymoobkx5z",
+              "value": {
+                "$type": "online.7778777.lessdugin.modAction",
+                "action": {
+                  "$type": "online.7778777.lessdugin.modAction#access",
+                  "level": "member"
+                },
+                "createdAt": "2026-01-01T00:01:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "subject": "did:plc:tess22222222222222222222"
+              }
+            },
+            {
+              "cid": "bafyreicqyv34faeybgnpbepz6oi3u6vmi236j67dht5wkjhgm5pnxwe22i",
+              "uri": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.modAction/rwsqt7ry6buy-bzbdvdnu7scpalvg",
+              "value": {
+                "$type": "online.7778777.lessdugin.modAction",
+                "action": {
+                  "$type": "online.7778777.lessdugin.modAction#access",
+                  "level": "member"
+                },
+                "createdAt": "2026-01-01T00:01:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "subject": "did:plc:wes222222222222222222222"
+              }
+            },
+            {
+              "cid": "bafyreicbbm66i4yevebtqykzjjcml5umpj4tmtmgbjt7md4spwflklsrba",
+              "uri": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.modAction/rwsqt7ry6buy-fbawfmvmt44aeclu",
+              "value": {
+                "$type": "online.7778777.lessdugin.modAction",
+                "action": {
+                  "$type": "online.7778777.lessdugin.modAction#access",
+                  "level": "member"
+                },
+                "createdAt": "2026-01-01T00:01:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "subject": "did:plc:boosterc2222222222222222"
+              }
+            },
+            {
+              "cid": "bafyreicangqwbr2h5hky4nheabiz5yanrycrx3zairowy4qm4jewduvmdm",
+              "uri": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.modAction/rwsqt7ry6buy-jv24ynrlfullvizn",
+              "value": {
+                "$type": "online.7778777.lessdugin.modAction",
+                "action": {
+                  "$type": "online.7778777.lessdugin.modAction#access",
+                  "level": "member"
+                },
+                "createdAt": "2026-01-01T00:01:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "subject": "did:plc:vera22222222222222222222"
+              }
+            },
+            {
+              "cid": "bafyreiai2v5tp534ceggbli5ujxg32zchnoz7mjqvwxepn4fksa5gndc7m",
+              "uri": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.modAction/rwsqt7ry6buy-srcjowfutdiu5fif",
+              "value": {
+                "$type": "online.7778777.lessdugin.modAction",
+                "action": {
+                  "$type": "online.7778777.lessdugin.modAction#access",
+                  "level": "member"
+                },
+                "createdAt": "2026-01-01T00:01:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "subject": "did:plc:boosterb2222222222222222"
+              }
+            },
+            {
+              "cid": "bafyreieedmmib2iherk2gtpgdhhwksp7qwwtfcwnm6eeq45l3vy24nu5gq",
+              "uri": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.modAction/rwsqt7ry6buy-sroyw6jxlp2bgx7g",
+              "value": {
+                "$type": "online.7778777.lessdugin.modAction",
+                "action": {
+                  "$type": "online.7778777.lessdugin.modAction#access",
+                  "level": "member"
+                },
+                "createdAt": "2026-01-01T00:01:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "subject": "did:plc:boostere2222222222222222"
+              }
+            },
+            {
+              "cid": "bafyreibw5v7xdbrvgcji2u4pj7c4mxwcadsz7tp67fdt272ujjzdlwsyqy",
+              "uri": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.modAction/rwsqt7ry6buy-tekorzktyarnj4ns",
+              "value": {
+                "$type": "online.7778777.lessdugin.modAction",
+                "action": {
+                  "$type": "online.7778777.lessdugin.modAction#access",
+                  "level": "member"
+                },
+                "createdAt": "2026-01-01T00:01:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "subject": "did:plc:boosterl2222222222222222"
+              }
+            },
+            {
+              "cid": "bafyreiaetx66n44gliqo4zxupovsbpuukmyv4xsd7fxnzjpxuiwikunta4",
+              "uri": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.modAction/rwsqt7ry6buy-tiemw5bsrbxgkoel",
+              "value": {
+                "$type": "online.7778777.lessdugin.modAction",
+                "action": {
+                  "$type": "online.7778777.lessdugin.modAction#access",
+                  "level": "member"
+                },
+                "createdAt": "2026-01-01T00:01:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "subject": "did:plc:sid222222222222222222222"
+              }
+            },
+            {
+              "cid": "bafyreiamvdpvxxcwfxsngi6cudb2uctxlxelvkptk5ycb3m4leplvfayl4",
+              "uri": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.modAction/rwsqt7ry6buy-ua7rornegsg2v2sp",
+              "value": {
+                "$type": "online.7778777.lessdugin.modAction",
+                "action": {
+                  "$type": "online.7778777.lessdugin.modAction#access",
+                  "level": "member"
+                },
+                "createdAt": "2026-01-01T00:01:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "subject": "did:plc:boosterd2222222222222222"
+              }
+            },
+            {
+              "cid": "bafyreidgccewj2z54rap2xmhxvr6qr4virnsghbbd2ifkuyravjqzyz3yi",
+              "uri": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.modAction/rwsqt7ry6buy-vgsgvq76t47akthx",
+              "value": {
+                "$type": "online.7778777.lessdugin.modAction",
+                "action": {
+                  "$type": "online.7778777.lessdugin.modAction#access",
+                  "level": "member"
+                },
+                "createdAt": "2026-01-01T00:01:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "subject": "did:plc:boostera2222222222222222"
+              }
+            },
+            {
+              "cid": "bafyreibxuf37sanh6gef4tbfitwkb7fyi47hhn2ebqpoyrudao5si75utm",
+              "uri": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.modAction/rwsqt7ry6buy-xiygsl552vaxj2ov",
+              "value": {
+                "$type": "online.7778777.lessdugin.modAction",
+                "action": {
+                  "$type": "online.7778777.lessdugin.modAction#access",
+                  "level": "member"
+                },
+                "createdAt": "2026-01-01T00:01:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "subject": "did:plc:boosterf2222222222222222"
+              }
+            },
+            {
+              "cid": "bafyreicoyngmlpucya3ggj46dbuow4cqu5tgrmbbi4kaal223q3quoz6ca",
+              "uri": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.modAction/rwsqt7ry6buy-xx7qvr3eeswnv2fh",
+              "value": {
+                "$type": "online.7778777.lessdugin.modAction",
+                "action": {
+                  "$type": "online.7778777.lessdugin.modAction#access",
+                  "level": "member"
+                },
+                "createdAt": "2026-01-01T00:01:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "subject": "did:plc:boosterg2222222222222222"
+              }
+            },
+            {
+              "cid": "bafyreih5dnddynjawfkefwpohy5rlztswdkbfamdtzlicxqbgxp4eghmve",
+              "uri": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.modAction/rwsqt7ry6buy-y4ehqovzto3cmkji",
+              "value": {
+                "$type": "online.7778777.lessdugin.modAction",
+                "action": {
+                  "$type": "online.7778777.lessdugin.modAction#access",
+                  "level": "member"
+                },
+                "createdAt": "2026-01-01T00:01:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "subject": "did:plc:abe222222222222222222222"
+              }
+            },
+            {
+              "cid": "bafyreihvavbxki6bgt6nvohjhbjzlxwvgff4juciv4rzh3cow5ygpy4gxe",
+              "uri": "at://did:plc:sid222222222222222222222/online.7778777.lessdugin.membership/rwsqt7ry6buy",
+              "value": {
+                "$type": "online.7778777.lessdugin.membership",
+                "createdAt": "2026-01-01T00:00:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test"
+              }
+            },
+            {
+              "cid": "bafyreigo5qbsucq5roxyhihvcg4jwhvlfl2tlsvagykqrwfq2mwhdxcaiy",
+              "uri": "at://did:plc:sid222222222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3eawr2225-dlg4tf42ohyitdvq",
+              "value": {
+                "$type": "online.7778777.lessdugin.opinion",
+                "createdAt": "2026-01-01T00:10:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "karma": "strongUp",
+                "subject": {
+                  "cid": "bafyreigjqqukjf35n35c3iilsybn2nybepe6g2wovzjyacnhh4xea7vqya",
+                  "uri": "at://did:plc:vera22222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3eawr2225"
+                }
+              }
+            },
+            {
+              "cid": "bafyreicowegkjlv7aatv5k7xmcsdz4bfnwhckehfcrac2ntgufyy6jdati",
+              "uri": "at://did:plc:sid222222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3chppc224",
+              "value": {
+                "$type": "online.7778777.lessdugin.post",
+                "createdAt": "2026-01-01T00:03:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "title": "sid's post"
+              }
+            },
+            {
+              "cid": "bafyreihvavbxki6bgt6nvohjhbjzlxwvgff4juciv4rzh3cow5ygpy4gxe",
+              "uri": "at://did:plc:tess22222222222222222222/online.7778777.lessdugin.membership/rwsqt7ry6buy",
+              "value": {
+                "$type": "online.7778777.lessdugin.membership",
+                "createdAt": "2026-01-01T00:00:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test"
+              }
+            },
+            {
+              "cid": "bafyreih4saq4qxfzmo2bavzx7u3o2jaqvs5gfaibigzbbqvqhgyzj7vpfe",
+              "uri": "at://did:plc:tess22222222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3chppc224-3wdfhf4depsnj7cl",
+              "value": {
+                "$type": "online.7778777.lessdugin.opinion",
+                "createdAt": "2026-01-01T00:10:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "karma": "strongDown",
+                "subject": {
+                  "cid": "bafyreicowegkjlv7aatv5k7xmcsdz4bfnwhckehfcrac2ntgufyy6jdati",
+                  "uri": "at://did:plc:sid222222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3chppc224"
+                }
+              }
+            },
+            {
+              "cid": "bafyreiaplotrtaqg2ggdr36cf4bpjygbp3vhjcsvtlmadwmzj7gcvlr4oe",
+              "uri": "at://did:plc:tess22222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3aoink223",
+              "value": {
+                "$type": "online.7778777.lessdugin.post",
+                "createdAt": "2026-01-01T00:02:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "title": "tess's post"
+              }
+            },
+            {
+              "cid": "bafyreihvavbxki6bgt6nvohjhbjzlxwvgff4juciv4rzh3cow5ygpy4gxe",
+              "uri": "at://did:plc:vera22222222222222222222/online.7778777.lessdugin.membership/rwsqt7ry6buy",
+              "value": {
+                "$type": "online.7778777.lessdugin.membership",
+                "createdAt": "2026-01-01T00:00:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test"
+              }
+            },
+            {
+              "cid": "bafyreibndhs775qai3d6z42gmix4frnfknlboqo2j5txfrmmodyv4xy5nu",
+              "uri": "at://did:plc:vera22222222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3g25ss226-epolxf57hy5l26ok",
+              "value": {
+                "$type": "online.7778777.lessdugin.opinion",
+                "createdAt": "2026-01-01T00:10:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "karma": "strongUp",
+                "subject": {
+                  "cid": "bafyreiaox7segrk5ofteeoqh7n74l3seuuqmnqriixljgh3fyiokg43tdq",
+                  "uri": "at://did:plc:wes222222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3g25ss226"
+                }
+              }
+            },
+            {
+              "cid": "bafyreigl53medf3cmgz4h7gqnf2v756upkmgiswpcu5xmnmsnqxpz7kjz4",
+              "uri": "at://did:plc:vera22222222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3hteuk227-xcyjvhdoqkmxagfj",
+              "value": {
+                "$type": "online.7778777.lessdugin.opinion",
+                "createdAt": "2026-01-01T00:10:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "karma": "up",
+                "subject": {
+                  "cid": "bafyreicjclvwaqq4mqu6lzswo2yv4lf7wcn5hvkcvwqii3hv6v5q6s6uou",
+                  "uri": "at://did:plc:abe222222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3hteuk227"
+                }
+              }
+            },
+            {
+              "cid": "bafyreigjqqukjf35n35c3iilsybn2nybepe6g2wovzjyacnhh4xea7vqya",
+              "uri": "at://did:plc:vera22222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3eawr2225",
+              "value": {
+                "$type": "online.7778777.lessdugin.post",
+                "createdAt": "2026-01-01T00:04:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "title": "vera's post"
+              }
+            },
+            {
+              "cid": "bafyreihvavbxki6bgt6nvohjhbjzlxwvgff4juciv4rzh3cow5ygpy4gxe",
+              "uri": "at://did:plc:wes222222222222222222222/online.7778777.lessdugin.membership/rwsqt7ry6buy",
+              "value": {
+                "$type": "online.7778777.lessdugin.membership",
+                "createdAt": "2026-01-01T00:00:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test"
+              }
+            },
+            {
+              "cid": "bafyreiboqutca7nbtjbkzq6446euesl3y5vnwkt72p4klfqq67augwypi4",
+              "uri": "at://did:plc:wes222222222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3aoink223-vi2to7h5gl5y2zql",
+              "value": {
+                "$type": "online.7778777.lessdugin.opinion",
+                "createdAt": "2026-01-01T00:20:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "reacts": [
+                  {
+                    "react": "insightful"
+                  }
+                ],
+                "subject": {
+                  "cid": "bafyreiaplotrtaqg2ggdr36cf4bpjygbp3vhjcsvtlmadwmzj7gcvlr4oe",
+                  "uri": "at://did:plc:tess22222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3aoink223"
+                }
+              }
+            },
+            {
+              "cid": "bafyreiaox7segrk5ofteeoqh7n74l3seuuqmnqriixljgh3fyiokg43tdq",
+              "uri": "at://did:plc:wes222222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3g25ss226",
+              "value": {
+                "$type": "online.7778777.lessdugin.post",
+                "createdAt": "2026-01-01T00:05:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "title": "wes's post"
+              }
+            }
+          ],
+          "repoStatus": {
+            "did:plc:abe222222222222222222222": "fresh",
+            "did:plc:boostera2222222222222222": "fresh",
+            "did:plc:boosterb2222222222222222": "fresh",
+            "did:plc:boosterc2222222222222222": "fresh",
+            "did:plc:boosterd2222222222222222": "fresh",
+            "did:plc:boostere2222222222222222": "fresh",
+            "did:plc:boosterf2222222222222222": "fresh",
+            "did:plc:boosterg2222222222222222": "fresh",
+            "did:plc:boosterh2222222222222222": "fresh",
+            "did:plc:boosteri2222222222222222": "fresh",
+            "did:plc:boosterj2222222222222222": "fresh",
+            "did:plc:boosterk2222222222222222": "fresh",
+            "did:plc:boosterl2222222222222222": "fresh",
+            "did:plc:owner2222222222222222222": "fresh",
+            "did:plc:sid222222222222222222222": "fresh",
+            "did:plc:tess22222222222222222222": "fresh",
+            "did:plc:vera22222222222222222222": "fresh",
+            "did:plc:wes222222222222222222222": "fresh"
+          }
+        }
+      },
+      "name": "creator-by-k",
+      "note": "the K \u2260 KP cast (approval mode, every user granted): wes has K 2 and KP 1, abe K 1 and KP 1, and did(abe) < did(wes). Both react insightful on tess's post with the gates reactCreate and reactSecond at 0. The creator is the supporter with the greatest K (\u00a79.2), so wes; by KP they would tie and abe, the smaller DID, would be the creator"
     }
   ]
 }

@@ -81,6 +81,8 @@ vector_files![
     "xss/mathml.json",
     "terminal/escapes.json",
     "mathml/math-core-0.9.json",
+    "mathml/s10-corpus.json",
+    "mathml/s10-probes.json",
 ];
 
 /// The vector files in run order as `(dir/name, path, text)`, read from disk.
@@ -359,6 +361,38 @@ fn forbidden_terminal_char(c: char) -> bool {
     matches!(c, '\u{0}'..='\u{1F}' | '\u{7F}'..='\u{9F}' | '\u{2028}' | '\u{2029}' | '\u{61C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
 }
 
+/// The invariants over one `mathml` vector (`docs/spec/lfm-1.md` §7.3, ADR 0002): the
+/// allowlist checker accepts the document, the normaliser met no `style` declaration or class
+/// token it does not know (a math-core upgrade that emits new ones shows up here), and with the
+/// `ammonia` feature `ammonia(html) == html`.
+fn mathml_invariants(name: &str, input: &Value, html: &str) -> Vec<String> {
+    let mut errs = Vec::new();
+    if let Err(e) = check_html(html) {
+        errs.push(format!("{name}: allowlist: {e}"));
+    }
+    let tex = input["tex"].as_str().expect("tex");
+    let display = input
+        .get("display")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let unknown = lessdugin_markdown::math::unknown_engine_styles(tex, display);
+    if !unknown.is_empty() {
+        errs.push(format!(
+            "{name}: unknown math-core styles dropped: {unknown:?}"
+        ));
+    }
+    #[cfg(feature = "ammonia")]
+    {
+        let a = lessdugin_markdown::allowlist::ammonia_clean(html);
+        if a != html {
+            errs.push(format!(
+                "{name}: ammonia changed the output:\n  ours:    {html:?}\n  ammonia: {a:?}"
+            ));
+        }
+    }
+    errs
+}
+
 /// The invariants of §13 over one render input.
 fn invariants(name: &str, input: &Value, r: &Rendered, t: &Rendered) -> Vec<String> {
     let mut errs = Vec::new();
@@ -482,10 +516,16 @@ fn escape_invisibles(json: &str) -> String {
 
 #[test]
 fn vectors() {
-    let bless = std::env::var("LESSDUGIN_BLESS").is_ok_and(|v| v == "1");
+    let bless_all = std::env::var("LESSDUGIN_BLESS").is_ok_and(|v| v == "1");
+    // `LESSDUGIN_BLESS_ONLY=lfm1/a.json,xss/b.json` limits blessing to those files; the
+    // others are checked as usual.
+    let bless_only: Option<Vec<String>> = std::env::var("LESSDUGIN_BLESS_ONLY")
+        .ok()
+        .map(|v| v.split(',').map(|f| f.trim().to_owned()).collect());
     let mut failures: Vec<String> = Vec::new();
     let mut counts: Vec<(String, usize)> = Vec::new();
     for (file, path, raw) in vector_files() {
+        let bless = bless_all && bless_only.as_ref().is_none_or(|l| l.contains(&file));
         let mut doc: Value =
             serde_json::from_str(&raw).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
         assert_eq!(doc["behaviour"], "lfm/1", "{}", path.display());
@@ -524,6 +564,10 @@ fn vectors() {
                         ));
                     }
                 }
+            }
+            if kind == "mathml" {
+                let html = got.get("html").and_then(Value::as_str).unwrap_or_default();
+                failures.extend(mathml_invariants(&name, &input, html));
             }
             if let Some((r, t)) = &renders {
                 failures.extend(invariants(&name, &input, r, t));

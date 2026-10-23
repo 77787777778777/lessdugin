@@ -76,6 +76,21 @@ describe("LFM sanitiser (DOMPurify with exactly the lfm-1.md §8.2 allowlist)", 
     ["dir other than auto", '<p dir="rtl">x</p>', "rtl"],
     ["math href", '<math href="javascript:alert(1)"><mi>x</mi></math>', "javascript"],
     ["mathml style", '<math><mi style="color:red" mathcolor="red">x</mi></math>', "color"],
+    ["mathml class outside §7.3", '<math><mrow class="evil">x</mrow></math>', "evil"],
+    [
+      "mathml math-core font class",
+      '<math><mtext class="math-core-serif-font">x</mtext></math>',
+      "font",
+    ],
+    ["mathml unsorted classes", '<math><mtd class="mc-pr0 mc-al">x</mtd></math>', "class"],
+    ["mathml duplicate classes", '<math><mtd class="mc-al mc-al">x</mtd></math>', "class"],
+    [
+      "mathcolor not lower-case hex",
+      '<math><mrow mathcolor="#FF0000">x</mrow></math>',
+      "mathcolor",
+    ],
+    ["mathcolor with a url", '<math><mrow mathcolor="url(#x)">x</mrow></math>', "mathcolor"],
+    ["mathml id", '<math><mtd id="eq:1">x</mtd></math>', "eq:1"],
     ["mark element", "<mark>x</mark>", "<mark"],
     ["template", "<template><img src=x onerror=alert(1)></template>", "onerror"],
     ["object", '<object data="x.swf"></object>', "object"],
@@ -83,6 +98,30 @@ describe("LFM sanitiser (DOMPurify with exactly the lfm-1.md §8.2 allowlist)", 
   ])("strips %s", (_name, dirty, needle) => {
     const out = sanitizeLfm(dirty);
     expect(out.toLowerCase()).not.toContain(needle);
+  });
+
+  it("keeps the lfm-1.md §7.3 MathML classes and mathcolor (ADR 0002 decision 2)", () => {
+    const html = ROOT(
+      [
+        '<p dir="auto"><math display="block"><mtable class="mc-w100" displaystyle="true" scriptlevel="0"><mtr>',
+        '<mtd class="mc-w50"></mtd><mtd class="mc-al mc-pl1 mc-pr0"><mi>x</mi></mtd>',
+        '<mtd class="mc-ar mc-w50"><mtext>(1)</mtext></mtd></mtr></mtable>',
+        '<mrow mathcolor="#ff0000"><mi>y</mi></mrow><mspace class="mc-negthin"></mspace>',
+        '<mtext class="mc-fs120 mc-tsc">s</mtext>',
+        '<menclose notation="updiagonalstrike"><mi>z</mi><mrow class="menclose-updiagonalstrike"></mrow></menclose>',
+        "</math></p>\n",
+      ].join(""),
+    );
+    expect(sanitizerMismatch(html)).toBeNull();
+    const mtd = document.createElementNS("http://www.w3.org/1998/Math/MathML", "mtd");
+    expect(attributeAllowed(mtd, "class", "mc-al mc-pl1 mc-pr0")).toBe(true);
+    expect(attributeAllowed(mtd, "class", "mc-pl1 mc-al")).toBe(false);
+    expect(attributeAllowed(mtd, "class", "mc-al  mc-pr0")).toBe(false);
+    expect(attributeAllowed(mtd, "class", "")).toBe(false);
+    expect(attributeAllowed(mtd, "mathcolor", "#0a1b2c")).toBe(true);
+    expect(attributeAllowed(mtd, "mathcolor", "red")).toBe(false);
+    expect(attributeAllowed(mtd, "style", "width: 50%")).toBe(false);
+    expect(attributeAllowed(mtd, "id", "eq:1")).toBe(false);
   });
 
   it("enforces per-element attribute grammars", () => {

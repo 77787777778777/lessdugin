@@ -95,7 +95,8 @@ this stage proposed normative wording for the spec owner to fold into `social.md
    applicants = { d ∈ members ∖ A : access(d) = none }, in approval mode only. Pinned by
    `modfold/participation.json` `approval-mode-sets` (`applicants`, `modQueue`).
 10. **Mod-log time `None`.** µs(createdAt) is `None` for a valid datetime before 1970. Such an
-    entry sorts after every entry that has a time, then by uri. No vector exercises this.
+    entry sorts after every entry that has a time, then by uri. Pinned by `modfold/forum.json`
+    `mod-log-untimed-entries-last`.
 11. **The mod-queue projection** holds three kinds of item:
     - `stale`: a positive assertion whose subject is in `records` with another CID, or a
       `#tag.head` that names a revision in `records` with another CID;
@@ -111,8 +112,13 @@ this stage proposed normative wording for the spec owner to fold into `social.md
     MA3 therefore applies only to subjects in forum-scoped collections. Otherwise MA9's "valid
     but without effect" could never be reached. This corrects `data-model.md` MA3 (proposed);
     pinned by `modfold/forum.json` `forum-uri-lock-has-no-effect`.
-13. **Reserved keys** (MA2, `^FK-TID$`) are still checked against MA3–MA6. Only MA7 skips those
-    rules. Such a record is valid and has no effect.
+13. **Reserved keys** (MA2, `^FK-TID$`) are checked against G1–G10 and MA10–MA12 only: MA1 and
+    MA3–MA7 are skipped, because the P2 actions that will use the key form may take subjects and
+    values v1 does not know (`data-model.md` MA2, `social.md` §20.1 item 43). Such a record is
+    valid, has no effect and is `reserved/unknown` in the mod log. (Until M3 the model checked
+    MA3–MA6 for them; §20.1 item 43 did not adopt that reading.) Pinned by `modfold/forum.json`
+    `reserved-key-skips-ma3` (one subject in another forum's key range, which MA3 would reject, and
+    one that is no DID, at-uri or tag, which MA1 would reject).
 14. **MA10 applies under MA7.** MA7 says MA10–MA12 still apply, so a `#tag` with an unknown
     `scope` whose `head` lies outside the forum's fk is invalid. (The earlier partial model
     skipped this; fixed in this stage.)
@@ -151,13 +157,17 @@ this stage proposed normative wording for the spec owner to fold into `social.md
       `{fk}-`;
     - `algorithmIds`, when given, equals the effective IDs derived from `decl`;
     - an invalid `decl` is an input error, because the forum cannot be opened (§1.6, FO4).
-20. **CO5 with an invalid root.** If the root post is in `records`, its `value.forum` is
-    compared literally with the comment's `forum`, even when the root is invalid, so an absent
-    field fails. Invalid records are fold inputs (§1.1), and CO5 says "in the fold input". This
-    is also the only way CO5 can fail without a 60-bit fk collision: a valid root in F's key
-    range names a forum with F's fk (G9), so it names F. Pinned by `visibility/visibility.json`
-    `v1-before-v2-and-v3` and `karma/staged.json` `opinions-that-never-count` (a root post whose
-    `forum` names another forum is invalid by G9, and its comment is Excluded by CO5).
+20. **CO5 compares only a valid root** (`social.md` §20.1 item 51, `data-model.md` CO5). If a
+    valid root post is in `records`, its `value.forum` must equal the comment's `forum`; an invalid
+    root is not compared. It is a Missing root (decision 3), so its comments stay in the thread
+    under the placeholder and the opinions on them count. CO5 then fails only on a 60-bit fk
+    collision: a valid root in F's key range names a forum with F's fk (G9). Until M3 the model
+    compared an invalid root's `forum` too (the reading first adopted as §20.1 item 36), which let a
+    post author exclude a whole thread by editing the root's `forum`. Pinned by
+    `visibility/visibility.json` `v1-before-v2-and-v3` and `co5-invalid-root-is-a-missing-root`,
+    and `karma/staged.json` `opinions-that-never-count` and `co5-invalid-root-opinions-count` (a
+    root post whose `forum` names another forum is invalid by G9; its comments are Visible and
+    the opinions on them count).
 21. **A Missing placeholder** is a child of the root, at depth 1. The `parent` map points a
     comment at the placeholder's uri, and `missing` lists placeholder uris. One placeholder
     exists per distinct parent uri that is not a node of the thread.
@@ -209,8 +219,8 @@ this stage proposed normative wording for the spec owner to fold into `social.md
     deleted wikiRevision, and mona's opinion on dora's deleted post, its only voter).
 31. **O2 "s is valid … and s.forum = v.forum"** means that s is a candidate item not Excluded
     by V1. That includes the cross-record rule CO5, which `data-model.md` §7.3 lists among the
-    validity rules: an opinion on a comment whose root post (in the input) names another forum
-    does not count. O3 and O5 read the subject uri, so they apply to absent subjects too; a
+    validity rules: an opinion on a comment whose valid root post names another forum does not
+    count (decision 20: only an fk collision can make that happen). O3 and O5 read the subject uri, so they apply to absent subjects too; a
     forum-scope `#hide{spam}` on a deleted uri is a negative assertion and counts without its
     subject (§4.5), voiding the opinions on it.
 32. **Axes are resolved per counting opinion** (§5 table):
@@ -369,15 +379,16 @@ Three injected faults were caught: seedUp counted from all voters (P7), K1 from 
 
 ### Tags and wiki (`karma/1` §13)
 
-53. **Where the tags vectors live.** §19 lists `testdata/vectors/tags/`, which was not among the
-    directories this generator may write. The vectors are `karma/tags.json`, kind `tags`: §13
-    belongs to `karma/1` (§0.3), the precedent of `karma/gates.json` (decision 38). Moving the
-    file is a one-line change of its path in `cases/tags_cases.py` and of the README table.
+53. **Where the tags vectors live.** The vectors are `karma/tags.json` and
+    `karma/tags-large.json` (inputs of about 1,000 records), kind `tags`: §13 belongs to `karma/1`
+    (§0.3), the precedent of `karma/gates.json` (decision 38). `social.md` §20.1 item 44 adopted
+    this, so §19 no longer names a `tags/` directory.
 54. **The page** of a slug holds the wikiRevisions with that slug that V1 does not exclude and
     V2–V5 do not hide (`visibility.mod_state` is `None`; V6 and V7 concern comments only). A
     revision by a non-participant is therefore on no page (V2). The 1,000-revision cap keeps the
-    greatest (TID of the rkey desc, uri asc) and sets `partial`; no vector reaches it (the model
-    was checked by hand with 1,001 revisions).
+    greatest (TID of the rkey desc, uri asc) and sets `partial`. Pinned by `karma/tags-large.json`
+    `page-cap-1000` (not partial) and `page-cap-1001` (partial; of two revisions with the lowest
+    TID, the smaller uri is kept).
 55. **Candidates and the cycle cut** follow §13.2 literally. `genesisOK(r)` does not look at
     `parents`, so a revision whose author passes `createTag` (or is an authority under
     `tagCreation = moderators`) is a candidate whatever its parents. The cut is recomputed until
@@ -389,7 +400,7 @@ Three injected faults were caught: seedUp counted from all voters (P7), K1 from 
       projected, because a non-candidate is never displayed;
     - `altered` lists, per candidate, the parents along its edges *after* the cycle cut whose
       stored `parents` entry has a CID ≠ cid(q); when one uri is listed twice with different
-      CIDs, any differing entry marks the edge (no vector has a duplicate);
+      CIDs, any differing entry marks the edge (`karma/tags.json` `duplicate-parent-entries`);
     - `history` is the chain from `canonical`, each step to the parent with the greatest depth,
       ties by the smallest uri; `unmerged` = |{ r ∈ Cand ∖ {canonical} : no edge into r }|.
 57. **Which slugs `wiki` lists**: every slug of a wikiRevision that V1 does not exclude (even if
@@ -415,19 +426,63 @@ Three injected faults were caught: seedUp counted from all voters (P7), K1 from 
     therefore test G5/G9 and say so in their notes.
 61. **`hotBits` are portable.** For every `hotBits` value the rank case module checks, with
     exact rational arithmetic, that the exact pow(base, e) lies within 0.1 ulp of the double
-    `math.pow` returned, so any pow whose error is below 0.9 ulp returns the same double (the
-    `libm` crate's pow, a port of the fdlibm/musl routine, is nearly correctly rounded); the
-    remaining operations are exact or correctly rounded IEEE arithmetic. The review confirmed
-    every value is the correctly rounded result (at most 0.075 ulp from the exact pow). The
-    file keeps `"hotBitsSource": "python-math.pow"` until the Rust side blesses the bits, and a
-    runner MAY compare exactly already.
+    `math.pow` returned, so any pow whose error is below 0.9 ulp returns the same double; the
+    remaining operations are exact or correctly rounded IEEE arithmetic. At M3 every `hotBits`
+    value of `rank/rank.json` (19 values) was also recomputed with the `libm` crate 0.2.16 (the
+    version the workspace pins), by a scratch Rust program that calls `libm::pow` directly and
+    reads only the inputs of hot() (b, age, offsetHours, exponentMilli) dumped by the model: all
+    19 bit patterns are equal, and libm's pow equals the platform pow on all of them. The file
+    therefore carries `"hotBitsSource": "rust-libm-0.2.16"`, and runners compare bits exactly.
 
-## Cross-check of `testdata/vectors/thread/`
+### M3 integration (`social.md` §20.1 items 43–51)
+
+62. **CIDs written in records compare by canonical form** (`social.md` §0.4, §20.1 item 45;
+    `lessdugin_ref/cids.py`). canon(s) decodes the multibase (base16, base32 and base32pad in both
+    cases, base32hex, base32z, base36, base58btc, base58flickr, base64 and its url and padded
+    forms; strictly: one case per alphabet, no non-zero trailing bits), requires the bytes of a
+    CIDv1 (version 1, codec, multihash code and length as minimal varints, nothing after the
+    digest) and re-encodes it as multibase `b`. A string that is not a CIDv1 names no version.
+    A prefix of the other multibases (identity, base2, base8, base10, proquint, base45,
+    base256emoji) raises NotModelled. It is used by the §4.5 CID check (forum and author tier,
+    positive assertions and `#tag.head`, whose resolved value is the canonical form, so two
+    spellings of one head agree), `earlier` (§7), "ancestor altered" (§13.2), versions (§11 step
+    6), and RV5, which compares CIDs (`data-model.md`). No earlier vector changed. Pinned by
+    `modfold/forum.json` `positive-assertion-cid-spelling` (multibase `B`, `z`, and a non-CID),
+    `tag-head-spellings-agree` (also in `karma/tags.json`), `karma/scores.json`
+    `earlier-ignores-cid-spelling` and `thread/thread.json` `versions-on-revision-n`.
+63. **Versions and the edited badge** (`social.md` §11 step 6 and "Edited", §20.1 item 46;
+    `lessdugin_ref/versions.py`, fields `versions` of kind `thread` and `edited` of kind `time`).
+    `versions` lists every non-Excluded comment of the input, whatever the query's thread. A
+    parent comment that is in `records` and not Excluded but under another root is a Missing
+    placeholder in the comment's thread (§11 step 2), and §11 step 6 does not say whether a
+    reference to it shows a version: the model raises NotModelled there, and no vector has one.
+    The `edited` badge reads valid `op: update` revisions and `updatedAt` against `createdAt`
+    (a `createdAt` before 1970 counts as earlier; an `updatedAt` before 1970 never counts).
+64. **The K ≠ KP cast** (informative, `cases/kcast.py`). Every other cast has K1 = KP = K for the
+    users that matter. This one (approval mode, everyone granted) gives vera KP 10 and K 9 and wes
+    KP 1 and K 2, so the vectors `karma/staged.json` `k-and-kp-differ`, `reacts/reacts.json`
+    `creator-by-k`, `karma/tags.json` `canonical-tie-by-k` and `tag-vote-power-kp`, and
+    `modfold/author.json` `author-gate-reads-k` each fail a fold that reads the other value.
+    `karma/tags-large.json` `own-tag-weight-kp` needs KP 1,000 (small() changes there) and builds
+    its own cast of 40 boosters.
+65. **M3 review cases.** The other vectors added at M3 come from the reviews of the Rust fold
+    (`social.md` §20.1 items 18, 31, 32, 34, 40, 41, 47), each computed by the model and asserted
+    against a hand derivation in its case module: `rank/rank.json` (Recent Discussion ties and
+    collapsed posts, recentComments and latestReply activity, thread pins in every comment sort,
+    forum pins only in magic, tombstones through placeholders and re-attached comments),
+    `visibility/visibility.json` (the same tombstones), `time/time.json`
+    (`orphaned-comment-bounded-by-root` reworked so that the bound binds, the
+    `decl-obs-moves-a-non-future-item-*` pair, `edited-badge`), `fold/digest.json` (the pair
+    `decl-obs-is-outside-the-digest-*`: equal digests), `modfold/forum.json` (`until` before
+    1970, lock allow lists, untimed mod-log entries), `modfold/author.json` (author unpin,
+    author lock on an invalid post), `karma/tags.json` (history ties, duplicate parents, OP3
+    before OP4).
+
+## `thread/`
 
 An earlier stage wrote `thread/thread.json` and `thread/depth.json` (the 1,002-comment depth-cap
-vector in its own file) when `testdata/vectors/thread/` did not exist. That directory is shared
-with the Rust engine agent, and who owns it is still to be decided, so the generator now treats
-it as read-only:
+vector in its own file) when `testdata/vectors/thread/` did not exist. Until M3 the directory was
+shared with the Rust engine agent, so the generator treated it as read-only:
 - `cases/thread_cases.py` exposes its cases as `SHARED`; they are built and their hand
   expectations asserted on every run, but written only with `--emit-shared DIR` (for example
   into the scratch directory, for the directory's owner to adopt);
@@ -437,9 +492,11 @@ it as read-only:
   model does not model is reported and skipped;
 - the run also says whether each shared file is identical to the model's own rendering.
 
-Last cross-check (this stage): `thread/thread.json` (11 vectors, 57 fields) and
-`thread/depth.json` (1 vector, 4 fields) agree with the model, and both files are identical to
-the model's own cases. No other file exists there yet.
+The last cross-check (before M3) found both files identical to the model's own cases. At M3 the
+generator took the directory over (it is in `OWNED_DIRS`, and `cases/thread_cases.py` exposes
+`FILES`); the cross-check machinery stays for a directory another producer may share
+(`SHARED_DIRS`, empty at present). `thread/thread.json` gained `versions-on-revision-n`
+(decision 63).
 
 ## TODO (next stages)
 
@@ -454,5 +511,5 @@ and shapes are already fixed in `projections.py` and the README.
 karma stage ran a one-off randomized check of §6.3 P1–P7 (see "Property self-check" above);
 the Rust proptests remain the normative ones.
 
-**Ownership of `thread/` and `tags/`** is for the orchestrator or spec owner to decide
-(decision 53 and the cross-check section above).
+**Ownership.** `thread/` is owned by the generator since M3 (section `thread/` above), and the
+tags vectors live under `karma/` (decision 53, `social.md` §20.1 item 44).

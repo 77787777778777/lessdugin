@@ -2,15 +2,15 @@
 """thread/thread.json and thread/depth.json (kind "thread"): thread placement, social.md §11
 steps 1–4.
 
-testdata/vectors/thread/ is shared with the Rust engine agent, so gen_social.py never writes it:
-these cases are exposed as SHARED, built and self-checked on every run, and written only with
-`--emit-shared DIR`. Every vector in thread/ is cross-checked against the model instead
-(NOTES.md, "Cross-check of testdata/vectors/thread/").
+testdata/vectors/thread/ was shared with the Rust engine agent until M3 (these cases were exposed
+as SHARED and the directory was only cross-checked); its files were always identical to these
+cases, and the generator owns the directory now (NOTES.md, "thread/").
 """
 
 from __future__ import annotations
 
 from lessdugin_ref.build import HOUR, MIN, SEC, T0, Forum, cid, nsid, rec
+from lessdugin_ref.cids import upper_spelling
 
 from .util import file_doc, vector
 
@@ -174,7 +174,64 @@ def thread_vectors() -> list:
     assert v["expected"]["rootMissing"] is True
     out.append(v)
 
+    p = f.post("alice", T0)
+    p = rec(u(p), {**p["value"], "forum": f"at://{f.owner}/{nsid('forum')}/elsewhere"})
+    c1 = comment("bob", p, T0 + HOUR)
+    c2 = comment("carol", p, T0 + 2 * HOUR, parent=c1)
+    v = V("root-names-another-forum", f, [p, c1, c2], p,
+          "the root post's forum field names another forum, so it is invalid (G5, the G9 part) and "
+          "Excluded: a Missing(p) root. CO5 compares only a valid root (social.md §20.1 item 51), so the "
+          "comments are nodes of the thread, under the Missing root", invalid={u(p): "G5"},
+          fields=("rootMissing", "missing", "parent", "depth", "orphaned", "maxDepth"))
+    assert v["expected"]["rootMissing"] is True and v["expected"]["parent"] == {u(c1): u(p), u(c2): u(c1)}
+    out.append(v)
+
+    out.append(versions_vector())
     return out
+
+
+def versions_vector() -> dict:
+    """§11 step 6, "on revision n" (social.md §20.1 items 45, 46)."""
+    f = Forum()
+
+    def m(k):
+        return T0 + k * MIN
+
+    p = f.post("alice", m(10), title="One")
+    v1 = p["value"]
+    v2 = {**v1, "title": "Two"}
+    v3 = {**v1, "title": "Three"}
+    revs = [f.revision({"uri": u(p), "cid": cid(x)}, "update", m(k), record=x)
+            for x, k in ((v1, 20), (v2, 30), (v1, 40))]
+    p = rec(u(p), v3)
+    other = cid({"$type": nsid("post"), "label": "another post"})
+    up = upper_spelling
+
+    def c(who, k, root_cid, parent=None, **kw):
+        return f.comment(who, (u(p), root_cid), m(k), parent=parent, clock=1, **kw)
+
+    ca0 = c("bob", 50, cid(v1), text="first wording")
+    ca = rec(u(ca0), {**ca0["value"], "body": {**ca0["value"]["body"], "text": "second wording"}})
+    rca = f.revision(ca0, "update", m(55), record=ca0["value"])
+    cb = c("carol", 51, cid(v2))
+    cc = c("dave", 52, cid(v3))
+    cd = c("erin", 53, other)
+    ce = c("fred", 54, up(cid(v1)))
+    cf = c("gina", 60, cid(v3), parent=(u(ca), other))
+    cg = c("hugo", 61, cid(v3), parent=(u(ca), up(ca["cid"])))
+    ch = c("ivan", 62, cid(v3), parent=(u(ca), ca0["cid"]))
+    v = V("versions-on-revision-n", f, [p, *revs, ca, rca, cb, cc, cd, ce, cf, cg, ch], p,
+          "alice's post has three valid op: update revisions, whose snapshots are versions 1 (title One), 2 "
+          "(Two) and 3 (One again, an edit that restored earlier content); the current version (Three) is "
+          "version 4. Root references: One → 3 (the greatest i with that CID), Two → 2, the current CID → "
+          "not listed, a CID of no version → unavailable, One in base32 upper case → 3 (CIDs compare by "
+          "canonical form). bob's comment was edited once: a reply citing its first version → parent 1, "
+          "one citing its current version in upper case → not listed, one citing a CID of no version → "
+          "unavailable", fields=("versions",))
+    want = {u(ca): {"root": 3}, u(cb): {"root": 2}, u(cd): {"root": "unavailable"}, u(ce): {"root": 3},
+            u(cf): {"parent": "unavailable"}, u(ch): {"parent": 1}}
+    assert v["expected"]["versions"] == {k: want[k] for k in sorted(want, key=str.encode)}
+    return v
 
 
 def depth_vectors() -> list:
@@ -198,7 +255,7 @@ def depth_vectors() -> list:
     return out
 
 
-SHARED = [
+FILES = [
     ("thread/thread.json", lambda: file_doc(
         "mod/1", "thread",
         "social.md §11 thread placement, steps 1–4: nodes (non-Excluded comments with root.uri = p), "

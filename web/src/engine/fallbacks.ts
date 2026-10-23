@@ -40,7 +40,7 @@ function isDraftEntry(v: unknown): v is DraftEntry {
     typeof e.savedAtMs === "number" &&
     typeof d === "object" &&
     d !== null &&
-    (d.kind === "post" || d.kind === "comment" || d.kind === "sequence") &&
+    (d.kind === "post" || d.kind === "comment") &&
     typeof d[d.kind as string] === "object"
   );
 }
@@ -84,9 +84,7 @@ export function pageStorage(): Storage | null {
 }
 
 function draftText(d: Draft): string {
-  if (d.kind === "post") return d.post.body.markdown;
-  if (d.kind === "comment") return d.comment.body.markdown;
-  return d.sequence.body?.markdown ?? "";
+  return d.kind === "post" ? d.post.body.markdown : d.comment.body.markdown;
 }
 
 function newDraftId(): string {
@@ -147,7 +145,7 @@ function stateFallbacks(): Fallbacks {
   return {
     bookmarks: async () => [],
     subscriptions: async () => [],
-    notifications: async () => ({ dto: 1, items: [] }),
+    notifications: async () => ({ dto: 1, items: [], unread: 0 }),
     tags: async () => [],
     sequences: async () => [],
     forumDiscover: async () => [],

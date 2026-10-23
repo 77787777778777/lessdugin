@@ -25,6 +25,8 @@ Modules (bottom-up; "stub" = exact only where its subject matter is absent, else
     tags                      L5 (§13): wiki heads, relevance, applies
     sequences                 L5 (§14)                     stub
     threads                   §11 placement, steps 1–4
+    versions                  §11 step 6 versions ("on revision n") and the edited badge
+    cids                      canonical CID form (§0.4): CIDs written in records compare by it
     visibility                L6 V1–V10 and the thread pass (§10.1–§10.2); L7 lens (§10.3)
     rank                      L6 ranking, sorts, filters, Recent Discussion (§12)
     fold                      orchestration: ForumView (see its docstring for the layer table)

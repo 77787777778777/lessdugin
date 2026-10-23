@@ -2,7 +2,10 @@
 # lessdugin engine API and DTO schema (`dto/1`)
 
 Status: normative for implementations in this repository; informative for other implementations
-(they only need the data model, LFM/1, social and sync specs). Version: `dto/1`.
+(they only need the data model, LFM/1, social and sync specs). Version: **engine API v0
+(`dto/1`), frozen at M3**: from M3 on, the operations, DTOs and events below change only
+compatibly (§1 "Freeze"). The operations a later milestone implements are listed with it
+(§3.9); until then they reject with `unsupported`.
 
 ## 0. Purpose
 
@@ -11,8 +14,9 @@ One engine (`lessdugin-core::engine::Engine<H: Host>`) serves the CLI, the TUI, 
 
 - the engine's public operations, grouped as in synthesis §6.5;
 - the **DTO schema** returned by queries. The CLI's `--json` output *is* this schema, and the SPA
-  receives the same objects (generated TypeScript types via `tsify`), so cross-client parity
-  checks are byte comparisons of serialised DTOs (`docs/plan.md`, M2 acceptance);
+  receives the same objects (TypeScript types checked against the declarations `tsify`
+  generates from the Rust DTOs, §5), so cross-client parity checks are byte comparisons of
+  serialised DTOs (`docs/plan.md`, M2 acceptance);
 - the event model used by every UI.
 
 Normative details of the underlying behaviour live in `data-model.md` (records, writes),
@@ -33,13 +37,25 @@ Normative details of the underlying behaviour live in `data-model.md` (records, 
   query returns byte-identical JSON on every platform (`social.md` §1.3). Local-only fields
   (read marks, mutes, "mine") are computed from the local `state` store and are part of the
   parity scenario's injected state.
+- **Request fields.** Fields of operation inputs (§4.4) that the engine defaults
+  (`#[serde(default)]`: `SyncOpts.full`, `PostDraft.tags`, `ModActionValue.hide.spam`, …) may be
+  left out by callers; the TypeScript types mark them optional like the omitted output fields.
 - **Versioning.** Every top-level view DTO (§4: `PostList`, `ThreadView`, `ForumView`, …)
   carries `"dto": 1`. Operation results that are not views, such as a `WriteTicket`, a
-  `Vec<…>` list (`accounts()`, `writes()`, `drafts()`, …) or a bare value, are serialised
+  `Vec<…>` list (`accounts()`, `writes()`, `bookmarks()`, …) or a bare value, are serialised
   without it, exactly as `dto.rs` serialises them; the engine and the wasm binding (§5) pass
   them on unchanged, and the CLI's `--json` wraps every object it prints in its own
-  `{ "dto": 1, … }` envelope (`crates/cli/src/out.rs`). Adding optional fields or enum variants
-  is compatible; anything else bumps the version.
+  `{ "dto": 1, … }` envelope (`crates/cli/src/out.rs`).
+- **Freeze (engine API v0, M3).** After M3 only compatible changes are made within `dto/1`:
+  new operations; implementing an operation of §3.9 (it stops rejecting with `unsupported`); new
+  optional output fields; new enum variants and new event kinds or topics (clients ignore what
+  they do not know); new optional request fields whose default keeps the old behaviour; new
+  error `detail` keys. Anything else (removing or renaming an operation, a field or a variant,
+  changing a type, making an optional field required, changing what an operation means) is a
+  new major version: `dto/2`, engine API v1. The Rust DTOs (`crates/core/src/dto.rs`) are the
+  schema; their TypeScript form `testdata/dto/dto-1.d.ts` is generated from them
+  (`crates/wasm/tests/dto_decl.rs`, which fails when it is stale) and the hand-written
+  `packages/engine/src/types.ts` must match it field for field (`types.parity.test.ts`).
 - **Errors.** Operations return `Result<T, EngineError>`; `EngineError` serialises as
   `{ "code": <string>, "message": <string>, "retryable": bool, "detail"?: object }` with codes:
   `auth_required`, `not_found`, `invalid_ref`, `invalid_input`, `conflict`, `rate_limited`,
@@ -123,14 +139,17 @@ when the engine is dropped or the corresponding stop method is called.
 | Operation | Result / notes |
 |---|---|
 | `forum_open(ref)` | `ForumView` header (§4.3). Resolves the declaration (first open fetches a proof), schedules authority sync. |
-| `forum_discover(q)` | `Vec<ForumSummary>` (relay + owners' listings + indexers; grouped by owner) |
+| `forum_discover(q)` | `Vec<ForumSummary>` (relay + owners' listings + indexers; grouped by owner). M5 (§3.9) |
 | `forum_follow(uri, alias?)`, `forum_unfollow(uri)`, `followed()` | local; `followed()` also seeds from the user's own `membership` records |
 | `forum_create(ForumDraft)` | `WriteTicket`; writes the declaration and the owner's membership in one `applyWrites` |
-| `forum_update(uri, ForumDraft)` | edit protocol |
-| `join(uri, note?)`, `leave(uri)` | membership create / delete |
-| `members(uri, MembersQuery { status?, pending? })` | `Vec<MemberView>` |
-| `grant(uri, dids)`, `revoke(uri, dids)` | `#access{member}` / delete |
-| `mods_set(uri, ModsChange)` | `mods rm` adopts first (`social.md` §4.10) |
+| `forum_update(uri, ForumDraft)` | `WriteTicket`. By the owner, through the edit protocol (a revision of the old version; unknown fields and the policy are kept): name, description, about, membership mode, default tier, featured tags, report contact. The slug is fixed; an absent or empty `moderators` keeps them, a different list is refused (`invalid_input`: use `mods_set`, which adopts first) |
+| `join(uri, note?)`, `leave(uri)` | `WriteTicket`: membership create / delete. Joining (applying, in approval mode) is a public action (`social.md` §17, `PublicActionKind::Join`) |
+| `members(uri, MembersQuery { status?, pending? })` | `Vec<MemberView>`: every DID with a valid membership record (`member(d)`, `social.md` §3.1), by DID, with its role, grant, karma and moderation flags; `pending: true` keeps the applicants (approval mode) not rejected on this device; `status` keeps one role |
+| `grant(uri, actors)`, `revoke(uri, actors)` | `Vec<WriteTicket>`, one per actor (a DID or handle): `#access{member}` by the active account / its removal |
+| `approve(uri, actors)` | `Vec<WriteTicket>`: approval mode, by an authority (`blocked` otherwise): `grant`, and the actors leave this device's rejected list |
+| `reject(uri, actors)` | `Vec<WriteTicket>`: dismisses applicants on this device (nothing public is written for them; they leave `members { pending }`) and removes the active account's own grant of an actor, if any (the removals' tickets) |
+| `rejected_applicants(uri)` | `BTreeSet<did>` (a JSON array): the applicants rejected on this device |
+| `mods_set(uri, ModsChange)` | `ActionTicket` (§3.5). By the owner, through the edit protocol of the declaration. `Add` adds the entry or replaces the DID's (a role change). `Remove` first enqueues `mod_adopt` of the moderator's assertions, then the declaration edit, sent only once the adoption is done (it fails unsent if the adoption failed); the ticket carries an `adoptedFirst` notice naming the adoption's write. `skipAdopt` lets the assertions lapse at once (clients confirm first, listing them) (`social.md` §4.10) |
 
 ### 3.3 Sync
 
@@ -161,30 +180,52 @@ SyncReport { dto, forum, reposTotal, reposComplete, reposStale, reposUnavailable
 
 | Operation | Result |
 |---|---|
-| `list_posts(ListPostsQuery { forum, sort, filter, tag?, kind?, author?, cursor?, limit })` | `PostList` |
-| `recent_discussion(forum, cursor?, limit)` | `DiscussionList` |
+| `list_posts(ListPostsQuery { forum, sort, filter, tag?, kind?, author?, cursor?, limit })` | `PostList`: the listed posts (`Visible` or `Collapsed`, `social.md` §10.1) passing `filter`, `tag` (`applies(p, t)`, §13.3: a tag applies only once its wiki page exists), `kind` and `author` (a DID or handle), in `sort` order (§12.2) |
+| `recent_discussion(forum, cursor?, limit)` | `DiscussionList`: the full fold's Recent Discussion (§12.5), each post with its `DISCUSSION_COMMENTS` newest `Visible` comments |
 | `get_post(uri)` | `PostView` |
 | `get_thread(uri, ThreadOpts { sort, unreadOnly })` | `ThreadView` (comments in pre-order with depth) |
 | `history(uri)` | `HistoryView` |
-| `tags(forum)` / `tag(forum, slug)` | `Vec<TagSummary>` / `TagView` |
-| `sequences(forum)` / `sequence(uri)` | `Vec<SequenceSummary>` / `SequenceView` |
-| `user(forum?, actor)` | `UserView` |
-| `search(SearchQuery { q, forum?, author?, limit })` | `SearchResults` |
-| `notifications(NotificationsQuery { all, limit })` | `NotificationList` |
-| `mod_queue(forum)` / `mod_log(forum, cursor?)` | `ModQueue` / `ModLog` |
-| `raw(uri)` | `RawView` (record JSON, validity errors, every assertion incl. lapsed) |
-| `drafts()` / `bookmarks()` / `subscriptions()` | local lists |
+| `tags(forum)` / `tag(forum, slug)` | `Vec<TagSummary>` / `TagView`. M5 (§3.9) |
+| `sequences(forum)` / `sequence(uri)` | `Vec<SequenceSummary>` / `SequenceView`. M5 |
+| `user(forum?, actor)` | `UserView`. M5 |
+| `search(SearchQuery { q, forum?, author?, limit })` | `SearchResults`. M5 |
+| `notifications(NotificationsQuery { all?, limit })` | `NotificationList` (`social.md` §16): the active account's notifications in its followed forums, newest first (then by id), unread only unless `all`, at most `limit`; `unread` counts every unread one (the badge). Empty without an active account. Computed lazily: it first brings the stored notifications up to date over the cached models (it does not sync); clients re-query on `Changed` with a `Notifications`, `Forum` or `Thread` topic. `atMs` is when the item was first seen (never its `createdAt`) or when the change was noticed |
+| `unread_counts()` | `UnreadCounts`: the notification badge and, per followed forum (by uri), the listed posts first seen since its post list was last visited, the listed comments first seen since each visited thread was last viewed (threads never viewed count as new posts) and its unread notifications; the active account's own items never count. A forum's first count records the visit mark. Brings the notifications up to date first |
+| `mod_queue(forum)` | `ModQueue` (`social.md` §4.12): applicants, top-rank unordered conflicts, stale positive assertions and, in open mode, the newest newcomer items. The forum's authorities only (`blocked` for anyone else) |
+| `mod_log(forum, cursor?, limit)` | `ModLog` (`social.md` §4.12), `(time desc, uri asc)`, paged like `list_posts`. Public, except the `reason` of a `#hide` with `showReason: false`, shown to the forum's authorities only |
+| `raw(uri)` | `RawView`: the stored record JSON, its validity violations, every modAction naming it (valid or not, each with its mod-log status), its state and its score. Open to every viewer: the raw view shows everything, hidden content included (`social.md` §10.3) |
+| `bookmarks()` | `Vec<BookmarkEntry>`: newest first, each with the post's summary when its forum's model is cached |
+| `bookmarked(uri)` | `bool` |
+| `subscriptions()` | `Vec<SubscriptionEntry>`, oldest first |
+| `mutes()` | `Vec<ActorView>`: the muted actors (the lens, `social.md` §10.3), by DID |
+| `drafts()` | `Vec<DraftEntry>`: the engine's draft store. M4 (§3.9); until then the CLI keeps drafts as files and the SPA in browser storage |
 
 `sort`/`filter` values are exactly those of `social.md` §12 (`magic | top | new | old | recentComments`;
 `frontpage | all | curated`; comment sorts `magic | top | new | old | latestReply`).
 
-**Default list view (M2).** Until votes and curation exist (M3), every client opens a forum's
-post list with `sort = new`, `filter = all` (the CLI's `ls`, the TUI's forum screen, the SPA's
-`web/src/lib/listDefaults.ts`), so the three show the same posts for the same forum; the
-parity scenario lists with these values and compares one page of 30 posts (the CLI's `ls -n`
-default and the SPA's page size; the TUI's forum screen lists up to 200, and its parity driver
-checks that they start with that page, `crates/tui/src/exec.rs` `PARITY_LIST_LIMIT`). The
-defaults change together when M3 lands.
+**Defaults (M3).** `ListPostsQuery` defaults to `sort = magic`, `filter = frontpage`;
+`ThreadOpts` to `sort = magic`. Every client opens a forum's post list with these defaults (the
+CLI's `ls`, the TUI's forum screen, the SPA's `web/src/lib/listDefaults.ts`), so the three show
+the same posts for the same forum; the parity scenario lists with explicit values.
+
+**One fold per forum.** The engine folds a forum once per change of its cache (`social.md` §1,
+the full fold with the empty query) and answers every query from that model: a sort, filter,
+tag, kind, author or thread is re-ranked from the cached layers (`full::reorder`), which gives
+the same orderings as a fold with that query. Refolds are single-flight per forum, throttled by
+the last fold's cost (a forum whose fold took `c` ms is not refolded more often than every `c`
+ms, at most 5 s apart, and its model is reused for up to `30 c` ms or `MODEL_MAX_AGE_MS`), and a
+fold that rejects its input (a malformed `FoldInput`, §1.1) keeps the last good model and logs
+the error. The model's `now` is the view time (`parity_now_ms` in parity mode), so the same
+cache, local state and clock give byte-identical JSON on every engine.
+
+**Paging.** `list_posts`, `recent_discussion` and `mod_log` page with an opaque `cursor` (the
+next page's offset) and `limit` (0: `LIST_PAGE_DEFAULT`, at most `LIST_PAGE_MAX`).
+
+**Viewer.** Views are computed for the active account (the viewer): its own opinions (`mine`),
+react stances, read marks (`unread`, `unreadComments`), mutes (the lens: a muted author's listed
+items are `collapsed/muted`, `social.md` §10.3) and `ForumView.viewer` capabilities. Hidden and
+tombstoned items carry no author content (title, link, tags, labels, body, reacts) and a zero
+score for viewers who are not the forum's authorities; `raw` shows everything.
 
 ### 3.5 Writes
 
@@ -204,36 +245,63 @@ emits `Auth { did, state: Expired }`, and the next login of the account (`add_ac
 
 | Operation | Notes |
 |---|---|
-| `publish(PostDraft)` | `PostDraft { forum, kind, title?, body: BodyDraft, link?, tags, labels }`; adds membership on first content (`data-model.md` §8) |
+| `publish(PostDraft)` | `PostDraft { forum, kind, title?, body: BodyDraft, link?, tags?, labels? }`; adds membership on first content (`data-model.md` §8) |
 | `comment(CommentDraft)` | `{ root, parent?, body, quote? }` |
 | `edit(uri, Draft, EditOpts { history: bool, summary? })` | edit protocol with revision snapshot |
 | `delete(uri)` / `retract(uri)` | |
-| `opinion(subject_uri, OpinionIntent)` | `Karma(v|clear) | Agreement(v|clear) | React{ id, stance, quote?, remove } | Tag{ slug, v|clear }`; 4 s undo window |
-| `mod_action(ModActionIntent)` | per `data-model.md` §6.7 / §8.6 |
-| `mod_adopt(forum, former_mod)` | |
-| `wiki_edit(forum, slug, WikiDraft)` | |
-| `seq_create`, `seq_edit`, `seq_add`, `seq_remove`, `seq_move` | |
-| `redact_revision(uri)` | deletes revision records |
-| `prepare_media(MediaInput) -> MediaRef` | sniff, strip, orient (native), CID; upload happens at publish |
-| `undo(write_id)` | within the undo window |
+| `opinion(subject_uri, OpinionIntent) -> ActionTicket` | the active account's opinion on a cached post, comment, wiki revision or sequence (`data-model.md` §8.5): `Karma { value? }`, `Agreement { value? }` (an absent value clears the axis), `React { id, stance, quote?, remove? }` (`quote.exact` only: the engine derives `prefix`, `suffix` and `start` from the item's current text), `Tag { slug, value? }`. Held for the 4 s undo window (`OPINION_UNDO_WINDOW_MS`, `Pending { held }`); an intent on a subject whose write is still held joins it (the ticket is that write's). When sent, the record is re-read and the intents re-applied per axis, so two devices' opinions merge; an opinion left empty is deleted; `subject.cid` is the cached version's. Refused before enqueueing when it could never count: `blocked` (banned, nullified, restricted, a gate of `ViewerCaps`), `invalid_input` (an own item, a forum without agreement or reacts, an unknown react, nothing to react against, an unknown value), `invalid_ref` (not an opinion subject), `not_found` (not cached). A vote that does not carry weight yet is recorded with a `notEstablished` notice ("recorded; will count once you're established"). A public action (§3.6) |
+| `mod_action(ModActionIntent) -> ActionTicket` | `Assert { forum, scope, subject, action: ModActionValue, reason?, untilMs? }` creates the active account's record for (scope, subject, action key), or updates it through the edit protocol; `Remove { forum, scope, subject, actionKey }` deletes it through the removal protocol (unhide, unban, unpin, unlock, unrestrict, …) (`data-model.md` §6.7, §8.4, §8.6). `subject` is a DID or handle, an at-uri or `tag:<slug>`; a positive assertion is bound to the subject's cached CID. Refused before enqueueing when it would have no effect: `blocked` (forum scope needs an authority with the rank and role, `social.md` §4.3; author scope the §4.9 conditions), `invalid_input` (a subject of the wrong kind, an action author scope does not allow, a lock that would keep more than 5,000 comments: `detail.hint = "useHide"`, offer hiding the thread), `not_found` (a positive assertion on an uncached subject, or removing an assertion the account does not have). Bans and restrictions carry a `retroactive` notice. `lock.allowed` is computed by the engine. A public action (§3.6) |
+| `mod_adopt(forum, former) -> WriteTicket` | by an authority: re-issues the former (or departing) moderator's (a DID or handle) non-lapsed forum-scope assertions with `adopts` pointing at each original (`social.md` §4.10); what could not be adopted is reported in the write's result |
+| `wiki_edit(forum, slug, WikiDraft)` | M5 (§3.9) |
+| `seq_create`, `seq_edit`, `seq_add`, `seq_remove`, `seq_move` | M5 |
+| `redact_revision(uri)` | deletes revision records. M4 |
+| `prepare_media(MediaInput) -> MediaRef` | sniff, strip, orient (native), CID; upload happens at publish. M4 |
+| `undo(write_id)` | removes a write not sent yet (the undo window), or writes the inverse of a sent opinion (`sync.md` §7.4) |
 | `retry_write(write_id)` | queues a `failed` (or conflicting) write again with its attempts reset; on a write that backs off after a failure, or waits for a login, it is "send now" (queued at once, attempts kept). A write held by the undo window, the write budget or a rate limit is refused (`invalid_input`). Returns its ticket |
 | `write_status(write_id) -> Option<WriteTicket>` | `None`: unknown or pruned |
 | `writes() -> Vec<WriteTicket>` | every write in the outbox, by account then `seq` (the CLI's `outbox` listing, the SPA's pending badges) |
 
-`BodyDraft { markdown, media: Vec<MediaRef> }` — the engine performs spill-to-blob, mention
+`BodyDraft { markdown, media?: Vec<MediaRef> }` — the engine performs spill-to-blob, mention
 rewriting (`at://handle` → DID), derived `mentions`/`links`, and validation before persisting.
+
+**`ActionTicket { id, state, notices? }`** is a `WriteTicket` (same `id`, same `state`, the same
+`Write` events) plus the notices clients show with the result: `ActionNotice { code, message }`
+with `code` one of `notEstablished`, `retroactive`, `adoptedFirst` (stable) and `message`
+English text. `opinion`, `mod_action` and `mods_set` return it.
 
 ### 3.6 Local state
 
-`mark_read(post_uri)`, `save_draft(Draft) -> draft_id`, `delete_draft(id)`, `bookmark(uri, on)`,
-`subscribe(Subscription, on)`, `mute(did, on)`, `settings() / set_setting(key, value)`,
-`export_local() -> Json`, `import_local(Json)`.
+Kept in the `state` store of this device, never written to a PDS. Every operation emits the
+`Changed` topics named here.
+
+| Operation | Notes |
+|---|---|
+| `mark_read(uri)` | a post: `lastVisited` becomes the greatest first-seen time among the post and its listed comments (never lower than before), and the active account's notifications about the thread are read (`Changed [Thread, Forum]`, plus `Notifications`). A forum: its post list was visited (the new-post count of `unread_counts` restarts) (`Changed [Forum]`) (`social.md` §16) |
+| `mark_notifications_read(ids)` | the active account's notifications `ids` (unknown ids are ignored); `Changed [Notifications]` if one changed |
+| `mark_all_notifications_read()` | every notification of the active account |
+| `bookmark(uri, on)` | `Changed [Thread]` |
+| `subscribe(Subscription, on)` | new posts in a forum, by a user or with a tag, new comments on a post, new entries of a sequence (`social.md` §16); `Changed [Notifications]`. In TypeScript `setSubscription`, since `subscribe` is the event subscription (§3.8) |
+| `mute(actor, on)` | a DID or handle; the lens collapses the actor's listed items (`social.md` §10.3); `Changed` for the user and every cached forum |
+| `acknowledged_public_actions() -> Vec<PublicActionKind>` | the "this is public" interstitials the active account has seen (`social.md` §17, `threat-model.md` PRIV-9), in `PublicActionKind` order (`vote`, `react`, `tagVote`, `join`, `modAction`); empty without an active account |
+| `public_action_acknowledged(kind) -> bool` | |
+| `acknowledge_public_action(kind)` | per account, shared by every client on this device; `auth_required` without an active account; `Changed [Accounts]` |
+| `karma_notifications() -> KarmaCadence`, `set_karma_notifications(cadence)` | `realtime`, `daily` (the default) or `weekly` (`social.md` §16); `Changed [Notifications]` |
+| `save_draft(Draft) -> draft_id`, `delete_draft(id)` | M4 (§3.9) |
+| `settings()`, `set_setting(key, value)` | M4 |
+| `export_local() -> Json`, `import_local(Json)` | M4 |
+
+**Public actions.** Votes and agreement, reacts, tag votes, joining or applying, and mod actions
+are public (`social.md` §17). Before the first action of a kind, every client shows the "this is
+public" interstitial unless `public_action_acknowledged(kind)`, then calls
+`acknowledge_public_action(kind)`; `OpinionIntent::public_kind()` names the kind of an intent.
+The engine does not enforce it.
 
 ### 3.7 Pure functions (also exported to wasm)
 
-`render(markdown, media, RenderOpts) -> RenderedBody`, `safe_href(raw, ctx)`, `parse_ref`,
-`validate_record(collection, json)`, `derive_rkey(...)`, `verify(uri, deep) -> VerifyReport`
-(network, but no state), `run_vector(kind, json) -> json` (tests only, feature `vectors`).
+`render(markdown, media, RenderOpts) -> RenderedBody` (media: M4), `safe_href(raw, ctx)`,
+`parse_ref`, `verify(uri, deep) -> VerifyReport` (network, but no state);
+`validate_record(collection, json)` and `derive_rkey(...)` (M4); `run_vector(kind, json) -> json`
+(tests only).
 
 ### 3.8 Events
 
@@ -268,18 +336,46 @@ UIs re-query on `Changed` and never move the user's cursor on live updates (TUI 
   expired, log in again" (the CLI exits 3 with that hint). `Ok` and `Expiring` are Reserved.
 - **Handles.** Handle verification (`verify_handles`, `live_tail`) emits `Changed` for the users
   whose handle state changed and for the cached forums.
+- **Social writes and local state (M3).** `opinion`, `mod_action`, `mod_adopt`, `mods_set`,
+  `approve` and `reject` report through `Write` events like every write (an opinion stays
+  `pending { held }` for the undo window). The local-state operations emit the topics of §3.6.
+  Notifications and unread counts are computed lazily: clients re-query `notifications` and
+  `unread_counts` on `Changed` with a `Notifications`, `Forum` or `Thread` topic.
 
-### 3.9 Planned operations (not specified yet)
+### 3.9 Not implemented in engine API v0, and the Rust-only API
 
-Clients asked for these; they arrive with the milestone that implements the behaviour behind
-them, as compatible additions (`docs/plan.md`):
+**Unsupported operations.** These are part of the API (`EngineApi`, and the Rust API where it
+exists) but not implemented yet: they reject with `unsupported` (`retryable: false`,
+`detail.milestone`), and the milestone that brings the behaviour behind them implements them,
+a compatible change (§1). Clients hide or stub what they need of them meanwhile.
+
+| Operations | Milestone |
+|---|---|
+| `forum_discover` | M5 (the forum directory) |
+| `tags`, `tag`, `wiki_edit` | M5 (tags and the wiki) |
+| `sequences`, `sequence`, `seq_create`, `seq_edit`, `seq_add`, `seq_remove`, `seq_move` | M5 |
+| `user` | M5 (user pages, with profiles) |
+| `search` | M5 |
+| `prepare_media`, `redact_revision`, `render` with media | M4 (the media pipeline; history and redaction) |
+| `drafts`, `save_draft`, `delete_draft` | M4 (the editor; the CLI keeps drafts as files, the SPA in browser storage) |
+| `settings`, `set_setting` | M4 (the media autoload and external-image policies; the karma cadence and the public-action acknowledgements already have their own operations, §3.6) |
+| `export_local`, `import_local` | M4 (`export`) |
+| `validate_record`, `derive_rkey` | M4 |
+| `run_vector` | never in a release module (the social vectors run natively and in the wasm32 test harness) |
+
+**Planned additions** (compatible, not in v0):
 
 | Operation / field | Milestone | Notes |
 |---|---|---|
-| `mutes() -> Vec<ActorView>` | M3 | the local mute list behind `mute(did, on)` (§3.6) |
-| `mark_notifications_read(ids)`, or all | M3 | notification read state (`social.md` §16) |
 | viewer's own tag votes and tag relevance on `PostView` | M5 | `applies(p, t)` (`social.md` §13.3); until then a client only knows the votes it made itself |
 | `backlinks(uri)` ("linked from") | M5 | listed posts linking to an item, from rendered bodies (`social.md` §16 Pingbacks) |
+
+**Rust API only** (native hosts and tests; not dispatched by the wasm binding): `acting_as`
+(§3.1), the native login plumbing (`bind_login`, `record_account`, `refresh_account`,
+`account`), identity helpers (`resolve_identity`, `resolve_identity_fresh`,
+`invalidate_identity`), `read_mark(post)` (the read mark in µs behind `unread` and
+`unreadComments`) and `muted()` (the DIDs behind `mutes()`). `live_step` and `outbox_flush`
+are reachable from the worker as glue (§5).
 
 ## 4. DTO schema (`dto/1`)
 
@@ -300,11 +396,19 @@ HiddenReason  = { kind: "notParticipant" } | { kind: "moderationUnavailable" }
               | { kind: "locked" } | { kind: "newUser" }
 Badges        { verified?: true, edited?: true, futureDated?: true, identityUnverified?: true,
                 stale?: true, hint?: true, pending?: true, inconsistentTimestamps?: true }   // sync.md §1.6
-ScoreView     { score: i64, agreement?: i64 /* absent when policy.voting = karmaOnly, social.md §7 */,
-                unweighted: u32, earlierVersionVotes: u32,
-                mine?: { karma?: KarmaValue, agreement?: AgreementValue } }
-ReactTally    { react, label, glyph, for: u32, against: u32, quote?: TextQuote, anchor?: Anchor,
-                creator?: did, mine?: "for"|"against" }
+ScoreView     { score: i64 /* includes the implicit self-vote, social.md §7 */,
+                agreement?: i64 /* absent when policy.voting = karmaOnly, social.md §7 */,
+                unweighted: u32 /* "n votes not yet counted" */,
+                earlierVersionVotes: u32, weightedVotes?: u32 /* N and M of "N of M votes were
+                cast on an earlier version"; M omitted when 0 */,
+                mine?: MyOpinion }
+MyOpinion     { karma?: KarmaValue, agreement?: AgreementValue,
+                pending?: true /* a write of it waits in the outbox */,
+                notYetCounted?: true /* "recorded; will count once you're established" */ }
+ReactTally    { react, label, glyph, for: u32 /* |supporters|, creator included */,
+                against: u32 /* |opposers| */, quote?: TextQuote /* the creator's */,
+                anchor?: Anchor, creator?: did, mine?: "for"|"against",
+                uncounted?: true /* the viewer's own react, which forms no valid react */ }
 Anchor        { start: u32, end: u32 } | { orphan: true }    // code-point offsets into P
 RenderedBody  { html, text, toc: Vec<TocEntry>, wordCount, readMinutes, media: Vec<MediaView>,
                 excerpt, notices: Vec<string>, rendererVersion }
@@ -324,7 +428,8 @@ PostSummary   { uri, cid, forum, author: ActorView, kind, title?, excerpt, tags:
                 createdAtMs, tRankMs, commentCount, lastCommentAtMs?, score: ScoreView,
                 state: ItemState, badges: Badges, unreadComments?: u32, link?: ExternalLinkView,
                 labels: Vec<string> }
-PostList      { dto, forum, sort, filter, items: Vec<PostSummary>, cursor?, completeness }
+PostList      { dto, forum, sort, filter, items: Vec<PostSummary>, cursor?, completeness,
+                banners?: Vec<Banner> }
 PostView      { dto, post: PostSummary, body: RenderedBody, reacts: Vec<ReactTally>,
                 history: { revisions: u32, redacted: bool }, sequences: Vec<SequenceNav> }
 CommentNode   { uri, cid, root: uri /* the thread the engine placed it in */, parent?: uri,
@@ -334,8 +439,10 @@ CommentNode   { uri, cid, root: uri /* the thread the engine placed it in */, pa
                 moderatorHat: bool, version?: { revision: u32 } | { unavailable: true },
                 orphaned: bool, missing: bool, unread: bool, pinned: bool }
 ThreadView    { dto, post: PostView | { missing: uri }, comments: Vec<CommentNode>, sort,
-                completeness }
-DiscussionList{ dto, items: Vec<{ post: PostSummary, comments: Vec<CommentNode> }>, cursor?, completeness }
+                completeness, banners?: Vec<Banner> }
+DiscussionList{ dto, items: Vec<{ post: PostSummary, comments: Vec<CommentNode> }>, cursor?, completeness,
+                banners?: Vec<Banner> }
+Banner        { code: "moderationUnavailable" /* degraded, social.md §4.11 */ | "newerRules", message }
 HistoryView   { dto, uri, versions: Vec<{ n, cid, createdAtMs, summary?, available: bool }> }
 ```
 
@@ -346,25 +453,114 @@ ForumSummary  { uri, owner: ActorView, name, description?, membership: open|appr
                 followed: bool, member: bool, alias?,
                 reportContact? /* as written; shown only through safe_href (Field) */ }
 ForumView     { dto, forum: ForumSummary, about?: RenderedBody, moderators: Vec<{ actor, role, title?, shown: bool }>,
-                policy: EffectivePolicy, myRole: owner|admin|moderator|member|established|newcomer|none,
-                myKarma?: i64, banners: Vec<Banner>, completeness }
+                policy: EffectivePolicy, myRole: ForumRole, myKarma?: i64, banners: Vec<Banner>,
+                completeness, viewer?: ViewerCaps /* absent without an active account */ }
+ForumRole     = owner|admin|moderator      // A, by rank
+              | member|established|newcomer // with a valid membership record: S, E ∖ S, P ∖ (S ∪ E)
+              | none                       // (a grant without a membership record is "none")
+ViewerCaps    { vote, strongVote, agree, weighted /* in E */, react, reactCreate, reactSecond,
+                reactAnti, post, comment, newcomer, applicant, moderate, rank?: 1|2|3, curate,
+                authorModPersonal, authorModFrontpage }   // all bool; gates as action enablement
+                // (social.md §4.9, §5, §8): clients disable what would not count
 UserView      { dto, actor: ActorView, forum?, karma?: { k1, kp, k }, status, bio?: RenderedBody,
                 links, pinned: Vec<PostSummary>, recentPosts: Vec<PostSummary>, recentComments: Vec<CommentNode> }
-MemberView    { actor, status, granted: bool, membershipNote?, joinedAtMs }
+MemberView    { actor, status: ForumRole, granted: bool, membershipNote?, joinedAtMs,
+                karma?: i64 /* omitted when 0 */, applicant?: true, banned?: true,
+                nullified?: true, restricted?: Vec<capability> }
 TagSummary    { slug, name, description?, postCount, unmergedEdits }
 TagView       { dto, tag: TagSummary, page?: RenderedBody, head?: uri, posts: Vec<PostSummary> }
 SequenceSummary { uri, author, title, chapters: u32, posts: u32, score: ScoreView, pinned: bool }
 SequenceView  { dto, sequence: SequenceSummary, body?: RenderedBody, chapters: Vec<{ title?, body?, posts: Vec<PostSummary> }> }
 SequenceNav   { sequence: uri, title, prev?: uri, next?: uri }
 SearchResults { dto, hits: Vec<{ item: PostSummary | CommentNode, snippet: string, highlights: Vec<[u32,u32]> }> }
-NotificationList { dto, items: Vec<{ id, reason, atMs, subject: uri, actor?: ActorView, read: bool, preview?: string }> }
-                 // reason: reply|mention|quote|pingback|newComment|newPost|reacted|modAction|karmaChange (social.md §16)
-ModQueue      { dto, items: Vec<{ kind, subject, reason, detail }> }
-ModLog        { dto, entries: Vec<{ actor, action, subject, value, reason?, atMs, lapsed: bool, adoptedFrom? }> }
+NotificationList { dto, items: Vec<NotificationView>, unread: u32 /* every unread one: the badge */ }
+NotificationView { id, reason: NotificationReason, atMs /* first seen, or when the change was
+                 noticed; never createdAt */, subject: uri, forum?: uri, actor?: ActorView,
+                 read: bool, preview?: string }
+NotificationReason = reply|mention|quote|pingback|newComment|newPost|reacted|modAction|karmaChange
+                                                                  // social.md §16
+UnreadCounts  { dto, notifications: u32, forums: Vec<ForumUnread> /* by forum uri */ }
+ForumUnread   { forum: uri, posts: u32, comments: u32, notifications: u32 }
+BookmarkEntry { uri, savedAtMs, post?: PostSummary }
+SubscriptionEntry { subscription: Subscription, sinceMs }
+ModQueue      { dto, items: Vec<{ kind: applicant|conflict|stale|newcomer, subject, reason,
+                detail?, uri? /* the stale modAction */, actor?: ActorView, atMs? }> }
+ModLog        { dto, entries: Vec<ModLogEntry>, cursor? }
+ModLogEntry   { uri /* modAction or revision */, actor: ActorView, action, subject, value,
+                reason?, atMs, status: ModLogStatus, lapsed: bool, rank? /* the winner's, when
+                overridden */, authorScope?: true, adoptedFrom?: uri }
+ModLogStatus  = effective|overridden|lapsed|expired|stale|unauthorised|reservedUnknown
+              | edited|removed                                   // social.md §4.12
 RawView       { dto, uri, cid?, root?: uri /* a comment's thread, as placed by the engine */,
                 level: pds|proven|hint, record?: json, validity: Vec<string>,
-                assertions: Vec<…>, state?: ItemState }
+                assertions: Vec<{ uri, cid, valid, record, rule?, status?: ModLogStatus }>,
+                state?: ItemState, score?: ScoreView }
 VerifyReport  { dto, uri, result: proven|absent|failed, rev?, commitCid?, keySource, checks: Vec<{ name, ok, detail? }> }
+```
+
+### 4.4 Operation inputs and results
+
+Optional request fields (`?`) may be left out; the default is named where it is not "none".
+
+```
+AccountInfo   { did, pds, auth: oauth|appPassword, issuer?, intended?, confirmIssuerChange? /* false */ }
+AccountView   { did, handle?, pds, authKind: oauth|appPassword, active: bool }
+Ref           = { kind: forum|post|comment|sequence|record, uri } | { kind: "actor", did }
+RefContext    { forum? }
+ForumDraft    { slug, name, description?, about?: BodyDraft, membership: open|approval,
+                defaultTier: personal|frontpage, featuredTags?: Vec<slug>,
+                moderators?: Vec<{ did, role: admin|moderator, title? }>, reportContact? }
+MembersQuery  { status?: ForumRole, pending?: bool }
+ModsChange    = { kind: "add", did, role: admin|moderator, title? }
+              | { kind: "remove", did, skipAdopt? /* false */ }
+SyncOpts      { budgetMs?, maxRequests?, full? /* false */ }
+ListPostsQuery { forum, sort: PostSort, filter: PostFilter, tag?: slug, kind?: PostKind,
+                 author? /* DID or handle */, cursor?, limit /* 0: LIST_PAGE_DEFAULT */ }
+ThreadOpts    { sort: CommentSort, unreadOnly? /* false */ }
+NotificationsQuery { all? /* false: unread only */, limit }
+BodyDraft     { markdown, media?: Vec<MediaRef> }
+MediaRef      { id, cid, mime, sizeBytes, alt?, aspectRatio?, durationMs?, name? }
+PostDraft     { forum, kind: PostKind, title?, body: BodyDraft, link?: { uri, title?, description? },
+                tags?: Vec<slug>, labels?: Vec<string> }
+CommentDraft  { root, parent?, body: BodyDraft, quote?: TextQuote }
+Draft         = { kind: "post", id?, post: PostDraft } | { kind: "comment", id?, comment: CommentDraft }
+EditOpts      { history: bool, summary? }
+OpinionIntent = { kind: "karma", value?: up|down|strongUp|strongDown }      // absent: clear
+              | { kind: "agreement", value?: agree|disagree|strongAgree|strongDisagree }
+              | { kind: "react", id /* palette id */, stance: for|against, quote?: TextQuote,
+                  remove? /* false */ }
+              | { kind: "tag", slug, value?: KarmaValue }
+ModActionIntent = { kind: "assert", forum, scope: forum|author, subject /* DID or handle,
+                    at-uri or tag:<slug> */, action: ModActionValue, reason?, untilMs? }
+                | { kind: "remove", forum, scope: forum|author, subject, actionKey }
+ModActionValue = { kind: "hide", hidden, spam? /* false */, showReason? /* true */ }
+               | { kind: "access", level: banned|member }
+               | { kind: "restrict", capabilities: Vec<post|comment|vote|react|tag|wiki|sequence>,
+                   nullifyVotes? /* false */ }
+               | { kind: "tier", tier: Tier, notice?: BodyDraft }
+               | { kind: "pin", scope: forum|thread, pinned }
+               | { kind: "lock", locked }
+               | { kind: "tag", removed, head?: uri /* a wikiRevision */ }
+               // actionKey: the kind, or "pin:forum" / "pin:thread" (data-model.md §3.1)
+WriteTicket   { id, state: WriteState }
+WriteState    = { kind: "pending", notBeforeMs?, held?: true, throttled?: true, needsLogin?: true,
+                  error?: EngineError } | { kind: "sending" } | { kind: "done", uri, cid? }
+              | { kind: "failed", error: EngineError } | { kind: "undone" }
+ActionTicket  { id, state: WriteState, notices?: Vec<ActionNotice> }
+ActionNotice  { code: notEstablished|retroactive|adoptedFirst, message }
+Subscription  = { kind: "forum", uri } | { kind: "post", uri } | { kind: "user", did }
+              | { kind: "tag", forum, slug } | { kind: "sequence", uri }
+PublicActionKind = vote|react|tagVote|join|modAction
+KarmaCadence  = realtime|daily|weekly
+EngineError   { code, message, retryable: bool, detail?: object }      // §1
+Event         = { kind: "changed", topics: Vec<Topic> }
+              | { kind: "syncProgress", forum, done, total }
+              | { kind: "write", id, state: WriteState }
+              | { kind: "auth", did, state: { kind: ok } | { kind: expiring, inMs } | { kind: expired } }
+              | { kind: "warning", warning: equivocation|indexerContradiction|degraded|renderFailure|other,
+                  source?, message }
+Topic         = { kind: forum|thread, uri } | { kind: "user", did }
+              | { kind: notifications|outbox|drafts|accounts }
 ```
 
 ## 5. Wasm binding (`@lessdugin/engine`)
@@ -376,12 +572,19 @@ VerifyReport  { dto, uri, result: proven|absent|failed, rev?, commitCid?, keySou
   array, and the result is the DTO's dto/1 JSON text exactly as `dto.rs` serialises it (the
   bytes the CLI's `--json` prints); a failure rejects with an `EngineError` JSON string. Events
   reach `cb` as dto/1 JSON strings, in order, never re-entrantly. The TS types are the
-  hand-written `types.ts`, checked against `dto.rs` by `types.parity.test.ts`.
+  hand-written `types.ts`, checked by `types.parity.test.ts` against `testdata/dto/dto-1.d.ts`,
+  which the Rust types generate through their tsify derives (§1 "Freeze"; the derives are a
+  test-only feature, `lessdugin-wasm/dto-decl`, never in the module).
 - **Coverage.** Every `EngineApi` method is either dispatched (`crates/wasm/src/ops.rs` `OPS`)
-  or rejects with `unsupported` (`UNSUPPORTED`, the operations of later milestones); a native
-  test parses `api.ts` and fails when a method is in neither list. Worker glue operations
-  outside `EngineApi`: `externalChange`, `outboxWake`, `outboxFlush`, `liveStep`.
+  or rejects with `unsupported` and `detail.milestone` (`UNSUPPORTED`, §3.9); a native test
+  parses `api.ts` and fails when a method is in neither list, and `crates/wasm/tests/ops_social.rs`
+  runs the M3 operations through the dispatcher with the JSON the client sends. Method names
+  are the Rust names camelCased, except `setSubscription` (§3.6 `subscribe`). Worker glue
+  operations outside `EngineApi`: `externalChange`, `outboxWake`, `outboxFlush`, `liveStep`.
   `grant`/`revoke` resolve with one ticket per actor in wasm; the client returns the first.
+  `approve`/`reject` resolve with every ticket. The wasm side reads the arguments as a
+  fixed-size tuple, so the client sends an omitted trailing optional argument as `null`
+  (`client.ts` `OP_ARITY`, checked against `api.ts` by `client.test.ts`).
 - **Configuration.** `configJson` is `EngineConfigInput` (`packages/engine/src/protocol.ts`,
   camelCase, unknown keys refused): `network` (`production` or `devnet { plc, pds }`), the
   sources, `verify`, the resolver lists and `parityNowMs` (§2.1). The worker accepts `devnet`

@@ -18,7 +18,9 @@ from lessdugin_ref.common import h16, rkey_of
 from lessdugin_ref.karma import LADDER, power, small, strong
 from lessdugin_ref.scores import self_score
 from lessdugin_ref.fold import fold_vector_input
+from lessdugin_ref.cids import upper_spelling
 
+from . import kcast
 from .util import file_doc, vector
 
 MODS = (("adam", "admin"), ("mona", "moderator"), ("mike", "moderator"))
@@ -463,14 +465,16 @@ def staged_vectors() -> list:
             good, weird, bad_key, *never]
     out.append(V("opinions-that-never-count", f, recs,
                  "mike's second opinion has a wrong h16 in its rkey (invalid: G5) and fails O1. mona's "
-                 "opinions on the spam post (O5), on an untitled post (invalid: PO3), on a post that is "
-                 "neither in records nor in absent, and on a comment that CO5 excludes (its root post is "
-                 "invalid: G5, because its forum field names another forum) fail O5 or O2. The opinion on a "
-                 "hidden (not spam) post counts. mike's opinion with an unknown karma value counts with no "
-                 "karma axis (OP3); its agreement axis is kept. alice: K1 2, seedUp 1",
+                 "opinions on the spam post (O5), on an untitled post (invalid: PO3) and on a post that is "
+                 "neither in records nor in absent fail O5 or O2. The opinion on a hidden (not spam) post "
+                 "counts. alice's comment whose root post is invalid (G5: its forum field names another "
+                 "forum) is not excluded: CO5 compares only a valid root (social.md §20.1 item 51), so the "
+                 "comment sits under a Missing root and mona's opinion on it counts. mike's opinion with an "
+                 "unknown karma value counts with no karma axis (OP3); its agreement axis is kept. alice: "
+                 "K1 3 (mona's three upvotes), seedUp 1",
                  invalid={u(bad_key): "G5", u(p_untitled): "PO3", u(root_bad): "G5"}, extra=("scores",),
-                 expect={"counting": us(o_ok, good, weird), "K1": km(alice=2), "seedUp": km(alice=1),
-                         "E": ds(*A), "established": [], "KP": km(alice=2), "K": km(alice=2),
+                 expect={"counting": us(o_ok, good, weird, never[3]), "K1": km(alice=3), "seedUp": km(alice=1),
+                         "E": ds(*A), "established": [], "KP": km(alice=3), "K": km(alice=3),
                          "scores": {u(p_ok): {"score": 1, "agreement": 0, "unweighted": 0, "earlier": 0,
                                               "weighted": 1},
                                     u(p_hidden): {"score": 1, "agreement": 0, "unweighted": 0, "earlier": 0,
@@ -478,7 +482,45 @@ def staged_vectors() -> list:
                                     u(p_spam): {"score": 0, "agreement": 0, "unweighted": 0, "earlier": 0,
                                                 "weighted": 0},
                                     u(p_unknown): {"score": 0, "agreement": 1, "unweighted": 0, "earlier": 0,
-                                                   "weighted": 0}}}))
+                                                   "weighted": 0},
+                                    u(c_co5): {"score": 1, "agreement": 0, "unweighted": 0, "earlier": 0,
+                                               "weighted": 1}}}))
+
+    # ------------------------------------------------------------------ CO5 compares only a valid root
+    f = F(policy={"display": {"newUsers": "collapse"}})
+    other = at(did("owner"), "forum", "elsewhere")
+    root = f.post("xavier", T0 + 10 * MIN)
+    root = rec(root["uri"], {**root["value"], "forum": other})
+    c4 = f.comment("maria", root, T0 + 20 * MIN)
+    c2 = f.comment("mona", root, T0 + 21 * MIN)
+    o4 = f.opinion("owner", c4, T0 + 30 * MIN, karma="up")
+    o2 = f.opinion("adam", c2, T0 + 30 * MIN, karma="up")
+    out.append(V("co5-invalid-root-opinions-count", f, [*mem(f, "xavier", "maria"), *grant(f, "maria"), root, c4,
+                                                        c2, o4, o2],
+                 "open mode. xavier's root post names another forum in its forum field (invalid: G5, the G9 "
+                 "part), as an edit of the post could. CO5 compares only a valid root (social.md §20.1 item "
+                 "51), so the two comments under it are not excluded and the opinions on them count: maria "
+                 "(granted) and mona each get K 1",
+                 invalid={u(root): "G5"}, extra=("scores",),
+                 expect={"counting": us(o4, o2), "K1": km(maria=1, mona=1), "KP": km(maria=1, mona=1),
+                         "K": km(maria=1, mona=1), "E": ds(*A, "maria"), "established": [],
+                         "scores": {u(c4): {"score": 2, "agreement": 0, "unweighted": 0, "earlier": 0,
+                                            "weighted": 1},
+                                    u(c2): {"score": 2, "agreement": 0, "unweighted": 0, "earlier": 0,
+                                            "weighted": 1}}}))
+
+    # ------------------------------------------------------------------ K ≠ KP (cases/kcast.py)
+    f = kcast.forum()
+    c = kcast.cast(f)
+    v = V("k-and-kp-differ", f, c["records"],
+          "approval mode, every user granted (E = S), pairCap 25. Boosters (K 0) give one-point votes. "
+          "tess: 10 ups (K1 = KP = K = 10). sid: 11 ups and tess's strongDown, which weighs 1 in K1 and "
+          "strong(10) = 2 in KP and K (K1 10, KP 9, K 9). vera: 8 ups and sid's strongUp, which weighs "
+          "strong(K1 sid 10) = 2 in KP and strong(KP sid 9) = 1 in K (K1 9, KP 10, K 9). wes: vera's "
+          "strongUp (K1 1, KP strong(9) = 1, K strong(10) = 2). abe: vera's up (1, 1, 1)",
+          fields=("K1", "KP", "K"))
+    kcast.check(fold_vector_input(v["input"]))
+    out.append(v)
     return out
 
 
@@ -606,6 +648,20 @@ def score_vectors() -> list:
                  "pairCap 2: mona upvotes three of pat's posts. Each post's score counts mona's vote (no pair "
                  "cap in scores) while K[pat] is clamped to 2, so here K ≠ Σ (score − self) = 3",
                  fields=("scores", "K"), expect={"scores": {u(p): S(1, weighted=1) for p in pp}, "K": km(pat=2)}))
+
+    # `earlier` compares CIDs by canonical form (social.md §0.4, §20.1 item 45)
+    f, clk = F(), Clock()
+    old = f.post("alice", clk(), title="First title")
+    pa = rec(old["uri"], {**old["value"], "title": "Second title", "updatedAt": dt(clk())})
+    o1 = f.opinion("owner", {"uri": u(pa), "cid": upper_spelling(pa["cid"])}, karma="up")
+    o2 = f.opinion("mona", {"uri": u(pa), "cid": upper_spelling(old["cid"])}, karma="up")
+    out.append(V("earlier-ignores-cid-spelling", f, [*mem(f, "alice"), pa, o1, o2],
+                 "alice edited her post. The owner's up cites the current version with its CID in base32 upper "
+                 "case (multibase B), mona's cites the first version, also in upper case. CIDs written in "
+                 "records compare by canonical form (§0.4, §20.1 item 45): only mona's vote was cast on an "
+                 "earlier version (1 of 2). The two seed votes also establish alice, so her self(i) is 1 and "
+                 "the score 3",
+                 fields=("scores",), expect={"scores": {u(pa): S(3, earlier=1, weighted=2)}}))
     return out
 
 

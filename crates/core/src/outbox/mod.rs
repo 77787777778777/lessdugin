@@ -159,6 +159,9 @@ pub struct NewWrite {
     pub hold_ms: Option<i64>,
     /// For an inverse write made by `undo`: the undone write's id.
     pub undo_of: Option<String>,
+    /// Sent only after the write with this `seq` (same account) is done
+    /// ([`PendingWrite::after`]).
+    pub after: Option<i64>,
 }
 
 impl NewWrite {
@@ -170,7 +173,15 @@ impl NewWrite {
             blobs: Vec::new(),
             hold_ms: None,
             undo_of: None,
+            after: None,
         }
+    }
+
+    /// Sent only once the earlier write `seq` of the same account is done; failed unsent if it
+    /// failed, conflicted or was undone ([`PendingWrite::after`]).
+    pub fn after(mut self, seq: i64) -> Self {
+        self.after = Some(seq);
+        self
     }
 
     /// With blobs.
@@ -724,6 +735,20 @@ impl<H: Host> Outbox<H> {
         base: &str,
         opts: EditOpts,
     ) -> Result<WriteTicket, EngineError> {
+        self.edit_after(session, uri, value, base, opts, None).await
+    }
+
+    /// [`Outbox::edit`], sent only once the earlier write `after` (a `seq` of the same account)
+    /// is done, and failed unsent if it did not complete ([`PendingWrite::after`]).
+    pub async fn edit_after(
+        &self,
+        session: &Session,
+        uri: &str,
+        value: &Value,
+        base: &str,
+        opts: EditOpts,
+        after: Option<i64>,
+    ) -> Result<WriteTicket, EngineError> {
         let u = own_uri(session, uri)?;
         let collection = u.collection().as_str().to_owned();
         let rkey = u.rkey().as_str().to_owned();
@@ -764,7 +789,9 @@ impl<H: Host> Outbox<H> {
             } else {
                 Intent::Put { base }
             };
-            Ok(NewWrite::new(intent, vec![op]).with_blobs(opts.blobs))
+            let mut w = NewWrite::new(intent, vec![op]).with_blobs(opts.blobs);
+            w.after = after;
+            Ok(w)
         })
         .await
     }
@@ -1255,6 +1282,21 @@ impl<H: Host> Outbox<H> {
                 self.emit(&w);
                 return Ok(Step::Processed(w.ticket()));
             }
+            if let Some(dep) = w.after {
+                let d: Option<PendingWrite> = self.get_row(model::write_key(&account, dep)).await?;
+                if let Some(error) = unmet_dependency(&account, dep, d.as_ref()) {
+                    // FIFO: an earlier write is picked first, so a dependency still pending
+                    // here cannot happen; one that did not complete fails this write unsent
+                    w.state = WriteStage::Failed;
+                    w.error = Some(StoredError::from(&error));
+                    w.not_before = None;
+                    w.updated_at = now;
+                    self.save(&account, &w, None).await?;
+                    drop(_g);
+                    self.emit(&w);
+                    return Ok(Step::Processed(w.ticket()));
+                }
+            }
             let budget: BudgetRow = self
                 .get_row(model::budget_key(&account))
                 .await?
@@ -1716,8 +1758,27 @@ fn prepare(
         results: Vec::new(),
         error: None,
         undo_of: new.undo_of,
+        after: new.after,
     };
     Ok((w, chunks))
+}
+
+/// Why a write that depends on write `dep` of `account` ([`PendingWrite::after`]) may not be
+/// sent: `None` once `dep` is done.
+fn unmet_dependency(account: &str, dep: i64, d: Option<&PendingWrite>) -> Option<EngineError> {
+    let id = model::write_id(account, dep);
+    let why = match d.map(|d| (d.state, d.intent.name())) {
+        Some((WriteStage::Done, _)) => return None,
+        Some((WriteStage::Failed | WriteStage::Conflict, name)) => {
+            format!("the {name} write {id} it depends on did not complete")
+        }
+        Some((WriteStage::Undone, name)) => {
+            format!("the {name} write {id} it depends on was undone")
+        }
+        Some((_, name)) => format!("the {name} write {id} it depends on has not been sent"),
+        None => format!("the write {id} it depends on is no longer in the outbox"),
+    };
+    Some(EngineError::conflict(format!("{why}; this write was not sent")).with_detail("after", id))
 }
 
 /// The `state` rows of `account`'s outbox, for purging an account: writes, blob chunks, the

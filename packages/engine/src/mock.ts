@@ -69,6 +69,7 @@ import {
   type HrefContext,
   type ItemState,
   type Json,
+  type KarmaCadence,
   type ListPostsQuery,
   type MediaInput,
   type MediaRef,
@@ -86,6 +87,7 @@ import {
   type PostList,
   type PostSummary,
   type PostView,
+  type PublicActionKind,
   type RawView,
   type ReactTally,
   type Ref,
@@ -114,6 +116,7 @@ import {
   type ThreadOpts,
   type ThreadView,
   type Topic,
+  type UnreadCounts,
   type Unsubscribe,
   type UserView,
   type ValidationReport,
@@ -147,6 +150,15 @@ interface WriteRec {
 
 const RENDER_NOTICE = "Rendered by the mock engine's minimal markdown renderer.";
 const AUTHORITY: ReadonlySet<string> = new Set(["owner", "admin", "moderator"]);
+
+/** `PublicActionKind` in its Rust order (the order of `acknowledgedPublicActions`). */
+const PUBLIC_ACTION_KINDS: readonly PublicActionKind[] = [
+  "vote",
+  "react",
+  "tagVote",
+  "join",
+  "modAction",
+];
 const RANK: Record<string, number> = { owner: 3, admin: 2, moderator: 1 };
 
 function err(code: EngineErrorCode, message: string, retryable = false): EngineError {
@@ -250,6 +262,8 @@ export class MockEngine implements EngineApi {
   private readonly queue: EngineEvent[] = [];
   private flushing = false;
   private readonly writeRecs = new Map<string, WriteRec>();
+  /** Applicants rejected on this device, by forum. */
+  private readonly rejected = new Map<AtUri, Set<Did>>();
 
   constructor(opts: MockEngineOptions = {}) {
     this.s = buildFixture().state;
@@ -942,10 +956,10 @@ export class MockEngine implements EngineApi {
     return this.write(false, () => {
       const f: ForumRec = {
         summary: { uri, owner: me, name: draft.name, membership: draft.membership },
-        moderators: draft.moderators.map((m) => ({ ...m, shown: true })),
+        moderators: (draft.moderators ?? []).map((m) => ({ ...m, shown: true })),
         policy: clone(this.forumRec(FORUM_URI).policy),
         banners: [],
-        featuredTags: [...draft.featuredTags],
+        featuredTags: [...(draft.featuredTags ?? [])],
         defaultTier: draft.defaultTier,
         membership: draft.membership,
       };
@@ -974,8 +988,11 @@ export class MockEngine implements EngineApi {
       f.membership = draft.membership;
       f.summary.membership = draft.membership;
       f.defaultTier = draft.defaultTier;
-      f.featuredTags = [...draft.featuredTags];
-      f.moderators = draft.moderators.map((m) => ({ ...m, shown: true }));
+      f.featuredTags = [...(draft.featuredTags ?? [])];
+      // an empty or absent list keeps the moderators (the engine changes them with modsSet)
+      if (draft.moderators?.length) {
+        f.moderators = draft.moderators.map((m) => ({ ...m, shown: true }));
+      }
       return { uri, cid: fakeCid(`${uri}@${this.tick()}`), topics: [{ kind: "forum", uri }] };
     });
   }
@@ -1025,6 +1042,7 @@ export class MockEngine implements EngineApi {
       .filter((a) => a.status !== "none")
       .filter((a) => query.status === undefined || a.status === query.status)
       .filter((a) => !query.pending || a.status === "newcomer")
+      .filter((a) => !query.pending || !this.rejected.get(uri)?.has(a.view.did))
       .sort((x, y) => x.joinedAtMs - y.joinedAtMs || (x.view.did < y.view.did ? -1 : 1))
       .map((a) => {
         const m: MemberView = {
@@ -1063,6 +1081,35 @@ export class MockEngine implements EngineApi {
 
   async revoke(uri: AtUri, dids: Did[]): Promise<WriteTicket> {
     return this.grantWrite(uri, dids, false);
+  }
+
+  async approve(uri: AtUri, actors: string[]): Promise<WriteTicket[]> {
+    const tickets: WriteTicket[] = [];
+    for (const d of actors) {
+      tickets.push(await this.grantWrite(uri, [d], true));
+      this.rejected.get(uri)?.delete(d);
+    }
+    return tickets;
+  }
+
+  async reject(uri: AtUri, actors: string[]): Promise<WriteTicket[]> {
+    this.forumRec(uri);
+    const set = this.rejected.get(uri) ?? new Set<Did>();
+    this.rejected.set(uri, set);
+    const tickets: WriteTicket[] = [];
+    for (const d of actors) {
+      set.add(d);
+      if (this.s.actors.get(d)?.granted && this.isAuthority(uri)) {
+        tickets.push(await this.grantWrite(uri, [d], false));
+      }
+    }
+    this.changed({ kind: "forum", uri });
+    return tickets;
+  }
+
+  async rejectedApplicants(uri: AtUri): Promise<Did[]> {
+    this.forumRec(uri);
+    return [...(this.rejected.get(uri) ?? [])].sort();
   }
 
   async modsSet(uri: AtUri, change: ModsChange): Promise<WriteTicket> {
@@ -1137,6 +1184,10 @@ export class MockEngine implements EngineApi {
   async outboxPump(): Promise<void> {}
 
   async outboxStop(): Promise<void> {}
+
+  async outboxExpedite(): Promise<number> {
+    return 0;
+  }
 
   async backgroundVerify(): Promise<void> {}
 
@@ -1472,7 +1523,8 @@ export class MockEngine implements EngineApi {
 
   async notifications(q: NotificationsQuery): Promise<NotificationList> {
     const me = this.s.active;
-    if (!me) return { dto: DTO_VERSION, items: [] };
+    if (!me) return { dto: DTO_VERSION, items: [], unread: 0 };
+    const unread = (this.s.notifications.get(me) ?? []).filter((n) => !n.read).length;
     const items = (this.s.notifications.get(me) ?? [])
       .filter((n) => q.all || !n.read)
       .sort((a, b) => b.atMs - a.atMs || (a.id < b.id ? -1 : 1))
@@ -1489,7 +1541,21 @@ export class MockEngine implements EngineApi {
         if (n.preview !== undefined) item.preview = n.preview;
         return item;
       });
-    return { dto: DTO_VERSION, items };
+    return { dto: DTO_VERSION, items, unread };
+  }
+
+  async unreadCounts(): Promise<UnreadCounts> {
+    const me = this.s.active;
+    const unread = me ? (this.s.notifications.get(me) ?? []).filter((n) => !n.read).length : 0;
+    const forums = me
+      ? [...this.s.followed.keys()].sort().map((forum) => ({
+          forum,
+          posts: 0,
+          comments: 0,
+          notifications: forum === FORUM_URI ? unread : 0,
+        }))
+      : [];
+    return { dto: DTO_VERSION, notifications: unread, forums };
   }
 
   async modQueue(forum: AtUri): Promise<ModQueue> {
@@ -1497,11 +1563,20 @@ export class MockEngine implements EngineApi {
     return { dto: DTO_VERSION, items: clone(this.s.modQueue.get(forum) ?? []) };
   }
 
-  async modLog(forum: AtUri, _cursor?: string): Promise<ModLog> {
+  async modLog(forum: AtUri, _cursor?: string, _limit?: number): Promise<ModLog> {
     this.forumRec(forum);
     const entries = [...(this.s.modLog.get(forum) ?? [])]
       .sort((a, b) => b.atMs - a.atMs || (a.subject < b.subject ? -1 : 1))
-      .map((e) => ({ ...clone(e), actor: this.actor(e.actor) }));
+      .map((e) => ({
+        ...clone(e),
+        uri: atUri(
+          e.actor,
+          COLL.modAction,
+          `${this.fkOf(forum)}-${b32hash(`${e.action}:${e.subject}`, 16)}`,
+        ),
+        actor: this.actor(e.actor),
+        status: e.lapsed ? ("lapsed" as const) : ("effective" as const),
+      }));
     return { dto: DTO_VERSION, entries };
   }
 
@@ -1620,6 +1695,14 @@ export class MockEngine implements EngineApi {
     return clone(this.s.subscriptions);
   }
 
+  async bookmarked(uri: AtUri): Promise<boolean> {
+    return this.s.bookmarks.has(uri);
+  }
+
+  async mutes(): Promise<ActorView[]> {
+    return [...this.s.mutes].sort().map((d) => this.actor(d));
+  }
+
   // =============================================================================== §3.5
 
   async publish(draft: PostDraft): Promise<WriteTicket> {
@@ -1644,7 +1727,7 @@ export class MockEngine implements EngineApi {
         kind: draft.kind,
         markdown: draft.body.markdown,
         body: renderMarkdown(draft.body.markdown).body,
-        tags: [...draft.tags],
+        tags: [...(draft.tags ?? [])],
         tier: f.defaultTier,
         pinned: false,
         locked: false,
@@ -1654,7 +1737,7 @@ export class MockEngine implements EngineApi {
         reacts: [],
         state: { kind: "visible" },
         badges: {},
-        labels: [...draft.labels],
+        labels: [...(draft.labels ?? [])],
         revisions: [],
         redacted: false,
       };
@@ -1757,7 +1840,7 @@ export class MockEngine implements EngineApi {
         p.markdown = draft.post.body.markdown;
         p.body = renderMarkdown(p.markdown).body;
         if (draft.post.title !== undefined && p.kind !== "quickTake") p.title = draft.post.title;
-        p.tags = [...draft.post.tags];
+        p.tags = [...(draft.post.tags ?? [])];
         p.cid = fakeCid(`${uri}#t${t}`);
         p.badges = { ...p.badges, edited: true };
         return { uri, cid: p.cid, topics: this.threadTopics(uri) };
@@ -1918,9 +2001,9 @@ export class MockEngine implements EngineApi {
                 kind: "removed",
                 rank,
                 actor: me,
-                spam: a.spam,
+                spam: a.spam ?? false,
               };
-              if (copy.reason !== undefined && a.showReason) reason.reason = copy.reason;
+              if (copy.reason !== undefined && a.showReason !== false) reason.reason = copy.reason;
               item.state = { kind: "hidden", reason };
               value = a.spam ? "hidden (spam)" : "hidden";
             } else {
@@ -2226,7 +2309,12 @@ export class MockEngine implements EngineApi {
 
   // =============================================================================== §3.6
 
-  async markRead(postUri: AtUri): Promise<void> {
+  async markRead(uri: AtUri): Promise<void> {
+    if (this.s.forums.has(uri)) {
+      this.changed({ kind: "forum", uri });
+      return;
+    }
+    const postUri = uri;
     const times = [...this.s.comments.values()]
       .filter((c) => c.root === postUri)
       .map((c) => c.tRankMs);
@@ -2248,6 +2336,26 @@ export class MockEngine implements EngineApi {
     ];
     if (touched) topics.push({ kind: "notifications" });
     this.changed(...topics);
+  }
+
+  async markNotificationsRead(ids: string[]): Promise<void> {
+    const me = this.s.active;
+    if (!me) return;
+    const wanted = new Set(ids);
+    let touched = false;
+    for (const n of this.s.notifications.get(me) ?? []) {
+      if (!n.read && wanted.has(n.id)) {
+        n.read = true;
+        touched = true;
+      }
+    }
+    if (touched) this.changed({ kind: "notifications" });
+  }
+
+  async markAllNotificationsRead(): Promise<void> {
+    const me = this.s.active;
+    if (!me) return;
+    await this.markNotificationsRead((this.s.notifications.get(me) ?? []).map((n) => n.id));
   }
 
   async saveDraft(draft: Draft): Promise<string> {
@@ -2291,6 +2399,33 @@ export class MockEngine implements EngineApi {
     ];
     for (const p of this.s.posts.values()) topics.push({ kind: "thread", uri: p.uri });
     this.changed(...topics);
+  }
+
+  async acknowledgedPublicActions(): Promise<PublicActionKind[]> {
+    if (!this.s.active) return [];
+    const seen = new Set(this.s.settings.acknowledgedPublicActions);
+    return PUBLIC_ACTION_KINDS.filter((k) => seen.has(k));
+  }
+
+  async publicActionAcknowledged(kind: PublicActionKind): Promise<boolean> {
+    return (await this.acknowledgedPublicActions()).includes(kind);
+  }
+
+  async acknowledgePublicAction(kind: PublicActionKind): Promise<void> {
+    this.me();
+    if (!this.s.settings.acknowledgedPublicActions.includes(kind)) {
+      this.s.settings.acknowledgedPublicActions.push(kind);
+    }
+    this.changed({ kind: "accounts" });
+  }
+
+  async karmaNotifications(): Promise<KarmaCadence> {
+    return this.s.settings.karmaNotifications;
+  }
+
+  async setKarmaNotifications(cadence: KarmaCadence): Promise<void> {
+    this.s.settings.karmaNotifications = cadence;
+    this.changed({ kind: "notifications" });
   }
 
   async settings(): Promise<Settings> {

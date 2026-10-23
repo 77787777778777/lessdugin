@@ -187,11 +187,8 @@ fn http_href(scheme: &str, rest: &str) -> Option<Href> {
     let (host, port) = if let Some(v6) = authority.strip_prefix('[') {
         let close = v6.find(']')?;
         let inner = &v6[..close];
-        if inner.is_empty()
-            || !inner
-                .bytes()
-                .all(|b| b.is_ascii_hexdigit() || b == b':' || b == b'.')
-        {
+        // The RFC 4291 text form (§5.1), which the WHATWG IPv6 parser also accepts.
+        if inner.parse::<core::net::Ipv6Addr>().is_err() {
             return None;
         }
         let after_br = &v6[close + 1..];
@@ -211,6 +208,7 @@ fn http_href(scheme: &str, rest: &str) -> Option<Href> {
                 .bytes()
                 .all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b'-'))
             || h.bytes().all(|b| b == b'.')
+            || !whatwg_host_ok(&h)
         {
             return None;
         }
@@ -231,6 +229,110 @@ fn http_href(scheme: &str, rest: &str) -> Option<Href> {
     }
     url.push_str(&pct(tail));
     Some(Href::External { url, host })
+}
+
+/// The checks that keep every accepted `http(s)` host one the WHATWG URL parser accepts, and so
+/// one the browser and ammonia (§8.5) accept too (§5.1, `host_ok`). `h` already matches
+/// `^[a-z0-9._-]+$`.
+/// - A host that ends in a number (its last label, after removing one trailing `.`, is all ASCII
+///   digits, or `0x` and hex digits) is parsed by WHATWG as an IPv4 address, which can fail
+///   (`256.1.1.1`, `a.123`) or rewrite it (`0x7f.1` is 127.0.0.1). It must be a dotted-quad IPv4
+///   address, so that the host shown is the host visited.
+/// - A label that starts with `xn--` is Punycode, and must decode ([`punycode_ok`]). It is still
+///   never decoded for display (threat model ID-3).
+fn whatwg_host_ok(h: &str) -> bool {
+    let trimmed = h.strip_suffix('.').unwrap_or(h);
+    let last = trimmed.rsplit('.').next().unwrap_or("");
+    let ends_in_number = (!last.is_empty() && last.bytes().all(|b| b.is_ascii_digit()))
+        || last
+            .strip_prefix("0x")
+            .is_some_and(|x| x.bytes().all(|b| b.is_ascii_hexdigit()));
+    if ends_in_number {
+        return h.parse::<core::net::Ipv4Addr>().is_ok();
+    }
+    h.split('.').all(|label| match label.strip_prefix("xn--") {
+        Some(p) => punycode_ok(p.as_bytes()),
+        None => true,
+    })
+}
+
+/// Whether `p`, the ASCII rest of an `xn--` label, is the Punycode (RFC 3492 §6.2) of a label
+/// that UTS #46 processing accepts without Unicode tables: non-empty and not ending in `-`, at
+/// most 2,000 bytes, decoding without error or overflow to at most 1,000 code points, the first
+/// of them not U+200C or U+200D (ContextJ). These are the checks the WHATWG URL parser applies
+/// before any table lookup. The decoded text itself is discarded.
+fn punycode_ok(p: &[u8]) -> bool {
+    const BASE: u32 = 36;
+    const T_MIN: u32 = 1;
+    const T_MAX: u32 = 26;
+    fn adapt(mut delta: u32, points: u32, first: bool) -> u32 {
+        delta /= if first { 700 } else { 2 };
+        delta += delta / points;
+        let mut k = 0;
+        while delta > ((BASE - T_MIN) * T_MAX) / 2 {
+            delta /= BASE - T_MIN;
+            k += BASE;
+        }
+        k + (BASE - T_MIN + 1) * delta / (delta + 38)
+    }
+    if p.is_empty() || p.ends_with(b"-") || p.len() > 2000 {
+        return false;
+    }
+    // Basic code points come before the last `-`; a `-` in first position is not a delimiter
+    // (it then fails as a digit).
+    let (basic, ext) = match p.iter().rposition(|&b| b == b'-') {
+        Some(i) if i > 0 => (&p[..i], &p[i + 1..]),
+        _ => (&p[..0], p),
+    };
+    // Only the first code point matters (ContextJ); insertions at 0 replace it.
+    let mut first = basic.first().map(|&b| char::from(b));
+    let mut len = basic.len() as u32;
+    let (mut n, mut bias, mut i) = (0x80u32, 72u32, 0u32);
+    let mut digits = ext.iter();
+    while let Some(&b0) = digits.next() {
+        let prev = i;
+        let (mut w, mut k, mut b) = (1u32, BASE, b0);
+        loop {
+            let digit = match b {
+                b'a'..=b'z' => u32::from(b - b'a'),
+                b'0'..=b'9' => u32::from(b - b'0') + 26,
+                _ => return false,
+            };
+            let Some(next) = digit.checked_mul(w).and_then(|d| i.checked_add(d)) else {
+                return false;
+            };
+            i = next;
+            let t = if k <= bias {
+                T_MIN
+            } else if k >= bias + T_MAX {
+                T_MAX
+            } else {
+                k - bias
+            };
+            if digit < t {
+                break;
+            }
+            let (Some(nw), Some(&nb)) = (w.checked_mul(BASE - t), digits.next()) else {
+                return false;
+            };
+            (w, k, b) = (nw, k + BASE, nb);
+        }
+        bias = adapt(i - prev, len + 1, prev == 0);
+        let Some(cp) = n.checked_add(i / (len + 1)) else {
+            return false;
+        };
+        n = cp;
+        i %= len + 1;
+        let Some(c) = char::from_u32(n) else {
+            return false;
+        };
+        if i == 0 {
+            first = Some(c);
+        }
+        len += 1;
+        i += 1;
+    }
+    len <= 1000 && !matches!(first, Some('\u{200C}' | '\u{200D}'))
 }
 
 /// `pct(x)` (§5.1): every UTF-8 byte outside `[A-Za-z0-9]` and `-._~:/?#[]@!$&'()*+,;=%`
@@ -487,6 +589,83 @@ mod tests {
         assert!(ext("http:example.com").is_none());
         assert!(safe_href("javascript:alert(1)", HrefCtx::Markdown).is_none());
         assert!(safe_href("http://a.b\\c", HrefCtx::Markdown).is_none());
+    }
+
+    /// Hosts the WHATWG URL parser rejects or rewrites are not linked (§5.1). Found by the
+    /// `render` fuzz target (`fuzz/regressions/render/invalid-punycode-host`): ammonia, which
+    /// parses URLs with the `url` crate, stripped the `href` of an invalid Punycode host. Every
+    /// case was checked against `url` 2.5.8 (idna 1.1.0, the workspace's ASCII-only
+    /// idna_adapter 1.0.0): it rejects each `None` below except the rewritten IPv4 forms, and
+    /// accepts each `Some`.
+    #[test]
+    fn hosts_the_url_parser_accepts() {
+        for ok in [
+            "xn--exmple-cua.com",
+            "a.xn--p1ai",
+            "xn--a",
+            "xn--a_b-xyz",
+            "xn--ls8h",
+            "a_b.com",
+            "-a.com",
+            "a..b",
+            "a.",
+            "1.2.3.4",
+            "255.255.255.255",
+            "a.0x1g",
+            "1e1.com",
+            "[::1]",
+            "[::]",
+            "[1:2:3:4:5:6:7:8]",
+            "[::ffff:1.2.3.4]",
+            "[::1.2.3.4]",
+        ] {
+            assert!(ext(&format!("https://{ok}/")).is_some(), "{ok}");
+        }
+        for bad in [
+            // the fuzz reproducer
+            "xn--exmple-cuattps2//ex%C3%A4mple.com",
+            "xn--",
+            "xn--a-",
+            "xn---",
+            "xn---abc",
+            "xn--abc-",
+            "xn--zz",
+            "xn--9",
+            "a.xn--zz.com",
+            "xn--0ug",
+            "xn--1ug.com",
+            "256.1.1.1",
+            "1.2.3.4.5",
+            "a.123",
+            "example.0x",
+            "example.1",
+            "a.b.0",
+            "a.09",
+            "999999999999",
+            "4294967296",
+            // valid for WHATWG, but rewritten to another address than the one shown
+            "0x7f.1",
+            "1.2.3",
+            "01.02.03.04",
+            "4294967295",
+            "1.2.3.4.",
+            "[1]",
+            "[1::2::3]",
+            "[1.2.3.4]",
+            "[:::]",
+            "[::1:]",
+            "[12345::]",
+            "[1:2:3:4::5:6:7:8]",
+            "[::01.2.3.4]",
+            "[1:2:3:4:5:6:7:1.2.3.4]",
+        ] {
+            assert!(ext(&format!("https://{bad}/")).is_none(), "{bad}");
+        }
+        let long = format!("https://xn--{}/", "a".repeat(2001));
+        assert!(ext(&long).is_none());
+        // 1,001 decoded code points (one basic code point and 1,000 insertions)
+        assert!(ext(&format!("https://xn--a-{}/", "a".repeat(1000))).is_none());
+        assert!(ext(&format!("https://xn--a-{}/", "a".repeat(999))).is_some());
     }
 
     #[test]

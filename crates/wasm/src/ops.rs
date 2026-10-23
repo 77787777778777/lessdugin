@@ -5,11 +5,13 @@
 //! dto/1 JSON (`"null"` for operations without one).
 //!
 //! It is generic over the host, so the native tests run it over `MemHost`. Operations the engine
-//! does not implement yet ([`UNSUPPORTED`]) and unknown names fail with `unsupported`.
+//! does not implement yet ([`UNSUPPORTED`], each with the milestone that brings it) and unknown
+//! names fail with `unsupported`.
 
 use lessdugin_core::dto::{
-    CommentDraft, Draft, EditOpts, ForumDraft, ListPostsQuery, MembersQuery, PostDraft, RefContext,
-    SyncOpts, ThreadOpts, Topic,
+    CommentDraft, Draft, EditOpts, ForumDraft, KarmaCadence, ListPostsQuery, MembersQuery,
+    ModActionIntent, ModsChange, NotificationsQuery, OpinionIntent, PostDraft, PublicActionKind,
+    RefContext, Subscription, SyncOpts, ThreadOpts, Topic,
 };
 use lessdugin_core::engine::{AccountInfo, Engine, EngineError, ErrorCode};
 use lessdugin_core::host::Host;
@@ -36,11 +38,16 @@ pub const OPS: &[&str] = &[
     "forumUnfollow",
     "followed",
     "forumCreate",
+    "forumUpdate",
     "join",
     "leave",
     "members",
     "grant",
     "revoke",
+    "approve",
+    "reject",
+    "rejectedApplicants",
+    "modsSet",
     // §3.3
     "syncForum",
     "syncThread",
@@ -51,6 +58,7 @@ pub const OPS: &[&str] = &[
     "outboxPump",
     "outboxStop",
     "outboxFlush",
+    "outboxExpedite",
     "outboxWake",
     "backgroundVerify",
     // §3.4
@@ -59,17 +67,40 @@ pub const OPS: &[&str] = &[
     "getPost",
     "getThread",
     "history",
+    "notifications",
+    "unreadCounts",
+    "modQueue",
+    "modLog",
     "raw",
+    "bookmarks",
+    "bookmarked",
+    "subscriptions",
+    "mutes",
     // §3.5
     "publish",
     "comment",
     "edit",
     "delete",
     "retract",
+    "opinion",
+    "modAction",
+    "modAdopt",
     "undo",
     "retryWrite",
     "writeStatus",
     "writes",
+    // §3.6
+    "markRead",
+    "markNotificationsRead",
+    "markAllNotificationsRead",
+    "bookmark",
+    "setSubscription",
+    "mute",
+    "acknowledgedPublicActions",
+    "publicActionAcknowledged",
+    "acknowledgePublicAction",
+    "karmaNotifications",
+    "setKarmaNotifications",
     // §3.7
     "render",
     "safeHref",
@@ -78,58 +109,65 @@ pub const OPS: &[&str] = &[
     "externalChange",
 ];
 
-/// `EngineApi` methods the engine does not implement yet: they reject with `unsupported`
-/// (`engine-api.md` §3.9 and the later milestones).
-pub const UNSUPPORTED: &[&str] = &[
-    "forumDiscover",
-    "forumUpdate",
-    "modsSet",
-    "tags",
-    "tag",
-    "sequences",
-    "sequence",
-    "user",
-    "search",
-    "notifications",
-    "modQueue",
-    "modLog",
-    "drafts",
-    "bookmarks",
-    "subscriptions",
-    "opinion",
-    "modAction",
-    "modAdopt",
-    "wikiEdit",
-    "seqCreate",
-    "seqEdit",
-    "seqAdd",
-    "seqRemove",
-    "seqMove",
-    "redactRevision",
-    "prepareMedia",
-    "markRead",
-    "saveDraft",
-    "deleteDraft",
-    "bookmark",
-    "setSubscription",
-    "mute",
-    "settings",
-    "setSetting",
-    "exportLocal",
-    "importLocal",
-    "validateRecord",
-    "deriveRkey",
-    "runVector",
+/// `EngineApi` methods the engine does not implement yet, with the milestone that brings each
+/// (`engine-api.md` §3.9): they reject with `unsupported` (`detail.milestone`). Implementing
+/// one later is a compatible change of engine API v0.
+pub const UNSUPPORTED: &[(&str, &str)] = &[
+    // §3.2: the forum directory
+    ("forumDiscover", "M5"),
+    // §3.4: tags, sequences, user pages, search
+    ("tags", "M5"),
+    ("tag", "M5"),
+    ("sequences", "M5"),
+    ("sequence", "M5"),
+    ("user", "M5"),
+    ("search", "M5"),
+    // §3.5: the wiki and sequences (M5), media and redaction (M4)
+    ("wikiEdit", "M5"),
+    ("seqCreate", "M5"),
+    ("seqEdit", "M5"),
+    ("seqAdd", "M5"),
+    ("seqRemove", "M5"),
+    ("seqMove", "M5"),
+    ("redactRevision", "M4"),
+    ("prepareMedia", "M4"),
+    // §3.6: the engine's draft store, settings and local export (M4, with the editor, the
+    // media policy and `export`)
+    ("drafts", "M4"),
+    ("saveDraft", "M4"),
+    ("deleteDraft", "M4"),
+    ("settings", "M4"),
+    ("setSetting", "M4"),
+    ("exportLocal", "M4"),
+    ("importLocal", "M4"),
+    // §3.7
+    ("validateRecord", "M4"),
+    ("deriveRkey", "M4"),
+    // test builds only (the social vectors run natively and in the wasm32 test harness)
+    ("runVector", "tests"),
 ];
+
+/// The milestone that brings `op`, if it is one of [`UNSUPPORTED`].
+pub fn unsupported_until(op: &str) -> Option<&'static str> {
+    UNSUPPORTED
+        .iter()
+        .find_map(|(name, milestone)| (*name == op).then_some(*milestone))
+}
 
 /// The `unsupported` error of an operation this build does not implement.
 pub fn unsupported(op: &str) -> EngineError {
-    let message = if UNSUPPORTED.contains(&op) {
-        format!("{op} is not implemented by this engine yet")
-    } else {
-        format!("unknown engine operation {op:?}")
-    };
-    EngineError::new(ErrorCode::Unsupported, message).with_retryable(false)
+    match unsupported_until(op) {
+        Some(milestone) => EngineError::new(
+            ErrorCode::Unsupported,
+            format!("{op} is not implemented by this engine yet ({milestone})"),
+        )
+        .with_detail("milestone", milestone),
+        None => EngineError::new(
+            ErrorCode::Unsupported,
+            format!("unknown engine operation {op:?}"),
+        ),
+    }
+    .with_retryable(false)
 }
 
 fn args<T: DeserializeOwned>(op: &str, json: &str) -> Result<T, EngineError> {
@@ -247,6 +285,10 @@ pub async fn call<H: Host>(engine: &Engine<H>, op: &str, a: &str) -> Result<Stri
             let (draft,): (ForumDraft,) = args(op, a)?;
             out(&engine.forum_create(&draft).await?)
         }
+        "forumUpdate" => {
+            let (uri, draft): (String, ForumDraft) = args(op, a)?;
+            out(&engine.forum_update(&uri, &draft).await?)
+        }
         "join" => {
             let (uri, note): (String, Option<String>) = args(op, a)?;
             out(&engine.join(&uri, note.as_deref()).await?)
@@ -267,6 +309,22 @@ pub async fn call<H: Host>(engine: &Engine<H>, op: &str, a: &str) -> Result<Stri
         "revoke" => {
             let (uri, actors): (String, Vec<String>) = args(op, a)?;
             out(&engine.revoke(&uri, &actors).await?)
+        }
+        "approve" => {
+            let (uri, actors): (String, Vec<String>) = args(op, a)?;
+            out(&engine.approve(&uri, &actors).await?)
+        }
+        "reject" => {
+            let (uri, actors): (String, Vec<String>) = args(op, a)?;
+            out(&engine.reject(&uri, &actors).await?)
+        }
+        "rejectedApplicants" => {
+            let (uri,): (String,) = args(op, a)?;
+            out(&engine.rejected_applicants(&uri).await?)
+        }
+        "modsSet" => {
+            let (uri, change): (String, ModsChange) = args(op, a)?;
+            out(&engine.mods_set(&uri, &change).await?)
         }
 
         // §3.3 Sync
@@ -326,7 +384,12 @@ pub async fn call<H: Host>(engine: &Engine<H>, op: &str, a: &str) -> Result<Stri
                 "failed": r.failed,
                 "conflicts": r.conflicts,
                 "throttled": r.throttled,
+                "needsLogin": r.needs_login,
             }))
+        }
+        "outboxExpedite" => {
+            no_args(op, a)?;
+            out(&engine.outbox_expedite().await?)
         }
         // another tab enqueued a write: wake this engine's pump
         "outboxWake" => {
@@ -363,9 +426,43 @@ pub async fn call<H: Host>(engine: &Engine<H>, op: &str, a: &str) -> Result<Stri
             let (uri,): (String,) = args(op, a)?;
             out(&engine.history(&uri).await?)
         }
+        "notifications" => {
+            let (q,): (Option<NotificationsQuery>,) = args(op, a)?;
+            out(&engine.notifications(&q.unwrap_or_default()).await?)
+        }
+        "unreadCounts" => {
+            no_args(op, a)?;
+            out(&engine.unread_counts().await?)
+        }
+        "modQueue" => {
+            let (forum,): (String,) = args(op, a)?;
+            out(&engine.mod_queue(&forum).await?)
+        }
+        "modLog" => {
+            let (forum, cursor, limit): (String, Option<String>, Option<u32>) = args(op, a)?;
+            out(&engine
+                .mod_log(&forum, cursor.as_deref(), limit.unwrap_or(0))
+                .await?)
+        }
         "raw" => {
             let (uri,): (String,) = args(op, a)?;
             out(&engine.raw(&uri).await?)
+        }
+        "bookmarks" => {
+            no_args(op, a)?;
+            out(&engine.bookmarks().await?)
+        }
+        "bookmarked" => {
+            let (uri,): (String,) = args(op, a)?;
+            out(&engine.bookmarked(&uri).await?)
+        }
+        "subscriptions" => {
+            no_args(op, a)?;
+            out(&engine.subscriptions().await?)
+        }
+        "mutes" => {
+            no_args(op, a)?;
+            out(&engine.mutes().await?)
         }
 
         // §3.5 Writes
@@ -389,6 +486,18 @@ pub async fn call<H: Host>(engine: &Engine<H>, op: &str, a: &str) -> Result<Stri
             let (uri,): (String,) = args(op, a)?;
             out(&engine.retract(&uri).await?)
         }
+        "opinion" => {
+            let (subject, intent): (String, OpinionIntent) = args(op, a)?;
+            out(&engine.opinion(&subject, &intent).await?)
+        }
+        "modAction" => {
+            let (intent,): (ModActionIntent,) = args(op, a)?;
+            out(&engine.mod_action(&intent).await?)
+        }
+        "modAdopt" => {
+            let (forum, former): (String, String) = args(op, a)?;
+            out(&engine.mod_adopt(&forum, &former).await?)
+        }
         "undo" => {
             let (id,): (String,) = args(op, a)?;
             out(&engine.undo(&id).await?)
@@ -404,6 +513,60 @@ pub async fn call<H: Host>(engine: &Engine<H>, op: &str, a: &str) -> Result<Stri
         "writes" => {
             no_args(op, a)?;
             out(&engine.writes().await?)
+        }
+
+        // §3.6 Local state
+        "markRead" => {
+            let (uri,): (String,) = args(op, a)?;
+            engine.mark_read(&uri).await?;
+            Ok(NULL.into())
+        }
+        "markNotificationsRead" => {
+            let (ids,): (Vec<String>,) = args(op, a)?;
+            engine.mark_notifications_read(&ids).await?;
+            Ok(NULL.into())
+        }
+        "markAllNotificationsRead" => {
+            no_args(op, a)?;
+            engine.mark_all_notifications_read().await?;
+            Ok(NULL.into())
+        }
+        "bookmark" => {
+            let (uri, on): (String, bool) = args(op, a)?;
+            engine.bookmark(&uri, on).await?;
+            Ok(NULL.into())
+        }
+        "setSubscription" => {
+            let (sub, on): (Subscription, bool) = args(op, a)?;
+            engine.set_subscription(&sub, on).await?;
+            Ok(NULL.into())
+        }
+        "mute" => {
+            let (actor, on): (String, bool) = args(op, a)?;
+            engine.mute(&actor, on).await?;
+            Ok(NULL.into())
+        }
+        "acknowledgedPublicActions" => {
+            no_args(op, a)?;
+            out(&engine.acknowledged_public_actions().await?)
+        }
+        "publicActionAcknowledged" => {
+            let (kind,): (PublicActionKind,) = args(op, a)?;
+            out(&engine.public_action_acknowledged(kind).await?)
+        }
+        "acknowledgePublicAction" => {
+            let (kind,): (PublicActionKind,) = args(op, a)?;
+            engine.acknowledge_public_action(kind).await?;
+            Ok(NULL.into())
+        }
+        "karmaNotifications" => {
+            no_args(op, a)?;
+            out(&engine.karma_notifications().await?)
+        }
+        "setKarmaNotifications" => {
+            let (cadence,): (KarmaCadence,) = args(op, a)?;
+            engine.set_karma_notifications(cadence).await?;
+            Ok(NULL.into())
         }
 
         // §3.7 Pure functions
@@ -489,17 +652,25 @@ mod tests {
         assert!(api.len() > 60, "parsed {} EngineApi methods", api.len());
         for m in &api {
             assert!(
-                OPS.contains(&m.as_str()) || UNSUPPORTED.contains(&m.as_str()),
+                OPS.contains(&m.as_str()) || unsupported_until(m).is_some(),
                 "EngineApi.{m} is neither in OPS nor in UNSUPPORTED"
             );
         }
-        for m in UNSUPPORTED {
+        for (m, milestone) in UNSUPPORTED {
             assert!(
                 api.iter().any(|a| a == m),
                 "UNSUPPORTED lists {m}, not in EngineApi"
             );
             assert!(!OPS.contains(m), "{m} is in OPS and UNSUPPORTED");
+            assert!(
+                ["M4", "M5", "tests"].contains(milestone),
+                "{m}: milestone {milestone}"
+            );
         }
+        let mut sorted = OPS.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), OPS.len(), "OPS lists an operation twice");
         let glue = ["outboxWake", "externalChange", "outboxFlush", "liveStep"];
         for m in OPS {
             assert!(
@@ -512,14 +683,16 @@ mod tests {
     #[test]
     fn unsupported_and_unknown_operations() {
         let e = engine();
-        for op in UNSUPPORTED {
+        for (op, milestone) in UNSUPPORTED {
             let err = call_err(&e, op, "[]");
             assert_eq!(err.code, ErrorCode::Unsupported, "{op}");
             assert!(!err.retryable);
+            assert_eq!(err.detail, Some(json!({ "milestone": milestone })), "{op}");
         }
         let err = call_err(&e, "noSuchOp", "[]");
         assert_eq!(err.code, ErrorCode::Unsupported);
         assert!(err.message.contains("unknown"), "{}", err.message);
+        assert_eq!(err.detail, None);
     }
 
     #[test]

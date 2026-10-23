@@ -1,14 +1,24 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Writes (`engine-api.md` §3.5) through the durable outbox: `publish`, `comment`, `edit`,
-//! `delete`, `retract`, `undo`, the write status, and the pump (`outbox_pump`, long-lived;
-//! `outbox_flush` runs every account's outbox until idle).
+//! `delete`, `retract`, `opinion`, `undo`, the write status, and the pump (`outbox_pump`,
+//! long-lived; `outbox_flush` runs every account's outbox until idle). Moderation writes are in
+//! `moderation.rs`.
+//!
+//! **Opinions** (`data-model.md` §8.5): one record per (voter, subject), computed when sent as a
+//! pure function of the current value and the intents, held 4 s so it can be undone and
+//! coalesced with later intents on the same subject, merged across devices (a swap failure
+//! re-reads and re-applies the intents per axis), deleted when empty. Before enqueueing, the
+//! engine checks the viewer's standing in its fold of the forum (`social.md` §5, §8, §9.2): what
+//! could never count is refused (`blocked` or `invalid_input`), and a vote that will count only
+//! once the voter is established is recorded with a notice.
 //!
 //! New content is written by the active account; edits, deletes and undos by the account that
 //! owns the record or write (W9). Each returns a [`WriteTicket`] once the write is persisted;
 //! progress arrives as `Write` events, and a confirmed write as `Changed` for its forum and
 //! thread. Bodies are LFM/1 markdown with the derived `mentions`/`links` (W8); media are
-//! refused until M4 (`unsupported`). TODO(M3): `at://handle` mention rewriting (W7) and the
-//! quote's derived `prefix`/`suffix`/`start` (W8).
+//! refused until M4 (`unsupported`). A comment's or react's quote gets its derived
+//! `prefix`/`suffix`/`start` from P of the target's cached version (W8). TODO(M4):
+//! `at://handle` mention rewriting (W7).
 
 use futures::StreamExt;
 use futures::future::join_all;
@@ -19,9 +29,18 @@ use lessdugin_lexicon::records::{
 };
 use serde_json::{Map, Value};
 
-use crate::dto::{CommentDraft, Draft, EditOpts, PostDraft, PostKind, TextQuote, WriteTicket};
+use crate::dto::{
+    ActionTicket, AgreementValue, CommentDraft, Draft, EditOpts, KarmaValue, NoticeCode,
+    OpinionIntent, PostDraft, PostKind, Stance, TextQuote, WriteTicket,
+};
 use crate::host::Host;
-use crate::outbox::{self, ContentOpts, PumpReport, Session, Step, parse_write_id, records};
+use crate::outbox::{
+    self, ContentOpts, OpinionStep, PumpReport, Session, Step, parse_write_id, records,
+};
+use crate::social::full::ForumView;
+use crate::social::full::gates::{Gate, passes};
+use crate::social::full::reacts::palette;
+use crate::social::input::split_uri;
 use crate::store::records::RecordStore;
 
 use super::forums::{excerpt_of, markdown_body};
@@ -43,6 +62,187 @@ fn lex_quote(q: &TextQuote) -> LexQuote {
     l.suffix.clone_from(&q.suffix);
     l.start = q.start.map(i64::from);
     l
+}
+
+/// The record value of a karma (or tag vote) value.
+pub(crate) fn karma_str(v: KarmaValue) -> &'static str {
+    match v {
+        KarmaValue::Up => "up",
+        KarmaValue::Down => "down",
+        KarmaValue::StrongUp => "strongUp",
+        KarmaValue::StrongDown => "strongDown",
+    }
+}
+
+/// The record value of an agreement value.
+pub(crate) fn agreement_str(v: AgreementValue) -> &'static str {
+    match v {
+        AgreementValue::Agree => "agree",
+        AgreementValue::Disagree => "disagree",
+        AgreementValue::StrongAgree => "strongAgree",
+        AgreementValue::StrongDisagree => "strongDisagree",
+    }
+}
+
+/// P (`lfm-1.md` §10) of a record's inline body; `None` for a spilled or absent body.
+pub(crate) fn body_text(value: &Value) -> Option<String> {
+    let src = value.get("body")?.get("text")?.as_str()?;
+    Some(lessdugin_markdown::plain_projection(src).text)
+}
+
+/// A quote with its derived `prefix`, `suffix` and `start` (W8): a quote with only `exact` is
+/// located in P of the item's current version (`lfm-1.md` §11, the CLI's `--quote`); one with a
+/// selector already (built by a client from a selection) is kept. A spilled body keeps `exact`
+/// alone.
+fn derived_quote(q: &TextQuote, value: &Value) -> Result<LexQuote, EngineError> {
+    if q.prefix.is_some() || q.suffix.is_some() || q.start.is_some() {
+        return Ok(lex_quote(q));
+    }
+    let Some(p) = body_text(value) else {
+        return Ok(lex_quote(q));
+    };
+    let (start, end) = lessdugin_markdown::quote::find_first(&q.exact, &p).ok_or_else(|| {
+        EngineError::invalid_input(format!("the quoted text {:?} is not in the item", q.exact))
+    })?;
+    let (start, end) = (
+        usize::try_from(start).unwrap_or(usize::MAX),
+        usize::try_from(end).unwrap_or(usize::MAX),
+    );
+    let b = lessdugin_markdown::build_quote(&p, start, end)
+        .map_err(|e| EngineError::invalid_input(format!("quote: {e}")))?;
+    let mut l = LexQuote::new(b.exact);
+    l.prefix = b.prefix;
+    l.suffix = b.suffix;
+    l.start = b.start.and_then(|s| i64::try_from(s).ok());
+    Ok(l)
+}
+
+/// The notice of an opinion that is recorded but does not count yet.
+pub const NOT_ESTABLISHED: &str = "recorded; will count once you're established";
+
+/// `true` if `intent` only clears or removes (always allowed: it can only stop something
+/// from counting).
+fn clears(intent: &OpinionIntent) -> bool {
+    match intent {
+        OpinionIntent::Karma { value } => value.is_none(),
+        OpinionIntent::Agreement { value } => value.is_none(),
+        OpinionIntent::React { remove, .. } => *remove,
+        OpinionIntent::Tag { value, .. } => value.is_none(),
+    }
+}
+
+/// The checks before an opinion is enqueued (`social.md` §5, §8, §9.2), over the viewer's
+/// fold of the forum: an opinion that could never count is refused, and one that will count
+/// only once the voter is established gets a [`NoticeCode::NotEstablished`] notice. These are
+/// UX checks (readers enforce the rules in the fold); clearing and removing are always allowed.
+/// `qkey` is the react quote's key (`""` for the whole item).
+pub(crate) fn opinion_checks(
+    v: &ForumView,
+    me: &str,
+    subject: &str,
+    intent: &OpinionIntent,
+    qkey: &str,
+) -> Result<Vec<(NoticeCode, String)>, EngineError> {
+    use lessdugin_lexicon::values::{Capability, Voting};
+    if clears(intent) {
+        return Ok(Vec::new());
+    }
+    let (author, coll, _) = split_uri(subject)
+        .ok_or_else(|| EngineError::invalid_ref(format!("{subject:?} is not a record uri")))?;
+    if author == me {
+        return Err(EngineError::invalid_input(
+            "opinions on your own items are ignored (O3)",
+        ));
+    }
+    if v.participation.b.contains(me) {
+        return Err(EngineError::blocked(
+            "you are banned in this forum, so your opinions do not count",
+        ));
+    }
+    if v.participation.n.contains(me) {
+        return Err(EngineError::blocked(
+            "your votes in this forum are nullified, so your opinions do not count",
+        ));
+    }
+    if v.moderation.spam(subject) {
+        return Err(EngineError::blocked(
+            "this item is marked as spam, so opinions on it do not count",
+        ));
+    }
+    let karma = v.karma.as_ref().ok();
+    let established = karma.is_none_or(|k| k.e.contains(me));
+    let restricted = |c: Capability, what: &str| {
+        if v.moderation.restricted(me, c) {
+            Err(EngineError::blocked(format!(
+                "you are restricted from {what} in this forum"
+            )))
+        } else {
+            Ok(())
+        }
+    };
+    match intent {
+        OpinionIntent::Karma { .. } => restricted(Capability::Vote, "voting")?,
+        OpinionIntent::Agreement { .. } => {
+            restricted(Capability::Vote, "voting")?;
+            if v.policy.voting == Voting::KarmaOnly {
+                return Err(EngineError::invalid_input(
+                    "this forum does not use agreement voting",
+                ));
+            }
+        }
+        OpinionIntent::React { id, stance, .. } => {
+            if v.policy.voting != Voting::Reacts {
+                return Err(EngineError::invalid_input("this forum does not use reacts"));
+            }
+            if !palette(v.policy.react_palette).contains(&id.as_str()) {
+                return Err(EngineError::invalid_input(format!(
+                    "{id:?} is not a react of this forum's palette"
+                )));
+            }
+            restricted(Capability::React, "reacting")?;
+            let existing = v
+                .reacts
+                .as_ref()
+                .ok()
+                .and_then(|r| r.get(subject))
+                .and_then(|ts| ts.iter().find(|t| t.react == *id && t.qkey == qkey));
+            let gate = match (stance, existing) {
+                (Stance::For, Some(t)) if t.supporters.contains(me) => None,
+                (Stance::For, Some(_)) => Some((Gate::ReactSecond, "seconding a react")),
+                (Stance::For, None) => Some((Gate::ReactCreate, "starting a new react")),
+                (Stance::Against, Some(t)) if t.opposers.contains(me) => None,
+                (Stance::Against, Some(_)) => Some((Gate::ReactAnti, "reacting against")),
+                (Stance::Against, None) => {
+                    return Err(EngineError::invalid_input(format!(
+                        "nobody has reacted {id:?} here yet, so there is nothing to react against"
+                    )));
+                }
+            };
+            if let (Some((g, what)), Some(k)) = (gate, karma)
+                && !passes(&v.policy, &v.authorities, k, me, g)
+            {
+                let need = g.value(&v.policy);
+                let have = k.k_of(me);
+                return Err(EngineError::blocked(format!(
+                    "{what} needs {need} karma in this forum (you have {have})"
+                ))
+                .with_detail("gate", g.name())
+                .with_detail("need", need)
+                .with_detail("have", have));
+            }
+        }
+        OpinionIntent::Tag { .. } => {
+            if coll != lessdugin_lexicon::collection::nsid::POST {
+                return Err(EngineError::invalid_input("tag votes apply to posts only"));
+            }
+            restricted(Capability::Tag, "tag voting")?;
+        }
+    }
+    Ok(if established {
+        Vec::new()
+    } else {
+        vec![(NoticeCode::NotEstablished, NOT_ESTABLISHED.to_owned())]
+    })
 }
 
 fn to_value<T: serde::Serialize>(v: &T) -> Result<Value, EngineError> {
@@ -120,7 +320,7 @@ impl<H: Host> Engine<H> {
     }
 
     /// The current `(cid, value)` of a cached record.
-    async fn current(&self, uri: &AtUri) -> Result<(String, Value), EngineError> {
+    pub(crate) async fn current(&self, uri: &AtUri) -> Result<(String, Value), EngineError> {
         let row = RecordStore::new(self.host.cache())
             .get(uri)
             .await
@@ -150,6 +350,7 @@ impl<H: Host> Engine<H> {
             .and_then(Value::as_str)
             .ok_or_else(|| EngineError::invalid_input(format!("{root} names no forum")))
             .and_then(records::at_uri)?;
+        let mut quoted = root_value.clone();
         let parent = match &draft.parent {
             Some(p) => {
                 let p = records::at_uri(p)?;
@@ -167,6 +368,7 @@ impl<H: Host> Engine<H> {
                         "{p} is not a comment in the thread of {root}"
                     )));
                 }
+                quoted = value;
                 Some(StrongRef::new(p, cid))
             }
             None => None,
@@ -179,7 +381,12 @@ impl<H: Host> Engine<H> {
             records::datetime_ms(self.host.now_ms())?,
         );
         c.body = markdown_body(&draft.body)?;
-        c.quote = draft.quote.as_ref().map(lex_quote);
+        // the quote's target is the parent if present, else the root (`social.md` §16)
+        c.quote = draft
+            .quote
+            .as_ref()
+            .map(|q| derived_quote(q, &quoted))
+            .transpose()?;
         self.outbox
             .create_comment(&session, &c, ContentOpts::default())
             .await
@@ -273,6 +480,103 @@ impl<H: Host> Engine<H> {
         let u = records::at_uri(uri)?;
         let session = self.session_for(u.did().as_str()).await?;
         self.outbox.delete(&session, uri).await
+    }
+
+    /// `opinion(subject, OpinionIntent)` (`engine-api.md` §3.5, `data-model.md` §8.5): the
+    /// active account's opinion on a cached post, comment, wiki revision or sequence. The intent
+    /// is held for the 4 s undo window ([`Engine::undo`] removes it) and joins a write on the same
+    /// subject that is still held (the ticket is that write's). When sent, the record is
+    /// re-read and the intents re-applied per axis, so opinions written from two devices merge;
+    /// an opinion left empty is deleted. The subject's version (`subject.cid`) is the cached one.
+    /// Refused before enqueueing when it could never count (`blocked`: banned, nullified,
+    /// restricted, a karma gate; `invalid_input`: an own item, a forum without agreement or
+    /// reacts, an unknown react, nothing to react against); a vote by a voter who is not
+    /// established yet is recorded with a [`NoticeCode::NotEstablished`] notice.
+    pub async fn opinion(
+        &self,
+        subject: &str,
+        intent: &OpinionIntent,
+    ) -> Result<ActionTicket, EngineError> {
+        let session = self.active_session().await?;
+        let u = records::at_uri(subject)?;
+        let coll = u.collection().as_str();
+        if ![
+            nsid::POST,
+            nsid::COMMENT,
+            nsid::WIKI_REVISION,
+            nsid::SEQUENCE,
+        ]
+        .contains(&coll)
+        {
+            return Err(EngineError::invalid_ref(format!(
+                "{u} is not a post, comment, wiki revision or sequence"
+            )));
+        }
+        let (cid, value) = self.current(&u).await?;
+        let forum = value
+            .get("forum")
+            .and_then(Value::as_str)
+            .ok_or_else(|| EngineError::invalid_input(format!("{u} names no forum")))?;
+        let key = self.forum_key(forum).await?;
+        let mut quote_key = String::new();
+        let step = match intent {
+            OpinionIntent::Karma { value } => OpinionStep::Karma {
+                value: value.map(|v| karma_str(v).to_owned()),
+            },
+            OpinionIntent::Agreement { value } => OpinionStep::Agreement {
+                value: value.map(|v| agreement_str(v).to_owned()),
+            },
+            OpinionIntent::React {
+                id,
+                stance,
+                quote,
+                remove,
+            } => {
+                let q = match quote {
+                    Some(q) if *remove => Some(lex_quote(q)),
+                    Some(q) => Some(derived_quote(q, &value)?),
+                    None => None,
+                };
+                quote_key = lessdugin_markdown::qkey(q.as_ref().map(|q| q.exact.as_str()));
+                OpinionStep::React {
+                    id: id.clone(),
+                    stance: match stance {
+                        Stance::For => "for",
+                        Stance::Against => "against",
+                    }
+                    .to_owned(),
+                    quote: q
+                        .map(|q| serde_json::to_string(&q))
+                        .transpose()
+                        .map_err(|e| EngineError::internal(format!("quote: {e}")))?,
+                    remove: *remove,
+                }
+            }
+            OpinionIntent::Tag { slug, value } => OpinionStep::Tag {
+                slug: slug.clone(),
+                value: value.map(|v| karma_str(v).to_owned()),
+            },
+        };
+        let notices = match self.loaded(&key).await {
+            Ok(l) => opinion_checks(
+                &l.model.view,
+                session.did.as_str(),
+                u.as_str(),
+                intent,
+                &quote_key,
+            )?,
+            Err(e) => {
+                tracing::debug!(forum = %key.uri, error = %e, "opinion checks skipped");
+                Vec::new()
+            }
+        };
+        let t = self
+            .outbox
+            .opinion(&session, key.uri.as_str(), u.as_str(), &cid, step)
+            .await?;
+        Ok(notices
+            .into_iter()
+            .fold(ActionTicket::new(t), |t, (c, m)| t.with_notice(c, m)))
     }
 
     /// `undo(write_id)`: removes a write not yet sent, or inverts a sent opinion

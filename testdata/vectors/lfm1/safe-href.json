@@ -454,6 +454,128 @@
       }
     },
     {
+      "name": "ipv6-not-an-address",
+      "input": {
+        "raw": "http://[1.2.3.4]/",
+        "ctx": "markdown"
+      },
+      "expected": {
+        "href": null
+      }
+    },
+    {
+      "name": "ipv6-embedded-ipv4",
+      "input": {
+        "raw": "http://[::ffff:1.2.3.4]/",
+        "ctx": "markdown"
+      },
+      "expected": {
+        "href": {
+          "type": "external",
+          "url": "http://[::ffff:1.2.3.4]/",
+          "host": "[::ffff:1.2.3.4]"
+        }
+      }
+    },
+    {
+      "name": "ipv4",
+      "input": {
+        "raw": "https://1.2.3.4/",
+        "ctx": "markdown"
+      },
+      "expected": {
+        "href": {
+          "type": "external",
+          "url": "https://1.2.3.4/",
+          "host": "1.2.3.4"
+        }
+      }
+    },
+    {
+      "name": "ipv4-out-of-range",
+      "input": {
+        "raw": "https://256.1.1.1/",
+        "ctx": "markdown"
+      },
+      "expected": {
+        "href": null
+      }
+    },
+    {
+      "name": "ipv4-hex-rewritten",
+      "input": {
+        "raw": "https://0x7f.1/",
+        "ctx": "markdown"
+      },
+      "expected": {
+        "href": null
+      }
+    },
+    {
+      "name": "ipv4-integer-rewritten",
+      "input": {
+        "raw": "https://2130706433/",
+        "ctx": "markdown"
+      },
+      "expected": {
+        "href": null
+      }
+    },
+    {
+      "name": "ends-in-number",
+      "input": {
+        "raw": "https://a.123/",
+        "ctx": "markdown"
+      },
+      "expected": {
+        "href": null
+      }
+    },
+    {
+      "name": "punycode",
+      "input": {
+        "raw": "https://xn--bcher-kva.example/",
+        "ctx": "markdown"
+      },
+      "expected": {
+        "href": {
+          "type": "external",
+          "url": "https://xn--bcher-kva.example/",
+          "host": "xn--bcher-kva.example"
+        }
+      }
+    },
+    {
+      "name": "punycode-invalid",
+      "input": {
+        "raw": "https://xn--exmple-cuattps2/",
+        "ctx": "markdown"
+      },
+      "expected": {
+        "href": null
+      }
+    },
+    {
+      "name": "punycode-empty",
+      "input": {
+        "raw": "https://xn--.com/",
+        "ctx": "markdown"
+      },
+      "expected": {
+        "href": null
+      }
+    },
+    {
+      "name": "punycode-leading-joiner",
+      "input": {
+        "raw": "https://xn--0ug.com/",
+        "ctx": "markdown"
+      },
+      "expected": {
+        "href": null
+      }
+    },
+    {
       "name": "pct-path-unicode",
       "input": {
         "raw": "https://e.com/ü?ö=ä#ß",
@@ -839,6 +961,26 @@
       "name": "at-did-web-single-label",
       "input": {
         "raw": "at://did:web:localhost",
+        "ctx": "markdown"
+      },
+      "expected": {
+        "href": null
+      }
+    },
+    {
+      "name": "at-did-web-digit-tld",
+      "input": {
+        "raw": "at://did:web:example.123",
+        "ctx": "markdown"
+      },
+      "expected": {
+        "href": null
+      }
+    },
+    {
+      "name": "at-did-web-percent-port",
+      "input": {
+        "raw": "at://did:web:example.com%3A8080",
         "ctx": "markdown"
       },
       "expected": {

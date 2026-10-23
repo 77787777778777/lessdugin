@@ -11,7 +11,8 @@ Interface (keep it; visibility.py V9, rank.py, sequences.py and projections.py c
     Score.score       int        self(i) + Σ power(KP[voter], karma) over W(i); no pair cap
     Score.agreement   int | None None when policy.voting = karmaOnly
     Score.unweighted  int        counting opinions with a karma value whose voter ∉ E
-    Score.earlier     int        N: |{v ∈ W(i) with a karma value : v.subject.cid ≠ cid(i)}|
+    Score.earlier     int        N: |{v ∈ W(i) with a karma value : v.subject.cid ≠ cid(i)}|, CIDs
+                                 compared by canonical form (§0.4)
     Score.weighted    int        M: |{v ∈ W(i) with a karma value}|
 
 W(i) = { v : v counts (§5), v.subject.uri = i.uri, voter(v) ∈ E }. Opinions on absent
@@ -24,6 +25,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from . import cids
 from .common import ITEM_COLLECTIONS, sat_add
 from .karma import power, small, strong
 
@@ -68,7 +70,7 @@ def compute_scores(view) -> dict:
                 if c.karma is not None:
                     score = sat_add(score, power(KP.get(c.voter, 0), c.karma))
                     weighted += 1
-                    if c.subject_cid != rec.cid:
+                    if not cids.same(c.subject_cid, rec.cid):       # canonical form (§0.4)
                         earlier += 1
                 if c.agreement is not None and agreement is not None:
                     agreement = sat_add(agreement, power(KP.get(c.voter, 0), c.agreement))

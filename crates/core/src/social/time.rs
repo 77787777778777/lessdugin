@@ -14,8 +14,9 @@
 //! inconsistent ⇔ both present ∧ |t_claim − t_tid| > 3_600_000_000
 //! ```
 //!
-//! Pure functions: no clock is read. The tree walk for comments is in [`crate::social::fold`],
-//! which visits each thread top-down after placement (§11 step 5).
+//! Pure functions: no clock is read. The tree walk for comments is in
+//! [`crate::social::full::timeline`], which visits each thread top-down after placement (§11
+//! step 5).
 
 use lessdugin_atp::syntax::Datetime;
 use lessdugin_atp::tid::Tid;

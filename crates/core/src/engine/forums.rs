@@ -204,7 +204,7 @@ impl<H: Host> Engine<H> {
     ) -> Result<T, EngineError> {
         let m = &l.model;
         let dids: BTreeSet<&str> = m
-            .fold
+            .view
             .authorities
             .keys()
             .map(String::as_str)
@@ -219,6 +219,7 @@ impl<H: Host> Engine<H> {
         let (actors, pds) = self.actors(dids).await;
         let values = self.values(m, body_uris).await?;
         let pending = self.pending_uris().await?;
+        let viewer = self.viewer(m, body_uris).await?;
         let v = Views {
             model: m,
             actors: &actors,
@@ -227,7 +228,7 @@ impl<H: Host> Engine<H> {
             renders: &self.rt.renders,
             pending: &pending,
             completeness: &l.completeness,
-            now: self.view_now_ms().saturating_mul(1000),
+            viewer: &viewer,
         };
         Ok(f(&v))
     }
@@ -632,8 +633,11 @@ impl<H: Host> Engine<H> {
         Ok(out)
     }
 
-    /// `members(uri, MembersQuery)` (basic, M2): every DID with a valid membership record, with
-    /// its role (`established`/`newcomer` arrive with karma, M3).
+    /// `members(uri, MembersQuery)` (`social.md` §3): every DID with a valid membership
+    /// record, by DID, with its role (owner, admin, moderator, member = a seed, established,
+    /// newcomer, none), grant, karma and moderation flags. `pending: true` lists the applicants
+    /// (approval mode: a membership without a grant); `status` keeps one role (`newcomer`: the
+    /// newcomers).
     pub async fn members(
         &self,
         forum: &str,
@@ -641,8 +645,15 @@ impl<H: Host> Engine<H> {
     ) -> Result<Vec<MemberView>, EngineError> {
         let key = self.forum_key(forum).await?;
         let l = self.loaded(&key).await?;
-        let people: Vec<String> = l.model.fold.roster.members.iter().cloned().collect();
-        self.with_views(&l, &[], &people, |v| v.members(query))
-            .await
+        let people: Vec<String> = l.model.view.participation.members.iter().cloned().collect();
+        let mut out = self
+            .with_views(&l, &[], &people, |v| v.members(query))
+            .await?;
+        if query.pending == Some(true) {
+            // the applicants rejected on this device leave the pending list
+            let rejected = self.rejected_applicants(forum).await?;
+            out.retain(|m| !rejected.contains(&m.actor.did));
+        }
+        Ok(out)
     }
 }

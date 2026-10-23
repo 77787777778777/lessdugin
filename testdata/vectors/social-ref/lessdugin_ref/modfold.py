@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from . import cids
 from .common import NS, KeyDerivationError, coll_of, did_of, fk, split_uri, thread_tid, ubytes
 from .syntax import datetime_us
 from .validity import is_positive
@@ -148,13 +149,16 @@ class ModFold:
             if not self._cid_bound_ok(huri, hcid):                             # §4.5 #tag.head
                 del dims["tag.head"]
                 m.stale_head = True
+            else:                                       # equal heads compare canonically (§0.4)
+                dims["tag.head"] = (huri, cids.canon(hcid))
         m.dims = dims
         for d, value in dims.items():
             self._by.setdefault((T, d), []).append((m.rank, value, m.uri))
 
     def _cid_bound_ok(self, uri: str, cid) -> bool:
+        """§4.5: the subject is in records and the written CID names its version (§0.4)."""
         r = self.records.get(uri)
-        return r is not None and cid == r.cid
+        return r is not None and cids.same(cid, r.cid)
 
     # ------------------------------------------------------------------ resolution (§4.4)
 

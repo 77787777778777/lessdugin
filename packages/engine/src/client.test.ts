@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // The main-thread client over Comlink, against a stand-in worker on a MessageChannel: lazy
 // start, method forwarding, events, and the AuthBridge port the worker calls back into.
+import { readFileSync } from "node:fs";
 import * as Comlink from "comlink";
 import { afterEach, describe, expect, it } from "vitest";
 import { NS } from "./auth-bridge.ts";
 import { connectBridgePort } from "./bridge-port.ts";
-import { type EngineClient, startEngine } from "./client.ts";
+import { type EngineClient, OP_ARITY, padArgs, startEngine } from "./client.ts";
 import type { AuthBridgePort, WorkerInit } from "./protocol.ts";
 
 interface FakeWorker {
@@ -275,5 +276,39 @@ describe("startEngine", () => {
     await c.ready;
     await c.terminate();
     expect(state.closed).toBe(true);
+  });
+});
+
+describe("OP_ARITY", () => {
+  /** `name(params)` of every `EngineApi` method, signatures joined across lines. */
+  function signatures(): [string, string][] {
+    const src = readFileSync(new URL("./api.ts", import.meta.url), "utf8");
+    const start = src.indexOf("export interface EngineApi {");
+    const body = src.slice(start, src.indexOf("\n}\n", start));
+    const flat = body.replace(/\/\*\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+    return [...flat.matchAll(/\n\s+(\w+)(?:<[^>]*>)?\(([^)]*)\):/g)].map(
+      (m) => [m[1] ?? "", (m[2] ?? "").trim()] as [string, string],
+    );
+  }
+
+  it("pads every operation with optional trailing parameters to its full arity", () => {
+    const sigs = signatures();
+    expect(sigs.length).toBeGreaterThan(90);
+    const optional = sigs
+      .filter(([, params]) => /\?:/.test(params))
+      .map(([name, params]) => [name, params.split(",").filter((p) => p.trim()).length]);
+    for (const [name, arity] of optional) {
+      expect(OP_ARITY[name as string], `${name}`).toBe(arity);
+    }
+    for (const [name, n] of Object.entries(OP_ARITY)) {
+      const sig = sigs.find(([m]) => m === name);
+      expect(sig, name).toBeDefined();
+      expect(sig?.[1].split(",").filter((p) => p.trim()).length, name).toBe(n);
+    }
+    expect(padArgs("modLog", ["at://f"])).toEqual(["at://f", null, null]);
+    expect(padArgs("opinion", ["at://p", { kind: "karma" }])).toEqual([
+      "at://p",
+      { kind: "karma" },
+    ]);
   });
 });

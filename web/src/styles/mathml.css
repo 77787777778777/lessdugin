@@ -1,0 +1,7 @@
+/* SPDX-License-Identifier: AGPL-3.0-or-later */
+/* Rendered MathML (lfm-1.md §7.3, ADR 0002 decision 2). The renderer never emits inline
+   `style` (CSP `style-src 'self'`): its normaliser maps math-core's styles to `mc-*` classes,
+   and these two stylesheets, shipped with the renderer crate, give them their effect.
+   Order matters: math-core's fixes (MIT, notice kept in the file) first, then the classes. */
+@import "../../../crates/markdown/assets/mathmlfixes.css";
+@import "../../../crates/markdown/assets/mathml.css";

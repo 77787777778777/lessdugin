@@ -1483,20 +1483,20 @@
       "expected": {
         "tDecl": 1767225600000000,
         "times": {
-          "at://did:plc:alice2222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbdikaxo2223": {
+          "at://did:plc:alice2222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbdapw3z2223": {
             "futureDated": false,
             "inconsistentTimestamps": false,
-            "tRank": 1767240000000000
+            "tRank": 1767231600000000
           },
-          "at://did:plc:bob222222222222222222222/online.7778777.lessdugin.comment/rwsqt7ry6buy-3mbdikaxo2223-3mbd6ifbt2223": {
+          "at://did:plc:bob222222222222222222222/online.7778777.lessdugin.comment/rwsqt7ry6buy-3mbdapw3z2223-3mbd3oyb3k223": {
             "futureDated": false,
             "inconsistentTimestamps": false,
-            "tRank": 1767247200000000
+            "tRank": 1767231600000000
           },
-          "at://did:plc:carol2222222222222222222/online.7778777.lessdugin.comment/rwsqt7ry6buy-3mbdikaxo2223-3mbdpatga2224": {
+          "at://did:plc:carol2222222222222222222/online.7778777.lessdugin.comment/rwsqt7ry6buy-3mbdapw3z2223-3mbd3skp72224": {
             "futureDated": false,
             "inconsistentTimestamps": false,
-            "tRank": 1767247200000000
+            "tRank": 1767231600000000
           }
         }
       },
@@ -1516,19 +1516,19 @@
           "now": 1769817600000000,
           "obs": [
             {
-              "cid": "bafyreifbwf5vah2v5qyx3cr3bx635z7s2jyrlm3lmflnokxkwyxsrr4sju",
-              "uri": "at://did:plc:alice2222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbdikaxo2223",
-              "us": 1767240000000000
+              "cid": "bafyreibakr5cpbjgmxki2s62xekjroxf37qnuxp5naw43ljs5awdxwxt7q",
+              "uri": "at://did:plc:alice2222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbdapw3z2223",
+              "us": 1767231600000000
             },
             {
-              "cid": "bafyreidldmk2ymt37q54i4wc3b2yhvpdoor6ddp7vc6d6r4di7nulnynka",
-              "uri": "at://did:plc:bob222222222222222222222/online.7778777.lessdugin.comment/rwsqt7ry6buy-3mbdikaxo2223-3mbd6ifbt2223",
-              "us": 1767250800000000
+              "cid": "bafyreihxe777ttdxqzec5wlw7qinio4wqw34cgi37hndgymzckhwvw5a5e",
+              "uri": "at://did:plc:bob222222222222222222222/online.7778777.lessdugin.comment/rwsqt7ry6buy-3mbdapw3z2223-3mbd3oyb3k223",
+              "us": 1767226200000000
             },
             {
-              "cid": "bafyreiextmlzlyfopqbcwiielrb2pmtgyyae67c4r434q5be4ytfozkjxu",
-              "uri": "at://did:plc:carol2222222222222222222/online.7778777.lessdugin.comment/rwsqt7ry6buy-3mbdikaxo2223-3mbdpatga2224",
-              "us": 1767247200000000
+              "cid": "bafyreigcp6pr2styzakxiacw23e4th42sqikekyozynjmwgdwbixewhxue",
+              "uri": "at://did:plc:carol2222222222222222222/online.7778777.lessdugin.comment/rwsqt7ry6buy-3mbdapw3z2223-3mbd3skp72224",
+              "us": 1767226320000000
             },
             {
               "cid": "bafyreif7ve7w3t3dwxyv76izp6t5rw4c3apghvt2hzvleizm2n25h53w2u",
@@ -1538,54 +1538,54 @@
           ],
           "records": [
             {
-              "cid": "bafyreifbwf5vah2v5qyx3cr3bx635z7s2jyrlm3lmflnokxkwyxsrr4sju",
-              "uri": "at://did:plc:alice2222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbdikaxo2223",
+              "cid": "bafyreibakr5cpbjgmxki2s62xekjroxf37qnuxp5naw43ljs5awdxwxt7q",
+              "uri": "at://did:plc:alice2222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbdapw3z2223",
               "value": {
                 "$type": "online.7778777.lessdugin.post",
-                "createdAt": "2026-01-01T04:00:00.000Z",
+                "createdAt": "2026-01-01T01:40:00.000Z",
                 "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
                 "title": "A post"
               }
             },
             {
-              "cid": "bafyreidldmk2ymt37q54i4wc3b2yhvpdoor6ddp7vc6d6r4di7nulnynka",
-              "uri": "at://did:plc:bob222222222222222222222/online.7778777.lessdugin.comment/rwsqt7ry6buy-3mbdikaxo2223-3mbd6ifbt2223",
+              "cid": "bafyreihxe777ttdxqzec5wlw7qinio4wqw34cgi37hndgymzckhwvw5a5e",
+              "uri": "at://did:plc:bob222222222222222222222/online.7778777.lessdugin.comment/rwsqt7ry6buy-3mbdapw3z2223-3mbd3oyb3k223",
               "value": {
                 "$type": "online.7778777.lessdugin.comment",
                 "body": {
                   "$type": "online.7778777.lessdugin.markdown",
                   "text": "A comment"
                 },
-                "createdAt": "2026-01-01T01:00:00.000Z",
+                "createdAt": "2026-01-01T00:10:00.000Z",
                 "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
                 "parent": {
-                  "cid": "bafyreiacpfkc5n3chi3dr3qm2uqheu4peab3ofzhdyecrme7wwlcduduo4",
-                  "uri": "at://did:plc:carol2222222222222222222/online.7778777.lessdugin.comment/rwsqt7ry6buy-3mbdikaxo2223-3mbdpatga2224"
+                  "cid": "bafyreidqko2s5xdbhqbyao32wxj4y7k3h4o56shmzzbqz7bfmxmw4oxziu",
+                  "uri": "at://did:plc:carol2222222222222222222/online.7778777.lessdugin.comment/rwsqt7ry6buy-3mbdapw3z2223-3mbd3skp72224"
                 },
                 "root": {
-                  "cid": "bafyreifbwf5vah2v5qyx3cr3bx635z7s2jyrlm3lmflnokxkwyxsrr4sju",
-                  "uri": "at://did:plc:alice2222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbdikaxo2223"
+                  "cid": "bafyreibakr5cpbjgmxki2s62xekjroxf37qnuxp5naw43ljs5awdxwxt7q",
+                  "uri": "at://did:plc:alice2222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbdapw3z2223"
                 }
               }
             },
             {
-              "cid": "bafyreiextmlzlyfopqbcwiielrb2pmtgyyae67c4r434q5be4ytfozkjxu",
-              "uri": "at://did:plc:carol2222222222222222222/online.7778777.lessdugin.comment/rwsqt7ry6buy-3mbdikaxo2223-3mbdpatga2224",
+              "cid": "bafyreigcp6pr2styzakxiacw23e4th42sqikekyozynjmwgdwbixewhxue",
+              "uri": "at://did:plc:carol2222222222222222222/online.7778777.lessdugin.comment/rwsqt7ry6buy-3mbdapw3z2223-3mbd3skp72224",
               "value": {
                 "$type": "online.7778777.lessdugin.comment",
                 "body": {
                   "$type": "online.7778777.lessdugin.markdown",
                   "text": "A comment"
                 },
-                "createdAt": "2026-01-01T06:00:00.000Z",
+                "createdAt": "2026-01-01T00:12:00.000Z",
                 "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
                 "parent": {
-                  "cid": "bafyreidldmk2ymt37q54i4wc3b2yhvpdoor6ddp7vc6d6r4di7nulnynka",
-                  "uri": "at://did:plc:bob222222222222222222222/online.7778777.lessdugin.comment/rwsqt7ry6buy-3mbdikaxo2223-3mbd6ifbt2223"
+                  "cid": "bafyreihxe777ttdxqzec5wlw7qinio4wqw34cgi37hndgymzckhwvw5a5e",
+                  "uri": "at://did:plc:bob222222222222222222222/online.7778777.lessdugin.comment/rwsqt7ry6buy-3mbdapw3z2223-3mbd3oyb3k223"
                 },
                 "root": {
-                  "cid": "bafyreifbwf5vah2v5qyx3cr3bx635z7s2jyrlm3lmflnokxkwyxsrr4sju",
-                  "uri": "at://did:plc:alice2222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbdikaxo2223"
+                  "cid": "bafyreibakr5cpbjgmxki2s62xekjroxf37qnuxp5naw43ljs5awdxwxt7q",
+                  "uri": "at://did:plc:alice2222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbdapw3z2223"
                 }
               }
             }
@@ -1599,7 +1599,270 @@
         }
       },
       "name": "orphaned-comment-bounded-by-root",
-      "note": "c1 and c2 name each other as parent; the greater uri (carol's) is re-attached to the root (Orphaned), so it is bounded by the post and the other by it"
+      "note": "c1 (bob) and c2 (carol) name each other as parent and are claimed and keyed before the post (T0 + 10 and 12 min; the post T0 + 100 min). The greater uri, carol's, is re-attached to the root (Orphaned), so its lower bound is the post's t_rank, and bob's comment, now its child, is bounded by it: all three rank at T0 + 100 min"
+    },
+    {
+      "expected": {
+        "tDecl": 1767225600000000,
+        "times": {
+          "at://did:plc:adam22222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd2u5xbc223": {
+            "futureDated": false,
+            "inconsistentTimestamps": false,
+            "tRank": 1767225600000000
+          }
+        }
+      },
+      "input": {
+        "fold": {
+          "absent": [],
+          "decl": {
+            "cid": "bafyreif7ve7w3t3dwxyv76izp6t5rw4c3apghvt2hzvleizm2n25h53w2u",
+            "uri": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+            "value": {
+              "$type": "online.7778777.lessdugin.forum",
+              "createdAt": "2026-01-01T00:00:00.000Z",
+              "membership": "open",
+              "name": "Test forum"
+            }
+          },
+          "now": 1769817600000000,
+          "obs": [
+            {
+              "cid": "bafyreig6a4wxnr7b7mjdc7vzho3kedtlsn5e475uulu6ur6fajpodmyu6y",
+              "uri": "at://did:plc:adam22222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd2u5xbc223",
+              "us": 1767225660000000
+            },
+            {
+              "cid": "bafyreif7ve7w3t3dwxyv76izp6t5rw4c3apghvt2hzvleizm2n25h53w2u",
+              "uri": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+              "us": 1767225600000000
+            }
+          ],
+          "records": [
+            {
+              "cid": "bafyreig6a4wxnr7b7mjdc7vzho3kedtlsn5e475uulu6ur6fajpodmyu6y",
+              "uri": "at://did:plc:adam22222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd2u5xbc223",
+              "value": {
+                "$type": "online.7778777.lessdugin.post",
+                "createdAt": "2025-12-31T23:55:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "title": "A post"
+              }
+            }
+          ],
+          "repoStatus": {
+            "did:plc:adam22222222222222222222": "fresh",
+            "did:plc:owner2222222222222222222": "fresh"
+          }
+        }
+      },
+      "name": "decl-obs-moves-a-non-future-item-decl-seen-at-creation",
+      "note": "adam's post is claimed and keyed at T0 \u2212 5 min and first seen at T0 + 1 min (not future-dated). The declaration's createdAt is T0; first seen at T0, so t_decl = T0 and the post ranks at T0. t_obs(decl) is outside inputDigest, so the two vectors of this pair have equal digests (fold/digest.json) and different t_rank values"
+    },
+    {
+      "expected": {
+        "tDecl": 1767225000000000,
+        "times": {
+          "at://did:plc:adam22222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd2u5xbc223": {
+            "futureDated": false,
+            "inconsistentTimestamps": false,
+            "tRank": 1767225300000000
+          }
+        }
+      },
+      "input": {
+        "fold": {
+          "absent": [],
+          "decl": {
+            "cid": "bafyreif7ve7w3t3dwxyv76izp6t5rw4c3apghvt2hzvleizm2n25h53w2u",
+            "uri": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+            "value": {
+              "$type": "online.7778777.lessdugin.forum",
+              "createdAt": "2026-01-01T00:00:00.000Z",
+              "membership": "open",
+              "name": "Test forum"
+            }
+          },
+          "now": 1769817600000000,
+          "obs": [
+            {
+              "cid": "bafyreig6a4wxnr7b7mjdc7vzho3kedtlsn5e475uulu6ur6fajpodmyu6y",
+              "uri": "at://did:plc:adam22222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd2u5xbc223",
+              "us": 1767225660000000
+            },
+            {
+              "cid": "bafyreif7ve7w3t3dwxyv76izp6t5rw4c3apghvt2hzvleizm2n25h53w2u",
+              "uri": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+              "us": 1767225000000000
+            }
+          ],
+          "records": [
+            {
+              "cid": "bafyreig6a4wxnr7b7mjdc7vzho3kedtlsn5e475uulu6ur6fajpodmyu6y",
+              "uri": "at://did:plc:adam22222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd2u5xbc223",
+              "value": {
+                "$type": "online.7778777.lessdugin.post",
+                "createdAt": "2025-12-31T23:55:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "title": "A post"
+              }
+            }
+          ],
+          "repoStatus": {
+            "did:plc:adam22222222222222222222": "fresh",
+            "did:plc:owner2222222222222222222": "fresh"
+          }
+        }
+      },
+      "name": "decl-obs-moves-a-non-future-item-decl-seen-before-creation",
+      "note": "adam's post is claimed and keyed at T0 \u2212 5 min and first seen at T0 + 1 min (not future-dated). The declaration's createdAt is T0; first seen at T0 \u2212 10 min, so its createdAt is more than 5 min after t_obs and is clamped: t_decl = T0 \u2212 10 min, and the post ranks at its own T0 \u2212 5 min. t_obs(decl) is outside inputDigest, so the two vectors of this pair have equal digests (fold/digest.json) and different t_rank values"
+    },
+    {
+      "expected": {
+        "edited": [
+          "at://did:plc:alice2222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3oyb3k223",
+          "at://did:plc:carol2222222222222222222/online.7778777.lessdugin.comment/rwsqt7ry6buy-3mbd3skp72225-3mbd3w55ck227"
+        ]
+      },
+      "input": {
+        "fold": {
+          "absent": [],
+          "decl": {
+            "cid": "bafyreif7ve7w3t3dwxyv76izp6t5rw4c3apghvt2hzvleizm2n25h53w2u",
+            "uri": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+            "value": {
+              "$type": "online.7778777.lessdugin.forum",
+              "createdAt": "2026-01-01T00:00:00.000Z",
+              "membership": "open",
+              "name": "Test forum"
+            }
+          },
+          "now": 1769817600000000,
+          "obs": [
+            {
+              "cid": "bafyreigi3ukhwn4dti2phdsxp5fbe4y25vjq2qrqn3llvtjvq4bqlw5vye",
+              "uri": "at://did:plc:alice2222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3oyb3k223",
+              "us": 1767226800000000
+            },
+            {
+              "cid": "bafyreid3sqgtow7dgyzl7klqnypd6su454erkflu6e6r2oftayossfbemy",
+              "uri": "at://did:plc:bob222222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3skp72225",
+              "us": 1767226320000000
+            },
+            {
+              "cid": "bafyreicwqdghdyv7zeq52choe3v5c5gpdvylp5rj57375tamlmcnmg2bem",
+              "uri": "at://did:plc:carol2222222222222222222/online.7778777.lessdugin.comment/rwsqt7ry6buy-3mbd3skp72225-3mbd3w55ck227",
+              "us": 1767226440000000
+            },
+            {
+              "cid": "bafyreicdnptdeoprhkojh76kearpt24hbkzqhd4gmzu35cz5fvxlhcydte",
+              "uri": "at://did:plc:carol2222222222222222222/online.7778777.lessdugin.revision/rwsqt7ry6buy-3mbd3skp72225-3mbd3w55ck227-3mbd3xweec22a",
+              "us": 1767226500000000
+            },
+            {
+              "cid": "bafyreif7ve7w3t3dwxyv76izp6t5rw4c3apghvt2hzvleizm2n25h53w2u",
+              "uri": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+              "us": 1767225600000000
+            }
+          ],
+          "records": [
+            {
+              "cid": "bafyreigi3ukhwn4dti2phdsxp5fbe4y25vjq2qrqn3llvtjvq4bqlw5vye",
+              "uri": "at://did:plc:alice2222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3oyb3k223",
+              "value": {
+                "$type": "online.7778777.lessdugin.post",
+                "createdAt": "1969-12-31T00:00:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "title": "A post",
+                "updatedAt": "2026-01-01T00:20:00.000Z"
+              }
+            },
+            {
+              "cid": "bafyreidufpvds4nmhjkhqn2j2v7b6ooihng35dxu5ive5ylnfbfrcwsvjm",
+              "uri": "at://did:plc:alice2222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3qri5c224",
+              "value": {
+                "$type": "online.7778777.lessdugin.post",
+                "createdAt": "1969-12-31T00:00:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "title": "A post"
+              }
+            },
+            {
+              "cid": "bafyreid3sqgtow7dgyzl7klqnypd6su454erkflu6e6r2oftayossfbemy",
+              "uri": "at://did:plc:bob222222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3skp72225",
+              "value": {
+                "$type": "online.7778777.lessdugin.post",
+                "createdAt": "2026-01-01T00:12:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "title": "A post",
+                "updatedAt": "2026-01-01T00:12:00.000Z"
+              }
+            },
+            {
+              "cid": "bafyreidnd4kfe3ilar65uls27iwabrgmvumykjk3rfd4gzvcgehejltteu",
+              "uri": "at://did:plc:bob222222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3udwas226",
+              "value": {
+                "$type": "online.7778777.lessdugin.post",
+                "createdAt": "2026-01-01T00:13:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "title": "A post",
+                "updatedAt": "1969-12-31T00:00:00.000Z"
+              }
+            },
+            {
+              "cid": "bafyreicwqdghdyv7zeq52choe3v5c5gpdvylp5rj57375tamlmcnmg2bem",
+              "uri": "at://did:plc:carol2222222222222222222/online.7778777.lessdugin.comment/rwsqt7ry6buy-3mbd3skp72225-3mbd3w55ck227",
+              "value": {
+                "$type": "online.7778777.lessdugin.comment",
+                "body": {
+                  "$type": "online.7778777.lessdugin.markdown",
+                  "text": "second wording"
+                },
+                "createdAt": "2026-01-01T00:14:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "root": {
+                  "cid": "bafyreid3sqgtow7dgyzl7klqnypd6su454erkflu6e6r2oftayossfbemy",
+                  "uri": "at://did:plc:bob222222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3skp72225"
+                }
+              }
+            },
+            {
+              "cid": "bafyreicdnptdeoprhkojh76kearpt24hbkzqhd4gmzu35cz5fvxlhcydte",
+              "uri": "at://did:plc:carol2222222222222222222/online.7778777.lessdugin.revision/rwsqt7ry6buy-3mbd3skp72225-3mbd3w55ck227-3mbd3xweec22a",
+              "value": {
+                "$type": "online.7778777.lessdugin.revision",
+                "createdAt": "2026-01-01T00:15:00.000Z",
+                "op": "update",
+                "record": {
+                  "$type": "online.7778777.lessdugin.comment",
+                  "body": {
+                    "$type": "online.7778777.lessdugin.markdown",
+                    "text": "first wording"
+                  },
+                  "createdAt": "2026-01-01T00:14:00.000Z",
+                  "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                  "root": {
+                    "cid": "bafyreid3sqgtow7dgyzl7klqnypd6su454erkflu6e6r2oftayossfbemy",
+                    "uri": "at://did:plc:bob222222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3skp72225"
+                  }
+                },
+                "subject": {
+                  "cid": "bafyreidz5qqa5gvf77r5x7btaqjelbiuwng66xpy4y76tjfdnkdv3d7wza",
+                  "uri": "at://did:plc:carol2222222222222222222/online.7778777.lessdugin.comment/rwsqt7ry6buy-3mbd3skp72225-3mbd3w55ck227"
+                }
+              }
+            }
+          ],
+          "repoStatus": {
+            "did:plc:alice2222222222222222222": "fresh",
+            "did:plc:bob222222222222222222222": "fresh",
+            "did:plc:carol2222222222222222222": "fresh",
+            "did:plc:owner2222222222222222222": "fresh"
+          }
+        }
+      },
+      "name": "edited-badge",
+      "note": "the [edited] badge: p1 was created before 1970 (no \u00b5s) and updated at T0 + 20 min, which counts as later (\u00a720.1 item 46); p2 has the same createdAt and no updatedAt; p3's updatedAt equals its createdAt; p4's updatedAt is before 1970 (no \u00b5s) and never makes an item edited; carol's comment has a valid op: update revision (its createdAt is unchanged)"
     },
     {
       "expected": {

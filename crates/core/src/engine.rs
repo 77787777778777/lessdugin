@@ -6,7 +6,9 @@
 //! `active_account`). M2 adds forums and membership (`forums`), sync (`syncing`), the queries
 //! over the forum model (`queries`), `parse_ref` (`refs`), writes through the outbox
 //! (`writes`), the long-lived `live_tail` and `background_verify` (`live`) and events
-//! (`events`). The engine keeps no global state: two engines over two hosts are independent.
+//! (`events`). M3 adds opinions (`writes`), moderation writes (`moderation`), and
+//! notifications, read state and the local lists (`notify`, `notify_local`). The engine keeps
+//! no global state: two engines over two hosts are independent.
 //! Cloning an engine shares its host, outbox, event subscribers and model cache.
 
 mod accounts;
@@ -16,6 +18,9 @@ mod events;
 mod forums;
 mod live;
 mod models;
+mod moderation;
+mod notify;
+mod notify_local;
 mod queries;
 mod refs;
 mod syncing;

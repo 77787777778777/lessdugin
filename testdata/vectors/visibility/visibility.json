@@ -17,7 +17,7 @@
             "state": "Excluded"
           },
           "at://did:plc:carol2222222222222222222/online.7778777.lessdugin.comment/rwsqt7ry6buy-3mbdf6xqf2224-3mbdikaxo2225": {
-            "state": "Excluded"
+            "state": "Visible"
           }
         },
         "states": {
@@ -31,7 +31,7 @@
             "state": "Excluded"
           },
           "at://did:plc:carol2222222222222222222/online.7778777.lessdugin.comment/rwsqt7ry6buy-3mbdf6xqf2224-3mbdikaxo2225": {
-            "state": "Excluded"
+            "state": "Visible"
           }
         }
       },
@@ -236,7 +236,7 @@
         }
       },
       "name": "v1-before-v2-and-v3",
-      "note": "V1 first: bob's post is invalid (PO3: a title of U+2003 only) although bob is no participant and mona hid it; alice's other post names another forum in value.forum (G5/G9: invalid), so carol's valid comment on it fails CO5 (root post.forum \u2260 comment.forum) and is Excluded too"
+      "note": "V1 first: bob's post is invalid (PO3: a title of U+2003 only) although bob is no participant and mona hid it; alice's other post names another forum in value.forum (G5/G9: invalid) and is Excluded. carol's valid comment on it is not: CO5 compares only a valid root (social.md \u00a720.1 item 51), so the comment sits under a Missing root and is Visible"
     },
     {
       "expected": {
@@ -6361,6 +6361,544 @@
       },
       "name": "tombstone-under-missing-placeholders",
       "note": "the root post is not in records (a Missing root) and c1's parent is missing (a Missing placeholder): placeholders are not items, but the thread pass still runs over the placed tree, so the hidden c1 with a listed reply becomes a Tombstone"
+    },
+    {
+      "expected": {
+        "displayed": {
+          "at://did:plc:maria2222222222222222222/online.7778777.lessdugin.comment/rwsqt7ry6buy-3mbd3oyb3k223-3mbd4auhn2224": {
+            "state": "Visible"
+          },
+          "at://did:plc:mona22222222222222222222/online.7778777.lessdugin.comment/rwsqt7ry6buy-3mbd3oyb3k223-3mbd4cnoos225": {
+            "state": "Visible"
+          },
+          "at://did:plc:xavier222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3oyb3k223": {
+            "state": "Excluded"
+          }
+        },
+        "states": {
+          "at://did:plc:maria2222222222222222222/online.7778777.lessdugin.comment/rwsqt7ry6buy-3mbd3oyb3k223-3mbd4auhn2224": {
+            "state": "Visible"
+          },
+          "at://did:plc:mona22222222222222222222/online.7778777.lessdugin.comment/rwsqt7ry6buy-3mbd3oyb3k223-3mbd4cnoos225": {
+            "state": "Visible"
+          },
+          "at://did:plc:xavier222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3oyb3k223": {
+            "state": "Excluded"
+          }
+        }
+      },
+      "input": {
+        "fold": {
+          "absent": [],
+          "decl": {
+            "cid": "bafyreia5wmegqdzfbahmej3yksqwsg3hdx2rcjlsqzg5s37jsbdg6nm33m",
+            "uri": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+            "value": {
+              "$type": "online.7778777.lessdugin.forum",
+              "createdAt": "2026-01-01T00:00:00.000Z",
+              "membership": "open",
+              "moderators": [
+                {
+                  "did": "did:plc:adam22222222222222222222",
+                  "role": "admin"
+                },
+                {
+                  "did": "did:plc:mona22222222222222222222",
+                  "role": "moderator"
+                },
+                {
+                  "did": "did:plc:mike22222222222222222222",
+                  "role": "moderator"
+                }
+              ],
+              "name": "Test forum",
+              "policy": {
+                "display": {
+                  "newUsers": "collapse"
+                }
+              }
+            }
+          },
+          "now": 1769817600000000,
+          "obs": [
+            {
+              "cid": "bafyreibgvaosrrpsed3mmml4gqezxwkffkgeujlwmjlbrfcakv2kh3d7uq",
+              "uri": "at://did:plc:adam22222222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3oyb3k223-ohiuyks7wiz4b3vx",
+              "us": 1767227400000000
+            },
+            {
+              "cid": "bafyreicft4dt3ka3yqu5eagp4lnb7ainy6y4nb4pl6unueqvdyk2jwmdbi",
+              "uri": "at://did:plc:maria2222222222222222222/online.7778777.lessdugin.comment/rwsqt7ry6buy-3mbd3oyb3k223-3mbd4auhn2224",
+              "us": 1767226800000000
+            },
+            {
+              "cid": "bafyreihvavbxki6bgt6nvohjhbjzlxwvgff4juciv4rzh3cow5ygpy4gxe",
+              "uri": "at://did:plc:maria2222222222222222222/online.7778777.lessdugin.membership/rwsqt7ry6buy",
+              "us": 1767225600000000
+            },
+            {
+              "cid": "bafyreibteq3ttyddukkzbymkd5l775eg3l5sdrwqsnkg65fiwqyhkatkn4",
+              "uri": "at://did:plc:mona22222222222222222222/online.7778777.lessdugin.comment/rwsqt7ry6buy-3mbd3oyb3k223-3mbd4cnoos225",
+              "us": 1767226860000000
+            },
+            {
+              "cid": "bafyreia5wmegqdzfbahmej3yksqwsg3hdx2rcjlsqzg5s37jsbdg6nm33m",
+              "uri": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+              "us": 1767225600000000
+            },
+            {
+              "cid": "bafyreidz7oma3espgmjf4ibkjt6gs75unedso7vjcg4dmiykky4ry6krqi",
+              "uri": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.modAction/rwsqt7ry6buy-fimmc4ghv3yemqvw",
+              "us": 1767225660000000
+            },
+            {
+              "cid": "bafyreigaqmlrwnkq64t323j4bd6bcql2tw2kln73gt6e23ymu4y5ftmm3q",
+              "uri": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3oyb3k223-t2orewa25zuhnf2j",
+              "us": 1767227400000000
+            },
+            {
+              "cid": "bafyreihvavbxki6bgt6nvohjhbjzlxwvgff4juciv4rzh3cow5ygpy4gxe",
+              "uri": "at://did:plc:xavier222222222222222222/online.7778777.lessdugin.membership/rwsqt7ry6buy",
+              "us": 1767225600000000
+            },
+            {
+              "cid": "bafyreic4s7ihhdmtokjdseo33fiykag67nf5uacg6aj4cygj5x2sdn22ie",
+              "uri": "at://did:plc:xavier222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3oyb3k223",
+              "us": 1767226200000000
+            }
+          ],
+          "records": [
+            {
+              "cid": "bafyreibgvaosrrpsed3mmml4gqezxwkffkgeujlwmjlbrfcakv2kh3d7uq",
+              "uri": "at://did:plc:adam22222222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3oyb3k223-ohiuyks7wiz4b3vx",
+              "value": {
+                "$type": "online.7778777.lessdugin.opinion",
+                "createdAt": "2026-01-01T00:30:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "karma": "up",
+                "subject": {
+                  "cid": "bafyreibteq3ttyddukkzbymkd5l775eg3l5sdrwqsnkg65fiwqyhkatkn4",
+                  "uri": "at://did:plc:mona22222222222222222222/online.7778777.lessdugin.comment/rwsqt7ry6buy-3mbd3oyb3k223-3mbd4cnoos225"
+                }
+              }
+            },
+            {
+              "cid": "bafyreicft4dt3ka3yqu5eagp4lnb7ainy6y4nb4pl6unueqvdyk2jwmdbi",
+              "uri": "at://did:plc:maria2222222222222222222/online.7778777.lessdugin.comment/rwsqt7ry6buy-3mbd3oyb3k223-3mbd4auhn2224",
+              "value": {
+                "$type": "online.7778777.lessdugin.comment",
+                "body": {
+                  "$type": "online.7778777.lessdugin.markdown",
+                  "text": "A comment"
+                },
+                "createdAt": "2026-01-01T00:20:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "root": {
+                  "cid": "bafyreic4s7ihhdmtokjdseo33fiykag67nf5uacg6aj4cygj5x2sdn22ie",
+                  "uri": "at://did:plc:xavier222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3oyb3k223"
+                }
+              }
+            },
+            {
+              "cid": "bafyreihvavbxki6bgt6nvohjhbjzlxwvgff4juciv4rzh3cow5ygpy4gxe",
+              "uri": "at://did:plc:maria2222222222222222222/online.7778777.lessdugin.membership/rwsqt7ry6buy",
+              "value": {
+                "$type": "online.7778777.lessdugin.membership",
+                "createdAt": "2026-01-01T00:00:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test"
+              }
+            },
+            {
+              "cid": "bafyreibteq3ttyddukkzbymkd5l775eg3l5sdrwqsnkg65fiwqyhkatkn4",
+              "uri": "at://did:plc:mona22222222222222222222/online.7778777.lessdugin.comment/rwsqt7ry6buy-3mbd3oyb3k223-3mbd4cnoos225",
+              "value": {
+                "$type": "online.7778777.lessdugin.comment",
+                "body": {
+                  "$type": "online.7778777.lessdugin.markdown",
+                  "text": "A comment"
+                },
+                "createdAt": "2026-01-01T00:21:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "root": {
+                  "cid": "bafyreic4s7ihhdmtokjdseo33fiykag67nf5uacg6aj4cygj5x2sdn22ie",
+                  "uri": "at://did:plc:xavier222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3oyb3k223"
+                }
+              }
+            },
+            {
+              "cid": "bafyreidz7oma3espgmjf4ibkjt6gs75unedso7vjcg4dmiykky4ry6krqi",
+              "uri": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.modAction/rwsqt7ry6buy-fimmc4ghv3yemqvw",
+              "value": {
+                "$type": "online.7778777.lessdugin.modAction",
+                "action": {
+                  "$type": "online.7778777.lessdugin.modAction#access",
+                  "level": "member"
+                },
+                "createdAt": "2026-01-01T00:01:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "subject": "did:plc:maria2222222222222222222"
+              }
+            },
+            {
+              "cid": "bafyreigaqmlrwnkq64t323j4bd6bcql2tw2kln73gt6e23ymu4y5ftmm3q",
+              "uri": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.opinion/rwsqt7ry6buy-3mbd3oyb3k223-t2orewa25zuhnf2j",
+              "value": {
+                "$type": "online.7778777.lessdugin.opinion",
+                "createdAt": "2026-01-01T00:30:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "karma": "up",
+                "subject": {
+                  "cid": "bafyreicft4dt3ka3yqu5eagp4lnb7ainy6y4nb4pl6unueqvdyk2jwmdbi",
+                  "uri": "at://did:plc:maria2222222222222222222/online.7778777.lessdugin.comment/rwsqt7ry6buy-3mbd3oyb3k223-3mbd4auhn2224"
+                }
+              }
+            },
+            {
+              "cid": "bafyreihvavbxki6bgt6nvohjhbjzlxwvgff4juciv4rzh3cow5ygpy4gxe",
+              "uri": "at://did:plc:xavier222222222222222222/online.7778777.lessdugin.membership/rwsqt7ry6buy",
+              "value": {
+                "$type": "online.7778777.lessdugin.membership",
+                "createdAt": "2026-01-01T00:00:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test"
+              }
+            },
+            {
+              "cid": "bafyreic4s7ihhdmtokjdseo33fiykag67nf5uacg6aj4cygj5x2sdn22ie",
+              "uri": "at://did:plc:xavier222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3oyb3k223",
+              "value": {
+                "$type": "online.7778777.lessdugin.post",
+                "createdAt": "2026-01-01T00:10:00.000Z",
+                "forum": "at://did:plc:other2222222222222222222/online.7778777.lessdugin.forum/elsewhere",
+                "title": "A post"
+              }
+            }
+          ],
+          "repoStatus": {
+            "did:plc:adam22222222222222222222": "fresh",
+            "did:plc:maria2222222222222222222": "fresh",
+            "did:plc:mike22222222222222222222": "fresh",
+            "did:plc:mona22222222222222222222": "fresh",
+            "did:plc:owner2222222222222222222": "fresh",
+            "did:plc:xavier222222222222222222": "fresh"
+          }
+        }
+      },
+      "name": "co5-invalid-root-is-a-missing-root",
+      "note": "open mode, newUsers = collapse. xavier (a membership only) wrote the root post with a forum field naming another forum, as an edit of the post could (invalid: G5, the G9 part). CO5 compares only a valid root (social.md \u00a720.1 item 51), so the post is Excluded but the comments are not: they sit under a Missing root and keep their own states (maria is granted, mona is a moderator)"
+    },
+    {
+      "expected": {
+        "displayed": {
+          "at://did:plc:adam22222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3oyb3k223": {
+            "reason": "Removed",
+            "removed": {
+              "actor": "did:plc:owner2222222222222222222",
+              "rank": 3,
+              "reason": null,
+              "spam": false
+            },
+            "state": "Tombstone"
+          },
+          "at://did:plc:mona22222222222222222222/online.7778777.lessdugin.comment/rwsqt7ry6buy-3mbd3oyb3k223-3mbd4auhn2224": {
+            "state": "Visible"
+          }
+        },
+        "states": {
+          "at://did:plc:adam22222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3oyb3k223": {
+            "reason": "Removed",
+            "removed": {
+              "actor": "did:plc:owner2222222222222222222",
+              "rank": 3,
+              "reason": null,
+              "spam": false
+            },
+            "state": "Hidden"
+          },
+          "at://did:plc:mona22222222222222222222/online.7778777.lessdugin.comment/rwsqt7ry6buy-3mbd3oyb3k223-3mbd4auhn2224": {
+            "state": "Visible"
+          }
+        }
+      },
+      "input": {
+        "fold": {
+          "absent": [],
+          "decl": {
+            "cid": "bafyreibw3wetlwdpcn2ugxkra7sknquzw4jkv2z4zkhknilqsdxze566wu",
+            "uri": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+            "value": {
+              "$type": "online.7778777.lessdugin.forum",
+              "createdAt": "2026-01-01T00:00:00.000Z",
+              "membership": "approval",
+              "moderators": [
+                {
+                  "did": "did:plc:adam22222222222222222222",
+                  "role": "admin"
+                },
+                {
+                  "did": "did:plc:mona22222222222222222222",
+                  "role": "moderator"
+                },
+                {
+                  "did": "did:plc:mike22222222222222222222",
+                  "role": "moderator"
+                }
+              ],
+              "name": "Test forum"
+            }
+          },
+          "now": 1769817600000000,
+          "obs": [
+            {
+              "cid": "bafyreigdwzskzgn2t4ke6ixdbb5e2y5u3c42bqfjdbtjfuaptinpjjfbbi",
+              "uri": "at://did:plc:adam22222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3oyb3k223",
+              "us": 1767226200000000
+            },
+            {
+              "cid": "bafyreighlkyi2mj2qdt7e6ibmmx4znv6ald2kxwavmrwmi2dlqp5vze6iy",
+              "uri": "at://did:plc:mona22222222222222222222/online.7778777.lessdugin.comment/rwsqt7ry6buy-3mbd3oyb3k223-3mbd4auhn2224",
+              "us": 1767226800000000
+            },
+            {
+              "cid": "bafyreibw3wetlwdpcn2ugxkra7sknquzw4jkv2z4zkhknilqsdxze566wu",
+              "uri": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+              "us": 1767225600000000
+            },
+            {
+              "cid": "bafyreibgyq23yr6aqhf7x3ne6t47d24ecdsg7wc7hevrh65if3qlexwn5a",
+              "uri": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.modAction/rwsqt7ry6buy-y5ov64wj5jrugs4c",
+              "us": 1767227400000000
+            }
+          ],
+          "records": [
+            {
+              "cid": "bafyreigdwzskzgn2t4ke6ixdbb5e2y5u3c42bqfjdbtjfuaptinpjjfbbi",
+              "uri": "at://did:plc:adam22222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3oyb3k223",
+              "value": {
+                "$type": "online.7778777.lessdugin.post",
+                "createdAt": "2026-01-01T00:10:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "title": "A post"
+              }
+            },
+            {
+              "cid": "bafyreighlkyi2mj2qdt7e6ibmmx4znv6ald2kxwavmrwmi2dlqp5vze6iy",
+              "uri": "at://did:plc:mona22222222222222222222/online.7778777.lessdugin.comment/rwsqt7ry6buy-3mbd3oyb3k223-3mbd4auhn2224",
+              "value": {
+                "$type": "online.7778777.lessdugin.comment",
+                "body": {
+                  "$type": "online.7778777.lessdugin.markdown",
+                  "text": "A comment"
+                },
+                "createdAt": "2026-01-01T00:20:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "parent": {
+                  "cid": "bafyreigdwzskzgn2t4ke6ixdbb5e2y5u3c42bqfjdbtjfuaptinpjjfbbi",
+                  "uri": "at://did:plc:zoe222222222222222222222/online.7778777.lessdugin.comment/rwsqt7ry6buy-3mbd3oyb3k223-3mbd3xweec22d"
+                },
+                "root": {
+                  "cid": "bafyreigdwzskzgn2t4ke6ixdbb5e2y5u3c42bqfjdbtjfuaptinpjjfbbi",
+                  "uri": "at://did:plc:adam22222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3oyb3k223"
+                }
+              }
+            },
+            {
+              "cid": "bafyreibgyq23yr6aqhf7x3ne6t47d24ecdsg7wc7hevrh65if3qlexwn5a",
+              "uri": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.modAction/rwsqt7ry6buy-y5ov64wj5jrugs4c",
+              "value": {
+                "$type": "online.7778777.lessdugin.modAction",
+                "action": {
+                  "$type": "online.7778777.lessdugin.modAction#hide"
+                },
+                "createdAt": "2026-01-01T00:30:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "subject": "at://did:plc:adam22222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3oyb3k223",
+                "subjectCid": "bafyreigdwzskzgn2t4ke6ixdbb5e2y5u3c42bqfjdbtjfuaptinpjjfbbi"
+              }
+            }
+          ],
+          "repoStatus": {
+            "did:plc:adam22222222222222222222": "fresh",
+            "did:plc:mike22222222222222222222": "fresh",
+            "did:plc:mona22222222222222222222": "fresh",
+            "did:plc:owner2222222222222222222": "fresh"
+          }
+        }
+      },
+      "name": "hidden-root-tombstone-through-placeholder",
+      "note": "approval mode, authorities only. The owner hid adam's post; mona's comment names a parent comment that is no record, so it sits under a Missing placeholder (not an item). The thread pass walks through the placeholder: the post has a listed descendant and becomes Tombstone(Removed)"
+    },
+    {
+      "expected": {
+        "displayed": {
+          "at://did:plc:adam22222222222222222222/online.7778777.lessdugin.comment/rwsqt7ry6buy-3mbd3g25ss223-3mbd3oyb3k223": {
+            "state": "Visible"
+          },
+          "at://did:plc:mona22222222222222222222/online.7778777.lessdugin.comment/rwsqt7ry6buy-3mbd3g25ss223-3mbd3qri5c223": {
+            "reason": "Removed",
+            "removed": {
+              "actor": "did:plc:owner2222222222222222222",
+              "rank": 3,
+              "reason": null,
+              "spam": false
+            },
+            "state": "Tombstone"
+          },
+          "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3g25ss223": {
+            "state": "Visible"
+          }
+        },
+        "states": {
+          "at://did:plc:adam22222222222222222222/online.7778777.lessdugin.comment/rwsqt7ry6buy-3mbd3g25ss223-3mbd3oyb3k223": {
+            "state": "Visible"
+          },
+          "at://did:plc:mona22222222222222222222/online.7778777.lessdugin.comment/rwsqt7ry6buy-3mbd3g25ss223-3mbd3qri5c223": {
+            "reason": "Removed",
+            "removed": {
+              "actor": "did:plc:owner2222222222222222222",
+              "rank": 3,
+              "reason": null,
+              "spam": false
+            },
+            "state": "Hidden"
+          },
+          "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3g25ss223": {
+            "state": "Visible"
+          }
+        }
+      },
+      "input": {
+        "fold": {
+          "absent": [],
+          "decl": {
+            "cid": "bafyreibw3wetlwdpcn2ugxkra7sknquzw4jkv2z4zkhknilqsdxze566wu",
+            "uri": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+            "value": {
+              "$type": "online.7778777.lessdugin.forum",
+              "createdAt": "2026-01-01T00:00:00.000Z",
+              "membership": "approval",
+              "moderators": [
+                {
+                  "did": "did:plc:adam22222222222222222222",
+                  "role": "admin"
+                },
+                {
+                  "did": "did:plc:mona22222222222222222222",
+                  "role": "moderator"
+                },
+                {
+                  "did": "did:plc:mike22222222222222222222",
+                  "role": "moderator"
+                }
+              ],
+              "name": "Test forum"
+            }
+          },
+          "now": 1769817600000000,
+          "obs": [
+            {
+              "cid": "bafyreiaotvbvay5p5qyh2oq4frhnpq3ktbhmle6hbibtlzwjfnl4fx36pi",
+              "uri": "at://did:plc:adam22222222222222222222/online.7778777.lessdugin.comment/rwsqt7ry6buy-3mbd3g25ss223-3mbd3oyb3k223",
+              "us": 1767226200000000
+            },
+            {
+              "cid": "bafyreifhc4oqzwexz5zdycqu2b34vlut7h2uk2hkw2cgac4is2hwcpfytm",
+              "uri": "at://did:plc:mona22222222222222222222/online.7778777.lessdugin.comment/rwsqt7ry6buy-3mbd3g25ss223-3mbd3qri5c223",
+              "us": 1767226260000000
+            },
+            {
+              "cid": "bafyreibw3wetlwdpcn2ugxkra7sknquzw4jkv2z4zkhknilqsdxze566wu",
+              "uri": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+              "us": 1767225600000000
+            },
+            {
+              "cid": "bafyreie7trs376ew2qor2uvrazm6vgkgcfqiyia73jivvfvus6epuwvr7a",
+              "uri": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.modAction/rwsqt7ry6buy-elxg3pvepn4yize3",
+              "us": 1767226800000000
+            },
+            {
+              "cid": "bafyreidqivjeraghms352i7btvhulp352zz6feevbzbafzj3al227yf2wu",
+              "uri": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3g25ss223",
+              "us": 1767225900000000
+            }
+          ],
+          "records": [
+            {
+              "cid": "bafyreiaotvbvay5p5qyh2oq4frhnpq3ktbhmle6hbibtlzwjfnl4fx36pi",
+              "uri": "at://did:plc:adam22222222222222222222/online.7778777.lessdugin.comment/rwsqt7ry6buy-3mbd3g25ss223-3mbd3oyb3k223",
+              "value": {
+                "$type": "online.7778777.lessdugin.comment",
+                "body": {
+                  "$type": "online.7778777.lessdugin.markdown",
+                  "text": "A comment"
+                },
+                "createdAt": "2026-01-01T00:10:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "parent": {
+                  "cid": "bafyreifhc4oqzwexz5zdycqu2b34vlut7h2uk2hkw2cgac4is2hwcpfytm",
+                  "uri": "at://did:plc:mona22222222222222222222/online.7778777.lessdugin.comment/rwsqt7ry6buy-3mbd3g25ss223-3mbd3qri5c223"
+                },
+                "root": {
+                  "cid": "bafyreidqivjeraghms352i7btvhulp352zz6feevbzbafzj3al227yf2wu",
+                  "uri": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3g25ss223"
+                }
+              }
+            },
+            {
+              "cid": "bafyreifhc4oqzwexz5zdycqu2b34vlut7h2uk2hkw2cgac4is2hwcpfytm",
+              "uri": "at://did:plc:mona22222222222222222222/online.7778777.lessdugin.comment/rwsqt7ry6buy-3mbd3g25ss223-3mbd3qri5c223",
+              "value": {
+                "$type": "online.7778777.lessdugin.comment",
+                "body": {
+                  "$type": "online.7778777.lessdugin.markdown",
+                  "text": "A comment"
+                },
+                "createdAt": "2026-01-01T00:11:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "parent": {
+                  "cid": "bafyreidqivjeraghms352i7btvhulp352zz6feevbzbafzj3al227yf2wu",
+                  "uri": "at://did:plc:adam22222222222222222222/online.7778777.lessdugin.comment/rwsqt7ry6buy-3mbd3g25ss223-3mbd3oyb3k223"
+                },
+                "root": {
+                  "cid": "bafyreidqivjeraghms352i7btvhulp352zz6feevbzbafzj3al227yf2wu",
+                  "uri": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3g25ss223"
+                }
+              }
+            },
+            {
+              "cid": "bafyreie7trs376ew2qor2uvrazm6vgkgcfqiyia73jivvfvus6epuwvr7a",
+              "uri": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.modAction/rwsqt7ry6buy-elxg3pvepn4yize3",
+              "value": {
+                "$type": "online.7778777.lessdugin.modAction",
+                "action": {
+                  "$type": "online.7778777.lessdugin.modAction#hide"
+                },
+                "createdAt": "2026-01-01T00:20:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "subject": "at://did:plc:mona22222222222222222222/online.7778777.lessdugin.comment/rwsqt7ry6buy-3mbd3g25ss223-3mbd3qri5c223",
+                "subjectCid": "bafyreifhc4oqzwexz5zdycqu2b34vlut7h2uk2hkw2cgac4is2hwcpfytm"
+              }
+            },
+            {
+              "cid": "bafyreidqivjeraghms352i7btvhulp352zz6feevbzbafzj3al227yf2wu",
+              "uri": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.post/rwsqt7ry6buy-3mbd3g25ss223",
+              "value": {
+                "$type": "online.7778777.lessdugin.post",
+                "createdAt": "2026-01-01T00:05:00.000Z",
+                "forum": "at://did:plc:owner2222222222222222222/online.7778777.lessdugin.forum/test",
+                "title": "A post"
+              }
+            }
+          ],
+          "repoStatus": {
+            "did:plc:adam22222222222222222222": "fresh",
+            "did:plc:mike22222222222222222222": "fresh",
+            "did:plc:mona22222222222222222222": "fresh",
+            "did:plc:owner2222222222222222222": "fresh"
+          }
+        }
+      },
+      "name": "reattached-hidden-comment-tombstone",
+      "note": "adam's ux and mona's uy name each other as parent; uy (the greater uri) is re-attached to the root (Orphaned) and ux becomes its child. The owner hid uy; its listed child makes it a Tombstone(Removed)"
     }
   ]
 }

@@ -14,6 +14,7 @@ use serde_json::{Map, Value, json};
 
 use crate::social::digest;
 use crate::social::full::gates::Gate;
+use crate::social::full::timeline::{CommentVersions, Version};
 use crate::social::full::view::{
     DimValue, ForumView, HiddenReason, ModStatus, Pending, QueueItem, Resolution, Stage, State,
 };
@@ -44,6 +45,7 @@ pub const FIELDS: &[&str] = &[
     "newerRulesBanner",
     "tDecl",
     "times",
+    "edited",
     "authorities",
     "mode",
     "members",
@@ -65,6 +67,7 @@ pub const FIELDS: &[&str] = &[
     "depth",
     "orphaned",
     "maxDepth",
+    "versions",
     "inputDigest",
     "digestPreimage",
     "algs",
@@ -176,6 +179,25 @@ fn status_json(uri: &str, st: ModStatus) -> Value {
     }
 }
 
+fn version_json(v: Version) -> Value {
+    match v {
+        Version::Revision(n) => json!(n),
+        Version::Unavailable => json!("unavailable"),
+    }
+}
+
+/// `{root?, parent?}`: the references that name another version than the target's current one.
+fn versions_json(cv: &CommentVersions) -> Value {
+    let mut o = Map::new();
+    if let Some(r) = cv.root {
+        o.insert("root".into(), version_json(r));
+    }
+    if let Some(p) = cv.parent {
+        o.insert("parent".into(), version_json(p));
+    }
+    Value::Object(o)
+}
+
 fn thread_field(v: &ForumView, field: &str) -> Value {
     let p = v.query.thread.as_deref().unwrap_or_default();
     let Some(pl) = v.threads.get(p) else {
@@ -245,6 +267,7 @@ pub fn project(v: &ForumView, field: &str) -> Result<Value, ProjectError> {
                 })
                 .collect(),
         ),
+        "edited" => set(&v.edited),
 
         // modfold
         "authorities" => json!(v.authorities),
@@ -306,6 +329,13 @@ pub fn project(v: &ForumView, field: &str) -> Result<Value, ProjectError> {
         "rootMissing" | "parent" | "missing" | "depth" | "orphaned" | "maxDepth" => {
             thread_field(v, field)
         }
+        // §11 step 6, forum-wide (not per query)
+        "versions" => Value::Object(
+            v.versions
+                .iter()
+                .map(|(c, cv)| (c.clone(), versions_json(cv)))
+                .collect(),
+        ),
 
         // digest
         "inputDigest" => json!(v.input_digest),

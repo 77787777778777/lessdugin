@@ -3257,6 +3257,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tracing",
+ "tsify",
  "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",

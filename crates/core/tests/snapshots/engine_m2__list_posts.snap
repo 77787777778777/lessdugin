@@ -29,7 +29,7 @@ expression: list
       "tRankMs": 1760000180050,
       "commentCount": 0,
       "score": {
-        "score": 0,
+        "score": 1,
         "agreement": 0,
         "unweighted": 0,
         "earlierVersionVotes": 0
@@ -62,7 +62,7 @@ expression: list
       "commentCount": 3,
       "lastCommentAtMs": 1760000420050,
       "score": {
-        "score": 0,
+        "score": 1,
         "agreement": 0,
         "unweighted": 0,
         "earlierVersionVotes": 0

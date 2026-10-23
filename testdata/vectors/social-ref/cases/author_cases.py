@@ -14,6 +14,7 @@ from lessdugin_ref.build import DAY, HOUR, MIN, NOW, T0, Forum, did, dt, rec
 from lessdugin_ref.common import split_uri
 from lessdugin_ref.fold import fold_vector_input
 
+from . import kcast
 from .util import file_doc, vector
 
 MODS = (("adam", "admin"), ("mona", "moderator"), ("mike", "moderator"))
@@ -466,6 +467,56 @@ def author_vectors() -> list:
     assert all(status(v, x) is None for x in bad)
     out.append(v)
 
+    out += m3_author_vectors()
+    return out
+
+
+def m3_author_vectors() -> list:
+    """Cases proposed by the M3 fold reviews (social.md §4.9, §4.12, §20.1 items 32, 34)."""
+    out = []
+
+    def m(k):
+        return T0 + k * MIN
+
+    # An author unpin is effective: it pins nothing, and no forum-tier value governs it (§4.12)
+    f = F(membership="approval", policy={"authorModeration": True})
+    p = f.post("alice", m(10))
+    c = f.comment("bob", p, m(20))
+    un = am(f, "alice", "pin", c, pin_scope="thread", pinned=False, t=m(30))
+    v = V("author-unpin-is-effective", f, [*mem(f, "alice", "bob"), *grant(f, "alice", "bob"), p, c, un],
+          "approval mode, authorModPersonal 0: alice (granted, so in E) unpins bob's comment in her own "
+          "thread with an author-scope #pin{scope: thread, pinned: false}. It passes the table condition, "
+          "has no until and is not positive (no CID check), and the forum tier has no pin.thread value for "
+          "the comment, so it is effective", extra=("modLog",))
+    assert status(v, un) == ("effective", None) and st(v, c) is None
+    out.append(v)
+
+    # An author lock needs a live post (§4.9, item 32)
+    f = F(membership="approval", policy={"authorModeration": True})
+    p = f.post("alice", m(10), title="   ")
+    c = f.comment("bob", p, m(20))
+    lk = am(f, "alice", "lock", p, t=m(30))
+    v = V("author-lock-needs-a-live-post", f, [*mem(f, "alice", "bob"), *grant(f, "alice", "bob"), p, c, lk],
+          "alice's post has a title of spaces only (invalid: PO3), so it is Excluded and is no live post: her "
+          "author-scope #lock on it fails the table condition and is unauthorised, and bob's comment under "
+          "the (Missing) root is not AuthorModerated", extra=("modLog",), invalid={u(p): "PO3"})
+    assert status(v, lk) == ("unauthorised", None) and st(v, c) is None
+    out.append(v)
+
+    # authorGate reads K, not KP (cases/kcast.py: wes has K 2 and KP 1)
+    f = kcast.forum(policy={"gates": {"authorModPersonal": 2}})
+    kc = kcast.cast(f)
+    wp = kc["posts"]["wes"]
+    c = f.comment("boosterl", wp, m(20))
+    h = am(f, "wes", "hide", c, t=m(30))
+    v = V("author-gate-reads-k", f, [*kc["records"], c, h],
+          "the K ≠ KP cast (approval mode, every user granted): wes has K 2 and KP 1. authorModPersonal = 2, "
+          "and wes's post is personal (the default tier), so authorGate(wes, post) = K[wes] ≥ 2 holds: his "
+          "author-scope hide of boosterl's comment is effective and the comment is "
+          "Hidden(AuthorModerated). Reading KP would make the hide unauthorised", extra=("modLog",))
+    kcast.check(_view(v))
+    assert status(v, h) == ("effective", None) and st(v, c) == AM
+    out.append(v)
     return out
 
 

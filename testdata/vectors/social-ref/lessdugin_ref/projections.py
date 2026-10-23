@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from . import digest as _digest
 from . import rank as _rank
+from . import versions as _versions
 from .common import ubytes
 from .modfold import DIMENSIONS, Resolved
 from .policy import algs_line, params_line
@@ -68,6 +69,11 @@ def _times(view):
     _, it, tr = view.times
     return {u: {"tRank": tr[u], "futureDated": it[u].future,
                 "inconsistentTimestamps": it[u].inconsistent} for u in _sorted(tr)}
+
+
+@field("time", "edited")
+def _edited(view):
+    return _versions.edited(view)
 
 
 # =========================================================================== kind "modfold"
@@ -183,6 +189,11 @@ def _orphaned(view):
 @field("thread", "maxDepth")
 def _max_depth(view):
     return max(_thread(view).depth.values(), default=0)
+
+
+@field("thread", "versions")
+def _versions_field(view):
+    return _versions.versions(view)
 
 
 # =========================================================================== kind "digest"

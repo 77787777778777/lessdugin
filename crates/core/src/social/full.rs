@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! The full social fold (`social.md` §1): `ForumView = fold(FoldInput, Query)` with every layer
-//! of §1.4, checked against `testdata/vectors/` (`crates/core/tests/social_fold.rs`). The engine
-//! still runs the M2 fold ([`crate::social::fold::fold`]) until the M3 integration switches it to
-//! [`fold_view`].
+//! of §1.4, checked against `testdata/vectors/` (`crates/core/tests/social_fold.rs`). The
+//! engine's forum model ([`crate::model::ForumModel`]) prepares a [`Cx`] from the record store
+//! (stored validity), folds it with [`fold_cx`], keeps the prepared skeletons, and answers sort
+//! and filter changes with [`reorder`] over the cached layers instead of folding again.
 //!
 //! | Module | Layer | Spec | Status |
 //! |---|---|---|---|
@@ -60,8 +61,8 @@ pub use project::{ProjectError, project, project_fold};
 pub use query::Query;
 pub use view::{ForumView, Pending, Stage, State};
 
+use crate::social::FoldError;
 use crate::social::digest;
-use crate::social::fold::FoldError;
 use crate::social::input::FoldInput;
 use view::Banner;
 
@@ -79,52 +80,59 @@ pub fn fold_view_with(
     query: &Query,
 ) -> Result<ForumView, FoldError> {
     let cx = Cx::new(input, ns, validity)?;
+    fold_cx(&cx, query)
+}
+
+/// The full fold over a prepared input ([`Cx::new`]); the caller keeps `cx` (its skeletons and
+/// typed declaration) for the views and for [`reorder`].
+pub fn fold_cx(cx: &Cx<'_>, query: &Query) -> Result<ForumView, FoldError> {
+    let input = cx.input;
 
     // §1.2 (the preimage is dropped once hashed)
     let input_digest = digest::input_digest(input).map_err(|e| FoldError(e.to_string()))?;
 
     // L0
-    let a = authority::authorities(&cx)?;
-    let newer_rules_banner = authority::newer_rules_banner(&cx);
+    let a = authority::authorities(cx)?;
+    let newer_rules_banner = authority::newer_rules_banner(cx);
     // L1
-    let l1 = moderation::forum_tier(&cx, &a);
+    let l1 = moderation::forum_tier(cx, &a);
     let tiers = cx
         .records()
         .filter(|x| x.coll == Some(Collection::Post) && cx.live(&x.uri))
         .map(|x| (x.uri.clone(), l1.tier(&x.uri)))
         .collect();
     // L2
-    let l2 = participation::participation(&cx, &a, &l1);
-    let degraded = participation::degraded(&cx, &a);
+    let l2 = participation::participation(cx, &a, &l1);
+    let degraded = participation::degraded(cx, &a);
     // V1–V5, V7 (L0–L2 only)
-    let v1_v5 = modstate::v1_v5(&cx, &l1, &l2, degraded);
-    let locked_out = modstate::locked_out(&cx, &a, &l1);
+    let v1_v5 = modstate::v1_v5(cx, &l1, &l2, degraded);
+    let locked_out = modstate::locked_out(cx, &a, &l1);
     // time and threads
-    let tl = timeline::timeline(&cx);
+    let tl = timeline::timeline(cx);
 
     // L3, L3.5, L4
-    let karma = karma::karma(&cx, &a, &l1, &l2);
+    let karma = karma::karma(cx, &a, &l1, &l2);
     let newcomers = karma.as_ref().map_err(|p| *p).map(|k| {
         l2.p.iter()
             .filter(|d| !l2.s.contains(*d) && !k.e.contains(*d))
             .cloned()
             .collect::<BTreeSet<String>>()
     });
-    let scores = scores::scores(&cx, &karma);
-    let gates = gates::gates(&cx, &a, &karma);
+    let scores = scores::scores(cx, &karma);
+    let gates = gates::gates(cx, &a, &karma);
     // L5
-    let author = author::author_tier(&cx, &a, &l1, &karma);
-    let mod_states = modstate::v1_v7(&cx, &v1_v5, &author, &locked_out);
-    let mod_log = modlog::mod_log(&cx, &l1, &author);
-    let mod_queue = modlog::mod_queue(&cx, &l1, &l2);
-    let raw = modlog::raw(&cx, &l1);
-    let reacts = reacts::reacts(&cx, &a, &karma, &gates);
-    let wiki = wiki::wiki(&cx, &a, &l1, &v1_v5, &karma, &gates);
-    let library = sequences::library(&cx, &l1, &v1_v5, &scores, &gates, &tl.times);
+    let author = author::author_tier(cx, &a, &l1, &karma);
+    let mod_states = modstate::v1_v7(cx, &v1_v5, &author, &locked_out);
+    let mod_log = modlog::mod_log(cx, &l1, &author);
+    let mod_queue = modlog::mod_queue(cx, &l1, &l2);
+    let raw = modlog::raw(cx, &l1);
+    let reacts = reacts::reacts(cx, &a, &karma, &gates);
+    let wiki = wiki::wiki(cx, &a, &l1, &v1_v5, &karma, &gates);
+    let library = sequences::library(cx, &l1, &v1_v5, &scores, &gates, &tl.times);
     // L6
-    let visibility = visibility::visibility(&cx, &l2, &mod_states, &karma, &scores, &tl.threads);
+    let visibility = visibility::visibility(cx, &l2, &mod_states, &karma, &scores, &tl.threads);
     let orderings = ranking::orderings(
-        &cx,
+        cx,
         query,
         &l1,
         &tl.times,
@@ -188,4 +196,27 @@ pub fn fold_view_with(
         visibility,
         orderings,
     })
+}
+
+/// The orderings `query` asks for (§12), recomputed from the layers `view` cached (L1 tiers and
+/// pins, times, threads, visibility, scores, wiki, author tier) over the skeletons `skel` the
+/// view was folded from: the same result as folding again with `query` (property-tested in
+/// `crates/core/tests/model_views.rs`), at the cost of the sort alone.
+pub fn reorder(
+    view: &ForumView,
+    skel: &crate::social::input::ForumInput,
+    query: &Query,
+) -> view::Stage<ranking::Orderings> {
+    ranking::orderings_in(
+        skel,
+        &view.policy,
+        query,
+        &view.moderation,
+        &view.times,
+        &view.threads,
+        &view.visibility,
+        &view.scores,
+        &view.wiki,
+        &view.author,
+    )
 }

@@ -9,7 +9,7 @@
         "did": "did:plc:abcdefghijklmnopqrstuvwx"
       },
       "expected": {
-        "out": "did:plc:abcdefgh…"
+        "out": "did:plc:abcdefgh\u2026"
       }
     },
     {
@@ -36,7 +36,7 @@
         "did": "did:web:aaaaaaaaaaaaaaaaaaaaaaaaaaaaa.com"
       },
       "expected": {
-        "out": "did:web:aaaaaaaaaaaaaaaaaaaaaaaaaaaaa.c…"
+        "out": "did:web:aaaaaaaaaaaaaaaaaaaaaaaaaaaaa.c\u2026"
       }
     }
   ]

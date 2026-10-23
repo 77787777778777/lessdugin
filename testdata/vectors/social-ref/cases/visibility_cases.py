@@ -114,10 +114,11 @@ def visibility_vectors() -> list:
     pa = f.post("alice", T0 + 5 * HOUR)
     v = V("v1-before-v2-and-v3", f, [*mem(f, "alice", "carol"), *grant(f, "alice", "carol"), pb, hb, q, c, pa],
           "V1 first: bob's post is invalid (PO3: a title of U+2003 only) although bob is no participant and "
-          "mona hid it; alice's other post names another forum in value.forum (G5/G9: invalid), so carol's "
-          "valid comment on it fails CO5 (root post.forum ≠ comment.forum) and is Excluded too",
+          "mona hid it; alice's other post names another forum in value.forum (G5/G9: invalid) and is "
+          "Excluded. carol's valid comment on it is not: CO5 compares only a valid root (social.md §20.1 "
+          "item 51), so the comment sits under a Missing root and is Visible",
           invalid={u(pb): "PO3", u(q): "G5"})
-    assert [S(v, x) for x in (pb, q, c, pa)] == [EXC, EXC, EXC, VIS] and v["expected"]["displayed"] == \
+    assert [S(v, x) for x in (pb, q, c, pa)] == [EXC, EXC, VIS, VIS] and v["expected"]["displayed"] == \
         v["expected"]["states"]
     out.append(v)
 
@@ -397,6 +398,63 @@ def visibility_vectors() -> list:
     assert D(v, c1)["state"] == "Tombstone" and D(v, c2) == VIS
     out.append(v)
 
+    out += m3_visibility_vectors()
+    return out
+
+
+def m3_visibility_vectors() -> list:
+    """Cases from the M3 fold reviews and the CO5 decision (social.md §10.2, §20.1 item 51)."""
+    out = []
+
+    def m(k):
+        return T0 + k * MIN
+
+    # CO5 compares only a valid root (social.md §20.1 item 51)
+    f = F(display={"newUsers": "collapse"})
+    p = in_other_forum(f, f.post("xavier", m(10)))
+    c4 = f.comment("maria", p, m(20))
+    c2 = f.comment("mona", p, m(21))
+    ups = [f.opinion("owner", c4, t=m(30), karma="up"), f.opinion("adam", c2, t=m(30), karma="up")]
+    v = V("co5-invalid-root-is-a-missing-root", f, [*mem(f, "xavier", "maria"), *grant(f, "maria"), p, c4, c2, *ups],
+          "open mode, newUsers = collapse. xavier (a membership only) wrote the root post with a forum field "
+          "naming another forum, as an edit of the post could (invalid: G5, the G9 part). CO5 compares only "
+          "a valid root (social.md §20.1 item 51), so the post is Excluded but the comments are not: they "
+          "sit under a Missing root and keep their own states (maria is granted, mona is a moderator)",
+          invalid={u(p): "G5"})
+    assert [S(v, x) for x in (p, c4, c2)] == [EXC, VIS, VIS]
+    view = fold_vector_input(v["input"])
+    assert view.threads[u(p)].root_missing
+    out.append(v)
+
+    # A hidden root post becomes a Tombstone through a Missing placeholder (§10.2)
+    f = F(membership="approval")
+    p = f.post("adam", m(10))
+    gone = f.comment_uri("zoe", u(p), m(15), 9)
+    c = f.comment("mona", p, m(20), parent=(gone, p["cid"]))
+    hide = f.modaction("owner", "hide", p, t=m(30))
+    v = V("hidden-root-tombstone-through-placeholder", f, [p, c, hide],
+          "approval mode, authorities only. The owner hid adam's post; mona's comment names a parent comment "
+          "that is no record, so it sits under a Missing placeholder (not an item). The thread pass walks "
+          "through the placeholder: the post has a listed descendant and becomes Tombstone(Removed)")
+    assert S(v, p) == removed(3, "owner") and D(v, p) == removed(3, "owner", state="Tombstone")
+    assert S(v, c) == VIS and D(v, c) == VIS
+    out.append(v)
+
+    # A re-attached (cycle-cut) hidden comment with a listed child becomes a Tombstone (§10.2)
+    f = F(membership="approval")
+    p = f.post("owner", m(5))
+    xa = f.comment_uri("adam", u(p), m(10), 1)
+    uy = f.comment("mona", p, m(11), parent=(xa, p["cid"]), clock=1)
+    ux = f.comment("adam", p, m(10), parent=uy, clock=1)
+    hide = f.modaction("owner", "hide", uy, t=m(20))
+    v = V("reattached-hidden-comment-tombstone", f, [p, ux, uy, hide],
+          "adam's ux and mona's uy name each other as parent; uy (the greater uri) is re-attached to the root "
+          "(Orphaned) and ux becomes its child. The owner hid uy; its listed child makes it a "
+          "Tombstone(Removed)")
+    view = fold_vector_input(v["input"])
+    assert u(ux) == xa and view.threads[u(p)].orphaned == frozenset([u(uy)])
+    assert D(v, uy) == removed(3, "owner", state="Tombstone") and D(v, ux) == VIS
+    out.append(v)
     return out
 
 

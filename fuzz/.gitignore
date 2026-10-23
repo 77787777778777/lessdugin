@@ -1,0 +1,7 @@
+# libFuzzer working state: the corpora grow locally (`cargo xtask fuzz` seeds them from the
+# vectors), artifacts are crash/timeout/OOM inputs. Minimized reproducers worth keeping go to
+# regressions/<target>/ with a regression test in the crate that was fixed.
+/target
+/corpus
+/artifacts
+/coverage

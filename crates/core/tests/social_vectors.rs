@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Runs the social fold vectors the core implements so far (`testdata/vectors/README.md`,
-//! "Social fold vectors"): `thread/*.json` (§11 placement), `time/*.json` (§2), and the
-//! `algs`/`params`/`inputDigest` fields of `fold/digest.json` (§1.2).
+//! Runs the social fold vectors that also hold in this build's default namespace
+//! (`testdata/vectors/README.md`, "Social fold vectors"): `thread/*.json` (§11 placement and
+//! step 6 versions), `time/*.json` (§2, the edited badge), and the `algs`/`params`/`inputDigest`
+//! fields of `fold/digest.json` (§1.2), through the full fold ([`fold_view_with`], the one the
+//! engine runs) with the runner's validity, projected like every other runner ([`project`]).
 //!
 //! **Namespace.** The vectors are written in the final namespace (`ns` in each file). With the
 //! `final-ns` feature (`cargo test -p lessdugin-core --features final-ns --test social_vectors`)
@@ -9,7 +11,9 @@
 //! default (`.temp`) build each record is checked after mapping its NSIDs into this build's
 //! namespace, ignoring the rules whose outcome depends on keys hashed from the namespace (G5, G9,
 //! the key equalities and RV5): the vectors' deliberately invalid records break other rules.
-//! The fold itself always runs on the original values with the file's `ns`.
+//! G9 alone is then checked on the original values (`fk(value.forum)` hashes the forum uri as
+//! written, so it needs no mapping): the CO5 vectors' roots are invalid by G9 only. The fold
+//! itself always runs on the original values with the file's `ns`.
 //!
 //! **The full fold.** In a `final-ns` build this binary also holds the full fold's runner of
 //! every vector file and kind (`social_fold.rs`) and the `Query` contract over every vector
@@ -21,12 +25,11 @@ use std::path::PathBuf;
 
 use lessdugin_atp::syntax::AtUri;
 use lessdugin_core::social::digest;
-use lessdugin_core::social::fold::fold;
-use lessdugin_core::social::input::{FoldInput, ForumInput};
-use lessdugin_core::social::threads::Parent;
+use lessdugin_core::social::full::{ForumView, Query, fold_view_with, project};
+use lessdugin_core::social::input::FoldInput;
 use lessdugin_core::social::time;
-use lessdugin_lexicon::RuleId;
 use lessdugin_lexicon::ns::{NS, to_build_nsid};
+use lessdugin_lexicon::{RuleId, keys};
 use serde_json::{Map, Value, json};
 
 #[cfg(feature = "final-ns")]
@@ -89,9 +92,22 @@ fn map_value(v: &Value) -> Value {
     }
 }
 
+/// G9 on the original values: `fk(value.forum)` equals the key's fk segment (`data-model.md` §7;
+/// a value without a string `forum` has nothing to compare here).
+fn g9(uri: &str, value: &Value) -> bool {
+    let Some(forum) = value.get("forum").and_then(Value::as_str) else {
+        return true;
+    };
+    let rkey = uri.rsplit('/').next().unwrap_or_default();
+    keys::fk(forum).is_ok_and(|fk| keys::fk_of(rkey) == Some(fk.as_str()))
+}
+
 /// `data-model.md` §7 for a vector record in namespace `ns`.
 fn validity(ns: &str, uri: &str, value: &Value) -> (bool, Option<String>) {
     let exact = ns == NS;
+    if !exact && !g9(uri, value) {
+        return (false, Some(RuleId::G9.to_string()));
+    }
     let (uri, value) = if exact {
         (uri.to_owned(), value.clone())
     } else {
@@ -135,11 +151,33 @@ fn cases(rel: &str) -> Vec<Case> {
         .collect()
 }
 
-fn forum_input(c: &Case) -> (FoldInput, ForumInput) {
-    let fi = FoldInput::from_vector_json(&c.input["fold"]).unwrap();
+fn forum_input(c: &Case) -> FoldInput {
+    FoldInput::from_vector_json(&c.input["fold"]).unwrap()
+}
+
+/// The full fold of a case's input under its `query` (`thread` names the placed thread).
+fn fold(c: &Case, fi: &FoldInput) -> ForumView {
     let ns = c.ns.clone();
-    let input = ForumInput::from_contract(&fi, &c.ns, |u, v| validity(&ns, u, v)).unwrap();
-    (fi, input)
+    let query: Query = match c.input.get("query") {
+        None | Some(Value::Null) => Query::default(),
+        Some(q) => serde_json::from_value(q.clone())
+            .unwrap_or_else(|e| panic!("{} / {}: query: {e}", c.file, c.name)),
+    };
+    fold_view_with(fi, &c.ns, &|u, v| validity(&ns, u, v), &query)
+        .unwrap_or_else(|e| panic!("{} / {}: {e}", c.file, c.name))
+}
+
+/// `fields` of the fold of `c` ([`project`]).
+fn projected(c: &Case, fields: &[&str]) -> Map<String, Value> {
+    let fi = forum_input(c);
+    let r = fold(c, &fi);
+    fields
+        .iter()
+        .map(|f| {
+            let v = project(&r, f).unwrap_or_else(|e| panic!("{} / {}: {e:?}", c.file, c.name));
+            ((*f).to_owned(), v)
+        })
+        .collect()
 }
 
 /// Compares every listed field; returns the failures.
@@ -179,66 +217,25 @@ fn run(files: &[&str], project: impl Fn(&Case) -> Map<String, Value>) {
 #[test]
 fn thread_vectors() {
     run(&["thread/thread.json", "thread/depth.json"], |c| {
-        let (_, input) = forum_input(c);
-        let r = fold(&input).unwrap();
-        let p = c.input["query"]["thread"].as_str().unwrap();
-        let mut out = Map::new();
-        let Some(th) = r.threads.get(p) else {
-            out.insert("rootMissing".into(), json!(true));
-            for k in ["parent", "depth"] {
-                out.insert(k.into(), json!({}));
-            }
-            for k in ["missing", "orphaned"] {
-                out.insert(k.into(), json!([]));
-            }
-            out.insert("maxDepth".into(), json!(0));
-            return out;
-        };
-        let pl = &th.placement;
-        let parent: Map<String, Value> = pl
-            .parent
-            .iter()
-            .map(|(c, par)| {
-                let to = match par {
-                    Parent::Root => p.to_owned(),
-                    Parent::Comment(u) | Parent::Missing(u) => u.clone(),
-                };
-                (c.clone(), json!(to))
-            })
-            .collect();
-        out.insert("rootMissing".into(), json!(pl.root_missing));
-        out.insert("parent".into(), Value::Object(parent));
-        out.insert("missing".into(), json!(pl.missing));
-        out.insert("depth".into(), json!(pl.depth));
-        out.insert("orphaned".into(), json!(pl.orphaned));
-        out.insert("maxDepth".into(), json!(pl.max_depth()));
-        out
+        projected(
+            c,
+            &[
+                "rootMissing",
+                "parent",
+                "missing",
+                "depth",
+                "orphaned",
+                "maxDepth",
+                "versions",
+            ],
+        )
     });
 }
 
 #[test]
 fn time_vectors() {
     run(&["time/time.json"], |c| {
-        let (_, input) = forum_input(c);
-        let r = fold(&input).unwrap();
-        let times: Map<String, Value> = r
-            .items
-            .iter()
-            .filter_map(|(u, i)| {
-                Some((
-                    u.clone(),
-                    json!({
-                        "tRank": i.t_rank?,
-                        "futureDated": i.future,
-                        "inconsistentTimestamps": i.inconsistent,
-                    }),
-                ))
-            })
-            .collect();
-        let mut out = Map::new();
-        out.insert("tDecl".into(), json!(r.t_decl));
-        out.insert("times".into(), Value::Object(times));
-        out
+        projected(c, &["tDecl", "times", "edited"])
     });
 }
 
@@ -259,8 +256,8 @@ fn time_conversion_vectors() {
 #[test]
 fn digest_vectors() {
     run(&["fold/digest.json"], |c| {
-        let (fi, input) = forum_input(c);
-        let r = fold(&input).unwrap();
+        let fi = forum_input(c);
+        let r = fold(c, &fi);
         let pre = digest::preimage(&fi).unwrap();
         let mut out = Map::new();
         out.insert("algs".into(), json!(r.policy.algs_line()));

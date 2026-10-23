@@ -48,7 +48,7 @@ export function DraftsPage() {
                 </Link>
               );
             }
-          } else if (draft.kind === "comment") {
+          } else {
             // The composer for the same place resumes the draft: the post's comment box, or the
             // reply box of the parent comment (on its own page).
             title = draft.comment.parent ? "Reply" : "Comment";
@@ -58,9 +58,6 @@ export function DraftsPage() {
             ) : (
               <RecordLink uri={draft.comment.root}>Continue on the post</RecordLink>
             );
-          } else {
-            title = cleanName(draft.sequence.title, 300) || "Sequence";
-            text = draft.sequence.body?.markdown ?? "";
           }
           return (
             <article key={d.id} className={styles.forumCard}>

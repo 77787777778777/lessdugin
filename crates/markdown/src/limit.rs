@@ -104,10 +104,12 @@ pub(crate) fn limit(evs: Vec<Ev>, base: usize) -> (Vec<Ev>, bool) {
     (out, limited)
 }
 
-/// `flat(subtree)` (§8.4): text, literal and code payloads as `Text`, math as its TeX, image
-/// alts as `Text`; `SoftBreak` at block boundaries and for soft and hard breaks, never
-/// repeated and never at either end; footnote references and task markers dropped. A spoiler
-/// flattens to its fixed summary `Spoiler` only: flat HTML cannot hide its content.
+/// `flat(subtree)` (§8.4): text, literal and code payloads as `Text`, math as its TeX, a
+/// figure's caption after its image; `SoftBreak` at block boundaries and for soft and hard
+/// breaks, never repeated and never at either end; task markers dropped. The leaves that point
+/// elsewhere stay as they are: images (so used media stays visible) and footnote references (so
+/// every back-link and sidenote keeps its reference). A spoiler flattens to its fixed summary
+/// `Spoiler` only: flat HTML cannot hide its content.
 fn flatten(sub: &[Ev]) -> Vec<Ev> {
     fn brk(out: &mut Vec<Ev>) {
         if !out.is_empty() && !matches!(out.last(), Some(Ev::SoftBreak)) {
@@ -116,14 +118,23 @@ fn flatten(sub: &[Ev]) -> Vec<Ev> {
     }
     let mut out: Vec<Ev> = Vec::new();
     let mut i = 0usize;
-    // Inside an image (its alt was emitted) or a spoiler (skipped): the open tag count.
+    // Inside a spoiler (skipped): the open tag count.
     let mut skip_depth = 0usize;
+    // Inside an image (copied unchanged): the open tag count.
+    let mut copy_depth = 0usize;
+    let mut captions: Vec<&str> = Vec::new();
     while i < sub.len() {
         let e = &sub[i];
-        if skip_depth > 0 {
+        if skip_depth > 0 || copy_depth > 0 {
+            let depth = if skip_depth > 0 {
+                &mut skip_depth
+            } else {
+                out.push(e.clone());
+                &mut copy_depth
+            };
             match e {
-                Ev::Start(_) => skip_depth += 1,
-                Ev::End(_) => skip_depth -= 1,
+                Ev::Start(_) => *depth += 1,
+                Ev::End(_) => *depth -= 1,
                 _ => {}
             }
             i += 1;
@@ -133,9 +144,21 @@ fn flatten(sub: &[Ev]) -> Vec<Ev> {
             Ev::Text(t) | Ev::Literal(t) | Ev::Code(t) | Ev::InlineMath(t) | Ev::DisplayMath(t) => {
                 push_text(&mut out, t)
             }
-            Ev::Start(Tag::Image(d)) => {
-                push_text(&mut out, &d.alt);
-                skip_depth = 1;
+            Ev::Start(Tag::Image(_)) => {
+                out.push(e.clone());
+                copy_depth = 1;
+            }
+            Ev::FnRef(_) => out.push(e.clone()),
+            Ev::Start(Tag::Figure(c)) => {
+                brk(&mut out);
+                captions.push(c);
+            }
+            Ev::End(TagKind::Figure) => {
+                brk(&mut out);
+                if let Some(c) = captions.pop() {
+                    push_text(&mut out, c);
+                }
+                brk(&mut out);
             }
             Ev::Start(Tag::Spoiler) => {
                 brk(&mut out);

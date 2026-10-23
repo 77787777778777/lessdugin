@@ -28,7 +28,7 @@ expression: thread
       "commentCount": 3,
       "lastCommentAtMs": 1760000420050,
       "score": {
-        "score": 0,
+        "score": 1,
         "agreement": 0,
         "unweighted": 0,
         "earlierVersionVotes": 0
@@ -85,7 +85,7 @@ expression: thread
       "createdAtMs": 1760000360050,
       "tRankMs": 1760000360050,
       "score": {
-        "score": 0,
+        "score": 1,
         "agreement": 0,
         "unweighted": 0,
         "earlierVersionVotes": 0
@@ -130,7 +130,7 @@ expression: thread
       "createdAtMs": 1760000240050,
       "tRankMs": 1760000240050,
       "score": {
-        "score": 0,
+        "score": 1,
         "agreement": 0,
         "unweighted": 0,
         "earlierVersionVotes": 0
@@ -176,7 +176,7 @@ expression: thread
       "createdAtMs": 1760000420050,
       "tRankMs": 1760000420050,
       "score": {
-        "score": 0,
+        "score": 1,
         "agreement": 0,
         "unweighted": 0,
         "earlierVersionVotes": 0

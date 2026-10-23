@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::event::{Ev, ImageRes, Tag};
+use crate::event::{Ev, ImageRes, Tag, TagKind};
 
 /// `{"$link": cid}`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -153,14 +153,23 @@ pub(crate) fn trim_alt(s: &str) -> &str {
 pub(crate) fn assign_alt_fallback<'a>(flows: impl IntoIterator<Item = &'a mut [Ev]>, n: usize) {
     let mut taken = vec![false; n];
     for flow in flows {
+        // An image inside another image's alt is never rendered: it takes no fallback.
+        let mut in_image = 0usize;
         for e in flow.iter_mut() {
-            if let Ev::Start(Tag::Image(d)) = e
-                && let ImageRes::Media(i) = d.res
-                && trim_alt(&d.alt).is_empty()
-                && let Some(t) = taken.get_mut(i)
-            {
-                d.fallback_alt = !*t;
-                *t = true;
+            match e {
+                Ev::Start(Tag::Image(d)) => {
+                    if in_image == 0
+                        && let ImageRes::Media(i) = d.res
+                        && trim_alt(&d.alt).is_empty()
+                        && let Some(t) = taken.get_mut(i)
+                    {
+                        d.fallback_alt = !*t;
+                        *t = true;
+                    }
+                    in_image += 1;
+                }
+                Ev::End(TagKind::Image) => in_image = in_image.saturating_sub(1),
+                _ => {}
             }
         }
     }

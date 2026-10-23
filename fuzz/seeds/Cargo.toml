@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+[package]
+name = "lessdugin-fuzz-seeds"
+description = "Writes the fuzz seed corpora from the repository's vectors and fixtures"
+version = "0.0.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+publish = false
+
+[dependencies]
+lessdugin-atp = { path = "../../crates/atp" }
+lessdugin-lexicon = { path = "../../crates/lexicon" }
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
+k256 = { version = "0.13", default-features = false, features = ["ecdsa", "alloc"] }

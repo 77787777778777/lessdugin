@@ -23,8 +23,10 @@ Interface (projections.py calls it):
         descendant. sort is magic | top | new | old | latestReply.
     recent_discussion(view) -> tuple of (post uri, tuple of up to 3 comment uris)  §12.5
 
-Python's math.pow may differ from libm::pow in the last bit; rank vectors therefore carry
-"hotBitsSource": "python-math.pow" at file level (testdata/vectors/README.md, social section).
+Python's math.pow could differ from libm::pow in the last bit; every hotBits value written is
+checked to be the correctly rounded result (cases/rank_cases.py), and the values of
+rank/rank.json were checked against libm 0.2.16 at M3, so the file carries "hotBitsSource":
+"rust-libm-0.2.16" (testdata/vectors/README.md, social section).
 
 Reads L0–L5 (tiers and forum pins from L1, scores from L3.5, author thread pins from L5,
 tag application from L5 tags only when a tag filter is asked), the L6 states (visibility.py),

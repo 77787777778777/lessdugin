@@ -7,9 +7,10 @@
 //!   once with `input.query` (or an empty query), and compare each field `expected` lists with
 //!   `project(view, field)` (JSON equality); `conversion` and `power` call their function
 //!   directly.
-//! - `hotBits` are compared **exactly**: `libm::pow` gives the vectors' `python-math.pow` bits
-//!   for every value (README "Floats" lets a runner do so). A mismatch within 1 ulp is still a
-//!   failure, labelled as such, to be reported with its inputs rather than absorbed.
+//! - `hotBits` are compared **exactly** (README "Floats"): the rank files name their source,
+//!   `"hotBitsSource": "rust-libm-0.2.16"`, the `libm` version the workspace pins, and the runner
+//!   checks that it is [`HOT_BITS_SOURCE`]. A mismatch within 1 ulp is still a failure, labelled
+//!   as such, to be reported with its inputs rather than absorbed.
 //! - A field whose layer is still a stub is **pending**, never passed: a vector is `pass` when
 //!   every field matches, `pending` when none mismatches but some is pending, `fail` otherwise.
 //!   The test fails on any mismatch, on any input the fold rejects, and on any pending vector of
@@ -50,6 +51,7 @@ const MUST_PASS: &[&str] = &[
     "karma/power.json",
     "karma/scores.json",
     "karma/staged.json",
+    "karma/tags-large.json",
     "karma/tags.json",
     "modfold/author.json",
     "modfold/forum.json",
@@ -62,6 +64,10 @@ const MUST_PASS: &[&str] = &[
     "time/time.json",
     "visibility/visibility.json",
 ];
+
+/// The `hotBitsSource` of the rank files: `hot()` uses `libm::pow`, pinned to `=0.2.16` in the
+/// workspace `Cargo.toml` (`social.md` §1.3 rule 3).
+const HOT_BITS_SOURCE: &str = "rust-libm-0.2.16";
 
 fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata/vectors")
@@ -129,7 +135,7 @@ fn run_vector(kind: &str, input: &Value, expected: &serde_json::Map<String, Valu
             let want = &expected[field];
             if !compare(want, &got) {
                 let ulp = if field == "hotBits" && hot_bits_close(want, &got) {
-                    " (hotBits within 1 ulp of python-math.pow: report the inputs)"
+                    " (hotBits within 1 ulp of the vector: report the inputs)"
                 } else {
                     ""
                 };
@@ -229,6 +235,13 @@ fn social_fold_vectors() {
         let kind = f["kind"].as_str().unwrap_or_default().to_owned();
         let ns = f["ns"].as_str().unwrap_or_default();
         assert_eq!(ns, NS, "{rel}: vectors in namespace {ns}, build in {NS}");
+        if let Some(src) = f.get("hotBitsSource") {
+            assert_eq!(
+                src.as_str(),
+                Some(HOT_BITS_SOURCE),
+                "{rel}: hotBits computed with another pow than this build's"
+            );
+        }
         let mut t = Tally::default();
         for v in f["vectors"].as_array().unwrap() {
             total += 1;

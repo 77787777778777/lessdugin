@@ -27,10 +27,10 @@ thiserror.workspace = true
 unicode-segmentation = "=1.13.3"
 unicode-normalization = "=0.1.25"
 unicode-width = "=0.2.2"
-# Footnote label matching must agree with pulldown-cmark, which uses `UniCase` (lfm-1.md §3 step 5).
-unicase = "=2.10.0"
-# General_Category for heading slugs and anchors (lfm-1.md §4.6, §5.1; spec open question).
-unicode-general-category = "=1.1.0"
+# Footnote label matching must agree with pulldown-cmark, which uses `UniCase` (lfm-1.md §4.6).
+unicase.workspace = true
+# General_Category for heading slugs, anchors and the host test (lfm-1.md §2 "Unicode data").
+unicode-general-category.workspace = true
 
 [dev-dependencies]
 insta.workspace = true

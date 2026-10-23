@@ -14,7 +14,7 @@ use lessdugin_atp::syntax::Did;
 use lessdugin_lexicon::values::Role;
 
 use crate::discovery::roster;
-use crate::social::fold::FoldError;
+use crate::social::FoldError;
 use crate::social::full::cx::Cx;
 use crate::social::input::split_uri;
 

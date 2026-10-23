@@ -11,10 +11,11 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
-import { sanitizeLfm } from "./sanitize.ts";
+import { MATHML_CLASSES, sanitizeLfm } from "./sanitize.ts";
 
 // vitest runs from web/ (jsdom's import.meta.url is not a file: URL).
 const VECTORS = `${resolve(process.cwd(), "../testdata/vectors")}/`;
+const CRATE = `${resolve(process.cwd(), "../crates/markdown")}/`;
 
 interface Vector {
   id: string;
@@ -58,5 +59,48 @@ describe("LFM vectors through the sanitiser (jsdom)", () => {
       .filter((v) => sanitizeLfm(v.html) !== reserialised(v.html))
       .map((v) => v.id);
     expect(changed).toEqual([]);
+  });
+});
+
+// lfm-1.md §7.3 / ADR 0002 decision 2: the MathML class tokens are one closed list, kept in step
+// between the renderer (`MATHML_CLASSES` in crates/markdown/src/math/normalize.rs), this
+// sanitiser and the stylesheet the SPA imports (src/styles/mathml.css).
+describe("MathML classes", () => {
+  const rustList = (): string[] => {
+    const src = readFileSync(`${CRATE}src/math/normalize.rs`, "utf8");
+    const block = /pub const MATHML_CLASSES: &\[&str\] = &\[([^\]]*)\];/.exec(src)?.[1] ?? "";
+    return [...block.matchAll(/"([^"]+)"/g)].map((m) => m[1] as string);
+  };
+  const css = () =>
+    ["mathmlfixes.css", "mathml.css"]
+      .map((f) => readFileSync(`${CRATE}assets/${f}`, "utf8"))
+      .join("\n");
+
+  it("are the renderer's list", () => {
+    const rust = rustList();
+    expect(rust.length).toBeGreaterThan(40);
+    expect([...MATHML_CLASSES]).toEqual(rust);
+  });
+
+  it("each have a rule in the stylesheet the SPA imports", () => {
+    const sheet = css();
+    const missing = [...MATHML_CLASSES].filter((c) => !new RegExp(`\\.${c}[\\s.,{]`).test(sheet));
+    expect(missing).toEqual([]);
+    const entry = readFileSync(resolve(process.cwd(), "src/styles/mathml.css"), "utf8");
+    expect(entry).toContain('@import "../../../crates/markdown/assets/mathmlfixes.css";');
+    expect(entry).toContain('@import "../../../crates/markdown/assets/mathml.css";');
+    expect(sheet).not.toMatch(/style=|!important;/);
+  });
+
+  it("cover every class the vectors use", () => {
+    const used = new Set<string>();
+    for (const v of loadVectors()) {
+      for (const m of v.html.matchAll(/<m[a-z]* [^>]*class="([^"]*)"/g)) {
+        for (const t of (m[1] as string).split(" ")) used.add(t);
+      }
+    }
+    expect([...used].filter((t) => !MATHML_CLASSES.has(t))).toEqual([]);
+    // the corpus exercises every token (testdata/vectors/mathml/gen_mathml.py)
+    expect([...MATHML_CLASSES].filter((t) => !used.has(t))).toEqual([]);
   });
 });

@@ -23,7 +23,7 @@ expression: posts
     "tRankMs": 1760007200000,
     "commentCount": 0,
     "score": {
-      "score": 0,
+      "score": 1,
       "agreement": 0,
       "unweighted": 0,
       "earlierVersionVotes": 0
@@ -55,7 +55,7 @@ expression: posts
     "commentCount": 3,
     "lastCommentAtMs": 1760003840000,
     "score": {
-      "score": 0,
+      "score": 1,
       "agreement": 0,
       "unweighted": 0,
       "earlierVersionVotes": 0

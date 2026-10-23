@@ -28,15 +28,16 @@ use social_gen::{
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::wasm_bindgen_test as test;
 
-/// The parity digest per namespace (recorded natively).
+/// The parity digest per namespace (recorded natively; last re-recorded at M3 for CO5 comparing
+/// only a valid root, `social.md` §20.1 item 51, and the projected `versions` and `edited`).
 const GOLDEN: &[(&str, &str)] = &[
     (
         "online.7778777.lessdugin.temp",
-        "012bcceb5996d9aed93af62d31ff8b1879ac222fdb4474aa17f3e7495329efae",
+        "993638987e37175f4cac6654e4b038176ab6152e0a9bb8f278559d4e9927466a",
     ),
     (
         "online.7778777.lessdugin",
-        "40c1a1a00e0cfb149c75f17b01f42573c29ee2eded58b2151405813c583c0a3d",
+        "cffcb857391d012a6893eefad78d439b8cd129ebd68376e8ffe3645c26aef594",
     ),
 ];
 

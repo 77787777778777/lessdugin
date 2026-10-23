@@ -8,8 +8,7 @@
 //! | [`policy`] | the effective policy and `PARAMS` (§1.2, §1.6) |
 //! | [`time`] | `µs`, `tidTime`, `t_rank` (§2) |
 //! | [`threads`] | thread placement (§11), a pure function |
-//! | [`fold`](mod@fold) | the fold: authorities, participation, time, threads, visibility (M2 subset) |
-//! | [`full`] | the full fold, every layer of §1.4 (`fold_view`; stubs for the layers in progress) |
+//! | [`full`] | the fold, every layer of §1.4 ([`full::fold_view`]; the engine's forum model runs [`full::fold_cx`]) |
 //! | [`rank`] | `hot`, post and comment sorts (§12) |
 //! | [`digest`] | `inputDigest` (§1.2) |
 //!
@@ -17,7 +16,6 @@
 //! (§1.3).
 
 pub mod digest;
-pub mod fold;
 pub mod full;
 pub mod input;
 pub mod policy;
@@ -25,6 +23,11 @@ pub mod rank;
 pub mod threads;
 pub mod time;
 
-pub use fold::{FoldError, FoldResult, ItemFold, State, ThreadFold, fold};
 pub use input::{FoldInput, ForumInput, Skel, SkelData};
 pub use policy::EffectivePolicy;
+
+/// Why a fold could not run: a malformed input (§1.1, §20.1 item 25) or a declaration that
+/// cannot be read.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("fold input: {0}")]
+pub struct FoldError(pub String);

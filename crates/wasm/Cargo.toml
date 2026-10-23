@@ -24,6 +24,9 @@ kv-conformance = ["dep:lessdugin-testkit", "debug-panic"]
 # Report Rust panics on `console.error` (test and debug builds).
 debug-panic = []
 vectors = []
+# Test-only: the tsify declarations of every DTO (`tests/dto_decl.rs`), which
+# `packages/engine/src/types.parity.test.ts` compares with the hand-written `types.ts`.
+dto-decl = ["lessdugin-core/tsify", "dep:tsify"]
 
 [dependencies]
 lessdugin-core = { path = "../core", default-features = false }
@@ -31,6 +34,7 @@ lessdugin-markdown = { path = "../markdown", default-features = false }
 lessdugin-atp.workspace = true
 lessdugin-lexicon.workspace = true
 lessdugin-testkit = { workspace = true, optional = true }
+tsify = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 futures.workspace = true
@@ -53,3 +57,7 @@ js-sys.workspace = true
 
 [dev-dependencies]
 lessdugin-testkit.workspace = true
+
+[[test]]
+name = "dto_decl"
+required-features = ["dto-decl"]

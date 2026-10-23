@@ -13,7 +13,7 @@
 //! | P4 | adding or removing L5–L7-only inputs (author-scope modActions, the `reacts` and `tags` entries of opinions, wikiRevisions, sequences, opinions on wikiRevisions or sequences) never changes K1, `seedUp`, E, KP or K |
 //! | P5 | per stage: removing voter u's opinions on recipient r's items (none on an absent subject) moves `K1[r]` by at most `pairCap` and no other K1; with E and the K1 basis unchanged, `KP[r]` by at most `pairCap × strong(max(K1[u], 0))` and no other KP; with E and the KP basis unchanged, `K[r]` by at most `pairCap × strong(max(KP[u], 0))` and no other K. The corollary: removing all opinions of u ∉ S (none on an absent subject) changes no K1, `seedUp` or E and moves each `KP[r]` by at most `pairCap × strong(max(K1[u], 0))` |
 //! | P6 | s ∈ S ⇒ s ∈ E, whatever K1[s] is |
-//! | P7 | I' = I ∪ R, R by DIDs ∉ E(I) ∪ A with hypotheses (a) and (b): K1, `seedUp`, E, KP, K, the score and agreement of every item of I, and the V1–V10 state (before the thread pass) of every item of I whose author wrote nothing in R are unchanged. **Plus hypothesis (c)**, which §6.3 lacks: R holds no record whose `forum` is not F at the root uri of a comment of I. Without it P7 is false under CO5 as adopted (§20.1 item 36); `p7_counterexample_co5_invalid_root` pins the counterexample |
+//! | P7 | I' = I ∪ R, R by DIDs ∉ E(I) ∪ A with hypotheses (a) and (b): K1, `seedUp`, E, KP, K, the score and agreement of every item of I, and the V1–V10 state (before the thread pass) of every item of I whose author wrote nothing in R are unchanged. No hypothesis (c): CO5 compares only a valid root (§20.1 item 51), so R may hold a record whose `forum` is not F at the root uri of a comment of I; `p7_holds_for_an_invalid_record_at_a_root_uri` pins the former counterexample (§20.1 item 49) |
 //! | P8 | incremental equals batch: a stream of puts, edits, deletes and re-puts, applied by an incremental driver (today: the engine's rebuild-and-refold), ends in the view of the batch fold of the final record set; replaying a suffix (resume) and folding intermediate states change nothing |
 //! | §19 | the thread cycle cut does not depend on walk order (and §11 steps 2–4 hold); the lens never changes fold outputs |
 //! | §1.3 | folding twice, and folding a shuffled input, gives identical serialised views and `inputDigest`; the fold's sources use no hash maps, clocks, randomness or floats outside `hot` |
@@ -631,13 +631,9 @@ fn check_p5(s: &Spec, pick_u: usize, pick_r: usize) -> Result<usize, TestCaseErr
 /// R: the candidates whose author is outside E(I) ∪ A, minus (a) items an E(I) voter of I has an
 /// opinion on and (b) memberships of DIDs that I already qualifies for E.
 ///
-/// Also minus (c): posts whose `forum` is not F at the root uri of a comment of I. §6.3 states
-/// P7 without (c), but CO5 as adopted (`data-model.md` CO5, `social.md` §20.1 item 36,
-/// `social-ref/NOTES.md` 20, pinned by `visibility/visibility.json` and `karma/staged.json`)
-/// excludes every comment under such a root, valid or not, and with them their scores and the
-/// karma their votes carried: an outsider who owns a thread whose root is missing from I can
-/// exclude everyone's comments in it. [`p7_counterexample_co5_invalid_root`] shows it; the
-/// conflict is reported to the spec owner.
+/// Posts whose `forum` is not F at the root uri of a comment of I stay in R: CO5 compares only a
+/// valid root (`social.md` §20.1 item 51), so hypothesis (c) of item 49 is withdrawn
+/// ([`p7_holds_for_an_invalid_record_at_a_root_uri`]).
 fn sybil_records(
     f: &Forum,
     i: &FoldInput,
@@ -652,11 +648,6 @@ fn sybil_records(
         .filter(|x| x.kind == Kind::Opinion && k.e.contains(&x.author))
         .filter_map(Rec::subject)
         .collect();
-    let roots: BTreeSet<&str> = i
-        .records
-        .values()
-        .filter_map(|x| x.value.get("root")?.get("uri")?.as_str())
-        .collect();
     let p = &vi.policy;
     cand.iter()
         .filter(|u| {
@@ -667,9 +658,6 @@ fn sybil_records(
                 && !(x.kind == Kind::Membership
                     && k.k1_of(&x.author) >= p.establish
                     && get(&k.seed_up, &x.author) >= p.establish_seeds)
-                && !(x.kind == Kind::Post
-                    && roots.contains(u.as_str())
-                    && x.value["forum"].as_str() != Some(f.uri.as_str()))
         })
         .cloned()
         .collect()
@@ -736,16 +724,15 @@ fn diagnose(f: &Forum, uri: &str, r: &BTreeSet<String>, v2: &ForumView) -> Strin
     out
 }
 
-/// The P7 counterexample behind hypothesis (c) of [`sybil_records`]. In I, a granted member's
-/// comment sits in the thread of a post that is missing (deleted by its author, an outsider), and
-/// a moderator's upvote on it gives the member karma. The outsider publishes a record at the root
-/// uri whose `forum` names another forum (invalid by G9, still a fold input). I' = I ∪ R meets
-/// §6.3's hypotheses (the outsider ∉ E ∪ A; nobody voted on the root; no membership), yet CO5
-/// now excludes the comment (V1), so its score disappears and the vote no longer counts: K moves,
-/// against P7. The assertions pin the fold's current, vector-pinned behaviour (CO5 applies to
-/// invalid roots: `social.md` §20.1 item 36); they change when the spec resolves the conflict.
+/// The former P7 counterexample of `social.md` §20.1 item 49, which item 51 removes. In I, a
+/// granted member's comment sits in the thread of a post that is missing (deleted by its author,
+/// an outsider), and a moderator's upvote on it gives the member karma. The outsider publishes a
+/// record at the root uri whose `forum` names another forum (invalid by G9, still a fold input).
+/// I' = I ∪ R meets §6.3's hypotheses (the outsider ∉ E ∪ A; nobody voted on the root; no
+/// membership). CO5 compares only a valid root, so the invalid record is a `Missing` root: the
+/// comment keeps its state and score, and the vote still counts.
 #[test]
-fn p7_counterexample_co5_invalid_root() {
+fn p7_holds_for_an_invalid_record_at_a_root_uri() {
     let decl = json!({
         "name": "Test forum",
         "membership": "open",
@@ -779,18 +766,21 @@ fn p7_counterexample_co5_invalid_root() {
         !karma(&vi).e.contains(&outsider) && !vi.authorities.contains_key(&outsider),
         "the hypotheses of §6.3 P7 hold"
     );
-    let vi2 = fold(&f.input(), &Query::default());
-    // §6.3 P7 says these are unchanged; CO5 changes them
+    let i2 = f.input();
+    let vi2 = fold(&i2, &Query::default());
+    assert!(vi2.raw.invalid.contains_key(&root), "R is invalid (G9)");
     assert_eq!(karma(&vi).k_of(&member), 1);
-    assert_eq!(karma(&vi2).k_of(&member), 0);
-    assert!(vi.scores.as_ref().unwrap().contains_key(&c));
-    assert!(!vi2.scores.as_ref().unwrap().contains_key(&c));
     assert_eq!(
         vi2.visibility.as_ref().unwrap().states.get(&c),
-        Some(&lessdugin_core::social::full::State::Excluded)
+        Some(&lessdugin_core::social::full::State::Visible)
     );
-    // hypothesis (c) is what the generated property leaves out
-    assert!(sybil_records(&f, &i, &vi, &r).is_empty());
+    // the generated property keeps such a record in R, and P7 holds for it
+    assert_eq!(sybil_records(&f, &i, &vi, &r), r);
+    check_p7(&f, &i, &vi, &vi2, &r).unwrap();
+    // the comment stays in the thread, under the Missing root
+    let t = &vi2.threads[&root];
+    assert!(t.root_missing);
+    assert_eq!(t.parent.get(&c), Some(&Parent::Root));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1243,6 +1233,22 @@ fn generator_coverage_report() {
         let vi = fold(&i, &Query::default());
         let r = sybil_records(&f, &i, &vi, &cand);
         bump("P7 |R|", r.len());
+        // the former hypothesis (c) (§20.1 items 49, 51): R records at a comment's root uri
+        // whose `forum` is not F
+        let roots: BTreeSet<&str> = i
+            .records
+            .values()
+            .filter_map(|x| x.value.get("root")?.get("uri")?.as_str())
+            .collect();
+        bump(
+            "P7 R records at a root uri of I naming another forum",
+            r.iter()
+                .filter(|u| {
+                    roots.contains(u.as_str())
+                        && f.get(u).unwrap().value["forum"].as_str() != Some(f.uri.as_str())
+                })
+                .count(),
+        );
         bump(
             "P7 R records by DIDs of I",
             r.iter()

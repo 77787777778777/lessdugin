@@ -9,9 +9,9 @@ use lessdugin_atp::datamodel::record_cid;
 use lessdugin_atp::syntax::{AtUri, Datetime};
 use lessdugin_core::discovery::ForumKey;
 use lessdugin_core::dto::{CommentSort, Completeness, ForumRole, HiddenReason, ItemState};
-use lessdugin_core::model::views::Views;
+use lessdugin_core::model::views::{Viewer, Views};
 use lessdugin_core::model::{ForumModel, RenderCache};
-use lessdugin_core::social::input::{FoldInput, ForumInput};
+use lessdugin_core::social::input::FoldInput;
 use lessdugin_core::store::records::Level;
 use lessdugin_lexicon::collection::nsid;
 use lessdugin_lexicon::keys;
@@ -189,9 +189,15 @@ fn views_of_an_injected_input() {
 
     let now = T0 + 3 * HOUR;
     let contract = i.contract(&decl, now);
-    let input = ForumInput::from_contract(&contract, NS, validity).unwrap();
-    let model =
-        ForumModel::from_input(key, input, Level::Pds, BTreeMap::new(), BTreeSet::new()).unwrap();
+    let model = ForumModel::from_contract(
+        key.clone(),
+        &contract,
+        &validity,
+        Level::Pds,
+        BTreeMap::new(),
+        BTreeSet::new(),
+    )
+    .unwrap();
     let values: BTreeMap<String, Value> = i.records.iter().cloned().collect();
     let renders = RenderCache::default();
     let v = Views {
@@ -202,7 +208,7 @@ fn views_of_an_injected_input() {
         renders: &renders,
         pending: &BTreeSet::new(),
         completeness: &Completeness::default(),
-        now: model.now(),
+        viewer: &Viewer::default(),
     };
 
     let thread = v.thread_view(&p1, CommentSort::Old);
@@ -239,9 +245,10 @@ fn views_of_an_injected_input() {
     insta::assert_json_snapshot!("model_thread", thread);
     insta::assert_json_snapshot!("model_posts", posts);
     // the same input gives the same bytes
-    let again = ForumModel::from_input(
-        model.key.clone(),
-        model.input.clone(),
+    let again = ForumModel::from_contract(
+        key,
+        &contract,
+        &validity,
         Level::Pds,
         BTreeMap::new(),
         BTreeSet::new(),
@@ -253,8 +260,15 @@ fn views_of_an_injected_input() {
 fn build(decl: &Value, i: &Input, now: i64) -> ForumModel {
     let key = ForumKey::new(&OWNER.parse().unwrap(), "meta").unwrap();
     let contract = i.contract(decl, now);
-    let input = ForumInput::from_contract(&contract, NS, validity).unwrap();
-    ForumModel::from_input(key, input, Level::Pds, BTreeMap::new(), BTreeSet::new()).unwrap()
+    ForumModel::from_contract(
+        key,
+        &contract,
+        &validity,
+        Level::Pds,
+        BTreeMap::new(),
+        BTreeSet::new(),
+    )
+    .unwrap()
 }
 
 fn base(mode: lessdugin_lexicon::values::MembershipMode) -> (String, Value, Input) {
@@ -292,8 +306,13 @@ fn views<'a>(
         renders,
         pending,
         completeness,
-        now: model.now(),
+        viewer: viewer(),
     }
+}
+
+fn viewer() -> &'static Viewer {
+    static NOBODY: std::sync::OnceLock<Viewer> = std::sync::OnceLock::new();
+    NOBODY.get_or_init(Viewer::default)
 }
 
 fn actors_pds() -> &'static BTreeMap<String, String> {

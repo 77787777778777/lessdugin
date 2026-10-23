@@ -130,13 +130,13 @@ impl<H: Host> Engine<H> {
                     continue;
                 }
             };
-            let f = &l.model.fold;
+            let f = &l.model.view;
             for a in f.authorities.keys() {
                 let r = rel.entry(a.clone()).or_default();
                 r.fks.insert(key.fk.clone());
                 r.authority = true;
             }
-            for p in &f.participants {
+            for p in &f.participation.p {
                 rel.entry(p.clone()).or_default().fks.insert(key.fk.clone());
             }
         }

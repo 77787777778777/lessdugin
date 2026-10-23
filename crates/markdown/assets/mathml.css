@@ -1,0 +1,208 @@
+/* SPDX-License-Identifier: CC0-1.0 */
+/* The `mc-*` classes of the LFM/1 MathML normaliser (docs/spec/lfm-1.md §7.3, ADR 0002
+   decision 2). math-core emits these declarations as inline `style` attributes, which CSP
+   `style-src 'self'` does not apply; the normaliser replaces each with the class below, and
+   this stylesheet restores its effect. The declarations are exactly the ones of the §7.3 table,
+   so this file is CC0 like the specification: any client, and any exported document, may use it.
+   Load it after math-core's `mathmlfixes.css` (MIT, shipped next to this file).
+
+   Specificity: every selector is `math .mc-x.mc-x`, (0,2,1). An inline style beat every rule of
+   `mathmlfixes.css`; the highest of those that can match the same element is
+   `mtr > mtd:first-child` (0,1,2), so the class still wins, without `!important`. */
+
+/* Table cell alignment (`cases`, `align`, `aligned`, `array`, `multline`, equation numbers). */
+math .mc-al.mc-al {
+  text-align: left;
+  justify-items: start;
+}
+
+math .mc-ar.mc-ar {
+  text-align: right;
+  justify-items: end;
+}
+
+/* Cell and box padding. */
+math .mc-pl0.mc-pl0 {
+  padding-left: 0;
+}
+
+math .mc-pr0.mc-pr0 {
+  padding-right: 0;
+}
+
+math .mc-py0.mc-py0 {
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
+math .mc-px01.mc-px01 {
+  padding-left: 0.1em;
+  padding-right: 0.1em;
+}
+
+math .mc-pl1.mc-pl1 {
+  padding-left: 1em;
+}
+
+math .mc-pl3mu.mc-pl3mu {
+  padding-left: 0.1667em;
+}
+
+math .mc-pl4mu.mc-pl4mu {
+  padding-left: 0.2222em;
+}
+
+math .mc-pl5mu.mc-pl5mu {
+  padding-left: 0.2778em;
+}
+
+math .mc-pr3mu.mc-pr3mu {
+  padding-right: 0.1667em;
+}
+
+math .mc-pr4mu.mc-pr4mu {
+  padding-right: 0.2222em;
+}
+
+math .mc-pr5mu.mc-pr5mu {
+  padding-right: 0.2778em;
+}
+
+math .mc-pt3mu.mc-pt3mu {
+  padding-top: 0.1667em;
+}
+
+/* Widths of numbered equation tables and their number columns. */
+math .mc-w7-5.mc-w7-5 {
+  width: 7.5%;
+}
+
+math .mc-w50.mc-w50 {
+  width: 50%;
+}
+
+math .mc-w100.mc-w100 {
+  width: 100%;
+}
+
+/* Array rules (`|`, `:`, `\hline`, `\hdashline`). */
+math .mc-bt-solid.mc-bt-solid {
+  border-top: 0.05em solid currentcolor;
+}
+
+math .mc-bt-dashed.mc-bt-dashed {
+  border-top: 0.05em dashed currentcolor;
+}
+
+math .mc-br-solid.mc-br-solid {
+  border-right: 0.05em solid currentcolor;
+}
+
+math .mc-br-dashed.mc-br-dashed {
+  border-right: 0.05em dashed currentcolor;
+}
+
+math .mc-bl-solid.mc-bl-solid {
+  border-left: 0.05em solid currentcolor;
+}
+
+math .mc-bl-dashed.mc-bl-dashed {
+  border-left: 0.05em dashed currentcolor;
+}
+
+/* Negative spaces: `\!` (`\negthinspace`, `\mkern-3mu`), `\negmedspace`, `\negthickspace`. */
+math .mc-negthin.mc-negthin {
+  margin-left: -0.16666667em;
+}
+
+math .mc-negmed.mc-negmed {
+  margin-left: -0.22222222em;
+}
+
+math .mc-negthick.mc-negthick {
+  margin-left: -0.2777778em;
+}
+
+/* `\cramped`. */
+math .mc-cramped.mc-cramped {
+  math-shift: compact;
+}
+
+/* Text sizes inside `\text{…}` (`\tiny` … `\Huge`). */
+math .mc-fs50.mc-fs50 {
+  font-size: 50%;
+}
+
+math .mc-fs60.mc-fs60 {
+  font-size: 60%;
+}
+
+math .mc-fs70.mc-fs70 {
+  font-size: 70%;
+}
+
+math .mc-fs80.mc-fs80 {
+  font-size: 80%;
+}
+
+math .mc-fs90.mc-fs90 {
+  font-size: 90%;
+}
+
+math .mc-fs100.mc-fs100 {
+  font-size: 100%;
+}
+
+math .mc-fs120.mc-fs120 {
+  font-size: 120%;
+}
+
+math .mc-fs140.mc-fs140 {
+  font-size: 140%;
+}
+
+math .mc-fs170.mc-fs170 {
+  font-size: 170%;
+}
+
+math .mc-fs200.mc-fs200 {
+  font-size: 200%;
+}
+
+math .mc-fs250.mc-fs250 {
+  font-size: 250%;
+}
+
+/* Text styles of `mtext` (`\textbf`, `\textit`/`\emph`, `\texttt`, `\sout`, `\underline`,
+   `\textsf`, `\textrm`, `\textsc`), which math-core writes as HTML wrappers inside `mtext`. */
+math .mc-tb.mc-tb {
+  font-weight: bold;
+}
+
+math .mc-ti.mc-ti {
+  font-style: italic;
+}
+
+math .mc-tt.mc-tt {
+  font-family: monospace;
+}
+
+math .mc-ts.mc-ts {
+  text-decoration: line-through;
+}
+
+math .mc-tu.mc-tu {
+  text-decoration: underline;
+}
+
+math .mc-tsf.mc-tsf {
+  font-family: sans-serif;
+}
+
+math .mc-trm.mc-trm {
+  font-family: serif;
+}
+
+math .mc-tsc.mc-tsc {
+  font-variant-caps: small-caps;
+}

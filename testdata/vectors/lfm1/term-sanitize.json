@@ -183,11 +183,73 @@
     {
       "name": "prose-badges-kept",
       "input": {
-        "text": "ok ✅ ✓",
+        "text": "ok \u2705 \u2713",
         "ctx": "prose"
       },
       "expected": {
-        "out": "ok ✅ ✓"
+        "out": "ok \u2705 \u2713"
+      }
+    },
+    {
+      "name": "prose-vt-ff-escaped",
+      "input": {
+        "text": "a\u000bb\fc",
+        "ctx": "prose"
+      },
+      "expected": {
+        "out": [
+          {
+            "plain": "a"
+          },
+          {
+            "escaped": "^K"
+          },
+          {
+            "plain": "b"
+          },
+          {
+            "escaped": "^L"
+          },
+          {
+            "plain": "c"
+          }
+        ]
+      }
+    },
+    {
+      "name": "code-vt-ff-escaped",
+      "input": {
+        "text": "a\u000bb\fc",
+        "ctx": "code"
+      },
+      "expected": {
+        "out": [
+          {
+            "plain": "a"
+          },
+          {
+            "escaped": "^K"
+          },
+          {
+            "plain": "b"
+          },
+          {
+            "escaped": "^L"
+          },
+          {
+            "plain": "c"
+          }
+        ]
+      }
+    },
+    {
+      "name": "name-vt-ff-spaces",
+      "input": {
+        "text": "a\u000b\fb",
+        "ctx": "name"
+      },
+      "expected": {
+        "out": "a b"
       }
     },
     {
@@ -203,11 +265,11 @@
     {
       "name": "code-tab-after-wide",
       "input": {
-        "text": "日\tx",
+        "text": "\u65e5\tx",
         "ctx": "code"
       },
       "expected": {
-        "out": "日  x"
+        "out": "\u65e5  x"
       }
     },
     {
@@ -222,13 +284,13 @@
             "plain": "a"
           },
           {
-            "escaped": "⟨RLO⟩"
+            "escaped": "\u27e8RLO\u27e9"
           },
           {
             "plain": "b"
           },
           {
-            "escaped": "⟨PDI⟩"
+            "escaped": "\u27e8PDI\u27e9"
           }
         ]
       }
@@ -245,31 +307,31 @@
             "plain": "a"
           },
           {
-            "escaped": "⟨ZWSP⟩"
+            "escaped": "\u27e8ZWSP\u27e9"
           },
           {
             "plain": "b"
           },
           {
-            "escaped": "⟨ZWNJ⟩"
+            "escaped": "\u27e8ZWNJ\u27e9"
           },
           {
             "plain": "c"
           },
           {
-            "escaped": "⟨ZWJ⟩"
+            "escaped": "\u27e8ZWJ\u27e9"
           },
           {
             "plain": "d"
           },
           {
-            "escaped": "⟨WJ⟩"
+            "escaped": "\u27e8WJ\u27e9"
           },
           {
             "plain": "e"
           },
           {
-            "escaped": "⟨BOM⟩"
+            "escaped": "\u27e8BOM\u27e9"
           },
           {
             "plain": "f"
@@ -316,7 +378,7 @@
     {
       "name": "name-removes-invisibles-and-badges",
       "input": {
-        "text": "al\u200bice\u202e ✅⚠☑ x",
+        "text": "al\u200bice\u202e \u2705\u26a0\u2611 x",
         "ctx": "name"
       },
       "expected": {
@@ -351,7 +413,7 @@
         "max": 5
       },
       "expected": {
-        "out": "abcd…"
+        "out": "abcd\u2026"
       }
     },
     {
@@ -373,7 +435,7 @@
         "max": 3
       },
       "expected": {
-        "out": "e\u0301e\u0301…"
+        "out": "e\u0301e\u0301\u2026"
       }
     }
   ]

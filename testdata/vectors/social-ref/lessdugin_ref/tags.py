@@ -32,7 +32,8 @@
                  else the candidate with (depth desc, K[author] desc, uri asc); none if Cand = ∅
     flags      parentUnavailable(r) ⇔ r ∈ Cand, r.parents non-empty, par(r) ∩ Cand = ∅
                altered(r, q) for an edge (after the cut) whose stored parents entry for q.uri
-               has a CID ≠ cid(q) (any entry, when q.uri is listed more than once)
+               has a CID ≠ cid(q) (any entry, when q.uri is listed more than once); CIDs
+               compare by canonical form (§0.4, §20.1 item 45)
     history    from canonical, at each step the edge to the parent with the greatest depth,
                ties by the smallest uri
     unmerged   |{ r ∈ Cand ∖ {canonical} : no edge (x, r) }|
@@ -51,7 +52,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from . import opinions
+from . import cids, opinions
 from .common import sat_add, tid_int, ubytes
 from .karma import power, small
 
@@ -235,14 +236,15 @@ def _page_view(view, slug: str, members: list) -> PageView:
 
     head = l1.effective("tag:" + slug, "tag.head")
     canonical = None
-    if head is not None and head[0] in cand and records[head[0]].cid == head[1]:
+    if head is not None and head[0] in cand and cids.same(head[1], records[head[0]].cid):
         canonical = head[0]
     elif cands:
         canonical = min(cands, key=lambda r: (-depth[r], -K.get(author(r), 0), ubytes(r)))
 
     altered = {}
     for r in cands:
-        alt = {p["uri"] for p in entries[r] if p["uri"] in edges[r] and p["cid"] != records[p["uri"]].cid}
+        alt = {p["uri"] for p in entries[r]
+               if p["uri"] in edges[r] and not cids.same(p["cid"], records[p["uri"]].cid)}
         if alt:
             altered[r] = tuple(sorted(alt, key=ubytes))
     unavailable = frozenset(r for r in cands if entries[r] and not (par[r] & cand))

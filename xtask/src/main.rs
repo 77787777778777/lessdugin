@@ -22,6 +22,11 @@
 //!                      it) and the TUI parity driver, unless --no-build
 //!   lex lint           lint lexicons with goat (if installed)
 //!   vectors            run shared test vectors (Rust)
+//!   fuzz [<target>…|all] [--seconds N] [--jobs J] [--sanitizer S] [--list] [-- <libFuzzer args>]
+//!                      seed the cargo-fuzz corpora (fuzz/, its own workspace) from the vectors
+//!                      and fixtures, then run each target for N seconds (default: every target,
+//!                      600 s each, the M4 acceptance run) with cargo-fuzz on a nightly toolchain
+//!                      ($LESSDUGIN_FUZZ_TOOLCHAIN, default `nightly`); see fuzz/README.md
 
 use std::collections::BTreeMap;
 use std::env;
@@ -62,8 +67,9 @@ fn main() -> ExitCode {
             "cargo",
             &["test", "-p", "lessdugin-testkit", "--", "vectors"],
         ),
+        Some("fuzz") => fuzz(&args[1..]),
         _ => {
-            eprintln!("usage: cargo xtask <ci|test-wasm|wasm|e2e|lex|vectors> [args]");
+            eprintln!("usage: cargo xtask <ci|test-wasm|wasm|e2e|lex|vectors|fuzz> [args]");
             return ExitCode::from(2);
         }
     };
@@ -167,6 +173,22 @@ fn ci() -> Result<(), String> {
             "social_fold",
             "--test",
             "social_query",
+            "--test",
+            "model_reorder",
+        ],
+    )?;
+    // the TypeScript form of the DTOs (testdata/dto/dto-1.d.ts, which the engine package's
+    // types.parity.test.ts compares types.ts with) is what the Rust types generate
+    run(
+        "cargo",
+        &[
+            "test",
+            "-p",
+            "lessdugin-wasm",
+            "--features",
+            "dto-decl",
+            "--test",
+            "dto_decl",
         ],
     )?;
     // M2 acceptance: the 50-member cold sync in under 5 s, on an optimised build (the debug
@@ -921,5 +943,162 @@ fn lex(args: &[String]) -> Result<(), String> {
             run(goat, &["lex", "lint", "-I", "large-string", "lexicons"])
         }
         _ => Err("usage: cargo xtask lex lint".into()),
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// fuzz
+
+/// The cargo-fuzz targets (`fuzz/fuzz_targets/<name>.rs`, see fuzz/README.md) with their libFuzzer
+/// `-max_len` (bytes) and `-timeout` (seconds per input). `fuzz/dicts/<name>.dict` is used when
+/// present. Every run also has `-rss_limit_mb=2048` (and so `-malloc_limit_mb=2048`).
+const FUZZ_TARGETS: &[(&str, usize, u32)] = &[
+    ("car", 16_384, 10),
+    ("commit", 4_096, 10),
+    ("dagcbor", 16_384, 10),
+    ("lexicon", 16_384, 10),
+    ("mst", 16_384, 10),
+    ("render", 32_768, 10),
+];
+
+/// `cargo xtask fuzz`: seeds `fuzz/corpus/<target>/` from the vectors and fixtures (and the kept
+/// reproducers in `fuzz/regressions/`), then runs each target in turn. Fails if any target stops
+/// on a crash, timeout or OOM (the input is in `fuzz/artifacts/<target>/`).
+fn fuzz(args: &[String]) -> Result<(), String> {
+    let mut targets: Vec<&str> = Vec::new();
+    let mut seconds = 600u64;
+    let mut jobs: Option<u32> = None;
+    let mut sanitizer = "address".to_owned();
+    let mut extra: Vec<String> = Vec::new();
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--seconds" => {
+                seconds = it
+                    .next()
+                    .and_then(|s| s.parse().ok())
+                    .ok_or("--seconds needs a number of seconds")?;
+            }
+            "--jobs" => {
+                jobs = Some(
+                    it.next()
+                        .and_then(|s| s.parse().ok())
+                        .ok_or("--jobs needs a number")?,
+                );
+            }
+            "--sanitizer" => {
+                sanitizer = it
+                    .next()
+                    .cloned()
+                    .ok_or("--sanitizer needs address, none, …")?;
+            }
+            "--list" => {
+                for (t, ..) in FUZZ_TARGETS {
+                    println!("{t}");
+                }
+                return Ok(());
+            }
+            "--" => extra.extend(it.by_ref().cloned()),
+            "all" => targets.extend(FUZZ_TARGETS.iter().map(|t| t.0)),
+            t => match FUZZ_TARGETS.iter().find(|x| x.0 == t) {
+                Some(x) => targets.push(x.0),
+                None => {
+                    let names: Vec<&str> = FUZZ_TARGETS.iter().map(|x| x.0).collect();
+                    return Err(format!(
+                        "unknown fuzz target or option {t:?} (targets: {})",
+                        names.join(", ")
+                    ));
+                }
+            },
+        }
+    }
+    if targets.is_empty() {
+        targets.extend(FUZZ_TARGETS.iter().map(|t| t.0));
+    }
+    let toolchain = format!(
+        "+{}",
+        env::var("LESSDUGIN_FUZZ_TOOLCHAIN").unwrap_or_else(|_| "nightly".into())
+    );
+    let has_fuzz = Command::new("cargo")
+        .args([toolchain.as_str(), "fuzz", "--version"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !has_fuzz {
+        return Err(format!(
+            "cargo-fuzz on the {} toolchain is needed: rustup toolchain install {} --profile \
+             minimal && cargo install cargo-fuzz --locked",
+            &toolchain[1..],
+            &toolchain[1..]
+        ));
+    }
+    let root = root();
+    let target = target_dir().join("fuzz");
+    let target = target.to_string_lossy().into_owned();
+    let corpus = root.join("fuzz/corpus").to_string_lossy().into_owned();
+    let mut seed_args = vec![
+        toolchain.as_str(),
+        "run",
+        "--quiet",
+        "--manifest-path",
+        "fuzz/Cargo.toml",
+        "-p",
+        "lessdugin-fuzz-seeds",
+        "--target-dir",
+        &target,
+        "--",
+        &corpus,
+    ];
+    seed_args.extend(targets.iter().copied());
+    run("cargo", &seed_args)?;
+    let mut failed = Vec::new();
+    for t in &targets {
+        let (_, max_len, timeout) = FUZZ_TARGETS
+            .iter()
+            .find(|x| x.0 == *t)
+            .copied()
+            .unwrap_or((t, 4096, 10));
+        let mut a: Vec<String> = [
+            toolchain.as_str(),
+            "fuzz",
+            "run",
+            "--fuzz-dir",
+            "fuzz",
+            "--target-dir",
+            &target,
+            "--sanitizer",
+            &sanitizer,
+            t,
+            "--",
+        ]
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect();
+        a.push(format!("-max_total_time={seconds}"));
+        a.push(format!("-max_len={max_len}"));
+        a.push(format!("-timeout={timeout}"));
+        a.push("-rss_limit_mb=2048".into());
+        a.push("-print_final_stats=1".into());
+        let dict = root.join(format!("fuzz/dicts/{t}.dict"));
+        if dict.exists() {
+            a.push(format!("-dict={}", dict.display()));
+        }
+        if let Some(j) = jobs {
+            a.push(format!("-fork={j}"));
+        }
+        a.extend(extra.iter().cloned());
+        let a: Vec<&str> = a.iter().map(String::as_str).collect();
+        if run("cargo", &a).is_err() {
+            failed.push(*t);
+        }
+    }
+    if failed.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "fuzz target(s) failed: {} (inputs in fuzz/artifacts/<target>/; reproduce with \
+             `cargo +nightly fuzz run <target> <input>`, minimise with `cargo +nightly fuzz tmin`)",
+            failed.join(", ")
+        ))
     }
 }

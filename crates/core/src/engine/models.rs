@@ -4,9 +4,21 @@
 //! queries share (loading a model, actor views, record values, pending own uris).
 //!
 //! A model is rebuilt when a `Changed` event names its forum (the listener drops it first), when
-//! it is older than [`limits::MODEL_MAX_AGE_MS`], or when it is evicted (at most
-//! [`limits::MODEL_CACHE_ENTRIES`], least recently built first). A build that raced an
-//! invalidation is used for its own query but not cached.
+//! it is older than [`limits::MODEL_MAX_AGE_MS`] (or [`REFOLD_AGE_FACTOR`] times its build cost,
+//! whichever is longer), or when it is evicted (at most [`limits::MODEL_CACHE_ENTRIES`], least
+//! recently built first). A build that raced an invalidation is used for its own query but not
+//! cached.
+//!
+//! **Refolds are capped.** The full fold has no incremental path (`social.md` §1.3 rule 7), so:
+//! - builds are single-flight per forum: queries that arrive while one runs wait for it and reuse
+//!   its model;
+//! - a forum is refolded at most once per build cost of its last build (capped at
+//!   [`REFOLD_WAIT_MAX_MS`]): a query that finds the model invalidated sooner waits out the rest,
+//!   and every invalidation in between is folded in the one rebuild;
+//! - sort and filter changes never refold: they re-rank the cached layers
+//!   ([`ForumModel::orderings`]);
+//! - a build that fails in the fold (a malformed input, which the builder never produces) is
+//!   logged and the forum's last good model is served instead of an error.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -14,6 +26,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use futures::channel::mpsc;
 use futures::future::join_all;
+use futures::lock::Mutex as AsyncMutex;
 use lessdugin_atp::syntax::{AtIdentifier, AtUri, Did};
 use serde_json::Value;
 
@@ -35,6 +48,11 @@ use crate::sync::{Priority, Stats};
 use super::events::EventBus;
 use super::{Engine, EngineError};
 
+/// A model stays fresh for at least this many times its build cost (ms).
+pub(crate) const REFOLD_AGE_FACTOR: i64 = 30;
+/// The longest a query waits for the refold throttle (ms).
+pub(crate) const REFOLD_WAIT_MAX_MS: i64 = 5_000;
+
 impl From<ModelError> for EngineError {
     fn from(e: ModelError) -> Self {
         match e {
@@ -50,6 +68,27 @@ impl From<ModelError> for EngineError {
     }
 }
 
+/// Why a model build failed: in the fold (the last good model may be served), or otherwise.
+enum BuildError {
+    Fold(crate::social::FoldError),
+    Engine(EngineError),
+}
+
+impl From<ModelError> for BuildError {
+    fn from(e: ModelError) -> Self {
+        match e {
+            ModelError::Fold(e) => Self::Fold(e),
+            e => Self::Engine(e.into()),
+        }
+    }
+}
+
+impl From<EngineError> for BuildError {
+    fn from(e: EngineError) -> Self {
+        Self::Engine(e)
+    }
+}
+
 /// A store failure.
 pub(crate) fn store_error(e: StoreError) -> EngineError {
     EngineError::internal(format!("record store: {e}")).with_retryable(true)
@@ -61,11 +100,23 @@ pub(crate) struct Loaded {
     pub(crate) model: Arc<ForumModel>,
     pub(crate) completeness: Completeness,
     built_ms: i64,
+    /// How long the build took (ms, host clock).
+    cost_ms: i64,
+}
+
+impl Loaded {
+    /// How long the model stays fresh (ms).
+    fn max_age_ms(&self) -> i64 {
+        limits::MODEL_MAX_AGE_MS.max(self.cost_ms.saturating_mul(REFOLD_AGE_FACTOR))
+    }
 }
 
 #[derive(Default)]
 struct Models {
     loaded: BTreeMap<String, Loaded>,
+    /// The last model built per forum, kept across invalidations: served when a rebuild fails
+    /// in the fold.
+    last_good: BTreeMap<String, Loaded>,
     /// Invalidations per forum, and of everything.
     gens: BTreeMap<String, u64>,
     all_gen: u64,
@@ -83,6 +134,8 @@ impl Models {
 pub(crate) struct Runtime {
     pub(crate) bus: EventBus,
     models: Mutex<Models>,
+    /// One build at a time per forum (single flight).
+    flights: Mutex<BTreeMap<String, Arc<AsyncMutex<()>>>>,
     pub(crate) renders: RenderCache,
     /// The last `open_forum` result per forum, with its time (ms).
     opened: Mutex<BTreeMap<String, (i64, OpenedForum)>>,
@@ -106,6 +159,7 @@ impl Runtime {
         Self {
             bus: EventBus::default(),
             models: Mutex::new(Models::default()),
+            flights: Mutex::new(BTreeMap::new()),
             renders: RenderCache::default(),
             opened: Mutex::new(BTreeMap::new()),
             verify: Mutex::new(BTreeSet::new()),
@@ -233,8 +287,34 @@ impl Runtime {
     fn cached(&self, f: &str, now_ms: i64) -> Option<Loaded> {
         let m = lock(&self.models);
         let l = m.loaded.get(f)?;
-        (now_ms.saturating_sub(l.built_ms) <= limits::MODEL_MAX_AGE_MS && l.built_ms <= now_ms)
+        (now_ms.saturating_sub(l.built_ms) <= l.max_age_ms() && l.built_ms <= now_ms)
             .then(|| l.clone())
+    }
+
+    /// The build lock of forum `f`.
+    fn flight(&self, f: &str) -> Arc<AsyncMutex<()>> {
+        let mut m = lock(&self.flights);
+        // forget locks nobody holds or waits for (only this map refers to them)
+        m.retain(|_, l| Arc::strong_count(l) > 1);
+        Arc::clone(m.entry(f.to_owned()).or_default())
+    }
+
+    /// How long a rebuild of `f` must wait (ms): until its last build's end plus that build's
+    /// cost, at most [`REFOLD_WAIT_MAX_MS`].
+    fn refold_wait(&self, f: &str, now_ms: i64) -> Option<u64> {
+        let m = lock(&self.models);
+        let l = m.last_good.get(f)?;
+        let wait = l
+            .built_ms
+            .saturating_add(l.cost_ms)
+            .saturating_sub(now_ms)
+            .min(REFOLD_WAIT_MAX_MS);
+        (wait > 0).then(|| u64::try_from(wait).unwrap_or(0))
+    }
+
+    /// The last good model of `f`, whatever its age.
+    fn last_good(&self, f: &str) -> Option<Loaded> {
+        lock(&self.models).last_good.get(f).cloned()
     }
 
     fn gen_of(&self, f: &str) -> (u64, u64) {
@@ -243,6 +323,21 @@ impl Runtime {
 
     fn put(&self, f: &str, l: Loaded, gen_before: (u64, u64)) {
         let mut m = lock(&self.models);
+        m.last_good.insert(f.to_owned(), l.clone());
+        while m.last_good.len() > limits::MODEL_CACHE_ENTRIES {
+            let oldest = m
+                .last_good
+                .iter()
+                .filter(|(k, _)| k.as_str() != f)
+                .min_by_key(|(k, l)| (l.built_ms, (*k).clone()))
+                .map(|(k, _)| k.clone());
+            match oldest {
+                Some(k) => {
+                    m.last_good.remove(&k);
+                }
+                None => break,
+            }
+        }
         if m.gen_of(f) != gen_before {
             return;
         }
@@ -337,14 +432,40 @@ impl<H: Host> Engine<H> {
     }
 
     /// The model of forum `key`, from memory or built from the cache; a forum whose declaration
-    /// is not cached yet is opened first.
+    /// is not cached yet is opened first. Builds are single-flight per forum and throttled (see
+    /// the module docs); a build that fails in the fold serves the forum's last good model.
     pub(crate) async fn loaded(&self, key: &ForumKey) -> Result<Loaded, EngineError> {
         let f = key.uri.as_str();
-        // the cache ages by the host clock; the fold runs at the view time (parity mode)
-        let now_ms = self.host.now_ms();
-        if let Some(l) = self.rt.cached(f, now_ms) {
+        if let Some(l) = self.rt.cached(f, self.host.now_ms()) {
             return Ok(l);
         }
+        let flight = self.rt.flight(f);
+        let _one = flight.lock().await;
+        // built by the query this one waited for
+        if let Some(l) = self.rt.cached(f, self.host.now_ms()) {
+            return Ok(l);
+        }
+        if let Some(wait) = self.rt.refold_wait(f, self.host.now_ms()) {
+            self.host.sleep(wait).await;
+        }
+        match self.build_loaded(key).await {
+            Err(BuildError::Fold(e)) => match self.rt.last_good(f) {
+                Some(l) => {
+                    tracing::warn!(forum = %f, error = %e, "fold failed; serving the last good view");
+                    Ok(l)
+                }
+                None => Err(ModelError::Fold(e).into()),
+            },
+            Err(BuildError::Engine(e)) => Err(e),
+            Ok(l) => Ok(l),
+        }
+    }
+
+    /// Builds the model of `key` from the cache and caches it (unless an invalidation raced it).
+    async fn build_loaded(&self, key: &ForumKey) -> Result<Loaded, BuildError> {
+        let f = key.uri.as_str();
+        // the cache ages by the host clock; the fold runs at the view time (parity mode)
+        let start_ms = self.host.now_ms();
         let mut gen_before = self.rt.gen_of(f);
         let kv = self.host.cache();
         let now_us = self.view_now_ms().saturating_mul(1000);
@@ -358,16 +479,18 @@ impl<H: Host> Engine<H> {
             }
             r => r?,
         };
-        let st = ForumState::load(kv, key, &model.fold.decl, now_us)
+        let st = ForumState::load(kv, key, &model.decl, now_us)
             .await
             .map_err(store_error)?;
         let (completeness, _) = state::completeness(kv, key, &st)
             .await
             .map_err(store_error)?;
+        let end_ms = self.host.now_ms();
         let l = Loaded {
             model: Arc::new(model),
             completeness,
-            built_ms: now_ms,
+            built_ms: end_ms,
+            cost_ms: end_ms.saturating_sub(start_ms).max(0),
         };
         self.rt.register(key);
         self.rt.put(f, l.clone(), gen_before);

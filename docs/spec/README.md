@@ -70,7 +70,7 @@ These are recorded here so that implementers do not have to discover them. Each 
 |---|---|---|
 | K1 | *Resolved:* `data-model.md` §8.4–§8.5 now specify create-if-absent as `putRecord{rkey, swapRecord: null}` (typed `InvalidSwap`), with `createRecord` only as a per-host fallback, as ADR 0005 and `sync.md` §7.2 do. | – |
 | K2 | *Resolved:* `data-model.md` MA8 now agrees with `social.md` §4.2 and §4.7: an empty `#restrict` restricts nothing itself, but at a higher rank it lifts lower-rank restrictions. | – |
-| K3 | ADR 0002 (accepted, S10) decides a MathML normaliser that maps a closed set of math-core `style` values to `mc-*` classes and `color` to `mathcolor`, and adds `\label`, `\eqref` and `\ref` to the TeX pre-scan. `lfm-1.md` §7.1 and §7.3, and the `lfm1/math.json` and `mathml/` vectors, instead drop every `style`, `class` and `mathcolor` and accept those three control words. | Precedence rule 4: ADR 0002 wins. Math is M4 work: `lfm-1.md` §7 and the math vectors MUST be amended together (and `RENDERER_VERSION`, §7.3 and the allowlist of §8.2 updated) before M4 freezes them, or ADR 0002 is amended by a new ADR. |
+| K3 | *Resolved:* ADR 0002 won (precedence rule 4) and is folded into `lfm-1.md`: §7.1 disables `\label`, `\eqref` and `\ref`; §7.3 is the MathML normaliser, which maps math-core's closed set of `style` values to `mc-*` classes (styled by `crates/markdown/assets/mathml.css`, after math-core's `mathmlfixes.css`) and `color` to `mathcolor`; §8.2 allows them on MathML. `lfm1/math.json`, `xss/mathml.json` and `mathml/` were amended with it. `RENDERER_VERSION` bumps when this lands. | – |
 
 ---
 
@@ -259,4 +259,4 @@ A claim is valid only while the implementation passes every normative vector of 
 
 **Open questions**
 - Confirm Level 0's treatment of author moderation (not evaluated, disclosed) rather than the alternative of applying author-scope hides without gates.
-- K3 (math normaliser and pre-scan, ADR 0002 against `lfm-1.md` §7 and its vectors) needs a decision before M4.
+- *(Resolved at M4.)* K3 (math normaliser and pre-scan, ADR 0002 against `lfm-1.md` §7 and its vectors): ADR 0002 is folded into `lfm-1.md` §7 and §8.2 unchanged, so no new ADR was needed.

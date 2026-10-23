@@ -2,9 +2,11 @@
 """rank/rank.json (kind "rank"): ranking, sorts, filters and Recent Discussion, social.md §12.
 
 hot() is the only float in the fold (§1.3 rule 3). The model computes it with Python's
-math.pow, which may differ from libm::pow in the last bit, so the file carries
-"hotBitsSource": "python-math.pow" (testdata/vectors/README.md, "Floats"). To keep the vectors
-portable anyway, every case here is checked before it is written:
+math.pow; the Rust fold uses the `libm` crate (pinned to 0.2.16). Every hotBits value of the
+file was checked at M3 to equal hot() computed with libm 0.2.16's pow (19 values, a scratch
+program outside the repository), so the file carries "hotBitsSource": "rust-libm-0.2.16" and
+runners compare bits exactly (testdata/vectors/README.md, "Floats"). To keep new values portable,
+every case here is also checked before it is written:
 
 - every hot value listed in `hotBits` comes from a pow(base, e) whose exact value lies within
   0.1 ulp of the double math.pow returned (exact rational arithmetic with `decimal`), so any
@@ -528,6 +530,161 @@ def rank_vectors() -> list:
     ]
     out.append(v)
 
+    out += m3_rank_vectors()
+    return out
+
+
+def m3_rank_vectors() -> list:
+    """Cases proposed by the M3 fold reviews (social.md §12.2, §12.4, §12.5, §20.1 items 18, 40)."""
+    out = []
+
+    def m(k):
+        return T0 + k * MIN
+
+    def cyc(f, root, a, ta, b, tb):
+        """A 2-cycle: a's parent is b and b's parent is a (b is built first with a placeholder parent;
+        placement never reads CIDs)."""
+        xa = f.comment_uri(a, u(root), ta, 1)
+        cb = f.comment(b, root, tb, parent=(xa, root["cid"]), clock=1)
+        ca = f.comment(a, root, ta, parent=cb, clock=1)
+        assert u(ca) == xa
+        return ca, cb
+
+    # Recent Discussion: equal newest-comment times order posts by uri, comments by uri (§12.5)
+    f = F(membership="approval")
+    pa = f.post("adam", m(10))
+    pb = f.post("mona", m(10))
+    a1 = f.comment("mona", pa, m(50))
+    a2 = f.comment("adam", pa, m(50))
+    a3 = f.comment("owner", pa, m(40))
+    a4 = f.comment("mona", pa, m(30))
+    b1 = f.comment("owner", pb, m(50))
+    v = V("recent-discussion-ties-by-post-uri", f, [pa, pb, a1, a2, a3, a4, b1], {}, fields=("recentDiscussion",),
+          note="approval mode, authorities only. Both posts' newest Visible comments have t_rank T0 + 50 min, so "
+               "the posts are ordered by uri; within a post, comments with equal t_rank are ordered by uri, "
+               "and only the 3 newest are listed")
+    first, second = sorted([a1, a2], key=lambda r: u(r).encode())
+    assert v["expected"]["recentDiscussion"] == [
+        {"post": p_, "comments": cs} for p_, cs in sorted(
+            [(u(pa), us([first, second, a3])), (u(pb), us([b1]))], key=lambda e: e[0].encode())]
+    out.append(v)
+
+    # Recent Discussion lists Collapsed posts (§12.5 "listed posts")
+    f = F(membership="approval", display={"collapseBelow": 0})
+    p = f.post("adam", m(10))
+    c = f.comment("mona", p, m(20))
+    recs = [p, c, f.opinion("owner", p, t=m(30), karma="down"), f.opinion("owner", c, t=m(30), karma="up")]
+    v = V("recent-discussion-lists-collapsed-posts", f, recs, {}, fields=("recentDiscussion",),
+          note="collapseBelow = 0: the owner's downvote takes adam's post to score 1 − 1 = 0, Collapsed(LowScore), "
+               "which is still listed, so it appears in Recent Discussion with mona's Visible comment (score 2)")
+    view = fold_vector_input(v["input"])
+    assert view.states[u(p)].to_json() == {"state": "Collapsed", "reason": "LowScore"}
+    assert view.l35[u(p)].score == 0 and view.states[u(c)].state == "Visible"
+    assert v["expected"]["recentDiscussion"] == [{"post": u(p), "comments": [u(c)]}]
+    out.append(v)
+
+    # recentComments activity reads comments under placeholders and re-attached comments (§12.2, item 40)
+    f = F(membership="approval")
+    pa = f.post("adam", m(10))
+    pb = f.post("adam", m(20))
+    pc = f.post("adam", m(30))
+    gone = f.comment_uri("zoe", u(pa), m(5), 9)
+    ca = f.comment("owner", pa, m(100), parent=(gone, pa["cid"]))
+    ux, uy = cyc(f, pb, "adam", m(89), "mona", m(90))
+    hide = f.modaction("owner", "hide", ux, t=m(95))
+    v = V("recent-comments-through-placeholders-and-orphans", f, [pa, pb, pc, ca, ux, uy, hide],
+          PQ("recentComments"),
+          "activity = max(t_rank(p), t_rank of p's Visible comments) over the whole placed thread: pa's only "
+          "comment (T0 + 100 min) sits under a Missing placeholder; in pb, adam's and mona's comments name "
+          "each other as parent, mona's (the greater uri) is re-attached to the root and is Visible at "
+          "T0 + 90 min, while the owner hid adam's; pc has no comment (T0 + 30 min)")
+    assert u(uy) > u(ux) and po(v) == us([pa, pb, pc])
+    out.append(v)
+
+    # latestReply: the newest Visible descendant; a collapsed newcomer's reply does not count (§12.4)
+    f = F(display={"newUsers": "collapse"})
+    p = f.post("owner", m(5))
+    c1 = f.comment("adam", p, m(10))
+    c2 = f.comment("adam", p, m(20))
+    c3 = f.comment("adam", p, m(30))
+    c1a = f.comment("mona", p, m(40), parent=c1)
+    c1b = f.comment("mona", p, m(100), parent=c1a)
+    c3a = f.comment("mona", p, m(41), parent=c3)
+    c3b = f.comment("nina", p, m(200), parent=c3a)
+    v = V("latest-reply-visible-descendants-only", f, [f.membership("nina"), p, c1, c2, c3, c1a, c1b, c3a, c3b],
+          CQ(p, "latestReply"),
+          "open mode, newUsers = collapse: nina has a membership only, so her reply c3b is Collapsed(NewUser) "
+          "and does not count toward latestReply. Keys: c1 → 100 (c1b, a grandchild), c3 → 41 (c3a), "
+          "c2 → 20 (its own t_rank)")
+    view = fold_vector_input(v["input"])
+    assert view.states[u(c3b)].to_json() == {"state": "Collapsed", "reason": "NewUser"}
+    assert co(v) == us([c1, c1a, c1b, c3, c3a, c3b, c2])
+    out.append(v)
+
+    # Thread pins come first in every comment sort (§12.4, item 18)
+    f = F(membership="approval")
+    p = f.post("owner", m(5))
+    cp = f.comment("adam", p, m(10))
+    cq = f.comment("mona", p, m(20))
+    cr = f.comment("adam", p, m(30))
+    recs = [p, cp, cq, cr, f.opinion("owner", cp, t=m(40), karma="down"),
+            f.modaction("owner", "pin", cp, pin_scope="thread", t=m(45))]
+    view = None
+    for sort, order in (("magic", [cp, cr, cq]), ("top", [cp, cr, cq]), ("latestReply", [cp, cr, cq]),
+                        ("new", [cp, cr, cq]), ("old", [cp, cq, cr])):
+        v = V(f"thread-pins-in-every-comment-sort-{sort}", f, recs, CQ(p, sort),
+              "the owner pins cp (#pin{scope: thread}) and downvotes it (score 0; cq and cr score 1): the pin "
+              "puts cp first in every comment sort, latestReply included; without it every sort but old "
+              "would put cp last")
+        view = view or fold_vector_input(v["input"])
+        assert co(v) == us(order), sort
+        out.append(v)
+    assert [view.l35[u(x)].score for x in (cp, cq, cr)] == [0, 1, 1]
+
+    # Forum pins come first only in post magic (§12.2, item 18)
+    f = F(membership="approval")
+    p2 = f.post("adam", m(10))
+    p1 = f.post("adam", m(20))
+    p3 = f.post("adam", m(30))
+    recs = [p1, p2, p3, f.opinion("owner", p1, t=m(40), karma="down"),
+            f.modaction("owner", "pin", p1, pin_scope="forum", t=m(45))]
+    view = None
+    for sort, order in (("magic", [p1, p3, p2]), ("top", [p3, p2, p1]), ("new", [p3, p1, p2]),
+                        ("old", [p2, p1, p3]), ("recentComments", [p3, p1, p2])):
+        v = V(f"post-pins-only-in-magic-{sort}", f, recs, PQ(sort),
+              "the owner pins p1 (#pin{scope: forum}) and downvotes it (score 0; p2 and p3 score 1): the pin "
+              "puts p1 first only under magic; the other sorts ignore it")
+        view = view or fold_vector_input(v["input"])
+        assert po(v) == us(order), sort
+        out.append(v)
+    assert [view.l35[u(x)].score for x in (p1, p2, p3)] == [0, 1, 1]
+
+    # A hidden root post with a listed comment under a placeholder (§10.2, §12.4, §12.5)
+    f = F(membership="approval")
+    p = f.post("adam", m(10))
+    gone = f.comment_uri("zoe", u(p), m(15), 9)
+    c = f.comment("mona", p, m(20), parent=(gone, p["cid"]))
+    hide = f.modaction("owner", "hide", p, t=m(30))
+    v = V("hidden-root-tombstone-through-placeholder", f, [p, c, hide], CQ(p, "magic"),
+          "the owner hid adam's post; mona's comment names a parent comment that is no record, so it sits "
+          "under a Missing placeholder. The thread pass walks through the placeholder: the post becomes a "
+          "Tombstone, which is not listed, so Recent Discussion is empty; the placeholder (with a listed "
+          "descendant) and the comment are displayed",
+          fields=("commentOrder", "recentDiscussion"))
+    assert co(v) == [gone, u(c)] and v["expected"]["recentDiscussion"] == []
+    out.append(v)
+
+    # A re-attached hidden comment with a listed child is a Tombstone (§10.2)
+    f = F(membership="approval")
+    p = f.post("owner", m(5))
+    ux, uy = cyc(f, p, "adam", m(10), "mona", m(11))
+    hide = f.modaction("owner", "hide", uy, t=m(20))
+    v = V("reattached-hidden-comment-tombstone", f, [p, ux, uy, hide], CQ(p, "old"),
+          "adam's ux and mona's uy name each other as parent; uy (the greater uri) is re-attached to the root "
+          "and ux becomes its child. The owner hid uy, which has a listed child, so uy is displayed as a "
+          "Tombstone before ux")
+    assert u(uy) > u(ux) and co(v) == us([uy, ux])
+    out.append(v)
     return out
 
 
@@ -540,8 +697,8 @@ FILES = [
         "{fold: FoldInput, query: {posts: {sort, filter, tag?, kind?, author?}} | {comments: {thread, sort}} "
         "| {}}. expected: postOrder (listed post uris), hotBits ({post uri: 16 lowercase hex digits of "
         "the binary64 hot value} for each post in postOrder with b > 0, magic only), commentOrder "
-        "(displayed node uris in pre-order), recentDiscussion ([{post, comments}]). hotBits come from "
-        "Python's math.pow (hotBitsSource): compare within 1 ulp until the Rust side blesses exact bits; "
-        "orderings are exact (testdata/vectors/README.md, social section).",
-        rank_vectors(), hotBitsSource="python-math.pow")),
+        "(displayed node uris in pre-order), recentDiscussion ([{post, comments}]). hotBits equal hot() "
+        "computed with the pow of the libm crate 0.2.16 (hotBitsSource) and with Python's math.pow: "
+        "compare them exactly, like the orderings (testdata/vectors/README.md, social section).",
+        rank_vectors(), hotBitsSource="rust-libm-0.2.16")),
 ]

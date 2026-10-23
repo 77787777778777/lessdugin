@@ -168,26 +168,47 @@ string_enum! {
 }
 
 dto! {
-    /// The viewer's own opinion on an item.
+    /// The viewer's own opinion on an item, as stored in the cache (their public opinion
+    /// record).
     #[derive(Default)]
     pub struct MyOpinion {
         #[serde(skip_serializing_if = "Option::is_none")]
         pub karma: Option<KarmaValue>,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub agreement: Option<AgreementValue>,
+        /// A write of the viewer's opinion on this item is in the outbox and not done (held
+        /// for the undo window, or not sent yet): the values above are the stored ones.
+        #[serde(default, skip_serializing_if = "is_false")]
+        pub pending: bool,
+        /// The viewer's vote is recorded but carries no weight (`social.md` §5–§7: the viewer
+        /// is not an eligible voter yet, or the opinion does not count): "recorded; will count
+        /// once you're established".
+        #[serde(default, skip_serializing_if = "is_false")]
+        pub not_yet_counted: bool,
     }
 }
 
+/// `u32` fields omitted when zero.
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
 dto! {
-    /// Score of an item (`social.md` §7).
+    /// Score of an item (`social.md` §7). Hidden and tombstoned items show the zero score to
+    /// everyone but the forum's authorities (their scores are in the raw view).
     #[derive(Default)]
     pub struct ScoreView {
         pub score: i64,
         /// Absent when the forum's `policy.voting` is `karmaOnly` (`social.md` §7).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub agreement: Option<i64>,
+        /// "n votes not yet counted": counting karma votes by voters outside E.
         pub unweighted: u32,
+        /// N of "N of M votes were cast on an earlier version".
         pub earlier_version_votes: u32,
+        /// M of "N of M": the weighted karma votes (omitted when 0).
+        #[serde(default, skip_serializing_if = "is_zero")]
+        pub weighted_votes: u32,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub mine: Option<MyOpinion>,
     }
@@ -220,7 +241,10 @@ untagged! {
 }
 
 dto! {
-    /// Aggregated reacts of one kind (and anchor) on an item.
+    /// Aggregated reacts of one kind and quote on an item (`social.md` §9.2): the creator, the
+    /// supporters (`for`, the creator included: everyone else "seconded" it) and the opposers
+    /// (`against`). Sorted by palette order, then by the quote key. The viewer's own react that
+    /// forms no valid tally is listed too, with `uncounted` and no creator.
     pub struct ReactTally {
         pub react: String,
         pub label: String,
@@ -228,14 +252,22 @@ dto! {
         #[serde(rename = "for")]
         pub for_count: u32,
         pub against: u32,
+        /// The creator's quote (`None`: the react applies to the whole item).
         #[serde(skip_serializing_if = "Option::is_none")]
         pub quote: Option<TextQuote>,
+        /// The quote resolved against the item's current text (absent while the body is not
+        /// rendered or not fetched).
         #[serde(skip_serializing_if = "Option::is_none")]
         pub anchor: Option<Anchor>,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub creator: Option<String>,
+        /// The viewer's stance, as their opinion record states it.
         #[serde(skip_serializing_if = "Option::is_none")]
         pub mine: Option<Stance>,
+        /// The viewer's own react, which forms no valid react (no creator passes `reactCreate`,
+        /// or the viewer's opinion does not count).
+        #[serde(default, skip_serializing_if = "is_false")]
+        pub uncounted: bool,
     }
 }
 
@@ -386,6 +418,9 @@ dto! {
         #[serde(skip_serializing_if = "Option::is_none")]
         pub cursor: Option<String>,
         pub completeness: Completeness,
+        /// The forum's banners (`newerRules`, `moderationUnavailable`; `social.md` §1.6, §4.11).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub banners: Vec<Banner>,
     }
 }
 
@@ -480,6 +515,9 @@ dto! {
         pub comments: Vec<CommentNode>,
         pub sort: CommentSort,
         pub completeness: Completeness,
+        /// The forum's banners (as [`PostList::banners`]).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub banners: Vec<Banner>,
     }
 }
 
@@ -499,6 +537,9 @@ dto! {
         #[serde(skip_serializing_if = "Option::is_none")]
         pub cursor: Option<String>,
         pub completeness: Completeness,
+        /// The forum's banners (as [`PostList::banners`]).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub banners: Vec<Banner>,
     }
 }
 
@@ -594,6 +635,58 @@ dto! {
 }
 
 dto! {
+    /// What the viewer (the active account) may do in a forum, from the fold (`social.md` §4.9,
+    /// §5, §8): clients enable or disable actions with it. Writers check gates as UX only; the
+    /// fold decides what counts.
+    #[derive(Default)]
+    pub struct ViewerCaps {
+        /// Karma votes count (O4: not banned or nullified; not restricted from `vote`). A
+        /// counting vote carries weight only when `weighted`.
+        pub vote: bool,
+        /// Strong votes: the same as `vote` under `karma/1` (their power grows with KP).
+        pub strong_vote: bool,
+        /// Agreement votes count: `vote` and `policy.voting` ≠ `karmaOnly`.
+        pub agree: bool,
+        /// The viewer is an eligible voter (E): their counting votes carry weight; otherwise
+        /// they are "recorded; will count once you're established".
+        pub weighted: bool,
+        /// Reacts count: `policy.voting = reacts`, not restricted from `react`, O4, and the
+        /// viewer is in E (reacts by voters outside E are never counted).
+        pub react: bool,
+        /// `passes(reactCreate)`: a new react by the viewer is valid (with `react`).
+        pub react_create: bool,
+        /// `passes(reactSecond)`: the viewer seconds a react (with `react`).
+        pub react_second: bool,
+        /// `passes(reactAnti)`: the viewer's against-react counts (with `react`).
+        pub react_anti: bool,
+        /// The viewer's posts are listed (V2–V5, V8): a participant (or, in open mode, anyone
+        /// whose first content carries a membership), not banned, not restricted from `post`,
+        /// and in S when the view is degraded.
+        pub post: bool,
+        /// The same for comments (`comment` capability).
+        pub comment: bool,
+        /// Open mode: the viewer is a newcomer (P ∖ (S ∪ E), or not a participant yet), so their
+        /// content is collapsed or hidden per `display.newUsers` (V8).
+        pub newcomer: bool,
+        /// Approval mode: the viewer has a membership record and no grant (an applicant).
+        pub applicant: bool,
+        /// Forum-tier moderation (the viewer is an authority).
+        pub moderate: bool,
+        /// The viewer's authority rank (1 moderator, 2 admin, 3 owner).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub rank: Option<u8>,
+        /// Curation (`#tier{curated}`): an admin or the owner.
+        pub curate: bool,
+        /// Author moderation (`social.md` §4.9) on the viewer's own `personal` posts:
+        /// `policy.authorModeration`, the viewer in E, and `passes(authorModPersonal)`.
+        pub author_mod_personal: bool,
+        /// The same on the viewer's own `frontpage` and `curated` posts
+        /// (`passes(authorModFrontpage)`).
+        pub author_mod_frontpage: bool,
+    }
+}
+
+dto! {
     /// A forum header.
     pub struct ForumView {
         pub dto: DtoVersion,
@@ -607,6 +700,9 @@ dto! {
         pub my_karma: Option<i64>,
         pub banners: Vec<Banner>,
         pub completeness: Completeness,
+        /// What the viewer may do (absent without an active account).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub viewer: Option<ViewerCaps>,
     }
 }
 
@@ -649,14 +745,33 @@ dto! {
 }
 
 dto! {
-    /// A member of a forum.
+    /// A member of a forum: a DID with a valid membership record (`social.md` §3.1).
     pub struct MemberView {
         pub actor: ActorView,
+        /// owner, admin, moderator; member (a seed: granted or an authority); established (in
+        /// E, not a seed); newcomer (a participant outside S ∪ E, banned and nullified ones
+        /// included); none (not a participant: an applicant, or a member of an approval forum
+        /// without a grant).
         pub status: ForumRole,
         pub granted: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub membership_note: Option<String>,
         pub joined_at_ms: i64,
+        /// `K` (omitted when 0).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub karma: Option<i64>,
+        /// Approval mode: a membership without a grant, waiting for a decision.
+        #[serde(default, skip_serializing_if = "is_false")]
+        pub applicant: bool,
+        /// `access = banned` (B).
+        #[serde(default, skip_serializing_if = "is_false")]
+        pub banned: bool,
+        /// `nullifyVotes` (N).
+        #[serde(default, skip_serializing_if = "is_false")]
+        pub nullified: bool,
+        /// The capabilities the member is restricted from (`#restrict`), sorted.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub restricted: Vec<String>,
     }
 }
 
@@ -754,12 +869,16 @@ string_enum! {
 }
 
 dto! {
-    /// A notification.
+    /// A notification (`social.md` §16). `atMs` is when the item was first seen (never its
+    /// `createdAt`), or when a change (reacts, moderation, karma) was noticed; `forum` is the
+    /// forum it belongs to.
     pub struct NotificationView {
         pub id: String,
         pub reason: NotificationReason,
         pub at_ms: i64,
         pub subject: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub forum: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub actor: Option<ActorView>,
         pub read: bool,
@@ -769,15 +888,18 @@ dto! {
 }
 
 dto! {
-    /// Notifications.
+    /// Notifications, newest first; `unread` counts every unread notification (the badge).
     pub struct NotificationList {
         pub dto: DtoVersion,
         pub items: Vec<NotificationView>,
+        pub unread: u32,
     }
 }
 
 dto! {
-    /// A mod-queue item.
+    /// A mod-queue item (`social.md` §4.12). `kind`: `applicant` (subject: the DID),
+    /// `conflict` (subject: `tag:slug`), `stale` (subject: the edited record; `uri`: the stale
+    /// modAction) or `newcomer` (subject: a newcomer's collapsed or hidden item).
     pub struct ModQueueItem {
         #[serde(rename = "kind")]
         pub item_kind: String,
@@ -785,6 +907,15 @@ dto! {
         pub reason: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub detail: Option<String>,
+        /// The modAction a `stale` item is about.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub uri: Option<String>,
+        /// The applicant, or the newcomer item's author.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub actor: Option<ActorView>,
+        /// When the applicant joined, or the newcomer item's `t_rank`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub at_ms: Option<i64>,
     }
 }
 
@@ -796,17 +927,42 @@ dto! {
     }
 }
 
+string_enum! {
+    /// The status of a mod-log entry (`social.md` §4.12).
+    pub enum ModLogStatus {
+        Effective, Overridden, Lapsed, Expired, Stale, Unauthorised, ReservedUnknown, Edited,
+        Removed,
+    }
+}
+
 dto! {
-    /// A mod-log entry.
+    /// A mod-log entry (`social.md` §4.12): a modAction, or a revision that edited (`action:
+    /// "edit"`) or removed (`action: "remove"`) one. `action` is the modAction's action
+    /// (`hide`, `access`, `restrict`, `tier`, `pin`, `lock`, `tag`, or `unknown`), `value` its
+    /// asserted values (`hidden`, `visible`, `spam`, `banned`, `member`, `none`, `curated`,
+    /// `pinned`, …, comma-separated). `reason` of a `#hide` with `showReason: false` is shown
+    /// to the forum's authorities only.
     pub struct ModLogEntry {
+        /// The modAction or revision uri.
+        pub uri: String,
         pub actor: ActorView,
         pub action: String,
         pub subject: String,
         pub value: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub reason: Option<String>,
+        /// `updatedAt ?? createdAt` (0: a time before 1970).
         pub at_ms: i64,
+        pub status: ModLogStatus,
+        /// `status = lapsed`: by a former moderator (or a DID that never was one).
         pub lapsed: bool,
+        /// The winning rank of an `overridden` entry.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub rank: Option<u8>,
+        /// An author-scope assertion (`social.md` §4.9).
+        #[serde(default, skip_serializing_if = "is_false")]
+        pub author_scope: bool,
+        /// `adopts`: the record this one re-issues (`mod adopt`).
         #[serde(skip_serializing_if = "Option::is_none")]
         pub adopted_from: Option<String>,
     }
@@ -842,9 +998,15 @@ dto! {
         #[serde(skip_serializing_if = "Option::is_none")]
         pub record: Option<serde_json::Value>,
         pub validity: Vec<String>,
+        /// Every modAction in the forum naming the uri (valid or not), as `{uri, cid, valid,
+        /// rule?, status?, record}` by uri; `status` is the mod-log status (§4.12) of a listed
+        /// one.
         pub assertions: Vec<serde_json::Value>,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub state: Option<ItemState>,
+        /// The fold's score of an item (hidden items included, `social.md` §7).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub score: Option<ScoreView>,
     }
 }
 
@@ -1274,6 +1436,318 @@ impl Default for EditOpts {
             history: true,
             summary: None,
         }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// §3.5 Social writes, §3.6 local state (M3): opinions, moderation, notifications, local lists
+
+string_enum! {
+    /// Restrictable capabilities (`data-model.md` §6.7 `#restrict`).
+    pub enum Capability { Post, Comment, Vote, React, Tag, Wiki, Sequence }
+}
+
+string_enum! {
+    /// A modAction's scope (`data-model.md` §6.7): the forum tier, or the post author's tier
+    /// (`social.md` §4.9).
+    pub enum ModScope { Forum, Author }
+}
+
+string_enum! {
+    /// `#access.level` (`data-model.md` §6.7).
+    pub enum AccessLevel { Banned, Member }
+}
+
+string_enum! {
+    /// `#pin.scope`: a post or sequence in the forum's lists, or a comment in its thread.
+    pub enum PinScope { Forum, Thread }
+}
+
+string_enum! {
+    /// Public actions with a first-use interstitial (`social.md` §17, `threat-model.md`
+    /// PRIV-9): vote or agree, react, tag vote, join or apply, mod action.
+    pub enum PublicActionKind { Vote, React, TagVote, Join, ModAction }
+}
+
+dto! {
+    /// `opinion(subject, OpinionIntent)` (`engine-api.md` §3.5, `data-model.md` §8.5): one
+    /// change of the viewer's opinion on an item. An absent `value` clears the axis or tag vote.
+    /// `React.quote` anchors the react to a passage (only `exact` is needed: the engine derives
+    /// `prefix`, `suffix` and `start` from the item's current text, W8).
+    pub enum OpinionIntent {
+        Karma {
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            value: Option<KarmaValue>,
+        },
+        Agreement {
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            value: Option<AgreementValue>,
+        },
+        React {
+            id: String,
+            stance: Stance,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            quote: Option<TextQuote>,
+            #[serde(default)]
+            remove: bool,
+        },
+        Tag {
+            slug: String,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            value: Option<KarmaValue>,
+        },
+    }
+}
+
+impl OpinionIntent {
+    /// The public action whose first-use interstitial covers this intent (`social.md` §17).
+    pub fn public_kind(&self) -> PublicActionKind {
+        match self {
+            Self::Karma { .. } | Self::Agreement { .. } => PublicActionKind::Vote,
+            Self::React { .. } => PublicActionKind::React,
+            Self::Tag { .. } => PublicActionKind::TagVote,
+        }
+    }
+}
+
+/// The default of `#hide.showReason`.
+fn yes() -> bool {
+    true
+}
+
+dto! {
+    /// A modAction `action` as a client asks for it (`data-model.md` §6.7). A record states the
+    /// complete desired state of its action key (`social.md` §4.2): a `restrict` lists every
+    /// capability, a `hide` says whether it is spam. `lock.allowed` is computed by the engine
+    /// from its view of the thread (`data-model.md` §8.6); `tag.head` is a wikiRevision uri
+    /// (its CID is the cached version's).
+    pub enum ModActionValue {
+        #[serde(rename_all = "camelCase")]
+        Hide {
+            hidden: bool,
+            #[serde(default)]
+            spam: bool,
+            #[serde(default = "yes")]
+            show_reason: bool,
+        },
+        Access { level: AccessLevel },
+        #[serde(rename_all = "camelCase")]
+        Restrict {
+            capabilities: Vec<Capability>,
+            #[serde(default)]
+            nullify_votes: bool,
+        },
+        Tier {
+            tier: Tier,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            notice: Option<BodyDraft>,
+        },
+        Pin { scope: PinScope, pinned: bool },
+        Lock { locked: bool },
+        Tag {
+            removed: bool,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            head: Option<String>,
+        },
+    }
+}
+
+impl ModActionValue {
+    /// `actionKey` (`data-model.md` §3.1): the definition name, or `"pin:" + scope`.
+    pub fn action_key(&self) -> &'static str {
+        match self {
+            Self::Hide { .. } => "hide",
+            Self::Access { .. } => "access",
+            Self::Restrict { .. } => "restrict",
+            Self::Tier { .. } => "tier",
+            Self::Pin {
+                scope: PinScope::Forum,
+                ..
+            } => "pin:forum",
+            Self::Pin {
+                scope: PinScope::Thread,
+                ..
+            } => "pin:thread",
+            Self::Lock { .. } => "lock",
+            Self::Tag { .. } => "tag",
+        }
+    }
+}
+
+dto! {
+    /// `mod_action(ModActionIntent)` (`data-model.md` §6.7, §8.4, §8.6). `assert` creates the
+    /// acting account's record for (scope, subject, action key), or updates it through the edit
+    /// protocol; `remove` deletes it through the removal protocol (unhide, unban, unpin,
+    /// unlock, unrestrict, …). `subject` is a DID (or handle), an at-uri or `tag:<slug>`.
+    pub enum ModActionIntent {
+        #[serde(rename_all = "camelCase")]
+        Assert {
+            forum: String,
+            scope: ModScope,
+            subject: String,
+            action: ModActionValue,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            reason: Option<String>,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            until_ms: Option<i64>,
+        },
+        #[serde(rename_all = "camelCase")]
+        Remove {
+            forum: String,
+            scope: ModScope,
+            subject: String,
+            action_key: String,
+        },
+    }
+}
+
+dto! {
+    /// `mods_set(forum, ModsChange)` (`data-model.md` §8.4, §8.6): add (or change the role of)
+    /// a moderator, or remove one. A removal runs `mod adopt` first and edits the declaration
+    /// only once the adoption is done; `skipAdopt` is the opt-out for a rogue moderator, which
+    /// clients offer only after a confirmation listing every assertion that will lapse.
+    pub enum ModsChange {
+        Add {
+            did: String,
+            role: ModRole,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            title: Option<String>,
+        },
+        #[serde(rename_all = "camelCase")]
+        Remove {
+            did: String,
+            #[serde(default)]
+            skip_adopt: bool,
+        },
+    }
+}
+
+string_enum! {
+    /// What a notice on an action's result is about.
+    pub enum NoticeCode { NotEstablished, Retroactive, AdoptedFirst }
+}
+
+dto! {
+    /// A notice clients show with an action's result, e.g. "recorded; will count once you're
+    /// established" (`code` is stable; `message` is English text).
+    pub struct ActionNotice {
+        pub code: NoticeCode,
+        pub message: String,
+    }
+}
+
+dto! {
+    /// What `opinion`, `mod_action` and `mods_set` return: the write's ticket (as
+    /// [`WriteTicket`]) and the notices to show with it.
+    pub struct ActionTicket {
+        pub id: String,
+        pub state: WriteState,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub notices: Vec<ActionNotice>,
+    }
+}
+
+impl ActionTicket {
+    /// The ticket without notices.
+    pub fn new(t: WriteTicket) -> Self {
+        Self {
+            id: t.id,
+            state: t.state,
+            notices: Vec::new(),
+        }
+    }
+
+    /// Adds a notice.
+    pub fn with_notice(mut self, code: NoticeCode, message: impl Into<String>) -> Self {
+        self.notices.push(ActionNotice {
+            code,
+            message: message.into(),
+        });
+        self
+    }
+
+    /// The plain [`WriteTicket`].
+    pub fn ticket(&self) -> WriteTicket {
+        WriteTicket {
+            id: self.id.clone(),
+            state: self.state.clone(),
+        }
+    }
+}
+
+dto! {
+    /// `notifications(NotificationsQuery)` (`engine-api.md` §3.4).
+    pub struct NotificationsQuery {
+        /// `false`: unread only; `true`: everything.
+        #[serde(default)]
+        pub all: bool,
+        pub limit: u32,
+    }
+}
+
+impl Default for NotificationsQuery {
+    fn default() -> Self {
+        Self {
+            all: false,
+            limit: 50,
+        }
+    }
+}
+
+string_enum! {
+    /// How often karma changes are notified (`social.md` §16; default daily).
+    pub enum KarmaCadence { Realtime, Daily, Weekly }
+}
+
+dto! {
+    /// A local subscription (`social.md` §16): new posts in a forum, by a user or with a tag;
+    /// new comments on a post; new entries of a sequence.
+    #[derive(Eq, PartialOrd, Ord)]
+    pub enum Subscription {
+        Forum { uri: String },
+        Post { uri: String },
+        User { did: String },
+        Tag { forum: String, slug: String },
+        Sequence { uri: String },
+    }
+}
+
+dto! {
+    /// A subscription and since when (ms).
+    pub struct SubscriptionEntry {
+        pub subscription: Subscription,
+        pub since_ms: i64,
+    }
+}
+
+dto! {
+    /// A local bookmark, with the post's summary when its forum is loaded.
+    pub struct BookmarkEntry {
+        pub uri: String,
+        pub saved_at_ms: i64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub post: Option<PostSummary>,
+    }
+}
+
+dto! {
+    /// Unread state of one followed forum (`social.md` §16): listed posts and comments first
+    /// seen since the last visit (never by `createdAt`), and unread notifications.
+    pub struct ForumUnread {
+        pub forum: String,
+        pub posts: u32,
+        pub comments: u32,
+        pub notifications: u32,
+    }
+}
+
+dto! {
+    /// `unread_counts()`: the notification badge and the unread state of every followed forum
+    /// (sorted by forum uri).
+    pub struct UnreadCounts {
+        pub dto: DtoVersion,
+        pub notifications: u32,
+        pub forums: Vec<ForumUnread>,
     }
 }
 

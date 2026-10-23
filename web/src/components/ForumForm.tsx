@@ -89,9 +89,9 @@ export function forumDraftProblems(d: ForumDraft, creating: boolean): string[] {
     }
   }
   if (d.name.trim() === "") out.push("The forum needs a name.");
-  if (d.featuredTags.length > MAX_FEATURED_TAGS)
-    out.push(`At most ${MAX_FEATURED_TAGS} featured tags.`);
-  const bad = d.featuredTags.filter((t) => !SLUG_RE.test(t));
+  const featured = d.featuredTags ?? [];
+  if (featured.length > MAX_FEATURED_TAGS) out.push(`At most ${MAX_FEATURED_TAGS} featured tags.`);
+  const bad = featured.filter((t) => !SLUG_RE.test(t));
   if (bad.length > 0) out.push(`Not a tag slug: ${bad.join(", ")}`);
   if (d.reportContact !== undefined && !REPORT_CONTACT_RE.test(d.reportContact)) {
     out.push("The report contact must start with mailto:, https:// or at://.");
@@ -142,7 +142,7 @@ export function ForumForm({
   const [about, setAbout] = useState(initial.about?.markdown ?? "");
   const [membership, setMembership] = useState<MembershipMode>(initial.membership);
   const [tier, setTier] = useState(initial.defaultTier);
-  const [featured, setFeatured] = useState(initial.featuredTags.join(" "));
+  const [featured, setFeatured] = useState((initial.featuredTags ?? []).join(" "));
   const [contact, setContact] = useState(initial.reportContact ?? "");
   const [problems, setProblems] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
@@ -154,8 +154,8 @@ export function ForumForm({
       membership,
       defaultTier: tier,
       featuredTags: splitTags(featured),
-      moderators: initial.moderators,
     };
+    if (initial.moderators) d.moderators = initial.moderators;
     if (description.trim() !== "") d.description = description.trim();
     if (about.trim() !== "") d.about = { markdown: about, media: initial.about?.media ?? [] };
     if (contact.trim() !== "") d.reportContact = contact.trim();

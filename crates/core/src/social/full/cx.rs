@@ -7,8 +7,9 @@
 //! well-formed (§1.1): decl valid; records = memberships with rkey fk ∪ ranged collections in the
 //!                     "{fk}-" range; absent ∩ records = ∅; every absent uri is the subject of an
 //!                     opinion in records; algorithmIds, when stated, = the effective IDs (§1.6)
-//! V1 excluded(x)    ⇔ x invalid ∨ x.forum ≠ F ∨ CO5 (x is a comment whose root uri is in records,
-//!                     valid or not, with value.forum ≠ x.forum; an absent forum fails)
+//! V1 excluded(x)    ⇔ x invalid ∨ x.forum ≠ F ∨ CO5 (x is a comment whose root uri is a valid
+//!                     record in records with value.forum ≠ x.forum; an invalid root is a Missing
+//!                     root and excludes nothing, §20.1 item 51)
 //! ```
 //!
 //! Records are read from their JSON values with the namespace prefix `ns` (never the typed
@@ -21,7 +22,7 @@ use lessdugin_lexicon::Collection;
 use lessdugin_lexicon::records::Forum;
 use serde_json::Value;
 
-use crate::social::fold::FoldError;
+use crate::social::FoldError;
 use crate::social::input::{FoldInput, ForumInput, Skel, SkelData, split_uri};
 use crate::social::policy::EffectivePolicy;
 use crate::store::repo::RepoStatus;
@@ -222,11 +223,13 @@ impl<'a> Cx<'a> {
         if !self.in_forum(x) {
             return true;
         }
-        // CO5: compared literally, even when the root is invalid (NOTES 20)
+        // CO5: only a valid root is compared (§20.1 item 51, NOTES 20); an invalid one is a
+        // Missing root, whose comments stay in the thread
         if let SkelData::Comment {
             root: Some(root), ..
         } = &x.data
             && let Some(r) = self.skel(&root.uri)
+            && r.valid
             && r.forum != x.forum
         {
             return true;

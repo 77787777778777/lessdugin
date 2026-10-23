@@ -55,6 +55,9 @@ unicode-security = "0.1"
 # rendering
 pulldown-cmark = { version = "=0.13.4", default-features = false }
 math-core = "=0.9.0"
+# Exact: Unicode data is part of the frozen lfm/1 semantics (lfm-1.md §2 "Unicode data").
+unicase = "=2.10.0" # footnote label matching, as pulldown-cmark does
+unicode-general-category = "=1.1.0" # Unicode 16.0; slugs, anchors, the host test
 ammonia = "4.2"
 
 # core runtime-agnostic
