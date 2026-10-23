@@ -28,8 +28,12 @@ jobs:
       - run: cargo clippy --target wasm32-unknown-unknown -p lessdugin-atp -p lessdugin-lexicon -p lessdugin-markdown -p lessdugin-core -p lessdugin-wasm -- -D warnings
       - run: cargo test --workspace
       # M2 acceptance: the 50-member cold sync in under 5 s, asserted on an optimised build
-      # (the debug run above only warns between 5 and 15 s)
+      # (the debug run above only warns between 5 and 15 s). This job never builds the SPA,
+      # so the release CLI embeds the placeholder page (build.rs WEB-5 escape hatch); the
+      # real bundle is verified by the `web` job's `pnpm run build` + check-release-bundle.
       - run: cargo test --release -p lessdugin --features devnet --test cold_sync
+        env:
+          LESSDUGIN_WEB_PLACEHOLDER: "1"
       # the social-fold vectors again at the final namespace (as `cargo xtask ci`)
       - run: cargo test -p lessdugin-core --features final-ns --test social_vectors --test social_fold --test social_query --test model_reorder
       # testdata/dto/dto-1.d.ts is what the Rust DTOs generate (types.parity.test.ts compares types.ts with it)
