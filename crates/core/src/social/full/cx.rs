@@ -6,7 +6,7 @@
 //! ```text
 //! well-formed (§1.1): decl valid; records = memberships with rkey fk ∪ ranged collections in the
 //!                     "{fk}-" range; absent ∩ records = ∅; every absent uri is the subject of an
-//!                     opinion in records
+//!                     opinion in records; algorithmIds, when stated, = the effective IDs (§1.6)
 //! V1 excluded(x)    ⇔ x invalid ∨ x.forum ≠ F ∨ CO5 (x is a comment whose root uri is in records,
 //!                     valid or not, with value.forum ≠ x.forum; an absent forum fails)
 //! ```
@@ -88,6 +88,28 @@ impl<'a> Cx<'a> {
     }
 
     fn check_well_formed(&self) -> Result<(), FoldError> {
+        if let Some(ids) = &self.input.algorithm_ids {
+            let p = &self.policy;
+            let derived = [
+                p.moderation.as_str(),
+                p.karma.as_str(),
+                p.ranking.as_str(),
+                p.react_palette.as_str(),
+            ];
+            let stated = [
+                ids.moderation.as_str(),
+                ids.karma.as_str(),
+                ids.ranking.as_str(),
+                ids.react_palette.as_str(),
+            ];
+            if derived != stated {
+                return Err(FoldError(format!(
+                    "algorithmIds {} differ from the effective IDs {} of the declaration",
+                    stated.join(","),
+                    derived.join(",")
+                )));
+            }
+        }
         let range = format!("{}-", self.fk());
         for x in self.skel.records.values() {
             let ok = match x.coll {
@@ -96,7 +118,10 @@ impl<'a> Cx<'a> {
                 None => false,
             };
             if !ok {
-                return Err(FoldError(format!("{} is outside the fold input's sets", x.uri)));
+                return Err(FoldError(format!(
+                    "{} is outside the fold input's sets",
+                    x.uri
+                )));
             }
         }
         let subjects: BTreeSet<&str> = self

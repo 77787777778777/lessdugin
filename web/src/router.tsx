@@ -172,6 +172,11 @@ const loginRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/login",
   component: LoginPage,
+  // `error`: the engine error code `lessdugin web` sends a failed sign-in back with.
+  validateSearch: (s: Record<string, unknown>): { error?: string } => {
+    const e = str(s.error);
+    return e && /^[a-z_]{1,40}$/.test(e) ? { error: e } : {};
+  },
 });
 
 export const routeTree = rootRoute.addChildren([

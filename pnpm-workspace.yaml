@@ -10,3 +10,7 @@ onlyBuiltDependencies:
 minimumReleaseAgeExclude:
   - "@atproto/*"
   - "@did-plc/*"
+# The browser OAuth client sits on the token path (threat-model SUP-6): its own dependency on
+# @atproto/oauth-client is pinned to the release it was published with (synthesis §6.6).
+overrides:
+  "@atproto/oauth-client-browser>@atproto/oauth-client": 0.8.9

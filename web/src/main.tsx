@@ -31,7 +31,12 @@ function start(): void {
     },
     (error: unknown) => {
       const p = document.createElement("p");
-      p.textContent = `The forum engine failed to start: ${String(error)}`;
+      p.setAttribute("role", "alert");
+      // A `lessdugin web` tab without a bridge session gets the §7.2 text as it is.
+      p.textContent =
+        error instanceof Error && error.name === "BridgeLinkError"
+          ? error.message
+          : `The forum engine failed to start: ${error instanceof Error ? error.message : String(error)}`;
       rootEl.replaceChildren(p);
     },
   );

@@ -29,9 +29,7 @@ pub fn participation(cx: &Cx<'_>, a: &BTreeMap<String, u8>, l1: &Moderation) -> 
     let mode = cx.policy.membership;
     let members: BTreeSet<String> = cx
         .records()
-        .filter(|x| {
-            x.coll == Some(Collection::Membership) && x.rkey == cx.fk() && cx.in_forum(x)
-        })
+        .filter(|x| x.coll == Some(Collection::Membership) && x.rkey == cx.fk() && cx.in_forum(x))
         .map(|x| x.did.clone())
         .collect();
     let mut g = BTreeSet::new();

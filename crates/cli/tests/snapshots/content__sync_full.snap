@@ -1,0 +1,6 @@
+---
+source: crates/cli/tests/content.rs
+expression: "redact(&users, &alice.ok(&[\"sync\", \"--full\"]))"
+---
+Synced at://<alice>/online.7778777.lessdugin.temp.forum/lounge
+  2 of 2 repositories complete · <n> records changed · <n> requests

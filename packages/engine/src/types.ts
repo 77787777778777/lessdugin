@@ -653,11 +653,20 @@ export interface AccountView {
   active: boolean;
 }
 
-/** `add_account(AccountInfo { did, pds, auth: AuthKind })`. */
+/** `add_account(AccountInfo { did, pds, auth: AuthKind, issuer?, intended?,
+ * confirmIssuerChange })`: what the login code reports after obtaining a session. */
 export interface AccountInfo {
+  /** The session's DID (the token's `sub`). */
   did: Did;
+  /** The PDS the session talks to. */
   pds: string;
   auth: AuthKind;
+  /** The OAuth authorization server issuer (`iss`); required for OAuth. */
+  issuer?: string;
+  /** The DID the user asked to log in as (resolved from their input), if any. */
+  intended?: Did;
+  /** The user confirmed a changed authorization server (`sync.md` §3.6); default `false`. */
+  confirmIssuerChange?: boolean;
 }
 
 export type AuthState = { kind: "ok" } | { kind: "expiring"; inMs: Ms } | { kind: "expired" };

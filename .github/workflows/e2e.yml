@@ -1,4 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
+# End-to-end tests against the local devnet (packages/e2e/devnet.mjs: PLC + PDS with alice, bob
+# and carol; ADR 0006). The same runs locally with `cargo xtask e2e` (packages/e2e/README.md).
 name: e2e
 on:
   pull_request:
@@ -7,11 +9,55 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
 env:
   CARGO_TERM_COLOR: always
+  # Chromium for Playwright and for the CLI tests' OAuth approvals (installed below; the
+  # Playwright version is pinned in web/package.json)
+  PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.pw-browsers
 jobs:
-  devnet:
+  # The devnet boots; then the Rust e2e tests (LESSDUGIN_E2E=1), each against a devnet of its
+  # own: identity and the login binding, the native host, the CLI's app-password and OAuth
+  # logins (headless Chromium approves at the PDS), concurrent refresh, the CLI forum scenario
+  # in parity mode, `lessdugin web`'s browser sign-in, and the TUI's reply through $EDITOR.
+  rust:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: "1.97.0"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: "22"
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @lessdugin/web exec playwright install --with-deps chromium
+      - name: devnet boots
+        working-directory: packages/e2e
+        run: |
+          node devnet.mjs --json devnet.json > devnet.log 2>&1 &
+          pid=$!
+          for i in $(seq 1 120); do [ -s devnet.json ] && break; sleep 1; done
+          cat devnet.json || cat devnet.log
+          test -s devnet.json
+          kill "$pid"
+      - name: Rust e2e (LESSDUGIN_E2E=1)
+        run: cargo xtask e2e --rust
+  # The SPA on the real wasm engine against the devnet, in Chromium (web/e2e/devnet): hosted
+  # mode with OAuth at the devnet PDS, parity mode, `lessdugin web` (the CLI embeds the e2e
+  # build), and the M2 parity scenario (docs/plan.md §4.2, text subset: alice with the CLI, bob
+  # in the SPA, carol in the TUI; the three clients' anonymous views must be byte-identical).
+  # Any CSP or Trusted Types violation fails. `cargo xtask e2e --web` builds the engine wasm,
+  # the e2e SPA, the CLI and the TUI parity driver first.
+  web:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
@@ -24,12 +70,18 @@ jobs:
         with:
           node-version: "22"
           cache: pnpm
+      - run: cargo install wasm-bindgen-cli --version =0.2.129 --locked
       - run: pnpm install --frozen-lockfile
-      - run: pnpm --filter @lessdugin/e2e exec playwright install --with-deps chromium
-      - name: devnet boots
-        run: |
-          cd packages/e2e
-          timeout 120 node devnet.mjs --json devnet.json &
-          for i in $(seq 1 60); do [ -s devnet.json ] && break; sleep 1; done
-          cat devnet.json
-          test -s devnet.json
+      - run: pnpm --filter @lessdugin/web exec playwright install --with-deps chromium
+      - name: Playwright devnet suite and the M2 parity scenario
+        run: cargo xtask e2e --web
+      # the parity scenario's outputs, timings and (on a mismatch) diffs, and the traces of
+      # failed tests
+      - name: upload test results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: e2e-web-test-results
+          path: test-results/web-e2e-devnet
+          if-no-files-found: ignore
+          retention-days: 14

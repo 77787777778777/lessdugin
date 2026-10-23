@@ -1,15 +1,19 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // A tiny static server for the e2e tests: serves web/dist with the production response headers
 // taken from deploy/site/_headers (the `/*` block), so CSP and Trusted Types are enforced
-// exactly as on the hosted site.
+// exactly as on the hosted site. `dev: true` swaps in the §6.2 development policy (the devnet
+// e2e harness: `connect-src` also allows `http:` and `ws:`), everything else unchanged.
 
 import { readFile, stat } from "node:fs/promises";
 import { createServer } from "node:http";
 import { extname, join, normalize, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { DEV_CSP } from "../csp.mjs";
 
 const here = fileURLToPath(new URL(".", import.meta.url));
 export const DIST = resolve(here, "../dist");
+/** The e2e build (`VITE_E2E=1 vite build --outDir dist-e2e`). */
+export const DIST_E2E = resolve(here, "../dist-e2e");
 export const HEADERS_FILE = resolve(here, "../../deploy/site/_headers");
 
 const MIME = {
@@ -51,8 +55,9 @@ export async function productionHeaders() {
 }
 
 /** Starts the server on 127.0.0.1:`port` (0 = any free port). Resolves to `{ url, close }`. */
-export async function startStaticServer({ port = 0, root = DIST } = {}) {
-  const headers = await productionHeaders();
+export async function startStaticServer({ port = 0, root = DIST, dev = false } = {}) {
+  const headers = { ...(await productionHeaders()) };
+  if (dev) headers["Content-Security-Policy"] = DEV_CSP;
   const server = createServer(async (req, res) => {
     try {
       const path = decodeURIComponent(new URL(req.url ?? "/", "http://x").pathname);

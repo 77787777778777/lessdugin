@@ -10,7 +10,6 @@ import { useEffect, useRef, useState } from "react";
 import { useEngine, useEngineHandle } from "../engine/context.tsx";
 import { useCurrentForum } from "../engine/currentForum.ts";
 import { qk, useActiveAccount, useFollowed, useUnreadNotifications } from "../engine/queries.ts";
-import { mockAllowed } from "../engine/select.ts";
 import { useWritesInFlight } from "../engine/writes.ts";
 import { cleanName } from "../lib/text.ts";
 import { parseAtUri } from "../lib/uri.ts";
@@ -18,7 +17,8 @@ import { useAccountActor } from "./AccountName.tsx";
 import { actorLabel } from "./ActorName.tsx";
 import styles from "./AppShell.module.css";
 import { SafeLink } from "./SafeLink.tsx";
-import { ToastRegion } from "./Toast.tsx";
+import { errorMessage } from "./Status.tsx";
+import { ToastRegion, toasts } from "./Toast.tsx";
 
 function ForumSwitcher() {
   const followed = useFollowed();
@@ -48,7 +48,7 @@ function ForumSwitcher() {
 }
 
 function AccountMenu() {
-  const engine = useEngine();
+  const handle = useEngineHandle();
   const qc = useQueryClient();
   const active = useActiveAccount();
   const [open, setOpen] = useState(false);
@@ -141,7 +141,10 @@ function AccountMenu() {
             className={styles.menuItem}
             onClick={() => {
               setOpen(false);
-              void engine.removeAccount(account.did, false).then(() => qc.invalidateQueries());
+              handle.login.logout(account.did).then(
+                () => qc.invalidateQueries(),
+                (e: unknown) => toasts.show({ message: errorMessage(e), tone: "error" }),
+              );
             }}
           >
             Sign out
@@ -206,22 +209,13 @@ function SearchBox() {
 
 function EngineBanner() {
   const handle = useEngineHandle();
-  if (handle.kind === "mock") {
-    return (
-      <p className={styles.engineBanner} data-testid="mock-banner">
-        Demo mode: the in-memory mock engine with fixture data. Nothing leaves this tab.
-      </p>
-    );
-  }
+  if (!handle.notice) return null;
   return (
-    <p className={styles.engineBanner}>
-      The lessdugin engine is not yet available in this build.
-      {mockAllowed(import.meta.env) && (
-        <>
-          {" "}
-          Add <code>?mock</code> to the address to explore with demo data.
-        </>
-      )}
+    <p
+      className={styles.engineBanner}
+      data-testid={handle.kind === "mock" ? "mock-banner" : "engine-banner"}
+    >
+      {handle.notice}
     </p>
   );
 }

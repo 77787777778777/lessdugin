@@ -4,6 +4,9 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+overrides:
+  '@atproto/oauth-client-browser>@atproto/oauth-client': 0.8.9
+
 importers:
 
   .:
@@ -39,6 +42,9 @@ importers:
       '@types/node':
         specifier: ^22.0.0
         version: 22.20.5
+      fake-indexeddb:
+        specifier: ^6.2.5
+        version: 6.2.5
       typescript:
         specifier: ^7.0.0
         version: 7.0.2
@@ -51,6 +57,9 @@ importers:
 
   web:
     dependencies:
+      '@atproto/oauth-client-browser':
+        specifier: 0.5.9
+        version: 0.5.9
       '@codemirror/commands':
         specifier: ^6.0.0
         version: 6.11.1
@@ -160,6 +169,14 @@ packages:
     resolution: {integrity: sha512-ro/J/cnqIp4bnSzDl8N3SkruvQcE3Pze+1H70mKdFfyFcdhPr+7O4lggl4VCbhI84Yqgz47c0xC6F/Yl39SxDA==}
     engines: {node: '>=22'}
 
+  '@atproto-labs/handle-resolver@0.4.10':
+    resolution: {integrity: sha512-hsYYvGhi6Tv6f4Fti//i/vllVIb/wrJaOcbT3Yh7oo10VxBKAyxzVaB7mIJcho2YJ5kHd2kbCYYPWLw8pvm/bg==}
+    engines: {node: '>=22'}
+
+  '@atproto-labs/identity-resolver@0.4.10':
+    resolution: {integrity: sha512-deKu7csOsM8lnIRnLa97te6ODIUx0Lm3Srxid/Ix+UYQqFKA0sIpfYmHZduAK7B+aTqiPcHjoA9Y/qpJyzgnMw==}
+    engines: {node: '>=22'}
+
   '@atproto-labs/opentelemetry-node@0.3.1':
     resolution: {integrity: sha512-OgEfUVGCrB5WhCPS8YyRHReLSugblYPwOAcmsVj0D5pwg95r7u9z8lfrF1BDemsEz3BOpF8cTstsFJzFdFVViA==}
     engines: {node: '>=22'}
@@ -240,6 +257,10 @@ packages:
     resolution: {integrity: sha512-gzDoA0JTwnc0ZJOBLM7WX9xFxtynRS2K1Bofb8epzoMWDQvyvfbPcfkdPrKFM7NXCFUVpGpBnsCB8KFPTf1rCg==}
     engines: {node: '>=22'}
 
+  '@atproto/jwk-webcrypto@0.3.4':
+    resolution: {integrity: sha512-UsFIUozqnRecXPo6HgKV4PW4FqYHxX1V3iAe0rRV6Q2RSfYD8V2mZ89pv8NpvJynnaqJArBQ7HZlcg0F4tRYhA==}
+    engines: {node: '>=22'}
+
   '@atproto/jwk@0.7.4':
     resolution: {integrity: sha512-tq7TUDmNfe1yDfpRgdGQMJdl9TUlJmREQNCag9yg5w8Evu+TOiFiLgiOCbo7X4ouRPSgd1DpOzXbUa8UyKKMZA==}
     engines: {node: '>=22'}
@@ -292,6 +313,14 @@ packages:
 
   '@atproto/lexicon@0.7.16':
     resolution: {integrity: sha512-iZ7LI/EfrQ++DAD4G4OrnB6tNHs+x3Qf5dxyXdLYOxjdjp5SjH2lipL/ecQxUMn9q/4eEkqEC0rvyx4eZd772w==}
+    engines: {node: '>=22'}
+
+  '@atproto/oauth-client-browser@0.5.9':
+    resolution: {integrity: sha512-3nULDZzU1xCIfqlbwlLFdsnmPJCJquIkkas8/EecMnpc4wLUhAQK0TzTJszkhPeEdUb3szk7yOHAYuVVvyZO0w==}
+    engines: {node: '>=22'}
+
+  '@atproto/oauth-client@0.8.9':
+    resolution: {integrity: sha512-K7IBkM4mCGOX3qDFyPIUEbFSxgxe1NCWRncYqTCFaayAie9O2iTZedagFxV47ZnvKHCWf7u1OUtYO/WqEs8uXg==}
     engines: {node: '>=22'}
 
   '@atproto/oauth-provider-api@0.10.0':
@@ -2265,6 +2294,10 @@ packages:
   extend@3.0.2:
     resolution: {integrity: sha512-fjquC59cD7CyW6urNXK0FBufkZcoiGG80wTuPujX590cB5Ttln20E2UB4S/WARVqhXffZl2LNgS+gQdPIIim/g==}
 
+  fake-indexeddb@6.2.5:
+    resolution: {integrity: sha512-CGnyrvbhPlWYMngksqrSSUT1BAVP49dZocrHuK0SvtR0D5TMs5wP0o3j7jexDJW01KSadjBp1M/71o/KR3nD1w==}
+    engines: {node: '>=18'}
+
   fast-printf@1.6.10:
     resolution: {integrity: sha512-GwTgG9O4FVIdShhbVF3JxOgSBY2+ePGsu2V/UONgoCPzF9VY6ZdBMKsHKCYQHZwNk3qNouUolRDsgVxcVA5G1w==}
     engines: {node: '>=10.0'}
@@ -3607,6 +3640,18 @@ snapshots:
     dependencies:
       '@atproto-labs/pipe': 0.2.4
 
+  '@atproto-labs/handle-resolver@0.4.10':
+    dependencies:
+      '@atproto-labs/simple-store': 0.5.1
+      '@atproto-labs/simple-store-memory': 0.2.6
+      '@atproto/did': 0.5.6
+      zod: 3.25.76
+
+  '@atproto-labs/identity-resolver@0.4.10':
+    dependencies:
+      '@atproto-labs/did-resolver': 0.3.10
+      '@atproto-labs/handle-resolver': 0.4.10
+
   '@atproto-labs/opentelemetry-node@0.3.1':
     dependencies:
       '@opentelemetry/api': 1.9.1
@@ -3838,6 +3883,12 @@ snapshots:
       '@atproto/jwk': 0.7.4
       jose: 5.10.0
 
+  '@atproto/jwk-webcrypto@0.3.4':
+    dependencies:
+      '@atproto/jwk': 0.7.4
+      '@atproto/jwk-jose': 0.2.4
+      zod: 3.25.76
+
   '@atproto/jwk@0.7.4':
     dependencies:
       multiformats: 13.4.2
@@ -3933,6 +3984,34 @@ snapshots:
     dependencies:
       '@atproto/common-web': 0.5.15
       '@atproto/syntax': 0.7.7
+      multiformats: 13.4.2
+      zod: 3.25.76
+
+  '@atproto/oauth-client-browser@0.5.9':
+    dependencies:
+      '@atproto-labs/did-resolver': 0.3.10
+      '@atproto-labs/handle-resolver': 0.4.10
+      '@atproto-labs/simple-store': 0.5.1
+      '@atproto/did': 0.5.6
+      '@atproto/jwk': 0.7.4
+      '@atproto/jwk-webcrypto': 0.3.4
+      '@atproto/oauth-client': 0.8.9
+      '@atproto/oauth-types': 0.7.7
+      core-js: 3.50.0
+
+  '@atproto/oauth-client@0.8.9':
+    dependencies:
+      '@atproto-labs/did-resolver': 0.3.10
+      '@atproto-labs/fetch': 0.3.6
+      '@atproto-labs/handle-resolver': 0.4.10
+      '@atproto-labs/identity-resolver': 0.4.10
+      '@atproto-labs/simple-store': 0.5.1
+      '@atproto-labs/simple-store-memory': 0.2.6
+      '@atproto/did': 0.5.6
+      '@atproto/jwk': 0.7.4
+      '@atproto/oauth-types': 0.7.7
+      '@atproto/xrpc': 0.8.15
+      core-js: 3.50.0
       multiformats: 13.4.2
       zod: 3.25.76
 
@@ -6303,6 +6382,8 @@ snapshots:
       - supports-color
 
   extend@3.0.2: {}
+
+  fake-indexeddb@6.2.5: {}
 
   fast-printf@1.6.10: {}
 

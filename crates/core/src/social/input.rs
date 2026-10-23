@@ -5,7 +5,8 @@
 //!
 //! ```text
 //! FoldInput { decl: (uri, cid, value), records: uri → (cid, value), absent: {uri},
-//!             obs: (uri, cid) → µs, repoStatus: did → Fresh|Stale|Unavailable, now: µs }
+//!             obs: (uri, cid) → µs, repoStatus: did → Fresh|Stale|Unavailable, now: µs,
+//!             algorithmIds? }
 //! ```
 //!
 //! Skeletons keep what the fold and the list views need (`sync.md` §13): uri, cid, author,
@@ -46,6 +47,19 @@ pub struct DeclInput {
     pub value: Value,
 }
 
+/// `algorithmIds` (§1.1): the effective behaviour IDs (§1.6) an input was built for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AlgorithmIds {
+    /// `moderation` (`mod/1`).
+    pub moderation: String,
+    /// `karma` (`karma/1`).
+    pub karma: String,
+    /// `ranking` (`magic/1`).
+    pub ranking: String,
+    /// `reactPalette` (`default/1`).
+    pub react_palette: String,
+}
+
 /// `FoldInput` (§1.1), contract form.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FoldInput {
@@ -61,6 +75,9 @@ pub struct FoldInput {
     pub repo_status: BTreeMap<String, RepoStatus>,
     /// Now (µs).
     pub now: i64,
+    /// `algorithmIds`, when the producer states them; they must equal the effective IDs derived
+    /// from `decl` (§1.6), or the input is malformed. `None`: derived from `decl` only.
+    pub algorithm_ids: Option<AlgorithmIds>,
 }
 
 fn s<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
@@ -128,6 +145,22 @@ impl FoldInput {
             })
             .unwrap_or_default();
         let now = v.get("now").and_then(Value::as_i64).ok_or("now")?;
+        let algorithm_ids = match v.get("algorithmIds") {
+            None | Some(Value::Null) => None,
+            Some(a) => {
+                let id = |k: &str| {
+                    s(a, k)
+                        .map(str::to_owned)
+                        .ok_or(format!("algorithmIds.{k}"))
+                };
+                Some(AlgorithmIds {
+                    moderation: id("moderation")?,
+                    karma: id("karma")?,
+                    ranking: id("ranking")?,
+                    react_palette: id("reactPalette")?,
+                })
+            }
+        };
         Ok(Self {
             decl,
             records,
@@ -135,6 +168,7 @@ impl FoldInput {
             obs,
             repo_status,
             now,
+            algorithm_ids,
         })
     }
 }

@@ -114,7 +114,9 @@ pub fn v1_v7(
     Ok(base
         .iter()
         .map(|(u, st)| {
-            let comment = cx.skel(u).is_some_and(|x| x.coll == Some(Collection::Comment));
+            let comment = cx
+                .skel(u)
+                .is_some_and(|x| x.coll == Some(Collection::Comment));
             let state = st.clone().or_else(|| {
                 if comment && author.moderated.contains(u) {
                     Some(State::Hidden(HiddenReason::AuthorModerated))

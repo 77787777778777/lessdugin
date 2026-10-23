@@ -14,6 +14,7 @@ pub mod ws;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
 use futures::future::BoxFuture;
@@ -30,6 +31,9 @@ pub use ws::NativeWs;
 
 use crate::config::{Config, FileLock, Paths};
 use crate::kv::{Durability, SqliteKv};
+
+/// The error message of every request made in offline mode ([`NativeHost::set_offline`]).
+pub const OFFLINE_MESSAGE: &str = "offline: the network is not used (--offline)";
 
 /// An authenticated session for one account, bound at login to one PDS
 /// (`threat-model.md` AUTH-7, AUTH-8; `docs/design/synthesis-v1.md` §6.7).
@@ -65,6 +69,8 @@ pub struct NativeHost<K: KvStore = SqliteKv> {
     /// stores no other process shares, which locks in-process only.
     lock_paths: Option<Paths>,
     locks: ProcessLocks,
+    /// Offline mode ([`NativeHost::set_offline`]): every network request fails at once.
+    offline: Arc<AtomicBool>,
 }
 
 /// A lock held by [`NativeHost`] ([`Host::lock`]): an exclusive `fd-lock` file, or an
@@ -112,7 +118,27 @@ impl<K: KvStore> NativeHost<K> {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             lock_paths: None,
             locks: ProcessLocks::new(),
+            offline: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Offline mode (the CLI's `--offline`): while on, every HTTP request, blob fetch and
+    /// WebSocket fails at once with a retryable `network` error and nothing leaves the
+    /// machine; queries read the cache, and writes stay queued in the outbox. Shared by clones.
+    pub fn set_offline(&self, offline: bool) {
+        self.offline.store(offline, Ordering::SeqCst);
+    }
+
+    /// True in offline mode.
+    pub fn is_offline(&self) -> bool {
+        self.offline.load(Ordering::SeqCst)
+    }
+
+    fn check_online(&self) -> Result<(), HostError> {
+        if self.is_offline() {
+            return Err(HostError::Network(OFFLINE_MESSAGE.into()));
+        }
+        Ok(())
     }
 
     /// Takes [`Host::lock`]s as `fd-lock` files under `paths` (`sync.md` §10.6), so they
@@ -182,6 +208,7 @@ impl<K: KvStore + 'static> Host for NativeHost<K> {
     }
 
     async fn http(&self, req: HttpRequest) -> Result<HttpResponse, HostError> {
+        self.check_online()?;
         match &req.target {
             Target::Anon(_) => self.net.execute(NetRequest::from_anon(req)?).await,
             Target::UserPds { account, .. } => {
@@ -201,6 +228,7 @@ impl<K: KvStore + 'static> Host for NativeHost<K> {
         cid: String,
         max_bytes: u64,
     ) -> Result<BlobHandle, HostError> {
+        self.check_online()?;
         self.blobs
             .fetch(&self.net, &pds, &did, &cid, max_bytes)
             .await
@@ -211,6 +239,7 @@ impl<K: KvStore + 'static> Host for NativeHost<K> {
         url: url::Url,
         max_message_bytes: u32,
     ) -> Result<NativeWs, HostError> {
+        self.check_online()?;
         ws::connect(&self.net, url, max_message_bytes).await
     }
 

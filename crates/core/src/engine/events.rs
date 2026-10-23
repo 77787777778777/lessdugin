@@ -186,6 +186,34 @@ impl EngineListener {
     }
 }
 
+impl<H: crate::host::Host> super::Engine<H> {
+    /// A change another engine made to the same stores (another tab's worker, another process;
+    /// `sync.md` §10.6 change notification), as the `Changed` topics that engine emitted: drops
+    /// the cached models those topics may touch, so the next query rebuilds them from the
+    /// stores. A `Forum` topic drops that forum's model; `Thread` or `User` topics without any
+    /// `Forum` topic drop every model; `Outbox`, `Drafts`, `Accounts` and `Notifications` hold
+    /// nothing cached. Emits nothing: the host forwards the other engine's events to its own
+    /// subscribers.
+    pub fn external_change(&self, topics: &[Topic]) {
+        let mut forum = false;
+        let mut other = false;
+        for t in topics {
+            match t {
+                Topic::Forum { uri } => {
+                    forum = true;
+                    self.rt.register_uri(uri);
+                    self.rt.invalidate(uri);
+                }
+                Topic::Thread { .. } | Topic::User { .. } => other = true,
+                Topic::Notifications | Topic::Outbox | Topic::Drafts | Topic::Accounts => {}
+            }
+        }
+        if other && !forum {
+            self.rt.invalidate_all();
+        }
+    }
+}
+
 impl OutboxListener for EngineListener {
     fn on_write(&self, ticket: &WriteTicket) {
         self.rt.bus.emit(Event::Write {

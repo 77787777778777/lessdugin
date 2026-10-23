@@ -5,8 +5,11 @@
 //! - Files: `testdata/vectors/{time,modfold,karma,reacts,rank,visibility,thread,fold}/*.json`.
 //! - Dispatch on the file's `kind`: the fold kinds parse `input.fold` into a `FoldInput`, fold
 //!   once with `input.query` (or an empty query), and compare each field `expected` lists with
-//!   `project(view, field)` (JSON equality; `hotBits` within 1 ulp, README "Floats");
-//!   `conversion` and `power` call their function directly.
+//!   `project(view, field)` (JSON equality); `conversion` and `power` call their function
+//!   directly.
+//! - `hotBits` are compared **exactly**: `libm::pow` gives the vectors' `python-math.pow` bits
+//!   for every value (README "Floats" lets a runner do so). A mismatch within 1 ulp is still a
+//!   failure, labelled as such, to be reported with its inputs rather than absorbed.
 //! - A field whose layer is still a stub is **pending**, never passed: a vector is `pass` when
 //!   every field matches, `pending` when none mismatches but some is pending, `fail` otherwise.
 //!   The test fails on any mismatch, on any input the fold rejects, and on any pending vector of
@@ -22,7 +25,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use lessdugin_core::social::full::karma;
-use lessdugin_core::social::full::{Pending, ProjectError, Query, fold_view, project};
+use lessdugin_core::social::full::{Pending, ProjectError, Query, fold_view, project_fold};
 use lessdugin_core::social::input::FoldInput;
 use lessdugin_core::social::time;
 use lessdugin_lexicon::ns::NS;
@@ -43,12 +46,21 @@ const DIRS: [&str; 8] = [
 /// Files whose every vector must pass (no pending). Add a file when its layers land.
 const MUST_PASS: &[&str] = &[
     "fold/digest.json",
+    "karma/gates.json",
+    "karma/power.json",
+    "karma/scores.json",
+    "karma/staged.json",
+    "karma/tags.json",
+    "modfold/author.json",
     "modfold/forum.json",
     "modfold/participation.json",
+    "rank/rank.json",
+    "reacts/reacts.json",
     "thread/depth.json",
     "thread/thread.json",
     "time/conversions.json",
     "time/time.json",
+    "visibility/visibility.json",
 ];
 
 fn root() -> PathBuf {
@@ -77,23 +89,23 @@ enum Outcome {
     Fail(Vec<String>),
 }
 
-/// `hotBits` within 1 ulp (README "Floats"): same-sign bit patterns differing by at most 1.
+/// `hotBits` within 1 ulp (README "Floats"): same-sign bit patterns differing by at most 1. Only
+/// labels a failure: the comparison is exact.
 fn hot_bits_close(want: &Value, got: &Value) -> bool {
     let (Some(w), Some(g)) = (want.as_object(), got.as_object()) else {
         return false;
     };
     let bits = |v: &Value| v.as_str().and_then(|s| u64::from_str_radix(s, 16).ok());
     w.len() == g.len()
-        && w.iter().all(|(k, wv)| {
-            match (bits(wv), g.get(k).and_then(bits)) {
+        && w.iter()
+            .all(|(k, wv)| match (bits(wv), g.get(k).and_then(bits)) {
                 (Some(a), Some(b)) => (a >> 63) == (b >> 63) && a.abs_diff(b) <= 1,
                 _ => false,
-            }
-        })
+            })
 }
 
-fn compare(field: &str, want: &Value, got: &Value) -> bool {
-    got == want || (field == "hotBits" && hot_bits_close(want, got))
+fn compare(want: &Value, got: &Value) -> bool {
+    got == want
 }
 
 fn algorithm_ids_match(fold: &Value, view: &lessdugin_core::social::full::ForumView) -> bool {
@@ -115,12 +127,20 @@ fn run_vector(kind: &str, input: &Value, expected: &serde_json::Map<String, Valu
     let mut check = |field: &str, got: Result<Value, ProjectError>| match got {
         Ok(got) => {
             let want = &expected[field];
-            if !compare(field, want, &got) {
-                fails.push(format!("field {field}\n    want {want}\n    got  {got}"));
+            if !compare(want, &got) {
+                let ulp = if field == "hotBits" && hot_bits_close(want, &got) {
+                    " (hotBits within 1 ulp of python-math.pow: report the inputs)"
+                } else {
+                    ""
+                };
+                fails.push(format!(
+                    "field {field}{ulp}\n    want {want}\n    got  {got}"
+                ));
             }
         }
         Err(ProjectError::Pending(p)) => pending.push((field.to_owned(), p)),
         Err(ProjectError::UnknownField(f)) => fails.push(format!("unknown field {f}")),
+        Err(ProjectError::NeedsInput(e)) => fails.push(format!("field {field}: {e}")),
     };
     match kind {
         "conversion" => {
@@ -143,9 +163,10 @@ fn run_vector(kind: &str, input: &Value, expected: &serde_json::Map<String, Valu
             };
             for field in expected.keys() {
                 let got = match field.as_str() {
-                    "power" => karma::power(k, x)
-                        .map(|p| json!(p))
-                        .map_err(ProjectError::Pending),
+                    "power" => match karma::power(k, x) {
+                        Some(p) => Ok(json!(p)),
+                        None => return Outcome::Fail(vec![format!("unknown power value {x}")]),
+                    },
                     f => Err(ProjectError::UnknownField(f.to_owned())),
                 };
                 check(field, got);
@@ -173,7 +194,7 @@ fn run_vector(kind: &str, input: &Value, expected: &serde_json::Map<String, Valu
                 return Outcome::Fail(vec!["input error: algorithmIds differ from decl".into()]);
             }
             for field in expected.keys() {
-                check(field, project(&view, field));
+                check(field, project_fold(&fi, &view, field));
             }
         }
         other => return Outcome::Fail(vec![format!("unknown kind {other}")]),
@@ -231,7 +252,11 @@ fn social_fold_vectors() {
                         let key = p.to_string();
                         stub_fields.entry(key.clone()).or_default().insert(field);
                         if seen.insert(key.clone()) {
-                            *stubs.entry(key).or_default().entry(rel.clone()).or_default() += 1;
+                            *stubs
+                                .entry(key)
+                                .or_default()
+                                .entry(rel.clone())
+                                .or_default() += 1;
                         }
                     }
                 }

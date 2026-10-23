@@ -6,16 +6,19 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
-    "build:demo": "VITE_DEMO=1 vite build",
-    "build:pages": "vite build --mode pages",
+    "build": "vite build && node scripts/check-release-bundle.mjs dist",
+    "build:demo": "VITE_DEMO=1 vite build && node scripts/check-release-bundle.mjs dist --demo",
+    "build:pages": "vite build --mode pages && node scripts/check-release-bundle.mjs dist",
     "preview": "vite preview",
     "typecheck": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json && biome check . && node scripts/check-no-raw-href.mjs",
     "test": "vitest run",
-    "e2e": "VITE_DEMO=1 vite build && PLAYWRIGHT_BROWSERS_PATH=${PLAYWRIGHT_BROWSERS_PATH:-/opt/pw-browsers} playwright test -c e2e/playwright.config.ts"
+    "e2e": "pnpm run build:demo && PLAYWRIGHT_BROWSERS_PATH=${PLAYWRIGHT_BROWSERS_PATH:-/opt/pw-browsers} playwright test -c e2e/playwright.config.ts",
+    "build:e2e": "VITE_E2E=1 vite build --outDir dist-e2e --emptyOutDir",
+    "e2e:devnet": "pnpm run build:e2e && PLAYWRIGHT_BROWSERS_PATH=${PLAYWRIGHT_BROWSERS_PATH:-/opt/pw-browsers} playwright test -c e2e/devnet/playwright.config.ts"
   },
   "dependencies": {
+    "@atproto/oauth-client-browser": "0.5.9",
     "@codemirror/commands": "^6.0.0",
     "@codemirror/lang-markdown": "^6.0.0",
     "@codemirror/language": "^6.0.0",

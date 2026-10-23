@@ -1,0 +1,12 @@
+---
+source: crates/cli/tests/content.rs
+expression: "redact(&users, &alice.ok(&[\"forum\", \"show\", \"alice.test/meta\"]))"
+---
+Meta
+Talk about the forum
+  uri          at://<alice>/online.7778777.lessdugin.temp.forum/meta
+  owner        @alice.test
+  membership   approval
+  your role    owner
+  followed     yes
+  synced       1 of 1 repositories

@@ -52,7 +52,9 @@ try {
     await page.waitForURL(callback, { timeout: 30000 });
     await page.waitForLoadState("load");
     console.log(`REDIRECT ${page.url()}`);
-    console.log(`PAGE ${(await page.evaluate(() => document.body.innerText)).replace(/\s+/g, " ")}`);
+    console.log(
+      `PAGE ${(await page.evaluate(() => document.body.innerText)).replace(/\s+/g, " ")}`,
+    );
   }
 } finally {
   await browser.close();

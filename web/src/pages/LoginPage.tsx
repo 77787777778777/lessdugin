@@ -1,16 +1,70 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Sign-in: the engine resolves the handle (DoH, both directions), then the host-specific login
-// runs (OAuth in the hosted app; a placeholder with the mock engine) and calls `addAccount`.
+// runs (OAuth in the hosted app, the CLI's OAuth in `lessdugin web`, a placeholder with the mock
+// engine) and the account is recorded with `addAccount`. After a redirect back from the
+// authorization server, the outcome that needs the user (an error, or a changed authorization
+// server to confirm, sync.md §3.6) is shown here.
 
 import type { ActorView } from "@lessdugin/engine/types";
 import { useQueryClient } from "@tanstack/react-query";
-import { useNavigate } from "@tanstack/react-router";
+import { getRouteApi, useNavigate } from "@tanstack/react-router";
 import { useId, useState } from "react";
 import { ActorName } from "../components/ActorName.tsx";
 import { errorMessage } from "../components/Status.tsx";
 import { toasts } from "../components/Toast.tsx";
 import { useEngineHandle } from "../engine/context.tsx";
+import { bridgeLoginErrorMessage, type LoginNotice, useLoginNotice } from "../host/loginNotice.ts";
 import ui from "../styles/ui.module.css";
+
+const route = getRouteApi("/login");
+
+function ConfirmIssuer({ notice }: { notice: Extract<LoginNotice, { kind: "confirmIssuer" }> }) {
+  const qc = useQueryClient();
+  const navigate = useNavigate();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const act = async (confirm: boolean): Promise<void> => {
+    setBusy(true);
+    setError(null);
+    try {
+      if (confirm) {
+        await notice.confirm();
+        await qc.invalidateQueries();
+        toasts.show({ message: "Signed in", tone: "success" });
+        void navigate({ to: "/" });
+      } else {
+        await notice.cancel();
+      }
+    } catch (e) {
+      setError(errorMessage(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className={ui.card} role="alert">
+      <p>
+        Your account <span className={ui.mono}>{notice.did}</span> signed in through a different
+        authorization server than last time.
+      </p>
+      <p>
+        Before: <span className={ui.mono}>{notice.pinned}</span>
+        <br />
+        Now: <span className={ui.mono}>{notice.issuer}</span>
+      </p>
+      <p>Continue only if you moved your account to a new server.</p>
+      <div className={ui.row}>
+        <button type="button" className={ui.primary} disabled={busy} onClick={() => void act(true)}>
+          I moved my account, continue
+        </button>
+        <button type="button" className={ui.ghost} disabled={busy} onClick={() => void act(false)}>
+          Cancel
+        </button>
+      </div>
+      {error && <p className={ui.error}>{error}</p>}
+    </div>
+  );
+}
 
 export function LoginPage() {
   const handle = useEngineHandle();
@@ -21,6 +75,8 @@ export function LoginPage() {
   const [actor, setActor] = useState<ActorView | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const notice = useLoginNotice();
+  const { error: bridgeError } = route.useSearch();
 
   const resolve = async (): Promise<void> => {
     setBusy(true);
@@ -39,7 +95,7 @@ export function LoginPage() {
     setBusy(true);
     setError(null);
     try {
-      await handle.login.login(a);
+      await handle.login.login(a, { returnTo: "#/" });
       await qc.invalidateQueries();
       toasts.show({ message: "Signed in", tone: "success" });
       void navigate({ to: "/" });
@@ -54,6 +110,17 @@ export function LoginPage() {
     <div className={ui.page}>
       <h1 className={ui.pageTitle}>Sign in</h1>
       <p>{handle.login.description}</p>
+      {notice?.kind === "error" && (
+        <p className={ui.error} role="alert">
+          {notice.message}
+        </p>
+      )}
+      {notice?.kind === "confirmIssuer" && <ConfirmIssuer notice={notice} />}
+      {bridgeError && !notice && (
+        <p className={ui.error} role="alert">
+          {bridgeLoginErrorMessage(bridgeError)}
+        </p>
+      )}
       <form
         className={ui.stack}
         onSubmit={(e) => {

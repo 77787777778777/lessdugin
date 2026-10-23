@@ -1,0 +1,28 @@
+---
+source: crates/tui/tests/screens.rs
+expression: screen
+---
+ lessdugin                                                   @carol.example.com
+ Forums you follow
+
+  You follow no forum yet.
+  Join one with `lessdugin join <forum>`,
+  or open one with `lessdugin tui <forum>`.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ Enter open · R sync · P post · ? help · q quit

@@ -2,12 +2,24 @@
 //! Project automation: `cargo xtask <command>`.
 //!
 //! Commands:
-//!   ci                 fmt, clippy (native + wasm32), tests (native + wasm32), lexicon lint,
-//!                      web checks
+//!   ci                 fmt, clippy (native + wasm32), tests (native + wasm32; the social
+//!                      vectors also with `final-ns`), lexicon lint, web checks
 //!   test-wasm [-- <test args>]   run the interop, vector and property tests of atp, lexicon and
 //!                      markdown on wasm32-unknown-unknown under node (wasm-bindgen-test-runner),
 //!                      after checking that the wasm32 test binaries hold the native tests
-//!   wasm [--dev] [--budget]   build the engine wasm + JS bindings into packages/engine/pkg
+//!   wasm [--release|--dev] [--budget] [--report] [--kv-test]
+//!                      build the engine wasm + JS bindings into packages/engine/pkg
+//!                      (wasm-bindgen = the workspace pin, then binaryen wasm-opt) and report
+//!                      its raw and gzipped size; --budget fails above 1.1 MB gzipped (warns
+//!                      above 2.5 MB raw), --report adds the `verify` marginal, --kv-test
+//!                      builds the test-only KV conformance module into pkg/kvtest
+//!   e2e [--rust] [--web] [--parity] [--no-build]
+//!                      the end-to-end tests against the local devnet (ADR 0006;
+//!                      packages/e2e/README.md): --rust the Rust e2e tests (LESSDUGIN_E2E=1),
+//!                      --web the SPA's devnet Playwright suite including the M2 parity
+//!                      scenario, --parity only that scenario; none of them: --rust and --web.
+//!                      The web runs first build the engine wasm, the e2e SPA, the CLI (embedding
+//!                      it) and the TUI parity driver, unless --no-build
 //!   lex lint           lint lexicons with goat (if installed)
 //!   vectors            run shared test vectors (Rust)
 
@@ -29,8 +41,13 @@ const WASM_SAFE: &[&str] = &[
 /// node (`test-wasm`); every integration test of these crates must build for wasm32.
 const WASM_TESTED: &[&str] = &["lessdugin-atp", "lessdugin-lexicon", "lessdugin-markdown"];
 
-/// Gzipped size budget for the engine wasm (docs/spec/limits.md).
-const WASM_BUDGET_GZ: u64 = 1_100 * 1024;
+/// The engine wasm's `gzip -9` size (after wasm-opt) above which `wasm --budget` fails
+/// (ADR 0002: 1.1 MB; sizes are decimal, as in the ADR's tables).
+const WASM_BUDGET_GZ: u64 = 1_100_000;
+/// The gzipped target (ADR 0002: 900 KB); above it `wasm` prints a note.
+const WASM_TARGET_GZ: u64 = 900_000;
+/// The raw size above which `wasm` warns (ADR 0002: compile time scales with raw bytes).
+const WASM_WARN_RAW: u64 = 2_500_000;
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -38,13 +55,14 @@ fn main() -> ExitCode {
         Some("ci") => ci(),
         Some("test-wasm") => test_wasm(&args[1..]),
         Some("wasm") => wasm(&args[1..]),
+        Some("e2e") => e2e(&args[1..]),
         Some("lex") => lex(&args[1..]),
         Some("vectors") => run(
             "cargo",
             &["test", "-p", "lessdugin-testkit", "--", "vectors"],
         ),
         _ => {
-            eprintln!("usage: cargo xtask <ci|test-wasm|wasm|lex|vectors> [args]");
+            eprintln!("usage: cargo xtask <ci|test-wasm|wasm|e2e|lex|vectors> [args]");
             return ExitCode::from(2);
         }
     };
@@ -78,6 +96,31 @@ fn run(cmd: &str, args: &[&str]) -> Result<(), String> {
     }
 }
 
+/// [`run`] with extra environment variables.
+fn run_env(cmd: &str, args: &[&str], vars: &[(String, String)]) -> Result<(), String> {
+    let shown: Vec<String> = vars.iter().map(|(k, v)| format!("{k}={v}")).collect();
+    eprintln!("$ {} {cmd} {}", shown.join(" "), args.join(" "));
+    let status = Command::new(cmd)
+        .args(args)
+        .envs(vars.iter().map(|(k, v)| (k, v)))
+        .current_dir(root())
+        .status()
+        .map_err(|e| format!("failed to run {cmd}: {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("{cmd} failed: {status}"))
+    }
+}
+
+/// Cargo's target directory (`CARGO_TARGET_DIR`, else `<root>/target`).
+fn target_dir() -> PathBuf {
+    match env::var_os("CARGO_TARGET_DIR") {
+        Some(d) if !d.is_empty() => root().join(d),
+        _ => root().join("target"),
+    }
+}
+
 fn have(cmd: &str) -> bool {
     Command::new(cmd)
         .arg("--version")
@@ -107,6 +150,20 @@ fn ci() -> Result<(), String> {
     wasm_args.extend(["--", "-D", "warnings"]);
     run("cargo", &wasm_args)?;
     run("cargo", &["test", "--workspace"])?;
+    // the social-fold vectors again at the final namespace (the default build runs them at the
+    // development one)
+    run(
+        "cargo",
+        &[
+            "test",
+            "-p",
+            "lessdugin-core",
+            "--features",
+            "final-ns",
+            "--test",
+            "social_vectors",
+        ],
+    )?;
     if have(TEST_RUNNER) && have("node") {
         test_wasm(&[])?;
     } else {
@@ -116,11 +173,144 @@ fn ci() -> Result<(), String> {
         );
     }
     lex(&["lint".to_owned()])?;
+    // the engine wasm and its size report, and the KV conformance module the engine package's
+    // tests load; both before the web checks, which type-check against pkg/. Being over the size
+    // budget fails the run after the web checks, so they still report.
+    let mut over_budget = None;
+    if have("wasm-bindgen") {
+        over_budget = wasm_build(&["--budget".to_owned(), "--report".to_owned()])?;
+        wasm(&["--kv-test".to_owned()])?;
+    } else {
+        eprintln!(
+            "(skipping the engine wasm build and size report: needs wasm-bindgen: {})",
+            install_runner_hint()
+        );
+    }
     if root().join("node_modules").exists() {
         run("pnpm", &["-r", "--if-present", "run", "check"])?;
         run("pnpm", &["-r", "--if-present", "run", "test"])?;
     } else {
         eprintln!("(skipping web checks: run `pnpm install` first)");
+    }
+    match over_budget {
+        Some(over) => Err(over),
+        None => Ok(()),
+    }
+}
+
+/// The Rust end-to-end tests against the devnet: (package, test targets). They run only with
+/// `LESSDUGIN_E2E=1`; each starts its own devnet (`packages/e2e/devnet.mjs`) unless
+/// `LESSDUGIN_DEVNET_JSON` names a running one.
+const RUST_E2E: &[(&str, &[&str])] = &[
+    // identity resolution, login binding and `verify`
+    ("lessdugin-testkit", &["e2e_devnet"]),
+    // the native host against the reference PDS
+    ("lessdugin-native", &["devnet"]),
+    // the CLI: app-password and OAuth logins, concurrent refresh, the forum scenario with
+    // parity mode, `lessdugin web`'s browser sign-in
+    ("lessdugin", &["e2e_devnet", "e2e_forum", "web_e2e_devnet"]),
+    // the TUI's reply through $EDITOR and its parity capture
+    ("lessdugin-tui", &["e2e_devnet"]),
+];
+
+/// `cargo xtask e2e`: the end-to-end tests against the local devnet (`docs/plan.md` §4.1,
+/// ADR 0006). `--rust`: [`RUST_E2E`]. `--web`: the SPA's devnet Playwright suite
+/// (`web/e2e/devnet`: hosted mode, parity mode, `lessdugin web`, and the M2 parity scenario
+/// `scenario.spec.ts`). `--parity`: only the parity scenario. Without a selection, `--rust` and
+/// `--web`. The Playwright runs first build what they use (unless `--no-build`): the engine
+/// wasm, the e2e SPA (`web/dist-e2e`), the CLI embedding it (so the `lessdugin web` spec runs)
+/// and the TUI parity driver (`crates/tui/examples/parity_driver.rs`).
+fn e2e(args: &[String]) -> Result<(), String> {
+    let (mut rust, mut web, mut parity, mut build) = (false, false, false, true);
+    for a in args {
+        match a.as_str() {
+            "--rust" => rust = true,
+            "--web" => web = true,
+            "--parity" => parity = true,
+            "--no-build" => build = false,
+            _ => {
+                return Err(format!(
+                    "usage: cargo xtask e2e [--rust] [--web] [--parity] [--no-build] (unknown \
+                     argument {a})"
+                ));
+            }
+        }
+    }
+    if !(rust || web || parity) {
+        rust = true;
+        web = true;
+    }
+    let mut vars: Vec<(String, String)> = vec![("LESSDUGIN_E2E".into(), "1".into())];
+    // Chromium: the preinstalled one when the environment names none
+    if env::var_os("PLAYWRIGHT_BROWSERS_PATH").is_none() && Path::new("/opt/pw-browsers").exists() {
+        vars.push(("PLAYWRIGHT_BROWSERS_PATH".into(), "/opt/pw-browsers".into()));
+    }
+    // The CLI tests' OAuth approver loads Playwright from PLAYWRIGHT_MODULE; pnpm keeps it out
+    // of the root node_modules, so point it at the web package's copy (the pinned version).
+    let global_playwright = Path::new("/opt/node22/lib/node_modules/playwright");
+    let web_playwright = root().join("web/node_modules/@playwright/test");
+    if env::var_os("PLAYWRIGHT_MODULE").is_none()
+        && !global_playwright.exists()
+        && web_playwright.exists()
+    {
+        vars.push((
+            "PLAYWRIGHT_MODULE".into(),
+            web_playwright.display().to_string(),
+        ));
+    }
+    if rust {
+        for (package, tests) in RUST_E2E {
+            let mut a = vec!["test", "-p", package];
+            for t in *tests {
+                a.extend(["--test", t]);
+            }
+            run_env("cargo", &a, &vars)?;
+        }
+    }
+    if web || parity {
+        let dist = root().join("web/dist-e2e").display().to_string();
+        if build {
+            wasm(&[])?;
+            run("pnpm", &["--filter", "@lessdugin/web", "run", "build:e2e"])?;
+            // the CLI embeds the e2e SPA, so bridge.spec.ts (`lessdugin web`) runs too
+            run_env(
+                "cargo",
+                &["build", "-p", "lessdugin"],
+                &[("LESSDUGIN_WEB_DIST".into(), dist.clone())],
+            )?;
+            run(
+                "cargo",
+                &["build", "-p", "lessdugin-tui", "--example", "parity_driver"],
+            )?;
+            eprintln!(
+                "note: the debug `lessdugin` now embeds the e2e SPA ({dist}); the next \
+                 `cargo build -p lessdugin` without LESSDUGIN_WEB_DIST embeds web/dist again"
+            );
+        }
+        let debug = target_dir().join("debug");
+        vars.push((
+            "LESSDUGIN_BIN".into(),
+            debug.join("lessdugin").display().to_string(),
+        ));
+        vars.push((
+            "LESSDUGIN_TUI_DRIVER".into(),
+            debug.join("examples/parity_driver").display().to_string(),
+        ));
+        // the scenario fails instead of skipping when a binary is missing
+        vars.push(("LESSDUGIN_PARITY_REQUIRED".into(), "1".into()));
+        let mut a = vec![
+            "--filter",
+            "@lessdugin/web",
+            "exec",
+            "playwright",
+            "test",
+            "-c",
+            "e2e/devnet/playwright.config.ts",
+        ];
+        if !web {
+            a.push("scenario.spec.ts");
+        }
+        run_env("pnpm", &a, &vars)?;
     }
     Ok(())
 }
@@ -359,27 +549,273 @@ fn listed_tests(cmd: &mut Command) -> Result<Vec<String>, String> {
     Ok(names)
 }
 
+/// `wasm` options.
+#[derive(Default)]
+struct WasmOpts {
+    /// Dev profile, no wasm-opt (fast; not measured against the budget).
+    dev: bool,
+    /// Fail above [`WASM_BUDGET_GZ`] (warn above [`WASM_WARN_RAW`] in any case).
+    budget: bool,
+    /// Also build without `verify` and print its marginal size (ADR 0002 rule 5).
+    report: bool,
+    /// The test-only `kv-conformance` build into `packages/engine/pkg/kvtest` (dev profile).
+    kv_test: bool,
+}
+
+fn wasm_opts(args: &[String]) -> Result<WasmOpts, String> {
+    let mut o = WasmOpts::default();
+    for a in args {
+        match a.as_str() {
+            "--dev" => o.dev = true,
+            "--release" => o.dev = false,
+            "--budget" => o.budget = true,
+            "--report" => o.report = true,
+            "--kv-test" => o.kv_test = true,
+            _ => {
+                return Err(format!(
+                    "usage: cargo xtask wasm [--release|--dev] [--budget] [--report] [--kv-test] \
+                     (unknown argument {a})"
+                ));
+            }
+        }
+    }
+    Ok(o)
+}
+
+/// The engine's sizes after wasm-bindgen and wasm-opt.
+struct WasmSize {
+    raw: u64,
+    gz: u64,
+    glue_gz: u64,
+    optimised: bool,
+}
+
+/// `cargo xtask wasm`: builds `lessdugin-wasm` for wasm32 (profile `wasm`: opt-level z, fat LTO,
+/// panic=abort), runs `wasm-bindgen --target web` (the CLI must equal the workspace pin) into
+/// `packages/engine/pkg`, optimises with binaryen's `wasm-opt` (ADR 0002's flags) and reports the
+/// raw and `gzip -9` sizes. `--budget` fails above 1.1 MB gzipped; above 2.5 MB raw it warns.
+/// `--report` adds the marginal size of the `verify` feature. `--kv-test` builds the test-only
+/// `kv-conformance` module into `packages/engine/pkg/kvtest` for the engine package's vitest.
 fn wasm(args: &[String]) -> Result<(), String> {
-    let dev = args.iter().any(|a| a == "--dev");
-    let budget = args.iter().any(|a| a == "--budget");
-    let profile = if dev { "dev" } else { "wasm" };
-    run(
-        "cargo",
-        &[
-            "build",
+    match wasm_build(args)? {
+        Some(over) => Err(over),
+        None => Ok(()),
+    }
+}
+
+/// `cargo xtask wasm`; `Ok(Some(message))` when `--budget` is given and the module is over it
+/// (the build itself succeeded, so later checks can still use `pkg/`).
+fn wasm_build(args: &[String]) -> Result<Option<String>, String> {
+    let o = wasm_opts(args)?;
+    check_wasm_bindgen_cli()?;
+    check_no_ammonia()?;
+    if o.kv_test {
+        let out = root().join("packages/engine/pkg/kvtest");
+        build_wasm(&["--features", "kv-conformance"], "dev", &out, false)?;
+        eprintln!(
+            "kv-conformance module: {}",
+            out.join("lessdugin_engine_bg.wasm").display()
+        );
+        return Ok(None);
+    }
+    let profile = if o.dev { "dev" } else { "wasm" };
+    let out = root().join("packages/engine/pkg");
+    let size = build_wasm(&[], profile, &out, !o.dev)?;
+    let mut report = vec![format!(
+        "engine wasm ({}): {} raw, {} gzipped (target {}, budget {}); JS glue {} gzipped",
+        if o.dev {
+            "dev, not optimised"
+        } else {
+            "release"
+        },
+        bytes(size.raw),
+        bytes(size.gz),
+        bytes(WASM_TARGET_GZ),
+        bytes(WASM_BUDGET_GZ),
+        bytes(size.glue_gz),
+    )];
+    if !size.optimised && !o.dev {
+        report.push("wasm-opt not found: the sizes are not final (install binaryen)".into());
+    }
+    if o.report && !o.dev {
+        let tmp = root().join("target/wasm-report/no-verify");
+        let nv = build_wasm(
+            &["--no-default-features", "--features", "math"],
+            profile,
+            &tmp,
+            true,
+        )?;
+        let marginal = size.gz as i64 - nv.gz as i64;
+        report.push(format!(
+            "without `verify`: {} raw, {} gzipped; verify's marginal size {marginal} bytes gzipped \
+             (ADR 0002 rule 5: split into a lazy verify.wasm only above 900 KB gz with a marginal \
+             of at least 100 KB gz)",
+            bytes(nv.raw),
+            bytes(nv.gz)
+        ));
+    }
+    let mut failed = None;
+    if size.raw > WASM_WARN_RAW && !o.dev {
+        report.push(format!(
+            "WARNING: {} raw is above {} (compile time scales with raw size, ADR 0002)",
+            bytes(size.raw),
+            bytes(WASM_WARN_RAW)
+        ));
+        github_annotation("warning", &report[report.len() - 1]);
+    }
+    if size.gz > WASM_TARGET_GZ && !o.dev {
+        report.push(format!(
+            "note: {} gzipped is above the {} target",
+            bytes(size.gz),
+            bytes(WASM_TARGET_GZ)
+        ));
+    }
+    if o.budget && !o.dev && size.gz > WASM_BUDGET_GZ {
+        let msg = format!(
+            "wasm over budget: {} gzipped > {}",
+            bytes(size.gz),
+            bytes(WASM_BUDGET_GZ)
+        );
+        github_annotation("error", &msg);
+        failed = Some(msg);
+    }
+    for l in &report {
+        eprintln!("{l}");
+    }
+    step_summary(&report);
+    Ok(failed)
+}
+
+/// `1,234,567 B (1.23 MB)`.
+fn bytes(n: u64) -> String {
+    let digits = n.to_string();
+    let mut grouped = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            grouped.push(',');
+        }
+        grouped.push(c);
+    }
+    if n >= 1_000_000 {
+        format!("{grouped} B ({:.2} MB)", n as f64 / 1e6)
+    } else {
+        format!("{grouped} B ({:.1} KB)", n as f64 / 1e3)
+    }
+}
+
+/// A GitHub Actions annotation (`::warning::…`) when running there.
+fn github_annotation(level: &str, msg: &str) {
+    if env::var_os("GITHUB_ACTIONS").is_some() {
+        println!("::{level}::{msg}");
+    }
+}
+
+/// Appends the size report to the GitHub Actions job summary when running there.
+fn step_summary(lines: &[String]) {
+    let Some(path) = env::var_os("GITHUB_STEP_SUMMARY") else {
+        return;
+    };
+    let mut text = String::from("### Engine wasm size\n\n");
+    for l in lines {
+        text.push_str("- ");
+        text.push_str(l);
+        text.push('\n');
+    }
+    let _ = std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(path)
+        .and_then(|mut f| std::io::Write::write_all(&mut f, text.as_bytes()));
+}
+
+/// The wasm-bindgen CLI must be the workspace's exact `wasm-bindgen` version: the CLI reads the
+/// module's bindgen metadata, which changes between versions.
+fn check_wasm_bindgen_cli() -> Result<(), String> {
+    let want = wasm_bindgen_version()?;
+    let hint = format!("cargo install wasm-bindgen-cli --version ={want} --locked");
+    let out = Command::new("wasm-bindgen")
+        .arg("--version")
+        .output()
+        .map_err(|_| format!("wasm-bindgen not found: {hint}"))?;
+    let got = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    if got.split_whitespace().nth(1) != Some(want.as_str()) {
+        return Err(format!(
+            "`{got}` does not match the workspace wasm-bindgen {want}: {hint}"
+        ));
+    }
+    Ok(())
+}
+
+/// ADR 0002 decision 3: ammonia must not be in the wasm32 dependency tree (lessdugin-wasm also
+/// fails to compile with it, see `ammonia_must_stay_out_of_wasm32`).
+fn check_no_ammonia() -> Result<(), String> {
+    let out = Command::new("cargo")
+        .args([
+            "tree",
             "-p",
             "lessdugin-wasm",
             "--target",
             "wasm32-unknown-unknown",
-            "--profile",
-            profile,
-        ],
-    )?;
-    let dir = if dev { "debug" } else { "wasm" };
+            "-e",
+            "normal",
+            "--prefix",
+            "none",
+        ])
+        .current_dir(root())
+        .output()
+        .map_err(|e| format!("cargo tree: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "cargo tree failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
+    let tree = String::from_utf8_lossy(&out.stdout);
+    for banned in ["ammonia ", "html5ever "] {
+        if tree.lines().any(|l| l.starts_with(banned)) {
+            return Err(format!(
+                "{}is in the wasm32 dependency tree of lessdugin-wasm (ADR 0002: native only)",
+                banned
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The binaryen `wasm-opt`: on PATH, else the workspace's `binaryen` npm package.
+fn wasm_opt() -> Option<String> {
+    if have("wasm-opt") {
+        return Some("wasm-opt".to_owned());
+    }
+    let local = root().join("node_modules/.bin/wasm-opt");
+    local.exists().then(|| local.to_string_lossy().into_owned())
+}
+
+/// Builds lessdugin-wasm with `features` and `profile`, binds it into `out`
+/// (`lessdugin_engine.js` + `lessdugin_engine_bg.wasm`) and, if `optimise`, runs wasm-opt.
+fn build_wasm(
+    features: &[&str],
+    profile: &str,
+    out: &Path,
+    optimise: bool,
+) -> Result<WasmSize, String> {
+    let mut cargo = vec![
+        "build",
+        "-p",
+        "lessdugin-wasm",
+        "--lib",
+        "--target",
+        "wasm32-unknown-unknown",
+        "--profile",
+        profile,
+    ];
+    cargo.extend_from_slice(features);
+    run("cargo", &cargo)?;
+    let dir = if profile == "dev" { "debug" } else { profile };
     let wasm = root().join(format!(
         "target/wasm32-unknown-unknown/{dir}/lessdugin_wasm.wasm"
     ));
-    let out = root().join("packages/engine/pkg");
+    std::fs::create_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;
     run(
         "wasm-bindgen",
         &[
@@ -393,38 +829,47 @@ fn wasm(args: &[String]) -> Result<(), String> {
         ],
     )?;
     let bg = out.join("lessdugin_engine_bg.wasm");
-    if !dev {
-        let opt = if have("wasm-opt") {
-            Some("wasm-opt".to_owned())
-        } else {
-            let local = root().join("node_modules/.bin/wasm-opt");
-            local.exists().then(|| local.to_string_lossy().into_owned())
-        };
-        match opt {
-            Some(o) => run(
-                &o,
-                &[
-                    "-Oz",
-                    "--enable-bulk-memory",
-                    "--enable-nontrapping-float-to-int",
+    let mut optimised = false;
+    if optimise {
+        match wasm_opt() {
+            Some(o) => {
+                // ADR 0002: exactly the target features rustc 1.97 writes, then -Oz; no
+                // --converge
+                let mut a = vec!["-Oz"];
+                a.extend(WASM_OPT_FEATURES);
+                a.extend([
+                    "--strip-debug",
+                    "--strip-producers",
                     "-o",
                     bg.to_str().unwrap(),
                     bg.to_str().unwrap(),
-                ],
-            )?,
+                ]);
+                run(&o, &a)?;
+                optimised = true;
+            }
             None => eprintln!("(wasm-opt not found; skipping size optimisation)"),
         }
     }
     let raw = std::fs::metadata(&bg).map_err(|e| e.to_string())?.len();
-    let gz = gz_size(&bg)?;
-    eprintln!("engine wasm: {raw} bytes raw, {gz} bytes gzipped (budget {WASM_BUDGET_GZ})");
-    if budget && gz > WASM_BUDGET_GZ {
-        return Err(format!(
-            "wasm over budget: {gz} > {WASM_BUDGET_GZ} bytes gzipped"
-        ));
-    }
-    Ok(())
+    Ok(WasmSize {
+        raw,
+        gz: gz_size(&bg)?,
+        glue_gz: gz_size(&out.join("lessdugin_engine.js"))?,
+        optimised,
+    })
 }
+
+/// The `target_features` section rustc 1.97 writes for wasm32-unknown-unknown (ADR 0002).
+const WASM_OPT_FEATURES: &[&str] = &[
+    "--enable-bulk-memory",
+    "--enable-bulk-memory-opt",
+    "--enable-call-indirect-overlong",
+    "--enable-multivalue",
+    "--enable-mutable-globals",
+    "--enable-nontrapping-float-to-int",
+    "--enable-reference-types",
+    "--enable-sign-ext",
+];
 
 fn gz_size(path: &Path) -> Result<u64, String> {
     let out = Command::new("gzip")
@@ -432,6 +877,9 @@ fn gz_size(path: &Path) -> Result<u64, String> {
         .arg(path)
         .output()
         .map_err(|e| format!("gzip: {e}"))?;
+    if !out.status.success() {
+        return Err(format!("gzip {} failed", path.display()));
+    }
     Ok(out.stdout.len() as u64)
 }
 

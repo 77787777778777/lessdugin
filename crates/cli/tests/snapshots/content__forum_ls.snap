@@ -1,0 +1,8 @@
+---
+source: crates/cli/tests/content.rs
+expression: "redact(&users, &alice.ok(&[\"forum\", \"ls\"]))"
+---
+1   lounge  @alice.test · open · member
+    at://<alice>/online.7778777.lessdugin.temp.forum/lounge
+2 * Meta  @alice.test · approval · member
+    at://<alice>/online.7778777.lessdugin.temp.forum/meta

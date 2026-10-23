@@ -76,6 +76,8 @@ clamp(x, lo, hi)       max(lo, min(hi, x))
 
 **Comparisons and identifiers**
 - Strings (uris, DIDs, slugs) compare by their UTF-8 bytes. CIDs compare by the bytes of their canonical string form: CIDv1, base32 lowercase, multibase prefix `b`.
+  - The fold input's own CIDs (`cid(x)`, `declCid`) are canonical: the sync layer computes them.
+  - A CID written in a record (`subjectCid`, `subject.cid`, `root.cid`, `parent.cid`, `head.cid`, `parents[].cid`) is converted to that form before it is compared. G2's `cid` format accepts other spellings of a CID (another multibase, upper-case base32), and they name the same version. A string that is not a CIDv1 in any multibase names no version (§20.1 item 45).
 - "Smallest uri" means the smallest in that byte order.
 - When a record x is used as a moderation subject, as in `resolve(x, d)` or `effective(x, d)`, it stands for `x.uri`.
 
@@ -184,7 +186,9 @@ PARAMS = membership, defaultTier, voting, authorModeration, tagCreation, pairCap
 - A uri never contains 0x00, so sorting lines by bytes sorts by (uri, cid). A uri cannot be in both `records` and `absent`.
 
 **What the digest does not cover:** `obs`, `repoStatus` and `now`. Two inputs with equal digests therefore produce equal outputs, except for:
-- the `t_rank` of future-dated items (§2.2);
+- the `t_rank` and the `[future-dated]` flag of future-dated items (§2.2);
+- `t_decl`, whose future clamp reads `t_obs(decl)`, and through it the `t_rank` of every item that `t_decl` bounds below, future-dated or not (§2.2, §20.1 item 47);
+- the orderings that read those `t_rank` values (§12);
 - `degraded` (§4.11);
 - rules that depend on `now`: `until`, `hot` and the cutoff.
 
@@ -779,7 +783,7 @@ K         = pairsum(Some(KP), E)                            // displayed karma; 
 | P1 | **Permutation invariance.** Every output is independent of the order of records. |
 | P2 | **Idempotence.** Supplying the same `(uri, cid)` twice changes nothing. |
 | P3 | **Acyclic and linear.** Each stage reads only earlier stages and makes one pass over V. |
-| P4 | **Layering.** Adding or removing records that are only L5–L7 inputs never changes K1, `seedUp`, E, KP or K. Those inputs are: author-scope modActions; the `reacts` and `tags` entries of opinions; wikiRevisions; sequences; and opinions whose subject is a wikiRevision or sequence. |
+| P4 | **Layering.** Changing only L5–L7 inputs never changes K1, `seedUp`, E, KP or K. Those inputs are: author-scope modAction records; wikiRevision and sequence records; opinion records whose subject is a wikiRevision or a sequence; opinion records that carry only `reacts` and `tags` entries (no karma or agreement value); and, within any opinion, its `reacts` and `tags` entries (changing them makes a new version of the opinion). Every change keeps the input well-formed (§1.1) and every remaining record valid (§20.1 item 48). |
 | P5 | **Stage pair bound.** In each stage, voter u's net contribution to recipient r is at most `pairCap` (K1), or `pairCap × strong(max(basis[u], 0))` (KP, K), in absolute value. Corollary: if u ∉ S and none of u's opinions has a subject in `absent`, removing u's opinions changes no K1, `seedUp` or E, and changes `KP[r]` by at most `pairCap × strong(max(K1[u], 0))` for every r. |
 | P6 | **Seed persistence.** s ∈ S ⇒ s ∈ E, whatever K1[s] is (even negative). |
 | P7 | **Sybil bound** (restricted to K, scores and other users' visibility; see below). |
@@ -788,7 +792,8 @@ K         = pairsum(Some(KP), E)                            // displayed karma; 
 
 **P7, sybil bound.** Let I be a fold input, and R a set of records with uris not in I, each authored by a DID ∉ E(I) ∪ A, such that:
 - (a) no record in R is the subject (by uri) of an opinion in I whose voter is in E(I);
-- (b) R contains no membership record of a DID u with `K1(I)[u] ≥ establish ∧ seedUp(I)[u] ≥ establishSeeds`.
+- (b) R contains no membership record of a DID u with `K1(I)[u] ≥ establish ∧ seedUp(I)[u] ≥ establishSeeds`;
+- (c) no record in R has the `root.uri` of a comment in I as its uri and a `forum` other than F. Such a record is invalid (G9), but under CO5 as adopted (§20.1 item 36) it excludes every comment of the thread, and with them their scores and the karma their votes carried (§20.1 item 49; §20.2 item 5).
 
 Then for I' = I ∪ R, all of these are unchanged:
 - K1, `seedUp`, E, KP and K;
@@ -1001,14 +1006,15 @@ Thread placement for a post uri p:
 4. **Depth.** The root's children have depth 1. A comment whose depth would exceed **1,000** is re-attached to the root and flagged `Orphaned`. Nodes are processed top-down, so its subtree continues from depth 1.
 5. **Time.** `t_rank` is computed top-down after steps 3–4 (§2.2).
 6. **Versions.** A comment whose `root.cid` or `parent.cid` differs from the target's current CID shows "on revision n" or "on an unavailable version".
-   - Let the target's valid `op: update` revisions, in TID order, be R1 … Rk. Version i (1 ≤ i ≤ k) is the snapshot with CID `Ri.subject.cid`, and version k + 1 is the current one.
-   - n is the version whose CID equals the referenced CID. If there is none, the version is unavailable.
+   - Let the target's valid `op: update` revisions, in TID order (then uri), be R1 … Rk. Version i (1 ≤ i ≤ k) is the snapshot with CID `Ri.subject.cid`, and version k + 1 is the current one.
+   - n is the version whose CID equals the referenced CID; when several snapshots have it (an edit that restored earlier content), n is the greatest such i. If there is none, the version is unavailable.
+   - CIDs compare by canonical form (§0.4). The target is a non-Excluded item in `records`; a reference to an absent or Excluded target shows no version (it is a `Missing` node).
    - Placement never depends on CIDs.
 
 **Display**
 - **Indentation** is capped at about 6 levels in the TUI and on mobile, then "continue thread →".
 - **Missing roots.** A thread opened for a post that is not a non-Excluded post in `records` shows its comments under the `Missing(p)` root. Those comments do not appear in lists or in Recent Discussion.
-- **Edited.** An item with valid `op: update` revisions, or with `updatedAt` later than its `createdAt`, gets the `[edited]` badge.
+- **Edited.** An item with valid `op: update` revisions, or with `µs(updatedAt)` later than `µs(createdAt)`, gets the `[edited]` badge. A `createdAt` without µs (before 1970, §2.1) counts as earlier than any `updatedAt` that has one (§20.1 item 46).
 - **Retracted comments** (`retracted: true`) render struck through and still count.
 
 ---
@@ -1123,7 +1129,10 @@ Edges = { (r, q) : r ∈ Cand, q ∈ par(r) ∩ Cand }
 cycle cut: while (Cand, Edges) has a cycle:
              for each strongly connected component C with |C| > 1, or with a self-loop:
                remove every edge (m, q) ∈ Edges with q ∈ C, where m is the greatest-uri member of C
-           // the components are computed once per round, from the edges left by the previous round
+           // the components are computed once per round, from the edges left by the previous round;
+           // cutting edges inside a component only splits it and edges between components are never
+           // cut, so an implementation may cut and re-decompose each cyclic component on its own
+           // edges, which gives the same Edges (informative; §20.1 item 50)
 depth(r)  = 0 if r has no outgoing edge; else 1 + max{ depth(q) : (r, q) ∈ Edges }
 
 headRef   = effective("tag:" + slug, tag.head)
@@ -1388,7 +1397,7 @@ These choices fill gaps in the sources or resolve ambiguities. Each takes the si
     - Restrictions apply per axis rather than voiding the whole opinion.
 11. **`unweighted` counts** only counting opinions that carry a karma value (§7).
 12. **Pair bound (P5)** is stated per stage, with a corollary. Read literally for K, the synthesis claim is false, because removing a voter changes others' KP and therefore their vote power.
-13. **Sybil bound (P7)** gets precise hypotheses. Without (a) and (b), adding an outsider's voted-on content, or a returning user's membership record, legitimately changes E.
+13. **Sybil bound (P7)** gets precise hypotheses. Without (a) and (b), adding an outsider's voted-on content, or a returning user's membership record, legitimately changes E. Hypothesis (c) is item 49.
 14. **The deleted-subject threshold** ("≥ 2 distinct voters") uses each stage's eligible set (S for K1, E for KP and K), which keeps the stages acyclic.
 15. **React aggregation (§9.2).**
     - Groups by `(react, qkey)`, not by resolved range, so the fold never depends on whether a spilled body blob has been fetched (`lfm-1.md` "Pending"). Anchors are display-only.
@@ -1475,9 +1484,21 @@ These choices fill gaps in the sources or resolve ambiguities. Each takes the si
     - `hotBits` are exact for any pow with an error below 0.9 ulp.
     - The cast and builder conventions of the vectors are informative.
 
+**Decisions from the M3 fold reviews.** The two reviews of the Rust fold found no vector it disagrees with. Items 45–50 settle the gaps they found; none changes a vector. §20.2 item 5 records the one defect that needs the reference model.
+
+45. **CIDs in records compare by canonical form (§0.4).** G2's `cid` format accepts any multibase and letter case, and `data-model.md` RV5 already compares CIDs rather than strings. The fold therefore converts a CID written in a record before comparing it with a version's CID: in the CID check of positive assertions and `#tag.head` (§4.5), `earlier` (§7), "ancestor altered" (§13.2) and versions (§11 step 6). Two `#tag.head` values that name one revision with differently spelled CIDs are equal (no conflict). A string that is not a CIDv1 names no version, so a positive assertion carrying one is `stale`.
+46. **Versions and the edited badge (§11).** "On revision n" takes the greatest i when several snapshots share the referenced CID, and needs a non-Excluded target in `records`. The `[edited]` badge compares µs values; a `createdAt` before 1970 has none and counts as earlier than any `updatedAt` that has one.
+47. **What the digest leaves out (§1.2).** `t_decl`'s future clamp (§2.2) reads `t_obs(decl)`, which is outside the digest, so equal digests can give different `t_rank` values to items that are not future-dated. §1.2's list of exceptions now says so.
+48. **P4 (§6.3)** lists L5–L7-only *inputs*, not only records: the `reacts` and `tags` entries are parts of an opinion, and an opinion that carries nothing else is a whole L5–L7-only record. The property holds for changes that keep the input well-formed and the other records valid (removing a record that an opinion names may change `absent`; a malformed entry may invalidate its opinion).
+49. **P7 hypothesis (c) (§6.3).** Under CO5 as adopted (item 36), an outsider who owns the root uri of a thread whose root post is missing from I (deleted, or not yet synced) can publish a record there whose `forum` names another forum. It is invalid by G9 and still a fold input, so CO5 excludes every comment of the thread, with its scores and the karma its votes carried. The same holds for an edit of an existing root post. Hypothesis (c) leaves this out of P7. §20.2 item 5 proposes removing the lever.
+50. **The wiki cycle cut (§13.2)** may be computed per component (informative). It is the same cut as the round-based definition, because components only split; the per-component form costs O(|C| + |E_C|) per cut instead of a pass over the whole page (SOC-10, "bounded walks"; a hostile 1,000-revision page whose one component is cut 999 times).
+
 ### 20.2 Open questions
 
 1. *(Resolved in the consistency review: `data-model.md` MA8 now says that an empty `#restrict` lifts lower-rank restrictions, as §4.2 and §4.7 require.)*
 2. **The `absent` input (§1.1)** must be produced by `sync.md`, from tombstones and complete listings, and included in the indexer's `inputDigest`.
 3. **Author moderation requires E (§4.9).** This tightens the gate beyond the synthesis. The alternative is to drop it and weaken P7 to exclude visibility inside outsiders' own threads.
 4. *(Resolved: forum-pinned posts are exempt from the magic cutoff, matching ForumMagnum's sticky posts; see 20.1 item 18.)*
+5. **CO5 on invalid roots (§20.1 items 36 and 49; `data-model.md` CO5).** As adopted, CO5 compares the root's `forum` even when the root is invalid. Any post author can then remove their whole thread: editing the post so that its `forum` names another forum (invalid by G9) excludes every comment in it, with the scores and the karma the votes on them carried, and no moderator action brings them back. This bypasses everything §4.9 requires of author moderation (an actor in E, the author gate, `authorModeration`, the immunity of authorities), and it is why P7 needs hypothesis (c).
+   - **Proposed:** CO5 compares only a *valid* root. An invalid root is already a `Missing` root (item 28), so its comments stay in the thread under the placeholder, and CO5 then fails only on a 60-bit fk collision, like the other forum checks (item 23). P7 would hold without (c).
+   - **Order of change:** `data-model.md` CO5 and item 36 first, then the reference model, which regenerates `visibility/visibility.json` `v1-before-v2-and-v3` and `karma/staged.json` `opinions-that-never-count` (the only vectors that pin the current reading), then the Rust fold (`crates/core/src/social/full/cx.rs`, V1: also require the root to be valid) and the tests that pin the current reading (`social_props.rs` `p7_counterexample_co5_invalid_root`, `social_cases.rs` `co5_edit_of_the_root_forum_excludes_the_thread`).

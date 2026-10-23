@@ -249,7 +249,7 @@ export class MockEngine implements EngineApi {
   private readonly listeners = new Set<EventListener>();
   private readonly queue: EngineEvent[] = [];
   private flushing = false;
-  private readonly writes = new Map<string, WriteRec>();
+  private readonly writeRecs = new Map<string, WriteRec>();
 
   constructor(opts: MockEngineOptions = {}) {
     this.s = buildFixture().state;
@@ -702,7 +702,7 @@ export class MockEngine implements EngineApi {
   ): WriteTicket {
     const id = this.nextId("w");
     const rec: WriteRec = { id, state: { kind: "pending" }, undoable, apply };
-    this.writes.set(id, rec);
+    this.writeRecs.set(id, rec);
     this.emit({ kind: "write", id, state: { kind: "pending" } });
     this.changed({ kind: "outbox" });
     rec.timer = setTimeout(() => this.send(id), undoable ? this.holdMs : 0);
@@ -710,7 +710,7 @@ export class MockEngine implements EngineApi {
   }
 
   private send(id: string): void {
-    const rec = this.writes.get(id);
+    const rec = this.writeRecs.get(id);
     if (rec?.state.kind !== "pending") return;
     rec.state = { kind: "sending" };
     this.emit({ kind: "write", id, state: rec.state });
@@ -1128,7 +1128,15 @@ export class MockEngine implements EngineApi {
 
   async liveTail(): Promise<void> {}
 
+  async liveStop(): Promise<void> {}
+
+  async verifyHandles(_n: number): Promise<number> {
+    return 0;
+  }
+
   async outboxPump(): Promise<void> {}
+
+  async outboxStop(): Promise<void> {}
 
   async backgroundVerify(): Promise<void> {}
 
@@ -2182,7 +2190,7 @@ export class MockEngine implements EngineApi {
   }
 
   async undo(writeId: string): Promise<WriteTicket> {
-    const rec = this.writes.get(writeId);
+    const rec = this.writeRecs.get(writeId);
     if (!rec) throw err("not_found", `No write ${writeId}`);
     if (!rec.undoable || rec.state.kind !== "pending") {
       throw err("conflict", "The undo window for this write has passed.");
@@ -2192,6 +2200,28 @@ export class MockEngine implements EngineApi {
     this.emit({ kind: "write", id: writeId, state: { kind: "undone" } });
     this.changed({ kind: "outbox" });
     return { id: writeId, state: { kind: "undone" } };
+  }
+
+  async retryWrite(writeId: string): Promise<WriteTicket> {
+    const rec = this.writeRecs.get(writeId);
+    if (!rec) throw err("not_found", `No write ${writeId}`);
+    if (rec.state.kind !== "failed") {
+      throw err("conflict", "Only a failed write can be retried.");
+    }
+    rec.state = { kind: "pending" };
+    this.emit({ kind: "write", id: writeId, state: { kind: "pending" } });
+    this.changed({ kind: "outbox" });
+    rec.timer = setTimeout(() => this.send(writeId), 0);
+    return { id: writeId, state: { kind: "pending" } };
+  }
+
+  async writeStatus(writeId: string): Promise<WriteTicket | null> {
+    const rec = this.writeRecs.get(writeId);
+    return rec ? { id: rec.id, state: clone(rec.state) } : null;
+  }
+
+  async writes(): Promise<WriteTicket[]> {
+    return [...this.writeRecs.values()].map((r) => ({ id: r.id, state: clone(r.state) }));
   }
 
   // =============================================================================== §3.6

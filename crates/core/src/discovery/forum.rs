@@ -23,8 +23,12 @@
 //!
 //! Each candidate is confirmed by `sync_repo` itself (the membership `getRecord` comes first and
 //! stops the pass if absent or invalid, §4.2.1), so a confirmed candidate costs no extra request.
-//! Rejected candidates get a `rejected` disc row and are skipped until a new hint names them (or
-//! [`state::REJECTED_RECHECK_MS`] passes).
+//! Rejected candidates get a `rejected` disc row. A background pass ([`SyncOpts::background`])
+//! skips them until a new hint names them or [`state::REJECTED_RECHECK_MS`] has passed since
+//! their last check. A user-initiated `sync_forum` (with or without `full`) re-checks up to
+//! [`state::REJECTED_RECHECK_BATCH`] of them, cheapest first ([`recheck_cost`]): a candidate
+//! whose membership was created after this device last looked shows up at the next explicit
+//! sync instead of a day later.
 //!
 //! **Grants are not gated.** `sync.md` §4.2.1 confirms every participant outside A, but
 //! `social.md` §3.3 keeps a grant counting after its holder leaves (their opinions keep
@@ -56,6 +60,7 @@ use crate::engine::EngineError;
 use crate::host::{Host, MaybeSendSync};
 use crate::identity::{DID_DOC_TTL_MS, IdentityError, IdentityLevel, ResolvedIdentity};
 use crate::limits;
+use crate::store::RepoRow;
 use crate::store::admit::{self, LexiconValidator};
 use crate::store::blob::ForumRow;
 use crate::store::records::{Level, RecordRow, RecordStore, Source};
@@ -145,6 +150,11 @@ pub struct SyncOpts {
     pub newcomers: Vec<(String, String)>,
     /// Progress reports while the sync runs.
     pub progress: Progress,
+    /// A background pass (hint-driven discovery from `live_tail`, M5), not a user's command:
+    /// rejected candidates keep the [`state::REJECTED_RECHECK_MS`] back-off. A user-initiated
+    /// sync (`false`, the default) re-checks up to [`state::REJECTED_RECHECK_BATCH`] of them,
+    /// cheapest first (`sync.md` §4.2.1).
+    pub background: bool,
 }
 
 /// How the declaration's proof went.
@@ -265,6 +275,26 @@ struct Candidate {
     /// In G: synced like an authority, without the membership gate, whatever its disc row says
     /// (`social.md` §3.3: a grant still counts after its holder leaves).
     granted: bool,
+}
+
+/// The cost rank of confirming a rejected candidate again (`sync.md` §4.2.1), lowest first. A
+/// confirmation is a `getLatestCommit`, plus the membership `getRecord` when the head moved
+/// (an unchanged head is answered from the cache). On top of that:
+/// - +2 without a cached DID document at level `doc` (a resolution first), +1 with a stale one;
+/// - +1 for a repo whose last passes failed (its host may refuse or time out).
+pub(crate) async fn recheck_cost<H: Host>(
+    s: &Session<H>,
+    did: &Did,
+    repo: Option<&RepoRow>,
+    now_ms: i64,
+) -> u8 {
+    let identity = match s.resolver().cached(did).await {
+        Some(id) if id.level == IdentityLevel::Doc && id.pds.is_some() => {
+            u8::from(now_ms.saturating_sub(id.doc_at_ms) > DID_DOC_TTL_MS)
+        }
+        _ => 2,
+    };
+    identity + u8::from(repo.is_some_and(|r| r.fails > 0))
 }
 
 fn parse_dids<'a>(it: impl IntoIterator<Item = &'a String>) -> Vec<Did> {
@@ -472,6 +502,12 @@ impl<H: Host> Syncer<H> {
         let mut repos: Vec<RepoReport> = Vec::new();
         let mut done: BTreeSet<String> = BTreeSet::new();
         let tally = Tally::default();
+        // rejected candidates a user-initiated sync re-checks (§4.2.1), cheapest first
+        let mut recheck = if opts.background {
+            0
+        } else {
+            state::REJECTED_RECHECK_BATCH
+        };
 
         // 1. authorities at P0; 2. authors on screen at P0
         let a = &forum.authorities;
@@ -492,7 +528,18 @@ impl<H: Host> Syncer<H> {
                     granted: false,
                 })
                 .collect();
-        jobs.extend(self.candidate_jobs(&key, &view, &mut done, &disc, reason(Reason::View)));
+        jobs.extend(
+            self.candidate_jobs(
+                &p0,
+                &key,
+                &view,
+                &mut done,
+                &disc,
+                reason(Reason::View),
+                &mut recheck,
+            )
+            .await?,
+        );
         let reports = self.run_jobs(&p0, &jobs, &tally, &opts.progress).await;
         self.note_candidates(&key, &view, &reports, &mut disc, &mut touched);
         repos.extend(reports);
@@ -546,8 +593,17 @@ impl<H: Host> Syncer<H> {
                 granted,
             });
         }
-        let jobs =
-            self.candidate_jobs(&key, &active, &mut done, &disc, reason(Reason::Participant));
+        let jobs = self
+            .candidate_jobs(
+                &p1,
+                &key,
+                &active,
+                &mut done,
+                &disc,
+                reason(Reason::Participant),
+                &mut recheck,
+            )
+            .await?;
         let reports = self.run_jobs(&p1, &jobs, &tally, &opts.progress).await;
         self.note_candidates(&key, &active, &reports, &mut disc, &mut touched);
         repos.extend(reports);
@@ -564,8 +620,17 @@ impl<H: Host> Syncer<H> {
                 granted: true,
             })
             .collect();
-        let jobs =
-            self.candidate_jobs(&key, &grants, &mut done, &disc, reason(Reason::Participant));
+        let jobs = self
+            .candidate_jobs(
+                &p1,
+                &key,
+                &grants,
+                &mut done,
+                &disc,
+                reason(Reason::Participant),
+                &mut recheck,
+            )
+            .await?;
         let reports = self.run_jobs(&p1, &jobs, &tally, &opts.progress).await;
         self.note_candidates(&key, &grants, &reports, &mut disc, &mut touched);
         repos.extend(reports);
@@ -582,13 +647,17 @@ impl<H: Host> Syncer<H> {
                     granted: false,
                 })
                 .collect();
-            let jobs = self.candidate_jobs(
-                &key,
-                &closure,
-                &mut done,
-                &disc,
-                reason(Reason::Participant),
-            );
+            let jobs = self
+                .candidate_jobs(
+                    &p1,
+                    &key,
+                    &closure,
+                    &mut done,
+                    &disc,
+                    reason(Reason::Participant),
+                    &mut recheck,
+                )
+                .await?;
             let reports = self.run_jobs(&p1, &jobs, &tally, &opts.progress).await;
             self.note_candidates(&key, &closure, &reports, &mut disc, &mut touched);
             repos.extend(reports);
@@ -609,13 +678,17 @@ impl<H: Host> Syncer<H> {
                 })
                 .collect();
             let (now_list, later) = newcomers.split_at(newcomers.len().min(budget));
-            let jobs = self.candidate_jobs(
-                &key,
-                now_list,
-                &mut done,
-                &disc,
-                reason(Reason::Participant),
-            );
+            let jobs = self
+                .candidate_jobs(
+                    &p2,
+                    &key,
+                    now_list,
+                    &mut done,
+                    &disc,
+                    reason(Reason::Participant),
+                    &mut recheck,
+                )
+                .await?;
             let reports = self.run_jobs(&p2, &jobs, &tally, &opts.progress).await;
             self.note_candidates(&key, now_list, &reports, &mut disc, &mut touched);
             repos.extend(reports);
@@ -654,16 +727,29 @@ impl<H: Host> Syncer<H> {
     /// granted candidate is synced without the membership gate and never held back (H1 of the
     /// M2 review: `social.md` §3.3 keeps a grant counting after its holder leaves, so its repo
     /// must stay synced, like an authority's).
-    fn candidate_jobs(
+    ///
+    /// A candidate rejected less than [`state::REJECTED_RECHECK_MS`] ago and named by no new
+    /// hint is held back, except that up to `recheck` of them (the rest of the command's
+    /// [`state::REJECTED_RECHECK_BATCH`]; 0 for a background pass) are confirmed again,
+    /// cheapest first ([`recheck_cost`], then the longest unchecked, then by DID).
+    #[allow(clippy::too_many_arguments)]
+    async fn candidate_jobs(
         &self,
+        s: &Session<H>,
         key: &ForumKey,
         cands: &[Candidate],
         done: &mut BTreeSet<String>,
         disc: &BTreeMap<String, DiscRow>,
         reason: Reason,
-    ) -> Vec<SyncRequest> {
+        recheck: &mut usize,
+    ) -> Result<Vec<SyncRequest>, DiscoveryError> {
         let now = self.host().now_ms();
+        let confirming = |c: &Candidate| {
+            SyncRequest::forum(c.did.clone(), &key.fk, reason).confirming(key.uri.clone(), &key.fk)
+        };
         let mut out = Vec::new();
+        let mut held: Vec<&Candidate> = Vec::new();
+        let mut held_dids: BTreeSet<String> = BTreeSet::new();
         for c in cands {
             let d = c.did.to_string();
             if done.contains(&d) {
@@ -677,19 +763,38 @@ impl<H: Host> Syncer<H> {
                 );
                 continue;
             }
-            let held = reason != Reason::Full
-                && !c.hinted
-                && disc.get(&d).is_some_and(|r| r.skip_rejected(now));
-            if held {
+            if !c.hinted && disc.get(&d).is_some_and(|r| r.skip_rejected(now)) {
+                if held_dids.insert(d) {
+                    held.push(c);
+                }
                 continue;
             }
             done.insert(d);
-            out.push(
-                SyncRequest::forum(c.did.clone(), &key.fk, reason)
-                    .confirming(key.uri.clone(), &key.fk),
-            );
+            out.push(confirming(c));
         }
-        out
+        if *recheck > 0 && !held.is_empty() {
+            let store = RecordStore::new(self.host().cache());
+            let dids: Vec<&str> = held.iter().map(|c| c.did.as_str()).collect();
+            let rows = store.repos(&dids).await?;
+            let costs = join_all(
+                held.iter()
+                    .zip(&rows)
+                    .map(|(c, row)| recheck_cost(s, &c.did, row.as_ref(), now)),
+            )
+            .await;
+            let mut ranked: Vec<(u8, i64, &Candidate)> = held
+                .into_iter()
+                .zip(costs)
+                .map(|(c, cost)| (cost, disc.get(c.did.as_str()).map_or(0, |r| r.at), c))
+                .collect();
+            ranked.sort_by(|a, b| (a.0, a.1, a.2.did.as_str()).cmp(&(b.0, b.1, b.2.did.as_str())));
+            for (_, _, c) in ranked.into_iter().take(*recheck) {
+                *recheck -= 1;
+                done.insert(c.did.to_string());
+                out.push(confirming(c));
+            }
+        }
+        Ok(out)
     }
 
     /// Updates discovery rows from the reports of a candidate phase.
@@ -718,8 +823,8 @@ impl<H: Host> Syncer<H> {
                 Some(MembershipCheck::Valid) => row.set(DiscState::Confirmed, now),
                 // a grant is never rejected: its repo is synced without the gate
                 _ if c.granted => {}
-                Some(m) if m.rejects() => row.set(DiscState::Rejected, now),
-                _ if rep.outcome == RepoOutcome::Rejected => row.set(DiscState::Rejected, now),
+                Some(m) if m.rejects() => row.reject(now),
+                _ if rep.outcome == RepoOutcome::Rejected => row.reject(now),
                 _ => {}
             }
         }

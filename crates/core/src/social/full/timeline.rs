@@ -10,18 +10,44 @@
 //!              comments under the root (top-level, under a placeholder, re-attached, or in a
 //!              Missing root's thread); else t_rank(parent comment); computed top-down
 //! revisions  = valid op: update revisions per subject, in TID order (§11 step 6)
-//! edited     ⇔ such a revision exists ∨ updatedAt later than createdAt
+//! versions   = per non-Excluded comment whose root.cid or parent.cid names another CID than its
+//!              non-Excluded target's current one: "on revision n" (version i is the snapshot
+//!              R_i.subject.cid of the target's i-th revision; the greatest i whose CID matches),
+//!              or "on an unavailable version" (none matches); CIDs compare canonically (§0.4)
+//! edited     ⇔ such a revision exists ∨ µs(updatedAt) later than µs(createdAt) (a createdAt
+//!              without µs, before 1970, is earlier than any updatedAt)
 //! ```
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use lessdugin_lexicon::Collection;
 
+use crate::social::full::cids;
 use crate::social::full::cx::Cx;
 use crate::social::full::view::ItemTime;
-use crate::social::input::SkelData;
+use crate::social::input::{RefSkel, SkelData};
 use crate::social::threads::{self, Node, Placement, ThreadComment};
 use crate::social::time;
+
+/// The version of its target a comment's `root` or `parent` reference names (§11 step 6), when
+/// it is not the target's current version.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Version {
+    /// "on revision n": the snapshot of the target's n-th `op: update` revision (1-based, TID
+    /// order).
+    Revision(u32),
+    /// "on an unavailable version": no revision snapshot has the referenced CID.
+    Unavailable,
+}
+
+/// The versions a comment's references name (§11 step 6); `None` for the current version.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CommentVersions {
+    /// `root.cid`.
+    pub root: Option<Version>,
+    /// `parent.cid`.
+    pub parent: Option<Version>,
+}
 
 /// Time and threads.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -34,6 +60,9 @@ pub struct Timeline {
     pub threads: BTreeMap<String, Placement>,
     /// Valid `op: update` revisions per subject uri, in TID order.
     pub revisions: BTreeMap<String, Vec<String>>,
+    /// Comments whose `root` or `parent` names an earlier or unavailable version of a
+    /// non-Excluded target (§11 step 6).
+    pub versions: BTreeMap<String, CommentVersions>,
     /// Items with the `[edited]` badge.
     pub edited: BTreeSet<String>,
 }
@@ -50,8 +79,8 @@ pub fn timeline(cx: &Cx<'_>) -> Timeline {
         cx.skel.decl_obs,
     );
 
-    // §11 step 6: revisions in TID order
-    let mut revs: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
+    // §11 step 6: revisions in TID order (then uri), with their snapshots' CIDs
+    let mut revs: BTreeMap<String, Vec<(String, String, String)>> = BTreeMap::new();
     for x in cx.records() {
         if let SkelData::Revision {
             subject: Some(s),
@@ -64,16 +93,48 @@ pub fn timeline(cx: &Cx<'_>) -> Timeline {
             let tid = time::rkey_tid(&x.rkey).unwrap_or_default().to_owned();
             revs.entry(s.uri.clone())
                 .or_default()
-                .push((tid, x.uri.clone()));
+                .push((tid, x.uri.clone(), s.cid.clone()));
         }
     }
+    for v in revs.values_mut() {
+        v.sort();
+    }
     let revisions: BTreeMap<String, Vec<String>> = revs
-        .into_iter()
-        .map(|(s, mut v)| {
-            v.sort();
-            (s, v.into_iter().map(|(_, u)| u).collect())
-        })
+        .iter()
+        .map(|(s, v)| (s.clone(), v.iter().map(|(_, u, _)| u.clone()).collect()))
         .collect();
+    let version = |r: &RefSkel| -> Option<Version> {
+        if !cx.live(&r.uri) {
+            return None;
+        }
+        let target = cx.skel(&r.uri)?;
+        if cids::same(&r.cid, &target.cid) {
+            return None;
+        }
+        let n = revs
+            .get(&r.uri)
+            .into_iter()
+            .flatten()
+            .enumerate()
+            .filter(|(_, (_, _, c))| cids::same(&r.cid, c))
+            .map(|(i, _)| i + 1)
+            .last();
+        Some(n.map_or(Version::Unavailable, |n| {
+            Version::Revision(u32::try_from(n).unwrap_or(u32::MAX))
+        }))
+    };
+    let mut versions = BTreeMap::new();
+    for x in cx.items().filter(|x| cx.live(&x.uri)) {
+        if let SkelData::Comment { root, parent, .. } = &x.data {
+            let v = CommentVersions {
+                root: root.as_ref().and_then(version),
+                parent: parent.as_ref().and_then(version),
+            };
+            if v != CommentVersions::default() {
+                versions.insert(x.uri.clone(), v);
+            }
+        }
+    }
 
     // t_rank of posts, wikiRevisions and sequences
     let mut t_rank: BTreeMap<String, i64> = BTreeMap::new();
@@ -154,6 +215,7 @@ pub fn timeline(cx: &Cx<'_>) -> Timeline {
         times,
         threads: placed,
         revisions,
+        versions,
         edited,
     }
 }

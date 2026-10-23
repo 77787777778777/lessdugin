@@ -1,0 +1,52 @@
+---
+source: crates/tui/tests/screens.rs
+expression: screen
+---
+ lessdugin › Meta                                                                                                                            @carol.example.com
+ sort:  new  old  top   filter: all  synced 08:58 UTC
+▌ Hello from bob
+▌ @bob.example.com · 2025-10-09 08:56 UTC · 0 comments · 0 points
+  Welcome
+  @alice.example.com · 2025-10-09 08:54 UTC · 1 comment · 0 points
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ Enter open · s sort · P post · R sync · ? help · h back

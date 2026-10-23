@@ -13,7 +13,9 @@
 use serde::{Deserialize, Serialize};
 
 /// The post sorts of §12.2.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 #[serde(rename_all = "camelCase")]
 pub enum PostSort {
     /// `magic` (the default): pins, then `hot`, with the cutoff.
@@ -30,7 +32,9 @@ pub enum PostSort {
 }
 
 /// The list filters of §12.3.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 #[serde(rename_all = "camelCase")]
 pub enum PostFilter {
     /// `frontpage` (the default): tier ≥ frontpage, not quick takes.
@@ -43,7 +47,9 @@ pub enum PostFilter {
 }
 
 /// The comment sorts of §12.4.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 #[serde(rename_all = "camelCase")]
 pub enum CommentSort {
     /// `magic` (the default).
@@ -122,6 +128,9 @@ mod tests {
         assert_eq!(p.filter, PostFilter::All);
         assert_eq!(p.tag.as_deref(), Some("x"));
         assert_eq!(q.comments.unwrap().sort, CommentSort::LatestReply);
-        assert_eq!(serde_json::from_str::<Query>("{}").unwrap(), Query::default());
+        assert_eq!(
+            serde_json::from_str::<Query>("{}").unwrap(),
+            Query::default()
+        );
     }
 }

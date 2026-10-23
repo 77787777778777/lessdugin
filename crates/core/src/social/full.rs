@@ -7,22 +7,23 @@
 //! | Module | Layer | Spec | Status |
 //! |---|---|---|---|
 //! | [`cx`] | input | §1.1 well-formedness, §1.6 policy, V1 | implemented |
+//! | [`cids`] | – | §0.4 CID comparison by canonical form | implemented |
 //! | [`authority`] | L0 | §4.1 authorities and ranks; §1.6 banner | implemented |
 //! | [`moderation`] | L1 | §4.2–§4.8, §4.10 forum tier; forum-scope statuses of §4.12 | implemented |
 //! | [`participation`] | L2 | §3 participation, seeds, applicants; §4.11 `degraded` | implemented |
 //! | [`timeline`] | – | §2 time, §11 thread placement and versions | implemented |
 //! | [`modstate`] | L6 (V1–V7) | §10.1 V1–V7 (V6 from the author tier) | implemented |
 //! | [`modlog`] | L1/L5 | §4.12 mod log, mod queue, raw view | implemented |
-//! | [`karma`] | L3 | §5 opinion validity, §6 power and karma | **stub** |
-//! | [`scores`] | L3.5 | §7 scores and agreement | **stub** |
-//! | [`gates`] | L4 | §8 gates (values implemented) | **stub** |
-//! | [`author`] | L5 | §4.9 author tier and author-scope statuses | **stub** |
-//! | [`reacts`] | L5 | §9.2 react aggregation | **stub** |
-//! | [`wiki`] | L5 | §13 wiki heads, tag relevance | **stub** |
+//! | [`karma`] | L3 | §5 opinion validity, §6 power and karma | implemented |
+//! | [`scores`] | L3.5 | §7 scores and agreement | implemented |
+//! | [`gates`] | L4 | §8 gate values and passes | implemented |
+//! | [`author`] | L5 | §4.9 author tier and author-scope statuses | implemented |
+//! | [`reacts`] | L5 | §9 the `default/1` palette, react aggregation | implemented |
+//! | [`wiki`] | L5 | §13 wiki heads, tag relevance | implemented |
 //! | [`sequences`] | L5 | §14 sequence library | **stub** |
-//! | [`visibility`] | L6 | §10.1 V8–V10, §10.2 thread pass | **stub** |
-//! | [`ranking`] | L6 | §12 sorts, filters, Recent Discussion | **stub** |
-//! | [`project`] | – | the vector projection (`testdata/vectors/README.md`) | implemented |
+//! | [`visibility`] | L6 | §10.1 V8–V10, §10.2 thread pass | implemented |
+//! | [`ranking`] | L6 | §12 sorts, filters, Recent Discussion | implemented |
+//! | [`project`](mod@project) | – | the vector projection (`testdata/vectors/README.md`) | implemented |
 //!
 //! A stub returns [`view::Pending`] (some return exact results for inputs that do not exercise
 //! them, documented on each); every layer that reads a pending one is pending too. The fold is
@@ -30,6 +31,7 @@
 
 pub mod author;
 pub mod authority;
+pub mod cids;
 pub mod cx;
 pub mod gates;
 pub mod karma;
@@ -54,7 +56,7 @@ use lessdugin_lexicon::Collection;
 use lessdugin_lexicon::ns::NS;
 
 pub use cx::{Cx, Validity, lexicon_validity};
-pub use project::{ProjectError, project};
+pub use project::{ProjectError, project, project_fold};
 pub use query::Query;
 pub use view::{ForumView, Pending, Stage, State};
 
@@ -78,12 +80,8 @@ pub fn fold_view_with(
 ) -> Result<ForumView, FoldError> {
     let cx = Cx::new(input, ns, validity)?;
 
-    // §1.2
-    let digest_preimage = digest::preimage(input).map_err(|e| FoldError(e.to_string()))?;
-    let input_digest = lessdugin_atp::cid::sha256(&digest_preimage)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
+    // §1.2 (the preimage is dropped once hashed)
+    let input_digest = digest::input_digest(input).map_err(|e| FoldError(e.to_string()))?;
 
     // L0
     let a = authority::authorities(&cx)?;
@@ -124,8 +122,7 @@ pub fn fold_view_with(
     let wiki = wiki::wiki(&cx, &a, &l1, &v1_v5, &karma, &gates);
     let library = sequences::library(&cx, &l1, &v1_v5, &scores, &gates, &tl.times);
     // L6
-    let visibility =
-        visibility::visibility(&cx, &l2, &mod_states, &karma, &scores, &tl.threads);
+    let visibility = visibility::visibility(&cx, &l2, &mod_states, &karma, &scores, &tl.threads);
     let orderings = ranking::orderings(
         &cx,
         query,
@@ -163,7 +160,6 @@ pub fn fold_view_with(
         degraded,
         banners,
         input_digest,
-        digest_preimage,
         authorities: a,
         tiers,
         mod_queue,
@@ -173,6 +169,7 @@ pub fn fold_view_with(
         times: tl.times,
         threads: tl.threads,
         revisions: tl.revisions,
+        versions: tl.versions,
         edited: tl.edited,
         excluded: cx.excluded.clone(),
         v1_v5,

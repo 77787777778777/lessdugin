@@ -434,9 +434,9 @@ pub trait Host: MaybeSendSync + 'static {
     /// other tabs of the origin. It is released when the guard is dropped and when its holder
     /// dies (process exit, tab close), so it is never left stale. Implementations:
     /// - native: an exclusive `fd-lock` file (`<data dir>/locks/outbox-<h(did)>.lock`, §10.6);
-    /// - browser: the Web Lock `lessdugin-<name>` with `:` replaced by `-` (for example
-    ///   `lessdugin-outbox-<did>`), requested in exclusive mode (`ifAvailable` when `!wait`),
-    ///   held until the guard is dropped;
+    /// - browser: the Web Lock `lessdugin-<name>` with the first `:` replaced by `-` (for
+    ///   example `lessdugin-outbox-<did>`, the DID unchanged), requested in exclusive mode
+    ///   (`ifAvailable` when `!wait`), held until the guard is dropped;
     /// - tests (`MemHost`): an in-process lock shared by clones of the host.
     ///
     /// Lock names are not reentrant: a holder that asks again for a name it holds waits for

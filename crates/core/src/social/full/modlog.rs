@@ -22,9 +22,7 @@ use lessdugin_lexicon::Collection;
 use crate::social::full::author::AuthorTier;
 use crate::social::full::cx::Cx;
 use crate::social::full::moderation::{ModScope, Moderation};
-use crate::social::full::view::{
-    ModLogEntry, ModStatus, Participation, QueueItem, Raw, Stage,
-};
+use crate::social::full::view::{ModLogEntry, ModStatus, Participation, QueueItem, Raw, Stage};
 use crate::social::input::SkelData;
 use crate::social::time;
 

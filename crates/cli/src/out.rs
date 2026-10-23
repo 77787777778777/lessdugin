@@ -201,6 +201,41 @@ impl Printer {
         self.json
     }
 
+    /// True if colour is on for stdout.
+    pub fn color(&self) -> bool {
+        self.color_out
+    }
+
+    /// True if stdout is a terminal.
+    pub fn stdout_is_tty(&self) -> bool {
+        self.stdout_tty
+    }
+
+    /// True with `-q`.
+    pub fn is_quiet(&self) -> bool {
+        self.quiet
+    }
+
+    /// Renders styled spans as one line (no newline) for stdout.
+    pub fn spans(&self, spans: &[Span]) -> String {
+        spans
+            .iter()
+            .map(|(t, st)| render(t, *st, self.color_out))
+            .collect()
+    }
+
+    /// Writes already rendered text (made of [`TermText`] and our SGR only) to stdout, through
+    /// `less -R` when stdout is a terminal and `pager` is set (`--no-pager` clears it). If the
+    /// pager cannot be started, the text is written directly.
+    pub fn page(&self, text: &str, pager: bool) {
+        if pager && self.stdout_tty && !self.json && spawn_pager(text) {
+            return;
+        }
+        let mut out = std::io::stdout().lock();
+        let _ = out.write_all(text.as_bytes());
+        let _ = out.flush();
+    }
+
     /// Writes a DTO as JSON to stdout.
     pub fn json<T: Serialize + ?Sized>(&self, value: &T) {
         let text = serde_json::to_string_pretty(value).unwrap_or_else(|_| "null".into());
@@ -295,6 +330,25 @@ impl Printer {
         }
         self.err_line(&[(lit("error: "), Style::Bad), (tt(msg), Style::Plain)]);
     }
+}
+
+/// Pipes `text` through `less -R -F -X` (`-F`: no paging when it fits on one screen); `false`
+/// if `less` could not be started.
+fn spawn_pager(text: &str) -> bool {
+    use std::process::{Command, Stdio};
+    let child = Command::new("less")
+        .args(["-R", "-F", "-X"])
+        .stdin(Stdio::piped())
+        .spawn();
+    let Ok(mut child) = child else {
+        return false;
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        // a reader quitting early (q) closes the pipe: not an error
+        let _ = stdin.write_all(text.as_bytes());
+    }
+    let _ = child.wait();
+    true
 }
 
 fn hint_for(e: &EngineError) -> Option<&'static str> {

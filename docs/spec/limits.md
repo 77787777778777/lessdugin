@@ -270,6 +270,8 @@ The 1 %-per-hour automatic audit and automatic demotion (above 2 % contradiction
 | Constant | Value | Class | Applies to | Defined in |
 |---|---|---|---|---|
 | `NEWCOMER_BUDGET` | 500 | O | newcomer repos synced per forum open, most recent first | `sync.md` |
+| `REJECTED_RECHECK_MS` | 86,400,000 (24 h) | O | a background pass confirms a rejected candidate (no membership) again only this long after its last check, unless a new hint names it | `sync.md` §4.2.1 |
+| `REJECTED_RECHECK_BATCH` | 50 | O | rejected candidates a user-initiated `sync_forum` (also `--full`) confirms again before their back-off ends, cheapest first | `sync.md` §4.2.1 |
 | `RECENT_POSTS_DISCOVERY` | 100 | O | newest `NS.post` backlinks of the forum read from Constellation to find recently active authors | `sync.md` |
 | `RECENT_ACTIVITY_REPLAY_MS` | 129,600,000 (36 h) | O | Jetstream replay window used to find recently active authors | `sync.md` |
 | `RELAY_ECOSYSTEM_MAX_REPOS` | 5,000 | O | relay `listReposByCollection(NS.membership)` is used for newcomers only while it lists at most this many repos | `sync.md` |

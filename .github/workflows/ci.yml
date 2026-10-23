@@ -27,6 +27,8 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo clippy --target wasm32-unknown-unknown -p lessdugin-atp -p lessdugin-lexicon -p lessdugin-markdown -p lessdugin-core -p lessdugin-wasm -- -D warnings
       - run: cargo test --workspace
+      # the social-fold vectors again at the final namespace (as `cargo xtask ci`)
+      - run: cargo test -p lessdugin-core --features final-ns --test social_vectors
   # The interop, vector and property tests of atp, lexicon and markdown on wasm32-unknown-unknown,
   # in node through wasm-bindgen-test-runner (same version as the workspace wasm-bindgen pin).
   wasm-tests:
@@ -68,10 +70,21 @@ jobs:
           cache: pnpm
       - run: cargo install wasm-bindgen-cli --version =0.2.129 --locked
       - run: pnpm install --frozen-lockfile
-      - run: cargo xtask wasm --budget
+      # the engine wasm (packages/engine/pkg) and its size report in the job summary; over the
+      # budget (ADR 0002) the job fails in the last step, after the web checks have run
+      - id: wasm-size
+        run: cargo xtask wasm --budget --report
+        continue-on-error: true
+      # the KV conformance module the engine package's tests run (packages/engine/pkg/kvtest)
+      - run: cargo xtask wasm --kv-test
       - run: pnpm run check
       - run: pnpm run test
       - run: pnpm run build
+      - name: wasm size budget
+        if: steps.wasm-size.outcome != 'success'
+        run: |
+          echo "::error::the engine wasm failed to build or is over the size budget (see the wasm-size step)"
+          exit 1
   # The SPA's end-to-end tests (web/e2e): the demo build in Chromium, including the production
   # CSP and Trusted Types run, axe, the sanitiser vector equality and the keyboard checks. The
   # Playwright version is pinned in web/package.json; its Chromium is installed here.
@@ -94,6 +107,7 @@ jobs:
           cache: pnpm
       - run: cargo install wasm-bindgen-cli --version =0.2.129 --locked
       - run: pnpm install --frozen-lockfile
-      - run: cargo xtask wasm --budget
+      # the size budget is enforced by the web job
+      - run: cargo xtask wasm
       - run: pnpm --filter @lessdugin/web exec playwright install --with-deps chromium
       - run: pnpm --filter @lessdugin/web run e2e

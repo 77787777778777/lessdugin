@@ -535,6 +535,24 @@ impl<H: Host> Engine<H> {
         Ok(())
     }
 
+    /// A clone of this engine that acts as the recorded account `did` instead of the active
+    /// one (the CLI's `--account`): new content, joins, grants and the viewer-dependent view
+    /// fields use it, as [`Engine::active_account`] returns it. The stored active account is
+    /// unchanged, and other clones are not affected. `not_found` if `did` is not recorded.
+    pub async fn acting_as(&self, did: &str) -> Result<Self, EngineError> {
+        let did = parse_did(did)?;
+        if self
+            .state_get::<AccountRow>(account_key(did.as_str()))
+            .await?
+            .is_none()
+        {
+            return Err(EngineError::not_found(format!("no account {did}")));
+        }
+        let mut e = self.clone();
+        e.acting = Some(std::sync::Arc::from(did.as_str()));
+        Ok(e)
+    }
+
     /// Makes a recorded account the active one (emits `Changed [Accounts]`).
     pub async fn set_active_account(&self, did: &str) -> Result<(), EngineError> {
         let did = parse_did(did)?;
@@ -555,9 +573,14 @@ impl<H: Host> Engine<H> {
         Ok(())
     }
 
-    /// The active account, if any.
+    /// The active account, if any: the account this clone acts as ([`Engine::acting_as`]),
+    /// else the stored active account.
     pub async fn active_account(&self) -> Result<Option<AccountView>, EngineError> {
-        match self.active_did().await? {
+        let did = match &self.acting {
+            Some(d) => Some(d.to_string()),
+            None => self.active_did().await?,
+        };
+        match did {
             Some(did) => Ok(self
                 .state_get::<AccountRow>(account_key(&did))
                 .await?

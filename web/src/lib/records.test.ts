@@ -75,6 +75,13 @@ describe("post edits", () => {
     expect(d?.link).toEqual({ uri: "https://example.com/", title: "Example", description: "d" });
     expect(postDraftOf({ kind: "poem", body: md("b") }, "at://f")).toBeNull();
   });
+  it("read a record without `kind` as an article (writers omit the default)", () => {
+    expect(postDraftOf({ title: "T", body: md("b") }, "at://f")).toMatchObject({
+      kind: "article",
+      title: "T",
+      body: { markdown: "b" },
+    });
+  });
 });
 
 describe("forum declaration edits (data-model.md §6.1)", () => {

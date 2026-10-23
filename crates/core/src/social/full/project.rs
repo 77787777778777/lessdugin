@@ -12,10 +12,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use lessdugin_lexicon::values::{AccessLevel, MembershipMode};
 use serde_json::{Map, Value, json};
 
+use crate::social::digest;
 use crate::social::full::gates::Gate;
 use crate::social::full::view::{
     DimValue, ForumView, HiddenReason, ModStatus, Pending, QueueItem, Resolution, Stage, State,
 };
+use crate::social::input::FoldInput;
 use crate::social::threads::Parent;
 
 /// Why a field could not be projected.
@@ -25,6 +27,9 @@ pub enum ProjectError {
     Pending(Pending),
     /// No such field.
     UnknownField(String),
+    /// The field is a function of the fold input, which the view does not keep
+    /// (`digestPreimage`): use [`project_fold`].
+    NeedsInput(String),
 }
 
 impl From<Pending> for ProjectError {
@@ -202,7 +207,21 @@ fn thread_field(v: &ForumView, field: &str) -> Value {
     }
 }
 
-/// Projects `field` of `v` (the README's "Comparing results" contract).
+/// Projects `field` of the fold of `input` into `v` (the README's "Comparing results" contract):
+/// [`project`], plus `digestPreimage`, which the view does not keep (the preimage D of §1.2 is as
+/// large as the input's uri list).
+pub fn project_fold(input: &FoldInput, v: &ForumView, field: &str) -> Result<Value, ProjectError> {
+    match field {
+        "digestPreimage" => {
+            let d = digest::preimage(input).map_err(|e| ProjectError::NeedsInput(e.to_string()))?;
+            Ok(json!(String::from_utf8_lossy(&d)))
+        }
+        _ => project(v, field),
+    }
+}
+
+/// Projects `field` of `v` (the README's "Comparing results" contract); `digestPreimage` needs
+/// the input ([`project_fold`]).
 pub fn project(v: &ForumView, field: &str) -> Result<Value, ProjectError> {
     let l2 = &v.participation;
     Ok(match field {
@@ -290,7 +309,7 @@ pub fn project(v: &ForumView, field: &str) -> Result<Value, ProjectError> {
 
         // digest
         "inputDigest" => json!(v.input_digest),
-        "digestPreimage" => json!(String::from_utf8_lossy(&v.digest_preimage)),
+        "digestPreimage" => return Err(ProjectError::NeedsInput(field.to_owned())),
         "algs" => json!(v.policy.algs_line()),
         "params" => json!(v.policy.params_line()),
 

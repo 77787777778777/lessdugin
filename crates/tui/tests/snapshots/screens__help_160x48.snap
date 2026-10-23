@@ -1,0 +1,52 @@
+---
+source: crates/tui/tests/screens.rs
+expression: help
+---
+ lessdugin › Meta › Welcome                                                                                                                  @carol.example.com
+ Meta · synced
+▌ Welcome
+▌ @alice.example.com · 2025-10-09 08:54 UTC · 1 comment · 0 points
+▌
+▌ Hello everyone, and welcome to the forum.
+▌
+▌ ## Rules
+▌
+▌ • Be kind.
+▌ • Stay on topic; see the guide ⟨example.com⟩.
+▌
+▌ lessdugin tui
+                                                ┌ Keys ────────────────────────────────────────────────────────┐
+  1 comment                                     │Navigation                                                    │
+                                                │  j k  Down Up    next / previous                             │
+  @bob.example.com · 2025-10-09 08:57 UTC · 0 po│  g G             first / last                                │
+    Thanks for the forum!                       │  Ctrl-d Ctrl-u   half a page down / up                       │
+                                                │  Enter l         open                                        │
+    It looks great.                             │  h Esc q         back (q on the home screen quits)           │
+                                                │Threads                                                       │
+                                                │  Space           collapse / expand replies                   │
+                                                │  p               parent comment                              │
+                                                │  r               reply in $EDITOR                            │
+                                                │  c               comment on the post in $EDITOR              │
+                                                │Forums                                                        │
+                                                │  s               sort: new, old, top                         │
+                                                │  P               new post in $EDITOR                         │
+                                                │  R               sync and show new items                     │
+                                                │Other                                                         │
+                                                │  ?               this help                                   │
+                                                │  Ctrl-c          quit                                        │
+                                                │                                                              │
+                                                │Any key closes this help.                                     │
+                                                └──────────────────────────────────────────────────────────────┘
+
+
+
+
+
+
+
+
+
+
+
+
+ r reply · c comment · Space fold · p parent · R sync · ? help · h back

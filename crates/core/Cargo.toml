@@ -36,7 +36,17 @@ tsify = { workspace = true, optional = true }
 wasm-bindgen = { workspace = true, optional = true }
 
 [dev-dependencies]
-proptest.workspace = true
 insta.workspace = true
 # Integration tests (tests/) run the engine over the in-memory host.
 lessdugin-testkit.workspace = true
+
+# The social fold's parity test (`tests/social_parity.rs`, social.md §6.3 P9) also runs on wasm32
+# under node (wasm-bindgen-test-runner). proptest's default `fork`/`timeout` features spawn
+# processes, so the wasm32 build takes it without them; its seed comes from `getrandom` 0.4.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+proptest.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+proptest = { version = "1", default-features = false, features = ["std", "bit-set"] }
+getrandom = { version = "0.4", features = ["wasm_js"] }
+wasm-bindgen-test.workspace = true

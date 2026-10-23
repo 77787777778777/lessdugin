@@ -32,6 +32,9 @@ describe("check-no-raw-href", () => {
       [],
     );
     expect(rules("lib/sanitize.ts", "el.innerHTML = html;")).toEqual([]);
+    expect(rules("lib/navigate.ts", "win.location.assign(url.href);")).toEqual([]);
+    expect(rules("lib/navigate.ts", "a.href = u;")).toEqual(["dom-url"]);
+    expect(rules("lib/navigate.ts", "location.replace(u);")).toEqual(["dom-url"]);
   });
   it("flags DOM writes that set a URL or navigate", () => {
     const lines = [

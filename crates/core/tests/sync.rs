@@ -1941,3 +1941,92 @@ fn an_explicit_sync_refreshes_a_stale_collection_list() {
     w.sync_forum(&f, &SyncOpts::default());
     assert_eq!(describes(&w), before + 1);
 }
+
+/// `sync.md` §4.2.1: a rejected candidate (no membership yet) who joins later. A background
+/// pass keeps the `REJECTED_RECHECK_MS` back-off; a user-initiated `sync_forum` re-checks up to
+/// `REJECTED_RECHECK_BATCH` rejected candidates at once, cheapest first (a cached, fresh DID
+/// document before one that must be resolved), and the next explicit sync takes the rest.
+#[test]
+fn an_explicit_sync_rechecks_rejected_candidates_cheapest_first() {
+    use lessdugin_core::discovery::state::REJECTED_RECHECK_BATCH;
+
+    let w = World::new();
+    let owner = w.net.add_account("owner.example.com");
+    let f = w.forum(&owner, "open", MembershipMode::Open, &[]);
+    // the owner replies to each candidate's post, so all are in the closure; none is a member
+    let n = REJECTED_RECHECK_BATCH + 2;
+    let cands: Vec<AccountHandle> = (0..n)
+        .map(|i| w.net.add_account(&format!("c{i}.example.com")))
+        .collect();
+    for c in &cands {
+        let p = w.post(c, &f);
+        w.comment(&owner, &f, &p);
+    }
+    let st =
+        |fs: &ForumSync, a: &AccountHandle| fs.state.disc.get(a.did().as_str()).map(|d| d.state);
+    let fs = w.sync_forum(&f, &SyncOpts::default());
+    assert_eq!(fs.state.closure.len(), n);
+    assert!(
+        cands
+            .iter()
+            .all(|c| st(&fs, c) == Some(DiscState::Rejected))
+    );
+
+    // they all join; c0 and c1's DID documents are no longer cached (a re-check must resolve
+    // them first, so they cost more)
+    for c in &cands {
+        w.join(c, &f);
+    }
+    w.host.advance_ms(60_000);
+    let sy = w.syncer();
+    for c in &cands[..2] {
+        block_on(w.session(&sy).resolver().invalidate_did(c.did()));
+    }
+
+    // a background pass holds every rejection back
+    let before: Vec<usize> = cands.iter().map(|c| w.requests_about(c.did())).collect();
+    let bg = SyncOpts {
+        background: true,
+        ..SyncOpts::default()
+    };
+    let fs = w.sync_forum(&f, &bg);
+    assert!(
+        cands
+            .iter()
+            .all(|c| st(&fs, c) == Some(DiscState::Rejected))
+    );
+    let after: Vec<usize> = cands.iter().map(|c| w.requests_about(c.did())).collect();
+    assert_eq!(before, after);
+
+    // an explicit sync re-checks a batch, cheapest first: the cached ones
+    let fs = w.sync_forum(&f, &SyncOpts::default());
+    for c in &cands[2..] {
+        assert_eq!(st(&fs, c), Some(DiscState::Confirmed), "{}", c.handle());
+        assert_eq!(
+            w.stored(&f, c).len(),
+            2,
+            "post and membership of {}",
+            c.handle()
+        );
+    }
+    for c in &cands[..2] {
+        assert_eq!(st(&fs, c), Some(DiscState::Rejected), "{}", c.handle());
+        assert!(w.stored(&f, c).is_empty());
+    }
+    assert_eq!(
+        fs.completeness.repos_total,
+        1 + REJECTED_RECHECK_BATCH as u32,
+        "{:?}",
+        fs.completeness
+    );
+
+    // the next explicit sync takes the rest (no 24 h wait)
+    let fs = w.sync_forum(&f, &SyncOpts::default());
+    assert!(
+        cands
+            .iter()
+            .all(|c| st(&fs, c) == Some(DiscState::Confirmed))
+    );
+    assert_eq!(fs.completeness.repos_total, 1 + n as u32);
+    assert!(!fs.completeness.partial, "{:?}", fs.completeness);
+}

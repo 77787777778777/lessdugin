@@ -12,8 +12,9 @@
 //                 properties, `setAttribute("href" | "src" | "style" | "srcdoc" | "on…", …)` (or
 //                 a non-literal attribute name), `setAttributeNS`, assignments to `location` /
 //                 `location.href`, `location.assign` / `replace`, `window.open`, and
-//                 `createElement("a", { href })`; the one allowed place is the object-URL
-//                 download helper in src/lib/download.ts;
+//                 `createElement("a", { href })`; the allowed places are the object-URL
+//                 download helper in src/lib/download.ts and, for `location.assign` only, the
+//                 sign-in redirect in src/lib/navigate.ts;
 //   dsih          `dangerouslySetInnerHTML` anywhere (attribute, property or identifier);
 //   html-sink     `innerHTML` / `outerHTML` / `insertAdjacentHTML` / `createContextualFragment` /
 //                 `setHTMLUnsafe` / `document.write` outside src/lib/sanitize.ts (the Trusted
@@ -31,6 +32,7 @@ import { parseAst } from "vite";
 const SAFE_LINK = "components/SafeLink.tsx";
 const SANITIZE = "lib/sanitize.ts";
 const DOWNLOAD = "lib/download.ts";
+const NAVIGATE = "lib/navigate.ts";
 const SINKS = new Set([
   "innerHTML",
   "outerHTML",
@@ -238,7 +240,7 @@ export function check(file, text) {
         (method === "assign" || method === "replace") &&
         isLocation(callee.object)
       ) {
-        domUrl(node, `location.${method}`);
+        if (!(file === NAVIGATE && method === "assign")) domUrl(node, `location.${method}`);
       } else if (
         node.type === "CallExpression" &&
         ((method === "open" &&

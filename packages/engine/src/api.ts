@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
 // The engine's public operations (docs/spec/engine-api.md §3), one async method per operation,
-// camelCased exactly as `lessdugin-wasm`'s `WasmEngine` will expose them. Every method resolves
-// with a DTO from `./types.ts` or rejects with an `EngineError`.
+// camelCased: `lessdugin-wasm` dispatches each name (`WasmEngine.call(op, argsJson)`,
+// crates/wasm/src/ops.rs, whose native test checks this list). Every method resolves with a DTO
+// from `./types.ts` or rejects with an `EngineError`; operations the engine does not implement
+// yet reject with code `unsupported`.
 //
 // Two names differ from a literal camelCasing of §3, because JavaScript has no overloading:
 // - `subscribe(cb)` is the event subscription of §3.8;
@@ -101,18 +103,30 @@ export interface EngineApi {
   join(uri: AtUri, note?: string): Promise<WriteTicket>;
   leave(uri: AtUri): Promise<WriteTicket>;
   members(uri: AtUri, query: MembersQuery): Promise<MemberView[]>;
+  /** One write per actor; resolves with the first actor's ticket (the others report through
+   * `write` events and `writes()`). */
   grant(uri: AtUri, dids: Did[]): Promise<WriteTicket>;
+  /** Like `grant`: one write per actor, the first actor's ticket. */
   revoke(uri: AtUri, dids: Did[]): Promise<WriteTicket>;
   modsSet(uri: AtUri, change: ModsChange): Promise<WriteTicket>;
 
   // §3.3 Sync ---------------------------------------------------------------------------------
   syncForum(uri: AtUri, opts: SyncOpts): Promise<SyncReport>;
   syncThread(postUri: AtUri, opts: SyncOpts): Promise<SyncReport>;
-  /** Long-lived; resolves when the engine is dropped. */
+  /** Long-lived; resolves after `liveStop()`. In the browser the worker runs it in the leader
+   * tab only. */
   liveTail(): Promise<void>;
-  /** Long-lived; resolves when the engine is dropped. */
+  /** Stops every running `liveTail` after its current round; a later `liveTail` runs. */
+  liveStop(): Promise<void>;
+  /** Verifies the handles of up to `n` shown authors queued by views (`liveTail` does this each
+   * round); resolves with how many were checked. */
+  verifyHandles(n: number): Promise<number>;
+  /** Long-lived; resolves after `outboxStop()`. In the browser the worker runs it in the leader
+   * tab only. */
   outboxPump(): Promise<void>;
-  /** Long-lived; resolves when the engine is dropped (no-op unless `verify = proof`). */
+  /** Stops every running `outboxPump` after its current round; a later `outboxPump` runs. */
+  outboxStop(): Promise<void>;
+  /** Long-lived; returns at once in v1 (`verify = proof` is Reserved). */
   backgroundVerify(): Promise<void>;
 
   // §3.4 Queries ------------------------------------------------------------------------------
@@ -158,6 +172,12 @@ export interface EngineApi {
   redactRevision(uri: AtUri): Promise<WriteTicket>;
   prepareMedia(input: MediaInput): Promise<MediaRef>;
   undo(writeId: string): Promise<WriteTicket>;
+  /** Queues a `failed` (or conflicting) write again. */
+  retryWrite(writeId: string): Promise<WriteTicket>;
+  /** `null`: unknown or pruned. */
+  writeStatus(writeId: string): Promise<WriteTicket | null>;
+  /** Every write in the outbox, by account then sequence (pending badges, an outbox view). */
+  writes(): Promise<WriteTicket[]>;
 
   // §3.6 Local state --------------------------------------------------------------------------
   markRead(postUri: AtUri): Promise<void>;

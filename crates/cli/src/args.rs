@@ -15,6 +15,9 @@ use std::path::PathBuf;
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use url::Url;
 
+mod content;
+pub use content::*;
+
 /// A serverless markdown and media forum on atproto.
 #[derive(Debug, Parser)]
 #[command(
@@ -85,11 +88,51 @@ pub struct GlobalArgs {
     /// Only errors on stderr.
     #[arg(short, long, global = true, conflicts_with = "verbose")]
     pub quiet: bool,
+
+    /// The forum to act in, instead of the current one (`forum use`).
+    #[arg(long, global = true, value_name = "FORUM", env = "LESSDUGIN_FORUM")]
+    pub forum: Option<String>,
+
+    /// Do not use the network: read the local cache only; writes stay queued.
+    #[arg(long, global = true)]
+    pub offline: bool,
 }
 
 /// Commands.
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Read a post and its comments (labelled c1…cN; no login needed).
+    Read(ReadArgs),
+    /// List a forum's posts, numbered (`read 3` reads the third).
+    Ls(LsArgs),
+    /// Publish a post from a markdown file, or write it in $EDITOR.
+    Post(PostArgs),
+    /// Comment on a post, or reply to a comment.
+    Comment(CommentArgs),
+    /// Edit your post or comment (the old version is kept as a revision).
+    Edit(EditArgs),
+    /// Delete your post or comment, with its revisions.
+    Delete(DeleteArgs),
+    /// Retract your comment (it stays visible, marked as retracted).
+    Retract(RefArgs),
+    /// List the versions of a post or comment.
+    History(RefArgs),
+    /// Sync a forum (or every followed forum) and send queued writes.
+    Sync(SyncArgs),
+    /// Join a forum: follow it, write your membership and make it the current forum.
+    Join(JoinArgs),
+    /// Leave a forum: delete your membership (the forum stays followed).
+    Leave(LeaveArgs),
+    /// Forums: ls, show, follow, unfollow, use, create.
+    Forum(ForumArgs),
+    /// List a forum's members.
+    Members(MembersArgs),
+    /// Grant membership to applicants (approval-mode forums; owner and admins).
+    Approve(ApproveArgs),
+    /// Drafts kept in the data directory: ls, edit, rm, publish.
+    Draft(DraftArgs),
+    /// Queued writes: ls, flush, retry, undo.
+    Outbox(OutboxArgs),
     /// Log in (OAuth in the browser by default; --app-password for bots and headless use).
     Login(LoginArgs),
     /// Log out: revoke the session and delete it from the keyring.
@@ -106,6 +149,22 @@ pub enum Command {
     Doctor(DoctorArgs),
     /// Print a shell completion script.
     Completions(CompletionsArgs),
+    /// Serve the web app on 127.0.0.1 with a bridge to your logged-in accounts (the browser
+    /// holds no secret; each printed link works once).
+    #[cfg(feature = "web")]
+    Web(crate::web::WebArgs),
+    /// Open the terminal UI (bare `lessdugin` does too, on a terminal with an account).
+    #[cfg(feature = "tui")]
+    Tui(TuiArgs),
+}
+
+/// `tui`.
+#[cfg(feature = "tui")]
+#[derive(Debug, Default, Args)]
+pub struct TuiArgs {
+    /// A forum to open (as `ls` takes it); without one, the forums you follow.
+    #[arg(value_name = "FORUM")]
+    pub forum: Option<String>,
 }
 
 /// `--oauth-client`.

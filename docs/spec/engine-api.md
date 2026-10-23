@@ -107,10 +107,11 @@ when the engine is dropped or the corresponding stop method is called.
 |---|---|
 | `resolve_actor(input: &str)` | `ActorView` (handle verification state included) |
 | `accounts()` | `Vec<AccountView>` |
-| `add_account(AccountInfo { did, pds, auth: AuthKind })` | called by host-specific login code after a successful login; verifies the login binding (`sync.md` §3.6) |
+| `add_account(AccountInfo { did, pds, auth: AuthKind, issuer?, intended?, confirmIssuerChange })` | called by host-specific login code after a successful login; verifies the login binding (`sync.md` §3.6) |
 | `remove_account(did, purge: bool)` | – |
 | `set_active_account(did)` / `active_account()` | – |
-| `parse_ref(input, RefContext) -> Ref` | accepts at-uris, SPA URLs (`#/p/…`, `#/c/…`, `#/f/…`, `#/s/…`, `#/u/…`, `#/at/…`), `handle/rkey` (post in the current forum), `did`, `handle`. Listing indices (`3`, `c12`) are resolved by the CLI before calling. |
+| `acting_as(did) -> Engine` | Rust API only (not in the wasm bindings): a clone of the engine whose `active_account()` is the recorded account `did` (`not_found` otherwise) without changing the stored active account; its queries and writes act as that account (CLI `--account`, writes to a record by its owner) |
+| `parse_ref(input, RefContext { forum? }) -> Ref` | accepts at-uris, SPA URLs (`#/p/…`, `#/c/…`, `#/f/…`, `#/s/…`, `#/u/…`, `#/at/…`, also inside a full URL), `handle/rkey` (post in `ctx.forum`; without one `invalid_ref`), `did`, `@handle`/`handle`. Listing indices (`3`, `c12`) are resolved by the CLI before calling. `Ref = forum{uri} \| post{uri} \| comment{uri} \| sequence{uri} \| record{uri} \| actor{did}` (tagged by `kind`). |
 
 ### 3.2 Forums and membership
 
@@ -130,11 +131,19 @@ when the engine is dropped or the corresponding stop method is called.
 
 | Operation | Notes |
 |---|---|
-| `sync_forum(uri, SyncOpts { budget_ms, max_requests, full })` | `SyncReport` |
-| `sync_thread(post_uri, SyncOpts)` | P0 fetch of the thread's participants' ranges |
-| `live_tail()` | long-lived: Jetstream / polling / indexer `getChanges`, feeds the dirty queue |
-| `outbox_pump()` | long-lived: drains the outbox, one write in flight per account |
-| `background_verify()` | long-lived; `verify = Proof` is Reserved (P2) (`sync.md` §2.3), so in v1 it is a no-op |
+| `sync_forum(uri, SyncOpts { budget_ms, max_requests, full })` | `SyncReport`. User-initiated: stale collection lists are refreshed (`sync.md` §5.2) and up to `REJECTED_RECHECK_BATCH` rejected candidates are confirmed again, cheapest first (`sync.md` §4.2.1) |
+| `sync_thread(post_or_comment_uri, SyncOpts)` | P0 fetch of the thread's participants' ranges; opens an unknown forum from the record itself; `degraded` reflects the state after the sync |
+| `live_tail()` | long-lived: Jetstream / polling / indexer `getChanges`, feeds the dirty queue; runs `live_step` rounds until `live_stop()` |
+| `live_step() -> LiveRound` | one `live_tail` round (seeding, head polls, reconciles, up to `LIVE_TAIL_BATCH` queued syncs, handle verification, tombstone GC); for one-shot use (`tail --once`). `LiveRound { polled, reconciles, synced, changed: Vec<forum uri>, verified, gc, nextMs }` is a Rust value, not a DTO |
+| `live_stop()` | sync; stops every running `live_tail` after its current round; a `live_tail` started later runs |
+| `verify_handles(n) -> usize` | verifies the handles of up to `n` shown authors queued by views (`sync.md` §3.3); emits `Changed` when a handle state changed; `live_tail` calls it each round |
+| `outbox_pump()` | long-lived: drains the outbox of every logged-in account, one write in flight per account (`sync.md` §7.1, across processes and tabs through `Host::lock`); picks up account changes; never returns an error; ends on `outbox_stop()` |
+| `outbox_stop()` | sync; stops every running pump after its current round; a pump started later runs |
+| `outbox_flush() -> PumpReport` | one-shot (CLI, tests): prunes finished writes older than `DONE_KEEP_MS`, then runs every account's outbox until nothing is pending, sleeping through holds and back-offs. `PumpReport { processed, done, failed, conflicts, throttled }` is a Rust value, not a DTO |
+| `background_verify()` | long-lived; `verify = Proof` is Reserved (P2) (`sync.md` §2.3), so in v1 it returns at once |
+| `external_change(topics)` | sync; another engine over the same stores (another browser tab, `sync.md` §10.6) emitted `Changed { topics }`: drops the cached models those topics touch (a `Thread` or `User` topic drops every cached forum model). Emits nothing; the caller forwards the event to its own subscribers |
+
+Clients start `outbox_pump()` and `live_tail()` once at start-up (before or after login) and stop them with `outbox_stop()` / `live_stop()`; one-shot CLI commands use `outbox_flush()` and `live_step()` instead.
 
 ```
 SyncReport { dto, forum, reposTotal, reposComplete, reposStale, reposUnavailable,
@@ -184,6 +193,9 @@ Writes go through the durable outbox (`data-model.md` §8). Each returns a `Writ
 | `redact_revision(uri)` | deletes revision records |
 | `prepare_media(MediaInput) -> MediaRef` | sniff, strip, orient (native), CID; upload happens at publish |
 | `undo(write_id)` | within the undo window |
+| `retry_write(write_id)` | queues a `failed` (or conflicting) write again; returns its ticket |
+| `write_status(write_id) -> Option<WriteTicket>` | `None`: unknown or pruned |
+| `writes() -> Vec<WriteTicket>` | every write in the outbox, by account then `seq` (the CLI's `outbox` listing, the SPA's pending badges) |
 
 `BodyDraft { markdown, media: Vec<MediaRef> }` — the engine performs spill-to-blob, mention
 rewriting (`at://handle` → DID), derived `mentions`/`links`, and validation before persisting.
@@ -208,14 +220,28 @@ rewriting (`at://handle` → DID), derived `mentions`/`links`, and validation be
 Event =
   | Changed { topics: Vec<Topic> }             // Topic = Forum(uri) | Thread(uri) | User(did)
                                                //       | Notifications | Outbox | Drafts | Accounts
-  | SyncProgress { forum, done, total }
-  | Write { id, state }
+  | SyncProgress { forum, done, total }         // repos synced so far / planned so far
+  | Write { id, state }                         // always followed by Changed [Outbox]
   | Auth { did, state: Ok | Expiring { inMs } | Expired }
   | Warning { kind, source?, message }         // e.g. equivocation, indexer contradiction, degraded
 ```
 
 UIs re-query on `Changed` and never move the user's cursor on live updates (TUI banner
 "N new — R"; SPA query invalidation).
+
+- **`SyncProgress`.** `sync_forum` and `sync_thread` emit it as repos finish: `done` is the
+  number of repos synced so far and `total` the number planned so far. `total` grows as each
+  step of `sync.md` §4.5 plans its candidates, so the ratio can go down. The last event of a
+  command always has `done == total`, also when the command fails; it is followed by
+  `Changed [Forum (, Thread)]`. The counts are progress only; completeness is the report's
+  `reposComplete` of `reposTotal`.
+- **`Write`.** Every outbox state change emits `Write { id, state }`, then `Changed [Outbox]`.
+  For an applied own write, the forum, thread and user topics come after `Write { done }`, so a
+  re-query no longer shows the item as pending.
+- **Accounts.** `add_account`, `record_account`, `set_active_account` and `remove_account` emit
+  `Changed [Accounts]` (plus `Outbox` when a purge dropped writes).
+- **Handles.** Handle verification (`verify_handles`, `live_tail`) emits `Changed` for the users
+  whose handle state changed and for the cached forums.
 
 ### 3.9 Planned operations (not specified yet)
 
@@ -234,7 +260,9 @@ them, as compatible additions (`docs/plan.md`):
 ### 4.1 Common types
 
 ```
-ActorView     { did, handle?, handleState: verified|unverified|invalid, displayName?, avatar?: MediaView,
+ActorView     { did, handle?, handleState: verified|unverified|invalid,
+                claimedHandle? /* only while unverified; untrusted, shown struck through (sync.md §3.1) */,
+                displayName?, avatar?: MediaView,
                 shortDid }                       // handle present only if verified both ways
 ItemState     = { kind: "visible" }
               | { kind: "collapsed", reason: "newUser"|"lowScore"|"muted" }
@@ -315,11 +343,49 @@ VerifyReport  { dto, uri, result: proven|absent|failed, rev?, commitCid?, keySou
 
 ## 5. Wasm binding (`@lessdugin/engine`)
 
-- `lessdugin-wasm` exposes `WasmEngine` with one method per operation above (camelCase), returning
-  Promises of the DTOs; types are generated with `tsify` into `pkg/lessdugin_engine.d.ts`.
-- The engine runs in a Web Worker (`packages/engine/src/worker.ts`); the main thread holds the
-  OAuth session (`auth-bridge.ts`) and serves `Target::UserPds` requests through an allowlist
-  (`threat-model.md`). `@lessdugin/engine/client` wraps the worker with Comlink and re-exports
-  the DTO types.
-- Events are forwarded with `postMessage`; the React app maps `Changed` topics to TanStack Query
-  invalidations.
+- **Boundary.** `lessdugin-wasm` exposes one class, `WasmEngine`, built with wasm-bindgen
+  (`--target web`, no tsify, no serde-wasm-bindgen): `new WasmEngine(configJson, host)`,
+  `call(op, argsJson) → Promise<string>`, `subscribe(cb) → id`, `unsubscribe(id)`. `op` is an
+  `EngineApi` method name (`packages/engine/src/api.ts`), `argsJson` its arguments as a JSON
+  array, and the result is the DTO's dto/1 JSON text exactly as `dto.rs` serialises it (the
+  bytes the CLI's `--json` prints); a failure rejects with an `EngineError` JSON string. Events
+  reach `cb` as dto/1 JSON strings, in order, never re-entrantly. The TS types are the
+  hand-written `types.ts`, checked against `dto.rs` by `types.parity.test.ts`.
+- **Coverage.** Every `EngineApi` method is either dispatched (`crates/wasm/src/ops.rs` `OPS`)
+  or rejects with `unsupported` (`UNSUPPORTED`, the operations of later milestones); a native
+  test parses `api.ts` and fails when a method is in neither list. Worker glue operations
+  outside `EngineApi`: `externalChange`, `outboxWake`, `outboxFlush`, `liveStep`.
+  `grant`/`revoke` resolve with one ticket per actor in wasm; the client returns the first.
+- **Configuration.** `configJson` is `EngineConfigInput` (`packages/engine/src/protocol.ts`,
+  camelCase, unknown keys refused): `network` (`production` or `devnet { plc, pds }`), the
+  sources, `verify`, the resolver lists and `parityNowMs` (§2.1). The worker accepts `devnet`
+  only in development and e2e builds and `parityNowMs` only in e2e builds (`VITE_E2E=1`).
+- **Host.** The worker implements the core `Host` in JS (`host.ts`) and passes it to the
+  constructor: `Target::Anon` requests through `fetch` with the browser URL policy, streaming
+  byte caps and `cache: "no-store"` (`fetch.ts`); `Target::UserPds` requests to the main
+  thread's AuthBridge, except anonymous GETs of the account's own public records, which go
+  to the account's PDS directly (`worker-core.ts`); `fetch_blob` streamed and hashed in JS with
+  the CID check, stored in IndexedDB, never copied into wasm (`blobs.ts`); `lock` as the Web
+  Lock `lessdugin-<name>` (`locks.ts`); `sleep`, `now_ms`, `fill_random` from the platform;
+  WebSockets are `unsupported` until M5. The two `KvStore`s are IndexedDB databases
+  (`<prefix>-cache` relaxed, `<prefix>-state` strict; `idb.ts`), or in `lessdugin web` mode
+  the state store is the native one behind `POST /bridge/kv` (`bridge-kv.ts`). The IndexedDB
+  store passes the core KV conformance suites in CI (`kv-conformance.test.ts`, with the test
+  module of `cargo xtask wasm --kv-test`).
+- **Threads.** The engine runs in a Web Worker (`worker.ts`, Comlink); the main thread holds
+  the session and serves `Target::UserPds` requests through the AuthBridge allowlist
+  (`auth-bridge.ts`, threat-model AUTH-4, AUTH-8), with a pluggable session: hosted OAuth
+  (`oauthSession(did, fetchHandler)`) or the `lessdugin web` bridge
+  (`bridgeSession({ did, token })`). `@lessdugin/engine/client` (`startEngine`) wraps the
+  worker as an `EngineApi` and re-exports the DTO types.
+- **Tabs.** One worker per tab; the Web Lock `lessdugin-sync-leader` elects the leader, the
+  only worker that runs `outbox_pump()` and `live_tail()` (the client's `outboxPump()` and
+  `liveTail()` resolve at once). Workers relay their `Changed` and `Write` events on the
+  BroadcastChannel `lessdugin-changes`; a receiving worker calls `external_change(topics)`
+  (§3.3) and forwards the event to its subscribers, and the leader wakes its pump on another
+  tab's `Write { pending }` (`leader.ts`, `sync.md` §10.6). The React app maps `Changed`
+  topics to TanStack Query invalidations.
+- **Size.** `cargo xtask wasm [--release|--dev] [--budget] [--report]` builds
+  `packages/engine/pkg` with wasm-opt (ADR 0002); `--budget` fails above 1.1 MB gzipped, a
+  release build warns above 2.5 MB raw. Native-only dependencies (ammonia/html5ever) are refused
+  in the wasm build, and `idna` uses the ASCII-only adapter.

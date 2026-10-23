@@ -10,7 +10,22 @@ repository.workspace = true
 [dependencies]
 lessdugin-core.workspace = true
 lessdugin-markdown.workspace = true
+lessdugin-atp.workspace = true
+lessdugin-lexicon.workspace = true
+# Private template files for $EDITOR (threat-model TERM-9).
+lessdugin-native.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true
 ratatui-image.workspace = true
 anyhow.workspace = true
+tokio.workspace = true
+futures.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+unicode-width.workspace = true
+
+[dev-dependencies]
+lessdugin-testkit.workspace = true
+insta.workspace = true
+tempfile.workspace = true
+url.workspace = true

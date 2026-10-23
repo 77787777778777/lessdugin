@@ -52,6 +52,8 @@ pub struct Engine<H: Host> {
     rt: Arc<models::Runtime>,
     /// The durable outbox, reporting to the event bus.
     outbox: Outbox<H>,
+    /// The account this clone acts as instead of the active one ([`Engine::acting_as`]).
+    acting: Option<Arc<str>>,
 }
 
 impl<H: Host> Clone for Engine<H> {
@@ -63,6 +65,7 @@ impl<H: Host> Clone for Engine<H> {
             sync: Arc::clone(&self.sync),
             rt: Arc::clone(&self.rt),
             outbox: self.outbox.clone(),
+            acting: self.acting.clone(),
         }
     }
 }
@@ -93,6 +96,7 @@ impl<H: Host> Engine<H> {
             sync,
             rt,
             outbox,
+            acting: None,
         }
     }
 

@@ -10,6 +10,12 @@
 //! namespace, ignoring the rules whose outcome depends on keys hashed from the namespace (G5, G9,
 //! the key equalities and RV5): the vectors' deliberately invalid records break other rules.
 //! The fold itself always runs on the original values with the file's `ns`.
+//!
+//! **The full fold.** In a `final-ns` build this binary also holds the full fold's runner of
+//! every vector file and kind (`social_fold.rs`) and the `Query` contract over every vector
+//! input (`social_query.rs`), as modules, so the one command CI and `cargo xtask ci` run at the
+//! final namespace (`--features final-ns --test social_vectors`) covers all of them. They stay
+//! runnable alone (`--test social_fold`, `--test social_query`).
 
 use std::path::PathBuf;
 
@@ -22,6 +28,13 @@ use lessdugin_core::social::time;
 use lessdugin_lexicon::RuleId;
 use lessdugin_lexicon::ns::{NS, to_build_nsid};
 use serde_json::{Map, Value, json};
+
+#[cfg(feature = "final-ns")]
+#[path = "social_fold.rs"]
+mod social_fold;
+#[cfg(feature = "final-ns")]
+#[path = "social_query.rs"]
+mod social_query;
 
 fn load(rel: &str) -> Value {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))

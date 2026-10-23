@@ -409,10 +409,19 @@ confirm(d):                                   // per (forum, candidate)
   identity(d) at level doc, else: stays a candidate; retried with the identity backoff
   m = getRecord(PDS(d), NS.membership, fk)    // level pds; usually served from cache after a sync
   valid m (ME1) with m.forum = F → confirmed: sync_repo(d, {fk}, priority per §4.5)
-  RecordNotFound or invalid → rejected (disc row, §10.4)
-  a rejected d is skipped until: a new hint names d; a `sync --full` pass (every rejection is
-  re-checked); or REJECTED_RECHECK_MS (24 h, `limits.md`) has passed since the rejection
+  RecordNotFound or invalid → rejected (disc row, §10.4; its `at` is the time of this check)
+  a rejected d is confirmed again only when:
+    a new hint names d;
+    a user-initiated sync_forum (with or without `full`) runs: it re-checks up to
+      REJECTED_RECHECK_BATCH (50) rejected candidates of the forum, cheapest first; or
+    REJECTED_RECHECK_MS (24 h) has passed since its last check (background passes)
 ```
+
+**Re-checking rejections.** Background passes (`live_tail`, and from M5 the hint-driven discovery that runs in it) keep the 24 h back-off, so a forum's non-members cost nothing between reconciles. A user who asks for a sync expects a member who joined a minute ago to appear, so an explicit `sync_forum` re-checks rejected candidates at once, within a bound that keeps the command's cost predictable. The batch is taken cheapest first:
+- the cost rank of a candidate is +2 when its DID document is not cached at level `doc` (a resolution is needed first), +1 when the cached document is older than `DID_DOC_TTL_MS`, and +1 when its repo's last passes failed;
+- then the candidate checked longest ago (oldest `at`) comes first, then the smaller DID.
+
+A re-check costs one `getLatestCommit` (plus the membership `getRecord` when the head moved), and one that rejects again restarts the back-off, so successive explicit syncs work through a long list of rejections in turn. `sync --full` is bounded the same way. Both constants are in `limits.md` §11.
 
 Authorities and granted DIDs need no confirmation: they are always synced, with their membership record still read and reported. A grant keeps counting after its holder leaves (`social.md` §3.3: their opinions keep counting), so gating a granted repo by its membership would freeze a leaver's last records on clients that synced them while fresh clients never see them, with both reporting complete (I6). A granted DID is therefore never rejected and is always in C(F) (§4.5). A confirmed candidate becomes a fold participant only through the rules of `social.md` §3.
 
@@ -711,6 +720,7 @@ So a subject counts as absent only if a delete was confirmed, or its range was c
 - In assisted mode, an indexer's `#recordRef.firstSeen` is also a candidate, and the minimum is taken.
 - Each stored row keeps `firstSeen` for its current CID, plus `firstCid` and `firstSeenUri` for the earliest version ever admitted. The fold's `obs` therefore contains `(u, cid) → firstSeen` and `(u, firstCid) → firstSeenUri`, so `t_obs` is the record's first-seen time across edits (`social.md` §2.2).
 - First-seen values are never moved later.
+- **Parity mode** (test-only, devnet-only; `engine-api.md` §2.1): the engine passes the fold one fixed time as the `obs` of every admitted version and as `now`, instead of the stored first-seen times and the clock. The stored values are not changed.
 
 ### 5.7 Point fetches
 
@@ -1377,6 +1387,7 @@ pub trait WsStream: MaybeSend {
 - `UserPds` requests go only to the PDS bound at login, carry DPoP or Bearer authentication added by the host (natively behind the OAuth facade; in the browser through the AuthBridge, which allowlists `com.atproto.repo.{createRecord, putRecord, deleteRecord, applyWrites, uploadBlob}` on NS collections plus `com.atproto.server.getSession`), and never follow redirects. Tokens and DPoP proofs are never logged.
 - `Anon` requests follow at most the given number of redirects, `https` only (`http` only in devnet mode). Natively, an SSRF guard checks every hop: the resolved IP is pinned, and loopback, private, link-local, CGNAT (`100.64/10`), ULA (`fc00::/7`), `169.254/16` and IPv4-mapped addresses are blocked (`Blocked`), except loopback in devnet mode.
 - In the browser, a failed cross-origin fetch is reported as `Cors` when it cannot be told apart from a network error.
+- **No HTTP cache.** Every request goes to the network: a host never answers from an HTTP cache and never stores responses in one (browser `fetch(…, { cache: "no-store" })`; natively no cache layer). Freshness is decided by the engine (heads, order keys, TTLs); a cached `getLatestCommit`, `listRecords` or DID document would make a stale state look current and give it a fresh `sent_at_ms`.
 - WebSocket messages larger than `max_msg` close the stream with `TooLarge`.
 
 ### 12.2 Blobs
@@ -1419,6 +1430,7 @@ pub trait Host: MaybeSendSync + 'static {
 ```
 
 - Lock names are `sync-leader`, `repo:<did>` and `outbox:<did>`; the host maps them as in §10.6.
+- `lock` is exclusive across every holder over the same stores: other engines in the process, other processes on the same data directory (native `fd-lock` files), other tabs of the origin (Web Locks, `ifAvailable` when `!wait`). It is released when the guard is dropped and when its holder dies, so it is never stale. Names are not reentrant: a holder that asks again for a name it holds waits for itself. A host whose stores no other process shares (tests: `MemHost`) may lock in-process only, shared by its clones.
 - CI checks that every engine future is `Send` natively (`assert_send`) and that no mutex guard is held across `.await`. `clippy.toml` bans `SystemTime::now`, `Instant::now`, `thread::sleep` and `Utc::now` in the wasm-safe crates.
 
 ### 12.4 `KvStore`

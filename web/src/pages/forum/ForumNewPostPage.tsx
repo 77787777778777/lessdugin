@@ -36,8 +36,10 @@ const KINDS: PostKind[] = ["article", "question", "link", "quickTake"];
 export function postDraftOf(record: unknown, forum: string): PostDraft | null {
   const body = objectField(record, "body");
   const markdown = markdownOf(body);
-  const kind = stringField(record, "kind");
-  if (markdown === undefined || !kind || !(POST_KINDS as readonly string[]).includes(kind)) {
+  // An absent `kind` is `article` (data-model.md §6.3; writers omit the default). An unknown
+  // kind is not edited here: rewriting it as another kind would change the post.
+  const kind = stringField(record, "kind") ?? "article";
+  if (markdown === undefined || !(POST_KINDS as readonly string[]).includes(kind)) {
     return null;
   }
   const d: PostDraft = {

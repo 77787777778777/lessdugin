@@ -1,0 +1,7 @@
+---
+source: crates/cli/tests/content.rs
+expression: "redact(&users, &alice.ok(&[\"history\", &post]))"
+---
+at://<alice>/online.7778777.lessdugin.temp.post/kdjl3qv6jmgz-<tid>
+v1  <time>  <cid>
+v2  <time>  <cid>  typo

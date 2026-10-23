@@ -1,0 +1,8 @@
+---
+source: crates/cli/tests/content.rs
+expression: "redact(&users, &alice.ok(&[\"ls\", \"--sort\", \"old\"]))"
+---
+1  Hello, world
+   @alice.test · <time> · 0 comments · 0 points · #intro
+2  Just a quick take.
+   @alice.test · <time> · 0 comments · 0 points · quick take

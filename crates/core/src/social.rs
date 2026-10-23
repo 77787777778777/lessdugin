@@ -8,7 +8,7 @@
 //! | [`policy`] | the effective policy and `PARAMS` (§1.2, §1.6) |
 //! | [`time`] | `µs`, `tidTime`, `t_rank` (§2) |
 //! | [`threads`] | thread placement (§11), a pure function |
-//! | [`fold`] | the fold: authorities, participation, time, threads, visibility (M2 subset) |
+//! | [`fold`](mod@fold) | the fold: authorities, participation, time, threads, visibility (M2 subset) |
 //! | [`full`] | the full fold, every layer of §1.4 (`fold_view`; stubs for the layers in progress) |
 //! | [`rank`] | `hot`, post and comment sorts (§12) |
 //! | [`digest`] | `inputDigest` (§1.2) |

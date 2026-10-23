@@ -1,0 +1,52 @@
+---
+source: crates/tui/tests/screens.rs
+expression: screen
+---
+ lessdugin › Meta › Welcome                                                                                                                  @carol.example.com
+ Meta · synced
+▌ Welcome
+▌ @alice.example.com · 2025-10-09 08:54 UTC · 1 comment · 0 points
+▌
+▌ Hello everyone, and welcome to the forum.
+▌
+▌ ## Rules
+▌
+▌ • Be kind.
+▌ • Stay on topic; see the guide ⟨example.com⟩.
+▌
+▌ lessdugin tui
+
+  1 comment
+
+  @bob.example.com · 2025-10-09 08:57 UTC · 0 points
+    Thanks for the forum!
+
+    It looks great.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ r reply · c comment · Space fold · p parent · R sync · ? help · h back

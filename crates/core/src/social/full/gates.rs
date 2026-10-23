@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! L4: gates (`karma/1`, `social.md` §8). The gate values read only the declaration and are
-//! implemented ([`Gate::value`]); **STUB**: the layer agent replaces [`gates`].
+//! L4: gates (`karma/1`, `social.md` §8).
 //!
 //! ```text
 //! gateValue(g) = decl.policy.gates.g if present, else the karma/1 default
@@ -11,19 +10,12 @@
 //!
 //! Inputs: `cx` (policy, record owners), `a` (L0), `karma` (K).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::social::full::cx::Cx;
 use crate::social::full::karma::Karma;
-use crate::social::full::view::{Pending, Stage};
+use crate::social::full::view::Stage;
 use crate::social::policy::EffectivePolicy;
-
-/// The pending marker of [`gates`].
-pub const PENDING: Pending = Pending {
-    stub: "gates::gates",
-    layer: "L4",
-    section: "§8",
-};
 
 /// The eight configurable gates of §8.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -88,6 +80,17 @@ impl Gate {
     }
 }
 
+/// `passes(u, g) ⇔ u ∈ A ∨ K[u] ≥ gateValue(g)` (§8), for any DID.
+pub fn passes(
+    p: &EffectivePolicy,
+    a: &BTreeMap<String, u8>,
+    karma: &Karma,
+    did: &str,
+    g: Gate,
+) -> bool {
+    a.contains_key(did) || karma.k_of(did) >= g.value(p)
+}
+
 /// L4 results.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Gates {
@@ -95,12 +98,36 @@ pub struct Gates {
     pub passes: BTreeMap<String, BTreeMap<Gate, bool>>,
 }
 
-/// **STUB (L4, `social.md` §8).** `passes(u, g)` for every DID of A and every record owner.
-pub fn gates(
-    _cx: &Cx<'_>,
-    _a: &BTreeMap<String, u8>,
-    karma: &Stage<Karma>,
-) -> Stage<Gates> {
-    let _karma = karma.as_ref().map_err(|p| *p)?;
-    Err(PENDING)
+impl Gates {
+    /// `passes(u, g)` for a DID of [`Gates::passes`] (`false` for any other DID; use [`passes`]
+    /// for those).
+    pub fn pass(&self, did: &str, g: Gate) -> bool {
+        self.passes
+            .get(did)
+            .and_then(|m| m.get(&g))
+            .copied()
+            .unwrap_or(false)
+    }
+}
+
+/// L4 (`social.md` §8): `passes(u, g)` for every DID of A and every record owner.
+pub fn gates(cx: &Cx<'_>, a: &BTreeMap<String, u8>, karma: &Stage<Karma>) -> Stage<Gates> {
+    let k = karma.as_ref().map_err(|p| *p)?;
+    let dids: BTreeSet<&str> = a
+        .keys()
+        .map(String::as_str)
+        .chain(cx.records().map(|x| x.did.as_str()))
+        .filter(|d| !d.is_empty())
+        .collect();
+    let passes = dids
+        .into_iter()
+        .map(|d| {
+            let gs = Gate::ALL
+                .iter()
+                .map(|g| (*g, passes(&cx.policy, a, k, d, *g)))
+                .collect();
+            (d.to_owned(), gs)
+        })
+        .collect();
+    Ok(Gates { passes })
 }

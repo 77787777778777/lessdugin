@@ -17,7 +17,11 @@ export function createMockHandle(engine: MockEngine = new MockEngine()): EngineH
         });
         await engine.setActiveAccount(actor.did);
       },
+      async logout(did) {
+        await engine.removeAccount(did, false);
+      },
     },
+    notice: "Demo mode: the in-memory mock engine with fixture data. Nothing leaves this tab.",
     async version() {
       return "mock (in-memory fixture)";
     },

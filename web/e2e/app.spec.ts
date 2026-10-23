@@ -217,4 +217,18 @@ test.describe("production headers", () => {
     });
     expect(sink).toBe("blocked");
   });
+
+  test("the real engine (wasm in a worker) starts under the production CSP", async ({ page }) => {
+    const w = await watch(page);
+    // No `?mock`: the demo build runs the wasm engine then, as a release build always does.
+    // Nothing may leave the machine; the settings page needs no network.
+    await page.route(/^(?!http:\/\/127\.0\.0\.1[:/])/, (r) => r.abort());
+    await page.goto(`${server.url}/#/settings`);
+    // The version comes from the wasm, through the worker created via the `lessdugin-worker`
+    // Trusted Types policy.
+    await expect(page.getByText(/^wasm · \d+\.\d+\.\d+/)).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByTestId("mock-banner")).toHaveCount(0);
+    expect(await w.violations()).toEqual([]);
+    expect(w.errors).toEqual([]);
+  });
 });

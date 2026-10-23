@@ -1,0 +1,14 @@
+---
+source: crates/cli/tests/content.rs
+expression: "redact(&users, &anon.ok(&[\"read\", \"1\"]))"
+---
+Bob asks
+@bob.test · <time> · 1 comment · 0 points · question
+at://<bob>/online.7778777.lessdugin.temp.post/kdjl3qv6jmgz-<tid>
+
+Bob's question body.
+
+1 comment
+
+c1  @carol.test · <time> · 0 points
+    Carol answers.

@@ -15,6 +15,7 @@
 //!                ∧ role allows it (a moderator never curates)                   else unauthorised
 //!                ∧ (until absent ∨ µs(until) > now)                             else expired
 //!                ∧ (positive ⇒ T ∈ records ∧ subjectCid = cid(T))               else stale
+//!                  (CIDs compare by canonical form, §0.4: [`cids::same`])
 //!                  (tag.head counts only if records[head.uri] has CID head.cid; else the record
 //!                   still asserts tag.removed, with status stale)
 //! resolve(T,d) : r = max rank; v* = safest value at r (restrict: union; tag.head: all equal, else
@@ -28,12 +29,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use lessdugin_lexicon::Collection;
 use lessdugin_lexicon::keys::{self, ModActionKey};
-use lessdugin_lexicon::values::{
-    AccessLevel, ActionKind, Capability, DefaultTier, PinScope, Tier,
-};
+use lessdugin_lexicon::values::{AccessLevel, ActionKind, Capability, DefaultTier, PinScope, Tier};
 use serde_json::Value;
 
 use crate::social::full::authority::{rank, subject_author, subject_rank};
+use crate::social::full::cids;
 use crate::social::full::cx::Cx;
 use crate::social::full::view::{Dim, DimValue, ModStatus, Resolution};
 use crate::social::input::{Skel, split_uri};
@@ -140,10 +140,7 @@ impl ModRecord {
             Some(ActionKind::Hide) => {
                 let hidden = flag("hidden", true);
                 asserts.push((Dim::Hidden, DimValue::Bool(hidden)));
-                asserts.push((
-                    Dim::Spam,
-                    DimValue::Bool(hidden && flag("spam", false)),
-                ));
+                asserts.push((Dim::Spam, DimValue::Bool(hidden && flag("spam", false))));
                 positive = !hidden;
                 show_reason = flag("showReason", true);
             }
@@ -159,10 +156,7 @@ impl ModRecord {
                     .filter_map(|c| Capability::parse(c.as_str()?))
                     .collect();
                 asserts.push((Dim::Restrict, DimValue::Caps(caps)));
-                asserts.push((
-                    Dim::Nullify,
-                    DimValue::Bool(flag("nullifyVotes", false)),
-                ));
+                asserts.push((Dim::Nullify, DimValue::Bool(flag("nullifyVotes", false))));
             }
             Some(ActionKind::Tier) => match text("tier").and_then(Tier::parse) {
                 Some(t) => {
@@ -183,8 +177,7 @@ impl ModRecord {
                 positive = pinned;
             }
             Some(ActionKind::Lock) => {
-                if subject.starts_with("at://") && cx.coll_of(&subject) == Some(Collection::Forum)
-                {
+                if subject.starts_with("at://") && cx.coll_of(&subject) == Some(Collection::Forum) {
                     no_effect = no_effect.or(Some(NoEffect::ForumLock));
                 }
                 asserts.push((Dim::Locked, DimValue::Bool(flag("locked", true))));
@@ -199,13 +192,15 @@ impl ModRecord {
                 asserts.push((Dim::TagRemoved, DimValue::Bool(flag("removed", false))));
                 if let Some(h) = field("head") {
                     let uri = h.get("uri").and_then(Value::as_str).unwrap_or_default();
-                    let cid = h.get("cid").and_then(Value::as_str).unwrap_or_default();
-                    head = Some((uri.to_owned(), cid.to_owned()));
+                    // canonical (§0.4), so that equal heads spelled differently agree
+                    let cid =
+                        cids::normalise(h.get("cid").and_then(Value::as_str).unwrap_or_default());
+                    head = Some((uri.to_owned(), cid.clone()));
                     asserts.push((
                         Dim::TagHead,
                         DimValue::Head {
                             uri: uri.to_owned(),
-                            cid: cid.to_owned(),
+                            cid,
                         },
                     ));
                 }
@@ -228,10 +223,7 @@ impl ModRecord {
             head,
             reason: v.get("reason").and_then(Value::as_str).map(str::to_owned),
             show_reason,
-            until: v
-                .get("until")
-                .and_then(Value::as_str)
-                .map(|u| time::us(u)),
+            until: v.get("until").and_then(Value::as_str).map(time::us),
             allowed,
             time: x
                 .updated_at
@@ -255,16 +247,18 @@ impl ModRecord {
     /// The CID check of §4.5 for a positive record (`true` for a negative one).
     pub fn cid_ok(&self, cx: &Cx<'_>) -> bool {
         !self.positive
-            || cx
-                .skel(&self.subject)
-                .is_some_and(|s| self.subject_cid.as_deref() == Some(s.cid.as_str()))
+            || cx.skel(&self.subject).is_some_and(|s| {
+                self.subject_cid
+                    .as_deref()
+                    .is_some_and(|w| cids::same(w, &s.cid))
+            })
     }
 
     /// The `#tag.head` check of §4.5 (`true` without a head).
     pub fn head_ok(&self, cx: &Cx<'_>) -> bool {
         self.head
             .as_ref()
-            .is_none_or(|(u, c)| cx.skel(u).is_some_and(|s| &s.cid == c))
+            .is_none_or(|(u, c)| cx.skel(u).is_some_and(|s| cids::same(c, &s.cid)))
     }
 
     /// The edited subject of a stale record, when it is in `records` (a mod-queue item, §4.12):
@@ -522,7 +516,10 @@ pub fn forum_tier(cx: &Cx<'_>, a: &BTreeMap<String, u8>) -> Moderation {
         };
         let top: Vec<&Entry<'_>> = xs.iter().filter(|e| e.rank == r).collect();
         let min_uri = |es: &mut dyn Iterator<Item = &&Entry<'_>>| {
-            es.map(|e| e.rec.uri.as_str()).min().unwrap_or_default().to_owned()
+            es.map(|e| e.rec.uri.as_str())
+                .min()
+                .unwrap_or_default()
+                .to_owned()
         };
         let (value, winner) = match d {
             Dim::Restrict => {
@@ -614,7 +611,10 @@ mod tests {
 
     #[test]
     fn safest_values() {
-        assert!(safety(Dim::Hidden, &DimValue::Bool(true)) < safety(Dim::Hidden, &DimValue::Bool(false)));
+        assert!(
+            safety(Dim::Hidden, &DimValue::Bool(true))
+                < safety(Dim::Hidden, &DimValue::Bool(false))
+        );
         assert!(
             safety(Dim::PinForum, &DimValue::Bool(false))
                 < safety(Dim::PinForum, &DimValue::Bool(true))

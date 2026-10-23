@@ -1,0 +1,2 @@
+# e2e-only builds (VITE_E2E=1): never shipped, never embedded by `lessdugin web`.
+/dist-e2e/

@@ -12,6 +12,8 @@ const PORT = 4173;
 export default defineConfig({
   testDir: ".",
   testMatch: /.*\.spec\.ts$/,
+  // The devnet tests have their own config (e2e/devnet/playwright.config.ts).
+  testIgnore: /devnet\//,
   fullyParallel: false,
   workers: 1,
   timeout: 90_000,

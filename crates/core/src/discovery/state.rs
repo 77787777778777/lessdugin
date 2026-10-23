@@ -42,8 +42,9 @@ pub enum DiscState {
     Candidate,
     /// A valid membership record was seen (§4.2.1).
     Confirmed,
-    /// The membership record is absent or invalid; re-checked only when a new hint names the
-    /// DID (or after [`REJECTED_RECHECK_MS`]).
+    /// The membership record is absent or invalid. A background pass re-checks it only when a
+    /// new hint names the DID or after [`REJECTED_RECHECK_MS`]; a user-initiated sync re-checks
+    /// up to [`REJECTED_RECHECK_BATCH`] rejected candidates (`sync.md` §4.2.1).
     Rejected,
 }
 
@@ -58,13 +59,17 @@ pub struct DiscRow {
     pub first: i64,
     /// State.
     pub state: DiscState,
-    /// Last state change (ms).
+    /// Last state change (ms); for a rejected candidate, its last check.
     pub at: i64,
 }
 
-/// A rejected candidate is confirmed again after this long without a new hint (the daily
-/// reconcile period, `sync.md` §6.8).
+/// A background pass confirms a rejected candidate again after this long since its last check
+/// without a new hint (the daily reconcile period, `sync.md` §6.8; ms, *tunable*).
 pub const REJECTED_RECHECK_MS: i64 = 86_400_000;
+
+/// Rejected candidates a user-initiated `sync_forum` confirms again before their
+/// [`REJECTED_RECHECK_MS`] back-off ends, cheapest first (`sync.md` §4.2.1, *tunable*).
+pub const REJECTED_RECHECK_BATCH: usize = 50;
 
 impl DiscRow {
     /// A new candidate row.
@@ -92,6 +97,12 @@ impl DiscRow {
             self.state = state;
             self.at = now_ms;
         }
+    }
+
+    /// Records a check that found the membership absent or invalid: the back-off restarts now.
+    pub fn reject(&mut self, now_ms: i64) {
+        self.state = DiscState::Rejected;
+        self.at = now_ms;
     }
 
     /// `true` if a rejected candidate should be skipped now (no new hint).
@@ -334,6 +345,10 @@ mod tests {
         assert!(!r.skip_rejected(20 + REJECTED_RECHECK_MS));
         r.set(DiscState::Rejected, 99);
         assert_eq!(r.at, 20);
+        // a re-check that rejects again restarts the back-off
+        r.reject(99);
+        assert_eq!((r.state, r.at), (DiscState::Rejected, 99));
+        assert!(r.skip_rejected(20 + REJECTED_RECHECK_MS));
         let bytes = row::encode(&r).unwrap();
         assert_eq!(row::decode::<DiscRow>(&bytes).unwrap(), r);
         assert!(disc_key("aaaaaaaaaaaa", "did:x").starts_with(&schema::prefix(DISC, &[])));

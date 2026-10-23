@@ -1,0 +1,8 @@
+---
+source: crates/cli/tests/content.rs
+expression: "std::fs::read_to_string(alice.devnet_dir().join(format!(\"drafts/{id}.md\"))).unwrap()"
+---
+---
+title: Later
+---
+Not yet.

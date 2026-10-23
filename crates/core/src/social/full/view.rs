@@ -17,7 +17,10 @@
 //! names the stub function and the spec section it implements. Nothing reads a pending layer's
 //! values: every layer that depends on a pending one is pending too, so no output is ever a
 //! silent default. Layers L0–L2, time, threads, V1–V5 and V7, the mod log of forum-scope
-//! records, the mod queue and `inputDigest` are implemented.
+//! records, the mod queue and `inputDigest` are implemented, and so are opinion validity and
+//! karma (L3), scores (L3.5), gates (L4), the author tier, reacts, tags and wiki (L5),
+//! visibility V1–V10 with the thread pass, and the orderings (L6); `crate::social::full`'s
+//! module table has the status of every layer.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -32,6 +35,7 @@ use crate::social::full::ranking::Orderings;
 use crate::social::full::reacts::ReactTally;
 use crate::social::full::scores::Score;
 use crate::social::full::sequences::Library;
+use crate::social::full::timeline::CommentVersions;
 use crate::social::full::visibility::Visibility;
 use crate::social::full::wiki::Wiki;
 use crate::social::policy::EffectivePolicy;
@@ -384,10 +388,9 @@ pub struct ForumView {
     pub degraded: bool,
     /// The banners due.
     pub banners: Vec<Banner>,
-    /// `inputDigest` (§1.2).
+    /// `inputDigest` (§1.2). The preimage D is not kept (it is as large as the input's uri
+    /// list); [`crate::social::digest::preimage`] recomputes it from the input.
     pub input_digest: String,
-    /// The digest preimage D (§1.2).
-    pub digest_preimage: Vec<u8>,
 
     /// L0: A with ranks (§4.1).
     pub authorities: BTreeMap<String, u8>,
@@ -413,6 +416,9 @@ pub struct ForumView {
     pub threads: BTreeMap<String, Placement>,
     /// Valid `op: update` revisions per subject uri, in TID order (§11 step 6).
     pub revisions: BTreeMap<String, Vec<String>>,
+    /// "on revision n" / "on an unavailable version" of every non-Excluded comment whose `root`
+    /// or `parent` names another version of its (non-Excluded) target (§11 step 6).
+    pub versions: BTreeMap<String, CommentVersions>,
     /// Items with the `[edited]` badge (§11 "Display").
     pub edited: BTreeSet<String>,
 
@@ -454,5 +460,29 @@ impl ForumView {
     /// `true` if `did` is an authority.
     pub fn is_authority(&self, did: &str) -> bool {
         self.authorities.contains_key(did)
+    }
+
+    /// The stubs this view still waits for (empty once every layer is implemented).
+    pub fn pending(&self) -> BTreeSet<Pending> {
+        fn p<T>(s: &Stage<T>) -> Option<Pending> {
+            s.as_ref().err().copied()
+        }
+        [
+            p(&self.mod_states),
+            p(&self.mod_log),
+            p(&self.karma),
+            p(&self.newcomers),
+            p(&self.scores),
+            p(&self.gates),
+            p(&self.author),
+            p(&self.reacts),
+            p(&self.wiki),
+            p(&self.library),
+            p(&self.visibility),
+            p(&self.orderings),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
     }
 }

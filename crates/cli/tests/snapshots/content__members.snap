@@ -1,0 +1,6 @@
+---
+source: crates/cli/tests/content.rs
+expression: "redact(&users, &alice.ok(&[\"members\"]))"
+---
+@alice.test  owner · joined <time>
+@bob.test  member · approved · joined <time> · note: I would like to post

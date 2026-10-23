@@ -10,20 +10,19 @@
 
 use std::sync::OnceLock;
 
+use lessdugin_atp::syntax::Did;
 use lessdugin_core::dto::AccountView;
-use lessdugin_core::engine::{
-    Engine, EngineConfig, EngineError, ErrorCode, Sources as EngineSources,
-    VerifyMode as EngineVerifyMode,
-};
-use lessdugin_core::identity::DnsMode as EngineDns;
+use lessdugin_core::engine::{Engine, EngineConfig, EngineError, ErrorCode};
+use lessdugin_core::outbox::Session;
 use lessdugin_native::auth::{SecretStore, restore_session};
-use lessdugin_native::config::{
-    Config, DevnetProfile, DnsMode, NetworkProfile, Paths, Sources, VerifyMode,
-};
+use lessdugin_native::config::{Config, DevnetProfile, DnsMode, NetworkProfile, Paths};
 use lessdugin_native::host::NativeHost;
 
 use crate::args::GlobalArgs;
 use crate::out::{Printer, tt};
+use crate::state::CliState;
+
+pub use lessdugin_native::engine::engine_config;
 
 /// A command failure: an engine error (exit code by its code), a usage error (exit 2), or an
 /// error already reported (exit code only).
@@ -73,6 +72,8 @@ pub struct Ctx {
     pub config: Config,
     /// Why `config.toml` could not be used, if it could not (defaults are used instead).
     pub config_problem: Option<String>,
+    /// The CLI's own state: the current forum and this terminal's listings.
+    pub state: CliState,
     /// The keyring service of the session store (a devnet's own in devnet mode).
     keyring_service: Option<String>,
     /// The test-only parity-mode time (`LESSDUGIN_PARITY_NOW_MS`, devnet only;
@@ -81,30 +82,15 @@ pub struct Ctx {
     engine: OnceLock<Engine<NativeHost>>,
 }
 
-/// Maps the native configuration to the engine's.
-pub fn engine_config(cfg: &Config) -> EngineConfig {
-    match &cfg.network {
-        NetworkProfile::Devnet(d) => EngineConfig::devnet(d.plc.clone(), d.pds.clone()),
-        NetworkProfile::Production => EngineConfig {
-            sources: match cfg.sources {
-                Sources::Direct => EngineSources::Direct,
-                Sources::Assisted => EngineSources::Assisted,
-            },
-            verify: match cfg.verify {
-                VerifyMode::Pds => EngineVerifyMode::Pds,
-                VerifyMode::Proof => EngineVerifyMode::Proof,
-            },
-            doh: cfg.doh.clone(),
-            // The native host has no system TXT resolver yet; DoH is used instead.
-            dns: EngineDns::Doh,
-            plc: cfg.plc.clone(),
-            relays: cfg.relays.clone(),
-            jetstream: cfg.jetstream.clone(),
-            constellation: cfg.constellation.clone(),
-            slingshot: cfg.slingshot.clone(),
-            ..EngineConfig::default()
-        },
-    }
+/// An engine acting as one logged-in account, with its stored session registered for its
+/// PDS requests (the writing commands).
+pub struct Writer {
+    /// The engine, acting as the account.
+    pub engine: Engine<NativeHost>,
+    /// The account (re-checked against its DID document).
+    pub account: AccountView,
+    /// Its outbox session.
+    pub session: Session,
 }
 
 impl Ctx {
@@ -182,12 +168,14 @@ impl Ctx {
                 "parity mode: views are computed at the fixed time {t} ms (tests only)"
             )));
         }
+        let state = CliState::new(&paths);
         Ok(Self {
             g,
             out,
             paths,
             config,
             config_problem,
+            state,
             keyring_service,
             parity_now_ms,
             engine: OnceLock::new(),
@@ -200,6 +188,7 @@ impl Ctx {
             return Ok(e);
         }
         let host = NativeHost::open(&self.paths, &self.config).map_err(EngineError::from)?;
+        host.set_offline(self.g.offline);
         let engine = Engine::new(
             host,
             EngineConfig {
@@ -236,6 +225,62 @@ impl Ctx {
         let account = self.account().await?;
         let engine = self.engine()?;
         Ok(restore_session(engine, &self.store(), &self.paths, &account).await?)
+    }
+
+    /// True with `--offline`.
+    pub fn offline(&self) -> bool {
+        self.g.offline
+    }
+
+    /// The engine for queries: acting as `--account` when given (the viewer-dependent fields
+    /// are that account's), else the plain engine (the active account, or anonymous).
+    pub async fn reader(&self) -> Result<Engine<NativeHost>, CliError> {
+        let engine = self.engine()?;
+        match &self.g.account {
+            Some(_) => {
+                let a = self.account().await?;
+                Ok(engine.acting_as(&a.did).await?)
+            }
+            None => Ok(engine.clone()),
+        }
+    }
+
+    /// The writing engine for new content: the account (`--account` or the active one) with
+    /// its session restored.
+    pub async fn writer(&self) -> Result<Writer, CliError> {
+        let account = self.account_with_session().await?;
+        self.writer_of(account).await
+    }
+
+    /// The writing engine of the logged-in account `did` (edits, deletes and retracts are
+    /// written by the record's owner): `auth_required` if it is not logged in here.
+    pub async fn writer_for(&self, did: &str) -> Result<Writer, CliError> {
+        let engine = self.engine()?;
+        let Some(account) = engine.account(did).await? else {
+            return Err(CliError::Engine(
+                EngineError::new(
+                    ErrorCode::AuthRequired,
+                    format!("{did} is not logged in on this device; only its owner can change it"),
+                )
+                .with_detail("did", did),
+            ));
+        };
+        let account = restore_session(engine, &self.store(), &self.paths, &account).await?;
+        self.writer_of(account).await
+    }
+
+    async fn writer_of(&self, account: AccountView) -> Result<Writer, CliError> {
+        let engine = self.engine()?.acting_as(&account.did).await?;
+        let session = Session::new(
+            Did::parse(&account.did).map_err(|e| EngineError::internal(e.to_string()))?,
+            url::Url::parse(&account.pds)
+                .map_err(|e| EngineError::internal(format!("PDS {}: {e}", account.pds)))?,
+        );
+        Ok(Writer {
+            engine,
+            account,
+            session,
+        })
     }
 }
 
