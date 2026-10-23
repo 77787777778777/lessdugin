@@ -102,19 +102,20 @@ test("forum filters, sorts and search keep their query in the hash", async ({ pa
   const w = await watch(page);
   await page.goto("/?mock#/");
   await page.getByRole("link", { name: FORUM }).first().click();
-  // the M2 default view is every post, newest first (src/lib/listDefaults.ts)
-  await expect(page.getByRole("link", { name: /Quick take: the cheapest way/ })).toBeVisible();
-  await expect(page.getByRole("button", { name: "All posts" })).toHaveAttribute(
+  // the M3 default view is the frontpage, magic first (src/lib/listDefaults.ts):
+  // personal-tier posts, like the quick takes, are hidden until "All posts"
+  await expect(page.getByRole("button", { name: "Frontpage" })).toHaveAttribute(
     "aria-pressed",
     "true",
   );
-  await page.getByRole("button", { name: "Frontpage" }).click();
   await expect(page.getByText(/Quick take: the cheapest way/)).toHaveCount(0);
-  await expect(page).toHaveURL(/\?mock#\/f\/[^?]+\?filter=frontpage$/);
-  await page.getByLabel("Sort").selectOption("magic");
-  await expect(page).toHaveURL(/filter=frontpage/);
-  await expect(page).toHaveURL(/sort=magic/);
-  await expect(page.getByRole("button", { name: "Frontpage" })).toHaveAttribute(
+  await page.getByRole("button", { name: "All posts" }).click();
+  await expect(page.getByRole("link", { name: /Quick take: the cheapest way/ })).toBeVisible();
+  await expect(page).toHaveURL(/\?mock#\/f\/[^?]+\?filter=all$/);
+  await page.getByLabel("Sort").selectOption("new");
+  await expect(page).toHaveURL(/filter=all/);
+  await expect(page).toHaveURL(/sort=new/);
+  await expect(page.getByRole("button", { name: "All posts" })).toHaveAttribute(
     "aria-pressed",
     "true",
   );

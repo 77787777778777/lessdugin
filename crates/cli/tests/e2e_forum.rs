@@ -208,8 +208,9 @@ fn e2e_cli_forum_scenario() {
         "{m}"
     );
 
-    // anonymous reading
-    let list = anon.json(&["ls", &fref]);
+    // anonymous reading (`--all`: the fixture forum's default tier is personal, and
+    // this test is about content and parity, not the M3 frontpage default)
+    let list = anon.json(&["ls", &fref, "--all"]);
     let items = list["items"].as_array().unwrap();
     let uris: Vec<&str> = items.iter().map(|p| p["uri"].as_str().unwrap()).collect();
     assert!(
@@ -231,8 +232,8 @@ fn e2e_cli_forum_scenario() {
     let (_, from_anon) = anon.json_env(&["read", &welcome], &env);
     let (_, from_alice) = alice.json_env(&["read", &welcome], &env);
     assert_eq!(from_anon, from_alice);
-    let (_, list_anon) = anon.json_env(&["ls", &fref, "--sort", "old"], &env);
-    let (_, list_carol) = carol.json_env(&["ls", &fref, "--sort", "old"], &env);
+    let (_, list_anon) = anon.json_env(&["ls", &fref, "--all", "--sort", "old"], &env);
+    let (_, list_carol) = carol.json_env(&["ls", &fref, "--all", "--sort", "old"], &env);
     assert_eq!(list_anon, list_carol);
     // parity mode is refused outside devnet mode
     let mut c = Command::new(env!("CARGO_BIN_EXE_lessdugin"));

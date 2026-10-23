@@ -145,13 +145,15 @@ fn body_style(ctx: &Ctx) -> BodyStyle {
     }
 }
 
+/// The M3 default is `frontpage` (`engine-api.md` §3.4, `social.md` §12.3);
+/// `--all` and `--curated` override it.
 fn filter_of(a: &LsArgs) -> PostFilter {
-    if a.frontpage {
-        PostFilter::Frontpage
+    if a.all {
+        PostFilter::All
     } else if a.curated {
         PostFilter::Curated
     } else {
-        PostFilter::All
+        PostFilter::Frontpage
     }
 }
 

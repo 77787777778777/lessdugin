@@ -1,5 +1,6 @@
 ---
 source: crates/tui/tests/screens.rs
+assertion_line: 86
 expression: help
 ---
  lessdugin › Meta › Welcome                                  @carol.example.com
@@ -16,7 +17,7 @@ expression: help
 ▌       │  r               reply in $EDITOR                            │
 ▌ lessdu│  c               comment on the post in $EDITOR              │
         │Forums                                                        │
-  1 comm│  s               sort: new, old, top                         │
+  1 comm│  s               sort: magic, top, new, old                  │
         │  P               new post in $EDITOR                         │
   @bob.e│  R               sync and show new items                     │
     Than│Other                                                         │

@@ -14,15 +14,15 @@ use lessdugin_core::dto::{CommentSort, MembershipMode, PostKind, PostSort};
 /// `--sort` of `ls`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
 pub enum PostSortArg {
-    /// Newest first.
+    /// Score with time decay (the M3 default, `engine-api.md` §3.4).
     #[default]
+    Magic,
+    /// Highest score first.
+    Top,
+    /// Newest first.
     New,
     /// Oldest first.
     Old,
-    /// Highest score first.
-    Top,
-    /// Score with time decay.
-    Magic,
     /// Most recent comment first.
     RecentComments,
 }
@@ -137,12 +137,12 @@ pub struct LsArgs {
     #[arg(value_name = "FORUM")]
     pub forum: Option<String>,
     /// Post order.
-    #[arg(long, value_enum, default_value_t = PostSortArg::New)]
+    #[arg(long, value_enum, default_value_t = PostSortArg::Magic)]
     pub sort: PostSortArg,
-    /// Every listed post (the default in M2: tiers arrive with moderation).
+    /// Every listed post, of any tier and kind.
     #[arg(long, conflicts_with_all = ["frontpage", "curated"])]
     pub all: bool,
-    /// Frontpage posts only.
+    /// Frontpage posts only (the default, `social.md` §12.3).
     #[arg(long, conflicts_with = "curated")]
     pub frontpage: bool,
     /// Curated posts only.

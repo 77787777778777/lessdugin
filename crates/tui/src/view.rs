@@ -206,9 +206,10 @@ fn info_line(state: &State, top: &Screen) -> Line<'static> {
         ScreenKind::Home(_) => info.push(lit("Forums you follow")),
         ScreenKind::Forum(f) => {
             let tabs = [
+                (PostSort::Magic, "magic"),
+                (PostSort::Top, "top"),
                 (PostSort::New, "new"),
                 (PostSort::Old, "old"),
-                (PostSort::Top, "top"),
             ];
             parts.push((lit(" sort: "), dim()));
             for (sort, label) in tabs {
@@ -219,7 +220,7 @@ fn info_line(state: &State, top: &Screen) -> Line<'static> {
                 };
                 parts.push((cat([lit(" "), lit(label), lit(" ")]), style));
             }
-            parts.push((lit("  filter: all "), dim()));
+            parts.push((lit("  filter: frontpage "), dim()));
             if let Some(d) = &f.data {
                 let c = &d.list.completeness;
                 if c.partial || c.degraded {

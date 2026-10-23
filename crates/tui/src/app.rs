@@ -153,7 +153,7 @@ pub enum Effect {
         /// Who asked.
         origin: Origin,
     },
-    /// `forum_open` and `list_posts` (filter all).
+    /// `forum_open` and `list_posts` (filter frontpage, the M3 default).
     LoadForum {
         /// The screen.
         screen: ScreenId,
@@ -876,7 +876,7 @@ impl State {
         let i = self.push(
             ScreenKind::Forum(Box::new(ForumScreen {
                 uri: uri.clone(),
-                sort: PostSort::New,
+                sort: PostSort::Magic,
                 data: None,
                 pending: None,
                 pos: ListPos::default(),
@@ -1107,9 +1107,10 @@ impl State {
             return;
         };
         s.sort = match s.sort {
+            PostSort::Magic => PostSort::Top,
+            PostSort::Top => PostSort::New,
             PostSort::New => PostSort::Old,
-            PostSort::Old => PostSort::Top,
-            _ => PostSort::New,
+            _ => PostSort::Magic,
         };
         s.pos = ListPos::default();
         s.pending = None;

@@ -1,17 +1,18 @@
 ---
 source: crates/cli/tests/content.rs
+assertion_line: 148
 expression: "redact(&users, &alice.ok(&[\"read\", \"1\"]))"
 ---
 Hello, world
-@alice.test · <time> · 2 comments · 0 points · #intro
+@alice.test · <time> · 2 comments · 1 point · #intro
 at://<alice>/online.7778777.lessdugin.temp.post/kdjl3qv6jmgz-<tid>
 
 First post, see the docs ⟨example.com⟩.
 
 2 comments
 
-c1  @alice.test · <time> · 0 points
+c1  @alice.test · <time> · 1 point
     A first comment.
 
-  c2  @alice.test · <time> · 0 points
+  c2  @alice.test · <time> · 1 point
       A reply to the comment.

@@ -95,8 +95,10 @@ fn a_failed_forum_sync_is_a_warning_and_is_tried_again() {
     assert_eq!(t["state"]["kind"], "done", "{t}");
 
     // bob's repository fails while the reader lists the forum: a warning, the list is shown
+    // (`--all`: the test forum's default tier is personal, and this asserts the
+    // sync-failure recovery, not the M3 frontpage default)
     let fault = bob.account.inject(Fault::status(500));
-    let out = anon.run(&["--json", "ls", "alice.test/meta"]);
+    let out = anon.run(&["--json", "ls", "alice.test/meta", "--all"]);
     let stderr = text(&out.stderr);
     assert!(out.status.success(), "{stderr}");
     let pl: Value = serde_json::from_slice(&out.stdout).unwrap();

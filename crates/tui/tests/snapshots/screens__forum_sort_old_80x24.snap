@@ -1,13 +1,14 @@
 ---
 source: crates/tui/tests/screens.rs
+assertion_line: 62
 expression: screen
 ---
  lessdugin › Meta                                            @carol.example.com
- sort:  new  old  top   filter: all  synced 08:58 UTC
+ sort:  magic  top  new  old   filter: frontpage  synced 08:58 UTC
   Welcome
-  @alice.example.com · 2025-10-09 08:54 UTC · 1 comment · 0 points
+  @alice.example.com · 2025-10-09 08:54 UTC · 1 comment · 1 point
 ▌ Hello from bob
-▌ @bob.example.com · 2025-10-09 08:56 UTC · 0 comments · 0 points
+▌ @bob.example.com · 2025-10-09 08:56 UTC · 0 comments · 1 point
 
 
 

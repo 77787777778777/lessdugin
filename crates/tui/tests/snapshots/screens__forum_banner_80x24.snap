@@ -1,13 +1,14 @@
 ---
 source: crates/tui/tests/screens.rs
+assertion_line: 208
 expression: screen
 ---
  lessdugin › Meta                                            @carol.example.com
- 1 new — R   sort:  new  old  top   filter: all  synced
+ 1 new — R   sort:  magic  top  new  old   filter: frontpage  synced
   Hello from bob
-  @bob.example.com · 2025-10-09 08:56 UTC · 0 comments · 0 points
+  @bob.example.com · 2025-10-09 08:56 UTC · 0 comments · 1 point
 ▌ Welcome
-▌ @alice.example.com · 2025-10-09 08:54 UTC · 1 comment · 0 points
+▌ @alice.example.com · 2025-10-09 08:54 UTC · 1 comment · 1 point
 
 
 

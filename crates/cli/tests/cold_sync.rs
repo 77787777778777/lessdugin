@@ -268,7 +268,18 @@ fn a_fifty_member_forum_cold_syncs_natively_within_five_seconds() {
     );
 
     // what was synced is readable offline: every post, the first one's comments
-    let list = reader.json(&["--offline", "ls", &forum, "--sort", "new", "-n", "100"]);
+    // (`--all`: the seeded forum's default tier is personal, and the frontpage
+    // filter would hide every post; this test is about sync, not ranking)
+    let list = reader.json(&[
+        "--offline",
+        "ls",
+        &forum,
+        "--all",
+        "--sort",
+        "new",
+        "-n",
+        "100",
+    ]);
     assert_eq!(list["items"].as_array().unwrap().len(), posts, "{list}");
     let thread = reader.json(&["--offline", "read", &first.0]);
     assert_eq!(

@@ -1,11 +1,12 @@
 ---
 source: crates/tui/tests/screens.rs
+assertion_line: 86
 expression: help
 ---
  lessdugin › Meta › Welcome                                                                                                                  @carol.example.com
  Meta · synced
 ▌ Welcome
-▌ @alice.example.com · 2025-10-09 08:54 UTC · 1 comment · 0 points
+▌ @alice.example.com · 2025-10-09 08:54 UTC · 1 comment · 1 point
 ▌
 ▌ Hello everyone, and welcome to the forum.
 ▌
@@ -18,7 +19,7 @@ expression: help
                                                 ┌ Keys ────────────────────────────────────────────────────────┐
   1 comment                                     │Navigation                                                    │
                                                 │  j k  Down Up    next / previous                             │
-  @bob.example.com · 2025-10-09 08:57 UTC · 0 po│  g G             first / last                                │
+  @bob.example.com · 2025-10-09 08:57 UTC · 1 po│  g G             first / last                                │
     Thanks for the forum!                       │  Ctrl-d Ctrl-u   half a page down / up                       │
                                                 │  Enter l         open                                        │
     It looks great.                             │  h Esc q         back (q on the home screen quits)           │
@@ -28,7 +29,7 @@ expression: help
                                                 │  r               reply in $EDITOR                            │
                                                 │  c               comment on the post in $EDITOR              │
                                                 │Forums                                                        │
-                                                │  s               sort: new, old, top                         │
+                                                │  s               sort: magic, top, new, old                  │
                                                 │  P               new post in $EDITOR                         │
                                                 │  R               sync and show new items                     │
                                                 │Other                                                         │

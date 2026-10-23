@@ -117,14 +117,17 @@ fn a_forum_from_creation_to_deletion() {
     let second = alice.file("second.md", "Just a quick take.\n");
     let t = alice.json(&["post", s(&second), "--kind", "quick-take", "--yes"]);
     assert_eq!(t["state"]["kind"], "done", "{t}");
-    let list = json_out(&alice, &["ls"]);
+    let list = json_out(&alice, &["ls", "--all", "--sort", "new"]);
     let pl: PostList = exact(&list);
     assert_eq!(pl.items.len(), 2);
     assert_eq!(pl.items[1].uri, post, "newest first");
     assert_eq!(pl.items[1].title.as_deref(), Some("Hello, world"));
     assert_eq!(pl.items[1].tags, ["intro"]);
     settings().bind(|| {
-        insta::assert_snapshot!("ls", redact(&users, &alice.ok(&["ls", "--sort", "old"])));
+        insta::assert_snapshot!(
+            "ls",
+            redact(&users, &alice.ok(&["ls", "--all", "--sort", "old"]))
+        );
     });
 
     // comments: `1` is the first post of the last `ls --sort old`, `c1` the first comment
@@ -220,7 +223,7 @@ fn a_forum_from_creation_to_deletion() {
         .collect();
     assert!(post_revisions.is_empty(), "{post_revisions:?}");
     // its comments stay (they are the commenters' records)
-    let left: PostList = exact(&json_out(&alice, &["ls"]));
+    let left: PostList = exact(&json_out(&alice, &["ls", "--all"]));
     assert!(left.items.iter().all(|p| p.uri != post));
 
     // sync and leave
@@ -303,7 +306,7 @@ fn approval_mode_with_three_users_and_anonymous_reading() {
     assert!(carol.account.get(nsid::MEMBERSHIP, &mrkey).is_some());
 
     // anonymous reading: ls with a forum reference, then `read 1`
-    let pl: PostList = exact(&json_out(&anon, &["ls", "alice.test/meta"]));
+    let pl: PostList = exact(&json_out(&anon, &["ls", "alice.test/meta", "--all"]));
     assert_eq!(pl.items.len(), 1, "{pl:?}");
     assert_eq!(pl.items[0].uri, post);
     assert_eq!(pl.items[0].author.handle.as_deref(), Some("bob.test"));
@@ -352,7 +355,7 @@ fn references_and_error_paths() {
     let f = alice.file("p.md", "---\ntitle: One\n---\nBody\n");
     let t = alice.json(&["post", s(&f), "--yes"]);
     let post = t["state"]["uri"].as_str().unwrap().to_owned();
-    alice.ok(&["ls"]);
+    alice.ok(&["ls", "--all"]);
     let e = alice.fails(1, &["read", "7"]);
     assert!(
         e["message"].as_str().unwrap().contains("has 1 entries"),
@@ -430,7 +433,7 @@ fn drafts_and_the_editor() {
     assert!(out.status.success(), "{}", text(&out.stderr));
     let t: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(t["state"]["kind"], "done", "{t}");
-    let pl: PostList = exact(&json_out(&alice, &["ls"]));
+    let pl: PostList = exact(&json_out(&alice, &["ls", "--all", "--sort", "new"]));
     assert_eq!(pl.items[0].title.as_deref(), Some("From the editor"));
     // the published draft is gone
     let d = alice.json(&["draft", "ls"]);
@@ -460,7 +463,7 @@ fn drafts_and_the_editor() {
     assert!(c.output().unwrap().status.success());
     let t = alice.json(&["draft", "publish", &id, "--yes"]);
     assert_eq!(t["state"]["kind"], "done", "{t}");
-    let pl: PostList = exact(&json_out(&alice, &["ls"]));
+    let pl: PostList = exact(&json_out(&alice, &["ls", "--all", "--sort", "new"]));
     assert_eq!(pl.items[0].title.as_deref(), Some("From the editor"));
     assert!(pl.items.len() == 2);
     let e = alice.fails(4, &["draft", "rm", &id]);
@@ -469,7 +472,7 @@ fn drafts_and_the_editor() {
     assert_eq!(e["code"], "invalid_input");
 
     // a comment written in the editor
-    alice.ok(&["ls"]);
+    alice.ok(&["ls", "--all"]);
     let comment_editor = alice.file(
         "c.sh",
         "#!/bin/sh\nsed -i '/ >8 /i From the comment editor.' \"$1\"\n",
@@ -652,10 +655,10 @@ fn hostile_text_never_reaches_the_terminal() {
 
     // …and every human view shows it inert, with and without color
     for u in [&alice, &anon] {
-        u.ok(&["ls", "alice.test/meta"]);
+        u.ok(&["ls", "alice.test/meta", "--all"]);
         for (color, flag) in [(true, "always"), (false, "never")] {
             for args in [
-                vec!["ls", "alice.test/meta"],
+                vec!["ls", "alice.test/meta", "--all"],
                 vec!["read", "1", "--no-pager"],
                 vec!["read", "1", "--no-comments", "--no-pager"],
                 vec!["read", "c1", "--no-pager"],
@@ -736,7 +739,7 @@ fn tags_links_stdin_follows_and_accounts() {
     );
     assert_eq!(t["state"]["kind"], "done", "{t}");
     let link_post = t["state"]["uri"].as_str().unwrap().to_owned();
-    let pl: PostList = exact(&json_out(&alice, &["ls", "--sort", "old"]));
+    let pl: PostList = exact(&json_out(&alice, &["ls", "--all", "--sort", "old"]));
     assert_eq!(pl.items.len(), 2);
     assert_eq!(pl.items[0].tags, ["rust", "cli"]);
     assert_eq!(pl.items[1].uri, link_post);
@@ -775,11 +778,15 @@ fn tags_links_stdin_follows_and_accounts() {
         .position(|f| f["uri"] == forum_of(&alice, "lounge").as_str())
         .unwrap_or_else(|| panic!("{fl}"))
         + 1;
-    let pl: PostList = exact(&json_out(&carol, &["ls", &n.to_string()]));
+    let pl: PostList = exact(&json_out(&carol, &["ls", &n.to_string(), "--all"]));
     assert_eq!(pl.forum, forum_of(&alice, "lounge"));
     assert_eq!(pl.items.len(), 2);
-    let pl: PostList = exact(&json_out(&carol, &["ls", "l", "--tag", "rust"]));
-    assert_eq!(pl.items.len(), 1, "{pl:?}");
+    // The tag filter matches only tags whose wiki page exists (social.md §13.3:
+    // an unknown tag never applies). The CLI cannot create a wiki page until M5,
+    // so `--tag rust` returns nothing here even though the post carries the tag
+    // (asserted above); M5 (organisation/discovery) adds the wiki and revisits this.
+    let pl: PostList = exact(&json_out(&carol, &["ls", "l", "--all", "--tag", "rust"]));
+    assert_eq!(pl.items.len(), 0, "{pl:?}");
     // two followed forums and no current one: `ls` asks which
     let e = carol.fails(2, &["ls"]);
     assert!(

@@ -47,10 +47,13 @@ fn forum_lists_posts_and_sorts() {
         let screen = t.render();
         let bob = screen.find("Hello from bob").expect("bob's post");
         let welcome = screen.find("Welcome").expect("the welcome post");
-        assert!(bob < welcome, "newest first:\n{screen}");
+        assert!(
+            bob < welcome,
+            "newest first (magic, equal scores):\n{screen}"
+        );
         insta::assert_snapshot!(format!("forum_{w}x{h}"), screen);
-        // s: old first
-        block_on(t.press("s"));
+        // s cycles magic → top → new → old; three presses land on old
+        block_on(t.keys(&["s", "s", "s"]));
         let screen = t.render();
         let bob = screen.rfind("Hello from bob").unwrap();
         let welcome = screen.rfind("Welcome").unwrap();

@@ -130,8 +130,9 @@ fn a_write_killed_while_the_pds_answers_is_not_sent_twice() {
     let post = w[1]["state"]["uri"].as_str().unwrap();
     let (rkey, _) = &alice.account.list(nsid::POST)[0];
     assert!(post.ends_with(rkey.as_str()), "{post} vs {rkey}");
-    // and the post reads back once
-    let list = alice.json(&["ls"]);
+    // and the post reads back once (`--all`: the test forum's default tier is
+    // personal, and this asserts the outbox, not the M3 frontpage default)
+    let list = alice.json(&["ls", "--all"]);
     assert_eq!(list["items"].as_array().unwrap().len(), 1, "{list}");
 }
 

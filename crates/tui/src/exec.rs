@@ -141,13 +141,13 @@ pub async fn load_forum<H: Host>(
     Ok(ForumData { view, list })
 }
 
-/// The query of the Forum screen (`filter: all`, the M2 default of every client,
+/// The query of the Forum screen: the M3 defaults (`magic` over `frontpage`,
 /// `engine-api.md` §3.4), at most `limit` posts.
 pub fn posts_query(forum: &str, sort: PostSort, limit: u32) -> ListPostsQuery {
     ListPostsQuery {
         forum: forum.to_owned(),
         sort,
-        filter: PostFilter::All,
+        filter: PostFilter::Frontpage,
         tag: None,
         kind: None,
         author: None,

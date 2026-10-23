@@ -1,11 +1,12 @@
 ---
 source: crates/tui/tests/screens.rs
+assertion_line: 161
 expression: screen
 ---
  lessdugin › Welcome                                         @carol.example.com
  Meta · synced
   Welcome
-  @alice.example.com · 2025-10-09 08:54 UTC · 3 comments · 0 points
+  @alice.example.com · 2025-10-09 08:54 UTC · 3 comments · 1 point
 
   Hello everyone, and welcome to the forum.
 
@@ -18,7 +19,7 @@ expression: screen
 
   3 comments
 
-▌ @bob.example.com · 2025-10-09 08:57 UTC · 0 points  [+2]
+▌ @bob.example.com · 2025-10-09 08:57 UTC · 1 point  [+2]
 ▌   Thanks for the forum!
 ▌
 ▌   It looks great.
