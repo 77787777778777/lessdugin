@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: CC0-1.0 -->
 # ADR 0002 — S3/S10: wasm size budget and the math engine
 
-- Status: Accepted
+- Status: Accepted; decision 4 and the 900 KB condition of rule 5 superseded by ADR 0008
 - Date: 2026-10-16
 - Spikes: S3 (wasm size with and without math-core and k256/p256) and S10 (math-core coverage and
   the cost of a Temml fallback)

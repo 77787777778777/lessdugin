@@ -10,8 +10,8 @@
 //!   wasm [--release|--dev] [--budget] [--report] [--kv-test]
 //!                      build the engine wasm + JS bindings into packages/engine/pkg
 //!                      (wasm-bindgen = the workspace pin, then binaryen wasm-opt) and report
-//!                      its raw and gzipped size; --budget fails above 1.1 MB gzipped (warns
-//!                      above 2.5 MB raw), --report adds the `verify` marginal, --kv-test
+//!                      its raw and gzipped size; --budget fails above 2.5 MB gzipped (warns
+//!                      above 1.5 MB gzipped or 4 MB raw), --report adds the `verify` marginal, --kv-test
 //!                      builds the test-only KV conformance module into pkg/kvtest
 //!   e2e [--rust] [--web] [--parity] [--no-build]
 //!                      the end-to-end tests against the local devnet (ADR 0006;
@@ -41,13 +41,14 @@ const WASM_SAFE: &[&str] = &[
 /// node (`test-wasm`); every integration test of these crates must build for wasm32.
 const WASM_TESTED: &[&str] = &["lessdugin-atp", "lessdugin-lexicon", "lessdugin-markdown"];
 
-/// The engine wasm's `gzip -9` size (after wasm-opt) above which `wasm --budget` fails
-/// (ADR 0002: 1.1 MB; sizes are decimal, as in the ADR's tables).
-const WASM_BUDGET_GZ: u64 = 1_100_000;
-/// The gzipped target (ADR 0002: 900 KB); above it `wasm` prints a note.
-const WASM_TARGET_GZ: u64 = 900_000;
-/// The raw size above which `wasm` warns (ADR 0002: compile time scales with raw bytes).
-const WASM_WARN_RAW: u64 = 2_500_000;
+/// The engine wasm's `gzip -9` size (after wasm-opt) above which `wasm --budget` fails. It is a
+/// tripwire for something linked in by mistake (tokio, reqwest, ammonia, debug info), not a
+/// performance budget (ADR 0008, superseding ADR 0002 decision 4; sizes are decimal).
+const WASM_BUDGET_GZ: u64 = 2_500_000;
+/// The gzipped size above which `wasm` prints a warning (ADR 0008).
+const WASM_TARGET_GZ: u64 = 1_500_000;
+/// The raw size above which `wasm` warns (compile time scales with raw bytes; ADR 0008).
+const WASM_WARN_RAW: u64 = 4_000_000;
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -150,8 +151,8 @@ fn ci() -> Result<(), String> {
     wasm_args.extend(["--", "-D", "warnings"]);
     run("cargo", &wasm_args)?;
     run("cargo", &["test", "--workspace"])?;
-    // the social-fold vectors again at the final namespace (the default build runs them at the
-    // development one)
+    // the social-fold vectors at the final namespace (the vectors are written in it; the default
+    // build runs only the namespace-independent parts)
     run(
         "cargo",
         &[
@@ -162,6 +163,10 @@ fn ci() -> Result<(), String> {
             "final-ns",
             "--test",
             "social_vectors",
+            "--test",
+            "social_fold",
+            "--test",
+            "social_query",
         ],
     )?;
     if have(TEST_RUNNER) && have("node") {
@@ -593,7 +598,8 @@ struct WasmSize {
 /// `cargo xtask wasm`: builds `lessdugin-wasm` for wasm32 (profile `wasm`: opt-level z, fat LTO,
 /// panic=abort), runs `wasm-bindgen --target web` (the CLI must equal the workspace pin) into
 /// `packages/engine/pkg`, optimises with binaryen's `wasm-opt` (ADR 0002's flags) and reports the
-/// raw and `gzip -9` sizes. `--budget` fails above 1.1 MB gzipped; above 2.5 MB raw it warns.
+/// raw and `gzip -9` sizes. `--budget` fails above 2.5 MB gzipped; above 1.5 MB gzipped or 4 MB raw
+/// it warns.
 /// `--report` adds the marginal size of the `verify` feature. `--kv-test` builds the test-only
 /// `kv-conformance` module into `packages/engine/pkg/kvtest` for the engine package's vitest.
 fn wasm(args: &[String]) -> Result<(), String> {
@@ -622,7 +628,7 @@ fn wasm_build(args: &[String]) -> Result<Option<String>, String> {
     let out = root().join("packages/engine/pkg");
     let size = build_wasm(&[], profile, &out, !o.dev)?;
     let mut report = vec![format!(
-        "engine wasm ({}): {} raw, {} gzipped (target {}, budget {}); JS glue {} gzipped",
+        "engine wasm ({}): {} raw, {} gzipped (warn above {}, fail above {}); JS glue {} gzipped",
         if o.dev {
             "dev, not optimised"
         } else {
@@ -648,8 +654,8 @@ fn wasm_build(args: &[String]) -> Result<Option<String>, String> {
         let marginal = size.gz as i64 - nv.gz as i64;
         report.push(format!(
             "without `verify`: {} raw, {} gzipped; verify's marginal size {marginal} bytes gzipped \
-             (ADR 0002 rule 5: split into a lazy verify.wasm only above 900 KB gz with a marginal \
-             of at least 100 KB gz)",
+             (ADR 0008: split into a lazy verify.wasm only above the 1.5 MB gz warning line with a \
+             marginal of at least 100 KB gz)",
             bytes(nv.raw),
             bytes(nv.gz)
         ));

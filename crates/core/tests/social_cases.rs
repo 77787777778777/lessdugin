@@ -12,7 +12,7 @@
 //! | `*_tombstone_*` | §10.2 tombstones through placeholders and for re-attached comments |
 //! | `reattached_comment_*` | §2.2 a re-attached comment's lower bound is the root post |
 //! | `until_before_1970_*`, `lock_allow_list_*`, `mod_log_*`, `author_*` | §4.3 condition 5, §4.4 `allowed`, §4.12 order and statuses, §4.9 live post |
-//! | `k_and_kp_*` | K versus KP: the author gate, the react creator, the wiki tie (K); tag-vote power (KP) |
+//! | `k_and_kp_*`, `own_tag_*` | K versus KP: the author gate, the react creator, the wiki tie (K); tag-vote power and own-tag weight (KP) |
 //! | `wiki_*`, `tag_votes_*` | §13.2 history tie, duplicate parents, the page cap; §13.3 OP3 before OP4 |
 //! | `cid_spellings_*` | §0.4 CIDs compare by canonical form |
 //! | `comment_versions_*` | §11 step 6 "on revision n" / "on an unavailable version" |
@@ -747,6 +747,65 @@ fn k_and_kp_differ_and_each_rule_reads_its_own() {
     assert_eq!(wiki.pages["t"].canonical.as_deref(), Some(rw.as_str()));
     assert_eq!(wiki.rel[&pq]["t"], 2);
     assert!(wiki.applies[&pq].contains("t"));
+}
+
+/// §13.3 `own(p, s) = max(1, small(max(KP, 0)))` reads KP, not K. `small` changes only at
+/// 1,000, so the cast puts the author's KP and K on either side of it (default `pairCap` 25):
+///
+/// ```text
+/// boosters b1..b40: K1 = KP = K = 0
+/// t : up from b1..b10                               K1 10, KP 10, K 10
+/// s1: up from b1..b11, strongDown from t            K1 10, KP 9, K 9
+/// a : 998 ups from b1..b40 on a's 25 posts          KP 998 + strong(K1 s1 = 10) = 1000
+///     (at most 25 per booster), strongUp from s1     K  998 + strong(KP s1 = 9)  = 999
+/// ```
+///
+/// a's own tag on a's post weighs small(1000) = 2 (small(999) would be 1).
+#[test]
+fn own_tag_weight_reads_kp() {
+    let mut f = forum("approval", json!({}));
+    let boosters: Vec<String> = (100..140).map(user).collect();
+    let (t, s1, a) = (user(40), user(41), user(42));
+    for d in boosters.iter().chain([&t, &s1, &a]) {
+        grant(&mut f, d);
+    }
+    let pt = post(&mut f, &t, 10);
+    let ps1 = post(&mut f, &s1, 11);
+    for b in &boosters[..10] {
+        vote(&mut f, b, &pt, "up");
+    }
+    for b in &boosters[..11] {
+        vote(&mut f, b, &ps1, "up");
+    }
+    vote(&mut f, &t, &ps1, "strongDown");
+    // a's 25 posts, the first tagged `t`
+    let pa: Vec<String> = (0..25)
+        .map(|i| {
+            let uri = f.ranged_uri(&a, "post", 20 + i);
+            let v = f.post_value(20 + i, 0, u8::from(i == 0), 0, "A post");
+            f.put(&uri, Kind::Post, v, true, Forum::seen(20 + i))
+                .unwrap();
+            uri
+        })
+        .collect();
+    let mut ups = 0;
+    for b in &boosters {
+        for p in &pa {
+            if ups < 998 {
+                vote(&mut f, b, p, "up");
+                ups += 1;
+            }
+        }
+    }
+    vote(&mut f, &s1, &pa[1], "strongUp");
+
+    let view = run(&f, &Query::default());
+    let k = view.karma.as_ref().unwrap();
+    let cast = |d: &str| (k.kp_of(d), k.k_of(d));
+    assert_eq!(cast(&t), (10, 10));
+    assert_eq!(cast(&s1), (9, 9));
+    assert_eq!(cast(&a), (1000, 999));
+    assert_eq!(view.wiki.as_ref().unwrap().rel[&pa[0]]["t"], 2);
 }
 
 // ---------------------------------------------------------------------------------------------

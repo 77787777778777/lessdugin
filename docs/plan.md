@@ -155,7 +155,7 @@ A milestone is done when all of the following hold:
 - [auto] The devnet parity scenario, text subset (§4.2), is byte-identical across CLI `--json`, SPA and TUI.
 - [auto] A 50-member FakePds forum cold-syncs natively in under 5 s.
 - [auto] No CSP or Trusted Types violations: any `securitypolicyviolation` fails Playwright.
-- [auto] CI reports the wasm size. It fails above 1.1 MB gzipped (target 900 KB) and warns above 2.5 MB raw (ADR 0002).
+- [auto] CI reports the wasm size. It warns above 1.5 MB gzipped or 4 MB raw and fails only above 2.5 MB gzipped, a tripwire for something linked in by mistake (ADR 0008, superseding the 1.1 MB line of ADR 0002).
 - [auto] Sync and outbox scenarios on `MemHost` + FakePds pass: idempotent sync; cursor-range fallback (opaque cursors, cursors that ignore the bound); rollback; deletes only after confirmation; the outbox survives `kill -9`; `InvalidSwap` retry versus a real conflict; the FakePds behaviours listed in ADR 0005.
 - [user] A production smoke test on `.temp` with throwaway bsky.social accounts.
 - [target] The rest of S9: a cold sync of 200 real repos (read-only, a small opt-in sample) and PLC throughput at 20 requests/s.

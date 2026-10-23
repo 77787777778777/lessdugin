@@ -28,7 +28,7 @@ jobs:
       - run: cargo clippy --target wasm32-unknown-unknown -p lessdugin-atp -p lessdugin-lexicon -p lessdugin-markdown -p lessdugin-core -p lessdugin-wasm -- -D warnings
       - run: cargo test --workspace
       # the social-fold vectors again at the final namespace (as `cargo xtask ci`)
-      - run: cargo test -p lessdugin-core --features final-ns --test social_vectors
+      - run: cargo test -p lessdugin-core --features final-ns --test social_vectors --test social_fold --test social_query
   # The interop, vector and property tests of atp, lexicon and markdown on wasm32-unknown-unknown,
   # in node through wasm-bindgen-test-runner (same version as the workspace wasm-bindgen pin).
   wasm-tests:
