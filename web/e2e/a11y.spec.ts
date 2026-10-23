@@ -118,11 +118,11 @@ test.describe("keyboard", () => {
     await expect(sort).toBeFocused();
     await page.keyboard.press("ArrowDown");
     await expect(sort).toBeFocused();
-    const frontpage = page.getByRole("button", { name: "Frontpage" });
-    await frontpage.focus();
+    const all = page.getByRole("button", { name: "All posts" });
+    await all.focus();
     await page.keyboard.press("Enter");
-    await expect(page).toHaveURL(/filter=frontpage/);
-    await expect(frontpage).toBeFocused();
+    await expect(page).toHaveURL(/filter=all/);
+    await expect(all).toBeFocused();
     // A new page still moves focus to its heading.
     await page.getByRole("link", { name: WELCOME }).click();
     await expect(page.getByRole("heading", { level: 1, name: WELCOME })).toBeFocused();

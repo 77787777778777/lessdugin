@@ -52,7 +52,9 @@ fn the_tui_comments_through_the_editor_on_a_real_terminal() {
     }
     let net = Net::new();
     let alice = net.user("alice.test", true);
-    alice.json(&["forum", "create", "meta"]);
+    // --frontpage: the M3 default listing shows only frontpage-tier posts, and the
+    // TUI lists with the default filter (this test is about the runtime, not tiers)
+    alice.json(&["forum", "create", "meta", "--frontpage"]);
     let f = alice.file(
         "p.md",
         "---\ntitle: Terminal post\n---\nRead me in a pty.\n",
