@@ -67,7 +67,7 @@ pub fn draw(state: &State, f: &mut Frame<'_>) {
     }
     f.render_widget(Paragraph::new(status_lines(state)), status);
     if state.help {
-        help(f, area);
+        help(f, state, area);
     }
 }
 
@@ -437,7 +437,7 @@ fn thread(top: &Screen, t: &ThreadScreen, h: usize, lines: &mut Vec<Line<'static
     }
 }
 
-fn help(f: &mut Frame<'_>, area: Rect) {
+fn help(f: &mut Frame<'_>, state: &State, area: Rect) {
     let mut lines: Vec<Line<'static>> = Vec::new();
     for (group, rows) in HELP {
         lines.push(line([(tt(group), bold())]));
@@ -452,19 +452,32 @@ fn help(f: &mut Frame<'_>, area: Rect) {
     lines.push(Line::default());
     lines.push(line([(lit("Any key closes this help."), dim())]));
     let width = 64.min(area.width);
-    let height = u16::try_from(lines.len() + 2)
+    let total = lines.len();
+    let height = u16::try_from(total + 2)
         .unwrap_or(u16::MAX)
         .min(area.height);
+    // the content rows inside the border, and the scroll window
+    let inner = usize::from(height.saturating_sub(2));
+    let max_scroll = total.saturating_sub(inner);
+    let scroll = state.help_scroll.min(max_scroll);
+    let shown: Vec<Line<'static>> = lines.into_iter().skip(scroll).take(inner).collect();
     let x = area.x + (area.width - width) / 2;
     let y = area.y + (area.height - height) / 2;
     let r = Rect::new(x, y, width, height);
+    let mut block = Block::default()
+        .borders(Borders::ALL)
+        .title(line([(lit(" Keys "), bold())]));
+    if max_scroll > 0 {
+        block = block.title_bottom(line([(
+            tt(&format!(
+                " {}-{} of {} ",
+                scroll + 1,
+                scroll + shown.len(),
+                total
+            )),
+            dim(),
+        )]));
+    }
     f.render_widget(Clear, r);
-    f.render_widget(
-        Paragraph::new(Text::from(lines)).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(line([(lit(" Keys "), bold())])),
-        ),
-        r,
-    );
+    f.render_widget(Paragraph::new(Text::from(shown)).block(block), r);
 }

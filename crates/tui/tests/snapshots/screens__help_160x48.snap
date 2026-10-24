@@ -12,35 +12,35 @@ expression: help
 ▌
 ▌ ## Rules
 ▌
-▌ • Be kind.
-▌ • Stay on topic; see the guide ⟨example.com⟩.
-▌
-▌ lessdugin tui
-                                                ┌ Keys ────────────────────────────────────────────────────────┐
-  1 comment                                     │Navigation                                                    │
-                                                │  j k  Down Up    next / previous                             │
-  @bob.example.com · 2025-10-09 08:57 UTC · 1 po│  g G             first / last                                │
-    Thanks for the forum!                       │  Ctrl-d Ctrl-u   half a page down / up                       │
-                                                │  Enter l         open                                        │
-    It looks great.                             │  h Esc q         back (q on the home screen quits)           │
-                                                │Threads                                                       │
-                                                │  Space           collapse / expand replies                   │
+▌ • Be kind.                                    ┌ Keys ────────────────────────────────────────────────────────┐
+▌ • Stay on topic; see the guide ⟨example.com⟩. │Navigation                                                    │
+▌                                               │  j k  Down Up    next / previous                             │
+▌ lessdugin tui                                 │  g G             first / last                                │
+                                                │  Ctrl-d Ctrl-u   half a page down / up                       │
+  1 comment                                     │  Enter l         open                                        │
+                                                │  h Esc q         back (q on the home screen quits)           │
+  @bob.example.com · 2025-10-09 08:57 UTC · 1 po│Threads                                                       │
+    Thanks for the forum!                       │  Space           collapse / expand replies                   │
                                                 │  p               parent comment                              │
-                                                │  r               reply in $EDITOR                            │
+    It looks great.                             │  r               reply in $EDITOR                            │
                                                 │  c               comment on the post in $EDITOR              │
                                                 │Forums                                                        │
                                                 │  s               sort: magic, top, new, old                  │
                                                 │  P               new post in $EDITOR                         │
                                                 │  R               sync and show new items                     │
+                                                │Opinions                                                      │
+                                                │  u U             upvote / strong upvote                      │
+                                                │  d D             downvote / strong downvote                  │
+                                                │  a A             agree / strongly agree                      │
+                                                │  z Z             disagree / strongly disagree                │
+                                                │  0               clear your votes on the item                │
+                                                │  Backspace       undo the pending write (4 s window)         │
                                                 │Other                                                         │
                                                 │  ?               this help                                   │
                                                 │  Ctrl-c          quit                                        │
                                                 │                                                              │
                                                 │Any key closes this help.                                     │
                                                 └──────────────────────────────────────────────────────────────┘
-
-
-
 
 
 

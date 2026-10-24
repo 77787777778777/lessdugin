@@ -98,6 +98,20 @@ pub async fn run<H: Host>(engine: &Engine<H>, effect: Effect, opts: ExecOpts) ->
             },
             result: engine.publish(&draft).await,
         },
+        Effect::Opinion {
+            subject,
+            intent,
+            forum,
+            screen,
+        } => Action::OpinionDone {
+            forum,
+            screen,
+            result: engine.opinion(&subject, &intent).await,
+        },
+        Effect::Undo { id, screen } => Action::Undone {
+            screen,
+            result: engine.undo(&id).await,
+        },
         Effect::LoadWrites => Action::WritesLoaded(engine.writes().await),
         Effect::Editor(_) | Effect::Quit => return None,
     })

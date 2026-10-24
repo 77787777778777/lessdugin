@@ -19,14 +19,15 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crossterm::event::KeyEvent;
 use lessdugin_core::dto::{
-    AccountView, CommentDraft, Event, ForumSummary, ForumView, PostDraft, PostList, PostSort,
-    SyncReport, ThreadRoot, ThreadView, Topic, WriteState, WriteTicket,
+    AccountView, ActionTicket, AgreementValue, CommentDraft, Event, ForumSummary, ForumView,
+    KarmaValue, OpinionIntent, PostDraft, PostList, PostSort, SyncReport, ThreadRoot, ThreadView,
+    Topic, ViewerCaps, WriteState, WriteTicket,
 };
 use lessdugin_core::engine::EngineError;
 
 use crate::body::Body;
 use crate::editor;
-use crate::keys::{self, Cmd};
+use crate::keys::{self, Cmd, Op};
 use crate::text::{TermText, actor, cat, lit, post_title, tt};
 use crate::thread::{self, Layout, Pos};
 
@@ -192,6 +193,24 @@ pub enum Effect {
         /// The draft.
         draft: PostDraft,
     },
+    /// `opinion(subject, intent)`: one opinion key (`synthesis-v1.md` §6.11).
+    Opinion {
+        /// The post, comment, wiki revision or sequence.
+        subject: String,
+        /// The opinion change.
+        intent: OpinionIntent,
+        /// The forum the subject is in (for the caps gate message and a reload).
+        forum: String,
+        /// The screen the key was pressed on (reloaded after the write).
+        screen: ScreenId,
+    },
+    /// `undo(id)`: undo a pending opinion write (`Backspace`, the 4 s undo window).
+    Undo {
+        /// The write id.
+        id: String,
+        /// The screen to reload afterwards.
+        screen: ScreenId,
+    },
     /// `writes()`: the outbox as it is at start (writes queued or failed before this
     /// session).
     LoadWrites,
@@ -262,6 +281,22 @@ pub enum Action {
         /// The text (kept for another attempt when queuing failed).
         text: String,
         /// The ticket.
+        result: Result<WriteTicket, EngineError>,
+    },
+    /// [`Effect::Opinion`] finished.
+    OpinionDone {
+        /// The forum the subject is in.
+        forum: String,
+        /// The screen that was reloaded.
+        screen: ScreenId,
+        /// The action ticket (with its notices), or why it was refused.
+        result: Result<ActionTicket, EngineError>,
+    },
+    /// [`Effect::Undo`] finished.
+    Undone {
+        /// The screen that was reloaded.
+        screen: ScreenId,
+        /// The write's new state.
         result: Result<WriteTicket, EngineError>,
     },
 }
@@ -658,6 +693,8 @@ pub struct State {
     next_id: ScreenId,
     /// The `?` overlay is open.
     pub help: bool,
+    /// The help overlay's first shown row (it scrolls with the navigation keys).
+    pub help_scroll: usize,
     /// The status line's message.
     pub status: Option<Status>,
     /// The account that writes (`None`: read-only).
@@ -674,6 +711,9 @@ pub struct State {
     pub failed: BTreeSet<String>,
     /// The writes queued from this TUI.
     own: BTreeMap<String, OwnWrite>,
+    /// Opinion writes queued from this TUI, in order (a vote, an agreement vote or a react):
+    /// `Backspace` undoes the last one still open (`engine.undo`, the 4 s undo window).
+    pub op_writes: Vec<String>,
     /// Writes an event finished before the result of queuing them arrived (the runtime runs
     /// the call as a task, and the pump may send the write first).
     finished: BTreeSet<String>,
@@ -708,6 +748,7 @@ impl State {
             stack: Vec::new(),
             next_id: 1,
             help: false,
+            help_scroll: 0,
             status: None,
             account,
             offline,
@@ -716,6 +757,7 @@ impl State {
             writes: BTreeMap::new(),
             failed: BTreeSet::new(),
             own: BTreeMap::new(),
+            op_writes: Vec::new(),
             finished: BTreeSet::new(),
             follow_own: None,
             kept: None,
@@ -820,6 +862,12 @@ impl State {
                 text,
                 result,
             } => self.queued(compose, text, result, &mut fx),
+            Action::OpinionDone {
+                forum: _,
+                screen,
+                result,
+            } => self.opinion_done(screen, result, &mut fx),
+            Action::Undone { screen, result } => self.undone(screen, result, &mut fx),
         }
         self.fit();
         fx
@@ -1004,16 +1052,31 @@ impl State {
             fx.push(Effect::Quit);
             return;
         }
-        // any key closes the help overlay
+        // while the help overlay is open, the navigation keys scroll it and any other key
+        // closes it
         if self.help {
-            self.help = false;
+            match cmd {
+                Some(Cmd::Down) => self.help_scroll = self.help_scroll.saturating_add(1),
+                Some(Cmd::Up) => self.help_scroll = self.help_scroll.saturating_sub(1),
+                Some(Cmd::HalfDown) => self.help_scroll = self.help_scroll.saturating_add(5),
+                Some(Cmd::HalfUp) => self.help_scroll = self.help_scroll.saturating_sub(5),
+                Some(Cmd::Top) => self.help_scroll = 0,
+                Some(Cmd::Bottom) => self.help_scroll = usize::MAX,
+                _ => {
+                    self.help = false;
+                    self.help_scroll = 0;
+                }
+            }
             return;
         }
         let Some(cmd) = cmd else {
             return;
         };
         match cmd {
-            Cmd::Help => self.help = true,
+            Cmd::Help => {
+                self.help = true;
+                self.help_scroll = 0;
+            }
             Cmd::Back => self.pop(fx),
             Cmd::BackOrQuit => {
                 if self.stack.len() > 1 {
@@ -1029,6 +1092,8 @@ impl State {
             Cmd::Reply => self.compose_comment(true, fx),
             Cmd::CommentOnPost => self.compose_comment(false, fx),
             Cmd::NewPost => self.compose_post(fx),
+            Cmd::Opinion(op) => self.opinion(op, fx),
+            Cmd::Undo => self.undo_last(fx),
             nav => self.navigate(nav),
         }
     }
@@ -1398,6 +1463,210 @@ impl State {
     }
 
     // -----------------------------------------------------------------------------------------
+    // opinions (M3, synthesis-v1.md §6.11)
+
+    /// The item an opinion key applies to: its uri and its forum.
+    fn opinion_subject(&self) -> Option<(String, String)> {
+        match &self.stack.last()?.kind {
+            ScreenKind::Forum(s) => s.selected().map(|p| (p.uri.clone(), p.forum.clone())),
+            ScreenKind::Thread(t) => {
+                let uri = t.layout.items.get(t.pos.selected)?.uri.clone();
+                let d = t.data.as_ref()?;
+                let forum = match &d.view.post {
+                    ThreadRoot::Post(p) => p.post.forum.clone(),
+                    ThreadRoot::Missing { .. } => return None,
+                };
+                Some((uri, forum))
+            }
+            ScreenKind::Home(_) => None,
+        }
+    }
+
+    /// The viewer caps of `forum` from the screens below (a Forum screen has its own).
+    fn caps_of(&self, forum: &str) -> Option<&ViewerCaps> {
+        self.stack.iter().rev().find_map(|s| match &s.kind {
+            ScreenKind::Forum(f) if f.uri == forum => f.data.as_ref()?.view.viewer.as_ref(),
+            _ => None,
+        })
+    }
+
+    /// Why an opinion key is refused before the engine is asked, if it is (a disabled cap
+    /// shows why; the engine re-checks and is authoritative).
+    fn opinion_gate(&self, op: Op, caps: Option<&ViewerCaps>) -> Option<TermText> {
+        let Some(c) = caps else {
+            // the forum's header is not on the stack: the engine's own checks decide
+            return None;
+        };
+        let agreed = matches!(
+            op,
+            Op::Agree | Op::StrongAgree | Op::Disagree | Op::StrongDisagree
+        );
+        let strong = matches!(op, Op::StrongUp | Op::StrongDown);
+        if op != Op::Clear && !c.vote {
+            return Some(lit(
+                "You cannot vote here (banned, nullified or restricted from voting).",
+            ));
+        }
+        if agreed && !c.agree {
+            return Some(lit(
+                "This forum does not use agreement voting (its karma policy is `karmaOnly`).",
+            ));
+        }
+        if strong && !c.strong_vote {
+            return Some(lit("Strong votes are not available to you here."));
+        }
+        // A non-established voter (vote but not weighted) is NOT refused: the engine records
+        // the vote and returns a NotEstablished notice ("will count once you're established"),
+        // which opinion_done surfaces. Nothing to gate here.
+        None
+    }
+
+    /// One opinion key (`u`/`U`/`d`/`D`/`a`/`A`/`z`/`Z`/`0`).
+    fn opinion(&mut self, op: Op, fx: &mut Vec<Effect>) {
+        let Some((subject, forum)) = self.opinion_subject() else {
+            self.say(Tone::Info, lit("Nothing selected to vote on."));
+            return;
+        };
+        if !self.can_write() {
+            return;
+        }
+        if let Some(why) = self.opinion_gate(op, self.caps_of(&forum)) {
+            self.say(Tone::Warn, why);
+            return;
+        }
+        let Some(screen) = self.stack.last().map(|s| s.id) else {
+            return;
+        };
+        // `0` clears both axes: the engine coalesces the two intents into one held write.
+        let intents: Vec<OpinionIntent> = match op {
+            Op::Up => vec![OpinionIntent::Karma {
+                value: Some(KarmaValue::Up),
+            }],
+            Op::StrongUp => vec![OpinionIntent::Karma {
+                value: Some(KarmaValue::StrongUp),
+            }],
+            Op::Down => vec![OpinionIntent::Karma {
+                value: Some(KarmaValue::Down),
+            }],
+            Op::StrongDown => vec![OpinionIntent::Karma {
+                value: Some(KarmaValue::StrongDown),
+            }],
+            Op::Agree => vec![OpinionIntent::Agreement {
+                value: Some(AgreementValue::Agree),
+            }],
+            Op::StrongAgree => vec![OpinionIntent::Agreement {
+                value: Some(AgreementValue::StrongAgree),
+            }],
+            Op::Disagree => vec![OpinionIntent::Agreement {
+                value: Some(AgreementValue::Disagree),
+            }],
+            Op::StrongDisagree => vec![OpinionIntent::Agreement {
+                value: Some(AgreementValue::StrongDisagree),
+            }],
+            Op::Clear => vec![
+                OpinionIntent::Karma { value: None },
+                OpinionIntent::Agreement { value: None },
+            ],
+        };
+        for intent in intents {
+            fx.push(Effect::Opinion {
+                subject: subject.clone(),
+                intent,
+                forum: forum.clone(),
+                screen,
+            });
+        }
+    }
+
+    /// `Backspace`: undoes the most recent opinion write this TUI queued that is still open
+    /// (the 4 s undo window; `engine.undo`).
+    fn undo_last(&mut self, fx: &mut Vec<Effect>) {
+        let Some(id) = self
+            .op_writes
+            .iter()
+            .rev()
+            .find(|id| self.writes.contains_key(*id))
+            .cloned()
+        else {
+            self.say(
+                Tone::Info,
+                lit("Nothing to undo: no opinion write is pending."),
+            );
+            return;
+        };
+        self.op_writes.retain(|x| *x != id);
+        let screen = self.top().map_or(0, |s| s.id);
+        self.say(Tone::Info, lit("Undoing..."));
+        fx.push(Effect::Undo { id, screen });
+    }
+
+    /// [`Action::OpinionDone`]: notices and the undo hint, or the refusal.
+    fn opinion_done(
+        &mut self,
+        screen: ScreenId,
+        result: Result<ActionTicket, EngineError>,
+        fx: &mut Vec<Effect>,
+    ) {
+        match result {
+            Ok(t) => {
+                if !matches!(
+                    t.state,
+                    WriteState::Done { .. } | WriteState::Failed { .. } | WriteState::Undone
+                ) {
+                    if !self.op_writes.contains(&t.id) {
+                        self.op_writes.push(t.id.clone());
+                    }
+                    self.writes.insert(t.id.clone(), t.state);
+                }
+                let mut msg = lit("Vote recorded (Backspace undoes).");
+                if let Some(n) = t.notices.first() {
+                    msg = cat([
+                        lit("Vote recorded: "),
+                        tt(&n.message),
+                        lit(" (Backspace undoes)."),
+                    ]);
+                }
+                self.say(Tone::Good, msg);
+                self.follow_own = Some(screen);
+                if let Some(i) = self.index_of(screen) {
+                    self.reload(i, Origin::User, fx);
+                }
+            }
+            Err(e) => {
+                self.say(Tone::Error, cat([lit("Not recorded: "), tt(&e.message)]));
+            }
+        }
+    }
+
+    /// [`Action::Undone`].
+    fn undone(
+        &mut self,
+        screen: ScreenId,
+        result: Result<WriteTicket, EngineError>,
+        fx: &mut Vec<Effect>,
+    ) {
+        match result {
+            Ok(t) if matches!(t.state, WriteState::Undone) => {
+                self.writes.remove(&t.id);
+                self.failed.remove(&t.id);
+                self.say(Tone::Good, lit("Undone: the vote was not sent."));
+                if let Some(i) = self.index_of(screen) {
+                    self.reload(i, Origin::User, fx);
+                }
+            }
+            Ok(t) => {
+                // it left the undo window before the key arrived
+                self.writes.insert(t.id, t.state);
+                self.say(
+                    Tone::Warn,
+                    lit("Too late to undo: the vote was already sent. Press 0 to clear it."),
+                );
+            }
+            Err(e) => self.say(Tone::Error, cat([lit("Undo failed: "), tt(&e.message)])),
+        }
+    }
+
+    // -----------------------------------------------------------------------------------------
     // engine results and events
 
     fn loaded(
@@ -1589,6 +1858,7 @@ impl State {
                 WriteState::Done { .. } => {
                     self.writes.remove(&id);
                     self.failed.remove(&id);
+                    self.op_writes.retain(|x| *x != id);
                     match self.own.remove(&id) {
                         Some(w) => {
                             if self.top().is_some_and(|s| s.id == w.screen) {
@@ -1622,6 +1892,7 @@ impl State {
                 WriteState::Undone => {
                     self.writes.remove(&id);
                     self.failed.remove(&id);
+                    self.op_writes.retain(|x| *x != id);
                     if self.own.remove(&id).is_none() {
                         self.finished.insert(id);
                     }
