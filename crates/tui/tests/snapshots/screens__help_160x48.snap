@@ -34,6 +34,7 @@ expression: help
                                                 │  a A             agree / strongly agree                      │
                                                 │  z Z             disagree / strongly disagree                │
                                                 │  0               clear your votes on the item                │
+                                                │  x               react palette (Tab: for/against)            │
                                                 │  Backspace       undo the pending write (4 s window)         │
                                                 │Other                                                         │
                                                 │  ?               this help                                   │
@@ -41,7 +42,6 @@ expression: help
                                                 │                                                              │
                                                 │Any key closes this help.                                     │
                                                 └──────────────────────────────────────────────────────────────┘
-
 
 
 

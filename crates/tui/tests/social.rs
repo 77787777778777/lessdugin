@@ -298,3 +298,137 @@ fn an_unestablished_voters_vote_shows_as_not_counted() {
     let screen = tn.render();
     assert!(screen.contains("your: up (not counted yet)"), "{screen}");
 }
+
+/// An open forum where carol is a declared moderator (an authority passes every react gate,
+/// so no karma is needed to start a react) and bob is a granted seed. Returns the forum uri,
+/// bob's post and bob's comment on it.
+fn react_forum(s: &common::Scenario) -> (String, String, String) {
+    use lessdugin_core::dto::{
+        BodyDraft, CommentDraft, DefaultTier, ForumDraft, ModRole, ModeratorDraft, PostDraft,
+    };
+    let (alice, bob, carol) = (&s.w.alice, &s.w.bob, &s.w.carol);
+    let mut draft = ForumDraft::new("react", "React forum");
+    draft.default_tier = DefaultTier::Frontpage;
+    draft.about = Some(BodyDraft::text("Be kind."));
+    draft.moderators = vec![ModeratorDraft {
+        did: carol.did(),
+        role: ModRole::Moderator,
+        title: None,
+    }];
+    let t = block_on(alice.engine.forum_create(&draft)).unwrap();
+    alice.flush();
+    let forum = alice.done(&t);
+    s.w.tick(MINUTE);
+    let t = block_on(alice.engine.publish(&PostDraft::article(
+        &forum,
+        "Seed post",
+        "A first post.",
+    )))
+    .unwrap();
+    alice.flush();
+    let welcome = alice.done(&t);
+    s.w.tick(MINUTE);
+    block_on(bob.engine.forum_follow(&forum, None)).unwrap();
+    block_on(bob.engine.join(&forum, None)).unwrap();
+    bob.flush();
+    block_on(carol.engine.forum_follow(&forum, None)).unwrap();
+    block_on(carol.engine.join(&forum, None)).unwrap();
+    carol.flush();
+    block_on(alice.engine.grant(&forum, &[bob.did(), carol.did()])).unwrap();
+    alice.flush();
+    s.w.tick(MINUTE);
+    let t = block_on(
+        bob.engine
+            .publish(&PostDraft::article(&forum, "Bob's post", "Bob writes.")),
+    )
+    .unwrap();
+    bob.flush();
+    let bob_post = bob.done(&t);
+    bob.sync(&forum);
+    s.w.tick(MINUTE);
+    let t = block_on(
+        bob.engine
+            .comment(&CommentDraft::new(&welcome, None, "A comment.")),
+    )
+    .unwrap();
+    bob.flush();
+    let bob_c = bob.done(&t);
+    s.w.tick(MINUTE);
+    carol.sync(&forum);
+    (forum, bob_post, bob_c)
+}
+
+#[test]
+fn the_react_palette_opens_and_lists_the_palette() {
+    let s = scenario();
+    let (forum, _, _) = react_forum(&s);
+    let mut t = tui(&s, 80, 24);
+    block_on(t.start(Some(forum.clone())));
+    block_on(t.press("Enter"));
+    assert!(t.on_thread(), "bob's post opened");
+    block_on(t.press("x"));
+    let screen = t.render();
+    assert!(screen.contains("React"), "{screen}");
+    assert!(screen.contains("Agreed"), "{screen}");
+    insta::assert_snapshot!("react_palette_80x24", screen);
+    // Tab switches the stance; Esc closes the palette
+    block_on(t.press("Tab"));
+    assert_eq!(
+        t.state.react.as_ref().map(|o| o.stance),
+        Some(lessdugin_core::dto::Stance::Against)
+    );
+    block_on(t.press("Esc"));
+    assert!(t.state.react.is_none(), "the palette closed");
+}
+
+#[test]
+fn a_react_shows_in_the_palette_and_under_the_item() {
+    use lessdugin_core::dto::OpinionIntent;
+    let s = scenario();
+    let (forum, _, bob_c) = react_forum(&s);
+    let mut t = tui(&s, 80, 24);
+    block_on(t.start(Some(forum.clone())));
+    block_on(t.press("Enter"));
+    // `x` on the post, `Enter` on the first entry ("Agreed")
+    block_on(t.press("x"));
+    block_on(t.press("Enter"));
+    assert!(t.state.react.is_none(), "the palette closed");
+    let st = status(&t);
+    assert!(st.contains("React recorded"), "{st}");
+    assert!(!t.state.op_writes.is_empty(), "the write is open");
+    block_on(t.engine().outbox_flush()).unwrap();
+    block_on(t.settle());
+    let doc = t.thread_document().unwrap();
+    assert!(doc.contains("Agreed"), "{doc}");
+    assert!(doc.contains("1 for") || doc.contains("yours"), "{doc}");
+    insta::assert_snapshot!("react_under_item_80x24", t.render());
+
+    // the same react is offered as the viewer's own, and picking it again takes it back
+    block_on(t.press("x"));
+    let o = t.state.react.as_ref().expect("the palette opened");
+    let first = o.tallies.get("agree").expect("carol's tally");
+    assert_eq!(first.mine, Some(lessdugin_core::dto::Stance::For));
+    block_on(t.press("Enter"));
+    block_on(t.engine().outbox_flush()).unwrap();
+    block_on(t.settle());
+    let doc = t.thread_document().unwrap();
+    assert!(!doc.contains("Agreed"), "the react is gone:\n{doc}");
+
+    // a react on a comment (bob's comment under alice's post)
+    let mut t2 = tui(&s, 80, 24);
+    block_on(t2.start(Some(forum.clone())));
+    block_on(t2.open_thread(&bob_c));
+    // select bob's comment, then react
+    while t2.state.top_thread().unwrap().layout.items[t2.state.top_thread().unwrap().pos.selected]
+        .uri
+        != bob_c
+    {
+        block_on(t2.press("j"));
+    }
+    block_on(t2.press("x"));
+    block_on(t2.press("j"));
+    block_on(t2.press("Enter"));
+    let st = status(&t2);
+    assert!(st.contains("React recorded"), "{st}");
+    let _ = OpinionIntent::Karma { value: None };
+}

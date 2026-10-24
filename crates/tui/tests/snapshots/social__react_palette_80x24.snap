@@ -1,0 +1,29 @@
+---
+source: crates/tui/tests/social.rs
+assertion_line: 374
+expression: screen
+---
+ lessdugin › R┌ React ───────────────────────────────────────────┐l.example.com
+ React forum ·│React for · Tab stance · Enter pick · Esc close   │
+▌ Bob's post  │✅ Agreed                                         │
+▌ @bob.example│❌ Disagree                                       │
+▌             │❗ Important                                      │
+▌ Bob writes. │💡 Insightful                                     │
+              │🔄 Changed my mind                                │
+  No comments │🔑 Crux                                           │
+              │🤷 Not a crux                                     │
+              │=> Locally valid                                  │
+              │=/> Locally invalid                               │
+              │📝 Typo                                           │
+              │🚫 Wrong                                          │
+              │🎭 Misleading                                     │
+              │🤔 Unclear                                        │
+              │❓ I don't understand                             │
+              │e.g. Examples?                                    │
+              │📚 Citation needed                                │
+              │🧱 Concrete                                       │
+              │🔺 Overconfident                                  │
+              │🔻 Underconfident                                 │
+              │🎯 Hits the mark                                  │
+              └ 1-20 of 34 ──────────────────────────────────────┘
+ r reply · c comment · Space fold · p parent · R sync · ? help · h back

@@ -6,7 +6,7 @@
 //! update), the content, and a status line (the last message, or the keys). Every string is a
 //! [`TermText`](crate::text::TermText) turned into spans by [`crate::text`].
 
-use lessdugin_core::dto::{ForumRole, MembershipMode, PostSort};
+use lessdugin_core::dto::{ForumRole, MembershipMode, PostSort, Stance};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout as Split, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -14,13 +14,13 @@ use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use crate::app::{
-    ForumScreen, HomeScreen, LIST_ROWS, Screen, ScreenKind, State, SyncStatus, ThreadScreen, Tone,
-    status_text,
+    ForumScreen, HomeScreen, LIST_ROWS, ReactOverlay, Screen, ScreenKind, State, SyncStatus,
+    ThreadScreen, Tone, status_text,
 };
 use crate::keys::HELP;
 use crate::text::{
-    TermText, actor, banner_lines, cat, clock, joined, line, lit, name, pad, post_meta, post_title,
-    spans, tt, wrapped,
+    TermText, actor, banner_lines, cat, clock, count, joined, line, lit, name, pad, post_meta,
+    post_title, spans, tt, wrapped,
 };
 
 fn dim() -> Style {
@@ -75,6 +75,77 @@ pub fn draw(state: &State, f: &mut Frame<'_>) {
     if state.help {
         help(f, state, area);
     }
+    if let Some(o) = &state.react {
+        react_palette(f, o, area);
+    }
+}
+
+/// The `x` react palette overlay (`synthesis-v1.md` §6.11, `social.md` §9): the forum's
+/// palette (the MVP's `default/1`), the for/against stance, and the tallies of the reacts the
+/// selected item already has.
+fn react_palette(f: &mut Frame<'_>, o: &ReactOverlay, area: Rect) {
+    let palette = lessdugin_core::model::palette::default_1();
+    let rows = usize::from(area.height.saturating_sub(4)).max(1);
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let stance = match o.stance {
+        Stance::For => "for",
+        Stance::Against => "against",
+    };
+    lines.push(line([(
+        tt(&format!(
+            "React {stance} \u{b7} Tab stance \u{b7} Enter pick \u{b7} Esc close"
+        )),
+        dim(),
+    )]));
+    for (i, r) in palette.iter().enumerate().skip(o.scroll).take(rows) {
+        let on = i == o.cursor;
+        let mut row = vec![
+            (tt(&r.glyph), Style::default()),
+            (lit(" "), Style::default()),
+            (name(&r.label), if on { bold() } else { Style::default() }),
+        ];
+        if let Some(t) = o.tallies.get(&r.id) {
+            let mut counts: Vec<TermText> = Vec::new();
+            if t.for_count > 0 {
+                counts.push(cat([count(t.for_count, "for", "for")]));
+            }
+            if t.against > 0 {
+                counts.push(cat([count(t.against, "against", "against")]));
+            }
+            match t.mine {
+                Some(Stance::For) => counts.push(lit("yours")),
+                Some(Stance::Against) => counts.push(lit("yours, against")),
+                None => {}
+            }
+            if t.uncounted {
+                counts.push(lit("not counted"));
+            }
+            row.push((cat([lit("  "), joined(counts)]), dim()));
+        }
+        lines.push(line(row));
+    }
+    let width = 52.min(area.width);
+    let height = u16::try_from(lines.len() + 2)
+        .unwrap_or(u16::MAX)
+        .min(area.height);
+    let x = area.x + (area.width - width) / 2;
+    let y = area.y + (area.height - height) / 2;
+    let r = Rect::new(x, y, width, height);
+    let shown_end = (o.scroll + rows).min(palette.len());
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(line([(lit(" React "), bold())]))
+        .title_bottom(line([(
+            tt(&format!(
+                " {}-{} of {} ",
+                o.scroll + 1,
+                shown_end,
+                palette.len()
+            )),
+            dim(),
+        )]));
+    f.render_widget(Clear, r);
+    f.render_widget(Paragraph::new(Text::from(lines)).block(block), r);
 }
 
 fn header_style() -> Style {

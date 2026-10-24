@@ -7,9 +7,11 @@
 //! [`crate::body`] for the LFM/1 printer's output, which is itself made of `TermText` runs and
 //! checked before use. Nothing relies on ratatui to filter control characters.
 
+use std::collections::BTreeMap;
+
 use lessdugin_core::dto::{
     ActorView, AgreementValue, Badges, Banner, CollapseReason, HandleState, HiddenReason,
-    ItemState, KarmaValue, PostKind, PostSummary, ScoreView,
+    ItemState, KarmaValue, PostKind, PostSummary, ReactTally, ScoreView, Stance,
 };
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -337,6 +339,74 @@ pub fn score_parts(s: &ScoreView) -> Vec<TermText> {
         v.push(m);
     }
     v
+}
+
+/// The creator's name: their verified handle (`@h`) when `handles` has one, else their short
+/// DID (as [`actor`] shows an actor without a handle).
+fn tally_author(creator: &str, handles: &BTreeMap<String, String>) -> TermText {
+    match handles.get(creator) {
+        Some(h) => cat([lit("@"), name(h)]),
+        None => tt(&lessdugin_core::identity::short_did(creator)),
+    }
+}
+
+/// One react tally as it is listed under its item (`social.md` §9.2): the glyph and label, who
+/// created it, how many seconded it, how many are against, the viewer's stance, and whether the
+/// viewer's own react forms no valid tally (`uncounted`). `handles` maps the thread's DIDs to
+/// their verified handles.
+pub fn react_line(t: &ReactTally, handles: &BTreeMap<String, String>) -> TermText {
+    let mut parts = vec![tt(&t.glyph), lit(" "), name(&t.label)];
+    if let Some(c) = &t.creator {
+        parts.push(lit(" by "));
+        parts.push(tally_author(c, handles));
+    }
+    let seconded = t.for_count.saturating_sub(1);
+    if seconded > 0 {
+        parts.push(cat([
+            lit(", +"),
+            tt(&seconded.to_string()),
+            lit(" seconded"),
+        ]));
+    }
+    if t.against > 0 {
+        parts.push(cat([
+            lit(", "),
+            tt(&t.against.to_string()),
+            lit(" against"),
+        ]));
+    }
+    if let Some(quote) = &t.quote {
+        parts.push(cat([
+            lit(" on \u{201c}"),
+            tt(&quote.exact),
+            lit("\u{201d}"),
+        ]));
+        if matches!(t.anchor, Some(lessdugin_core::dto::Anchor::Orphan { .. })) {
+            parts.push(lit(" (quoted text no longer present)"));
+        }
+    }
+    match &t.mine {
+        Some(Stance::For) => parts.push(lit(" [yours]")),
+        Some(Stance::Against) => parts.push(lit(" [yours, against]")),
+        None => {}
+    }
+    if t.uncounted {
+        parts.push(lit(" (not counted)"));
+    }
+    cat(parts)
+}
+
+/// The item's react tallies as lines under it (`social.md` §9.2: "anchored reacts are listed
+/// under the item"), `indent` columns in.
+pub fn react_lines(
+    reacts: &[ReactTally],
+    indent: usize,
+    handles: &BTreeMap<String, String>,
+) -> Vec<TermText> {
+    reacts
+        .iter()
+        .map(|t| cat([pad(indent), react_line(t, handles)]))
+        .collect()
 }
 
 /// A post's title: `[deleted]`/`[hidden]`, the title, or the first line of the excerpt.

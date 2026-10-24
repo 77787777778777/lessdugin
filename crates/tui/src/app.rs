@@ -20,8 +20,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use crossterm::event::KeyEvent;
 use lessdugin_core::dto::{
     AccountView, ActionTicket, AgreementValue, CommentDraft, Event, ForumSummary, ForumView,
-    KarmaValue, OpinionIntent, PostDraft, PostList, PostSort, SyncReport, ThreadRoot, ThreadView,
-    Topic, ViewerCaps, WriteState, WriteTicket,
+    KarmaValue, OpinionIntent, PostDraft, PostList, PostSort, ReactTally, Stance, SyncReport,
+    ThreadRoot, ThreadView, Topic, ViewerCaps, WriteState, WriteTicket,
 };
 use lessdugin_core::engine::EngineError;
 
@@ -203,6 +203,8 @@ pub enum Effect {
         forum: String,
         /// The screen the key was pressed on (reloaded after the write).
         screen: ScreenId,
+        /// What the status line calls the write (`"Vote"`, `"React"`).
+        label: &'static str,
     },
     /// `undo(id)`: undo a pending opinion write (`Backspace`, the 4 s undo window).
     Undo {
@@ -289,6 +291,8 @@ pub enum Action {
         forum: String,
         /// The screen that was reloaded.
         screen: ScreenId,
+        /// What the status line calls the write (as [`Effect::Opinion::label`]).
+        label: &'static str,
         /// The action ticket (with its notices), or why it was refused.
         result: Result<ActionTicket, EngineError>,
     },
@@ -690,6 +694,26 @@ fn receive_list<T>(
     }
 }
 
+/// The react palette overlay (`x`, `synthesis-v1.md` §6.11, `social.md` §9). The palette is
+/// the forum's (`policy.reactPalette`, `default/1` in the MVP); the overlay reacts without a
+/// quote (the TUI has no quote-selection mechanism yet).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReactOverlay {
+    /// The item reacted to.
+    pub subject: String,
+    /// Its forum.
+    pub forum: String,
+    /// `Tab` switches it.
+    pub stance: Stance,
+    /// The selected palette entry.
+    pub cursor: usize,
+    /// The first entry shown.
+    pub scroll: usize,
+    /// The item's whole-item tallies (`quote: None`), by react id: the counts the picker shows
+    /// and the viewer's own stance (`Enter` on a react the viewer already holds removes it).
+    pub tallies: BTreeMap<String, ReactTally>,
+}
+
 /// The application state.
 #[derive(Clone, Debug)]
 pub struct State {
@@ -702,6 +726,8 @@ pub struct State {
     next_id: ScreenId,
     /// The `?` overlay is open.
     pub help: bool,
+    /// The `x` react palette overlay.
+    pub react: Option<ReactOverlay>,
     /// The help overlay's first shown row (it scrolls with the navigation keys).
     pub help_scroll: usize,
     /// The status line's message.
@@ -757,6 +783,7 @@ impl State {
             stack: Vec::new(),
             next_id: 1,
             help: false,
+            react: None,
             help_scroll: 0,
             status: None,
             account,
@@ -874,8 +901,9 @@ impl State {
             Action::OpinionDone {
                 forum: _,
                 screen,
+                label,
                 result,
-            } => self.opinion_done(screen, result, &mut fx),
+            } => self.opinion_done(screen, label, result, &mut fx),
             Action::Undone { screen, result } => self.undone(screen, result, &mut fx),
         }
         self.fit();
@@ -1094,6 +1122,12 @@ impl State {
         let Some(cmd) = cmd else {
             return;
         };
+        // while the react palette is open, it captures the keys (navigation, Enter to react,
+        // Tab for the stance, Back/Esc to close)
+        if self.react.is_some() {
+            self.react_key(cmd, fx);
+            return;
+        }
         match cmd {
             Cmd::Help => {
                 self.help = true;
@@ -1116,6 +1150,11 @@ impl State {
             Cmd::NewPost => self.compose_post(fx),
             Cmd::Opinion(op) => self.opinion(op, fx),
             Cmd::Undo => self.undo_last(fx),
+            Cmd::ReactPalette => self.open_react(),
+            Cmd::Stance => self.say(
+                Tone::Info,
+                lit("Open the react palette (x) to set a stance."),
+            ),
             nav => self.navigate(nav),
         }
     }
@@ -1597,6 +1636,7 @@ impl State {
                 intent,
                 forum: forum.clone(),
                 screen,
+                label: "Vote",
             });
         }
     }
@@ -1623,10 +1663,209 @@ impl State {
         fx.push(Effect::Undo { id, screen });
     }
 
+    // -----------------------------------------------------------------------------------------
+    // reacts (M3, synthesis-v1.md §6.11, social.md §9)
+
+    /// The forum header of `forum` from the screens below (a Forum screen has its own).
+    fn forum_view_of(&self, forum: &str) -> Option<&ForumView> {
+        self.stack.iter().rev().find_map(|s| match &s.kind {
+            ScreenKind::Forum(f) if f.uri == forum => f.data.as_ref().map(|d| &d.view),
+            _ => None,
+        })
+    }
+
+    /// The whole-item react tallies (`quote: None`) of `subject`, when the screen on top holds
+    /// them (a thread; a list's `PostSummary` carries no tallies).
+    fn react_tallies(&self, subject: &str) -> BTreeMap<String, ReactTally> {
+        let reacts: &[ReactTally] = match self.top_thread().and_then(|t| t.data.as_ref()) {
+            Some(d) => match &d.view.post {
+                ThreadRoot::Post(p) if p.post.uri == subject => &p.reacts,
+                _ => d
+                    .view
+                    .comments
+                    .iter()
+                    .find(|c| c.uri == subject)
+                    .map(|c| c.reacts.as_slice())
+                    .unwrap_or(&[]),
+            },
+            None => &[],
+        };
+        reacts
+            .iter()
+            .filter(|t| t.quote.is_none())
+            .map(|t| (t.react.clone(), t.clone()))
+            .collect()
+    }
+
+    /// `x`: opens the react palette for the selected item (`social.md` §9; the TUI has no
+    /// quote-selection mechanism, so the palette reacts on the whole item).
+    fn open_react(&mut self) {
+        let Some((subject, forum)) = self.opinion_subject() else {
+            self.say(Tone::Info, lit("Nothing selected to react to."));
+            return;
+        };
+        if !self.can_write() {
+            return;
+        }
+        // reacts exist only under `policy.voting = reacts` (the engine is authoritative; this
+        // is UX)
+        if let Some(v) = self.forum_view_of(&forum) {
+            let voting = v
+                .policy
+                .params
+                .iter()
+                .find(|(k, _)| k == "voting")
+                .map_or("", |(_, x)| x.as_str());
+            if voting != "reacts" {
+                self.say(
+                    Tone::Warn,
+                    tt(&format!(
+                        "This forum does not use reacts (its voting policy is `{voting}`)."
+                    )),
+                );
+                return;
+            }
+        }
+        if let Some(c) = self.caps_of(&forum) {
+            if !c.vote {
+                self.say(
+                    Tone::Warn,
+                    lit("You cannot react here (banned, nullified or restricted)."),
+                );
+                return;
+            }
+            // an eligible voter who may not react is restricted from it (a voter outside E is
+            // let through: the engine records the react and says it will not count)
+            if !c.react && c.weighted {
+                self.say(
+                    Tone::Warn,
+                    lit("You are restricted from reacting in this forum."),
+                );
+                return;
+            }
+        }
+        let tallies = self.react_tallies(&subject);
+        self.react = Some(ReactOverlay {
+            subject,
+            forum,
+            stance: Stance::For,
+            cursor: 0,
+            scroll: 0,
+            tallies,
+        });
+    }
+
+    /// A key while the react palette is open.
+    fn react_key(&mut self, cmd: Cmd, fx: &mut Vec<Effect>) {
+        let palette = lessdugin_core::model::palette::default_1();
+        let n = palette.len();
+        match cmd {
+            Cmd::Down => self.react_move(1, n),
+            Cmd::Up => self.react_move(-1, n),
+            Cmd::HalfDown => self.react_move(5, n),
+            Cmd::HalfUp => self.react_move(-5, n),
+            Cmd::Top => {
+                if let Some(o) = &mut self.react {
+                    o.cursor = 0;
+                    o.scroll = 0;
+                }
+            }
+            Cmd::Bottom => {
+                if let Some(o) = &mut self.react {
+                    o.cursor = n.saturating_sub(1);
+                }
+            }
+            Cmd::Stance => {
+                if let Some(o) = &mut self.react {
+                    o.stance = match o.stance {
+                        Stance::For => Stance::Against,
+                        Stance::Against => Stance::For,
+                    };
+                }
+            }
+            Cmd::Open => self.react_choose(fx),
+            _ => self.react = None,
+        }
+    }
+
+    /// Moves the palette's cursor by `d` (negative: up), revealing it in the scroll window.
+    fn react_move(&mut self, d: i64, n: usize) {
+        let rows = self.react_rows().max(1);
+        let Some(o) = &mut self.react else {
+            return;
+        };
+        let cur = o.cursor as i64 + d;
+        o.cursor = cur.clamp(0, n.saturating_sub(1) as i64) as usize;
+        if o.cursor < o.scroll {
+            o.scroll = o.cursor;
+        } else if o.cursor >= o.scroll + rows {
+            o.scroll = o.cursor + 1 - rows;
+        }
+    }
+
+    /// The palette rows that fit on the screen.
+    fn react_rows(&self) -> usize {
+        let h = usize::from(self.height.saturating_sub(4));
+        let n = lessdugin_core::model::palette::default_1().len();
+        h.min(n)
+    }
+
+    /// `Enter`: reacts with the selected palette entry (the viewer's own react of the same
+    /// stance toggles off; a stance switch removes and re-adds, as the engine coalesces the
+    /// two into one opinion record).
+    fn react_choose(&mut self, fx: &mut Vec<Effect>) {
+        let Some(o) = self.react.clone() else {
+            return;
+        };
+        let palette = lessdugin_core::model::palette::default_1();
+        let Some(info) = palette.get(o.cursor) else {
+            return;
+        };
+        let id = info.id.clone();
+        let existing = o.tallies.get(&id).and_then(|t| t.mine);
+        if o.stance == Stance::Against && !o.tallies.contains_key(&id) {
+            self.say(
+                Tone::Warn,
+                tt(&format!(
+                    "Nobody has reacted {id} here yet, so there is nothing to react against."
+                )),
+            );
+            return;
+        }
+        let Some(screen) = self.stack.last().map(|s| s.id) else {
+            return;
+        };
+        let react = |stance, remove| Effect::Opinion {
+            subject: o.subject.clone(),
+            intent: OpinionIntent::React {
+                id: id.clone(),
+                stance,
+                quote: None,
+                remove,
+            },
+            forum: o.forum.clone(),
+            screen,
+            label: "React",
+        };
+        match existing {
+            // the viewer already holds this stance: take it back
+            Some(s) if s == o.stance => fx.push(react(o.stance, true)),
+            // the opposite stance: remove it, then add the new one (one opinion record)
+            Some(s) => {
+                fx.push(react(s, true));
+                fx.push(react(o.stance, false));
+            }
+            None => fx.push(react(o.stance, false)),
+        }
+        self.react = None;
+        self.say(Tone::Info, lit("Recording the react..."));
+    }
+
     /// [`Action::OpinionDone`]: notices and the undo hint, or the refusal.
     fn opinion_done(
         &mut self,
         screen: ScreenId,
+        label: &'static str,
         result: Result<ActionTicket, EngineError>,
         fx: &mut Vec<Effect>,
     ) {
@@ -1641,10 +1880,11 @@ impl State {
                     }
                     self.writes.insert(t.id.clone(), t.state);
                 }
-                let mut msg = lit("Vote recorded (Backspace undoes).");
+                let mut msg = cat([lit(label), lit(" recorded (Backspace undoes).")]);
                 if let Some(n) = t.notices.first() {
                     msg = cat([
-                        lit("Vote recorded: "),
+                        lit(label),
+                        lit(" recorded: "),
                         tt(&n.message),
                         lit(" (Backspace undoes)."),
                     ]);

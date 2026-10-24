@@ -15,7 +15,7 @@ use ratatui::text::Line;
 use crate::app::ThreadData;
 use crate::text::{
     TermText, actor, badges, banner_lines, count, joined, line, lit, pad, post_meta, post_title,
-    score_parts, state_label, time, tt,
+    react_lines, score_parts, state_label, time, tt,
 };
 
 /// The selection gutter, in columns.
@@ -159,6 +159,16 @@ pub fn layout(data: &ThreadData, collapsed: &BTreeSet<String>, width: u16) -> La
                     lines.extend(body_lines);
                 }
             }
+            // the react tallies under the post (social.md §9.2: "anchored reacts are listed
+            // under the item")
+            if matches!(
+                p.post.state,
+                ItemState::Visible | ItemState::Collapsed { .. }
+            ) {
+                for t in react_lines(&p.reacts, 0, &handles) {
+                    lines.push(line([(t, dim())]));
+                }
+            }
         }
         ThreadRoot::Missing { missing } => {
             lines.push(line([(lit("[the post is not available]"), dim())]));
@@ -215,6 +225,12 @@ pub fn layout(data: &ThreadData, collapsed: &BTreeSet<String>, width: u16) -> La
         {
             let w = text_w.saturating_sub(indent + 2).min(MAX_BODY);
             lines.extend(body.lines(w, indent + 2, &handles));
+        }
+        // the react tallies under the comment (social.md §9.2)
+        if matches!(c.state, ItemState::Visible | ItemState::Collapsed { .. }) && !c.missing {
+            for t in react_lines(&c.reacts, indent + 2, &handles) {
+                lines.push(line([(t, dim())]));
+            }
         }
         items.push(ItemSpan {
             uri: c.uri.clone(),

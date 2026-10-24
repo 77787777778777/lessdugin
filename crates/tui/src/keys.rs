@@ -68,6 +68,10 @@ pub enum Cmd {
     Opinion(Op),
     /// `Backspace`: undo the pending write (the 4 s undo window).
     Undo,
+    /// `x`: open the react palette on the selected item.
+    ReactPalette,
+    /// `Tab` (inside the react palette): switch the stance.
+    Stance,
     /// `?`: help.
     Help,
 }
@@ -109,6 +113,8 @@ pub fn command(k: &KeyEvent) -> Option<Cmd> {
         KeyCode::Char('Z') => Cmd::Opinion(Op::StrongDisagree),
         KeyCode::Char('0') => Cmd::Opinion(Op::Clear),
         KeyCode::Backspace => Cmd::Undo,
+        KeyCode::Char('x') => Cmd::ReactPalette,
+        KeyCode::Tab => Cmd::Stance,
         KeyCode::Char('?') => Cmd::Help,
         _ => return None,
     })
@@ -193,6 +199,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("a A", "agree / strongly agree"),
             ("z Z", "disagree / strongly disagree"),
             ("0", "clear your votes on the item"),
+            ("x", "react palette (Tab: for/against)"),
             ("Backspace", "undo the pending write (4 s window)"),
         ],
     ),
@@ -225,8 +232,9 @@ mod tests {
         assert_eq!(c("Z"), Some(Cmd::Opinion(Op::StrongDisagree)));
         assert_eq!(c("0"), Some(Cmd::Opinion(Op::Clear)));
         assert_eq!(c("Backspace"), Some(Cmd::Undo));
+        assert_eq!(c("x"), Some(Cmd::ReactPalette));
+        assert_eq!(c("Tab"), Some(Cmd::Stance));
         assert_eq!(c("Ctrl-x"), None);
-        assert_eq!(c("x"), None);
         assert!(parse_key("Ctrl-").is_none());
     }
 }

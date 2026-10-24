@@ -103,9 +103,11 @@ pub async fn run<H: Host>(engine: &Engine<H>, effect: Effect, opts: ExecOpts) ->
             intent,
             forum,
             screen,
+            label,
         } => Action::OpinionDone {
             forum,
             screen,
+            label,
             result: engine.opinion(&subject, &intent).await,
         },
         Effect::Undo { id, screen } => Action::Undone {
