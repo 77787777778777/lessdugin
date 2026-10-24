@@ -106,3 +106,195 @@ fn a_banned_viewer_cannot_vote() {
         status(&t)
     );
 }
+use lessdugin_core::engine::{AccountInfo, Engine, EngineConfig};
+use lessdugin_testkit::MemHost;
+use lessdugin_testkit::fake_pds::Fault;
+
+/// A fresh read-only device on the scenario's network (no account): sees the forum as a
+/// reader who never listed a repo before.
+fn reader(name: &str, s: &common::Scenario) -> Engine<MemHost> {
+    let h = MemHost::new();
+    h.set_seed(9);
+    h.set_now_ms(s.w.alice.host.now());
+    s.w.net.install_as(&h, name);
+    Engine::new(h, EngineConfig::default())
+}
+
+#[test]
+fn a_degraded_forum_shows_its_banner() {
+    use lessdugin_core::dto::ModRole;
+    use lessdugin_core::dto::{BodyDraft, DefaultTier, ForumDraft, ModeratorDraft, PostDraft};
+    let s = scenario();
+    let (alice, bob) = (&s.w.alice, &s.w.bob);
+    // a forum with bob as a declared moderator: bob's repo then becomes an authority's repo
+    let mut draft = ForumDraft::new("deg", "Degraded");
+    draft.default_tier = DefaultTier::Frontpage;
+    draft.about = Some(BodyDraft::text("Be kind."));
+    draft.moderators = vec![ModeratorDraft {
+        did: bob.did(),
+        role: ModRole::Moderator,
+        title: None,
+    }];
+    let t = block_on(alice.engine.forum_create(&draft)).unwrap();
+    alice.flush();
+    let forum = alice.done(&t);
+    s.w.tick(MINUTE);
+    let t = block_on(
+        alice
+            .engine
+            .publish(&PostDraft::article(&forum, "Visible post", "Body.")),
+    )
+    .unwrap();
+    alice.flush();
+    let _post = alice.done(&t);
+    s.w.tick(MINUTE);
+
+    // bob's PDS stops answering, and enough time passes for his repo to count as unavailable
+    s.w.net.inject(Fault::status(503).on_repo(&s.w.bob.did()));
+    s.w.tick(3 * 24 * 60 * MINUTE);
+    let late = reader("late", &s);
+    let r = block_on(late.sync_forum(&forum, &SyncOpts::default())).unwrap();
+    assert!(r.degraded || r.repos_unavailable > 0, "{r:?}");
+
+    let mut t = block_on(lessdugin_tui::Headless::new(
+        late,
+        lessdugin_tui::HeadlessOpts {
+            width: 80,
+            height: 24,
+            auto_sync: false,
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    block_on(t.start(Some(forum.clone())));
+    let screen = t.render();
+    assert!(screen.contains("moderation data unavailable"), "{screen}");
+    insta::assert_snapshot!("forum_degraded_banner_80x24", screen);
+
+    // the thread screen shows the same banner
+    block_on(t.open_thread(&_post));
+    let doc = t.thread_document().unwrap();
+    assert!(doc.contains("moderation data unavailable"), "{doc}");
+}
+
+/// An open-mode forum with a newcomer (nina): her vote is recorded but carries no weight yet
+/// (`social.md` §5-§7: voters outside E), so every screen shows "1 vote not yet counted" and
+/// nina's own shows "(not counted yet)".
+#[test]
+fn an_unestablished_voters_vote_shows_as_not_counted() {
+    use lessdugin_core::dto::{
+        BodyDraft, DefaultTier, ForumDraft, KarmaValue, MembershipMode, OpinionIntent, PostDraft,
+    };
+    let s = scenario();
+    let (alice, bob, carol) = (&s.w.alice, &s.w.bob, &s.w.carol);
+    // nina's device on the same network
+    let nina_acct = s.w.net.add_account("nina.example.com");
+    let h = MemHost::new();
+    h.set_seed(7);
+    s.w.net.install_as(&h, "nina");
+    let nina = Engine::new(h, EngineConfig::default());
+    block_on(nina.add_account(AccountInfo::app_password(
+        nina_acct.did().as_str(),
+        nina_acct.pds_base(),
+    )))
+    .unwrap();
+
+    // an OPEN forum (approval mode has no newcomers: every granted member is a seed)
+    let mut draft = ForumDraft::new("open", "Open forum");
+    draft.membership = MembershipMode::Open;
+    draft.default_tier = DefaultTier::Frontpage;
+    draft.about = Some(BodyDraft::text("Be kind."));
+    let t = block_on(alice.engine.forum_create(&draft)).unwrap();
+    alice.flush();
+    let forum = alice.done(&t);
+    s.w.tick(MINUTE);
+    let t = block_on(
+        alice
+            .engine
+            .publish(&PostDraft::article(&forum, "Welcome aboard", "Hello.")),
+    )
+    .unwrap();
+    alice.flush();
+    let welcome = alice.done(&t);
+    s.w.tick(MINUTE);
+    // bob and carol join and are granted (seeds); nina just joins (a newcomer)
+    block_on(bob.engine.forum_follow(&forum, None)).unwrap();
+    block_on(bob.engine.join(&forum, None)).unwrap();
+    bob.flush();
+    block_on(carol.engine.forum_follow(&forum, None)).unwrap();
+    block_on(carol.engine.join(&forum, None)).unwrap();
+    carol.flush();
+    block_on(alice.engine.grant(&forum, &[bob.did(), carol.did()])).unwrap();
+    alice.flush();
+    block_on(nina.forum_follow(&forum, None)).unwrap();
+    block_on(nina.join(&forum, Some("new here"))).unwrap();
+    block_on(nina.outbox_flush()).unwrap();
+    s.w.tick(MINUTE);
+    block_on(nina.sync_forum(&forum, &SyncOpts::default())).unwrap();
+    // nina comments and a seed (bob) replies: the reply pulls nina's repo into the closure
+    // (`sync.md` §4.3) so other devices discover her records, her opinion included
+    let tc = block_on(nina.comment(&lessdugin_core::dto::CommentDraft::new(
+        &welcome,
+        None,
+        "New here!",
+    )))
+    .unwrap();
+    block_on(nina.outbox_flush()).unwrap();
+    let nina_c = match block_on(nina.write_status(&tc.id)).unwrap().unwrap().state {
+        lessdugin_core::dto::WriteState::Done { uri, .. } => uri,
+        other => panic!("{other:?}"),
+    };
+    s.w.tick(MINUTE);
+    // bob point-syncs nina's comment (sync.md §4.2: an unknown author is confirmed first),
+    // then replies: the reply pulls nina's repo into the closure for everyone else
+    block_on(bob.engine.sync_thread(&nina_c, &SyncOpts::default())).unwrap();
+    block_on(bob.engine.comment(&lessdugin_core::dto::CommentDraft::new(
+        &welcome,
+        Some(nina_c),
+        "Welcome!",
+    )))
+    .unwrap();
+    bob.flush();
+    s.w.tick(MINUTE);
+    // nina's upvote: counting (she is a participant) but unweighted (outside E)
+    block_on(nina.opinion(
+        &welcome,
+        &OpinionIntent::Karma {
+            value: Some(KarmaValue::Up),
+        },
+    ))
+    .unwrap();
+    s.w.tick(MINUTE);
+    block_on(nina.outbox_flush()).unwrap();
+    s.w.tick(MINUTE);
+
+    // carol's TUI shows the note on the list
+    let mut t = block_on(lessdugin_tui::Headless::new(
+        carol.engine.clone(),
+        lessdugin_tui::HeadlessOpts {
+            width: 100,
+            height: 24,
+            auto_sync: true,
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    block_on(t.start(Some(forum.clone())));
+    let screen = t.render();
+    assert!(screen.contains("1 vote not yet counted"), "{screen}");
+
+    // nina's own TUI shows her vote as not counted yet
+    let mut tn = block_on(lessdugin_tui::Headless::new(
+        nina,
+        lessdugin_tui::HeadlessOpts {
+            width: 140,
+            height: 24,
+            auto_sync: true,
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    block_on(tn.start(Some(forum.clone())));
+    let screen = tn.render();
+    assert!(screen.contains("your: up (not counted yet)"), "{screen}");
+}

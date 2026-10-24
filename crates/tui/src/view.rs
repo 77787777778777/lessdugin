@@ -19,8 +19,8 @@ use crate::app::{
 };
 use crate::keys::HELP;
 use crate::text::{
-    TermText, actor, cat, clock, joined, line, lit, name, pad, post_meta, post_title, spans, tt,
-    wrapped,
+    TermText, actor, banner_lines, cat, clock, joined, line, lit, name, pad, post_meta, post_title,
+    spans, tt, wrapped,
 };
 
 fn dim() -> Style {
@@ -29,6 +29,12 @@ fn dim() -> Style {
 
 fn bold() -> Style {
     Style::default().add_modifier(Modifier::BOLD)
+}
+
+fn warn_style() -> Style {
+    Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD)
 }
 
 fn selected_gutter() -> Style {
@@ -391,6 +397,9 @@ fn forum(top: &Screen, s: &ForumScreen, h: usize, lines: &mut Vec<Line<'static>>
         loading_or_error(top, lines);
         return;
     };
+    for b in banner_lines(&d.list.banners) {
+        lines.push(line([(lit("  "), Style::default()), (b, warn_style())]));
+    }
     if d.list.items.is_empty() {
         lines.push(Line::default());
         message(lines, lit("No posts yet."), bold());

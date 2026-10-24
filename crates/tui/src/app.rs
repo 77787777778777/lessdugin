@@ -401,6 +401,10 @@ impl ListPos {
 /// Rows per item in the Home and Forum lists.
 pub const LIST_ROWS: usize = 2;
 
+/// The most consecutive live reloads of one screen with no user activity in between
+/// ([`Screen::live_burst`]): the loop guard against a load that always re-announces a change.
+pub const LIVE_RELOAD_CAP: u32 = 3;
+
 /// The Home screen: followed forums with their sync status.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct HomeScreen {
@@ -573,6 +577,11 @@ pub struct Screen {
     /// The sync started when it opened is running and the user has not moved yet: live
     /// reloads apply at once (nothing to keep in place yet).
     pub settling: bool,
+    /// Consecutive live (engine-event) reloads with no user activity in between. A forum
+    /// whose authority repo stays unavailable re-emits `Changed` on every load
+    /// (`sync_authorities` always reports a change then), so the cap breaks what would be an
+    /// endless reload loop; any key or user reload starts over.
+    pub live_burst: u32,
     /// The last load's error.
     pub error: Option<EngineError>,
 }
@@ -913,6 +922,7 @@ impl State {
             dirty: false,
             stale: false,
             settling: false,
+            live_burst: 0,
             error: None,
         });
         let i = self.stack.len() - 1;
@@ -991,6 +1001,18 @@ impl State {
         if origin == Origin::Live && s.loading > 0 {
             s.dirty = true;
             return;
+        }
+        match origin {
+            Origin::Live => {
+                if s.live_burst >= LIVE_RELOAD_CAP {
+                    // the loads change nothing the user can see (an authority repo that stays
+                    // unavailable keeps re-announcing itself): stop until the user acts or
+                    // presses R; the screen keeps what it shows
+                    return;
+                }
+                s.live_burst += 1;
+            }
+            Origin::User => s.live_burst = 0,
         }
         s.loading += 1;
         fx.push(s.load(origin));
@@ -1104,6 +1126,7 @@ impl State {
             return;
         };
         top.settling = false;
+        top.live_burst = 0;
         match &mut top.kind {
             ScreenKind::Home(s) => {
                 let len = s.data.as_ref().map_or(0, |d| d.forums.len());
