@@ -7,12 +7,19 @@
 // display of a newer vote on the same axis. The first vote ever shows an interstitial explaining
 // that votes are public records. A vote still in the outbox shows `[pending]` (sync.md §1.6).
 
-import type { AgreementValue, KarmaValue, OpinionIntent, ScoreView } from "@lessdugin/engine/types";
+import type {
+  AgreementValue,
+  KarmaValue,
+  OpinionIntent,
+  ScoreView,
+  ViewerCaps,
+} from "@lessdugin/engine/types";
 import { OPINION_UNDO_WINDOW_MS } from "@lessdugin/engine/types";
 import { useNavigate } from "@tanstack/react-router";
 import { type MouseEvent, type PointerEvent, useEffect, useId, useRef, useState } from "react";
 import { useEngine } from "../engine/context.tsx";
 import { usePendingWrite, writeStore } from "../engine/writes.ts";
+import { allows, capReason } from "../lib/caps.ts";
 import { cx } from "../lib/cx.ts";
 import type { VotingMode } from "../lib/policy.ts";
 import { Badges } from "./Badges.tsx";
@@ -90,6 +97,7 @@ function VoteButton({
   active,
   strong,
   disabled,
+  disabledTitle,
   describedBy,
   onVote,
 }: {
@@ -98,6 +106,7 @@ function VoteButton({
   active: boolean;
   strong: boolean;
   disabled: boolean;
+  disabledTitle?: string | undefined;
   describedBy: string;
   onVote: (strong: boolean) => void;
 }) {
@@ -130,6 +139,7 @@ function VoteButton({
       aria-label={`${label}${active ? (strong ? " (strong vote cast)" : " (vote cast)") : ""}`}
       aria-pressed={active}
       aria-describedby={describedBy}
+      title={disabled && disabledTitle !== undefined ? disabledTitle : undefined}
       disabled={disabled}
       onPointerDown={(e: PointerEvent<HTMLButtonElement>) => {
         if (e.button !== 0) return;
@@ -167,6 +177,7 @@ export function VoteControls({
   size = "comment",
   ownItem = false,
   signedIn = true,
+  caps,
 }: {
   subject: string;
   score: ScoreView;
@@ -174,6 +185,9 @@ export function VoteControls({
   size?: "post" | "comment" | undefined;
   ownItem?: boolean | undefined;
   signedIn?: boolean | undefined;
+  /** `ForumView.viewer` (social.md §8): absent without an active account, which never disables.
+   * The fold still decides what counts; the caps are UX only. */
+  caps?: ViewerCaps | undefined;
 }) {
   const engine = useEngine();
   const requestAck = usePublicAck();
@@ -218,6 +232,7 @@ export function VoteControls({
       return;
     }
     if (ownItem) return;
+    if (!allows(caps, axis === "karma" ? "vote" : "agree")) return;
     const current = displayedAxis(axis, score, optimistic).mine;
     const target = valueFor(axis, dir, strong);
     const next = current === target ? null : target;
@@ -265,8 +280,15 @@ export function VoteControls({
 
   const karma = displayedAxis("karma", score, optimistic);
   const agreement = displayedAxis("agreement", score, optimistic);
-  const disabled = ownItem;
+  // A cap of `false` disables the axis; an absent cap (signed out) leaves it to the sign-in
+  // affordance and the fold (social.md §8).
+  const karmaDisabled = ownItem || !allows(caps, "vote");
+  const karmaTitle = ownItem ? undefined : capReason(caps, "vote");
+  const agreementDisabled = ownItem || !allows(caps, "agree");
+  const agreementTitle = ownItem ? undefined : capReason(caps, "agree");
   const showAgreement = mode !== "karmaOnly";
+  // "N of M votes were cast on an earlier version" (ScoreView.earlierVersionVotes/weightedVotes).
+  const weighted = score.weightedVotes;
   return (
     <div className={cx(styles.controls, size === "post" && styles.post)}>
       <span id={hintId} className="visually-hidden">
@@ -281,11 +303,15 @@ export function VoteControls({
           dir="down"
           active={directionOf(karma.mine) === "down"}
           strong={isStrong(karma.mine)}
-          disabled={disabled}
+          disabled={karmaDisabled}
+          disabledTitle={karmaTitle}
           describedBy={hintId}
           onVote={(s) => void vote("karma", "down", s)}
         />
-        <span className={styles.score} title={`${score.unweighted} votes not yet counted`}>
+        <span
+          className={styles.score}
+          title={score.unweighted > 0 ? `${score.unweighted} votes not yet counted` : undefined}
+        >
           <span className="visually-hidden">Karma score </span>
           {karma.total}
         </span>
@@ -294,7 +320,8 @@ export function VoteControls({
           dir="up"
           active={directionOf(karma.mine) === "up"}
           strong={isStrong(karma.mine)}
-          disabled={disabled}
+          disabled={karmaDisabled}
+          disabledTitle={karmaTitle}
           describedBy={hintId}
           onVote={(s) => void vote("karma", "up", s)}
         />
@@ -307,7 +334,8 @@ export function VoteControls({
             dir="down"
             active={directionOf(agreement.mine) === "down"}
             strong={isStrong(agreement.mine)}
-            disabled={disabled}
+            disabled={agreementDisabled}
+            disabledTitle={agreementTitle}
             describedBy={hintId}
             onVote={(s) => void vote("agreement", "down", s)}
           />
@@ -320,17 +348,24 @@ export function VoteControls({
             dir="up"
             active={directionOf(agreement.mine) === "up"}
             strong={isStrong(agreement.mine)}
-            disabled={disabled}
+            disabled={agreementDisabled}
+            disabledTitle={agreementTitle}
             describedBy={hintId}
             onVote={(s) => void vote("agreement", "up", s)}
           />
         </fieldset>
       )}
-      {!ownItem && pending && <Badges pending />}
+      {!ownItem && (pending || score.mine?.pending === true) && <Badges pending />}
+      {!ownItem && score.mine?.notYetCounted === true && (
+        <span className={styles.note} data-testid="not-yet-counted">
+          Recorded; will count once you're established
+        </span>
+      )}
       {size === "post" && score.earlierVersionVotes > 0 && (
         <span className={styles.note}>
-          {score.earlierVersionVotes} {score.earlierVersionVotes === 1 ? "vote was" : "votes were"}{" "}
-          cast on an earlier version
+          {score.earlierVersionVotes}
+          {weighted !== undefined && weighted > 0 ? ` of ${weighted}` : ""}{" "}
+          {score.earlierVersionVotes === 1 ? "vote was" : "votes were"} cast on an earlier version
         </span>
       )}
       {size === "post" && score.unweighted > 0 && (

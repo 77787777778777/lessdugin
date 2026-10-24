@@ -14,7 +14,7 @@ export function ForumMembersPage() {
   const engine = useEngine();
   const view = useForumView();
   const uri = view.forum.uri;
-  const authority = isAuthorityRole(view.myRole);
+  const authority = view.viewer !== undefined ? view.viewer.moderate : isAuthorityRole(view.myRole);
   const q = useQuery({ queryKey: qk.members(uri), queryFn: () => engine.members(uri, {}) });
   if (q.isPending) return <Loading />;
   if (q.isError) return <ErrorView error={q.error} />;
@@ -44,6 +44,7 @@ export function ForumMembersPage() {
               <th scope="col">Status</th>
               <th scope="col">Joined</th>
               <th scope="col">Note</th>
+              <th scope="col">Flags</th>
               {authority && <th scope="col">Grant</th>}
             </tr>
           </thead>
@@ -56,9 +57,40 @@ export function ForumMembersPage() {
                 <td>
                   {m.status}
                   {m.granted && <span className={ui.muted}> (granted)</span>}
+                  {m.karma !== undefined && <span className={ui.muted}> · karma {m.karma}</span>}
                 </td>
                 <td>{fullDate(m.joinedAtMs)}</td>
                 <td className={ui.muted}>{m.membershipNote}</td>
+                <td data-testid="member-flags">
+                  {m.applicant === true && (
+                    <span className={ui.chip} data-flag="applicant">
+                      Applicant
+                    </span>
+                  )}
+                  {m.banned === true && (
+                    <span className={ui.chip} data-flag="banned">
+                      Banned
+                    </span>
+                  )}
+                  {m.nullified === true && (
+                    <span
+                      className={ui.chip}
+                      data-flag="nullified"
+                      title="Their votes carry no weight"
+                    >
+                      Nullified
+                    </span>
+                  )}
+                  {m.restricted !== undefined && m.restricted.length > 0 && (
+                    <span
+                      className={ui.chip}
+                      data-flag="restricted"
+                      title={`Restricted from: ${m.restricted.join(", ")}`}
+                    >
+                      Restricted
+                    </span>
+                  )}
+                </td>
                 {authority && (
                   <td>
                     <button

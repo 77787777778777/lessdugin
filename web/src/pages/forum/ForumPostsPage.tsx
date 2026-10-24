@@ -5,6 +5,7 @@ import type { ListPostsQuery, PostFilter, PostSort } from "@lessdugin/engine/typ
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { getRouteApi, Link } from "@tanstack/react-router";
 import { Badges } from "../../components/Badges.tsx";
+import { Banners } from "../../components/Banners.tsx";
 import { PostListItem } from "../../components/PostListItem.tsx";
 import { ErrorView, Loading } from "../../components/Status.tsx";
 import { useEngine } from "../../engine/context.tsx";
@@ -123,6 +124,7 @@ export function ForumPostsPage() {
         )}
         {posts.isPending && <Loading />}
         {posts.isError && <ErrorView error={posts.error} />}
+        <Banners banners={posts.data?.pages[0]?.banners} />
         {posts.data && items.length === 0 && <p className={ui.muted}>No posts match.</p>}
         <div>
           {items.map((p) => (

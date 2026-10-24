@@ -5,13 +5,18 @@
 // opinion. The engine's views do not report the viewer's own tag votes, so the buttons show the
 // votes made on this page; the tags shown as applied are the post's resolved tags.
 
-import { OPINION_UNDO_WINDOW_MS, type TagVoteValue } from "@lessdugin/engine/types";
+import {
+  OPINION_UNDO_WINDOW_MS,
+  type TagVoteValue,
+  type ViewerCaps,
+} from "@lessdugin/engine/types";
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { useId, useState } from "react";
 import { useEngine } from "../engine/context.tsx";
 import { qk } from "../engine/queries.ts";
 import { writeStore } from "../engine/writes.ts";
+import { allows, capReason } from "../lib/caps.ts";
 import { cleanName } from "../lib/text.ts";
 import ui from "../styles/ui.module.css";
 import { usePublicAck } from "./PublicAck.tsx";
@@ -29,12 +34,16 @@ export function TagVotes({
   forum,
   applied,
   signedIn,
+  caps,
 }: {
   post: string;
   forum: string;
   /** The post's resolved tags (slugs). */
   applied: readonly string[];
   signedIn: boolean;
+  /** `ForumView.viewer` (social.md §8): tag votes are karma votes on the tag axis; a viewer
+   * who cannot vote cannot tag-vote either. Absent (signed out) never disables. */
+  caps?: ViewerCaps | undefined;
 }) {
   const engine = useEngine();
   const navigate = useNavigate();
@@ -62,6 +71,7 @@ export function TagVotes({
       void navigate({ to: "/login" });
       return;
     }
+    if (!allows(caps, "vote")) return;
     if (busy.has(slug) || !(await requestAck("tagVote"))) return;
     setBusy((b) => new Set(b).add(slug));
     const before = mine[slug] ?? null;
@@ -124,6 +134,7 @@ export function TagVotes({
             Vote on whether each tag applies to this post. Tag votes are public records in your
             repository.
           </p>
+          {capReason(caps, "vote") && <p className={ui.muted}>{capReason(caps, "vote")}</p>}
           {shown.length === 0 && <p className={ui.muted}>This post has no tags yet.</p>}
           <ul className={styles.list}>
             {shown.map((slug) => {
@@ -139,7 +150,8 @@ export function TagVotes({
                       type="button"
                       className={current === c.value ? ui.chipActive : ui.chip}
                       aria-pressed={current === c.value}
-                      disabled={busy.has(slug)}
+                      disabled={busy.has(slug) || !allows(caps, "vote")}
+                      title={capReason(caps, "vote")}
                       onClick={() => void vote(slug, current === c.value ? null : c.value)}
                     >
                       <span aria-hidden="true">{c.glyph}</span> {c.label}
@@ -178,7 +190,7 @@ export function TagVotes({
               <button
                 type="submit"
                 className={ui.button}
-                disabled={extra === "" || busy.has(extra)}
+                disabled={extra === "" || busy.has(extra) || !allows(caps, "vote")}
               >
                 Vote to apply
               </button>

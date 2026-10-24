@@ -4,6 +4,7 @@ import { getRouteApi, Link, Outlet, useNavigate } from "@tanstack/react-router";
 import { useEffect } from "react";
 import { ActorName } from "../../components/ActorName.tsx";
 import { Badges } from "../../components/Badges.tsx";
+import { Banners } from "../../components/Banners.tsx";
 import { usePublicAck } from "../../components/PublicAck.tsx";
 import { ParticipantsProvider } from "../../components/participants.tsx";
 import { ErrorView, errorMessage, Loading } from "../../components/Status.tsx";
@@ -45,7 +46,7 @@ export function ForumLayout() {
   const view = forum.data;
   const f = view.forum;
   const params = { owner, slug };
-  const authority = isAuthorityRole(view.myRole);
+  const authority = view.viewer !== undefined ? view.viewer.moderate : isAuthorityRole(view.myRole);
 
   const signedIn = active.data !== null && active.data !== undefined;
   const join = async (): Promise<void> => {
@@ -95,7 +96,11 @@ export function ForumLayout() {
               </span>
             )}
             {!f.member &&
-              (signedIn ? (
+              (view.viewer?.applicant === true ? (
+                <span className={ui.chip} data-viewer-state="applicant">
+                  Application pending
+                </span>
+              ) : signedIn ? (
                 <button
                   type="button"
                   className={ui.primary}
@@ -121,16 +126,25 @@ export function ForumLayout() {
               {f.followed ? "Unfollow" : "Follow"}
             </button>
           </div>
-          {view.banners.map((b) => (
-            <p key={b.code} className={styles.banner} data-banner={b.code}>
-              {b.message}
-            </p>
-          ))}
-          {view.completeness.degraded && (
-            <p className={styles.banner}>
-              Moderation data unavailable: some items are hidden until it loads.
+          <Banners banners={view.banners} />
+          {view.viewer?.newcomer === true && (
+            <p className={styles.banner} data-viewer-state="newcomer">
+              You are a new user here: your posts and comments are collapsed for other readers until
+              you are established.
             </p>
           )}
+          {view.viewer?.applicant === true && (
+            <p className={styles.banner} data-viewer-state="applicant">
+              Your membership is awaiting approval; your content stays unlisted until an authority
+              grants it.
+            </p>
+          )}
+          {view.completeness.degraded &&
+            !view.banners.some((b) => b.code === "moderationUnavailable") && (
+              <p className={styles.banner} data-banner="moderationUnavailable">
+                Moderation data unavailable: some items are hidden until it loads.
+              </p>
+            )}
           <nav className={styles.tabs} aria-label="Forum sections">
             <Link
               to="/f/$owner/$slug"

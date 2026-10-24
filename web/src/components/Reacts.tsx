@@ -7,7 +7,7 @@
 // Reacts are public; the first one shows an interstitial, and each is held for the undo window.
 
 import { DEFAULT_PALETTE } from "@lessdugin/engine/palette";
-import type { ActorView, ReactTally, Stance, TextQuote } from "@lessdugin/engine/types";
+import type { ActorView, ReactTally, Stance, TextQuote, ViewerCaps } from "@lessdugin/engine/types";
 import { isOrphanAnchor, OPINION_UNDO_WINDOW_MS } from "@lessdugin/engine/types";
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
@@ -15,6 +15,7 @@ import { type RefObject, useEffect, useId, useRef, useState } from "react";
 import { useEngine } from "../engine/context.tsx";
 import { qk } from "../engine/queries.ts";
 import { writeStore } from "../engine/writes.ts";
+import { allows, capReason } from "../lib/caps.ts";
 import { cx } from "../lib/cx.ts";
 import type { QuoteSelection } from "../lib/quote.ts";
 import { cleanName } from "../lib/text.ts";
@@ -156,11 +157,22 @@ function Tally({
   tally,
   ownItem,
   pending,
+  forDisabled,
+  antiDisabled,
+  disabledTitle,
+  antiTitle,
   onToggle,
 }: {
   tally: ReactTally;
   ownItem: boolean;
   pending: boolean;
+  /** Seconding the tally is gated by `reactSecond` (social.md §8); an own item hides the
+   * buttons entirely, and an absent cap (signed out) never disables. */
+  forDisabled: boolean;
+  /** Opposing the tally is gated by `reactAnti`. */
+  antiDisabled: boolean;
+  disabledTitle?: string | undefined;
+  antiTitle?: string | undefined;
   onToggle: (stance: Stance) => void;
 }) {
   const t = tally;
@@ -171,6 +183,7 @@ function Tally({
     creator ? `added by ${creator}` : null,
     seconded > 0 ? `seconded by ${seconded}` : null,
     t.against > 0 ? `${t.against} against` : null,
+    t.uncounted === true ? "your react is not counted yet" : null,
   ]
     .filter((x) => x !== null)
     .join(", ");
@@ -181,8 +194,12 @@ function Tally({
         type="button"
         className={cx(styles.tally, t.mine === "for" && styles.mine)}
         aria-pressed={t.mine === "for"}
-        disabled={ownItem}
-        title={`${t.label}${quoteText}${details ? ` (${details})` : ""}`}
+        disabled={ownItem || forDisabled}
+        title={
+          forDisabled && disabledTitle !== undefined
+            ? disabledTitle
+            : `${t.label}${quoteText}${details ? ` (${details})` : ""}`
+        }
         onClick={() => onToggle("for")}
       >
         <span className={styles.glyph} aria-hidden="true">
@@ -195,6 +212,12 @@ function Tally({
             <span aria-hidden="true">−</span>
             <span className="visually-hidden">, against: </span>
             {t.against}
+          </span>
+        )}
+        {t.uncounted === true && (
+          <span className={styles.uncounted} data-testid="react-uncounted">
+            <span className="visually-hidden">(your react is not counted yet)</span>
+            <span aria-hidden="true">⋯</span>
           </span>
         )}
         {t.quote && (
@@ -210,7 +233,8 @@ function Tally({
           className={cx(styles.oppose, t.mine === "against" && styles.opposed)}
           aria-pressed={t.mine === "against"}
           aria-label={`Oppose “${t.label}”${quoteText}`}
-          title="Oppose this react"
+          title={antiDisabled && antiTitle !== undefined ? antiTitle : "Oppose this react"}
+          disabled={antiDisabled}
           onClick={() => onToggle("against")}
         >
           <span aria-hidden="true">✗</span>
@@ -227,6 +251,7 @@ export function ReactBar({
   getQuote,
   ownItem = false,
   signedIn = true,
+  caps,
 }: {
   subject: string;
   reacts: ReactTally[];
@@ -234,6 +259,9 @@ export function ReactBar({
   getQuote: () => QuoteSelection | null;
   ownItem?: boolean | undefined;
   signedIn?: boolean | undefined;
+  /** `ForumView.viewer` (social.md §8): gates creating, seconding and opposing reacts. Absent
+   * (signed out) never disables; the sign-in affordance carries that case. */
+  caps?: ViewerCaps | undefined;
 }) {
   const engine = useEngine();
   const requestAck = usePublicAck();
@@ -265,6 +293,7 @@ export function ReactBar({
       void navigate({ to: "/login" });
       return;
     }
+    if (!allows(caps, "react")) return;
     if (!(await requestAck("react"))) return;
     const key = tallyKey(id, q);
     const forDelta = (stance === "for" ? 1 : 0) - (current === "for" ? 1 : 0);
@@ -342,17 +371,29 @@ export function ReactBar({
     }
   }
 
+  // Seconding an existing tally needs `reactSecond`; opposing needs `reactAnti` (social.md §8).
+  const canSecond = allows(caps, "reactSecond");
+  const canAnti = allows(caps, "reactAnti");
+  const secondTitle = capReason(caps, "reactSecond");
+  const antiTitle = capReason(caps, "reactAnti");
+  const canCreate = allows(caps, "reactCreate");
+  const createTitle = capReason(caps, "reactCreate");
+
   return (
     <div className={styles.bar}>
       <ul className={styles.tallies} aria-label="Reacts">
         {shown
-          .filter(({ tally: t }) => t.for > 0 || t.against > 0)
+          .filter(({ tally: t }) => t.for > 0 || t.against > 0 || t.mine !== undefined)
           .map(({ tally: t, pending: inFlight }) => (
             <Tally
               key={tallyKey(t.react, t.quote)}
               tally={t}
               ownItem={ownItem}
               pending={inFlight}
+              forDisabled={!canSecond}
+              antiDisabled={!canAnti}
+              disabledTitle={secondTitle}
+              antiTitle={antiTitle}
               onToggle={(stance) => {
                 const current = t.mine ?? null;
                 void send(t.react, t.quote, current === stance ? null : stance, current);
@@ -367,6 +408,8 @@ export function ReactBar({
             className={styles.add}
             aria-expanded={open}
             aria-haspopup="dialog"
+            disabled={!canCreate}
+            title={createTitle}
             onPointerDown={() => {
               if (!open) setSelection(getQuote());
             }}

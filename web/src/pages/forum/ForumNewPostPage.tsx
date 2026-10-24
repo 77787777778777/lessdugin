@@ -18,6 +18,7 @@ import { useEngine } from "../../engine/context.tsx";
 import { qk, useActiveAccount } from "../../engine/queries.ts";
 import { useAnnounceQueued } from "../../engine/queued.ts";
 import { writeStore } from "../../engine/writes.ts";
+import { capReason } from "../../lib/caps.ts";
 import {
   markdownOf,
   mediaRefsOf,
@@ -303,6 +304,7 @@ function EditPost({ uri }: { uri: string }) {
 
 export function ForumNewPostPage() {
   const engine = useEngine();
+  const view = useForumView();
   const { draft, edit } = route.useSearch();
   const active = useActiveAccount();
   const drafts = useQuery({
@@ -317,9 +319,32 @@ export function ForumNewPostPage() {
   if (draft !== undefined && drafts.isPending) return <Loading />;
   const entry = drafts.data?.find((d) => d.id === draft);
   const initial = entry?.draft.kind === "post" ? entry.draft.post : null;
+  const viewer = view.viewer;
+  // `post` cap false: the viewer's posts would not be listed (social.md §8). The fold would
+  // refuse the write anyway; say so up front.
+  if (viewer !== undefined && !viewer.post) {
+    return (
+      <section className={ui.page} aria-label="New post">
+        <h2 className={ui.sectionTitle}>New post</h2>
+        <p className={ui.notice}>{capReason(viewer, "post")}</p>
+      </section>
+    );
+  }
   return (
     <section className={ui.page} aria-label="New post">
       <h2 className={ui.sectionTitle}>{initial ? "Continue draft" : "New post"}</h2>
+      {viewer?.newcomer === true && (
+        <p className={ui.notice} data-viewer-state="newcomer">
+          You are a new user here: your post will be collapsed for other readers until you are
+          established.
+        </p>
+      )}
+      {viewer?.applicant === true && (
+        <p className={ui.notice} data-viewer-state="applicant">
+          Your membership is awaiting approval; your post stays unlisted until an authority grants
+          it.
+        </p>
+      )}
       <PostForm key={draft ?? "new"} initial={initial} draftId={entry?.id} />
     </section>
   );

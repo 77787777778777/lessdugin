@@ -100,3 +100,13 @@
     align-items: center;
   }
 }
+
+/* A hidden or tombstoned post: its reason only, no body (social.md §10.1). */
+.tombstone {
+  opacity: 0.65;
+}
+
+.tombstone .title {
+  font-weight: 400;
+  font-style: italic;
+}

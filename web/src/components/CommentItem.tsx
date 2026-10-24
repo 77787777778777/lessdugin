@@ -3,7 +3,7 @@
 // body with reacts, and actions (reply, link, moderate). Tombstones, missing placeholders and
 // collapsed comments render their reason instead of the body (social.md §10.2).
 
-import type { CommentNode, HiddenReason } from "@lessdugin/engine/types";
+import type { CommentNode, HiddenReason, ViewerCaps } from "@lessdugin/engine/types";
 import { isOrphanAnchor } from "@lessdugin/engine/types";
 import { useNavigate } from "@tanstack/react-router";
 import { type FocusEvent, type KeyboardEvent, useRef } from "react";
@@ -11,6 +11,7 @@ import { useEngine } from "../engine/context.tsx";
 import { useCommentDraft } from "../engine/drafts.ts";
 import { useAnnounceQueued } from "../engine/queued.ts";
 import { usePendingWrite, writeStore } from "../engine/writes.ts";
+import { allows, capReason } from "../lib/caps.ts";
 import { cx } from "../lib/cx.ts";
 import type { VotingMode } from "../lib/policy.ts";
 import { quoteFromSelection } from "../lib/quote.ts";
@@ -39,6 +40,9 @@ export interface ThreadContext {
   myDid: string | null;
   isAuthority: boolean;
   canCurate: boolean;
+  /** `ForumView.viewer` (social.md §8): gates voting, reacts and commenting. Absent signed
+   * out, which never disables an action (the sign-in affordance carries that case). */
+  caps?: ViewerCaps | undefined;
 }
 
 /** Why a hidden item is shown as a tombstone (social.md §10.1–10.2). */
@@ -264,6 +268,7 @@ export function CommentItem({
             mode={ctx.votingMode}
             ownItem={mine}
             signedIn={signedIn}
+            caps={ctx.caps}
           />
         )}
         {node.pinned && <span className={styles.flag}>📌 Pinned</span>}
@@ -310,6 +315,7 @@ export function CommentItem({
               reacts={node.reacts}
               ownItem={mine}
               signedIn={signedIn}
+              caps={ctx.caps}
               getQuote={() => quoteFromSelection(bodyRef.current?.root() ?? null, node.body.text)}
             />
           )}
@@ -318,8 +324,12 @@ export function CommentItem({
               <button
                 type="button"
                 className={ui.link}
-                disabled={ctx.locked && !ctx.isAuthority}
-                title={ctx.locked && !ctx.isAuthority ? "Comments are locked" : undefined}
+                disabled={(ctx.locked && !ctx.isAuthority) || !allows(ctx.caps, "comment")}
+                title={
+                  ctx.locked && !ctx.isAuthority
+                    ? "Comments are locked"
+                    : capReason(ctx.caps, "comment")
+                }
                 aria-expanded={replying}
                 onClick={() => onReply(replying ? null : node.uri)}
               >

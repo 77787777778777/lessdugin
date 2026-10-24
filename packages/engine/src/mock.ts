@@ -79,6 +79,7 @@ import {
   type ModLog,
   type ModQueue,
   type ModsChange,
+  type MyOpinion,
   type NotificationList,
   type NotificationsQuery,
   OPINION_UNDO_WINDOW_MS,
@@ -121,6 +122,7 @@ import {
   type UserView,
   type ValidationReport,
   type VerifyReport,
+  type ViewerCaps,
   type WikiDraft,
   type WriteState,
   type WriteTicket,
@@ -145,6 +147,8 @@ interface WriteRec {
   state: WriteState;
   undoable: boolean;
   timer?: Timer;
+  /** The subject an opinion write is about (`MyOpinion.pending`). */
+  subject?: AtUri;
   apply: () => { uri: AtUri; cid: string; topics: Topic[] };
 }
 
@@ -375,6 +379,72 @@ export class MockEngine implements EngineApi {
     return this.s.opinions.get(me)?.get(subject);
   }
 
+  /** Whether an own opinion write about `subject` is not yet done (`MyOpinion.pending`). */
+  private pendingOpinion(subject: AtUri): boolean {
+    for (const rec of this.writeRecs.values()) {
+      if (rec.subject !== subject) continue;
+      const s = rec.state;
+      if (s.kind === "pending" || s.kind === "sending") return true;
+    }
+    return false;
+  }
+
+  /** Whether a gate value passes for the active account (authorities bypass every gate). */
+  private gatePasses(forum: ForumRec, gate: string): boolean {
+    const me = this.s.active;
+    if (!me) return false;
+    if (this.isAuthorityDid(forum.summary.uri, me)) return true;
+    const limit = forum.policy.gates[gate];
+    const k = this.s.actors.get(me)?.karma.k ?? 0;
+    return limit === undefined || k >= limit;
+  }
+
+  /** What the active account may do in `forum` (social.md §4.9, §5, §8), as the fold computes
+   * it. Absent without an active account (`ForumView.viewer`). */
+  private viewerCaps(forum: ForumRec): ViewerCaps | undefined {
+    const me = this.s.active;
+    if (!me) return undefined;
+    const actor = this.s.actors.get(me);
+    const role = this.myRole(forum);
+    const authority = AUTHORITY.has(role);
+    const rank = RANK[role] ?? 0;
+    const excluded = actor?.banned === true || actor?.nullified === true;
+    const restricted = (cap: string): boolean => actor?.restricted?.includes(cap) === true;
+    const vote = !excluded && !restricted("vote");
+    const react = !excluded && forum.policy.voting === "reacts" && !restricted("react");
+    // E: authorities and granted, non-newcomer participants (karma/1 on the fixture's statuses).
+    const weighted =
+      !excluded && (authority || (actor?.granted === true && actor?.status !== "newcomer"));
+    const open = forum.membership === "open";
+    // Listed content (V2–V5, V8): a participant, not banned or nullified. In open mode the
+    // first content carries the membership (data-model.md §8), so anyone not excluded may
+    // post; newcomer content is collapsed (display.newUsers), so it stays listed.
+    const participant = open || (actor !== undefined && actor.status !== "none");
+    const newcomer = open && !authority && actor?.status === "newcomer" && !weighted;
+    const listed = participant && !excluded;
+    return {
+      vote,
+      strongVote: vote,
+      agree: vote && forum.policy.voting !== "karmaOnly",
+      weighted,
+      react,
+      reactCreate: react && this.gatePasses(forum, "reactCreate"),
+      reactSecond: react && this.gatePasses(forum, "reactSecond"),
+      reactAnti: react && this.gatePasses(forum, "reactAnti"),
+      post: listed && !restricted("post"),
+      comment: listed && !restricted("comment"),
+      newcomer,
+      applicant: forum.membership === "approval" && !authority && actor?.granted === false,
+      moderate: authority,
+      ...(authority ? { rank } : {}),
+      curate: rank >= 2,
+      authorModPersonal:
+        forum.policy.authorModeration && weighted && this.gatePasses(forum, "authorModPersonal"),
+      authorModFrontpage:
+        forum.policy.authorModeration && weighted && this.gatePasses(forum, "authorModFrontpage"),
+    };
+  }
+
   private scoreView(subject: AtUri, base: BaseScore): ScoreView {
     const mine = this.myOpinion(subject);
     const view: ScoreView = {
@@ -383,38 +453,71 @@ export class MockEngine implements EngineApi {
       unweighted: base.unweighted,
       earlierVersionVotes: base.earlier,
     };
+    if (base.weighted > 0) view.weightedVotes = base.weighted;
     if (mine && (mine.karma !== undefined || mine.agreement !== undefined)) {
-      view.mine = {};
-      if (mine.karma !== undefined) view.mine.karma = mine.karma;
-      if (mine.agreement !== undefined) view.mine.agreement = mine.agreement;
+      const op: MyOpinion = {};
+      if (mine.karma !== undefined) op.karma = mine.karma;
+      if (mine.agreement !== undefined) op.agreement = mine.agreement;
+      if (this.pendingOpinion(subject)) op.pending = true;
+      // "recorded; will count once you're established": a karma vote by a viewer outside E.
+      if (mine.karma !== undefined && !this.viewerWeighted()) op.notYetCounted = true;
+      view.mine = op;
     }
     return view;
   }
 
-  private reacts(subject: AtUri, base: BaseReact[], text: string): ReactTally[] {
+  /** Whether the active account's votes carry weight (E, social.md §6.2). */
+  private viewerWeighted(): boolean {
+    const me = this.s.active;
+    if (!me) return false;
+    if (this.isAuthorityDid(FORUM_URI, me)) return true;
+    const a = this.s.actors.get(me);
+    return (
+      a !== undefined &&
+      a.banned !== true &&
+      a.nullified !== true &&
+      a.granted &&
+      a.status !== "newcomer"
+    );
+  }
+
+  /** Whether an own react forms a valid tally (the creator passes `reactCreate` and is in E). */
+  private reactCounts(forum: ForumRec): boolean {
+    const caps = this.viewerCaps(forum);
+    return caps?.reactCreate === true && caps.weighted;
+  }
+
+  private reacts(subject: AtUri, base: BaseReact[], text: string, forum: ForumRec): ReactTally[] {
     const out: ReactTally[] = base.map((b) => {
       const p = paletteReact(b.react);
       return { ...clone(b), label: p?.label ?? b.react, glyph: p?.glyph ?? "?" };
     });
     const mine = this.myOpinion(subject)?.reacts ?? [];
+    // Whether the viewer's own reacts count (in E, and passing `reactCreate`).
+    const counts = this.reactCounts(forum);
     for (const r of mine) {
       const k = qkey(r.quote);
       const t = out.find((x) => x.react === r.react && qkey(x.quote) === k);
       if (t) {
-        if (r.stance === "for") t.for++;
-        else t.against++;
+        if (counts) {
+          if (r.stance === "for") t.for++;
+          else t.against++;
+        }
         t.mine = r.stance;
-      } else if (r.stance === "for") {
+      } else {
         const p = paletteReact(r.react);
         const tally: ReactTally = {
           react: r.react,
           label: p?.label ?? r.react,
           glyph: p?.glyph ?? "?",
-          for: 1,
-          against: 0,
-          mine: "for",
+          for: counts && r.stance === "for" ? 1 : 0,
+          against: counts && r.stance === "against" ? 1 : 0,
+          mine: r.stance,
         };
-        if (this.s.active) tally.creator = this.s.active;
+        // An own react that forms no valid react is listed with `uncounted` and no creator
+        // (engine-api.md §4.1 `ReactTally`).
+        if (counts && r.stance === "for" && this.s.active) tally.creator = this.s.active;
+        if (!counts) tally.uncounted = true;
         if (r.quote) {
           tally.quote = clone(r.quote);
           tally.anchor = cpIndexOf(text, normalizeP(r.quote.exact));
@@ -477,7 +580,7 @@ export class MockEngine implements EngineApi {
       dto: DTO_VERSION,
       post: summary,
       body: hidden ? emptyBody("[hidden]") : clone(p.body),
-      reacts: hidden ? [] : this.reacts(p.uri, p.reacts, p.body.text),
+      reacts: hidden ? [] : this.reacts(p.uri, p.reacts, p.body.text, this.forumRec(p.forum)),
       history: { revisions: p.revisions.length, redacted: p.redacted },
       sequences: [],
     };
@@ -512,7 +615,10 @@ export class MockEngine implements EngineApi {
       createdAtMs: c.createdAtMs,
       tRankMs: c.tRankMs,
       score: this.scoreView(c.uri, c.base),
-      reacts: state.kind === "tombstone" ? [] : this.reacts(c.uri, c.reacts, c.body.text),
+      reacts:
+        state.kind === "tombstone"
+          ? []
+          : this.reacts(c.uri, c.reacts, c.body.text, this.forumRec(c.forum)),
       state,
       badges: { ...c.badges },
       retracted: c.retracted,
@@ -920,6 +1026,8 @@ export class MockEngine implements EngineApi {
     if (f.about !== undefined) view.about = renderMarkdown(f.about).body;
     const me = this.s.active;
     if (me) view.myKarma = this.s.actors.get(me)?.karma.k ?? 0;
+    const viewer = this.viewerCaps(f);
+    if (viewer !== undefined) view.viewer = viewer;
     return view;
   }
 
@@ -1052,6 +1160,13 @@ export class MockEngine implements EngineApi {
           joinedAtMs: a.joinedAtMs,
         };
         if (a.membershipNote !== undefined) m.membershipNote = a.membershipNote;
+        if (a.karma.k !== 0) m.karma = a.karma.k;
+        // Approval mode: a membership record without a grant (`MemberView.applicant`).
+        const f = this.s.forums.get(uri);
+        if (f?.membership === "approval" && !a.granted) m.applicant = true;
+        if (a.banned === true) m.banned = true;
+        if (a.nullified === true) m.nullified = true;
+        if (a.restricted !== undefined && a.restricted.length > 0) m.restricted = [...a.restricted];
         return m;
       });
   }
@@ -1560,6 +1675,10 @@ export class MockEngine implements EngineApi {
 
   async modQueue(forum: AtUri): Promise<ModQueue> {
     this.forumRec(forum);
+    // Authorities only; anyone else gets `blocked` (engine-api.md §3.4 `mod_queue`).
+    if (!this.isAuthorityDid(forum, this.s.active ?? "")) {
+      throw err("blocked", "The mod queue is available to this forum's authorities only.");
+    }
     return { dto: DTO_VERSION, items: clone(this.s.modQueue.get(forum) ?? []) };
   }
 
@@ -1733,7 +1852,7 @@ export class MockEngine implements EngineApi {
         locked: false,
         createdAtMs: t,
         tRankMs: t,
-        base: { score: 1, agreement: 0, unweighted: 0, earlier: 0 },
+        base: { score: 1, agreement: 0, unweighted: 0, earlier: 0, weighted: 0 },
         reacts: [],
         state: { kind: "visible" },
         badges: {},
@@ -1795,7 +1914,7 @@ export class MockEngine implements EngineApi {
         body: renderMarkdown(draft.body.markdown).body,
         createdAtMs: t,
         tRankMs: t,
-        base: { score: 1, agreement: 0, unweighted: 0, earlier: 0 },
+        base: { score: 1, agreement: 0, unweighted: 0, earlier: 0, weighted: 0 },
         reacts: [],
         state: { kind: "visible" },
         badges: {},
@@ -2189,7 +2308,7 @@ export class MockEngine implements EngineApi {
           if (c.body) ch.body = c.body.markdown;
           return ch;
         }),
-        base: { score: 0, agreement: 0, unweighted: 0, earlier: 0 },
+        base: { score: 0, agreement: 0, unweighted: 0, earlier: 0, weighted: 0 },
         pinned: false,
         createdAtMs: t,
       };

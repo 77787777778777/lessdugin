@@ -9,6 +9,7 @@ import { getRouteApi, Link, useNavigate } from "@tanstack/react-router";
 import { type ReactNode, useEffect, useId, useMemo, useRef, useState } from "react";
 import { ActorName } from "../components/ActorName.tsx";
 import { Badges } from "../components/Badges.tsx";
+import { Banners } from "../components/Banners.tsx";
 import type { ThreadContext } from "../components/CommentItem.tsx";
 import { hiddenReasonText } from "../components/CommentItem.tsx";
 import { CommentTree } from "../components/CommentTree.tsx";
@@ -38,6 +39,7 @@ import { qk, useActiveAccount, useForum, useParsedRef } from "../engine/queries.
 import { useAnnounceQueued } from "../engine/queued.ts";
 import { useThreadSync } from "../engine/sync.ts";
 import { usePendingWrite, writeStore } from "../engine/writes.ts";
+import { allows, capReason } from "../lib/caps.ts";
 import { votingMode } from "../lib/policy.ts";
 import { quoteFromSelection } from "../lib/quote.ts";
 import { cleanName } from "../lib/text.ts";
@@ -321,6 +323,7 @@ function PostBodyView({
             size="post"
             ownItem={own}
             signedIn={myDid !== null}
+            caps={ctx.caps}
           />
           {ctx.votingMode === "reacts" && (
             <ReactBar
@@ -328,6 +331,7 @@ function PostBodyView({
               reacts={view.reacts}
               ownItem={own}
               signedIn={myDid !== null}
+              caps={ctx.caps}
               getQuote={() => quoteFromSelection(bodyRef.current?.root() ?? null, body.text)}
             />
           )}
@@ -338,6 +342,7 @@ function PostBodyView({
               forum={post.forum}
               applied={post.tags}
               signedIn={myDid !== null}
+              caps={ctx.caps}
             />
           )}
           {own && <OwnPostActions uri={post.uri} forum={post.forum} />}
@@ -412,16 +417,19 @@ export function PostThread({ uri }: { uri: string }) {
 
   const myDid = active.data?.did ?? null;
   const role = forum.data?.myRole ?? "none";
+  const viewer = forum.data?.viewer;
   const ctx: ThreadContext = {
     postUri: uri,
     forum: forumUri ?? "",
     votingMode: votingMode(forum.data?.policy),
     locked: postView?.post.locked ?? false,
     myDid,
-    isAuthority: isAuthorityRole(role),
-    canCurate: role === "owner" || role === "admin",
+    isAuthority: viewer !== undefined ? viewer.moderate : isAuthorityRole(role),
+    canCurate: viewer !== undefined ? viewer.curate : role === "owner" || role === "admin",
+    caps: viewer,
   };
-  const canComment = myDid !== null && (!ctx.locked || ctx.isAuthority);
+  const canComment =
+    myDid !== null && (!ctx.locked || ctx.isAuthority) && allows(ctx.caps, "comment");
   const count = postView?.post.commentCount ?? comments.length;
 
   const submitComment = async (markdown: string): Promise<boolean> => {
@@ -484,8 +492,26 @@ export function PostThread({ uri }: { uri: string }) {
               hidden until it loads.
             </p>
           )}
+          {thread.data.banners !== undefined && thread.data.banners.length > 0 && (
+            <Banners banners={thread.data.banners} />
+          )}
           {ctx.locked && !ctx.isAuthority && (
             <p className={ui.notice}>Comments on this post are locked.</p>
+          )}
+          {ctx.caps?.newcomer === true && (
+            <p className={ui.notice} data-viewer-state="newcomer">
+              You are a new user here: your posts and comments are collapsed for other readers until
+              you are established.
+            </p>
+          )}
+          {ctx.caps?.applicant === true && (
+            <p className={ui.notice} data-viewer-state="applicant">
+              Your membership is awaiting approval; your content stays unlisted until an authority
+              grants it.
+            </p>
+          )}
+          {myDid !== null && !canComment && !ctx.locked && capReason(ctx.caps, "comment") && (
+            <p className={ui.muted}>{capReason(ctx.caps, "comment")}</p>
           )}
           {canComment &&
             (topDraft.ready ? (

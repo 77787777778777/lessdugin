@@ -3,6 +3,8 @@
 
 import { useInfiniteQuery } from "@tanstack/react-query";
 import { ActorName } from "../../components/ActorName.tsx";
+import { Banners } from "../../components/Banners.tsx";
+import { hiddenReasonText } from "../../components/CommentItem.tsx";
 import { postTitle } from "../../components/PostMeta.tsx";
 import { RecordLink } from "../../components/RecordLink.tsx";
 import { RenderedHtml } from "../../components/RenderedHtml.tsx";
@@ -29,13 +31,19 @@ export function ForumActivityPage() {
   return (
     <section className={ui.page} aria-label="Recent discussion">
       <h2 className={ui.sectionTitle}>Recent discussion</h2>
+      <Banners banners={q.data.pages[0]?.banners} />
       {items.length === 0 && <p className={ui.muted}>No discussion yet.</p>}
       {items.map(({ post, comments }) => (
         <article key={post.uri} className={styles.discussion}>
           <h3 className={styles.discussionTitle}>
-            <RecordLink uri={post.uri}>
-              <bdi>{postTitle(post)}</bdi>
-            </RecordLink>
+            {post.state.kind === "hidden" || post.state.kind === "tombstone" ? (
+              // A hidden post: its reason only, no title or body (social.md §10.1).
+              <span className={ui.muted}>[{hiddenReasonText(post.state.reason)}]</span>
+            ) : (
+              <RecordLink uri={post.uri}>
+                <bdi>{postTitle(post)}</bdi>
+              </RecordLink>
+            )}
           </h3>
           {comments.map((c) => (
             <div key={c.uri} className={styles.miniComment}>

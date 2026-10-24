@@ -52,14 +52,16 @@ function CommentThread({ uri }: { uri: string }) {
   const comments = subtree(thread.data.comments, uri);
   const first = comments[0];
   const role = forum.data?.myRole ?? "none";
+  const viewer = forum.data?.viewer;
   const ctx: ThreadContext = {
     postUri: rootUri,
     forum: post?.forum ?? "",
     votingMode: votingMode(forum.data?.policy),
     locked: post?.locked ?? false,
     myDid: active.data?.did ?? null,
-    isAuthority: isAuthorityRole(role),
-    canCurate: role === "owner" || role === "admin",
+    isAuthority: viewer !== undefined ? viewer.moderate : isAuthorityRole(role),
+    canCurate: viewer !== undefined ? viewer.curate : role === "owner" || role === "admin",
+    caps: viewer,
   };
   return (
     <div className={ui.page}>

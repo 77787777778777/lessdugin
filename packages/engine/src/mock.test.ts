@@ -68,6 +68,56 @@ describe("MockEngine fixture", () => {
     expect(t.comments[0]?.pinned).toBe(true);
     for (const c of t.comments) expect(c.body.html.startsWith(LFM_ROOT)).toBe(true);
   });
+
+  it("reports the viewer's caps, and omits them signed out (M3, social.md §8)", async () => {
+    const e = new MockEngine();
+    const view = await e.forumOpen(FORUM_URI);
+    expect(view.viewer).toBeDefined();
+    // The fixture's active account is an admin of the fixture forum.
+    expect(view.viewer?.moderate).toBe(true);
+    expect(view.viewer?.rank).toBe(2);
+    expect(view.viewer?.curate).toBe(true);
+    expect(view.viewer?.vote).toBe(true);
+    expect(view.viewer?.weighted).toBe(true);
+    expect(view.viewer?.post).toBe(true);
+    expect(view.viewer?.comment).toBe(true);
+    expect(view.viewer?.newcomer).toBe(false);
+    expect(view.viewer?.applicant).toBe(false);
+    // Signed out (the fixture's only account removed): no `viewer` at all.
+    const me = (await e.activeAccount())?.did ?? "";
+    await e.removeAccount(me, false);
+    expect((await e.forumOpen(FORUM_URI)).viewer).toBeUndefined();
+  });
+
+  it("flags member state and refuses the mod queue to non-authorities (M3)", async () => {
+    const e = new MockEngine();
+    const members = await e.members(FORUM_URI, {});
+    const frank = members.find((m) => m.actor.handle === "frank.test");
+    expect(frank?.banned).toBe(true);
+    const dan = members.find((m) => m.actor.displayName?.includes("Dan") === true);
+    expect(dan?.status).toBe("newcomer");
+    // The authority sees the queue; a signed-out viewer gets `blocked`.
+    expect((await e.modQueue(FORUM_URI)).items.length).toBeGreaterThan(0);
+    const me = (await e.activeAccount())?.did ?? "";
+    await e.removeAccount(me, false);
+    await expect(e.modQueue(FORUM_URI)).rejects.toMatchObject({ code: "blocked" });
+    // The public mod log stays readable, with status on every entry.
+    const log = await e.modLog(FORUM_URI);
+    expect(log.entries.length).toBeGreaterThan(0);
+    for (const en of log.entries) expect(en.status).toBeDefined();
+  });
+
+  it("carries M3 score fields and own-opinion markers (social.md §5–§7)", async () => {
+    const e = new MockEngine();
+    const list = await e.listPosts({ forum: FORUM_URI, sort: "new", filter: "all", limit: 100 });
+    const withEarlier = list.items.find((p) => p.score.earlierVersionVotes > 0);
+    expect(withEarlier).toBeDefined();
+    expect(withEarlier?.score.weightedVotes).toBeGreaterThan(0);
+    // The fixture's active account upvoted the "confusion" post.
+    const confusion = list.items.find((p) => p.title?.includes("confusion") ?? false);
+    const own = confusion !== undefined ? await e.getPost(confusion.uri) : null;
+    expect(own?.post.score.mine?.karma).toBe("up");
+  });
 });
 
 describe("MockEngine writes", () => {

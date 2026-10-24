@@ -222,8 +222,8 @@ export const FK = b32hash(`lessdugin-fk/1:${FORUM_URI}`, 12);
 
 const VISIBLE: ItemState = { kind: "visible" };
 
-function score(s: number, agreement = 0, unweighted = 0, earlier = 0): BaseScore {
-  return { score: s, agreement, unweighted, earlier };
+function score(s: number, agreement = 0, unweighted = 0, earlier = 0, weighted = 0): BaseScore {
+  return { score: s, agreement, unweighted, earlier, weighted };
 }
 
 /** Code-point anchor of `exact` in P, or an orphan marker. */
@@ -319,6 +319,8 @@ export function buildFixture(): Fixture {
     };
     if (a.bio !== undefined) rec.bio = a.bio;
     if (a.note !== undefined) rec.membershipNote = a.note;
+    // The fixture's mod log bans Frank for spam (`MemberView.banned`, social.md §4.9).
+    if (a.key === "frank") rec.banned = true;
     actors.set(d, rec);
   }
 
@@ -461,7 +463,7 @@ export function buildFixture(): Fixture {
       tags: ["meta"],
       tier: "personal",
       ageMs: 6 * D,
-      score: score(5, 1, 0, 3),
+      score: score(5, 1, 0, 3, 12),
       badges: { edited: true, identityUnverified: true },
       revisions: 2,
       redacted: true,

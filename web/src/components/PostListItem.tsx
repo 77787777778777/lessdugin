@@ -8,6 +8,7 @@ import { cx } from "../lib/cx.ts";
 import { fullDate, shortAge } from "../lib/time.ts";
 import { ActorName } from "./ActorName.tsx";
 import { Badges } from "./Badges.tsx";
+import { hiddenReasonText } from "./CommentItem.tsx";
 import styles from "./PostListItem.module.css";
 import { COLLAPSE_LABEL, KindBadge, postTitle, TagChips, TierBadge } from "./PostMeta.tsx";
 import { RecordLink } from "./RecordLink.tsx";
@@ -15,6 +16,16 @@ import { RecordLink } from "./RecordLink.tsx";
 export function PostListItem({ post }: { post: PostSummary }) {
   const titleId = useId();
   const collapsed = post.state.kind === "collapsed" ? post.state.reason : null;
+  // A hidden or tombstoned post is listed as a reason only, with no body (social.md §10.1).
+  if (post.state.kind === "hidden" || post.state.kind === "tombstone") {
+    return (
+      <article className={cx(styles.item, styles.tombstone)} aria-labelledby={titleId}>
+        <h3 className={styles.title} id={titleId}>
+          [{hiddenReasonText(post.state.reason)}]
+        </h3>
+      </article>
+    );
+  }
   return (
     <article className={cx(styles.item, collapsed && styles.collapsed)} aria-labelledby={titleId}>
       <span className={styles.score} title={`Karma ${post.score.score}`}>

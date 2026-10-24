@@ -202,3 +202,10 @@
     border-radius: var(--radius-lg) var(--radius-lg) 0 0;
   }
 }
+
+/* An own react that forms no valid tally (`ReactTally.uncounted`, social.md §9.2). */
+.uncounted {
+  margin-left: 0.2rem;
+  color: var(--color-text-faint);
+  font-size: 0.75em;
+}

@@ -46,6 +46,10 @@ export interface ActorRec {
   granted: boolean;
   membershipNote?: string;
   pinned: AtUri[];
+  /** The resolved moderation of the fixture forum (`MemberView.banned/nullified/restricted`). */
+  banned?: boolean;
+  nullified?: boolean;
+  restricted?: string[];
 }
 
 export interface BaseScore {
@@ -53,6 +57,9 @@ export interface BaseScore {
   agreement: number;
   unweighted: number;
   earlier: number;
+  /** M of "N of M votes were cast on an earlier version" (`ScoreView.weightedVotes`; 0 omits
+   * it, as the wire DTO does). */
+  weighted: number;
 }
 
 export interface BaseReact {

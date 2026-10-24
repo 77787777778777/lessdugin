@@ -2,11 +2,12 @@
 // Notifications (social.md §16), computed locally by the engine.
 
 import type { NotificationReason } from "@lessdugin/engine/types";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { ActorName } from "../components/ActorName.tsx";
 import { RecordLink } from "../components/RecordLink.tsx";
-import { ErrorView, Loading } from "../components/Status.tsx";
+import { ErrorView, errorMessage, Loading } from "../components/Status.tsx";
+import { toasts } from "../components/Toast.tsx";
 import { useEngine } from "../engine/context.tsx";
 import { qk } from "../engine/queries.ts";
 import { fullDate, shortAge } from "../lib/time.ts";
@@ -45,11 +46,29 @@ function subjectLabel(uri: string): string {
 
 export function NotificationsPage() {
   const engine = useEngine();
+  const qc = useQueryClient();
   const [all, setAll] = useState(true);
   const q = useQuery({
     queryKey: qk.notifications(all),
     queryFn: () => engine.notifications({ all, limit: 100 }),
   });
+  const unreadCount = q.data?.unread ?? 0;
+  const markAll = async (): Promise<void> => {
+    try {
+      await engine.markAllNotificationsRead();
+      qc.invalidateQueries({ queryKey: ["notifications"] });
+    } catch (e) {
+      toasts.show({ message: errorMessage(e), tone: "error" });
+    }
+  };
+  const markOne = async (id: string): Promise<void> => {
+    try {
+      await engine.markNotificationsRead([id]);
+      qc.invalidateQueries({ queryKey: ["notifications"] });
+    } catch (e) {
+      toasts.show({ message: errorMessage(e), tone: "error" });
+    }
+  };
   return (
     <div className={ui.page}>
       <h1 className={ui.pageTitle}>Notifications</h1>
@@ -68,8 +87,13 @@ export function NotificationsPage() {
           aria-pressed={!all}
           onClick={() => setAll(false)}
         >
-          Unread
+          Unread{unreadCount > 0 ? ` (${unreadCount})` : ""}
         </button>
+        {unreadCount > 0 && (
+          <button type="button" className={ui.ghost} onClick={() => void markAll()}>
+            Mark all read
+          </button>
+        )}
       </p>
       {q.isPending && <Loading />}
       {q.isError && <ErrorView error={q.error} />}
@@ -101,6 +125,16 @@ export function NotificationsPage() {
               >
                 {shortAge(n.atMs)}
               </time>
+              {!n.read && (
+                <button
+                  type="button"
+                  className={ui.link}
+                  aria-label="Mark as read"
+                  onClick={() => void markOne(n.id)}
+                >
+                  Mark read
+                </button>
+              )}
             </li>
           );
         })}
