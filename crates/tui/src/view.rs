@@ -14,13 +14,13 @@ use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use crate::app::{
-    ForumScreen, HomeScreen, LIST_ROWS, ReactOverlay, Screen, ScreenKind, State, SyncStatus,
-    ThreadScreen, Tone, status_text,
+    ForumScreen, HomeScreen, LIST_ROWS, ModMenu, ModScreen, ModTab, Prompt, ReactOverlay, Screen,
+    ScreenKind, State, SyncStatus, ThreadScreen, Tone, status_text,
 };
 use crate::keys::HELP;
 use crate::text::{
-    TermText, actor, banner_lines, cat, clock, count, joined, line, lit, name, pad, post_meta,
-    post_title, spans, tt, wrapped,
+    TermText, actor, banner_lines, cat, clock, count, joined, line, lit, mod_log_entry,
+    mod_queue_item, name, pad, post_meta, post_title, spans, tt, wrapped,
 };
 
 fn dim() -> Style {
@@ -78,6 +78,92 @@ pub fn draw(state: &State, f: &mut Frame<'_>) {
     if let Some(o) = &state.react {
         react_palette(f, o, area);
     }
+    if let Some(m) = &state.mod_menu {
+        mod_menu(f, m, area);
+    }
+    if let Some(p) = &state.prompt {
+        prompt(f, p, area);
+    }
+}
+
+/// The `m` mod menu overlay: the forum-tier actions of `ViewerCaps.moderate`/`rank` (plus the
+/// queue and log entries), one key per action with a reason prompt after it
+/// (`synthesis-v1.md` §6.11).
+fn mod_menu(f: &mut Frame<'_>, m: &ModMenu, area: Rect) {
+    let rows = usize::from(area.height.saturating_sub(6)).max(1);
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    lines.push(line([(
+        tt("Moderate \u{b7} Enter run \u{b7} Esc close"),
+        dim(),
+    )]));
+    for (i, e) in m.entries.iter().enumerate().skip(m.scroll).take(rows) {
+        let on = i == m.cursor;
+        lines.push(line([(
+            lit(e.label),
+            if on {
+                bold().fg(Color::Cyan)
+            } else {
+                Style::default()
+            },
+        )]));
+    }
+    let width = 44.min(area.width);
+    let height = u16::try_from(lines.len() + 2)
+        .unwrap_or(u16::MAX)
+        .min(area.height);
+    let x = area.x + (area.width - width) / 2;
+    let y = area.y + (area.height - height) / 2;
+    let r = Rect::new(x, y, width, height);
+    let shown_end = (m.scroll + rows).min(m.entries.len());
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(line([(lit(" Mod "), bold())]))
+        .title_bottom(line([(
+            tt(&format!(
+                " {}-{} of {} ",
+                m.scroll + 1,
+                shown_end,
+                m.entries.len()
+            )),
+            dim(),
+        )]));
+    f.render_widget(Clear, r);
+    f.render_widget(Paragraph::new(Text::from(lines)).block(block), r);
+}
+
+/// A one-line prompt (the mod action's optional reason): Enter runs the action, Esc cancels.
+fn prompt(f: &mut Frame<'_>, p: &Prompt, area: Rect) {
+    let width = 60.min(area.width);
+    let height = 3.min(area.height);
+    let x = area.x + (area.width - width) / 2;
+    let y = area.y + (area.height - height) / 2;
+    let r = Rect::new(x, y, width, height);
+    let inner = usize::from(width.saturating_sub(2));
+    let shown = fit_to(&p.text, inner.saturating_sub(1));
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(line([(tt(&format!(" {} ", p.label)), bold())]));
+    let text = cat([tt(&shown), lit("_")]);
+    f.render_widget(Clear, r);
+    f.render_widget(
+        Paragraph::new(line([(text, Style::default())])).block(block),
+        r,
+    );
+}
+
+/// The end of `s` that fits in `width` columns (the prompt shows the text around the cursor).
+fn fit_to(s: &str, width: usize) -> String {
+    let mut out = String::new();
+    let mut w = 0usize;
+    for ch in s.chars().rev() {
+        let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if w + cw > width {
+            break;
+        }
+        w += cw;
+        out.insert(0, ch);
+    }
+    out
 }
 
 /// The `x` react palette overlay (`synthesis-v1.md` §6.11, `social.md` §9): the forum's
@@ -161,6 +247,7 @@ fn header_line(state: &State) -> Line<'static> {
             ScreenKind::Thread(t) => t
                 .post()
                 .map_or_else(|| lit("thread"), |p| post_title(&p.post)),
+            ScreenKind::Mod(_) => lit("moderation"),
         };
         crumbs.push(label);
     }
@@ -340,6 +427,22 @@ fn info_line(state: &State, top: &Screen) -> Line<'static> {
                 }
             }
         }
+        ScreenKind::Mod(m) => {
+            let tabs = [(ModTab::Queue, "queue"), (ModTab::Log, "log")];
+            parts.push((lit(" "), dim()));
+            for (tab, label) in tabs {
+                let style = if m.tab == tab {
+                    Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
+                } else {
+                    dim()
+                };
+                parts.push((cat([lit(" "), lit(label), lit(" ")]), style));
+            }
+            parts.push((lit("  Tab switch"), dim()));
+            if let Some(n) = forum_name(state, &m.forum) {
+                info.push(n);
+            }
+        }
     }
     if !info.is_empty() {
         parts.push((cat([lit(" "), joined(info)]), dim()));
@@ -384,6 +487,7 @@ fn status_lines(state: &State) -> Text<'static> {
         Some(ScreenKind::Thread(_)) => {
             " r reply \u{b7} c comment \u{b7} Space fold \u{b7} p parent \u{b7} R sync \u{b7} ? help \u{b7} h back"
         }
+        Some(ScreenKind::Mod(_)) => " Tab queue/log \u{b7} R sync \u{b7} ? help \u{b7} h back",
         None => "",
     };
     Text::from(line([(tt(hints), dim())]))
@@ -399,6 +503,7 @@ fn content_lines(state: &State, top: &Screen, h: usize) -> Vec<Line<'static>> {
         ScreenKind::Home(s) => home(state, top, s, h, &mut lines),
         ScreenKind::Forum(s) => forum(top, s, h, &mut lines),
         ScreenKind::Thread(t) => thread(top, t, h, &mut lines),
+        ScreenKind::Mod(m) => mod_screen(top, m, h, &mut lines),
     }
     lines
 }
@@ -514,6 +619,58 @@ fn thread(top: &Screen, t: &ThreadScreen, h: usize, lines: &mut Vec<Line<'static
         let mut v = spans(&g, gs);
         v.extend(row.spans.iter().cloned());
         lines.push(Line::from(v));
+    }
+}
+
+fn mod_screen(top: &Screen, m: &ModScreen, h: usize, lines: &mut Vec<Line<'static>>) {
+    match m.tab {
+        ModTab::Queue => match &m.queue {
+            None => loading_or_error(top, lines),
+            Some(Err(e)) => message(
+                lines,
+                cat([lit("The queue is not available: "), tt(&e.message)]),
+                Style::default().fg(Color::Red),
+            ),
+            Some(Ok(q)) => {
+                if q.items.is_empty() {
+                    lines.push(Line::default());
+                    message(lines, lit("The queue is empty."), bold());
+                    return;
+                }
+                for (i, it) in q.items.iter().enumerate().skip(m.pos.top).take(h) {
+                    let on = i == m.pos.cursor;
+                    lines.push(line([
+                        gutter(on),
+                        (
+                            mod_queue_item(it),
+                            if on { bold() } else { Style::default() },
+                        ),
+                    ]));
+                }
+            }
+        },
+        ModTab::Log => match &m.log {
+            None => loading_or_error(top, lines),
+            Some(Err(e)) => message(
+                lines,
+                cat([lit("The log is not available: "), tt(&e.message)]),
+                Style::default().fg(Color::Red),
+            ),
+            Some(Ok(l)) => {
+                if l.entries.is_empty() {
+                    lines.push(Line::default());
+                    message(lines, lit("No moderation yet."), bold());
+                    return;
+                }
+                for (i, e) in l.entries.iter().enumerate().skip(m.pos.top).take(h) {
+                    let on = i == m.pos.cursor;
+                    lines.push(line([
+                        gutter(on),
+                        (mod_log_entry(e), if on { bold() } else { Style::default() }),
+                    ]));
+                }
+            }
+        },
     }
 }
 

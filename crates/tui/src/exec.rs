@@ -31,6 +31,10 @@ pub const LIST_LIMIT: u32 = 200;
 /// page.
 pub const PARITY_LIST_LIMIT: u32 = 30;
 
+/// The most mod-log entries the Mod screen lists (`mod_log` pages; the first page is enough
+/// for the MVP).
+pub const MOD_LOG_LIMIT: u32 = 100;
+
 /// The time budget of the syncs a screen runs when it opens (as the CLI's implicit syncs).
 pub const IMPLICIT_SYNC_MS: i64 = 20_000;
 
@@ -113,6 +117,33 @@ pub async fn run<H: Host>(engine: &Engine<H>, effect: Effect, opts: ExecOpts) ->
         Effect::Undo { id, screen } => Action::Undone {
             screen,
             result: engine.undo(&id).await,
+        },
+        Effect::ModAction {
+            intent,
+            forum,
+            screen,
+        } => Action::ModActionDone {
+            forum,
+            screen,
+            result: engine.mod_action(&intent).await,
+        },
+        Effect::LoadQueue {
+            screen,
+            forum,
+            origin,
+        } => Action::QueueLoaded {
+            screen,
+            origin,
+            result: engine.mod_queue(&forum).await,
+        },
+        Effect::LoadLog {
+            screen,
+            forum,
+            origin,
+        } => Action::LogLoaded {
+            screen,
+            origin,
+            result: engine.mod_log(&forum, None, MOD_LOG_LIMIT).await,
         },
         Effect::LoadWrites => Action::WritesLoaded(engine.writes().await),
         Effect::Editor(_) | Effect::Quit => return None,

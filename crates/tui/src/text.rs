@@ -377,9 +377,10 @@ pub fn react_line(t: &ReactTally, handles: &BTreeMap<String, String>) -> TermTex
     }
     if let Some(quote) = &t.quote {
         parts.push(cat([
-            lit(" on \u{201c}"),
+            lit(" on "),
+            tt("\u{201c}"),
             tt(&quote.exact),
-            lit("\u{201d}"),
+            tt("\u{201d}"),
         ]));
         if matches!(t.anchor, Some(lessdugin_core::dto::Anchor::Orphan { .. })) {
             parts.push(lit(" (quoted text no longer present)"));
@@ -407,6 +408,66 @@ pub fn react_lines(
         .iter()
         .map(|t| cat([pad(indent), react_line(t, handles)]))
         .collect()
+}
+
+/// One mod-queue row (`social.md` §4.12): its kind, subject, reason and actor.
+pub fn mod_queue_item(i: &lessdugin_core::dto::ModQueueItem) -> TermText {
+    let mut parts = vec![tt(&i.item_kind), lit("  ")];
+    match &i.actor {
+        Some(a) => parts.push(actor(a)),
+        None => parts.push(tt(&i.subject)),
+    }
+    parts.push(lit("  "));
+    parts.push(tt(&i.reason));
+    if let Some(d) = &i.detail {
+        parts.push(cat([lit("  ("), tt(d), lit(")")]));
+    }
+    if let Some(at) = i.at_ms {
+        parts.push(cat([lit("  "), tt(&time(at))]));
+    }
+    cat(parts)
+}
+
+/// One mod-log row (`social.md` §4.12): the action and value, who asserted it, the status
+/// (`effective`, `overridden`, `lapsed`, …) and the winning rank of an override.
+pub fn mod_log_entry(e: &lessdugin_core::dto::ModLogEntry) -> TermText {
+    use lessdugin_core::dto::ModLogStatus;
+    let mut parts = vec![
+        tt(&time(e.at_ms)),
+        lit("  "),
+        actor(&e.actor),
+        lit("  "),
+        tt(&e.action),
+        lit(" "),
+        tt(&e.value),
+    ];
+    if e.author_scope {
+        parts.push(lit(" [author scope]"));
+    }
+    let status = match e.status {
+        ModLogStatus::Effective => None,
+        ModLogStatus::Overridden => match e.rank {
+            Some(r) => Some(format!("overridden (rank {r})")),
+            None => Some("overridden".into()),
+        },
+        ModLogStatus::Lapsed => Some("lapsed".into()),
+        ModLogStatus::Expired => Some("expired".into()),
+        ModLogStatus::Stale => Some("stale".into()),
+        ModLogStatus::Unauthorised => Some("unauthorised".into()),
+        ModLogStatus::ReservedUnknown => Some("reserved".into()),
+        ModLogStatus::Edited => Some("edited".into()),
+        ModLogStatus::Removed => Some("removed".into()),
+    };
+    if let Some(s) = status {
+        parts.push(cat([lit("  "), tt(&format!("[{s}]"))]));
+    }
+    if let Some(r) = &e.reason {
+        parts.push(cat([lit("  "), tt("\u{201c}"), tt(r), tt("\u{201d}")]));
+    }
+    if let Some(a) = &e.adopted_from {
+        parts.push(cat([lit("  (adopts "), tt(a), lit(")")]));
+    }
+    cat(parts)
 }
 
 /// A post's title: `[deleted]`/`[hidden]`, the title, or the first line of the excerpt.

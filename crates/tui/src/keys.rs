@@ -72,6 +72,8 @@ pub enum Cmd {
     ReactPalette,
     /// `Tab` (inside the react palette): switch the stance.
     Stance,
+    /// `m`: open the mod menu on the selected item (or its author).
+    ModMenu,
     /// `?`: help.
     Help,
 }
@@ -115,6 +117,7 @@ pub fn command(k: &KeyEvent) -> Option<Cmd> {
         KeyCode::Backspace => Cmd::Undo,
         KeyCode::Char('x') => Cmd::ReactPalette,
         KeyCode::Tab => Cmd::Stance,
+        KeyCode::Char('m') => Cmd::ModMenu,
         KeyCode::Char('?') => Cmd::Help,
         _ => return None,
     })
@@ -203,7 +206,14 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("Backspace", "undo the pending write (4 s window)"),
         ],
     ),
-    ("Other", &[("?", "this help"), ("Ctrl-c", "quit")]),
+    (
+        "Other",
+        &[
+            ("m", "mod menu (queue, log, actions)"),
+            ("?", "this help"),
+            ("Ctrl-c", "quit"),
+        ],
+    ),
 ];
 
 #[cfg(test)]
@@ -234,6 +244,7 @@ mod tests {
         assert_eq!(c("Backspace"), Some(Cmd::Undo));
         assert_eq!(c("x"), Some(Cmd::ReactPalette));
         assert_eq!(c("Tab"), Some(Cmd::Stance));
+        assert_eq!(c("m"), Some(Cmd::ModMenu));
         assert_eq!(c("Ctrl-x"), None);
         assert!(parse_key("Ctrl-").is_none());
     }

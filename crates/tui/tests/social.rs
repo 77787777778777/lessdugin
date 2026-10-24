@@ -432,3 +432,142 @@ fn a_react_shows_in_the_palette_and_under_the_item() {
     assert!(st.contains("React recorded"), "{st}");
     let _ = OpinionIntent::Karma { value: None };
 }
+
+#[test]
+fn the_mod_menu_hides_an_item_with_a_reason() {
+    use lessdugin_core::dto::{ItemState, ThreadOpts};
+    let s = scenario();
+    let (forum, bob_post, _) = react_forum(&s); // carol is a moderator there
+    let mut t = tui(&s, 100, 30);
+    block_on(t.start(Some(forum.clone())));
+    block_on(t.press("Enter")); // bob's post
+    block_on(t.press("m"));
+    let menu = t.state.mod_menu.as_ref().expect("the menu opened");
+    assert!(
+        menu.entries.iter().any(|e| e.label == "hide this item"),
+        "{menu:?}"
+    );
+    let screen = t.render();
+    assert!(screen.contains("Moderate"), "{screen}");
+    insta::assert_snapshot!("mod_menu_80x24", t.render());
+    // Enter: the reason prompt; type a reason and Enter: the mod_action is issued
+    block_on(t.press("Enter"));
+    assert!(t.state.prompt.is_some(), "the reason prompt opened");
+    for k in ["p", "i", "l", "l", "s"] {
+        block_on(t.press(k));
+    }
+    assert_eq!(
+        t.state.prompt.as_ref().map(|p| p.text.as_str()),
+        Some("pills")
+    );
+    block_on(t.press("Enter"));
+    let st = status(&t);
+    assert!(st.contains("Mod action recorded"), "{st}");
+    block_on(t.engine().outbox_flush()).unwrap();
+    block_on(t.settle());
+    s.w.tick(MINUTE);
+    // the post is hidden in bob's thread view (carol is an authority, so she sees the reason)
+    let tv = block_on(t.engine().get_thread(&bob_post, &ThreadOpts::default())).unwrap();
+    let lessdugin_core::dto::ThreadRoot::Post(p) = &tv.post else {
+        panic!("the post is gone");
+    };
+    assert!(
+        matches!(
+            p.post.state,
+            ItemState::Hidden {
+                reason: lessdugin_core::dto::HiddenReason::Removed { .. }
+            }
+        ),
+        "{:?}",
+        p.post.state
+    );
+    // the mod log shows the action with its status and reason
+    let log = block_on(t.engine().mod_log(&forum, None, 20)).unwrap();
+    assert!(
+        log.entries.iter().any(|e| e.action == "hide"
+            && e.value.contains("hidden")
+            && e.reason.as_deref() == Some("pills")),
+        "{:?}",
+        log.entries
+    );
+}
+
+#[test]
+fn the_mod_queue_and_log_screens() {
+    use lessdugin_core::dto::{ModActionValue, ModScope};
+    let s = scenario();
+    let (forum, bob_post, _) = react_forum(&s);
+    // alice (the owner, rank 3) hides bob's post, carol (a moderator, rank 1) keeps it: the
+    // log then shows carol's keep as overridden by the higher rank (mod/1 resolution)
+    block_on(s.w.alice.engine.mod_action(&ModActionIntent::Assert {
+        forum: forum.clone(),
+        scope: ModScope::Forum,
+        subject: bob_post.clone(),
+        action: ModActionValue::Hide {
+            hidden: true,
+            spam: false,
+            show_reason: true,
+        },
+        reason: None,
+        until_ms: None,
+    }))
+    .unwrap();
+    s.w.alice.flush();
+    block_on(s.w.carol.engine.mod_action(&ModActionIntent::Assert {
+        forum: forum.clone(),
+        scope: ModScope::Forum,
+        subject: bob_post.clone(),
+        action: ModActionValue::Hide {
+            hidden: false,
+            spam: false,
+            show_reason: true,
+        },
+        reason: Some("keep".into()),
+        until_ms: None,
+    }))
+    .unwrap();
+    s.w.tick(MINUTE);
+    s.w.carol.flush();
+    s.w.tick(MINUTE);
+    // carol (a moderator) opens the queue through the menu
+    let mut t = tui(&s, 100, 30);
+    block_on(t.start(Some(forum.clone())));
+    block_on(t.press("m"));
+    // go to the "mod queue" entry
+    let n = t
+        .state
+        .mod_menu
+        .as_ref()
+        .unwrap()
+        .entries
+        .iter()
+        .position(|e| e.queue)
+        .expect("a queue entry");
+    for _ in 0..n {
+        block_on(t.press("j"));
+    }
+    block_on(t.press("Enter"));
+    let screen = t.render();
+    assert!(screen.contains("queue"), "{screen}");
+    insta::assert_snapshot!("mod_queue_screen_80x24", t.render());
+    // Tab switches to the log: carol's keep shows as overridden by alice's rank-3 hide,
+    // with its status and reason
+    block_on(t.press("Tab"));
+    let screen = t.render();
+    assert!(screen.contains("log"), "{screen}");
+    assert!(screen.contains("overridden"), "{screen}");
+    assert!(screen.contains("hidden"), "{screen}");
+    assert!(screen.contains("keep"), "{screen}");
+    insta::assert_snapshot!("mod_log_screen_80x24", t.render());
+}
+
+#[test]
+fn the_mod_queue_is_blocked_for_a_plain_member() {
+    let s = scenario();
+    // in the default (approval) scenario forum carol is a plain member: `m` is refused
+    let mut t = tui(&s, 100, 30);
+    block_on(t.start(Some(s.forum.clone())));
+    block_on(t.press("m"));
+    assert!(t.state.mod_menu.is_none(), "no menu for a plain member");
+    assert!(status(&t).contains("cannot moderate"), "{}", status(&t));
+}

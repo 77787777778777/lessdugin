@@ -11,19 +11,18 @@ expression: help
 ▌ Hello everyone, and welcome to the forum.
 ▌
 ▌ ## Rules
-▌
-▌ • Be kind.                                    ┌ Keys ────────────────────────────────────────────────────────┐
-▌ • Stay on topic; see the guide ⟨example.com⟩. │Navigation                                                    │
-▌                                               │  j k  Down Up    next / previous                             │
-▌ lessdugin tui                                 │  g G             first / last                                │
-                                                │  Ctrl-d Ctrl-u   half a page down / up                       │
-  1 comment                                     │  Enter l         open                                        │
-                                                │  h Esc q         back (q on the home screen quits)           │
-  @bob.example.com · 2025-10-09 08:57 UTC · 1 po│Threads                                                       │
-    Thanks for the forum!                       │  Space           collapse / expand replies                   │
-                                                │  p               parent comment                              │
-    It looks great.                             │  r               reply in $EDITOR                            │
-                                                │  c               comment on the post in $EDITOR              │
+▌                                               ┌ Keys ────────────────────────────────────────────────────────┐
+▌ • Be kind.                                    │Navigation                                                    │
+▌ • Stay on topic; see the guide ⟨example.com⟩. │  j k  Down Up    next / previous                             │
+▌                                               │  g G             first / last                                │
+▌ lessdugin tui                                 │  Ctrl-d Ctrl-u   half a page down / up                       │
+                                                │  Enter l         open                                        │
+  1 comment                                     │  h Esc q         back (q on the home screen quits)           │
+                                                │Threads                                                       │
+  @bob.example.com · 2025-10-09 08:57 UTC · 1 po│  Space           collapse / expand replies                   │
+    Thanks for the forum!                       │  p               parent comment                              │
+                                                │  r               reply in $EDITOR                            │
+    It looks great.                             │  c               comment on the post in $EDITOR              │
                                                 │Forums                                                        │
                                                 │  s               sort: magic, top, new, old                  │
                                                 │  P               new post in $EDITOR                         │
@@ -37,6 +36,7 @@ expression: help
                                                 │  x               react palette (Tab: for/against)            │
                                                 │  Backspace       undo the pending write (4 s window)         │
                                                 │Other                                                         │
+                                                │  m               mod menu (queue, log, actions)              │
                                                 │  ?               this help                                   │
                                                 │  Ctrl-c          quit                                        │
                                                 │                                                              │

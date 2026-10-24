@@ -19,9 +19,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crossterm::event::KeyEvent;
 use lessdugin_core::dto::{
-    AccountView, ActionTicket, AgreementValue, CommentDraft, Event, ForumSummary, ForumView,
-    KarmaValue, OpinionIntent, PostDraft, PostList, PostSort, ReactTally, Stance, SyncReport,
-    ThreadRoot, ThreadView, Topic, ViewerCaps, WriteState, WriteTicket,
+    AccessLevel, AccountView, ActionTicket, AgreementValue, Capability, CommentDraft, Event,
+    ForumSummary, ForumView, KarmaValue, ModActionIntent, ModActionValue, ModLog, ModQueue,
+    ModScope, OpinionIntent, PinScope, PostDraft, PostList, PostSort, ReactTally, Stance,
+    SyncReport, ThreadRoot, ThreadView, Tier, Topic, ViewerCaps, WriteState, WriteTicket,
 };
 use lessdugin_core::engine::EngineError;
 
@@ -213,6 +214,33 @@ pub enum Effect {
         /// The screen to reload afterwards.
         screen: ScreenId,
     },
+    /// `mod_action(intent)`: one entry of the mod menu (`synthesis-v1.md` §6.11 "Other").
+    ModAction {
+        /// The assertion or removal.
+        intent: ModActionIntent,
+        /// The forum it is in (reloaded after the write).
+        forum: String,
+        /// The screen the menu was opened from.
+        screen: ScreenId,
+    },
+    /// `mod_queue(forum)`.
+    LoadQueue {
+        /// The screen.
+        screen: ScreenId,
+        /// The forum uri.
+        forum: String,
+        /// Who asked.
+        origin: Origin,
+    },
+    /// `mod_log(forum, None, MOD_LOG_LIMIT)`.
+    LoadLog {
+        /// The screen.
+        screen: ScreenId,
+        /// The forum uri.
+        forum: String,
+        /// Who asked.
+        origin: Origin,
+    },
     /// `writes()`: the outbox as it is at start (writes queued or failed before this
     /// session).
     LoadWrites,
@@ -302,6 +330,33 @@ pub enum Action {
         screen: ScreenId,
         /// The write's new state.
         result: Result<WriteTicket, EngineError>,
+    },
+    /// [`Effect::ModAction`] finished.
+    ModActionDone {
+        /// The forum it was in.
+        forum: String,
+        /// The screen that was reloaded.
+        screen: ScreenId,
+        /// The action ticket (with its notices), or why it was refused.
+        result: Result<ActionTicket, EngineError>,
+    },
+    /// [`Effect::LoadQueue`] finished.
+    QueueLoaded {
+        /// The screen.
+        screen: ScreenId,
+        /// Who asked.
+        origin: Origin,
+        /// The queue (or `blocked` for a viewer who is not an authority).
+        result: Result<ModQueue, EngineError>,
+    },
+    /// [`Effect::LoadLog`] finished.
+    LogLoaded {
+        /// The screen.
+        screen: ScreenId,
+        /// Who asked.
+        origin: Origin,
+        /// The log.
+        result: Result<ModLog, EngineError>,
     },
 }
 
@@ -554,6 +609,49 @@ impl ThreadScreen {
     }
 }
 
+/// Which half of the Mod screen shows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ModTab {
+    /// The mod queue (authorities only).
+    #[default]
+    Queue,
+    /// The mod log.
+    Log,
+}
+
+/// The Mod screen: the forum's mod queue and log (`synthesis-v1.md` §6.11).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ModScreen {
+    /// The forum uri.
+    pub forum: String,
+    /// What shows.
+    pub tab: ModTab,
+    /// The queue (or why it is blocked: it is for the forum's authorities).
+    pub queue: Option<Result<ModQueue, EngineError>>,
+    /// The log.
+    pub log: Option<Result<ModLog, EngineError>>,
+    /// The cursor.
+    pub pos: ListPos,
+}
+
+impl ModScreen {
+    /// The number of rows the current tab has.
+    pub fn row_count(&self) -> usize {
+        match self.tab {
+            ModTab::Queue => self
+                .queue
+                .as_ref()
+                .and_then(|r| r.as_ref().ok())
+                .map_or(0, |q| q.items.len()),
+            ModTab::Log => self
+                .log
+                .as_ref()
+                .and_then(|r| r.as_ref().ok())
+                .map_or(0, |l| l.entries.len()),
+        }
+    }
+}
+
 /// A screen kind.
 #[derive(Clone, Debug)]
 pub enum ScreenKind {
@@ -563,6 +661,54 @@ pub enum ScreenKind {
     Forum(Box<ForumScreen>),
     /// A thread.
     Thread(Box<ThreadScreen>),
+    /// The mod queue and log of a forum.
+    Mod(Box<ModScreen>),
+}
+
+/// One entry of the mod menu (`m`): a fixed label and the intent it issues (the reason is
+/// prompted for after).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ModEntry {
+    /// What the menu shows.
+    pub label: &'static str,
+    /// The action, or `None` for the two screens the menu also opens.
+    pub intent: Option<ModActionIntent>,
+    /// The entry opens the queue screen.
+    pub queue: bool,
+    /// The entry opens the log screen.
+    pub log: bool,
+}
+
+/// The mod menu overlay (`synthesis-v1.md` §6.11 "Other": `m` mod menu). The entries are the
+/// forum-tier actions of `ViewerCaps.moderate`/`rank` (plus `curate` for the curated tier),
+/// built for the selected item and its author.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ModMenu {
+    /// The forum.
+    pub forum: String,
+    /// The entries.
+    pub entries: Vec<ModEntry>,
+    /// The selected entry.
+    pub cursor: usize,
+    /// The first entry shown.
+    pub scroll: usize,
+    /// The screen to reload after a write.
+    pub screen: ScreenId,
+}
+
+/// A one-line text prompt (the mod action's optional reason, `synthesis-v1.md` §6.11).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Prompt {
+    /// What is asked for.
+    pub label: &'static str,
+    /// The text so far.
+    pub text: String,
+    /// The action the text is the reason of.
+    pub intent: ModActionIntent,
+    /// Its forum.
+    pub forum: String,
+    /// The screen to reload after the write.
+    pub screen: ScreenId,
 }
 
 /// A screen on the stack.
@@ -606,6 +752,33 @@ impl Screen {
                 uri: t.uri.clone(),
                 origin,
             },
+            ScreenKind::Mod(m) => Effect::LoadQueue {
+                screen,
+                forum: m.forum.clone(),
+                origin,
+            },
+        }
+    }
+
+    /// The loads of this screen (the Mod screen loads its queue and its log together).
+    fn loads(&self, origin: Origin) -> Vec<Effect> {
+        match &self.kind {
+            ScreenKind::Mod(m) => {
+                let screen = self.id;
+                vec![
+                    Effect::LoadQueue {
+                        screen,
+                        forum: m.forum.clone(),
+                        origin,
+                    },
+                    Effect::LoadLog {
+                        screen,
+                        forum: m.forum.clone(),
+                        origin,
+                    },
+                ]
+            }
+            _ => vec![self.load(origin)],
         }
     }
 
@@ -660,6 +833,7 @@ impl Screen {
                     thread::item_uris(p),
                 ))
             }
+            ScreenKind::Mod(_) => None,
         }
     }
 }
@@ -728,6 +902,10 @@ pub struct State {
     pub help: bool,
     /// The `x` react palette overlay.
     pub react: Option<ReactOverlay>,
+    /// The `m` mod menu overlay.
+    pub mod_menu: Option<ModMenu>,
+    /// A one-line prompt (the mod action's reason).
+    pub prompt: Option<Prompt>,
     /// The help overlay's first shown row (it scrolls with the navigation keys).
     pub help_scroll: usize,
     /// The status line's message.
@@ -784,6 +962,8 @@ impl State {
             next_id: 1,
             help: false,
             react: None,
+            mod_menu: None,
+            prompt: None,
             help_scroll: 0,
             status: None,
             account,
@@ -905,6 +1085,15 @@ impl State {
                 result,
             } => self.opinion_done(screen, label, result, &mut fx),
             Action::Undone { screen, result } => self.undone(screen, result, &mut fx),
+            Action::ModActionDone {
+                forum: _,
+                screen,
+                result,
+            } => self.mod_action_done(screen, result, &mut fx),
+            Action::QueueLoaded { screen, result, .. } => {
+                self.mod_loaded(screen, Some(result), None)
+            }
+            Action::LogLoaded { screen, result, .. } => self.mod_loaded(screen, None, Some(result)),
         }
         self.fit();
         fx
@@ -932,6 +1121,10 @@ impl State {
                     t.pos.reveal(&t.layout, h, false);
                 }
                 t.pos.clamp(&t.layout, h);
+            }
+            ScreenKind::Mod(m) => {
+                let len = m.row_count();
+                m.pos.reveal(len, h);
             }
         }
     }
@@ -1042,8 +1235,9 @@ impl State {
             }
             Origin::User => s.live_burst = 0,
         }
-        s.loading += 1;
-        fx.push(s.load(origin));
+        let effects = s.loads(origin);
+        s.loading += u32::try_from(effects.len()).unwrap_or(1);
+        fx.extend(effects);
     }
 
     fn apply_pending(&mut self) {
@@ -1079,6 +1273,7 @@ impl State {
             ScreenKind::Thread(t) => {
                 t.apply_pending(w, h);
             }
+            ScreenKind::Mod(_) => {}
         }
     }
 
@@ -1094,6 +1289,11 @@ impl State {
 
     fn key(&mut self, k: &KeyEvent, fx: &mut Vec<Effect>) {
         if k.kind == crossterm::event::KeyEventKind::Release {
+            return;
+        }
+        // a prompt captures the raw keys (it edits a text line)
+        if self.prompt.is_some() {
+            self.prompt_key(k, fx);
             return;
         }
         let cmd = keys::command(k);
@@ -1128,6 +1328,11 @@ impl State {
             self.react_key(cmd, fx);
             return;
         }
+        // the mod menu captures the keys too
+        if self.mod_menu.is_some() {
+            self.mod_menu_key(cmd, fx);
+            return;
+        }
         match cmd {
             Cmd::Help => {
                 self.help = true;
@@ -1151,10 +1356,23 @@ impl State {
             Cmd::Opinion(op) => self.opinion(op, fx),
             Cmd::Undo => self.undo_last(fx),
             Cmd::ReactPalette => self.open_react(),
-            Cmd::Stance => self.say(
-                Tone::Info,
-                lit("Open the react palette (x) to set a stance."),
-            ),
+            Cmd::ModMenu => self.open_mod_menu(),
+            Cmd::Stance => {
+                // on the Mod screen, `Tab` switches the queue/log tab; elsewhere it is the
+                // react palette's stance key, which only makes sense inside the palette
+                if let Some(ScreenKind::Mod(m)) = self.stack.last().map(|s| &s.kind) {
+                    let tab = match m.tab {
+                        ModTab::Queue => ModTab::Log,
+                        ModTab::Log => ModTab::Queue,
+                    };
+                    self.switch_mod_tab(tab);
+                } else {
+                    self.say(
+                        Tone::Info,
+                        lit("Open the react palette (x) to set a stance."),
+                    );
+                }
+            }
             nav => self.navigate(nav),
         }
     }
@@ -1202,6 +1420,10 @@ impl State {
                     _ => {}
                 }
             }
+            ScreenKind::Mod(m) => {
+                let len = m.row_count();
+                m.pos.apply(cmd, len, h);
+            }
         }
     }
 
@@ -1223,6 +1445,8 @@ impl State {
                 }
             }
             ScreenKind::Thread(_) => self.navigate(Cmd::Collapse),
+            // the Mod screen's rows are not openable
+            ScreenKind::Mod(_) => {}
         }
     }
 
@@ -1274,6 +1498,7 @@ impl State {
                 uri: t.uri.clone(),
                 forum: t.post().map(|p| p.post.forum.clone()),
             },
+            ScreenKind::Mod(m) => SyncTarget::Forum(m.forum.clone()),
         };
         let forums = match &target {
             SyncTarget::Forums(f) => f.clone(),
@@ -1387,6 +1612,7 @@ impl State {
                     .unwrap_or_else(|| uri.clone());
                 (uri, name)
             }),
+            ScreenKind::Mod(m) => Some((m.forum.clone(), m.forum.clone())),
         };
         let Some((uri, name)) = forum else {
             self.say(Tone::Info, lit("Open a forum to post in it."));
@@ -1540,7 +1766,7 @@ impl State {
                 };
                 Some((uri, forum))
             }
-            ScreenKind::Home(_) => None,
+            ScreenKind::Home(_) | ScreenKind::Mod(_) => None,
         }
     }
 
@@ -1859,6 +2085,461 @@ impl State {
         }
         self.react = None;
         self.say(Tone::Info, lit("Recording the react..."));
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // moderation (M3, synthesis-v1.md §6.11, social.md §4.4)
+
+    /// The item and author the mod menu acts on: `(item uri, forum, author did)`. The author
+    /// is the selected comment's author, or the thread's post author, or (on a list) the
+    /// selected post's author.
+    fn mod_subject(&self) -> Option<(String, String, String)> {
+        match &self.stack.last()?.kind {
+            ScreenKind::Forum(s) => s
+                .selected()
+                .map(|p| (p.uri.clone(), p.forum.clone(), p.author.did.clone())),
+            ScreenKind::Thread(t) => {
+                let d = t.data.as_ref()?;
+                let forum = match &d.view.post {
+                    ThreadRoot::Post(p) => p.post.forum.clone(),
+                    ThreadRoot::Missing { .. } => return None,
+                };
+                let uri = t.layout.items.get(t.pos.selected)?.uri.clone();
+                let author = match d.view.comments.iter().find(|c| c.uri == uri) {
+                    Some(c) => c.author.did.clone(),
+                    None => match &d.view.post {
+                        ThreadRoot::Post(p) => p.post.author.did.clone(),
+                        ThreadRoot::Missing { .. } => return None,
+                    },
+                };
+                Some((uri, forum, author))
+            }
+            _ => None,
+        }
+    }
+
+    /// `m`: opens the mod menu for the selected item (and its author) when the viewer may
+    /// moderate the forum (`ViewerCaps.moderate`, §4.4), else says why not.
+    fn open_mod_menu(&mut self) {
+        let Some((item, forum, author)) = self.mod_subject() else {
+            self.say(Tone::Info, lit("Nothing selected to moderate."));
+            return;
+        };
+        let caps = self.caps_of(&forum).cloned();
+        let Some(c) = caps.as_ref() else {
+            // no forum header on the stack: the engine's own checks decide
+            self.mod_menu = Some(self.mod_menu_for(&forum, &item, &author, None));
+            return;
+        };
+        if !c.moderate && !c.author_mod_personal && !c.author_mod_frontpage {
+            self.say(
+                Tone::Warn,
+                lit("You cannot moderate this forum (not an authority)."),
+            );
+            return;
+        }
+        self.mod_menu = Some(self.mod_menu_for(&forum, &item, &author, Some(c)));
+    }
+
+    /// The menu's entries for the selected item and author, from the viewer's caps
+    /// (`ViewerCaps.moderate`/`rank`/`curate`; `social.md` §4.4).
+    fn mod_menu_for(
+        &self,
+        forum: &str,
+        item: &str,
+        author: &str,
+        caps: Option<&ViewerCaps>,
+    ) -> ModMenu {
+        let moderate = caps.is_none_or(|c| c.moderate);
+        let curate = caps.is_none_or(|c| c.curate);
+        let me = self.account.as_ref().map(|a| a.did.as_str()).unwrap_or("");
+        let own_thread = me == author;
+        let assert = |action: ModActionValue| ModActionIntent::Assert {
+            forum: forum.to_owned(),
+            scope: ModScope::Forum,
+            subject: item.to_owned(),
+            action,
+            reason: None,
+            until_ms: None,
+        };
+        let remove = |key: &'static str| ModActionIntent::Remove {
+            forum: forum.to_owned(),
+            scope: ModScope::Forum,
+            subject: item.to_owned(),
+            action_key: key.to_owned(),
+        };
+        let user_assert = |action: ModActionValue| ModActionIntent::Assert {
+            forum: forum.to_owned(),
+            scope: ModScope::Forum,
+            subject: author.to_owned(),
+            action,
+            reason: None,
+            until_ms: None,
+        };
+        let user_remove = |key: &'static str| ModActionIntent::Remove {
+            forum: forum.to_owned(),
+            scope: ModScope::Forum,
+            subject: author.to_owned(),
+            action_key: key.to_owned(),
+        };
+        let mut e = Vec::new();
+        let entry = |label: &'static str, intent| ModEntry {
+            label,
+            intent: Some(intent),
+            queue: false,
+            log: false,
+        };
+        if moderate {
+            e.push(entry(
+                "hide this item",
+                assert(ModActionValue::Hide {
+                    hidden: true,
+                    spam: false,
+                    show_reason: true,
+                }),
+            ));
+            e.push(entry(
+                "hide as spam",
+                assert(ModActionValue::Hide {
+                    hidden: true,
+                    spam: true,
+                    show_reason: true,
+                }),
+            ));
+            e.push(entry("unhide (keep)", remove("hide")));
+            e.push(entry(
+                "ban the author",
+                user_assert(ModActionValue::Access {
+                    level: AccessLevel::Banned,
+                }),
+            ));
+            e.push(entry("unban the author", user_remove("access")));
+            e.push(entry(
+                "pin in the forum",
+                assert(ModActionValue::Pin {
+                    scope: PinScope::Forum,
+                    pinned: true,
+                }),
+            ));
+            e.push(entry("unpin", remove("pin:forum")));
+            e.push(entry("lock", assert(ModActionValue::Lock { locked: true })));
+            e.push(entry("unlock", remove("lock")));
+            e.push(entry(
+                "tier: personal",
+                assert(ModActionValue::Tier {
+                    tier: Tier::Personal,
+                    notice: None,
+                }),
+            ));
+            e.push(entry(
+                "tier: frontpage",
+                assert(ModActionValue::Tier {
+                    tier: Tier::Frontpage,
+                    notice: None,
+                }),
+            ));
+            if curate {
+                e.push(entry(
+                    "tier: curated",
+                    assert(ModActionValue::Tier {
+                        tier: Tier::Curated,
+                        notice: None,
+                    }),
+                ));
+            }
+            e.push(entry(
+                "restrict the author (posting)",
+                user_assert(ModActionValue::Restrict {
+                    capabilities: vec![Capability::Post, Capability::Comment],
+                    nullify_votes: false,
+                }),
+            ));
+            e.push(entry(
+                "nullify the author's votes",
+                user_assert(ModActionValue::Restrict {
+                    capabilities: vec![],
+                    nullify_votes: true,
+                }),
+            ));
+            e.push(entry("unrestrict", user_remove("restrict")));
+        }
+        if !moderate && own_thread {
+            // author scope on one's own thread (social.md §4.9): hide a comment, ban a user
+            let hide = ModActionIntent::Assert {
+                forum: forum.to_owned(),
+                scope: ModScope::Author,
+                subject: item.to_owned(),
+                action: ModActionValue::Hide {
+                    hidden: true,
+                    spam: false,
+                    show_reason: true,
+                },
+                reason: None,
+                until_ms: None,
+            };
+            e.push(entry("hide this comment (your thread)", hide));
+            let ban = ModActionIntent::Assert {
+                forum: forum.to_owned(),
+                scope: ModScope::Author,
+                subject: author.to_owned(),
+                action: ModActionValue::Access {
+                    level: AccessLevel::Banned,
+                },
+                reason: None,
+                until_ms: None,
+            };
+            e.push(entry("ban the author (your threads)", ban));
+        }
+        e.push(ModEntry {
+            label: "mod queue",
+            intent: None,
+            queue: true,
+            log: false,
+        });
+        e.push(ModEntry {
+            label: "mod log",
+            intent: None,
+            queue: false,
+            log: true,
+        });
+        ModMenu {
+            forum: forum.to_owned(),
+            entries: e,
+            cursor: 0,
+            scroll: 0,
+            screen: self.stack.last().map_or(0, |s| s.id),
+        }
+    }
+
+    /// A key while the mod menu is open.
+    fn mod_menu_key(&mut self, cmd: Cmd, fx: &mut Vec<Effect>) {
+        let n = self.mod_menu.as_ref().map_or(0, |m| m.entries.len());
+        match cmd {
+            Cmd::Down => self.mod_move(1, n),
+            Cmd::Up => self.mod_move(-1, n),
+            Cmd::Top => {
+                if let Some(m) = &mut self.mod_menu {
+                    m.cursor = 0;
+                    m.scroll = 0;
+                }
+            }
+            Cmd::Bottom => {
+                if let Some(m) = &mut self.mod_menu {
+                    m.cursor = n.saturating_sub(1);
+                }
+            }
+            Cmd::Open => self.mod_choose(fx),
+            // anything else closes the menu
+            _ => self.mod_menu = None,
+        }
+    }
+
+    /// Moves the menu's cursor by `d`, revealing it.
+    fn mod_move(&mut self, d: i64, n: usize) {
+        let rows = self.mod_rows().max(1);
+        let Some(m) = &mut self.mod_menu else {
+            return;
+        };
+        let cur = m.cursor as i64 + d;
+        m.cursor = cur.clamp(0, n.saturating_sub(1) as i64) as usize;
+        if m.cursor < m.scroll {
+            m.scroll = m.cursor;
+        } else if m.cursor >= m.scroll + rows {
+            m.scroll = m.cursor + 1 - rows;
+        }
+    }
+
+    /// The menu rows that fit on the screen.
+    fn mod_rows(&self) -> usize {
+        let h = usize::from(self.height.saturating_sub(6));
+        let n = self.mod_menu.as_ref().map_or(0, |m| m.entries.len());
+        h.clamp(1, n.max(1))
+    }
+
+    /// `Enter`: runs the selected entry (an action goes through the reason prompt; the queue
+    /// and log entries open their screens).
+    fn mod_choose(&mut self, fx: &mut Vec<Effect>) {
+        let Some(m) = self.mod_menu.clone() else {
+            return;
+        };
+        let Some(e) = m.entries.get(m.cursor) else {
+            return;
+        };
+        if e.queue || e.log {
+            self.mod_menu = None;
+            self.open_mod_screen(e.queue, fx);
+            return;
+        }
+        let Some(intent) = e.intent.clone() else {
+            return;
+        };
+        self.mod_menu = None;
+        // ask for the optional reason before the write
+        self.prompt = Some(Prompt {
+            label: e.label,
+            text: String::new(),
+            intent,
+            forum: m.forum.clone(),
+            screen: m.screen,
+        });
+    }
+
+    /// Switches the Mod screen's tab (queue/log), resetting its cursor.
+    fn switch_mod_tab(&mut self, tab: ModTab) {
+        if let Some(ScreenKind::Mod(m)) = self.stack.last_mut().map(|s| &mut s.kind) {
+            m.tab = tab;
+            m.pos = ListPos::default();
+        }
+    }
+
+    /// Opens the Mod screen (queue and log) for the forum under the top screen.
+    fn open_mod_screen(&mut self, queue: bool, fx: &mut Vec<Effect>) {
+        let Some(forum) = self.top_forum() else {
+            self.say(Tone::Info, lit("Open a forum first."));
+            return;
+        };
+        self.push(
+            ScreenKind::Mod(Box::new(ModScreen {
+                forum,
+                tab: if queue { ModTab::Queue } else { ModTab::Log },
+                ..ModScreen::default()
+            })),
+            fx,
+        );
+    }
+
+    /// The forum uri of the screen on top (or under it, for a thread).
+    fn top_forum(&self) -> Option<String> {
+        for s in self.stack.iter().rev() {
+            match &s.kind {
+                ScreenKind::Forum(f) => return Some(f.uri.clone()),
+                ScreenKind::Mod(m) => return Some(m.forum.clone()),
+                ScreenKind::Thread(t) => {
+                    if let Some(p) = t.post() {
+                        return Some(p.post.forum.clone());
+                    }
+                }
+                ScreenKind::Home(_) => {}
+            }
+        }
+        None
+    }
+
+    /// A key while a prompt is open: printable characters edit the text, Enter runs the
+    /// action, Esc closes it.
+    fn prompt_key(&mut self, k: &KeyEvent, fx: &mut Vec<Effect>) {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        if ctrl && matches!(k.code, KeyCode::Char('c')) {
+            self.prompt = None;
+            self.quit = true;
+            fx.push(Effect::Quit);
+            return;
+        }
+        match k.code {
+            KeyCode::Esc => self.prompt = None,
+            KeyCode::Enter => {
+                let Some(p) = self.prompt.clone() else {
+                    return;
+                };
+                self.prompt = None;
+                let intent = match &p.intent {
+                    ModActionIntent::Assert {
+                        forum,
+                        scope,
+                        subject,
+                        action,
+                        until_ms,
+                        ..
+                    } => ModActionIntent::Assert {
+                        forum: forum.clone(),
+                        scope: *scope,
+                        subject: subject.clone(),
+                        action: action.clone(),
+                        reason: (!p.text.trim().is_empty()).then(|| p.text.trim().to_owned()),
+                        until_ms: *until_ms,
+                    },
+                    r => r.clone(),
+                };
+                fx.push(Effect::ModAction {
+                    intent,
+                    forum: p.forum,
+                    screen: p.screen,
+                });
+            }
+            KeyCode::Backspace => {
+                if let Some(p) = &mut self.prompt {
+                    p.text.pop();
+                }
+            }
+            KeyCode::Char(c) if !ctrl => {
+                if let Some(p) = &mut self.prompt {
+                    // a reason is prose: keep printable text, drop control characters
+                    if !c.is_control() {
+                        p.text.push(c);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// [`Action::ModActionDone`]: the notices, or the refusal.
+    fn mod_action_done(
+        &mut self,
+        screen: ScreenId,
+        result: Result<ActionTicket, EngineError>,
+        fx: &mut Vec<Effect>,
+    ) {
+        match result {
+            Ok(t) => {
+                if !matches!(
+                    t.state,
+                    WriteState::Done { .. } | WriteState::Failed { .. } | WriteState::Undone
+                ) {
+                    self.writes.insert(t.id.clone(), t.state);
+                }
+                let mut msg = lit("Mod action recorded.");
+                if let Some(n) = t.notices.first() {
+                    msg = cat([lit("Mod action recorded: "), tt(&n.message), lit(".")]);
+                }
+                self.say(Tone::Good, msg);
+                self.follow_own = Some(screen);
+                if let Some(i) = self.index_of(screen) {
+                    self.reload(i, Origin::User, fx);
+                }
+            }
+            Err(e) => self.say(
+                Tone::Error,
+                cat([lit("Mod action refused: "), tt(&e.message)]),
+            ),
+        }
+    }
+
+    /// [`Action::QueueLoaded`] / [`Action::LogLoaded`].
+    fn mod_loaded(
+        &mut self,
+        screen: ScreenId,
+        queue: Option<Result<ModQueue, EngineError>>,
+        log: Option<Result<ModLog, EngineError>>,
+    ) {
+        let Some(i) = self.index_of(screen) else {
+            return;
+        };
+        let s = &mut self.stack[i];
+        s.loading = s.loading.saturating_sub(1);
+        let ScreenKind::Mod(m) = &mut s.kind else {
+            return;
+        };
+        if let Some(q) = queue {
+            // `blocked` for a viewer who is not an authority is not an error: the screen says so
+            m.queue = Some(q);
+        }
+        if let Some(l) = log {
+            m.log = Some(l);
+        }
+        let len = m.row_count();
+        m.pos.reveal(len, usize::from(self.height));
     }
 
     /// [`Action::OpinionDone`]: notices and the undo hint, or the refusal.
