@@ -18,6 +18,9 @@ use url::Url;
 mod content;
 pub use content::*;
 
+mod social;
+pub use social::*;
+
 /// A serverless markdown and media forum on atproto.
 #[derive(Debug, Parser)]
 #[command(
@@ -129,6 +132,22 @@ pub enum Command {
     Members(MembersArgs),
     /// Grant membership to applicants (approval-mode forums; owner and admins).
     Approve(ApproveArgs),
+    /// Vote on a post or comment (public record).
+    Vote(VoteArgs),
+    /// Cast an agreement vote (public record).
+    Agree(AgreeArgs),
+    /// React to a post or comment, optionally against or on a quote (public record).
+    React(ReactArgs),
+    /// List the react palette.
+    Reacts,
+    /// Your notifications (computed locally; --mark-read marks them read).
+    Notifications(NotificationsArgs),
+    /// Recent Discussion: the posts with the newest comments.
+    Activity(ActivityArgs),
+    /// Moderators: add, rm (a removal adopts their assertions first).
+    Mods(ModsArgs),
+    /// Moderate: hide, ban, restrict, tier, pin, lock, queue, log, adopt, …
+    Mod(ModArgs),
     /// Drafts kept in the data directory: ls, edit, rm, publish.
     Draft(DraftArgs),
     /// Queued writes: ls, flush, retry, undo.

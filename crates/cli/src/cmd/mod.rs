@@ -10,4 +10,5 @@ pub mod outbox;
 pub mod read;
 pub mod refs;
 pub mod session;
+pub mod social;
 pub mod write;
