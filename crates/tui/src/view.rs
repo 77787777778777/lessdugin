@@ -487,7 +487,9 @@ fn status_lines(state: &State) -> Text<'static> {
         Some(ScreenKind::Thread(_)) => {
             " r reply \u{b7} c comment \u{b7} Space fold \u{b7} p parent \u{b7} R sync \u{b7} ? help \u{b7} h back"
         }
-        Some(ScreenKind::Mod(_)) => " Tab queue/log \u{b7} R sync \u{b7} ? help \u{b7} h back",
+        Some(ScreenKind::Mod(_)) => {
+            " Enter approve \u{b7} Tab queue/log \u{b7} R sync \u{b7} ? help \u{b7} h back"
+        }
         None => "",
     };
     Text::from(line([(tt(hints), dim())]))

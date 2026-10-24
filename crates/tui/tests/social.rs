@@ -571,3 +571,96 @@ fn the_mod_queue_is_blocked_for_a_plain_member() {
     assert!(t.state.mod_menu.is_none(), "no menu for a plain member");
     assert!(status(&t).contains("cannot moderate"), "{}", status(&t));
 }
+
+#[test]
+fn an_applicant_shows_in_the_queue_and_enter_approves() {
+    let s = scenario();
+    // dave applies to the approval-mode forum (a membership without a grant)
+    let dave_acct = s.w.net.add_account("dave.example.com");
+    let h = MemHost::new();
+    h.set_seed(11);
+    s.w.net.install_as(&h, "dave");
+    let dave = Engine::new(h, EngineConfig::default());
+    block_on(dave.add_account(AccountInfo::app_password(
+        dave_acct.did().as_str(),
+        dave_acct.pds_base(),
+    )))
+    .unwrap();
+    block_on(dave.forum_follow(&s.forum, None)).unwrap();
+    block_on(dave.join(&s.forum, Some("let me in"))).unwrap();
+    block_on(dave.outbox_flush()).unwrap();
+    block_on(dave.sync_forum(&s.forum, &SyncOpts::default())).unwrap();
+    s.w.tick(MINUTE);
+    // dave comments; bob (a seed) replies, which pulls dave's repo into the closure
+    // (sync.md §4.3) so alice's next sync discovers dave's membership (the application)
+    let td = block_on(dave.comment(&lessdugin_core::dto::CommentDraft::new(
+        &s.welcome,
+        None,
+        "Let me in!",
+    )))
+    .unwrap();
+    s.w.tick(MINUTE);
+    block_on(dave.outbox_flush()).unwrap();
+    let dave_c = match block_on(dave.write_status(&td.id)).unwrap().unwrap().state {
+        lessdugin_core::dto::WriteState::Done { uri, .. } => uri,
+        other => panic!("{other:?}"),
+    };
+    s.w.tick(MINUTE);
+    // alice point-syncs dave's comment (sync.md §4.2: the unknown author is confirmed),
+    // which caches dave's membership: his application shows in her queue
+    block_on(s.w.alice.engine.sync_thread(&dave_c, &SyncOpts::default())).unwrap();
+    s.w.tick(MINUTE);
+    s.w.alice.sync(&s.forum);
+
+    // alice (the owner) opens the Mod screen: the queue lists dave as an applicant
+    let mut t = block_on(lessdugin_tui::Headless::new(
+        s.w.alice.engine.clone(),
+        lessdugin_tui::HeadlessOpts {
+            width: 100,
+            height: 24,
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    block_on(t.start(Some(s.forum.clone())));
+    block_on(t.press("m"));
+    let n = t
+        .state
+        .mod_menu
+        .as_ref()
+        .unwrap()
+        .entries
+        .iter()
+        .position(|e| e.queue)
+        .expect("a queue entry");
+    for _ in 0..n {
+        block_on(t.press("j"));
+    }
+    block_on(t.press("Enter"));
+    let screen = t.render();
+    assert!(screen.contains("applicant"), "{screen}");
+    assert!(screen.contains("dave"), "{screen}");
+    insta::assert_snapshot!("mod_queue_applicant_80x24", t.render());
+
+    // Enter approves (engine.grant); the queue empties once the write lands
+    block_on(t.press("Enter"));
+    assert!(status(&t).contains("approved"), "{}", status(&t));
+    block_on(t.engine().outbox_flush()).unwrap();
+    s.w.tick(MINUTE);
+    block_on(t.press("R"));
+    let screen = t.render();
+    assert!(screen.contains("queue is empty"), "{screen}");
+    // dave is granted now
+    let members = block_on(
+        s.w.alice
+            .engine
+            .members(&s.forum, &lessdugin_core::dto::MembersQuery::default()),
+    )
+    .unwrap();
+    assert!(
+        members
+            .iter()
+            .any(|m| m.actor.did == dave_acct.did().to_string() && m.granted),
+        "{members:?}"
+    );
+}

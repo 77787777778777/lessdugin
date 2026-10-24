@@ -118,6 +118,14 @@ pub async fn run<H: Host>(engine: &Engine<H>, effect: Effect, opts: ExecOpts) ->
             screen,
             result: engine.undo(&id).await,
         },
+        Effect::Grant {
+            forum,
+            actors,
+            screen,
+        } => Action::Granted {
+            screen,
+            result: engine.grant(&forum, &actors).await,
+        },
         Effect::ModAction {
             intent,
             forum,

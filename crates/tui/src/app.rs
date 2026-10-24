@@ -29,7 +29,7 @@ use lessdugin_core::engine::EngineError;
 use crate::body::Body;
 use crate::editor;
 use crate::keys::{self, Cmd, Op};
-use crate::text::{TermText, actor, cat, lit, post_title, tt};
+use crate::text::{TermText, actor, cat, count, lit, post_title, tt};
 use crate::thread::{self, Layout, Pos};
 
 /// Identifies a screen instance (results for a screen that was closed are dropped).
@@ -214,6 +214,15 @@ pub enum Effect {
         /// The screen to reload afterwards.
         screen: ScreenId,
     },
+    /// `grant(forum, actors)`: approves applicants from the mod queue (`social.md` §4.7).
+    Grant {
+        /// The forum.
+        forum: String,
+        /// The applicants' DIDs.
+        actors: Vec<String>,
+        /// The screen to reload afterwards.
+        screen: ScreenId,
+    },
     /// `mod_action(intent)`: one entry of the mod menu (`synthesis-v1.md` §6.11 "Other").
     ModAction {
         /// The assertion or removal.
@@ -330,6 +339,13 @@ pub enum Action {
         screen: ScreenId,
         /// The write's new state.
         result: Result<WriteTicket, EngineError>,
+    },
+    /// [`Effect::Grant`] finished.
+    Granted {
+        /// The screen to reload.
+        screen: ScreenId,
+        /// The write tickets, or why the grant was refused.
+        result: Result<Vec<WriteTicket>, EngineError>,
     },
     /// [`Effect::ModAction`] finished.
     ModActionDone {
@@ -1085,6 +1101,7 @@ impl State {
                 result,
             } => self.opinion_done(screen, label, result, &mut fx),
             Action::Undone { screen, result } => self.undone(screen, result, &mut fx),
+            Action::Granted { screen, result } => self.granted(screen, result, &mut fx),
             Action::ModActionDone {
                 forum: _,
                 screen,
@@ -1445,8 +1462,8 @@ impl State {
                 }
             }
             ScreenKind::Thread(_) => self.navigate(Cmd::Collapse),
-            // the Mod screen's rows are not openable
-            ScreenKind::Mod(_) => {}
+            // on the Mod screen, Enter approves the selected queue row (an applicant)
+            ScreenKind::Mod(_) => self.approve_selected(fx),
         }
     }
 
@@ -2382,6 +2399,76 @@ impl State {
             forum: m.forum.clone(),
             screen: m.screen,
         });
+    }
+
+    /// `Enter` on the Mod screen: approves the selected queue row when it is an applicant
+    /// (`engine.grant`, `social.md` §4.7). Other queue rows and log rows have no action.
+    fn approve_selected(&mut self, fx: &mut Vec<Effect>) {
+        let Some(m) = self.stack.last().and_then(|s| match &s.kind {
+            ScreenKind::Mod(m) => Some(m.clone()),
+            _ => None,
+        }) else {
+            return;
+        };
+        if m.tab != ModTab::Queue {
+            return;
+        }
+        let Some(q) = m.queue.as_ref().and_then(|r| r.as_ref().ok()) else {
+            return;
+        };
+        let Some(item) = q.items.get(m.pos.cursor) else {
+            return;
+        };
+        if item.item_kind != "applicant" {
+            self.say(
+                Tone::Info,
+                lit("Only an applicant can be approved from the queue."),
+            );
+            return;
+        }
+        let Some(screen) = self.stack.last().map(|s| s.id) else {
+            return;
+        };
+        self.say(Tone::Info, lit("Approving..."));
+        fx.push(Effect::Grant {
+            forum: m.forum.clone(),
+            actors: vec![item.subject.clone()],
+            screen,
+        });
+    }
+
+    /// [`Action::Granted`]: reloads the queue after an approval.
+    fn granted(
+        &mut self,
+        screen: ScreenId,
+        result: Result<Vec<WriteTicket>, EngineError>,
+        fx: &mut Vec<Effect>,
+    ) {
+        match result {
+            Ok(tickets) => {
+                let n = u32::try_from(tickets.len()).unwrap_or(u32::MAX);
+                for t in tickets {
+                    if !matches!(
+                        t.state,
+                        WriteState::Done { .. } | WriteState::Failed { .. } | WriteState::Undone
+                    ) {
+                        self.writes.insert(t.id.clone(), t.state);
+                    }
+                }
+                self.say(
+                    Tone::Good,
+                    cat([count(n, "applicant", "applicants"), lit(" approved.")]),
+                );
+                self.follow_own = Some(screen);
+                if let Some(i) = self.index_of(screen) {
+                    self.reload(i, Origin::User, fx);
+                }
+            }
+            Err(e) => self.say(
+                Tone::Error,
+                cat([lit("Approval refused: "), tt(&e.message)]),
+            ),
+        }
     }
 
     /// Switches the Mod screen's tab (queue/log), resetting its cursor.
