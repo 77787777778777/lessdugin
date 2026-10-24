@@ -11,7 +11,8 @@ use std::collections::BTreeMap;
 
 use lessdugin_atp::syntax::AtUri;
 use lessdugin_core::dto::{
-    ActorView, ListPostsQuery, PostFilter, PostSort, SyncOpts, ThreadOpts, ThreadRoot,
+    ActorView, ListPostsQuery, NotificationsQuery, PostFilter, PostSort, SyncOpts, ThreadOpts,
+    ThreadRoot,
 };
 use lessdugin_core::engine::{Engine, EngineError};
 use lessdugin_core::host::Host;
@@ -34,6 +35,9 @@ pub const PARITY_LIST_LIMIT: u32 = 30;
 /// The most mod-log entries the Mod screen lists (`mod_log` pages; the first page is enough
 /// for the MVP).
 pub const MOD_LOG_LIMIT: u32 = 100;
+
+/// The most notifications the Notifications screen lists.
+pub const NOTIF_LIMIT: u32 = 100;
 
 /// The time budget of the syncs a screen runs when it opens (as the CLI's implicit syncs).
 pub const IMPLICIT_SYNC_MS: i64 = 20_000;
@@ -153,6 +157,18 @@ pub async fn run<H: Host>(engine: &Engine<H>, effect: Effect, opts: ExecOpts) ->
             origin,
             result: engine.mod_log(&forum, None, MOD_LOG_LIMIT).await,
         },
+        Effect::LoadNotifications { screen, all, origin } => Action::NotificationsLoaded {
+            screen,
+            origin,
+            result: engine
+                .notifications(&NotificationsQuery { all, limit: NOTIF_LIMIT })
+                .await,
+        },
+        Effect::MarkRead { ids, screen } => Action::MarkedRead {
+            screen,
+            result: engine.mark_notifications_read(&ids).await,
+        },
+        Effect::LoadUnread => Action::UnreadLoaded(engine.unread_counts().await),
         Effect::LoadWrites => Action::WritesLoaded(engine.writes().await),
         Effect::Editor(_) | Effect::Quit => return None,
     })

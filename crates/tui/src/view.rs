@@ -14,13 +14,13 @@ use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use crate::app::{
-    ForumScreen, HomeScreen, LIST_ROWS, ModMenu, ModScreen, ModTab, Prompt, ReactOverlay, Screen,
-    ScreenKind, State, SyncStatus, ThreadScreen, Tone, status_text,
+    ForumScreen, HomeScreen, LIST_ROWS, ModMenu, ModScreen, ModTab, NotificationsScreen, Prompt,
+    ReactOverlay, Screen, ScreenKind, State, SyncStatus, ThreadScreen, Tone, status_text,
 };
 use crate::keys::HELP;
 use crate::text::{
     TermText, actor, banner_lines, cat, clock, count, joined, line, lit, mod_log_entry,
-    mod_queue_item, name, pad, post_meta, post_title, spans, tt, wrapped,
+    mod_queue_item, name, notification_line, pad, post_meta, post_title, spans, tt, wrapped,
 };
 
 fn dim() -> Style {
@@ -248,6 +248,7 @@ fn header_line(state: &State) -> Line<'static> {
                 .post()
                 .map_or_else(|| lit("thread"), |p| post_title(&p.post)),
             ScreenKind::Mod(_) => lit("moderation"),
+            ScreenKind::Notifications(_) => lit("notifications"),
         };
         crumbs.push(label);
     }
@@ -259,6 +260,16 @@ fn header_line(state: &State) -> Line<'static> {
         left.append(c);
     }
     let mut right = Vec::new();
+    // the notification badge (§6.11: Home shows it; the header carries it everywhere)
+    if let Some(u) = &state.unread
+        && u.notifications > 0
+    {
+        right.push(cat([
+            lit("[N "),
+            tt(&u.notifications.to_string()),
+            lit("]"),
+        ]));
+    }
     if state.offline {
         right.push(lit("offline"));
     }
@@ -427,6 +438,16 @@ fn info_line(state: &State, top: &Screen) -> Line<'static> {
                 }
             }
         }
+        ScreenKind::Notifications(n) => {
+            info.push(lit(if n.all {
+                "All notifications"
+            } else {
+                "Unread notifications"
+            }));
+            if let Some(d) = &n.data {
+                info.push(cat([count(d.unread, "unread", "unread")]));
+            }
+        }
         ScreenKind::Mod(m) => {
             let tabs = [(ModTab::Queue, "queue"), (ModTab::Log, "log")];
             parts.push((lit(" "), dim()));
@@ -490,6 +511,9 @@ fn status_lines(state: &State) -> Text<'static> {
         Some(ScreenKind::Mod(_)) => {
             " Enter approve \u{b7} Tab queue/log \u{b7} R sync \u{b7} ? help \u{b7} h back"
         }
+        Some(ScreenKind::Notifications(_)) => {
+            " Enter open \u{b7} M mark read \u{b7} a all/unread \u{b7} ? help \u{b7} h back"
+        }
         None => "",
     };
     Text::from(line([(tt(hints), dim())]))
@@ -506,8 +530,30 @@ fn content_lines(state: &State, top: &Screen, h: usize) -> Vec<Line<'static>> {
         ScreenKind::Forum(s) => forum(top, s, h, &mut lines),
         ScreenKind::Thread(t) => thread(top, t, h, &mut lines),
         ScreenKind::Mod(m) => mod_screen(top, m, h, &mut lines),
+        ScreenKind::Notifications(n) => notifications(top, n, h, &mut lines),
     }
     lines
+}
+
+fn notifications(top: &Screen, n: &NotificationsScreen, h: usize, lines: &mut Vec<Line<'static>>) {
+    let Some(d) = &n.data else {
+        loading_or_error(top, lines);
+        return;
+    };
+    if d.items.is_empty() {
+        lines.push(Line::default());
+        message(lines, lit("Nothing new."), bold());
+        return;
+    }
+    for (i, item) in d.items.iter().enumerate().skip(n.pos.top).take(h) {
+        let on = i == n.pos.cursor;
+        let style = if on {
+            bold().add_modifier(Modifier::REVERSED)
+        } else {
+            Style::default()
+        };
+        lines.push(line([gutter(on), (notification_line(item), style)]));
+    }
 }
 
 fn loading_or_error(top: &Screen, lines: &mut Vec<Line<'static>>) {

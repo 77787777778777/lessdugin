@@ -410,6 +410,38 @@ pub fn react_lines(
         .collect()
 }
 
+/// One notification row (`social.md` §16): the reason kind, who, a preview, the time, and an
+/// unread mark.
+pub fn notification_line(n: &lessdugin_core::dto::NotificationView) -> TermText {
+    use lessdugin_core::dto::NotificationReason;
+    let reason = match n.reason {
+        NotificationReason::Reply => "reply",
+        NotificationReason::Mention => "mention",
+        NotificationReason::Quote => "quote",
+        NotificationReason::Pingback => "pingback",
+        NotificationReason::NewComment => "new comment",
+        NotificationReason::NewPost => "new post",
+        NotificationReason::Reacted => "reacted",
+        NotificationReason::ModAction => "mod action",
+        NotificationReason::KarmaChange => "karma",
+    };
+    let mut parts = vec![
+        lit(if n.read { "  " } else { "* " }),
+        tt(reason),
+        lit("  "),
+    ];
+    if let Some(a) = &n.actor {
+        parts.push(actor(a));
+        parts.push(lit("  "));
+    }
+    if let Some(p) = &n.preview {
+        parts.push(tt(p));
+        parts.push(lit("  "));
+    }
+    parts.push(tt(&time(n.at_ms)));
+    cat(parts)
+}
+
 /// One mod-queue row (`social.md` §4.12): its kind, subject, reason and actor.
 pub fn mod_queue_item(i: &lessdugin_core::dto::ModQueueItem) -> TermText {
     let mut parts = vec![tt(&i.item_kind), lit("  ")];

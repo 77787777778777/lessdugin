@@ -21,8 +21,9 @@ use crossterm::event::KeyEvent;
 use lessdugin_core::dto::{
     AccessLevel, AccountView, ActionTicket, AgreementValue, Capability, CommentDraft, Event,
     ForumSummary, ForumView, KarmaValue, ModActionIntent, ModActionValue, ModLog, ModQueue,
-    ModScope, OpinionIntent, PinScope, PostDraft, PostList, PostSort, ReactTally, Stance,
-    SyncReport, ThreadRoot, ThreadView, Tier, Topic, ViewerCaps, WriteState, WriteTicket,
+    ModScope, NotificationList, OpinionIntent, PinScope, PostDraft, PostList, PostSort,
+    ReactTally, Stance, SyncReport, ThreadRoot, ThreadView, Tier, Topic, UnreadCounts, ViewerCaps,
+    WriteState, WriteTicket,
 };
 use lessdugin_core::engine::EngineError;
 
@@ -232,6 +233,24 @@ pub enum Effect {
         /// The screen the menu was opened from.
         screen: ScreenId,
     },
+    /// `notifications(q)` (the Notifications screen).
+    LoadNotifications {
+        /// The screen.
+        screen: ScreenId,
+        /// Read ones too.
+        all: bool,
+        /// Who asked.
+        origin: Origin,
+    },
+    /// `mark_notifications_read(ids)`.
+    MarkRead {
+        /// The notification ids.
+        ids: Vec<String>,
+        /// The screen to reload afterwards.
+        screen: ScreenId,
+    },
+    /// `unread_counts()`: the notification badge and the forums' unread state.
+    LoadUnread,
     /// `mod_queue(forum)`.
     LoadQueue {
         /// The screen.
@@ -356,6 +375,24 @@ pub enum Action {
         /// The action ticket (with its notices), or why it was refused.
         result: Result<ActionTicket, EngineError>,
     },
+    /// [`Effect::LoadNotifications`] finished.
+    NotificationsLoaded {
+        /// The screen.
+        screen: ScreenId,
+        /// Who asked.
+        origin: Origin,
+        /// The list.
+        result: Result<NotificationList, EngineError>,
+    },
+    /// [`Effect::MarkRead`] finished.
+    MarkedRead {
+        /// The screen to reload.
+        screen: ScreenId,
+        /// Why marking failed, if it did.
+        result: Result<(), EngineError>,
+    },
+    /// [`Effect::LoadUnread`] finished.
+    UnreadLoaded(Result<UnreadCounts, EngineError>),
     /// [`Effect::LoadQueue`] finished.
     QueueLoaded {
         /// The screen.
@@ -668,6 +705,26 @@ impl ModScreen {
     }
 }
 
+/// The Notifications screen (`synthesis-v1.md` §6.11, `social.md` §16): the account's
+/// notifications, newest first, with their reason kinds.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct NotificationsScreen {
+    /// Read ones too (`a` toggles).
+    pub all: bool,
+    /// The list, once loaded.
+    pub data: Option<NotificationList>,
+    /// A live update waiting for `R`.
+    pub pending: Option<NotificationList>,
+    /// The cursor.
+    pub pos: ListPos,
+}
+
+impl NotificationsScreen {
+    fn uris(d: &NotificationList) -> Vec<String> {
+        d.items.iter().map(|n| n.id.clone()).collect()
+    }
+}
+
 /// A screen kind.
 #[derive(Clone, Debug)]
 pub enum ScreenKind {
@@ -679,6 +736,8 @@ pub enum ScreenKind {
     Thread(Box<ThreadScreen>),
     /// The mod queue and log of a forum.
     Mod(Box<ModScreen>),
+    /// The account's notifications.
+    Notifications(Box<NotificationsScreen>),
 }
 
 /// One entry of the mod menu (`m`): a fixed label and the intent it issues (the reason is
@@ -773,6 +832,11 @@ impl Screen {
                 forum: m.forum.clone(),
                 origin,
             },
+            ScreenKind::Notifications(n) => Effect::LoadNotifications {
+                screen,
+                all: n.all,
+                origin,
+            },
         }
     }
 
@@ -802,6 +866,7 @@ impl Screen {
     fn concerns(&self, topic: &Topic) -> bool {
         match (&self.kind, topic) {
             (ScreenKind::Home(_), Topic::Forum { .. } | Topic::Accounts) => true,
+            (ScreenKind::Notifications(_), Topic::Notifications) => true,
             (ScreenKind::Forum(f), Topic::Forum { uri }) => *uri == f.uri,
             (ScreenKind::Thread(t), topic) => {
                 let Some(d) = &t.data else {
@@ -850,6 +915,13 @@ impl Screen {
                 ))
             }
             ScreenKind::Mod(_) => None,
+            ScreenKind::Notifications(s) => {
+                let p = s.pending.as_ref()?;
+                Some(new_of(
+                    s.data.as_ref().map(NotificationsScreen::uris).unwrap_or_default(),
+                    NotificationsScreen::uris(p),
+                ))
+            }
         }
     }
 }
@@ -922,6 +994,9 @@ pub struct State {
     pub mod_menu: Option<ModMenu>,
     /// A one-line prompt (the mod action's reason).
     pub prompt: Option<Prompt>,
+    /// The unread counts (`unread_counts()`): the header's notification badge and the Home
+    /// screen's per-forum new counts.
+    pub unread: Option<UnreadCounts>,
     /// The help overlay's first shown row (it scrolls with the navigation keys).
     pub help_scroll: usize,
     /// The status line's message.
@@ -980,6 +1055,7 @@ impl State {
             react: None,
             mod_menu: None,
             prompt: None,
+            unread: None,
             help_scroll: 0,
             status: None,
             account,
@@ -1003,6 +1079,7 @@ impl State {
         let mut fx = Vec::new();
         if self.account.is_some() {
             fx.push(Effect::LoadWrites);
+            fx.push(Effect::LoadUnread);
         }
         self.push(ScreenKind::Home(HomeScreen::default()), &mut fx);
         if let Some(f) = forum {
@@ -1111,6 +1188,17 @@ impl State {
                 self.mod_loaded(screen, Some(result), None)
             }
             Action::LogLoaded { screen, result, .. } => self.mod_loaded(screen, None, Some(result)),
+            Action::NotificationsLoaded {
+                screen,
+                origin,
+                result,
+            } => self.notifications_loaded(screen, origin, result),
+            Action::MarkedRead { screen, result } => self.marked_read(screen, result, &mut fx),
+            Action::UnreadLoaded(result) => {
+                if let Ok(u) = result {
+                    self.unread = Some(u);
+                }
+            }
         }
         self.fit();
         fx
@@ -1142,6 +1230,10 @@ impl State {
             ScreenKind::Mod(m) => {
                 let len = m.row_count();
                 m.pos.reveal(len, h);
+            }
+            ScreenKind::Notifications(s) => {
+                let len = s.data.as_ref().map_or(0, |d| d.items.len());
+                s.pos.reveal(len, h);
             }
         }
     }
@@ -1291,6 +1383,18 @@ impl State {
                 t.apply_pending(w, h);
             }
             ScreenKind::Mod(_) => {}
+            ScreenKind::Notifications(s) => {
+                if let Some(p) = s.pending.take() {
+                    receive_list(
+                        &mut s.data,
+                        &mut s.pending,
+                        &mut s.pos,
+                        p,
+                        Origin::User,
+                        NotificationsScreen::uris,
+                    );
+                }
+            }
         }
     }
 
@@ -1374,6 +1478,8 @@ impl State {
             Cmd::Undo => self.undo_last(fx),
             Cmd::ReactPalette => self.open_react(),
             Cmd::ModMenu => self.open_mod_menu(),
+            Cmd::Notifications => self.open_notifications(fx),
+            Cmd::MarkAllRead => self.mark_all_read(fx),
             Cmd::Stance => {
                 // on the Mod screen, `Tab` switches the queue/log tab; elsewhere it is the
                 // react palette's stance key, which only makes sense inside the palette
@@ -1441,6 +1547,10 @@ impl State {
                 let len = m.row_count();
                 m.pos.apply(cmd, len, h);
             }
+            ScreenKind::Notifications(s) => {
+                let len = s.data.as_ref().map_or(0, |d| d.items.len());
+                s.pos.apply(cmd, len, h);
+            }
         }
     }
 
@@ -1464,6 +1574,17 @@ impl State {
             ScreenKind::Thread(_) => self.navigate(Cmd::Collapse),
             // on the Mod screen, Enter approves the selected queue row (an applicant)
             ScreenKind::Mod(_) => self.approve_selected(fx),
+            // on the Notifications screen, Enter opens the notification's thread
+            ScreenKind::Notifications(s) => {
+                if let Some(n) = s
+                    .data
+                    .as_ref()
+                    .and_then(|d| d.items.get(s.pos.cursor))
+                {
+                    let uri = n.subject.clone();
+                    self.push_thread(uri, fx);
+                }
+            }
         }
     }
 
@@ -1516,6 +1637,10 @@ impl State {
                 forum: t.post().map(|p| p.post.forum.clone()),
             },
             ScreenKind::Mod(m) => SyncTarget::Forum(m.forum.clone()),
+            ScreenKind::Notifications(_) => {
+                self.say(Tone::Info, lit("Notifications are local; sync a forum with R on it."));
+                return;
+            }
         };
         let forums = match &target {
             SyncTarget::Forums(f) => f.clone(),
@@ -1630,6 +1755,7 @@ impl State {
                 (uri, name)
             }),
             ScreenKind::Mod(m) => Some((m.forum.clone(), m.forum.clone())),
+            ScreenKind::Notifications(_) => None,
         };
         let Some((uri, name)) = forum else {
             self.say(Tone::Info, lit("Open a forum to post in it."));
@@ -1783,7 +1909,7 @@ impl State {
                 };
                 Some((uri, forum))
             }
-            ScreenKind::Home(_) | ScreenKind::Mod(_) => None,
+            ScreenKind::Home(_) | ScreenKind::Mod(_) | ScreenKind::Notifications(_) => None,
         }
     }
 
@@ -2479,6 +2605,102 @@ impl State {
         }
     }
 
+    /// `N`: opens the Notifications screen on top of Home.
+    fn open_notifications(&mut self, fx: &mut Vec<Effect>) {
+        if self.account.is_none() {
+            self.say(
+                Tone::Info,
+                lit("Notifications need an account: run `lessdugin login`."),
+            );
+            return;
+        }
+        self.push(
+            ScreenKind::Notifications(Box::new(NotificationsScreen::default())),
+            fx,
+        );
+    }
+
+    /// `M` (or the notifications' opening): marks every listed notification read
+    /// (`engine.mark_notifications_read`).
+    fn mark_all_read(&mut self, fx: &mut Vec<Effect>) {
+        let Some(s) = self.stack.last().and_then(|s| match &s.kind {
+            ScreenKind::Notifications(s) => Some(s.clone()),
+            _ => None,
+        }) else {
+            self.say(
+                Tone::Info,
+                lit("Mark notifications read on the notifications screen (N)."),
+            );
+            return;
+        };
+        let ids: Vec<String> = s
+            .data
+            .as_ref()
+            .map(|d| {
+                d.items
+                    .iter()
+                    .filter(|n| !n.read)
+                    .map(|n| n.id.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        if ids.is_empty() {
+            self.say(Tone::Info, lit("Nothing to mark read."));
+            return;
+        }
+        let screen = self.stack.last().map_or(0, |x| x.id);
+        fx.push(Effect::MarkRead { ids, screen });
+    }
+
+    /// [`Action::NotificationsLoaded`].
+    fn notifications_loaded(
+        &mut self,
+        screen: ScreenId,
+        origin: Origin,
+        result: Result<NotificationList, EngineError>,
+    ) {
+        let Some(i) = self.index_of(screen) else {
+            return;
+        };
+        let s = &mut self.stack[i];
+        s.loading = s.loading.saturating_sub(1);
+        let ScreenKind::Notifications(n) = &mut s.kind else {
+            return;
+        };
+        match result {
+            Ok(list) => {
+                receive_list(
+                    &mut n.data,
+                    &mut n.pending,
+                    &mut n.pos,
+                    list,
+                    origin,
+                    NotificationsScreen::uris,
+                );
+            }
+            Err(e) => s.error = Some(e),
+        }
+    }
+
+    /// [`Action::MarkedRead`]: refreshes the list and the badge.
+    fn marked_read(
+        &mut self,
+        screen: ScreenId,
+        result: Result<(), EngineError>,
+        fx: &mut Vec<Effect>,
+    ) {
+        match result {
+            Ok(()) => {
+                self.unread = None;
+                fx.push(Effect::LoadUnread);
+                if let Some(i) = self.index_of(screen) {
+                    self.reload(i, Origin::Live, fx);
+                }
+            }
+            Err(e) => self.say(Tone::Error, cat([lit("Marking read failed: "), tt(&e.message)])),
+        }
+    }
+
     /// Opens the Mod screen (queue and log) for the forum under the top screen.
     fn open_mod_screen(&mut self, queue: bool, fx: &mut Vec<Effect>) {
         let Some(forum) = self.top_forum() else {
@@ -2506,7 +2728,7 @@ impl State {
                         return Some(p.post.forum.clone());
                     }
                 }
-                ScreenKind::Home(_) => {}
+                ScreenKind::Home(_) | ScreenKind::Notifications(_) => {}
             }
         }
         None
@@ -2876,6 +3098,13 @@ impl State {
                     } else {
                         self.stack[i].stale = true;
                     }
+                }
+                // the header's badge follows the notifications
+                if topics
+                    .iter()
+                    .any(|t| matches!(t, Topic::Notifications | Topic::Forum { .. }))
+                {
+                    fx.push(Effect::LoadUnread);
                 }
             }
             Event::SyncProgress { forum, done, total } => {

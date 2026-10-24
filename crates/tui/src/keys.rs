@@ -74,6 +74,13 @@ pub enum Cmd {
     Stance,
     /// `m`: open the mod menu on the selected item (or its author).
     ModMenu,
+    /// `N`: open the Notifications screen (`synthesis-v1.md` §6.11 lists it; `n`/`N` are
+    /// reserved for search matches there, and search is not built yet).
+    Notifications,
+    /// `M` (on the Notifications screen): mark every listed notification read.
+    MarkAllRead,
+    /// `a` (on the Notifications screen): toggle unread-only / all.
+    ToggleAll,
     /// `?`: help.
     Help,
 }
@@ -118,6 +125,8 @@ pub fn command(k: &KeyEvent) -> Option<Cmd> {
         KeyCode::Char('x') => Cmd::ReactPalette,
         KeyCode::Tab => Cmd::Stance,
         KeyCode::Char('m') => Cmd::ModMenu,
+        KeyCode::Char('N') => Cmd::Notifications,
+        KeyCode::Char('M') => Cmd::MarkAllRead,
         KeyCode::Char('?') => Cmd::Help,
         _ => return None,
     })
@@ -210,6 +219,8 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
         "Other",
         &[
             ("m", "mod menu (queue, log, actions)"),
+            ("N", "notifications"),
+            ("M", "mark all notifications read"),
             ("?", "this help"),
             ("Ctrl-c", "quit"),
         ],
@@ -245,6 +256,8 @@ mod tests {
         assert_eq!(c("x"), Some(Cmd::ReactPalette));
         assert_eq!(c("Tab"), Some(Cmd::Stance));
         assert_eq!(c("m"), Some(Cmd::ModMenu));
+        assert_eq!(c("N"), Some(Cmd::Notifications));
+        assert_eq!(c("M"), Some(Cmd::MarkAllRead));
         assert_eq!(c("Ctrl-x"), None);
         assert!(parse_key("Ctrl-").is_none());
     }
