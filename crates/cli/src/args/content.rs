@@ -419,3 +419,17 @@ pub enum OutboxAction {
         id: String,
     },
 }
+
+/// `redact`: delete an item's version history (`engine-api.md` §3.6 `redact_revision`, M4).
+///
+/// Deleting revision records cannot be undone, so `--yes` is required rather than assumed: a
+/// command that destroys history should not be one flag away from a typo.
+#[derive(Debug, Args)]
+pub struct RedactArgs {
+    /// The post or comment whose history goes.
+    #[arg(value_name = "REF")]
+    pub reference: String,
+    /// Confirm the deletion (without it the command only reports what it would delete).
+    #[arg(long)]
+    pub yes: bool,
+}

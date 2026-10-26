@@ -38,6 +38,7 @@ async fn run(ctx: &Ctx, command: Command) -> Result<(), CliError> {
         Command::Delete(a) => cmd::write::delete(ctx, a).await,
         Command::Retract(a) => cmd::write::retract(ctx, a).await,
         Command::History(a) => cmd::read::history(ctx, a).await,
+        Command::Redact(a) => cmd::write::redact(ctx, a).await,
         Command::Sync(a) => cmd::forum::sync(ctx, a).await,
         Command::Join(a) => cmd::forum::join(ctx, a).await,
         Command::Leave(a) => cmd::forum::leave(ctx, a).await,

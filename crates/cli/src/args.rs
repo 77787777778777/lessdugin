@@ -120,6 +120,8 @@ pub enum Command {
     Retract(RefArgs),
     /// List the versions of a post or comment.
     History(RefArgs),
+    /// Delete the version history of one of your posts or comments (cannot be undone).
+    Redact(RedactArgs),
     /// Sync a forum (or every followed forum) and send queued writes.
     Sync(SyncArgs),
     /// Join a forum: follow it, write your membership and make it the current forum.
