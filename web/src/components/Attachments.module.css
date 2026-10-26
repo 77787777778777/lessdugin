@@ -10,7 +10,9 @@
   border: 1px dashed var(--color-border);
   border-radius: 6px;
   padding: 0.5rem 0.75rem;
-  transition: border-color 120ms ease, background 120ms ease;
+  transition:
+    border-color 120ms ease,
+    background 120ms ease;
 }
 
 .dragging {

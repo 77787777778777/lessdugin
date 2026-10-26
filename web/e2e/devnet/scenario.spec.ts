@@ -49,7 +49,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { expect, type Browser, type Page, type TestInfo, test } from "@playwright/test";
+import { type Browser, expect, type Page, type TestInfo, test } from "@playwright/test";
 import { login as atpLogin, createPostAt, fk } from "./atp.mjs";
 import { e2eState, route, signIn, watchStrict, withDevnet } from "./state.ts";
 
@@ -64,6 +64,8 @@ const MISSING = [BIN, DRIVER].filter((p) => !existsSync(p));
 const FORUM_NAME = "Parity scenario";
 const TITLE = "Bob's question";
 const BODY = "Does this read the **same** everywhere?";
+// A real 8x8 PNG, attached in step 2 so the media subset (M4) goes through the engine.
+const FIXTURE_PNG = fileURLToPath(new URL("../fixtures/pixel.png", import.meta.url));
 const EDITED_TITLE = "Bob's question (edited)";
 const EDIT_TAIL = "Edited in the browser.";
 const REPLY = "Carol answers from the TUI: it should.";
@@ -297,44 +299,48 @@ async function runScenario(
   let canary = "";
   // step 4's settled opinion, kept so the report can show what the keys recorded
   let socialVote: unknown = null;
+  // (read below, in the parity report)
   const total0 = Date.now();
 
   try {
     // 1. alice, CLI: the forum in this variant's membership mode; in approval mode bob and carol
     // are approved before they can post
-    await step(`1. alice (CLI): forum create (${mode}), ${approval ? "approve bob and carol" : "no grant needed"}`, async () => {
-      await alice.login();
-      forum = doneUri(
-        await alice.cli("forum-create", [
-          "--json",
-          "forum",
-          "create",
-          slug,
-          "--name",
-          FORUM_NAME,
-          "--mode",
-          mode,
-          "--frontpage",
-        ]),
-      );
-      const show = JSON.parse(await alice.cli("forum-show", ["--json", "forum", "show", forum]));
-      expect(show.forum.membership).toBe(mode);
-      if (approval) {
-        const approved = JSON.parse(
-          await alice.cli("approve", [
+    await step(
+      `1. alice (CLI): forum create (${mode}), ${approval ? "approve bob and carol" : "no grant needed"}`,
+      async () => {
+        await alice.login();
+        forum = doneUri(
+          await alice.cli("forum-create", [
             "--json",
-            "--forum",
-            forum,
-            "approve",
-            "bob.test",
-            "carol.test",
+            "forum",
+            "create",
+            slug,
+            "--name",
+            FORUM_NAME,
+            "--mode",
+            mode,
+            "--frontpage",
           ]),
-        ) as { writes: { state: { kind: string } }[] };
-        expect(approved.writes.map((w) => w.state.kind)).toEqual(["done", "done"]);
-      }
-      // carol signs in with the CLI; the TUI uses that stored session (as `lessdugin tui`)
-      await carol.login();
-    });
+        );
+        const show = JSON.parse(await alice.cli("forum-show", ["--json", "forum", "show", forum]));
+        expect(show.forum.membership).toBe(mode);
+        if (approval) {
+          const approved = JSON.parse(
+            await alice.cli("approve", [
+              "--json",
+              "--forum",
+              forum,
+              "approve",
+              "bob.test",
+              "carol.test",
+            ]),
+          ) as { writes: { state: { kind: string } }[] };
+          expect(approved.writes.map((w) => w.state.kind)).toEqual(["done", "done"]);
+        }
+        // carol signs in with the CLI; the TUI uses that stored session (as `lessdugin tui`)
+        await carol.login();
+      },
+    );
 
     // the parity canary: alice's post dated an hour ahead of the real clock (well before `t`)
     await step("1b. alice (PDS API): a post dated an hour ahead", async () => {
@@ -377,6 +383,11 @@ async function runScenario(
       await page.getByLabel("Title").fill(TITLE);
       await page.getByRole("textbox", { name: "Post body" }).click();
       await page.keyboard.type(BODY);
+      // docs/plan.md §4.2 step 2, the MEDIA subset (M4): the post carries an image, which
+      // runs the engine's whole path - sniff the type, strip the metadata, apply the
+      // orientation, enforce the 413 policy - on the same bytes every client then reads.
+      await page.getByTestId("attachment-input").setInputFiles(FIXTURE_PNG);
+      await expect(page.getByTestId("attachment-list")).toContainText("ready");
       await page.getByRole("button", { name: "Publish", exact: true }).click();
       await expect(page.getByRole("heading", { level: 1, name: TITLE })).toBeVisible();
       const m = /#\/p\/(did:plc:[a-z2-7]{24})\/([a-z2-7-]+)$/.exec(page.url());
@@ -557,7 +568,7 @@ async function runScenario(
     ];
     writeFileSync(
       join(out, "result.json"),
-      `${JSON.stringify({ parityNowMs: t, forum, post, reply, identical: problems.length === 0, problems }, null, 2)}\n`,
+      `${JSON.stringify({ parityNowMs: t, forum, post, reply, socialVote, identical: problems.length === 0, problems }, null, 2)}\n`,
     );
     expect(problems, `the clients disagree; diffs in ${out}`).toEqual([]);
 

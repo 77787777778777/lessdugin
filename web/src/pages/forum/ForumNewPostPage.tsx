@@ -6,11 +6,11 @@
 // chooses to replace it without history.
 
 import type { Draft, MediaRef, PostDraft, PostKind } from "@lessdugin/engine/types";
-import type { Attachment } from "../../components/Attachments.tsx";
 import { POST_KINDS } from "@lessdugin/engine/types";
 import { useQuery } from "@tanstack/react-query";
 import { getRouteApi, useNavigate } from "@tanstack/react-router";
 import { useCallback, useId, useRef, useState } from "react";
+import type { Attachment } from "../../components/Attachments.tsx";
 import { LazyComposer } from "../../components/LazyComposer.tsx";
 import { KIND_LABEL } from "../../components/PostMeta.tsx";
 import { ErrorView, Loading } from "../../components/Status.tsx";

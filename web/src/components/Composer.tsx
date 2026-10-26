@@ -20,8 +20,8 @@ import { useEngine } from "../engine/context.tsx";
 import { qk } from "../engine/queries.ts";
 import { cx } from "../lib/cx.ts";
 import ui from "../styles/ui.module.css";
+import { type Attachment, Attachments } from "./Attachments.tsx";
 import styles from "./Composer.module.css";
-import { Attachments, type Attachment } from "./Attachments.tsx";
 import { RenderedHtml } from "./RenderedHtml.tsx";
 import { errorMessage } from "./Status.tsx";
 
@@ -320,9 +320,7 @@ export function Composer({
         </button>
       </div>
       <div ref={hostRef} className={styles.editor} data-testid="composer-editor" />
-      {attachments ? (
-        <Attachments value={files} onChange={setFiles} disabled={busy} />
-      ) : null}
+      {attachments ? <Attachments value={files} onChange={setFiles} disabled={busy} /> : null}
       {showPreview && preview && (
         <section className={styles.preview} aria-label="Preview">
           <RenderedHtml html={preview.html} preview className="lfm-compact" />

@@ -9,8 +9,8 @@
 //! names fail with `unsupported`.
 
 use lessdugin_core::dto::{
-    CommentDraft, Draft, EditOpts, ForumDraft, KarmaCadence, ListPostsQuery, MembersQuery,
-    ModActionIntent, ModsChange, NotificationsQuery, OpinionIntent, PostDraft, PublicActionKind,
+    CommentDraft, Draft, EditOpts, ForumDraft, KarmaCadence, ListPostsQuery, MediaInput,
+    MembersQuery, ModActionIntent, ModsChange, NotificationsQuery, OpinionIntent, PostDraft, PublicActionKind,
     RefContext, Subscription, SyncOpts, ThreadOpts, Topic,
 };
 use lessdugin_core::engine::{AccountInfo, Engine, EngineError, ErrorCode};
@@ -130,7 +130,6 @@ pub const UNSUPPORTED: &[(&str, &str)] = &[
     ("seqRemove", "M5"),
     ("seqMove", "M5"),
     ("redactRevision", "M4"),
-    ("prepareMedia", "M4"),
     // §3.6: the engine's draft store, settings and local export (M4, with the editor, the
     // media policy and `export`)
     ("drafts", "M4"),
@@ -481,6 +480,20 @@ pub async fn call<H: Host>(engine: &Engine<H>, op: &str, a: &str) -> Result<Stri
         "delete" => {
             let (uri,): (String,) = args(op, a)?;
             out(&engine.delete(&uri).await?)
+        }
+        "prepareMedia" => {
+            // The bytes are a separate argument from the hints (engine-api.md §3.6), so
+            // this op takes them as a number array: the bridge serialises a Uint8Array
+            // that way, and `prepare_media` is synchronous - it allocates nothing large and
+            // touches no network, so it does not need the outbox.
+            let (bytes, input): (Vec<u8>, Option<MediaInput>) = args(op, a)?;
+            let hints = input.unwrap_or(MediaInput {
+                declared_mime: None,
+                alt: None,
+                name: None,
+                aspect_ratio: None,
+            });
+            out(&engine.prepare_media(bytes, &hints)?)
         }
         "retract" => {
             let (uri,): (String,) = args(op, a)?;
