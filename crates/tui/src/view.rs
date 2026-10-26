@@ -14,8 +14,8 @@ use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use crate::app::{
-    ForumScreen, HomeScreen, LIST_ROWS, ModMenu, ModScreen, ModTab, NotificationsScreen, Prompt,
-    ReactOverlay, Screen, ScreenKind, State, SyncStatus, ThreadScreen, Tone, status_text,
+    ForumScreen, ForumTab, HomeScreen, LIST_ROWS, ModMenu, ModScreen, ModTab, NotificationsScreen,
+    Prompt, ReactOverlay, Screen, ScreenKind, State, SyncStatus, ThreadScreen, Tone, status_text,
 };
 use crate::keys::HELP;
 use crate::text::{
@@ -380,15 +380,51 @@ fn info_line(state: &State, top: &Screen) -> Line<'static> {
     match &top.kind {
         ScreenKind::Home(_) => info.push(lit("Forums you follow")),
         ScreenKind::Forum(f) => {
-            let tabs = [
+            // Posts and Activity (synthesis-v1.md §6.11); the sort tabs belong to Posts
+            parts.push((lit(" "), dim()));
+            let tab = |parts: &mut Vec<(TermText, Style)>, on: bool, label: &'static str| {
+                parts.push((
+                    cat([lit(" "), lit(label), lit(" ")]),
+                    if on {
+                        Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
+                    } else {
+                        dim()
+                    },
+                ));
+            };
+            tab(&mut parts, f.tab == ForumTab::Posts, "posts");
+            tab(&mut parts, f.tab == ForumTab::Activity, "activity");
+            // the completeness marker goes before the sort chrome: it is the safety-critical
+            // text (moderation incomplete), and this line truncates at 80 columns. Losing a
+            // sort label costs a keystroke; losing this costs a reader the warning.
+            if let Some(d) = &f.data {
+                let c = &d.list.completeness;
+                if c.partial || c.degraded {
+                    parts.push((
+                        cat([
+                            lit(" "),
+                            tt(&format!("{} of {}", c.repos_complete, c.repos_total)),
+                            lit(" repositories"),
+                            lit(if c.degraded {
+                                ", moderation incomplete"
+                            } else {
+                                ""
+                            }),
+                            tt(" \u{b7}"),
+                        ]),
+                        warn_style(),
+                    ));
+                }
+            }
+            let sorts = [
                 (PostSort::Magic, "magic"),
                 (PostSort::Top, "top"),
                 (PostSort::New, "new"),
                 (PostSort::Old, "old"),
             ];
             parts.push((lit(" sort: "), dim()));
-            for (sort, label) in tabs {
-                let style = if f.sort == sort {
+            for (sort, label) in sorts {
+                let style = if f.sort == sort && f.tab == ForumTab::Posts {
                     Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
                 } else {
                     dim()
@@ -396,20 +432,6 @@ fn info_line(state: &State, top: &Screen) -> Line<'static> {
                 parts.push((cat([lit(" "), lit(label), lit(" ")]), style));
             }
             parts.push((lit("  filter: frontpage "), dim()));
-            if let Some(d) = &f.data {
-                let c = &d.list.completeness;
-                if c.partial || c.degraded {
-                    info.push(cat([
-                        tt(&format!("{} of {}", c.repos_complete, c.repos_total)),
-                        lit(" repositories"),
-                        lit(if c.degraded {
-                            ", moderation incomplete"
-                        } else {
-                            ""
-                        }),
-                    ]));
-                }
-            }
             if let Some(s) = sync_text(state.sync.get(&f.uri)) {
                 info.push(s);
             }
@@ -525,9 +547,10 @@ fn message(lines: &mut Vec<Line<'static>>, t: TermText, style: Style) {
 
 fn content_lines(state: &State, top: &Screen, h: usize) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
+    let w = usize::from(state.width);
     match &top.kind {
         ScreenKind::Home(s) => home(state, top, s, h, &mut lines),
-        ScreenKind::Forum(s) => forum(top, s, h, &mut lines),
+        ScreenKind::Forum(s) => forum(top, s, h, w, &mut lines),
         ScreenKind::Thread(t) => thread(top, t, h, &mut lines),
         ScreenKind::Mod(m) => mod_screen(top, m, h, &mut lines),
         ScreenKind::Notifications(n) => notifications(top, n, h, &mut lines),
@@ -616,13 +639,22 @@ fn home(state: &State, top: &Screen, s: &HomeScreen, h: usize, lines: &mut Vec<L
     }
 }
 
-fn forum(top: &Screen, s: &ForumScreen, h: usize, lines: &mut Vec<Line<'static>>) {
+fn forum(top: &Screen, s: &ForumScreen, h: usize, w: usize, lines: &mut Vec<Line<'static>>) {
     let Some(d) = &s.data else {
-        loading_or_error(top, lines);
+        // the Activity tab can show while the post list is still loading (or failed)
+        if s.tab == ForumTab::Activity {
+            activity(top, s, h, w, lines);
+        } else {
+            loading_or_error(top, lines);
+        }
         return;
     };
     for b in banner_lines(&d.list.banners) {
         lines.push(line([(lit("  "), Style::default()), (b, warn_style())]));
+    }
+    if s.tab == ForumTab::Activity {
+        activity(top, s, h, w, lines);
+        return;
     }
     if d.list.items.is_empty() {
         lines.push(Line::default());
@@ -651,6 +683,61 @@ fn forum(top: &Screen, s: &ForumScreen, h: usize, lines: &mut Vec<Line<'static>>
         };
         lines.push(line([gutter(on), (post_title(p), title_style)]));
         lines.push(line([gutter(on), (joined(post_meta(p)), dim())]));
+    }
+}
+
+/// The Activity tab: the forum's Recent Discussion (`recent_discussion`, `social.md` §12.5) —
+/// each post with its newest comments under it.
+fn activity(top: &Screen, s: &ForumScreen, h: usize, w: usize, lines: &mut Vec<Line<'static>>) {
+    let Some(a) = &s.activity else {
+        loading_or_error(top, lines);
+        return;
+    };
+    for b in banner_lines(&a.list.banners) {
+        lines.push(line([(lit("  "), Style::default()), (b, warn_style())]));
+    }
+    if a.list.items.is_empty() {
+        lines.push(Line::default());
+        message(lines, lit("No discussion yet."), bold());
+        message(lines, lit("Press P to write the first post."), dim());
+        return;
+    }
+    let visible = (h / LIST_ROWS).max(1);
+    let room = w.saturating_sub(30).max(20);
+    for (i, item) in a
+        .list
+        .items
+        .iter()
+        .enumerate()
+        .skip(s.activity_pos.top)
+        .take(visible)
+    {
+        let on = i == s.activity_pos.cursor;
+        let title_style = if on {
+            bold().add_modifier(Modifier::REVERSED)
+        } else {
+            bold()
+        };
+        lines.push(line([gutter(on), (post_title(&item.post), title_style)]));
+        lines.push(line([gutter(on), (joined(post_meta(&item.post)), dim())]));
+        // the newest comments under it, one line each (the Thread screen has the bodies; this
+        // tab is a scan)
+        for c in &item.comments {
+            let text = a
+                .bodies
+                .get(&c.uri)
+                .and_then(|b| b.plain_excerpt())
+                .unwrap_or_else(|| c.body.excerpt.clone());
+            lines.push(line([
+                gutter(on),
+                (pad(2), Style::default()),
+                (actor(&c.author), Style::default()),
+                (lit(" "), Style::default()),
+                (tt(&clock(c.created_at_ms)), dim()),
+                (lit("  "), Style::default()),
+                (fit(&tt(&text), room), dim()),
+            ]));
+        }
     }
 }
 

@@ -199,6 +199,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
         "Forums",
         &[
             ("s", "sort: magic, top, new, old"),
+            ("Tab", "posts / activity"),
             ("P", "new post in $EDITOR"),
             ("R", "sync and show new items"),
         ],

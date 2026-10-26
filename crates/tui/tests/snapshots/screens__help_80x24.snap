@@ -17,13 +17,13 @@ expression: help
 ▌       │  c               comment on the post in $EDITOR              │
 ▌ lessdu│Forums                                                        │
         │  s               sort: magic, top, new, old                  │
-  1 comm│  P               new post in $EDITOR                         │
-        │  R               sync and show new items                     │
-  @bob.e│Opinions                                                      │
-    Than│  u U             upvote / strong upvote                      │
-        │  d D             downvote / strong downvote                  │
-    It l│  a A             agree / strongly agree                      │
+  1 comm│  Tab             posts / activity                            │
+        │  P               new post in $EDITOR                         │
+  @bob.e│  R               sync and show new items                     │
+    Than│Opinions                                                      │
+        │  u U             upvote / strong upvote                      │
+    It l│  d D             downvote / strong downvote                  │
+        │  a A             agree / strongly agree                      │
         │  z Z             disagree / strongly disagree                │
         │  0               clear your votes on the item                │
-        │  x               react palette (Tab: for/against)            │
- r reply└ 1-22 of 31 ──────────────────────────────────────────────────┘
+ r reply└ 1-22 of 32 ──────────────────────────────────────────────────┘

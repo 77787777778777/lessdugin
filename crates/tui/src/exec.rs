@@ -18,7 +18,7 @@ use lessdugin_core::engine::{Engine, EngineError};
 use lessdugin_core::host::Host;
 use lessdugin_core::store::records::RecordStore;
 
-use crate::app::{Action, Effect, ForumData, HomeData, SyncTarget, ThreadData};
+use crate::app::{Action, ActivityData, Effect, ForumData, HomeData, SyncTarget, ThreadData};
 use crate::body::Body;
 
 /// How many queued handle verifications a load runs before showing a view (as the CLI).
@@ -38,6 +38,9 @@ pub const MOD_LOG_LIMIT: u32 = 100;
 
 /// The most notifications the Notifications screen lists.
 pub const NOTIF_LIMIT: u32 = 100;
+
+/// The most Recent Discussion items the Forum screen's Activity tab lists.
+pub const ACTIVITY_LIMIT: u32 = 50;
 
 /// The time budget of the syncs a screen runs when it opens (as the CLI's implicit syncs).
 pub const IMPLICIT_SYNC_MS: i64 = 20_000;
@@ -157,6 +160,15 @@ pub async fn run<H: Host>(engine: &Engine<H>, effect: Effect, opts: ExecOpts) ->
             origin,
             result: engine.mod_log(&forum, None, MOD_LOG_LIMIT).await,
         },
+        Effect::LoadActivity {
+            screen,
+            forum,
+            origin,
+        } => Action::ActivityLoaded {
+            screen,
+            origin,
+            result: load_activity(engine, &forum, opts).await.map(Box::new),
+        },
         Effect::LoadNotifications {
             screen,
             all,
@@ -217,6 +229,39 @@ pub async fn load_forum<H: Host>(
         list = engine.list_posts(&q).await?;
     }
     Ok(ForumData { view, list })
+}
+
+/// `recent_discussion(forum, None, ACTIVITY_LIMIT)` and the bodies of the comments it shows
+/// (`social.md` §12.5; the Forum screen's Activity tab, `synthesis-v1.md` §6.11).
+pub async fn load_activity<H: Host>(
+    engine: &Engine<H>,
+    forum: &str,
+    opts: ExecOpts,
+) -> Result<ActivityData, EngineError> {
+    let mut list = engine
+        .recent_discussion(forum, None, ACTIVITY_LIMIT)
+        .await?;
+    let actors: Vec<&ActorView> = list
+        .items
+        .iter()
+        .flat_map(|i| std::iter::once(&i.post.author).chain(i.comments.iter().map(|c| &c.author)))
+        .collect();
+    if !opts.offline
+        && unverified(actors.into_iter())
+        && engine.verify_handles(VERIFY_HANDLES).await > 0
+    {
+        list = engine
+            .recent_discussion(forum, None, ACTIVITY_LIMIT)
+            .await?;
+    }
+    let mut bodies = BTreeMap::new();
+    for item in &list.items {
+        for c in &item.comments {
+            let b = body(engine, &c.uri, &c.cid, &c.body).await;
+            bodies.insert(c.uri.clone(), b);
+        }
+    }
+    Ok(ActivityData { list, bodies })
 }
 
 /// The query of the Forum screen: the M3 defaults (`magic` over `frontpage`,

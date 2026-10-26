@@ -664,3 +664,89 @@ fn an_applicant_shows_in_the_queue_and_enter_approves() {
         "{members:?}"
     );
 }
+
+#[test]
+fn the_activity_tab_lists_recent_discussion() {
+    let s = scenario();
+    // bob's post and his comment on the welcome both carry comments/activity; give his post a
+    // comment so the Activity tab shows a post *with* its newest comment under it
+    let t = block_on(
+        s.w.carol
+            .engine
+            .comment(&lessdugin_core::dto::CommentDraft::new(
+                &s.bob_post,
+                None,
+                "Nice first post, bob.",
+            )),
+    )
+    .unwrap();
+    s.w.carol.flush();
+    s.w.tick(MINUTE);
+    let _carol_c = s.w.carol.done(&t);
+
+    let mut t = tui(&s, 100, 30);
+    block_on(t.start(Some(s.forum.clone())));
+    // Posts is the default tab: the sort tabs and the post list show
+    let screen = t.render();
+    assert!(screen.contains("Hello from bob"), "{screen}");
+    assert!(screen.contains("posts"), "{screen}");
+
+    // Tab: the Activity tab (engine.recent_discussion)
+    block_on(t.press("Tab"));
+    let screen = t.render();
+    assert!(screen.contains("activity"), "{screen}");
+    assert!(screen.contains("Hello from bob"), "{screen}");
+    assert!(
+        screen.contains("Nice first post, bob."),
+        "the newest comment under the post:\n{screen}"
+    );
+    insta::assert_snapshot!("forum_activity_tab_100x30", t.render());
+
+    // the cursor belongs to the tab: j moves it, and Tab back keeps the posts cursor where it was
+    let posts_cursor = t.state.top_forum_screen().unwrap().pos.cursor;
+    block_on(t.press("j"));
+    assert_eq!(t.state.top_forum_screen().unwrap().activity_pos.cursor, 1);
+    assert_eq!(t.state.top_forum_screen().unwrap().pos.cursor, posts_cursor);
+    block_on(t.press("k"));
+    assert_eq!(t.state.top_forum_screen().unwrap().activity_pos.cursor, 0);
+
+    // Tab back to Posts
+    block_on(t.press("Tab"));
+    assert_eq!(
+        t.state.top_forum_screen().unwrap().tab,
+        lessdugin_tui::ForumTab::Posts
+    );
+}
+
+#[test]
+fn the_activity_tab_calls_recent_discussion() {
+    // the same data the engine returns, so the tab is not inventing it
+    let s = scenario();
+    let list = block_on(s.w.carol.engine.recent_discussion(&s.forum, None, 50)).unwrap();
+    assert!(!list.items.is_empty(), "the scenario has listed posts");
+
+    let mut t = tui(&s, 100, 30);
+    block_on(t.start(Some(s.forum.clone())));
+    block_on(t.press("Tab"));
+    let screen = t.render();
+    for item in &list.items {
+        // a post with no title shows its excerpt's first line (post_title); assert on whichever
+        let shown = item.post.title.as_deref().unwrap_or(&item.post.excerpt);
+        let first = shown.lines().next().unwrap_or_default().trim();
+        assert!(
+            !first.is_empty() && screen.contains(first),
+            "the tab lists {first:?}:\n{screen}"
+        );
+        for c in &item.comments {
+            // each comment shows the first line of its body (the tab renders bodies from the
+            // records it fetched, falling back to the summary excerpt, which collapses lines)
+            let excerpt = c.body.excerpt.trim();
+            let prefix: String = excerpt.chars().take(20).collect();
+            let prefix = prefix.trim();
+            assert!(
+                !prefix.is_empty() && screen.contains(prefix),
+                "the comment's text {prefix:?} shows:\n{screen}"
+            );
+        }
+    }
+}

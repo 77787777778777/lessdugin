@@ -19,11 +19,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crossterm::event::KeyEvent;
 use lessdugin_core::dto::{
-    AccessLevel, AccountView, ActionTicket, AgreementValue, Capability, CommentDraft, Event,
-    ForumSummary, ForumView, KarmaValue, ModActionIntent, ModActionValue, ModLog, ModQueue,
-    ModScope, NotificationList, OpinionIntent, PinScope, PostDraft, PostList, PostSort, ReactTally,
-    Stance, SyncReport, ThreadRoot, ThreadView, Tier, Topic, UnreadCounts, ViewerCaps, WriteState,
-    WriteTicket,
+    AccessLevel, AccountView, ActionTicket, AgreementValue, Capability, CommentDraft,
+    DiscussionList, Event, ForumSummary, ForumView, KarmaValue, ModActionIntent, ModActionValue,
+    ModLog, ModQueue, ModScope, NotificationList, OpinionIntent, PinScope, PostDraft, PostList,
+    PostSort, ReactTally, Stance, SyncReport, ThreadRoot, ThreadView, Tier, Topic, UnreadCounts,
+    ViewerCaps, WriteState, WriteTicket,
 };
 use lessdugin_core::engine::EngineError;
 
@@ -233,6 +233,16 @@ pub enum Effect {
         /// The screen the menu was opened from.
         screen: ScreenId,
     },
+    /// `recent_discussion(forum, None, limit)`: the Forum screen's Activity tab
+    /// (`synthesis-v1.md` §6.11, `social.md` §12.5).
+    LoadActivity {
+        /// The screen.
+        screen: ScreenId,
+        /// The forum uri.
+        forum: String,
+        /// Who asked.
+        origin: Origin,
+    },
     /// `notifications(q)` (the Notifications screen).
     LoadNotifications {
         /// The screen.
@@ -374,6 +384,15 @@ pub enum Action {
         screen: ScreenId,
         /// The action ticket (with its notices), or why it was refused.
         result: Result<ActionTicket, EngineError>,
+    },
+    /// [`Effect::LoadActivity`] finished.
+    ActivityLoaded {
+        /// The screen.
+        screen: ScreenId,
+        /// Who asked.
+        origin: Origin,
+        /// The list.
+        result: Result<Box<ActivityData>, EngineError>,
     },
     /// [`Effect::LoadNotifications`] finished.
     NotificationsLoaded {
@@ -539,7 +558,27 @@ impl HomeScreen {
     }
 }
 
-/// The Forum screen: the post list.
+/// Which half of the Forum screen shows (`synthesis-v1.md` §6.11: "Forum (sort and filter
+/// tabs; Posts and Activity)").
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ForumTab {
+    /// The post list (`list_posts`).
+    #[default]
+    Posts,
+    /// Recent Discussion (`recent_discussion`, `social.md` §12.5).
+    Activity,
+}
+
+/// The Activity tab (`recent_discussion`): the forum's posts with their newest comments.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ActivityData {
+    /// The list.
+    pub list: DiscussionList,
+    /// The bodies of the comments it shows, by comment uri.
+    pub bodies: BTreeMap<String, Body>,
+}
+
+/// The Forum screen: the post list, and the Activity tab.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ForumScreen {
     /// The forum uri.
@@ -550,8 +589,16 @@ pub struct ForumScreen {
     pub data: Option<ForumData>,
     /// A live update waiting for `R`.
     pub pending: Option<ForumData>,
-    /// The cursor.
+    /// Which tab shows (`Tab` switches).
+    pub tab: ForumTab,
+    /// The Activity tab (`recent_discussion`), once loaded.
+    pub activity: Option<ActivityData>,
+    /// A live update of it waiting for `R`.
+    pub activity_pending: Option<ActivityData>,
+    /// The Posts cursor.
     pub pos: ListPos,
+    /// The Activity cursor (each tab keeps its own place).
+    pub activity_pos: ListPos,
 }
 
 impl ForumScreen {
@@ -559,9 +606,41 @@ impl ForumScreen {
         d.list.items.iter().map(|p| p.uri.clone()).collect()
     }
 
-    /// The selected post.
+    fn activity_uris(d: &ActivityData) -> Vec<String> {
+        d.list.items.iter().map(|i| i.post.uri.clone()).collect()
+    }
+
+    /// The cursor of what shows.
+    pub fn cursor(&self) -> &ListPos {
+        match self.tab {
+            ForumTab::Posts => &self.pos,
+            ForumTab::Activity => &self.activity_pos,
+        }
+    }
+
+    /// The cursor of what shows, to move.
+    pub fn cursor_mut(&mut self) -> &mut ListPos {
+        match self.tab {
+            ForumTab::Posts => &mut self.pos,
+            ForumTab::Activity => &mut self.activity_pos,
+        }
+    }
+
+    /// The posts the current tab lists.
     pub fn selected(&self) -> Option<&lessdugin_core::dto::PostSummary> {
-        self.data.as_ref()?.list.items.get(self.pos.cursor)
+        let i = self.cursor().cursor;
+        match self.tab {
+            ForumTab::Posts => self.data.as_ref()?.list.items.get(i),
+            ForumTab::Activity => self.activity.as_ref()?.list.items.get(i).map(|x| &x.post),
+        }
+    }
+
+    /// The rows the current tab has.
+    pub fn row_count(&self) -> usize {
+        match self.tab {
+            ForumTab::Posts => self.data.as_ref().map_or(0, |d| d.list.items.len()),
+            ForumTab::Activity => self.activity.as_ref().map_or(0, |d| d.list.items.len()),
+        }
     }
 
     /// The forum's name, once known.
@@ -840,7 +919,8 @@ impl Screen {
         }
     }
 
-    /// The loads of this screen (the Mod screen loads its queue and its log together).
+    /// The loads of this screen (the Mod screen loads its queue and its log together; the Forum
+    /// screen loads its Activity tab when that is what shows).
     fn loads(&self, origin: Origin) -> Vec<Effect> {
         match &self.kind {
             ScreenKind::Mod(m) => {
@@ -857,6 +937,15 @@ impl Screen {
                         origin,
                     },
                 ]
+            }
+            ScreenKind::Forum(f) if f.tab == ForumTab::Activity || f.activity.is_some() => {
+                let mut fx = vec![self.load(origin)];
+                fx.push(Effect::LoadActivity {
+                    screen: self.id,
+                    forum: f.uri.clone(),
+                    origin,
+                });
+                fx
             }
             _ => vec![self.load(origin)],
         }
@@ -901,11 +990,21 @@ impl Screen {
                 ))
             }
             ScreenKind::Forum(s) => {
-                let p = s.pending.as_ref()?;
-                Some(new_of(
-                    s.data.as_ref().map(ForumScreen::uris).unwrap_or_default(),
-                    ForumScreen::uris(p),
-                ))
+                if let Some(p) = &s.pending {
+                    Some(new_of(
+                        s.data.as_ref().map(ForumScreen::uris).unwrap_or_default(),
+                        ForumScreen::uris(p),
+                    ))
+                } else {
+                    let p = s.activity_pending.as_ref()?;
+                    Some(new_of(
+                        s.activity
+                            .as_ref()
+                            .map(ForumScreen::activity_uris)
+                            .unwrap_or_default(),
+                        ForumScreen::activity_uris(p),
+                    ))
+                }
             }
             ScreenKind::Thread(s) => {
                 let p = s.pending.as_ref()?;
@@ -1128,6 +1227,14 @@ impl State {
         }
     }
 
+    /// The forum on top, if a forum is on top.
+    pub fn top_forum_screen(&self) -> Option<&ForumScreen> {
+        match &self.top()?.kind {
+            ScreenKind::Forum(f) => Some(f),
+            _ => None,
+        }
+    }
+
     fn index_of(&self, id: ScreenId) -> Option<usize> {
         self.stack.iter().position(|s| s.id == id)
     }
@@ -1191,6 +1298,11 @@ impl State {
                 self.mod_loaded(screen, Some(result), None)
             }
             Action::LogLoaded { screen, result, .. } => self.mod_loaded(screen, None, Some(result)),
+            Action::ActivityLoaded {
+                screen,
+                origin,
+                result,
+            } => self.activity_loaded(screen, origin, result, &mut fx),
             Action::NotificationsLoaded {
                 screen,
                 origin,
@@ -1220,8 +1332,9 @@ impl State {
                 s.pos.reveal(len, h / LIST_ROWS);
             }
             ScreenKind::Forum(s) => {
-                let len = s.data.as_ref().map_or(0, |d| d.list.items.len());
-                s.pos.reveal(len, h / LIST_ROWS);
+                let len = s.row_count();
+                let rows = h / LIST_ROWS;
+                s.cursor_mut().reveal(len, rows);
             }
             ScreenKind::Thread(t) => {
                 if t.layout.width != w {
@@ -1270,7 +1383,11 @@ impl State {
                 sort: PostSort::Magic,
                 data: None,
                 pending: None,
+                tab: ForumTab::Posts,
+                activity: None,
+                activity_pending: None,
                 pos: ListPos::default(),
+                activity_pos: ListPos::default(),
             })),
             fx,
         );
@@ -1372,13 +1489,25 @@ impl State {
             }
             ScreenKind::Forum(s) => {
                 if let Some(p) = s.pending.take() {
+                    let pos = &mut s.pos;
                     receive_list(
                         &mut s.data,
                         &mut s.pending,
-                        &mut s.pos,
+                        pos,
                         p,
                         Origin::User,
                         ForumScreen::uris,
+                    );
+                }
+                if let Some(p) = s.activity_pending.take() {
+                    let pos = &mut s.activity_pos;
+                    receive_list(
+                        &mut s.activity,
+                        &mut s.activity_pending,
+                        pos,
+                        p,
+                        Origin::User,
+                        ForumScreen::activity_uris,
                     );
                 }
             }
@@ -1484,19 +1613,22 @@ impl State {
             Cmd::Notifications => self.open_notifications(fx),
             Cmd::MarkAllRead => self.mark_all_read(fx),
             Cmd::Stance => {
-                // on the Mod screen, `Tab` switches the queue/log tab; elsewhere it is the
-                // react palette's stance key, which only makes sense inside the palette
-                if let Some(ScreenKind::Mod(m)) = self.stack.last().map(|s| &s.kind) {
-                    let tab = match m.tab {
-                        ModTab::Queue => ModTab::Log,
-                        ModTab::Log => ModTab::Queue,
-                    };
-                    self.switch_mod_tab(tab);
-                } else {
-                    self.say(
+                // on the Mod screen, `Tab` switches the queue/log tab; on a forum, Posts and
+                // Activity (§6.11); elsewhere it is the react palette's stance key, which only
+                // makes sense inside the palette
+                match self.stack.last().map(|s| &s.kind) {
+                    Some(ScreenKind::Mod(m)) => {
+                        let tab = match m.tab {
+                            ModTab::Queue => ModTab::Log,
+                            ModTab::Log => ModTab::Queue,
+                        };
+                        self.switch_mod_tab(tab);
+                    }
+                    Some(ScreenKind::Forum(_)) => self.switch_forum_tab(fx),
+                    _ => self.say(
                         Tone::Info,
                         lit("Open the react palette (x) to set a stance."),
-                    );
+                    ),
                 }
             }
             nav => self.navigate(nav),
@@ -1516,8 +1648,9 @@ impl State {
                 s.pos.apply(cmd, len, h / LIST_ROWS);
             }
             ScreenKind::Forum(s) => {
-                let len = s.data.as_ref().map_or(0, |d| d.list.items.len());
-                s.pos.apply(cmd, len, h / LIST_ROWS);
+                let len = s.row_count();
+                let rows = h / LIST_ROWS;
+                s.cursor_mut().apply(cmd, len, rows);
             }
             ScreenKind::Thread(t) => {
                 let l = &t.layout;
@@ -2607,6 +2740,32 @@ impl State {
         }
     }
 
+    /// `Tab` on a forum: switches Posts and Activity (`synthesis-v1.md` §6.11). The Activity
+    /// tab is loaded the first time it shows.
+    fn switch_forum_tab(&mut self, fx: &mut Vec<Effect>) {
+        let Some(i) = self.stack.len().checked_sub(1) else {
+            return;
+        };
+        let screen = self.stack[i].id;
+        let ScreenKind::Forum(f) = &mut self.stack[i].kind else {
+            return;
+        };
+        f.tab = match f.tab {
+            ForumTab::Posts => ForumTab::Activity,
+            ForumTab::Activity => ForumTab::Posts,
+        };
+        if f.tab == ForumTab::Activity && f.activity.is_none() {
+            let forum = f.uri.clone();
+            self.stack[i].loading += 1;
+            fx.push(Effect::LoadActivity {
+                screen,
+                forum,
+                origin: Origin::User,
+            });
+        }
+        self.fit();
+    }
+
     /// `N`: opens the Notifications screen on top of Home.
     fn open_notifications(&mut self, fx: &mut Vec<Effect>) {
         if self.account.is_none() {
@@ -2700,6 +2859,54 @@ impl State {
                 Tone::Error,
                 cat([lit("Marking read failed: "), tt(&e.message)]),
             ),
+        }
+    }
+
+    /// [`Action::ActivityLoaded`]: the Forum screen's Activity tab.
+    fn activity_loaded(
+        &mut self,
+        screen: ScreenId,
+        origin: Origin,
+        result: Result<Box<ActivityData>, EngineError>,
+        fx: &mut Vec<Effect>,
+    ) {
+        let h = self.content_height();
+        let Some(i) = self.index_of(screen) else {
+            return;
+        };
+        let is_top = i + 1 == self.stack.len();
+        let s = &mut self.stack[i];
+        s.loading = s.loading.saturating_sub(1);
+        let origin = if s.settling { Origin::User } else { origin };
+        let ScreenKind::Forum(f) = &mut s.kind else {
+            return;
+        };
+        let mut failed = None;
+        match result {
+            Ok(d) => {
+                s.error = None;
+                receive_list(
+                    &mut f.activity,
+                    &mut f.activity_pending,
+                    &mut f.activity_pos,
+                    *d,
+                    origin,
+                    ForumScreen::activity_uris,
+                );
+            }
+            Err(e) => {
+                failed = Some(tt(&e.message));
+                s.error = Some(e);
+            }
+        }
+        let len = f.row_count();
+        f.cursor_mut().reveal(len, h / LIST_ROWS);
+        if s.dirty && s.loading == 0 {
+            s.dirty = false;
+            self.reload(i, Origin::Live, fx);
+        }
+        if let (Some(msg), true, Origin::User) = (failed, is_top, origin) {
+            self.say(Tone::Error, cat([lit("Could not load activity: "), msg]));
         }
     }
 

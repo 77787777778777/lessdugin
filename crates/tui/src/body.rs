@@ -64,6 +64,29 @@ impl Body {
         }
     }
 
+    /// The body's first line of prose, or `None` when it has nothing to show.
+    pub fn plain_excerpt(&self) -> Option<String> {
+        let text = match &self.doc {
+            BodyDoc::Styled(doc) => {
+                // printed wide so the excerpt is the source's own line, not a wrap
+                print_doc_with(
+                    doc,
+                    &PrintOpts {
+                        color: false,
+                        hyperlinks: false,
+                        reveal_spoilers: false,
+                        width: None,
+                    },
+                    &|_| None,
+                )
+            }
+            BodyDoc::Plain(t) => t.clone(),
+            BodyDoc::Empty => return None,
+        };
+        let first = text.lines().map(str::trim).find(|l| !l.is_empty())?;
+        Some(first.to_owned())
+    }
+
     /// The body laid out at `width` columns (at least 20), each line indented by `indent`.
     pub fn lines(
         &self,
