@@ -37,6 +37,7 @@ expression: help
                                                 │Other                                                         │
                                                 │  m               mod menu (queue, log, actions)              │
                                                 │  :               command line (any M3 verb; : help)          │
+                                                │  E               versions of the selected item               │
                                                 │  N               notifications                               │
                                                 │  M               mark all notifications read                 │
                                                 │  ?               this help                                   │
@@ -44,7 +45,6 @@ expression: help
                                                 │                                                              │
                                                 │Any key closes this help.                                     │
                                                 └──────────────────────────────────────────────────────────────┘
-
 
 
 

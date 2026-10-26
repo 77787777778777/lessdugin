@@ -6,11 +6,11 @@
 //! update), the content, and a status line (the last message, or the keys). Every string is a
 //! [`TermText`](crate::text::TermText) turned into spans by [`crate::text`].
 
-use lessdugin_core::dto::{ForumRole, MembershipMode, PostSort, Stance};
+use lessdugin_core::dto::{ForumRole, HistoryView, MembershipMode, PostSort, Stance};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout as Split, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Text};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use crate::app::{
@@ -776,6 +776,48 @@ fn thread(top: &Screen, t: &ThreadScreen, h: usize, lines: &mut Vec<Line<'static
         let mut v = spans(&g, gs);
         v.extend(row.spans.iter().cloned());
         lines.push(Line::from(v));
+    }
+    // the version panel (`h`, M4) hangs under the thread, so it never displaces the item the
+    // reader is looking at
+    if let Some(h) = &t.history {
+        history_panel(h, lines);
+    }
+}
+
+/// The version history of the opened item (`synthesis-v1.md` F29-F34, M4).
+///
+/// A redacted item says so: "the author redacted part of this history" is the reader-facing
+/// fact when a version is unavailable, and an item that was edited but has no versions left is
+/// exactly what redaction produces.
+fn history_panel(h: &Result<HistoryView, String>, lines: &mut Vec<Line<'static>>) {
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "History",
+        Style::default().add_modifier(Modifier::BOLD),
+    )));
+    match h {
+        Err(e) => lines.push(line([(lit("  "), dim()), (tt(e), dim())])),
+        Ok(v) if v.versions.is_empty() => {
+            lines.push(line([(lit("  no version is available"), dim())]));
+        }
+        Ok(v) => {
+            for ver in &v.versions {
+                let mut row = vec![
+                    (lit("  "), dim()),
+                    (tt(&format!("v{}", ver.n)), Style::default()),
+                    (lit("  "), dim()),
+                    (tt(&clock(ver.created_at_ms)), dim()),
+                ];
+                if let Some(sum) = &ver.summary {
+                    row.push((lit("  "), dim()));
+                    row.push((tt(sum), dim()));
+                }
+                if !ver.available {
+                    row.push((lit("  (history redacted)"), dim()));
+                }
+                lines.push(line(row));
+            }
+        }
     }
 }
 

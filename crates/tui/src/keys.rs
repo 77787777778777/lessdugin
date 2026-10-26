@@ -70,6 +70,8 @@ pub enum Cmd {
     Undo,
     /// `x`: open the react palette on the selected item.
     ReactPalette,
+    /// `E`: show the version history of the selected item (M4).
+    History,
     /// `Tab` (inside the react palette): switch the stance.
     Stance,
     /// `m`: open the mod menu on the selected item (or its author).
@@ -125,6 +127,7 @@ pub fn command(k: &KeyEvent) -> Option<Cmd> {
         KeyCode::Char('0') => Cmd::Opinion(Op::Clear),
         KeyCode::Backspace => Cmd::Undo,
         KeyCode::Char('x') => Cmd::ReactPalette,
+        KeyCode::Char('E') => Cmd::History,
         KeyCode::Tab => Cmd::Stance,
         KeyCode::Char('m') => Cmd::ModMenu,
         KeyCode::Char('N') => Cmd::Notifications,
@@ -224,6 +227,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
         &[
             ("m", "mod menu (queue, log, actions)"),
             (":", "command line (any M3 verb; : help)"),
+            ("E", "versions of the selected item"),
             ("N", "notifications"),
             ("M", "mark all notifications read"),
             ("?", "this help"),

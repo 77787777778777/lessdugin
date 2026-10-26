@@ -1034,3 +1034,31 @@ fn mark_all_read_outside_the_screen_says_where_it_works() {
         status(&t)
     );
 }
+
+#[test]
+fn versions_panel_shows_the_history_and_says_when_it_was_redacted() {
+    // `E` (M4: "history view and redaction"). The panel hangs under the thread, so it never
+    // displaces the item being read, and a redacted item says so rather than showing nothing.
+    let s = scenario();
+    let mut t = tui(&s, 80, 24);
+    block_on(t.start(Some(s.forum.clone())));
+    // the welcome post is second (newest first), and it is the one with a revision
+    block_on(t.keys(&["j", "Enter"]));
+    assert!(
+        t.on_thread(),
+        "the test must be on a thread for its history"
+    );
+    block_on(t.press("E"));
+    let screen = t.render();
+    assert!(
+        screen.contains("History"),
+        "the panel must be visible:\n{screen}"
+    );
+    // a second `E` closes it again
+    block_on(t.press("E"));
+    let screen = t.render();
+    assert!(
+        !screen.contains("History"),
+        "the panel must close:\n{screen}"
+    );
+}

@@ -20,10 +20,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use crossterm::event::KeyEvent;
 use lessdugin_core::dto::{
     AccessLevel, AccountView, ActionTicket, AgreementValue, Capability, CommentDraft,
-    DiscussionList, Event, ForumSummary, ForumView, KarmaValue, ModActionIntent, ModActionValue,
-    ModLog, ModQueue, ModScope, ModsChange, NotificationList, OpinionIntent, PinScope, PostDraft,
-    PostList, PostSort, ReactTally, Stance, SyncReport, ThreadRoot, ThreadView, Tier, Topic,
-    UnreadCounts, ViewerCaps, WriteState, WriteTicket,
+    DiscussionList, Event, ForumSummary, ForumView, HistoryView, KarmaValue, ModActionIntent,
+    ModActionValue, ModLog, ModQueue, ModScope, ModsChange, NotificationList, OpinionIntent,
+    PinScope, PostDraft, PostList, PostSort, ReactTally, Stance, SyncReport, ThreadRoot,
+    ThreadView, Tier, Topic, UnreadCounts, ViewerCaps, WriteState, WriteTicket,
 };
 use lessdugin_core::engine::EngineError;
 
@@ -253,6 +253,15 @@ pub enum Effect {
         origin: Origin,
     },
     /// `notifications(q)` (the Notifications screen).
+    /// `history` (`engine-api.md` §3.6): the version panel of the opened item.
+    LoadHistory {
+        /// The screen.
+        screen: ScreenId,
+        /// The item.
+        uri: String,
+        /// Who asked.
+        origin: Origin,
+    },
     LoadNotifications {
         /// The screen.
         screen: ScreenId,
@@ -409,6 +418,15 @@ pub enum Action {
         origin: Origin,
         /// The list.
         result: Result<Box<ActivityData>, EngineError>,
+    },
+    /// [`Effect::LoadHistory`] finished.
+    HistoryLoaded {
+        /// The screen.
+        screen: ScreenId,
+        /// Who asked.
+        origin: Origin,
+        /// The versions.
+        result: Result<HistoryView, String>,
     },
     /// [`Effect::LoadNotifications`] finished.
     NotificationsLoaded {
@@ -674,6 +692,8 @@ pub struct ThreadScreen {
     pub data: Option<ThreadData>,
     /// A live update waiting for `R`.
     pub pending: Option<ThreadData>,
+    /// The version history of the opened item, once loaded (`h` toggles the panel; M4).
+    pub history: Option<Result<HistoryView, String>>,
     /// Comments whose replies are folded.
     pub collapsed: BTreeSet<String>,
     /// The selection and scroll.
@@ -1414,6 +1434,18 @@ impl State {
                 origin,
                 result,
             } => self.notifications_loaded(screen, origin, result),
+            Action::HistoryLoaded {
+                screen,
+                origin,
+                result,
+            } => {
+                let _ = origin;
+                if let Some(i) = self.index_of(screen)
+                    && let ScreenKind::Thread(t) = &mut self.stack[i].kind
+                {
+                    t.history = Some(result);
+                }
+            }
             Action::MarkedRead { screen, result } => self.marked_read(screen, result, &mut fx),
             Action::UnreadLoaded(result) => {
                 if let Ok(u) = result {
@@ -1720,6 +1752,7 @@ impl State {
             Cmd::Opinion(op) => self.opinion(op, fx),
             Cmd::Undo => self.undo_last(fx),
             Cmd::ReactPalette => self.open_react(),
+            Cmd::History => self.open_history(fx),
             Cmd::ModMenu => self.open_mod_menu(),
             Cmd::Notifications => self.open_notifications(fx),
             Cmd::Command => self.command = Some(String::new()),
@@ -2905,6 +2938,42 @@ impl State {
     }
 
     /// `N`: opens the Notifications screen on top of Home.
+    /// `h`: shows the version history of the selected item (`engine-api.md` §3.6, M4), or
+    /// hides it again. The panel is per-screen, so opening another thread starts closed.
+    fn open_history(&mut self, fx: &mut Vec<Effect>) {
+        let Some(screen) = self.stack.last() else {
+            return;
+        };
+        let sid = screen.id;
+        let ScreenKind::Thread(t) = &screen.kind else {
+            self.say(
+                Tone::Info,
+                lit("History is shown on a thread: open the post first (Enter)."),
+            );
+            return;
+        };
+        // a second `h` closes the panel; a third re-asks the engine, because the item may have
+        // been edited in another window since
+        let already_open = matches!(&t.history, Some(Ok(_)));
+        let uri = self
+            .opinion_subject()
+            .map_or_else(|| t.uri.clone(), |(u, _)| u);
+        if already_open
+            && let Some(ScreenKind::Thread(t)) = self.stack.last_mut().map(|s| &mut s.kind)
+        {
+            t.history = None;
+            return;
+        }
+        if let Some(ScreenKind::Thread(t)) = self.stack.last_mut().map(|s| &mut s.kind) {
+            t.history = Some(Err("loading…".to_owned()));
+        }
+        fx.push(Effect::LoadHistory {
+            screen: sid,
+            uri,
+            origin: Origin::User,
+        });
+    }
+
     fn open_notifications(&mut self, fx: &mut Vec<Effect>) {
         if self.account.is_none() {
             self.say(

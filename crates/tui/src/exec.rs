@@ -177,6 +177,16 @@ pub async fn run<H: Host>(engine: &Engine<H>, effect: Effect, opts: ExecOpts) ->
             origin,
             result: load_activity(engine, &forum, opts).await.map(Box::new),
         },
+        Effect::LoadHistory {
+            screen,
+            uri,
+            origin,
+        } => Action::HistoryLoaded {
+            screen,
+            origin,
+            // the panel shows why it could not load rather than staying empty
+            result: engine.history(&uri).await.map_err(|e| e.to_string()),
+        },
         Effect::LoadNotifications {
             screen,
             all,
