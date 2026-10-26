@@ -232,7 +232,26 @@ test.describe("production headers", () => {
     await page.goto(`${server.url}/#/settings`);
     // The version comes from the wasm, through the worker created via the `lessdugin-worker`
     // Trusted Types policy.
-    await expect(page.getByText(/^wasm · \d+\.\d+\.\d+/)).toBeVisible({ timeout: 30_000 });
+    // If the worker never comes up, the REASON is what matters: a page error, a console error or
+    // a CSP violation says why. Asserting only on the text turns every cause into one 30 s
+    // timeout with no diagnosis, which is exactly what CI produced.
+    const versionText = page.getByText(/^wasm · \d+\.\d+\.\d+/);
+    try {
+      await expect(versionText).toBeVisible({ timeout: 30_000 });
+    } catch (e) {
+      const state = await page.evaluate(() => ({
+        engineLine: document.querySelector("dd")?.textContent ?? "(no dd)",
+        body: document.body.innerText.slice(0, 600),
+      }));
+      throw new Error(
+        `the wasm engine did not start.\n` +
+          `page errors: ${JSON.stringify(w.errors)}\n` +
+          `csp violations: ${JSON.stringify(await w.violations())}\n` +
+          `engine line: ${state.engineLine}\n` +
+          `body: ${state.body}\n` +
+          `original: ${(e as Error).message}`,
+      );
+    }
     await expect(page.getByTestId("mock-banner")).toHaveCount(0);
     expect(await w.violations()).toEqual([]);
     expect(w.errors).toEqual([]);
