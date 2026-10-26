@@ -5,7 +5,9 @@
 mod common;
 
 use common::{MINUTE, block_on, scenario, tui};
-use lessdugin_core::dto::{AccessLevel, ModActionIntent, ModActionValue, ModScope, SyncOpts};
+use lessdugin_core::dto::{
+    AccessLevel, CommentDraft, ModActionIntent, ModActionValue, ModScope, SyncOpts,
+};
 
 type Tui = lessdugin_tui::Headless<lessdugin_testkit::MemHost>;
 
@@ -948,5 +950,87 @@ fn the_command_line_adds_a_moderator_end_to_end() {
         view.moderators.iter().any(|m| m.actor.did == s.w.bob.did()),
         "{:?}",
         view.moderators
+    );
+}
+
+// --- scope 5: the Notifications screen (§6.11; social.md §16) -------------------------------
+
+/// carol comments on alice's welcome post; alice's device then has a notification for it.
+///
+/// The FIRST computation for an (account, forum) only records a baseline (`notify.rs`: a new
+/// device does not replay history), so this first query is what lets the second one notify.
+fn alice_with_a_notification(s: &common::Scenario) -> String {
+    let (alice, carol) = (&s.w.alice, &s.w.carol);
+    // the baseline is recorded BEFORE the comment exists, so the comment is news
+    let _baseline = block_on(alice.engine.notifications(&Default::default())).unwrap();
+    let t = block_on(carol.engine.comment(&CommentDraft::new(
+        &s.welcome,
+        None,
+        "Thanks @alice.example.com! Carol answers from the TUI.",
+    )))
+    .unwrap();
+    carol.flush();
+    let comment = carol.done(&t);
+    s.w.tick(MINUTE);
+    // the author's device folds the comment in through a forum sync, which raises the note
+    alice.sync(&s.forum);
+    comment
+}
+
+#[test]
+fn the_notifications_screen_lists_unread_reasons_and_marks_them_read() {
+    let s = scenario();
+    let _comment = alice_with_a_notification(&s);
+    // alice drives this test: the notifications belong to the welcome post's author
+    let mut t = block_on(lessdugin_tui::Headless::new(
+        s.w.alice.engine.clone(),
+        lessdugin_tui::HeadlessOpts {
+            width: 80,
+            height: 24,
+            ..lessdugin_tui::HeadlessOpts::default()
+        },
+    ))
+    .unwrap();
+    block_on(t.start(None));
+
+    // the header carries the badge before the screen is even opened: two replies, both unread
+    let badge = t.render();
+    assert!(badge.contains("[N 2]"), "{badge}");
+    block_on(t.press("N"));
+    let screen = t.render();
+    // the reason kind, the actors (as verified-or-claimed handles) and the preview
+    assert!(screen.contains("reply"), "{screen}");
+    assert!(screen.contains("bob.example.com"), "{screen}");
+    assert!(screen.contains("carol.example.com"), "{screen}");
+    assert!(screen.contains("2 unread"), "{screen}");
+    insta::assert_snapshot!("notifications_screen_80x24", t.render());
+
+    // `M` marks them read: the unread counter drains and the rows lose their `*`
+    assert!(t.state.unread.as_ref().is_some_and(|u| u.notifications > 0));
+    block_on(t.press("M"));
+    block_on(t.engine().outbox_flush()).unwrap();
+    block_on(t.settle());
+    assert_eq!(
+        t.state.unread.as_ref().map(|u| u.notifications),
+        Some(0),
+        "{:?}",
+        t.state.unread
+    );
+    let screen = t.render();
+    // nothing is marked unread any more
+    assert!(screen.contains("0 unread"), "{screen}");
+    assert!(!screen.starts_with("* "), "{screen}");
+}
+
+#[test]
+fn mark_all_read_outside_the_screen_says_where_it_works() {
+    let s = scenario();
+    let mut t = tui(&s, 80, 24);
+    block_on(t.start(Some(s.forum.clone())));
+    block_on(t.press("M"));
+    assert!(
+        status(&t).contains("notifications screen (N)"),
+        "{}",
+        status(&t)
     );
 }

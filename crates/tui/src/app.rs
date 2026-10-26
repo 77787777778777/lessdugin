@@ -2989,8 +2989,12 @@ impl State {
             Ok(()) => {
                 self.unread = None;
                 fx.push(Effect::LoadUnread);
+                // Marking read is a user action, so the reload is `Origin::User`: with
+                // `Origin::Live` an earlier burst of live reloads (`LIVE_RELOAD_CAP`) would
+                // swallow it and the screen would keep showing the stale unread count.
                 if let Some(i) = self.index_of(screen) {
-                    self.reload(i, Origin::Live, fx);
+                    self.stack[i].live_burst = 0;
+                    self.reload(i, Origin::User, fx);
                 }
             }
             Err(e) => self.say(
