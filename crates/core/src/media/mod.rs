@@ -935,3 +935,6 @@ mod tests {
         assert!(decoding_allowed(b"not an image at all"));
     }
 }
+
+pub mod policy;
+pub use policy::{Autoload, LoadReason, MediaCandidate, autoload, host_of, is_bluesky_host};
