@@ -899,11 +899,15 @@ export interface MediaRef {
   name?: string;
 }
 
+// What `prepare_media` takes: the display hints and the DECLARED type. The bytes are a
+// separate argument (a `Uint8Array` or a file), because neither belongs in a DTO that is also
+// exported to Rust (engine-api.md §3.6; the Rust type is `MediaInput`).
 export interface MediaInput {
-  bytes: Uint8Array;
-  mime?: string;
-  name?: string;
+  /** The declared mimeType; the sniffed one wins when they disagree (data-model.md §8.8). */
+  declaredMime?: string;
   alt?: string;
+  name?: string;
+  aspectRatio?: AspectRatio;
 }
 
 export interface BodyDraft {

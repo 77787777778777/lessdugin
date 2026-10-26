@@ -40,7 +40,6 @@ const TS_ONLY: Readonly<Record<string, string>> = {
   Href: "lessdugin-markdown's safe_href result, re-tagged by the wasm binding",
   HrefContext: "an argument of safeHref",
   SearchQuery: "search (M5)",
-  MediaInput: "prepareMedia (M4)",
   SequenceChapterDraft: "sequences (M5)",
   SequenceDraft: "sequences (M5)",
   SequencePosition: "sequences (M5)",

@@ -283,6 +283,13 @@ export interface ListPostsQuery {
     limit: number;
 }
 
+export interface MediaInput {
+    declaredMime?: string;
+    alt?: string;
+    name?: string;
+    aspectRatio?: AspectRatio;
+}
+
 export interface MediaRef {
     id: string;
     cid: string;

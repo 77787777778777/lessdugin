@@ -127,6 +127,7 @@ fn all() -> Vec<(&'static str, &'static str)> {
         ListPostsQuery,
         ThreadOpts,
         MediaRef,
+        MediaInput,
         BodyDraft,
         ExternalLinkDraft,
         PostDraft,
