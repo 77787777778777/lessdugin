@@ -23,7 +23,10 @@ jobs:
   # logins (headless Chromium approves at the PDS), concurrent refresh, the CLI forum scenario
   # in parity mode, `lessdugin web`'s browser sign-in, and the TUI's reply through $EDITOR.
   rust:
-    runs-on: ubuntu-latest
+    # Playwright 1.56.1 refuses to run on ubuntu-26.04 ("Playwright does not support chromium on
+    # ubuntu26.04-x64") and `ubuntu-latest` now resolves there, so pin the last LTS it supports.
+    # Drop the pin when the Playwright package moves past 1.56.1.
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -56,7 +59,10 @@ jobs:
   # Any CSP or Trusted Types violation fails. `cargo xtask e2e --web` builds the engine wasm,
   # the e2e SPA, the CLI and the TUI parity driver first.
   web:
-    runs-on: ubuntu-latest
+    # Playwright 1.56.1 refuses to run on ubuntu-26.04 ("Playwright does not support chromium on
+    # ubuntu26.04-x64") and `ubuntu-latest` now resolves there, so pin the last LTS it supports.
+    # Drop the pin when the Playwright package moves past 1.56.1.
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
