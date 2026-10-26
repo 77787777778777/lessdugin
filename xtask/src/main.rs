@@ -959,6 +959,7 @@ const FUZZ_TARGETS: &[(&str, usize, u32)] = &[
     ("lexicon", 16_384, 10),
     ("mst", 16_384, 10),
     ("render", 32_768, 10),
+    ("media", 65_536, 10),
 ];
 
 /// `cargo xtask fuzz`: seeds `fuzz/corpus/<target>/` from the vectors and fixtures (and the kept

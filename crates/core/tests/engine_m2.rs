@@ -500,7 +500,7 @@ fn snapshots_are_deterministic() {
 }
 
 #[test]
-fn writes_need_an_account_and_refuse_media() {
+fn writes_need_an_account_and_publish_media() {
     let host = MemHost::new();
     let _net = FakeNet::on(&host);
     let e = Engine::new(host.clone(), EngineConfig::default());
@@ -512,20 +512,45 @@ fn writes_need_an_account_and_refuse_media() {
 
     let s = scenario();
     let bob = &s.w.bob;
-    let mut d = PostDraft::article(&s.forum, "t", "b");
+    // M4: a body with media publishes now. The record carries a placeholder blob object for
+    // each item, and the outbox substitutes what `uploadBlob` returns, failing the write when
+    // the returned `ref.$link` is not the CID computed locally (data-model.md §8.8).
+    // a real CID, from the pipeline, so the record validates (G2: links must be CIDs)
+    let png: &[u8] =
+        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00";
+    let prepared = lessdugin_core::media::prepare(png.to_vec()).unwrap();
+    let cid = lessdugin_atp::cid::for_raw(&prepared).to_string();
+    let mut d = PostDraft::article(
+        &s.forum,
+        "Post with an image",
+        format!("See ![x](cid:{cid})"),
+    );
     d.body.media.push(lessdugin_core::dto::MediaRef {
-        id: "m".into(),
-        cid: "bafy".into(),
+        id: cid.clone(),
+        cid: cid.clone(),
         mime: "image/png".into(),
         size_bytes: 1,
-        alt: None,
+        alt: Some("an image".into()),
         aspect_ratio: None,
         duration_ms: None,
         name: None,
     });
-    assert_eq!(
-        block_on(bob.engine.publish(&d)).unwrap_err().code,
-        ErrorCode::Unsupported
+    let t = block_on(bob.engine.publish(&d)).unwrap();
+    assert!(!t.id.is_empty());
+    // the flusher uploads the blob first. FakePds holds no blob for this synthetic CID, so
+    // the write ends `Failed` with `mediaRejected` - which is exactly the guard working: a
+    // mismatched or missing blob refuses the write rather than storing a dangling ref.
+    let r = block_on(bob.engine.outbox_flush()).unwrap();
+    assert_eq!(r.failed, 1, "{r:?}");
+    let tickets = block_on(bob.engine.writes()).unwrap();
+    let failed = tickets
+        .iter()
+        .find(|w| w.id == t.id)
+        .expect("the ticket is still listed");
+    assert!(
+        matches!(&failed.state, WriteState::Failed { .. }),
+        "{:?}",
+        failed.state
     );
     // W9: bob's engine cannot write to carol's repo
     let err = block_on(bob.engine.retract(&s.carol_c1)).unwrap_err();

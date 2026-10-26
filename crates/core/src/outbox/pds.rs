@@ -718,10 +718,32 @@ impl<'h, H: Host> PdsClient<'h, H> {
     }
 
     /// `uploadBlob`: the returned blob object, verbatim.
-    pub async fn upload_blob(&mut self, bytes: Vec<u8>, mime: &str) -> Result<Value, CallError> {
-        let (resp, _) = self
-            .send_write("com.atproto.repo.uploadBlob", bytes, mime, 0)
-            .await?;
+    pub async fn upload_blob(
+        &mut self,
+        bytes: Vec<u8>,
+        mime: &str,
+    ) -> Result<(Value, Vec<u8>), CallError> {
+        // The bytes that end up stored. On a 413 this becomes the downscaled body (§8.8: "On
+        // 413, the client downscales (images) or refuses"), and the caller compares the CID of
+        // exactly these bytes with the `ref.` the PDS returns.
+        let mut sent = bytes;
+        let (resp, _) = match self
+            .send_write("com.atproto.repo.uploadBlob", sent.clone(), mime, 0)
+            .await
+        {
+            Ok(v) => v,
+            Err(CallError::Rejected { status: 413, .. }) => {
+                sent = crate::media::fit_for_upload(sent, crate::media::UPLOAD_TARGET_BYTES)
+                    .map_err(|error| CallError::Rejected {
+                        status: 413,
+                        name: None,
+                        error,
+                    })?;
+                self.send_write("com.atproto.repo.uploadBlob", sent.clone(), mime, 0)
+                    .await?
+            }
+            Err(e) => return Err(e),
+        };
         let v: Value = crate::xrpc::decode_json(&resp.body).map_err(|e| {
             CallError::Ambiguous(EngineError::new(
                 ErrorCode::Network,
@@ -729,7 +751,7 @@ impl<'h, H: Host> PdsClient<'h, H> {
             ))
         })?;
         match v.get("blob") {
-            Some(b @ Value::Object(_)) => Ok(b.clone()),
+            Some(b @ Value::Object(_)) => Ok((b.clone(), sent)),
             _ => Err(CallError::Ambiguous(EngineError::new(
                 ErrorCode::Network,
                 "uploadBlob answered without a blob",

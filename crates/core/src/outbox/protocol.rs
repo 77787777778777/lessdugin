@@ -343,8 +343,12 @@ impl<'a, H: Host> Runner<'a, H> {
     /// Uploads `bytes` and replaces its placeholders in the op values with the returned object,
     /// verbatim (`data-model.md` §8.8). The returned `ref.$link` must equal the local CID.
     async fn upload(&mut self, data: &BlobData) -> Result<(), CallError> {
-        let object = self.pds.upload_blob(data.bytes.clone(), &data.mime).await?;
-        if blob::blob_link(&object) != Some(data.cid.as_str()) {
+        let (object, stored) = self.pds.upload_blob(data.bytes.clone(), &data.mime).await?;
+        // The PDS may have downscaled on a 413 (§8.8), which gives the stored bytes a different
+        // CID. The record must then refer to the CID that was ACTUALLY stored, so compare
+        // against the returned bytes rather than the ones we meant to send.
+        let stored_cid = lessdugin_atp::cid::for_raw(&stored).to_string();
+        if blob::blob_link(&object) != Some(stored_cid.as_str()) {
             return Err(rejected(
                 EngineError::invalid_input("the PDS stored the blob under another CID")
                     .with_detail("kind", "mediaRejected")
