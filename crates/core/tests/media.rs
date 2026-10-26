@@ -722,3 +722,55 @@ fn a_hostile_frame_size_is_never_decoded() {
     // and it does not crash the pipeline either way
     assert_eq!(prepare(hostile.clone()).unwrap(), hostile);
 }
+
+#[test]
+fn an_mp4_nested_past_the_depth_cap_is_refused_not_stripped() {
+    use lessdugin_core::media::{MEDIA_CONTAINER_MAX_DEPTH, prepare};
+
+    let boxed = |kind: &[u8; 4], payload: &[u8]| {
+        let mut v = ((payload.len() + 8) as u32).to_be_bytes().to_vec();
+        v.extend_from_slice(kind);
+        v.extend_from_slice(payload);
+        v
+    };
+    // N nested `moov` boxes around a `udta` core, after a SHALLOW `udta`. The shallow one matters:
+    // the walk zeroes it before it ever reaches the deep chain, so a refusal that returned the
+    // half-processed buffer would not equal the input (see the last assertion below).
+    let nest = |n: usize| {
+        let mut inner = boxed(b"udta", b"deep-secret");
+        for _ in 0..n {
+            inner = boxed(b"moov", &inner);
+        }
+        let mut v = boxed(b"ftyp", b"isom\0\0\x02\0isomiso2");
+        v.extend_from_slice(&boxed(b"udta", b"shallow-secret"));
+        v.extend_from_slice(&inner);
+        v
+    };
+
+    // the cap counts the file level as depth 1, so MAX-1 nested containers keep the core
+    // reachable: it is stripped, not refused
+    let at_cap = nest((MEDIA_CONTAINER_MAX_DEPTH - 1) as usize);
+    let out = strip_metadata(&at_cap);
+    assert!(!out.too_deep, "nesting at the cap must not be refused");
+    assert!(out.changed);
+    assert!(
+        !contains(&out.bytes, b"deep-secret"),
+        "the deep udta survived"
+    );
+    assert_eq!(out.bytes.len(), at_cap.len(), "MP4 offsets must not shift");
+
+    // one container deeper: §6 refuses the file for upload, with its bytes unmodified - a
+    // half-processed file (an outer udta already zeroed) must not come back either
+    let too_deep = nest(MEDIA_CONTAINER_MAX_DEPTH as usize);
+    let out = strip_metadata(&too_deep);
+    assert!(out.too_deep, "nesting past the cap must be refused");
+    assert_eq!(out.bytes, too_deep, "a refusal returns the input untouched");
+    assert!(!out.changed);
+    // and the pipeline turns the refusal into a mediaRejected error rather than uploading it
+    let err = prepare(too_deep).unwrap_err();
+    assert_eq!(err.code, lessdugin_core::engine::ErrorCode::InvalidInput);
+    assert_eq!(
+        err.detail.as_ref().and_then(|d| d.get("kind")),
+        Some(&serde_json::json!("mediaRejected"))
+    );
+}

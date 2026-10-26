@@ -76,17 +76,26 @@ pub struct Stripped {
     pub changed: bool,
     /// The EXIF orientation that was found, if any (`1`..=`8`); the caller applies it.
     pub orientation: Option<u16>,
+    /// The container nests deeper than [`MEDIA_CONTAINER_MAX_DEPTH`], so §6 refuses it for
+    /// upload. The bytes are the input's, unmodified; this is not a "nothing to drop" answer.
+    pub too_deep: bool,
 }
+
+/// Nesting of MP4 boxes (and RIFF chunks) walked by the sniffer and the strippers
+/// (`limits.md` §6, `MEDIA_CONTAINER_MAX_DEPTH`). Deeper: the file is refused for upload.
+pub const MEDIA_CONTAINER_MAX_DEPTH: u32 = 32;
 
 /// Strips metadata from `b` by allowlist rebuild (§5.9.1). A format outside the table, or one the
 /// walk cannot parse, is returned unchanged with `changed: false`: the pipeline never destroys a
-/// file it does not understand, and PRIV-7 says the others upload as they are.
+/// file it does not understand, and PRIV-7 says the others upload as they are. A container nested
+/// past [`MEDIA_CONTAINER_MAX_DEPTH`] sets `too_deep` instead (§6: refused for upload).
 pub fn strip_metadata(b: &[u8]) -> Stripped {
     if b.len() > MAX_SCAN_BYTES {
         return Stripped {
             bytes: b.to_vec(),
             changed: false,
             orientation: None,
+            too_deep: false,
         };
     }
     match sniff(b) {
@@ -99,6 +108,7 @@ pub fn strip_metadata(b: &[u8]) -> Stripped {
             bytes: b.to_vec(),
             changed: false,
             orientation: None,
+            too_deep: false,
         },
     }
 }
@@ -108,6 +118,18 @@ fn unchanged(b: &[u8]) -> Stripped {
         bytes: b.to_vec(),
         changed: false,
         orientation: None,
+        too_deep: false,
+    }
+}
+
+/// §6's refusal: the container nests past [`MEDIA_CONTAINER_MAX_DEPTH`], so it is refused for
+/// upload with its bytes unmodified rather than half-processed.
+fn refused_too_deep(b: &[u8]) -> Stripped {
+    Stripped {
+        bytes: b.to_vec(),
+        changed: false,
+        orientation: None,
+        too_deep: true,
     }
 }
 
@@ -169,6 +191,7 @@ fn strip_jpeg(b: &[u8]) -> Stripped {
                     bytes: out,
                     changed: changed || i != b.len(),
                     orientation,
+                    too_deep: false,
                 };
             }
             0xD8 => {
@@ -332,6 +355,7 @@ fn strip_png(b: &[u8]) -> Stripped {
                     bytes: out,
                     changed: changed || end != b.len(),
                     orientation: None,
+                    too_deep: false,
                 };
             }
             k if KEEP.iter().any(|x| **x == *k) => out.extend_from_slice(&b[i..end]),
@@ -409,6 +433,7 @@ fn strip_webp(b: &[u8]) -> Stripped {
         bytes: out,
         changed,
         orientation: None,
+        too_deep: false,
     }
 }
 
@@ -555,6 +580,7 @@ fn strip_gif(b: &[u8]) -> Stripped {
                     bytes: out,
                     changed: changed || i + 1 != b.len(),
                     orientation: None,
+                    too_deep: false,
                 };
             }
             _ => return unchanged(b),
@@ -573,13 +599,16 @@ fn iso_dropped(kind: &[u8]) -> bool {
 /// Strips an MP4 by overwriting every `udta` and `meta` box **in place** with a `free` box whose
 /// payload is zeroed (`threat-model.md` §5.9.1). No byte offset shifts, which is why this format is
 /// rewritten rather than rebuilt.
+///
+/// Nesting is capped at [`MEDIA_CONTAINER_MAX_DEPTH`] (`limits.md` §6: "Deeper: the file is
+/// refused for upload"), which is what makes the walk bounded rather than merely iterative.
 fn strip_iso(b: &[u8]) -> Stripped {
     let mut out = b.to_vec();
     let mut changed = false;
-    // (start, end) of the region to walk; iterative, so nesting cannot overflow the stack
-    let mut stack: Vec<(usize, usize)> = vec![(0, out.len())];
+    // (start, end, depth) of the region to walk; iterative, so nesting cannot overflow the stack
+    let mut stack: Vec<(usize, usize, u32)> = vec![(0, out.len(), 1)];
     let mut guard = 0usize;
-    while let Some((start, end)) = stack.pop() {
+    while let Some((start, end, depth)) = stack.pop() {
         let mut i = start;
         while i + 8 <= end {
             guard += 1;
@@ -629,8 +658,13 @@ fn strip_iso(b: &[u8]) -> Stripped {
                     | b"mfra"
                     | b"udta"
             ) {
-                // container boxes: descend
-                stack.push((i + header, box_end));
+                // container boxes: descend, but never past §6's depth cap. `out` may already hold
+                // neutralised boxes from this walk, so a refusal returns the ORIGINAL bytes rather
+                // than a half-processed file.
+                if depth >= MEDIA_CONTAINER_MAX_DEPTH {
+                    return refused_too_deep(b);
+                }
+                stack.push((i + header, box_end, depth + 1));
             }
             i = box_end;
         }
@@ -640,6 +674,7 @@ fn strip_iso(b: &[u8]) -> Stripped {
             bytes: out,
             changed,
             orientation: None,
+            too_deep: false,
         }
     } else {
         unchanged(b)
@@ -729,6 +764,13 @@ pub fn apply_orientation(bytes: &[u8], orientation: u16) -> Vec<u8> {
 /// Returns the bytes to upload. A refused type is the caller's concern (`BlobData::media`).
 pub fn prepare(bytes: Vec<u8>) -> Result<Vec<u8>, EngineError> {
     let stripped = strip_metadata(&bytes);
+    // §6: a container nested past MEDIA_CONTAINER_MAX_DEPTH is refused for upload, not stripped.
+    if stripped.too_deep {
+        return Err(EngineError::invalid_input(format!(
+            "the container nests deeper than {MEDIA_CONTAINER_MAX_DEPTH} levels (limits.md §6)",
+        ))
+        .with_detail("kind", "mediaRejected"));
+    }
     #[cfg(feature = "orientation")]
     if let Some(o) = stripped.orientation.filter(|o| *o != 1) {
         return Ok(apply_orientation(&stripped.bytes, o));
