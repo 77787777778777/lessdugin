@@ -8,8 +8,12 @@ license.workspace = true
 repository.workspace = true
 
 [features]
-default = ["verify"]
+default = ["verify", "orientation"]
 verify = []
+# EXIF orientation is applied physically, which needs a decoder. `image` is pure Rust and builds
+# for wasm32, so this is on by default; `--no-default-features` drops it and the pipeline then
+# only strips metadata (the orientation tag is dropped with the rest of the EXIF).
+orientation = ["dep:image"]
 # This build reads and writes the published namespace (`lessdugin-lexicon/final-ns`); the social
 # vector runner then checks record validity exactly.
 final-ns = ["lessdugin-lexicon/final-ns"]
@@ -31,12 +35,15 @@ serde_json.workspace = true
 serde_bytes.workspace = true
 thiserror.workspace = true
 img-parts.workspace = true
+image = { workspace = true, optional = true }
 imagesize.workspace = true
 tsify = { workspace = true, optional = true }
 wasm-bindgen = { workspace = true, optional = true }
 
 [dev-dependencies]
 insta.workspace = true
+# The media test builds a real PNG so the orientation pass decodes it.
+image = { workspace = true }
 # Integration tests (tests/) run the engine over the in-memory host.
 lessdugin-testkit.workspace = true
 

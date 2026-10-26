@@ -3091,6 +3091,7 @@ dependencies = [
  "futures",
  "getrandom 0.4.3",
  "http",
+ "image",
  "imagesize",
  "img-parts",
  "insta",
