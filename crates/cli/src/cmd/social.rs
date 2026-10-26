@@ -20,8 +20,8 @@ use lessdugin_native::host::NativeHost;
 use serde_json::Value;
 
 use crate::args::{
-    ActivityArgs, AgreeArgs, ModAction, ModArgs, ModSubject, ModsAction, ModsArgs,
-    NotificationsArgs, PinArgs, ReactArgs, VoteArgs, scope_of, stance_of,
+    ActivityArgs, AgreeArgs, ExportArgs, ExportScopeArg, ModAction, ModArgs, ModSubject,
+    ModsAction, ModsArgs, NotificationsArgs, PinArgs, ReactArgs, VoteArgs, scope_of, stance_of,
 };
 use crate::cmd::{read, refs, write};
 use crate::ctx::{CliError, Ctx, Writer};
@@ -771,4 +771,62 @@ async fn removal(
         done,
     )
     .await
+}
+
+/// `export`: this device's local state as JSON, or `--import` to merge one back
+/// (`engine-api.md` §3.6, `synthesis-v1.md` §6.10, `threat-model.md` PRIV-8/PRIV-10).
+///
+/// `--mine` is the default: the active account's state plus the rows that belong to no account.
+/// An import merges, so a partial or older export never destroys state it does not mention.
+pub async fn export(ctx: &Ctx, args: ExportArgs) -> Result<(), CliError> {
+    let engine = ctx.reader().await?;
+    if let Some(path) = args.import {
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| CliError::usage(format!("could not read {}: {e}", path.display())))?;
+        let parsed: lessdugin_core::engine::LocalExport = serde_json::from_str(&text)
+            .map_err(|e| CliError::usage(format!("{} is not an export: {e}", path.display())))?;
+        let scope = scope_of_export(args.scope);
+        let report = engine.import_local(&parsed, scope).await?;
+        if ctx.out.is_json() {
+            ctx.out.json(&report);
+        } else {
+            ctx.out.line(&[(
+                crate::out::tt(&format!(
+                    "Imported {} rows ({} out of scope, {} unreadable).",
+                    report.imported, report.out_of_scope, report.undecodable
+                )),
+                crate::out::Style::Plain,
+            )]);
+        }
+        return Ok(());
+    }
+    let scope = scope_of_export(args.scope);
+    let x = engine.export_local(scope).await?;
+    match args.out {
+        Some(path) => {
+            let text = serde_json::to_string_pretty(&x)
+                .map_err(|e| CliError::usage(format!("could not serialise the export: {e}")))?;
+            std::fs::write(&path, text)
+                .map_err(|e| CliError::usage(format!("could not write {}: {e}", path.display())))?;
+            if !ctx.out.is_quiet() {
+                ctx.out.line(&[(
+                    crate::out::tt(&format!(
+                        "Wrote {} rows to {}.",
+                        x.members.len(),
+                        path.display()
+                    )),
+                    crate::out::Style::Plain,
+                )]);
+            }
+        }
+        None => ctx.out.json(&x),
+    }
+    Ok(())
+}
+
+fn scope_of_export(a: ExportScopeArg) -> lessdugin_core::engine::ExportScope {
+    match a {
+        ExportScopeArg::Mine => lessdugin_core::engine::ExportScope::Mine,
+        ExportScopeArg::Everything => lessdugin_core::engine::ExportScope::Everything,
+    }
 }

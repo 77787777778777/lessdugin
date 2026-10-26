@@ -17,6 +17,7 @@ mod error;
 mod events;
 mod forums;
 mod live;
+mod local;
 mod models;
 mod moderation;
 mod notify;
@@ -37,6 +38,7 @@ pub use config::{
 pub use error::{EngineError, ErrorCode};
 pub use events::{EventCallback, SubscriptionId};
 pub use live::LiveRound;
+pub use local::{EXPORT_VERSION, ExportMember, ExportScope, ImportReport, LocalExport};
 pub use syncing::ForumSyncOpts;
 
 use crate::dto::{ActorView, VerifyReport};

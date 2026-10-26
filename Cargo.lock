@@ -3088,6 +3088,7 @@ dependencies = [
 name = "lessdugin-core"
 version = "0.0.1"
 dependencies = [
+ "base64 0.22.1",
  "futures",
  "getrandom 0.4.3",
  "http",

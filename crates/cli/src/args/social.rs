@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Arguments of the M3 social commands (`docs/design/synthesis-v1.md` §6.10): opinions
+//! Arguments of the M3 social commands and M4 `export` (`docs/design/synthesis-v1.md` §6.10): opinions
 //! (`vote`, `agree`, `react`), `notifications`, `activity`, `mods`, `mod`.
 //!
 //! References are the ones `refs` resolves (`3`, `c12`, an at-uri, an SPA link,
@@ -393,4 +393,28 @@ pub fn stance_of(against: bool) -> Stance {
     } else {
         Stance::For
     }
+}
+
+/// Which local state `export` covers.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+pub enum ExportScopeArg {
+    /// Your own state (the default, `threat-model.md` PRIV-8).
+    #[default]
+    Mine,
+    /// Every account on this device.
+    Everything,
+}
+
+/// `export`: write this device's local state as JSON.
+#[derive(Debug, Args)]
+pub struct ExportArgs {
+    /// What to export.
+    #[arg(long, value_enum, default_value_t = ExportScopeArg::Mine)]
+    pub scope: ExportScopeArg,
+    /// Write to this file instead of stdout.
+    #[arg(long, short = 'o', value_name = "PATH")]
+    pub out: Option<std::path::PathBuf>,
+    /// Import instead: merge a file written by `export` back into this device.
+    #[arg(long, value_name = "PATH", conflicts_with_all = ["scope", "out"])]
+    pub import: Option<std::path::PathBuf>,
 }

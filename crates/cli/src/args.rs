@@ -142,6 +142,8 @@ pub enum Command {
     Reacts,
     /// Your notifications (computed locally; --mark-read marks them read).
     Notifications(NotificationsArgs),
+    /// Export this device's local state as JSON (or --import it back).
+    Export(ExportArgs),
     /// Recent Discussion: the posts with the newest comments.
     Activity(ActivityArgs),
     /// Moderators: add, rm (a removal adopts their assertions first).

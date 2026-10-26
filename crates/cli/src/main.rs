@@ -49,6 +49,7 @@ async fn run(ctx: &Ctx, command: Command) -> Result<(), CliError> {
         Command::React(a) => cmd::social::react(ctx, a).await,
         Command::Reacts => cmd::social::reacts(ctx).await,
         Command::Notifications(a) => cmd::social::notifications(ctx, a).await,
+        Command::Export(a) => cmd::social::export(ctx, a).await,
         Command::Activity(a) => cmd::social::activity(ctx, a).await,
         Command::Mods(a) => cmd::social::mods(ctx, a).await,
         Command::Mod(a) => cmd::social::run(ctx, a).await,
