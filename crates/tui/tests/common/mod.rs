@@ -72,6 +72,8 @@ pub struct World {
     pub alice: User,
     pub bob: User,
     pub carol: User,
+    /// The shared fake network (fault injection).
+    pub net: FakeNet,
 }
 
 impl World {
@@ -93,6 +95,7 @@ impl World {
             alice: User::new(&net, ha, "alice.example.com", config.clone()),
             bob: User::new(&net, hb, "bob.example.com", config.clone()),
             carol: User::new(&net, hc, "carol.example.com", config),
+            net: net.clone(),
         }
     }
 

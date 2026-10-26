@@ -3,27 +3,27 @@ source: crates/tui/tests/screens.rs
 assertion_line: 86
 expression: help
 ---
- lessdugin › Meta › Welcome                                  @carol.example.com
- Meta · ┌ Keys ────────────────────────────────────────────────────────┐
-▌ Welcom│Navigation                                                    │
-▌ @alice│  j k  Down Up    next / previous                             │
-▌       │  g G             first / last                                │
-▌ Hello │  Ctrl-d Ctrl-u   half a page down / up                       │
-▌       │  Enter l         open                                        │
-▌ ## Rul│  h Esc q         back (q on the home screen quits)           │
-▌       │Threads                                                       │
-▌ • Be k│  Space           collapse / expand replies                   │
-▌ • Stay│  p               parent comment                              │
-▌       │  r               reply in $EDITOR                            │
-▌ lessdu│  c               comment on the post in $EDITOR              │
-        │Forums                                                        │
-  1 comm│  s               sort: magic, top, new, old                  │
+ lessdug┌ Keys ────────────────────────────────────────────────────────┐ple.com
+ Meta · │Navigation                                                    │
+▌ Welcom│  j k  Down Up    next / previous                             │
+▌ @alice│  g G             first / last                                │
+▌       │  Ctrl-d Ctrl-u   half a page down / up                       │
+▌ Hello │  Enter l         open                                        │
+▌       │  h Esc q         back (q on the home screen quits)           │
+▌ ## Rul│Threads                                                       │
+▌       │  Space           collapse / expand replies                   │
+▌ • Be k│  p               parent comment                              │
+▌ • Stay│  r               reply in $EDITOR                            │
+▌       │  c               comment on the post in $EDITOR              │
+▌ lessdu│Forums                                                        │
+        │  s               sort: magic, top, new, old                  │
+  1 comm│  Tab             posts / activity                            │
         │  P               new post in $EDITOR                         │
   @bob.e│  R               sync and show new items                     │
-    Than│Other                                                         │
-        │  ?               this help                                   │
-    It l│  Ctrl-c          quit                                        │
-        │                                                              │
-        │Any key closes this help.                                     │
-        └──────────────────────────────────────────────────────────────┘
- r reply · c comment · Space fold · p parent · R sync · ? help · h back
+    Than│Opinions                                                      │
+        │  u U             upvote / strong upvote                      │
+    It l│  d D             downvote / strong downvote                  │
+        │  a A             agree / strongly agree                      │
+        │  z Z             disagree / strongly disagree                │
+        │  0               clear your votes on the item                │
+ r reply└ 1-22 of 33 ──────────────────────────────────────────────────┘

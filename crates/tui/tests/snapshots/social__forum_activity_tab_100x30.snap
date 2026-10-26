@@ -1,0 +1,35 @@
+---
+source: crates/tui/tests/social.rs
+assertion_line: 699
+expression: t.render()
+---
+ lessdugin › Meta                                                                @carol.example.com
+  posts  activity  sort:  magic  top  new  old   filter: frontpage  synced 08:59 UTC
+▌ Hello from bob
+▌ @bob.example.com · 2025-10-09 08:56 UTC · 1 comment · 1 point
+▌   @carol.example.com 08:58 UTC  Nice first post, bob.
+  Welcome
+  @alice.example.com · 2025-10-09 08:54 UTC · 1 comment · 1 point
+    @bob.example.com 08:57 UTC  Thanks for the forum!
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ Enter open · s sort · P post · R sync · ? help · h back

@@ -14,8 +14,8 @@ use ratatui::text::Line;
 
 use crate::app::ThreadData;
 use crate::text::{
-    TermText, actor, badges, count, joined, line, lit, pad, points, post_meta, post_title,
-    state_label, time, tt,
+    TermText, actor, badges, banner_lines, count, joined, line, lit, pad, post_meta, post_title,
+    react_lines, score_parts, state_label, time, tt,
 };
 
 /// The selection gutter, in columns.
@@ -124,6 +124,14 @@ pub fn layout(data: &ThreadData, collapsed: &BTreeSet<String>, width: u16) -> La
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut items = Vec::new();
 
+    // the forum's banners (moderationUnavailable, newerRules)
+    for b in banner_lines(&data.view.banners) {
+        lines.push(line([(
+            b,
+            Style::default().fg(ratatui::style::Color::Yellow),
+        )]));
+    }
+
     // the post
     let start = lines.len();
     match &data.view.post {
@@ -149,6 +157,16 @@ pub fn layout(data: &ThreadData, collapsed: &BTreeSet<String>, width: u16) -> La
                 if !body_lines.is_empty() {
                     lines.push(Line::default());
                     lines.extend(body_lines);
+                }
+            }
+            // the react tallies under the post (social.md §9.2: "anchored reacts are listed
+            // under the item")
+            if matches!(
+                p.post.state,
+                ItemState::Visible | ItemState::Collapsed { .. }
+            ) {
+                for t in react_lines(&p.reacts, 0, &handles) {
+                    lines.push(line([(t, dim())]));
                 }
             }
         }
@@ -208,6 +226,12 @@ pub fn layout(data: &ThreadData, collapsed: &BTreeSet<String>, width: u16) -> La
             let w = text_w.saturating_sub(indent + 2).min(MAX_BODY);
             lines.extend(body.lines(w, indent + 2, &handles));
         }
+        // the react tallies under the comment (social.md §9.2)
+        if matches!(c.state, ItemState::Visible | ItemState::Collapsed { .. }) && !c.missing {
+            for t in react_lines(&c.reacts, indent + 2, &handles) {
+                lines.push(line([(t, dim())]));
+            }
+        }
         items.push(ItemSpan {
             uri: c.uri.clone(),
             start,
@@ -232,11 +256,8 @@ fn comment_header(c: &CommentNode, indent: usize, folded: Option<usize>) -> Line
         return line(parts);
     }
     parts.push((actor(&c.author), bold()));
-    let mut meta = vec![
-        TermText::empty(),
-        tt(&time(c.created_at_ms)),
-        points(&c.score),
-    ];
+    let mut meta = vec![TermText::empty(), tt(&time(c.created_at_ms))];
+    meta.extend(score_parts(&c.score));
     if c.retracted {
         meta.push(lit("retracted"));
     }

@@ -1,0 +1,34 @@
+---
+source: crates/tui/tests/social.rs
+expression: t.render()
+---
+ lessdugin › React forum › Bob's post                                            @carol.example.com
+ React forum · synced
+▌ Bob's post
+▌ @bob.example.com · 2025-10-09 09:01 UTC · 0 comments · 1 point
+▌
+▌ Bob writes.               ┌ Mod ─────────────────────────────────────┐
+                            │Moderate · Enter run · Esc close          │
+  No comments yet.          │hide this item                            │
+                            │hide as spam                              │
+                            │unhide (keep)                             │
+                            │ban the author                            │
+                            │unban the author                          │
+                            │pin in the forum                          │
+                            │unpin                                     │
+                            │lock                                      │
+                            │unlock                                    │
+                            │tier: personal                            │
+                            │tier: frontpage                           │
+                            │restrict the author (posting)             │
+                            │nullify the author's votes                │
+                            │unrestrict                                │
+                            │mod queue                                 │
+                            │mod log                                   │
+                            └ 1-16 of 16 ──────────────────────────────┘
+
+
+
+
+
+ r reply · c comment · Space fold · p parent · R sync · ? help · h back

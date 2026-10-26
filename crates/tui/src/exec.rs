@@ -11,13 +11,14 @@ use std::collections::BTreeMap;
 
 use lessdugin_atp::syntax::AtUri;
 use lessdugin_core::dto::{
-    ActorView, ListPostsQuery, PostFilter, PostSort, SyncOpts, ThreadOpts, ThreadRoot,
+    ActorView, ListPostsQuery, NotificationsQuery, PostFilter, PostSort, SyncOpts, ThreadOpts,
+    ThreadRoot,
 };
 use lessdugin_core::engine::{Engine, EngineError};
 use lessdugin_core::host::Host;
 use lessdugin_core::store::records::RecordStore;
 
-use crate::app::{Action, Effect, ForumData, HomeData, SyncTarget, ThreadData};
+use crate::app::{Action, ActivityData, Effect, ForumData, HomeData, SyncTarget, ThreadData};
 use crate::body::Body;
 
 /// How many queued handle verifications a load runs before showing a view (as the CLI).
@@ -30,6 +31,16 @@ pub const LIST_LIMIT: u32 = 200;
 /// the SPA's page size. The Forum screen lists up to [`LIST_LIMIT`]; its first posts are this
 /// page.
 pub const PARITY_LIST_LIMIT: u32 = 30;
+
+/// The most mod-log entries the Mod screen lists (`mod_log` pages; the first page is enough
+/// for the MVP).
+pub const MOD_LOG_LIMIT: u32 = 100;
+
+/// The most notifications the Notifications screen lists.
+pub const NOTIF_LIMIT: u32 = 100;
+
+/// The most Recent Discussion items the Forum screen's Activity tab lists.
+pub const ACTIVITY_LIMIT: u32 = 50;
 
 /// The time budget of the syncs a screen runs when it opens (as the CLI's implicit syncs).
 pub const IMPLICIT_SYNC_MS: i64 = 20_000;
@@ -98,6 +109,93 @@ pub async fn run<H: Host>(engine: &Engine<H>, effect: Effect, opts: ExecOpts) ->
             },
             result: engine.publish(&draft).await,
         },
+        Effect::Opinion {
+            subject,
+            intent,
+            forum,
+            screen,
+            label,
+        } => Action::OpinionDone {
+            forum,
+            screen,
+            label,
+            result: engine.opinion(&subject, &intent).await,
+        },
+        Effect::Undo { id, screen } => Action::Undone {
+            screen,
+            result: engine.undo(&id).await,
+        },
+        Effect::Grant {
+            forum,
+            actors,
+            screen,
+        } => Action::Granted {
+            screen,
+            result: engine.grant(&forum, &actors).await,
+        },
+        Effect::ModsSet {
+            forum,
+            change,
+            screen,
+        } => Action::ModsSetDone {
+            screen,
+            result: engine.mods_set(&forum, &change).await,
+        },
+        Effect::ModAction {
+            intent,
+            forum,
+            screen,
+        } => Action::ModActionDone {
+            forum,
+            screen,
+            result: engine.mod_action(&intent).await,
+        },
+        Effect::LoadQueue {
+            screen,
+            forum,
+            origin,
+        } => Action::QueueLoaded {
+            screen,
+            origin,
+            result: engine.mod_queue(&forum).await,
+        },
+        Effect::LoadLog {
+            screen,
+            forum,
+            origin,
+        } => Action::LogLoaded {
+            screen,
+            origin,
+            result: engine.mod_log(&forum, None, MOD_LOG_LIMIT).await,
+        },
+        Effect::LoadActivity {
+            screen,
+            forum,
+            origin,
+        } => Action::ActivityLoaded {
+            screen,
+            origin,
+            result: load_activity(engine, &forum, opts).await.map(Box::new),
+        },
+        Effect::LoadNotifications {
+            screen,
+            all,
+            origin,
+        } => Action::NotificationsLoaded {
+            screen,
+            origin,
+            result: engine
+                .notifications(&NotificationsQuery {
+                    all,
+                    limit: NOTIF_LIMIT,
+                })
+                .await,
+        },
+        Effect::MarkRead { ids, screen } => Action::MarkedRead {
+            screen,
+            result: engine.mark_notifications_read(&ids).await,
+        },
+        Effect::LoadUnread => Action::UnreadLoaded(engine.unread_counts().await),
         Effect::LoadWrites => Action::WritesLoaded(engine.writes().await),
         Effect::Editor(_) | Effect::Quit => return None,
     })
@@ -139,6 +237,39 @@ pub async fn load_forum<H: Host>(
         list = engine.list_posts(&q).await?;
     }
     Ok(ForumData { view, list })
+}
+
+/// `recent_discussion(forum, None, ACTIVITY_LIMIT)` and the bodies of the comments it shows
+/// (`social.md` §12.5; the Forum screen's Activity tab, `synthesis-v1.md` §6.11).
+pub async fn load_activity<H: Host>(
+    engine: &Engine<H>,
+    forum: &str,
+    opts: ExecOpts,
+) -> Result<ActivityData, EngineError> {
+    let mut list = engine
+        .recent_discussion(forum, None, ACTIVITY_LIMIT)
+        .await?;
+    let actors: Vec<&ActorView> = list
+        .items
+        .iter()
+        .flat_map(|i| std::iter::once(&i.post.author).chain(i.comments.iter().map(|c| &c.author)))
+        .collect();
+    if !opts.offline
+        && unverified(actors.into_iter())
+        && engine.verify_handles(VERIFY_HANDLES).await > 0
+    {
+        list = engine
+            .recent_discussion(forum, None, ACTIVITY_LIMIT)
+            .await?;
+    }
+    let mut bodies = BTreeMap::new();
+    for item in &list.items {
+        for c in &item.comments {
+            let b = body(engine, &c.uri, &c.cid, &c.body).await;
+            bodies.insert(c.uri.clone(), b);
+        }
+    }
+    Ok(ActivityData { list, bodies })
 }
 
 /// The query of the Forum screen: the M3 defaults (`magic` over `frontpage`,

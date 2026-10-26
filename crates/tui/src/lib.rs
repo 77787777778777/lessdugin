@@ -23,6 +23,7 @@
 
 pub mod app;
 pub mod body;
+pub mod command;
 pub mod editor;
 pub mod exec;
 pub mod headless;
@@ -32,7 +33,7 @@ pub mod text;
 pub mod thread;
 pub mod view;
 
-pub use app::{Action, Effect, State};
+pub use app::{Action, ActivityData, Effect, ForumScreen, ForumTab, State};
 pub use editor::EditorConfig;
 pub use headless::{CaptureOpts, Headless, HeadlessOpts, ThreadCapture, capture_thread};
 pub use runtime::{Options, Report, run};

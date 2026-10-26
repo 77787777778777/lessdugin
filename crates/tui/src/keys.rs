@@ -4,6 +4,29 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
+/// One opinion key's meaning (`synthesis-v1.md` §6.11 "Opinions").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Op {
+    /// `u`.
+    Up,
+    /// `U`.
+    StrongUp,
+    /// `d`.
+    Down,
+    /// `D`.
+    StrongDown,
+    /// `a`.
+    Agree,
+    /// `A`.
+    StrongAgree,
+    /// `z`.
+    Disagree,
+    /// `Z`.
+    StrongDisagree,
+    /// `0`.
+    Clear,
+}
+
 /// A command, independent of the key that gave it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Cmd {
@@ -41,8 +64,27 @@ pub enum Cmd {
     Sync,
     /// `s`: next sort.
     Sort,
+    /// `u`, `U`, `d`, `D`, `a`, `A`, `z`, `Z`, `0`: an opinion on the selected item.
+    Opinion(Op),
+    /// `Backspace`: undo the pending write (the 4 s undo window).
+    Undo,
+    /// `x`: open the react palette on the selected item.
+    ReactPalette,
+    /// `Tab` (inside the react palette): switch the stance.
+    Stance,
+    /// `m`: open the mod menu on the selected item (or its author).
+    ModMenu,
+    /// `N`: open the Notifications screen (`synthesis-v1.md` §6.11 lists it; `n`/`N` are
+    /// reserved for search matches there, and search is not built yet).
+    Notifications,
+    /// `M` (on the Notifications screen): mark every listed notification read.
+    MarkAllRead,
+    /// `a` (on the Notifications screen): toggle unread-only / all.
+    ToggleAll,
     /// `?`: help.
     Help,
+    /// `:`: the command line overlay (`synthesis-v1.md` §6.11 Overlays).
+    Command,
 }
 
 /// The command of a key press, if any (key releases and repeats on some platforms are ignored).
@@ -63,7 +105,6 @@ pub fn command(k: &KeyEvent) -> Option<Cmd> {
         KeyCode::PageDown => Cmd::HalfDown,
         KeyCode::PageUp => Cmd::HalfUp,
         KeyCode::Enter | KeyCode::Char('l') | KeyCode::Right => Cmd::Open,
-        // Backspace is kept free: synthesis §6.11 gives it to undoing the pending write (M3).
         KeyCode::Char('h') | KeyCode::Left | KeyCode::Esc => Cmd::Back,
         KeyCode::Char('q') => Cmd::BackOrQuit,
         KeyCode::Char(' ') => Cmd::Collapse,
@@ -73,7 +114,23 @@ pub fn command(k: &KeyEvent) -> Option<Cmd> {
         KeyCode::Char('P') => Cmd::NewPost,
         KeyCode::Char('R') => Cmd::Sync,
         KeyCode::Char('s') => Cmd::Sort,
+        KeyCode::Char('u') => Cmd::Opinion(Op::Up),
+        KeyCode::Char('U') => Cmd::Opinion(Op::StrongUp),
+        KeyCode::Char('d') => Cmd::Opinion(Op::Down),
+        KeyCode::Char('D') => Cmd::Opinion(Op::StrongDown),
+        KeyCode::Char('a') => Cmd::Opinion(Op::Agree),
+        KeyCode::Char('A') => Cmd::Opinion(Op::StrongAgree),
+        KeyCode::Char('z') => Cmd::Opinion(Op::Disagree),
+        KeyCode::Char('Z') => Cmd::Opinion(Op::StrongDisagree),
+        KeyCode::Char('0') => Cmd::Opinion(Op::Clear),
+        KeyCode::Backspace => Cmd::Undo,
+        KeyCode::Char('x') => Cmd::ReactPalette,
+        KeyCode::Tab => Cmd::Stance,
+        KeyCode::Char('m') => Cmd::ModMenu,
+        KeyCode::Char('N') => Cmd::Notifications,
+        KeyCode::Char('M') => Cmd::MarkAllRead,
         KeyCode::Char('?') => Cmd::Help,
+        KeyCode::Char(':') => Cmd::Command,
         _ => return None,
     })
 }
@@ -145,11 +202,34 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
         "Forums",
         &[
             ("s", "sort: magic, top, new, old"),
+            ("Tab", "posts / activity"),
             ("P", "new post in $EDITOR"),
             ("R", "sync and show new items"),
         ],
     ),
-    ("Other", &[("?", "this help"), ("Ctrl-c", "quit")]),
+    (
+        "Opinions",
+        &[
+            ("u U", "upvote / strong upvote"),
+            ("d D", "downvote / strong downvote"),
+            ("a A", "agree / strongly agree"),
+            ("z Z", "disagree / strongly disagree"),
+            ("0", "clear your votes on the item"),
+            ("x", "react palette (Tab: for/against)"),
+            ("Backspace", "undo the pending write (4 s window)"),
+        ],
+    ),
+    (
+        "Other",
+        &[
+            ("m", "mod menu (queue, log, actions)"),
+            (":", "command line (any M3 verb; : help)"),
+            ("N", "notifications"),
+            ("M", "mark all notifications read"),
+            ("?", "this help"),
+            ("Ctrl-c", "quit"),
+        ],
+    ),
 ];
 
 #[cfg(test)]
@@ -167,10 +247,25 @@ mod tests {
         assert_eq!(c("R"), Some(Cmd::Sync));
         assert_eq!(c("Space"), Some(Cmd::Collapse));
         assert_eq!(c("Esc"), Some(Cmd::Back));
-        // reserved for undoing the pending write (synthesis §6.11, M3)
-        assert_eq!(c("Backspace"), None);
+        // the M3 opinion keys (synthesis §6.11)
+        assert_eq!(c("u"), Some(Cmd::Opinion(Op::Up)));
+        assert_eq!(c("U"), Some(Cmd::Opinion(Op::StrongUp)));
+        assert_eq!(c("d"), Some(Cmd::Opinion(Op::Down)));
+        assert_eq!(c("D"), Some(Cmd::Opinion(Op::StrongDown)));
+        assert_eq!(c("a"), Some(Cmd::Opinion(Op::Agree)));
+        assert_eq!(c("A"), Some(Cmd::Opinion(Op::StrongAgree)));
+        assert_eq!(c("z"), Some(Cmd::Opinion(Op::Disagree)));
+        assert_eq!(c("Z"), Some(Cmd::Opinion(Op::StrongDisagree)));
+        assert_eq!(c("0"), Some(Cmd::Opinion(Op::Clear)));
+        assert_eq!(c("Backspace"), Some(Cmd::Undo));
+        assert_eq!(c("x"), Some(Cmd::ReactPalette));
+        assert_eq!(c("Tab"), Some(Cmd::Stance));
+        assert_eq!(c("m"), Some(Cmd::ModMenu));
+        assert_eq!(c("N"), Some(Cmd::Notifications));
+        assert_eq!(c("M"), Some(Cmd::MarkAllRead));
+        // the `:` command line (synthesis §6.11 Overlays)
+        assert_eq!(c(":"), Some(Cmd::Command));
         assert_eq!(c("Ctrl-x"), None);
-        assert_eq!(c("x"), None);
         assert!(parse_key("Ctrl-").is_none());
     }
 }

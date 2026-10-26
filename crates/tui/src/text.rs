@@ -7,9 +7,11 @@
 //! [`crate::body`] for the LFM/1 printer's output, which is itself made of `TermText` runs and
 //! checked before use. Nothing relies on ratatui to filter control characters.
 
+use std::collections::BTreeMap;
+
 use lessdugin_core::dto::{
-    ActorView, Badges, CollapseReason, HandleState, HiddenReason, ItemState, PostKind, PostSummary,
-    ScoreView,
+    ActorView, AgreementValue, Badges, Banner, CollapseReason, HandleState, HiddenReason,
+    ItemState, KarmaValue, PostKind, PostSummary, ReactTally, ScoreView, Stance,
 };
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -168,6 +170,15 @@ pub fn actor(a: &ActorView) -> TermText {
     }
 }
 
+/// The forum's banners (`social.md` §1.6, §4.11; `moderationUnavailable`, `newerRules`), one
+/// line each. Rendered on the forum/list/thread screens (`synthesis-v1.md` §6.11).
+pub fn banner_lines(banners: &[Banner]) -> Vec<TermText> {
+    banners
+        .iter()
+        .map(|b| cat([lit("! "), tt(&b.message)]))
+        .collect()
+}
+
 fn hidden_reason(r: &HiddenReason) -> TermText {
     match r {
         HiddenReason::NotParticipant => lit("not a participant"),
@@ -242,6 +253,251 @@ pub fn points(s: &ScoreView) -> TermText {
     ])
 }
 
+/// `agreement +n` / `-n` (only when the forum has an agreement axis and it moved; a zero
+/// agreement would only bloat every meta line).
+pub fn agreement(s: &ScoreView) -> Option<TermText> {
+    let n = s.agreement?;
+    if n == 0 {
+        return None;
+    }
+    Some(cat([lit("agreement "), tt(&format!("{:+}", n))]))
+}
+
+/// The viewer's own vote as one word (`your: up`, `your: strong agree`).
+fn own_word(mine: &lessdugin_core::dto::MyOpinion) -> Vec<TermText> {
+    let mut v = Vec::new();
+    if let Some(k) = &mine.karma {
+        v.push(lit(match k {
+            KarmaValue::Up => "up",
+            KarmaValue::StrongUp => "strong up",
+            KarmaValue::Down => "down",
+            KarmaValue::StrongDown => "strong down",
+        }));
+    }
+    if let Some(a) = &mine.agreement {
+        if !v.is_empty() {
+            v.push(lit(", "));
+        }
+        v.push(lit(match a {
+            AgreementValue::Agree => "agree",
+            AgreementValue::StrongAgree => "strong agree",
+            AgreementValue::Disagree => "disagree",
+            AgreementValue::StrongDisagree => "strong disagree",
+        }));
+    }
+    v
+}
+
+/// The viewer's own vote with its pending/not-established markers (`social.md` §7,
+/// `engine-api.md` §3.5): `your: up [pending]` / `your: up (not counted yet)`.
+pub fn mine(m: &lessdugin_core::dto::MyOpinion) -> Option<TermText> {
+    let words = own_word(m);
+    if words.is_empty() && !m.pending {
+        return None;
+    }
+    let mut parts = vec![lit("your:")];
+    if !words.is_empty() {
+        parts.push(lit(" "));
+        parts.extend(words);
+    }
+    if m.pending {
+        parts.push(lit(" [pending]"));
+    } else if m.not_yet_counted {
+        parts.push(lit(" (not counted yet)"));
+    }
+    Some(cat(parts))
+}
+
+/// The score's auxiliary counts (`social.md` §7): "n votes not yet counted" (`unweighted`) and
+/// "N of M votes were cast on an earlier version".
+pub fn score_notes(s: &ScoreView) -> Vec<TermText> {
+    let mut v = Vec::new();
+    if s.unweighted > 0 {
+        v.push(cat([
+            count(s.unweighted, "vote", "votes"),
+            lit(" not yet counted"),
+        ]));
+    }
+    if s.earlier_version_votes > 0 {
+        v.push(cat([tt(&format!(
+            "{} of {} votes were cast on an earlier version",
+            s.earlier_version_votes, s.weighted_votes
+        ))]));
+    }
+    v
+}
+
+/// Every part of an item's score for a meta line: the points, agreement, the auxiliary
+/// counts and the viewer's own vote (with its markers).
+pub fn score_parts(s: &ScoreView) -> Vec<TermText> {
+    let mut v = vec![points(s)];
+    if let Some(a) = agreement(s) {
+        v.push(a);
+    }
+    v.extend(score_notes(s));
+    if let Some(m) = s.mine.as_ref().and_then(mine) {
+        v.push(m);
+    }
+    v
+}
+
+/// The creator's name: their verified handle (`@h`) when `handles` has one, else their short
+/// DID (as [`actor`] shows an actor without a handle).
+fn tally_author(creator: &str, handles: &BTreeMap<String, String>) -> TermText {
+    match handles.get(creator) {
+        Some(h) => cat([lit("@"), name(h)]),
+        None => tt(&lessdugin_core::identity::short_did(creator)),
+    }
+}
+
+/// One react tally as it is listed under its item (`social.md` §9.2): the glyph and label, who
+/// created it, how many seconded it, how many are against, the viewer's stance, and whether the
+/// viewer's own react forms no valid tally (`uncounted`). `handles` maps the thread's DIDs to
+/// their verified handles.
+pub fn react_line(t: &ReactTally, handles: &BTreeMap<String, String>) -> TermText {
+    let mut parts = vec![tt(&t.glyph), lit(" "), name(&t.label)];
+    if let Some(c) = &t.creator {
+        parts.push(lit(" by "));
+        parts.push(tally_author(c, handles));
+    }
+    let seconded = t.for_count.saturating_sub(1);
+    if seconded > 0 {
+        parts.push(cat([
+            lit(", +"),
+            tt(&seconded.to_string()),
+            lit(" seconded"),
+        ]));
+    }
+    if t.against > 0 {
+        parts.push(cat([
+            lit(", "),
+            tt(&t.against.to_string()),
+            lit(" against"),
+        ]));
+    }
+    if let Some(quote) = &t.quote {
+        parts.push(cat([
+            lit(" on "),
+            tt("\u{201c}"),
+            tt(&quote.exact),
+            tt("\u{201d}"),
+        ]));
+        if matches!(t.anchor, Some(lessdugin_core::dto::Anchor::Orphan { .. })) {
+            parts.push(lit(" (quoted text no longer present)"));
+        }
+    }
+    match &t.mine {
+        Some(Stance::For) => parts.push(lit(" [yours]")),
+        Some(Stance::Against) => parts.push(lit(" [yours, against]")),
+        None => {}
+    }
+    if t.uncounted {
+        parts.push(lit(" (not counted)"));
+    }
+    cat(parts)
+}
+
+/// The item's react tallies as lines under it (`social.md` §9.2: "anchored reacts are listed
+/// under the item"), `indent` columns in.
+pub fn react_lines(
+    reacts: &[ReactTally],
+    indent: usize,
+    handles: &BTreeMap<String, String>,
+) -> Vec<TermText> {
+    reacts
+        .iter()
+        .map(|t| cat([pad(indent), react_line(t, handles)]))
+        .collect()
+}
+
+/// One notification row (`social.md` §16): the reason kind, who, a preview, the time, and an
+/// unread mark.
+pub fn notification_line(n: &lessdugin_core::dto::NotificationView) -> TermText {
+    use lessdugin_core::dto::NotificationReason;
+    let reason = match n.reason {
+        NotificationReason::Reply => "reply",
+        NotificationReason::Mention => "mention",
+        NotificationReason::Quote => "quote",
+        NotificationReason::Pingback => "pingback",
+        NotificationReason::NewComment => "new comment",
+        NotificationReason::NewPost => "new post",
+        NotificationReason::Reacted => "reacted",
+        NotificationReason::ModAction => "mod action",
+        NotificationReason::KarmaChange => "karma",
+    };
+    let mut parts = vec![lit(if n.read { "  " } else { "* " }), tt(reason), lit("  ")];
+    if let Some(a) = &n.actor {
+        parts.push(actor(a));
+        parts.push(lit("  "));
+    }
+    if let Some(p) = &n.preview {
+        parts.push(tt(p));
+        parts.push(lit("  "));
+    }
+    parts.push(tt(&time(n.at_ms)));
+    cat(parts)
+}
+
+/// One mod-queue row (`social.md` §4.12): its kind, subject, reason and actor.
+pub fn mod_queue_item(i: &lessdugin_core::dto::ModQueueItem) -> TermText {
+    let mut parts = vec![tt(&i.item_kind), lit("  ")];
+    match &i.actor {
+        Some(a) => parts.push(actor(a)),
+        None => parts.push(tt(&i.subject)),
+    }
+    parts.push(lit("  "));
+    parts.push(tt(&i.reason));
+    if let Some(d) = &i.detail {
+        parts.push(cat([lit("  ("), tt(d), lit(")")]));
+    }
+    if let Some(at) = i.at_ms {
+        parts.push(cat([lit("  "), tt(&time(at))]));
+    }
+    cat(parts)
+}
+
+/// One mod-log row (`social.md` §4.12): the action and value, who asserted it, the status
+/// (`effective`, `overridden`, `lapsed`, …) and the winning rank of an override.
+pub fn mod_log_entry(e: &lessdugin_core::dto::ModLogEntry) -> TermText {
+    use lessdugin_core::dto::ModLogStatus;
+    let mut parts = vec![
+        tt(&time(e.at_ms)),
+        lit("  "),
+        actor(&e.actor),
+        lit("  "),
+        tt(&e.action),
+        lit(" "),
+        tt(&e.value),
+    ];
+    if e.author_scope {
+        parts.push(lit(" [author scope]"));
+    }
+    let status = match e.status {
+        ModLogStatus::Effective => None,
+        ModLogStatus::Overridden => match e.rank {
+            Some(r) => Some(format!("overridden (rank {r})")),
+            None => Some("overridden".into()),
+        },
+        ModLogStatus::Lapsed => Some("lapsed".into()),
+        ModLogStatus::Expired => Some("expired".into()),
+        ModLogStatus::Stale => Some("stale".into()),
+        ModLogStatus::Unauthorised => Some("unauthorised".into()),
+        ModLogStatus::ReservedUnknown => Some("reserved".into()),
+        ModLogStatus::Edited => Some("edited".into()),
+        ModLogStatus::Removed => Some("removed".into()),
+    };
+    if let Some(s) = status {
+        parts.push(cat([lit("  "), tt(&format!("[{s}]"))]));
+    }
+    if let Some(r) = &e.reason {
+        parts.push(cat([lit("  "), tt("\u{201c}"), tt(r), tt("\u{201d}")]));
+    }
+    if let Some(a) = &e.adopted_from {
+        parts.push(cat([lit("  (adopts "), tt(a), lit(")")]));
+    }
+    cat(parts)
+}
+
 /// A post's title: `[deleted]`/`[hidden]`, the title, or the first line of the excerpt.
 pub fn post_title(p: &PostSummary) -> TermText {
     match (&p.title, &p.state) {
@@ -259,19 +515,35 @@ pub fn post_title(p: &PostSummary) -> TermText {
     }
 }
 
-/// A post's meta line: author, time, comments, score, kind, tags, state and badges.
+/// A post's meta line: author, time, comments, score (with agreement, notes and the viewer's
+/// own vote), kind, badges (tier, pinned, locked, unread), tags, state and trust badges.
 pub fn post_meta(p: &PostSummary) -> Vec<TermText> {
     let mut parts = vec![
         actor(&p.author),
         tt(&time(p.created_at_ms)),
         count(p.comment_count, "comment", "comments"),
-        points(&p.score),
     ];
+    parts.extend(score_parts(&p.score));
     match p.post_kind {
         PostKind::Article => {}
         PostKind::Link => parts.push(lit("link")),
         PostKind::Question => parts.push(lit("question")),
         PostKind::QuickTake => parts.push(lit("quick take")),
+    }
+    match p.tier {
+        lessdugin_core::dto::Tier::Curated => parts.push(lit("curated")),
+        lessdugin_core::dto::Tier::Frontpage | lessdugin_core::dto::Tier::Personal => {}
+    }
+    if p.pinned {
+        parts.push(lit("pinned"));
+    }
+    if p.locked {
+        parts.push(lit("locked"));
+    }
+    if let Some(n) = p.unread_comments
+        && n > 0
+    {
+        parts.push(cat([count(n, "unread", "unread")]));
     }
     if !p.tags.is_empty() {
         parts.push(cat(p.tags.iter().enumerate().map(|(i, t)| {

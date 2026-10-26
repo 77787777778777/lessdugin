@@ -1,0 +1,29 @@
+---
+source: crates/tui/tests/social.rs
+assertion_line: 172
+expression: screen
+---
+ lessdugin › Degraded                                 not logged in (read-only)
+  posts  activity  1 of 2 repositories, moderation incomplete · sort:  magic  to
+  ! moderation data unavailable
+▌ Visible post
+▌ @alice.example.com · 2025-10-09 08:59 UTC · 0 comments · 1 point
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ Enter open · s sort · P post · R sync · ? help · h back

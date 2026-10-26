@@ -1,0 +1,28 @@
+---
+source: crates/tui/tests/social.rs
+expression: t.render()
+---
+ lessdugin › notifications                           [N 2] · @alice.example.com
+ Unread notifications · 2 unread
+▌ * reply  did:plc:ochphg43… (claims @bob.example.com, unverified)  Thanks for t
+  * reply  did:plc:2hjzbjve… (claims @carol.example.com, unverified)  Thanks @al
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ Enter open · M mark read · a all/unread · ? help · h back

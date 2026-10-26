@@ -6,7 +6,7 @@
 //! update), the content, and a status line (the last message, or the keys). Every string is a
 //! [`TermText`](crate::text::TermText) turned into spans by [`crate::text`].
 
-use lessdugin_core::dto::{ForumRole, MembershipMode, PostSort};
+use lessdugin_core::dto::{ForumRole, MembershipMode, PostSort, Stance};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout as Split, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -14,13 +14,13 @@ use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use crate::app::{
-    ForumScreen, HomeScreen, LIST_ROWS, Screen, ScreenKind, State, SyncStatus, ThreadScreen, Tone,
-    status_text,
+    ForumScreen, ForumTab, HomeScreen, LIST_ROWS, ModMenu, ModScreen, ModTab, NotificationsScreen,
+    Prompt, ReactOverlay, Screen, ScreenKind, State, SyncStatus, ThreadScreen, Tone, status_text,
 };
 use crate::keys::HELP;
 use crate::text::{
-    TermText, actor, cat, clock, joined, line, lit, name, pad, post_meta, post_title, spans, tt,
-    wrapped,
+    TermText, actor, banner_lines, cat, clock, count, joined, line, lit, mod_log_entry,
+    mod_queue_item, name, notification_line, pad, post_meta, post_title, spans, tt, wrapped,
 };
 
 fn dim() -> Style {
@@ -29,6 +29,12 @@ fn dim() -> Style {
 
 fn bold() -> Style {
     Style::default().add_modifier(Modifier::BOLD)
+}
+
+fn warn_style() -> Style {
+    Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD)
 }
 
 fn selected_gutter() -> Style {
@@ -67,8 +73,187 @@ pub fn draw(state: &State, f: &mut Frame<'_>) {
     }
     f.render_widget(Paragraph::new(status_lines(state)), status);
     if state.help {
-        help(f, area);
+        help(f, state, area);
     }
+    if let Some(o) = &state.react {
+        react_palette(f, o, area);
+    }
+    if let Some(m) = &state.mod_menu {
+        mod_menu(f, m, area);
+    }
+    if let Some(p) = &state.prompt {
+        prompt(f, p, area);
+    }
+    if let Some(c) = &state.command {
+        command_line(f, c, area);
+    }
+}
+
+/// The `m` mod menu overlay: the forum-tier actions of `ViewerCaps.moderate`/`rank` (plus the
+/// queue and log entries), one key per action with a reason prompt after it
+/// (`synthesis-v1.md` §6.11).
+fn mod_menu(f: &mut Frame<'_>, m: &ModMenu, area: Rect) {
+    let rows = usize::from(area.height.saturating_sub(6)).max(1);
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    lines.push(line([(
+        tt("Moderate \u{b7} Enter run \u{b7} Esc close"),
+        dim(),
+    )]));
+    for (i, e) in m.entries.iter().enumerate().skip(m.scroll).take(rows) {
+        let on = i == m.cursor;
+        lines.push(line([(
+            lit(e.label),
+            if on {
+                bold().fg(Color::Cyan)
+            } else {
+                Style::default()
+            },
+        )]));
+    }
+    let width = 44.min(area.width);
+    let height = u16::try_from(lines.len() + 2)
+        .unwrap_or(u16::MAX)
+        .min(area.height);
+    let x = area.x + (area.width - width) / 2;
+    let y = area.y + (area.height - height) / 2;
+    let r = Rect::new(x, y, width, height);
+    let shown_end = (m.scroll + rows).min(m.entries.len());
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(line([(lit(" Mod "), bold())]))
+        .title_bottom(line([(
+            tt(&format!(
+                " {}-{} of {} ",
+                m.scroll + 1,
+                shown_end,
+                m.entries.len()
+            )),
+            dim(),
+        )]));
+    f.render_widget(Clear, r);
+    f.render_widget(Paragraph::new(Text::from(lines)).block(block), r);
+}
+
+/// The `:` command line (`synthesis-v1.md` §6.11 Overlays): Enter runs, Esc closes, Tab
+/// completes. Drawn at the bottom above the status line, like vim's.
+fn command_line(f: &mut Frame<'_>, text: &str, area: Rect) {
+    let width = area.width;
+    let height = 1.min(area.height);
+    let y = area.y + area.height.saturating_sub(height);
+    let r = Rect::new(area.x, y, width, height);
+    let shown = fit_to(text, usize::from(width).saturating_sub(4));
+    f.render_widget(Clear, r);
+    f.render_widget(
+        Paragraph::new(line([
+            (lit(":"), bold()),
+            (tt(&shown), Style::default()),
+            (lit("_"), dim()),
+        ])),
+        r,
+    );
+}
+
+/// A one-line prompt (the mod action's optional reason): Enter runs the action, Esc cancels.
+fn prompt(f: &mut Frame<'_>, p: &Prompt, area: Rect) {
+    let width = 60.min(area.width);
+    let height = 3.min(area.height);
+    let x = area.x + (area.width - width) / 2;
+    let y = area.y + (area.height - height) / 2;
+    let r = Rect::new(x, y, width, height);
+    let inner = usize::from(width.saturating_sub(2));
+    let shown = fit_to(&p.text, inner.saturating_sub(1));
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(line([(tt(&format!(" {} ", p.label)), bold())]));
+    let text = cat([tt(&shown), lit("_")]);
+    f.render_widget(Clear, r);
+    f.render_widget(
+        Paragraph::new(line([(text, Style::default())])).block(block),
+        r,
+    );
+}
+
+/// The end of `s` that fits in `width` columns (the prompt shows the text around the cursor).
+fn fit_to(s: &str, width: usize) -> String {
+    let mut out = String::new();
+    let mut w = 0usize;
+    for ch in s.chars().rev() {
+        let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if w + cw > width {
+            break;
+        }
+        w += cw;
+        out.insert(0, ch);
+    }
+    out
+}
+
+/// The `x` react palette overlay (`synthesis-v1.md` §6.11, `social.md` §9): the forum's
+/// palette (the MVP's `default/1`), the for/against stance, and the tallies of the reacts the
+/// selected item already has.
+fn react_palette(f: &mut Frame<'_>, o: &ReactOverlay, area: Rect) {
+    let palette = lessdugin_core::model::palette::default_1();
+    let rows = usize::from(area.height.saturating_sub(4)).max(1);
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let stance = match o.stance {
+        Stance::For => "for",
+        Stance::Against => "against",
+    };
+    lines.push(line([(
+        tt(&format!(
+            "React {stance} \u{b7} Tab stance \u{b7} Enter pick \u{b7} Esc close"
+        )),
+        dim(),
+    )]));
+    for (i, r) in palette.iter().enumerate().skip(o.scroll).take(rows) {
+        let on = i == o.cursor;
+        let mut row = vec![
+            (tt(&r.glyph), Style::default()),
+            (lit(" "), Style::default()),
+            (name(&r.label), if on { bold() } else { Style::default() }),
+        ];
+        if let Some(t) = o.tallies.get(&r.id) {
+            let mut counts: Vec<TermText> = Vec::new();
+            if t.for_count > 0 {
+                counts.push(cat([count(t.for_count, "for", "for")]));
+            }
+            if t.against > 0 {
+                counts.push(cat([count(t.against, "against", "against")]));
+            }
+            match t.mine {
+                Some(Stance::For) => counts.push(lit("yours")),
+                Some(Stance::Against) => counts.push(lit("yours, against")),
+                None => {}
+            }
+            if t.uncounted {
+                counts.push(lit("not counted"));
+            }
+            row.push((cat([lit("  "), joined(counts)]), dim()));
+        }
+        lines.push(line(row));
+    }
+    let width = 52.min(area.width);
+    let height = u16::try_from(lines.len() + 2)
+        .unwrap_or(u16::MAX)
+        .min(area.height);
+    let x = area.x + (area.width - width) / 2;
+    let y = area.y + (area.height - height) / 2;
+    let r = Rect::new(x, y, width, height);
+    let shown_end = (o.scroll + rows).min(palette.len());
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(line([(lit(" React "), bold())]))
+        .title_bottom(line([(
+            tt(&format!(
+                " {}-{} of {} ",
+                o.scroll + 1,
+                shown_end,
+                palette.len()
+            )),
+            dim(),
+        )]));
+    f.render_widget(Clear, r);
+    f.render_widget(Paragraph::new(Text::from(lines)).block(block), r);
 }
 
 fn header_style() -> Style {
@@ -84,6 +269,8 @@ fn header_line(state: &State) -> Line<'static> {
             ScreenKind::Thread(t) => t
                 .post()
                 .map_or_else(|| lit("thread"), |p| post_title(&p.post)),
+            ScreenKind::Mod(_) => lit("moderation"),
+            ScreenKind::Notifications(_) => lit("notifications"),
         };
         crumbs.push(label);
     }
@@ -95,6 +282,16 @@ fn header_line(state: &State) -> Line<'static> {
         left.append(c);
     }
     let mut right = Vec::new();
+    // the notification badge (§6.11: Home shows it; the header carries it everywhere)
+    if let Some(u) = &state.unread
+        && u.notifications > 0
+    {
+        right.push(cat([
+            lit("[N "),
+            tt(&u.notifications.to_string()),
+            lit("]"),
+        ]));
+    }
     if state.offline {
         right.push(lit("offline"));
     }
@@ -205,15 +402,51 @@ fn info_line(state: &State, top: &Screen) -> Line<'static> {
     match &top.kind {
         ScreenKind::Home(_) => info.push(lit("Forums you follow")),
         ScreenKind::Forum(f) => {
-            let tabs = [
+            // Posts and Activity (synthesis-v1.md §6.11); the sort tabs belong to Posts
+            parts.push((lit(" "), dim()));
+            let tab = |parts: &mut Vec<(TermText, Style)>, on: bool, label: &'static str| {
+                parts.push((
+                    cat([lit(" "), lit(label), lit(" ")]),
+                    if on {
+                        Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
+                    } else {
+                        dim()
+                    },
+                ));
+            };
+            tab(&mut parts, f.tab == ForumTab::Posts, "posts");
+            tab(&mut parts, f.tab == ForumTab::Activity, "activity");
+            // the completeness marker goes before the sort chrome: it is the safety-critical
+            // text (moderation incomplete), and this line truncates at 80 columns. Losing a
+            // sort label costs a keystroke; losing this costs a reader the warning.
+            if let Some(d) = &f.data {
+                let c = &d.list.completeness;
+                if c.partial || c.degraded {
+                    parts.push((
+                        cat([
+                            lit(" "),
+                            tt(&format!("{} of {}", c.repos_complete, c.repos_total)),
+                            lit(" repositories"),
+                            lit(if c.degraded {
+                                ", moderation incomplete"
+                            } else {
+                                ""
+                            }),
+                            tt(" \u{b7}"),
+                        ]),
+                        warn_style(),
+                    ));
+                }
+            }
+            let sorts = [
                 (PostSort::Magic, "magic"),
                 (PostSort::Top, "top"),
                 (PostSort::New, "new"),
                 (PostSort::Old, "old"),
             ];
             parts.push((lit(" sort: "), dim()));
-            for (sort, label) in tabs {
-                let style = if f.sort == sort {
+            for (sort, label) in sorts {
+                let style = if f.sort == sort && f.tab == ForumTab::Posts {
                     Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
                 } else {
                     dim()
@@ -221,20 +454,6 @@ fn info_line(state: &State, top: &Screen) -> Line<'static> {
                 parts.push((cat([lit(" "), lit(label), lit(" ")]), style));
             }
             parts.push((lit("  filter: frontpage "), dim()));
-            if let Some(d) = &f.data {
-                let c = &d.list.completeness;
-                if c.partial || c.degraded {
-                    info.push(cat([
-                        tt(&format!("{} of {}", c.repos_complete, c.repos_total)),
-                        lit(" repositories"),
-                        lit(if c.degraded {
-                            ", moderation incomplete"
-                        } else {
-                            ""
-                        }),
-                    ]));
-                }
-            }
             if let Some(s) = sync_text(state.sync.get(&f.uri)) {
                 info.push(s);
             }
@@ -261,6 +480,32 @@ fn info_line(state: &State, top: &Screen) -> Line<'static> {
                 if let Some(s) = sync_text(state.sync.get(&p.post.forum)) {
                     info.push(s);
                 }
+            }
+        }
+        ScreenKind::Notifications(n) => {
+            info.push(lit(if n.all {
+                "All notifications"
+            } else {
+                "Unread notifications"
+            }));
+            if let Some(d) = &n.data {
+                info.push(cat([count(d.unread, "unread", "unread")]));
+            }
+        }
+        ScreenKind::Mod(m) => {
+            let tabs = [(ModTab::Queue, "queue"), (ModTab::Log, "log")];
+            parts.push((lit(" "), dim()));
+            for (tab, label) in tabs {
+                let style = if m.tab == tab {
+                    Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
+                } else {
+                    dim()
+                };
+                parts.push((cat([lit(" "), lit(label), lit(" ")]), style));
+            }
+            parts.push((lit("  Tab switch"), dim()));
+            if let Some(n) = forum_name(state, &m.forum) {
+                info.push(n);
             }
         }
     }
@@ -307,6 +552,12 @@ fn status_lines(state: &State) -> Text<'static> {
         Some(ScreenKind::Thread(_)) => {
             " r reply \u{b7} c comment \u{b7} Space fold \u{b7} p parent \u{b7} R sync \u{b7} ? help \u{b7} h back"
         }
+        Some(ScreenKind::Mod(_)) => {
+            " Enter approve \u{b7} Tab queue/log \u{b7} R sync \u{b7} ? help \u{b7} h back"
+        }
+        Some(ScreenKind::Notifications(_)) => {
+            " Enter open \u{b7} M mark read \u{b7} a all/unread \u{b7} ? help \u{b7} h back"
+        }
         None => "",
     };
     Text::from(line([(tt(hints), dim())]))
@@ -318,12 +569,36 @@ fn message(lines: &mut Vec<Line<'static>>, t: TermText, style: Style) {
 
 fn content_lines(state: &State, top: &Screen, h: usize) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
+    let w = usize::from(state.width);
     match &top.kind {
         ScreenKind::Home(s) => home(state, top, s, h, &mut lines),
-        ScreenKind::Forum(s) => forum(top, s, h, &mut lines),
+        ScreenKind::Forum(s) => forum(top, s, h, w, &mut lines),
         ScreenKind::Thread(t) => thread(top, t, h, &mut lines),
+        ScreenKind::Mod(m) => mod_screen(top, m, h, &mut lines),
+        ScreenKind::Notifications(n) => notifications(top, n, h, &mut lines),
     }
     lines
+}
+
+fn notifications(top: &Screen, n: &NotificationsScreen, h: usize, lines: &mut Vec<Line<'static>>) {
+    let Some(d) = &n.data else {
+        loading_or_error(top, lines);
+        return;
+    };
+    if d.items.is_empty() {
+        lines.push(Line::default());
+        message(lines, lit("Nothing new."), bold());
+        return;
+    }
+    for (i, item) in d.items.iter().enumerate().skip(n.pos.top).take(h) {
+        let on = i == n.pos.cursor;
+        let style = if on {
+            bold().add_modifier(Modifier::REVERSED)
+        } else {
+            Style::default()
+        };
+        lines.push(line([gutter(on), (notification_line(item), style)]));
+    }
 }
 
 fn loading_or_error(top: &Screen, lines: &mut Vec<Line<'static>>) {
@@ -386,11 +661,23 @@ fn home(state: &State, top: &Screen, s: &HomeScreen, h: usize, lines: &mut Vec<L
     }
 }
 
-fn forum(top: &Screen, s: &ForumScreen, h: usize, lines: &mut Vec<Line<'static>>) {
+fn forum(top: &Screen, s: &ForumScreen, h: usize, w: usize, lines: &mut Vec<Line<'static>>) {
     let Some(d) = &s.data else {
-        loading_or_error(top, lines);
+        // the Activity tab can show while the post list is still loading (or failed)
+        if s.tab == ForumTab::Activity {
+            activity(top, s, h, w, lines);
+        } else {
+            loading_or_error(top, lines);
+        }
         return;
     };
+    for b in banner_lines(&d.list.banners) {
+        lines.push(line([(lit("  "), Style::default()), (b, warn_style())]));
+    }
+    if s.tab == ForumTab::Activity {
+        activity(top, s, h, w, lines);
+        return;
+    }
     if d.list.items.is_empty() {
         lines.push(Line::default());
         message(lines, lit("No posts yet."), bold());
@@ -421,6 +708,61 @@ fn forum(top: &Screen, s: &ForumScreen, h: usize, lines: &mut Vec<Line<'static>>
     }
 }
 
+/// The Activity tab: the forum's Recent Discussion (`recent_discussion`, `social.md` §12.5) —
+/// each post with its newest comments under it.
+fn activity(top: &Screen, s: &ForumScreen, h: usize, w: usize, lines: &mut Vec<Line<'static>>) {
+    let Some(a) = &s.activity else {
+        loading_or_error(top, lines);
+        return;
+    };
+    for b in banner_lines(&a.list.banners) {
+        lines.push(line([(lit("  "), Style::default()), (b, warn_style())]));
+    }
+    if a.list.items.is_empty() {
+        lines.push(Line::default());
+        message(lines, lit("No discussion yet."), bold());
+        message(lines, lit("Press P to write the first post."), dim());
+        return;
+    }
+    let visible = (h / LIST_ROWS).max(1);
+    let room = w.saturating_sub(30).max(20);
+    for (i, item) in a
+        .list
+        .items
+        .iter()
+        .enumerate()
+        .skip(s.activity_pos.top)
+        .take(visible)
+    {
+        let on = i == s.activity_pos.cursor;
+        let title_style = if on {
+            bold().add_modifier(Modifier::REVERSED)
+        } else {
+            bold()
+        };
+        lines.push(line([gutter(on), (post_title(&item.post), title_style)]));
+        lines.push(line([gutter(on), (joined(post_meta(&item.post)), dim())]));
+        // the newest comments under it, one line each (the Thread screen has the bodies; this
+        // tab is a scan)
+        for c in &item.comments {
+            let text = a
+                .bodies
+                .get(&c.uri)
+                .and_then(|b| b.plain_excerpt())
+                .unwrap_or_else(|| c.body.excerpt.clone());
+            lines.push(line([
+                gutter(on),
+                (pad(2), Style::default()),
+                (actor(&c.author), Style::default()),
+                (lit(" "), Style::default()),
+                (tt(&clock(c.created_at_ms)), dim()),
+                (lit("  "), Style::default()),
+                (fit(&tt(&text), room), dim()),
+            ]));
+        }
+    }
+}
+
 fn thread(top: &Screen, t: &ThreadScreen, h: usize, lines: &mut Vec<Line<'static>>) {
     if t.data.is_none() {
         loading_or_error(top, lines);
@@ -437,7 +779,59 @@ fn thread(top: &Screen, t: &ThreadScreen, h: usize, lines: &mut Vec<Line<'static
     }
 }
 
-fn help(f: &mut Frame<'_>, area: Rect) {
+fn mod_screen(top: &Screen, m: &ModScreen, h: usize, lines: &mut Vec<Line<'static>>) {
+    match m.tab {
+        ModTab::Queue => match &m.queue {
+            None => loading_or_error(top, lines),
+            Some(Err(e)) => message(
+                lines,
+                cat([lit("The queue is not available: "), tt(&e.message)]),
+                Style::default().fg(Color::Red),
+            ),
+            Some(Ok(q)) => {
+                if q.items.is_empty() {
+                    lines.push(Line::default());
+                    message(lines, lit("The queue is empty."), bold());
+                    return;
+                }
+                for (i, it) in q.items.iter().enumerate().skip(m.pos.top).take(h) {
+                    let on = i == m.pos.cursor;
+                    lines.push(line([
+                        gutter(on),
+                        (
+                            mod_queue_item(it),
+                            if on { bold() } else { Style::default() },
+                        ),
+                    ]));
+                }
+            }
+        },
+        ModTab::Log => match &m.log {
+            None => loading_or_error(top, lines),
+            Some(Err(e)) => message(
+                lines,
+                cat([lit("The log is not available: "), tt(&e.message)]),
+                Style::default().fg(Color::Red),
+            ),
+            Some(Ok(l)) => {
+                if l.entries.is_empty() {
+                    lines.push(Line::default());
+                    message(lines, lit("No moderation yet."), bold());
+                    return;
+                }
+                for (i, e) in l.entries.iter().enumerate().skip(m.pos.top).take(h) {
+                    let on = i == m.pos.cursor;
+                    lines.push(line([
+                        gutter(on),
+                        (mod_log_entry(e), if on { bold() } else { Style::default() }),
+                    ]));
+                }
+            }
+        },
+    }
+}
+
+fn help(f: &mut Frame<'_>, state: &State, area: Rect) {
     let mut lines: Vec<Line<'static>> = Vec::new();
     for (group, rows) in HELP {
         lines.push(line([(tt(group), bold())]));
@@ -452,19 +846,32 @@ fn help(f: &mut Frame<'_>, area: Rect) {
     lines.push(Line::default());
     lines.push(line([(lit("Any key closes this help."), dim())]));
     let width = 64.min(area.width);
-    let height = u16::try_from(lines.len() + 2)
+    let total = lines.len();
+    let height = u16::try_from(total + 2)
         .unwrap_or(u16::MAX)
         .min(area.height);
+    // the content rows inside the border, and the scroll window
+    let inner = usize::from(height.saturating_sub(2));
+    let max_scroll = total.saturating_sub(inner);
+    let scroll = state.help_scroll.min(max_scroll);
+    let shown: Vec<Line<'static>> = lines.into_iter().skip(scroll).take(inner).collect();
     let x = area.x + (area.width - width) / 2;
     let y = area.y + (area.height - height) / 2;
     let r = Rect::new(x, y, width, height);
+    let mut block = Block::default()
+        .borders(Borders::ALL)
+        .title(line([(lit(" Keys "), bold())]));
+    if max_scroll > 0 {
+        block = block.title_bottom(line([(
+            tt(&format!(
+                " {}-{} of {} ",
+                scroll + 1,
+                scroll + shown.len(),
+                total
+            )),
+            dim(),
+        )]));
+    }
     f.render_widget(Clear, r);
-    f.render_widget(
-        Paragraph::new(Text::from(lines)).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(line([(lit(" Keys "), bold())])),
-        ),
-        r,
-    );
+    f.render_widget(Paragraph::new(Text::from(shown)).block(block), r);
 }

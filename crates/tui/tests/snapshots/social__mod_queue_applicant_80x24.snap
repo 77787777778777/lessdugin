@@ -1,0 +1,28 @@
+---
+source: crates/tui/tests/social.rs
+expression: t.render()
+---
+ lessdugin › Meta › moderation                                                   @alice.example.com
+  queue  log   Tab switch Meta
+▌ applicant  did:plc:sys3r3do… (claims @dave.example.com, unverified)  applied to join  (let me in)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ Enter approve · Tab queue/log · R sync · ? help · h back
