@@ -12,6 +12,10 @@ use lessdugin_core::media::{Format, apply_orientation, prepare, sniff, strip_met
 // --- builders -------------------------------------------------------------------------------
 
 /// A JPEG segment: `FF marker`, big-endian length (including itself), payload.
+fn block_on<F: std::future::Future>(f: F) -> F::Output {
+    futures::executor::block_on(f)
+}
+
 fn seg(marker: u8, payload: &[u8]) -> Vec<u8> {
     let mut v = vec![0xFF, marker];
     let len = (payload.len() + 2) as u16;
@@ -552,7 +556,7 @@ fn prepare_media_strips_and_refuses_what_it_must() {
         name: Some("shot.png".into()),
         aspect_ratio: None,
     };
-    let m = e.prepare_media(png.clone(), &input).unwrap();
+    let m = block_on(e.prepare_media(png.clone(), &input)).unwrap();
     assert_eq!(m.mime, "image/png");
     assert_eq!(m.alt.as_deref(), Some("a screenshot"));
     assert_eq!(m.name.as_deref(), Some("shot.png"));
@@ -565,11 +569,11 @@ fn prepare_media_strips_and_refuses_what_it_must() {
     assert_eq!(m.id, m.cid);
 
     // the CID identifies the STRIPPED bytes, not the input
-    let again = e.prepare_media(png, &input).unwrap();
+    let again = block_on(e.prepare_media(png, &input)).unwrap();
     assert_eq!(again.cid, m.cid, "prepare_media is deterministic");
 
     // a type outside §8.8's table is refused
-    let err = e
+    let err = block_on(e
         .prepare_media(
             b"<html>not media</html>".to_vec(),
             &MediaInput {
@@ -578,7 +582,7 @@ fn prepare_media_strips_and_refuses_what_it_must() {
                 name: None,
                 aspect_ratio: None,
             },
-        )
+        ))
         .unwrap_err();
     assert_eq!(err.code, lessdugin_core::engine::ErrorCode::InvalidInput);
     assert_eq!(
@@ -594,7 +598,7 @@ fn prepare_media_strips_and_refuses_what_it_must() {
         name: None,
         aspect_ratio: None,
     };
-    let m = e.prepare_media(jpeg, &guessed).unwrap();
+    let m = block_on(e.prepare_media(jpeg, &guessed)).unwrap();
     assert_eq!(m.mime, "image/jpeg", "the sniffed type must win");
 }
 
@@ -773,4 +777,36 @@ fn an_mp4_nested_past_the_depth_cap_is_refused_not_stripped() {
         err.detail.as_ref().and_then(|d| d.get("kind")),
         Some(&serde_json::json!("mediaRejected"))
     );
+}
+
+#[test]
+fn prepared_bytes_are_kept_so_a_publish_can_upload_them() {
+    // The devnet surfaced this as `BlobNotFound (HTTP 400)`: `prepare_media` returned a
+    // reference, the draft carried only the reference, and nothing had kept the bytes. A publish
+    // then asked the PDS to accept a blob it had never received.
+    use lessdugin_core::dto::MediaInput;
+    let host = lessdugin_testkit::MemHost::new();
+    let e = lessdugin_core::engine::Engine::new(host, Default::default());
+    let input = MediaInput {
+        declared_mime: None,
+        alt: Some("a picture".into()),
+        name: Some("pixel.png".into()),
+        aspect_ratio: None,
+    };
+    let m = block_on(e.prepare_media(png_with_metadata(), &input)).unwrap();
+    let blob = block_on(e.prepared_media(&m.cid)).unwrap();
+    let blob = blob.expect("the prepared bytes must still be on the device");
+    assert_eq!(blob.cid, m.cid);
+    assert_eq!(blob.mime, m.mime);
+    assert_eq!(blob.bytes.len() as u64, m.size_bytes);
+    // and the bytes are the PREPARED ones (metadata stripped), not the input
+    // and the bytes really are the prepared ones, not the input: the location chunk is gone
+    let prepared = strip_metadata(&blob.bytes);
+    assert!(
+        !prepared.bytes.windows(8).any(|w| w == b"location"),
+        "the prepared bytes must have lost their metadata"
+    );
+
+    // an unknown CID has no bytes, which is what lets `publish` refuse clearly
+    assert!(block_on(e.prepared_media("bafkreinotprepared")).unwrap().is_none());
 }

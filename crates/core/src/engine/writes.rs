@@ -313,7 +313,7 @@ impl<H: Host> Engine<H> {
         let key = self.forum_key(&draft.forum).await?;
         let post = self.post_record(draft, key.uri.clone())?;
         let opts = ContentOpts {
-            blobs: Vec::new(),
+            blobs: self.media_blobs(&draft.body.media).await?,
             excerpt: Some(excerpt_of(&draft.body.markdown)),
         };
         self.outbox.create_post(&session, &post, opts).await

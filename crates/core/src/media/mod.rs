@@ -795,7 +795,7 @@ use crate::dto::{MediaInput, MediaRef};
 /// returned with the bytes it came in with.
 impl<H: crate::host::Host> crate::engine::Engine<H> {
     /// See [`prepare_media`](Self::prepare_media).
-    pub fn prepare_media(
+    pub async fn prepare_media(
         &self,
         bytes: Vec<u8>,
         input: &MediaInput,
@@ -822,6 +822,11 @@ impl<H: crate::host::Host> crate::engine::Engine<H> {
             mime
         };
         let cid = lessdugin_atp::cid::for_raw(&prepared).to_string();
+        // Keep the PREPARED bytes under their CID: the reference in the draft is only that,
+        // a reference, and the outbox needs the bytes to upload at publish time
+        // (data-model.md §8.8). They are stored, not held in memory, so a composer that is
+        // closed and reopened still publishes the file it prepared.
+        self.store_prepared_media(&cid, &prepared, mime).await?;
         Ok(MediaRef {
             id: cid.clone(),
             cid,
@@ -941,3 +946,89 @@ mod tests {
 
 pub mod policy;
 pub use policy::{Autoload, LoadReason, MediaCandidate, autoload, host_of, is_bluesky_host};
+
+/// The prepared bytes of a media reference, kept until the write that uses them is sent.
+///
+/// A `MediaRef` is only a reference: `prepare_media` computes the CID and returns it, but the
+/// outbox has to upload the bytes when the record write goes out (`data-model.md` §8.8), so they
+/// are stored here under their CID. `publish` reads them back with
+/// [`Engine::prepared_media`] and hands them to the outbox.
+impl<H: crate::host::Host> crate::engine::Engine<H> {
+    /// Stores the prepared bytes under their CID.
+    async fn store_prepared_media(
+        &self,
+        cid: &str,
+        bytes: &[u8],
+        mime: &str,
+    ) -> Result<(), crate::engine::EngineError> {
+        let key = crate::key!("loc", "media", cid);
+        let value = serde_json::json!({ "mime": mime, "bytes": bytes }).to_string();
+        crate::host::KvStore::write(
+            self.host().state(),
+            vec![crate::host::KvOp::Put(key, value.into_bytes())],
+        )
+            .await?;
+        Ok(())
+    }
+
+    /// The prepared bytes of `cid`, as [`crate::outbox::BlobData`] hands them to the outbox.
+    ///
+    /// `None` when the bytes are gone (a different device, a cleared store): the caller then
+    /// refuses the publish rather than sending a reference the PDS cannot resolve, which is the
+    /// failure the devnet surfaced as `BlobNotFound (HTTP 400)`.
+    pub async fn prepared_media(
+        &self,
+        cid: &str,
+    ) -> Result<Option<crate::outbox::BlobData>, crate::engine::EngineError> {
+        let key = crate::key!("loc", "media", cid);
+        let rows = crate::host::KvStore::get_many(self.host().state(), vec![key]).await?;
+        let Some(Some(raw)) = rows.into_iter().next() else {
+            return Ok(None);
+        };
+        let Ok(v) = serde_json::from_slice::<serde_json::Value>(&raw) else {
+            return Ok(None);
+        };
+        let Some(bytes) = v.get("bytes").and_then(|b| b.as_array()) else {
+            return Ok(None);
+        };
+        let bytes: Vec<u8> = bytes
+            .iter()
+            .filter_map(|n| n.as_u64().and_then(|n| u8::try_from(n).ok()))
+            .collect();
+        let Some(mime) = v.get("mime").and_then(|m| m.as_str()) else {
+            return Ok(None);
+        };
+        Ok(Some(crate::outbox::BlobData {
+            cid: cid.to_owned(),
+            mime: mime.to_owned(),
+            bytes,
+        }))
+    }
+}
+
+impl<H: crate::host::Host> crate::engine::Engine<H> {
+    /// The blob data for a body's media references, ready for `ContentOpts.blobs`.
+    ///
+    /// Fails when a reference has no prepared bytes on this device: publishing a reference whose
+    /// bytes were never uploaded is what the PDS answers with `BlobNotFound (HTTP 400)`, and a
+    /// clear refusal here is better than a failed write the user cannot act on.
+    pub(crate) async fn media_blobs(
+        &self,
+        media: &[crate::dto::MediaRef],
+    ) -> Result<Vec<crate::outbox::BlobData>, crate::engine::EngineError> {
+        let mut out = Vec::with_capacity(media.len());
+        for m in media {
+            match self.prepared_media(&m.cid).await? {
+                Some(blob) => out.push(blob),
+                None => {
+                    return Err(crate::engine::EngineError::invalid_input(format!(
+                        "the bytes for {} are not on this device: prepare the file again",
+                        m.name.as_deref().unwrap_or(&m.cid)
+                    ))
+                    .with_detail("kind", "mediaBytesMissing"))
+                }
+            }
+        }
+        Ok(out)
+    }
+}

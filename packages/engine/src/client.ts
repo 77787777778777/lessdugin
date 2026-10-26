@@ -186,6 +186,13 @@ export function startEngine(options: StartEngineOptions = {}): EngineClient {
   const special: Record<string, (...args: unknown[]) => Promise<unknown>> = {
     outboxPump: async () => undefined,
     liveTail: async () => undefined,
+    // The bytes cross the worker boundary as a structured-cloned array (a Uint8Array arrives as
+    // an index-keyed object), so they are flattened to a plain number array here. A Uint8Array
+    // that the structured clone left intact is spread just the same.
+    async prepareMedia(...args) {
+      const [bytes, input] = args as [Uint8Array | number[] | ArrayLike<number>, unknown];
+      return remote.call("prepareMedia", [Array.from(bytes), input ?? null]);
+    },
     async grant(...args) {
       return first(await call("grant", args));
     },

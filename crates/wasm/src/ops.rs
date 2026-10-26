@@ -493,7 +493,7 @@ pub async fn call<H: Host>(engine: &Engine<H>, op: &str, a: &str) -> Result<Stri
                 name: None,
                 aspect_ratio: None,
             });
-            out(&engine.prepare_media(bytes, &hints)?)
+            out(&engine.prepare_media(bytes, &hints).await?)
         }
         "retract" => {
             let (uri,): (String,) = args(op, a)?;
