@@ -45,6 +45,8 @@ import {
   type ActorView,
   type Anchor,
   type AtUri,
+  type Cid,
+  type LoadedMedia,
   type BookmarkEntry,
   type CommentDraft,
   type CommentNode,
@@ -1793,6 +1795,11 @@ export class MockEngine implements EngineApi {
     if (c) view.root = c.root;
     if (state !== undefined) view.state = state;
     return view;
+  }
+
+  async loadMedia(cid: Cid): Promise<LoadedMedia> {
+    // the mock has no network: it refuses rather than pretending a blob arrived
+    throw new Error(`the mock engine cannot load media (${cid})`);
   }
 
   async drafts(): Promise<DraftEntry[]> {

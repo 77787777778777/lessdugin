@@ -9,7 +9,9 @@
 // One set of delegated listeners handles the rendered root:
 // - `a[data-at-uri]` / `a[data-did]`: re-parsed by the engine (F5), then routed in-app;
 // - `a[data-anchor]`: scrolls inside this root only (lfm-1.md §4.6; never `location.hash`);
-// - `[data-cid]` media: "click to load" placeholders (media loading arrives later);
+// - `[data-cid]` media: "click to load" placeholders; a click is the consent (synthesis-v1.md
+//   3.9) and the bytes then come from the author's PDS through `engine.loadMedia`, which
+//   streams and CID-checks them before the element gets a URL;
 // - hover/focus previews for eligible record links and DIDs, depth 1 (lfm-1.md §5.3).
 // After insertion it also substitutes verified handles into mentions (§5.4: eagerly only for
 // the first 16 distinct mentioned DIDs that are forum participants; any other mention only once
@@ -29,6 +31,7 @@ import { HoverPreview, type HoverTarget } from "./HoverPreview.tsx";
 import { useParticipants } from "./participants.tsx";
 import { useOpenRef } from "./RecordLink.tsx";
 import styles from "./RenderedHtml.module.css";
+import { errorMessage } from "./Status.tsx";
 import { toasts } from "./Toast.tsx";
 
 export interface RenderedHtmlHandle {
@@ -270,10 +273,40 @@ export function RenderedHtml({
       const media = target?.closest("button.lfm-media-load");
       if (media && root.contains(media)) {
         e.preventDefault();
-        toasts.show({
-          message:
-            "Media loading arrives in a later milestone: the bytes will be fetched from the author's PDS and checked against their CID first.",
-        });
+        if (media.getAttribute("aria-busy") === "true") return;
+        const cid = media.getAttribute("data-media-cid") ?? "";
+        if (cid === "") return;
+        // Clicking IS the consent (synthesis-v1.md 3.9): the bytes come from the author's PDS,
+        // which learns this device's address, so nothing is fetched until the reader asks.
+        media.setAttribute("aria-busy", "true");
+        media.textContent = "loading…";
+        void engine
+          .loadMedia(cid as Parameters<typeof engine.loadMedia>[0])
+          .then((loaded) => {
+            // the host streamed and CID-checked the bytes, so `url` is safe to point at
+            const pending = root.querySelector(`[data-cid="${CSS.escape(cid)}"]`);
+            if (pending === null) return;
+            if (pending.localName === "img") {
+              pending.setAttribute("src", loaded.url);
+              pending.classList.remove("lfm-media-pending");
+            } else {
+              // video/audio/other: replace the placeholder span with a player that has
+              // controls, because a media element without them cannot be started by keyboard
+              const el = document.createElement(
+                pending.getAttribute("data-media-kind") === "audio" ? "audio" : "video",
+              );
+              el.setAttribute("src", loaded.url);
+              el.setAttribute("controls", "");
+              el.setAttribute("preload", "metadata");
+              el.className = "lfm-media";
+              pending.replaceWith(el);
+            }
+            media.remove();
+          })
+          .catch((err: unknown) => {
+            media.removeAttribute("aria-busy");
+            media.textContent = `could not load: ${errorMessage(err)}`;
+          });
         return;
       }
       const a = linkFrom(e.target);
