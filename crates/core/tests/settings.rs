@@ -115,3 +115,54 @@ fn every_documented_setting_is_known() {
     }
     assert_eq!(block_on(e.settings()).unwrap().len(), SETTINGS.len());
 }
+
+#[test]
+fn drafts_round_trip_overwrite_and_delete() {
+    // engine-api.md §3.6 (M4). The SPA's composer autosaves through these, so a no-op here would
+    // silently lose every draft; there was no store at all before M4.
+    use lessdugin_core::dto::{BodyDraft, Draft, PostDraft};
+    let e = engine();
+    assert!(
+        block_on(e.drafts()).unwrap().is_empty(),
+        "nothing saved yet"
+    );
+
+    let draft = Draft::Post {
+        id: None,
+        post: PostDraft {
+            forum: "at://did:plc:alice/online.7778777.lessdugin.temp.forum/meta".into(),
+            kind: lessdugin_core::dto::PostKind::Article,
+            title: Some("A question".into()),
+            body: BodyDraft::text("half-written"),
+            tags: Vec::new(),
+            labels: Vec::new(),
+            link: None,
+        },
+    };
+    let id = block_on(e.save_draft(&draft)).unwrap();
+    assert!(!id.is_empty());
+    let saved = block_on(e.drafts()).unwrap();
+    assert_eq!(saved.len(), 1, "{saved:?}");
+    assert_eq!(saved[0].id, id);
+
+    // a second save with the id OVERWRITES, which is what autosave does every second
+    let updated = Draft::Post {
+        id: Some(id.clone()),
+        post: PostDraft {
+            forum: "at://did:plc:alice/online.7778777.lessdugin.temp.forum/meta".into(),
+            kind: lessdugin_core::dto::PostKind::Article,
+            title: Some("A question".into()),
+            body: BodyDraft::text("finished"),
+            tags: Vec::new(),
+            labels: Vec::new(),
+            link: None,
+        },
+    };
+    assert_eq!(block_on(e.save_draft(&updated)).unwrap(), id);
+    assert_eq!(block_on(e.drafts()).unwrap().len(), 1, "one draft, not two");
+
+    block_on(e.delete_draft(&id)).unwrap();
+    assert!(block_on(e.drafts()).unwrap().is_empty());
+    // deleting what is gone is not an error: the composer deletes on publish regardless
+    block_on(e.delete_draft(&id)).unwrap();
+}

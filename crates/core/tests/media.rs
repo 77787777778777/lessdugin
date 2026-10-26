@@ -573,17 +573,16 @@ fn prepare_media_strips_and_refuses_what_it_must() {
     assert_eq!(again.cid, m.cid, "prepare_media is deterministic");
 
     // a type outside §8.8's table is refused
-    let err = block_on(e
-        .prepare_media(
-            b"<html>not media</html>".to_vec(),
-            &MediaInput {
-                declared_mime: None,
-                alt: None,
-                name: None,
-                aspect_ratio: None,
-            },
-        ))
-        .unwrap_err();
+    let err = block_on(e.prepare_media(
+        b"<html>not media</html>".to_vec(),
+        &MediaInput {
+            declared_mime: None,
+            alt: None,
+            name: None,
+            aspect_ratio: None,
+        },
+    ))
+    .unwrap_err();
     assert_eq!(err.code, lessdugin_core::engine::ErrorCode::InvalidInput);
     assert_eq!(
         err.detail.as_ref().and_then(|d| d.get("kind")),
@@ -808,5 +807,9 @@ fn prepared_bytes_are_kept_so_a_publish_can_upload_them() {
     );
 
     // an unknown CID has no bytes, which is what lets `publish` refuse clearly
-    assert!(block_on(e.prepared_media("bafkreinotprepared")).unwrap().is_none());
+    assert!(
+        block_on(e.prepared_media("bafkreinotprepared"))
+            .unwrap()
+            .is_none()
+    );
 }

@@ -967,7 +967,7 @@ impl<H: crate::host::Host> crate::engine::Engine<H> {
             self.host().state(),
             vec![crate::host::KvOp::Put(key, value.into_bytes())],
         )
-            .await?;
+        .await?;
         Ok(())
     }
 
@@ -1025,7 +1025,7 @@ impl<H: crate::host::Host> crate::engine::Engine<H> {
                         "the bytes for {} are not on this device: prepare the file again",
                         m.name.as_deref().unwrap_or(&m.cid)
                     ))
-                    .with_detail("kind", "mediaBytesMissing"))
+                    .with_detail("kind", "mediaBytesMissing"));
                 }
             }
         }

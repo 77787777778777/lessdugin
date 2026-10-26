@@ -10,8 +10,8 @@
 
 use lessdugin_core::dto::{
     CommentDraft, Draft, EditOpts, ForumDraft, KarmaCadence, ListPostsQuery, MediaInput,
-    MembersQuery, ModActionIntent, ModsChange, NotificationsQuery, OpinionIntent, PostDraft, PublicActionKind,
-    RefContext, Subscription, SyncOpts, ThreadOpts, Topic,
+    MembersQuery, ModActionIntent, ModsChange, NotificationsQuery, OpinionIntent, PostDraft,
+    PublicActionKind, RefContext, Subscription, SyncOpts, ThreadOpts, Topic,
 };
 use lessdugin_core::engine::{AccountInfo, Engine, EngineError, ErrorCode};
 use lessdugin_core::host::Host;
@@ -131,13 +131,6 @@ pub const UNSUPPORTED: &[(&str, &str)] = &[
     ("seqMove", "M5"),
     // §3.6: the engine's draft store, settings and local export (M4, with the editor, the
     // media policy and `export`)
-    ("drafts", "M4"),
-    ("saveDraft", "M4"),
-    ("deleteDraft", "M4"),
-    ("settings", "M4"),
-    ("setSetting", "M4"),
-    ("exportLocal", "M4"),
-    ("importLocal", "M4"),
     // §3.7
     ("validateRecord", "M4"),
     ("deriveRkey", "M4"),
@@ -479,6 +472,42 @@ pub async fn call<H: Host>(engine: &Engine<H>, op: &str, a: &str) -> Result<Stri
         "delete" => {
             let (uri,): (String,) = args(op, a)?;
             out(&engine.delete(&uri).await?)
+        }
+        "drafts" => out(&engine.drafts().await?),
+        "saveDraft" => {
+            let (draft,): (Draft,) = args(op, a)?;
+            out(&engine.save_draft(&draft).await?)
+        }
+        "deleteDraft" => {
+            let (id,): (String,) = args(op, a)?;
+            engine.delete_draft(&id).await?;
+            out(&())
+        }
+        "settings" => out(&engine.settings().await?),
+        "setSetting" => {
+            // §3.6: `value: null` removes the key, which is how a client returns a setting to
+            // its default
+            let (key, value): (String, Option<String>) = args(op, a)?;
+            engine.set_setting(&key, value.as_deref()).await?;
+            out(&())
+        }
+        "exportLocal" => {
+            // the client's declaration takes no scope, so the server default applies
+            out(&engine
+                .export_local(lessdugin_core::engine::ExportScope::default())
+                .await?)
+        }
+        "importLocal" => {
+            // `{ scope, export }`: importing is a decision about what to overwrite, so the scope
+            // travels with the data rather than defaulting silently
+            let (json, scope): (lessdugin_core::engine::LocalExport, Option<String>) = args(op, a)?;
+            // `ExportScope` is a plain enum with no serde form, so the client names it: "mine"
+            // (the default, PRIV-8) or "everything"
+            let scope = match scope.as_deref() {
+                Some("everything") => lessdugin_core::engine::ExportScope::Everything,
+                _ => lessdugin_core::engine::ExportScope::Mine,
+            };
+            out(&engine.import_local(&json, scope).await?)
         }
         "redactRevision" => {
             // The engine returns one batched write (the outbox chunks the deletes), and the

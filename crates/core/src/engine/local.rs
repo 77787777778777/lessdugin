@@ -363,3 +363,103 @@ fn check_setting_value(key: &str, v: &str) -> Result<(), EngineError> {
         _ => Ok(()),
     }
 }
+
+/// A saved draft: the `Draft` the composer was working on and when it was last written
+/// (`engine-api.md` §3.6, M4).
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DraftEntryRow {
+    /// The draft's id (the same one a save returns and a delete takes).
+    pub id: String,
+    /// When it was last saved (ms).
+    pub saved_at_ms: i64,
+    /// The draft itself.
+    pub draft: crate::dto::Draft,
+}
+
+/// How many drafts are kept. A composer autosaves every second while it is open, so without a
+/// cap a long editing session would accumulate them without limit; the oldest go first.
+pub const MAX_DRAFTS: usize = 100;
+
+impl<H: crate::host::Host> Engine<H> {
+    /// `drafts()` (`engine-api.md` §3.6, M4): every saved draft, newest first.
+    pub async fn drafts(&self) -> Result<Vec<DraftEntryRow>, EngineError> {
+        let rows = self.loc_rows(crate::key!("loc", "draft")).await?;
+        let mut out: Vec<DraftEntryRow> = rows
+            .into_iter()
+            .filter_map(|(rest, v)| {
+                let id = rest.first()?.clone();
+                let mut row: DraftEntryRow = serde_json::from_slice(&v).ok()?;
+                row.id = id;
+                Some(row)
+            })
+            .collect();
+        out.sort_by(|a, b| b.saved_at_ms.cmp(&a.saved_at_ms).then(a.id.cmp(&b.id)));
+        Ok(out)
+    }
+
+    /// `saveDraft(draft)` -> its id. A draft that already carries an id is overwritten, which is
+    /// what the composer's autosave does with the id a previous save returned.
+    pub async fn save_draft(&self, draft: &crate::dto::Draft) -> Result<String, EngineError> {
+        let existing = match draft {
+            crate::dto::Draft::Post { id, .. } => id.clone(),
+            crate::dto::Draft::Comment { id, .. } => id.clone(),
+        };
+        let now = self.host.now_ms();
+        // a TID-shaped id: sortable by time and valid as an rkey, which is what a draft that is
+        // later published wants its id to resemble
+        let id = existing.unwrap_or_else(|| {
+            lessdugin_atp::tid::Tid::from_parts(
+                u64::try_from(now).unwrap_or(0).saturating_mul(1000),
+                0,
+            )
+            .map(|t| t.to_string())
+            .unwrap_or_else(|_| format!("{now:013}"))
+        });
+        let row = DraftEntryRow {
+            id: id.clone(),
+            saved_at_ms: now,
+            draft: draft.clone(),
+        };
+        let encoded = serde_json::to_vec(&row)
+            .map_err(|e| EngineError::internal(format!("a draft could not be encoded: {e}")))?;
+        crate::host::KvStore::write(
+            self.host().state(),
+            vec![crate::host::KvOp::Put(
+                crate::key!("loc", "draft", id.as_str()),
+                encoded,
+            )],
+        )
+        .await?;
+        self.rt.bus.changed([crate::dto::Topic::Drafts]);
+        self.prune_drafts().await?;
+        Ok(id)
+    }
+
+    /// `deleteDraft(id)`: removes a draft. Deleting what is not there is not an error, because
+    /// the composer deletes on publish whether or not a save landed.
+    pub async fn delete_draft(&self, id: &str) -> Result<(), EngineError> {
+        crate::host::KvStore::write(
+            self.host().state(),
+            vec![crate::host::KvOp::Delete(crate::key!("loc", "draft", id))],
+        )
+        .await?;
+        self.rt.bus.changed([crate::dto::Topic::Drafts]);
+        Ok(())
+    }
+
+    /// Drops the oldest drafts past [`MAX_DRAFTS`].
+    async fn prune_drafts(&self) -> Result<(), EngineError> {
+        let all = self.drafts().await?;
+        if all.len() <= MAX_DRAFTS {
+            return Ok(());
+        }
+        let ops: Vec<crate::host::KvOp> = all
+            .into_iter()
+            .skip(MAX_DRAFTS)
+            .map(|d| crate::host::KvOp::Delete(crate::key!("loc", "draft", d.id.as_str())))
+            .collect();
+        crate::host::KvStore::write(self.host().state(), ops).await?;
+        Ok(())
+    }
+}

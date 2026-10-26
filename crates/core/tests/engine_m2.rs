@@ -515,43 +515,49 @@ fn writes_need_an_account_and_publish_media() {
     // M4: a body with media publishes now. The record carries a placeholder blob object for
     // each item, and the outbox substitutes what `uploadBlob` returns, failing the write when
     // the returned `ref.$link` is not the CID computed locally (data-model.md §8.8).
-    // a real CID, from the pipeline, so the record validates (G2: links must be CIDs)
+    // a real CID, prepared THROUGH THE ENGINE, so the bytes are kept for the upload as well as
+    // the reference being valid (G2: links must be CIDs). Hand-building the MediaRef skips the
+    // store and would make publish refuse - which is the guard that exists because the devnet
+    // answered such a publish with `BlobNotFound (HTTP 400)`.
     let png: &[u8] =
         b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00";
-    let prepared = lessdugin_core::media::prepare(png.to_vec()).unwrap();
-    let cid = lessdugin_atp::cid::for_raw(&prepared).to_string();
+    let prepared = block_on(bob.engine.prepare_media(
+        png.to_vec(),
+        &lessdugin_core::dto::MediaInput {
+            declared_mime: Some("image/png".into()),
+            alt: Some("an image".into()),
+            name: None,
+            aspect_ratio: None,
+        },
+    ))
+    .unwrap();
+    let cid = prepared.cid.clone();
     let mut d = PostDraft::article(
         &s.forum,
         "Post with an image",
         format!("See ![x](cid:{cid})"),
     );
-    d.body.media.push(lessdugin_core::dto::MediaRef {
-        id: cid.clone(),
-        cid: cid.clone(),
-        mime: "image/png".into(),
-        size_bytes: 1,
-        alt: Some("an image".into()),
-        aspect_ratio: None,
-        duration_ms: None,
-        name: None,
-    });
+    d.body.media.push(prepared);
     let t = block_on(bob.engine.publish(&d)).unwrap();
     assert!(!t.id.is_empty());
-    // the flusher uploads the blob first. FakePds holds no blob for this synthetic CID, so
-    // the write ends `Failed` with `mediaRejected` - which is exactly the guard working: a
-    // mismatched or missing blob refuses the write rather than storing a dangling ref.
+    // the flusher uploads the blob first, then writes the record, so the publish SUCCEEDS: the
+    // prepared bytes are on the device and FakePds accepts them, and its `uploadBlob` answer is
+    // checked against the locally computed CID (§8.8). Before the bytes were kept this write
+    // failed with `mediaRejected`, and on the devnet with `BlobNotFound (HTTP 400)`.
     let r = block_on(bob.engine.outbox_flush()).unwrap();
-    assert_eq!(r.failed, 1, "{r:?}");
+    assert_eq!(r.failed, 0, "{r:?}");
+    assert_eq!(r.done, 1, "{r:?}");
     let tickets = block_on(bob.engine.writes()).unwrap();
-    let failed = tickets
+    let written = tickets
         .iter()
         .find(|w| w.id == t.id)
         .expect("the ticket is still listed");
-    assert!(
-        matches!(&failed.state, WriteState::Failed { .. }),
-        "{:?}",
-        failed.state
-    );
+    match &written.state {
+        WriteState::Done { uri, .. } => {
+            assert!(uri.contains("Post with an image") || !uri.is_empty())
+        }
+        other => panic!("the media publish must be done: {other:?}"),
+    }
     // W9: bob's engine cannot write to carol's repo
     let err = block_on(bob.engine.retract(&s.carol_c1)).unwrap_err();
     assert_eq!(err.code, ErrorCode::AuthRequired);
