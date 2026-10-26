@@ -676,3 +676,57 @@ pub fn prepare(bytes: Vec<u8>) -> Result<Vec<u8>, EngineError> {
     }
     Ok(stripped.bytes)
 }
+
+// --- the engine entry point -----------------------------------------------------------------
+
+use crate::dto::{MediaInput, MediaRef};
+
+/// `prepare_media` (`engine-api.md` §3.6, M4): sniff, strip, orient, compute the CID. The upload
+/// happens at publish time (`data-model.md` §8.8), so this returns a reference, not a blob.
+///
+/// The declared type is checked against the sniffed one through §8.8's table, which is also what
+/// decides whether the type is acceptable at all; a type outside the table is refused rather than
+/// uploaded as something the reader will not accept. A file whose metadata cannot be parsed is
+/// still returned (the pipeline never destroys a file it does not understand, PRIV-7), but it is
+/// returned with the bytes it came in with.
+impl<H: crate::host::Host> crate::engine::Engine<H> {
+    /// See [`prepare_media`](Self::prepare_media).
+    pub fn prepare_media(
+        &self,
+        bytes: Vec<u8>,
+        input: &MediaInput,
+    ) -> Result<MediaRef, crate::engine::EngineError> {
+        let sniffed = crate::outbox::blob::normalise_mime(&bytes).ok_or_else(|| {
+            crate::engine::EngineError::invalid_input("unsupported media type (data-model.md §8.8)")
+                .with_detail("kind", "mediaRejected")
+        })?;
+        // §8.8: the declared type is normalised from the sniffed one, so a mismatch is not an
+        // error in the file - it is a caller that guessed. The sniffed type wins.
+        if let Some(declared) = input.declared_mime.as_deref().filter(|d| *d != sniffed) {
+            tracing::debug!(
+                declared = %declared,
+                sniffed = %sniffed,
+                "prepare_media: the sniffed type wins (data-model.md §8.8)"
+            );
+        }
+        let prepared = prepare(bytes)?;
+        let mime = crate::outbox::blob::normalise_mime(&prepared).unwrap_or(sniffed);
+        let mime = if mime == sniffed {
+            sniffed
+        } else {
+            // stripping changed the container enough to change its type: trust the result
+            mime
+        };
+        let cid = lessdugin_atp::cid::for_raw(&prepared).to_string();
+        Ok(MediaRef {
+            id: cid.clone(),
+            cid,
+            mime: mime.to_owned(),
+            size_bytes: prepared.len() as u64,
+            alt: input.alt.clone(),
+            aspect_ratio: input.aspect_ratio.clone(),
+            duration_ms: None,
+            name: input.name.clone(),
+        })
+    }
+}

@@ -1308,6 +1308,26 @@ dto! {
 }
 
 dto! {
+    /// A file handed to `prepare_media` (`engine-api.md` §3.6, M4): the bytes, the declared type
+    /// (checked against the sniffed one, `data-model.md` §8.8) and the display hints.
+    pub struct MediaInput {
+        /// The declared `mimeType`. When it disagrees with the sniffed type the sniffed one wins
+        /// (and a type outside the §8.8 table is refused).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub declared_mime: Option<String>,
+        /// The accessible description; writers warn when it is missing.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub alt: Option<String>,
+        /// Opt-in, display-only, basename only (`data-model.md` §8.7).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub name: Option<String>,
+        /// A layout hint (display clamps it to between 1:20 and 20:1).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub aspect_ratio: Option<AspectRatio>,
+    }
+}
+
+dto! {
     /// A markdown body to write.
     #[derive(Default)]
     pub struct BodyDraft {

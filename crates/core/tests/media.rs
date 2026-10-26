@@ -505,3 +505,65 @@ fn apply_orientation_rotates_a_real_image() {
     assert_eq!(apply_orientation(&px, 1), px);
     assert_eq!(apply_orientation(b"not an image", 6), b"not an image");
 }
+
+// --- the engine entry point -----------------------------------------------------------------
+
+#[test]
+fn prepare_media_strips_and_refuses_what_it_must() {
+    use lessdugin_core::dto::MediaInput;
+    let host = lessdugin_testkit::MemHost::new();
+    let e = lessdugin_core::engine::Engine::new(host, Default::default());
+
+    // a PNG with a text chunk holding a location
+    let png = png_with_metadata();
+    let input = MediaInput {
+        declared_mime: Some("image/png".into()),
+        alt: Some("a screenshot".into()),
+        name: Some("shot.png".into()),
+        aspect_ratio: None,
+    };
+    let m = e.prepare_media(png.clone(), &input).unwrap();
+    assert_eq!(m.mime, "image/png");
+    assert_eq!(m.alt.as_deref(), Some("a screenshot"));
+    assert_eq!(m.name.as_deref(), Some("shot.png"));
+    assert!(m.size_bytes < png.len() as u64, "the metadata was dropped");
+    assert!(
+        m.cid.starts_with("bafkrei"),
+        "not a raw sha2-256 CID: {}",
+        m.cid
+    );
+    assert_eq!(m.id, m.cid);
+
+    // the CID identifies the STRIPPED bytes, not the input
+    let again = e.prepare_media(png, &input).unwrap();
+    assert_eq!(again.cid, m.cid, "prepare_media is deterministic");
+
+    // a type outside §8.8's table is refused
+    let err = e
+        .prepare_media(
+            b"<html>not media</html>".to_vec(),
+            &MediaInput {
+                declared_mime: None,
+                alt: None,
+                name: None,
+                aspect_ratio: None,
+            },
+        )
+        .unwrap_err();
+    assert_eq!(err.code, lessdugin_core::engine::ErrorCode::InvalidInput);
+    assert_eq!(
+        err.detail.as_ref().and_then(|d| d.get("kind")),
+        Some(&serde_json::json!("mediaRejected"))
+    );
+
+    // a wrong declared type is not an error: the sniffed type wins (§8.8)
+    let jpeg = jpeg_with_metadata(1, true);
+    let guessed = MediaInput {
+        declared_mime: Some("image/gif".into()),
+        alt: None,
+        name: None,
+        aspect_ratio: None,
+    };
+    let m = e.prepare_media(jpeg, &guessed).unwrap();
+    assert_eq!(m.mime, "image/jpeg", "the sniffed type must win");
+}
