@@ -263,3 +263,103 @@ impl<H: crate::host::Host> Engine<H> {
         Ok(report)
     }
 }
+
+/// The settings a client may change (synthesis-v1.md §1.4, §6.12: "accounts, sources,
+/// verification, indexer consent, external images, media autoload hosts").
+///
+/// These are per device, not per account: they are how this copy of the app behaves, so they
+/// live in the same `loc` state the rest of the local lists use, and they travel with
+/// [`LocalExport`].
+pub const SETTINGS: [&str; 5] = [
+    /// `direct` or `assisted` (`engine::Sources`).
+    "sources",
+    /// `pds` or `proof` (`engine::VerifyMode`).
+    "verify",
+    /// `off` or `on`: whether media loads at all (3.9's master switch).
+    "mediaAutoload",
+    /// Extra hosts whose media may load without a click, comma separated (3.9's allowlist).
+    "mediaHosts",
+    /// `off` or `on`: whether external link cards fetch a preview.
+    "externalImages",
+];
+
+impl<H: crate::host::Host> Engine<H> {
+    /// `settings()` (`engine-api.md` §3.6, M4): every stored setting, plus the ones that were
+    /// never set left out, so a client can tell "default" from "chosen".
+    pub async fn settings(
+        &self,
+    ) -> Result<std::collections::BTreeMap<String, String>, EngineError> {
+        let rows = self.loc_rows(crate::key!("loc", "setting")).await?;
+        let mut out = std::collections::BTreeMap::new();
+        for (rest, v) in rows {
+            let Some(key) = rest.first() else { continue };
+            if let Ok(text) = String::from_utf8(v) {
+                out.insert(key.clone(), text);
+            }
+        }
+        Ok(out)
+    }
+
+    /// `set_setting(key, value)`: `None` removes the key (back to its default).
+    ///
+    /// An unknown key is refused rather than stored: a typo would otherwise silently do nothing,
+    /// and the export would carry junk nobody reads.
+    pub async fn set_setting(&self, key: &str, value: Option<&str>) -> Result<(), EngineError> {
+        if !SETTINGS.contains(&key) {
+            return Err(EngineError::invalid_input(format!(
+                "unknown setting {key:?} (known: {})",
+                SETTINGS.join(", ")
+            ))
+            .with_detail("kind", "unknownSetting"));
+        }
+        if let Some(v) = value {
+            check_setting_value(key, v)?;
+        }
+        let k = crate::key!("loc", "setting", key);
+        let op = match value {
+            Some(v) => KvOp::Put(k, v.as_bytes().to_vec()),
+            None => KvOp::Delete(k),
+        };
+        self.host().state().write(vec![op]).await?;
+        self.rt.bus.changed([crate::dto::Topic::Accounts]);
+        Ok(())
+    }
+
+    /// `media_hosts()`: the allowlist of 3.9, parsed from `mediaHosts`.
+    pub async fn media_hosts(&self) -> Result<Vec<String>, EngineError> {
+        let all = self.settings().await?;
+        Ok(all
+            .get("mediaHosts")
+            .map(|v| {
+                v.split(',')
+                    .map(|h| h.trim().to_owned())
+                    .filter(|h| !h.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+}
+
+/// Refuses a value that the setting cannot mean, so a stored setting is always usable.
+fn check_setting_value(key: &str, v: &str) -> Result<(), EngineError> {
+    let bad = |what: &str| {
+        EngineError::invalid_input(format!("{key} = {v:?} is not {what}"))
+            .with_detail("kind", "unknownSetting")
+    };
+    match key {
+        "sources" => match v {
+            "direct" | "assisted" => Ok(()),
+            _ => Err(bad("`direct` or `assisted`")),
+        },
+        "verify" => match v {
+            "pds" | "proof" => Ok(()),
+            _ => Err(bad("`pds` or `proof`")),
+        },
+        "mediaAutoload" | "externalImages" => match v {
+            "on" | "off" => Ok(()),
+            _ => Err(bad("`on` or `off`")),
+        },
+        "mediaHosts" => Ok(()),
+        _ => Ok(()),
+    }
+}
