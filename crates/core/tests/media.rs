@@ -5,6 +5,8 @@
 //! The fixtures are built here, byte by byte, so the privacy properties are asserted against
 //! containers whose metadata this test controls exactly (`threat-model.md`'s fixture row).
 
+mod common;
+
 use lessdugin_core::media::{Format, apply_orientation, prepare, sniff, strip_metadata};
 
 // --- builders -------------------------------------------------------------------------------
