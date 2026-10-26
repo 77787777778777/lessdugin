@@ -15,7 +15,7 @@
 //! | JPEG | SOI; SOF\*; DHT, DAC, DQT, DRI; SOS with its entropy-coded data and RST\* ; APP2 with the `ICC_PROFILE\0` identifier; APP14 `Adobe`; EOI | APP0, APP1 (EXIF, XMP), APP13 (IPTC), every other APP\*, COM, MPF APP2, anything after EOI |
 //! | PNG | IHDR, PLTE, tRNS, cHRM, gAMA, iCCP, sBIT, sRGB, cICP, mDCV, cLLI, bKGD, pHYs, acTL, fcTL, IDAT, fdAT, IEND | tEXt, iTXt, zTXt, eXIf, tIME, every other chunk, anything after IEND |
 //! | WebP | RIFF header with the size recomputed; VP8, VP8L, ALPH, ANIM, ANMF, ICCP; VP8X with its EXIF and XMP flag bits cleared | EXIF, XMP, every other chunk |
-//! | GIF | the image and extension blocks, except comments | comment extensions |
+//! | GIF | the header, logical screen descriptor, global colour table, graphic control extensions, image descriptors with local colour tables and image data, the `NETSCAPE2.0` application extension, trailer | comment and plain-text extensions, other application extensions (XMP), anything after the trailer |
 //! | MP4 / MOV | **every byte** — offsets must never shift | every `udta` and `meta` box at any depth, overwritten with a `free` box whose payload is zeroed |
 //!
 //! **Orientation.** An EXIF orientation other than 1 is applied physically (the pixels are
@@ -414,8 +414,16 @@ fn strip_webp(b: &[u8]) -> Stripped {
 
 // --- GIF ------------------------------------------------------------------------------------
 
-/// Strips GIF comment extensions (`threat-model.md` §5.9.1 keeps the image and other extension
-/// blocks; the synthesis table adds "except NETSCAPE loop" for application extensions).
+/// True when an application extension's (`0xFF`) data sub-blocks begin with the `NETSCAPE2.0`
+/// identifier, which makes it the loop-count extension §5.9.1 keeps. `blocks` is the collected
+/// sub-block chain: a size byte, that many bytes, …, terminated by a zero size byte.
+fn is_netscape_loop(blocks: &[u8]) -> bool {
+    blocks.first() == Some(&0x0B) && blocks.get(1..12) == Some(b"NETSCAPE2.0")
+}
+
+/// Strips a GIF by extension allowlist (`threat-model.md` §5.9.1): the graphic control and the
+/// `NETSCAPE2.0` loop extension are kept, and comment, plain-text and every other application
+/// extension (XMP) are dropped, as is anything after the trailer.
 fn strip_gif(b: &[u8]) -> Stripped {
     if b.len() < 13 {
         return unchanged(b);
@@ -476,14 +484,22 @@ fn strip_gif(b: &[u8]) -> Stripped {
                     blocks.extend_from_slice(&b[j..end]);
                     j = end;
                 }
-                // 0xF9 = graphic control, 0x01 = plain text, 0xFF = application,
-                // 0xFE = comment (dropped)
-                if label == 0xFE {
-                    changed = true;
-                } else {
+                // Allowlist rebuild (`threat-model.md` §5.9.1's GIF row): the kept extensions are
+                // the graphic control and the `NETSCAPE2.0` application extension (loop count).
+                // Dropped: comment (0xFE), plain text (0x01) and every other application
+                // extension - which is where XMP lives - plus any label the row does not name,
+                // so nothing can ride along in one the allowlist forgot.
+                let keep = match label {
+                    0xF9 => true,
+                    0xFF => is_netscape_loop(&blocks),
+                    _ => false,
+                };
+                if keep {
                     out.push(0x21);
                     out.push(label);
                     out.extend_from_slice(&blocks);
+                } else {
+                    changed = true;
                 }
                 i = j;
             }
@@ -630,6 +646,40 @@ fn strip_iso(b: &[u8]) -> Stripped {
     }
 }
 
+/// SUP-9's decode caps (`threat-model.md` SUP-9, `limits.md` §6). These belong in
+/// [`crate::limits`] once it mirrors §6's media rows (limits.md §21 notes that module mirrors only
+/// part of the table today); the values equal the rows exactly.
+#[cfg(feature = "orientation")]
+const DECODE_MAX_INPUT_BYTES: usize = 64 * 1024 * 1024;
+/// The longest side, in pixels, a decoder is given (SUP-9).
+#[cfg(feature = "orientation")]
+const DECODE_MAX_SIDE: usize = 8_192;
+/// A decoder's allocation cap: one 8,192² RGBA frame (SUP-9).
+#[cfg(feature = "orientation")]
+const DECODE_MAX_ALLOC_BYTES: usize = 256 * 1024 * 1024;
+
+/// True when SUP-9 lets us decode `bytes` at all. A hostile header can declare an enormous frame,
+/// and `image::load_from_memory` would allocate it, so the caps are checked BEFORE any pixels are
+/// read. `imagesize` parses only the container header, which costs no decode.
+///
+/// A header `imagesize` cannot parse is not a cap violation: the decode below then decides, which
+/// is what already happens for an undecodable file (the metadata is still stripped, and
+/// orientation and downscaling no-op).
+#[cfg(feature = "orientation")]
+fn decoding_allowed(bytes: &[u8]) -> bool {
+    if bytes.len() > DECODE_MAX_INPUT_BYTES {
+        return false;
+    }
+    let Ok(size) = imagesize::blob_size(bytes) else {
+        return true;
+    };
+    if size.width.max(size.height) > DECODE_MAX_SIDE {
+        return false;
+    }
+    // RGBA is the largest allocation the decoders here make per pixel.
+    size.width.saturating_mul(size.height).saturating_mul(4) <= DECODE_MAX_ALLOC_BYTES
+}
+
 /// Applies EXIF orientation physically, by re-encoding the pixels (so no EXIF survives). Returns
 /// the input unchanged when the orientation is 1/absent or the image cannot be decoded.
 ///
@@ -639,6 +689,9 @@ fn strip_iso(b: &[u8]) -> Stripped {
 pub fn apply_orientation(bytes: &[u8], orientation: u16) -> Vec<u8> {
     use image::{DynamicImage, ImageFormat};
     if !(2..=8).contains(&orientation) {
+        return bytes.to_vec();
+    }
+    if !decoding_allowed(bytes) {
         return bytes.to_vec();
     }
     let Ok(img) = image::load_from_memory(bytes) else {
@@ -757,6 +810,9 @@ pub fn downscale_to_fit(bytes: &[u8], max_bytes: usize) -> Option<Vec<u8>> {
         Format::Jpeg => ImageFormat::Jpeg,
         Format::Iso => return None,
     };
+    if !decoding_allowed(bytes) {
+        return None;
+    }
     let mut img = image::load_from_memory(bytes).ok()?;
     // bounded: at most 20 halvings (a 2^20-fold reduction), so this cannot spin
     for _ in 0..20 {
@@ -803,4 +859,37 @@ pub fn fit_for_upload(prepared: Vec<u8>, max_bytes: usize) -> Result<Vec<u8>, En
     .with_detail("kind", "mediaRejected")
     .with_detail("bytes", prepared.len() as u64)
     .with_detail("limit", max_bytes as u64))
+}
+
+#[cfg(all(test, feature = "orientation"))]
+mod tests {
+    use super::*;
+
+    /// A PNG whose IHDR declares `w`×`h` and nothing else: enough for `imagesize` to read the
+    /// declared frame, which is all the guard consults.
+    fn png_claiming(w: u32, h: u32) -> Vec<u8> {
+        let mut v = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        let mut ihdr = w.to_be_bytes().to_vec();
+        ihdr.extend_from_slice(&h.to_be_bytes());
+        ihdr.extend_from_slice(&[8, 6, 0, 0, 0]);
+        v.extend_from_slice(&(ihdr.len() as u32).to_be_bytes());
+        v.extend_from_slice(b"IHDR");
+        v.extend_from_slice(&ihdr);
+        v.extend_from_slice(&[0; 4]);
+        v
+    }
+
+    #[test]
+    fn the_sup9_caps_are_checked_before_any_decode() {
+        // exactly at the caps: one 8192² RGBA frame = 256 MiB (limits.md §6)
+        assert!(decoding_allowed(&png_claiming(8_192, 8_192)));
+        assert!(decoding_allowed(&png_claiming(8_192, 1)));
+        // one pixel past the side cap
+        assert!(!decoding_allowed(&png_claiming(8_193, 1)));
+        assert!(!decoding_allowed(&png_claiming(1, 8_193)));
+        // within the side cap but past the allocation cap
+        assert!(!decoding_allowed(&png_claiming(8_192, 8_193)));
+        // a header imagesize cannot parse is not a cap violation: the decode decides
+        assert!(decoding_allowed(b"not an image at all"));
+    }
 }
