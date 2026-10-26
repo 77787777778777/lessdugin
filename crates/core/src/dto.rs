@@ -73,6 +73,34 @@ string_enum! {
 }
 
 dto! {
+    /// An indexer the reader consented to (`synthesis-v1.md` §1.4: a forum-declared endpoint
+    /// needs one-time consent).
+    pub struct IndexerConsent {
+        /// The indexer's base URL.
+        pub url: String,
+        /// The DID, once it is known and verified.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub did: Option<String>,
+        /// The forum that declared it, when it came from a declaration.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub forum: Option<String>,
+        /// When the reader granted it (ms).
+        pub granted_at_ms: i64,
+    }
+}
+
+string_enum! {
+    /// Where content comes from (`synthesis-v1.md` §1.4): CORE only, or CORE+ with the
+    /// optional helper services.
+    pub enum Sources { Direct, Assisted }
+}
+
+string_enum! {
+    /// How much is verified (`sync.md` §2.3).
+    pub enum VerifyMode { Pds, Proof }
+}
+
+dto! {
     /// An actor (user) as displayed.
     pub struct ActorView {
         pub did: String,
@@ -1304,6 +1332,31 @@ dto! {
         pub duration_ms: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub name: Option<String>,
+    }
+}
+
+dto! {
+    /// The local settings (`engine-api.md` §3.6 `settings()`, M4).
+    ///
+    /// This is an OBJECT rather than a key/value map, because the client declares it that way
+    /// (`packages/engine/src/types.ts` `Settings`) and four of its fields are lists. The karma
+    /// cadence and the public-action acknowledgements are included even though they have their
+    /// own operations (§3.6 says so), so a client can read the whole picture from one call.
+    pub struct Settings {
+        /// Where content comes from.
+        pub sources: Sources,
+        /// How much is verified.
+        pub verify: VerifyMode,
+        /// Indexers the reader consented to.
+        pub indexers: Vec<IndexerConsent>,
+        /// Forums whose external images may be fetched.
+        pub external_images_forums: Vec<String>,
+        /// Hosts whose media may load without a click (synthesis-v1.md §3.9).
+        pub media_autoload_hosts: Vec<String>,
+        /// The karma-notification cadence.
+        pub karma_notifications: KarmaCadence,
+        /// Public-action interstitials already acknowledged.
+        pub acknowledged_public_actions: Vec<crate::dto::PublicActionKind>,
     }
 }
 

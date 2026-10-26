@@ -254,6 +254,13 @@ export interface HistoryView {
     versions: VersionEntry[];
 }
 
+export interface IndexerConsent {
+    url: string;
+    did?: string;
+    forum?: string;
+    grantedAtMs: number;
+}
+
 export type ItemState = { kind: "visible" } | { kind: "collapsed"; reason: CollapseReason } | { kind: "hidden"; reason: HiddenReason } | { kind: "tombstone"; reason: HiddenReason };
 
 export type KarmaCadence = "realtime" | "daily" | "weekly";
@@ -591,6 +598,18 @@ export interface SequenceView {
     chapters: ChapterView[];
 }
 
+export interface Settings {
+    sources: Sources;
+    verify: VerifyMode;
+    indexers: IndexerConsent[];
+    externalImagesForums: string[];
+    mediaAutoloadHosts: string[];
+    karmaNotifications: KarmaCadence;
+    acknowledgedPublicActions: PublicActionKind[];
+}
+
+export type Sources = "direct" | "assisted";
+
 export type Stance = "for" | "against";
 
 export type Subscription = { kind: "forum"; uri: string } | { kind: "post"; uri: string } | { kind: "user"; did: string } | { kind: "tag"; forum: string; slug: string } | { kind: "sequence"; uri: string };
@@ -703,6 +722,8 @@ export interface VerifyCheck {
     ok: boolean;
     detail?: string;
 }
+
+export type VerifyMode = "pds" | "proof";
 
 export type VerifyOutcome = "proven" | "absent" | "failed";
 

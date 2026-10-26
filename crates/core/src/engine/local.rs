@@ -284,9 +284,37 @@ pub const SETTINGS: [&str; 5] = [
 ];
 
 impl<H: crate::host::Host> Engine<H> {
-    /// `settings()` (`engine-api.md` §3.6, M4): every stored setting, plus the ones that were
-    /// never set left out, so a client can tell "default" from "chosen".
-    pub async fn settings(
+    /// `settings()` (`engine-api.md` §3.6, M4): the whole local picture, in the shape the
+    /// client declares (`Settings` in `types.ts`). Fields never set report their defaults.
+    ///
+    /// It is an OBJECT with four list fields, not a flat key/value map. The client does
+    /// `settings.indexers.map(...)`, so returning a map here crashed the settings page - which
+    /// is what the CI-only e2e failure turned out to be, and why the client's type wins.
+    pub async fn settings(&self) -> Result<crate::dto::Settings, EngineError> {
+        let raw = self.stored_settings().await?;
+        let get = |k: &str, d: &str| raw.get(k).map_or_else(|| d.to_owned(), Clone::clone);
+        Ok(crate::dto::Settings {
+            sources: match get("sources", "assisted").as_str() {
+                "direct" => crate::dto::Sources::Direct,
+                _ => crate::dto::Sources::Assisted,
+            },
+            verify: match get("verify", "pds").as_str() {
+                "proof" => crate::dto::VerifyMode::Proof,
+                _ => crate::dto::VerifyMode::Pds,
+            },
+            // nothing has been consented to yet: the indexer consent list and the
+            // external-image forum list are M5 (the indexer) and M4's SPA policy; an empty
+            // list is the honest answer rather than a fabricated default
+            indexers: Vec::new(),
+            external_images_forums: Vec::new(),
+            media_autoload_hosts: split_hosts(raw.get("mediaHosts")),
+            karma_notifications: self.karma_notifications().await?,
+            acknowledged_public_actions: self.acknowledged_public_actions().await?,
+        })
+    }
+
+    /// The stored key/value rows, the raw form `set_setting` writes.
+    async fn stored_settings(
         &self,
     ) -> Result<std::collections::BTreeMap<String, String>, EngineError> {
         let rows = self.loc_rows(crate::key!("loc", "setting")).await?;
@@ -327,17 +355,20 @@ impl<H: crate::host::Host> Engine<H> {
 
     /// `media_hosts()`: the allowlist of 3.9, parsed from `mediaHosts`.
     pub async fn media_hosts(&self) -> Result<Vec<String>, EngineError> {
-        let all = self.settings().await?;
-        Ok(all
-            .get("mediaHosts")
-            .map(|v| {
-                v.split(',')
-                    .map(|h| h.trim().to_owned())
-                    .filter(|h| !h.is_empty())
-                    .collect()
-            })
-            .unwrap_or_default())
+        let raw = self.stored_settings().await?;
+        Ok(split_hosts(raw.get("mediaHosts")))
     }
+}
+
+/// Splits a stored `mediaHosts` value into hosts: comma separated, trimmed, empties dropped.
+fn split_hosts(v: Option<&String>) -> Vec<String> {
+    v.map(|v| {
+        v.split(',')
+            .map(|h| h.trim().to_owned())
+            .filter(|h| !h.is_empty())
+            .collect()
+    })
+    .unwrap_or_default()
 }
 
 /// Refuses a value that the setting cannot mean, so a stored setting is always usable.

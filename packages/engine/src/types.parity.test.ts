@@ -47,8 +47,6 @@ const TS_ONLY: Readonly<Record<string, string>> = {
   TagVoteValue: "alias of KarmaValue",
   RkeyInput: "deriveRkey (M4)",
   DraftEntry: "drafts (M4)",
-  IndexerConsent: "settings (M4)",
-  Settings: "settings (M4)",
   SettingKey: "settings (M4)",
   RenderOpts: "an argument of render",
   ValidationReport: "validateRecord (M4)",

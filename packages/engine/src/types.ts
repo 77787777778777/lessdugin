@@ -1121,9 +1121,15 @@ export interface IndexerConsent {
 }
 
 /** Local settings (synthesis §1.4, §3.9, §6.12). */
+/** Where content comes from (synthesis-v1.md 1.4). */
+export type Sources = "direct" | "assisted";
+
+/** How much is verified (sync.md 2.3). */
+export type VerifyMode = "pds" | "proof";
+
 export interface Settings {
-  sources: "direct" | "assisted";
-  verify: "pds" | "proof";
+  sources: Sources;
+  verify: VerifyMode;
   indexers: IndexerConsent[];
   /** Forums for which external images may be fetched (lfm-1.md §6.4; off by default). */
   externalImagesForums: AtUri[];

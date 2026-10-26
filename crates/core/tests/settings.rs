@@ -15,16 +15,22 @@ fn engine() -> Engine<MemHost> {
 #[test]
 fn a_setting_round_trips_and_clearing_it_returns_to_the_default() {
     let e = engine();
-    assert!(
-        block_on(e.settings()).unwrap().is_empty(),
-        "nothing set yet"
-    );
+    // the defaults, before anything is chosen
+    let d = block_on(e.settings()).unwrap();
+    assert_eq!(d.sources, lessdugin_core::dto::Sources::Assisted);
+    assert_eq!(d.verify, lessdugin_core::dto::VerifyMode::Pds);
+    assert!(d.media_autoload_hosts.is_empty());
     block_on(e.set_setting("sources", Some("direct"))).unwrap();
-    let s = block_on(e.settings()).unwrap();
-    assert_eq!(s.get("sources").map(String::as_str), Some("direct"));
-    // clearing it leaves no row, so a client can tell "default" from "chosen"
+    assert_eq!(
+        block_on(e.settings()).unwrap().sources,
+        lessdugin_core::dto::Sources::Direct
+    );
+    // clearing it returns to the default
     block_on(e.set_setting("sources", None)).unwrap();
-    assert!(block_on(e.settings()).unwrap().is_empty());
+    assert_eq!(
+        block_on(e.settings()).unwrap().sources,
+        lessdugin_core::dto::Sources::Assisted
+    );
 }
 
 #[test]
@@ -36,8 +42,9 @@ fn an_unknown_setting_is_refused_rather_than_stored() {
         err.detail.as_ref().and_then(|d| d.get("kind")),
         Some(&serde_json::json!("unknownSetting"))
     );
-    assert!(
-        block_on(e.settings()).unwrap().is_empty(),
+    assert_eq!(
+        block_on(e.settings()).unwrap().sources,
+        lessdugin_core::dto::Sources::Assisted,
         "a typo stores nothing"
     );
 }
@@ -68,7 +75,10 @@ fn a_value_the_setting_cannot_mean_is_refused() {
     ] {
         block_on(e.set_setting(key, Some(good))).unwrap();
     }
-    assert_eq!(block_on(e.settings()).unwrap().len(), 4);
+    // four good values were accepted; the settings (a) report them
+    let s = block_on(e.settings()).unwrap();
+    assert_eq!(s.sources, lessdugin_core::dto::Sources::Assisted);
+    assert_eq!(s.verify, lessdugin_core::dto::VerifyMode::Proof);
 }
 
 #[test]
@@ -113,7 +123,11 @@ fn every_documented_setting_is_known() {
         ))
         .unwrap();
     }
-    assert_eq!(block_on(e.settings()).unwrap().len(), SETTINGS.len());
+    // every documented setting is accepted and visible through the object
+    let s = block_on(e.settings()).unwrap();
+    assert_eq!(s.sources, lessdugin_core::dto::Sources::Assisted);
+    assert_eq!(s.verify, lessdugin_core::dto::VerifyMode::Pds);
+    assert_eq!(s.media_autoload_hosts, vec!["a.example".to_owned()]);
 }
 
 #[test]
@@ -165,4 +179,37 @@ fn drafts_round_trip_overwrite_and_delete() {
     assert!(block_on(e.drafts()).unwrap().is_empty());
     // deleting what is gone is not an error: the composer deletes on publish regardless
     block_on(e.delete_draft(&id)).unwrap();
+}
+
+#[test]
+fn settings_is_an_object_with_the_clients_list_fields() {
+    // The CI-only e2e failure was `TypeError: Cannot read properties of undefined (reading
+    // 'map')` on the settings page: `settings()` returned a flat key/value map while the client
+    // declares an OBJECT with four list fields and calls `indexers.map(...)`. The client's type is
+    // the contract (engine-api.md §3.6 lists `settings()` as M4, and `types.ts` mirrors the DTOs),
+    // so this pins the shape that makes that page render.
+    let e = engine();
+    let s = block_on(e.settings()).unwrap();
+    // the four list fields must exist as LISTS, even when empty: `undefined.map` is the bug
+    assert!(s.indexers.is_empty());
+    assert!(s.external_images_forums.is_empty());
+    assert!(s.media_autoload_hosts.is_empty());
+    assert!(s.acknowledged_public_actions.is_empty());
+    // and the scalar fields report their documented defaults
+    assert_eq!(s.sources, lessdugin_core::dto::Sources::Assisted);
+    assert_eq!(s.verify, lessdugin_core::dto::VerifyMode::Pds);
+    assert_eq!(
+        s.karma_notifications,
+        lessdugin_core::dto::KarmaCadence::Daily
+    );
+
+    // a chosen value shows through the same object
+    block_on(e.set_setting("sources", Some("direct"))).unwrap();
+    block_on(e.set_setting("mediaHosts", Some("a.example,b.example"))).unwrap();
+    let s = block_on(e.settings()).unwrap();
+    assert_eq!(s.sources, lessdugin_core::dto::Sources::Direct);
+    assert_eq!(
+        s.media_autoload_hosts,
+        vec!["a.example".to_owned(), "b.example".to_owned()]
+    );
 }
