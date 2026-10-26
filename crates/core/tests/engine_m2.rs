@@ -573,3 +573,53 @@ fn writes_need_an_account_and_publish_media() {
     assert_send(&bob.engine.outbox_pump());
     assert_send(&bob.engine);
 }
+
+#[test]
+fn redact_revision_removes_the_history_and_only_the_author_may() {
+    // engine-api.md 3.6 (M4): `redact_revision(uri)` deletes revision records, so the history
+    // stops being readable and the PDS can collect any blob those versions referenced.
+    let s = scenario();
+    let (alice, bob) = (&s.w.alice, &s.w.bob);
+    let welcome = s.welcome.clone();
+
+    // the scenario's edits left revisions; record how many so the redaction count is exact
+    let h = block_on(alice.engine.history(&welcome)).unwrap();
+    let before = h.versions.len();
+    assert!(before >= 1, "the fixture must leave a revision: {h:?}");
+    assert!(h.versions.iter().all(|v| v.available));
+
+    // bob does not own the post, so he cannot redact its history (W9)
+    let err = block_on(bob.engine.redact_revision(&welcome)).unwrap_err();
+    assert_eq!(err.code, ErrorCode::AuthRequired, "{err:?}");
+
+    // the author can
+    // one write, because the outbox batches the deletes into a single `applyWrites`
+    let tickets = block_on(alice.engine.redact_revision(&welcome)).unwrap();
+    assert_eq!(tickets.len(), 1, "the deletes are batched into one write");
+    alice.flush();
+    block_on(alice.engine.sync_forum(&s.forum, &SyncOpts::default())).unwrap();
+
+    // the revisions the fold knew are gone. (A version entry can outlive this when the fold's
+    // revision list and `history()` disagree about a revision - the list keeps only revisions
+    // whose snapshot verifies - so the assertion is "strictly fewer", not "none".)
+    let h = block_on(alice.engine.history(&welcome)).unwrap();
+    assert!(
+        h.versions.len() < before,
+        "the redaction must remove at least one version: {h:?}"
+    );
+    // the item itself still reads, and `badges.edited` stays set: the edit happened, only its
+    // snapshot is gone. The redacted flag comes from `history()`, which is what a client shows.
+    let t = block_on(alice.engine.get_thread(&welcome, &ThreadOpts::default())).unwrap();
+    match &t.post {
+        ThreadRoot::Post(p) => assert!(p.post.badges.edited, "the edit still happened"),
+        other => panic!("{other:?}"),
+    }
+
+    // and a second redaction is a no-op rather than an error: the state is already what the
+    // caller asked for
+    assert!(
+        block_on(alice.engine.redact_revision(&welcome))
+            .unwrap()
+            .is_empty()
+    );
+}

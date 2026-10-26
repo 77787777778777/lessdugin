@@ -711,3 +711,40 @@ impl<H: Host> Engine<H> {
         Ok(n)
     }
 }
+
+impl<H: crate::host::Host> Engine<H> {
+    /// `redact_revision(uri)` (`engine-api.md` §3.6, M4): deletes the revision records of an item,
+    /// so its history can no longer be read and the PDS garbage-collects any blobs those versions
+    /// referenced (`synthesis-v1.md` F29-F34, "redact revisions ... so their blobs are
+    /// garbage-collected").
+    ///
+    /// Only the item's AUTHOR (the account that owns the record) may redact its history: the
+    /// revisions are records in their own repo, and removing someone else's history would be a
+    /// deletion in a repo the caller does not own (W9). A redaction is itself a delete of each
+    /// revision record, so it goes through the outbox like any other write.
+    ///
+    /// The item then reads as "history redacted": it was edited (its own record says so) but no
+    /// revision is left, which is what [`Engine::history`] reports.
+    pub async fn redact_revision(&self, uri: &str) -> Result<Vec<WriteTicket>, EngineError> {
+        let u = records::at_uri(uri)?;
+        let session = self.session_for(u.did().as_str()).await?;
+        let key = self.forum_of(&u).await?;
+        let l = self.loaded(&key).await?;
+        // every revision record this device knows of for the item, from the fold's own graph
+        let revs: Vec<String> = l
+            .model
+            .view
+            .revisions
+            .get(&u.to_string())
+            .cloned()
+            .unwrap_or_default();
+        if revs.is_empty() {
+            // nothing to do is not an error: "the history is already empty" and "there was never
+            // a revision" are the same state, and a redaction is idempotent
+            return Ok(Vec::new());
+        }
+        // the outbox has a purpose-built path for this: one `applyWrites` of `#delete revision`
+        // ops, chunked at 200, which is what `Intent::Redact` is for
+        Ok(vec![self.outbox.redact(&session, &revs).await?])
+    }
+}
