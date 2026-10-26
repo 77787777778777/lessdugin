@@ -701,7 +701,10 @@ const DECODE_MAX_ALLOC_BYTES: usize = 256 * 1024 * 1024;
 /// is what already happens for an undecodable file (the metadata is still stripped, and
 /// orientation and downscaling no-op).
 #[cfg(feature = "orientation")]
-fn decoding_allowed(bytes: &[u8]) -> bool {
+/// True when the bytes may be handed to a decoder: the three SUP-9 caps hold (64 MiB of input,
+/// 8192 pixels per side, a 256 MiB allocation at 4 bytes a pixel). Public so every surface that
+/// decodes media - the pipeline here, and the TUI's image widget - uses ONE policy.
+pub fn decoding_allowed(bytes: &[u8]) -> bool {
     if bytes.len() > DECODE_MAX_INPUT_BYTES {
         return false;
     }

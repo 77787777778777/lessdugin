@@ -271,15 +271,15 @@ impl<H: crate::host::Host> Engine<H> {
 /// live in the same `loc` state the rest of the local lists use, and they travel with
 /// [`LocalExport`].
 pub const SETTINGS: [&str; 5] = [
-    /// `direct` or `assisted` (`engine::Sources`).
+    // `direct` or `assisted` (`engine::Sources`).
     "sources",
-    /// `pds` or `proof` (`engine::VerifyMode`).
+    // `pds` or `proof` (`engine::VerifyMode`).
     "verify",
-    /// `off` or `on`: whether media loads at all (3.9's master switch).
+    // `off` or `on`: whether media loads at all (3.9's master switch).
     "mediaAutoload",
-    /// Extra hosts whose media may load without a click, comma separated (3.9's allowlist).
+    // Extra hosts whose media may load without a click, comma separated (3.9's allowlist).
     "mediaHosts",
-    /// `off` or `on`: whether external link cards fetch a preview.
+    // `off` or `on`: whether external link cards fetch a preview.
     "externalImages",
 ];
 

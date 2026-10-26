@@ -3227,6 +3227,7 @@ dependencies = [
  "anyhow",
  "crossterm",
  "futures",
+ "image",
  "insta",
  "lessdugin-atp",
  "lessdugin-core",

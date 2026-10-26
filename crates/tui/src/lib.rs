@@ -27,6 +27,7 @@ pub mod command;
 pub mod editor;
 pub mod exec;
 pub mod headless;
+pub mod image;
 pub mod keys;
 pub mod runtime;
 pub mod text;

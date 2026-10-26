@@ -17,6 +17,8 @@ lessdugin-native.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true
 ratatui-image.workspace = true
+# the F35/F36 decode caps are checked from the header before pixels are allocated
+image.workspace = true
 anyhow.workspace = true
 tokio.workspace = true
 futures.workspace = true
