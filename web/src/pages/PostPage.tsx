@@ -63,13 +63,19 @@ function HistoryButton({
   uri,
   revisions,
   redacted,
+  own,
 }: {
   uri: string;
   revisions: number;
   redacted: boolean;
+  /** The viewer wrote this item, so redacting its history is theirs to do. */
+  own: boolean;
 }) {
   const engine = useEngine();
   const [open, setOpen] = useState(false);
+  const [redacting, setRedacting] = useState(false);
+  const [redactError, setRedactError] = useState<string | null>(null);
+  const qc = useQueryClient();
   const history = useQuery({
     queryKey: qk.history(uri),
     queryFn: () => engine.history(uri),
@@ -96,6 +102,35 @@ function HistoryButton({
             ))}
           </ol>
         )}
+        {own && revisions > 0 && (
+          <button
+            type="button"
+            className={ui.button}
+            disabled={redacting}
+            onClick={() => {
+              // Redacting deletes the revision records, which cannot be undone, so it asks
+              // first and names what goes (docs/plan.md M4: "history view and redaction").
+              if (
+                !window.confirm(
+                  `Delete all ${revisions} revision${revisions === 1 ? "" : "s"} of this post? ` +
+                    "The versions cannot be restored.",
+                )
+              ) {
+                return;
+              }
+              setRedacting(true);
+              setRedactError(null);
+              void engine
+                .redactRevision(uri)
+                .then(() => qc.invalidateQueries())
+                .catch((e: unknown) => setRedactError(errorMessage(e)))
+                .finally(() => setRedacting(false));
+            }}
+          >
+            {redacting ? "Redacting…" : "Redact history"}
+          </button>
+        )}
+        {redactError && <p className={ui.error}>{redactError}</p>}
         <button type="button" className={ui.button} onClick={() => setOpen(false)}>
           Close
         </button>
@@ -278,6 +313,7 @@ function PostBodyView({
               uri={post.uri}
               revisions={view.history.revisions}
               redacted={view.history.redacted}
+              own={own}
             />
           </div>
         </header>

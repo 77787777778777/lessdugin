@@ -129,7 +129,6 @@ pub const UNSUPPORTED: &[(&str, &str)] = &[
     ("seqAdd", "M5"),
     ("seqRemove", "M5"),
     ("seqMove", "M5"),
-    ("redactRevision", "M4"),
     // §3.6: the engine's draft store, settings and local export (M4, with the editor, the
     // media policy and `export`)
     ("drafts", "M4"),
@@ -480,6 +479,18 @@ pub async fn call<H: Host>(engine: &Engine<H>, op: &str, a: &str) -> Result<Stri
         "delete" => {
             let (uri,): (String,) = args(op, a)?;
             out(&engine.delete(&uri).await?)
+        }
+        "redactRevision" => {
+            // The engine returns one batched write (the outbox chunks the deletes), and the
+            // client's declaration is a single WriteTicket, so the first is the one.
+            let (uri,): (String,) = args(op, a)?;
+            let tickets = engine.redact_revision(&uri).await?;
+            // nothing to redact is the state the caller asked for, so it is `null`, not an
+            // invented ticket and not an error
+            match tickets.into_iter().next() {
+                Some(t) => out(&t),
+                None => out(&Option::<lessdugin_core::dto::WriteTicket>::None),
+            }
         }
         "prepareMedia" => {
             // The bytes are a separate argument from the hints (engine-api.md §3.6), so

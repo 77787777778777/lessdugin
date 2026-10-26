@@ -216,7 +216,8 @@ export interface EngineApi {
   seqAdd(uri: AtUri, post: AtUri, at: SequencePosition): Promise<WriteTicket>;
   seqRemove(uri: AtUri, post: AtUri): Promise<WriteTicket>;
   seqMove(uri: AtUri, from: SequencePosition, to: SequencePosition): Promise<WriteTicket>;
-  redactRevision(uri: AtUri): Promise<WriteTicket>;
+  /** `null` when the item had no history left to redact (the call is idempotent). */
+  redactRevision(uri: AtUri): Promise<WriteTicket | null>;
   /**
    * `prepare_media` (engine-api.md §3.6): sniff, strip metadata, apply EXIF orientation and
    * compute the CID. The bytes are a separate argument because a Blob or a file is not a DTO
