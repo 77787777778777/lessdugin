@@ -21,6 +21,7 @@ import { qk } from "../engine/queries.ts";
 import { cx } from "../lib/cx.ts";
 import ui from "../styles/ui.module.css";
 import styles from "./Composer.module.css";
+import { Attachments, type Attachment } from "./Attachments.tsx";
 import { RenderedHtml } from "./RenderedHtml.tsx";
 import { errorMessage } from "./Status.tsx";
 
@@ -106,6 +107,7 @@ export function Composer({
   label = "Comment",
   autoFocus = false,
   compact = false,
+  attachments = false,
   onSubmit,
   onCancel,
 }: {
@@ -119,7 +121,9 @@ export function Composer({
   autoFocus?: boolean | undefined;
   compact?: boolean | undefined;
   /** Resolves to true when the text was accepted (the composer then clears). */
-  onSubmit: (markdown: string) => Promise<boolean>;
+  onSubmit: (markdown: string, attachments: Attachment[]) => Promise<boolean>;
+  /** Show the attachment picker (a post's composer does; a reply box does not, M4). */
+  attachments?: boolean | undefined;
   onCancel?: (() => void) | undefined;
 }) {
   const engine = useEngine();
@@ -130,6 +134,7 @@ export function Composer({
   const [showPreview, setShowPreview] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [files, setFiles] = useState<Attachment[]>([]);
   const [savedAt, setSavedAt] = useState<number | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const qc = useQueryClient();
@@ -264,7 +269,7 @@ export function Composer({
     setBusy(true);
     setError(null);
     try {
-      const ok = await onSubmit(value);
+      const ok = await onSubmit(value, files);
       if (ok) {
         generation.current++;
         const view = viewRef.current;
@@ -275,6 +280,7 @@ export function Composer({
         draftIdRef.current = undefined;
         if (id !== undefined) await engine.deleteDraft(id).catch(() => {});
         setSavedAt(null);
+        setFiles([]);
       }
     } catch (e) {
       setError(errorMessage(e));
@@ -314,6 +320,9 @@ export function Composer({
         </button>
       </div>
       <div ref={hostRef} className={styles.editor} data-testid="composer-editor" />
+      {attachments ? (
+        <Attachments value={files} onChange={setFiles} disabled={busy} />
+      ) : null}
       {showPreview && preview && (
         <section className={styles.preview} aria-label="Preview">
           <RenderedHtml html={preview.html} preview className="lfm-compact" />

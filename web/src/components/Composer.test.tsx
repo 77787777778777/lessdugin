@@ -72,8 +72,9 @@ describe("Composer", () => {
     // The autosave starts after its debounce and stays in flight.
     await waitFor(() => expect(save).toHaveBeenCalledTimes(1), { timeout: 3000 });
     fireEvent.click(screen.getByRole("button", { name: "Publish" }));
+    // the second argument is the composer's attachment rows (empty here, M4)
     await waitFor(() =>
-      expect(onSubmit).toHaveBeenCalledWith("A comment that is published quickly."),
+      expect(onSubmit).toHaveBeenCalledWith("A comment that is published quickly.", []),
     );
     gate.resolve();
     await waitFor(() => expect(remove).toHaveBeenCalledTimes(1));

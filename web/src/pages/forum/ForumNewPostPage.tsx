@@ -6,6 +6,7 @@
 // chooses to replace it without history.
 
 import type { Draft, MediaRef, PostDraft, PostKind } from "@lessdugin/engine/types";
+import type { Attachment } from "../../components/Attachments.tsx";
 import { POST_KINDS } from "@lessdugin/engine/types";
 import { useQuery } from "@tanstack/react-query";
 import { getRouteApi, useNavigate } from "@tanstack/react-router";
@@ -123,7 +124,11 @@ function PostForm({
     [draftFor],
   );
 
-  const publish = async (markdown: string): Promise<boolean> => {
+  const publish = async (markdown: string, attached: Attachment[]): Promise<boolean> => {
+    // the prepared refs the composer collected (docs/plan.md M4); a refused file is never
+    // already in the draft, and one whose row was removed is not either
+    const prepared = attached.flatMap((a) => (a.kind === "ready" ? [a.ref] : []));
+    media.current = [...media.current, ...prepared];
     const ticket = editing
       ? await engine.edit(
           editing,
@@ -234,6 +239,7 @@ function PostForm({
           submitLabel={editing ? "Save edit" : "Publish"}
           placeholder="Write your post in markdown…"
           onSubmit={publish}
+          attachments
         />
         <span className={ui.hint}>
           Published posts are public records in your repository. Edits keep a public history unless
