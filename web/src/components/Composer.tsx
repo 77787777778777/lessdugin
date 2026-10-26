@@ -14,11 +14,12 @@ import { markdown } from "@codemirror/lang-markdown";
 import { EditorSelection, EditorState } from "@codemirror/state";
 import { EditorView, keymap, placeholder as placeholderExt } from "@codemirror/view";
 import type { Draft, RenderedBody } from "@lessdugin/engine/types";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { useEngine } from "../engine/context.tsx";
 import { qk } from "../engine/queries.ts";
 import { cx } from "../lib/cx.ts";
+import { applyMention, type MentionCandidate, mentionAt, rankMentions } from "../lib/mentions.ts";
 import ui from "../styles/ui.module.css";
 import { type Attachment, Attachments } from "./Attachments.tsx";
 import styles from "./Composer.module.css";
@@ -108,6 +109,7 @@ export function Composer({
   autoFocus = false,
   compact = false,
   attachments = false,
+  forumUri = undefined,
   onSubmit,
   onCancel,
 }: {
@@ -124,9 +126,35 @@ export function Composer({
   onSubmit: (markdown: string, attachments: Attachment[]) => Promise<boolean>;
   /** Show the attachment picker (a post's composer does; a reply box does not, M4). */
   attachments?: boolean | undefined;
+  /** The forum whose members can be mentioned; omit to offer no completion (M4). */
+  forumUri?: string | undefined;
   onCancel?: (() => void) | undefined;
 }) {
   const engine = useEngine();
+  // Who can be mentioned: the forum's members, by handle. Only a VERIFIED handle is offered,
+  // because inserting an unverified one would assert an identity this client cannot vouch
+  // for (synthesis-v1.md §3.4 shows those struck through).
+  const members = useQuery({
+    queryKey: qk.members(forumUri ?? ""),
+    queryFn: () => engine.members(forumUri as string, {}),
+    enabled: forumUri !== undefined,
+    staleTime: 60_000,
+  });
+  const candidatesRef = useRef<MentionCandidate[]>([]);
+  // the first candidate, for the keyboard; set below once `mentions` is known
+  const pendingMention = useRef<MentionCandidate | null>(null);
+  const acceptMentionRef = useRef<(c: MentionCandidate) => void>(() => {});
+  candidatesRef.current = (members.data ?? []).flatMap((m) =>
+    m.actor.handle !== undefined && m.actor.handleState === "verified"
+      ? [
+          {
+            did: m.actor.did,
+            handle: m.actor.handle,
+            ...(m.actor.displayName ? { label: m.actor.displayName } : {}),
+          },
+        ]
+      : [],
+  );
   const hostRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
   const [text, setText] = useState(initial);
@@ -135,6 +163,10 @@ export function Composer({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [files, setFiles] = useState<Attachment[]>([]);
+  // mention completion (M4): the token under the caret and the candidates for it
+  const [mentions, setMentions] = useState<{ start: number; items: MentionCandidate[] } | null>(
+    null,
+  );
   const [savedAt, setSavedAt] = useState<number | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const qc = useQueryClient();
@@ -167,6 +199,35 @@ export function Composer({
         extensions: [
           history(),
           keymap.of([
+            // while the mention popup is open, Enter and Tab take the first candidate;
+            // Escape closes it. This is checked against a ref because the keymap is built
+            // once, while the popup state changes as the reader types.
+            {
+              key: "Enter",
+              run: () => {
+                const c = pendingMention.current;
+                if (c === null) return false;
+                acceptMentionRef.current(c);
+                return true;
+              },
+            },
+            {
+              key: "Tab",
+              run: () => {
+                const c = pendingMention.current;
+                if (c === null) return false;
+                acceptMentionRef.current(c);
+                return true;
+              },
+            },
+            {
+              key: "Escape",
+              run: () => {
+                if (pendingMention.current === null) return false;
+                setMentions(null);
+                return true;
+              },
+            },
             {
               key: "Mod-Enter",
               run: () => {
@@ -200,6 +261,11 @@ export function Composer({
           EditorView.contentAttributes.of({ "aria-label": label, "aria-multiline": "true" }),
           EditorView.updateListener.of((u) => {
             if (u.docChanged) setText(u.state.doc.toString());
+            // completion follows the caret, so it is recomputed on selection changes too
+            const sel = u.state.selection.main;
+            const token = mentionAt(u.state.doc.toString(), sel.head);
+            const items = token === null ? [] : rankMentions(token.query, candidatesRef.current);
+            setMentions(token !== null && items.length > 0 ? { start: token.start, items } : null);
           }),
         ],
       }),
@@ -263,6 +329,24 @@ export function Composer({
     return () => clearTimeout(t);
   }, [text, autosave, engine, initial, qc]);
 
+  const acceptMention = (c: MentionCandidate): void => {
+    const view = viewRef.current;
+    if (!view || mentions === null) return;
+    const cur = view.state.doc.toString();
+    const caret = view.state.selection.main.head;
+    const out = applyMention(cur, mentions.start, caret, c.handle);
+    view.dispatch({
+      changes: { from: 0, to: cur.length, insert: out.text },
+      selection: EditorSelection.cursor(out.caret),
+    });
+    view.focus();
+    setMentions(null);
+  };
+
+  // the keymap reads these, so they follow the current state without re-creating the editor
+  acceptMentionRef.current = acceptMention;
+  pendingMention.current = mentions?.items[0] ?? null;
+
   const submit = async (): Promise<void> => {
     const value = viewRef.current?.state.doc.toString() ?? text;
     if (value.trim() === "" || busy) return;
@@ -320,6 +404,28 @@ export function Composer({
         </button>
       </div>
       <div ref={hostRef} className={styles.editor} data-testid="composer-editor" />
+      {mentions && (
+        <ul className={styles.mentions} data-testid="mention-menu" aria-label="Mention">
+          {mentions.items.map((c, i) => (
+            <li key={c.did}>
+              <button
+                type="button"
+                className={styles.mention}
+                // the first candidate is the default, so Enter in the editor still works
+                aria-current={i === 0 ? "true" : undefined}
+                onMouseDown={(e) => {
+                  // keep the editor's selection: a blur would move the caret
+                  e.preventDefault();
+                  acceptMention(c);
+                }}
+              >
+                <span className={styles.mentionHandle}>@{c.handle}</span>
+                {c.label && <span className={styles.mentionLabel}>{c.label}</span>}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
       {attachments ? <Attachments value={files} onChange={setFiles} disabled={busy} /> : null}
       {showPreview && preview && (
         <section className={styles.preview} aria-label="Preview">
