@@ -217,7 +217,12 @@ export interface EngineApi {
   seqRemove(uri: AtUri, post: AtUri): Promise<WriteTicket>;
   seqMove(uri: AtUri, from: SequencePosition, to: SequencePosition): Promise<WriteTicket>;
   redactRevision(uri: AtUri): Promise<WriteTicket>;
-  prepareMedia(input: MediaInput): Promise<MediaRef>;
+  /**
+   * `prepare_media` (engine-api.md §3.6): sniff, strip metadata, apply EXIF orientation and
+   * compute the CID. The bytes are a separate argument because a Blob or a file is not a DTO
+   * field; the upload itself happens at publish time (data-model.md §8.8).
+   */
+  prepareMedia(bytes: Uint8Array, input?: MediaInput): Promise<MediaRef>;
   undo(writeId: string): Promise<WriteTicket>;
   /** Queues a `failed` (or conflicting) write again. */
   retryWrite(writeId: string): Promise<WriteTicket>;

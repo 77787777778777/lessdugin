@@ -179,6 +179,103 @@ async fn reply(forum: &str, post: &str, size: (u16, u16)) -> Res<()> {
     Ok(())
 }
 
+/// The M3 parity scenario's social half (`docs/plan.md` §4.2 step 4): carol votes, agrees and
+/// reacts through the TUI's KEYS, so the scenario proves the keys work and not merely the engine
+/// API. Prints the viewer's own opinion afterwards, which is what the scenario compares.
+async fn votes(forum: &str, post: &str, size: (u16, u16)) -> Res<()> {
+    let d = open()?;
+    let account = d
+        .engine
+        .active_account()
+        .await
+        .map_err(|e| e.message)?
+        .ok_or("not logged in: run `lessdugin --dev login` with this data directory first")?;
+    let store = SecretStore::new(&d.paths).with_keyring_service(d.keyring_service.clone());
+    let account = restore_session(&d.engine, &store, &d.paths, &account)
+        .await
+        .map_err(|e| e.message)?;
+    let engine = d
+        .engine
+        .acting_as(&account.did)
+        .await
+        .map_err(|e| e.message)?;
+    let mut h = Headless::new(
+        engine.clone(),
+        HeadlessOpts {
+            width: size.0,
+            height: size.1,
+            ..HeadlessOpts::default()
+        },
+    )
+    .await
+    .map_err(|e| e.message)?;
+    open_post(&mut h, forum, post).await?;
+
+    // `u` upvote, `a` agree. Each write is sent before the next key, so the item's own view is
+    // settled and nothing is left in the undo window when the scenario compares the clients.
+    for key in ["u", "a"] {
+        h.press(key).await;
+        let screen = h.render();
+        if let Some(s) = &h.state.status {
+            let text = s.text.to_plain_string();
+            if text.contains("cannot") || text.contains("Cannot") || text.contains("refused") {
+                return Err(format!("{key} was refused: {text}\n{screen}"));
+            }
+        }
+        engine
+            .outbox_flush()
+            .await
+            .map_err(|e| format!("sending {key}: {}", e.message))?;
+        h.settle().await;
+    }
+    // the react palette (`x`), picking the highlighted entry with Enter
+    h.press("x").await;
+    h.press("Enter").await;
+    engine
+        .outbox_flush()
+        .await
+        .map_err(|e| format!("sending the react: {}", e.message))?;
+    h.settle().await;
+    let screen = h.render();
+
+    // the viewer's own opinion as the engine now holds it: this is what the scenario reports
+    let view = h
+        .thread_view()
+        .ok_or("the thread is gone after the opinions")?;
+    let mine = match &view.post {
+        lessdugin_core::dto::ThreadRoot::Post(p) => p.post.score.mine.clone(),
+        lessdugin_core::dto::ThreadRoot::Missing { .. } => None,
+    };
+    let Some(mine) = mine else {
+        return Err(format!(
+            "the keys wrote nothing: the viewer has no opinion\n{screen}"
+        ));
+    };
+    if mine.pending {
+        let writes = engine.writes().await.map_err(|e| e.message)?;
+        return Err(format!(
+            "an opinion was never sent: {}\n{screen}",
+            serde_json::to_string(&writes).unwrap_or_default()
+        ));
+    }
+    if mine.karma.is_none() && mine.agreement.is_none() {
+        return Err(format!(
+            "neither a vote nor an agreement was recorded\n{screen}"
+        ));
+    }
+    eprintln!("{screen}");
+    println!(
+        "{}",
+        serde_json::json!({
+            "subject": post,
+            "karma": mine.karma,
+            "agreement": mine.agreement,
+            "not_yet_counted": mine.not_yet_counted,
+        })
+    );
+    Ok(())
+}
+
 fn write(dir: &Path, name: &str, text: &str) -> Res<()> {
     std::fs::write(dir.join(name), text).map_err(|e| format!("{name}: {e}"))
 }
@@ -246,7 +343,7 @@ async fn read(forum: &str, post: &str, out: &Path, size: (u16, u16)) -> Res<()> 
     Ok(())
 }
 
-const USAGE: &str = "usage: parity_driver reply <forum-uri> <post-uri> [--width N] [--height N]\n       parity_driver read <forum-uri> <post-uri> <out-dir> [--width N] [--height N]";
+const USAGE: &str = "usage: parity_driver reply <forum-uri> <post-uri> [--width N] [--height N]\n       parity_driver read <forum-uri> <post-uri> <out-dir> [--width N] [--height N]\n       parity_driver votes <forum-uri> <post-uri> [--width N] [--height N]";
 
 fn main() -> ExitCode {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
@@ -281,6 +378,7 @@ fn main() -> ExitCode {
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let res = match args.as_slice() {
         ["reply", forum, post] => rt.block_on(reply(forum, post, size)),
+        ["votes", forum, post] => rt.block_on(votes(forum, post, size)),
         ["read", forum, post, out] => rt.block_on(read(forum, post, Path::new(out), size)),
         _ => {
             eprintln!("{USAGE}");

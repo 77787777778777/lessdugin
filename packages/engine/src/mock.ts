@@ -2373,9 +2373,10 @@ export class MockEngine implements EngineApi {
     });
   }
 
-  async prepareMedia(input: MediaInput): Promise<MediaRef> {
-    const b = input.bytes;
-    let mime = input.mime ?? "application/octet-stream";
+  async prepareMedia(bytes: Uint8Array, input: MediaInput = {}): Promise<MediaRef> {
+    const b = bytes;
+    // the declared type is only a hint: the sniffed one wins (data-model.md §8.8)
+    let mime = input.declaredMime ?? "application/octet-stream";
     if (b[0] === 0x89 && b[1] === 0x50) mime = "image/png";
     else if (b[0] === 0xff && b[1] === 0xd8) mime = "image/jpeg";
     let digest = `${b.length}:`;

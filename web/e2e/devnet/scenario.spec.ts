@@ -49,7 +49,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { expect, type Page, type TestInfo, test } from "@playwright/test";
+import { expect, type Browser, type Page, type TestInfo, test } from "@playwright/test";
 import { login as atpLogin, createPostAt, fk } from "./atp.mjs";
 import { e2eState, route, signIn, watchStrict, withDevnet } from "./state.ts";
 
@@ -251,9 +251,26 @@ test("M2 parity scenario: alice (CLI), bob (SPA) and carol (TUI); the three clie
   );
   test.setTimeout(360_000);
 
+  // docs/plan.md §4.2 "Variants: approval and open mode (M3)": the scenario runs once per
+  // membership mode, and the three clients must agree byte for byte in both. Approval mode needs
+  // the owner's grant before bob and carol can post; open mode lets them join and post at once,
+  // and there is no "Approval required" banner to see.
+  for (const mode of ["approval", "open"] as const) {
+    await runScenario(browser, info, mode);
+  }
+});
+
+/** One run of the parity scenario in one membership mode. */
+async function runScenario(
+  browser: Browser,
+  info: TestInfo,
+  mode: "approval" | "open",
+): Promise<void> {
+  const approval = mode === "approval";
+
   // the scenario's start plus a day, the same in every client (engine-api.md §2.1)
   const t = Date.now() + 86_400_000;
-  const out = info.outputPath("parity");
+  const out = info.outputPath(`parity-${mode}`);
   mkdirSync(out, { recursive: true });
   const work = mkdtempSync(join(tmpdir(), "lessdugin-parity-"));
   const timings: { step: string; ms: number }[] = [];
@@ -272,16 +289,20 @@ test("M2 parity scenario: alice (CLI), bob (SPA) and carol (TUI); the three clie
   const user = (name: string) => new User(name, join(work, name), t, logRun);
   const alice = user("alice");
   const carol = user("carol");
-  const slug = `parity-${Date.now().toString(36)}`;
+  // the slug is per variant: the two runs share a devnet, so a reused slug would collide
+  const slug = `parity-${mode}-${Date.now().toString(36)}`;
   let forum = "";
   let post = "";
   let reply = "";
   let canary = "";
+  // step 4's settled opinion, kept so the report can show what the keys recorded
+  let socialVote: unknown = null;
   const total0 = Date.now();
 
   try {
-    // 1. alice, CLI: the forum (approval mode, written explicitly), bob and carol approved
-    await step("1. alice (CLI): forum create, approve bob and carol", async () => {
+    // 1. alice, CLI: the forum in this variant's membership mode; in approval mode bob and carol
+    // are approved before they can post
+    await step(`1. alice (CLI): forum create (${mode}), ${approval ? "approve bob and carol" : "no grant needed"}`, async () => {
       await alice.login();
       forum = doneUri(
         await alice.cli("forum-create", [
@@ -292,23 +313,25 @@ test("M2 parity scenario: alice (CLI), bob (SPA) and carol (TUI); the three clie
           "--name",
           FORUM_NAME,
           "--mode",
-          "approval",
+          mode,
           "--frontpage",
         ]),
       );
       const show = JSON.parse(await alice.cli("forum-show", ["--json", "forum", "show", forum]));
-      expect(show.forum.membership).toBe("approval");
-      const approved = JSON.parse(
-        await alice.cli("approve", [
-          "--json",
-          "--forum",
-          forum,
-          "approve",
-          "bob.test",
-          "carol.test",
-        ]),
-      ) as { writes: { state: { kind: string } }[] };
-      expect(approved.writes.map((w) => w.state.kind)).toEqual(["done", "done"]);
+      expect(show.forum.membership).toBe(mode);
+      if (approval) {
+        const approved = JSON.parse(
+          await alice.cli("approve", [
+            "--json",
+            "--forum",
+            forum,
+            "approve",
+            "bob.test",
+            "carol.test",
+          ]),
+        ) as { writes: { state: { kind: string } }[] };
+        expect(approved.writes.map((w) => w.state.kind)).toEqual(["done", "done"]);
+      }
       // carol signs in with the CLI; the TUI uses that stored session (as `lessdugin tui`)
       await carol.login();
     });
@@ -333,11 +356,17 @@ test("M2 parity scenario: alice (CLI), bob (SPA) and carol (TUI); the three clie
     const page = await ctx.newPage();
     const w = await watchStrict(page);
     await withDevnet(page, s, { parityNowMs: t });
-    await step("2. bob (SPA): sign in, join, post", async () => {
+    await step(`2. bob (SPA): sign in, join, post (${mode})`, async () => {
       await signIn(page, s, "bob");
       await page.goto(`${s.app}/${route(forum)}`);
       await expect(page.getByRole("heading", { level: 1, name: FORUM_NAME })).toBeVisible();
-      await expect(page.getByText("Approval required")).toBeVisible();
+      if (approval) {
+        // approval mode: the grant is already there, and the join still asks for the interstitial
+        await expect(page.getByText("Approval required")).toBeVisible();
+      } else {
+        // open mode: no approval gate to announce
+        await expect(page.getByText("Approval required")).toHaveCount(0);
+      }
       await page.getByRole("button", { name: "Join", exact: true }).click();
       await page
         .getByRole("dialog", { name: "Membership is public" })
@@ -353,6 +382,15 @@ test("M2 parity scenario: alice (CLI), bob (SPA) and carol (TUI); the three clie
       const m = /#\/p\/(did:plc:[a-z2-7]{24})\/([a-z2-7-]+)$/.exec(page.url());
       expect(m?.[1]).toBe(s.devnet.accounts.bob.did);
       post = `at://${m?.[1]}/online.7778777.lessdugin.temp.post/${m?.[2]}`;
+      if (!approval) {
+        // open mode applies V8: a participant outside S ∪ E is a NEWCOMER, and a newcomer's
+        // content is Collapsed(NewUser) by default (social.md §6.5 V8, `display.newUsers`). Bob
+        // has just arrived, so the owner's seed upvote is what makes him established
+        // (E = S ∪ {seedUp ≥ establishSeeds}, §6.2) and his post visible to every client.
+        // Without it the open variant would compare three empty views and prove nothing.
+        await alice.cli("seed-vote", ["--json", "vote", post, "up"]);
+        await alice.cli("sync", ["--json", "sync", forum]);
+      }
     });
 
     // 3. carol, TUI: opens the forum and the post, `c`, writes the comment in $EDITOR
@@ -369,6 +407,65 @@ test("M2 parity scenario: alice (CLI), bob (SPA) and carol (TUI); the three clie
       const r = JSON.parse(await carol.tui("reply", ["reply", forum, post], { EDITOR: editor }));
       reply = r.uri;
       expect(reply).toContain(`at://${s.devnet.accounts.carol.did}/`);
+    });
+
+    // 4. carol, TUI: votes, agrees and reacts THROUGH THE KEYS (docs/plan.md §4.2 step 4). The
+    // driver presses `u`, `a` and `x` Enter and sends each write, so this proves the keys work
+    // and that the opinion is settled (not held in the undo window) before the clients compare.
+    await step("4. carol (TUI): votes, agrees and reacts", async () => {
+      const v = JSON.parse(await carol.tui("votes", ["votes", forum, post]));
+      expect(v.subject).toBe(post);
+      expect(v.karma, `carol's vote: ${JSON.stringify(v)}`).toBeTruthy();
+      expect(v.agreement, `carol's agreement: ${JSON.stringify(v)}`).toBeTruthy();
+      // In approval mode a granted member is established, so the opinion counts. In open mode
+      // carol is a newcomer too (V8, social.md §6.5), and a newcomer's vote is RECORDED but
+      // carries no weight yet - "recorded; will count once you're established". Both are
+      // correct, and the three clients must agree on whichever one applies.
+      expect(v.not_yet_counted, `counted-ness in ${mode} mode`).toBe(!approval);
+      socialVote = v;
+      // The react record went through. Whether it forms a COUNTED tally depends on the mode:
+      // approval mode establishes carol, so hers counts; in open mode she is a newcomer, and
+      // "reacts by voters outside E are never counted" (social.md §8.7) - her position is still
+      // recorded, which is what the TUI's uncounted marker shows. Either way the three clients
+      // must agree, which the byte comparison below proves.
+      const thread = JSON.parse(await carol.cli("read-after-votes", ["--json", "read", post])) as {
+        post: { reacts: unknown[] };
+      };
+      if (approval) {
+        expect(
+          thread.post.reacts.length,
+          `carol's react must form a counted tally: ${JSON.stringify(thread.post.reacts)}`,
+        ).toBeGreaterThan(0);
+      }
+    });
+
+    // 5. the moderator, CLI: hides carol's comment and pins the post (docs/plan.md §4.2 step 5).
+    // alice owns the forum, so she is an authority; the hide is a modAction, the pin a forum
+    // record update, and both must show up identically in all three clients.
+    await step("5. alice (CLI): hides a comment and pins the post", async () => {
+      const hidden = JSON.parse(
+        await alice.cli("mod-hide", ["--json", "mod", "hide", reply, "--reason", "off topic"]),
+      ) as unknown;
+      expect(hidden).toBeTruthy();
+      const pinned = JSON.parse(
+        await alice.cli("mod-pin", [
+          "--json",
+          "mod",
+          "pin",
+          post,
+          "--scope",
+          "forum",
+          "--reason",
+          "good question",
+        ]),
+      ) as unknown;
+      expect(pinned).toBeTruthy();
+      await alice.cli("sync", ["--json", "sync", forum]);
+      // the moderator's own view now shows the hide
+      const log = JSON.parse(await alice.cli("mod-log", ["--json", "mod", "log", forum])) as {
+        entries: { action: { $type?: string } }[];
+      };
+      expect(log.entries.length).toBeGreaterThan(0);
     });
 
     // 6. bob, SPA: edits the post (applyWrites [create revision, update post])
@@ -402,7 +499,10 @@ test("M2 parity scenario: alice (CLI), bob (SPA) and carol (TUI); the three clie
     const spaOut: Outputs = { thread: "", list: "" };
 
     await step("read: CLI (ls --json, read --json)", async () => {
-      cliOut.list = await cli.cli("ls", ["--json", "ls", forum, "--sort", "new", "--all"]);
+      // the DEFAULT view (magic sort, frontpage filter since M3, engine-api.md §3.4), which is
+      // what the TUI's Forum screen shows: the three clients must agree on the default, so none
+      // of them pins a sort or filter the others do not.
+      cliOut.list = await cli.cli("ls", ["--json", "ls", forum]);
       cliOut.thread = await cli.cli("read", ["--json", "read", post]);
     });
 
@@ -423,12 +523,19 @@ test("M2 parity scenario: alice (CLI), bob (SPA) and carol (TUI); the three clie
       await expect(apage.getByRole("heading", { level: 1, name: FORUM_NAME })).toBeVisible();
       await apage.getByRole("link", { name: EDITED_TITLE }).click();
       await expect(apage.getByRole("heading", { level: 1, name: EDITED_TITLE })).toBeVisible();
-      await expect(apage.getByText(REPLY)).toBeVisible();
+      // carol's reply was HIDDEN by the moderator in step 5, so an anonymous reader must not see
+      // its body; what matters here is that the three clients agree (compared below), not the
+      // text itself.
+      await expect(
+        apage.getByText(REPLY),
+        "a hidden comment must not show its body to an anonymous reader",
+      ).toHaveCount(0);
       // the forum sync the page started has finished before the views are read
       await hook(apage, "syncForum", [forum, { full: false }]);
       spaOut.thread = await hook(apage, "getThread", [post, { sort: "magic", unreadOnly: false }]);
       spaOut.list = await hook(apage, "listPosts", [
-        { forum, sort: "new", filter: "all", limit: 30 },
+        // the same default view as the CLI and the TUI (magic, frontpage)
+        { forum, sort: "magic", filter: "frontpage", limit: 30 },
       ]);
       expect(await aw.problems()).toEqual([]);
       await actx.close();
@@ -461,12 +568,27 @@ test("M2 parity scenario: alice (CLI), bob (SPA) and carol (TUI); the three clie
     expect(thread.post.post.author.handle).toBe("bob.test");
     expect(thread.post.body.text).toContain(EDIT_TAIL);
     expect(thread.post.history.revisions).toBe(1);
-    expect(thread.comments.map((c: { uri: string }) => c.uri)).toEqual([reply]);
-    expect(thread.comments[0].author.handle).toBe("carol.test");
+    // carol's reply was HIDDEN by step 5's mod action, and the fold drops a hidden comment
+    // from the anonymous view entirely: it is not listed, and no part of its body survives. This
+    // is as much a parity assertion as the byte comparison above - all three clients must agree
+    // that the comment is gone.
+    expect(
+      thread.comments.map((c: { uri: string }) => c.uri),
+      "a hidden comment must not be in the anonymous view",
+    ).toEqual([]);
+    expect(
+      JSON.stringify(thread),
+      "the hidden comment's body must not survive anywhere in the view",
+    ).not.toContain(REPLY);
+    // Which repos this thread still needs depends on the mode. In approval mode carol stays a
+    // participant whose repo is needed even though her only comment is hidden, so the count is 3
+    // (alice, bob, carol). In open mode a newcomer's hidden content takes her out of what the
+    // thread needs, so it is 2 (alice, bob). Either way all three clients agree, which the byte
+    // comparison above proves.
     expect(thread.completeness).toEqual({
       partial: false,
-      reposComplete: 3,
-      reposTotal: 3,
+      reposComplete: approval ? 3 : 2,
+      reposTotal: approval ? 3 : 2,
       degraded: false,
     });
     const list = JSON.parse(tuiOut.list.compact) as {
@@ -500,4 +622,4 @@ test("M2 parity scenario: alice (CLI), bob (SPA) and carol (TUI); the three clie
     }
     rmSync(work, { recursive: true, force: true });
   }
-});
+}
