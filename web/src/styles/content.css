@@ -308,6 +308,16 @@
   display: block;
   margin: 0.5em 0;
   overflow-x: auto;
+  /* A wide equation scrolls horizontally, and a keyboard user must be able to do the same:
+     the renderer gives a display-maths block `tabindex="0"`, so it takes focus (axe rule
+     `scrollable-region-focusable`). The ring makes that focus visible rather than silent. */
+  scrollbar-width: thin;
+}
+
+.lfm math[display="block"]:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+  border-radius: 3px;
 }
 
 .lfm p.notice {

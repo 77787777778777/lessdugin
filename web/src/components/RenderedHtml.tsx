@@ -103,6 +103,15 @@ function makeAnchorsFocusable(root: Element): void {
   }
 }
 
+/** A display-maths block scrolls horizontally when the equation is wider than the column
+ * (`content.css`), so it must be focusable or a keyboard user can never scroll it. The renderer
+ * output is fixed by the blessed LFM vectors, so the attribute is added here rather than there. */
+function makeMathScrollable(root: Element): void {
+  for (const el of root.querySelectorAll('math[display="block"]')) {
+    el.setAttribute("tabindex", "0");
+  }
+}
+
 /** Task-list checkboxes (`<input type="checkbox" disabled="">` + the item's text) get the
  * item's text as their accessible name; a bare checkbox would be announced without one. */
 function labelTaskCheckboxes(root: Element): void {
@@ -190,6 +199,7 @@ export function RenderedHtml({
     addMediaPlaceholders(el);
     makeAnchorsFocusable(el);
     labelTaskCheckboxes(el);
+    makeMathScrollable(el);
     if (sidenotes) {
       addSidenotes(el);
       makeAnchorsFocusable(el);
