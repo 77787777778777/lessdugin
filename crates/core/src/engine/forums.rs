@@ -31,7 +31,7 @@ use crate::store::row;
 use crate::xrpc::{CallOpts, Service, Xrpc};
 
 use super::models::{Loaded, store_error};
-use super::{Engine, EngineError, ErrorCode};
+use super::{Engine, EngineError};
 
 const ROW_V: u32 = 1;
 
@@ -93,16 +93,25 @@ fn encode<T: Serialize>(key: Vec<u8>, v: &T) -> Result<KvOp, EngineError> {
     Ok(KvOp::Put(key, row::encode(v).map_err(state_error)?))
 }
 
-/// A markdown body without media (M2; media arrive with M4).
+/// A markdown body, with its media (`data-model.md` §4, §8.8).
+///
+/// Each [`MediaRef`] came from `prepare_media`, so its bytes are already stripped and oriented
+/// and its CID identifies exactly those bytes. The record carries a PLACEHOLDER blob object for
+/// each one; the outbox replaces every placeholder with the object `uploadBlob` returns when the
+/// write is sent, and fails the write if the returned `ref.` differs from the local CID.
+///
+/// The body markdown refers to an item as `cid:<cid>` (lfm-1.md §6.1), which is why the media
+/// array is the only scope for those URLs.
 pub(crate) fn markdown_body(md: &crate::dto::BodyDraft) -> Result<Md, EngineError> {
-    if !md.media.is_empty() {
-        return Err(EngineError::new(
-            ErrorCode::Unsupported,
-            "media in bodies arrive with M4",
-        ));
+    let mut medias = Vec::with_capacity(md.media.len());
+    for m in &md.media {
+        medias.push(media_value(m)?);
     }
     let meta = lessdugin_markdown::derive_metadata(&md.markdown, &[]);
     let mut m = lessdugin_lexicon::records::Markdown::inline(md.markdown.clone());
+    if !medias.is_empty() {
+        m.media = Some(medias);
+    }
     // W8: derived hints
     if !meta.mentions.is_empty() {
         m.mentions = Some(meta.mentions);
@@ -656,4 +665,38 @@ impl<H: Host> Engine<H> {
         }
         Ok(out)
     }
+}
+
+/// A [`crate::dto::MediaRef`] as the record's `defs#media` value (`data-model.md` §4).
+///
+/// The blob is a placeholder: the outbox substitutes the object `uploadBlob` returns, verbatim,
+/// and fails the write when the returned `ref.$link` is not the CID computed locally (§8.8).
+fn media_value(m: &crate::dto::MediaRef) -> Result<lessdugin_lexicon::records::Media, EngineError> {
+    use lessdugin_lexicon::records::{AspectRatio as LexAspect, Blob, CidLink, Media};
+    if m.cid.is_empty() {
+        return Err(EngineError::invalid_input(
+            "a media reference has no CID: pass its bytes through `prepare_media` first",
+        )
+        .with_detail("kind", "mediaRejected"));
+    }
+    let size = i64::try_from(m.size_bytes)
+        .map_err(|_| EngineError::invalid_input("a media blob is too large (limits.md §5)"))?;
+    let mut media = Media::new(Blob {
+        r#type: "blob".to_owned(),
+        r#ref: CidLink {
+            link: m.cid.clone(),
+        },
+        mime_type: m.mime.clone(),
+        size,
+        extra: Map::new(),
+    });
+    media.alt = m.alt.clone();
+    media.name = m.name.clone();
+    media.aspect_ratio = m.aspect_ratio.as_ref().map(|a| LexAspect {
+        width: i64::from(a.width),
+        height: i64::from(a.height),
+        extra: Map::new(),
+    });
+    media.duration_ms = m.duration_ms.and_then(|d| i64::try_from(d).ok());
+    Ok(media)
 }
