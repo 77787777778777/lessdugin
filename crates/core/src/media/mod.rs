@@ -1032,3 +1032,41 @@ impl<H: crate::host::Host> crate::engine::Engine<H> {
         Ok(out)
     }
 }
+
+/// The largest media blob this client will load for display: the 64 MiB input cap of F35.
+pub const MEDIA_DISPLAY_MAX_BYTES: u64 = 64 * 1024 * 1024;
+
+impl<H: crate::host::Host> crate::engine::Engine<H> {
+    /// `loadMedia(cid)`: fetches a media blob for display and returns a URL for it.
+    ///
+    /// The bytes are streamed and CID-checked by the host while they arrive, so they never pass
+    /// through wasm linear memory (`threat-model.md`); the client gets a locator. The caller is
+    /// the one that decided to load - the autoload policy in [`super::policy`] is what decides
+    /// whether it may do that without asking.
+    pub async fn load_media(
+        &self,
+        cid: &str,
+    ) -> Result<crate::dto::LoadedMedia, crate::engine::EngineError> {
+        let session = self.active_session().await?;
+        // the session already holds the account's DID and PDS, which is where the blob lives
+        let handle = self
+            .host()
+            .fetch_blob(
+                session.pds.clone(),
+                session.did.clone(),
+                cid.to_owned(),
+                MEDIA_DISPLAY_MAX_BYTES,
+            )
+            .await
+            .map_err(|e| {
+                crate::engine::EngineError::internal(format!(
+                    "a media blob could not be fetched: {e}"
+                ))
+            })?;
+        Ok(crate::dto::LoadedMedia {
+            cid: handle.cid,
+            size: handle.size,
+            url: handle.locator,
+        })
+    }
+}

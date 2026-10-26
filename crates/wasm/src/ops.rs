@@ -90,6 +90,16 @@ pub const OPS: &[&str] = &[
     "writeStatus",
     "writes",
     // §3.6
+    "loadMedia",
+    "redactRevision",
+    "prepareMedia",
+    "drafts",
+    "saveDraft",
+    "deleteDraft",
+    "settings",
+    "setSetting",
+    "exportLocal",
+    "importLocal",
     "markRead",
     "markNotificationsRead",
     "markAllNotificationsRead",
@@ -472,6 +482,10 @@ pub async fn call<H: Host>(engine: &Engine<H>, op: &str, a: &str) -> Result<Stri
         "delete" => {
             let (uri,): (String,) = args(op, a)?;
             out(&engine.delete(&uri).await?)
+        }
+        "loadMedia" => {
+            let (cid,): (String,) = args(op, a)?;
+            out(&engine.load_media(&cid).await?)
         }
         "drafts" => out(&engine.drafts().await?),
         "saveDraft" => {

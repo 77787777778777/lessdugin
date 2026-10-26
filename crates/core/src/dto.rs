@@ -1308,6 +1308,18 @@ dto! {
 }
 
 dto! {
+    /// A media blob fetched for display (`engine-api.md` §3.6 `loadMedia`, synthesis-v1.md §3.9).
+    pub struct LoadedMedia {
+        /// The blob's CID, verified by the host while streaming.
+        pub cid: String,
+        /// The bytes' size.
+        pub size: u64,
+        /// A URL the client can put in `img.src` / `video.src` (an object URL in the browser).
+        pub url: String,
+    }
+}
+
+dto! {
     /// A file handed to `prepare_media` (`engine-api.md` §3.6, M4): the bytes, the declared type
     /// (checked against the sniffed one, `data-model.md` §8.8) and the display hints.
     pub struct MediaInput {

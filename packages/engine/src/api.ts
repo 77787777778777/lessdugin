@@ -184,6 +184,8 @@ export interface EngineApi {
   /** Public; paged like `listPosts` (`limit` 0 or absent: the default page). */
   modLog(forum: AtUri, cursor?: string, limit?: number): Promise<ModLog>;
   raw(uri: AtUri): Promise<RawView>;
+  /** Fetches a media blob for display; the URL is an object URL in the browser. */
+  loadMedia(cid: Cid): Promise<LoadedMedia>;
   drafts(): Promise<DraftEntry[]>;
   /** Newest first. */
   bookmarks(): Promise<BookmarkEntry[]>;

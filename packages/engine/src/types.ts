@@ -1090,6 +1090,15 @@ export interface SubscriptionEntry {
   sinceMs: Ms;
 }
 
+/** A media blob fetched for display (`engine-api.md` §3.6 `loadMedia`). `url` is an object URL
+ * in the browser; `cid` is already verified by the host while the bytes streamed
+ * (threat-model: blob bytes never enter wasm linear memory). */
+export interface LoadedMedia {
+  cid: string;
+  size: number;
+  url: string;
+}
+
 export interface DraftEntry {
   id: string;
   savedAtMs: Ms;

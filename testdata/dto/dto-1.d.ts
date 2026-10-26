@@ -283,6 +283,12 @@ export interface ListPostsQuery {
     limit: number;
 }
 
+export interface LoadedMedia {
+    cid: string;
+    size: number;
+    url: string;
+}
+
 export interface MediaInput {
     declaredMime?: string;
     alt?: string;

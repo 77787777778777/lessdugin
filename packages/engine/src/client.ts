@@ -78,6 +78,9 @@ const NO_SESSIONS: SessionProvider = { session: async () => null };
  * elements included), so an omitted trailing argument is sent as `null`. */
 export const OP_ARITY: Readonly<Record<string, number>> = Object.freeze({
   parseRef: 2,
+  // bytes are a separate argument from the hints (engine-api.md §3.6), so two
+  prepareMedia: 2,
+  loadMedia: 1,
   forumFollow: 2,
   join: 2,
   members: 2,

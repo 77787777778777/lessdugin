@@ -128,6 +128,7 @@ fn all() -> Vec<(&'static str, &'static str)> {
         ThreadOpts,
         MediaRef,
         MediaInput,
+        LoadedMedia,
         BodyDraft,
         ExternalLinkDraft,
         PostDraft,
