@@ -67,9 +67,10 @@ M1.
 17. **Engine guard** (nesting and unmatched-delimiter limits) and, *added at M4*, the engine
     budget (`len << unmatched`, 2^22 per document). → §7.2, K3
     (`math.json#engine-nesting-guard`, `#guard-*`, `#engine-document-budget`).
-18. **`RENDERER_VERSION`** is 2; Temml builds set bit 31. → §1.2. The M4 reconciliation changes
-    presentation again (decisions 2, 27 and bugs 1, 3, 4), so the version must be bumped when
-    it lands; that is the release owner's call, not made here.
+18. **`RENDERER_VERSION`** is 3 at M4 (2 before the normaliser landed); Temml builds set bit 31.
+    → §1.2. The M4 reconciliation changed presentation again (decisions 2, 27 and bugs 1, 3, 4)
+    and the normaliser of decision 16 changed it once more, so the version was bumped with them
+    in the same commit, as §1.2 requires.
 19. **`Rendered.error`.** → §1.3, §1.4.
 20. **Escaping record strings** (CR, CRLF → LF, NUL → U+FFFD in attribute values). → §8.3.
 21. **`StyledDoc`.** Shared summary ids, empty item `Para`, single-line contexts, code `lang`,

@@ -47,7 +47,7 @@ expression: thread
       "media": [],
       "excerpt": "The first post.",
       "notices": [],
-      "rendererVersion": "2"
+      "rendererVersion": "3"
     },
     "reacts": [],
     "history": {
@@ -76,7 +76,7 @@ expression: thread
         "media": [],
         "excerpt": "A reply.",
         "notices": [],
-        "rendererVersion": "2"
+        "rendererVersion": "3"
       },
       "createdAtMs": 1760003660000,
       "tRankMs": 1760003660000,
@@ -118,7 +118,7 @@ expression: thread
         "media": [],
         "excerpt": "",
         "notices": [],
-        "rendererVersion": "2"
+        "rendererVersion": "3"
       },
       "createdAtMs": 1760003720000,
       "tRankMs": 1760003720000,
@@ -163,7 +163,7 @@ expression: thread
         "media": [],
         "excerpt": "Hi eve.",
         "notices": [],
-        "rendererVersion": "2"
+        "rendererVersion": "3"
       },
       "createdAtMs": 1760003780000,
       "tRankMs": 1760003780000,
@@ -204,7 +204,7 @@ expression: thread
         "media": [],
         "excerpt": "",
         "notices": [],
-        "rendererVersion": "2"
+        "rendererVersion": "3"
       },
       "createdAtMs": 0,
       "tRankMs": 0,
@@ -245,7 +245,7 @@ expression: thread
         "media": [],
         "excerpt": "Replying to a lost one.",
         "notices": [],
-        "rendererVersion": "2"
+        "rendererVersion": "3"
       },
       "createdAtMs": 1760003840000,
       "tRankMs": 1760003840000,

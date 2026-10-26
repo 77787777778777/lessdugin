@@ -50,7 +50,7 @@ expression: thread
       "media": [],
       "excerpt": "Hello everyone. Read the rules.",
       "notices": [],
-      "rendererVersion": "2"
+      "rendererVersion": "3"
     },
     "reacts": [],
     "history": {
@@ -80,7 +80,7 @@ expression: thread
         "media": [],
         "excerpt": "Glad to be here.",
         "notices": [],
-        "rendererVersion": "2"
+        "rendererVersion": "3"
       },
       "createdAtMs": 1760000360050,
       "tRankMs": 1760000360050,
@@ -125,7 +125,7 @@ expression: thread
         "media": [],
         "excerpt": "Thanks for the forum!",
         "notices": [],
-        "rendererVersion": "2"
+        "rendererVersion": "3"
       },
       "createdAtMs": 1760000240050,
       "tRankMs": 1760000240050,
@@ -171,7 +171,7 @@ expression: thread
         "media": [],
         "excerpt": "Agreed!",
         "notices": [],
-        "rendererVersion": "2"
+        "rendererVersion": "3"
       },
       "createdAtMs": 1760000420050,
       "tRankMs": 1760000420050,

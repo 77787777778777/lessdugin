@@ -17,10 +17,16 @@ use crate::styled::{StyledDoc, build, error_doc};
 /// The presentation version (§1.2), part of the render-cache key `(cid, RENDERER_VERSION)`.
 /// Builds without the `math` feature use the Temml fallback (§7.5); that mode is part of the
 /// version, so it sets the top bit.
+///
+/// `3` at M4: the math normaliser changed presentation (ADR 0002 decision 3, §7.3 — math-core
+/// 0.9's closed `style` set becomes `mc-*` classes and `mathcolor`), and §1.2 requires the bump
+/// in the same commit as the re-blessed vectors and the regenerated sanitiser configurations
+/// (which here derive from `allowlist`'s tables at run time, so they follow automatically).
+/// `2` was the last version without the normaliser.
 pub const RENDERER_VERSION: u32 = if matches!(MATH_MODE, MathMode::MathCore) {
-    2
+    3
 } else {
-    2 | (1 << 31)
+    3 | (1 << 31)
 };
 
 /// Sources longer than this are not parsed (§1.3).
