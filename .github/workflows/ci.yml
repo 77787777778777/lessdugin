@@ -106,7 +106,10 @@ jobs:
   # CSP and Trusted Types run, axe, the sanitiser vector equality and the keyboard checks. The
   # Playwright version is pinned in web/package.json; its Chromium is installed here.
   web-e2e:
-    runs-on: ubuntu-latest
+    # Playwright 1.56.1 refuses to run on ubuntu-26.04 ("Playwright does not support chromium on
+    # ubuntu26.04-x64") and `ubuntu-latest` now resolves there, so pin the last LTS it supports.
+    # Drop the pin when the Playwright package moves past 1.56.1.
+    runs-on: ubuntu-24.04
     env:
       PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "0"
       PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.pw-browsers
