@@ -23,6 +23,7 @@
 
 pub mod app;
 pub mod body;
+pub mod command;
 pub mod editor;
 pub mod exec;
 pub mod headless;

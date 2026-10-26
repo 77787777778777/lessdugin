@@ -83,6 +83,8 @@ pub enum Cmd {
     ToggleAll,
     /// `?`: help.
     Help,
+    /// `:`: the command line overlay (`synthesis-v1.md` §6.11 Overlays).
+    Command,
 }
 
 /// The command of a key press, if any (key releases and repeats on some platforms are ignored).
@@ -128,6 +130,7 @@ pub fn command(k: &KeyEvent) -> Option<Cmd> {
         KeyCode::Char('N') => Cmd::Notifications,
         KeyCode::Char('M') => Cmd::MarkAllRead,
         KeyCode::Char('?') => Cmd::Help,
+        KeyCode::Char(':') => Cmd::Command,
         _ => return None,
     })
 }
@@ -220,6 +223,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
         "Other",
         &[
             ("m", "mod menu (queue, log, actions)"),
+            (":", "command line (any M3 verb; : help)"),
             ("N", "notifications"),
             ("M", "mark all notifications read"),
             ("?", "this help"),
@@ -259,6 +263,8 @@ mod tests {
         assert_eq!(c("m"), Some(Cmd::ModMenu));
         assert_eq!(c("N"), Some(Cmd::Notifications));
         assert_eq!(c("M"), Some(Cmd::MarkAllRead));
+        // the `:` command line (synthesis §6.11 Overlays)
+        assert_eq!(c(":"), Some(Cmd::Command));
         assert_eq!(c("Ctrl-x"), None);
         assert!(parse_key("Ctrl-").is_none());
     }

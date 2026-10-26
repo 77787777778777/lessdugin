@@ -750,3 +750,203 @@ fn the_activity_tab_calls_recent_discussion() {
         }
     }
 }
+
+/// Types a command line into the `:` overlay (one key per character) and presses Enter.
+fn run_command(t: &mut Tui, line: &str) {
+    block_on(t.press(":"));
+    assert!(t.state.command.is_some(), "the overlay opens on `:`");
+    for c in line.chars() {
+        block_on(t.press(&c.to_string()));
+    }
+    assert_eq!(t.state.command.as_deref(), Some(line), "typed verbatim");
+    block_on(t.press("Enter"));
+    assert!(t.state.command.is_none(), "Enter closes the overlay");
+}
+
+#[test]
+fn the_command_line_votes_end_to_end() {
+    let s = scenario();
+    let mut t = tui(&s, 100, 30);
+    block_on(t.start(Some(s.forum.clone())));
+    assert_eq!(points_of(&t.render(), "Hello from bob"), "1 point");
+
+    // `: vote up` -> the same Effect::Opinion the `u` key queues
+    run_command(&mut t, "vote up");
+    assert!(status(&t).contains("Vote recorded"), "{}", status(&t));
+    assert!(!t.state.op_writes.is_empty(), "the write is open");
+
+    block_on(t.engine().outbox_flush()).unwrap();
+    block_on(t.settle());
+    assert_eq!(points_of(&t.render(), "Hello from bob"), "2 points");
+
+    // `: agree for` goes through the agreement axis
+    run_command(&mut t, "agree for");
+    assert!(status(&t).contains("Vote recorded"), "{}", status(&t));
+    block_on(t.engine().outbox_flush()).unwrap();
+    block_on(t.settle());
+    let screen = t.render();
+    assert!(
+        screen.contains("agree"),
+        "the agreement shows in the meta line:\n{screen}"
+    );
+
+    // `: 0`-equivalent: the agreement axis clears
+    run_command(&mut t, "vote clear");
+    assert!(status(&t).contains("Vote recorded"), "{}", status(&t));
+}
+
+#[test]
+fn the_command_line_moderates_end_to_end() {
+    let s = scenario();
+    let (forum, bob_post, _) = react_forum(&s);
+    // carol is a moderator here: `: mod hide <uri> "reason"` issues the same mod_action as `m`
+    let mut t = tui(&s, 100, 30);
+    block_on(t.start(Some(forum.clone())));
+    run_command(&mut t, &format!("mod hide {bob_post} \"off topic\""));
+    assert!(status(&t).contains("Mod action"), "{}", status(&t));
+    block_on(t.engine().outbox_flush()).unwrap();
+    s.w.tick(MINUTE);
+    block_on(t.settle());
+    // the write reached the engine: the thread view holds the hide with its reason
+    use lessdugin_core::dto::{HiddenReason, ItemState, ThreadOpts};
+    let tv = block_on(t.engine().get_thread(&bob_post, &ThreadOpts::default())).unwrap();
+    let lessdugin_core::dto::ThreadRoot::Post(p) = &tv.post else {
+        panic!("the post is gone");
+    };
+    assert!(
+        matches!(
+            p.post.state,
+            ItemState::Hidden {
+                reason: HiddenReason::Removed { .. }
+            }
+        ),
+        "{:?}",
+        p.post.state
+    );
+    // and the mod log records it with the reason the command line carried
+    let log = block_on(t.engine().mod_log(&forum, None, 20)).unwrap();
+    assert!(
+        log.entries.iter().any(|e| e.action == "hide"
+            && e.value.contains("hidden")
+            && e.reason.as_deref() == Some("off topic")),
+        "{:?}",
+        log.entries
+    );
+}
+
+#[test]
+fn the_command_line_opens_activity_and_notifications() {
+    let s = scenario();
+    let mut t = tui(&s, 100, 30);
+    block_on(t.start(Some(s.forum.clone())));
+    // `: activity` switches the forum to its Activity tab
+    run_command(&mut t, "activity");
+    assert_eq!(
+        t.state.top_forum_screen().unwrap().tab,
+        lessdugin_tui::ForumTab::Activity
+    );
+    assert!(t.state.top_forum_screen().unwrap().activity.is_some());
+
+    // `: notifications` opens the Notifications screen
+    run_command(&mut t, "notifications");
+    assert!(
+        matches!(
+            t.state.top().map(|s| &s.kind),
+            Some(lessdugin_tui::app::ScreenKind::Notifications(_))
+        ),
+        "the notifications screen is on top"
+    );
+}
+
+#[test]
+fn the_command_line_reports_a_bad_verb() {
+    let s = scenario();
+    let mut t = tui(&s, 80, 24);
+    block_on(t.start(Some(s.forum.clone())));
+    run_command(&mut t, "frobnicate");
+    let st = status(&t);
+    assert!(st.contains("Unknown command"), "{st}");
+    assert!(t.state.op_writes.is_empty());
+}
+
+#[test]
+fn the_command_line_overlay_renders() {
+    let s = scenario();
+    let mut t = tui(&s, 80, 24);
+    block_on(t.start(Some(s.forum.clone())));
+    block_on(t.press(":"));
+    for c in "mod hide".chars() {
+        block_on(t.press(&c.to_string()));
+    }
+    let screen = t.render();
+    // the overlay draws at the bottom, with the text typed so far
+    let last_line = screen.lines().last().unwrap_or_default();
+    assert!(last_line.contains(":mod hide"), "{screen}");
+    insta::assert_snapshot!("command_line_overlay_80x24", screen);
+
+    // Esc closes it and leaves the screen as it was
+    block_on(t.press("Esc"));
+    assert!(t.state.command.is_none());
+    let after = t.render();
+    assert!(!after.contains(":mod hide"), "{after}");
+}
+
+#[test]
+fn the_command_line_sets_and_lists_moderators() {
+    let s = scenario();
+    let (forum, _, _) = react_forum(&s);
+    let mut t = tui(&s, 100, 30);
+    block_on(t.start(Some(forum.clone())));
+    // carol is a moderator here, not the owner: `mods add` is queued and the engine decides
+    run_command(&mut t, &format!("mods add {}", s.w.bob.did()));
+    assert!(
+        status(&t).contains("moderator list") || status(&t).contains("refused"),
+        "{}",
+        status(&t)
+    );
+
+    // `mods` lists what the loaded forum view declares (react_forum declares carol)
+    run_command(&mut t, "mods");
+    let st = status(&t);
+    assert!(st.contains("Moderators:"), "the listing reports: {st}");
+    assert!(st.contains("carol"), "{st}");
+
+    // and `mods add` with no actor hands back the usage error, not a panic
+    run_command(&mut t, "mods add");
+    assert!(status(&t).contains("needs a DID"), "{}", status(&t));
+}
+
+#[test]
+fn the_command_line_adds_a_moderator_end_to_end() {
+    let s = scenario();
+    let (forum, _, _) = react_forum(&s);
+    // alice owns the forum: her `mods add` writes the declaration
+    let mut t = block_on(lessdugin_tui::Headless::new(
+        s.w.alice.engine.clone(),
+        lessdugin_tui::HeadlessOpts {
+            width: 100,
+            height: 30,
+            auto_sync: false,
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    block_on(t.start(Some(forum.clone())));
+    run_command(&mut t, &format!("mods add {} admin", s.w.bob.did()));
+    assert!(
+        status(&t).contains("Updating the moderator list")
+            || status(&t).contains("Moderator list updated"),
+        "{}",
+        status(&t)
+    );
+    block_on(t.engine().outbox_flush()).unwrap();
+    s.w.tick(MINUTE);
+    block_on(t.settle());
+    // the declaration now names bob
+    let view = block_on(t.engine().forum_open(&forum)).unwrap();
+    assert!(
+        view.moderators.iter().any(|m| m.actor.did == s.w.bob.did()),
+        "{:?}",
+        view.moderators
+    );
+}

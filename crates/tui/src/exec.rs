@@ -133,6 +133,14 @@ pub async fn run<H: Host>(engine: &Engine<H>, effect: Effect, opts: ExecOpts) ->
             screen,
             result: engine.grant(&forum, &actors).await,
         },
+        Effect::ModsSet {
+            forum,
+            change,
+            screen,
+        } => Action::ModsSetDone {
+            screen,
+            result: engine.mods_set(&forum, &change).await,
+        },
         Effect::ModAction {
             intent,
             forum,

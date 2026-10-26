@@ -21,9 +21,9 @@ use crossterm::event::KeyEvent;
 use lessdugin_core::dto::{
     AccessLevel, AccountView, ActionTicket, AgreementValue, Capability, CommentDraft,
     DiscussionList, Event, ForumSummary, ForumView, KarmaValue, ModActionIntent, ModActionValue,
-    ModLog, ModQueue, ModScope, NotificationList, OpinionIntent, PinScope, PostDraft, PostList,
-    PostSort, ReactTally, Stance, SyncReport, ThreadRoot, ThreadView, Tier, Topic, UnreadCounts,
-    ViewerCaps, WriteState, WriteTicket,
+    ModLog, ModQueue, ModScope, ModsChange, NotificationList, OpinionIntent, PinScope, PostDraft,
+    PostList, PostSort, ReactTally, Stance, SyncReport, ThreadRoot, ThreadView, Tier, Topic,
+    UnreadCounts, ViewerCaps, WriteState, WriteTicket,
 };
 use lessdugin_core::engine::EngineError;
 
@@ -224,6 +224,15 @@ pub enum Effect {
         /// The screen to reload afterwards.
         screen: ScreenId,
     },
+    /// `mods_set(forum, change)`: adds or removes a moderator (`data-model.md` §6.1, `mods`).
+    ModsSet {
+        /// The forum.
+        forum: String,
+        /// The change.
+        change: ModsChange,
+        /// The screen to reload afterwards.
+        screen: ScreenId,
+    },
     /// `mod_action(intent)`: one entry of the mod menu (`synthesis-v1.md` §6.11 "Other").
     ModAction {
         /// The assertion or removal.
@@ -375,6 +384,13 @@ pub enum Action {
         screen: ScreenId,
         /// The write tickets, or why the grant was refused.
         result: Result<Vec<WriteTicket>, EngineError>,
+    },
+    /// [`Effect::ModsSet`] finished.
+    ModsSetDone {
+        /// The screen to reload.
+        screen: ScreenId,
+        /// The action ticket, or why it was refused.
+        result: Result<ActionTicket, EngineError>,
     },
     /// [`Effect::ModAction`] finished.
     ModActionDone {
@@ -1028,6 +1044,90 @@ impl Screen {
     }
 }
 
+/// The opinion key an intent corresponds to (the gate speaks in keys' terms).
+fn op_of(intent: &OpinionIntent) -> Op {
+    match intent {
+        OpinionIntent::Karma { value } => match value {
+            Some(KarmaValue::Up) => Op::Up,
+            Some(KarmaValue::StrongUp) => Op::StrongUp,
+            Some(KarmaValue::Down) => Op::Down,
+            Some(KarmaValue::StrongDown) => Op::StrongDown,
+            None => Op::Clear,
+        },
+        OpinionIntent::Agreement { value } => match value {
+            Some(AgreementValue::Agree) => Op::Agree,
+            Some(AgreementValue::StrongAgree) => Op::StrongAgree,
+            Some(AgreementValue::Disagree) => Op::Disagree,
+            Some(AgreementValue::StrongDisagree) => Op::StrongDisagree,
+            None => Op::Clear,
+        },
+        // reacts are gated by open_react, not by the opinion gate
+        OpinionIntent::React { .. } | OpinionIntent::Tag { .. } => Op::Clear,
+    }
+}
+
+/// Completes the last word of a command line against the verbs and their common arguments
+/// (`Tab` in the overlay).
+fn complete(line: &mut String) {
+    const VERBS: &[&str] = &[
+        "vote",
+        "agree",
+        "react",
+        "unreact",
+        "mod",
+        "mods",
+        "notifications",
+        "read",
+        "read-all",
+        "activity",
+        "user",
+        "help",
+    ];
+    const ARGS: &[&str] = &[
+        "up",
+        "strong-up",
+        "down",
+        "strong-down",
+        "for",
+        "against",
+        "strong-for",
+        "strong-against",
+        "clear",
+        "hide",
+        "spam",
+        "unhide",
+        "ban",
+        "unban",
+        "pin",
+        "unpin",
+        "lock",
+        "unlock",
+        "tier",
+        "restrict",
+        "unrestrict",
+        "nullify",
+        "approve",
+        "personal",
+        "frontpage",
+        "curated",
+        "all",
+        "unread",
+    ];
+    let start = line.rfind(char::is_whitespace).map_or(0, |i| i + 1);
+    let word = &line[start..];
+    if word.is_empty() && start > 0 {
+        return;
+    }
+    let set: &[&str] = if start == 0 { VERBS } else { ARGS };
+    let mut hits = set.iter().filter(|w| w.starts_with(word));
+    let Some(first) = hits.next() else {
+        return;
+    };
+    // only complete when the prefix is ambiguous-but-there or unique: replace the word
+    line.truncate(start);
+    line.push_str(first);
+}
+
 /// How a list screen takes new data: at once (the user asked, or nothing is shown yet), in
 /// place (the same items), or as pending.
 fn receive_list<T>(
@@ -1096,6 +1196,8 @@ pub struct State {
     pub mod_menu: Option<ModMenu>,
     /// A one-line prompt (the mod action's reason).
     pub prompt: Option<Prompt>,
+    /// The `:` command line overlay (`synthesis-v1.md` §6.11 Overlays): the text so far.
+    pub command: Option<String>,
     /// The unread counts (`unread_counts()`): the header's notification badge and the Home
     /// screen's per-forum new counts.
     pub unread: Option<UnreadCounts>,
@@ -1157,6 +1259,7 @@ impl State {
             react: None,
             mod_menu: None,
             prompt: None,
+            command: None,
             unread: None,
             help_scroll: 0,
             status: None,
@@ -1289,6 +1392,9 @@ impl State {
             } => self.opinion_done(screen, label, result, &mut fx),
             Action::Undone { screen, result } => self.undone(screen, result, &mut fx),
             Action::Granted { screen, result } => self.granted(screen, result, &mut fx),
+            Action::ModsSetDone { screen, result } => {
+                self.mods_set_done(screen, result, &mut fx);
+            }
             Action::ModActionDone {
                 forum: _,
                 screen,
@@ -1549,6 +1655,11 @@ impl State {
             self.prompt_key(k, fx);
             return;
         }
+        // so does the `:` command line
+        if self.command.is_some() {
+            self.command_key(k, fx);
+            return;
+        }
         let cmd = keys::command(k);
         if cmd == Some(Cmd::Quit) {
             self.quit = true;
@@ -1611,6 +1722,7 @@ impl State {
             Cmd::ReactPalette => self.open_react(),
             Cmd::ModMenu => self.open_mod_menu(),
             Cmd::Notifications => self.open_notifications(fx),
+            Cmd::Command => self.command = Some(String::new()),
             Cmd::MarkAllRead => self.mark_all_read(fx),
             Cmd::Stance => {
                 // on the Mod screen, `Tab` switches the queue/log tab; on a forum, Posts and
@@ -2698,6 +2810,32 @@ impl State {
         });
     }
 
+    /// [`Action::ModsSetDone`]: reloads the forum after a moderator change.
+    fn mods_set_done(
+        &mut self,
+        screen: ScreenId,
+        result: Result<ActionTicket, EngineError>,
+        fx: &mut Vec<Effect>,
+    ) {
+        match result {
+            Ok(t) => {
+                let mut msg = lit("Moderator list updated.");
+                if let Some(n) = t.notices.first() {
+                    msg = cat([lit("Moderator list updated: "), tt(&n.message), lit(".")]);
+                }
+                self.say(Tone::Good, msg);
+                self.follow_own = Some(screen);
+                if let Some(i) = self.index_of(screen) {
+                    self.reload(i, Origin::User, fx);
+                }
+            }
+            Err(e) => self.say(
+                Tone::Error,
+                cat([lit("Moderator change refused: "), tt(&e.message)]),
+            ),
+        }
+    }
+
     /// [`Action::Granted`]: reloads the queue after an approval.
     fn granted(
         &mut self,
@@ -2941,6 +3079,455 @@ impl State {
             }
         }
         None
+    }
+
+    /// A key while the `:` command line is open: printable characters edit it, Enter runs the
+    /// command, Esc closes it, and Tab completes a verb (`synthesis-v1.md` §6.11 Overlays).
+    fn command_key(&mut self, k: &KeyEvent, fx: &mut Vec<Effect>) {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        if ctrl && matches!(k.code, KeyCode::Char('c')) {
+            self.command = None;
+            self.quit = true;
+            fx.push(Effect::Quit);
+            return;
+        }
+        match k.code {
+            KeyCode::Esc => self.command = None,
+            KeyCode::Enter => {
+                let Some(line) = self.command.take() else {
+                    return;
+                };
+                self.run_command(&line, fx);
+            }
+            KeyCode::Tab => {
+                if let Some(c) = &mut self.command {
+                    complete(c);
+                }
+            }
+            KeyCode::Backspace => {
+                if let Some(c) = &mut self.command {
+                    c.pop();
+                }
+            }
+            KeyCode::Char(c) if !ctrl => {
+                if let Some(line) = &mut self.command {
+                    // a command line is words: drop control characters
+                    if !c.is_control() {
+                        line.push(c);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Runs a `:` command line against the engine through the same effects the keys use
+    /// (`synthesis-v1.md` §6.11: the backstop that makes every MVP action reachable).
+    fn run_command(&mut self, line: &str, fx: &mut Vec<Effect>) {
+        use crate::command::{ModVerb, Verb, agree_intent, mod_intent, vote_intent};
+        let line = line.trim();
+        if line.is_empty() || line == "help" || line == "?" {
+            self.say(Tone::Info, tt(&crate::command::usage()));
+            return;
+        }
+        let cmd = match crate::command::parse(line) {
+            Ok(c) => c,
+            Err(why) => {
+                self.say(Tone::Error, tt(&why));
+                return;
+            }
+        };
+        match cmd.verb {
+            Verb::Vote(v) => {
+                let Some((subject, forum)) = self.opinion_subject() else {
+                    self.say(Tone::Info, lit("Nothing selected to vote on."));
+                    return;
+                };
+                self.opinion_intent(vote_intent(v), subject, forum, "Vote", fx);
+            }
+            Verb::Agree(a) => {
+                let Some((subject, forum)) = self.opinion_subject() else {
+                    self.say(Tone::Info, lit("Nothing selected to vote on."));
+                    return;
+                };
+                self.opinion_intent(agree_intent(a), subject, forum, "Vote", fx);
+            }
+            Verb::React { id, against } => {
+                let Some((subject, forum)) = self.opinion_subject() else {
+                    self.say(Tone::Info, lit("Nothing selected to react to."));
+                    return;
+                };
+                if against && !self.react_tallies(&subject).contains_key(&id) {
+                    self.say(
+                        Tone::Warn,
+                        tt(&format!(
+                            "Nobody has reacted {id} here yet, so there is nothing to react \
+                             against."
+                        )),
+                    );
+                    return;
+                }
+                let stance = if against {
+                    Stance::Against
+                } else {
+                    Stance::For
+                };
+                self.opinion_intent(
+                    OpinionIntent::React {
+                        id,
+                        stance,
+                        quote: None,
+                        remove: false,
+                    },
+                    subject,
+                    forum,
+                    "React",
+                    fx,
+                );
+            }
+            Verb::Unreact { id } => {
+                let Some((subject, forum)) = self.opinion_subject() else {
+                    self.say(Tone::Info, lit("Nothing selected to react to."));
+                    return;
+                };
+                let Some(stance) = self.react_tallies(&subject).get(&id).and_then(|t| t.mine)
+                else {
+                    self.say(
+                        Tone::Info,
+                        tt(&format!(
+                            "You have no {id} react on that item to take back."
+                        )),
+                    );
+                    return;
+                };
+                self.opinion_intent(
+                    OpinionIntent::React {
+                        id,
+                        stance,
+                        quote: None,
+                        remove: true,
+                    },
+                    subject,
+                    forum,
+                    "React",
+                    fx,
+                );
+            }
+            Verb::Mod(m) => {
+                // a subject named on the command line wins; else the selection
+                let named = cmd.subject.clone();
+                let subject = match named.or_else(|| {
+                    self.mod_subject().map(|(item, _, author)| match m {
+                        // access-scoped actions act on the author, the rest on the item
+                        ModVerb::Ban
+                        | ModVerb::Unban
+                        | ModVerb::Restrict
+                        | ModVerb::Nullify
+                        | ModVerb::Unrestrict
+                        | ModVerb::Approve => author,
+                        _ => item,
+                    })
+                }) {
+                    Some(s) => s,
+                    None => {
+                        self.say(Tone::Info, lit("Nothing selected to moderate."));
+                        return;
+                    }
+                };
+                let Some(forum) = self.forum_for_subject(&subject) else {
+                    self.say(Tone::Info, lit("Open a forum first."));
+                    return;
+                };
+                if !self.can_write() {
+                    return;
+                }
+                let Some(screen) = self.stack.last().map(|s| s.id) else {
+                    return;
+                };
+                if m == ModVerb::Approve {
+                    fx.push(Effect::Grant {
+                        forum,
+                        actors: vec![subject],
+                        screen,
+                    });
+                    self.say(Tone::Info, lit("Approving..."));
+                    return;
+                }
+                let intent = mod_intent(&m, &forum, &subject, cmd.reason.clone());
+                self.say(Tone::Info, lit("Mod action..."));
+                fx.push(Effect::ModAction {
+                    intent,
+                    forum,
+                    screen,
+                });
+            }
+            Verb::Notifications { all } => self.command_notifications(all, fx),
+            Verb::Read | Verb::ReadAll => self.mark_all_read(fx),
+            Verb::Activity => {
+                let Some(top) = self.stack.last_mut() else {
+                    return;
+                };
+                if !matches!(&top.kind, ScreenKind::Forum(_)) {
+                    self.say(Tone::Info, lit("Open a forum to see its activity."));
+                    return;
+                }
+                if matches!(&top.kind, ScreenKind::Forum(f) if f.tab == ForumTab::Activity) {
+                    self.say(Tone::Info, lit("The activity tab is already showing."));
+                    return;
+                }
+                self.switch_forum_tab(fx);
+            }
+            Verb::User { actor } => {
+                let actor = actor.or_else(|| self.mod_subject().map(|(_, _, a)| a));
+                match actor {
+                    Some(a) => self.show_user(&a, fx),
+                    None => self.say(Tone::Info, lit("Nothing selected: name an actor.")),
+                }
+            }
+            Verb::ModsList { role } => self.show_mods(role.as_deref()),
+            Verb::ModsSet {
+                subject,
+                role,
+                remove,
+            } => {
+                let Some(forum) = self.top_forum() else {
+                    self.say(Tone::Info, lit("Open a forum first."));
+                    return;
+                };
+                if !self.can_write() {
+                    return;
+                }
+                let Some(screen) = self.stack.last().map(|s| s.id) else {
+                    return;
+                };
+                let change = ModsChange::Add {
+                    did: subject,
+                    role,
+                    title: None,
+                };
+                let change = if remove {
+                    match change {
+                        ModsChange::Add { did, .. } => ModsChange::Remove {
+                            did,
+                            skip_adopt: false,
+                        },
+                        r => r,
+                    }
+                } else {
+                    change
+                };
+                self.say(Tone::Info, lit("Updating the moderator list..."));
+                fx.push(Effect::ModsSet {
+                    forum,
+                    change,
+                    screen,
+                });
+            }
+        }
+    }
+
+    /// `notifications [all|unread]`: opens the Notifications screen, or switches the one on top.
+    fn command_notifications(&mut self, all: bool, fx: &mut Vec<Effect>) {
+        let on_top = matches!(
+            self.stack.last().map(|s| &s.kind),
+            Some(ScreenKind::Notifications(_))
+        );
+        if on_top {
+            let Some(ScreenKind::Notifications(n)) = self.stack.last().map(|s| &s.kind) else {
+                return;
+            };
+            if n.all == all {
+                self.say(
+                    Tone::Info,
+                    lit(if all {
+                        "Already showing all notifications."
+                    } else {
+                        "Already showing the unread notifications."
+                    }),
+                );
+                return;
+            }
+            if let Some(ScreenKind::Notifications(n)) = self.stack.last_mut().map(|s| &mut s.kind) {
+                n.all = all;
+                n.data = None;
+            }
+            if let Some(i) = self.stack.len().checked_sub(1) {
+                self.reload(i, Origin::User, fx);
+            }
+            return;
+        }
+        self.open_notifications(fx);
+        // `all` after the push: the screen loads the unread ones when it opens, so switch it
+        // and reload once it exists
+        if all {
+            if let Some(ScreenKind::Notifications(n)) = self.stack.last_mut().map(|s| &mut s.kind) {
+                n.all = true;
+                n.data = None;
+            }
+            if let Some(i) = self.stack.len().checked_sub(1) {
+                self.reload(i, Origin::User, fx);
+            }
+        }
+    }
+
+    /// The forum a subject is in: the one a screen on the stack shows it in, else the forum
+    /// the keys would use (`top_forum`). A command line that names an at-uri or a DID does not
+    /// say which forum it means, so the forum on the stack stands in for it; the engine is
+    /// authoritative about whether the action applies.
+    fn forum_for_subject(&self, subject: &str) -> Option<String> {
+        for s in self.stack.iter().rev() {
+            match &s.kind {
+                ScreenKind::Forum(f) => {
+                    let lists = f.data.as_ref().is_some_and(|d| {
+                        d.list
+                            .items
+                            .iter()
+                            .any(|p| p.uri == subject || p.author.did == subject)
+                    }) || f.activity.as_ref().is_some_and(|a| {
+                        a.list
+                            .items
+                            .iter()
+                            .any(|i| i.post.uri == subject || i.post.author.did == subject)
+                    });
+                    if lists {
+                        return Some(f.uri.clone());
+                    }
+                }
+                ScreenKind::Thread(t) => {
+                    if let Some(d) = &t.data {
+                        match &d.view.post {
+                            ThreadRoot::Post(p) => return Some(p.post.forum.clone()),
+                            ThreadRoot::Missing { .. } => {
+                                return self.top_forum();
+                            }
+                        }
+                    }
+                }
+                ScreenKind::Home(_) | ScreenKind::Mod(_) | ScreenKind::Notifications(_) => {}
+            }
+        }
+        self.top_forum()
+    }
+
+    /// One opinion effect, after the same gates the opinion keys use.
+    fn opinion_intent(
+        &mut self,
+        intent: OpinionIntent,
+        subject: String,
+        forum: String,
+        label: &'static str,
+        fx: &mut Vec<Effect>,
+    ) {
+        if !self.can_write() {
+            return;
+        }
+        if let Some(why) = self.opinion_gate(op_of(&intent), self.caps_of(&forum)) {
+            self.say(Tone::Warn, why);
+            return;
+        }
+        let Some(screen) = self.stack.last().map(|s| s.id) else {
+            return;
+        };
+        fx.push(Effect::Opinion {
+            subject,
+            intent,
+            forum,
+            screen,
+            label,
+        });
+    }
+
+    /// `user [actor]`: who an actor is here, from what the loaded forum view holds (their role
+    /// in the moderator list, and whether they wrote the selected item).
+    fn show_user(&mut self, actor: &str, _fx: &mut Vec<Effect>) {
+        let Some(forum) = self.top_forum() else {
+            self.say(Tone::Info, lit("Open a forum first."));
+            return;
+        };
+        let Some(view) = self.stack.iter().rev().find_map(|s| match &s.kind {
+            ScreenKind::Forum(f) if f.uri == forum => f.data.as_ref().map(|d| &d.view),
+            _ => None,
+        }) else {
+            self.say(Tone::Info, lit("The forum is still loading."));
+            return;
+        };
+        let role = view
+            .moderators
+            .iter()
+            .find(|m| m.actor.did == actor || m.actor.handle.as_deref() == Some(actor));
+        let wrote_selected = self.mod_subject().is_some_and(|(_, _, a)| a == actor);
+        match role {
+            Some(m) => {
+                let mut parts = vec![
+                    crate::text::actor(&m.actor),
+                    tt(&format!("{:?}", m.role).to_lowercase()),
+                ];
+                if let Some(t) = &m.title {
+                    parts.push(tt(&format!("\"{t}\"")));
+                }
+                if !m.shown {
+                    parts.push(lit("not a member"));
+                }
+                self.say(Tone::Info, crate::text::joined(parts));
+            }
+            None if wrote_selected => self.say(
+                Tone::Info,
+                tt(&format!(
+                    "{actor} wrote the selected item, and is not a declared moderator here."
+                )),
+            ),
+            None => self.say(
+                Tone::Info,
+                tt(&format!(
+                    "{actor} is not a declared moderator of this forum."
+                )),
+            ),
+        }
+    }
+
+    /// `mods [role]`: the forum's declared moderators from its view.
+    fn show_mods(&mut self, role: Option<&str>) {
+        let Some(forum) = self.top_forum() else {
+            self.say(Tone::Info, lit("Open a forum first."));
+            return;
+        };
+        let Some(view) = self.stack.iter().rev().find_map(|s| match &s.kind {
+            ScreenKind::Forum(f) if f.uri == forum => f.data.as_ref().map(|d| &d.view),
+            _ => None,
+        }) else {
+            self.say(Tone::Info, lit("The forum is still loading."));
+            return;
+        };
+        if view.moderators.is_empty() {
+            self.say(Tone::Info, lit("This forum has no declared moderators."));
+            return;
+        }
+        let wanted = role.map(str::to_lowercase);
+        let names: Vec<String> = view
+            .moderators
+            .iter()
+            .filter(|m| {
+                wanted
+                    .as_ref()
+                    .is_none_or(|w| format!("{:?}", m.role).to_lowercase().contains(w.as_str()))
+            })
+            .map(|m| {
+                format!(
+                    "{} ({:?})",
+                    m.actor
+                        .handle
+                        .clone()
+                        .unwrap_or_else(|| m.actor.short_did.clone()),
+                    m.role
+                )
+            })
+            .collect();
+        if names.is_empty() {
+            self.say(Tone::Info, lit("No moderators with that role."));
+            return;
+        }
+        self.say(Tone::Info, tt(&format!("Moderators: {}", names.join(", "))));
     }
 
     /// A key while a prompt is open: printable characters edit the text, Enter runs the
@@ -3658,5 +4245,27 @@ mod tests {
         let p = pending.take().unwrap();
         receive_list(&mut data, &mut pending, &mut pos, p, Origin::User, uris);
         assert_eq!(pos.cursor, 2);
+    }
+
+    #[test]
+    fn the_command_line_completes_verbs_and_arguments() {
+        let mut line = String::from("vo");
+        complete(&mut line);
+        assert_eq!(line, "vote");
+
+        // a unique argument completes too
+        let mut line = String::from("vote str");
+        complete(&mut line);
+        assert_eq!(line, "vote strong-up");
+
+        // no completion available leaves the line alone
+        let mut line = String::from("vote zzz");
+        complete(&mut line);
+        assert_eq!(line, "vote zzz");
+
+        // a trailing space does nothing
+        let mut line = String::from("vote ");
+        complete(&mut line);
+        assert_eq!(line, "vote ");
     }
 }

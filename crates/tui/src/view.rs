@@ -84,6 +84,9 @@ pub fn draw(state: &State, f: &mut Frame<'_>) {
     if let Some(p) = &state.prompt {
         prompt(f, p, area);
     }
+    if let Some(c) = &state.command {
+        command_line(f, c, area);
+    }
 }
 
 /// The `m` mod menu overlay: the forum-tier actions of `ViewerCaps.moderate`/`rank` (plus the
@@ -129,6 +132,25 @@ fn mod_menu(f: &mut Frame<'_>, m: &ModMenu, area: Rect) {
         )]));
     f.render_widget(Clear, r);
     f.render_widget(Paragraph::new(Text::from(lines)).block(block), r);
+}
+
+/// The `:` command line (`synthesis-v1.md` §6.11 Overlays): Enter runs, Esc closes, Tab
+/// completes. Drawn at the bottom above the status line, like vim's.
+fn command_line(f: &mut Frame<'_>, text: &str, area: Rect) {
+    let width = area.width;
+    let height = 1.min(area.height);
+    let y = area.y + area.height.saturating_sub(height);
+    let r = Rect::new(area.x, y, width, height);
+    let shown = fit_to(text, usize::from(width).saturating_sub(4));
+    f.render_widget(Clear, r);
+    f.render_widget(
+        Paragraph::new(line([
+            (lit(":"), bold()),
+            (tt(&shown), Style::default()),
+            (lit("_"), dim()),
+        ])),
+        r,
+    );
 }
 
 /// A one-line prompt (the mod action's optional reason): Enter runs the action, Esc cancels.
