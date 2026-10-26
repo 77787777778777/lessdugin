@@ -425,11 +425,7 @@ pub fn notification_line(n: &lessdugin_core::dto::NotificationView) -> TermText 
         NotificationReason::ModAction => "mod action",
         NotificationReason::KarmaChange => "karma",
     };
-    let mut parts = vec![
-        lit(if n.read { "  " } else { "* " }),
-        tt(reason),
-        lit("  "),
-    ];
+    let mut parts = vec![lit(if n.read { "  " } else { "* " }), tt(reason), lit("  ")];
     if let Some(a) = &n.actor {
         parts.push(actor(a));
         parts.push(lit("  "));

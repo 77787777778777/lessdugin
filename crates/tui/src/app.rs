@@ -21,9 +21,9 @@ use crossterm::event::KeyEvent;
 use lessdugin_core::dto::{
     AccessLevel, AccountView, ActionTicket, AgreementValue, Capability, CommentDraft, Event,
     ForumSummary, ForumView, KarmaValue, ModActionIntent, ModActionValue, ModLog, ModQueue,
-    ModScope, NotificationList, OpinionIntent, PinScope, PostDraft, PostList, PostSort,
-    ReactTally, Stance, SyncReport, ThreadRoot, ThreadView, Tier, Topic, UnreadCounts, ViewerCaps,
-    WriteState, WriteTicket,
+    ModScope, NotificationList, OpinionIntent, PinScope, PostDraft, PostList, PostSort, ReactTally,
+    Stance, SyncReport, ThreadRoot, ThreadView, Tier, Topic, UnreadCounts, ViewerCaps, WriteState,
+    WriteTicket,
 };
 use lessdugin_core::engine::EngineError;
 
@@ -918,7 +918,10 @@ impl Screen {
             ScreenKind::Notifications(s) => {
                 let p = s.pending.as_ref()?;
                 Some(new_of(
-                    s.data.as_ref().map(NotificationsScreen::uris).unwrap_or_default(),
+                    s.data
+                        .as_ref()
+                        .map(NotificationsScreen::uris)
+                        .unwrap_or_default(),
                     NotificationsScreen::uris(p),
                 ))
             }
@@ -1576,11 +1579,7 @@ impl State {
             ScreenKind::Mod(_) => self.approve_selected(fx),
             // on the Notifications screen, Enter opens the notification's thread
             ScreenKind::Notifications(s) => {
-                if let Some(n) = s
-                    .data
-                    .as_ref()
-                    .and_then(|d| d.items.get(s.pos.cursor))
-                {
+                if let Some(n) = s.data.as_ref().and_then(|d| d.items.get(s.pos.cursor)) {
                     let uri = n.subject.clone();
                     self.push_thread(uri, fx);
                 }
@@ -1638,7 +1637,10 @@ impl State {
             },
             ScreenKind::Mod(m) => SyncTarget::Forum(m.forum.clone()),
             ScreenKind::Notifications(_) => {
-                self.say(Tone::Info, lit("Notifications are local; sync a forum with R on it."));
+                self.say(
+                    Tone::Info,
+                    lit("Notifications are local; sync a forum with R on it."),
+                );
                 return;
             }
         };
@@ -2614,10 +2616,7 @@ impl State {
             );
             return;
         }
-        self.push(
-            ScreenKind::Notifications(Box::new(NotificationsScreen::default())),
-            fx,
-        );
+        self.push(ScreenKind::Notifications(Box::default()), fx);
     }
 
     /// `M` (or the notifications' opening): marks every listed notification read
@@ -2697,7 +2696,10 @@ impl State {
                     self.reload(i, Origin::Live, fx);
                 }
             }
-            Err(e) => self.say(Tone::Error, cat([lit("Marking read failed: "), tt(&e.message)])),
+            Err(e) => self.say(
+                Tone::Error,
+                cat([lit("Marking read failed: "), tt(&e.message)]),
+            ),
         }
     }
 

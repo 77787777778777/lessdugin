@@ -157,11 +157,18 @@ pub async fn run<H: Host>(engine: &Engine<H>, effect: Effect, opts: ExecOpts) ->
             origin,
             result: engine.mod_log(&forum, None, MOD_LOG_LIMIT).await,
         },
-        Effect::LoadNotifications { screen, all, origin } => Action::NotificationsLoaded {
+        Effect::LoadNotifications {
+            screen,
+            all,
+            origin,
+        } => Action::NotificationsLoaded {
             screen,
             origin,
             result: engine
-                .notifications(&NotificationsQuery { all, limit: NOTIF_LIMIT })
+                .notifications(&NotificationsQuery {
+                    all,
+                    limit: NOTIF_LIMIT,
+                })
                 .await,
         },
         Effect::MarkRead { ids, screen } => Action::MarkedRead {
