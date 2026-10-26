@@ -141,6 +141,16 @@ fn gif_with_comment() -> Vec<u8> {
     v.extend_from_slice(&[0x21, 0xFE, 0x09]);
     v.extend_from_slice(b"a secret!");
     v.push(0x00);
+    // an XMP application extension (dropped: §5.9.1 keeps only NETSCAPE2.0)
+    let xmp = b"XMP DataXMP";
+    v.extend_from_slice(&[0x21, 0xFF, xmp.len() as u8]);
+    v.extend_from_slice(xmp);
+    v.push(0x00);
+    // a plain-text extension (dropped)
+    let text = b"GPS 51.5,-0.12";
+    v.extend_from_slice(&[0x21, 0x01, text.len() as u8]);
+    v.extend_from_slice(text);
+    v.push(0x00);
     // graphic control extension (kept)
     v.extend_from_slice(&[0x21, 0xF9, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00]);
     // image descriptor 1x1 at 0,0, no local colour table
@@ -148,6 +158,8 @@ fn gif_with_comment() -> Vec<u8> {
     // minimal LZW data
     v.extend_from_slice(&[0x02, 0x02, 0x44, 0x01, 0x00]);
     v.push(0x3B);
+    // anything after the trailer is dropped
+    v.extend_from_slice(b"AFTER-TRAILER-MOTION-PHOTO");
     v
 }
 
@@ -357,6 +369,20 @@ fn gif_drops_comments_and_keeps_the_loop_and_frames() {
     let out = strip_metadata(&input);
     assert!(out.changed);
     assert!(!contains(&out.bytes, b"a secret!"), "the comment survived");
+    // §5.9.1 drops plain-text extensions and application extensions other than NETSCAPE2.0,
+    // which is where a GIF's XMP lives.
+    assert!(
+        !contains(&out.bytes, b"XMP DataXMP"),
+        "the XMP application extension survived"
+    );
+    assert!(
+        !contains(&out.bytes, b"GPS 51.5,-0.12"),
+        "the plain-text extension survived"
+    );
+    assert!(
+        !contains(&out.bytes, b"AFTER-TRAILER-MOTION-PHOTO"),
+        "data after the trailer survived"
+    );
     assert!(
         contains(&out.bytes, b"NETSCAPE2.0"),
         "the loop extension was dropped"
@@ -365,6 +391,8 @@ fn gif_drops_comments_and_keeps_the_loop_and_frames() {
     assert!(out.bytes.ends_with(&[0x3B]), "no trailer");
     // the image block is intact
     assert!(contains(&out.bytes, &[0x2C, 0, 0, 0, 0, 1, 0, 1, 0]));
+    // the graphic control extension survives with its label
+    assert!(contains(&out.bytes, &[0x21, 0xF9, 0x04]));
 }
 
 #[test]
@@ -645,5 +673,104 @@ fn redundant_jpeg_fill_bytes_are_a_reported_change() {
     assert!(
         out.changed || out.bytes == input,
         "changed == false must mean byte-identical"
+    );
+}
+
+#[test]
+fn jpeg_drops_everything_after_eoi() {
+    // The MPF/"motion photo" shape §5.9.1 names: a whole second image (here, another JPEG) is
+    // appended after the first one's EOI, and none of it may survive.
+    let mut input = jpeg_with_metadata(1, false);
+    let appended = jpeg_with_metadata(1, false);
+    input.extend_from_slice(&appended);
+    input.extend_from_slice(b"TRAILING-MOTION-PHOTO-VIDEO");
+
+    let out = strip_metadata(&input);
+    assert!(out.changed, "trailing data must be reported as dropped");
+    assert!(
+        !contains(&out.bytes, b"TRAILING-MOTION-PHOTO-VIDEO"),
+        "data after EOI survived"
+    );
+    // the appended second image is gone too: exactly one SOI..EOI pair survives
+    let soi = out.bytes.windows(2).filter(|w| *w == [0xFF, 0xD8]).count();
+    let eoi = out.bytes.windows(2).filter(|w| *w == [0xFF, 0xD9]).count();
+    assert_eq!((soi, eoi), (1, 1), "the appended second image survived");
+    assert!(out.bytes.ends_with(&[0xFF, 0xD9]), "EOI must be last");
+}
+
+#[test]
+fn a_hostile_frame_size_is_never_decoded() {
+    // A header that declares an enormous frame (100000² is ~40 GB as RGBA) must never make the
+    // pipeline decode, allocate or re-encode: the bytes come back unchanged. SUP-9's caps are
+    // checked on the header alone, BEFORE any pixels are read; that check is unit-tested in
+    // `media.rs` (`the_sup9_caps_are_checked_before_any_decode`), and this is the end-to-end
+    // behaviour it produces. Note that `image`'s own decoder also refuses this file, so this test
+    // alone would still pass without the guard - the unit test is what pins the guard.
+    let mut hostile = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+    let mut ihdr = (100_000u32).to_be_bytes().to_vec();
+    ihdr.extend_from_slice(&(100_000u32).to_be_bytes());
+    ihdr.extend_from_slice(&[8, 6, 0, 0, 0]);
+    hostile.extend_from_slice(&png_chunk(b"IHDR", &ihdr));
+    hostile.extend_from_slice(&png_chunk(b"IDAT", b"whatever"));
+    hostile.extend_from_slice(&png_chunk(b"IEND", b""));
+
+    assert_eq!(
+        apply_orientation(&hostile, 6),
+        hostile,
+        "an over-cap frame must not be decoded"
+    );
+    // and it does not crash the pipeline either way
+    assert_eq!(prepare(hostile.clone()).unwrap(), hostile);
+}
+
+#[test]
+fn an_mp4_nested_past_the_depth_cap_is_refused_not_stripped() {
+    use lessdugin_core::media::{MEDIA_CONTAINER_MAX_DEPTH, prepare};
+
+    let boxed = |kind: &[u8; 4], payload: &[u8]| {
+        let mut v = ((payload.len() + 8) as u32).to_be_bytes().to_vec();
+        v.extend_from_slice(kind);
+        v.extend_from_slice(payload);
+        v
+    };
+    // N nested `moov` boxes around a `udta` core, after a SHALLOW `udta`. The shallow one matters:
+    // the walk zeroes it before it ever reaches the deep chain, so a refusal that returned the
+    // half-processed buffer would not equal the input (see the last assertion below).
+    let nest = |n: usize| {
+        let mut inner = boxed(b"udta", b"deep-secret");
+        for _ in 0..n {
+            inner = boxed(b"moov", &inner);
+        }
+        let mut v = boxed(b"ftyp", b"isom\0\0\x02\0isomiso2");
+        v.extend_from_slice(&boxed(b"udta", b"shallow-secret"));
+        v.extend_from_slice(&inner);
+        v
+    };
+
+    // the cap counts the file level as depth 1, so MAX-1 nested containers keep the core
+    // reachable: it is stripped, not refused
+    let at_cap = nest((MEDIA_CONTAINER_MAX_DEPTH - 1) as usize);
+    let out = strip_metadata(&at_cap);
+    assert!(!out.too_deep, "nesting at the cap must not be refused");
+    assert!(out.changed);
+    assert!(
+        !contains(&out.bytes, b"deep-secret"),
+        "the deep udta survived"
+    );
+    assert_eq!(out.bytes.len(), at_cap.len(), "MP4 offsets must not shift");
+
+    // one container deeper: §6 refuses the file for upload, with its bytes unmodified - a
+    // half-processed file (an outer udta already zeroed) must not come back either
+    let too_deep = nest(MEDIA_CONTAINER_MAX_DEPTH as usize);
+    let out = strip_metadata(&too_deep);
+    assert!(out.too_deep, "nesting past the cap must be refused");
+    assert_eq!(out.bytes, too_deep, "a refusal returns the input untouched");
+    assert!(!out.changed);
+    // and the pipeline turns the refusal into a mediaRejected error rather than uploading it
+    let err = prepare(too_deep).unwrap_err();
+    assert_eq!(err.code, lessdugin_core::engine::ErrorCode::InvalidInput);
+    assert_eq!(
+        err.detail.as_ref().and_then(|d| d.get("kind")),
+        Some(&serde_json::json!("mediaRejected"))
     );
 }
