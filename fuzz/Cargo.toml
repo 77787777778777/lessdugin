@@ -30,6 +30,7 @@ arbitrary = { version = "1", features = ["derive"] }
 lessdugin-atp = { path = "../crates/atp" }
 lessdugin-lexicon = { path = "../crates/lexicon" }
 lessdugin-markdown = { path = "../crates/markdown" }
+lessdugin-core = { path = "../crates/core" }
 serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
 # Signs the commits of the structured repo inputs (the `mst` target) and re-signs decoded commits
 # (the `commit` target), so that verification gets past the signature check.
@@ -82,3 +83,9 @@ bench = false
 [profile.release]
 # Line tables keep crash backtraces readable; full debuginfo would outgrow the disk allowance.
 debug = "line-tables-only"
+
+[[bin]]
+name = "media"
+path = "fuzz_targets/media.rs"
+test = false
+doc = false

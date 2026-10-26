@@ -147,9 +147,15 @@ fn strip_jpeg(b: &[u8]) -> Stripped {
         if b[i] != 0xFF {
             return unchanged(b);
         }
-        // skip fill bytes
+        // Skip fill bytes (a run of 0xFF before a marker is legal padding). Collapsing them
+        // is a change to the file, so it must be reported as one: `changed == false` promises
+        // the caller byte-identical output.
+        let fill_at = i;
         while i < b.len() && b[i] == 0xFF {
             i += 1;
+        }
+        if i > fill_at + 1 {
+            changed = true;
         }
         let Some(&marker) = b.get(i) else {
             return unchanged(b);
@@ -729,4 +735,72 @@ impl<H: crate::host::Host> crate::engine::Engine<H> {
             name: input.name.clone(),
         })
     }
+}
+
+/// The upload size the pipeline aims for before trying (§8.8, "downscale (try 5 MiB first, fit on
+/// 413)").
+pub const UPLOAD_TARGET_BYTES: usize = 5 * 1024 * 1024;
+
+/// Re-encodes an image smaller so it fits `max_bytes`, halving the longest side until it does.
+///
+/// Returns `None` when the bytes are not a decodable image or cannot be made to fit - the caller
+/// then refuses the upload rather than sending something the PDS will reject again (§8.8: "On 413,
+/// the client downscales (images) or refuses"). Audio, video, PDF and text never downscale.
+#[cfg(feature = "orientation")]
+pub fn downscale_to_fit(bytes: &[u8], max_bytes: usize) -> Option<Vec<u8>> {
+    use image::ImageFormat;
+    let format = sniff(bytes)?;
+    let image_format = match format {
+        Format::Png => ImageFormat::Png,
+        Format::Gif => return None, // an animation is not resized frame by frame here
+        Format::Webp => ImageFormat::WebP,
+        Format::Jpeg => ImageFormat::Jpeg,
+        Format::Iso => return None,
+    };
+    let mut img = image::load_from_memory(bytes).ok()?;
+    // bounded: at most 20 halvings (a 2^20-fold reduction), so this cannot spin
+    for _ in 0..20 {
+        let mut out = Vec::new();
+        if img
+            .write_to(&mut std::io::Cursor::new(&mut out), image_format)
+            .is_err()
+        {
+            return None;
+        }
+        if out.len() <= max_bytes {
+            return Some(out);
+        }
+        let (w, h) = (img.width(), img.height());
+        if w <= 1 && h <= 1 {
+            return None;
+        }
+        img = img.resize(
+            (w / 2).max(1),
+            (h / 2).max(1),
+            image::imageops::FilterType::Lanczos3,
+        );
+    }
+    None
+}
+
+/// §8.8's upload policy: try the prepared bytes, and on a size refusal downscale an image or give
+/// up. `max_bytes` is the PDS's limit from the 413 (or [`UPLOAD_TARGET_BYTES`] beforehand).
+///
+/// The returned bytes are what should be uploaded, and the caller MUST recompute the CID from
+/// them - the record's `ref.$link` has to be the CID of the bytes the PDS actually stored.
+pub fn fit_for_upload(prepared: Vec<u8>, max_bytes: usize) -> Result<Vec<u8>, EngineError> {
+    if prepared.len() <= max_bytes {
+        return Ok(prepared);
+    }
+    #[cfg(feature = "orientation")]
+    if let Some(smaller) = downscale_to_fit(&prepared, max_bytes) {
+        return Ok(smaller);
+    }
+    Err(EngineError::new(
+        crate::engine::ErrorCode::TooLarge,
+        "the file is too large to upload and cannot be downscaled (data-model.md §8.8)",
+    )
+    .with_detail("kind", "mediaRejected")
+    .with_detail("bytes", prepared.len() as u64)
+    .with_detail("limit", max_bytes as u64))
 }

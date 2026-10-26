@@ -567,3 +567,81 @@ fn prepare_media_strips_and_refuses_what_it_must() {
     let m = e.prepare_media(jpeg, &guessed).unwrap();
     assert_eq!(m.mime, "image/jpeg", "the sniffed type must win");
 }
+
+// --- the 413 policy -------------------------------------------------------------------------
+
+#[test]
+fn fit_for_upload_downscales_an_image_and_refuses_the_rest() {
+    use lessdugin_core::media::{UPLOAD_TARGET_BYTES, fit_for_upload};
+
+    // a real, fairly incompressible image: 256x256 of noise
+    let mut img = image::RgbImage::new(256, 256);
+    for (x, y, px) in img.enumerate_pixels_mut() {
+        let n = (x * 7 + y * 13) % 256;
+        *px = image::Rgb([n as u8, (n * 3 % 256) as u8, (n * 7 % 256) as u8]);
+    }
+    let mut png = Vec::new();
+    image::DynamicImage::ImageRgb8(img)
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .unwrap();
+    let original = png.len();
+
+    // already small enough: untouched
+    assert_eq!(
+        fit_for_upload(png.clone(), UPLOAD_TARGET_BYTES).unwrap(),
+        png
+    );
+
+    // a tight budget: downscaled until it fits
+    let budget = original / 4;
+    let fitted = fit_for_upload(png.clone(), budget).unwrap();
+    assert!(fitted.len() <= budget, "{} > {budget}", fitted.len());
+    assert!(
+        fitted.len() < original,
+        "the result must be smaller than the input"
+    );
+    // still a valid PNG of the same format
+    assert_eq!(sniff(&fitted), Some(Format::Png));
+    assert!(image::load_from_memory(&fitted).is_ok());
+
+    // a budget nothing can meet: refused, not silently uploaded
+    let err = fit_for_upload(png.clone(), 8).unwrap_err();
+    assert_eq!(err.code, lessdugin_core::engine::ErrorCode::TooLarge);
+    assert_eq!(
+        err.detail.as_ref().and_then(|d| d.get("limit")),
+        Some(&serde_json::json!(8))
+    );
+
+    // a non-image never downscales: it is refused or passed through by size
+    let mp4 = mp4_with_udta();
+    assert_eq!(
+        fit_for_upload(mp4.clone(), UPLOAD_TARGET_BYTES).unwrap(),
+        mp4
+    );
+    assert!(
+        fit_for_upload(mp4, 4).is_err(),
+        "video must refuse, not resize"
+    );
+}
+
+#[test]
+fn redundant_jpeg_fill_bytes_are_a_reported_change() {
+    // Found by `cargo fuzz` (fuzz/fuzz_targets/media.rs) on the first run: a JPEG with a run of
+    // 0xFF fill bytes collapsed them but reported `changed: false`, which promises the caller
+    // byte-identical output. Collapsing padding IS a change, so it must be reported as one.
+    let input: &[u8] = &[0xFF, 0xD8, 0xFF, 0xFF, 0xFF, 0xFF, 0xD8, 0xFF, 0xFF, 0xD9];
+    let out = strip_metadata(input);
+    if out.changed {
+        // the output is a valid, denser JPEG
+        assert!(out.bytes.starts_with(&[0xFF, 0xD8]));
+        assert!(out.bytes.len() < input.len());
+    } else {
+        // or the contract holds and nothing moved
+        assert_eq!(out.bytes, input);
+    }
+    // the case that must never happen: changed == false with different bytes
+    assert!(
+        out.changed || out.bytes == input,
+        "changed == false must mean byte-identical"
+    );
+}
