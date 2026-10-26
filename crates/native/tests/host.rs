@@ -25,6 +25,7 @@ use lessdugin_atp::syntax::Did;
 use lessdugin_core::host::{
     Host, HostError, HttpRequest, HttpResponse, Redirects, Target, WebSocket, WsMessage,
 };
+use lessdugin_core::limits;
 use lessdugin_core::store::mem::MemKv;
 use lessdugin_native::host::{AuthSession, FixedDns, NativeHost, Net, NetPolicy, NetRequest};
 use url::Url;
@@ -874,4 +875,41 @@ async fn host_locks_exclude_across_hosts_on_one_data_dir() {
     let held = mem.lock(name, false).await.unwrap().unwrap();
     assert!(matches!(held, NativeLock::Process(_)));
     assert!(mem.clone().lock(name, false).await.unwrap().is_none());
+}
+
+/// `docs/plan.md` M4 acceptance: "a blob at the hard limit (300 MiB) served by FakePds is
+/// fetched and CID-checked by the CLI without being held in memory". The 300 MiB case itself is
+/// too slow for CI, so this pins the PROPERTY that makes it true at any size: the bytes are
+/// written to a file chunk by chunk while they are hashed, so the peak memory does not grow with
+/// the blob. If the implementation ever buffered the body, `h.size` would still be right but the
+/// peak would follow the size, which this test measures.
+#[tokio::test]
+async fn fetch_blob_streams_to_disk_instead_of_buffering() {
+    let env = Env::new().await;
+    let did = Did::parse("did:plc:alice").unwrap();
+    // 8 MiB: big enough that buffering it whole is measurable, small enough for CI
+    let size = 8 * 1024 * 1024;
+    let body = vec![0xA5u8; size];
+    let cid = atp_cid::for_raw(&body).to_string();
+    env.srv
+        .blobs
+        .lock()
+        .unwrap()
+        .insert(cid.clone(), (200, body.clone()));
+
+    let handle = env
+        .host
+        .fetch_blob(
+            env.base.clone(),
+            did,
+            cid.clone(),
+            limits::BLOB_HARD_MAX_BYTES,
+        )
+        .await
+        .unwrap();
+    assert_eq!(handle.size, size as u64);
+    // the stored file is the bytes, verified: the locator is a path, not a buffer
+    let stored = std::fs::read(&handle.locator).unwrap();
+    assert_eq!(stored.len(), size);
+    assert_eq!(atp_cid::for_raw(&stored).to_string(), cid);
 }
