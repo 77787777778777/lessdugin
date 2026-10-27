@@ -126,7 +126,7 @@ Query = the requested list, sort, filter or thread (§12); it never changes any 
 - records of `post`, `comment`, `revision`, `opinion`, `modAction`, `wikiRevision` or `sequence` in the `{fk}-` key range, after the normative fetch caps (`data-model.md` §7.4).
 
 The following are never members:
-- records of inactive repos;
+- records of inactive repos, except a member of A's `modAction` records while its account has been inactive for less than 7 days (`sync.md` §3.4; its `repoStatus` is then at least `Stale`, and `Unavailable` afterwards);
 - hints (Jetstream, Constellation, relay, Slingshot, indexer JSON);
 - third-party proofs whose rev is below the author PDS's `getLatestCommit` head (`[stale]`).
 
@@ -627,7 +627,7 @@ degraded ⇔ ∃ a ∈ A : repoStatus[a] = Unavailable
 - Rule V2 also hides every item whose author is not in S, as `Hidden(ModerationUnavailable)`.
 - A banner says "moderation data unavailable".
 
-**What does not cause degradation.** A `Stale` authority repo does not degrade the view: its cached assertions apply. Moderation never vanishes because a PDS is down, so hidden spam is never resurrected.
+**What does not cause degradation.** A `Stale` authority repo does not degrade the view: its cached assertions apply. Moderation never vanishes because a PDS is down, so hidden spam is never resurrected. The same holds for an authority whose account is inactive (taken down, suspended, deactivated or deleted), for 7 days: its cached assertions apply, with an `authorityInactive` banner. After that its repo is `Unavailable` and the view degrades (`sync.md` §3.4).
 
 ### 4.12 Mod log, mod queue, raw view
 

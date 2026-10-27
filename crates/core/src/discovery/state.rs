@@ -22,11 +22,11 @@ use lessdugin_lexicon::records::Forum;
 use serde::{Deserialize, Serialize};
 
 use crate::discovery::forum_ref::ForumKey;
-use crate::discovery::roster::{Roster, RosterRecord};
+use crate::discovery::roster::{self, Roster, RosterRecord};
 use crate::dto::Completeness;
 use crate::host::{Dir, KeyRange, KvOp, KvStore};
 use crate::store::key::{self, Part};
-use crate::store::records::{RecordStore, below_cap_boundary, eligible, fold_rows_capped};
+use crate::store::records::{RecordStore, below_cap_boundary, eligible_in_forum, fold_rows_capped};
 use crate::store::repo::{RepoRow, RepoStatus};
 use crate::store::row::{self, ROW_VERSION};
 use crate::store::{StoreError, schema};
@@ -171,12 +171,15 @@ pub async fn put_disc_rows<K: KvStore>(
 }
 
 /// The forum's stored records of one collection that may enter the fold (`fold_rows_capped`),
-/// valid and eligible, by authors that `keep` accepts.
+/// valid and eligible at `now_ms` (`authorities` for I8's exception, `sync.md` §3.4), by
+/// authors that `keep` accepts.
 pub async fn forum_records<K: KvStore>(
     kv: &K,
     fk: &str,
     collection: &str,
     keep: impl Fn(&str) -> bool,
+    authorities: &BTreeMap<String, u8>,
+    now_ms: i64,
 ) -> Result<Vec<RosterRecord>, StoreError> {
     let store = RecordStore::new(kv);
     let rows = store.scan_forum(fk, Some(collection)).collect().await?;
@@ -196,7 +199,9 @@ pub async fn forum_records<K: KvStore>(
         .iter()
         .filter(|r| {
             let repo = repos.get(r.key.did.as_str());
-            eligible(&r.row, repo) && !below_cap_boundary(fk, &r.key, repo)
+            let authority = authorities.contains_key(&r.key.did);
+            eligible_in_forum(&r.row, &r.key, repo, authority, now_ms)
+                && !below_cap_boundary(fk, &r.key, repo)
         })
         .filter_map(|r| {
             Some(RosterRecord {
@@ -228,13 +233,15 @@ impl ForumState {
         decl: &Forum,
         now_us: i64,
     ) -> Result<Self, StoreError> {
-        let mut recs = forum_records(kv, &key.fk, nsid::MOD_ACTION, |_| true).await?;
-        recs.extend(forum_records(kv, &key.fk, nsid::MEMBERSHIP, |_| true).await?);
+        let (a, now_ms) = (&roster::authorities(&key.owner, decl), now_us.div_euclid(1000));
+        let all = |_: &str| true;
+        let mut recs = forum_records(kv, &key.fk, nsid::MOD_ACTION, all, a, now_ms).await?;
+        recs.extend(forum_records(kv, &key.fk, nsid::MEMBERSHIP, all, a, now_ms).await?);
         let roster = Roster::compute(key, decl, &recs, now_us);
         let closure = if roster.is_open() {
-            let seeds = &roster.seeds;
-            let mut refs = forum_records(kv, &key.fk, nsid::OPINION, |d| seeds.contains(d)).await?;
-            refs.extend(forum_records(kv, &key.fk, nsid::COMMENT, |d| seeds.contains(d)).await?);
+            let seeds = |d: &str| roster.seeds.contains(d);
+            let mut refs = forum_records(kv, &key.fk, nsid::OPINION, seeds, a, now_ms).await?;
+            refs.extend(forum_records(kv, &key.fk, nsid::COMMENT, seeds, a, now_ms).await?);
             roster.closure(key, &refs)
         } else {
             BTreeSet::new()

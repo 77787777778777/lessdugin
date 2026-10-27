@@ -446,7 +446,8 @@ dto! {
         #[serde(skip_serializing_if = "Option::is_none")]
         pub cursor: Option<String>,
         pub completeness: Completeness,
-        /// The forum's banners (`newerRules`, `moderationUnavailable`; `social.md` §1.6, §4.11).
+        /// The forum's banners (`newerRules`, `moderationUnavailable`, `authorityInactive`;
+        /// `social.md` §1.6, §4.11).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         pub banners: Vec<Banner>,
     }

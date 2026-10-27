@@ -998,6 +998,74 @@ fn mods_rm_adopts_only_what_counted() {
     assert_eq!(decl["moderators"].as_array().unwrap().len(), 1, "{decl}");
 }
 
+/// A moderator whose account is taken down keeps moderating for the retention time (`sync.md`
+/// §3.4, I8's authority exception): the spam they hid stays hidden, with an `authorityInactive`
+/// banner. After 7 days their repo is `Unavailable`, so the view degrades instead of opening.
+#[test]
+fn an_inactive_moderators_hides_stay_then_the_view_degrades() {
+    use lessdugin_core::dto::{HiddenReason, ItemState};
+
+    let w = World::new();
+    let (alice, bob, carol) = (&w.alice, &w.bob, &w.carol);
+    block_on(alice.engine.mods_set(
+        &w.forum,
+        &ModsChange::Add {
+            did: bob.did(),
+            role: ModRole::Moderator,
+            title: None,
+        },
+    ))
+    .unwrap();
+    alice.flush();
+    let spam = carol.post(&w.forum, "SPAM", "buy pills");
+    w.resync(&[bob]);
+    let spam_hide = ModActionValue::Hide {
+        hidden: true,
+        spam: true,
+        show_reason: true,
+    };
+    bob.mod_action(assert_mod(&w.forum, &spam, spam_hide));
+    bob.flush();
+    w.resync(&[alice]);
+    let state = || block_on(alice.engine.get_post(&spam)).unwrap().post.state;
+    let hidden = |s: &ItemState| {
+        matches!(
+            s,
+            ItemState::Hidden {
+                reason: HiddenReason::Removed { spam: true, .. }
+            }
+        )
+    };
+    assert!(hidden(&state()), "{:?}", state());
+
+    bob.acct.takedown();
+    for _ in 0..2 {
+        w.tick(10 * MINUTE);
+        let _ = block_on(alice.engine.sync_forum(&w.forum, &SyncOpts::default()));
+    }
+    let open = block_on(alice.engine.forum_open(&w.forum)).unwrap();
+    let codes: Vec<&str> = open.banners.iter().map(|b| b.code.as_str()).collect();
+    assert_eq!(codes, ["authorityInactive"], "{open:?}");
+    assert!(!open.completeness.degraded, "{open:?}");
+    assert!(hidden(&state()), "still hidden: {:?}", state());
+
+    // after the retention time the repo is Unavailable: the view degrades
+    w.tick(7 * 24 * 60 * MINUTE);
+    let _ = block_on(alice.engine.sync_forum(&w.forum, &SyncOpts::default()));
+    let open = block_on(alice.engine.forum_open(&w.forum)).unwrap();
+    let codes: Vec<&str> = open.banners.iter().map(|b| b.code.as_str()).collect();
+    assert_eq!(codes, ["moderationUnavailable"], "{open:?}");
+    assert!(open.completeness.degraded, "{open:?}");
+
+    // active again: the hide applies at once, no banner
+    bob.acct.activate();
+    w.tick(10 * MINUTE);
+    let _ = block_on(alice.engine.sync_forum(&w.forum, &SyncOpts::default()));
+    let open = block_on(alice.engine.forum_open(&w.forum)).unwrap();
+    assert!(open.banners.is_empty(), "{open:?}");
+    assert!(hidden(&state()), "{:?}", state());
+}
+
 #[test]
 fn mods_rm_does_not_remove_when_adoption_fails() {
     let w = World::new();

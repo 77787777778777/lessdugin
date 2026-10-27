@@ -746,7 +746,7 @@ A record is considered at all only if it was admitted at trust level `pds` or `p
 - **`pds`:** fetched from the author's PDS (the one in the DID doc) over TLS, with JSON → DAG-CBOR → CIDv1 (dag-cbor, sha256) equal to the returned CID.
 - **`proven`:** proven by `proofs/1`.
 
-A third-party proof counts as current only if its rev is at least the head returned by the author PDS's `getLatestCommit`. Otherwise it is `[stale]` and is not a fold input. Hints (Jetstream, Constellation, relay, Slingshot, indexer JSON) are never fold inputs. Records of inactive repos are excluded (`sync.md`).
+A third-party proof counts as current only if its rev is at least the head returned by the author PDS's `getLatestCommit`. Otherwise it is `[stale]` and is not a fold input. Hints (Jetstream, Constellation, relay, Slingshot, indexer JSON) are never fold inputs. Records of inactive repos are excluded (`sync.md`), except an authority's modActions for a retention time (`sync.md` §3.4).
 
 ### 7.2 Generic rules (every collection)
 

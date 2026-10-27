@@ -147,7 +147,9 @@ on RecordNotFound: tombstone (§5.6); drop p
 ```
 eligible(v) ⇔ (v.level = pds ∨ (v.level = proven ∧ current(v)))
               ∧ ¬v.idHint                                   // identity level doc (§1.3)
-              ∧ status(did(v.uri)) ≠ inactive                // I8, §3.4
+              ∧ (status(did(v.uri)) ≠ inactive ∨ retained(v)) // I8, §3.4
+retained(v) ⇔ coll(v) = NS.modAction ∧ did(v.uri) ∈ A(F)     // the authority exception, §3.4
+              ∧ now < inactiveSince(did(v.uri)) + INACTIVE_RETENTION_MS
 ```
 
 The `records` input of the fold (`social.md` §1.1) is built from eligible stored versions only, after the fetch caps (§5.4). Invalid records are eligible and are fold inputs (the fold excludes them in V1).
@@ -325,7 +327,8 @@ DIDs that merely appear in records are never resolved eagerly.
   - after the errors listed in §3.3;
   - by the daily reconcile (§6.8).
 - The DID is **inactive** if `active = false` and `status` ∈ {`takendown`, `suspended`, `deleted`, `deactivated`} or `status` is absent. `desynchronized` and `throttled` are temporary: the repo is treated as failing (its cached records stay, `[stale]` badge), not as inactive.
-- Records of an inactive DID are excluded from every fold input (I8) and hidden. They stay in the cache for 7 days (*tunable*), then are purged. If the account is active again within that time, a P1 sync restores them.
+- Records of an inactive DID are excluded from every fold input (I8) and hidden. They stay in the cache for 7 days (`INACTIVE_RETENTION_MS`, *tunable*, counted from `inactiveSince`, when the DID was first found inactive), then are purged. If the account is active again within that time, a P1 sync restores them.
+- **Authority exception.** A DID in A(F) (`social.md` §4.1) is the forum's moderation, which must not vanish with its account (`threat-model.md` G2, SOC-6): a moderator can be taken down, suspended or deactivated by a host, or deactivate themselves. For the folds of F, its cached `NS.modAction` records stay fold inputs for those 7 days, and `repoStatus(d, fk)` is at least `Stale`, so its assertions keep applying and the view carries an `authorityInactive` banner. Its other records are excluded as usual. After the 7 days, none of its records is a fold input and `repoStatus(d, fk) = Unavailable`, so the view is degraded (`social.md` §4.11) until the owner removes it from the declaration or the account is active again.
 - Status changes are never taken from a hint: a Jetstream `account` event only triggers the check.
 
 ### 3.5 PLC pacing
@@ -1203,7 +1206,7 @@ Native paths: `~/.cache/lessdugin/{cache.sqlite, blobs/}`, `~/.local/share/lessd
 | I5 | The record store holds only `pds` and `proven` versions (and `idHint` rows, marked). Hints, `[stale]` proofs and pending writes live only in memory or in the outbox, and are never persisted as records. For the same `(uri, cid)`, the level only increases. |
 | I6 | A completeness claim requires every repo in the completeness set to be `Fresh` for that forum (§4.5, §5.9); otherwise the view shows `[partial k/n]`. |
 | I7 | Moderation inputs are read only from the record store, through the eligibility filter (§1.5). |
-| I8 | Records of DIDs that are not active (§3.4) are excluded from every fold input. |
+| I8 | Records of DIDs that are not active (§3.4) are excluded from every fold input, except an authority's modActions during the retention time (§3.4). |
 | I9 | One background-sync leader per cache (§10.6). Other processes and tabs do only P0 fetches, under per-repo locks. All writes are idempotent and order-key-monotonic (§5.6.2). Changes are broadcast (§10.6). |
 
 ### 10.3 Key encoding
@@ -1255,7 +1258,7 @@ RepoRow    { pds: url, rev: TID | "", commit?: CID, headSeen?: {rev, cid, sentAt
              listed: {scope → TID}, capped: {scope → {nsid → boundary rkey}}, byteCapped: {scope → bool},
              marks: {uri → TID} (≤ 1000), marksOverflow: bool,
              checkedAt, lastOk, nextCheck: ms, fails: int, unstable: int, class: string,
-             status: "active" | "inactive" | "temporary", statusDetail?: string, statusAt: ms,
+             status: "active" | "inactive" | "temporary", statusDetail?: string, statusAt: ms, inactiveSince?: ms,
              rollbackSince?: ms, lastChangeAt: ms, lastReconcile: ms }
 IdentityRow{ doc: bytes (JSON), level: "doc" | "hint", src: "plc" | "web" | "slingshot" | "devnet",
              pds?: url, key?: string (multikey), aka?: handle, hstate: "verified" | "unverified" | "invalid",

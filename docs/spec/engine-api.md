@@ -442,7 +442,8 @@ ThreadView    { dto, post: PostView | { missing: uri }, comments: Vec<CommentNod
                 completeness, banners?: Vec<Banner> }
 DiscussionList{ dto, items: Vec<{ post: PostSummary, comments: Vec<CommentNode> }>, cursor?, completeness,
                 banners?: Vec<Banner> }
-Banner        { code: "moderationUnavailable" /* degraded, social.md §4.11 */ | "newerRules", message }
+Banner        { code: "moderationUnavailable" /* degraded, social.md §4.11 */ | "newerRules"
+                      | "authorityInactive" /* an authority's account is inactive; its cached assertions still apply, sync.md §3.4 */, message }
 HistoryView   { dto, uri, versions: Vec<{ n, cid, createdAtMs, summary?, available: bool }> }
 ```
 

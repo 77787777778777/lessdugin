@@ -23,6 +23,9 @@ pub const REPO_BACKOFF_MAX_MS: i64 = 24 * 60 * 60 * 1000;
 pub const HOT_MS: i64 = 24 * 60 * 60 * 1000;
 /// `warm` repos changed at most this long ago (`sync.md` §5.9, *tunable*).
 pub const WARM_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+/// An inactive account's records stay in the cache this long (`sync.md` §3.4, `limits.md`
+/// `INACTIVE_RETENTION_MS`, *tunable*); an authority's modActions stay fold inputs as long.
+pub const INACTIVE_RETENTION_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
 /// The fold's `repoStatus` (`social.md` §1.1, `sync.md` §5.9).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -147,6 +150,9 @@ pub struct RepoRow {
     /// When the status was checked (ms).
     #[serde(default)]
     pub status_at: i64,
+    /// Since when the account has been inactive (ms; set on the change to `inactive`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inactive_since: Option<i64>,
     /// Since when the head is below `rev` (ms).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rollback_since: Option<i64>,
@@ -185,6 +191,7 @@ impl RepoRow {
             status: AccountStatus::Active,
             status_detail: None,
             status_at: 0,
+            inactive_since: None,
             rollback_since: None,
             last_change_at: 0,
             last_reconcile: 0,
@@ -225,6 +232,33 @@ impl RepoRow {
         } else {
             RepoStatus::Stale
         }
+    }
+
+    /// Sets the account status (§3.4) as checked at `now` (ms); `inactive_since` keeps when it
+    /// became inactive.
+    pub fn set_status(&mut self, status: AccountStatus, detail: Option<String>, now: i64) {
+        self.inactive_since = match status {
+            AccountStatus::Inactive if self.status == AccountStatus::Inactive => {
+                self.inactive_since.or(Some(now))
+            }
+            AccountStatus::Inactive => Some(now),
+            _ => None,
+        };
+        self.status = status;
+        self.status_detail = detail;
+        self.status_at = now;
+    }
+
+    /// I8's authority exception (§3.4): the account is inactive, and became so less than
+    /// [`INACTIVE_RETENTION_MS`] before `now` (ms), so the cached modActions of a forum
+    /// authority still apply.
+    pub fn inactive_retained(&self, now: i64) -> bool {
+        self.status == AccountStatus::Inactive
+            && now
+                < self
+                    .inactive_since
+                    .unwrap_or(self.status_at)
+                    .saturating_add(INACTIVE_RETENTION_MS)
     }
 
     /// Records a head observation from the author's PDS; the latest by send time wins.

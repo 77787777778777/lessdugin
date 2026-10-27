@@ -274,8 +274,8 @@ export interface PostList {
   items: PostSummary[];
   cursor?: string;
   completeness: Completeness;
-  /** `moderationUnavailable` (a degraded view, social.md §4.11), `newerRules`; omitted when
-   * empty. */
+  /** `moderationUnavailable` (a degraded view, social.md §4.11), `newerRules`,
+   * `authorityInactive` (sync.md §3.4); omitted when empty. */
   banners?: Banner[];
 }
 
