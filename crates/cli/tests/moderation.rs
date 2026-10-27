@@ -337,6 +337,9 @@ fn mods_rm_skip_adopt_lists_what_lapses_and_needs_a_confirmation() {
             .unwrap_or_default()
     };
     assert_eq!(mods_of(&alice).len(), 1);
+    // the human mod log lists it (its separators are not ASCII)
+    let log = alice.ok(&["mod", "log"]);
+    assert!(log.contains("spam run") && log.contains(" · "), "{log}");
 
     // headless without --yes: the hide is listed, the removal refused, the declaration kept
     let out = alice.run(&["mods", "rm", "bob.test", "--skip-adopt"]);

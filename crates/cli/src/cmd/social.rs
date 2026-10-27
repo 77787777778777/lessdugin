@@ -602,7 +602,7 @@ fn intersperse(parts: Vec<crate::out::TermText>) -> Vec<crate::out::TermText> {
     let mut out = Vec::with_capacity(parts.len() * 2);
     for (i, p) in parts.into_iter().enumerate() {
         if i > 0 {
-            out.push(lit(" · "));
+            out.push(tt(" · "));
         }
         out.push(p);
     }
