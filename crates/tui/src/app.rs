@@ -1133,7 +1133,13 @@ fn complete(line: &mut String) {
         "all",
         "unread",
     ];
-    let start = line.rfind(char::is_whitespace).map_or(0, |i| i + 1);
+    // the byte after the last whitespace character, which may be wider than one byte (an NBSP,
+    // an IME's full-width space): `i + 1` would slice inside it
+    let start = line
+        .char_indices()
+        .rev()
+        .find(|(_, c)| c.is_whitespace())
+        .map_or(0, |(i, c)| i + c.len_utf8());
     let word = &line[start..];
     if word.is_empty() && start > 0 {
         return;
@@ -4340,5 +4346,32 @@ mod tests {
         let mut line = String::from("vote ");
         complete(&mut line);
         assert_eq!(line, "vote ");
+    }
+
+    /// A multi-byte space (NBSP from macOS Option-Space, U+3000 from a CJK IME) before `Tab`
+    /// completes the word after it instead of slicing inside the space and panicking.
+    #[test]
+    fn completion_after_a_wide_space_does_not_panic() {
+        for space in ['\u{a0}', '\u{3000}'] {
+            let mut line = format!("vote{space}str");
+            complete(&mut line);
+            assert_eq!(line, format!("vote{space}strong-up"));
+            let mut line = format!("vote{space}");
+            complete(&mut line);
+            assert_eq!(line, format!("vote{space}"));
+
+            // the same through the key loop: the overlay keeps the text, the TUI keeps running
+            let mut st = State::new(80, 24, None, true);
+            st.start(None);
+            st.update(Action::Key(keys::parse_key(":").unwrap()));
+            for c in format!("vote{space}").chars() {
+                st.update(Action::Key(crossterm::event::KeyEvent::new(
+                    crossterm::event::KeyCode::Char(c),
+                    crossterm::event::KeyModifiers::NONE,
+                )));
+            }
+            st.update(Action::Key(keys::parse_key("Tab").unwrap()));
+            assert_eq!(st.command.as_deref(), Some(format!("vote{space}").as_str()));
+        }
     }
 }
