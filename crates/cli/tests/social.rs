@@ -441,3 +441,116 @@ fn restrict_and_nullify_keep_each_other() {
     assert_eq!(a["capabilities"], serde_json::json!(["comment"]), "{a}");
     assert_eq!(a["nullifyVotes"], true, "{a}");
 }
+
+/// The CLI reaches the owner's and the reader's remaining M3 operations (`engine-api.md` §3.2,
+/// §3.6): `forum edit` (the membership mode among the fields; what is not given is kept),
+/// `reject` (an applicant leaves the pending list; approving brings them back), `mute` (the
+/// lens collapses the author's items, locally) and the karma-notification cadence.
+#[test]
+fn forum_edit_reject_mute_and_the_karma_cadence() {
+    use lessdugin_lexicon::collection::nsid;
+    let w = World::new();
+
+    // forum edit: open mode (with the L7 label), a description; the name stays
+    let out = w.alice.run(&[
+        "forum",
+        "edit",
+        "--mode",
+        "open",
+        "--description",
+        "Talk",
+        "--report-contact",
+        "mods@example.com",
+    ]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).contains("Open mode relies on"),
+        "{}",
+        text(&out.stderr)
+    );
+    let decl = w.alice.account.get(nsid::FORUM, "meta").unwrap();
+    assert_eq!(decl["membership"], "open", "{decl}");
+    assert_eq!(decl["description"], "Talk", "{decl}");
+    assert_eq!(decl["reportContact"], "mods@example.com", "{decl}");
+    assert_eq!(decl["name"], "meta", "{decl}");
+    assert_eq!(decl["defaultTier"], "frontpage", "{decl}");
+    // back to approval (archiving), the description removed, the contact kept
+    let e = w
+        .alice
+        .json(&["forum", "edit", "--mode", "approval", "--description", ""]);
+    assert_eq!(e["state"]["kind"], "done", "{e}");
+    let decl = w.alice.account.get(nsid::FORUM, "meta").unwrap();
+    assert_eq!(decl["membership"], "approval", "{decl}");
+    assert!(decl.get("description").is_none(), "{decl}");
+    assert_eq!(decl["reportContact"], "mods@example.com", "{decl}");
+    // only the owner edits
+    let e = w.bob.fails(1, &["forum", "edit", "alice.test/meta", "--name", "Mine"]);
+    assert_eq!(e["code"], "blocked", "{e}");
+
+    // reject: dave applies, alice dismisses him on this device
+    let dave = w.net.user("dave.test", true);
+    dave.json(&["join", &w.forum, "--yes"]);
+    w.alice.ok(&["sync", &w.forum]);
+    let pending = |u: &fakenet::User| -> Vec<String> {
+        u.json(&["members", "--pending"])["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["actor"]["did"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    assert_eq!(pending(&w.alice), [dave.did()]);
+    let r = w.alice.json(&["reject", "dave.test"]);
+    assert_eq!(r["writes"].as_array().unwrap().len(), 0, "{r}");
+    assert!(pending(&w.alice).is_empty());
+    // approving brings him back from the rejected list, with the grant
+    let a = w.alice.json(&["approve", "dave.test"]);
+    assert_eq!(a["writes"][0]["state"]["kind"], "done", "{a}");
+    // rejecting a granted actor removes the account's own grant
+    let r = w.alice.json(&["reject", "dave.test"]);
+    let writes = r["writes"].as_array().unwrap();
+    assert_eq!(writes.len(), 1, "{r}");
+    assert_eq!(writes[0]["state"]["kind"], "done", "{r}");
+
+    // mute: bob's comment is collapsed for alice only, until she unmutes him
+    let c = w.bob.json(&["comment", &w.post, "-m", "A reply."]);
+    assert_eq!(c["state"]["kind"], "done", "{c}");
+    w.alice.ok(&["sync", &w.forum]);
+    let m = w.alice.json(&["mute", "bob.test"]);
+    assert_eq!(m["mutes"][0]["did"], w.bob.did(), "{m}");
+    let tv: ThreadView = exact(&w.alice.ok(&["--json", "read", &w.post]));
+    assert!(
+        matches!(
+            tv.comments[0].state,
+            lessdugin_core::dto::ItemState::Collapsed {
+                reason: lessdugin_core::dto::CollapseReason::Muted
+            }
+        ),
+        "{:?}",
+        tv.comments[0].state
+    );
+    let listed = w.alice.ok(&["mutes"]);
+    assert!(listed.contains("bob.test"), "{listed}");
+    let m = w.alice.json(&["unmute", "bob.test"]);
+    assert!(m["mutes"].as_array().unwrap().is_empty(), "{m}");
+    let tv: ThreadView = exact(&w.alice.ok(&["--json", "read", &w.post]));
+    assert_eq!(tv.comments[0].state, lessdugin_core::dto::ItemState::Visible);
+
+    // the karma cadence is saved on this device
+    let cadence = || -> Option<String> {
+        let x = w.alice.json(&["export"]);
+        x["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["parts"] == serde_json::json!(["loc", "karmaCadence"]))
+            .map(|m| m["value"].as_str().unwrap().to_owned())
+    };
+    assert_eq!(cadence(), None);
+    let out = w.alice.run(&["notifications", "--karma-cadence", "weekly"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(text(&out.stderr).contains("weekly"), "{}", text(&out.stderr));
+    let weekly = cadence().expect("the cadence is saved");
+    w.alice.ok(&["notifications", "--karma-cadence", "realtime"]);
+    assert_ne!(cadence().unwrap(), weekly);
+}
