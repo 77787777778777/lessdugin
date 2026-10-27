@@ -1753,4 +1753,16 @@ fn the_command_line_reaches_membership_items_and_local_state() {
     let f = block_on(alice.engine.forum_open(&s.forum)).unwrap();
     assert_eq!(f.forum.name, "Meta, renamed");
     assert_eq!(f.forum.description, None);
+    assert!(!status(&ta).contains("relies on"), "{}", status(&ta));
+
+    // an open forum, created or switched to, carries the L7 label (threat-model.md L7)
+    let label = lessdugin_tui::view::OPEN_MODE_LABEL;
+    run_command(&mut ta, "forum edit --mode open");
+    assert!(status(&ta).contains(label), "{}", status(&ta));
+    run_command(&mut ta, "forum create cafe The cafe --open");
+    assert!(status(&ta).contains("New open forum"), "{}", status(&ta));
+    assert!(status(&ta).contains(label), "{}", status(&ta));
+    run_command(&mut ta, "forum create desk The desk");
+    assert!(status(&ta).contains("New forum"), "{}", status(&ta));
+    assert!(!status(&ta).contains(label), "{}", status(&ta));
 }

@@ -923,6 +923,13 @@ pub const LIST_ROWS: usize = 2;
 /// ([`Screen::live_burst`]): the loop guard against a load that always re-announces a change.
 pub const LIVE_RELOAD_CAP: u32 = 3;
 
+/// What the status line calls a write that creates an open forum; its message carries the
+/// L7 label (`threat-model.md` L7).
+pub const NEW_OPEN_FORUM: &str = "New open forum";
+
+/// What the status line calls a forum edit that sets open membership (with the L7 label).
+pub const OPEN_FORUM_EDIT: &str = "Forum edit (open membership)";
+
 /// The Home screen: followed forums with their sync status.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct HomeScreen {
@@ -2221,11 +2228,16 @@ impl State {
                         self.writes.insert(t.id.clone(), t.state);
                     }
                 }
-                let msg = if self.offline {
+                let mut msg = if self.offline {
                     format!("{what}: queued; it is sent when you are online.")
                 } else {
                     format!("{what}: queued; sending...")
                 };
+                // creating an open forum, or opening one, says what open mode relies on
+                // (`threat-model.md` L7, as the CLI's `forum create --mode open`)
+                if matches!(what, NEW_OPEN_FORUM | OPEN_FORUM_EDIT) {
+                    msg = format!("{msg} {}.", crate::view::OPEN_MODE_LABEL);
+                }
                 self.say(Tone::Good, tt(&msg));
                 if let Some(i) = screen.and_then(|id| self.index_of(id)) {
                     self.follow_own = screen;

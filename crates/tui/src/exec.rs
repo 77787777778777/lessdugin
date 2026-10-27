@@ -333,7 +333,11 @@ pub async fn run<H: Host>(engine: &Engine<H>, effect: Effect, opts: ExecOpts) ->
             result: engine.mod_adopt(&forum, &former).await.map(|t| vec![t]),
         },
         Effect::ForumCreate { draft } => Action::Written {
-            what: "New forum",
+            what: if draft.membership == MembershipMode::Open {
+                crate::app::NEW_OPEN_FORUM
+            } else {
+                "New forum"
+            },
             screen: None,
             result: engine.forum_create(&draft).await.map(|t| vec![t]),
         },
@@ -342,7 +346,11 @@ pub async fn run<H: Host>(engine: &Engine<H>, effect: Effect, opts: ExecOpts) ->
             changes,
             screen,
         } => Action::Written {
-            what: "Forum edit",
+            what: if changes.membership == Some(MembershipMode::Open) {
+                crate::app::OPEN_FORUM_EDIT
+            } else {
+                "Forum edit"
+            },
             screen: Some(screen),
             result: match forum_draft(engine, &forum, &changes).await {
                 Ok(d) => engine.forum_update(&forum, &d).await.map(|t| vec![t]),
