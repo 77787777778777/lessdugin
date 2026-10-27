@@ -1,10 +1,11 @@
 // Mention completion for the composer (docs/plan.md M4: "mention autocomplete").
 //
 // The rule is deliberately small: find the `@`-token the caret is inside, and offer the
-// participants whose handle or display name starts with what was typed. Completion inserts the
-// HANDLE, never a DID, because a handle is what a reader recognises and what the renderer's
-// verified-mention path re-checks (lfm-1.md §5.4, synthesis-v1.md §3.4) - an unverified handle is
-// shown struck through rather than being treated as identity.
+// participants whose handle or display name starts with what was typed. Completion inserts a
+// mention link, `[@handle](at://did)` (lfm-1.md §12 "Writers"): a mention is a link to a DID's
+// profile whose text starts with `@` (§4.4), so plain `@handle` text would be neither a mention
+// nor a notification. The DID is the identity; readers substitute the handle only once they
+// verified it themselves (§5.4).
 
 /** One completion candidate. */
 export interface MentionCandidate {
@@ -69,14 +70,15 @@ export function rankMentions(
   return out;
 }
 
-/** Replaces the token at `start` with `@handle ` and returns the text and the new caret. */
+/** Replaces the token at `start` with the mention link `[@handle](at://did) ` and returns the
+ * text and the new caret. */
 export function applyMention(
   text: string,
   start: number,
   caret: number,
-  handle: string,
+  candidate: Pick<MentionCandidate, "did" | "handle">,
 ): { text: string; caret: number } {
-  const insert = `@${handle} `;
+  const insert = `[@${candidate.handle}](at://${candidate.did}) `;
   return {
     text: text.slice(0, start) + insert + text.slice(caret),
     caret: start + insert.length,

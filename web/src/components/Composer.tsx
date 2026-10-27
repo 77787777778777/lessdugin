@@ -334,7 +334,7 @@ export function Composer({
     if (!view || mentions === null) return;
     const cur = view.state.doc.toString();
     const caret = view.state.selection.main.head;
-    const out = applyMention(cur, mentions.start, caret, c.handle);
+    const out = applyMention(cur, mentions.start, caret, c);
     view.dispatch({
       changes: { from: 0, to: cur.length, insert: out.text },
       selection: EditorSelection.cursor(out.caret),
