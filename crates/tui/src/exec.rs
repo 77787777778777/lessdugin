@@ -592,11 +592,13 @@ async fn start_edit<H: Host>(
             let kind = s("kind")
                 .and_then(|k| serde_json::from_value::<PostKind>(serde_json::Value::String(k)).ok())
                 .unwrap_or(PostKind::Article);
-            let title = s("title").unwrap_or_default();
+            // a quick take has no title (data-model.md PO4): its text is all body
+            let quick = kind == PostKind::QuickTake;
+            let title = s("title");
             let draft = PostDraft {
                 forum: s("forum").unwrap_or_default(),
                 kind,
-                title: Some(title.clone()),
+                title: title.clone(),
                 body: BodyDraft::text(markdown.clone()),
                 link: strong("link").map(|uri| ExternalLinkDraft {
                     uri,
@@ -615,14 +617,23 @@ async fn start_edit<H: Host>(
                     })
                     .unwrap_or_default(),
             };
+            let (prefill, context) = if quick {
+                (markdown.clone(), "Editing your quick take".to_owned())
+            } else {
+                let title = title.unwrap_or_default();
+                (
+                    format!("{title}\n\n{markdown}"),
+                    format!("Editing your post: {title}"),
+                )
+            };
             (
                 Draft::Post {
                     id: None,
                     post: draft,
                 },
-                format!("{title}\n\n{markdown}"),
-                vec![format!("Editing your post: {title}")],
-                true,
+                prefill,
+                vec![context],
+                !quick,
             )
         }
         nsid::COMMENT => (

@@ -208,3 +208,107 @@ fn the_edit_command_edits_your_comment() {
     let st = t.state.status.as_ref().unwrap().text.to_plain_string();
     assert!(st.contains("only your own"), "{st}");
 }
+
+/// Types `line` into the `:` overlay and runs it.
+fn run(t: &mut Headless<lessdugin_testkit::MemHost>, line: &str) {
+    block_on(t.press(":"));
+    for c in line.chars() {
+        block_on(t.press(&c.to_string()));
+    }
+    block_on(t.press("Enter"));
+}
+
+/// carol's post `uri` as the engine reads it back: `(title, body text)`.
+fn post_of(s: &common::Scenario, uri: &str) -> (Option<String>, String) {
+    let view = block_on(s.w.carol.engine.get_thread(uri, &ThreadOpts::default())).unwrap();
+    let ThreadRoot::Post(p) = view.post else {
+        panic!("missing")
+    };
+    (p.post.title, p.body.text)
+}
+
+/// `:edit` on a quick take edits its body: it has no title line (`data-model.md` PO4), so the
+/// first line of the text stays in the body, and a one-line take is not emptied.
+#[test]
+fn the_edit_command_edits_a_quick_takes_body() {
+    use lessdugin_core::dto::{BodyDraft, PostDraft, PostKind};
+    let s = scenario();
+    let carol = &s.w.carol;
+    let draft = PostDraft {
+        kind: PostKind::QuickTake,
+        title: None,
+        body: BodyDraft::text("A one-line take."),
+        ..PostDraft::article(&s.forum, "", "")
+    };
+    let t = block_on(carol.engine.publish(&draft)).unwrap();
+    carol.flush();
+    let take = carol.done(&t);
+
+    // the editor writes a new first line above the take
+    let dir = tempfile::tempdir().unwrap();
+    let mut t = tui_with_editor(&s, dir.path(), "Sharper:");
+    block_on(t.start(None));
+    run(&mut t, &format!("edit {take}"));
+    block_on(t.engine().outbox_flush()).unwrap();
+    block_on(t.settle());
+    let (title, body) = post_of(&s, &take);
+    assert_eq!(title, None);
+    assert_eq!(body.trim(), "Sharper:\nA one-line take.", "{body:?}");
+
+    // an editor that leaves the text as it is keeps the whole take
+    let dir = tempfile::tempdir().unwrap();
+    let mut t = tui_with_editor(&s, dir.path(), "");
+    block_on(t.start(None));
+    run(&mut t, &format!("edit {take}"));
+    block_on(t.engine().outbox_flush()).unwrap();
+    block_on(t.settle());
+    let (title, body) = post_of(&s, &take);
+    assert_eq!(title, None);
+    assert_eq!(body.trim(), "Sharper:\nA one-line take.", "{body:?}");
+}
+
+/// `:edit` on an article keeps a title the user did not change as it was, a leading `#`
+/// included, and takes the edited body.
+#[test]
+fn the_edit_command_keeps_an_unchanged_title() {
+    use lessdugin_core::dto::PostDraft;
+    let s = scenario();
+    let carol = &s.w.carol;
+    let t = block_on(carol.engine.publish(&PostDraft::article(
+        &s.forum,
+        "#1 rule: be kind",
+        "The old body.",
+    )))
+    .unwrap();
+    carol.flush();
+    let post = carol.done(&t);
+
+    // an editor that changes the body only
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("sed-editor.sh");
+    std::fs::write(
+        &script,
+        "#!/bin/sh\nset -e\nsed 's/The old body./The new body./' \"$1\" > \"$1.new\"\nmv \"$1.new\" \"$1\"\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let mut t = block_on(Headless::new(
+        carol.engine.clone(),
+        HeadlessOpts {
+            editor: Some(editor(dir.path(), &script)),
+            ..HeadlessOpts::default()
+        },
+    ))
+    .unwrap();
+    block_on(t.start(None));
+    run(&mut t, &format!("edit {post}"));
+    block_on(t.engine().outbox_flush()).unwrap();
+    block_on(t.settle());
+    let (title, body) = post_of(&s, &post);
+    assert_eq!(title.as_deref(), Some("#1 rule: be kind"));
+    assert_eq!(body.trim(), "The new body.", "{body:?}");
+}

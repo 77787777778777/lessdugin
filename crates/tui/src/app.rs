@@ -27,8 +27,8 @@ use lessdugin_core::dto::{
     WriteState, WriteTicket,
 };
 use lessdugin_core::dto::{
-    Draft, ForumDraft, ForumRole, KarmaCadence, MemberView, MembershipMode, RawView, Ref, Settings,
-    Subscription, TextQuote,
+    Draft, ForumDraft, ForumRole, KarmaCadence, MemberView, MembershipMode, PostKind, RawView, Ref,
+    Settings, Subscription, TextQuote,
 };
 use lessdugin_core::engine::EngineError;
 
@@ -3044,9 +3044,18 @@ impl State {
             Compose::Edit { uri, base } => {
                 let mut draft = (**base).clone();
                 match &mut draft {
+                    // a quick take has no title line (data-model.md PO4): the text is its body
+                    Draft::Post { post, .. } if post.kind == PostKind::QuickTake => {
+                        post.body = lessdugin_core::dto::BodyDraft::text(text.clone());
+                    }
                     Draft::Post { post, .. } => match editor::split_post(&text) {
                         Ok((title, body)) => {
-                            post.title = Some(title);
+                            // an unchanged first line keeps the title as it was (`split_post`
+                            // drops a leading `#`, which an article's title may start with)
+                            let first = text.trim_start().lines().next().unwrap_or("").trim();
+                            if post.title.as_deref().map(str::trim) != Some(first) {
+                                post.title = Some(title);
+                            }
                             post.body = lessdugin_core::dto::BodyDraft::text(body);
                         }
                         Err(why) => {
