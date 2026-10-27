@@ -417,8 +417,11 @@ fn a_spilled_body_that_cannot_be_fetched_stays_pending_and_is_asked_again_later(
     let f = forum(&n, &bob);
     let uri = spilled_post(&n, &bob, &f, b"# The whole body");
     // the first getBlob drops the connection
-    n.net
-        .inject(Fault::disconnect().on_nsid("com.atproto.sync.getBlob").once());
+    n.net.inject(
+        Fault::disconnect()
+            .on_nsid("com.atproto.sync.getBlob")
+            .once(),
+    );
     let e = n.device("anon", None);
     let pv = read(&e, &f, &uri);
     assert_eq!(
@@ -468,11 +471,17 @@ fn a_slow_authors_pds_does_not_hold_back_the_thread() {
     let lessdugin_core::dto::ThreadRoot::Post(root) = t else {
         panic!("the thread has its post");
     };
-    assert_eq!(root.body.notices, [lessdugin_core::model::render::NOTICE_SPILLED]);
+    assert_eq!(
+        root.body.notices,
+        [lessdugin_core::model::render::NOTICE_SPILLED]
+    );
     assert_eq!(root.body.text, "An excerpt");
     assert_eq!(e.host().sleeps(), [BODY_BLOB_WAIT_MS]);
     // and the next view does not wait again: polled once, it is ready
-    let pv = e.get_post(&uri).now_or_never().expect("a view that does not wait");
+    let pv = e
+        .get_post(&uri)
+        .now_or_never()
+        .expect("a view that does not wait");
     assert_eq!(pv.unwrap().body.text, "An excerpt");
     // a copy the host stored meanwhile (the browser's download ran on) is taken, unasked
     let blob = lessdugin_atp::cid::for_raw(source).to_string();
@@ -492,7 +501,10 @@ fn a_slow_authors_pds_does_not_hold_back_the_thread() {
     assert_eq!(block_on(e.get_post(&uri)).unwrap().body.text, "An excerpt");
     assert!(blob_requests(&n).is_empty());
     n.tick(BODY_BLOB_RETRY_MS);
-    assert_eq!(block_on(e.get_post(&uri)).unwrap().body.text, "Another body");
+    assert_eq!(
+        block_on(e.get_post(&uri)).unwrap().body.text,
+        "Another body"
+    );
     assert_eq!(blob_requests(&n).len(), 1);
 }
 

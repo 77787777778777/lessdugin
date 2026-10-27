@@ -366,14 +366,26 @@ fn legacy_prepared_rows_are_neither_exported_nor_imported() {
     let legacy = lessdugin_core::key!("loc", "media", "bafkreiold");
     let bookmark = lessdugin_core::key!("loc", "bookmark", "at://did:plc:x/p/1");
     block_on(host.state().write(vec![
-        KvOp::Put(legacy.clone(), br#"{"mime":"image/png","bytes":[1,2,3]}"#.to_vec()),
+        KvOp::Put(
+            legacy.clone(),
+            br#"{"mime":"image/png","bytes":[1,2,3]}"#.to_vec(),
+        ),
         KvOp::Put(bookmark.clone(), b"1".to_vec()),
     ]))
     .unwrap();
     let export = block_on(e.export_local(ExportScope::Everything)).unwrap();
     let parts: Vec<&[String]> = export.members.iter().map(|m| m.parts.as_slice()).collect();
-    assert!(parts.iter().all(|p| p.get(1).map(String::as_str) != Some("media")), "{parts:?}");
-    assert!(parts.iter().any(|p| p.get(1).map(String::as_str) == Some("bookmark")));
+    assert!(
+        parts
+            .iter()
+            .all(|p| p.get(1).map(String::as_str) != Some("media")),
+        "{parts:?}"
+    );
+    assert!(
+        parts
+            .iter()
+            .any(|p| p.get(1).map(String::as_str) == Some("bookmark"))
+    );
     // an export that carries one (an older build's) does not write it
     let fresh = MemHost::new();
     let f = Engine::new(fresh.clone(), EngineConfig::default());

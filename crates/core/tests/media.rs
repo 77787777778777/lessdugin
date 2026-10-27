@@ -733,7 +733,11 @@ fn crc32(bytes: &[u8]) -> u32 {
     for &b in bytes {
         c ^= u32::from(b);
         for _ in 0..8 {
-            c = if c & 1 != 0 { 0xEDB8_8320 ^ (c >> 1) } else { c >> 1 };
+            c = if c & 1 != 0 {
+                0xEDB8_8320 ^ (c >> 1)
+            } else {
+                c >> 1
+            };
         }
     }
     !c
@@ -852,7 +856,10 @@ fn an_animation_is_never_flattened_to_its_first_frame() {
     assert_eq!(apply_orientation(&png, 6), png);
     assert_eq!(downscale_to_fit(&png, png.len() / 2), None);
     // its EXIF goes, its frames stay, unrotated
-    let tagged = apng(&[frame(), frame()], &[png_chunk_crc(b"eXIf", &tiff_with(6))]);
+    let tagged = apng(
+        &[frame(), frame()],
+        &[png_chunk_crc(b"eXIf", &tiff_with(6))],
+    );
     assert_eq!(strip_metadata(&tagged).orientation, Some(6));
     let out = prepare(tagged).unwrap();
     assert!(contains(&out, b"acTL") && contains(&out, b"fdAT"));
@@ -905,7 +912,8 @@ fn an_animation_over_5_mib_keeps_its_frames_when_it_is_prepared() {
     };
     let anim = apng(&[noise(1), noise(2)], &[]);
     assert!(anim.len() > 5 * 1024 * 1024, "{} bytes", anim.len());
-    let e = lessdugin_core::engine::Engine::new(lessdugin_testkit::MemHost::new(), Default::default());
+    let e =
+        lessdugin_core::engine::Engine::new(lessdugin_testkit::MemHost::new(), Default::default());
     let input = MediaInput {
         declared_mime: Some("image/png".into()),
         alt: Some("two frames of noise".into()),

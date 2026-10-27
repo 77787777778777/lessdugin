@@ -797,7 +797,9 @@ fn is_animated(b: &[u8]) -> bool {
             false
         }
         // VP8X, when present, is the first chunk; byte 0 of its payload holds the flags
-        Some(Format::Webp) => b.get(12..16) == Some(b"VP8X") && b.get(20).is_some_and(|f| f & 0x02 != 0),
+        Some(Format::Webp) => {
+            b.get(12..16) == Some(b"VP8X") && b.get(20).is_some_and(|f| f & 0x02 != 0)
+        }
         _ => false,
     }
 }
@@ -1641,15 +1643,16 @@ impl<H: crate::host::Host> crate::engine::Engine<H> {
         if wanted.is_empty() {
             return;
         }
-        let fetches = futures::future::join_all(wanted.iter().map(|&(uri, did, blob)| async move {
-            match self.fetch_text_blob(did, blob).await {
-                Ok(s) => renders.put_spilled(blob, s),
-                Err(e) => {
-                    tracing::debug!(uri = %uri, error = %e, "a spilled body stays pending");
-                    renders.spilled_unavailable(blob, retry);
+        let fetches =
+            futures::future::join_all(wanted.iter().map(|&(uri, did, blob)| async move {
+                match self.fetch_text_blob(did, blob).await {
+                    Ok(s) => renders.put_spilled(blob, s),
+                    Err(e) => {
+                        tracing::debug!(uri = %uri, error = %e, "a spilled body stays pending");
+                        renders.spilled_unavailable(blob, retry);
+                    }
                 }
-            }
-        }));
+            }));
         let wait = std::pin::pin!(self.host().sleep(crate::limits::BODY_BLOB_WAIT_MS));
         let fetches = std::pin::pin!(fetches);
         // the fetches first: one that is ready (a stored copy) never waits for the clock

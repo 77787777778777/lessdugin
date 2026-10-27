@@ -454,7 +454,11 @@ impl Host for MemHost {
             }
             // registered before the second check, so a release in between still wakes this task
             lock(&self.inner.parked).push(cx.waker().clone());
-            if held() { Poll::Pending } else { Poll::Ready(()) }
+            if held() {
+                Poll::Pending
+            } else {
+                Poll::Ready(())
+            }
         })
         .await;
         let qs = lessdugin_atp::xrpc::query_string(&[("did", did.as_str()), ("cid", cid.as_str())]);
