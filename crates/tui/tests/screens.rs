@@ -414,3 +414,67 @@ fn an_open_forum_says_it_relies_on_public_relays() {
     let screen = t.render();
     assert!(!screen.contains(OPEN_MODE_LABEL), "{screen}");
 }
+
+/// Collapsed comments render collapsed, with their reason (`social.md` §10.1), and `Space`
+/// expands them; the viewer's own `Collapsed(NewUser)` comments show expanded with the label
+/// kept, since the newcomer collapse is for other readers (§10.3, decision O-4).
+#[test]
+fn collapsed_comments_fold_except_the_viewers_own_newcomer_ones() {
+    use lessdugin_core::dto::{CollapseReason, ItemState, ThreadOpts};
+    use lessdugin_tui::app::ThreadData;
+    use lessdugin_tui::body::Body;
+    use std::collections::BTreeSet;
+    let s = scenario();
+    let mut view = block_on(
+        s.w.carol
+            .engine
+            .get_thread(&s.welcome, &ThreadOpts::default()),
+    )
+    .unwrap();
+    let bob = s.w.bob.did();
+    assert_eq!(view.comments[0].author.did, bob);
+    let doc = |view: &lessdugin_core::dto::ThreadView, toggled: &BTreeSet<String>, me: Option<&str>| {
+        let c = &view.comments[0];
+        let data = ThreadData {
+            bodies: [(c.uri.clone(), Body::from_record(None, &c.body))].into(),
+            view: view.clone(),
+        };
+        lessdugin_tui::thread::layout_for(&data, toggled, 80, me)
+            .lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.to_string()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let none = BTreeSet::new();
+    let body = "Thanks for the forum!";
+    for reason in [CollapseReason::NewUser, CollapseReason::LowScore] {
+        view.comments[0].state = ItemState::Collapsed { reason };
+        // another reader (carol), and a reader without an account
+        for me in [Some(s.w.carol.did()), None] {
+            let shown = doc(&view, &none, me.as_deref());
+            assert!(shown.contains("collapsed: "), "{shown}");
+            assert!(shown.contains("[+]"), "{shown}");
+            assert!(!shown.contains(body), "{reason:?} folds for others:\n{shown}");
+            // Space expands it
+            let toggled = BTreeSet::from([s.bob_c1.clone()]);
+            let shown = doc(&view, &toggled, me.as_deref());
+            assert!(shown.contains(body), "{shown}");
+            assert!(!shown.contains("[+]"), "{shown}");
+        }
+    }
+    // bob sees his own newcomer comment expanded, label kept
+    view.comments[0].state = ItemState::Collapsed {
+        reason: CollapseReason::NewUser,
+    };
+    let shown = doc(&view, &none, Some(&bob));
+    assert!(shown.contains(body), "{shown}");
+    assert!(shown.contains("collapsed: "), "{shown}");
+    assert!(!shown.contains("[+]"), "{shown}");
+    // a low-score collapse is not the newcomer one: it folds for its author too
+    view.comments[0].state = ItemState::Collapsed {
+        reason: CollapseReason::LowScore,
+    };
+    let shown = doc(&view, &none, Some(&bob));
+    assert!(!shown.contains(body), "{shown}");
+}

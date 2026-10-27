@@ -713,8 +713,11 @@ pub struct ThreadScreen {
     pub pending: Option<ThreadData>,
     /// The version history of the opened item, once loaded (`h` toggles the panel; M4).
     pub history: Option<Result<HistoryView, String>>,
-    /// Comments whose replies are folded.
+    /// Comments whose fold the reader switched (`Space`): a collapsed comment expands, any
+    /// other one folds its replies.
     pub collapsed: BTreeSet<String>,
+    /// The viewer's DID: their own `Collapsed(NewUser)` comments show expanded.
+    pub viewer: Option<String>,
     /// The selection and scroll.
     pub pos: Pos,
     /// The layout for the current width.
@@ -738,7 +741,7 @@ impl ThreadScreen {
             .items
             .get(self.pos.selected)
             .map(|i| (i.uri.clone(), i.start as isize - self.pos.scroll as isize));
-        self.layout = thread::layout(data, &self.collapsed, width);
+        self.layout = thread::layout_for(data, &self.collapsed, width, self.viewer.as_deref());
         if let Some((uri, row)) = before {
             if let Some(i) = self.layout.index_of(&uri) {
                 self.pos.selected = i;
@@ -1627,6 +1630,7 @@ impl State {
         let i = self.push(
             ScreenKind::Thread(Box::new(ThreadScreen {
                 uri: uri.clone(),
+                viewer: self.account.as_ref().map(|a| a.did.clone()),
                 ..ThreadScreen::default()
             })),
             fx,
@@ -1890,7 +1894,7 @@ impl State {
                         let Some(it) = l.items.get(t.pos.selected) else {
                             return;
                         };
-                        if !it.comment || it.replies == 0 {
+                        if !it.comment || (it.replies == 0 && !it.collapsed) {
                             return;
                         }
                         let uri = it.uri.clone();

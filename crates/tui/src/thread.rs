@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use lessdugin_core::dto::{CommentNode, ItemState, ThreadRoot};
+use lessdugin_core::dto::{CollapseReason, CommentNode, ItemState, ThreadRoot};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
 
@@ -41,6 +41,9 @@ pub struct ItemSpan {
     pub hidden: usize,
     /// Replies under it (descendants).
     pub replies: usize,
+    /// A comment the fold collapsed (`Collapsed`, `social.md` §10.2): it shows folded, header
+    /// and reason only, until `Space` expands it.
+    pub collapsed: bool,
 }
 
 /// A thread laid out at a width.
@@ -117,8 +120,35 @@ pub fn root_uri(data: &ThreadData) -> String {
     }
 }
 
-/// Lays out `data` for a screen `width` columns wide.
-pub fn layout(data: &ThreadData, collapsed: &BTreeSet<String>, width: u16) -> Layout {
+/// True if comment `c` shows folded until the reader expands it: listed items the fold
+/// collapsed "render collapsed, with their reason" (`social.md` §10.2), except the viewer's own
+/// `Collapsed(NewUser)` items, which the viewer sees expanded with the label kept (the
+/// newcomer collapse is for other readers, §10.3).
+pub fn collapsed_by_default(c: &CommentNode, viewer: Option<&str>) -> bool {
+    match &c.state {
+        ItemState::Collapsed {
+            reason: CollapseReason::NewUser,
+        } => viewer != Some(c.author.did.as_str()),
+        ItemState::Collapsed { .. } => true,
+        _ => false,
+    }
+}
+
+/// Lays out `data` for a screen `width` columns wide, as a reader without an account sees it
+/// (see [`layout_for`]).
+pub fn layout(data: &ThreadData, toggled: &BTreeSet<String>, width: u16) -> Layout {
+    layout_for(data, toggled, width, None)
+}
+
+/// Lays out `data` for `viewer` on a screen `width` columns wide. `toggled` holds the comments
+/// whose fold the reader switched with `Space`: a comment collapsed by default
+/// ([`collapsed_by_default`]) expands, any other one folds its replies.
+pub fn layout_for(
+    data: &ThreadData,
+    toggled: &BTreeSet<String>,
+    width: u16,
+    viewer: Option<&str>,
+) -> Layout {
     let text_w = usize::from(width.saturating_sub(GUTTER)).max(20);
     let handles = handles(data);
     let mut lines: Vec<Line<'static>> = Vec::new();
@@ -183,6 +213,7 @@ pub fn layout(data: &ThreadData, collapsed: &BTreeSet<String>, width: u16) -> La
         comment: false,
         hidden: 0,
         replies: data.view.comments.len(),
+        collapsed: false,
     });
 
     // the comments
@@ -210,7 +241,12 @@ pub fn layout(data: &ThreadData, collapsed: &BTreeSet<String>, width: u16) -> La
             }
             skip_until_depth = None;
         }
-        let folded = collapsed.contains(&c.uri) && desc[i] > 0;
+        let by_default = !c.missing && collapsed_by_default(c, viewer);
+        let toggled_here = toggled.contains(&c.uri);
+        // a collapsed comment hides its body and its replies; a reader's fold of another one
+        // hides its replies only
+        let body_hidden = by_default && !toggled_here;
+        let folded = (by_default != toggled_here) && desc[i] > 0;
         if folded {
             skip_until_depth = Some(c.depth);
         }
@@ -218,16 +254,25 @@ pub fn layout(data: &ThreadData, collapsed: &BTreeSet<String>, width: u16) -> La
         let indent = (depth * 2).min(max_indent);
         lines.push(Line::default());
         let start = lines.len();
-        lines.push(comment_header(c, indent, folded.then_some(desc[i])));
+        let marker = match (folded, body_hidden) {
+            (true, _) => Some(desc[i]),
+            (false, true) => Some(0),
+            (false, false) => None,
+        };
+        lines.push(comment_header(c, indent, marker));
         if matches!(c.state, ItemState::Visible | ItemState::Collapsed { .. })
             && !c.missing
+            && !body_hidden
             && let Some(body) = data.bodies.get(&c.uri)
         {
             let w = text_w.saturating_sub(indent + 2).min(MAX_BODY);
             lines.extend(body.lines(w, indent + 2, &handles));
         }
         // the react tallies under the comment (social.md §9.2)
-        if matches!(c.state, ItemState::Visible | ItemState::Collapsed { .. }) && !c.missing {
+        if matches!(c.state, ItemState::Visible | ItemState::Collapsed { .. })
+            && !c.missing
+            && !body_hidden
+        {
             for t in react_lines(&c.reacts, indent + 2, &handles) {
                 lines.push(line([(t, dim())]));
             }
@@ -240,6 +285,7 @@ pub fn layout(data: &ThreadData, collapsed: &BTreeSet<String>, width: u16) -> La
             comment: true,
             hidden: if folded { desc[i] } else { 0 },
             replies: desc[i],
+            collapsed: by_default,
         });
     }
     Layout {
@@ -270,10 +316,16 @@ fn comment_header(c: &CommentNode, indent: usize, folded: Option<usize>) -> Line
     }
     meta.extend(badges(&c.badges));
     parts.push((joined(meta), dim()));
+    // `[+n]`: n replies folded under it; `[+]`: its own body is folded (a collapsed comment)
     if let Some(n) = folded {
         parts.push((lit("  "), Style::default()));
+        let count = if n > 0 {
+            tt(&n.to_string())
+        } else {
+            TermText::empty()
+        };
         parts.push((
-            crate::text::cat([lit("[+"), tt(&n.to_string()), lit("]")]),
+            crate::text::cat([lit("[+"), count, lit("]")]),
             Style::default().add_modifier(Modifier::REVERSED),
         ));
     }
@@ -431,6 +483,7 @@ mod tests {
                     comment: i > 0,
                     hidden: 0,
                     replies: 0,
+                    collapsed: false,
                 })
                 .collect(),
         }

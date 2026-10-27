@@ -988,6 +988,7 @@ The lens is applied after the fold, from local state only. It never changes any 
 - **Raw view.** Shows everything, with annotations (§4.12).
 - **"My view".** A local alternative algorithm (§6.4).
 - **Display limit.** Clients show at most 50 comments per author per thread expanded, in `(t_rank, uri)` order. The rest collapse behind "show N more by @x" (`limits.md`). This is presentation only.
+- **Own newcomer items.** V8 is the same for every viewer, but clients show the viewer's own `Collapsed(NewUser)` items expanded, with the label kept: they are collapsed for other readers. This is presentation only.
 
 ---
 
