@@ -178,25 +178,6 @@ impl<H: Host> Engine<H> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn routes() {
-        assert_eq!(
-            spa_route("https://x.example/#/p/alice.example.com/abc?x=1"),
-            Some(("p", vec!["alice.example.com".to_owned(), "abc".to_owned()]))
-        );
-        assert_eq!(
-            spa_route("#/u/did%3Aplc%3Aabc"),
-            Some(("u", vec!["did:plc:abc".to_owned()]))
-        );
-        assert_eq!(spa_route("at://x"), None);
-        assert_eq!(percent_decode("a%2"), "a%2");
-        assert_eq!(percent_decode("%zz%41"), "%zzA");
-    }
-}
 
 impl<H: Host> Engine<H> {
     /// `validate_record(collection, json)` (`engine-api.md` §3.7): the validity of `json` as a
@@ -330,4 +311,24 @@ fn draft_rkey(ns: &str, coll: &str, v: &serde_json::Value, tid: &str) -> Option<
         },
     };
     keys::derive(ns, &input).ok().map(|d| d.rkey)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn routes() {
+        assert_eq!(
+            spa_route("https://x.example/#/p/alice.example.com/abc?x=1"),
+            Some(("p", vec!["alice.example.com".to_owned(), "abc".to_owned()]))
+        );
+        assert_eq!(
+            spa_route("#/u/did%3Aplc%3Aabc"),
+            Some(("u", vec!["did:plc:abc".to_owned()]))
+        );
+        assert_eq!(spa_route("at://x"), None);
+        assert_eq!(percent_decode("a%2"), "a%2");
+        assert_eq!(percent_decode("%zz%41"), "%zzA");
+    }
 }
