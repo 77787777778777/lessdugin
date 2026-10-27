@@ -11,7 +11,8 @@
 //!
 //! **Refolds are capped.** The full fold has no incremental path (`social.md` §1.3 rule 7), so:
 //! - builds are single-flight per forum: queries that arrive while one runs wait for it and reuse
-//!   its model;
+//!   its model, even when it raced an invalidation that came after them (it is then used by
+//!   them but not cached; queries that arrived after the invalidation build again);
 //! - a forum is refolded at most once per build cost of its last build (capped at
 //!   [`REFOLD_WAIT_MAX_MS`]): a query that finds the model invalidated sooner waits out the rest,
 //!   and every invalidation in between is folded in the one rebuild;
@@ -102,6 +103,8 @@ pub(crate) struct Loaded {
     built_ms: i64,
     /// How long the build took (ms, host clock).
     cost_ms: i64,
+    /// The forum's invalidation generation when the build started ([`Models::gen_of`]).
+    gen_at: (u64, u64),
 }
 
 impl Loaded {
@@ -343,6 +346,16 @@ impl Runtime {
         lock(&self.models).last_good.get(f).cloned()
     }
 
+    /// The last model of `f` if it is good for a query that arrived at `arrived` (its
+    /// invalidation generation and host time): built after the query arrived, from a cache that
+    /// had every invalidation the query had seen. This is the build the query waited for,
+    /// cached or not.
+    fn built_since(&self, f: &str, arrived: ((u64, u64), i64)) -> Option<Loaded> {
+        let ((g, all), at) = arrived;
+        self.last_good(f)
+            .filter(|l| l.gen_at.0 >= g && l.gen_at.1 >= all && l.built_ms >= at)
+    }
+
     fn gen_of(&self, f: &str) -> (u64, u64) {
         lock(&self.models).gen_of(f)
     }
@@ -462,13 +475,18 @@ impl<H: Host> Engine<H> {
     /// the module docs); a build that fails in the fold serves the forum's last good model.
     pub(crate) async fn loaded(&self, key: &ForumKey) -> Result<Loaded, EngineError> {
         let f = key.uri.as_str();
-        if let Some(l) = self.rt.cached(f, self.host.now_ms()) {
+        let arrived = (self.rt.gen_of(f), self.host.now_ms());
+        if let Some(l) = self.rt.cached(f, arrived.1) {
             return Ok(l);
         }
         let flight = self.rt.flight(f);
         let _one = flight.lock().await;
-        // built by the query this one waited for
-        if let Some(l) = self.rt.cached(f, self.host.now_ms()) {
+        // built by the query this one waited for (not cached if it raced a later invalidation)
+        if let Some(l) = self
+            .rt
+            .cached(f, self.host.now_ms())
+            .or_else(|| self.rt.built_since(f, arrived))
+        {
             return Ok(l);
         }
         if let Some(wait) = self.rt.refold_wait(f, self.host.now_ms()) {
@@ -517,6 +535,7 @@ impl<H: Host> Engine<H> {
             completeness,
             built_ms: end_ms,
             cost_ms: end_ms.saturating_sub(start_ms).max(0),
+            gen_at: gen_before,
         };
         self.rt.register(key);
         self.rt.put(f, l.clone(), gen_before);
@@ -626,5 +645,72 @@ impl<H: Host> Engine<H> {
             .iter()
             .flat_map(|w| w.ops.iter().map(|o| o.uri(&w.account)))
             .collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use lessdugin_atp::syntax::Datetime;
+    use lessdugin_lexicon::records::Forum;
+    use lessdugin_lexicon::values::MembershipMode;
+    use serde_json::json;
+
+    use super::*;
+    use crate::social::input::FoldInput;
+    use crate::store::records::Level;
+
+    fn loaded(gen_at: (u64, u64), built_ms: i64) -> Loaded {
+        let owner = Did::parse("did:plc:aaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
+        let key = ForumKey::new(&owner, "meta").unwrap();
+        let decl = serde_json::to_value(Forum::create(
+            "Meta",
+            Datetime::from_millis(0).unwrap(),
+            MembershipMode::Open,
+        ))
+        .unwrap();
+        let cid = lessdugin_atp::datamodel::record_cid(&decl)
+            .unwrap()
+            .to_string();
+        let input = FoldInput::from_vector_json(&json!({
+            "decl": {"uri": key.uri.to_string(), "cid": cid, "value": decl},
+            "records": [], "absent": [],
+            "obs": [{"uri": key.uri.to_string(), "cid": cid, "us": 0}],
+            "repoStatus": {owner.as_str(): "fresh"}, "now": 0,
+        }))
+        .unwrap();
+        let model = ForumModel::from_contract(
+            key,
+            &input,
+            &|_: &str, _: &Value| (true, None),
+            Level::Pds,
+            BTreeMap::new(),
+            BTreeSet::new(),
+        )
+        .unwrap();
+        Loaded {
+            model: Arc::new(model),
+            completeness: Completeness::default(),
+            built_ms,
+            cost_ms: 50,
+            gen_at,
+        }
+    }
+
+    /// m3r-7: a build that raced an invalidation is not cached, but the queries that waited for
+    /// it (they arrived before the invalidation) use it instead of folding again one by one.
+    #[test]
+    fn waiters_reuse_a_build_that_raced_an_invalidation() {
+        let rt = Runtime::new();
+        let f = "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/forum/meta";
+        let waiter = (rt.gen_of(f), 100);
+        let gen_before = rt.gen_of(f);
+        rt.invalidate(f);
+        let after = (rt.gen_of(f), 120);
+        rt.put(f, loaded(gen_before, 150), gen_before);
+        assert!(rt.cached(f, 150).is_none(), "raced an invalidation: not cached");
+        assert!(rt.built_since(f, waiter).is_some(), "the waiter reuses it");
+        assert!(rt.built_since(f, after).is_none(), "a later query builds again");
+        let late = (gen_before, 200);
+        assert!(rt.built_since(f, late).is_none(), "built before the query arrived");
     }
 }

@@ -211,7 +211,9 @@ the same posts for the same forum; the parity scenario lists with explicit value
 **One fold per forum.** The engine folds a forum once per change of its cache (`social.md` §1,
 the full fold with the empty query) and answers every query from that model: a sort, filter,
 tag, kind, author or thread is re-ranked from the cached layers (`full::reorder`), which gives
-the same orderings as a fold with that query. Refolds are single-flight per forum, throttled by
+the same orderings as a fold with that query. Refolds are single-flight per forum (a query that
+waited for a fold uses its model, even if an invalidation that came after the query raced that
+fold; only queries that arrived after the invalidation fold again), throttled by
 the last fold's cost (a forum whose fold took `c` ms is not refolded more often than every `c`
 ms, at most 5 s apart, and its model is reused for up to `30 c` ms or `MODEL_MAX_AGE_MS`), and a
 fold that rejects its input (a malformed `FoldInput`, §1.1) keeps the last good model and logs
