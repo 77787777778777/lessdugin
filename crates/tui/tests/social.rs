@@ -1101,3 +1101,51 @@ fn versions_panel_shows_the_history_and_says_when_it_was_redacted() {
         "the panel must close:\n{screen}"
     );
 }
+
+/// alice's TUI (headless, syncing as the TUI does).
+fn alice_tui(s: &common::Scenario, width: u16, height: u16) -> Tui {
+    block_on(lessdugin_tui::Headless::new(
+        s.w.alice.engine.clone(),
+        lessdugin_tui::HeadlessOpts {
+            width,
+            height,
+            ..lessdugin_tui::HeadlessOpts::default()
+        },
+    ))
+    .unwrap()
+}
+
+/// Viewing a thread sets its read mark (`social.md` §16): the notifications about it are read
+/// once it has been opened, and the badge drops.
+#[test]
+fn opening_a_thread_marks_it_read() {
+    let s = scenario();
+    let _comment = alice_with_a_notification(&s);
+    let mut t = alice_tui(&s, 80, 24);
+    block_on(t.start(None));
+    assert!(t.render().contains("[N 2]"), "{}", t.render());
+    block_on(t.open_thread(&s.welcome));
+    let n = block_on(t.engine().notifications(&Default::default())).unwrap();
+    assert_eq!(n.unread, 0, "{n:?}");
+    let screen = t.render();
+    assert!(!screen.contains("[N "), "{screen}");
+}
+
+/// `:read` marks the selected notification read, not every listed one.
+#[test]
+fn the_read_command_marks_only_the_selected_notification() {
+    let s = scenario();
+    let _comment = alice_with_a_notification(&s);
+    let mut t = alice_tui(&s, 80, 24);
+    block_on(t.start(None));
+    block_on(t.press("N"));
+    run_command(&mut t, "read");
+    let n = block_on(t.engine().notifications(&Default::default())).unwrap();
+    assert_eq!(n.unread, 1, "one of the two is read: {n:?}");
+    // the screen follows
+    assert!(t.render().contains("1 unread"), "{}", t.render());
+    // `read-all` takes the rest
+    run_command(&mut t, "read-all");
+    let n = block_on(t.engine().notifications(&Default::default())).unwrap();
+    assert_eq!(n.unread, 0, "{n:?}");
+}

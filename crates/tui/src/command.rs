@@ -14,7 +14,7 @@
 //! | `react <id> [for\|against]` | `opinion` (`React`) | `x`, then Enter |
 //! | `unreact <id>` | `opinion` (`React`, remove) | `x`, then Enter again |
 //! | `mod <action> [subject] [reason]` | `mod_action` | `m` |
-//! | `notifications [all]`, `read`, `read-all` | `notifications`, `mark_*` | `N`, `a`, `M` |
+//! | `notifications [all]`, `read`, `read-all` | `notifications`, `mark_notifications_read` | `N`, `a`, `M` |
 //! | `activity` | `recent_discussion` | `Tab` on a forum |
 //! | `user [actor]` | the forum view's `moderators` | - |
 //! | `mods [role]` | the forum view's `moderators` | - |

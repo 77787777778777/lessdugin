@@ -206,6 +206,13 @@ pub async fn run<H: Host>(engine: &Engine<H>, effect: Effect, opts: ExecOpts) ->
             result: engine.mark_notifications_read(&ids).await,
         },
         Effect::LoadUnread => Action::UnreadLoaded(engine.unread_counts().await),
+        Effect::MarkThreadRead { post } => {
+            // a read mark that could not be stored only leaves the thread unread
+            if let Err(e) = engine.mark_read(&post).await {
+                tracing::debug!(error = %e, %post, "mark_read failed");
+            }
+            return None;
+        }
         Effect::LoadWrites => Action::WritesLoaded(engine.writes().await),
         Effect::Editor(_) | Effect::Quit => return None,
     })

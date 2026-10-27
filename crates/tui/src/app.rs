@@ -279,6 +279,12 @@ pub enum Effect {
     },
     /// `unread_counts()`: the notification badge and the forums' unread state.
     LoadUnread,
+    /// `mark_read(post)`: the thread was viewed (`social.md` §16: "viewing a thread sets
+    /// lastVisited"); its unread marks and notifications clear.
+    MarkThreadRead {
+        /// The thread's post.
+        post: String,
+    },
     /// `mod_queue(forum)`.
     LoadQueue {
         /// The screen.
@@ -3038,6 +3044,30 @@ impl State {
         fx.push(Effect::MarkRead { ids, screen });
     }
 
+    /// `:read`: marks the selected notification read.
+    fn mark_selected_read(&mut self, fx: &mut Vec<Effect>) {
+        let Some((id, screen)) = self.stack.last().and_then(|s| match &s.kind {
+            ScreenKind::Notifications(n) => n
+                .data
+                .as_ref()
+                .and_then(|d| d.items.get(n.pos.cursor))
+                .map(|item| (item, s.id)),
+            _ => None,
+        }) else {
+            self.say(
+                Tone::Info,
+                lit("Select a notification on the notifications screen (N)."),
+            );
+            return;
+        };
+        if id.read {
+            self.say(Tone::Info, lit("That notification is already read."));
+            return;
+        }
+        let ids = vec![id.id.clone()];
+        fx.push(Effect::MarkRead { ids, screen });
+    }
+
     /// [`Action::NotificationsLoaded`].
     fn notifications_loaded(
         &mut self,
@@ -3363,7 +3393,8 @@ impl State {
                 });
             }
             Verb::Notifications { all } => self.command_notifications(all, fx),
-            Verb::Read | Verb::ReadAll => self.mark_all_read(fx),
+            Verb::Read => self.mark_selected_read(fx),
+            Verb::ReadAll => self.mark_all_read(fx),
             Verb::Activity => {
                 let Some(top) = self.stack.last_mut() else {
                     return;
@@ -3837,6 +3868,10 @@ impl State {
         let is_top = i + 1 == self.stack.len();
         let s = &mut self.stack[i];
         s.loading = s.loading.saturating_sub(1);
+        // a load the user asked for (opening the thread, R, an own write) shows the thread to
+        // them: it is read. A live load is not, nor one that only counts as the user's while
+        // the screen settles (marking emits `Changed [Thread]`, which would reload it again)
+        let viewed = origin == Origin::User && is_top;
         let origin = if s.settling { Origin::User } else { origin };
         let mut failed = None;
         match result {
@@ -3868,7 +3903,14 @@ impl State {
                             );
                         }
                     }
-                    (ScreenKind::Thread(t), Loaded::Thread(d)) => t.receive(*d, origin, w, h),
+                    (ScreenKind::Thread(t), Loaded::Thread(d)) => {
+                        if viewed && let ThreadRoot::Post(p) = &d.view.post {
+                            fx.push(Effect::MarkThreadRead {
+                                post: p.post.uri.clone(),
+                            });
+                        }
+                        t.receive(*d, origin, w, h);
+                    }
                     _ => {}
                 }
             }
