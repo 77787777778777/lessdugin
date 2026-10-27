@@ -8,7 +8,8 @@
 //!   baseline and notifies nothing (a new device does not replay history). Refreshes run one
 //!   at a time, so two overlapping ones never notify the same change twice. A notification
 //!   about an item is listed (and counted unread) only while the item is listed (`social.md`
-//!   §10.1): one about an item hidden, removed or deleted since is left out.
+//!   §10.1): one about an item hidden, removed or deleted since is left out, and so is one of
+//!   a forum that is not followed or cannot be loaded now.
 //! - `mark_notifications_read(ids)` / `mark_all_notifications_read()`.
 //! - `mark_read(uri)`: a post (thread) — `lastVisited[post]` becomes the greatest `t_obs` among
 //!   the post and its listed comments, and the thread's notifications are read; a forum — the
@@ -220,8 +221,11 @@ impl<H: Host> Engine<H> {
 
     /// `false` for a notification about an item that is not listed now (`social.md` §10.1:
     /// notifications never include Excluded or Hidden items): hidden, removed as spam or
-    /// deleted since it was stored. Changes (reacts, moderation, karma) concern the viewer's
-    /// own items or standing and are always shown, as are rows of forums not loaded.
+    /// deleted since it was stored. It fails closed: an item of a forum with no model now
+    /// (unfollowed, or one that cannot be loaded, such as a forum whose declaration is
+    /// unavailable) cannot be shown to be listed, so it is left out until the forum loads
+    /// again. Changes (reacts, moderation, karma) concern the viewer's own items or standing,
+    /// with the engine's own text, and are always shown.
     fn shown(models: &[(ForumKey, Loaded)], r: &NotifRow) -> bool {
         let change = matches!(
             r.reason,
@@ -233,7 +237,7 @@ impl<H: Host> Engine<H> {
             || models
                 .iter()
                 .find(|(k, _)| k.uri.as_str() == r.forum)
-                .is_none_or(|(_, l)| notify::listed(&l.model.view, &r.subject))
+                .is_some_and(|(_, l)| notify::listed(&l.model.view, &r.subject))
     }
 
     /// Every stored notification of `account`.

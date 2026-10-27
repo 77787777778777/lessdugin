@@ -1441,7 +1441,8 @@ fn reacts_moderation_and_subscriptions_notify() {
 }
 
 /// `social.md` §10.1: notifications never include Hidden items. A reply hidden as spam after it
-/// was notified leaves the list and the unread counts (its text with it); kept again, it is back.
+/// was notified leaves the list and the unread counts (its text with it), and stays out while
+/// the forum is unfollowed (no model shows it listed); kept again, it is back.
 #[test]
 fn notifications_about_hidden_items_are_left_out() {
     let w = World::new();
@@ -1469,6 +1470,16 @@ fn notifications_about_hidden_items_are_left_out() {
         (0, 0),
         "{u:?}"
     );
+    // unfollowed, the forum has no model to tell whether the item is listed: still left out
+    block_on(alice.engine.forum_unfollow(&w.forum)).unwrap();
+    let n = notes(alice, true);
+    assert!(n.items.iter().all(|i| i.subject != spam), "{n:?}");
+    assert_eq!(n.unread, 0, "{n:?}");
+    assert_eq!(
+        block_on(alice.engine.unread_counts()).unwrap().notifications,
+        0
+    );
+    block_on(alice.engine.forum_follow(&w.forum, None)).unwrap();
     // unhidden: listed again, so is its notification
     let rm = ModActionIntent::Remove {
         forum: w.forum.clone(),
