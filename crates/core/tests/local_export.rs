@@ -153,9 +153,9 @@ fn importing_a_mine_export_cannot_write_another_accounts_state() {
     let (host, _pds, alice, bob) = setup();
     let e = engine(&host);
     block_on(e.add_account(AccountInfo::app_password(alice.did.as_str(), PDS))).unwrap();
-    // craft an export that carries bob's ack, as a hand-edited file could
+    // craft an export that carries bob's notification, as a hand-edited file could
     let mut x = block_on(e.export_local(ExportScope::Mine)).unwrap();
-    put(&host, &["loc", "ack", bob.did.as_str(), "vote"], b"1");
+    put(&host, &["loc", "notif", bob.did.as_str(), "n1"], b"1");
     x.members = block_on(e.export_local(ExportScope::Everything))
         .unwrap()
         .members;
