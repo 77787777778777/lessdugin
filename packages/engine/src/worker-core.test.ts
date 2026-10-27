@@ -175,11 +175,14 @@ function indexOf(hay: Uint8Array, needle: number[]): number {
   return -1;
 }
 
-/** The JPEG a stored value holds (SOI to the end of the value), or null. */
+/** The JPEG a stored value holds (its SOI to its last EOI), or null. */
 function storedJpeg(values: Uint8Array[]): Uint8Array | null {
   for (const v of values) {
     const at = indexOf(v, [0xff, 0xd8, 0xff]);
-    if (at >= 0) return v.subarray(at);
+    if (at < 0) continue;
+    for (let end = v.length - 2; end > at; end--) {
+      if (v[end] === 0xff && v[end + 1] === 0xd9) return v.subarray(at, end + 2);
+    }
   }
   return null;
 }
