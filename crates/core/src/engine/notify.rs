@@ -5,7 +5,10 @@
 //! - `notifications(q)` first brings every followed forum's notifications up to date for the
 //!   active account ([`crate::notify::compute`] over the forum's model), stores the new ones,
 //!   then lists them, newest first. The first computation for an (account, forum) records a
-//!   baseline and notifies nothing (a new device does not replay history).
+//!   baseline and notifies nothing (a new device does not replay history). Refreshes run one
+//!   at a time, so two overlapping ones never notify the same change twice. A notification
+//!   about an item is listed (and counted unread) only while the item is listed (`social.md`
+//!   §10.1): one about an item hidden, removed or deleted since is left out.
 //! - `mark_notifications_read(ids)` / `mark_all_notifications_read()`.
 //! - `mark_read(uri)`: a post (thread) — `lastVisited[post]` becomes the greatest `t_obs` among
 //!   the post and its listed comments, and the thread's notifications are read; a forum — the
@@ -139,13 +142,15 @@ impl<H: Host> Engine<H> {
         Ok(out)
     }
 
-    /// Brings `account`'s notifications up to date over `models`; returns `true` if a row was
-    /// added.
+    /// Brings `account`'s notifications up to date over the followed forums' models, which it
+    /// returns. One refresh runs at a time, and it takes the models and baselines once it runs:
+    /// each refresh diffs against the baseline the previous one wrote, at least as new a model.
     async fn refresh_notifications(
         &self,
         account: &str,
-        models: &[(ForumKey, Loaded)],
-    ) -> Result<bool, EngineError> {
+    ) -> Result<Vec<(ForumKey, Loaded)>, EngineError> {
+        let _one = self.rt.notify.lock().await;
+        let models = self.followed_models().await?;
         let subs: Vec<Subscription> = self
             .subscriptions()
             .await?
@@ -156,13 +161,13 @@ impl<H: Host> Engine<H> {
         let now = self.host.now_ms();
         let mut ops = Vec::new();
         let mut added = false;
-        for (key, l) in models {
+        for (key, l) in &models {
             let f = key.uri.as_str();
             let base: Option<Baseline> = self.loc_row(base_key(account, f)).await?;
             let m = &l.model;
             let s = Self::subs_of(&subs, f);
             let new_uris: Vec<String> = match &base {
-                Some(b) => notify::new_items(&m.input, &m.view, account, b.obs)
+                Some(b) => notify::new_items(&m.input, &m.view, account, b)
                     .iter()
                     .map(|x| x.uri.clone())
                     .collect(),
@@ -210,7 +215,25 @@ impl<H: Host> Engine<H> {
         if added {
             self.prune_notifications(account).await?;
         }
-        Ok(added)
+        Ok(models)
+    }
+
+    /// `false` for a notification about an item that is not listed now (`social.md` §10.1:
+    /// notifications never include Excluded or Hidden items): hidden, removed as spam or
+    /// deleted since it was stored. Changes (reacts, moderation, karma) concern the viewer's
+    /// own items or standing and are always shown, as are rows of forums not loaded.
+    fn shown(models: &[(ForumKey, Loaded)], r: &NotifRow) -> bool {
+        let change = matches!(
+            r.reason,
+            NotificationReason::Reacted
+                | NotificationReason::ModAction
+                | NotificationReason::KarmaChange
+        );
+        change
+            || models
+                .iter()
+                .find(|(k, _)| k.uri.as_str() == r.forum)
+                .is_none_or(|(_, l)| notify::listed(&l.model.view, &r.subject))
     }
 
     /// Every stored notification of `account`.
@@ -260,9 +283,9 @@ impl<H: Host> Engine<H> {
                 unread: 0,
             });
         };
-        let models = self.followed_models().await?;
-        self.refresh_notifications(&me, &models).await?;
+        let models = self.refresh_notifications(&me).await?;
         let mut rows = self.notif_rows(&me).await?;
+        rows.retain(|r| Self::shown(&models, r));
         let unread = u32::try_from(rows.iter().filter(|r| !r.read).count()).unwrap_or(u32::MAX);
         rows.retain(|r| q.all || !r.read);
         rows.sort_by(|a, b| b.at_ms.cmp(&a.at_ms).then_with(|| a.id.cmp(&b.id)));
@@ -423,18 +446,27 @@ impl<H: Host> Engine<H> {
     /// (what was synced before is not new). Sorted by forum uri.
     pub async fn unread_counts(&self) -> Result<UnreadCounts, EngineError> {
         let me = self.me().await?;
-        let models = self.followed_models().await?;
+        let models = match &me {
+            Some(me) => self.refresh_notifications(me).await?,
+            None => self.followed_models().await?,
+        };
         let mut per_forum: BTreeMap<String, u32> = BTreeMap::new();
         let mut total = 0;
         if let Some(me) = &me {
-            self.refresh_notifications(me, &models).await?;
             for r in self.notif_rows(me).await? {
-                if !r.read {
+                if !r.read && Self::shown(&models, &r) {
                     total += 1;
                     *per_forum.entry(r.forum).or_default() += 1;
                 }
             }
         }
+        // every thread's read mark, in one scan
+        let marks: BTreeMap<String, i64> = self
+            .loc_rows(crate::key!("loc", "read"))
+            .await?
+            .into_iter()
+            .filter_map(|(k, v)| Some((k.into_iter().next()?, row::decode::<MarkRow>(&v).ok()?.at)))
+            .collect();
         let mut forums = Vec::new();
         let mut ops = Vec::new();
         for (key, l) in &models {
@@ -449,21 +481,7 @@ impl<H: Host> Engine<H> {
                 }
             };
             let posts = notify::unread_posts(input, view, visit, me.as_deref());
-            let mut comments = 0u32;
-            for x in input.records.values() {
-                if x.coll != Some(lessdugin_lexicon::Collection::Post) {
-                    continue;
-                }
-                if let Some(m) = self.read_mark(&x.uri).await? {
-                    comments = comments.saturating_add(notify::unread_comments(
-                        input,
-                        view,
-                        &x.uri,
-                        m,
-                        me.as_deref(),
-                    ));
-                }
-            }
+            let comments = notify::unread_comments(input, view, &marks, me.as_deref());
             forums.push(ForumUnread {
                 forum: f.to_owned(),
                 posts,

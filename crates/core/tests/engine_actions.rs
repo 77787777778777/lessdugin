@@ -1367,6 +1367,119 @@ fn reacts_moderation_and_subscriptions_notify() {
     assert_eq!(notes(bob, false).unread, 0);
 }
 
+/// `social.md` §10.1: notifications never include Hidden items. A reply hidden as spam after it
+/// was notified leaves the list and the unread counts (its text with it); kept again, it is back.
+#[test]
+fn notifications_about_hidden_items_are_left_out() {
+    let w = World::new();
+    let (alice, bob) = (&w.alice, &w.bob);
+    assert!(notes(alice, true).items.is_empty());
+    let spam = bob.comment(&w.welcome, None, "BUY CHEAP PILLS");
+    w.resync(&[alice]);
+    let n = notes(alice, false);
+    assert_eq!(n.items.len(), 1, "{n:?}");
+    assert_eq!(n.items[0].subject, spam);
+    let spam_hide = ModActionValue::Hide {
+        hidden: true,
+        spam: true,
+        show_reason: true,
+    };
+    alice.mod_action(assert_mod(&w.forum, &spam, spam_hide));
+    alice.flush();
+    w.resync(&[alice]);
+    let n = notes(alice, true);
+    assert!(n.items.iter().all(|i| i.subject != spam), "{n:?}");
+    assert_eq!(n.unread, 0, "{n:?}");
+    let u = block_on(alice.engine.unread_counts()).unwrap();
+    assert_eq!((u.notifications, u.forums[0].notifications), (0, 0), "{u:?}");
+    // unhidden: listed again, so is its notification
+    let rm = ModActionIntent::Remove {
+        forum: w.forum.clone(),
+        scope: ModScope::Forum,
+        subject: spam.clone(),
+        action_key: "hide".into(),
+    };
+    alice.mod_action(rm);
+    alice.flush();
+    w.resync(&[alice]);
+    let n = notes(alice, false);
+    assert!(n.items.iter().any(|i| i.subject == spam), "{n:?}");
+}
+
+/// `social.md` §16: an item that is not listed when first seen (a moderator's hide, later
+/// overridden by an admin's keep) is notified once it is listed, though the watermark moved
+/// past it in between.
+#[test]
+fn an_item_listed_after_it_was_first_seen_still_notifies() {
+    let w = World::new();
+    let (alice, bob, carol, dave) = (&w.alice, &w.bob, &w.carol, &w.dave);
+    for (u, role) in [(carol, ModRole::Moderator), (dave, ModRole::Admin)] {
+        block_on(alice.engine.mods_set(
+            &w.forum,
+            &ModsChange::Add {
+                did: u.did(),
+                role,
+                title: None,
+            },
+        ))
+        .unwrap();
+        alice.flush();
+    }
+    w.sync_all();
+    assert!(notes(alice, true).items.is_empty());
+    let reply = bob.comment(&w.welcome, None, "a reply");
+    w.resync(&[carol]);
+    carol.mod_action(assert_mod(&w.forum, &reply, hide()));
+    carol.flush();
+    w.resync(&[alice]);
+    assert!(notes(alice, true).items.is_empty(), "hidden: not notified");
+    w.resync(&[dave]);
+    let keep = ModActionValue::Hide {
+        hidden: false,
+        spam: false,
+        show_reason: true,
+    };
+    dave.mod_action(assert_mod(&w.forum, &reply, keep));
+    dave.flush();
+    w.resync(&[alice]);
+    let n = notes(alice, false);
+    assert_eq!(n.items.len(), 1, "{n:?}");
+    assert_eq!(
+        (n.items[0].reason, n.items[0].subject.as_str()),
+        (NotificationReason::Reply, reply.as_str())
+    );
+}
+
+/// Two refreshes from one baseline (overlapping calls, or two processes over one state store)
+/// store a change once: its id carries the baseline's generation, not the time.
+#[test]
+fn a_change_is_stored_once_when_refreshes_overlap() {
+    use lessdugin_core::host::{KvOp, KvStore};
+
+    let w = World::new();
+    let (bob, carol) = (&w.bob, &w.carol);
+    assert!(notes(bob, true).items.is_empty());
+    carol.opinion(&w.bob_post, react("insightful", Stance::For));
+    carol.flush();
+    w.resync(&[bob]);
+    let k = lessdugin_core::key!("loc", "nbase", bob.did().as_str(), w.forum.as_str());
+    let kv = bob.host.state_kv();
+    let before = block_on(kv.get_many(vec![k.clone()])).unwrap().pop().flatten();
+    let n = notes(bob, false);
+    let reacted = |n: &lessdugin_core::dto::NotificationList| {
+        n.items
+            .iter()
+            .filter(|i| i.reason == NotificationReason::Reacted)
+            .count()
+    };
+    assert_eq!(reacted(&n), 1, "{n:?}");
+    // a second refresh that read the baseline before the first one wrote it
+    block_on(kv.write(vec![KvOp::Put(k, before.unwrap())])).unwrap();
+    w.tick(MINUTE);
+    let n = notes(bob, false);
+    assert_eq!(reacted(&n), 1, "{n:?}");
+}
+
 #[test]
 fn unread_counts_per_forum_and_thread() {
     let w = World::new();

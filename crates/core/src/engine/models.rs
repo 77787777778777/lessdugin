@@ -148,6 +148,8 @@ pub(crate) struct Runtime {
     live_wakers: Mutex<Vec<mpsc::UnboundedSender<()>>>,
     /// When `live_tail` last dropped expired tombstones (ms).
     pub(crate) gc_at: Mutex<Option<i64>>,
+    /// One notification refresh at a time (each reads the baseline the previous one wrote).
+    pub(crate) notify: AsyncMutex<()>,
 }
 
 pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -166,6 +168,7 @@ impl Runtime {
             live_gen: AtomicU64::new(0),
             live_wakers: Mutex::new(Vec::new()),
             gc_at: Mutex::new(None),
+            notify: AsyncMutex::new(()),
         }
     }
 
