@@ -691,7 +691,8 @@ fn media_value(m: &crate::dto::MediaRef) -> Result<lessdugin_lexicon::records::M
         size,
         extra: Map::new(),
     });
-    media.alt = m.alt.clone();
+    // a blank alt is no alt (data-model.md §4)
+    media.alt = m.alt.clone().filter(|a| !a.trim().is_empty());
     media.name = m.name.clone();
     media.aspect_ratio = m.aspect_ratio.as_ref().map(|a| LexAspect {
         width: i64::from(a.width),

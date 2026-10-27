@@ -896,18 +896,33 @@ impl<H: crate::host::Host> crate::engine::Engine<H> {
         // (data-model.md §8.8). They are stored, not held in memory, so a composer that is
         // closed and reopened still publishes the file it prepared.
         self.store_prepared_media(&cid, &prepared, mime).await?;
+        // data-model.md §4: a blank alt is no alt, and writers warn when it is missing
+        let alt = input.alt.clone().filter(|a| !a.trim().is_empty());
+        let notices = if alt.is_none() {
+            vec![crate::dto::ActionNotice {
+                code: crate::dto::NoticeCode::MissingAlt,
+                message: MISSING_ALT.to_owned(),
+            }]
+        } else {
+            Vec::new()
+        };
         Ok(MediaRef {
             id: cid.clone(),
             cid,
             mime: mime.to_owned(),
             size_bytes: prepared.len() as u64,
-            alt: input.alt.clone(),
+            alt,
             aspect_ratio: input.aspect_ratio.clone(),
             duration_ms: None,
             name: input.name.clone(),
+            notices,
         })
     }
 }
+
+/// The `missingAlt` notice of [`prepare_media`](crate::engine::Engine::prepare_media).
+pub const MISSING_ALT: &str =
+    "this file has no alt text: readers who cannot see it will not know what it shows";
 
 /// The upload size the pipeline aims for before trying (§8.8, "downscale (try 5 MiB first, fit on
 /// 413)"): `limits.md` §12 `IMAGE_UPLOAD_TARGET_BYTES`.

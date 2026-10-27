@@ -352,3 +352,25 @@ fn prepared_bytes_of_a_draft_never_sent_expire() {
     assert!(block_on(e.prepared_media(&new.cid)).unwrap().is_some());
     assert!(block_on(e.prepared_media(&newer.cid)).unwrap().is_some());
 }
+
+#[test]
+fn a_file_without_alt_text_is_reported_and_its_alt_is_absent_not_blank() {
+    // m4-19: prepare_media returned no warning, and the SPA's empty Alt field was written as
+    // `alt: ""` (data-model.md §4: writers warn when alt is missing)
+    let a = Author::new(PdsConfig::default());
+    let bare = block_on(a.engine.prepare_media(noise_png(8, 8, 20), &input("  "))).unwrap();
+    assert_eq!(bare.alt, None);
+    assert_eq!(
+        bare.notices.iter().map(|n| n.code).collect::<Vec<_>>(),
+        [lessdugin_core::dto::NoticeCode::MissingAlt]
+    );
+    let described = block_on(a.engine.prepare_media(noise_png(8, 8, 21), &input("a dot"))).unwrap();
+    assert!(described.notices.is_empty());
+    assert_eq!(described.alt.as_deref(), Some("a dot"));
+    // a client that sends a blank alt anyway: the record has none
+    let mut sent = bare.clone();
+    sent.alt = Some(String::new());
+    let uri = a.done(&a.post_with(&sent));
+    let media = &a.record(&uri)["body"]["media"][0];
+    assert!(media.get("alt").is_none(), "{media}");
+}

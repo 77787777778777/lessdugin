@@ -313,6 +313,7 @@ export interface MediaRef {
     aspectRatio?: AspectRatio;
     durationMs?: number;
     name?: string;
+    notices?: ActionNotice[];
 }
 
 export interface MediaView {
@@ -417,7 +418,7 @@ export interface MyOpinion {
     notYetCounted?: boolean;
 }
 
-export type NoticeCode = "notEstablished" | "retroactive" | "adoptedFirst";
+export type NoticeCode = "notEstablished" | "retroactive" | "adoptedFirst" | "missingAlt";
 
 export interface NotificationList {
     dto: DtoVersion;

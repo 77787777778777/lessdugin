@@ -897,6 +897,9 @@ export interface MediaRef {
   aspectRatio?: AspectRatio;
   durationMs?: number;
   name?: string;
+  /** From `prepareMedia`: `missingAlt` when the file has no alt text (writers warn,
+   * data-model.md §4); a client clears it once the user writes one. */
+  notices?: ActionNotice[];
 }
 
 // What `prepare_media` takes: the display hints and the DECLARED type. The bytes are a
@@ -1044,7 +1047,7 @@ export interface WriteTicket {
   state: WriteState;
 }
 
-export type NoticeCode = "notEstablished" | "retroactive" | "adoptedFirst";
+export type NoticeCode = "notEstablished" | "retroactive" | "adoptedFirst" | "missingAlt";
 
 /** A notice to show with an action's result, e.g. "recorded; will count once you're
  * established". */

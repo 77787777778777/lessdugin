@@ -1344,6 +1344,8 @@ Media loads automatically only if all of these hold:
 
 Otherwise the user clicks through a notice: "loads from <host>, which will see your IP". Avatars and forum icons follow the same rules, with the profile or declaration as the item.
 
+The engine decides while it builds a view: `MediaView.autoload` is this verdict for this device (`engine-api.md` §4.1), so every client shows the same thing. Condition 1 also needs the author's identity at level `doc` (§11.1); condition 4 counts the participants' identity rows the cache holds (any level, nothing is resolved for it); condition 5 reads the record's declared `mimeType` and `size`, and a blob whose size the record does not state never autoloads. The `mediaAutoload` setting `off` turns autoload off on the device. `pds` in the view names the host for the notice.
+
 ### 11.4 Caching and purging
 
 - Hidden, provisional and pending content is never prefetched.

@@ -256,7 +256,7 @@ emits `Auth { did, state: Expired }`, and the next login of the account (`add_ac
 | `wiki_edit(forum, slug, WikiDraft)` | M5 (§3.9) |
 | `seq_create`, `seq_edit`, `seq_add`, `seq_remove`, `seq_move` | M5 |
 | `redact_revision(uri)` | deletes revision records. M4 |
-| `prepare_media(MediaInput) -> MediaRef` | sniff, strip, orient, downscale to 5 MiB (`data-model.md` §8.8), CID; the same pipeline natively and in the SPA's wasm. Upload happens at publish. M4 |
+| `prepare_media(MediaInput) -> MediaRef` | sniff, strip, orient, downscale to 5 MiB (`data-model.md` §8.8), CID; the same pipeline natively and in the SPA's wasm. Upload happens at publish. A blank `alt` is no alt (it is never written as `""`), and the reference then carries a `missingAlt` notice, which writers show (`data-model.md` §4). M4 |
 | `undo(write_id)` | removes a write not sent yet (the undo window), or writes the inverse of a sent opinion (`sync.md` §7.4) |
 | `retry_write(write_id)` | queues a `failed` (or conflicting) write again with its attempts reset; on a write that backs off after a failure, or waits for a login, it is "send now" (queued at once, attempts kept). A write held by the undo window, the write budget or a rate limit is refused (`invalid_input`). Returns its ticket |
 | `write_status(write_id) -> Option<WriteTicket>` | `None`: unknown or pruned |
@@ -414,7 +414,7 @@ Anchor        { start: u32, end: u32 } | { orphan: true }    // code-point offse
 RenderedBody  { html, text, toc: Vec<TocEntry>, wordCount, readMinutes, media: Vec<MediaView>,
                 excerpt, notices: Vec<string>, rendererVersion }
 MediaView     { index, cid, mime, alt?, aspectRatio?, durationMs?, name?, author: did, pds,
-                autoload: bool, sizeBytes }
+                autoload: bool /* sync.md §11.3, for this device */, sizeBytes }
 Completeness  { partial: bool, reposComplete, reposTotal, degraded: bool }
 ```
 
@@ -520,7 +520,8 @@ ListPostsQuery { forum, sort: PostSort, filter: PostFilter, tag?: slug, kind?: P
 ThreadOpts    { sort: CommentSort, unreadOnly? /* false */ }
 NotificationsQuery { all? /* false: unread only */, limit }
 BodyDraft     { markdown, media?: Vec<MediaRef> }
-MediaRef      { id, cid, mime, sizeBytes, alt?, aspectRatio?, durationMs?, name? }
+MediaRef      { id, cid, mime, sizeBytes, alt?, aspectRatio?, durationMs?, name?,
+                notices?: Vec<ActionNotice> /* prepare_media: missingAlt when alt is absent */ }
 LoadedMedia   { cid, size, url, mime? /* the §11.2 display type; absent: a download card */ }
 PostDraft     { forum, kind: PostKind, title?, body: BodyDraft, link?: { uri, title?, description? },
                 tags?: Vec<slug>, labels?: Vec<string> }
@@ -549,7 +550,7 @@ WriteState    = { kind: "pending", notBeforeMs?, held?: true, throttled?: true, 
                   error?: EngineError } | { kind: "sending" } | { kind: "done", uri, cid? }
               | { kind: "failed", error: EngineError } | { kind: "undone" }
 ActionTicket  { id, state: WriteState, notices?: Vec<ActionNotice> }
-ActionNotice  { code: notEstablished|retroactive|adoptedFirst, message }
+ActionNotice  { code: notEstablished|retroactive|adoptedFirst|missingAlt, message }
 Subscription  = { kind: "forum", uri } | { kind: "post", uri } | { kind: "user", did }
               | { kind: "tag", forum, slug } | { kind: "sequence", uri }
 PublicActionKind = vote|react|tagVote|join|modAction

@@ -1332,6 +1332,10 @@ dto! {
         pub duration_ms: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub name: Option<String>,
+        /// From `prepare_media`: `missingAlt` when the file has no alt text (writers warn,
+        /// `data-model.md` §4).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub notices: Vec<ActionNotice>,
     }
 }
 
@@ -1714,7 +1718,7 @@ dto! {
 
 string_enum! {
     /// What a notice on an action's result is about.
-    pub enum NoticeCode { NotEstablished, Retroactive, AdoptedFirst }
+    pub enum NoticeCode { NotEstablished, Retroactive, AdoptedFirst, MissingAlt }
 }
 
 dto! {
