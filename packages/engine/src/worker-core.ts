@@ -104,6 +104,7 @@ export class WorkerEngine {
   private leader: LeaderElection | null = null;
   private relay: ChangeRelay | null = null;
   private stores: { close?: () => void }[] = [];
+  private blobs: BlobStore | null = null;
   private offOnline: (() => void) | null = null;
   readonly id = randomId();
 
@@ -199,6 +200,7 @@ export class WorkerEngine {
       throw toEngineError(e);
     }
     const { cache, state, blobs } = stores;
+    this.blobs = blobs;
     let locks = this.env.locks;
     if (!locks) {
       this.warn("Web Locks are unavailable: locks hold within this worker only", null);
@@ -309,6 +311,13 @@ export class WorkerEngine {
     return JSON.parse(await this.callJson(op, JSON.stringify(args))) as unknown;
   }
 
+  /** The stored blob `cid`, which `fetchBlob` kept only after checking it against its CID
+   * (`loadMedia`); `null` when it is not stored. The main thread types it and makes the object
+   * URL (sync.md §11.2), so no blob byte passes through wasm or JSON. */
+  async blob(cid: string): Promise<Blob | null> {
+    return (await this.blobs?.get(cid)) ?? null;
+  }
+
   /** `prepareMedia(bytes, input)`: the bytes go into wasm memory once, as bytes (never as a
    * JSON number array), and only up to `MEDIA_WASM_WINDOW_BYTES` (limits.md §6). */
   async prepareMedia(bytes: Uint8Array, input: unknown): Promise<unknown> {
@@ -337,6 +346,7 @@ export class WorkerEngine {
     this.relay?.close();
     if (this.subscription !== null) engine.unsubscribe(this.subscription);
     this.closeStores();
+    this.blobs = null;
     this.engine = null;
   }
 

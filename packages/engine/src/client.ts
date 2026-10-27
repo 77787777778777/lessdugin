@@ -28,7 +28,14 @@ import {
   type WorkerInfo,
   type WorkerInit,
 } from "./protocol.ts";
-import type { EngineEvent, EventListener, Unsubscribe, WriteTicket } from "./types.ts";
+import type {
+  EngineError,
+  EngineEvent,
+  EventListener,
+  LoadedMedia,
+  Unsubscribe,
+  WriteTicket,
+} from "./types.ts";
 import type { EngineWorkerApi } from "./worker.ts";
 import { workerScriptUrl } from "./workerUrl.ts";
 
@@ -85,7 +92,7 @@ export const OP_ARITY: Readonly<Record<string, number>> = Object.freeze({
   parseRef: 2,
   // bytes are a separate argument from the hints (engine-api.md §3.6), so two
   prepareMedia: 2,
-  loadMedia: 1,
+  loadMedia: 2,
   forumFollow: 2,
   join: 2,
   members: 2,
@@ -204,6 +211,19 @@ export function startEngine(options: StartEngineOptions = {}): EngineClient {
       await start();
       return remote.prepareMedia(bytes, input ?? null);
     },
+    // The worker's host streamed the blob, checked it against its CID and stored it (it never
+    // entered wasm memory); here, on the main thread, the stored Blob is typed with the display
+    // type and turned into the `blob:` URL the page can load (sync.md §11.2, CSP `img-src blob:`).
+    // The caller revokes it when the element unmounts.
+    async loadMedia(...args) {
+      const loaded = (await call("loadMedia", args)) as LoadedMedia;
+      const stored = await remote.blob(loaded.cid);
+      if (!stored) {
+        throw engineError("internal", `the verified blob ${loaded.cid} is not stored`);
+      }
+      const typed = new Blob([stored], { type: loaded.mime ?? "application/octet-stream" });
+      return { ...loaded, url: URL.createObjectURL(typed) };
+    },
     async grant(...args) {
       return first(await call("grant", args));
     },
@@ -221,6 +241,10 @@ export function startEngine(options: StartEngineOptions = {}): EngineClient {
       return (...args: unknown[]) => call(prop, args);
     },
   });
+}
+
+function engineError(code: EngineError["code"], message: string): EngineError {
+  return { code, message, retryable: false };
 }
 
 function first(tickets: unknown): WriteTicket {

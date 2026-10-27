@@ -294,6 +294,7 @@ export interface LoadedMedia {
     cid: string;
     size: number;
     url: string;
+    mime?: string;
 }
 
 export interface MediaInput {

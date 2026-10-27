@@ -1090,13 +1090,18 @@ export interface SubscriptionEntry {
   sinceMs: Ms;
 }
 
-/** A media blob fetched for display (`engine-api.md` §3.6 `loadMedia`). `url` is an object URL
- * in the browser; `cid` is already verified by the host while the bytes streamed
- * (threat-model: blob bytes never enter wasm linear memory). */
+/** A media blob fetched for display (`engine-api.md` §3.4 `loadMedia`, sync.md §11.2). `cid` was
+ * verified while the bytes streamed (they never enter wasm memory). In the browser `url` is a
+ * `blob:` object URL the client made on the main thread from the verified stored `Blob`, typed
+ * `mime` (or `application/octet-stream`); the caller owns it and revokes it
+ * (`URL.revokeObjectURL`) when the element unmounts. `mime` is the display type: present only
+ * when the sniffed type matches the declared one and is on the display allowlist (inline image,
+ * or a click-to-play video/audio); absent, show a download card, never inline. */
 export interface LoadedMedia {
   cid: string;
   size: number;
   url: string;
+  mime?: string;
 }
 
 export interface DraftEntry {
