@@ -213,7 +213,8 @@ fn post_title(p: &PostSummary) -> TermText {
 fn post_meta(p: &PostSummary) -> Vec<TermText> {
     let mut parts = vec![
         render::actor(&p.author),
-        tt(&render::time(p.created_at_ms)),
+        // the displayed time is t_rank, never the claimed createdAt (`social.md` §2.3)
+        tt(&render::time(p.t_rank_ms)),
         render::count(p.comment_count, "comment", "comments"),
         cat([
             tt(&p.score.score.to_string()),
@@ -500,7 +501,7 @@ async fn comment_text(
     }
     let mut meta = vec![
         render::actor(&c.author),
-        tt(&render::time(c.created_at_ms)),
+        tt(&render::time(c.t_rank_ms)),
         cat([
             tt(&c.score.score.to_string()),
             lit(if c.score.score.abs() == 1 {

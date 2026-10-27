@@ -7,9 +7,10 @@
 //!   `lessdugin mod lock`);
 //! - `mods rm` runs `mod adopt` first: the departing moderator's assertions are re-issued
 //!   under the remover (with `adopts` pointing at each original) before the declaration
-//!   edits, and the ticket says so (`adoptedFirst` notice).
+//!   edits, and the ticket says so (`adoptedFirst` notice);
+//! - a backdated item shows its `t_rank`, not its claimed `createdAt` (`social.md` §2.3).
 //!
-//! Both run on the FakePds network (`support/fakenet.rs`) with the real CLI binary.
+//! All run on the FakePds network (`support/fakenet.rs`) with the real CLI binary.
 
 #![allow(clippy::disallowed_methods)] // a real clock and tid for the seeded repositories
 
@@ -108,15 +109,26 @@ impl Seed {
     }
 
     fn comment(&self, a: &AccountHandle, f: &ForumKey, root: &(String, String), i: usize) {
+        let at = Datetime::from_millis(self.base_ms + 10_000 + i as i64).unwrap();
+        self.comment_claiming(a, f, root, i, &at);
+    }
+
+    /// A comment whose `createdAt` claims `created` (its TID is the real time).
+    fn comment_claiming(
+        &self,
+        a: &AccountHandle,
+        f: &ForumKey,
+        root: &(String, String),
+        i: usize,
+        created: &Datetime,
+    ) {
         let body = serde_json::to_value(Md::Known(Markdown::inline("A reply."))).unwrap();
         let v = json!({
             "$type": nsid::COMMENT,
             "root": {"uri": root.0, "cid": root.1},
             "forum": f.uri.as_str(),
             "body": body,
-            "createdAt": Datetime::from_millis(self.base_ms + 10_000 + i as i64)
-                .unwrap()
-                .as_str(),
+            "createdAt": created.as_str(),
         });
         let rkey = keys::comment_rkey(
             NS,
@@ -251,5 +263,44 @@ fn mods_rm_runs_mod_adopt_first() {
     assert!(
         !out.contains("From carol"),
         "the hidden post is listed: {out}"
+    );
+}
+
+/// `ls` and `read` show an item's `t_rank`, never its self-asserted `createdAt`
+/// (`social.md` §2.2–§2.3): a post and a comment backdated by years are shown at the forum's
+/// creation (the causal lower bound), like the SPA shows them.
+#[test]
+fn a_backdated_item_shows_its_t_rank_not_its_claimed_time() {
+    let net = Net::new();
+    let alice = net.user("alice.test", true);
+    let seed = Seed::new();
+    let f = seed.forum(&alice.account, "past");
+    let declared = alice.account.get(nsid::FORUM, "past").unwrap()["createdAt"]
+        .as_str()
+        .unwrap()[..10]
+        .to_owned();
+    let claimed = Datetime::parse("2019-03-04T05:06:07Z").unwrap();
+    let p = Post::article(f.uri.clone(), "Old news", "Body.", claimed.clone());
+    let rkey = keys::post_rkey(f.uri.as_str(), &seed.tid()).unwrap();
+    let uri = seed.put(
+        &alice.account,
+        nsid::POST,
+        &rkey,
+        &serde_json::to_value(&p).unwrap(),
+    );
+    let cid = alice.account.cid(nsid::POST, &rkey).unwrap().to_string();
+    seed.comment_claiming(&alice.account, &f, &(uri.clone(), cid), 0, &claimed);
+    let forum = f.uri.to_string();
+
+    alice.ok(&["sync", &forum]);
+    let ls = alice.ok(&["ls", &forum, "--all"]);
+    assert!(ls.contains("Old news"), "{ls}");
+    assert!(!ls.contains("2019-03-04"), "the claimed time is shown: {ls}");
+    assert!(ls.contains(&declared), "{ls}");
+    let read = alice.ok(&["read", &uri, "--no-pager"]);
+    assert!(read.contains("A reply."), "{read}");
+    assert!(
+        !read.contains("2019-03-04"),
+        "the claimed time is shown: {read}"
     );
 }
