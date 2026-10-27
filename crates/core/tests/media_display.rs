@@ -1,0 +1,237 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//! The display half of the media pipeline over the fake network (`sync.md` §11): a reader's
+//! engine fetches another author's media from THAT author's PDS (`load_media`), signed in or
+//! not, and sniffs what it got.
+//!
+//! The records are written straight into the authors' repos, as in `engine_views.rs`.
+
+mod common;
+
+use common::block_on;
+use lessdugin_core::dto::{MediaView, PostView, SyncOpts};
+use lessdugin_core::engine::{AccountInfo, Engine, EngineConfig, ErrorCode};
+use lessdugin_core::host::Host;
+use lessdugin_core::media::MediaOwner;
+use lessdugin_lexicon::collection::nsid;
+use lessdugin_lexicon::keys;
+use lessdugin_testkit::fake_pds::{AccountHandle, tiny_png};
+use lessdugin_testkit::repo::tid_at_ms;
+use lessdugin_testkit::{FakeNet, MemHost};
+use serde_json::{Value, json};
+
+const MINUTE: i64 = 60_000;
+
+struct Net {
+    net: FakeNet,
+    hosts: Vec<MemHost>,
+}
+
+impl Net {
+    fn new() -> Self {
+        let h = MemHost::new();
+        let net = FakeNet::on(&h);
+        let _ = net.default_pds();
+        Self {
+            net,
+            hosts: vec![h],
+        }
+    }
+
+    fn now(&self) -> i64 {
+        self.hosts[0].now()
+    }
+
+    fn tick(&self, ms: i64) {
+        for h in &self.hosts {
+            h.advance_ms(ms);
+        }
+    }
+
+    /// A new device signed in as `who`, or anonymous.
+    fn device(&mut self, name: &str, who: Option<&AccountHandle>) -> Engine<MemHost> {
+        let h = MemHost::new();
+        h.set_now_ms(self.now());
+        h.set_seed(self.hosts.len() as u64 + 1);
+        self.net.install_as(&h, name);
+        self.hosts.push(h.clone());
+        let e = Engine::new(h, EngineConfig::default());
+        if let Some(a) = who {
+            block_on(e.add_account(AccountInfo::app_password(a.did().as_str(), a.pds_base())))
+                .unwrap();
+        }
+        e
+    }
+}
+
+fn dt(ms: i64) -> String {
+    lessdugin_atp::syntax::Datetime::from_millis(ms)
+        .unwrap()
+        .as_str()
+        .to_owned()
+}
+
+/// `owner`'s open forum, with its membership.
+fn forum(n: &Net, owner: &AccountHandle) -> String {
+    owner.put(
+        nsid::FORUM,
+        "meta",
+        &json!({
+            "$type": nsid::FORUM, "name": "Pics", "membership": "open",
+            "defaultTier": "frontpage", "createdAt": dt(n.now()),
+        }),
+    );
+    let f = owner.uri(nsid::FORUM, "meta");
+    owner.put(
+        nsid::MEMBERSHIP,
+        &keys::membership_rkey(&f).unwrap(),
+        &json!({"$type": nsid::MEMBERSHIP, "forum": f, "createdAt": dt(n.now())}),
+    );
+    n.tick(MINUTE);
+    f
+}
+
+/// A post by `who` in `f` whose body is `body` (an `NS.markdown` value).
+fn post(n: &Net, who: &AccountHandle, f: &str, body: Value) -> String {
+    let at = n.now();
+    let v = json!({
+        "$type": nsid::POST, "forum": f, "title": "Pictures", "body": body,
+        "createdAt": dt(at),
+    });
+    let uri = format!(
+        "at://{}/{}/{}",
+        who.did(),
+        nsid::POST,
+        keys::post_rkey(f, tid_at_ms(at).as_str()).unwrap()
+    );
+    let check = lessdugin_lexicon::validity::check_uri(
+        &lessdugin_atp::syntax::AtUri::parse(&uri).unwrap(),
+        &v,
+    );
+    assert!(check.valid, "{check:?}");
+    let rkey = uri.rsplit('/').next().unwrap().to_owned();
+    who.put(nsid::POST, &rkey, &v);
+    n.tick(MINUTE);
+    uri
+}
+
+fn image_body(blob: &Value) -> Value {
+    json!({
+        "$type": nsid::MARKDOWN, "profile": "lfm/1",
+        "text": format!("Look: ![a dot](cid:{})", blob["ref"]["$link"].as_str().unwrap()),
+        "media": [{"blob": blob, "alt": "a dot"}],
+    })
+}
+
+fn read(e: &Engine<MemHost>, f: &str, uri: &str) -> PostView {
+    let r = block_on(e.sync_forum(f, &SyncOpts::default())).unwrap();
+    assert!(r.errors.is_empty(), "{r:?}");
+    block_on(e.get_post(uri)).unwrap()
+}
+
+/// The `getBlob` requests the network saw, as (PDS base, `did` parameter).
+fn blob_requests(n: &Net) -> Vec<(String, String)> {
+    n.net
+        .requests_for("com.atproto.sync.getBlob")
+        .into_iter()
+        .map(|r| (r.host, r.params.get("did").cloned().unwrap_or_default()))
+        .collect()
+}
+
+#[test]
+fn media_comes_from_its_authors_pds_for_any_reader() {
+    // m4-1: load_media asked the ACTIVE account's PDS for the reader's own DID, so another
+    // author's media never loaded (BlobNotFound) and a signed-out reader got auth_required
+    let mut n = Net::new();
+    let bob = n
+        .net
+        .add_pds("bob.example.com")
+        .add_account("bob.example.com");
+    let carol = n
+        .net
+        .add_pds("carol.example.com")
+        .add_account("carol.example.com");
+    let f = forum(&n, &bob);
+    let blob = bob.upload_blob(tiny_png(7), "image/png");
+    let cid = blob["ref"]["$link"].as_str().unwrap().to_owned();
+    let uri = post(&n, &bob, &f, image_body(&blob));
+
+    for (name, who) in [("anon", None), ("carol", Some(&carol))] {
+        let e = n.device(name, who);
+        let pv = read(&e, &f, &uri);
+        let view: &MediaView = &pv.body.media[0];
+        assert_eq!(view.cid, cid);
+        assert_eq!(view.author, bob.did().as_str());
+        n.net.clear_requests();
+        let loaded = block_on(e.load_media(&cid, Some(MediaOwner::of_view(view)))).unwrap();
+        assert_eq!(loaded.cid, cid, "{name}");
+        assert_eq!(loaded.size, tiny_png(7).len() as u64);
+        assert_eq!(loaded.mime.as_deref(), Some("image/png"), "{name}");
+        assert_eq!(
+            blob_requests(&n),
+            [(bob.pds_base(), bob.did().to_string())],
+            "{name}: from bob's PDS, as bob"
+        );
+        // the verified bytes are the host's to hand out (an object URL, a file path)
+        assert_eq!(
+            block_on(e.host().blob_read(&cid, 0, 4096)).unwrap(),
+            tiny_png(7)
+        );
+        // only the author's DID works too: the sniffed type decides alone
+        let again = block_on(e.load_media(&cid, Some(MediaOwner::author(bob.did().as_str()))));
+        assert_eq!(again.unwrap().mime.as_deref(), Some("image/png"));
+    }
+}
+
+#[test]
+fn the_view_is_not_trusted_for_the_pds_and_its_declaration_must_agree() {
+    let mut n = Net::new();
+    let bob = n
+        .net
+        .add_pds("bob.example.com")
+        .add_account("bob.example.com");
+    let f = forum(&n, &bob);
+    let blob = bob.upload_blob(tiny_png(8), "image/png");
+    let cid = blob["ref"]["$link"].as_str().unwrap().to_owned();
+    let uri = post(&n, &bob, &f, image_body(&blob));
+    let e = n.device("anon", None);
+    let mut view = read(&e, &f, &uri).body.media[0].clone();
+
+    // a view naming another PDS is not followed: the DID document decides
+    view.pds = "https://elsewhere.example.com".into();
+    n.net.clear_requests();
+    block_on(e.load_media(&cid, Some(MediaOwner::of_view(&view)))).unwrap();
+    assert_eq!(blob_requests(&n)[0].0, bob.pds_base());
+
+    // a declared type the bytes do not have: a download card, never inline
+    view.mime = "video/mp4".into();
+    let card = block_on(e.load_media(&cid, Some(MediaOwner::of_view(&view)))).unwrap();
+    assert_eq!(card.mime, None);
+
+    // a view of another blob is refused
+    let err = block_on(e.load_media("bafkreiother", Some(MediaOwner::of_view(&view)))).unwrap_err();
+    assert_eq!(err.code, ErrorCode::InvalidInput);
+
+    // the declared size is the cap: a body longer than it is aborted, and nothing is kept
+    block_on(e.host().blob_delete(&cid)).unwrap();
+    view.mime = "image/png".into();
+    view.size_bytes = 10;
+    let err = block_on(e.load_media(&cid, Some(MediaOwner::of_view(&view)))).unwrap_err();
+    assert_eq!(err.code, ErrorCode::TooLarge);
+    assert_eq!(block_on(e.host().blob_open(&cid)).unwrap(), None);
+}
+
+#[test]
+fn a_blob_the_pds_does_not_have_is_missing_and_purged() {
+    // sync.md §11.4: "Blob not found" is not retried, and a cached copy is deleted
+    let mut n = Net::new();
+    let bob = n
+        .net
+        .add_pds("bob.example.com")
+        .add_account("bob.example.com");
+    let e = n.device("anon", None);
+    let gone = lessdugin_atp::cid::for_raw(b"never uploaded").to_string();
+    let err =
+        block_on(e.load_media(&gone, Some(MediaOwner::author(bob.did().as_str())))).unwrap_err();
+    assert_eq!(err.code, ErrorCode::NotFound);
+    assert_eq!(err.detail.unwrap()["kind"], "mediaMissing");
+}

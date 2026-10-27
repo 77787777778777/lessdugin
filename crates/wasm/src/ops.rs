@@ -484,9 +484,33 @@ pub async fn call<H: Host>(engine: &Engine<H>, op: &str, a: &str) -> Result<Stri
             out(&engine.delete(&uri).await?)
         }
         "loadMedia" => {
-            // the item's MediaView names the author whose PDS has the blob (sync.md §11.1)
-            let (cid, media): (String, Option<lessdugin_core::dto::MediaView>) = args(op, a)?;
-            out(&engine.load_media(&cid, media.as_ref()).await?)
+            // `[cid, media?]`: the item's MediaView, or only its author's DID, names the author
+            // whose PDS has the blob (sync.md §11.1); absent, the active account's own repo
+            let v: Vec<Value> = args(op, a)?;
+            let cid = v.first().and_then(Value::as_str).ok_or_else(|| {
+                EngineError::invalid_input(format!("{op}: bad arguments: no cid"))
+            })?;
+            let view = match v.get(1) {
+                Some(m @ Value::Object(_)) => Some(
+                    serde_json::from_value::<lessdugin_core::dto::MediaView>(m.clone()).map_err(
+                        |e| EngineError::invalid_input(format!("{op}: bad arguments: {e}")),
+                    )?,
+                ),
+                _ => None,
+            };
+            let owner = match (v.get(1), &view) {
+                (_, Some(m)) => Some(lessdugin_core::media::MediaOwner::of_view(m)),
+                (Some(Value::String(did)), None) => {
+                    Some(lessdugin_core::media::MediaOwner::author(did))
+                }
+                (None | Some(Value::Null), None) => None,
+                (Some(_), None) => {
+                    return Err(EngineError::invalid_input(format!(
+                        "{op}: bad arguments: the second is a MediaView or a DID"
+                    )));
+                }
+            };
+            out(&engine.load_media(cid, owner).await?)
         }
         "drafts" => out(&engine.drafts().await?),
         "saveDraft" => {

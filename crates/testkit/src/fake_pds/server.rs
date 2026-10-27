@@ -899,9 +899,11 @@ impl NetState {
             _ => return Err(repo_not_found(did)),
         }
         let a = &self.accounts[did];
-        let served = a.blobs.get(&cid).filter(|b| b.permanent).map(|b| {
-            (b.mime.clone(), b.bytes.as_ref().clone())
-        });
+        let served = a
+            .blobs
+            .get(&cid)
+            .filter(|b| b.permanent)
+            .map(|b| (b.mime.clone(), b.bytes.as_ref().clone()));
         let served = served.or_else(|| {
             let (g, mime) = a.generated.get(&cid)?;
             // the transport makes the body (Abort::Generate), a chunk at a time

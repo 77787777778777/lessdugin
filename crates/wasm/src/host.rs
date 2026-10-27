@@ -58,8 +58,12 @@ extern "C" {
 
     /// `blobRead(cid, offset, len)`: resolves with at most `len` bytes from `offset`.
     #[wasm_bindgen(method, catch, js_name = blobRead)]
-    fn blob_read(this: &JsHostImports, cid: &str, offset: f64, len: u32)
-    -> Result<Promise, JsValue>;
+    fn blob_read(
+        this: &JsHostImports,
+        cid: &str,
+        offset: f64,
+        len: u32,
+    ) -> Result<Promise, JsValue>;
 
     /// `blobDelete(cid)`: resolves once the stored blob is gone.
     #[wasm_bindgen(method, catch, js_name = blobDelete)]

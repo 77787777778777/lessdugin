@@ -663,7 +663,9 @@ async fn the_core_reads_stored_blobs_through_the_host_trait() {
         body[..4096]
     );
     // a window is capped at 1 MiB, and the end is short
-    let w = Host::blob_read(&env.host, &cid, 10, u32::MAX).await.unwrap();
+    let w = Host::blob_read(&env.host, &cid, 10, u32::MAX)
+        .await
+        .unwrap();
     assert_eq!(w.len(), lessdugin_core::host::BLOB_READ_MAX_BYTES as usize);
     assert_eq!(w[..], body[10..10 + w.len()]);
     let end = Host::blob_read(&env.host, &cid, body.len() as u64 - 3, 4096)

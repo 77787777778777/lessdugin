@@ -1370,38 +1370,92 @@ fn normalise_declared(declared: &str) -> String {
     }
 }
 
+/// Whose blob [`load_media`](crate::engine::Engine::load_media) fetches, and what the record
+/// declares of it: the item's [`crate::dto::MediaView`], or only the author's DID.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MediaOwner<'a> {
+    /// The author's DID: their PDS has the blob.
+    pub author: &'a str,
+    /// The view's CID, which must be the one asked for.
+    pub cid: Option<&'a str>,
+    /// The record's `mimeType` (the sniffed type must agree with it to display inline).
+    pub mime: Option<&'a str>,
+    /// The record's `size` (0 or absent: not stated; the hard cap applies).
+    pub size_bytes: u64,
+}
+
+impl<'a> MediaOwner<'a> {
+    /// The owner and declaration of a media item, from its view.
+    pub fn of_view(m: &'a crate::dto::MediaView) -> Self {
+        Self {
+            author: &m.author,
+            cid: Some(&m.cid),
+            mime: Some(&m.mime),
+            size_bytes: m.size_bytes,
+        }
+    }
+
+    /// Only the author (the sniffed type decides the display alone).
+    pub fn author(did: &'a str) -> Self {
+        Self {
+            author: did,
+            cid: None,
+            mime: None,
+            size_bytes: 0,
+        }
+    }
+}
+
 impl<H: crate::host::Host> crate::engine::Engine<H> {
+    /// The PDS of `did` from its DID document (`sync.md` §11.1 "require identity(did) is doc"),
+    /// never from a view or a record, which anyone can write.
+    async fn author_pds(
+        &self,
+        did: &lessdugin_atp::syntax::Did,
+    ) -> Result<String, crate::engine::EngineError> {
+        let ident = self
+            .resolver()
+            .resolve_did_doc(did, crate::identity::DID_DOC_TTL_MS)
+            .await?;
+        ident.pds.ok_or_else(|| {
+            crate::engine::EngineError::not_found(format!(
+                "{did} has no usable PDS: {}",
+                ident.pds_problem.as_deref().unwrap_or("unknown")
+            ))
+        })
+    }
+
     /// `loadMedia(cid, media?)`: fetches a media blob for display (`sync.md` §11.1).
     ///
-    /// With the item's [`crate::dto::MediaView`] (what a rendered body lists), the blob comes from
-    /// the AUTHOR's PDS, resolved from their DID document here (the view's `pds` is not trusted
-    /// for this), for any reader, signed in or not; the cap is the declared `size`, so a longer
-    /// body is aborted, within `BLOB_HARD_MAX_BYTES`. Without it the active account's own repo is
-    /// asked, as before the view was passed (a client of the first M4 builds).
+    /// With the item's owner (its [`crate::dto::MediaView`], as a rendered body lists it, or only
+    /// its author's DID), the blob comes from the AUTHOR's PDS, resolved from their DID document
+    /// here (the view's `pds` is not trusted for this), as the author's DID, for any reader,
+    /// signed in or not; the cap is the declared `size`, so a longer body is aborted, within
+    /// `BLOB_HARD_MAX_BYTES`. Without it the active account's own repo is asked, as before the
+    /// owner was passed (a client of the first M4 builds).
     ///
     /// The host streams and CID-checks the bytes, so they never pass through wasm memory
     /// (INFRA-6); the core reads only the first `BLOB_SNIFF_PREFIX_BYTES` to sniff the type.
-    /// `mime` is set only when the sniffed type agrees with the declared one and is on the
-    /// display allowlist, and it is the allowlist's constant string; otherwise the client shows a
-    /// download card. The caller is the one that decided to load - [`super::policy`] says
-    /// whether it may do that without asking.
+    /// `mime` is set only when the sniffed type is on the display allowlist and agrees with the
+    /// declared one (when the owner states one), and it is the allowlist's constant string;
+    /// otherwise the client shows a download card. The caller is the one that decided to load -
+    /// [`super::policy`] says whether it may do that without asking.
     pub async fn load_media(
         &self,
         cid: &str,
-        media: Option<&crate::dto::MediaView>,
+        owner: Option<MediaOwner<'_>>,
     ) -> Result<crate::dto::LoadedMedia, crate::engine::EngineError> {
         use crate::engine::{EngineError, ErrorCode};
         use crate::host::HostError;
         let hard = crate::limits::BLOB_HARD_MAX_BYTES;
-        let (pds, did, declared, max) = match media {
+        let (pds, did, declared, max) = match owner {
             Some(m) => {
-                if m.cid != cid {
+                if let Some(other) = m.cid.filter(|c| *c != cid) {
                     return Err(EngineError::invalid_input(format!(
-                        "loadMedia: the media view is of {}, not {cid}",
-                        m.cid
+                        "loadMedia: the media view is of {other}, not {cid}"
                     )));
                 }
-                let did = lessdugin_atp::syntax::Did::parse(&m.author).map_err(|e| {
+                let did = lessdugin_atp::syntax::Did::parse(m.author).map_err(|e| {
                     EngineError::invalid_input(format!("loadMedia: author {:?}: {e}", m.author))
                 })?;
                 if m.size_bytes > hard {
@@ -1411,19 +1465,14 @@ impl<H: crate::host::Host> crate::engine::Engine<H> {
                     )
                     .with_detail("bytes", m.size_bytes));
                 }
-                let ident = self
-                    .resolver()
-                    .resolve_did_doc(&did, crate::identity::DID_DOC_TTL_MS)
-                    .await?;
-                let pds = ident.pds.ok_or_else(|| {
-                    EngineError::not_found(format!(
-                        "{did} has no usable PDS: {}",
-                        ident.pds_problem.as_deref().unwrap_or("unknown")
-                    ))
-                })?;
+                let pds = self.author_pds(&did).await?;
                 // a declared size of 0 is no size: the hard cap applies
-                let max = if m.size_bytes == 0 { hard } else { m.size_bytes };
-                (pds, did, Some(m.mime.as_str()), max)
+                let max = if m.size_bytes == 0 {
+                    hard
+                } else {
+                    m.size_bytes
+                };
+                (pds, did, m.mime, max)
             }
             None => {
                 let session = self.active_session().await?;
@@ -1432,11 +1481,7 @@ impl<H: crate::host::Host> crate::engine::Engine<H> {
         };
         let pds = url::Url::parse(&pds)
             .map_err(|e| EngineError::internal(format!("the PDS URL {pds:?}: {e}")))?;
-        let handle = match self
-            .host()
-            .fetch_blob(pds, did, cid.to_owned(), max)
-            .await
-        {
+        let handle = match self.host().fetch_blob(pds, did, cid.to_owned(), max).await {
             Ok(h) => h,
             Err(HostError::HttpStatus(400, _)) => {
                 // "Blob not found": not retried, and no copy is kept (sync.md §11.4)

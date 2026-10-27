@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // The main-thread client over Comlink, against a stand-in worker on a MessageChannel: lazy
 // start, method forwarding, events, and the AuthBridge port the worker calls back into.
+import { resolveObjectURL } from "node:buffer";
 import { readFileSync } from "node:fs";
 import * as Comlink from "comlink";
 import { afterEach, describe, expect, it } from "vitest";
@@ -50,7 +51,14 @@ function fakeWorker(opts: { failInits?: number } = {}): {
       state.calls.push([op, args]);
       if (op === "grant") return [{ writeId: "w1" }, { writeId: "w2" }];
       if (op === "fail") throw { code: "network", message: "down", retryable: true };
+      if (op === "loadMedia") {
+        const cid = args[0] as string;
+        return { cid, size: 3, url: `idb:${cid}`, ...(cid === "bafkreimp4" ? {} : { mime: "image/png" }) };
+      }
       return { op };
+    },
+    async blob(cid: string) {
+      return cid === "bafkreigone" ? null : new Blob([Uint8Array.of(1, 2, 3)]);
     },
     async callJson(op: string, argsJson: string) {
       return JSON.stringify({ op, args: JSON.parse(argsJson) });
@@ -149,6 +157,29 @@ describe("startEngine", () => {
       detail: { kind: "mediaRejected", limit: 64 * 1024 * 1024 },
     });
     expect(state.calls.length).toBe(calls);
+  });
+
+  it("turns loadMedia's verified blob into a typed blob: URL on the main thread (m4-1)", async () => {
+    const { worker, state } = fakeWorker();
+    const c = start({ worker });
+    const view = { index: 0, cid: "bafkreipng", mime: "image/png", author: "did:plc:bob" };
+    const loaded = await c.loadMedia("bafkreipng", view as never);
+    // the item's view (or the author's DID) goes to the engine, which asks the author's PDS
+    expect(state.calls.at(-1)).toEqual(["loadMedia", ["bafkreipng", view]]);
+    expect(loaded).toMatchObject({ cid: "bafkreipng", size: 3, mime: "image/png" });
+    // not the host's `idb:` locator, which no element can load (CSP: img-src 'self' blob:)
+    expect(loaded.url).toMatch(/^blob:/);
+    const made = resolveObjectURL(loaded.url);
+    expect(made?.type).toBe("image/png");
+    expect(Array.from(new Uint8Array((await made?.arrayBuffer()) ?? new ArrayBuffer(0)))).toEqual([
+      1, 2, 3,
+    ]);
+    URL.revokeObjectURL(loaded.url);
+    // no display type: the bytes are typed as nothing a page would render inline
+    const card = await c.loadMedia("bafkreimp4", "did:plc:bob");
+    expect(resolveObjectURL(card.url)?.type).toBe("application/octet-stream");
+    URL.revokeObjectURL(card.url);
+    await expect(c.loadMedia("bafkreigone")).rejects.toMatchObject({ code: "internal" });
   });
 
   it("is not a thenable", async () => {

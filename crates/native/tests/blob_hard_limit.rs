@@ -74,7 +74,9 @@ fn a_blob_at_the_hard_limit_is_streamed_to_disk_and_cid_checked() {
     let net = FakeNet::serve_http(Arc::new(ManualClock::new(1_700_000_000_000)));
     let alice = net.add_account("alice.test");
     let size = BLOB_HARD_MAX_BYTES;
-    let cid = alice.serve_generated_blob(size, 0x5EED, "video/mp4").to_string();
+    let cid = alice
+        .serve_generated_blob(size, 0x5EED, "video/mp4")
+        .to_string();
     let pds = Url::parse(&alice.pds_base()).unwrap();
 
     let tmp = tempfile::tempdir().unwrap();
@@ -122,10 +124,7 @@ fn a_blob_at_the_hard_limit_is_streamed_to_disk_and_cid_checked() {
         lessdugin_atp::cid::from_sha256_digest(lessdugin_atp::cid::RAW, digest).to_string(),
         cid
     );
-    let g = Generated {
-        size,
-        seed: 0x5EED,
-    };
+    let g = Generated { size, seed: 0x5EED };
     let last = g.chunks() - 1;
     let tail = rt
         .block_on(host.blob_read(&cid, last * Generated::CHUNK as u64, BLOB_READ_MAX_BYTES))
