@@ -288,7 +288,7 @@ Kept in the `state` store of this device, never written to a PDS. Every operatio
 | `karma_notifications() -> KarmaCadence`, `set_karma_notifications(cadence)` | `realtime`, `daily` (the default) or `weekly` (`social.md` §16); `Changed [Notifications]` |
 | `save_draft(Draft) -> draft_id`, `delete_draft(id)` | M4 (§3.9) |
 | `settings()`, `set_setting(key, value)` | M4 |
-| `export_local() -> Json`, `import_local(Json)` | M4 |
+| `export_local() -> Json`, `import_local(Json)` | M4. The CLI's `export --local` and `export --import`; its plain `export` exports content (own posts and comments by default; a forum without hidden and deleted items, `threat-model.md` PRIV-8) |
 
 **Public actions.** Votes and agreement, reacts, tag votes, joining or applying, and mod actions
 are public (`social.md` §17). Before the first action of a kind, every client shows the "this is
