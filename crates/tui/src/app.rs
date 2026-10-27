@@ -27,8 +27,8 @@ use lessdugin_core::dto::{
     WriteState, WriteTicket,
 };
 use lessdugin_core::dto::{
-    Draft, ForumDraft, ForumRole, KarmaCadence, MemberView, MembershipMode, RawView, Ref,
-    Settings, Subscription, TextQuote,
+    Draft, ForumDraft, ForumRole, KarmaCadence, MemberView, MembershipMode, RawView, Ref, Settings,
+    Subscription, TextQuote,
 };
 use lessdugin_core::engine::EngineError;
 
@@ -114,7 +114,7 @@ pub enum Compose {
         /// The item.
         uri: String,
         /// Its draft as cached.
-        base: Draft,
+        base: Box<Draft>,
     },
 }
 
@@ -297,6 +297,11 @@ pub enum Effect {
     MarkRead {
         /// The notification ids.
         ids: Vec<String>,
+        /// The screen to reload afterwards.
+        screen: ScreenId,
+    },
+    /// `mark_all_notifications_read()`: every notification, listed or not (`M`, `:read-all`).
+    MarkAllRead {
         /// The screen to reload afterwards.
         screen: ScreenId,
     },
@@ -515,10 +520,16 @@ impl Effect {
         }
     }
 
-    /// The engine operation (`engine-api.md` §3) the effect calls, by its name there; `None`
-    /// for the ones the runtime handles itself (the editor, quitting).
+    /// The engine operation (`engine-api.md` §3) the effect calls, by its name there (for an
+    /// editor session, the write it leads to; for `Open`, the screen's `forum_open` or
+    /// `get_thread`); `None` for quitting.
     pub fn operation(&self) -> Option<&'static str> {
         Some(match self {
+            Effect::Editor(req) => match req.compose {
+                Compose::Comment { .. } => "comment",
+                Compose::Post { .. } => "publish",
+                Compose::Edit { .. } => "edit",
+            },
             Effect::LoadHome { .. } => "followed",
             Effect::LoadForum { .. } => "list_posts",
             Effect::LoadThread { .. } => "get_thread",
@@ -534,6 +545,7 @@ impl Effect {
             Effect::LoadHistory { .. } => "history",
             Effect::LoadNotifications { .. } => "notifications",
             Effect::MarkRead { .. } => "mark_notifications_read",
+            Effect::MarkAllRead { .. } => "mark_all_notifications_read",
             Effect::LoadUnread => "unread_counts",
             Effect::MarkThreadRead { .. } => "mark_read",
             Effect::LoadQueue { .. } => "mod_queue",
@@ -571,7 +583,7 @@ impl Effect {
             Effect::Settings { set: None } => "settings",
             Effect::Settings { set: Some(_) } => "set_setting",
             Effect::Retry { .. } => "retry_write",
-            Effect::Editor(_) | Effect::Quit => return None,
+            Effect::Quit => return None,
         })
     }
 }
@@ -1887,10 +1899,7 @@ impl State {
             Action::Opened(result) => match result {
                 Ok(Ref::Forum { uri }) => self.push_forum(uri, &mut fx),
                 Ok(Ref::Post { uri } | Ref::Comment { uri }) => self.push_thread(uri, &mut fx),
-                Ok(_) => self.say(
-                    Tone::Info,
-                    lit("That is not a forum, a post or a comment."),
-                ),
+                Ok(_) => self.say(Tone::Info, lit("That is not a forum, a post or a comment.")),
                 Err(e) => self.say(Tone::Error, cat([lit("Cannot open it: "), tt(&e.message)])),
             },
             Action::Written {
@@ -2810,7 +2819,7 @@ impl State {
                 ),
             },
             Compose::Edit { uri, base } => {
-                let mut draft = base.clone();
+                let mut draft = (**base).clone();
                 match &mut draft {
                     Draft::Post { post, .. } => match editor::split_post(&text) {
                         Ok((title, body)) => {
@@ -3864,8 +3873,8 @@ impl State {
         self.push(ScreenKind::Notifications(Box::default()), fx);
     }
 
-    /// `M` (or the notifications' opening): marks every listed notification read
-    /// (`engine.mark_notifications_read`).
+    /// `M` and `:read-all`: marks every notification read, the listed ones and any past the
+    /// list (`engine.mark_all_notifications_read`).
     fn mark_all_read(&mut self, fx: &mut Vec<Effect>) {
         let Some(s) = self.stack.last().and_then(|s| match &s.kind {
             ScreenKind::Notifications(s) => Some(s.clone()),
@@ -3877,23 +3886,13 @@ impl State {
             );
             return;
         };
-        let ids: Vec<String> = s
-            .data
-            .as_ref()
-            .map(|d| {
-                d.items
-                    .iter()
-                    .filter(|n| !n.read)
-                    .map(|n| n.id.clone())
-                    .collect()
-            })
-            .unwrap_or_default();
-        if ids.is_empty() {
+        // `unread` counts every unread notification, listed or not
+        if s.data.as_ref().is_none_or(|d| d.unread == 0) {
             self.say(Tone::Info, lit("Nothing to mark read."));
             return;
         }
         let screen = self.stack.last().map_or(0, |x| x.id);
-        fx.push(Effect::MarkRead { ids, screen });
+        fx.push(Effect::MarkAllRead { screen });
     }
 
     /// `:read`: marks the selected notification read.
@@ -4378,7 +4377,11 @@ impl State {
                     on,
                 });
                 // a forum followed by name opens
-                if on && !self.stack.iter().any(|s| matches!(&s.kind, ScreenKind::Forum(x) if x.uri == f))
+                if on
+                    && !self
+                        .stack
+                        .iter()
+                        .any(|s| matches!(&s.kind, ScreenKind::Forum(x) if x.uri == f))
                 {
                     self.push_forum(f, fx);
                 }
@@ -4477,7 +4480,9 @@ impl State {
                 // neither a deletion nor a redaction can be undone: ask first
                 let question = match op {
                     ItemOp::Delete => Some("Delete this item, with its revisions?"),
-                    ItemOp::Redact => Some("Delete this item's version history? It cannot be undone."),
+                    ItemOp::Redact => {
+                        Some("Delete this item's version history? It cannot be undone.")
+                    }
                     ItemOp::Retract => None,
                 };
                 match question {
@@ -4512,7 +4517,9 @@ impl State {
                             self.top_thread()
                                 .and_then(|t| t.post())
                                 .map(|p| p.post.uri.clone())
-                                .or_else(|| self.top_forum_screen()?.selected().map(|p| p.uri.clone()))
+                                .or_else(|| {
+                                    self.top_forum_screen()?.selected().map(|p| p.uri.clone())
+                                })
                         });
                         let Some(uri) = post else {
                             self.say(Tone::Info, lit("Nothing selected to subscribe to."));
@@ -4553,9 +4560,21 @@ impl State {
             }),
             Verb::Undo => self.undo_last(fx),
             Verb::Retry { id } => {
-                let Some(id) = id.or_else(|| self.failed.iter().next_back().cloned()) else {
-                    self.say(Tone::Info, lit("No failed write to send again."));
-                    return;
+                let id = match (id, self.failed.len()) {
+                    (Some(id), _) => id,
+                    (None, 0) => {
+                        self.say(Tone::Info, lit("No failed write to send again."));
+                        return;
+                    }
+                    (None, 1) => self.failed.iter().next().cloned().unwrap_or_default(),
+                    (None, _) => {
+                        let ids: Vec<&str> = self.failed.iter().map(String::as_str).collect();
+                        self.say(
+                            Tone::Info,
+                            tt(&format!("Which write? retry one of: {}", ids.join(", "))),
+                        );
+                        return;
+                    }
                 };
                 if self.can_write() {
                     fx.push(Effect::Retry { id });
@@ -5324,7 +5343,9 @@ fn settings_lines(s: &Settings) -> Vec<TermText> {
             out.push(tt(&format!("{k}: {val}")));
         }
     }
-    out.push(lit("Change one with `set <key> <value>`; `unset <key>` restores it."));
+    out.push(lit(
+        "Change one with `set <key> <value>`; `unset <key>` restores it.",
+    ));
     out
 }
 

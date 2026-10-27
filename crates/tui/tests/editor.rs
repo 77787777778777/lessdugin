@@ -161,3 +161,50 @@ fn writing_needs_an_account() {
     assert!(screen.contains("Log in to write"), "{screen}");
     assert!(screen.contains("not logged in (read-only)"), "{screen}");
 }
+
+/// `:edit` opens `$EDITOR` on your comment's current text and sends the edit; the old version
+/// is kept as a revision. Someone else's comment is refused.
+#[test]
+fn the_edit_command_edits_your_comment() {
+    use lessdugin_core::dto::CommentDraft;
+    let s = scenario();
+    let carol = &s.w.carol;
+    let t = block_on(
+        carol
+            .engine
+            .comment(&CommentDraft::new(&s.welcome, None, "First version.")),
+    )
+    .unwrap();
+    carol.flush();
+    let mine = carol.done(&t);
+    let dir = tempfile::tempdir().unwrap();
+    let mut t = tui_with_editor(&s, dir.path(), "Second version.");
+    block_on(t.start(None));
+    block_on(t.open_thread(&s.welcome));
+    let run = |t: &mut Headless<lessdugin_testkit::MemHost>, line: &str| {
+        block_on(t.press(":"));
+        for c in line.chars() {
+            block_on(t.press(&c.to_string()));
+        }
+        block_on(t.press("Enter"));
+    };
+    run(&mut t, &format!("edit {mine}"));
+    block_on(t.engine().outbox_flush()).unwrap();
+    block_on(t.settle());
+    let view = block_on(carol.engine.get_thread(&s.welcome, &ThreadOpts::default())).unwrap();
+    let c = view.comments.iter().find(|c| c.uri == mine).unwrap();
+    // the editor's text above the template's: the new line, then the old text it was given
+    assert!(
+        c.body.text.starts_with("Second version."),
+        "{:?}",
+        c.body.text
+    );
+    assert!(c.badges.edited, "{:?}", c.badges);
+    let h = block_on(carol.engine.history(&mine)).unwrap();
+    assert!(!h.versions.is_empty(), "{h:?}");
+
+    // bob's comment is not carol's to edit
+    run(&mut t, &format!("edit {}", s.bob_c1));
+    let st = t.state.status.as_ref().unwrap().text.to_plain_string();
+    assert!(st.contains("only your own"), "{st}");
+}

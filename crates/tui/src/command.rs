@@ -14,7 +14,7 @@
 //! | `react <id> [for\|against]` | `opinion` (`React`) | `x`, then Enter |
 //! | `unreact <id>` | `opinion` (`React`, remove) | `x`, then Enter again |
 //! | `mod <action> [subject] [reason] [--until WHEN] [--author]` | `mod_action` | `m` |
-//! | `notifications [all]`, `read`, `read-all` | `notifications`, `mark_notifications_read` | `N`, `a`, `M` |
+//! | `notifications [all]`, `read`, `read-all` | `notifications`, `mark_notifications_read`, `mark_all_notifications_read` | `N`, `a`, `M` |
 //! | `activity` | `recent_discussion` | `Tab` on a forum |
 //! | `sort <sort>`, `filter <filter>` | `list_posts`, `get_thread` | `s`, `f` |
 //! | `user [actor]` | the forum view's `moderators` | - |
@@ -72,7 +72,7 @@ pub enum Verb {
     },
     /// `read`: mark the selected notification read.
     Read,
-    /// `read-all`: mark every listed notification read.
+    /// `read-all`: mark every notification read.
     ReadAll,
     /// `activity`: the forum's Recent Discussion tab.
     Activity,
@@ -189,7 +189,7 @@ pub enum Verb {
     },
     /// `undo`: the last opinion still in its undo window (`Backspace`).
     Undo,
-    /// `retry [write id]`: a failed write again (the last one when none is named).
+    /// `retry [write id]`: a failed write again (the only one when none is named).
     Retry {
         /// The write id.
         id: Option<String>,
@@ -260,21 +260,45 @@ pub const REACH: &[(&str, Reach)] = &[
     ("forum_discover", Reach::NotHere("M5 (engine-api.md §3.9)")),
     ("forum_follow", Reach::Command("follow")),
     ("forum_unfollow", Reach::Command("unfollow")),
-    ("followed", Reach::Automatic("the Home screen lists the followed forums")),
-    ("forum_create", Reach::Command("forum create tui-made A forum made here")),
-    ("forum_update", Reach::Command("forum edit --name Meta, renamed")),
+    (
+        "followed",
+        Reach::Automatic("the Home screen lists the followed forums"),
+    ),
+    (
+        "forum_create",
+        Reach::Command("forum create tui-made A forum made here"),
+    ),
+    (
+        "forum_update",
+        Reach::Command("forum edit --name Meta, renamed"),
+    ),
     ("join", Reach::Command("join hello")),
     ("leave", Reach::Command("leave")),
     ("members", Reach::Command("members")),
-    ("grant", Reach::Command("grant did:plc:aaaaaaaaaaaaaaaaaaaaaaaa")),
-    ("revoke", Reach::Command("revoke did:plc:aaaaaaaaaaaaaaaaaaaaaaaa")),
-    ("approve", Reach::Command("approve did:plc:aaaaaaaaaaaaaaaaaaaaaaaa")),
-    ("reject", Reach::Command("reject did:plc:aaaaaaaaaaaaaaaaaaaaaaaa")),
+    (
+        "grant",
+        Reach::Command("grant did:plc:aaaaaaaaaaaaaaaaaaaaaaaa"),
+    ),
+    (
+        "revoke",
+        Reach::Command("revoke did:plc:aaaaaaaaaaaaaaaaaaaaaaaa"),
+    ),
+    (
+        "approve",
+        Reach::Command("approve did:plc:aaaaaaaaaaaaaaaaaaaaaaaa"),
+    ),
+    (
+        "reject",
+        Reach::Command("reject did:plc:aaaaaaaaaaaaaaaaaaaaaaaa"),
+    ),
     (
         "rejected_applicants",
         Reach::Automatic("`members pending` leaves out the applicants rejected here"),
     ),
-    ("mods_set", Reach::Command("mods add did:plc:aaaaaaaaaaaaaaaaaaaaaaaa")),
+    (
+        "mods_set",
+        Reach::Command("mods add did:plc:aaaaaaaaaaaaaaaaaaaaaaaa"),
+    ),
     // §3.5
     ("publish", Reach::Keys(&["P"])),
     ("comment", Reach::Keys(&["r"])),
@@ -283,7 +307,10 @@ pub const REACH: &[(&str, Reach)] = &[
     ("retract", Reach::Command("retract")),
     ("opinion", Reach::Keys(&["u"])),
     ("mod_action", Reach::Command("mod hide")),
-    ("mod_adopt", Reach::Command("mod adopt did:plc:aaaaaaaaaaaaaaaaaaaaaaaa")),
+    (
+        "mod_adopt",
+        Reach::Command("mod adopt did:plc:aaaaaaaaaaaaaaaaaaaaaaaa"),
+    ),
     ("wiki_edit", Reach::NotHere("M5 (engine-api.md §3.9)")),
     ("seq_create", Reach::NotHere("M5 (engine-api.md §3.9)")),
     ("seq_edit", Reach::NotHere("M5 (engine-api.md §3.9)")),
@@ -297,10 +324,19 @@ pub const REACH: &[(&str, Reach)] = &[
     ),
     ("undo", Reach::Command("undo")),
     ("retry_write", Reach::Command("retry 1")),
-    ("write_status", Reach::Automatic("write events update the header's queued count")),
-    ("writes", Reach::Automatic("the outbox of earlier sessions is loaded at start")),
+    (
+        "write_status",
+        Reach::Automatic("write events update the header's queued count"),
+    ),
+    (
+        "writes",
+        Reach::Automatic("the outbox of earlier sessions is loaded at start"),
+    ),
     // §3.6
-    ("mark_read", Reach::Automatic("opening a thread marks it read")),
+    (
+        "mark_read",
+        Reach::Automatic("opening a thread marks it read"),
+    ),
     ("mark_notifications_read", Reach::Command("read")),
     ("mark_all_notifications_read", Reach::Command("read-all")),
     ("bookmark", Reach::Command("bookmark")),
@@ -319,19 +355,29 @@ pub const REACH: &[(&str, Reach)] = &[
         Reach::Automatic("going past the interstitial (`y`) records it"),
     ),
     ("karma_notifications", Reach::Command("karma-notifications")),
-    ("set_karma_notifications", Reach::Command("karma-notifications weekly")),
+    (
+        "set_karma_notifications",
+        Reach::Command("karma-notifications weekly"),
+    ),
     (
         "save_draft",
-        Reach::NotHere("the TUI keeps unsent text for the next editor session; drafts are the CLI's and the SPA's"),
+        Reach::NotHere(
+            "the TUI keeps unsent text for the next editor session; drafts are the CLI's and the SPA's",
+        ),
     ),
     (
         "delete_draft",
-        Reach::NotHere("the TUI keeps unsent text for the next editor session; drafts are the CLI's and the SPA's"),
+        Reach::NotHere(
+            "the TUI keeps unsent text for the next editor session; drafts are the CLI's and the SPA's",
+        ),
     ),
     ("settings", Reach::Command("settings")),
     ("set_setting", Reach::Command("set mediaAutoload off")),
     ("export_local", Reach::NotHere("a file: `lessdugin export`")),
-    ("import_local", Reach::NotHere("a file: `lessdugin export --import`")),
+    (
+        "import_local",
+        Reach::NotHere("a file: `lessdugin export --import`"),
+    ),
 ];
 
 /// A sort `sort` names: a post sort (`social.md` §12.2) or a comment sort (§12.4).
@@ -798,9 +844,9 @@ fn more(verb: &str, rest: &[&str]) -> Option<Parsed> {
             let (status, pending) = match rest.first().copied() {
                 None => (None, false),
                 Some("pending" | "applicants") => (None, true),
-                Some(role) => match serde_json::from_value::<ForumRole>(
-                    serde_json::Value::String(role.to_owned()),
-                ) {
+                Some(role) => match serde_json::from_value::<ForumRole>(serde_json::Value::String(
+                    role.to_owned(),
+                )) {
                     Ok(r) => (Some(r), false),
                     Err(_) => {
                         return Some(Err(format!(
@@ -965,9 +1011,11 @@ fn forum_verb(rest: &[&str]) -> Parsed {
                 }
             }
             if c == ForumChanges::default() {
-                return Err("forum edit needs something to change (--name, --description, \
+                return Err(
+                    "forum edit needs something to change (--name, --description, \
                             --mode, --tier, --report-contact)."
-                    .into());
+                        .into(),
+                );
             }
             bare(Verb::ForumEdit(c), None)
         }

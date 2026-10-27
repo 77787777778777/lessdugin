@@ -17,9 +17,9 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use crate::app::{
-    ForumScreen, ForumTab, HomeScreen, LIST_ROWS, ModMenu, ModScreen, ModTab, NotificationsScreen,
-    Prompt, PublicNotice, ReactOverlay, Screen, ScreenKind, State, SyncStatus, ThreadScreen, Tone,
-    status_text,
+    Confirm, ForumScreen, ForumTab, HomeScreen, LIST_ROWS, ModMenu, ModScreen, ModTab,
+    NotificationsScreen, Panel, Prompt, PublicNotice, ReactOverlay, Screen, ScreenKind, State,
+    SyncStatus, ThreadScreen, Tone, status_text,
 };
 use crate::keys::HELP;
 use crate::text::{
@@ -98,9 +98,73 @@ pub fn draw(state: &State, f: &mut Frame<'_>) {
     if let Some(c) = &state.command {
         command_line(f, c, area);
     }
+    if let Some(p) = &state.panel {
+        panel(f, p, area);
+    }
+    if let Some(c) = &state.confirm {
+        confirm(f, c, area);
+    }
     if let Some(n) = &state.public_notice {
         public_notice(f, n, area);
     }
+}
+
+/// A text panel (`:members`, `:raw`, `:settings`): it scrolls like the help overlay.
+fn panel(f: &mut Frame<'_>, p: &Panel, area: Rect) {
+    let width = 76.min(area.width);
+    let inner = usize::from(width.saturating_sub(2)).max(1);
+    let lines: Vec<Line<'static>> = p
+        .lines
+        .iter()
+        .flat_map(|t| wrapped(t, Style::default(), inner))
+        .collect();
+    let rows = usize::from(area.height.saturating_sub(4)).max(1);
+    let max_scroll = lines.len().saturating_sub(rows);
+    let scroll = p.scroll.min(max_scroll);
+    let total = lines.len();
+    let shown: Vec<Line<'static>> = lines.into_iter().skip(scroll).take(rows).collect();
+    let height = u16::try_from(shown.len() + 2)
+        .unwrap_or(u16::MAX)
+        .min(area.height);
+    let x = area.x + (area.width - width) / 2;
+    let y = area.y + (area.height - height) / 2;
+    let r = Rect::new(x, y, width, height);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(line([(tt(&format!(" {} ", p.title)), bold())]))
+        .title_bottom(line([(
+            tt(&format!(
+                " {}-{} of {} \u{b7} any key closes ",
+                (scroll + 1).min(total),
+                (scroll + rows).min(total),
+                total
+            )),
+            dim(),
+        )]));
+    f.render_widget(Clear, r);
+    f.render_widget(Paragraph::new(Text::from(shown)).block(block), r);
+}
+
+/// A yes/no question before a write that cannot be taken back.
+fn confirm(f: &mut Frame<'_>, c: &Confirm, area: Rect) {
+    let width = 60.min(area.width);
+    let inner = usize::from(width.saturating_sub(2)).max(1);
+    let mut lines: Vec<Line<'static>> = crate::body::wrap(&c.text, inner)
+        .iter()
+        .map(|t| line([(tt(t), Style::default())]))
+        .collect();
+    lines.push(line([(tt("y yes \u{b7} n no"), bold())]));
+    let height = u16::try_from(lines.len() + 2)
+        .unwrap_or(u16::MAX)
+        .min(area.height);
+    let x = area.x + (area.width - width) / 2;
+    let y = area.y + (area.height - height) / 2;
+    let r = Rect::new(x, y, width, height);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(line([(lit(" Confirm "), warn_style())]));
+    f.render_widget(Clear, r);
+    f.render_widget(Paragraph::new(Text::from(lines)).block(block), r);
 }
 
 /// What the interstitial says of a kind (`social.md` §17), as the CLI and the SPA say it.

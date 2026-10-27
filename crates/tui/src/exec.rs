@@ -13,8 +13,8 @@ use lessdugin_atp::syntax::AtUri;
 use lessdugin_core::dto::{
     ActorView, BodyDraft, Capability, CommentDraft, DefaultTier, Draft, EditOpts,
     ExternalLinkDraft, ForumDraft, KarmaCadence, ListPostsQuery, MembersQuery, MembershipMode,
-    ModActionIntent, ModActionValue, ModScope, NotificationsQuery, PostDraft, PostFilter,
-    PostKind, PostSort, Ref, RefContext, SyncOpts, TextQuote, ThreadOpts, ThreadRoot,
+    ModActionIntent, ModActionValue, ModScope, NotificationsQuery, PostDraft, PostFilter, PostKind,
+    PostSort, Ref, RefContext, SyncOpts, TextQuote, ThreadOpts, ThreadRoot,
 };
 use lessdugin_core::engine::{Engine, EngineError};
 use lessdugin_core::host::Host;
@@ -225,6 +225,10 @@ pub async fn run<H: Host>(engine: &Engine<H>, effect: Effect, opts: ExecOpts) ->
             screen,
             result: engine.mark_notifications_read(&ids).await,
         },
+        Effect::MarkAllRead { screen } => Action::MarkedRead {
+            screen,
+            result: engine.mark_all_notifications_read().await,
+        },
         Effect::LoadUnread => Action::UnreadLoaded(engine.unread_counts().await),
         Effect::MarkThreadRead { post } => {
             // a read mark that could not be stored only leaves the thread unread
@@ -331,11 +335,13 @@ pub async fn run<H: Host>(engine: &Engine<H>, effect: Effect, opts: ExecOpts) ->
                 Err(e) => Err(e),
             },
         },
-        Effect::StartEdit { uri, forum } => Action::EditReady(start_edit(engine, &uri, &forum).await),
+        Effect::StartEdit { uri, forum } => {
+            Action::EditReady(start_edit(engine, &uri, &forum).await)
+        }
         Effect::Edit { uri, draft, text } => Action::Queued {
             compose: Compose::Edit {
                 uri: uri.clone(),
-                base: draft.clone(),
+                base: Box::new(draft.clone()),
             },
             text,
             result: engine.edit(&uri, &draft, &EditOpts::default()).await,
@@ -365,14 +371,21 @@ pub async fn run<H: Host>(engine: &Engine<H>, effect: Effect, opts: ExecOpts) ->
                 result,
             }
         }
-        Effect::LoadRaw { uri, forum } => Action::RawLoaded(match item_uri(engine, &uri, &forum).await {
-            Ok(uri) => engine.raw(&uri).await,
-            Err(e) => Err(e),
-        }),
+        Effect::LoadRaw { uri, forum } => {
+            Action::RawLoaded(match item_uri(engine, &uri, &forum).await {
+                Ok(uri) => engine.raw(&uri).await,
+                Err(e) => Err(e),
+            })
+        }
         Effect::Bookmark { uri, forum, on } => {
             Action::LocalDone(match item_uri(engine, &uri, &forum).await {
                 Ok(uri) => engine.bookmark(&uri, on).await.map(|()| {
-                    if on { "Bookmarked." } else { "Bookmark removed." }.to_owned()
+                    if on {
+                        "Bookmarked."
+                    } else {
+                        "Bookmark removed."
+                    }
+                    .to_owned()
                 }),
                 Err(e) => Err(e),
             })
@@ -425,10 +438,7 @@ fn cadence_name(c: KarmaCadence) -> &'static str {
 }
 
 /// The cached record of `uri` as JSON.
-async fn cached<H: Host>(
-    engine: &Engine<H>,
-    uri: &str,
-) -> Result<serde_json::Value, EngineError> {
+async fn cached<H: Host>(engine: &Engine<H>, uri: &str) -> Result<serde_json::Value, EngineError> {
     let u = AtUri::parse(uri).map_err(|e| EngineError::invalid_ref(format!("{uri:?}: {e}")))?;
     let row = RecordStore::new(engine.host().cache())
         .get(&u)
@@ -443,7 +453,10 @@ async fn cached<H: Host>(
 /// as in the CLI.
 fn body_markdown(v: &serde_json::Value) -> Result<String, EngineError> {
     let body = v.get("body");
-    match body.and_then(|b| b.get("text")).and_then(serde_json::Value::as_str) {
+    match body
+        .and_then(|b| b.get("text"))
+        .and_then(serde_json::Value::as_str)
+    {
         Some(t) => Ok(t.to_owned()),
         None if body.is_none() => Ok(String::new()),
         None => Err(EngineError::invalid_input(
@@ -463,11 +476,17 @@ async fn start_edit<H: Host>(
     let me = engine.active_account().await?.map(|a| a.did);
     let u = AtUri::parse(&uri).map_err(|e| EngineError::invalid_ref(format!("{uri:?}: {e}")))?;
     if me.as_deref() != Some(u.did().as_str()) {
-        return Err(EngineError::invalid_input("only your own posts and comments can be edited"));
+        return Err(EngineError::invalid_input(
+            "only your own posts and comments can be edited",
+        ));
     }
     let v = cached(engine, &uri).await?;
     let markdown = body_markdown(&v)?;
-    let s = |k: &str| v.get(k).and_then(serde_json::Value::as_str).map(str::to_owned);
+    let s = |k: &str| {
+        v.get(k)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+    };
     let strong = |k: &str| {
         v.get(k)
             .and_then(|r| r.get("uri"))
@@ -503,7 +522,10 @@ async fn start_edit<H: Host>(
                     .unwrap_or_default(),
             };
             (
-                Draft::Post { id: None, post: draft },
+                Draft::Post {
+                    id: None,
+                    post: draft,
+                },
                 format!("{title}\n\n{markdown}"),
                 vec![format!("Editing your post: {title}")],
                 true,
@@ -525,10 +547,17 @@ async fn start_edit<H: Host>(
             vec!["Editing your comment".to_owned()],
             false,
         ),
-        _ => return Err(EngineError::invalid_ref(format!("{uri} is not a post or a comment"))),
+        _ => {
+            return Err(EngineError::invalid_ref(format!(
+                "{uri} is not a post or a comment"
+            )));
+        }
     };
     Ok(EditorRequest {
-        compose: Compose::Edit { uri, base },
+        compose: Compose::Edit {
+            uri,
+            base: Box::new(base),
+        },
         template: crate::editor::edit_template(&prefill, &context, post),
     })
 }
@@ -551,7 +580,11 @@ async fn forum_draft<H: Host>(
     changes: &ForumChanges,
 ) -> Result<ForumDraft, EngineError> {
     let v = cached(engine, forum).await?;
-    let s = |k: &str| v.get(k).and_then(serde_json::Value::as_str).map(str::to_owned);
+    let s = |k: &str| {
+        v.get(k)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+    };
     let about = match v.get("about") {
         None => None,
         Some(b) => match b.get("text").and_then(serde_json::Value::as_str) {
@@ -567,20 +600,28 @@ async fn forum_draft<H: Host>(
     Ok(ForumDraft {
         // the slug is fixed; empty keeps it
         slug: String::new(),
-        name: changes.name.clone().or_else(|| s("name")).unwrap_or_default(),
+        name: changes
+            .name
+            .clone()
+            .or_else(|| s("name"))
+            .unwrap_or_default(),
         description: match &changes.description {
             Some(_) => empty_is_none(&changes.description),
             None => s("description"),
         },
         about,
-        membership: changes.membership.unwrap_or(match s("membership").as_deref() {
-            Some("open") => MembershipMode::Open,
-            _ => MembershipMode::Approval,
-        }),
-        default_tier: changes.default_tier.unwrap_or(match s("defaultTier").as_deref() {
-            Some("frontpage") => DefaultTier::Frontpage,
-            _ => DefaultTier::Personal,
-        }),
+        membership: changes
+            .membership
+            .unwrap_or(match s("membership").as_deref() {
+                Some("open") => MembershipMode::Open,
+                _ => MembershipMode::Approval,
+            }),
+        default_tier: changes
+            .default_tier
+            .unwrap_or(match s("defaultTier").as_deref() {
+                Some("frontpage") => DefaultTier::Frontpage,
+                _ => DefaultTier::Personal,
+            }),
         featured_tags: strs(v.get("featuredTags")),
         // an empty list keeps the moderators (they change through mods_set)
         moderators: Vec::new(),

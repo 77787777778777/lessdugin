@@ -1403,3 +1403,246 @@ fn the_first_public_action_of_each_kind_asks_first() {
     assert!(t2.state.public_notice.is_none());
     assert!(status(&t2).contains("Vote recorded"), "{}", status(&t2));
 }
+
+/// The operations of `engine-api.md` §3.2 (forums and membership), §3.5 (writes) and §3.6
+/// (local state), by name, from the spec's tables.
+fn spec_operations() -> std::collections::BTreeSet<String> {
+    let spec = include_str!("../../../docs/spec/engine-api.md");
+    let mut ops = std::collections::BTreeSet::new();
+    let mut on = false;
+    for line in spec.lines() {
+        if line.starts_with("### ") {
+            on = ["### 3.2 ", "### 3.5 ", "### 3.6 "]
+                .iter()
+                .any(|h| line.starts_with(h));
+            continue;
+        }
+        if !on || !line.starts_with("| `") {
+            continue;
+        }
+        let first = line.split('|').nth(1).unwrap_or_default();
+        for code in first.split('`').skip(1).step_by(2) {
+            let name: String = code
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            if !name.is_empty() {
+                ops.insert(name);
+            }
+        }
+    }
+    ops
+}
+
+/// `docs/plan.md` §M3: "every MVP action is reachable in all three clients (in the TUI at least
+/// through the `:` command line)". The TUI's `REACH` table names every operation of the spec's
+/// tables, and nothing else; so an operation the spec adds fails here until the TUI reaches it
+/// (or says why it does not).
+#[test]
+fn every_engine_operation_has_a_way_in() {
+    use lessdugin_tui::command::{REACH, Reach};
+    let spec = spec_operations();
+    assert!(spec.len() > 40, "the spec's tables were not read: {spec:?}");
+    let reach: std::collections::BTreeSet<String> =
+        REACH.iter().map(|(op, _)| (*op).to_owned()).collect();
+    assert_eq!(REACH.len(), reach.len(), "an operation is listed twice");
+    let missing: Vec<&String> = spec.difference(&reach).collect();
+    assert!(
+        missing.is_empty(),
+        "not reachable from the TUI: {missing:?}"
+    );
+    let stale: Vec<&String> = reach.difference(&spec).collect();
+    assert!(stale.is_empty(), "not operations of the spec: {stale:?}");
+    // every operation an M3 client must offer is a key or a command
+    for (op, r) in REACH {
+        if let Reach::NotHere(why) = r {
+            assert!(
+                why.starts_with("M5")
+                    || op.contains("draft")
+                    || op.contains("_local")
+                    || *op == "prepare_media",
+                "{op} must be reachable: {why}"
+            );
+        }
+    }
+}
+
+/// Each key and command of `REACH` leads to its operation: run on alice's welcome thread with
+/// bob's comment selected (and `read`/`read-all` on her Notifications screen), the effects
+/// it queues (or holds behind a confirmation or the public-action interstitial) include one
+/// that calls it.
+#[test]
+fn every_key_and_command_reaches_its_operation() {
+    use lessdugin_tui::command::{REACH, Reach};
+    let s = scenario();
+    let _comment = alice_with_a_notification(&s);
+    let mut t = alice_tui(&s, 100, 30);
+    block_on(t.start(Some(s.forum.clone())));
+    block_on(t.open_thread(&s.welcome));
+    let on_comment = |t: &Tui| {
+        t.state
+            .top_thread()
+            .and_then(|th| th.layout.items.get(th.pos.selected))
+            .is_some_and(|i| i.uri == s.bob_c1)
+    };
+    for _ in 0..4 {
+        if !on_comment(&t) {
+            block_on(t.press("j"));
+        }
+    }
+    assert!(on_comment(&t), "{}", t.render());
+    // an opinion in its undo window, for `undo`
+    block_on(t.press("u"));
+    assert!(status(&t).contains("Vote recorded"), "{}", status(&t));
+    // opening the thread (and the vote's reload) read its notifications: a new one, for
+    // `read` and `read-all`
+    let _again = alice_with_a_notification(&s);
+    block_on(t.settle());
+
+    let notifications = ["mark_notifications_read", "mark_all_notifications_read"];
+    for (op, r) in REACH {
+        let fx = match r {
+            Reach::Command(line) => {
+                if notifications.contains(op) {
+                    block_on(t.press("N"));
+                }
+                command_effects(&mut t, line)
+            }
+            Reach::Keys(keys) => {
+                let (last, first) = keys.split_last().unwrap();
+                for k in first {
+                    block_on(t.press(k));
+                }
+                t.state.update(lessdugin_tui::Action::Key(
+                    lessdugin_tui::keys::parse_key(last).unwrap(),
+                ))
+            }
+            Reach::Automatic(_) | Reach::NotHere(_) => continue,
+        };
+        let mut all = fx;
+        if let Some(c) = t.state.confirm.take() {
+            all.extend(c.effects);
+        }
+        if let Some(n) = t.state.public_notice.take() {
+            all.extend(n.held);
+        }
+        t.state.panel = None;
+        let ops: Vec<Option<&str>> = all.iter().map(|e| e.operation()).collect();
+        assert!(
+            ops.contains(&Some(*op)),
+            "{op} via {r:?}: {ops:?}, status {}",
+            status(&t)
+        );
+        // back where it started
+        if notifications.contains(op) {
+            block_on(t.press("h"));
+        }
+        assert!(on_comment(&t), "{op} moved away:\n{}", t.render());
+    }
+}
+
+/// Membership, own items and local state from the `:` line, end to end: carol joins with a
+/// note, alice sees her in `:members`, carol deletes her comment after confirming, reads an
+/// item's raw view, bookmarks, mutes, and alice renames the forum.
+#[test]
+fn the_command_line_reaches_membership_items_and_local_state() {
+    use lessdugin_core::dto::{MembersQuery, OpinionIntent, ThreadOpts};
+    let s = scenario();
+    let (alice, carol) = (&s.w.alice, &s.w.carol);
+    let mut t = tui(&s, 100, 30);
+    block_on(t.start(Some(s.forum.clone())));
+
+    // `:join` writes the membership, with its note
+    run_command(&mut t, "join Carol, from the TUI");
+    assert!(status(&t).contains("Join: queued"), "{}", status(&t));
+    block_on(t.engine().outbox_flush()).unwrap();
+    alice.sync(&s.forum);
+    let members = block_on(alice.engine.members(&s.forum, &MembersQuery::default())).unwrap();
+    let c = members.iter().find(|m| m.actor.did == carol.did()).unwrap();
+    assert_eq!(c.membership_note.as_deref(), Some("Carol, from the TUI"));
+    // `:members` shows them in a panel; any key closes it
+    run_command(&mut t, "members");
+    block_on(t.settle());
+    let panel = t.render();
+    assert!(panel.contains("Members"), "{panel}");
+    assert!(panel.contains("bob.example.com"), "{panel}");
+    block_on(t.press("x"));
+    assert!(t.state.panel.is_none());
+
+    // `:react ... --quote` anchors the react to the passage
+    block_on(t.open_thread(&s.welcome));
+    let fx = command_effects(
+        &mut t,
+        &format!("react agree for {} --quote Thanks for the forum", s.bob_c1),
+    );
+    let quoted = fx.iter().any(|e| {
+        matches!(e, lessdugin_tui::Effect::Opinion {
+            intent: OpinionIntent::React { quote: Some(q), .. }, ..
+        } if q.exact == "Thanks for the forum")
+    });
+    assert!(quoted, "{fx:?}");
+
+    // `:raw` shows the record and the mod actions naming it
+    run_command(&mut t, &format!("raw {}", s.bob_c1));
+    block_on(t.settle());
+    let panel = t.render();
+    assert!(panel.contains("Raw"), "{panel}");
+    assert!(panel.contains("mod actions name it"), "{panel}");
+    assert!(panel.contains("Thanks for the forum!"), "{panel}");
+    block_on(t.press("q"));
+
+    // `:bookmark` and `:mute` are local state
+    run_command(&mut t, "bookmark");
+    assert!(block_on(carol.engine.bookmarked(&s.welcome)).unwrap());
+    run_command(&mut t, &format!("mute {}", s.w.bob.did()));
+    let mutes = block_on(carol.engine.mutes()).unwrap();
+    assert!(mutes.iter().any(|m| m.did == s.w.bob.did()), "{mutes:?}");
+
+    // `:delete` asks first: `n` keeps the comment, `y` deletes it
+    let t2 = block_on(
+        carol
+            .engine
+            .comment(&lessdugin_core::dto::CommentDraft::new(
+                &s.welcome,
+                None,
+                "To be deleted.",
+            )),
+    )
+    .unwrap();
+    carol.flush();
+    let mine = carol.done(&t2);
+    run_command(&mut t, &format!("delete {mine}"));
+    assert!(t.state.confirm.is_some());
+    assert!(t.render().contains("Confirm"), "{}", t.render());
+    block_on(t.press("n"));
+    assert!(t.state.confirm.is_none());
+    assert_eq!(
+        block_on(t.engine().writes())
+            .unwrap()
+            .iter()
+            .filter(|w| !matches!(w.state, lessdugin_core::dto::WriteState::Done { .. }))
+            .count(),
+        0
+    );
+    run_command(&mut t, &format!("delete {mine}"));
+    block_on(t.press("y"));
+    assert!(status(&t).contains("Delete: queued"), "{}", status(&t));
+    block_on(t.engine().outbox_flush()).unwrap();
+    block_on(t.settle());
+    let view = block_on(carol.engine.get_thread(&s.welcome, &ThreadOpts::default())).unwrap();
+    assert!(view.comments.iter().all(|c| c.uri != mine), "{view:?}");
+
+    // alice renames her forum with `:forum edit`
+    let mut ta = alice_tui(&s, 100, 30);
+    block_on(ta.start(Some(s.forum.clone())));
+    run_command(&mut ta, "forum edit --name Meta, renamed --description");
+    assert!(
+        status(&ta).contains("Forum edit: queued"),
+        "{}",
+        status(&ta)
+    );
+    block_on(ta.engine().outbox_flush()).unwrap();
+    let f = block_on(alice.engine.forum_open(&s.forum)).unwrap();
+    assert_eq!(f.forum.name, "Meta, renamed");
+    assert_eq!(f.forum.description, None);
+}
