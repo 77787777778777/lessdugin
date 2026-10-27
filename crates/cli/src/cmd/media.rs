@@ -706,8 +706,8 @@ async fn get(
     if ctx.out.is_json() {
         ctx.out.json(&Saved {
             dto: lessdugin_core::dto::DTO_VERSION,
-            cid: f.cid,
             mime: f.agreed(),
+            cid: f.cid,
             size_bytes: f.size,
             path: to.display().to_string(),
         });
