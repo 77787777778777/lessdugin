@@ -5,9 +5,11 @@
 // under CI (or with LESSDUGIN_WASM_TEST=1).
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
+import { deflateSync } from "node:zlib";
 import { IDBFactory, IDBKeyRange } from "fake-indexeddb";
 import { afterEach, describe, expect, it } from "vitest";
 import { NS } from "./auth-bridge.ts";
+import { IdbKv } from "./idb.ts";
 import type { ChannelLike } from "./leader.ts";
 import { LocalLocks } from "./locks.ts";
 import type { AuthBridgePort, PdsRequest, WorkerInit } from "./protocol.ts";
@@ -153,6 +155,98 @@ async function rawCidOfDigest(digest: Uint8Array): Promise<string> {
   return out;
 }
 
+/** Every value of the state store `${prefix}-state` of `o` (prepared media are among them). */
+async function stateValues(o: ReturnType<typeof origin>, prefix: string): Promise<Uint8Array[]> {
+  const kv = await IdbKv.open(`${prefix}-state`, "strict", o.idb);
+  try {
+    const flat = await kv.scan(undefined, false, undefined, false, false, 100_000);
+    return flat.filter((_, i) => i % 2 === 1);
+  } finally {
+    kv.close();
+  }
+}
+
+/** The offset of `needle` in `hay`, or -1. */
+function indexOf(hay: Uint8Array, needle: number[]): number {
+  outer: for (let i = 0; i + needle.length <= hay.length; i++) {
+    for (let j = 0; j < needle.length; j++) if (hay[i + j] !== needle[j]) continue outer;
+    return i;
+  }
+  return -1;
+}
+
+/** The JPEG a stored value holds (SOI to the end of the value), or null. */
+function storedJpeg(values: Uint8Array[]): Uint8Array | null {
+  for (const v of values) {
+    const at = indexOf(v, [0xff, 0xd8, 0xff]);
+    if (at >= 0) return v.subarray(at);
+  }
+  return null;
+}
+
+/** [width, height] from a JPEG's start-of-frame segment. */
+function jpegSize(jpeg: Uint8Array): [number, number] {
+  let i = 2;
+  while (i + 9 < jpeg.length && jpeg[i] === 0xff) {
+    const marker = jpeg[i + 1] ?? 0;
+    if (marker >= 0xc0 && marker <= 0xc3) {
+      const at = (k: number) => ((jpeg[i + k] ?? 0) << 8) | (jpeg[i + k + 1] ?? 0);
+      return [at(7), at(5)];
+    }
+    i += 2 + (((jpeg[i + 2] ?? 0) << 8) | (jpeg[i + 3] ?? 0));
+  }
+  throw new Error("no start-of-frame segment");
+}
+
+/** The CRC-32 of a PNG chunk's type and data. */
+function crc32(bytes: Uint8Array): number {
+  let c = ~0;
+  for (const b of bytes) {
+    c ^= b;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+  }
+  return ~c >>> 0;
+}
+
+/** A `w`×`h` RGB PNG of noise (stored, not compressed: about `3·w·h` bytes). */
+function noisePng(w: number, h: number): Uint8Array {
+  const chunk = (kind: string, data: Uint8Array): Uint8Array => {
+    const out = new Uint8Array(12 + data.length);
+    const dv = new DataView(out.buffer);
+    dv.setUint32(0, data.length);
+    out.set(new TextEncoder().encode(kind), 4);
+    out.set(data, 8);
+    dv.setUint32(8 + data.length, crc32(out.subarray(4, 8 + data.length)));
+    return out;
+  };
+  const ihdr = new Uint8Array(13);
+  const dv = new DataView(ihdr.buffer);
+  dv.setUint32(0, w);
+  dv.setUint32(4, h);
+  ihdr.set([8, 2, 0, 0, 0], 8); // 8-bit RGB
+  const raw = new Uint8Array(h * (1 + 3 * w));
+  let x = 0x2545f491;
+  for (let i = 0; i < raw.length; i++) {
+    x ^= x << 13;
+    x ^= x >>> 17;
+    x ^= x << 5;
+    raw[i] = i % (1 + 3 * w) === 0 ? 0 : x & 0xff; // filter byte 0 starts each row
+  }
+  const parts = [
+    Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk("IHDR", ihdr),
+    chunk("IDAT", new Uint8Array(deflateSync(raw, { level: 0 }))),
+    chunk("IEND", new Uint8Array()),
+  ];
+  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+  let at = 0;
+  for (const p of parts) {
+    out.set(p, at);
+    at += p.length;
+  }
+  return out;
+}
+
 async function rejects(p: Promise<unknown>): Promise<EngineError> {
   try {
     await p;
@@ -286,7 +380,8 @@ describe.runIf(present)("WorkerEngine over the real wasm", () => {
     const app1 = [...new TextEncoder().encode("Exif\0\0"), ...tiff, 0, 0, 0, 0];
     const seg = [0xff, 0xe1, (app1.length + 2) >> 8, (app1.length + 2) & 0xff, ...app1];
     const photo = Uint8Array.from([...plain.subarray(0, 2), ...seg, ...plain.subarray(2)]);
-    const { engine } = await tab(origin(), { elect: false });
+    const o = origin();
+    const { engine } = await tab(o, { elect: false, dbPrefix: "orient" });
     const ref = (await engine.prepareMedia(photo, { declaredMime: "image/jpeg" })) as {
       cid: string;
       mime: string;
@@ -297,8 +392,36 @@ describe.runIf(present)("WorkerEngine over the real wasm", () => {
     // pixels unrotated. The orientation pass re-encodes, so the prepared file is another one.
     const stripped = Uint8Array.from([...plain.subarray(0, 2), ...plain.subarray(20)]);
     expect(ref.cid).not.toBe(await rawCid(stripped));
-    expect(ref.sizeBytes).not.toBe(stripped.length);
+    expect(jpegSize(plain)).toEqual([8, 4]);
+    // the prepared bytes (kept for the upload) are the photo turned a quarter: 4 wide, 8 high
+    const prepared = storedJpeg(await stateValues(o, "orient"));
+    expect(prepared, "the prepared JPEG is in the state store").not.toBeNull();
+    if (!prepared) return;
+    expect(await rawCid(prepared)).toBe(ref.cid);
+    expect(prepared.length).toBe(ref.sizeBytes);
+    expect(jpegSize(prepared)).toEqual([4, 8]);
   });
+
+  it("downscales an image over 5 MiB in the SPA's prepareMedia (m4-6, m4-7)", async () => {
+    const big = noisePng(1400, 1400);
+    expect(big.length).toBeGreaterThan(5 * 1024 * 1024);
+    const o = origin();
+    const { engine } = await tab(o, { elect: false, dbPrefix: "down" });
+    const ref = (await engine.prepareMedia(big, { declaredMime: "image/png" })) as {
+      mime: string;
+      sizeBytes: number;
+    };
+    expect(ref.mime).toBe("image/png");
+    expect(ref.sizeBytes).toBeLessThanOrEqual(5 * 1024 * 1024);
+    // its first chunk starts with the PNG signature and an IHDR of half the size
+    const values = await stateValues(o, "down");
+    const first = values.find((v) => indexOf(v, [0x89, 0x50, 0x4e, 0x47]) >= 0);
+    expect(first, "the prepared PNG is in the state store").toBeDefined();
+    if (!first) return;
+    const at = indexOf(first, [0x89, 0x50, 0x4e, 0x47]);
+    const ihdr = new DataView(first.buffer, first.byteOffset + at + 16, 8);
+    expect([ihdr.getUint32(0), ihdr.getUint32(4)]).toEqual([700, 700]);
+  }, 60_000);
 
   it("prepares media from bytes, within the wasm window only (m4-18)", async () => {
     const { engine } = await tab(origin(), { elect: false });
