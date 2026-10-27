@@ -1130,6 +1130,13 @@ fn reopening_a_degraded_forum_announces_no_change() {
         let ev = bob.take_events();
         assert!(!forum_changed(&ev), "{ev:?}");
     }
+    // once the back-off is over the authority is tried again; it fails as before, which
+    // changes nothing in the cache, so there is still no `Changed`
+    w.tick(lessdugin_core::limits::FORUM_REOPEN_MS);
+    let v = block_on(bob.engine.forum_open(&w.forum)).unwrap();
+    assert!(v.completeness.degraded, "{v:?}");
+    let ev = bob.take_events();
+    assert!(!forum_changed(&ev), "a retry that changed nothing: {ev:?}");
 }
 
 #[test]

@@ -178,7 +178,6 @@ impl<H: Host> Engine<H> {
     }
 }
 
-
 impl<H: Host> Engine<H> {
     /// `validate_record(collection, json)` (`engine-api.md` §3.7): the validity of `json` as a
     /// record of `collection` (an NSID of this build's namespace, or its last segment such as
