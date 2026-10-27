@@ -1239,6 +1239,7 @@ The key of a tuple is the concatenation of its elements. A prefix scan over `(e1
 | state | `("out.blob", account, seq, index, chunk)` | bytes | ≤ 1 MiB chunks of a blob uploaded when write `seq` is sent (`data-model.md` §8.8) |
 | state | `("prep", cid)` | `{v, mime, size, chunks, at}` | a file `prepare_media` prepared, until a write that uploads it is enqueued or `PREPARED_MEDIA_TTL_MS` passes (`data-model.md` §8.8) |
 | state | `("prep.blob", cid, n)` | bytes | its ≤ 1 MiB chunks, raw |
+| state | `("loc", "media", cid)` | legacy | prepared bytes of the first M4 builds: deleted when a file is prepared, and never exported or imported (`export_local`), as they are a copy of a file, not local state |
 | state | `("loc", kind, key…)` | per kind | kinds: `draft`, `read`, `sub`, `follow`, `unfollow`, `bookmark`, `mute`, `setting`, `alias`, `last_listing`, `consent`, `media_host`, `as_pin`, `quarantine`, `account`, `active_account`, `seeded` |
 | state | `("notif", account, ts, id)` | notification | |
 | state | `("meta", "schema")` | integer | `state` is migrated, never dropped |
