@@ -565,13 +565,18 @@ fn the_human_thread_shows_agreement_reacts_and_banners() {
     w.bob.json(&["vote", &w.post, "up", "--yes"]);
     w.bob.json(&["agree", &w.post, "strong-agree", "--yes"]);
     w.carol.json(&["react", &w.post, "crux", "--quote", "First post", "--yes"]);
-    w.bob.json(&["react", &w.post, "crux"]);
+    w.bob.json(&["react", &w.post, "crux", "--yes"]);
     w.alice.ok(&["sync", &w.forum]);
     let out = w.alice.ok(&["read", &w.post, "--no-pager"]);
     assert!(out.contains("agreement +"), "{out}");
-    assert!(out.contains("by @carol.test"), "{out}");
-    assert!(out.contains("\u{201c}First post\u{201d}"), "{out}");
-    assert!(out.contains("by @bob.test"), "{out}");
+    // the creators are named by handle when the thread knows it, else by short DID
+    let carol_short = lessdugin_core::identity::short_did(&w.carol.did());
+    let bob_short = lessdugin_core::identity::short_did(&w.bob.did());
+    assert!(
+        out.contains(&format!("Crux by {carol_short} on \u{201c}First post\u{201d}")),
+        "{out}"
+    );
+    assert!(out.contains(&format!("Crux by {bob_short}\n")), "{out}");
 
     // the edit moves the votes to an earlier version and orphans the quote
     let e = w
@@ -590,8 +595,10 @@ fn the_human_thread_shows_agreement_reacts_and_banners() {
     w.alice.json(&["mods", "add", "bob.test"]);
     w.bob.account.deactivate();
     let dave = w.net.reader(&w.alice);
-    let out = dave.ok(&["read", &w.post, "--no-pager"]);
+    // the sync is partial (exit 6) with a moderator's repository unavailable
+    dave.run(&["sync", &w.forum]);
+    let out = dave.ok(&["--offline", "read", &w.post, "--no-pager"]);
     assert!(out.contains("moderation data unavailable"), "{out}");
-    let out = dave.ok(&["ls", &w.forum, "--all"]);
+    let out = dave.ok(&["--offline", "ls", &w.forum, "--all"]);
     assert!(out.contains("moderation data unavailable"), "{out}");
 }
