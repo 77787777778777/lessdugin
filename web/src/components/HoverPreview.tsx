@@ -83,7 +83,7 @@ function PostPreview({ uri }: { uri: string }) {
         <p className={styles.muted}>Collapsed ({post.state.reason})</p>
       )}
       <div className={styles.body}>
-        <RenderedHtml html={body.html} preview className="lfm-compact" />
+        <RenderedHtml html={body.html} media={body.media} preview className="lfm-compact" />
       </div>
       <RecordLink uri={uri} className={styles.open}>
         Open →

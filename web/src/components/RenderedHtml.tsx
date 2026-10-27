@@ -11,7 +11,9 @@
 // - `a[data-anchor]`: scrolls inside this root only (lfm-1.md §4.6; never `location.hash`);
 // - `[data-cid]` media: "click to load" placeholders; a click is the consent (synthesis-v1.md
 //   3.9) and the bytes then come from the author's PDS through `engine.loadMedia`, which
-//   streams and CID-checks them before the element gets a URL;
+//   streams, CID-checks and sniffs them and hands back a `blob:` URL with the display type.
+//   An image or a player gets that URL (lib/media.ts, lib/mediaUrl.ts), anything else becomes
+//   a download card; the URL is revoked with the content (threat-model SPA-7);
 // - hover/focus previews for eligible record links and DIDs, depth 1 (lfm-1.md §5.3).
 // After insertion it also substitutes verified handles into mentions (§5.4: eagerly only for
 // the first 16 distinct mentioned DIDs that are forum participants; any other mention only once
@@ -19,12 +21,15 @@
 // links keyboard-reachable, names task-list checkboxes, and, when asked, copies footnotes next to
 // their references as sidenotes for wide screens.
 
-import type { ActorView } from "@lessdugin/engine/types";
+import type { ActorView, MediaView } from "@lessdugin/engine/types";
 import { useQueryClient } from "@tanstack/react-query";
 import { type Ref, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState } from "react";
 import { useEngine } from "../engine/context.tsx";
 import { qk } from "../engine/queries.ts";
 import { cx } from "../lib/cx.ts";
+import { downloadObjectUrl } from "../lib/download.ts";
+import { type LoadedForDisplay, loadMediaFor, mediaDisplay } from "../lib/media.ts";
+import { setMediaSource } from "../lib/mediaUrl.ts";
 import { sanitizerMismatch, setSanitizedHtml } from "../lib/sanitize.ts";
 import { isDid, parseAtUri, previewEligible } from "../lib/uri.ts";
 import { HoverPreview, type HoverTarget } from "./HoverPreview.tsx";
@@ -76,13 +81,20 @@ export function scrollToAnchor(
   setTimeout(() => target?.classList.remove("lfm-target"), 1500);
 }
 
+/** What a media placeholder is called: its alt or label (lfm-1.md §6.2), else its kind. */
+function mediaLabel(el: Element): string {
+  const isImage = el.localName === "img";
+  return (
+    (isImage ? el.getAttribute("alt") : el.textContent)?.trim() || (isImage ? "image" : "media")
+  );
+}
+
 /** Replaces media with "click to load" placeholders (runtime DOM changes, lfm-1.md §8.2). */
 function addMediaPlaceholders(root: Element): void {
   for (const el of root.querySelectorAll("img[data-cid], span.media[data-cid]")) {
     const cid = el.getAttribute("data-cid") ?? "";
     const isImage = el.localName === "img";
-    const label =
-      (isImage ? el.getAttribute("alt") : el.textContent)?.trim() || (isImage ? "image" : "media");
+    const label = mediaLabel(el);
     const button = document.createElement("button");
     button.type = "button";
     button.className = "lfm-media-load";
@@ -91,6 +103,38 @@ function addMediaPlaceholders(root: Element): void {
     el.classList.add("lfm-media-pending");
     el.before(button);
   }
+}
+
+/** Shows the loaded media of the placeholder `pending` (lfm-1.md §6.2, sync.md §11.2): as the
+ * image itself or a player when its display type allows it, else as a download card. */
+function showMedia(pending: Element, loaded: LoadedForDisplay): void {
+  const display = mediaDisplay(loaded, pending.localName === "img" ? "img" : "span");
+  if (display.kind === "img" && pending instanceof HTMLImageElement) {
+    setMediaSource(pending, loaded.url);
+    pending.classList.remove("lfm-media-pending");
+    return;
+  }
+  if (display.kind === "video" || display.kind === "audio") {
+    // a player with controls, because a media element without them cannot be started by
+    // keyboard
+    const el = document.createElement(display.kind);
+    setMediaSource(el, loaded.url);
+    el.setAttribute("controls", "");
+    el.setAttribute("preload", "metadata");
+    el.className = "lfm-media";
+    pending.replaceWith(el);
+    return;
+  }
+  // A download card: saved as `<cid>.<ext>`, never opened in the page (threat-model SPA-7).
+  const card = document.createElement("span");
+  card.className = "lfm-media-card";
+  const save = document.createElement("button");
+  save.type = "button";
+  save.className = "lfm-media-download";
+  save.textContent = `⤓ Download ${mediaLabel(pending)} (${display.filename})`;
+  save.addEventListener("click", () => downloadObjectUrl(loaded.url, display.filename));
+  card.append(save);
+  pending.replaceWith(card);
 }
 
 /** In-content anchor links (`a[data-anchor]`: footnote references, back-links, `#frag` links)
@@ -158,12 +202,16 @@ function addSidenotes(root: Element): void {
 
 export function RenderedHtml({
   html,
+  media,
   className,
   preview = false,
   sidenotes = false,
   ref,
 }: {
   html: string;
+  /** The body's media (`RenderedBody.media`): each names its author's PDS, declared type and
+   * size for `loadMedia`. */
+  media?: readonly MediaView[] | undefined;
   className?: string | undefined;
   /** Inside a hover preview: no nested previews (depth 1). */
   preview?: boolean | undefined;
@@ -175,6 +223,10 @@ export function RenderedHtml({
   const openRef = useOpenRef();
   const participants = useParticipants();
   const rootRef = useRef<HTMLDivElement>(null);
+  const mediaRef = useRef(media);
+  mediaRef.current = media;
+  /** Revokes the object URLs of the media shown in the current content. */
+  const revokers = useRef<(() => void)[]>([]);
   const [mismatch, setMismatch] = useState(false);
   const [hover, setHover] = useState<HoverTarget | null>(null);
   const timers = useRef<{
@@ -204,6 +256,11 @@ export function RenderedHtml({
       addSidenotes(el);
       makeAnchorsFocusable(el);
     }
+    // the content is replaced or unmounted: its media URLs go with it (SPA-7)
+    const shown = revokers.current;
+    return () => {
+      for (const revoke of shown.splice(0)) revoke();
+    };
   }, [html, sidenotes]);
 
   // Mentions: substitute handles verified both ways (§5.4). Eager resolution covers only the
@@ -290,33 +347,29 @@ export function RenderedHtml({
         // which learns this device's address, so nothing is fetched until the reader asks.
         media.setAttribute("aria-busy", "true");
         media.textContent = "loading…";
-        void engine
-          .loadMedia(cid as Parameters<typeof engine.loadMedia>[0])
-          .then((loaded) => {
-            // the host streamed and CID-checked the bytes, so `url` is safe to point at
-            const pending = root.querySelector(`[data-cid="${CSS.escape(cid)}"]`);
-            if (pending === null) return;
-            if (pending.localName === "img") {
-              pending.setAttribute("src", loaded.url);
-              pending.classList.remove("lfm-media-pending");
-            } else {
-              // video/audio/other: replace the placeholder span with a player that has
-              // controls, because a media element without them cannot be started by keyboard
-              const el = document.createElement(
-                pending.getAttribute("data-media-kind") === "audio" ? "audio" : "video",
-              );
-              el.setAttribute("src", loaded.url);
-              el.setAttribute("controls", "");
-              el.setAttribute("preload", "metadata");
-              el.className = "lfm-media";
-              pending.replaceWith(el);
-            }
-            media.remove();
-          })
-          .catch((err: unknown) => {
-            media.removeAttribute("aria-busy");
-            media.textContent = `could not load: ${errorMessage(err)}`;
-          });
+        const next = media.nextElementSibling;
+        const pending =
+          next?.getAttribute("data-cid") === cid
+            ? next
+            : root.querySelector(`[data-cid="${CSS.escape(cid)}"]`);
+        const view = mediaRef.current?.find((m) => m.cid === cid);
+        const show = async (): Promise<void> => {
+          // the host streamed the bytes, checked them against the CID and sniffed them; the
+          // `blob:` URL is ours to revoke, with the content it is shown in
+          const loaded = await loadMediaFor(engine, cid, view);
+          const revoke = (): void => URL.revokeObjectURL(loaded.url);
+          if (pending === null || !pending.isConnected || !root.contains(pending)) {
+            revoke();
+            return;
+          }
+          revokers.current.push(revoke);
+          showMedia(pending, loaded);
+          media.remove();
+        };
+        void show().catch((err: unknown) => {
+          media.removeAttribute("aria-busy");
+          media.textContent = `could not load: ${errorMessage(err)}`;
+        });
         return;
       }
       const a = linkFrom(e.target);

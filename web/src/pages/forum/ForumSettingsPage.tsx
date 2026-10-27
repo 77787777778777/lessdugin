@@ -194,7 +194,7 @@ export function ForumSettingsPage() {
         <>
           <h2 className={ui.sectionTitle}>About</h2>
           <div className={ui.card}>
-            <RenderedHtml html={view.about.html} />
+            <RenderedHtml html={view.about.html} media={view.about.media} />
           </div>
         </>
       )}

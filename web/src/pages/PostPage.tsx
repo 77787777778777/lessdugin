@@ -334,7 +334,7 @@ function PostBodyView({
             ]
           </p>
         ) : (
-          <RenderedHtml html={body.html} sidenotes ref={bodyRef} />
+          <RenderedHtml html={body.html} media={body.media} sidenotes ref={bodyRef} />
         )}
         {view.sequences.map((s) => (
           <nav

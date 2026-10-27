@@ -386,6 +386,24 @@
   color: var(--color-text);
 }
 
+/* A download card (sync.md §11.2): the file is saved, never opened in the page. */
+.lfm .lfm-media-download {
+  max-width: 100%;
+  padding: 0.6em 1em;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-2);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+
+.lfm .lfm-media-download:hover {
+  border-color: var(--color-primary);
+}
+
 .lfm .lfm-sidenote {
   display: none;
 }

@@ -101,7 +101,7 @@ function UserProfile({ actor }: { actor: string }) {
           </button>
         </p>
       )}
-      {u.bio && <RenderedHtml html={u.bio.html} />}
+      {u.bio && <RenderedHtml html={u.bio.html} media={u.bio.media} />}
       {u.links.length > 0 && (
         <ul className={ui.list}>
           {u.links.map((l) => (
@@ -134,7 +134,7 @@ function UserProfile({ actor }: { actor: string }) {
             <RecordLink uri={c.uri}>{shortAge(c.tRankMs)}</RecordLink>
             <span>{c.score.score} karma</span>
           </div>
-          <RenderedHtml html={c.body.html} className="lfm-compact" />
+          <RenderedHtml html={c.body.html} media={c.body.media} className="lfm-compact" />
         </div>
       ))}
     </div>

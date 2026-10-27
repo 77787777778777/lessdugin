@@ -13,8 +13,9 @@
 //                 a non-literal attribute name), `setAttributeNS`, assignments to `location` /
 //                 `location.href`, `location.assign` / `replace`, `window.open`, and
 //                 `createElement("a", { href })`; the allowed places are the object-URL
-//                 download helper in src/lib/download.ts and, for `location.assign` only, the
-//                 sign-in redirect in src/lib/navigate.ts;
+//                 download helper in src/lib/download.ts, for `.src` assignments only the
+//                 media-source helper in src/lib/mediaUrl.ts (object URLs of verified blobs),
+//                 and, for `location.assign` only, the sign-in redirect in src/lib/navigate.ts;
 //   dsih          `dangerouslySetInnerHTML` anywhere (attribute, property or identifier);
 //   html-sink     `innerHTML` / `outerHTML` / `insertAdjacentHTML` / `createContextualFragment` /
 //                 `setHTMLUnsafe` / `document.write` outside src/lib/sanitize.ts (the Trusted
@@ -32,6 +33,7 @@ import { parseAst } from "vite";
 const SAFE_LINK = "components/SafeLink.tsx";
 const SANITIZE = "lib/sanitize.ts";
 const DOWNLOAD = "lib/download.ts";
+const MEDIA_URL = "lib/mediaUrl.ts";
 const NAVIGATE = "lib/navigate.ts";
 const SINKS = new Set([
   "innerHTML",
@@ -146,7 +148,7 @@ export function check(file, text) {
       report(
         node,
         "dom-url",
-        `${what}: URLs reach the DOM only through <SafeLink> (or lib/download.ts for object URLs)`,
+        `${what}: URLs reach the DOM only through <SafeLink> (object URLs: lib/download.ts, lib/mediaUrl.ts)`,
       );
     }
   };
@@ -216,7 +218,7 @@ export function check(file, text) {
         if (prop !== null && DOM_URL_PROPS.has(prop)) {
           if (prop === "href" && isLocation(left.object))
             domUrl(node, "assignment to location.href");
-          else domUrl(node, `assignment to .${prop}`);
+          else if (!(file === MEDIA_URL && prop === "src")) domUrl(node, `assignment to .${prop}`);
         } else if (prop === "hash" && isLocation(left.object)) {
           domUrl(node, "assignment to location.hash");
         }

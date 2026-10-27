@@ -310,7 +310,12 @@ export function CommentItem({
             </blockquote>
           )}
           <div className={cx(node.retracted && styles.retracted)}>
-            <RenderedHtml html={node.body.html} className="lfm-compact" ref={bodyRef} />
+            <RenderedHtml
+              html={node.body.html}
+              media={node.body.media}
+              className="lfm-compact"
+              ref={bodyRef}
+            />
           </div>
           {ctx.votingMode === "reacts" && (
             <ReactBar
