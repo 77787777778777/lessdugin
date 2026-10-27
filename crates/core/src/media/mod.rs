@@ -774,13 +774,12 @@ pub fn decode_image(bytes: &[u8]) -> Option<image::DynamicImage> {
     reader(bytes)?.decode().ok()
 }
 
-/// True for an animation: a GIF, an APNG (an `acTL` chunk before the first `IDAT`) or an
-/// animated WebP (VP8X's animation flag `0x02`, RFC 9649). The decoders here return its first
-/// frame only, so a re-encode would turn it into a still: it keeps its bytes instead.
+/// True for an APNG (an `acTL` chunk before the first `IDAT`) or an animated WebP (VP8X's
+/// animation flag `0x02`, RFC 9649). The decoders here return the first frame only, so a
+/// re-encode would turn the animation into a still: it keeps its bytes instead.
 #[cfg(feature = "orientation")]
 fn is_animated(b: &[u8]) -> bool {
     match sniff(b) {
-        Some(Format::Gif) => true,
         Some(Format::Png) => {
             let mut i = 8;
             while let Some(head) = b.get(i..i + 8) {
@@ -978,8 +977,8 @@ fn fit_to_target(prepared: Vec<u8>) -> Vec<u8> {
 /// Returns `None` when the bytes are not a decodable image or cannot be made to fit - the caller
 /// then refuses the upload rather than sending something the PDS will reject again (§8.8: "On 413,
 /// the client downscales (images) or refuses"). Audio, video, PDF and text never downscale, and
-/// neither does an animation (a GIF, APNG or animated WebP, [`is_animated`]): it is not resized
-/// frame by frame here, and its first frame alone is not the file.
+/// neither does an animation (a GIF, an APNG or an animated WebP, [`is_animated`]): it is not
+/// resized frame by frame here, and its first frame alone is not the file.
 #[cfg(feature = "orientation")]
 pub fn downscale_to_fit(bytes: &[u8], max_bytes: usize) -> Option<Vec<u8>> {
     use image::ImageFormat;
@@ -988,9 +987,10 @@ pub fn downscale_to_fit(bytes: &[u8], max_bytes: usize) -> Option<Vec<u8>> {
     }
     let image_format = match sniff(bytes)? {
         Format::Png => ImageFormat::Png,
+        Format::Gif => return None, // an animation is not resized frame by frame here
         Format::Webp => ImageFormat::WebP,
         Format::Jpeg => ImageFormat::Jpeg,
-        Format::Gif | Format::Iso => return None,
+        Format::Iso => return None,
     };
     let mut img = decode_image(bytes)?;
     // bounded: at most 20 halvings (a 2^20-fold reduction), so this cannot spin
