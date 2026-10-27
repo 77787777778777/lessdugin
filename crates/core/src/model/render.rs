@@ -30,6 +30,9 @@ pub const NOTICE_SPILLED: &str = "[the body is stored as a blob and is not loade
 /// Notice for a spilled body whose fetched bytes do not match its CID (`data-model.md` §5.2
 /// rule 3: an "unreadable body" placeholder; the record stays valid).
 pub const NOTICE_UNVERIFIED_BODY: &str = "[unreadable body: it does not match its CID]";
+/// Notice for a spilled body whose blob the author's PDS reports missing (`sync.md` §11.1,
+/// HTTP 400 "Blob not found": not asked for again).
+pub const NOTICE_MISSING_BODY: &str = "[the body is missing: the author's PDS does not have it]";
 /// Notice for a body of an unknown union member.
 pub const NOTICE_UNKNOWN_BODY: &str = "[unsupported body format]";
 /// Notice for flattened structure (`lfm-1.md` §8.4).
@@ -176,6 +179,8 @@ pub enum Spilled {
     Error(lessdugin_markdown::BodyError),
     /// The bytes did not match the CID (`data-model.md` §5.2 rule 3).
     Unverified,
+    /// The author's PDS does not have the blob (`sync.md` §11.1: missing, not retried).
+    Missing,
 }
 
 /// Renders a spilled body from what was fetched for it.
@@ -185,11 +190,17 @@ fn render_spilled(md: &Value, spilled: &Spilled) -> RenderedBody {
     match spilled {
         Spilled::Text(src) => render_markdown(src, &media, profile),
         Spilled::Error(e) => from_rendered(lessdugin_markdown::render_error(*e, profile), &media),
-        Spilled::Unverified => RenderedBody {
-            notices: vec![NOTICE_UNVERIFIED_BODY.to_owned()],
-            media: media_views(&media),
-            ..empty_body()
-        },
+        Spilled::Unverified => placeholder(NOTICE_UNVERIFIED_BODY, &media),
+        Spilled::Missing => placeholder(NOTICE_MISSING_BODY, &media),
+    }
+}
+
+/// A body that is only `notice` (the record stays valid), with its media.
+fn placeholder(notice: &str, media: &Value) -> RenderedBody {
+    RenderedBody {
+        notices: vec![notice.to_owned()],
+        media: media_views(media),
+        ..empty_body()
     }
 }
 

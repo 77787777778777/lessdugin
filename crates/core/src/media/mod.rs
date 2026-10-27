@@ -1548,9 +1548,10 @@ impl<H: crate::host::Host> crate::engine::Engine<H> {
     /// does not hold yet, so the views render them (`lfm-1.md` §1.3): from the AUTHOR's PDS,
     /// through the streaming, CID-checked `Host::fetch_blob` with `BLOB_TEXT_MAX_BYTES`, then
     /// read back through `blob_read` and decoded (UTF-8, one leading U+FEFF stripped). A body
-    /// that cannot be fetched now (the network, a missing blob) stays pending and is asked for
-    /// again after `BODY_BLOB_RETRY_MS`; one that does not match its CID, is not UTF-8 or is too
-    /// large renders as unreadable. Only the bodies the views render are fetched: those of items
+    /// that cannot be fetched now (the network) stays pending and is asked for again after
+    /// `BODY_BLOB_RETRY_MS`; one the PDS reports missing renders as missing and is not asked for
+    /// again (`sync.md` §11.1); one that does not match its CID, is not UTF-8 or is too large
+    /// renders as unreadable. Only the bodies the views render are fetched: those of items
     /// the fold lists (`sync.md` §11.4, "hidden, provisional and pending content is never
     /// prefetched").
     pub(crate) async fn load_spilled_bodies(
@@ -1615,11 +1616,8 @@ impl<H: crate::host::Host> crate::engine::Engine<H> {
             Ok(h) => h,
             Err(HostError::CidMismatch) => return Ok(Spilled::Unverified),
             Err(HostError::TooLarge) => return Ok(Spilled::Error(BodyError::TooLarge)),
-            Err(e @ HostError::HttpStatus(400, _)) => {
-                // "Blob not found": no copy is kept (sync.md §11.4); it stays pending
-                let _ = self.host().blob_delete(cid).await;
-                return Err(e.into());
-            }
+            // "Blob not found": missing, not retried (sync.md §11.1); nothing was stored
+            Err(HostError::HttpStatus(400, _)) => return Ok(Spilled::Missing),
             Err(e) => return Err(e.into()),
         };
         // a copy stored by another fetch is held to the same cap

@@ -15,7 +15,7 @@ use lessdugin_core::host::{Host, KvOp, KvStore};
 use lessdugin_core::media::MediaOwner;
 use lessdugin_lexicon::collection::nsid;
 use lessdugin_lexicon::keys;
-use lessdugin_testkit::fake_pds::{AccountHandle, tiny_png};
+use lessdugin_testkit::fake_pds::{AccountHandle, Fault, tiny_png};
 use lessdugin_testkit::repo::tid_at_ms;
 use lessdugin_testkit::{FakeNet, MemHost};
 use serde_json::{Value, json};
@@ -359,7 +359,9 @@ fn a_spilled_body_that_is_not_utf8_is_unreadable() {
 }
 
 #[test]
-fn a_spilled_body_that_cannot_be_fetched_stays_pending_and_is_asked_again_later() {
+fn a_spilled_body_the_pds_does_not_have_is_missing_and_not_asked_again() {
+    // sync.md §11.1: HTTP 400 "Blob not found" is missing, not retried; the body was pending and
+    // asked for again every BODY_BLOB_RETRY_MS
     let mut n = Net::new();
     let bob = n
         .net
@@ -381,6 +383,35 @@ fn a_spilled_body_that_cannot_be_fetched_stays_pending_and_is_asked_again_later(
     bob.put(nsid::POST, &rkey, &v);
     let uri = bob.uri(nsid::POST, &rkey);
     let e = n.device("anon", None);
+    n.net.clear_requests();
+    let pv = read(&e, &f, &uri);
+    assert_eq!(
+        pv.body.notices,
+        [lessdugin_core::model::render::NOTICE_MISSING_BODY]
+    );
+    assert_eq!(pv.body.text, "");
+    assert_eq!(blob_requests(&n).len(), 1);
+    // not asked again, even once BODY_BLOB_RETRY_MS has passed
+    n.tick(lessdugin_core::limits::BODY_BLOB_RETRY_MS);
+    n.net.clear_requests();
+    let again = block_on(e.get_post(&uri)).unwrap();
+    assert_eq!(again.body.notices, pv.body.notices);
+    assert!(blob_requests(&n).is_empty());
+}
+
+#[test]
+fn a_spilled_body_that_cannot_be_fetched_stays_pending_and_is_asked_again_later() {
+    let mut n = Net::new();
+    let bob = n
+        .net
+        .add_pds("bob.example.com")
+        .add_account("bob.example.com");
+    let f = forum(&n, &bob);
+    let uri = spilled_post(&n, &bob, &f, b"# The whole body");
+    // the first getBlob drops the connection
+    n.net
+        .inject(Fault::disconnect().on_nsid("com.atproto.sync.getBlob").once());
+    let e = n.device("anon", None);
     let pv = read(&e, &f, &uri);
     assert_eq!(
         pv.body.notices,
@@ -393,8 +424,9 @@ fn a_spilled_body_that_cannot_be_fetched_stays_pending_and_is_asked_again_later(
     assert!(blob_requests(&n).is_empty());
     // but once BODY_BLOB_RETRY_MS has passed
     n.tick(lessdugin_core::limits::BODY_BLOB_RETRY_MS);
-    block_on(e.get_post(&uri)).unwrap();
+    let pv = block_on(e.get_post(&uri)).unwrap();
     assert_eq!(blob_requests(&n).len(), 1);
+    assert_eq!(pv.body.text, "The whole body");
 }
 
 // --- the autoload verdict (m4-4) ---------------------------------------------------------------
