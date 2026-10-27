@@ -194,6 +194,11 @@ export function startEngine(options: StartEngineOptions = {}): EngineClient {
     // that the structured clone left intact is spread just the same.
     async prepareMedia(...args) {
       const [bytes, input] = args as [Uint8Array | number[] | ArrayLike<number>, unknown];
+      // engine API v0's form: one MediaFile carrying the bytes
+      if (!ArrayBuffer.isView(bytes) && !Array.isArray(bytes) && "bytes" in bytes) {
+        const file = bytes as unknown as { bytes: ArrayLike<number> };
+        return remote.call("prepareMedia", [{ ...file, bytes: Array.from(file.bytes) }]);
+      }
       return remote.call("prepareMedia", [Array.from(bytes), input ?? null]);
     },
     async grant(...args) {

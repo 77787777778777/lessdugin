@@ -280,7 +280,7 @@ fn an_import_never_writes_login_state_outbox_rows_or_bad_settings() {
     assert_eq!((report.refused, report.imported), (n, 2), "{report:?}");
     assert_eq!(
         report.kinds,
-        [("follow".to_owned(), 1), ("setting".to_owned(), 1)].into()
+        [("follow".to_owned(), 1), ("setting".to_owned(), 1)]
     );
     assert!(block_on(e.outbox_flush()).unwrap().done == 0);
     assert!(block_on(e.writes()).unwrap().is_empty());

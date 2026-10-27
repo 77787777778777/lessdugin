@@ -126,24 +126,8 @@ pub struct LocalExport {
     pub members: Vec<ExportMember>,
 }
 
-/// `import_local`'s result.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ImportReport {
-    /// Members written.
-    pub imported: usize,
-    /// Members skipped because they were outside the scope.
-    pub out_of_scope: usize,
-    /// Members skipped because their key did not decode as a store key.
-    pub undecodable: usize,
-    /// Members an import never writes: a key outside `loc`, a family not in [`IMPORTABLE`], a
-    /// setting `set_setting` would refuse.
-    #[serde(default)]
-    pub refused: usize,
-    /// The members written per family (`follow`, `setting`, …).
-    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    pub kinds: std::collections::BTreeMap<String, usize>,
-}
+/// `import_local`'s result (a DTO).
+pub use crate::dto::ImportReport;
 
 fn b64() -> base64::engine::general_purpose::GeneralPurpose {
     base64::engine::general_purpose::URL_SAFE_NO_PAD
@@ -176,7 +160,8 @@ fn importable<'a>(parts: &'a [Part], v: &[u8]) -> Option<&'a str> {
     }
     let tag = part_str(parts.get(1)).filter(|t| IMPORTABLE.contains(t))?;
     if tag == "setting" {
-        let k = part_str(parts.get(2)).filter(|k| SETTINGS.contains(k) && parts.len() == 3)?;
+        let k = part_str(parts.get(2))
+            .filter(|k| SETTINGS.contains(k) && !NOT_IMPORTED.contains(k) && parts.len() == 3)?;
         let v = std::str::from_utf8(v).ok()?;
         check_setting_value(k, v).ok()?;
     }
@@ -289,6 +274,7 @@ impl<H: crate::host::Host> Engine<H> {
             .map(|a| a.did.clone())
             .filter(|d| !d.is_empty());
         let mut report = ImportReport::default();
+        let mut kinds: std::collections::BTreeMap<String, usize> = Default::default();
         let mut ops: Vec<KvOp> = Vec::new();
         for m in &export.members {
             let (Ok(k), Ok(v)) = (b64().decode(&m.key), b64().decode(&m.value)) else {
@@ -311,7 +297,7 @@ impl<H: crate::host::Host> Engine<H> {
             let dup = ops.iter().any(|op| matches!(op, KvOp::Put(prev, _) if prev == &k));
             ops.retain(|op| !matches!(op, KvOp::Put(prev, _) if prev == &k));
             if !dup {
-                *report.kinds.entry(kind.to_owned()).or_default() += 1;
+                *kinds.entry(kind.to_owned()).or_default() += 1;
                 report.imported += 1;
             }
             ops.push(KvOp::Put(k, v));
@@ -319,28 +305,52 @@ impl<H: crate::host::Host> Engine<H> {
         if !ops.is_empty() {
             self.host().state().write(ops).await?;
         }
+        report.kinds = kinds.into_iter().collect();
         Ok(report)
     }
 }
 
-/// The settings a client may change (synthesis-v1.md §1.4, §6.12: "accounts, sources,
-/// verification, indexer consent, external images, media autoload hosts").
+/// The stored settings, `("loc", "setting", key)` (synthesis-v1.md §1.4, §6.12: "accounts,
+/// sources, verification, indexer consent, external images, media autoload hosts"), each with
+/// its value as text: the form an export carries.
 ///
 /// These are per device, not per account: they are how this copy of the app behaves, so they
 /// live in the same `loc` state the rest of the local lists use, and they travel with
 /// [`LocalExport`].
-pub const SETTINGS: [&str; 5] = [
+pub const SETTINGS: [&str; 7] = [
     // `direct` or `assisted` (`engine::Sources`).
     "sources",
     // `pds` or `proof` (`engine::VerifyMode`).
     "verify",
     // `off` or `on`: whether media loads at all (3.9's master switch).
     "mediaAutoload",
-    // Extra hosts whose media may load without a click, comma separated (3.9's allowlist).
+    // Extra hosts whose media may load without a click, comma separated (3.9's allowlist;
+    // `Settings.mediaAutoloadHosts`).
     "mediaHosts",
     // `off` or `on`: whether external link cards fetch a preview.
     "externalImages",
+    // `Settings.externalImagesForums`: a JSON array of forum uris.
+    "externalImagesForums",
+    // `Settings.indexers`: a JSON array of `IndexerConsent`.
+    "indexers",
 ];
+
+/// The keys of `set_setting` besides [`SETTINGS`]: the fields of the `Settings` object
+/// (`types.ts` `SettingKey`) that are not stored under their own name.
+pub const SETTING_FIELDS: [&str; 7] = [
+    "sources",
+    "verify",
+    "indexers",
+    "externalImagesForums",
+    "mediaAutoloadHosts",
+    "karmaNotifications",
+    "acknowledgedPublicActions",
+];
+
+/// The stored settings an import may not write (sec-9): they name third parties this device
+/// would then contact (media hosts, indexers, forums whose external images load). A backup
+/// cannot add one; the user does, in the settings, where the list is shown.
+const NOT_IMPORTED: [&str; 3] = ["mediaHosts", "externalImagesForums", "indexers"];
 
 impl<H: crate::host::Host> Engine<H> {
     /// `settings()` (`engine-api.md` §3.6, M4): the whole local picture, in the shape the
@@ -361,11 +371,8 @@ impl<H: crate::host::Host> Engine<H> {
                 "proof" => crate::dto::VerifyMode::Proof,
                 _ => crate::dto::VerifyMode::Pds,
             },
-            // nothing has been consented to yet: the indexer consent list and the
-            // external-image forum list are M5 (the indexer) and M4's SPA policy; an empty
-            // list is the honest answer rather than a fabricated default
-            indexers: Vec::new(),
-            external_images_forums: Vec::new(),
+            indexers: stored_list(&raw, "indexers"),
+            external_images_forums: stored_list(&raw, "externalImagesForums"),
             media_autoload_hosts: split_hosts(raw.get("mediaHosts")),
             karma_notifications: self.karma_notifications().await?,
             acknowledged_public_actions: self.acknowledged_public_actions().await?,
@@ -387,24 +394,72 @@ impl<H: crate::host::Host> Engine<H> {
         Ok(out)
     }
 
-    /// `set_setting(key, value)`: `None` removes the key (back to its default).
+    /// `set_setting(key, value)` (`engine-api.md` §3.6): `key` is a field of `Settings`
+    /// ([`SETTING_FIELDS`]) with a value of that field's type, or a stored setting
+    /// ([`SETTINGS`]) with its text. `None` (JSON `null`) returns it to its default.
+    /// `karmaNotifications` and `acknowledgedPublicActions` are kept where their own operations
+    /// keep them (the latter needs an active account: `auth_required`).
     ///
-    /// An unknown key is refused rather than stored: a typo would otherwise silently do nothing,
-    /// and the export would carry junk nobody reads.
-    pub async fn set_setting(&self, key: &str, value: Option<&str>) -> Result<(), EngineError> {
-        if !SETTINGS.contains(&key) {
-            return Err(EngineError::invalid_input(format!(
-                "unknown setting {key:?} (known: {})",
-                SETTINGS.join(", ")
-            ))
-            .with_detail("kind", "unknownSetting"));
-        }
-        if let Some(v) = value {
-            check_setting_value(key, v)?;
-        }
-        let k = crate::key!("loc", "setting", key);
-        let op = match value {
-            Some(v) => KvOp::Put(k, v.as_bytes().to_vec()),
+    /// An unknown key, or a value the setting cannot mean, is refused (`invalid_input`, `detail.kind
+    /// = "unknownSetting"`) rather than stored: a typo would otherwise silently do nothing, and
+    /// the export would carry junk nobody reads.
+    pub async fn set_setting(
+        &self,
+        key: &str,
+        value: Option<&serde_json::Value>,
+    ) -> Result<(), EngineError> {
+        use serde_json::Value;
+        let bad = |what: &str| {
+            EngineError::invalid_input(format!("{key} = {} is not {what}", show(value)))
+                .with_detail("kind", "unknownSetting")
+        };
+        // `null` is the default, like an absent value
+        let value = value.filter(|v| !v.is_null());
+        let (name, text): (&str, Option<String>) = match key {
+            "karmaNotifications" => {
+                let c = typed(value, || bad("a karma cadence"))?
+                    .unwrap_or(crate::dto::KarmaCadence::Daily);
+                return self.set_karma_notifications(c).await;
+            }
+            "acknowledgedPublicActions" => {
+                let kinds: Vec<crate::dto::PublicActionKind> =
+                    typed(value, || bad("a list of public actions"))?.unwrap_or_default();
+                return self.set_acknowledged_public_actions(&kinds).await;
+            }
+            "mediaAutoloadHosts" => {
+                let hosts: Vec<String> =
+                    typed(value, || bad("a list of host names"))?.unwrap_or_default();
+                let joined = hosts.join(",");
+                if hosts.iter().any(|h| !is_host(&h.to_ascii_lowercase())) {
+                    return Err(bad("a list of host names"));
+                }
+                ("mediaHosts", (!hosts.is_empty()).then_some(joined))
+            }
+            k if SETTINGS.contains(&k) => match value {
+                None => (k, None),
+                Some(Value::String(v)) if !matches!(k, "externalImagesForums" | "indexers") => {
+                    check_setting_value(k, v)?;
+                    (k, Some(v.clone()))
+                }
+                // the two lists are stored as their JSON text
+                Some(v) if matches!(k, "externalImagesForums" | "indexers") => {
+                    let t = v.to_string();
+                    check_setting_value(k, &t)?;
+                    (k, Some(t))
+                }
+                Some(_) => return Err(bad("a string")),
+            },
+            _ => {
+                return Err(EngineError::invalid_input(format!(
+                    "unknown setting {key:?} (known: {})",
+                    SETTING_FIELDS.join(", ")
+                ))
+                .with_detail("kind", "unknownSetting"));
+            }
+        };
+        let k = crate::key!("loc", "setting", name);
+        let op = match text {
+            Some(v) => KvOp::Put(k, v.into_bytes()),
             None => KvOp::Delete(k),
         };
         self.host().state().write(vec![op]).await?;
@@ -419,6 +474,31 @@ impl<H: crate::host::Host> Engine<H> {
     }
 }
 
+/// `v` as a `T`, or `bad()`.
+fn typed<T: serde::de::DeserializeOwned>(
+    v: Option<&serde_json::Value>,
+    bad: impl FnOnce() -> EngineError,
+) -> Result<Option<T>, EngineError> {
+    v.map(|v| serde_json::from_value(v.clone()))
+        .transpose()
+        .map_err(|_| bad())
+}
+
+/// A stored setting that holds a JSON list (empty if unset or unreadable).
+fn stored_list<T: serde::de::DeserializeOwned>(
+    raw: &std::collections::BTreeMap<String, String>,
+    k: &str,
+) -> Vec<T> {
+    raw.get(k)
+        .and_then(|v| serde_json::from_str(v).ok())
+        .unwrap_or_default()
+}
+
+/// A setting's value as an error message shows it.
+fn show(v: Option<&serde_json::Value>) -> String {
+    v.map_or_else(|| "null".to_owned(), serde_json::Value::to_string)
+}
+
 /// Splits a stored `mediaHosts` value into hosts: comma separated, trimmed, empties dropped.
 fn split_hosts(v: Option<&String>) -> Vec<String> {
     v.map(|v| {
@@ -430,7 +510,20 @@ fn split_hosts(v: Option<&String>) -> Vec<String> {
     .unwrap_or_default()
 }
 
-/// Refuses a value that the setting cannot mean, so a stored setting is always usable.
+/// `true` for a host name (`a.example`, `cdn-2.example.com`): no scheme, path, port or space.
+fn is_host(h: &str) -> bool {
+    !h.is_empty()
+        && h.len() <= 253
+        && h.split('.').all(|l| {
+            !l.is_empty()
+                && l.len() <= 63
+                && l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                && !l.starts_with('-')
+                && !l.ends_with('-')
+        })
+}
+
+/// Refuses a stored value that the setting cannot mean, so a stored setting is always usable.
 fn check_setting_value(key: &str, v: &str) -> Result<(), EngineError> {
     let bad = |what: &str| {
         EngineError::invalid_input(format!("{key} = {v:?} is not {what}"))
@@ -449,9 +542,38 @@ fn check_setting_value(key: &str, v: &str) -> Result<(), EngineError> {
             "on" | "off" => Ok(()),
             _ => Err(bad("`on` or `off`")),
         },
-        "mediaHosts" => Ok(()),
+        "mediaHosts" => {
+            if split_hosts(Some(&v.to_owned()))
+                .iter()
+                .all(|h| is_host(&h.to_ascii_lowercase()))
+            {
+                Ok(())
+            } else {
+                Err(bad("a comma-separated list of host names"))
+            }
+        }
+        "externalImagesForums" => match serde_json::from_str::<Vec<String>>(v) {
+            Ok(l) if l.iter().all(|u| lessdugin_atp::syntax::AtUri::parse(u).is_ok()) => Ok(()),
+            _ => Err(bad("a list of forum uris")),
+        },
+        "indexers" => match serde_json::from_str::<Vec<crate::dto::IndexerConsent>>(v) {
+            Ok(l) if l.iter().all(|i| is_https_endpoint(&i.url)) => Ok(()),
+            _ => Err(bad("a list of indexer consents with https URLs")),
+        },
         _ => Ok(()),
     }
+}
+
+/// An indexer URL a consent may name (`threat-model.md` §5): `https`, a host name, the default
+/// port, no user info.
+fn is_https_endpoint(raw: &str) -> bool {
+    url::Url::parse(raw).is_ok_and(|u| {
+        u.scheme() == "https"
+            && u.port().is_none()
+            && u.username().is_empty()
+            && u.password().is_none()
+            && u.host_str().is_some_and(is_host)
+    })
 }
 
 /// A saved draft: the `Draft` the composer was working on and when it was last written

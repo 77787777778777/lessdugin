@@ -68,6 +68,7 @@ import {
   type HistoryView,
   type Href,
   type HrefContext,
+  type ImportReport,
   type ItemState,
   type Json,
   type KarmaCadence,
@@ -2578,7 +2579,7 @@ export class MockEngine implements EngineApi {
     };
   }
 
-  async importLocal(json: Json): Promise<void> {
+  async importLocal(json: Json): Promise<ImportReport> {
     if (
       typeof json !== "object" ||
       json === null ||
@@ -2604,6 +2605,7 @@ export class MockEngine implements EngineApi {
     if (j.mutes) this.s.mutes = new Set(j.mutes);
     if (j.settings) this.s.settings = { ...this.s.settings, ...j.settings };
     this.changed({ kind: "drafts" }, { kind: "notifications" }, { kind: "forum", uri: FORUM_URI });
+    return { imported: Object.keys(j).length, outOfScope: 0, undecodable: 0 };
   }
 
   // =============================================================================== §3.7

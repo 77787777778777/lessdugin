@@ -3,12 +3,11 @@
 // The engine's public operations (docs/spec/engine-api.md §3: engine API v0, frozen at M3; only
 // compatible changes from here on), one async method per operation, camelCased:
 // `lessdugin-wasm` dispatches each name (`WasmEngine.call(op, argsJson)`, crates/wasm/src/ops.rs,
-// whose native test checks this list). Every method resolves with a DTO from `./types.ts` or
-// rejects with an `EngineError`. The operations of later milestones reject with code
-// `unsupported` and `detail.milestone` (engine-api.md §3.9): `forumDiscover`, `tags`, `tag`,
-// `sequences`, `sequence`, `user`, `search`, `wikiEdit`, the `seq*` writes (M5);
-// `redactRevision`, `prepareMedia`, the engine's drafts, `settings`/`setSetting`,
-// `exportLocal`/`importLocal`, `validateRecord`, `deriveRkey` (M4); `runVector` (tests).
+// whose native test checks this list and the arity of each). Every method resolves with a DTO
+// from `./types.ts` or rejects with an `EngineError`. The operations of later milestones reject
+// with code `unsupported` and `detail.milestone` (engine-api.md §3.9): `forumDiscover`, `tags`,
+// `tag`, `sequences`, `sequence`, `user`, `search`, `wikiEdit`, the `seq*` writes (M5);
+// `runVector` (tests).
 //
 // Two names differ from a literal camelCasing of §3, because JavaScript has no overloading:
 // - `subscribe(cb)` is the event subscription of §3.8;
@@ -37,10 +36,12 @@ import type {
   HistoryView,
   Href,
   HrefContext,
+  ImportReport,
   Json,
   KarmaCadence,
   ListPostsQuery,
   LoadedMedia,
+  MediaFile,
   MediaInput,
   MediaRef,
   MembersQuery,
@@ -186,8 +187,9 @@ export interface EngineApi {
   /** Public; paged like `listPosts` (`limit` 0 or absent: the default page). */
   modLog(forum: AtUri, cursor?: string, limit?: number): Promise<ModLog>;
   raw(uri: AtUri): Promise<RawView>;
-  /** Fetches a media blob for display; the URL is an object URL in the browser. */
-  loadMedia(cid: Cid): Promise<LoadedMedia>;
+  /** Fetches a media blob for display; the URL is an object URL in the browser. `author` is
+   * the DID whose PDS holds the blob (the item's author). */
+  loadMedia(cid: Cid, author?: Did): Promise<LoadedMedia>;
   drafts(): Promise<DraftEntry[]>;
   /** Newest first. */
   bookmarks(): Promise<BookmarkEntry[]>;
@@ -212,7 +214,8 @@ export interface EngineApi {
    * active account's modAction for (scope, subject, action key). A lock refused above 5,000
    * comments rejects with `detail.hint: "useHide"`. */
   modAction(intent: ModActionIntent): Promise<ActionTicket>;
-  /** Re-issues the former moderator's (a DID or handle) non-lapsed assertions. */
+  /** Re-issues the departing moderator's (a DID or handle) assertions that are in effect;
+   * the others are reported in the write's result. */
   modAdopt(forum: AtUri, formerMod: string): Promise<WriteTicket>;
   wikiEdit(forum: AtUri, slug: Slug, draft: WikiDraft): Promise<WriteTicket>;
   seqCreate(draft: SequenceDraft): Promise<WriteTicket>;
@@ -220,14 +223,15 @@ export interface EngineApi {
   seqAdd(uri: AtUri, post: AtUri, at: SequencePosition): Promise<WriteTicket>;
   seqRemove(uri: AtUri, post: AtUri): Promise<WriteTicket>;
   seqMove(uri: AtUri, from: SequencePosition, to: SequencePosition): Promise<WriteTicket>;
-  /** `null` when the item had no history left to redact (the call is idempotent). */
-  redactRevision(uri: AtUri): Promise<WriteTicket | null>;
+  /** Deletes the revision records of the active account's item; rejects with `not_found`
+   * (`detail.kind: "nothingToRedact"`) when no revision is left. */
+  redactRevision(uri: AtUri): Promise<WriteTicket>;
   /**
-   * `prepare_media` (engine-api.md §3.6): sniff, strip metadata, apply EXIF orientation and
-   * compute the CID. The bytes are a separate argument because a Blob or a file is not a DTO
-   * field; the upload itself happens at publish time (data-model.md §8.8).
+   * `prepare_media` (engine-api.md §3.5): sniff, strip metadata, apply EXIF orientation and
+   * compute the CID; the upload itself happens at publish time (data-model.md §8.8). The bytes
+   * and the hints, or (engine API v0) one `MediaFile` carrying both.
    */
-  prepareMedia(bytes: Uint8Array, input?: MediaInput): Promise<MediaRef>;
+  prepareMedia(bytes: Uint8Array | MediaFile, input?: MediaInput): Promise<MediaRef>;
   undo(writeId: string): Promise<WriteTicket>;
   /** Queues a `failed` (or conflicting) write again. */
   retryWrite(writeId: string): Promise<WriteTicket>;
@@ -261,9 +265,15 @@ export interface EngineApi {
   karmaNotifications(): Promise<KarmaCadence>;
   setKarmaNotifications(cadence: KarmaCadence): Promise<void>;
   settings(): Promise<Settings>;
+  /** One field of `Settings`, with a value of its type (`null` in JSON: back to the default).
+   * `acknowledgedPublicActions` needs an active account. */
   setSetting<K extends SettingKey>(key: K, value: Settings[K]): Promise<void>;
+  /** This device's local state (the active account's, plus the device-wide rows). */
   exportLocal(): Promise<Json>;
-  importLocal(json: Json): Promise<void>;
+  /** Merges an `exportLocal` result back (`scope` default `"mine"`). Login state, the
+   * acknowledgements and the settings that name third parties are never imported; the report
+   * counts what was written and what was left out. */
+  importLocal(json: Json, scope?: "mine" | "everything"): Promise<ImportReport>;
 
   // §3.7 Pure functions -----------------------------------------------------------------------
   render(markdown: string, media: MediaRef[], opts: RenderOpts): Promise<RenderedBody>;

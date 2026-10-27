@@ -325,6 +325,42 @@ impl<H: Host> Engine<H> {
         Ok(())
     }
 
+    /// Makes `kinds` the active account's acknowledged interstitials (`set_setting`'s
+    /// `acknowledgedPublicActions`): the kinds listed are acknowledged (an earlier
+    /// acknowledgement keeps its time), the others are not any more.
+    pub(crate) async fn set_acknowledged_public_actions(
+        &self,
+        kinds: &[PublicActionKind],
+    ) -> Result<(), EngineError> {
+        let me = self.me().await?.ok_or_else(|| {
+            EngineError::new(
+                super::ErrorCode::AuthRequired,
+                "no active account; log in first",
+            )
+        })?;
+        let had = self.acknowledged_public_actions().await?;
+        let mut ops = Vec::new();
+        for k in KINDS {
+            let key = ack_key(&me, kind_name(k));
+            match (kinds.contains(&k), had.contains(&k)) {
+                (true, false) => ops.push(encode(
+                    key,
+                    &AtRow {
+                        v: ROW_V,
+                        at: self.host.now_ms(),
+                    },
+                )?),
+                (false, true) => ops.push(KvOp::Delete(key)),
+                _ => {}
+            }
+        }
+        if !ops.is_empty() {
+            self.host.state().write(ops).await?;
+            self.rt.bus.changed([Topic::Accounts]);
+        }
+        Ok(())
+    }
+
     /// How often karma changes are notified (`social.md` §16; default daily).
     pub async fn karma_notifications(&self) -> Result<KarmaCadence, EngineError> {
         Ok(self

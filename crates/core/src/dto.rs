@@ -1142,6 +1142,29 @@ dto! {
     }
 }
 
+dto! {
+    /// `validate_record(collection, json)` (`engine-api.md` §3.7): whether the value is a valid
+    /// record of the collection (`data-model.md` §7), with the failing rule IDs, first failure
+    /// first.
+    pub struct ValidationReport {
+        pub valid: bool,
+        pub errors: Vec<String>,
+    }
+}
+
+dto! {
+    /// `derive_rkey(RkeyInput)` (`engine-api.md` §3.7, `data-model.md` §3): what a canonical
+    /// record key is derived from, per collection.
+    pub enum RkeyInput {
+        Membership { forum: String },
+        Post { forum: String, tid: String },
+        Comment { root: String, tid: String },
+        Opinion { forum: String, subject: String },
+        ModAction { forum: String, scope: ModScope, subject: String, action_key: String },
+        Revision { subject: String, tid: String },
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // §3.5 Writes
 
@@ -1834,6 +1857,27 @@ dto! {
         pub dto: DtoVersion,
         pub notifications: u32,
         pub forums: Vec<ForumUnread>,
+    }
+}
+
+dto! {
+    /// `import_local`'s result (`engine-api.md` §3.6): what an import wrote and what it left
+    /// out.
+    #[derive(Default)]
+    pub struct ImportReport {
+        /// Members written.
+        pub imported: usize,
+        /// Members skipped because they were outside the scope.
+        pub out_of_scope: usize,
+        /// Members skipped because their key did not decode as a store key.
+        pub undecodable: usize,
+        /// Members an import never writes: a key outside `loc`, a family it does not import, a
+        /// setting `set_setting` would refuse or one that names a third party.
+        #[serde(default)]
+        pub refused: usize,
+        /// The members written per family (`follow`, `setting`, …), by family.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub kinds: Vec<(String, usize)>,
     }
 }
 

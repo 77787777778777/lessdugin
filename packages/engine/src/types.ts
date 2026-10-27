@@ -901,13 +901,22 @@ export interface MediaRef {
 
 // What `prepare_media` takes: the display hints and the DECLARED type. The bytes are a
 // separate argument (a `Uint8Array` or a file), because neither belongs in a DTO that is also
-// exported to Rust (engine-api.md §3.6; the Rust type is `MediaInput`).
+// exported to Rust (engine-api.md §3.5; the Rust type is `MediaInput`).
 export interface MediaInput {
   /** The declared mimeType; the sniffed one wins when they disagree (data-model.md §8.8). */
   declaredMime?: string;
   alt?: string;
   name?: string;
   aspectRatio?: AspectRatio;
+}
+
+/** `prepareMedia`'s argument in engine API v0: the bytes with the hints (`mime` is the declared
+ * type, `declaredMime` in `MediaInput`). Still accepted. */
+export interface MediaFile {
+  bytes: Uint8Array;
+  mime?: string;
+  name?: string;
+  alt?: string;
 }
 
 export interface BodyDraft {
@@ -1141,6 +1150,18 @@ export interface Settings {
 }
 
 export type SettingKey = keyof Settings;
+
+/** `importLocal`'s result (engine-api.md §3.6). */
+export interface ImportReport {
+  imported: number;
+  outOfScope: number;
+  undecodable: number;
+  /** Members an import never writes (login state, acknowledgements, third-party settings, keys
+   * outside the local state). */
+  refused?: number;
+  /** Members written per family (`follow`, `setting`, …). */
+  kinds?: [string, number][];
+}
 
 export type KarmaCadence = "realtime" | "daily" | "weekly";
 

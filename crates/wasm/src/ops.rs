@@ -114,6 +114,8 @@ pub const OPS: &[&str] = &[
     // §3.7
     "render",
     "safeHref",
+    "validateRecord",
+    "deriveRkey",
     "verify",
     // host glue
     "externalChange",
@@ -139,11 +141,6 @@ pub const UNSUPPORTED: &[(&str, &str)] = &[
     ("seqAdd", "M5"),
     ("seqRemove", "M5"),
     ("seqMove", "M5"),
-    // §3.6: the engine's draft store, settings and local export (M4, with the editor, the
-    // media policy and `export`)
-    // §3.7
-    ("validateRecord", "M4"),
-    ("deriveRkey", "M4"),
     // test builds only (the social vectors run natively and in the wasm32 test harness)
     ("runVector", "tests"),
 ];
@@ -177,6 +174,18 @@ fn args<T: DeserializeOwned>(op: &str, json: &str) -> Result<T, EngineError> {
         s => s,
     };
     serde_json::from_str(json)
+        .map_err(|e| EngineError::invalid_input(format!("{op}: bad arguments: {e}")))
+}
+
+/// [`args`] for an operation whose trailing parameters are optional in `EngineApi`: an array
+/// shorter than `n` is padded with `null`, so a caller may leave them out (as `OP_ARITY` does in
+/// the client for the operations it lists).
+fn padded<T: DeserializeOwned>(op: &str, json: &str, n: usize) -> Result<T, EngineError> {
+    let mut v: Vec<Value> = args(op, json)?;
+    while v.len() < n {
+        v.push(Value::Null);
+    }
+    serde_json::from_value(Value::Array(v))
         .map_err(|e| EngineError::invalid_input(format!("{op}: bad arguments: {e}")))
 }
 
@@ -226,6 +235,35 @@ fn safe_href(raw: &str, ctx: HrefCtx) -> Result<Value, EngineError> {
     }
     tagged.extend(fields);
     Ok(Value::Object(tagged))
+}
+
+/// `prepareMedia`'s engine API v0 argument, `MediaFile { bytes, mime?, name?, alt? }` (`mime` is
+/// the declared type), as the bytes and the hints of the current form.
+fn media_file(
+    op: &str,
+    mut file: serde_json::Map<String, Value>,
+) -> Result<(Vec<u8>, Option<MediaInput>), EngineError> {
+    let bad = |e: String| EngineError::invalid_input(format!("{op}: bad arguments: {e}"));
+    let bytes = match file.remove("bytes") {
+        // a Uint8Array that crossed a structured clone arrives as an index-keyed object
+        Some(Value::Object(m)) => {
+            let mut v: Vec<(usize, Value)> = m
+                .into_iter()
+                .map(|(k, b)| k.parse().map(|i| (i, b)).map_err(|_| bad("bytes".into())))
+                .collect::<Result<_, _>>()?;
+            v.sort_by_key(|(i, _)| *i);
+            Value::Array(v.into_iter().map(|(_, b)| b).collect())
+        }
+        Some(b) => b,
+        None => return Err(bad("a MediaFile without bytes".into())),
+    };
+    let bytes: Vec<u8> = serde_json::from_value(bytes).map_err(|e| bad(e.to_string()))?;
+    if let Some(m) = file.remove("mime") {
+        file.entry("declaredMime").or_insert(m);
+    }
+    let hints: MediaInput =
+        serde_json::from_value(Value::Object(file)).map_err(|e| bad(e.to_string()))?;
+    Ok((bytes, Some(hints)))
 }
 
 /// Runs `op` with `args` (a JSON array) on `engine`; the result as dto/1 JSON.
@@ -484,7 +522,9 @@ pub async fn call<H: Host>(engine: &Engine<H>, op: &str, a: &str) -> Result<Stri
             out(&engine.delete(&uri).await?)
         }
         "loadMedia" => {
-            let (cid,): (String,) = args(op, a)?;
+            // `author` (the DID whose PDS holds the blob) is optional and read by the media
+            // pipeline's `load_media`
+            let (cid, _author): (String, Option<String>) = padded(op, a, 2)?;
             out(&engine.load_media(&cid).await?)
         }
         "drafts" => out(&engine.drafts().await?),
@@ -499,11 +539,11 @@ pub async fn call<H: Host>(engine: &Engine<H>, op: &str, a: &str) -> Result<Stri
         }
         "settings" => out(&engine.settings().await?),
         "setSetting" => {
-            // §3.6: `value: null` removes the key, which is how a client returns a setting to
-            // its default
-            let (key, value): (String, Option<String>) = args(op, a)?;
-            engine.set_setting(&key, value.as_deref()).await?;
-            out(&())
+            // §3.6: a field of `Settings` and a value of its type; `null` returns it to its
+            // default
+            let (key, value): (String, Option<Value>) = padded(op, a, 2)?;
+            engine.set_setting(&key, value.as_ref()).await?;
+            Ok(NULL.into())
         }
         "exportLocal" => {
             // the client's declaration takes no scope, so the server default applies
@@ -512,9 +552,9 @@ pub async fn call<H: Host>(engine: &Engine<H>, op: &str, a: &str) -> Result<Stri
                 .await?)
         }
         "importLocal" => {
-            // `{ scope, export }`: importing is a decision about what to overwrite, so the scope
-            // travels with the data rather than defaulting silently
-            let (json, scope): (lessdugin_core::engine::LocalExport, Option<String>) = args(op, a)?;
+            // `(export, scope?)`: `EngineApi.importLocal(json)` may leave the scope out
+            let (json, scope): (lessdugin_core::engine::LocalExport, Option<String>) =
+                padded(op, a, 2)?;
             // `ExportScope` is a plain enum with no serde form, so the client names it: "mine"
             // (the default, PRIV-8) or "everything"
             let scope = match scope.as_deref() {
@@ -525,14 +565,17 @@ pub async fn call<H: Host>(engine: &Engine<H>, op: &str, a: &str) -> Result<Stri
         }
         "redactRevision" => {
             // The engine returns one batched write (the outbox chunks the deletes), and the
-            // client's declaration is a single WriteTicket, so the first is the one.
+            // client's declaration is a single WriteTicket (engine API v0), so the first is the
+            // one; an item with no cached revision left is `not_found` (`detail.kind =
+            // "nothingToRedact"`): there is no write to report.
             let (uri,): (String,) = args(op, a)?;
             let tickets = engine.redact_revision(&uri).await?;
-            // nothing to redact is the state the caller asked for, so it is `null`, not an
-            // invented ticket and not an error
             match tickets.into_iter().next() {
                 Some(t) => out(&t),
-                None => out(&Option::<lessdugin_core::dto::WriteTicket>::None),
+                None => Err(EngineError::not_found(format!(
+                    "{uri} has no revision left to redact"
+                ))
+                .with_detail("kind", "nothingToRedact")),
             }
         }
         "prepareMedia" => {
@@ -540,8 +583,19 @@ pub async fn call<H: Host>(engine: &Engine<H>, op: &str, a: &str) -> Result<Stri
             // this op takes them as a number array: the bridge serialises a Uint8Array
             // that way, and `prepare_media` is synchronous - it allocates nothing large and
             // touches no network, so it does not need the outbox.
-            let (bytes, input): (Vec<u8>, Option<MediaInput>) = args(op, a)?;
-            let hints = input.unwrap_or(MediaInput {
+            // Engine API v0's form, one `MediaFile { bytes, mime?, name?, alt? }`, is accepted
+            // too.
+            let (first, input): (Value, Option<MediaInput>) = padded(op, a, 2)?;
+            let (bytes, hints) = match first {
+                Value::Object(file) => media_file(op, file)?,
+                bytes => (
+                    serde_json::from_value::<Vec<u8>>(bytes).map_err(|e| {
+                        EngineError::invalid_input(format!("{op}: bad arguments: {e}"))
+                    })?,
+                    input,
+                ),
+            };
+            let hints = hints.unwrap_or(MediaInput {
                 declared_mime: None,
                 alt: None,
                 name: None,
@@ -656,6 +710,14 @@ pub async fn call<H: Host>(engine: &Engine<H>, op: &str, a: &str) -> Result<Stri
         "safeHref" => {
             let (raw, ctx): (String, String) = args(op, a)?;
             out(&safe_href(&raw, href_ctx(&ctx)?)?)
+        }
+        "validateRecord" => {
+            let (collection, json): (String, Value) = args(op, a)?;
+            out(&engine.validate_record(&collection, &json).await?)
+        }
+        "deriveRkey" => {
+            let (input,): (lessdugin_core::dto::RkeyInput,) = args(op, a)?;
+            out(&engine.derive_rkey(&input)?)
         }
         "verify" => {
             let (uri, deep): (String, Option<bool>) = args(op, a)?;
