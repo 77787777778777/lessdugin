@@ -167,9 +167,9 @@ fn account_of(parts: &[Part]) -> Option<&str> {
         // ("loc","account",did), ("loc","as_pin",did), ("loc","seeded",did),
         // ("loc","ack",account,kind), ("loc","notif",account[,id]), ("loc","nbase",account,forum),
         // ("loc","draft",account,id)
-        "account" | "as_pin" | "seeded" | "ack" | "notif" | "nbase" | "draft" => {
-            part_str(parts.get(2))
-        }
+        "account" | "as_pin" | "seeded" | "ack" | "notif" | "nbase" => part_str(parts.get(2)),
+        // a draft saved before drafts were per account, ("loc","draft",id), names none
+        "draft" if parts.len() == 4 => part_str(parts.get(2)),
         // ("loc","rejected",forum,did) is per forum, not per account
         _ => None,
     }
@@ -190,8 +190,21 @@ fn importable<'a>(parts: &'a [Part], v: &[u8]) -> Option<&'a str> {
             return None;
         }
     }
+    // a draft of an account, that `drafts()` reads and a save would have stored
+    if tag == "draft"
+        && (parts.len() != 4
+            || v.len() > DRAFT_MAX_BYTES
+            || serde_json::from_slice::<DraftEntryRow>(v).is_err())
+    {
+        return None;
+    }
     Some(tag)
 }
+
+/// The longest key a `KvStore` must accept (`sync.md` §12.4); the longest value is
+/// [`crate::store::row::KV_VALUE_MAX_BYTES`]. An import refuses a member past either, so one
+/// such member cannot fail a batch after the batches before it were written.
+const KV_KEY_MAX_BYTES: usize = 2_048;
 
 /// True when `parts` is inside `scope`.
 fn in_scope(parts: &[Part], scope: &ExportScope, active: Option<&str>) -> bool {
@@ -282,7 +295,9 @@ impl<H: crate::host::Host> Engine<H> {
     /// `--mine` export cannot write another account's state, and a member of a family an import
     /// never writes is refused (the module docs). At most [`IMPORT_MAX_MEMBERS`] members and
     /// [`IMPORT_MAX_BYTES`] (`too_large` otherwise, before anything is written); a duplicate key's
-    /// last member wins. Rows are written in batches of at most 1,000.
+    /// last member wins. A member whose key or value a store need not accept, or a draft a save
+    /// would refuse, is refused. Rows are written in batches of at most 1,000, then each account's
+    /// drafts are pruned to [`MAX_DRAFTS`].
     pub async fn import_local(
         &self,
         export: &LocalExport,
@@ -325,6 +340,10 @@ impl<H: crate::host::Host> Engine<H> {
                 report.undecodable += 1;
                 continue;
             };
+            if k.len() > KV_KEY_MAX_BYTES || v.len() > crate::store::row::KV_VALUE_MAX_BYTES {
+                report.refused += 1;
+                continue;
+            }
             let Some(kind) = importable(&parts, &v) else {
                 report.refused += 1;
                 continue;
@@ -339,6 +358,12 @@ impl<H: crate::host::Host> Engine<H> {
         for (_, kind) in rows.values() {
             *kinds.entry(kind.clone()).or_default() += 1;
         }
+        // the accounts whose drafts this import adds to, pruned to `MAX_DRAFTS` below
+        let drafted: std::collections::BTreeSet<String> = rows
+            .iter()
+            .filter(|(_, (_, kind))| kind == "draft")
+            .filter_map(|(k, _)| account_of(&key::decode(k).ok()?).map(str::to_owned))
+            .collect();
         report.imported = rows.len();
         report.kinds = kinds.into_iter().collect();
         // bounded batches, so one import is never one unbounded transaction
@@ -351,6 +376,12 @@ impl<H: crate::host::Host> Engine<H> {
         }
         if !ops.is_empty() {
             self.host().state().write(ops).await?;
+        }
+        for account in &drafted {
+            self.prune_drafts(account).await?;
+        }
+        if !drafted.is_empty() {
+            self.rt.bus.changed([crate::dto::Topic::Drafts]);
         }
         Ok(report)
     }
@@ -707,14 +738,56 @@ fn draft_key(account: &str, id: &str) -> Vec<u8> {
 }
 
 impl<H: crate::host::Host> Engine<H> {
-    /// The active account, which drafts belong to (`auth_required` without one).
+    /// The active account, which drafts belong to (`auth_required` without one), once it has
+    /// adopted the drafts saved before they were per account.
     async fn draft_owner(&self) -> Result<String, EngineError> {
-        self.me().await?.ok_or_else(|| {
+        let me = self.me().await?.ok_or_else(|| {
             EngineError::new(
                 super::ErrorCode::AuthRequired,
                 "drafts belong to an account; log in first",
             )
-        })
+        })?;
+        self.adopt_legacy_drafts(&me).await?;
+        Ok(me)
+    }
+
+    /// The keys of the drafts saved before drafts were per account, `("loc", "draft", id)`
+    /// (M4's first store, which every account on the device listed), with their values.
+    pub(crate) async fn legacy_drafts(&self) -> Result<Vec<(String, Vec<u8>)>, EngineError> {
+        Ok(self
+            .loc_rows(crate::key!("loc", "draft"))
+            .await?
+            .into_iter()
+            .filter_map(|(rest, v)| match <[String; 1]>::try_from(rest) {
+                Ok([id]) => Some((id, v)),
+                Err(_) => None,
+            })
+            .collect())
+    }
+
+    /// Moves the drafts of [`Engine::legacy_drafts`] to `account`, the first one to list or save
+    /// drafts: they were every account's, so the one in use takes them (a draft it already has
+    /// under that id wins), and they are pruned, purged and exported with it from then on.
+    async fn adopt_legacy_drafts(&self, account: &str) -> Result<(), EngineError> {
+        let legacy = self.legacy_drafts().await?;
+        if legacy.is_empty() {
+            return Ok(());
+        }
+        let have: std::collections::BTreeSet<String> = self
+            .draft_rows(account)
+            .await?
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        let mut ops = Vec::with_capacity(legacy.len() * 2);
+        for (id, v) in legacy {
+            if !have.contains(&id) {
+                ops.push(KvOp::Put(draft_key(account, &id), v));
+            }
+            ops.push(KvOp::Delete(crate::key!("loc", "draft", id.as_str())));
+        }
+        self.host().state().write(ops).await?;
+        self.prune_drafts(account).await
     }
 
     /// `drafts()` (`engine-api.md` §3.6, M4): the active account's saved drafts, newest first
@@ -723,6 +796,7 @@ impl<H: crate::host::Host> Engine<H> {
         let Some(me) = self.me().await? else {
             return Ok(Vec::new());
         };
+        self.adopt_legacy_drafts(&me).await?;
         let mut out: Vec<DraftEntryRow> = self
             .draft_rows(&me)
             .await?

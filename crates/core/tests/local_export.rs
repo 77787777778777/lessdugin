@@ -467,3 +467,74 @@ fn an_import_sets_the_switches_only_toward_the_stricter_value() {
     assert_eq!(report.imported, 1, "{report:?}");
     assert_eq!(stored("sources").as_deref(), Some(&b"direct"[..]));
 }
+
+/// An import refuses a draft a save would refuse (too large, not a stored draft, of no
+/// account) and any key or value a store need not accept, so one member never fails a batch
+/// after earlier ones were written; then it prunes each account's drafts to `MAX_DRAFTS`.
+#[test]
+fn an_import_caps_drafts_and_values_like_a_save() {
+    use lessdugin_core::engine::{DRAFT_MAX_BYTES, MAX_DRAFTS};
+    let (host, _pds, alice, _bob) = setup();
+    let e = engine(&host);
+    block_on(e.add_account(AccountInfo::app_password(alice.did.as_str(), PDS))).unwrap();
+    let did = alice.did.as_str();
+    let mut x = block_on(e.export_local(ExportScope::Mine)).unwrap();
+    let mut huge = draft_row("huge");
+    huge.splice(1..1, format!(r#""pad":"{}","#, "x".repeat(DRAFT_MAX_BYTES)).into_bytes());
+    x.members = vec![
+        loc_member(&["loc", "draft", did, "huge"], &huge),
+        loc_member(&["loc", "draft", did, "junk"], b"not a draft"),
+        loc_member(&["loc", "draft", "3l2s5xxv2ze2c"], &draft_row("3l2s5xxv2ze2c")),
+        loc_member(&["loc", "follow", "big"], &vec![b'x'; (2 << 20) + 1]),
+        loc_member(&["loc", "follow", &"k".repeat(2_100)], b"1"),
+        loc_member(&["loc", "follow", "fk"], b"1"),
+    ];
+    let report = block_on(e.import_local(&x, ExportScope::Mine)).unwrap();
+    assert_eq!((report.refused, report.imported), (5, 1), "{report:?}");
+    assert!(block_on(e.drafts()).unwrap().is_empty());
+
+    x.members = (0..MAX_DRAFTS + 5)
+        .map(|i| {
+            let id = format!("d{i:03}");
+            loc_member(&["loc", "draft", did, &id], &draft_row(&id))
+        })
+        .collect();
+    let report = block_on(e.import_local(&x, ExportScope::Mine)).unwrap();
+    assert_eq!(report.imported, MAX_DRAFTS + 5, "{report:?}");
+    assert_eq!(block_on(e.drafts()).unwrap().len(), MAX_DRAFTS);
+}
+
+/// Drafts saved before they were per account (`("loc", "draft", id)`) are adopted by the first
+/// account that uses drafts, then purged with it; one no account adopted is purged too.
+#[test]
+fn drafts_saved_before_they_were_per_account_are_adopted_and_purged() {
+    let (host, _pds, alice, bob) = setup();
+    let e = engine(&host);
+    block_on(e.add_account(AccountInfo::app_password(alice.did.as_str(), PDS))).unwrap();
+    let (a, b) = (alice.did.as_str(), bob.did.as_str());
+    put(&host, &["loc", "draft", "3l2s5xxv2ze2c"], &draft_row("3l2s5xxv2ze2c"));
+    let d = block_on(e.drafts()).unwrap();
+    assert_eq!(
+        d.iter().map(|d| d.id.as_str()).collect::<Vec<_>>(),
+        ["3l2s5xxv2ze2c"]
+    );
+    let rows = |host: &MemHost| {
+        let e = engine(host);
+        block_on(e.export_local(ExportScope::Everything))
+            .unwrap()
+            .members
+            .into_iter()
+            .map(|m| m.parts)
+            .filter(|p| p.get(1).is_some_and(|t| t == "draft"))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(rows(&host), [["loc", "draft", a, "3l2s5xxv2ze2c"]]);
+    block_on(e.remove_account(a, true)).unwrap();
+    assert!(rows(&host).is_empty(), "{:?}", rows(&host));
+
+    // a legacy draft nobody listed yet: a purge removes it as well
+    block_on(e.add_account(AccountInfo::app_password(b, PDS))).unwrap();
+    put(&host, &["loc", "draft", "3l2s6aaaaaaa2"], &draft_row("3l2s6aaaaaaa2"));
+    block_on(e.remove_account(b, true)).unwrap();
+    assert!(rows(&host).is_empty(), "{:?}", rows(&host));
+}
