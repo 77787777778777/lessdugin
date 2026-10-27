@@ -216,15 +216,8 @@ fn post_meta(p: &PostSummary) -> Vec<TermText> {
         // the displayed time is t_rank, never the claimed createdAt (`social.md` §2.3)
         tt(&render::time(p.t_rank_ms)),
         render::count(p.comment_count, "comment", "comments"),
-        cat([
-            tt(&p.score.score.to_string()),
-            lit(if p.score.score.abs() == 1 {
-                " point"
-            } else {
-                " points"
-            }),
-        ]),
     ];
+    parts.extend(render::score(&p.score));
     match p.post_kind {
         PostKind::Article => {}
         PostKind::Link => parts.push(lit("link")),
@@ -257,6 +250,10 @@ fn joined(parts: Vec<TermText>) -> TermText {
 }
 
 fn print_list(ctx: &Ctx, list: &PostList) {
+    for b in &list.banners {
+        ctx.out
+            .line(&[(cat([lit("! "), tt(&b.message)]), Style::Warn)]);
+    }
     if list.items.is_empty() {
         ctx.out.line(&[(lit("No posts."), Style::Dim)]);
     }
@@ -401,7 +398,7 @@ async fn thread_text(
         .filter_map(|a| Some((a.did.clone(), a.handle.clone()?)))
         .collect();
     let handle_of = |did: &str| handles.get(did).cloned();
-    let mut s = String::new();
+    let mut s = banner_lines(ctx, &thread.banners);
     match &thread.post {
         ThreadRoot::Post(p) => s.push_str(&post_text(ctx, engine, p, &style, &handle_of).await),
         ThreadRoot::Missing { missing } => {
@@ -481,7 +478,38 @@ async fn post_text(
             .await,
         );
     }
+    s.push_str(&react_lines(ctx, &p.reacts, 0, handle_of));
     s
+}
+
+/// The react tallies listed under an item (`social.md` §9.2), `indent` columns in.
+fn react_lines(
+    ctx: &Ctx,
+    reacts: &[lessdugin_core::dto::ReactTally],
+    indent: usize,
+    handle_of: &dyn Fn(&str) -> Option<String>,
+) -> String {
+    let pad = " ".repeat(indent);
+    reacts
+        .iter()
+        .map(|t| {
+            line(
+                ctx,
+                &[
+                    (tt(&pad), Style::Plain),
+                    (render::react(t, handle_of), Style::Dim),
+                ],
+            )
+        })
+        .collect()
+}
+
+/// A view's banners (`social.md` §1.6, §4.11: "moderation data unavailable"), above it.
+fn banner_lines(ctx: &Ctx, banners: &[lessdugin_core::dto::Banner]) -> String {
+    banners
+        .iter()
+        .map(|b| line(ctx, &[(cat([lit("! "), tt(&b.message)]), Style::Warn)]))
+        .collect()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -512,15 +540,8 @@ async fn comment_text(
     let mut meta = vec![
         render::actor(&c.author),
         tt(&render::time(c.t_rank_ms)),
-        cat([
-            tt(&c.score.score.to_string()),
-            lit(if c.score.score.abs() == 1 {
-                " point"
-            } else {
-                " points"
-            }),
-        ]),
     ];
+    meta.extend(render::score(&c.score));
     if c.retracted {
         meta.push(lit("retracted"));
     }
@@ -549,6 +570,7 @@ async fn comment_text(
             )
             .await,
         );
+        s.push_str(&react_lines(ctx, &c.reacts, indent + 4, handle_of));
     }
     s
 }

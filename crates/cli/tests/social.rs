@@ -554,3 +554,44 @@ fn forum_edit_reject_mute_and_the_karma_cadence() {
     w.alice.ok(&["notifications", "--karma-cadence", "realtime"]);
     assert_ne!(cadence().unwrap(), weekly);
 }
+
+/// The human thread shows what the JSON carries (`social.md` §7 "Display", §9.2, §4.11): the
+/// agreement, "N of M votes were cast on an earlier version", the react tallies listed under
+/// the item with their creator and quote (or "quoted text no longer present"), and the
+/// "moderation data unavailable" banner of a degraded view.
+#[test]
+fn the_human_thread_shows_agreement_reacts_and_banners() {
+    let w = World::new();
+    w.bob.json(&["vote", &w.post, "up", "--yes"]);
+    w.bob.json(&["agree", &w.post, "strong-agree", "--yes"]);
+    w.carol.json(&["react", &w.post, "crux", "--quote", "First post", "--yes"]);
+    w.bob.json(&["react", &w.post, "crux"]);
+    w.alice.ok(&["sync", &w.forum]);
+    let out = w.alice.ok(&["read", &w.post, "--no-pager"]);
+    assert!(out.contains("agreement +"), "{out}");
+    assert!(out.contains("by @carol.test"), "{out}");
+    assert!(out.contains("\u{201c}First post\u{201d}"), "{out}");
+    assert!(out.contains("by @bob.test"), "{out}");
+
+    // the edit moves the votes to an earlier version and orphans the quote
+    let e = w
+        .alice
+        .json(&["edit", &w.post, "-m", "Rewritten from scratch."]);
+    assert_eq!(e["state"]["kind"], "done", "{e}");
+    w.alice.ok(&["sync", &w.forum]);
+    let out = w.alice.ok(&["read", &w.post, "--no-pager"]);
+    assert!(
+        out.contains("1 of 1 votes were cast on an earlier version"),
+        "{out}"
+    );
+    assert!(out.contains("(quoted text no longer present)"), "{out}");
+
+    // a moderator's repository is unavailable: the view is degraded, and says so
+    w.alice.json(&["mods", "add", "bob.test"]);
+    w.bob.account.deactivate();
+    let dave = w.net.reader(&w.alice);
+    let out = dave.ok(&["read", &w.post, "--no-pager"]);
+    assert!(out.contains("moderation data unavailable"), "{out}");
+    let out = dave.ok(&["ls", &w.forum, "--all"]);
+    assert!(out.contains("moderation data unavailable"), "{out}");
+}

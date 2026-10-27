@@ -10,7 +10,8 @@
 
 use lessdugin_atp::syntax::AtUri;
 use lessdugin_core::dto::{
-    ActorView, Badges, CollapseReason, HandleState, HiddenReason, ItemState, RenderedBody,
+    ActorView, Anchor, Badges, CollapseReason, HandleState, HiddenReason, ItemState, ReactTally,
+    RenderedBody, ScoreView, Stance,
 };
 use lessdugin_core::host::Host;
 use lessdugin_core::store::records::RecordStore;
@@ -144,6 +145,76 @@ pub fn count(n: u32, one: &'static str, many: &'static str) -> TermText {
         lit(" "),
         lit(if n == 1 { one } else { many }),
     ])
+}
+
+/// An item's score for a meta line (`social.md` §7 "Display"): the points; the agreement when
+/// the forum has the axis and it moved; "n votes not yet counted" (voters outside E); and "N of
+/// M votes were cast on an earlier version".
+pub fn score(s: &ScoreView) -> Vec<TermText> {
+    let mut v = vec![cat([
+        tt(&s.score.to_string()),
+        lit(if s.score.abs() == 1 {
+            " point"
+        } else {
+            " points"
+        }),
+    ])];
+    if let Some(a) = s.agreement
+        && a != 0
+    {
+        v.push(cat([lit("agreement "), tt(&format!("{a:+}"))]));
+    }
+    if s.unweighted > 0 {
+        v.push(cat([
+            count(s.unweighted, "vote", "votes"),
+            lit(" not yet counted"),
+        ]));
+    }
+    if s.earlier_version_votes > 0 {
+        v.push(tt(&format!(
+            "{} of {} votes were cast on an earlier version",
+            s.earlier_version_votes, s.weighted_votes
+        )));
+    }
+    v
+}
+
+/// One react tally as it is listed under its item (`social.md` §9.2 "Display", "Anchors"): the
+/// glyph and label, who created it (`handle_of` names a DID's verified handle, else the short
+/// DID), how many seconded it and how many are against, its quote (or that the quoted text is
+/// no longer present), the viewer's stance, and whether the viewer's own react is not counted.
+pub fn react(t: &ReactTally, handle_of: &dyn Fn(&str) -> Option<String>) -> TermText {
+    let mut parts = vec![tt(&t.glyph), lit(" "), name(&t.label)];
+    if let Some(c) = &t.creator {
+        parts.push(lit(" by "));
+        parts.push(match handle_of(c) {
+            Some(h) => cat([lit("@"), name(&h)]),
+            None => tt(&lessdugin_core::identity::short_did(c)),
+        });
+    }
+    let seconded = t.for_count.saturating_sub(1);
+    if seconded > 0 {
+        parts.push(cat([lit(", "), count(seconded, "seconded", "seconded")]));
+    }
+    if t.against > 0 {
+        parts.push(cat([lit(", "), tt(&t.against.to_string()), lit(" against")]));
+    }
+    if let Some(q) = &t.quote {
+        if matches!(t.anchor, Some(Anchor::Orphan { .. })) {
+            parts.push(lit(" (quoted text no longer present)"));
+        } else {
+            parts.push(cat([lit(" on "), tt("\u{201c}"), tt(&q.exact), tt("\u{201d}")]));
+        }
+    }
+    match t.mine {
+        Some(Stance::For) => parts.push(lit(" [yours]")),
+        Some(Stance::Against) => parts.push(lit(" [yours, against]")),
+        None => {}
+    }
+    if t.uncounted {
+        parts.push(lit(" (not counted)"));
+    }
+    cat(parts)
 }
 
 /// How bodies are printed.
