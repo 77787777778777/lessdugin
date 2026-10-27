@@ -1077,8 +1077,9 @@ delete(target):                                  // post | comment | sequence | 
 
 **Upload**
 - Blobs are uploaded only at publish time, after the media pipeline (strip, orient, downscale; `sync.md` and `threat-model.md`). An image or MP4 the pipeline cannot parse is refused (`invalid_input`, `detail.kind = "mediaRejected"`), never uploaded with its metadata (`threat-model.md` §5.9.1).
-- The record embeds the blob object returned by `uploadBlob` **verbatim**. The locally computed CID is for preview only and MUST equal the returned `ref.$link`; if it does not, the write fails.
-- On 413, the client downscales (images) or refuses.
+- Downscaling happens when the file is prepared: an image larger than `IMAGE_UPLOAD_TARGET_BYTES` (5 MiB, `limits.md` §12) is re-encoded to fit it, so the CID a draft's `cid:` URLs name is the CID that is uploaded. An image the pipeline cannot downscale (an animation, a format without a decoder) keeps its bytes.
+- The record embeds the blob object returned by `uploadBlob` **verbatim**. Its `ref.$link` MUST equal the CID of the bytes that were sent; if it does not, the write fails.
+- On 413, an image is re-encoded at half the size of the last encoding and sent again, at most `IMAGE_UPLOAD_413_RETRIES` (3) times; any other type, or an image still refused, fails the write (`too_large`, `detail.kind = "mediaRejected"`). A re-encoded image has a new CID: the blob object replaces the placeholder of the old CID, and every `cid:<old>` URL in the write's inline `NS.markdown` sources becomes `cid:<new>` (`lfm-1.md` §6.1 resolves `cid:` against `media[i].blob.ref.$link`). When a spilled `textBlob` of the same write names the old CID, the write fails instead, as its blob cannot follow.
 - A blob that is not referenced is garbage-collected by the PDS after about an hour. So the write that references a blob MUST follow its upload within the same `PendingWrite`.
 
 **MIME normalisation.** The declared `mimeType` sent to `uploadBlob` is normalised from the **sniffed** type, so that it falls within the requested blob scopes (§10.3):
