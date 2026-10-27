@@ -1,6 +1,5 @@
 ---
 source: crates/tui/tests/screens.rs
-assertion_line: 86
 expression: help
 ---
  lessdug┌ Keys ────────────────────────────────────────────────────────┐ple.com
@@ -15,15 +14,15 @@ expression: help
 ▌ • Be k│  p               parent comment                              │
 ▌ • Stay│  r               reply in $EDITOR                            │
 ▌       │  c               comment on the post in $EDITOR              │
-▌ lessdu│Forums                                                        │
-        │  s               sort: magic, top, new, old                  │
-  1 comm│  Tab             posts / activity                            │
-        │  P               new post in $EDITOR                         │
-  @bob.e│  R               sync and show new items                     │
-    Than│Opinions                                                      │
+▌ lessdu│  s               comment sort (magic, top, new, old, latest) │
+        │Forums                                                        │
+  1 comm│  s               sort: magic, top, new, old, recent comments │
+        │  f               filter: frontpage, all, curated             │
+  @bob.e│  Tab             posts / activity                            │
+    Than│  P               new post in $EDITOR                         │
+        │  R               sync and show new items                     │
+    It l│Opinions                                                      │
         │  u U             upvote / strong upvote                      │
-    It l│  d D             downvote / strong downvote                  │
+        │  d D             downvote / strong downvote                  │
         │  a A             agree / strongly agree                      │
-        │  z Z             disagree / strongly disagree                │
-        │  0               clear your votes on the item                │
- r reply└ 1-22 of 34 ──────────────────────────────────────────────────┘
+ r reply└ 1-22 of 36 ──────────────────────────────────────────────────┘

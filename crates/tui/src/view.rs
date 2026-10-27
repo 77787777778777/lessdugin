@@ -6,7 +6,9 @@
 //! update), the content, and a status line (the last message, or the keys). Every string is a
 //! [`TermText`](crate::text::TermText) turned into spans by [`crate::text`].
 
-use lessdugin_core::dto::{ForumRole, HistoryView, MembershipMode, PostSort, Stance};
+use lessdugin_core::dto::{
+    CommentSort, ForumRole, HistoryView, MembershipMode, PostFilter, PostSort, Stance,
+};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout as Split, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -438,22 +440,27 @@ fn info_line(state: &State, top: &Screen) -> Line<'static> {
                     ));
                 }
             }
-            let sorts = [
-                (PostSort::Magic, "magic"),
-                (PostSort::Top, "top"),
-                (PostSort::New, "new"),
-                (PostSort::Old, "old"),
-            ];
-            parts.push((lit(" sort: "), dim()));
-            for (sort, label) in sorts {
-                let style = if f.sort == sort && f.tab == ForumTab::Posts {
+            // the Posts tab's sort (`s`) and filter (`f`): the current ones, which is what
+            // fits in 80 columns next to the completeness marker and the sync state
+            let on = |posts: bool| {
+                if posts {
                     Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
                 } else {
                     dim()
-                };
-                parts.push((cat([lit(" "), lit(label), lit(" ")]), style));
-            }
-            parts.push((lit("  filter: frontpage "), dim()));
+                }
+            };
+            let posts = f.tab == ForumTab::Posts;
+            parts.push((lit(" sort: "), dim()));
+            parts.push((
+                cat([lit(" "), lit(post_sort_label(f.sort)), lit(" ")]),
+                on(posts),
+            ));
+            parts.push((lit("  filter: "), dim()));
+            parts.push((
+                cat([lit(" "), lit(post_filter_label(f.filter)), lit(" ")]),
+                on(posts),
+            ));
+            parts.push((lit(" "), dim()));
             if let Some(s) = sync_text(state.sync.get(&f.uri)) {
                 info.push(s);
             }
@@ -462,6 +469,13 @@ fn info_line(state: &State, top: &Screen) -> Line<'static> {
             if let Some(p) = t.post() {
                 if let Some(n) = forum_name(state, &p.post.forum) {
                     info.push(n);
+                }
+                // the comment sort (`s`), when it is not the default
+                if t.opts.sort != CommentSort::Magic {
+                    info.push(cat([
+                        lit("comments: "),
+                        lit(comment_sort_label(t.opts.sort)),
+                    ]));
                 }
                 if let Some(d) = &t.data {
                     let c = &d.view.completeness;
@@ -515,6 +529,37 @@ fn info_line(state: &State, top: &Screen) -> Line<'static> {
     line(parts)
 }
 
+/// A post sort's name (`social.md` §12.2).
+pub fn post_sort_label(s: PostSort) -> &'static str {
+    match s {
+        PostSort::Magic => "magic",
+        PostSort::Top => "top",
+        PostSort::New => "new",
+        PostSort::Old => "old",
+        PostSort::RecentComments => "recent comments",
+    }
+}
+
+/// A post filter's name (`social.md` §12.3).
+pub fn post_filter_label(f: PostFilter) -> &'static str {
+    match f {
+        PostFilter::Frontpage => "frontpage",
+        PostFilter::All => "all",
+        PostFilter::Curated => "curated",
+    }
+}
+
+/// A comment sort's name (`social.md` §12.4).
+pub fn comment_sort_label(s: CommentSort) -> &'static str {
+    match s {
+        CommentSort::Magic => "magic",
+        CommentSort::Top => "top",
+        CommentSort::New => "new",
+        CommentSort::Old => "old",
+        CommentSort::LatestReply => "latest reply",
+    }
+}
+
 fn forum_name(state: &State, uri: &str) -> Option<TermText> {
     state.stack.iter().find_map(|s| match &s.kind {
         ScreenKind::Forum(f) if f.uri == uri => f.name().map(name),
@@ -547,7 +592,7 @@ fn status_lines(state: &State) -> Text<'static> {
             " Enter open \u{b7} R sync \u{b7} P post \u{b7} ? help \u{b7} q quit"
         }
         Some(ScreenKind::Forum(_)) => {
-            " Enter open \u{b7} s sort \u{b7} P post \u{b7} R sync \u{b7} ? help \u{b7} h back"
+            " Enter open \u{b7} s sort \u{b7} f filter \u{b7} P post \u{b7} R sync \u{b7} ? help \u{b7} h back"
         }
         Some(ScreenKind::Thread(_)) => {
             " r reply \u{b7} c comment \u{b7} Space fold \u{b7} p parent \u{b7} R sync \u{b7} ? help \u{b7} h back"
@@ -680,6 +725,16 @@ fn forum(top: &Screen, s: &ForumScreen, h: usize, w: usize, lines: &mut Vec<Line
     }
     if d.list.items.is_empty() {
         lines.push(Line::default());
+        if s.filter != PostFilter::All {
+            // a new forum's posts start in `personal`: the frontpage may well be empty
+            message(
+                lines,
+                cat([lit("No "), lit(post_filter_label(s.filter)), lit(" posts.")]),
+                bold(),
+            );
+            message(lines, lit("Press f to list all posts."), dim());
+            return;
+        }
         message(lines, lit("No posts yet."), bold());
         let hint = match d.view.my_role {
             ForumRole::None => lit("Join the forum with `lessdugin join` to post in it."),

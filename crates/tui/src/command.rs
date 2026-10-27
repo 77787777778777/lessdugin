@@ -16,6 +16,7 @@
 //! | `mod <action> [subject] [reason] [--until WHEN] [--author]` | `mod_action` | `m` |
 //! | `notifications [all]`, `read`, `read-all` | `notifications`, `mark_notifications_read` | `N`, `a`, `M` |
 //! | `activity` | `recent_discussion` | `Tab` on a forum |
+//! | `sort <sort>`, `filter <filter>` | `list_posts`, `get_thread` | `s`, `f` |
 //! | `user [actor]` | the forum view's `moderators` | - |
 //! | `mods [role]` | the forum view's `moderators` | - |
 //! | `mods add <actor> [admin|moderator]`, `mods remove <actor>` | `mods_set` | - |
@@ -23,8 +24,8 @@
 //! `parse` is pure (no engine, no state); `State::command` runs it.
 
 use lessdugin_core::dto::{
-    AccessLevel, AgreementValue, Capability, KarmaValue, ModActionIntent, ModActionValue, ModRole,
-    ModScope, PinScope, Tier,
+    AccessLevel, AgreementValue, Capability, CommentSort, KarmaValue, ModActionIntent,
+    ModActionValue, ModRole, ModScope, PinScope, PostFilter, PostSort, Tier,
 };
 
 /// What the `:` command line was asked to do, once parsed.
@@ -59,6 +60,10 @@ pub enum Verb {
     ReadAll,
     /// `activity`: the forum's Recent Discussion tab.
     Activity,
+    /// `sort <sort>`: a forum's post sort or a thread's comment sort (`s`).
+    Sort(SortName),
+    /// `filter frontpage|all|curated`: a forum's post filter (`f`).
+    Filter(PostFilter),
     /// `user [actor]`: who an actor is and what they posted here.
     User {
         /// The actor, when named (else the selected item's author).
@@ -78,6 +83,49 @@ pub enum Verb {
         /// Remove instead of add.
         remove: bool,
     },
+}
+
+/// A sort `sort` names: a post sort (`social.md` §12.2) or a comment sort (§12.4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SortName {
+    /// `magic` (both).
+    Magic,
+    /// `top` (both).
+    Top,
+    /// `new` (both).
+    New,
+    /// `old` (both).
+    Old,
+    /// `recent-comments` (posts).
+    RecentComments,
+    /// `latest-reply` (comments).
+    LatestReply,
+}
+
+impl SortName {
+    /// The post sort, if it is one.
+    pub fn post(self) -> Option<PostSort> {
+        Some(match self {
+            SortName::Magic => PostSort::Magic,
+            SortName::Top => PostSort::Top,
+            SortName::New => PostSort::New,
+            SortName::Old => PostSort::Old,
+            SortName::RecentComments => PostSort::RecentComments,
+            SortName::LatestReply => return None,
+        })
+    }
+
+    /// The comment sort, if it is one.
+    pub fn comment(self) -> Option<CommentSort> {
+        Some(match self {
+            SortName::Magic => CommentSort::Magic,
+            SortName::Top => CommentSort::Top,
+            SortName::New => CommentSort::New,
+            SortName::Old => CommentSort::Old,
+            SortName::LatestReply => CommentSort::LatestReply,
+            SortName::RecentComments => return None,
+        })
+    }
 }
 
 /// The karma axis's values (`vote`).
@@ -281,6 +329,48 @@ pub fn parse(line: &str) -> Parsed {
             reason: None,
             opts: ModOpts::default(),
         }),
+        "sort" => {
+            let name = match rest.first().copied() {
+                Some("magic") => SortName::Magic,
+                Some("top") => SortName::Top,
+                Some("new") => SortName::New,
+                Some("old") => SortName::Old,
+                Some("recent" | "recent-comments" | "recentComments") => SortName::RecentComments,
+                Some("latest" | "latest-reply" | "latestReply") => SortName::LatestReply,
+                other => {
+                    return Err(format!(
+                        "sort takes magic, top, new, old, recent-comments (posts) or \
+                         latest-reply (comments), not `{}`.",
+                        other.unwrap_or("")
+                    ));
+                }
+            };
+            Ok(Command {
+                verb: Verb::Sort(name),
+                subject: None,
+                reason: None,
+                opts: ModOpts::default(),
+            })
+        }
+        "filter" => {
+            let filter = match rest.first().copied() {
+                Some("frontpage" | "front") => PostFilter::Frontpage,
+                Some("all") => PostFilter::All,
+                Some("curated") => PostFilter::Curated,
+                other => {
+                    return Err(format!(
+                        "filter takes frontpage, all or curated, not `{}`.",
+                        other.unwrap_or("")
+                    ));
+                }
+            };
+            Ok(Command {
+                verb: Verb::Filter(filter),
+                subject: None,
+                reason: None,
+                opts: ModOpts::default(),
+            })
+        }
         "notifications" | "notifs" => match rest.first().copied() {
             None | Some("unread") => Ok(Command {
                 verb: Verb::Notifications { all: false },
@@ -602,6 +692,8 @@ pub fn usage() -> String {
         "read",
         "read-all",
         "activity",
+        "sort magic|top|new|old|recent-comments|latest-reply",
+        "filter frontpage|all|curated",
         "user [actor]",
         "mods [role]",
         "mods add <did|handle> [admin|moderator]",

@@ -19,11 +19,12 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crossterm::event::KeyEvent;
 use lessdugin_core::dto::{
-    AccessLevel, AccountView, ActionTicket, AgreementValue, Capability, CommentDraft,
+    AccessLevel, AccountView, ActionTicket, AgreementValue, Capability, CommentDraft, CommentSort,
     DiscussionList, Event, ForumSummary, ForumView, HistoryView, KarmaValue, ModActionIntent,
     ModActionValue, ModLog, ModQueue, ModScope, ModsChange, NotificationList, OpinionIntent,
-    PinScope, PostDraft, PostList, PostSort, ReactTally, Stance, SyncReport, ThreadRoot,
-    ThreadView, Tier, Topic, UnreadCounts, ViewerCaps, WriteState, WriteTicket,
+    PinScope, PostDraft, PostFilter, PostList, PostSort, ReactTally, Stance, SyncReport,
+    ThreadOpts, ThreadRoot, ThreadView, Tier, Topic, UnreadCounts, ViewerCaps, WriteState,
+    WriteTicket,
 };
 use lessdugin_core::engine::EngineError;
 
@@ -157,7 +158,7 @@ pub enum Effect {
         /// Who asked.
         origin: Origin,
     },
-    /// `forum_open` and `list_posts` (filter frontpage, the M3 default).
+    /// `forum_open` and `list_posts` (`magic` over `frontpage` when it opens, the M3 default).
     LoadForum {
         /// The screen.
         screen: ScreenId,
@@ -165,6 +166,8 @@ pub enum Effect {
         forum: String,
         /// The sort.
         sort: PostSort,
+        /// The filter (`f`).
+        filter: PostFilter,
         /// Who asked.
         origin: Origin,
     },
@@ -174,6 +177,8 @@ pub enum Effect {
         screen: ScreenId,
         /// The post or comment uri.
         uri: String,
+        /// The comment sort (`s` on the thread).
+        opts: ThreadOpts,
         /// Who asked.
         origin: Origin,
     },
@@ -627,8 +632,10 @@ pub struct ActivityData {
 pub struct ForumScreen {
     /// The forum uri.
     pub uri: String,
-    /// The sort (`s`: new, old, top).
+    /// The sort (`s`: magic, top, new, old, recent comments; `social.md` §12.2).
     pub sort: PostSort,
+    /// The filter (`f`: frontpage, all, curated; `social.md` §12.3).
+    pub filter: PostFilter,
     /// The data, once loaded.
     pub data: Option<ForumData>,
     /// A live update waiting for `R`.
@@ -698,6 +705,8 @@ impl ForumScreen {
 pub struct ThreadScreen {
     /// The uri opened (a post, or a comment of the thread).
     pub uri: String,
+    /// The comment sort (`s`: magic, top, new, old, latest reply; `social.md` §12.4).
+    pub opts: ThreadOpts,
     /// The data, once loaded.
     pub data: Option<ThreadData>,
     /// A live update waiting for `R`.
@@ -967,11 +976,13 @@ impl Screen {
                 screen,
                 forum: f.uri.clone(),
                 sort: f.sort,
+                filter: f.filter,
                 origin,
             },
             ScreenKind::Thread(t) => Effect::LoadThread {
                 screen,
                 uri: t.uri.clone(),
+                opts: t.opts.clone(),
                 origin,
             },
             ScreenKind::Mod(m) => Effect::LoadQueue {
@@ -1139,6 +1150,8 @@ fn complete(line: &mut String) {
         "read",
         "read-all",
         "activity",
+        "sort",
+        "filter",
         "user",
         "help",
     ];
@@ -1173,6 +1186,12 @@ fn complete(line: &mut String) {
         "curated",
         "all",
         "unread",
+        "magic",
+        "top",
+        "new",
+        "old",
+        "recent-comments",
+        "latest-reply",
     ];
     // the byte after the last whitespace character, which may be wider than one byte (an NBSP,
     // an IME's full-width space): `i + 1` would slice inside it
@@ -1568,6 +1587,7 @@ impl State {
             ScreenKind::Forum(Box::new(ForumScreen {
                 uri: uri.clone(),
                 sort: PostSort::Magic,
+                filter: PostFilter::Frontpage,
                 data: None,
                 pending: None,
                 tab: ForumTab::Posts,
@@ -1797,6 +1817,7 @@ impl State {
             Cmd::Open => self.open(fx),
             Cmd::Sync => self.sync_top(fx),
             Cmd::Sort => self.sort(fx),
+            Cmd::Filter => self.filter(fx),
             Cmd::Reply => self.compose_comment(true, fx),
             Cmd::CommentOnPost => self.compose_comment(false, fx),
             Cmd::NewPost => self.compose_post(fx),
@@ -1923,19 +1944,92 @@ impl State {
         }
     }
 
+    /// `s`: the next post sort on a forum (`social.md` §12.2), the next comment sort on a
+    /// thread (§12.4).
     fn sort(&mut self, fx: &mut Vec<Effect>) {
         let Some(i) = self.stack.len().checked_sub(1) else {
             return;
         };
-        let ScreenKind::Forum(s) = &mut self.stack[i].kind else {
+        match &mut self.stack[i].kind {
+            ScreenKind::Forum(s) => {
+                let next = match s.sort {
+                    PostSort::Magic => PostSort::Top,
+                    PostSort::Top => PostSort::New,
+                    PostSort::New => PostSort::Old,
+                    PostSort::Old => PostSort::RecentComments,
+                    PostSort::RecentComments => PostSort::Magic,
+                };
+                self.set_post_sort(next, fx);
+            }
+            ScreenKind::Thread(t) => {
+                let next = match t.opts.sort {
+                    CommentSort::Magic => CommentSort::Top,
+                    CommentSort::Top => CommentSort::New,
+                    CommentSort::New => CommentSort::Old,
+                    CommentSort::Old => CommentSort::LatestReply,
+                    CommentSort::LatestReply => CommentSort::Magic,
+                };
+                self.set_comment_sort(next, fx);
+            }
+            _ => self.say(Tone::Info, lit("Sorting is for forums and threads.")),
+        }
+    }
+
+    /// Lists the forum on top in `sort`.
+    fn set_post_sort(&mut self, sort: PostSort, fx: &mut Vec<Effect>) {
+        let Some(i) = self.stack.len().checked_sub(1) else {
             return;
         };
-        s.sort = match s.sort {
-            PostSort::Magic => PostSort::Top,
-            PostSort::Top => PostSort::New,
-            PostSort::New => PostSort::Old,
-            _ => PostSort::Magic,
+        let ScreenKind::Forum(s) = &mut self.stack[i].kind else {
+            self.say(Tone::Info, lit("Open a forum to sort its posts."));
+            return;
         };
+        s.sort = sort;
+        s.tab = ForumTab::Posts;
+        s.pos = ListPos::default();
+        s.pending = None;
+        self.reload(i, Origin::User, fx);
+    }
+
+    /// Shows the thread on top in `sort` (the selection stays on its item).
+    fn set_comment_sort(&mut self, sort: CommentSort, fx: &mut Vec<Effect>) {
+        let Some(i) = self.stack.len().checked_sub(1) else {
+            return;
+        };
+        let ScreenKind::Thread(t) = &mut self.stack[i].kind else {
+            self.say(Tone::Info, lit("Open a thread to sort its comments."));
+            return;
+        };
+        t.opts.sort = sort;
+        t.pending = None;
+        self.reload(i, Origin::User, fx);
+    }
+
+    /// `f`: the next filter of the forum on top (frontpage, all, curated; `social.md` §12.3).
+    fn filter(&mut self, fx: &mut Vec<Effect>) {
+        let next = match self.top_forum_screen().map(|f| f.filter) {
+            Some(PostFilter::Frontpage) => PostFilter::All,
+            Some(PostFilter::All) => PostFilter::Curated,
+            Some(PostFilter::Curated) => PostFilter::Frontpage,
+            None => {
+                self.say(Tone::Info, lit("Open a forum to filter its posts."));
+                return;
+            }
+        };
+        self.set_filter(next, fx);
+    }
+
+    /// Lists the forum on top with `filter`.
+    fn set_filter(&mut self, filter: PostFilter, fx: &mut Vec<Effect>) {
+        let Some(i) = self.stack.len().checked_sub(1) else {
+            return;
+        };
+        let ScreenKind::Forum(s) = &mut self.stack[i].kind else {
+            self.say(Tone::Info, lit("Open a forum to filter its posts."));
+            return;
+        };
+        s.filter = filter;
+        s.tab = ForumTab::Posts;
         s.pos = ListPos::default();
         s.pending = None;
         self.reload(i, Origin::User, fx);
@@ -3595,6 +3689,18 @@ impl State {
                 }
                 self.switch_forum_tab(fx);
             }
+            Verb::Sort(name) => match self.stack.last().map(|s| &s.kind) {
+                Some(ScreenKind::Forum(_)) => match name.post() {
+                    Some(sort) => self.set_post_sort(sort, fx),
+                    None => self.say(Tone::Info, lit("latest-reply sorts a thread's comments.")),
+                },
+                Some(ScreenKind::Thread(_)) => match name.comment() {
+                    Some(sort) => self.set_comment_sort(sort, fx),
+                    None => self.say(Tone::Info, lit("recent-comments sorts a forum's posts.")),
+                },
+                _ => self.say(Tone::Info, lit("Open a forum or a thread to sort it.")),
+            },
+            Verb::Filter(filter) => self.set_filter(filter, fx),
             Verb::User { actor } => {
                 let actor = actor.or_else(|| self.mod_subject().map(|m| m.author));
                 match actor {
@@ -4078,8 +4184,8 @@ impl State {
                         HomeScreen::uris,
                     ),
                     (ScreenKind::Forum(s), Loaded::Forum(d)) => {
-                        // a load for another sort is superseded by the one in flight
-                        if d.list.sort == s.sort {
+                        // a load for another sort or filter is superseded by the one in flight
+                        if d.list.sort == s.sort && d.list.filter == s.filter {
                             receive_list(
                                 &mut s.data,
                                 &mut s.pending,
@@ -4090,6 +4196,8 @@ impl State {
                             );
                         }
                     }
+                    // as for a forum: a load in another comment sort is superseded
+                    (ScreenKind::Thread(t), Loaded::Thread(d)) if d.view.sort != t.opts.sort => {}
                     (ScreenKind::Thread(t), Loaded::Thread(d)) => {
                         if viewed && let ThreadRoot::Post(p) = &d.view.post {
                             fx.push(Effect::MarkThreadRead {

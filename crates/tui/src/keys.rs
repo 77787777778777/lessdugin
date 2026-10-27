@@ -62,8 +62,10 @@ pub enum Cmd {
     NewPost,
     /// `R`: sync, and show what a live update brought.
     Sync,
-    /// `s`: next sort.
+    /// `s`: next sort (posts on a forum, comments on a thread).
     Sort,
+    /// `f`: next filter of a forum's posts.
+    Filter,
     /// `u`, `U`, `d`, `D`, `a`, `A`, `z`, `Z`, `0`: an opinion on the selected item.
     Opinion(Op),
     /// `Backspace`: undo the pending write (the 4 s undo window).
@@ -116,6 +118,7 @@ pub fn command(k: &KeyEvent) -> Option<Cmd> {
         KeyCode::Char('P') => Cmd::NewPost,
         KeyCode::Char('R') => Cmd::Sync,
         KeyCode::Char('s') => Cmd::Sort,
+        KeyCode::Char('f') => Cmd::Filter,
         KeyCode::Char('u') => Cmd::Opinion(Op::Up),
         KeyCode::Char('U') => Cmd::Opinion(Op::StrongUp),
         KeyCode::Char('d') => Cmd::Opinion(Op::Down),
@@ -199,12 +202,14 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("p", "parent comment"),
             ("r", "reply in $EDITOR"),
             ("c", "comment on the post in $EDITOR"),
+            ("s", "comment sort (magic, top, new, old, latest)"),
         ],
     ),
     (
         "Forums",
         &[
-            ("s", "sort: magic, top, new, old"),
+            ("s", "sort: magic, top, new, old, recent comments"),
+            ("f", "filter: frontpage, all, curated"),
             ("Tab", "posts / activity"),
             ("P", "new post in $EDITOR"),
             ("R", "sync and show new items"),
@@ -249,6 +254,8 @@ mod tests {
         assert_eq!(c("G"), Some(Cmd::Bottom));
         assert_eq!(c("P"), Some(Cmd::NewPost));
         assert_eq!(c("R"), Some(Cmd::Sync));
+        assert_eq!(c("s"), Some(Cmd::Sort));
+        assert_eq!(c("f"), Some(Cmd::Filter));
         assert_eq!(c("Space"), Some(Cmd::Collapse));
         assert_eq!(c("Esc"), Some(Cmd::Back));
         // the M3 opinion keys (synthesis §6.11)

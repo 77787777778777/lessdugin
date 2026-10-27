@@ -69,20 +69,24 @@ pub async fn run<H: Host>(engine: &Engine<H>, effect: Effect, opts: ExecOpts) ->
             screen,
             forum,
             sort,
+            filter,
             origin,
         } => Action::ForumLoaded {
             screen,
             origin,
-            result: load_forum(engine, &forum, sort, opts).await.map(Box::new),
+            result: load_forum(engine, &forum, sort, filter, opts)
+                .await
+                .map(Box::new),
         },
         Effect::LoadThread {
             screen,
             uri,
+            opts: thread_opts,
             origin,
         } => Action::ThreadLoaded {
             screen,
             origin,
-            result: load_thread(engine, &uri, &ThreadOpts::default(), opts)
+            result: load_thread(engine, &uri, &thread_opts, opts)
                 .await
                 .map(Box::new),
         },
@@ -368,15 +372,16 @@ pub async fn load_home<H: Host>(
     Ok(HomeData { forums })
 }
 
-/// `forum_open` and `list_posts` (filter all).
+/// `forum_open` and `list_posts`.
 pub async fn load_forum<H: Host>(
     engine: &Engine<H>,
     forum: &str,
     sort: PostSort,
+    filter: PostFilter,
     opts: ExecOpts,
 ) -> Result<ForumData, EngineError> {
     let view = engine.forum_open(forum).await?;
-    let q = posts_query(forum, sort, LIST_LIMIT);
+    let q = posts_query(forum, sort, filter, LIST_LIMIT);
     let mut list = engine.list_posts(&q).await?;
     if !opts.offline
         && unverified(list.items.iter().map(|p| &p.author))
@@ -420,13 +425,13 @@ pub async fn load_activity<H: Host>(
     Ok(ActivityData { list, bodies })
 }
 
-/// The query of the Forum screen: the M3 defaults (`magic` over `frontpage`,
-/// `engine-api.md` §3.4), at most `limit` posts.
-pub fn posts_query(forum: &str, sort: PostSort, limit: u32) -> ListPostsQuery {
+/// The query of the Forum screen in `sort` and `filter` (it opens on the M3 defaults, `magic`
+/// over `frontpage`, `engine-api.md` §3.4), at most `limit` posts.
+pub fn posts_query(forum: &str, sort: PostSort, filter: PostFilter, limit: u32) -> ListPostsQuery {
     ListPostsQuery {
         forum: forum.to_owned(),
         sort,
-        filter: PostFilter::Frontpage,
+        filter,
         tag: None,
         kind: None,
         author: None,

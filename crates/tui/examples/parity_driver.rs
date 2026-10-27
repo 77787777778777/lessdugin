@@ -297,15 +297,20 @@ async fn read(forum: &str, post: &str, out: &Path, size: (u16, u16)) -> Res<()> 
     h.start(Some(forum.to_owned())).await;
     h.state.show_pending();
     let screen = forum_list(&h)?;
-    let sort = match h.state.top().map(|s| &s.kind) {
-        Some(ScreenKind::Forum(f)) => f.sort,
+    let (sort, filter) = match h.state.top().map(|s| &s.kind) {
+        Some(ScreenKind::Forum(f)) => (f.sort, f.filter),
         _ => return Err("the forum is not on top".into()),
     };
     // The page the other clients compare: the screen's query with their page size. The
     // screen lists more (LIST_LIMIT); its first posts must be this page, in this order.
     let list = d
         .engine
-        .list_posts(&exec::posts_query(forum, sort, exec::PARITY_LIST_LIMIT))
+        .list_posts(&exec::posts_query(
+            forum,
+            sort,
+            filter,
+            exec::PARITY_LIST_LIMIT,
+        ))
         .await
         .map_err(|e| e.message)?;
     let uris = |l: &PostList| l.items.iter().map(|p| p.uri.clone()).collect::<Vec<_>>();

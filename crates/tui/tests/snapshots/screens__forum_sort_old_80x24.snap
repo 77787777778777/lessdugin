@@ -1,10 +1,9 @@
 ---
 source: crates/tui/tests/screens.rs
-assertion_line: 62
 expression: screen
 ---
  lessdugin › Meta                                            @carol.example.com
-  posts  activity  sort:  magic  top  new  old   filter: frontpage  synced 08:58
+  posts  activity  sort:  old   filter:  frontpage   synced 08:58 UTC
   Welcome
   @alice.example.com · 2025-10-09 08:54 UTC · 1 comment · 1 point
 ▌ Hello from bob
@@ -26,4 +25,4 @@ expression: screen
 
 
 
- Enter open · s sort · P post · R sync · ? help · h back
+ Enter open · s sort · f filter · P post · R sync · ? help · h back

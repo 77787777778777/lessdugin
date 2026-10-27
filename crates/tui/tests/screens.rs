@@ -307,3 +307,82 @@ fn the_displayed_time_is_t_rank_not_the_claimed_created_at() {
     assert!(doc.contains(&shown), "{doc}");
     assert!(!doc.contains(&claimed), "{doc}");
 }
+
+/// A forum whose posts start in `personal` (the CLI's and the SPA's default) lists nothing on
+/// the frontpage; `f` cycles the filter to all posts (and curated), `s` reaches the
+/// recent-comments sort, and on a thread `s` sorts the comments (`social.md` §12.2-§12.4).
+#[test]
+fn filters_and_every_sort_are_reachable() {
+    use lessdugin_core::dto::{CommentSort, ForumDraft, PostFilter, PostSort};
+    let s = scenario();
+    let (alice, carol) = (&s.w.alice, &s.w.carol);
+    let t = block_on(
+        alice
+            .engine
+            .forum_create(&ForumDraft::new("personal", "Personal")),
+    )
+    .unwrap();
+    alice.flush();
+    let forum = alice.done(&t);
+    s.w.tick(MINUTE);
+    let t = block_on(
+        alice
+            .engine
+            .publish(&PostDraft::article(&forum, "A personal post", "Hi.")),
+    )
+    .unwrap();
+    alice.flush();
+    let post = alice.done(&t);
+    s.w.tick(MINUTE);
+    block_on(carol.engine.forum_follow(&forum, None)).unwrap();
+    carol.sync(&forum);
+
+    let mut t = tui(&s, 80, 24);
+    block_on(t.start(Some(forum.clone())));
+    let screen = t.render();
+    assert!(screen.contains("No frontpage posts."), "{screen}");
+    assert!(!screen.contains("A personal post"), "{screen}");
+    block_on(t.press("f"));
+    let screen = t.render();
+    assert!(screen.contains("A personal post"), "{screen}");
+    assert!(screen.contains("filter:  all"), "{screen}");
+    let f = t.state.top_forum_screen().unwrap();
+    assert_eq!(f.filter, PostFilter::All);
+    assert_eq!(f.data.as_ref().unwrap().list.filter, PostFilter::All);
+    block_on(t.press("f"));
+    assert_eq!(
+        t.state.top_forum_screen().unwrap().filter,
+        PostFilter::Curated
+    );
+    // `:filter all` sets it directly
+    block_on(t.press(":"));
+    for c in "filter all".chars() {
+        block_on(t.press(&c.to_string()));
+    }
+    block_on(t.press("Enter"));
+    assert_eq!(t.state.top_forum_screen().unwrap().filter, PostFilter::All);
+    // four `s` from magic: recent comments, and the list is in it
+    block_on(t.keys(&["s", "s", "s", "s"]));
+    let f = t.state.top_forum_screen().unwrap();
+    assert_eq!(f.sort, PostSort::RecentComments);
+    assert_eq!(f.data.as_ref().unwrap().list.sort, PostSort::RecentComments);
+    assert!(t.render().contains("recent comments"), "{}", t.render());
+
+    // a thread's comment sort
+    block_on(t.open_thread(&post));
+    block_on(t.press("s"));
+    let th = t.state.top_thread().unwrap();
+    assert_eq!(th.opts.sort, CommentSort::Top);
+    assert_eq!(th.data.as_ref().unwrap().view.sort, CommentSort::Top);
+    assert!(t.render().contains("comments: top"), "{}", t.render());
+    block_on(t.press(":"));
+    for c in "sort latest-reply".chars() {
+        block_on(t.press(&c.to_string()));
+    }
+    block_on(t.press("Enter"));
+    let th = t.state.top_thread().unwrap();
+    assert_eq!(
+        th.data.as_ref().unwrap().view.sort,
+        CommentSort::LatestReply
+    );
+}
