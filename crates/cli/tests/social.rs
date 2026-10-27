@@ -460,7 +460,7 @@ fn forum_edit_reject_mute_and_the_karma_cadence() {
         "--description",
         "Talk",
         "--report-contact",
-        "mods@example.com",
+        "mailto:mods@example.com",
     ]);
     assert!(out.status.success(), "{}", text(&out.stderr));
     assert!(
@@ -471,7 +471,7 @@ fn forum_edit_reject_mute_and_the_karma_cadence() {
     let decl = w.alice.account.get(nsid::FORUM, "meta").unwrap();
     assert_eq!(decl["membership"], "open", "{decl}");
     assert_eq!(decl["description"], "Talk", "{decl}");
-    assert_eq!(decl["reportContact"], "mods@example.com", "{decl}");
+    assert_eq!(decl["reportContact"], "mailto:mods@example.com", "{decl}");
     assert_eq!(decl["name"], "meta", "{decl}");
     assert_eq!(decl["defaultTier"], "frontpage", "{decl}");
     // back to approval (archiving), the description removed, the contact kept
@@ -482,35 +482,35 @@ fn forum_edit_reject_mute_and_the_karma_cadence() {
     let decl = w.alice.account.get(nsid::FORUM, "meta").unwrap();
     assert_eq!(decl["membership"], "approval", "{decl}");
     assert!(decl.get("description").is_none(), "{decl}");
-    assert_eq!(decl["reportContact"], "mods@example.com", "{decl}");
+    assert_eq!(decl["reportContact"], "mailto:mods@example.com", "{decl}");
     // only the owner edits
     let e = w.bob.fails(1, &["forum", "edit", "alice.test/meta", "--name", "Mine"]);
     assert_eq!(e["code"], "blocked", "{e}");
 
-    // reject: dave applies, alice dismisses him on this device
+    // reject: dave applies, and alice dismisses him (on this device: nothing to remove)
     let dave = w.net.user("dave.test", true);
     dave.json(&["join", &w.forum, "--yes"]);
-    w.alice.ok(&["sync", &w.forum]);
-    let pending = |u: &fakenet::User| -> Vec<String> {
-        u.json(&["members", "--pending"])["members"]
-            .as_array()
-            .unwrap()
+    let grants = || -> usize {
+        w.alice
+            .account
+            .list(nsid::MOD_ACTION)
             .iter()
-            .map(|m| m["actor"]["did"].as_str().unwrap().to_owned())
-            .collect()
+            .filter_map(|(rkey, _)| w.alice.account.get(nsid::MOD_ACTION, rkey))
+            .filter(|v| v["subject"] == dave.did().as_str())
+            .count()
     };
-    assert_eq!(pending(&w.alice), [dave.did()]);
     let r = w.alice.json(&["reject", "dave.test"]);
     assert_eq!(r["writes"].as_array().unwrap().len(), 0, "{r}");
-    assert!(pending(&w.alice).is_empty());
-    // approving brings him back from the rejected list, with the grant
+    // approving grants him (and forgets the rejection); rejecting him then removes the
+    // account's own grant
     let a = w.alice.json(&["approve", "dave.test"]);
     assert_eq!(a["writes"][0]["state"]["kind"], "done", "{a}");
-    // rejecting a granted actor removes the account's own grant
+    assert_eq!(grants(), 1);
     let r = w.alice.json(&["reject", "dave.test"]);
     let writes = r["writes"].as_array().unwrap();
     assert_eq!(writes.len(), 1, "{r}");
     assert_eq!(writes[0]["state"]["kind"], "done", "{r}");
+    assert_eq!(grants(), 0);
 
     // mute: bob's comment is collapsed for alice only, until she unmutes him
     let c = w.bob.json(&["comment", &w.post, "-m", "A reply."]);

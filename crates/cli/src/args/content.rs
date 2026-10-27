@@ -376,8 +376,8 @@ pub struct ForumEditArgs {
     /// Remove every featured tag.
     #[arg(long, conflicts_with = "featured_tags")]
     pub no_featured_tags: bool,
-    /// Where to report problems (empty removes it).
-    #[arg(long, value_name = "CONTACT")]
+    /// Where to report problems, a URI such as `mailto:…` or `https://…` (empty removes it).
+    #[arg(long, value_name = "URI")]
     pub report_contact: Option<String>,
 }
 
