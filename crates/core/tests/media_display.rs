@@ -396,16 +396,23 @@ fn a_labelled_post_or_an_unknown_host_asks_first() {
     let plain = post(&n, &bob, &f, image_body(&png));
     let e = n.device("anon", None);
     assert!(!read(&e, &f, &plain).body.media[0].autoload);
-    // with five participants on it, it is (AUTOLOAD_HOST_MIN_PARTICIPANTS, by identity rows)
+    // with five participants on it, it is (AUTOLOAD_HOST_MIN_PARTICIPANTS, by identity rows):
+    // four moderators on bob's PDS, so they are participants (A)
     let pds = n.net.pds(&bob.pds_base()).unwrap();
-    for i in 0..4 {
-        let m = pds.add_account(&format!("m{i}.example.com"));
-        m.put(
-            nsid::MEMBERSHIP,
-            &keys::membership_rkey(&f).unwrap(),
-            &json!({"$type": nsid::MEMBERSHIP, "forum": f, "createdAt": dt(n.now())}),
-        );
-    }
+    let mods: Vec<Value> = (0..4)
+        .map(|i| {
+            let m = pds.add_account(&format!("m{i}.example.com"));
+            json!({"did": m.did().as_str(), "role": "moderator"})
+        })
+        .collect();
+    bob.put(
+        nsid::FORUM,
+        "meta",
+        &json!({
+            "$type": nsid::FORUM, "name": "Pics", "membership": "open",
+            "defaultTier": "frontpage", "createdAt": dt(n.now()), "moderators": mods,
+        }),
+    );
     n.tick(MINUTE);
     let e = n.device("anon2", None);
     assert!(read(&e, &f, &plain).body.media[0].autoload);

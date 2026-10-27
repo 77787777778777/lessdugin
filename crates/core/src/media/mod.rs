@@ -1624,7 +1624,8 @@ impl<H: crate::host::Host> crate::engine::Engine<H> {
     /// The device's media autoload inputs for views over `model` whose bodies are `values`
     /// (`sync.md` §11.3): the `mediaAutoload` switch (on unless `off`), the `mediaHosts`
     /// allowlist and, when some body has media, how many participants each PDS host serves by
-    /// their cached identity rows (nothing is resolved here).
+    /// their cached identity rows, and which of them are at level `doc` (nothing is resolved
+    /// here).
     pub(crate) async fn media_prefs(
         &self,
         model: &crate::model::ForumModel,
@@ -1660,10 +1661,11 @@ impl<H: crate::host::Host> crate::engine::Engine<H> {
             .collect();
         let found = futures::future::join_all(dids.iter().map(|d| self.resolver().cached(d))).await;
         for id in found.into_iter().flatten() {
-            if id.level != crate::identity::IdentityLevel::Doc {
-                continue;
+            // the forum's sync talks to every participant's PDS, whatever level its row has; an
+            // author's own media autoload only at level doc (§11.1)
+            if id.level == crate::identity::IdentityLevel::Doc {
+                prefs.doc.insert(id.did.to_string());
             }
-            prefs.doc.insert(id.did.to_string());
             if let Some(host) = id
                 .pds
                 .as_deref()
