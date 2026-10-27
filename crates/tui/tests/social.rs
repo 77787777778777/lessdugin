@@ -452,9 +452,9 @@ fn a_stance_switch_is_one_add() {
     block_on(t.settle());
     // the palette again, against, Enter: the effects of that one key
     block_on(t.keys(&["x", "Tab"]));
-    let fx = t
-        .state
-        .update(Action::Key(lessdugin_tui::keys::parse_key("Enter").unwrap()));
+    let fx = t.state.update(Action::Key(
+        lessdugin_tui::keys::parse_key("Enter").unwrap(),
+    ));
     let opinions: Vec<&OpinionIntent> = fx
         .iter()
         .filter_map(|e| match e {

@@ -991,8 +991,15 @@ impl Screen {
     fn concerns(&self, topic: &Topic) -> bool {
         match (&self.kind, topic) {
             (ScreenKind::Home(_), Topic::Forum { .. } | Topic::Accounts) => true,
-            (ScreenKind::Notifications(_), Topic::Notifications) => true,
+            // notifications are computed lazily: a forum or thread change is what brings new
+            // ones (`engine-api.md` §3.4), and nothing emits `Notifications` for them
+            (
+                ScreenKind::Notifications(_),
+                Topic::Notifications | Topic::Forum { .. } | Topic::Thread { .. },
+            ) => true,
             (ScreenKind::Forum(f), Topic::Forum { uri }) => *uri == f.uri,
+            // new applicants and assertions arrive with the forum's changes
+            (ScreenKind::Mod(m), Topic::Forum { uri }) => *uri == m.forum,
             (ScreenKind::Thread(t), topic) => {
                 let Some(d) = &t.data else {
                     return matches!(topic, Topic::Thread { uri } if *uri == t.uri);
@@ -1427,9 +1434,11 @@ impl State {
                 result,
             } => self.mod_action_done(screen, result, &mut fx),
             Action::QueueLoaded { screen, result, .. } => {
-                self.mod_loaded(screen, Some(result), None)
+                self.mod_loaded(screen, Some(result), None, &mut fx)
             }
-            Action::LogLoaded { screen, result, .. } => self.mod_loaded(screen, None, Some(result)),
+            Action::LogLoaded { screen, result, .. } => {
+                self.mod_loaded(screen, None, Some(result), &mut fx)
+            }
             Action::ActivityLoaded {
                 screen,
                 origin,
@@ -1439,7 +1448,7 @@ impl State {
                 screen,
                 origin,
                 result,
-            } => self.notifications_loaded(screen, origin, result),
+            } => self.notifications_loaded(screen, origin, result, &mut fx),
             Action::HistoryLoaded {
                 screen,
                 origin,
@@ -1601,7 +1610,9 @@ impl State {
                 if s.live_burst >= LIVE_RELOAD_CAP {
                     // the loads change nothing the user can see (an authority repo that stays
                     // unavailable keeps re-announcing itself): stop until the user acts or
-                    // presses R; the screen keeps what it shows
+                    // presses R; the screen keeps what it shows, marked stale so the user's
+                    // next move reloads it (a genuine update is late, never lost)
+                    s.stale = true;
                     return;
                 }
                 s.live_burst += 1;
@@ -1782,17 +1793,24 @@ impl State {
                     ),
                 }
             }
-            nav => self.navigate(nav),
+            nav => self.navigate(nav, fx),
         }
     }
 
-    fn navigate(&mut self, cmd: Cmd) {
+    fn navigate(&mut self, cmd: Cmd, fx: &mut Vec<Effect>) {
         let (w, h) = (self.width, self.content_height());
-        let Some(top) = self.stack.last_mut() else {
+        let Some(i) = self.stack.len().checked_sub(1) else {
             return;
         };
+        let top = &mut self.stack[i];
         top.settling = false;
         top.live_burst = 0;
+        if top.stale {
+            // live updates were capped while the user did nothing: the move picks them up
+            top.stale = false;
+            self.reload(i, Origin::Live, fx);
+        }
+        let top = &mut self.stack[i];
         match &mut top.kind {
             ScreenKind::Home(s) => {
                 let len = s.data.as_ref().map_or(0, |d| d.forums.len());
@@ -1858,7 +1876,7 @@ impl State {
                     self.push_thread(uri, fx);
                 }
             }
-            ScreenKind::Thread(_) => self.navigate(Cmd::Collapse),
+            ScreenKind::Thread(_) => self.navigate(Cmd::Collapse, fx),
             // on the Mod screen, Enter approves the selected queue row (an applicant)
             ScreenKind::Mod(_) => self.approve_selected(fx),
             // on the Notifications screen, Enter opens the notification's thread
@@ -3026,6 +3044,7 @@ impl State {
         screen: ScreenId,
         origin: Origin,
         result: Result<NotificationList, EngineError>,
+        fx: &mut Vec<Effect>,
     ) {
         let Some(i) = self.index_of(screen) else {
             return;
@@ -3047,6 +3066,11 @@ impl State {
                 );
             }
             Err(e) => s.error = Some(e),
+        }
+        // a live reload asked for while this one ran (as `loaded`)
+        if s.dirty && s.loading == 0 {
+            s.dirty = false;
+            self.reload(i, Origin::Live, fx);
         }
     }
 
@@ -3703,6 +3727,7 @@ impl State {
         screen: ScreenId,
         queue: Option<Result<ModQueue, EngineError>>,
         log: Option<Result<ModLog, EngineError>>,
+        fx: &mut Vec<Effect>,
     ) {
         let Some(i) = self.index_of(screen) else {
             return;
@@ -3721,6 +3746,10 @@ impl State {
         }
         let len = m.row_count();
         m.pos.reveal(len, usize::from(self.height));
+        if s.dirty && s.loading == 0 {
+            s.dirty = false;
+            self.reload(i, Origin::Live, fx);
+        }
     }
 
     /// [`Action::OpinionDone`]: notices and the undo hint, or the refusal.
@@ -3971,11 +4000,14 @@ impl State {
                         self.stack[i].stale = true;
                     }
                 }
-                // the header's badge follows the notifications
-                if topics
-                    .iter()
-                    .any(|t| matches!(t, Topic::Notifications | Topic::Forum { .. }))
-                {
+                // the header's badge follows the notifications (re-queried on a Notifications,
+                // Forum or Thread topic, `engine-api.md` §3.4)
+                if topics.iter().any(|t| {
+                    matches!(
+                        t,
+                        Topic::Notifications | Topic::Forum { .. } | Topic::Thread { .. }
+                    )
+                }) {
                     fx.push(Effect::LoadUnread);
                 }
             }
@@ -4343,6 +4375,185 @@ mod tests {
         let mut line = String::from("vote ");
         complete(&mut line);
         assert_eq!(line, "vote ");
+    }
+
+    /// A writing account.
+    fn me() -> AccountView {
+        AccountView {
+            did: "did:plc:me".into(),
+            handle: None,
+            pds: "https://pds.example".into(),
+            auth_kind: lessdugin_core::dto::AuthKind::AppPassword,
+            active: true,
+        }
+    }
+
+    fn notification_loads(fx: &[Effect]) -> usize {
+        fx.iter()
+            .filter(|e| matches!(e, Effect::LoadNotifications { .. }))
+            .count()
+    }
+
+    /// Notifications are computed lazily: the Notifications screen re-queries on a Forum or
+    /// Thread topic (nothing emits `Notifications` for a new reply), and a reload asked for
+    /// while its load runs is not dropped.
+    #[test]
+    fn the_notifications_screen_follows_forum_and_thread_changes() {
+        let mut st = State::new(80, 24, Some(me()), true);
+        st.start(None);
+        let fx = st.update(Action::Key(keys::parse_key("N").unwrap()));
+        assert_eq!(notification_loads(&fx), 1, "{fx:?}");
+        let screen = st.top().unwrap().id;
+        // a change while the first load runs is kept for when it finishes
+        let fx = changed(
+            &mut st,
+            Topic::Thread {
+                uri: "at://t".into(),
+            },
+        );
+        assert_eq!(notification_loads(&fx), 0, "{fx:?}");
+        let fx = st.update(Action::NotificationsLoaded {
+            screen,
+            origin: Origin::User,
+            result: Ok(NotificationList {
+                dto: Default::default(),
+                items: Vec::new(),
+                unread: 0,
+            }),
+        });
+        assert_eq!(notification_loads(&fx), 1, "the dirty reload runs: {fx:?}");
+        st.update(Action::NotificationsLoaded {
+            screen,
+            origin: Origin::Live,
+            result: Ok(NotificationList {
+                dto: Default::default(),
+                items: Vec::new(),
+                unread: 0,
+            }),
+        });
+        // a forum change re-queries them too
+        let fx = changed(
+            &mut st,
+            Topic::Forum {
+                uri: "at://f".into(),
+            },
+        );
+        assert_eq!(notification_loads(&fx), 1, "{fx:?}");
+    }
+
+    fn forum_loads(fx: &[Effect]) -> usize {
+        fx.iter()
+            .filter(|e| matches!(e, Effect::LoadForum { .. }))
+            .count()
+    }
+
+    /// Past `LIVE_RELOAD_CAP` live reloads with no key in between, a change is not loaded at
+    /// once, but it is not lost either: the user's next move reloads the screen.
+    #[test]
+    fn a_capped_live_update_reloads_on_the_next_move() {
+        let mut st = State::new(80, 24, None, true);
+        st.start(None);
+        st.open_forum("at://f".into());
+        let screen = st.top().unwrap().id;
+        let finish = |st: &mut State| {
+            st.update(Action::ForumLoaded {
+                screen,
+                origin: Origin::Live,
+                result: Err(EngineError::internal("offline")),
+            });
+        };
+        finish(&mut st);
+        for _ in 0..LIVE_RELOAD_CAP {
+            let fx = changed(
+                &mut st,
+                Topic::Forum {
+                    uri: "at://f".into(),
+                },
+            );
+            assert_eq!(forum_loads(&fx), 1, "{fx:?}");
+            finish(&mut st);
+        }
+        let fx = changed(
+            &mut st,
+            Topic::Forum {
+                uri: "at://f".into(),
+            },
+        );
+        assert_eq!(forum_loads(&fx), 0, "capped: {fx:?}");
+        assert!(st.top().unwrap().stale);
+        let fx = st.update(Action::Key(keys::parse_key("j").unwrap()));
+        assert_eq!(forum_loads(&fx), 1, "the move reloads: {fx:?}");
+        assert!(!st.top().unwrap().stale);
+    }
+
+    /// The Mod screen follows its forum's changes (a new applicant), and a reload asked for
+    /// while its loads run is not dropped.
+    #[test]
+    fn the_mod_screen_follows_its_forum() {
+        let mut st = State::new(80, 24, None, true);
+        st.start(None);
+        st.open_forum("at://f".into());
+        let mut fx = Vec::new();
+        st.push(
+            ScreenKind::Mod(Box::new(ModScreen {
+                forum: "at://f".into(),
+                ..ModScreen::default()
+            })),
+            &mut fx,
+        );
+        let screen = st.top().unwrap().id;
+        let queue_loads = |fx: &[Effect]| {
+            fx.iter()
+                .filter(|e| matches!(e, Effect::LoadQueue { .. }))
+                .count()
+        };
+        let fx = changed(
+            &mut st,
+            Topic::Forum {
+                uri: "at://f".into(),
+            },
+        );
+        assert_eq!(queue_loads(&fx), 0, "loading: kept for later: {fx:?}");
+        let empty = || ModLog {
+            dto: Default::default(),
+            entries: Vec::new(),
+            cursor: None,
+        };
+        st.update(Action::LogLoaded {
+            screen,
+            origin: Origin::User,
+            result: Ok(empty()),
+        });
+        let fx = st.update(Action::LogLoaded {
+            screen,
+            origin: Origin::User,
+            result: Ok(empty()),
+        });
+        assert_eq!(queue_loads(&fx), 1, "the dirty reload runs: {fx:?}");
+        st.update(Action::LogLoaded {
+            screen,
+            origin: Origin::Live,
+            result: Ok(empty()),
+        });
+        st.update(Action::LogLoaded {
+            screen,
+            origin: Origin::Live,
+            result: Ok(empty()),
+        });
+        let fx = changed(
+            &mut st,
+            Topic::Forum {
+                uri: "at://f".into(),
+            },
+        );
+        assert_eq!(queue_loads(&fx), 1, "{fx:?}");
+        let fx = changed(
+            &mut st,
+            Topic::Forum {
+                uri: "at://g".into(),
+            },
+        );
+        assert_eq!(queue_loads(&fx), 0, "another forum: {fx:?}");
     }
 
     /// A multi-byte space (NBSP from macOS Option-Space, U+3000 from a CJK IME) before `Tab`
