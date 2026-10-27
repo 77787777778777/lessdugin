@@ -345,7 +345,7 @@ fn author_scope_lock_pin_and_removal() {
     assert_eq!(h["state"]["kind"], "done", "{h}");
     assert_eq!(author_records("#hide").len(), 1);
     // the removal names the author scope (a forum-scope unhide finds nothing to remove)
-    let e = w.alice.fails(1, &["mod", "unhide", &comment]);
+    let e = w.alice.fails(4, &["mod", "unhide", &comment]);
     assert_eq!(e["code"], "not_found", "{e}");
     let u = w
         .alice
