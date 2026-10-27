@@ -119,6 +119,31 @@ async function tab(
   return t;
 }
 
+/** An 8×4 baseline JPEG (left column red, the rest green) without EXIF, as Pillow writes it. */
+const JPEG_8X4 =
+  "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDABALDA4MChAODQ4SERATGCgaGBYWGDEjJR0oOjM9PDkzODdASFxOQERXRTc4UG1RV19iZ2hnPk1xeXBkeFxlZ2P/2wBDARESEhgVGC8aGi9jQjhCY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2P/wAARCAAEAAgDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAP/xAAaEAEAAQUAAAAAAAAAAAAAAAAAAQMENHKx/8QAFAEBAAAAAAAAAAAAAAAAAAAABv/EABsRAAIBBQAAAAAAAAAAAAAAAAABAgQxM3Gx/9oADAMBAAIRAxEAPwC1ti0tI4AMyuwpU5p7fT//2Q==";
+
+/** The CIDv1 (raw, sha2-256, base32) of `bytes`. */
+async function rawCid(bytes: Uint8Array): Promise<string> {
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes as BufferSource));
+  const raw = [0x01, 0x55, 0x12, 0x20, ...digest];
+  const b32 = "abcdefghijklmnopqrstuvwxyz234567";
+  let out = "b";
+  let bits = 0;
+  let value = 0;
+  for (const byte of raw) {
+    value = (value << 8) | byte;
+    bits += 8;
+    while (bits >= 5) {
+      bits -= 5;
+      out += b32[(value >> bits) & 31];
+    }
+    value &= (1 << bits) - 1;
+  }
+  if (bits > 0) out += b32[(value << (5 - bits)) & 31];
+  return out;
+}
+
 async function rejects(p: Promise<unknown>): Promise<EngineError> {
   try {
     await p;
@@ -243,6 +268,26 @@ describe.runIf(present)("WorkerEngine over the real wasm", () => {
     // every request was anonymous and went through the JS fetch
     expect(t.bridged).toEqual([]);
     expect(t.fetched.some((u) => u.startsWith(`https://plc.directory/${did}`))).toBe(true);
+  });
+
+  it("orients a photo in the SPA's prepareMedia, not only strips its EXIF (m4-6)", async () => {
+    // an 8×4 JPEG (no EXIF), and the same with an APP1 whose IFD0 says orientation 6
+    const plain = Uint8Array.from(atob(JPEG_8X4), (c) => c.charCodeAt(0));
+    const tiff = [0x49, 0x49, 0x2a, 0, 8, 0, 0, 0, 1, 0, 0x12, 0x01, 3, 0, 1, 0, 0, 0, 6, 0, 0, 0];
+    const app1 = [...new TextEncoder().encode("Exif\0\0"), ...tiff, 0, 0, 0, 0];
+    const seg = [0xff, 0xe1, (app1.length + 2) >> 8, (app1.length + 2) & 0xff, ...app1];
+    const photo = Uint8Array.from([...plain.subarray(0, 2), ...seg, ...plain.subarray(2)]);
+    const { engine } = await tab(origin(), { elect: false });
+    const ref = (await engine.call("prepareMedia", [
+      Array.from(photo),
+      { declaredMime: "image/jpeg" },
+    ])) as { cid: string; mime: string; sizeBytes: number };
+    expect(ref.mime).toBe("image/jpeg");
+    // what stripping alone gives: SOI, then everything after the JFIF APP0 (18 bytes) - the
+    // pixels unrotated. The orientation pass re-encodes, so the prepared file is another one.
+    const stripped = Uint8Array.from([...plain.subarray(0, 2), ...plain.subarray(20)]);
+    expect(ref.cid).not.toBe(await rawCid(stripped));
+    expect(ref.sizeBytes).not.toBe(stripped.length);
   });
 
   it("refuses a mismatched namespace, a bad configuration and a second init", async () => {
