@@ -53,20 +53,31 @@ fn public_notice(kind: PublicActionKind) -> &'static str {
 }
 
 /// Shows the first-use interstitial of `kind` unless it was acknowledged, and records the
-/// acknowledgement. On a terminal the user is asked; headless use proceeds after the note (a
-/// script cannot answer, and refusing every headless vote would make automation impossible).
-async fn acknowledge(ctx: &Ctx, w: &Writer, kind: PublicActionKind) -> Result<(), CliError> {
+/// acknowledgement (`engine-api.md` §3.6): the first action of a kind is a decision, taken on a
+/// terminal by answering the question, or by `--yes` (`yes`), which headless use needs, since a
+/// script cannot answer. Once acknowledged, the kind asks nothing again, on any client of this
+/// device.
+pub(crate) async fn acknowledge(
+    ctx: &Ctx,
+    w: &Writer,
+    kind: PublicActionKind,
+    yes: bool,
+) -> Result<(), CliError> {
     if w.engine.public_action_acknowledged(kind).await? {
         return Ok(());
     }
     let text = public_notice(kind);
-    if prompt::stdin_is_tty() {
-        ctx.out.line(&[(tt(text), Style::Warn)]);
+    if yes {
+        ctx.out.note(&[(lit(text), Style::Dim)]);
+    } else if prompt::stdin_is_tty() {
+        ctx.out.err_line(&[(lit(text), Style::Warn)]);
         if !prompt::confirm("continue?") {
             return Err(CliError::Reported(1));
         }
     } else {
-        ctx.out.note(&[(lit(text), Style::Dim)]);
+        return Err(CliError::usage(format!(
+            "{text} This is asked once: add --yes to confirm when not running interactively."
+        )));
     }
     w.engine.acknowledge_public_action(kind).await?;
     Ok(())
@@ -117,6 +128,7 @@ pub async fn vote(ctx: &Ctx, args: VoteArgs) -> Result<(), CliError> {
             value: args.value.into(),
         },
         "Voted",
+        args.yes,
     )
     .await
 }
@@ -129,6 +141,7 @@ pub async fn agree(ctx: &Ctx, args: AgreeArgs) -> Result<(), CliError> {
         &args.reference,
         OpinionIntent::Agreement { value },
         "Recorded",
+        args.yes,
     )
     .await
 }
@@ -154,6 +167,7 @@ pub async fn react(ctx: &Ctx, args: ReactArgs) -> Result<(), CliError> {
             remove: args.remove,
         },
         "Reacted",
+        args.yes,
     )
     .await
 }
@@ -165,11 +179,12 @@ async fn opinion(
     reference: &str,
     intent: OpinionIntent,
     done: &'static str,
+    yes: bool,
 ) -> Result<(), CliError> {
     let w = ctx.writer().await?;
     let (uri, _) = refs::post_or_comment(ctx, &w.engine, reference).await?;
     read::sync_thread_quietly(ctx, &w.engine, &uri).await;
-    acknowledge(ctx, &w, intent.public_kind()).await?;
+    acknowledge(ctx, &w, intent.public_kind(), yes).await?;
     let at = w.engine.opinion(&uri, &intent).await?;
     drive_action(ctx, &w, at, done).await
 }
@@ -310,7 +325,7 @@ pub async fn activity(ctx: &Ctx, args: ActivityArgs) -> Result<(), CliError> {
 pub async fn mods(ctx: &Ctx, args: ModsArgs) -> Result<(), CliError> {
     let w = ctx.writer().await?;
     let forum = refs::forum_or_current(ctx, &w.engine, None).await?;
-    acknowledge(ctx, &w, PublicActionKind::ModAction).await?;
+    acknowledge(ctx, &w, PublicActionKind::ModAction, args.yes).await?;
     let change = match args.action {
         ModsAction::Add { actor, role } => ModsChange::Add {
             did: actor,
@@ -410,8 +425,9 @@ async fn mod_action(
     w: &Writer,
     intent: ModActionIntent,
     done: &'static str,
+    yes: bool,
 ) -> Result<(), CliError> {
-    acknowledge(ctx, w, PublicActionKind::ModAction).await?;
+    acknowledge(ctx, w, PublicActionKind::ModAction, yes).await?;
     let at = w.engine.mod_action(&intent).await?;
     drive_action(ctx, w, at, done).await
 }
@@ -448,8 +464,8 @@ pub async fn run(ctx: &Ctx, args: ModArgs) -> Result<(), CliError> {
     match args.action {
         ModAction::Queue { forum } => queue(ctx, forum.as_deref()).await,
         ModAction::Log { forum, limit } => log(ctx, forum.as_deref(), limit).await,
-        ModAction::Adopt { actor, forum } => adopt(ctx, &actor, forum.as_deref()).await,
-        action => assert_or_remove(ctx, action).await,
+        ModAction::Adopt { actor, forum } => adopt(ctx, &actor, forum.as_deref(), args.yes).await,
+        action => assert_or_remove(ctx, action, args.yes).await,
     }
 }
 
@@ -529,17 +545,17 @@ fn intersperse(parts: Vec<crate::out::TermText>) -> Vec<crate::out::TermText> {
 }
 
 /// `mod adopt <former-mod>`.
-async fn adopt(ctx: &Ctx, actor: &str, forum: Option<&str>) -> Result<(), CliError> {
+async fn adopt(ctx: &Ctx, actor: &str, forum: Option<&str>, yes: bool) -> Result<(), CliError> {
     let w = ctx.writer().await?;
     let forum = refs::forum_or_current(ctx, &w.engine, forum).await?;
-    acknowledge(ctx, &w, PublicActionKind::ModAction).await?;
+    acknowledge(ctx, &w, PublicActionKind::ModAction, yes).await?;
     let ticket = w.engine.mod_adopt(&forum, actor).await?;
     let t = write::drive(ctx, &w, ticket).await?;
     write::report(ctx, &t, "Adopted")
 }
 
 /// Every `mod <verb> <subject>` that asserts or removes one action.
-async fn assert_or_remove(ctx: &Ctx, action: ModAction) -> Result<(), CliError> {
+async fn assert_or_remove(ctx: &Ctx, action: ModAction, yes: bool) -> Result<(), CliError> {
     let w = ctx.writer().await?;
     let (subject, forum_opt, scope, value, reason, until, done) = match action {
         ModAction::Hide(a) => (
@@ -616,19 +632,19 @@ async fn assert_or_remove(ctx: &Ctx, action: ModAction) -> Result<(), CliError> 
             "Votes nullified",
         ),
         ModAction::Personal(s) => {
-            return tier(ctx, &w, s, Tier::Personal, "Moved to personal").await;
+            return tier(ctx, &w, s, Tier::Personal, "Moved to personal", yes).await;
         }
         ModAction::Frontpage(s) => {
-            return tier(ctx, &w, s, Tier::Frontpage, "Moved to frontpage").await;
+            return tier(ctx, &w, s, Tier::Frontpage, "Moved to frontpage", yes).await;
         }
         ModAction::Curate(s) => {
-            return tier(ctx, &w, s, Tier::Curated, "Curated").await;
+            return tier(ctx, &w, s, Tier::Curated, "Curated", yes).await;
         }
         ModAction::Pin(a) => {
-            return pin(ctx, &w, a, true).await;
+            return pin(ctx, &w, a, true, yes).await;
         }
         ModAction::Unpin(a) => {
-            return pin(ctx, &w, a, false).await;
+            return pin(ctx, &w, a, false, yes).await;
         }
         ModAction::Lock(s) => (
             s.subject.clone(),
@@ -649,16 +665,18 @@ async fn assert_or_remove(ctx: &Ctx, action: ModAction) -> Result<(), CliError> 
             "Unlocked",
         ),
         ModAction::Unhide(s) => {
-            return removal(ctx, &w, s, "hide", "Unhidden").await;
+            return removal(ctx, &w, s, "hide", "Unhidden", yes).await;
         }
         ModAction::Unban(s) => {
-            return removal(ctx, &w, s, "access", "Unbanned").await;
+            return removal(ctx, &w, s, "access", "Unbanned", yes).await;
         }
         ModAction::Unrestrict(s) => {
-            return removal(ctx, &w, s, "restrict", "Unrestricted").await;
+            return removal(ctx, &w, s, "restrict", "Unrestricted", yes).await;
         }
         ModAction::Approve(s) => {
             let forum = refs::forum_or_current(ctx, &w.engine, s.forum.as_deref()).await?;
+            // a grant is an `#access` mod action (`social.md` §17)
+            acknowledge(ctx, &w, PublicActionKind::ModAction, yes).await?;
             let tickets = w
                 .engine
                 .grant(&forum, std::slice::from_ref(&s.subject))
@@ -699,6 +717,7 @@ async fn assert_or_remove(ctx: &Ctx, action: ModAction) -> Result<(), CliError> 
         &w,
         assert(forum, scope, subject, value, reason, until),
         done,
+        yes,
     )
     .await
 }
@@ -710,6 +729,7 @@ async fn tier(
     s: ModSubject,
     tier: Tier,
     done: &'static str,
+    yes: bool,
 ) -> Result<(), CliError> {
     let forum = mod_forum(ctx, &w.engine, s.forum.as_deref(), &s.subject).await?;
     let subject = subject_of(ctx, &w.engine, &s.subject).await?;
@@ -726,12 +746,13 @@ async fn tier(
             None,
         ),
         done,
+        yes,
     )
     .await
 }
 
 /// `mod pin|unpin`.
-async fn pin(ctx: &Ctx, w: &Writer, a: PinArgs, pinned: bool) -> Result<(), CliError> {
+async fn pin(ctx: &Ctx, w: &Writer, a: PinArgs, pinned: bool, yes: bool) -> Result<(), CliError> {
     let forum = mod_forum(ctx, &w.engine, a.forum.as_deref(), &a.subject).await?;
     let subject = subject_of(ctx, &w.engine, &a.subject).await?;
     read::sync_thread_quietly(ctx, &w.engine, &subject).await;
@@ -750,6 +771,7 @@ async fn pin(ctx: &Ctx, w: &Writer, a: PinArgs, pinned: bool) -> Result<(), CliE
             None,
         ),
         if pinned { "Pinned" } else { "Unpinned" },
+        yes,
     )
     .await
 }
@@ -761,6 +783,7 @@ async fn removal(
     s: ModSubject,
     action_key: &str,
     done: &'static str,
+    yes: bool,
 ) -> Result<(), CliError> {
     let forum = mod_forum(ctx, &w.engine, s.forum.as_deref(), &s.subject).await?;
     let subject = subject_of(ctx, &w.engine, &s.subject).await?;
@@ -769,6 +792,7 @@ async fn removal(
         w,
         remove(forum, ModScope::Forum, subject, action_key),
         done,
+        yes,
     )
     .await
 }

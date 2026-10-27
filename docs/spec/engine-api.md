@@ -294,7 +294,9 @@ Kept in the `state` store of this device, never written to a PDS. Every operatio
 are public (`social.md` §17). Before the first action of a kind, every client shows the "this is
 public" interstitial unless `public_action_acknowledged(kind)`, then calls
 `acknowledge_public_action(kind)`; `OpinionIntent::public_kind()` names the kind of an intent.
-The engine does not enforce it.
+The engine does not enforce it. The CLI asks on a terminal; without one, the first action of a
+kind (a vote, a react, `join`, `approve`, a `mod` or `mods` command) is refused (`usage`) unless
+`--yes` confirms it.
 
 ### 3.7 Pure functions (also exported to wasm)
 

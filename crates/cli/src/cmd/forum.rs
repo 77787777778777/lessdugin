@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use lessdugin_core::dto::{
     BodyDraft, DTO_VERSION, DefaultTier, Event, ForumDraft, ForumRole, ForumSummary, MemberView,
-    MembersQuery, MembershipMode, SyncOpts, SyncReport, WriteTicket,
+    MembersQuery, MembershipMode, PublicActionKind, SyncOpts, SyncReport, WriteTicket,
 };
 use lessdugin_core::engine::{Engine, EngineError};
 use lessdugin_native::host::NativeHost;
@@ -22,7 +22,7 @@ use serde::Serialize;
 use crate::args::{
     ApproveArgs, ForumAction, ForumArgs, JoinArgs, LeaveArgs, MembersArgs, SyncArgs,
 };
-use crate::cmd::{read, refs, write};
+use crate::cmd::{read, refs, social, write};
 use crate::ctx::{CliError, Ctx};
 use crate::out::{Style, TermText, cat, lit, name, tt};
 use crate::render;
@@ -344,6 +344,8 @@ async fn show(ctx: &Ctx, forum: Option<&str>) -> Result<(), CliError> {
 pub async fn join(ctx: &Ctx, args: JoinArgs) -> Result<(), CliError> {
     let w = ctx.writer().await?;
     let uri = refs::forum(ctx, &w.engine, &args.forum).await?;
+    // joining (applying, with its note) is public (`social.md` §17)
+    social::acknowledge(ctx, &w, PublicActionKind::Join, args.yes).await?;
     let ticket = w.engine.join(&uri, args.note.as_deref()).await?;
     if let Some(a) = &args.alias {
         w.engine.forum_follow(&uri, Some(a)).await?;
@@ -430,6 +432,8 @@ pub async fn members(ctx: &Ctx, args: MembersArgs) -> Result<(), CliError> {
 pub async fn approve(ctx: &Ctx, args: ApproveArgs) -> Result<(), CliError> {
     let w = ctx.writer().await?;
     let uri = refs::forum_or_current(ctx, &w.engine, None).await?;
+    // a grant is an `#access` mod action (`social.md` §17)
+    social::acknowledge(ctx, &w, PublicActionKind::ModAction, args.yes).await?;
     let tickets = w.engine.grant(&uri, &args.actors).await?;
     let mut done = Vec::with_capacity(tickets.len());
     for t in tickets {

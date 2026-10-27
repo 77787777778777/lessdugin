@@ -71,6 +71,10 @@ pub struct VoteArgs {
     /// The vote.
     #[arg(value_enum)]
     pub value: KarmaArg,
+    /// Confirm the public action without asking (the first one of its kind needs it when not
+    /// running interactively).
+    #[arg(long, short = 'y')]
+    pub yes: bool,
 }
 
 /// `agree`.
@@ -82,6 +86,10 @@ pub struct AgreeArgs {
     /// The agreement vote.
     #[arg(value_enum)]
     pub value: AgreementArg,
+    /// Confirm the public action without asking (the first one of its kind needs it when not
+    /// running interactively).
+    #[arg(long, short = 'y')]
+    pub yes: bool,
 }
 
 /// `react`.
@@ -102,6 +110,10 @@ pub struct ReactArgs {
     /// Remove your react (with the same quote, if it was anchored).
     #[arg(long)]
     pub remove: bool,
+    /// Confirm the public action without asking (the first one of its kind needs it when not
+    /// running interactively).
+    #[arg(long, short = 'y')]
+    pub yes: bool,
 }
 
 /// `notifications`.
@@ -135,6 +147,10 @@ pub struct ModsArgs {
     /// What to do.
     #[command(subcommand)]
     pub action: ModsAction,
+    /// Confirm without asking: the public-action notice, and a removal that lets
+    /// assertions lapse (needed when not running interactively).
+    #[arg(long, short = 'y', global = true)]
+    pub yes: bool,
 }
 
 /// `mods …` (`social.md` §4.3; a removal runs `mod adopt` first, `data-model.md` §8.6).
@@ -185,6 +201,10 @@ pub struct ModArgs {
     /// What to do.
     #[command(subcommand)]
     pub action: ModAction,
+    /// Confirm the public action without asking (the first mod action needs it when not
+    /// running interactively).
+    #[arg(long, short = 'y', global = true)]
+    pub yes: bool,
 }
 
 /// `mod …` (`social.md` §4; every action is a public record, `data-model.md` §6.7).

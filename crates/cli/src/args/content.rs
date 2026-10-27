@@ -269,6 +269,10 @@ pub struct JoinArgs {
     /// A short local name for the forum.
     #[arg(long, value_name = "ALIAS")]
     pub alias: Option<String>,
+    /// Confirm the public membership without asking (the first join needs it when not running
+    /// interactively).
+    #[arg(long, short = 'y')]
+    pub yes: bool,
 }
 
 /// `leave`.
@@ -358,6 +362,10 @@ pub struct ApproveArgs {
     /// Handles or DIDs (in --forum, else the current forum).
     #[arg(value_name = "ACTOR", required = true, num_args = 1..)]
     pub actors: Vec<String>,
+    /// Confirm the public grant without asking (the first mod action needs it when not running
+    /// interactively).
+    #[arg(long, short = 'y')]
+    pub yes: bool,
 }
 
 /// `draft`.

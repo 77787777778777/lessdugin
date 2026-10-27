@@ -41,9 +41,9 @@ impl World {
         let bob = net.user("bob.test", true);
         let carol = net.user("carol.test", true);
         alice.json(&["forum", "create", "meta", "--frontpage"]);
-        bob.json(&["join", "alice.test/meta"]);
-        carol.json(&["join", "alice.test/meta"]);
-        let a = alice.json(&["approve", "bob.test", "carol.test"]);
+        bob.json(&["join", "alice.test/meta", "--yes"]);
+        carol.json(&["join", "alice.test/meta", "--yes"]);
+        let a = alice.json(&["approve", "bob.test", "carol.test", "--yes"]);
         for w in a["writes"].as_array().unwrap() {
             assert_eq!(w["state"]["kind"], "done", "{w}");
         }
@@ -68,8 +68,23 @@ impl World {
 fn votes_agreement_and_reacts_move_the_score_and_notify() {
     let w = World::new();
 
-    // the first vote shows the public interstitial (headless: a note on stderr), then records
+    // the first vote is the public interstitial: headless, it needs --yes, and without it
+    // nothing is written (engine-api.md §3.6)
     let out = w.bob.run(&["vote", &w.post, "up"]);
+    assert_eq!(out.status.code(), Some(2), "{:?}", text(&out.stderr));
+    let stderr = text(&out.stderr);
+    assert!(
+        stderr.contains("public") && stderr.contains("--yes"),
+        "{stderr}"
+    );
+    assert!(
+        w.bob
+            .account
+            .list(lessdugin_lexicon::collection::nsid::OPINION)
+            .is_empty()
+    );
+    // with --yes the notice is shown and acknowledged, then the vote records
+    let out = w.bob.run(&["vote", &w.post, "up", "--yes"]);
     assert!(out.status.success(), "{:?}", text(&out.stderr));
     let stderr = text(&out.stderr);
     assert!(stderr.contains("public"), "{stderr}");
@@ -120,7 +135,7 @@ fn votes_agreement_and_reacts_move_the_score_and_notify() {
     // `createdAt`: the first call sets the baseline, so it must come before the react.
     let base: NotificationList = exact(&w.alice.ok(&["--json", "notifications", "--all"]));
     assert_eq!(base.unread, 0, "{base:?}");
-    let r = w.carol.json(&["react", &w.post, "crux"]);
+    let r = w.carol.json(&["react", &w.post, "crux", "--yes"]);
     assert_eq!(r["state"]["kind"], "done", "{r}");
     w.alice.ok(&["sync", &w.forum]);
     let tv: ThreadView = exact(&w.alice.ok(&["--json", "read", &w.post]));
@@ -175,11 +190,11 @@ fn votes_refuse_what_cannot_count_and_activity_lists_discussion() {
     let w = World::new();
 
     // no voting on your own post
-    let e = w.alice.fails(1, &["vote", &w.post, "up"]);
+    let e = w.alice.fails(1, &["vote", &w.post, "up", "--yes"]);
     assert_eq!(e["code"], "invalid_input", "{e}");
 
     // an unknown react is refused before anything is written
-    let e = w.bob.fails(1, &["react", &w.post, "nope"]);
+    let e = w.bob.fails(1, &["react", &w.post, "nope", "--yes"]);
     assert_eq!(e["code"], "invalid_input", "{e}");
 
     // Recent Discussion lists the post once it has a comment
@@ -229,4 +244,63 @@ fn votes_refuse_what_cannot_count_and_activity_lists_discussion() {
     assert_eq!(hides.len(), 1, "{log}");
     assert_eq!(hides[0]["status"], "effective", "{log}");
     assert_eq!(hides[0]["reason"], "off topic", "{log}");
+}
+
+/// Joining (with its note) and granting are public actions too (`social.md` §17): the first
+/// `join`, `approve` and `mod approve` (a grant is an `#access` mod action) show the
+/// interstitial, which headless use confirms with `--yes`; without it nothing is written. Once
+/// acknowledged, the kind asks nothing again.
+#[test]
+fn join_and_approve_ask_for_the_public_interstitial_once() {
+    use lessdugin_lexicon::collection::nsid;
+    let net = Net::new();
+    let alice = net.user("alice.test", true);
+    let bob = net.user("bob.test", true);
+    let carol = net.user("carol.test", true);
+    alice.json(&["forum", "create", "meta"]);
+    carol.json(&["forum", "create", "lounge"]);
+
+    // bob's first join: refused headless, and no membership is written
+    let e = bob.fails(2, &["join", "alice.test/meta", "--note", "hello"]);
+    assert_eq!(e["code"], "usage", "{e}");
+    let msg = e["message"].as_str().unwrap();
+    assert!(msg.contains("membership") && msg.contains("--yes"), "{e}");
+    assert!(bob.account.list(nsid::MEMBERSHIP).is_empty());
+    let out = bob.run(&["join", "alice.test/meta", "--note", "hello", "--yes"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).contains("public"),
+        "{}",
+        text(&out.stderr)
+    );
+    // acknowledged: the next join asks nothing
+    let t = bob.json(&["join", "carol.test/lounge"]);
+    assert_eq!(t["state"]["kind"], "done", "{t}");
+
+    // alice's first grant: refused headless, no grant written
+    let e = alice.fails(2, &["approve", "bob.test"]);
+    assert_eq!(e["code"], "usage", "{e}");
+    assert!(alice.account.list(nsid::MOD_ACTION).is_empty());
+    let a = alice.json(&["approve", "bob.test", "--yes"]);
+    assert_eq!(a["writes"][0]["state"]["kind"], "done", "{a}");
+
+    // `mod approve` is the same grant: carol's first one needs --yes too
+    let e = carol.fails(
+        2,
+        &["mod", "approve", "bob.test", "--forum", "carol.test/lounge"],
+    );
+    assert_eq!(e["code"], "usage", "{e}");
+    assert!(carol.account.list(nsid::MOD_ACTION).is_empty());
+    let a = carol.json(&[
+        "mod",
+        "approve",
+        "bob.test",
+        "--forum",
+        "carol.test/lounge",
+        "--yes",
+    ]);
+    assert_eq!(a["writes"][0]["state"]["kind"], "done", "{a}");
+    // and her later mod actions ask nothing
+    let m = carol.json(&["mods", "add", "bob.test"]);
+    assert_eq!(m["state"]["kind"], "done", "{m}");
 }

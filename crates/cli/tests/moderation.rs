@@ -147,7 +147,7 @@ fn a_lock_above_5000_allowed_comments_is_refused_with_the_hide_hint() {
     let forum = f.uri.to_string();
 
     alice.ok(&["sync", &forum]);
-    let e = alice.fails(1, &["mod", "lock", &post.0]);
+    let e = alice.fails(1, &["mod", "lock", &post.0, "--yes"]);
     assert_eq!(e["code"], "invalid_input", "{e}");
     let msg = e["message"].as_str().unwrap();
     assert!(msg.contains("hide the thread instead"), "{e}");
@@ -174,9 +174,9 @@ fn mods_rm_runs_mod_adopt_first() {
 
     // bob and carol join and are approved; bob becomes a moderator
     for u in [&bob, &carol] {
-        u.json(&["join", "alice.test/meta"]);
+        u.json(&["join", "alice.test/meta", "--yes"]);
     }
-    let a = alice.json(&["approve", "bob.test", "carol.test"]);
+    let a = alice.json(&["approve", "bob.test", "carol.test", "--yes"]);
     for w in a["writes"].as_array().unwrap() {
         assert_eq!(w["state"]["kind"], "done", "{w}");
     }
@@ -188,7 +188,7 @@ fn mods_rm_runs_mod_adopt_first() {
     let post = carol.json(&["post", s(&f), "--yes"]);
     let post_uri = post["state"]["uri"].as_str().unwrap().to_owned();
     bob.ok(&["sync", "alice.test/meta"]);
-    let h = bob.json(&["mod", "hide", &post_uri, "--reason", "testing"]);
+    let h = bob.json(&["mod", "hide", &post_uri, "--reason", "testing", "--yes"]);
     assert_eq!(h["state"]["kind"], "done", "{h}");
     let bob_hide = bob
         .account

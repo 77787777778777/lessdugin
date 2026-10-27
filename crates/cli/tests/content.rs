@@ -259,6 +259,7 @@ fn approval_mode_with_three_users_and_anonymous_reading() {
         "I would like to post",
         "--alias",
         "m",
+        "--yes",
     ]);
     assert_eq!(t["state"]["kind"], "done", "{t}");
     let fl = bob.json(&["forum", "ls"]);
@@ -267,7 +268,7 @@ fn approval_mode_with_three_users_and_anonymous_reading() {
     // a devnet does not have, so the owner names them)
     let pending = alice.json(&["members", "--pending"]);
     assert_eq!(pending["dto"], 1);
-    let a = alice.json(&["approve", "bob.test", &carol.did()]);
+    let a = alice.json(&["approve", "bob.test", &carol.did(), "--yes"]);
     let w = a["writes"].as_array().unwrap();
     assert_eq!(w.len(), 2);
     assert!(w.iter().all(|t| t["state"]["kind"] == "done"), "{a}");
@@ -907,9 +908,9 @@ fn outbox_undo_retry_and_partial_sync() {
     assert_eq!(alice.account.list(nsid::POST).len(), 1);
 
     // sync --full, and a member whose repository cannot be read: partial, exit 6
-    let a = alice.json(&["approve", "bob.test"]);
+    let a = alice.json(&["approve", "bob.test", "--yes"]);
     assert_eq!(a["writes"][0]["state"]["kind"], "done", "{a}");
-    let t = bob.json(&["join", "alice.test/lounge"]);
+    let t = bob.json(&["join", "alice.test/lounge", "--yes"]);
     assert_eq!(t["state"]["kind"], "done", "{t}");
     let t = bob.json(&["comment", &t_uri(&alice), "-m", "Hi."]);
     assert_eq!(t["state"]["kind"], "done", "{t}");
