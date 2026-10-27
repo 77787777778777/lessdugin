@@ -234,9 +234,9 @@ impl<H: Host> Headless<H> {
 
     /// Waits for the decodes under way and hands their outcomes to the state; `true` if there
     /// were any.
+    #[allow(clippy::disallowed_methods)] // the image workers are threads on wall time
     fn wait_for_images(&mut self) -> bool {
-        let deadline =
-            std::time::Instant::now() + crate::image::limits::DECODE_TIMEOUT * 2;
+        let deadline = std::time::Instant::now() + crate::image::limits::DECODE_TIMEOUT * 2;
         loop {
             let polled = self.images.poll();
             if !polled.decoded.is_empty() || !polled.evicted.is_empty() {
@@ -267,6 +267,7 @@ impl<H: Host> Headless<H> {
 
     /// [`Headless::render`] once the resizes it asked the image workers for are done (the
     /// first draw of an image only asks for its size).
+    #[allow(clippy::disallowed_methods)] // the resize worker is a thread on wall time
     pub fn render_images(&mut self) -> String {
         let mut screen = self.render();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);

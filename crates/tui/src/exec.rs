@@ -468,7 +468,9 @@ pub async fn fetch_media<H: Host>(
             .read_to_end(&mut bytes)
             .map_err(|e| EngineError::internal(format!("reading the image: {e}")))?;
         if bytes.len() as u64 > max {
-            return Err(EngineError::invalid_input("the image is over the 64 MiB cap"));
+            return Err(EngineError::invalid_input(
+                "the image is over the 64 MiB cap",
+            ));
         }
         return Ok(crate::image::MediaBytes(std::sync::Arc::new(bytes)));
     }

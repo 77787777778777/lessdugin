@@ -178,7 +178,12 @@ fn confirm(f: &mut Frame<'_>, c: &Confirm, area: Rect) {
 
 /// The decoded images of thread `t` whose slot shows whole in `content` (one cut by the edge
 /// would be drawn rescaled, and jump as it scrolls in).
-fn draw_images(t: &ThreadScreen, images: &mut crate::image::Images, content: Rect, f: &mut Frame<'_>) {
+fn draw_images(
+    t: &ThreadScreen,
+    images: &mut crate::image::Images,
+    content: Rect,
+    f: &mut Frame<'_>,
+) {
     if t.history.is_some() {
         return;
     }

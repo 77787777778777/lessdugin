@@ -35,9 +35,9 @@ use lessdugin_core::engine::EngineError;
 use crate::body::Body;
 use crate::command::{AccessOp, ForumChanges, RestrictDim};
 use crate::editor;
+use crate::image::{MediaBytes, Placeholder};
 use crate::keys::{self, Cmd, Op};
 use crate::text::{TermText, actor, cat, count, lit, post_title, tt};
-use crate::image::{MediaBytes, Placeholder};
 use crate::thread::{self, Layout, MediaState, Pos};
 
 /// Identifies a screen instance (results for a screen that was closed are dropped).
@@ -1978,13 +1978,15 @@ impl State {
             },
             Action::MediaFetched { cid, result } => {
                 let next = match result {
-                    Ok(bytes) => {
+                    // decoded only for a thread screen that still shows it
+                    Ok(bytes) if self.wants_media(&cid) => {
                         fx.push(Effect::DecodeMedia {
                             cid: cid.clone(),
                             bytes,
                         });
                         Some(MediaState::Decoding)
                     }
+                    Ok(_) => None,
                     Err(e) => Some(MediaState::Failed(format!("could not load: {}", e.message))),
                 };
                 self.set_media(&cid, next);
@@ -2057,6 +2059,13 @@ impl State {
         }
     }
 
+    /// True if a thread screen on the stack asked for the image `cid`.
+    fn wants_media(&self, cid: &str) -> bool {
+        self.stack
+            .iter()
+            .any(|s| matches!(&s.kind, ScreenKind::Thread(t) if t.media.contains_key(cid)))
+    }
+
     /// Sets where the image `cid` is on every thread screen that asked for it (`None`: not
     /// asked for any more), and lays the screens out again.
     fn set_media(&mut self, cid: &str, state: Option<MediaState>) {
@@ -2102,7 +2111,10 @@ impl State {
         if n == 0 {
             self.say(Tone::Info, lit("Its images are already loaded or loading."));
         } else {
-            self.say(Tone::Info, cat([lit("Loading "), count(n, "image", "images"), lit("...")]));
+            self.say(
+                Tone::Info,
+                cat([lit("Loading "), count(n, "image", "images"), lit("...")]),
+            );
         }
     }
 
@@ -5442,7 +5454,11 @@ impl State {
 
 /// The inline images of the item `uri` of a thread, when its body shows (`visible_only`: only
 /// for a `Visible` item, as autoload requires).
-fn item_media(d: &ThreadData, uri: &str, visible_only: bool) -> Vec<lessdugin_core::dto::MediaView> {
+fn item_media(
+    d: &ThreadData,
+    uri: &str,
+    visible_only: bool,
+) -> Vec<lessdugin_core::dto::MediaView> {
     use lessdugin_core::dto::ItemState;
     let shown = |st: &ItemState| match st {
         ItemState::Visible => true,

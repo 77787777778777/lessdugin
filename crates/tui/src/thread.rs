@@ -94,7 +94,10 @@ pub enum MediaState {
 /// True for the types the terminal draws inline (`sync.md` §11.2: AVIF is inline in the SPA
 /// only), compared exactly as `lfm-1.md` §6.2 compares them.
 pub fn inline_image(mime: &str) -> bool {
-    matches!(mime, "image/png" | "image/jpeg" | "image/gif" | "image/webp")
+    matches!(
+        mime,
+        "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+    )
 }
 
 /// The lines under an item's body for its images: a caption that says how to load each one, or
@@ -117,8 +120,9 @@ fn media_lines(
             None if m.size_bytes > crate::image::limits::MAX_INPUT_BYTES as u64 => {
                 lit("too large to show here")
             }
+            // the notice of `sync.md` §11.3
             None => tt(&format!(
-                "i loads it from {}, which sees your address",
+                "i loads it from {}, which will see your IP",
                 lessdugin_core::media::host_of(&m.pds)
             )),
             Some(MediaState::Fetching) => lit("fetching..."),
@@ -126,11 +130,11 @@ fn media_lines(
             Some(MediaState::Shown) => TermText::empty(),
             Some(MediaState::Failed(why)) => tt(why),
         };
-        lines.push(line([
-            (pad(indent), Style::default()),
-            (label, dim()),
-            (crate::text::cat([lit("  "), status]), dim()),
-        ]));
+        // word-wrapped as plain text, each piece sanitised again (as the plain bodies)
+        let caption = crate::text::cat([label, lit("  "), status]).to_plain_string();
+        for piece in crate::body::wrap(&caption, width.max(10)) {
+            lines.push(line([(pad(indent), Style::default()), (tt(&piece), dim())]));
+        }
         if states.get(&m.cid) == Some(&MediaState::Shown) {
             slots.push(ImageSlot {
                 cid: m.cid.clone(),

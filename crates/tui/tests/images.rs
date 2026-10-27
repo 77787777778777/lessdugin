@@ -1,11 +1,22 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! The terminal's image caps (synthesis-v1.md F35/F36): a decompression bomb is refused from its
-//! HEADER, before any pixels are allocated, and a disabled client decodes nothing.
+//! The terminal's images (synthesis-v1.md F35/F36, `threat-model.md` SUP-9, `sync.md` §11): a
+//! decompression bomb is refused from its HEADER and again by the decoder's own limits, the
+//! decode runs off the UI thread under a timeout, a disabled client decodes nothing, and on the
+//! Thread screen an image loads on `i` (or by the autoload policy) and is drawn.
 
-use lessdugin_tui::image::{Images, Placeholder, limits};
+#![allow(clippy::disallowed_methods)] // the image workers are threads on wall time
+
+mod common;
+
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use common::{block_on, scenario};
+use lessdugin_tui::image::{Images, MediaBytes, Placeholder, capped_decode, decode, limits};
+use lessdugin_tui::thread::MediaState;
 
 /// A PNG whose IHDR declares `w` x `h` and whose body is a single IDAT chunk. The pixels are not
-/// valid LZW, which is the point: the caps must bite before any decoder reads them.
+/// valid zlib, which is the point: the caps must bite before any decoder reads them.
 fn png_declaring(w: u32, h: u32) -> Vec<u8> {
     fn chunk(kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
         let mut v = (data.len() as u32).to_be_bytes().to_vec();
@@ -24,57 +35,95 @@ fn png_declaring(w: u32, h: u32) -> Vec<u8> {
     v
 }
 
-#[test]
-fn a_huge_declared_frame_is_refused_from_the_header() {
-    let mut img = Images::disabled();
-    // 100000 x 100000 declarations: the file itself is tiny, the allocation would be 40 GB
-    let bomb = png_declaring(100_000, 100_000);
-    assert!(bomb.len() < 1000, "the fixture must be tiny");
-    let why = img.load(bomb);
-    assert_eq!(
-        why,
-        Some(Placeholder::TooLarge),
-        "the header cap must refuse it"
-    );
-    assert!(!img.has_image());
-    assert_eq!(img.placeholder(), Some(Placeholder::TooLarge));
-    assert_eq!(img.placeholder().unwrap().text(), "[image too large]");
+/// A real PNG, `w` x `h`, a vertical gradient (so halfblocks draw it with half blocks, not
+/// with coloured spaces).
+fn png(w: u32, h: u32) -> Vec<u8> {
+    let img = image::RgbaImage::from_fn(w, h, |_, y| {
+        let v = u8::try_from(y * 255 / h.max(1)).unwrap_or(255);
+        image::Rgba([v, 30, 255 - v, 255])
+    });
+    let mut out = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(img)
+        .write_to(&mut out, image::ImageFormat::Png)
+        .unwrap();
+    out.into_inner()
+}
+
+fn bytes(v: Vec<u8>) -> MediaBytes {
+    MediaBytes(Arc::new(v))
+}
+
+/// Polls `img` until a decode reports, at most `wait`.
+fn outcome(img: &mut Images, wait: Duration) -> Vec<(String, Result<(), Placeholder>)> {
+    let end = Instant::now() + wait;
+    loop {
+        let p = img.poll();
+        if !p.decoded.is_empty() || Instant::now() > end {
+            return p.decoded;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+fn halfblocks() -> Images {
+    Images::new(ratatui_image::picker::Picker::halfblocks(), Arc::new(|| {}))
 }
 
 #[test]
-fn a_disabled_client_decodes_nothing() {
-    let mut img = Images::disabled();
-    assert!(!img.has_image());
-    assert_eq!(img.placeholder(), Some(Placeholder::Unsupported));
-    // even a perfectly good image stays unsupported: a pipe or a test backend shows no pixels
-    let real = png_declaring(2, 2);
-    assert!(!img.has_image(), "{real:?} must not be decoded");
-    assert!(!img.poll(), "nothing to apply");
+fn a_huge_declared_frame_is_refused_from_the_header() {
+    // 100000 x 100000 declarations: the file itself is tiny, the allocation would be 40 GB
+    let bomb = png_declaring(100_000, 100_000);
+    assert!(bomb.len() < 1000, "the fixture must be tiny");
+    assert_eq!(decode(&bomb).unwrap_err(), Placeholder::TooLarge);
+    assert_eq!(Placeholder::TooLarge.text(), "[image too large]");
+}
+
+/// The decoder enforces the side cap itself (`image::Limits`), so a header the pre-check
+/// cannot read (it lets those through, F3) still cannot make it allocate past the caps.
+#[test]
+fn the_decoder_applies_the_caps_itself() {
+    let wide = png(limits::MAX_SIDE + 1, 1);
+    assert_eq!(capped_decode(&wide).unwrap_err(), Placeholder::TooLarge);
+    let ok = capped_decode(&png(limits::MAX_SIDE, 1)).unwrap();
+    // decoded, then scaled down to what a terminal can show
+    assert!(ok.width() <= limits::SHOWN_MAX_SIDE, "{}", ok.width());
 }
 
 #[test]
 fn the_limits_are_the_ones_the_spec_names() {
-    // synthesis-v1.md F35/F36: 64 MB, 8192^2 pixels, 200 GIF frames.
+    // synthesis-v1.md F35/F36 and limits.md §6: 64 MiB, 8192 a side, 256 MiB, 200 GIF frames,
+    // 10 s
     assert_eq!(limits::MAX_INPUT_BYTES, 64 * 1024 * 1024);
     assert_eq!(limits::MAX_SIDE, 8_192);
+    assert_eq!(limits::MAX_ALLOC, 256 * 1024 * 1024);
     assert_eq!(limits::MAX_GIF_FRAMES, 200);
     assert_eq!(limits::DECODE_TIMEOUT.as_secs(), 10);
 }
 
 #[test]
 fn a_file_over_the_input_cap_is_refused_before_parsing() {
-    let mut img = Images::disabled();
     // one byte over the cap, with no valid header at all: the size check must come first
     let big = vec![0u8; limits::MAX_INPUT_BYTES + 1];
-    assert_eq!(img.load(big), Some(Placeholder::TooLarge));
+    assert_eq!(decode(&big).unwrap_err(), Placeholder::TooLarge);
+    let mut img = halfblocks();
+    img.decode("big".into(), bytes(big));
+    assert_eq!(
+        img.poll().decoded,
+        [("big".to_owned(), Err(Placeholder::TooLarge))]
+    );
+    assert!(!img.busy(), "nothing was handed to a worker");
 }
 
 #[test]
 fn garbage_is_unsupported_not_a_panic() {
-    let mut img = Images::disabled();
-    assert_eq!(img.load(vec![0xFF; 64]), Some(Placeholder::Unsupported));
-    assert_eq!(img.load(Vec::new()), Some(Placeholder::Unsupported));
-    // every placeholder has text to show
+    assert_eq!(decode(&[0xFF; 64]).unwrap_err(), Placeholder::Unsupported);
+    assert_eq!(decode(&[]).unwrap_err(), Placeholder::Unsupported);
+    // a format the terminal does not decode (BMP)
+    let mut bmp = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::new_rgb8(2, 2)
+        .write_to(&mut bmp, image::ImageFormat::Bmp)
+        .unwrap();
+    assert_eq!(decode(bmp.get_ref()).unwrap_err(), Placeholder::Unsupported);
     for p in [
         Placeholder::TooLarge,
         Placeholder::Unsupported,
@@ -82,6 +131,218 @@ fn garbage_is_unsupported_not_a_panic() {
         Placeholder::Failed,
     ] {
         assert!(p.text().starts_with('['), "{p:?}");
-        assert!(!p.text().is_empty());
     }
+}
+
+#[test]
+fn a_disabled_client_decodes_nothing() {
+    let mut img = Images::disabled();
+    img.decode("a".into(), bytes(png(2, 2)));
+    assert_eq!(
+        img.poll().decoded,
+        [("a".to_owned(), Err(Placeholder::Unsupported))]
+    );
+    assert!(!img.has("a"));
+}
+
+/// The decode runs on a worker; the caller only polls.
+#[test]
+fn an_image_decodes_off_the_ui_thread() {
+    let mut img = halfblocks();
+    img.decode("a".into(), bytes(png(16, 16)));
+    // `decode` returned at once: the worker reports through `poll`
+    let got = outcome(&mut img, Duration::from_secs(10));
+    assert_eq!(got, [("a".to_owned(), Ok(()))]);
+    assert!(img.has("a"));
+    // a corrupt file is a placeholder, and the next image still decodes
+    img.decode("b".into(), bytes(png_declaring(4, 4)));
+    assert_eq!(
+        outcome(&mut img, Duration::from_secs(10)),
+        [("b".to_owned(), Err(Placeholder::Failed))]
+    );
+    img.decode("c".into(), bytes(png(8, 8)));
+    assert_eq!(
+        outcome(&mut img, Duration::from_secs(10)),
+        [("c".to_owned(), Ok(()))]
+    );
+}
+
+/// A decode past its timeout is abandoned and reported as failed.
+#[test]
+fn a_decode_past_the_timeout_is_abandoned() {
+    let mut img = halfblocks().with_timeout(Duration::from_millis(1));
+    img.decode("slow".into(), bytes(png(2048, 2048)));
+    assert_eq!(
+        outcome(&mut img, Duration::from_secs(20)),
+        [("slow".to_owned(), Err(Placeholder::Failed))]
+    );
+    assert!(!img.has("slow"));
+}
+
+/// At most `MAX_SHOWN` decoded images are kept; the oldest goes first, and is reported.
+#[test]
+fn the_oldest_image_is_dropped_past_the_cap() {
+    let mut img = halfblocks();
+    let mut evicted = Vec::new();
+    for i in 0..=limits::MAX_SHOWN {
+        img.decode(format!("c{i}"), bytes(png(4, 4)));
+        let end = Instant::now() + Duration::from_secs(10);
+        loop {
+            let p = img.poll();
+            evicted.extend(p.evicted);
+            if !p.decoded.is_empty() || Instant::now() > end {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+    assert_eq!(evicted, ["c0"]);
+    assert!(!img.has("c0") && img.has(&format!("c{}", limits::MAX_SHOWN)));
+}
+
+/// On the Thread screen an image the autoload policy does not load says where it would come
+/// from; `i` (the reader's consent) fetches it from the author's PDS, CID-checked, decodes it
+/// off-thread and draws it.
+#[test]
+fn i_loads_the_selected_items_image() {
+    use lessdugin_core::dto::{MediaInput, PostDraft};
+    let s = scenario();
+    let (bob, carol) = (&s.w.bob, &s.w.carol);
+    let prepared = block_on(bob.engine.prepare_media(
+        png(24, 16),
+        &MediaInput {
+            declared_mime: Some("image/png".into()),
+            alt: Some("a red square".into()),
+            name: None,
+            aspect_ratio: None,
+        },
+    ))
+    .unwrap();
+    let cid = prepared.cid.clone();
+    let mut d = PostDraft::article(&s.forum, "A picture", format!("Look: ![red](cid:{cid})"));
+    d.body.media.push(prepared);
+    let t = block_on(bob.engine.publish(&d)).unwrap();
+    bob.flush();
+    let post = bob.done(&t);
+    carol.sync(&s.forum);
+
+    let mut t = block_on(lessdugin_tui::Headless::new(
+        carol.engine.clone(),
+        lessdugin_tui::HeadlessOpts {
+            width: 80,
+            height: 40,
+            images: true,
+            ..lessdugin_tui::HeadlessOpts::default()
+        },
+    ))
+    .unwrap();
+    block_on(t.start(None));
+    block_on(t.open_thread(&post));
+    let media = |t: &lessdugin_tui::Headless<lessdugin_testkit::MemHost>| {
+        t.state.top_thread().unwrap().media.get(&cid).cloned()
+    };
+    // not loaded by itself: it says where it would load from
+    assert_eq!(media(&t), None);
+    let screen = t.render();
+    assert!(screen.contains("[image 1: a red square]"), "{screen}");
+    assert!(
+        screen.contains("i loads it from pds.example.com"),
+        "{screen}"
+    );
+
+    block_on(t.press("i"));
+    assert_eq!(media(&t), Some(MediaState::Shown), "{}", t.render());
+    assert!(t.images.has(&cid));
+    let screen = t.render_images();
+    // halfblocks: the image is half-block cells
+    assert!(
+        screen.contains('\u{2580}') || screen.contains('\u{2584}'),
+        "{screen}"
+    );
+    // `i` again does nothing more
+    block_on(t.press("i"));
+    assert!(
+        t.state
+            .status
+            .as_ref()
+            .is_some_and(|s| s.text.to_plain_string().contains("already")),
+        "{:?}",
+        t.state.status
+    );
+}
+
+/// What loads without a key (`sync.md` §11.3, `threat-model.md` PRIV-1): an image the engine
+/// says may autoload, of a `Visible` item, at most 5 MiB; never one of a collapsed item, even
+/// expanded, nor a larger one.
+#[test]
+fn the_autoload_verdict_loads_only_visible_small_images() {
+    use lessdugin_core::dto::{
+        CollapseReason, ItemState, MediaInput, PostDraft, ThreadOpts, ThreadRoot,
+    };
+    use lessdugin_tui::app::ThreadData;
+    use lessdugin_tui::{Action, Effect};
+    let s = scenario();
+    let (bob, carol) = (&s.w.bob, &s.w.carol);
+    let prepared = block_on(bob.engine.prepare_media(
+        png(8, 8),
+        &MediaInput {
+            declared_mime: Some("image/png".into()),
+            alt: None,
+            name: None,
+            aspect_ratio: None,
+        },
+    ))
+    .unwrap();
+    let mut d = PostDraft::article(&s.forum, "Auto", format!("![x](cid:{})", prepared.cid));
+    d.body.media.push(prepared);
+    let t = block_on(bob.engine.publish(&d)).unwrap();
+    bob.flush();
+    let post = bob.done(&t);
+    carol.sync(&s.forum);
+    let mut t = common::tui(&s, 80, 30);
+    block_on(t.start(None));
+    block_on(t.open_thread(&post));
+    let screen = t.state.top().unwrap().id;
+    let view = block_on(carol.engine.get_thread(&post, &ThreadOpts::default())).unwrap();
+    let loaded = |view: &lessdugin_core::dto::ThreadView| Action::ThreadLoaded {
+        screen,
+        origin: lessdugin_tui::app::Origin::Live,
+        result: Ok(Box::new(ThreadData {
+            view: view.clone(),
+            bodies: Default::default(),
+        })),
+    };
+    let fetches = |fx: &[Effect]| {
+        fx.iter()
+            .filter(|e| matches!(e, Effect::FetchMedia { .. }))
+            .count()
+    };
+    // the engine's verdict today: click to load
+    assert_eq!(fetches(&t.state.update(loaded(&view))), 0);
+    let with = |f: &dyn Fn(&mut lessdugin_core::dto::PostView)| {
+        let mut v = view.clone();
+        let ThreadRoot::Post(p) = &mut v.post else {
+            panic!("no post")
+        };
+        p.body.media[0].autoload = true;
+        f(p);
+        v
+    };
+    // a collapsed item stays click-to-load, and so does a large image
+    let collapsed = with(&|p| {
+        p.post.state = ItemState::Collapsed {
+            reason: CollapseReason::NewUser,
+        }
+    });
+    assert_eq!(fetches(&t.state.update(loaded(&collapsed))), 0);
+    let large = with(&|p| p.body.media[0].size_bytes = 5 * 1024 * 1024 + 1);
+    assert_eq!(fetches(&t.state.update(loaded(&large))), 0);
+    // a small image of a visible item the engine allows loads by itself, once
+    let ok = with(&|_| {});
+    assert_eq!(fetches(&t.state.update(loaded(&ok))), 1);
+    assert_eq!(
+        fetches(&t.state.update(loaded(&ok))),
+        0,
+        "it is already loading"
+    );
 }
