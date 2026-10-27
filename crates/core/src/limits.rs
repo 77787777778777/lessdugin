@@ -28,6 +28,9 @@ pub const IMAGE_UPLOAD_TARGET_BYTES: u64 = 5 * 1024 * 1024;
 /// Re-encodings at half the last size after a 413, before the upload is refused (`limits.md`
 /// §12).
 pub const IMAGE_UPLOAD_413_RETRIES: u32 = 3;
+/// Prepared media bytes of a draft that is never sent are removed after this long (ms,
+/// `limits.md` §12).
+pub const PREPARED_MEDIA_TTL_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 /// Jetstream message cap (bytes).
 pub const JETSTREAM_MESSAGE_MAX_BYTES: u32 = 1_200_000;
 

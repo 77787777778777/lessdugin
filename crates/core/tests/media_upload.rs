@@ -303,7 +303,7 @@ fn prepared_bytes_of_a_draft_never_sent_expire() {
     .unwrap();
     let old = block_on(e.prepare_media(noise_png(8, 8, 10), &input("old"))).unwrap();
     assert!(rows(&host, lessdugin_core::key!("loc", "media")).is_empty());
-    host.advance_ms(lessdugin_core::media::PREPARED_MEDIA_TTL_MS);
+    host.advance_ms(lessdugin_core::limits::PREPARED_MEDIA_TTL_MS);
     let new = block_on(e.prepare_media(noise_png(8, 8, 11), &input("new"))).unwrap();
     // exactly the TTL: still kept
     assert!(block_on(e.prepared_media(&old.cid)).unwrap().is_some());

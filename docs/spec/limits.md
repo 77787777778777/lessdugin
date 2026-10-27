@@ -289,6 +289,7 @@ The 1 %-per-hour automatic audit and automatic demotion (above 2 % contradiction
 |---|---|---|---|---|
 | `IMAGE_UPLOAD_TARGET_BYTES` | 5,242,880 (5 MiB) | O | first downscale target for images (the default self-hosted PDS upload limit). On a 413, the target becomes half the size of the last encoding and the image is re-encoded, at most `IMAGE_UPLOAD_413_RETRIES` times; then the upload is refused. | `sync.md` (media pipeline) |
 | `IMAGE_UPLOAD_413_RETRIES` | 3 | O | see above | here |
+| `PREPARED_MEDIA_TTL_MS` | 604,800,000 (7 days) | O | the prepared bytes of a file (`prepare_media`) are kept until a write that uploads them is enqueued (the outbox then holds its own copy), or this long for a draft that is never sent; then the draft's reference is refused with `mediaBytesMissing` ("prepare the file again") | `data-model.md` §8.8 |
 | `AUTOLOAD_HOST_MIN_PARTICIPANTS` | 5 | O | a PDS host qualifies for media autoload if it serves at least this many participants of the forum | `threat-model.md` PRIV-1 |
 | `ASPECT_RATIO_MAX` | 20 | P | `aspectRatio` is clamped to between 1:20 and 20:1 for display | `lfm-1.md` §6.2 |
 

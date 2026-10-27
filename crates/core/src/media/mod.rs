@@ -1070,8 +1070,6 @@ pub fn too_large_for_the_browser(size: u64) -> EngineError {
     .with_detail("limit", crate::limits::MEDIA_WASM_WINDOW_BYTES)
 }
 
-/// How long prepared bytes are kept for a draft that is never published (`limits.md` §12).
-pub const PREPARED_MEDIA_TTL_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
 /// `("prep", cid)`: what was prepared under `cid`.
 const PREP: &str = "prep";
@@ -1098,7 +1096,8 @@ struct PreparedRow {
 /// are stored here under their CID: raw, in chunks of at most 1 MiB, never as JSON. `publish`,
 /// `comment` and `edit` read them back with [`Engine::prepared_media`] and hand them to the
 /// outbox, which keeps its own copy; then [`Engine::forget_prepared_media`] removes them. Files
-/// prepared for a draft that is never sent are removed after [`PREPARED_MEDIA_TTL_MS`].
+/// prepared for a draft that is never sent are removed after
+/// [`crate::limits::PREPARED_MEDIA_TTL_MS`].
 impl<H: crate::host::Host> crate::engine::Engine<H> {
     /// Stores the prepared bytes under their CID, and removes what expired.
     async fn store_prepared_media(
@@ -1144,8 +1143,8 @@ impl<H: crate::host::Host> crate::engine::Engine<H> {
         Ok(())
     }
 
-    /// The deletions of every prepared file older than [`PREPARED_MEDIA_TTL_MS`], and of the
-    /// legacy rows.
+    /// The deletions of every prepared file older than [`crate::limits::PREPARED_MEDIA_TTL_MS`],
+    /// and of the legacy rows.
     async fn expired_prepared_media(
         &self,
         now: i64,
@@ -1162,7 +1161,7 @@ impl<H: crate::host::Host> crate::engine::Engine<H> {
             let last = page.last().map(|(k, _)| k.clone());
             for (k, v) in page {
                 let stale = crate::store::row::decode::<PreparedRow>(&v)
-                    .map_or(true, |r| now.saturating_sub(r.at) > PREPARED_MEDIA_TTL_MS);
+                    .map_or(true, |r| now.saturating_sub(r.at) > crate::limits::PREPARED_MEDIA_TTL_MS);
                 let cid = match crate::store::key::decode(&k).ok().as_deref() {
                     Some([_, crate::store::key::Part::Bytes(c)]) => {
                         String::from_utf8(c.clone()).ok()
