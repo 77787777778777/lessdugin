@@ -115,7 +115,11 @@ fn purge_removes_the_accounts_local_state() {
             KvOp::Put(key!("out", did, 1i64), b"w1".to_vec()),
             KvOp::Put(key!("out", did, 2i64), b"w2".to_vec()),
             KvOp::Put(key!("out.budget", did), b"b".to_vec()),
-            KvOp::Put(key!("notif", did, 5i64, "n1"), b"n".to_vec()),
+            // the rows the engine keys by account (M4R-3: not a `("notif", did)` range)
+            KvOp::Put(key!("loc", "notif", did, "n1"), b"n".to_vec()),
+            KvOp::Put(key!("loc", "nbase", did, "fk"), b"b".to_vec()),
+            KvOp::Put(key!("loc", "ack", did, "vote"), b"a".to_vec()),
+            KvOp::Put(key!("loc", "draft", did, "d1"), b"d".to_vec()),
         ]
     };
     block_on(
@@ -136,12 +140,15 @@ fn purge_removes_the_accounts_local_state() {
     ]))
     .unwrap();
     assert_eq!(budget, vec![None, Some(b"b".to_vec())]);
-    let notif = block_on(
-        host.state_kv()
-            .scan(KeyRange::prefix(&key!("notif")), Dir::Forward, 100),
-    )
-    .unwrap();
-    assert_eq!(notif.len(), 1);
+    for family in ["notif", "nbase", "ack", "draft"] {
+        let rows = block_on(host.state_kv().scan(
+            KeyRange::prefix(&key!("loc", family)),
+            Dir::Forward,
+            100,
+        ))
+        .unwrap();
+        assert_eq!(rows.len(), 1, "only bob's {family} row remains");
+    }
 }
 
 #[test]
