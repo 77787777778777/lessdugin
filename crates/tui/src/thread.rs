@@ -256,7 +256,8 @@ fn comment_header(c: &CommentNode, indent: usize, folded: Option<usize>) -> Line
         return line(parts);
     }
     parts.push((actor(&c.author), bold()));
-    let mut meta = vec![TermText::empty(), tt(&time(c.created_at_ms))];
+    // t_rank, not the claimed createdAt (`social.md` §2.3)
+    let mut meta = vec![TermText::empty(), tt(&time(c.t_rank_ms))];
     meta.extend(score_parts(&c.score));
     if c.retracted {
         meta.push(lit("retracted"));

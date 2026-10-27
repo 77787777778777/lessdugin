@@ -755,7 +755,7 @@ fn activity(top: &Screen, s: &ForumScreen, h: usize, w: usize, lines: &mut Vec<L
                 (pad(2), Style::default()),
                 (actor(&c.author), Style::default()),
                 (lit(" "), Style::default()),
-                (tt(&clock(c.created_at_ms)), dim()),
+                (tt(&clock(c.t_rank_ms)), dim()),
                 (lit("  "), Style::default()),
                 (fit(&tt(&text), room), dim()),
             ]));

@@ -263,3 +263,47 @@ fn a_new_comment_shows_a_banner_on_the_thread() {
     assert_eq!(selected(&t).0, s.bob_c1);
     assert!(!t.render().contains("new \u{2014} R"));
 }
+
+/// The displayed time of a post or comment is its t_rank, never the createdAt its author claims
+/// (`social.md` §2.3): a backdated item shows when it was first seen.
+#[test]
+fn the_displayed_time_is_t_rank_not_the_claimed_created_at() {
+    use lessdugin_core::dto::{ListPostsQuery, ThreadOpts};
+    use lessdugin_tui::app::ThreadData;
+    use lessdugin_tui::text::{post_meta, time};
+    let s = scenario();
+    let list = block_on(
+        s.w.carol
+            .engine
+            .list_posts(&ListPostsQuery::new(s.forum.clone())),
+    )
+    .unwrap();
+    // three years before it was seen
+    let backdated = 3 * 365 * 24 * 60 * MINUTE;
+    let mut p = list.items[0].clone();
+    p.created_at_ms = p.t_rank_ms - backdated;
+    let meta: Vec<String> = post_meta(&p).iter().map(|t| t.to_plain_string()).collect();
+    assert!(meta.contains(&time(p.t_rank_ms)), "{meta:?}");
+    assert!(!meta.contains(&time(p.created_at_ms)), "{meta:?}");
+
+    let mut view = block_on(
+        s.w.carol
+            .engine
+            .get_thread(&s.welcome, &ThreadOpts::default()),
+    )
+    .unwrap();
+    let c = &mut view.comments[0];
+    c.created_at_ms = c.t_rank_ms - backdated;
+    let (shown, claimed) = (time(c.t_rank_ms), time(c.created_at_ms));
+    let data = ThreadData {
+        view,
+        bodies: Default::default(),
+    };
+    let doc: String = lessdugin_tui::thread::layout(&data, &Default::default(), 80)
+        .lines
+        .iter()
+        .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+        .collect();
+    assert!(doc.contains(&shown), "{doc}");
+    assert!(!doc.contains(&claimed), "{doc}");
+}
