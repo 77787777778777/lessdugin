@@ -95,6 +95,7 @@ fn a_blob_at_the_hard_limit_is_streamed_to_disk_and_cid_checked() {
         .block_on(host.fetch_blob(pds.clone(), alice.did().clone(), cid.clone(), size))
         .expect("the blob at the hard limit is fetched");
     let peak = PEAK.load(Ordering::Relaxed) - before;
+    eprintln!("peak heap during the fetch of {size} bytes: {peak} bytes");
 
     assert_eq!(handle.cid, cid);
     assert_eq!(handle.size, size);

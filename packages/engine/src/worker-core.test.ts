@@ -3,6 +3,7 @@
 // (IndexedDB over fake-indexeddb, fetch, locks, timers), the dto/1 boundary, events, the leader
 // election between two "tabs" and the change relay. Skipped locally without pkg/; required
 // under CI (or with LESSDUGIN_WASM_TEST=1).
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { IDBFactory, IDBKeyRange } from "fake-indexeddb";
 import { afterEach, describe, expect, it } from "vitest";
@@ -19,13 +20,15 @@ const present = existsSync(WASM);
 const required = process.env.CI !== undefined || process.env.LESSDUGIN_WASM_TEST === "1";
 
 let loaded: Promise<WasmModule> | null = null;
+/** The module's linear memory (to check that blob bytes stay out of it). */
+let memory: WebAssembly.Memory | null = null;
 function load(): Promise<WasmModule> {
   loaded ??= (async () => {
     const glue = new URL("lessdugin_engine.js", PKG).href;
     const m = (await import(/* @vite-ignore */ glue)) as WasmModule & {
-      initSync(input: { module: BufferSource }): unknown;
+      initSync(input: { module: BufferSource }): { memory: WebAssembly.Memory };
     };
-    m.initSync({ module: readFileSync(WASM) });
+    memory = m.initSync({ module: readFileSync(WASM) }).memory;
     return m;
   })();
   return loaded;
@@ -125,7 +128,11 @@ const JPEG_8X4 =
 
 /** The CIDv1 (raw, sha2-256, base32) of `bytes`. */
 async function rawCid(bytes: Uint8Array): Promise<string> {
-  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes as BufferSource));
+  return rawCidOfDigest(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes as BufferSource)));
+}
+
+/** The CIDv1 (raw, sha2-256, base32) of a SHA-256 digest. */
+async function rawCidOfDigest(digest: Uint8Array): Promise<string> {
   const raw = [0x01, 0x55, 0x12, 0x20, ...digest];
   const b32 = "abcdefghijklmnopqrstuvwxyz234567";
   let out = "b";
@@ -303,6 +310,89 @@ describe.runIf(present)("WorkerEngine over the real wasm", () => {
     expect(big.code).toBe("too_large");
     expect(big.detail).toMatchObject({ kind: "mediaRejected" });
   });
+
+  it("loads a 300 MiB blob from its author's PDS without its bytes entering wasm memory (M4)", async () => {
+    // docs/plan.md M4 acceptance, limits.md §5 BLOB_HARD_MAX_BYTES: the body is generated as it
+    // streams; the JS host hashes and stores it, the core sees a handle and a 4 KiB prefix
+    const size = 300 * 1024 * 1024;
+    const did = "did:plc:ewvi7nxzyoun6zhxrhs64oiz";
+    const chunk = 1 << 20;
+    const base = new Uint8Array(chunk);
+    let x = 0x5eed;
+    for (let i = 0; i < chunk; i++) {
+      x = (Math.imul(x, 1103515245) + 12345) >>> 0;
+      base[i] = x >>> 24;
+    }
+    // an MP4 `ftyp` first, so the sniff finds a video
+    base.set([0, 0, 0, 0x18, ...new TextEncoder().encode("ftypisom"), 0, 0, 0, 0], 0);
+    base.set(new TextEncoder().encode("isommp42"), 16);
+    const piece = (i: number): Uint8Array => {
+      const c = base.slice(0, Math.min(chunk, size - i * chunk));
+      if (i > 0) new DataView(c.buffer).setUint32(0, i);
+      return c;
+    };
+    const pieces = Math.ceil(size / chunk);
+    const hash = createHash("sha256");
+    for (let i = 0; i < pieces; i++) hash.update(piece(i));
+    const cid = await rawCidOfDigest(new Uint8Array(hash.digest()));
+    const doc = {
+      id: did,
+      alsoKnownAs: ["at://alice.example.com"],
+      verificationMethod: [],
+      service: [
+        {
+          id: "#atproto_pds",
+          type: "AtprotoPersonalDataServer",
+          serviceEndpoint: "https://pds.example.com",
+        },
+      ],
+    };
+    const t = await tab(origin(), { elect: false }, (url) => {
+      const u = new URL(url);
+      if (u.host === "plc.directory" && u.pathname === `/${did}`) return Response.json(doc);
+      if (u.host === "pds.example.com" && u.pathname === "/xrpc/com.atproto.sync.getBlob") {
+        if (u.searchParams.get("did") !== did || u.searchParams.get("cid") !== cid) {
+          return Response.json({ error: "BlobNotFound" }, { status: 400 });
+        }
+        let i = 0;
+        const body = new ReadableStream<Uint8Array>({
+          pull(ctl) {
+            if (i < pieces) ctl.enqueue(piece(i++));
+            else ctl.close();
+          },
+        });
+        return new Response(body, { headers: { "content-type": "video/mp4" } });
+      }
+      return new Response("not found", { status: 404 });
+    });
+    const view = {
+      index: 0,
+      cid,
+      mime: "video/mp4",
+      author: did,
+      pds: "https://elsewhere.example.com",
+      autoload: false,
+      sizeBytes: size,
+    };
+    const before = memory?.buffer.byteLength ?? 0;
+    // no account: reading media needs no login (m4-1)
+    const loaded = (await t.engine.call("loadMedia", [cid, view])) as {
+      cid: string;
+      size: number;
+      mime?: string;
+    };
+    const grown = (memory?.buffer.byteLength ?? 0) - before;
+    expect(loaded).toMatchObject({ cid, size, mime: "video/mp4" });
+    expect(grown, `wasm memory grew by ${grown} bytes`).toBeLessThan(32 * 1024 * 1024);
+    // it came from the author's PDS (the view's `pds` is not trusted), as the author's DID
+    const blobUrl = t.fetched.find((u) => u.includes("getBlob")) ?? "";
+    expect(new URL(blobUrl).host).toBe("pds.example.com");
+    expect(new URL(blobUrl).searchParams.get("did")).toBe(did);
+    // the verified bytes are in the worker's blob store, for the main thread's object URL
+    const stored = await t.engine.blob(cid);
+    expect(stored?.size).toBe(size);
+    expect(t.bridged).toEqual([]);
+  }, 120_000);
 
   it("refuses a mismatched namespace, a bad configuration and a second init", async () => {
     const o = origin();
