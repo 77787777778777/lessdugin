@@ -222,8 +222,10 @@ export interface EngineApi {
   seqAdd(uri: AtUri, post: AtUri, at: SequencePosition): Promise<WriteTicket>;
   seqRemove(uri: AtUri, post: AtUri): Promise<WriteTicket>;
   seqMove(uri: AtUri, from: SequencePosition, to: SequencePosition): Promise<WriteTicket>;
-  /** Deletes the revision records of the active account's item; rejects with `not_found`
-   * (`detail.kind: "nothingToRedact"`) when no revision is left. */
+  /** Deletes every revision record of the active account's item, as its PDS lists them when
+   * the write is sent: always one write, so an item without history is a write that deletes
+   * nothing. Rejects with `invalid_input` (`detail.kind: "modLog"`) for a forum or a modAction,
+   * whose history is the moderation log (engine-api.md §3.5). */
   redactRevision(uri: AtUri): Promise<WriteTicket>;
   /**
    * `prepare_media` (engine-api.md §3.5): sniff, strip metadata, apply EXIF orientation and

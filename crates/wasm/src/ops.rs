@@ -562,19 +562,16 @@ pub async fn call<H: Host>(engine: &Engine<H>, op: &str, a: &str) -> Result<Stri
             out(&engine.import_local(&json, scope).await?)
         }
         "redactRevision" => {
-            // The engine returns one batched write (the outbox chunks the deletes), and the
-            // client's declaration is a single WriteTicket (engine API v0), so the first is the
-            // one; an item with no cached revision left is `not_found` (`detail.kind =
-            // "nothingToRedact"`): there is no write to report.
+            // Always one write (engine-api.md §3.5), the client's single WriteTicket (engine API
+            // v0): it lists the item's revisions from the PDS when it is sent, so an item
+            // without history is a write that deletes nothing.
             let (uri,): (String,) = args(op, a)?;
             let tickets = engine.redact_revision(&uri).await?;
-            match tickets.into_iter().next() {
-                Some(t) => out(&t),
-                None => Err(EngineError::not_found(format!(
-                    "{uri} has no revision left to redact"
-                ))
-                .with_detail("kind", "nothingToRedact")),
-            }
+            let t = tickets
+                .into_iter()
+                .next()
+                .ok_or_else(|| EngineError::internal("redact_revision queued no write"))?;
+            out(&t)
         }
         "prepareMedia" => {
             // The bytes are a separate argument from the hints (engine-api.md §3.6), so
