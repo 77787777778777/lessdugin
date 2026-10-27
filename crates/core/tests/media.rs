@@ -724,6 +724,37 @@ fn png_exif_and_webp_exif_orientation_is_applied_too() {
 // --- the engine entry point -----------------------------------------------------------------
 
 #[test]
+fn a_heic_is_refused_not_uploaded_as_video_with_its_gps() {
+    // m4-10: an iPhone photo. The `meta` box indexes the items; the Exif item itself (GPS
+    // included) sits in `mdat`, where zeroing `meta` cannot reach it.
+    let boxed = |kind: &[u8; 4], payload: &[u8]| {
+        let mut v = ((payload.len() + 8) as u32).to_be_bytes().to_vec();
+        v.extend_from_slice(kind);
+        v.extend_from_slice(payload);
+        v
+    };
+    let mut heic = boxed(b"ftyp", b"heic\0\0\0\0mif1heic");
+    heic.extend(boxed(b"meta", b"\0\0\0\0iinf-iloc-the-item-index"));
+    let mut exif = b"\0\0\0\x06Exif\0\0".to_vec();
+    exif.extend_from_slice(&tiff_with(1));
+    heic.extend(boxed(b"mdat", &exif));
+    let e =
+        lessdugin_core::engine::Engine::new(lessdugin_testkit::MemHost::new(), Default::default());
+    let input = lessdugin_core::dto::MediaInput {
+        declared_mime: Some("image/heic".into()),
+        alt: None,
+        name: None,
+        aspect_ratio: None,
+    };
+    let err = block_on(e.prepare_media(heic, &input)).unwrap_err();
+    assert_eq!(err.code, lessdugin_core::engine::ErrorCode::InvalidInput);
+    assert_eq!(
+        err.detail.as_ref().and_then(|d| d.get("kind")),
+        Some(&serde_json::json!("mediaRejected"))
+    );
+}
+
+#[test]
 fn prepare_media_strips_and_refuses_what_it_must() {
     use lessdugin_core::dto::MediaInput;
     let host = lessdugin_testkit::MemHost::new();

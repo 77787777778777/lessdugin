@@ -37,10 +37,7 @@ pub fn normalise_mime(b: &[u8]) -> Option<&'static str> {
         return Some("image/webp");
     }
     if b.len() >= 12 && &b[4..8] == b"ftyp" {
-        return Some(match &b[8..12] {
-            b"M4A " | b"M4B " => "audio/mp4",
-            _ => "video/mp4",
-        });
+        return iso_mime(b);
     }
     if b.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]) {
         return Some("video/webm");
@@ -55,6 +52,46 @@ pub fn normalise_mime(b: &[u8]) -> Option<&'static str> {
         return Some("audio/mpeg");
     }
     None
+}
+
+/// Major brands of ISO-BMFF video (`data-model.md` §8.8): MP4, MOV, 3GP/3G2 and their
+/// relatives. Matched on the four bytes; `3gp`/`3g2` take any fourth byte.
+const ISO_VIDEO_BRANDS: [&[u8; 4]; 30] = [
+    b"isom", b"iso2", b"iso3", b"iso4", b"iso5", b"iso6", b"iso7", b"iso8", b"iso9", b"isml",
+    b"mp41", b"mp42", b"mp71", b"avc1", b"qt  ", b"M4V ", b"M4VH", b"M4VP", b"dash", b"msnv",
+    b"MSNV", b"XAVC", b"mmp4", b"F4V ", b"f4v ", b"NDAS", b"kddi", b"CAEP", b"MP4 ", b"3ge6",
+];
+
+/// ISO-BMFF brands of still images and image sequences (HEIF, HEIC, AVIF, Canon CR3). They are
+/// refused wherever they appear in `ftyp`: their EXIF lives in `mdat` as an item, where the MP4
+/// pass (`udta`/`meta` boxes) cannot reach it (`threat-model.md` PRIV-4, PRIV-6).
+const ISO_IMAGE_BRANDS: [&[u8; 4]; 16] = [
+    b"heic", b"heix", b"hevc", b"hevx", b"heim", b"heis", b"hevm", b"hevs", b"mif1", b"mif2",
+    b"msf1", b"miaf", b"avif", b"avis", b"avio", b"crx ",
+];
+
+/// The §8.8 row of an ISO-BMFF file from its `ftyp` box (major brand at 8, then the minor
+/// version, then the compatible brands up to the box's end): `audio/mp4` for M4A/M4B, `video/mp4`
+/// for a video brand, and `None` for an image brand anywhere in the box or an unknown major brand.
+fn iso_mime(b: &[u8]) -> Option<&'static str> {
+    let size = u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as usize;
+    // the brands the box holds within the bytes given (a sniff prefix may cut it short)
+    let end = size.clamp(12, 4096).min(b.len());
+    let major = &b[8..12];
+    let compatible = b.get(16..end).unwrap_or_default().chunks_exact(4);
+    if std::iter::once(major)
+        .chain(compatible)
+        .any(|brand| ISO_IMAGE_BRANDS.iter().any(|x| x.as_slice() == brand))
+    {
+        return None;
+    }
+    if matches!(major, b"M4A " | b"M4B ") {
+        return Some("audio/mp4");
+    }
+    let video = ISO_VIDEO_BRANDS.iter().any(|x| x.as_slice() == major)
+        || major.starts_with(b"3gp")
+        || major.starts_with(b"3g2");
+    video.then_some("video/mp4")
 }
 
 /// A blob a write uploads when it is sent.
@@ -263,6 +300,31 @@ mod tests {
         assert_eq!(normalise_mime(b"\0\0\0\x20ftypM4A \0\0"), Some("audio/mp4"));
         assert_eq!(normalise_mime(b"\0\0\0\x20ftypM4B \0\0"), Some("audio/mp4"));
         assert_eq!(normalise_mime(b"\0\0\0\x20ftypisom\0\0"), Some("video/mp4"));
+        assert_eq!(
+            normalise_mime(b"\0\0\0\x14ftypqt  \0\0\0\0qt  "),
+            Some("video/mp4")
+        );
+        assert_eq!(
+            normalise_mime(b"\0\0\0\x14ftyp3gp5\0\0\0\0isom"),
+            Some("video/mp4")
+        );
+        // m4-10: HEIF/HEIC/AVIF are ISO-BMFF too, but images whose EXIF sits in `mdat`, out of
+        // the MP4 pass's reach: refused as a major brand, as a compatible brand, and so is a
+        // major brand the table does not know
+        assert_eq!(normalise_mime(b"\0\0\0\x18ftypheic\0\0\0\0mif1heic"), None);
+        assert_eq!(normalise_mime(b"\0\0\0\x18ftypmif1\0\0\0\0mif1heic"), None);
+        assert_eq!(
+            normalise_mime(b"\0\0\0\x1cftypavif\0\0\0\0avifmif1miaf"),
+            None
+        );
+        assert_eq!(normalise_mime(b"\0\0\0\x18ftypisom\0\0\0\0isomavif"), None);
+        assert_eq!(normalise_mime(b"\0\0\0\x14ftypcrx \0\0\0\0crx "), None);
+        assert_eq!(normalise_mime(b"\0\0\0\x10ftypwhat\0\0\0\0"), None);
+        // a compatible brand past the box's end is another box's bytes, not a brand
+        assert_eq!(
+            normalise_mime(b"\0\0\0\x14ftypmp42\0\0\0\0isom\0\0\0\x08heic"),
+            Some("video/mp4")
+        );
         assert_eq!(
             normalise_mime(&[0x1A, 0x45, 0xDF, 0xA3, 1]),
             Some("video/webm")

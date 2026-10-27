@@ -1087,7 +1087,8 @@ delete(target):                                  // post | comment | sequence | 
 |---|---|---|
 | JPEG / PNG / WebP / GIF | `image/jpeg` / `image/png` / `image/webp` / `image/gif` | `blob:image/*` |
 | ISO-BMFF (MP4) with major brand `M4A ` or `M4B ` (`.m4a`, also sniffed as `audio/x-m4a`) | `audio/mp4` | `blob:audio/*` |
-| ISO-BMFF (MP4), any other brand | `video/mp4` | `blob:video/*` |
+| ISO-BMFF (MP4, MOV, 3GP) with a video major brand: `isom`, `iso2`–`iso9`, `isml`, `mp41`, `mp42`, `mp71`, `avc1`, `qt  `, `M4V `, `M4VH`, `M4VP`, `dash`, `msnv`, `MSNV`, `XAVC`, `mmp4`, `F4V `, `f4v `, `NDAS`, `kddi`, `CAEP`, `MP4 `, `3ge6`, `3gp?`, `3g2?` | `video/mp4` | `blob:video/*` |
+| ISO-BMFF naming an image brand as its major or a compatible brand (`heic`, `heix`, `hevc`, `hevx`, `heim`, `heis`, `hevm`, `hevs`, `mif1`, `mif2`, `msf1`, `miaf`, `avif`, `avis`, `avio`, `crx `: HEIF, HEIC, AVIF, CR3), or with another major brand | refused: the EXIF of a HEIF image is an item in `mdat`, which the MP4 pass of `threat-model.md` §5.9.1 does not reach | – |
 | WebM / Matroska | `video/webm` | `blob:video/*` |
 | MP3 (ID3 or MPEG audio frame sync) | `audio/mpeg` | `blob:audio/*` |
 | Ogg (`OggS`; also sniffed as `application/ogg`) | `audio/ogg` | `blob:audio/*` |
