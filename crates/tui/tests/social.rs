@@ -613,10 +613,9 @@ fn the_mod_queue_is_blocked_for_a_plain_member() {
     assert!(status(&t).contains("cannot moderate"), "{}", status(&t));
 }
 
-#[test]
-fn an_applicant_shows_in_the_queue_and_enter_approves() {
-    let s = scenario();
-    // dave applies to the approval-mode forum (a membership without a grant)
+/// dave applies to the approval-mode forum of `s` (a membership without a grant) and alice
+/// learns of it; returns his DID.
+fn dave_applies(s: &common::Scenario) -> String {
     let dave_acct = s.w.net.add_account("dave.example.com");
     let h = MemHost::new();
     h.set_seed(11);
@@ -652,8 +651,11 @@ fn an_applicant_shows_in_the_queue_and_enter_approves() {
     block_on(s.w.alice.engine.sync_thread(&dave_c, &SyncOpts::default())).unwrap();
     s.w.tick(MINUTE);
     s.w.alice.sync(&s.forum);
+    dave_acct.did().to_string()
+}
 
-    // alice (the owner) opens the Mod screen: the queue lists dave as an applicant
+/// alice's TUI on the Mod screen's queue of `s`'s forum.
+fn alice_queue(s: &common::Scenario) -> Tui {
     let mut t = block_on(lessdugin_tui::Headless::new(
         s.w.alice.engine.clone(),
         lessdugin_tui::HeadlessOpts {
@@ -678,6 +680,15 @@ fn an_applicant_shows_in_the_queue_and_enter_approves() {
         block_on(t.press("j"));
     }
     block_on(t.press("Enter"));
+    t
+}
+
+#[test]
+fn an_applicant_shows_in_the_queue_and_enter_approves() {
+    let s = scenario();
+    let dave = dave_applies(&s);
+    // alice (the owner) opens the Mod screen: the queue lists dave as an applicant
+    let mut t = alice_queue(&s);
     let screen = t.render();
     assert!(screen.contains("applicant"), "{screen}");
     assert!(screen.contains("dave"), "{screen}");
@@ -699,9 +710,7 @@ fn an_applicant_shows_in_the_queue_and_enter_approves() {
     )
     .unwrap();
     assert!(
-        members
-            .iter()
-            .any(|m| m.actor.did == dave_acct.did().to_string() && m.granted),
+        members.iter().any(|m| m.actor.did == dave && m.granted),
         "{members:?}"
     );
 }
@@ -1344,6 +1353,12 @@ fn the_first_public_action_of_each_kind_asks_first() {
     block_on(t.press("j"));
     assert!(t.state.public_notice.is_some());
     assert_eq!(writes(&t), 0);
+    // nor does Enter go past it (it queued most of the held writes: a second press, or a key
+    // repeat, must not publish unread)
+    block_on(t.press("Enter"));
+    assert!(t.state.public_notice.is_some(), "Enter is not a yes");
+    assert_eq!(writes(&t), 0);
+    assert!(!acked(PublicActionKind::Vote));
 
     // `n` cancels: nothing written, nothing acknowledged
     block_on(t.press("n"));
@@ -1402,6 +1417,85 @@ fn the_first_public_action_of_each_kind_asks_first() {
     block_on(t2.press("u"));
     assert!(t2.state.public_notice.is_none());
     assert!(status(&t2).contains("Vote recorded"), "{}", status(&t2));
+}
+
+/// A join (`:join`) and an approval from the mod queue (Enter) are public actions too: each
+/// waits behind the interstitial of its kind.
+#[test]
+fn a_join_and_a_queue_approval_ask_first() {
+    use lessdugin_core::dto::PublicActionKind;
+    use lessdugin_tui::Effect;
+    let s = common::scenario_unacknowledged();
+    // carol is granted but has not joined
+    let mut t = tui(&s, 80, 24);
+    block_on(t.start(Some(s.forum.clone())));
+    let fx = command_effects(&mut t, "join");
+    assert!(
+        !fx.iter().any(|e| matches!(e, Effect::Join { .. })),
+        "{fx:?}"
+    );
+    let n = t.state.public_notice.as_ref().expect("the join asks");
+    assert_eq!(n.kinds, [PublicActionKind::Join]);
+    assert!(matches!(n.held[..], [Effect::Join { .. }]), "{n:?}");
+    block_on(t.press("n"));
+    assert!(block_on(t.engine().writes()).unwrap().is_empty());
+
+    // Enter on an applicant in alice's queue: the grant waits
+    let dave = dave_applies(&s);
+    let mut t = alice_queue(&s);
+    assert!(t.render().contains("applicant"), "{}", t.render());
+    let before = block_on(t.engine().writes()).unwrap().len();
+    let fx = t.state.update(lessdugin_tui::Action::Key(
+        lessdugin_tui::keys::parse_key("Enter").unwrap(),
+    ));
+    assert!(
+        !fx.iter().any(|e| e.operation() == Some("grant")),
+        "{fx:?}"
+    );
+    let n = t.state.public_notice.as_ref().expect("the approval asks");
+    assert_eq!(n.kinds, [PublicActionKind::ModAction]);
+    assert!(
+        n.held.iter().all(|e| e.operation() == Some("grant")),
+        "{n:?}"
+    );
+    // `y` sends it
+    block_on(t.press("y"));
+    assert!(t.state.public_notice.is_none());
+    assert!(block_on(t.engine().writes()).unwrap().len() > before);
+    block_on(t.engine().outbox_flush()).unwrap();
+    let members = block_on(
+        s.w.alice
+            .engine
+            .members(&s.forum, &lessdugin_core::dto::MembersQuery::default()),
+    )
+    .unwrap();
+    assert!(
+        members.iter().any(|m| m.actor.did == dave && m.granted),
+        "{members:?}"
+    );
+}
+
+/// The acknowledgements are the active account's: when another client on the device switches
+/// to an account that has not seen the interstitial, the next public action asks again.
+#[test]
+fn another_active_account_asks_again() {
+    use lessdugin_core::dto::PublicActionKind;
+    let s = scenario();
+    let mut t = tui(&s, 80, 24);
+    block_on(t.start(Some(s.forum.clone())));
+    block_on(t.press("u"));
+    assert!(t.state.public_notice.is_none(), "carol acknowledged votes");
+    // erin logs in on carol's device (and is the active account now)
+    let erin = s.w.net.add_account("erin.example.com");
+    block_on(t.engine().add_account(AccountInfo::app_password(
+        erin.did().as_str(),
+        erin.pds_base(),
+    )))
+    .unwrap();
+    block_on(t.settle());
+    block_on(t.press("d"));
+    let n = t.state.public_notice.as_ref().expect("erin's first vote asks");
+    assert_eq!(n.kinds, [PublicActionKind::Vote]);
 }
 
 /// The operations of `engine-api.md` §3.2 (forums and membership), §3.5 (writes) and §3.6

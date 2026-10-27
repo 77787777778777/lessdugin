@@ -769,7 +769,12 @@ pub enum Action {
         result: Result<ModLog, EngineError>,
     },
     /// [`Effect::LoadAcknowledged`] finished.
-    AcknowledgedLoaded(Result<Vec<PublicActionKind>, EngineError>),
+    AcknowledgedLoaded {
+        /// The account they were read for (the active one; `None`: no account).
+        account: Option<String>,
+        /// Its acknowledgements.
+        result: Result<Vec<PublicActionKind>, EngineError>,
+    },
     /// [`Effect::Open`] resolved its reference.
     Opened(Result<Ref, EngineError>),
     /// A write a `:` command queued (or why it was refused); `what` names it.
@@ -1696,6 +1701,8 @@ pub struct State {
     pub panel: Option<Panel>,
     /// The public actions the account has acknowledged (`None` until loaded: every kind asks).
     pub acknowledged: Option<BTreeSet<PublicActionKind>>,
+    /// The account [`State::acknowledged`] was read for.
+    acknowledged_for: Option<String>,
     /// [`Effect::LoadAcknowledged`] was sent.
     acknowledged_asked: bool,
     /// The unread counts (`unread_counts()`): the header's notification badge and the Home
@@ -1764,6 +1771,7 @@ impl State {
             confirm: None,
             panel: None,
             acknowledged: None,
+            acknowledged_for: account.as_ref().map(|a| a.did.clone()),
             acknowledged_asked: false,
             unread: None,
             help_scroll: 0,
@@ -1939,7 +1947,13 @@ impl State {
                     self.unread = Some(u);
                 }
             }
-            Action::AcknowledgedLoaded(result) => match result {
+            Action::AcknowledgedLoaded { account, result } => match result {
+                // another account is active now (another client switched): its own
+                // acknowledgements replace the previous account's
+                Ok(kinds) if account != self.acknowledged_for => {
+                    self.acknowledged = Some(kinds.into_iter().collect());
+                    self.acknowledged_for = account;
+                }
                 // acknowledgements are never withdrawn, and one made here may not be stored
                 // yet when this list was read: keep both
                 Ok(kinds) => self.acknowledged.get_or_insert_default().extend(kinds),
@@ -2222,8 +2236,10 @@ impl State {
         }
     }
 
-    /// A key while the interstitial is open: `y` or Enter sends the held writes and records
-    /// the acknowledgement, `n` or Esc drops them.
+    /// A key while the interstitial is open: `y` sends the held writes and records the
+    /// acknowledgement, `n` or Esc drops them. Enter does nothing here: it is the key that
+    /// queued most of the held writes, and a second press (or a key repeat) must not publish
+    /// past a notice the user has not read (`threat-model.md` PRIV-9).
     fn public_notice_key(&mut self, k: &KeyEvent, fx: &mut Vec<Effect>) {
         use crossterm::event::{KeyCode, KeyModifiers};
         if k.modifiers.contains(KeyModifiers::CONTROL) && matches!(k.code, KeyCode::Char('c')) {
@@ -2233,7 +2249,7 @@ impl State {
             return;
         }
         match k.code {
-            KeyCode::Char('y' | 'Y') | KeyCode::Enter => {
+            KeyCode::Char('y' | 'Y') => {
                 let Some(n) = self.public_notice.take() else {
                     return;
                 };

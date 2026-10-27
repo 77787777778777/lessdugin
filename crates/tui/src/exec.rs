@@ -238,9 +238,16 @@ pub async fn run<H: Host>(engine: &Engine<H>, effect: Effect, opts: ExecOpts) ->
             return None;
         }
         Effect::LoadWrites => Action::WritesLoaded(engine.writes().await),
-        Effect::LoadAcknowledged => {
-            Action::AcknowledgedLoaded(engine.acknowledged_public_actions().await)
-        }
+        Effect::LoadAcknowledged => match engine.active_account().await {
+            Ok(account) => Action::AcknowledgedLoaded {
+                account: account.map(|a| a.did),
+                result: engine.acknowledged_public_actions().await,
+            },
+            Err(e) => Action::AcknowledgedLoaded {
+                account: None,
+                result: Err(e),
+            },
+        },
         Effect::Acknowledge { kind } => {
             // not stored: the next session asks again; this one already let the write go
             if let Err(e) = engine.acknowledge_public_action(kind).await {
