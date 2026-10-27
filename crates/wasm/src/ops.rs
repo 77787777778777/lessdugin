@@ -484,8 +484,9 @@ pub async fn call<H: Host>(engine: &Engine<H>, op: &str, a: &str) -> Result<Stri
             out(&engine.delete(&uri).await?)
         }
         "loadMedia" => {
-            let (cid,): (String,) = args(op, a)?;
-            out(&engine.load_media(&cid).await?)
+            // the item's MediaView names the author whose PDS has the blob (sync.md §11.1)
+            let (cid, media): (String, Option<lessdugin_core::dto::MediaView>) = args(op, a)?;
+            out(&engine.load_media(&cid, media.as_ref()).await?)
         }
         "drafts" => out(&engine.drafts().await?),
         "saveDraft" => {

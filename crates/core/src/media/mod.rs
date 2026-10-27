@@ -1332,40 +1332,151 @@ impl<H: crate::host::Host> crate::engine::Engine<H> {
     }
 }
 
-/// The largest media blob this client will load for display: the 64 MiB input cap of F35.
-pub const MEDIA_DISPLAY_MAX_BYTES: u64 = 64 * 1024 * 1024;
+/// The type a fetched blob is displayed as (`sync.md` §11.2): the §8.8 table of the sniffed
+/// prefix, plus AVIF (inline in the SPA only, never uploaded), or `None` (a download card).
+pub fn display_type(prefix: &[u8]) -> Option<&'static str> {
+    if let Some(t) = crate::outbox::blob::normalise_mime(prefix) {
+        return matches!(
+            t,
+            "image/png"
+                | "image/jpeg"
+                | "image/gif"
+                | "image/webp"
+                | "video/mp4"
+                | "video/webm"
+                | "audio/mp4"
+                | "audio/mpeg"
+                | "audio/ogg"
+        )
+        .then_some(t);
+    }
+    (prefix.len() >= 12 && &prefix[4..8] == b"ftyp" && matches!(&prefix[8..12], b"avif" | b"avis"))
+        .then_some("image/avif")
+}
+
+/// A declared `mimeType` through §8.8's names: parameters and case dropped, and the aliases the
+/// table names (`audio/x-m4a`, `application/ogg`) mapped to their type.
+fn normalise_declared(declared: &str) -> String {
+    let base = declared
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    match base.as_str() {
+        "audio/x-m4a" | "audio/m4a" => "audio/mp4".to_owned(),
+        "application/ogg" => "audio/ogg".to_owned(),
+        _ => base,
+    }
+}
 
 impl<H: crate::host::Host> crate::engine::Engine<H> {
-    /// `loadMedia(cid)`: fetches a media blob for display and returns a URL for it.
+    /// `loadMedia(cid, media?)`: fetches a media blob for display (`sync.md` §11.1).
     ///
-    /// The bytes are streamed and CID-checked by the host while they arrive, so they never pass
-    /// through wasm linear memory (`threat-model.md`); the client gets a locator. The caller is
-    /// the one that decided to load - the autoload policy in [`super::policy`] is what decides
+    /// With the item's [`crate::dto::MediaView`] (what a rendered body lists), the blob comes from
+    /// the AUTHOR's PDS, resolved from their DID document here (the view's `pds` is not trusted
+    /// for this), for any reader, signed in or not; the cap is the declared `size`, so a longer
+    /// body is aborted, within `BLOB_HARD_MAX_BYTES`. Without it the active account's own repo is
+    /// asked, as before the view was passed (a client of the first M4 builds).
+    ///
+    /// The host streams and CID-checks the bytes, so they never pass through wasm memory
+    /// (INFRA-6); the core reads only the first `BLOB_SNIFF_PREFIX_BYTES` to sniff the type.
+    /// `mime` is set only when the sniffed type agrees with the declared one and is on the
+    /// display allowlist, and it is the allowlist's constant string; otherwise the client shows a
+    /// download card. The caller is the one that decided to load - [`super::policy`] says
     /// whether it may do that without asking.
     pub async fn load_media(
         &self,
         cid: &str,
+        media: Option<&crate::dto::MediaView>,
     ) -> Result<crate::dto::LoadedMedia, crate::engine::EngineError> {
-        let session = self.active_session().await?;
-        // the session already holds the account's DID and PDS, which is where the blob lives
-        let handle = self
+        use crate::engine::{EngineError, ErrorCode};
+        use crate::host::HostError;
+        let hard = crate::limits::BLOB_HARD_MAX_BYTES;
+        let (pds, did, declared, max) = match media {
+            Some(m) => {
+                if m.cid != cid {
+                    return Err(EngineError::invalid_input(format!(
+                        "loadMedia: the media view is of {}, not {cid}",
+                        m.cid
+                    )));
+                }
+                let did = lessdugin_atp::syntax::Did::parse(&m.author).map_err(|e| {
+                    EngineError::invalid_input(format!("loadMedia: author {:?}: {e}", m.author))
+                })?;
+                if m.size_bytes > hard {
+                    return Err(EngineError::new(
+                        ErrorCode::TooLarge,
+                        "the file is larger than 300 MiB, which is never loaded (limits.md §5)",
+                    )
+                    .with_detail("bytes", m.size_bytes));
+                }
+                let ident = self
+                    .resolver()
+                    .resolve_did_doc(&did, crate::identity::DID_DOC_TTL_MS)
+                    .await?;
+                let pds = ident.pds.ok_or_else(|| {
+                    EngineError::not_found(format!(
+                        "{did} has no usable PDS: {}",
+                        ident.pds_problem.as_deref().unwrap_or("unknown")
+                    ))
+                })?;
+                // a declared size of 0 is no size: the hard cap applies
+                let max = if m.size_bytes == 0 { hard } else { m.size_bytes };
+                (pds, did, Some(m.mime.as_str()), max)
+            }
+            None => {
+                let session = self.active_session().await?;
+                (session.pds.to_string(), session.did.clone(), None, hard)
+            }
+        };
+        let pds = url::Url::parse(&pds)
+            .map_err(|e| EngineError::internal(format!("the PDS URL {pds:?}: {e}")))?;
+        let handle = match self
             .host()
-            .fetch_blob(
-                session.pds.clone(),
-                session.did.clone(),
-                cid.to_owned(),
-                MEDIA_DISPLAY_MAX_BYTES,
-            )
+            .fetch_blob(pds, did, cid.to_owned(), max)
             .await
-            .map_err(|e| {
-                crate::engine::EngineError::internal(format!(
-                    "a media blob could not be fetched: {e}"
-                ))
-            })?;
+        {
+            Ok(h) => h,
+            Err(HostError::HttpStatus(400, _)) => {
+                // "Blob not found": not retried, and no copy is kept (sync.md §11.4)
+                let _ = self.host().blob_delete(cid).await;
+                return Err(EngineError::not_found(
+                    "the author's PDS does not have this file (any more)",
+                )
+                .with_detail("kind", "mediaMissing"));
+            }
+            Err(HostError::CidMismatch) => {
+                return Err(EngineError::new(
+                    ErrorCode::Network,
+                    "the file failed verification: its bytes do not match its CID",
+                )
+                .with_detail("kind", "mediaFailedVerification"));
+            }
+            Err(HostError::TooLarge) => {
+                return Err(EngineError::new(
+                    ErrorCode::TooLarge,
+                    "the PDS sent more bytes than the file declares",
+                )
+                .with_detail("limit", max));
+            }
+            Err(e) => return Err(EngineError::from(e)),
+        };
+        let prefix = self
+            .host()
+            .blob_read(&handle.cid, 0, crate::limits::BLOB_SNIFF_PREFIX_BYTES)
+            .await?;
+        let sniffed = display_type(&prefix);
+        let mime = match (sniffed, declared) {
+            (Some(t), Some(d)) => (normalise_declared(d) == t).then_some(t),
+            (t, None) => t,
+            (None, Some(_)) => None,
+        };
         Ok(crate::dto::LoadedMedia {
             cid: handle.cid,
             size: handle.size,
             url: handle.locator,
+            mime: mime.map(str::to_owned),
         })
     }
 }
