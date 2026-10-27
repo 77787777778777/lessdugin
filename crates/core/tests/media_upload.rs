@@ -56,7 +56,7 @@ impl Author {
     fn new(cfg: PdsConfig) -> Self {
         let host = MemHost::new();
         let net = FakeNet::on(&host);
-        let pds = net.add_pds_with("pds", cfg);
+        let pds = net.add_pds_with("small.example.com", cfg);
         let acct = pds.add_account("alice.example.com");
         let engine = Engine::new(host, EngineConfig::default());
         block_on(engine.add_account(AccountInfo::app_password(
@@ -175,4 +175,29 @@ fn an_image_still_refused_after_three_halvings_fails_the_write() {
     }
     // the first attempt and IMAGE_UPLOAD_413_RETRIES re-encodings, then the refusal
     assert_eq!(a.net.count("com.atproto.repo.uploadBlob") - uploads, 4);
+}
+
+#[test]
+fn a_spilled_body_that_names_a_downscaled_image_fails_rather_than_lose_it() {
+    // m4-8: a body over 64 KiB is a `textBlob` (data-model.md §5.3), whose bytes cannot follow
+    // the new CID, so the write fails with a reason instead of publishing a broken image
+    let a = Author::new(PdsConfig {
+        blob_upload_limit: 100_000,
+        ..PdsConfig::default()
+    });
+    let m = block_on(a.engine.prepare_media(noise_png(256, 256, 5), &input("noise"))).unwrap();
+    let long = format!("![noise](cid:{})\n\n{}", m.cid, "word ".repeat(14_000));
+    let mut d = PostDraft::article(&a.forum, "A long one", long);
+    d.body.media.push(m);
+    let t = block_on(a.engine.publish(&d)).unwrap();
+    match a.state(&t) {
+        WriteState::Failed { error } => {
+            assert_eq!(error.code, ErrorCode::TooLarge, "{error:?}");
+            assert_eq!(
+                error.detail.as_ref().and_then(|d| d.get("kind")),
+                Some(&serde_json::json!("mediaRejected"))
+            );
+        }
+        other => panic!("the write must fail: {other:?}"),
+    }
 }
