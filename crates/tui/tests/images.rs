@@ -208,7 +208,7 @@ fn a_timed_out_decode_keeps_its_slot_until_it_ends() {
         got.extend(img.poll().decoded);
         std::thread::sleep(Duration::from_millis(5));
     }
-    got.sort();
+    got.sort_by(|a, b| a.0.cmp(&b.0));
     assert_eq!(
         got,
         [
