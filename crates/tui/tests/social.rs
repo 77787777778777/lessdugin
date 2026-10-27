@@ -1313,3 +1313,93 @@ fn restrict_then_nullify_keeps_both() {
     assert!(m.nullified, "the nullification stays: {m:?}");
     assert_eq!(m.restricted, ["vote"], "{m:?}");
 }
+
+/// The "this is public" interstitial (`social.md` §17, `threat-model.md` PRIV-9,
+/// `engine-api.md` §3.6): the first public action of each kind waits behind it; `n` drops it,
+/// `y` sends it and records the acknowledgement, which every client on the device shares.
+#[test]
+fn the_first_public_action_of_each_kind_asks_first() {
+    use lessdugin_core::dto::PublicActionKind;
+    let s = common::scenario_unacknowledged();
+    let engine = s.w.carol.engine.clone();
+    let acked = |k| block_on(engine.public_action_acknowledged(k)).unwrap();
+    let mut t = tui(&s, 80, 24);
+    block_on(t.start(Some(s.forum.clone())));
+    let writes = |t: &Tui| block_on(t.engine().writes()).unwrap().len();
+
+    // `u`: nothing is written yet
+    block_on(t.press("u"));
+    let n = t
+        .state
+        .public_notice
+        .as_ref()
+        .expect("the interstitial opens");
+    assert_eq!(n.kinds, [PublicActionKind::Vote]);
+    let screen = t.render();
+    assert!(screen.contains("This is public"), "{screen}");
+    assert!(screen.contains("y go on"), "{screen}");
+    insta::assert_snapshot!("public_notice_vote_80x24", screen);
+    assert_eq!(writes(&t), 0, "the vote waits");
+    // keys go to the interstitial, not to the screen below
+    block_on(t.press("j"));
+    assert!(t.state.public_notice.is_some());
+    assert_eq!(writes(&t), 0);
+
+    // `n` cancels: nothing written, nothing acknowledged
+    block_on(t.press("n"));
+    assert!(t.state.public_notice.is_none());
+    assert!(
+        status(&t).contains("nothing was published"),
+        "{}",
+        status(&t)
+    );
+    assert_eq!(writes(&t), 0);
+    assert!(!acked(PublicActionKind::Vote));
+
+    // `u` asks again; `y` sends the vote and records the acknowledgement
+    block_on(t.press("u"));
+    assert!(t.state.public_notice.is_some());
+    block_on(t.press("y"));
+    assert!(t.state.public_notice.is_none());
+    assert!(status(&t).contains("Vote recorded"), "{}", status(&t));
+    assert_eq!(writes(&t), 1);
+    assert!(acked(PublicActionKind::Vote));
+    // the next vote does not ask, nor does `0` (two intents, one kind)
+    block_on(t.press("d"));
+    assert!(t.state.public_notice.is_none());
+    block_on(t.press("0"));
+    assert!(t.state.public_notice.is_none());
+
+    // a react is another kind, and so is a mod action, whichever key or command queues it
+    block_on(t.press("x"));
+    block_on(t.press("Enter"));
+    let n = t.state.public_notice.as_ref().expect("the react asks");
+    assert_eq!(n.kinds, [PublicActionKind::React]);
+    block_on(t.press("Esc"));
+    assert!(!acked(PublicActionKind::React));
+    let fx = command_effects(&mut t, &format!("mod hide {}", s.bob_post));
+    assert!(
+        !fx.iter()
+            .any(|e| matches!(e, lessdugin_tui::Effect::ModAction { .. })),
+        "{fx:?}"
+    );
+    let n = t.state.public_notice.as_ref().expect("the mod action asks");
+    assert_eq!(n.kinds, [PublicActionKind::ModAction]);
+    assert_eq!(n.held.len(), 1);
+    block_on(t.press("n"));
+
+    // another client on the device acknowledges: this session follows
+    block_on(engine.acknowledge_public_action(PublicActionKind::React)).unwrap();
+    block_on(t.settle());
+    block_on(t.press("x"));
+    block_on(t.press("Enter"));
+    assert!(t.state.public_notice.is_none(), "{}", t.render());
+    assert!(status(&t).contains("React recorded"), "{}", status(&t));
+
+    // a new session reads the acknowledgements back
+    let mut t2 = tui(&s, 80, 24);
+    block_on(t2.start(Some(s.forum.clone())));
+    block_on(t2.press("u"));
+    assert!(t2.state.public_notice.is_none());
+    assert!(status(&t2).contains("Vote recorded"), "{}", status(&t2));
+}

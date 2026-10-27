@@ -1606,10 +1606,7 @@ impl State {
             notice.held.push(e);
         }
         notice.kinds.sort();
-        self.say(
-            Tone::Warn,
-            lit("This is public: y to go on, n to cancel."),
-        );
+        self.say(Tone::Warn, lit("This is public: y to go on, n to cancel."));
     }
 
     /// A key while the interstitial is open: `y` or Enter sends the held writes and records

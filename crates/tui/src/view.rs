@@ -140,7 +140,7 @@ fn public_notice(f: &mut Frame<'_>, n: &PublicNotice, area: Rect) {
         lit("You are asked once for each kind of public action."),
         dim(),
     )]));
-    lines.push(line([(lit("y go on \u{b7} n cancel"), bold())]));
+    lines.push(line([(tt("y go on \u{b7} n cancel"), bold())]));
     let height = u16::try_from(lines.len() + 2)
         .unwrap_or(u16::MAX)
         .min(area.height);
