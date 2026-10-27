@@ -3049,6 +3049,7 @@ dependencies = [
  "lessdugin-native",
  "lessdugin-testkit",
  "lessdugin-tui",
+ "pulldown-cmark",
  "reqwest",
  "rust-embed",
  "serde",
