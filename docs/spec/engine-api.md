@@ -80,7 +80,9 @@ Engine::new(host: H, config: EngineConfig) -> Engine<H>
 
 EngineConfig {
   network: Network,                 // Production | Devnet { plc: Url, pds: Url } (handles resolve via the PDS)
-  sources: Sources,                 // Direct | Assisted (default Assisted)
+  sources: Sources,                 // Direct | Assisted (default Assisted): the build default;
+                                    // the stored setting overrides it, read at each use (§3.6)
+  sources_flag: Option<Sources>,    // a flag of this invocation: wins over the stored setting
   verify: VerifyMode,               // Pds | Proof (default Pds)
   doh: Vec<Url>,                    // default [cloudflare-dns.com/dns-query, dns.google/resolve]
   plc: Url,                         // default https://plc.directory

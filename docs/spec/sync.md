@@ -224,7 +224,7 @@ The `records` input of the fold (`social.md` §1.1) is built from eligible store
 | `indexer` | `forum`, `none`, or a list of URLs | `forum` | which indexers to use (§2.4); CLI `--indexer <url\|none\|forum>` |
 | `media.hosts` | list of hostnames | empty | the user's media autoload allowlist (§11.3) |
 
-Settings live in the `state` store (`loc`, §10.4). CLI flags override them per invocation.
+Settings live in the `state` store (`loc`, §10.4). CLI flags override them per invocation. `sources` in effect is a flag of the invocation, else the stored setting, else the build default; the running engine reads it at each use, so `set_setting` applies at once, and in `direct` no CORE+ or EXT endpoint (Slingshot, Jetstream, Constellation, a relay, an indexer) is contacted (`engine-api.md` §3.6). A store that cannot be read counts as `direct`. `verify = proof` is refused by `set_setting` (`unsupported`) while it is Reserved, so a stored choice never claims a mode that does nothing.
 
 ### 2.4 Endpoints and consent
 
@@ -1642,3 +1642,4 @@ These choices fill gaps or resolve ambiguities in the sources. Each takes the si
 3. Does Jetstream's DID filter also filter `identity` and `account` events? This document drops unknown DIDs client-side either way. M5 should measure it, because it changes browser bandwidth.
 4. ADR 0004's per-host verdict is statistical (rotating egress IPs). The M1 fixed-IP check may still show a shared budget, which would change §9.2 and §14.
 5. ADR 0003 asks whether the public v1 Jetstream hosts will be retired. If they are, filters of more than 150 DIDs need several v2 connections of at most 150 DIDs each.
+6. *(Orchestrator decision O-3, for the U7 review.)* The `sources` setting is honoured at runtime by the running engine, with the precedence flag > stored setting > build default (§2.3). In `direct`, no CORE+ or EXT endpoint is contacted. The native configuration file sets the build default (`EngineConfig.sources`), so a stored setting overrides it; a client that wants its file to pin `sources` passes it as `EngineConfig.sources_flag`.
