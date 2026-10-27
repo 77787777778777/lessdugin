@@ -621,11 +621,94 @@ fn redact_revision_removes_the_history_and_only_the_author_may() {
         other => panic!("{other:?}"),
     }
 
-    // and a second redaction is a no-op rather than an error: the state is already what the
-    // caller asked for
-    assert!(
-        block_on(alice.engine.redact_revision(&welcome))
-            .unwrap()
-            .is_empty()
+    // and a second redaction is not an error: it is a write that finds nothing left to delete
+    let again = block_on(alice.engine.redact_revision(&welcome)).unwrap();
+    assert_eq!(again.len(), 1);
+    alice.flush();
+    assert_eq!(alice.done(&again[0]), welcome, "the write names the item");
+}
+
+/// The revision records of `item` in its author's repo, by rkey.
+fn own_revisions(u: &User, item: &str) -> Vec<String> {
+    u.acct
+        .list(nsid::REVISION)
+        .into_iter()
+        .filter(|(rkey, _)| {
+            u.acct
+                .get(nsid::REVISION, rkey)
+                .and_then(|v| v["subject"]["uri"].as_str().map(|s| s == item))
+                .unwrap_or(false)
+        })
+        .map(|(rkey, _)| rkey)
+        .collect()
+}
+
+/// M4R-2: a redaction deletes every own revision of the item that the author's PDS lists when
+/// it is sent, not just the ones this device folded: an invalid revision (which the fold drops)
+/// and one another device wrote after the last sync go too.
+#[test]
+fn redaction_deletes_unsynced_and_invalid_revisions_too() {
+    let s = scenario();
+    let alice = &s.w.alice;
+    let welcome = s.welcome.clone();
+    let p = welcome.rsplit('/').next().unwrap().to_owned();
+    let rev = |tid: &str, value: serde_json::Value| {
+        alice.acct.put(nsid::REVISION, &format!("{p}-{tid}"), &value);
+    };
+    // invalid (no snapshot of the old version): the fold leaves it out, then a sync caches it
+    rev(
+        "3l2s5xxv2zab2",
+        serde_json::json!({
+            "$type": nsid::REVISION,
+            "subject": { "uri": welcome, "cid": "bafyreie5737gdxlw5i64vzichcalba3z2v5n6icifvx5xytvske7mr3hpm" },
+            "op": "update",
+            "createdAt": "2024-01-01T00:00:00.000Z",
+        }),
     );
+    alice.sync(&s.forum);
+    // and one "another device" wrote after that sync
+    rev(
+        "3l2s5xxv2zac2",
+        serde_json::json!({
+            "$type": nsid::REVISION,
+            "subject": { "uri": welcome, "cid": "bafyreie5737gdxlw5i64vzichcalba3z2v5n6icifvx5xytvske7mr3hpm" },
+            "op": "update",
+            "record": { "title": "an older title" },
+            "createdAt": "2024-01-02T00:00:00.000Z",
+        }),
+    );
+    assert!(own_revisions(alice, &welcome).len() >= 3, "the fixture's revision and two more");
+    let t = block_on(alice.engine.redact_revision(&welcome)).unwrap();
+    alice.flush();
+    assert_eq!(alice.done(&t[0]), welcome);
+    assert_eq!(own_revisions(alice, &welcome), Vec::<String>::new(), "every revision is gone");
+}
+
+/// M4R-7 (`threat-model.md` SOC-7): a forum declaration's and a modAction's revisions are the
+/// mod log; neither `redact_revision` nor `delete` of a revision uri removes them.
+#[test]
+fn the_mod_log_is_never_redacted() {
+    let s = scenario();
+    let alice = &s.w.alice;
+    let did = alice.did();
+    let err = block_on(alice.engine.redact_revision(&s.forum)).unwrap_err();
+    assert_eq!(err.code, ErrorCode::InvalidInput, "{err:?}");
+    assert_eq!(
+        err.detail.as_ref().and_then(|d| d.get("kind")),
+        Some(&serde_json::json!("modLog"))
+    );
+    let fk = lessdugin_lexicon::keys::fk(&s.forum).unwrap();
+    let h16 = "a".repeat(16);
+    for p in [fk.clone(), format!("{fk}-{h16}")] {
+        let uri = format!("at://{did}/{}/{p}-3l2s5xxv2zab2", nsid::REVISION);
+        let err = block_on(alice.engine.delete(&uri)).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidInput, "{uri}: {err:?}");
+    }
+    let m = format!("at://{did}/{}/{fk}-{h16}", nsid::MOD_ACTION);
+    let err = block_on(alice.engine.redact_revision(&m)).unwrap_err();
+    assert_eq!(err.code, ErrorCode::InvalidInput, "{err:?}");
+    // a post's revision is still the author's to delete
+    let p = s.welcome.rsplit('/').next().unwrap();
+    let uri = format!("at://{did}/{}/{p}-3l2s5xxv2zab2", nsid::REVISION);
+    block_on(alice.engine.delete(&uri)).unwrap();
 }

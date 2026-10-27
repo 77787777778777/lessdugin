@@ -272,9 +272,11 @@ fn an_import_never_writes_login_state_outbox_rows_or_bad_settings() {
         member(p(&["loc", "setting", "verify"]), b"nonsense"),
         member(p(&["loc", "setting", "unknownKey"]), b"on"),
     ];
-    let n = refused.len();
+    // `verify = proof` is Reserved and refused below too
+    let n = refused.len() + 1;
     x.members.extend(refused);
     x.members.push(member(p(&["loc", "setting", "verify"]), b"proof"));
+    x.members.push(member(p(&["loc", "setting", "sources"]), b"direct"));
     x.members.push(member(p(&["loc", "follow", "fk"]), b"1"));
     let report = block_on(e.import_local(&x, ExportScope::Mine)).unwrap();
     assert_eq!((report.refused, report.imported), (n, 2), "{report:?}");
@@ -287,5 +289,91 @@ fn an_import_never_writes_login_state_outbox_rows_or_bad_settings() {
     let active = block_on(e.active_account()).unwrap().unwrap();
     assert_eq!(active.did, did, "the active account did not change");
     let s = block_on(e.settings()).unwrap();
-    assert_eq!(s.verify, lessdugin_core::dto::VerifyMode::Proof);
+    assert_eq!(s.sources, lessdugin_core::dto::Sources::Direct);
+    assert_eq!(s.verify, lessdugin_core::dto::VerifyMode::Pds);
+}
+
+/// One `loc` member of an export.
+fn loc_member(parts: &[&str], value: &[u8]) -> lessdugin_core::engine::ExportMember {
+    use base64::Engine as _;
+    let b = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let parts: Vec<lessdugin_core::store::key::Part> = parts.iter().map(|s| (*s).into()).collect();
+    lessdugin_core::engine::ExportMember {
+        key: b.encode(lessdugin_core::store::key::encode(&parts)),
+        parts: Vec::new(),
+        value: b.encode(value),
+    }
+}
+
+/// M4R-6: an import keeps the last of duplicate keys and counts each key once, writes more rows
+/// than one batch holds, and refuses a file past its caps before writing anything.
+#[test]
+fn an_import_is_capped_deduplicated_and_written_in_batches() {
+    use lessdugin_core::engine::IMPORT_MAX_MEMBERS;
+    let (host, _pds, alice, _bob) = setup();
+    let e = engine(&host);
+    block_on(e.add_account(AccountInfo::app_password(alice.did.as_str(), PDS))).unwrap();
+    let mut x = block_on(e.export_local(ExportScope::Mine)).unwrap();
+    x.members = (0..2_500)
+        .map(|i| loc_member(&["loc", "follow", &format!("fk{i:05}")], b"1"))
+        .collect();
+    x.members.push(loc_member(&["loc", "follow", "fk00007"], b"2"));
+    let report = block_on(e.import_local(&x, ExportScope::Mine)).unwrap();
+    assert_eq!(report.imported, 2_500, "{report:?}");
+    assert_eq!(report.kinds, [("follow".to_owned(), 2_500)]);
+    let k = lessdugin_core::store::key::encode(&["loc".into(), "follow".into(), "fk00007".into()]);
+    let v = block_on(host.state().get_many(vec![k])).unwrap();
+    assert_eq!(v[0].as_deref(), Some(&b"2"[..]), "the last duplicate wins");
+
+    let mut big = x.clone();
+    big.members = (0..=IMPORT_MAX_MEMBERS)
+        .map(|i| loc_member(&["loc", "follow", &format!("big{i}")], b"1"))
+        .collect();
+    let err = block_on(e.import_local(&big, ExportScope::Mine)).unwrap_err();
+    assert_eq!(err.code, lessdugin_core::engine::ErrorCode::TooLarge, "{err:?}");
+    let k = lessdugin_core::store::key::encode(&["loc".into(), "follow".into(), "big0".into()]);
+    assert_eq!(block_on(host.state().get_many(vec![k])).unwrap(), vec![None]);
+
+    let mut heavy = x;
+    heavy.members = (0..70)
+        .map(|i| loc_member(&["loc", "follow", &format!("heavy{i}")], &vec![b'x'; 1 << 20]))
+        .collect();
+    let err = block_on(e.import_local(&heavy, ExportScope::Mine)).unwrap_err();
+    assert_eq!(err.code, lessdugin_core::engine::ErrorCode::TooLarge, "{err:?}");
+}
+
+/// M4R-3 (`threat-model.md` AUTH-11): `remove_account(purge)` deletes every `loc` row keyed by
+/// the account (notifications, their baselines, acknowledgements, drafts), and nothing of
+/// another account.
+#[test]
+fn a_purge_deletes_the_accounts_notifications_acks_and_drafts() {
+    let (host, _pds, alice, bob) = setup();
+    let e = engine(&host);
+    block_on(e.add_account(AccountInfo::app_password(alice.did.as_str(), PDS))).unwrap();
+    let (a, b) = (alice.did.as_str(), bob.did.as_str());
+    block_on(e.acknowledge_public_action(lessdugin_core::dto::PublicActionKind::Vote)).unwrap();
+    block_on(e.save_draft(&lessdugin_core::dto::Draft::Comment {
+        id: None,
+        comment: lessdugin_core::dto::CommentDraft::new("at://did:plc:x/p/y", None, "unsent"),
+    }))
+    .unwrap();
+    put(&host, &["loc", "notif", a, "n1"], b"{}");
+    put(&host, &["loc", "nbase", a, "fk"], b"{}");
+    put(&host, &["loc", "notif", b, "n1"], b"{}");
+    put(&host, &["loc", "draft", b, "d1"], b"{}");
+    block_on(e.remove_account(a, true)).unwrap();
+    let left = block_on(e.export_local(ExportScope::Everything)).unwrap();
+    let alices: Vec<&Vec<String>> = left
+        .members
+        .iter()
+        .map(|m| &m.parts)
+        .filter(|p| p.get(2).is_some_and(|d| d == a) && p.get(1).is_some_and(|t| t != "as_pin"))
+        .collect();
+    assert!(alices.is_empty(), "alice's rows survived the purge: {alices:?}");
+    let bobs = left
+        .members
+        .iter()
+        .filter(|m| m.parts.get(2).is_some_and(|d| d == b))
+        .count();
+    assert_eq!(bobs, 2, "bob's rows are not alice's to purge");
 }

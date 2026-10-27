@@ -38,7 +38,10 @@ pub use config::{
 pub use error::{EngineError, ErrorCode};
 pub use events::{EventCallback, SubscriptionId};
 pub use live::LiveRound;
-pub use local::{EXPORT_VERSION, ExportMember, ExportScope, ImportReport, LocalExport, SETTINGS};
+pub use local::{
+    DRAFT_MAX_BYTES, EXPORT_VERSION, ExportMember, ExportScope, IMPORT_MAX_BYTES,
+    IMPORT_MAX_MEMBERS, ImportReport, LocalExport, MAX_DRAFTS, SETTINGS,
+};
 pub(crate) use local::stored_assisted;
 pub use syncing::ForumSyncOpts;
 
