@@ -387,9 +387,12 @@ impl<H: Host> Engine<H> {
             .as_ref()
             .map(|q| derived_quote(q, &quoted))
             .transpose()?;
-        self.outbox
-            .create_comment(&session, &c, ContentOpts::default())
-            .await
+        // the comment's media are uploaded with it (data-model.md §8.8)
+        let opts = ContentOpts {
+            blobs: self.media_blobs(&draft.body.media).await?,
+            excerpt: None,
+        };
+        self.outbox.create_comment(&session, &c, opts).await
     }
 
     /// `edit(uri, Draft, EditOpts)`: the edit protocol (`data-model.md` §8.3) with a revision
@@ -404,11 +407,16 @@ impl<H: Host> Engine<H> {
         let u = records::at_uri(uri)?;
         let session = self.session_for(u.did().as_str()).await?;
         let (base, mut value) = self.current(&u).await?;
+        let cached = value.clone();
         let coll = u.collection().as_str();
         let obj = value
             .as_object_mut()
             .ok_or_else(|| EngineError::internal(format!("{u} is not an object")))?;
         let mut excerpt = None;
+        let media = match draft {
+            Draft::Post { post, .. } => &post.body.media,
+            Draft::Comment { comment, .. } => &comment.body.media,
+        };
         match draft {
             Draft::Post { post, .. } => {
                 if coll != nsid::POST {
@@ -447,10 +455,13 @@ impl<H: Host> Engine<H> {
                 );
             }
         }
+        // media new in this version are uploaded with the edit; the others keep the blob
+        // objects of the cached version (data-model.md §8.8)
+        let blobs = self.edit_media_blobs(&cached, &mut value, media).await?;
         let o = outbox::EditOpts {
             history: opts.history,
             summary: opts.summary.clone(),
-            blobs: Vec::new(),
+            blobs,
             excerpt,
         };
         self.outbox.edit(&session, uri, &value, &base, o).await

@@ -1112,6 +1112,41 @@ impl<H: crate::host::Host> crate::engine::Engine<H> {
 }
 
 impl<H: crate::host::Host> crate::engine::Engine<H> {
+    /// The blobs an edit uploads (`data-model.md` §8.8): the media references of `media` that the
+    /// cached version `cached` does not already hold. Those it holds were uploaded with that
+    /// version and are referenced by it, so the PDS keeps them; their blob objects in `new` are
+    /// replaced by the cached ones, verbatim, rather than re-synthesised from the reference.
+    pub(crate) async fn edit_media_blobs(
+        &self,
+        cached: &serde_json::Value,
+        new: &mut serde_json::Value,
+        media: &[crate::dto::MediaRef],
+    ) -> Result<Vec<crate::outbox::BlobData>, crate::engine::EngineError> {
+        use crate::outbox::blob;
+        fn objects(v: &serde_json::Value, out: &mut Vec<(String, serde_json::Value)>) {
+            if let Some(l) = blob::blob_link(v) {
+                out.push((l.to_owned(), v.clone()));
+                return;
+            }
+            match v {
+                serde_json::Value::Object(m) => m.values().for_each(|x| objects(x, out)),
+                serde_json::Value::Array(a) => a.iter().for_each(|x| objects(x, out)),
+                _ => {}
+            }
+        }
+        let mut held = Vec::new();
+        objects(cached, &mut held);
+        for (link, object) in &held {
+            blob::substitute_blob(new, link, object);
+        }
+        let fresh: Vec<crate::dto::MediaRef> = media
+            .iter()
+            .filter(|m| !held.iter().any(|(l, _)| *l == m.cid))
+            .cloned()
+            .collect();
+        self.media_blobs(&fresh).await
+    }
+
     /// The blob data for a body's media references, ready for `ContentOpts.blobs`.
     ///
     /// Fails when a reference has no prepared bytes on this device: publishing a reference whose
