@@ -622,6 +622,12 @@ async fn adopt(ctx: &Ctx, actor: &str, forum: Option<&str>, yes: bool) -> Result
 /// Every `mod <verb> <subject>` that asserts or removes one action.
 async fn assert_or_remove(ctx: &Ctx, action: ModAction, yes: bool) -> Result<(), CliError> {
     let w = ctx.writer().await?;
+    // the `#restrict` dimension the verb names: `true` the capabilities, `false` nullifyVotes
+    let restrict_names_caps = match &action {
+        ModAction::Restrict(_) => Some(true),
+        ModAction::Nullify(_) => Some(false),
+        _ => None,
+    };
     let (subject, forum_opt, scope, value, reason, until, done) = match action {
         ModAction::Hide(a) => (
             a.subject.clone(),
@@ -782,6 +788,10 @@ async fn assert_or_remove(ctx: &Ctx, action: ModAction, yes: bool) -> Result<(),
     let forum = mod_forum(ctx, &w.engine, forum_opt.as_deref(), &subject).await?;
     let subject = subject_of(ctx, &w.engine, &subject).await?;
     read::sync_thread_quietly(ctx, &w.engine, &subject).await;
+    let value = match restrict_names_caps {
+        Some(caps) => keep_restrict_dimension(&w, &forum, scope, &subject, value, caps).await?,
+        None => value,
+    };
     mod_action(
         ctx,
         &w,
@@ -790,6 +800,81 @@ async fn assert_or_remove(ctx: &Ctx, action: ModAction, yes: bool) -> Result<(),
         yes,
     )
     .await
+}
+
+/// `#restrict` is one record per (actor, scope, subject) carrying both the capability set and
+/// `nullifyVotes`, and a record states the complete desired state of its key (`social.md` §4.2,
+/// §4.7). So `mod restrict` keeps the account's current nullification of the subject, and `mod
+/// nullify` its current capability set (`names_caps`: the verb names the capabilities): neither
+/// silently lifts the other. The current record is the cached one; without one, the other
+/// dimension is its default.
+async fn keep_restrict_dimension(
+    w: &Writer,
+    forum: &str,
+    scope: ModScope,
+    subject: &str,
+    value: ModActionValue,
+    names_caps: bool,
+) -> Result<ModActionValue, CliError> {
+    use lessdugin_lexicon::collection::nsid;
+    let ModActionValue::Restrict {
+        capabilities,
+        nullify_votes,
+    } = value
+    else {
+        return Ok(value);
+    };
+    // a restriction names a user; anything else is the engine's to refuse
+    let did = if subject.starts_with("at://") || subject.starts_with("tag:") {
+        None
+    } else {
+        Some(w.engine.resolve_actor(subject).await?.did)
+    };
+    let mut action = serde_json::Map::new();
+    action.insert("$type".into(), Value::String(nsid::MOD_ACTION_RESTRICT.into()));
+    let current = match &did {
+        Some(did) => {
+            let scope = matches!(scope, ModScope::Author).then_some("author");
+            match lessdugin_lexicon::keys::mod_action_rkey(
+                lessdugin_lexicon::ns::NS,
+                forum,
+                scope,
+                did,
+                &action,
+            ) {
+                Ok(rkey) => {
+                    let uri = format!("at://{}/{}/{rkey}", w.account.did, nsid::MOD_ACTION);
+                    write::cached(&w.engine, &uri).await.ok().map(|(_, v)| v)
+                }
+                Err(_) => None,
+            }
+        }
+        None => None,
+    };
+    let current = current.as_ref().map(|v| &v["action"]);
+    Ok(if names_caps {
+        ModActionValue::Restrict {
+            capabilities,
+            nullify_votes: current
+                .and_then(|a| a.get("nullifyVotes"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        }
+    } else {
+        ModActionValue::Restrict {
+            // the known capabilities (unknown ones have no dto value)
+            capabilities: current
+                .and_then(|a| a.get("capabilities"))
+                .and_then(Value::as_array)
+                .map(|caps| {
+                    caps.iter()
+                        .filter_map(|c| serde_json::from_value::<Capability>(c.clone()).ok())
+                        .collect()
+                })
+                .unwrap_or_default(),
+            nullify_votes,
+        }
+    })
 }
 
 /// A tier action (`mod personal|frontpage|curate`): an assertion on the item.

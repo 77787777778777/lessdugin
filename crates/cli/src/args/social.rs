@@ -223,11 +223,12 @@ pub enum ModAction {
     Unban(ModSubject),
     /// Approve an applicant (the grant; same as `approve`).
     Approve(ModSubject),
-    /// Restrict an actor's capabilities.
+    /// Restrict an actor's capabilities (replacing your current set; a nullification stays).
     Restrict(RestrictArgs),
     /// Remove your restriction (also lifts a nullification).
     Unrestrict(ModSubject),
-    /// Nullify an actor's votes (a restrict with `nullifyVotes`; their opinions stop counting).
+    /// Nullify an actor's votes (a restrict with `nullifyVotes`; their opinions stop counting;
+    /// your restriction of their capabilities stays).
     Nullify(ModCommon),
     /// Move your own item to the personal tier.
     Personal(ModSubject),

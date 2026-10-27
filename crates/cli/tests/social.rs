@@ -403,3 +403,41 @@ fn reading_a_thread_marks_it_read() {
     let pl: PostList = exact(&w.alice.ok(&["--json", "ls", "--all"]));
     assert_eq!(pl.items[0].unread_comments, Some(0), "{:?}", pl.items[0]);
 }
+
+/// `#restrict` holds both the capability set and `nullifyVotes` in one record, which states
+/// the complete desired state of its key (`social.md` §4.2, §4.7): `mod nullify` keeps the
+/// moderator's restriction, and `mod restrict` keeps the nullification.
+#[test]
+fn restrict_and_nullify_keep_each_other() {
+    use lessdugin_lexicon::collection::nsid;
+    let w = World::new();
+    let restrict = || -> Value {
+        let mut recs: Vec<Value> = w
+            .alice
+            .account
+            .list(nsid::MOD_ACTION)
+            .iter()
+            .filter_map(|(rkey, _)| w.alice.account.get(nsid::MOD_ACTION, rkey))
+            .filter(|v| v["action"]["$type"] == nsid::MOD_ACTION_RESTRICT)
+            .collect();
+        assert_eq!(recs.len(), 1, "{recs:?}");
+        recs.remove(0)["action"].clone()
+    };
+    let r = w
+        .alice
+        .json(&["mod", "restrict", "bob.test", "--cap", "post", "--yes"]);
+    assert_eq!(r["state"]["kind"], "done", "{r}");
+    let n = w.alice.json(&["mod", "nullify", "bob.test"]);
+    assert_eq!(n["state"]["kind"], "done", "{n}");
+    let a = restrict();
+    assert_eq!(a["capabilities"], serde_json::json!(["post"]), "{a}");
+    assert_eq!(a["nullifyVotes"], true, "{a}");
+
+    let r = w
+        .alice
+        .json(&["mod", "restrict", "bob.test", "--cap", "comment"]);
+    assert_eq!(r["state"]["kind"], "done", "{r}");
+    let a = restrict();
+    assert_eq!(a["capabilities"], serde_json::json!(["comment"]), "{a}");
+    assert_eq!(a["nullifyVotes"], true, "{a}");
+}
