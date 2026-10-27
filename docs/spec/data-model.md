@@ -985,7 +985,7 @@ edit(target, base, newValue, summary?):          // base = CID the user edited; 
 | Remove modAction (unhide, unban, unpin, unlock, unrestrict, …) | `applyWrites[#create revision{subject: {uri, cid: cur.cid}, op: "delete", record: cur.value}, #delete modAction]` with `swapCommit` = fresh head, retried as in §8.3. |
 | `mod adopt` | §8.6. |
 | Profile | No record: create-if-absent of `self`. Otherwise `putRecord(self, swapRecord = cid)`. Profiles have no revisions. |
-| Redact history | `applyWrites[#delete revision …]`, chunked at ≤ 200 ops. |
+| Redact history | an own post, comment or sequence `x`: when the write is sent, `listRecords(revision, prefix = P(x) + "-")` filtered by `subject.uri = x` (as §8.7), then `applyWrites[#delete revision …]` of every one listed, chunked at ≤ 200 ops; so revisions the writer's device never synced, and invalid ones, go too. A forum's and a modAction's revisions are the mod log and are never redacted (`threat-model.md` SOC-7). |
 | Blob | §8.8. |
 
 **PDS semantics (ADR 0005, spike S12, reference PDS).**

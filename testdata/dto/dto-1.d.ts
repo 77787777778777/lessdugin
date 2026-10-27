@@ -254,6 +254,14 @@ export interface HistoryView {
     versions: VersionEntry[];
 }
 
+export interface ImportReport {
+    imported: number;
+    outOfScope: number;
+    undecodable: number;
+    refused?: number;
+    kinds?: [string, number][];
+}
+
 export interface IndexerConsent {
     url: string;
     did?: string;
@@ -552,6 +560,8 @@ export interface RenderedBody {
     rendererVersion: string;
 }
 
+export type RkeyInput = { kind: "membership"; forum: string } | { kind: "post"; forum: string; tid: string } | { kind: "comment"; root: string; tid: string } | { kind: "opinion"; forum: string; subject: string } | { kind: "modAction"; forum: string; scope: ModScope; subject: string; actionKey: string } | { kind: "revision"; subject: string; tid: string };
+
 export interface ScoreView {
     score: number;
     agreement?: number;
@@ -715,6 +725,11 @@ export interface UserView {
     pinned: PostSummary[];
     recentPosts: PostSummary[];
     recentComments: CommentNode[];
+}
+
+export interface ValidationReport {
+    valid: boolean;
+    errors: string[];
 }
 
 export interface VerifyCheck {
