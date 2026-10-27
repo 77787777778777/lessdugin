@@ -186,7 +186,9 @@ describe("RenderedHtml", () => {
       const span = body(`<span class="media" data-cid="${CID}">paper.pdf</span>`);
       const { root } = await load(span, "application/pdf", "blob:t/4");
       expect(root.querySelector("video, audio")).toBeNull();
-      expect(screen.getByRole("button", { name: `⤓ Download paper.pdf (${CID}.bin)` })).toBeTruthy();
+      expect(
+        screen.getByRole("button", { name: `⤓ Download paper.pdf (${CID}.bin)` }),
+      ).toBeTruthy();
     });
   });
 

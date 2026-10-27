@@ -62,11 +62,9 @@ export type MediaDisplay =
 export function mediaDisplay(loaded: LoadedForDisplay, placeholder: "img" | "span"): MediaDisplay {
   // a CID is base32 (lowercase letters and 2–7): nothing else reaches the file name
   const name = /^b[a-z2-7]{8,100}$/.test(loaded.cid) ? loaded.cid : "media";
-  const mime = loaded.mime;
-  const kind = mime !== undefined && Object.hasOwn(DISPLAY, mime) ? DISPLAY[mime as keyof typeof DISPLAY] : null;
-  const filename = `${name}.${(kind !== null && mime !== undefined && EXT[mime]) || "bin"}`;
-  if (kind === "img" ? placeholder === "img" : kind !== null && placeholder === "span") {
-    return { kind, filename };
-  }
+  const mime = loaded.mime ?? "";
+  const kind = Object.hasOwn(DISPLAY, mime) ? DISPLAY[mime as keyof typeof DISPLAY] : null;
+  const filename = `${name}.${(kind !== null && EXT[mime]) || "bin"}`;
+  if (kind !== null && (kind === "img") === (placeholder === "img")) return { kind, filename };
   return { kind: "download", filename };
 }
