@@ -495,3 +495,47 @@ fn collapsed_comments_fold_except_the_viewers_own_newcomer_ones() {
     let shown = doc(&view, &none, Some(&bob));
     assert!(!shown.contains(body), "{shown}");
 }
+
+/// The same through the State: the Thread screen lays the thread out for the session's account,
+/// so bob's own newcomer comment shows expanded in bob's TUI and folded in carol's (decision
+/// O-4).
+#[test]
+fn the_thread_screen_shows_the_viewers_own_newcomer_comment_expanded() {
+    use lessdugin_core::dto::{CollapseReason, ItemState, ThreadOpts};
+    use lessdugin_tui::app::{Origin, ThreadData};
+    use lessdugin_tui::{Action, Headless, HeadlessOpts};
+    let s = scenario();
+    let body = "Thanks for the forum!";
+    let bob_tui = block_on(Headless::new(
+        s.w.bob.engine.clone(),
+        HeadlessOpts {
+            width: 80,
+            height: 30,
+            ..HeadlessOpts::default()
+        },
+    ))
+    .unwrap();
+    for (mut t, own) in [(bob_tui, true), (tui(&s, 80, 30), false)] {
+        block_on(t.start(None));
+        block_on(t.open_thread(&s.welcome));
+        let screen = t.state.top().unwrap().id;
+        let mut view = block_on(t.engine().get_thread(&s.welcome, &ThreadOpts::default())).unwrap();
+        let c = view
+            .comments
+            .iter_mut()
+            .find(|c| c.uri == s.bob_c1)
+            .expect("bob's comment");
+        c.state = ItemState::Collapsed {
+            reason: CollapseReason::NewUser,
+        };
+        let bodies = t.state.top_thread().unwrap().data.as_ref().unwrap().bodies.clone();
+        let _ = t.state.update(Action::ThreadLoaded {
+            screen,
+            origin: Origin::Live,
+            result: Ok(Box::new(ThreadData { view, bodies })),
+        });
+        let shown = t.thread_document().unwrap();
+        assert!(shown.contains("collapsed: new user"), "{shown}");
+        assert_eq!(shown.contains(body), own, "own: {own}\n{shown}");
+    }
+}
