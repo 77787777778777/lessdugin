@@ -255,7 +255,7 @@ emits `Auth { did, state: Expired }`, and the next login of the account (`add_ac
 | `wiki_edit(forum, slug, WikiDraft)` | M5 (§3.9) |
 | `seq_create`, `seq_edit`, `seq_add`, `seq_remove`, `seq_move` | M5 |
 | `redact_revision(uri)` | deletes revision records. M4 |
-| `prepare_media(MediaInput) -> MediaRef` | sniff, strip, orient (native), CID; upload happens at publish. M4 |
+| `prepare_media(MediaInput) -> MediaRef` | sniff, strip, orient, downscale to 5 MiB (`data-model.md` §8.8), CID; the same pipeline natively and in the SPA's wasm. Upload happens at publish. M4 |
 | `undo(write_id)` | removes a write not sent yet (the undo window), or writes the inverse of a sent opinion (`sync.md` §7.4) |
 | `retry_write(write_id)` | queues a `failed` (or conflicting) write again with its attempts reset; on a write that backs off after a failure, or waits for a login, it is "send now" (queued at once, attempts kept). A write held by the undo window, the write budget or a rate limit is refused (`invalid_input`). Returns its ticket |
 | `write_status(write_id) -> Option<WriteTicket>` | `None`: unknown or pruned |
