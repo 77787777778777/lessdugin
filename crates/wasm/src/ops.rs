@@ -809,6 +809,114 @@ mod tests {
         }
     }
 
+    /// `(name, required, total)` parameter counts of every `EngineApi` method (the first
+    /// declaration of an overloaded one), from `api.ts`.
+    fn api_arities() -> Vec<(String, usize, usize)> {
+        let src = include_str!("../../../packages/engine/src/api.ts");
+        let body = &src[src.find("export interface EngineApi").expect("EngineApi")..];
+        let body = &body[..body.find("\n}\n").expect("end of EngineApi")];
+        let mut out: Vec<(String, usize, usize)> = Vec::new();
+        for name in api_methods() {
+            let at = body
+                .find(&format!("\n  {name}("))
+                .or_else(|| body.find(&format!("\n  {name}<")))
+                .expect(&name);
+            let rest = &body[at..];
+            let open = rest.find('(').expect("(");
+            // the parameter list, to the matching parenthesis
+            let (mut depth, mut end) = (0i32, open);
+            for (i, c) in rest[open..].char_indices() {
+                match c {
+                    '(' | '<' | '{' | '[' => depth += 1,
+                    ')' | '>' | '}' | ']' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = open + i;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let list = &rest[open + 1..end];
+            let (mut params, mut depth, mut cur) = (Vec::new(), 0i32, String::new());
+            for c in list.chars() {
+                match c {
+                    '(' | '<' | '{' | '[' => depth += 1,
+                    ')' | '>' | '}' | ']' => depth -= 1,
+                    ',' if depth == 0 => {
+                        params.push(std::mem::take(&mut cur));
+                        continue;
+                    }
+                    _ => {}
+                }
+                cur.push(c);
+            }
+            params.push(cur);
+            let params: Vec<String> = params
+                .into_iter()
+                .map(|p| p.trim().to_owned())
+                .filter(|p| !p.is_empty())
+                .collect();
+            let optional = params
+                .iter()
+                .filter(|p| p.split(':').next().is_some_and(|n| n.ends_with('?')))
+                .count();
+            if !out.iter().any(|(n, _, _)| n == &name) {
+                out.push((name, params.len() - optional, params.len()));
+            }
+        }
+        out
+    }
+
+    /// `OP_ARITY` of `packages/engine/src/client.ts`: the operations the client pads to their
+    /// full arity with `null`.
+    fn client_padding() -> Vec<(String, usize)> {
+        let src = include_str!("../../../packages/engine/src/client.ts");
+        let body = &src[src.find("OP_ARITY").expect("OP_ARITY")..];
+        let body = &body[body.find('{').expect("{") + 1..body.find("});").expect("});")];
+        body.lines()
+            .filter_map(|l| {
+                let (k, v) = l.trim().split_once(':')?;
+                Some((k.trim().to_owned(), v.trim().trim_end_matches(',').parse().ok()?))
+            })
+            .collect()
+    }
+
+    /// The wasm dispatcher accepts every arity `EngineApi` lets a client send: the required
+    /// parameters only (or `OP_ARITY`'s padding), and all of them. Every argument is `null`, so
+    /// an operation fails on a type, never on the length of its argument tuple (`importLocal(json)`
+    /// once rejected every call that left the scope out).
+    #[test]
+    fn every_api_arity_is_accepted() {
+        let e = engine();
+        let pads = client_padding();
+        assert!(pads.iter().any(|(n, _)| n == "parseRef"), "{pads:?}");
+        // long-lived, or not dispatched here
+        let skip = ["liveTail", "outboxPump", "backgroundVerify"];
+        let arities = api_arities();
+        assert!(arities.len() > 60, "{}", arities.len());
+        for (op, required, total) in &arities {
+            if skip.contains(&op.as_str()) || unsupported_until(op).is_some() || *total == 0 {
+                continue;
+            }
+            let sent = pads
+                .iter()
+                .find(|(n, _)| n == op)
+                .map_or(*required, |(_, n)| *n);
+            for n in [sent, *total] {
+                let nulls = format!("[{}]", vec!["null"; n].join(","));
+                if let Err(err) = block_on(call(&e, op, &nulls)) {
+                    assert!(
+                        !err.message.contains("invalid length"),
+                        "{op} with {n} of {total} arguments: {}",
+                        err.message
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn unsupported_and_unknown_operations() {
         let e = engine();
@@ -905,6 +1013,100 @@ mod tests {
             let err = call_err(&e, op, a);
             assert_eq!(err.code, ErrorCode::InvalidInput, "{op} {a}: {err:?}");
         }
+    }
+
+    /// The M4 local-state operations keep `EngineApi`'s shapes (engine API v0): `setSetting` takes
+    /// a field of `Settings` with a typed value, `importLocal` its export alone and reports what
+    /// it wrote, `prepareMedia` the v0 `MediaFile` too.
+    #[test]
+    fn local_state_operations_take_the_declared_shapes() {
+        let e = engine();
+        assert_eq!(
+            call_ok(&e, "setSetting", r#"["mediaAutoloadHosts", ["cdn.example"]]"#),
+            "null"
+        );
+        call_ok(&e, "setSetting", r#"["karmaNotifications", "weekly"]"#);
+        let s: Value = serde_json::from_str(&call_ok(&e, "settings", "[]")).unwrap();
+        assert_eq!(s["mediaAutoloadHosts"], json!(["cdn.example"]));
+        assert_eq!(s["karmaNotifications"], "weekly");
+        let err = call_err(&e, "setSetting", r#"["noSuchSetting", 1]"#);
+        assert_eq!(err.code, ErrorCode::InvalidInput);
+
+        let x = call_ok(&e, "exportLocal", "[]");
+        let r: Value = serde_json::from_str(&call_ok(&e, "importLocal", &format!("[{x}]")))
+            .unwrap();
+        assert!(r["imported"].as_u64().unwrap() > 0, "{r}");
+        assert_eq!(r["outOfScope"], 0, "{r}");
+
+        // a 1x1 PNG, as engine API v0's `prepareMedia({ bytes, mime })`
+        let png: Vec<u8> = vec![
+            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0x0d, 0x49, 0x48, 0x44, 0x52,
+            0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 0x1f, 0x15, 0xc4, 0x89, 0, 0, 0, 0x0d, 0x49,
+            0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0xf8, 0xcf, 0xc0, 0xf0, 0x1f, 0, 5, 0, 1, 0xff,
+            0x89, 0x99, 0x3d, 0x1d, 0, 0, 0, 0, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+        ];
+        let bytes = serde_json::to_string(&png).unwrap();
+        let v0 = call_ok(
+            &e,
+            "prepareMedia",
+            &format!(r#"[{{"bytes": {bytes}, "mime": "image/png", "alt": "a dot"}}]"#),
+        );
+        let now = call_ok(
+            &e,
+            "prepareMedia",
+            &format!(r#"[{bytes}, {{"declaredMime": "image/png", "alt": "a dot"}}]"#),
+        );
+        let (v0, now): (Value, Value) =
+            (serde_json::from_str(&v0).unwrap(), serde_json::from_str(&now).unwrap());
+        assert_eq!((&v0["cid"], &v0["mime"], &v0["alt"]), (&now["cid"], &now["mime"], &now["alt"]));
+    }
+
+    #[test]
+    fn validate_record_and_derive_rkey() {
+        let e = engine();
+        let forum = "at://did:plc:ewvi7nxzyoun6zhxrhs64oiz/online.7778777.lessdugin.temp.forum/meta";
+        let post = json!({
+            "$type": "online.7778777.lessdugin.temp.post",
+            "forum": forum,
+            "kind": "article",
+            "title": "Hello",
+            "body": {"$type": "online.7778777.lessdugin.temp.markdown", "text": "Hi."},
+            "createdAt": "2024-01-01T00:00:00.000Z",
+        });
+        let r: Value = serde_json::from_str(&call_ok(
+            &e,
+            "validateRecord",
+            &format!(r#"["post", {post}]"#),
+        ))
+        .unwrap();
+        assert_eq!(r, json!({"valid": true, "errors": []}));
+        let mut untitled = post.clone();
+        untitled.as_object_mut().unwrap().remove("title");
+        let r: Value = serde_json::from_str(&call_ok(
+            &e,
+            "validateRecord",
+            &format!(r#"["online.7778777.lessdugin.temp.post", {untitled}]"#),
+        ))
+        .unwrap();
+        assert_eq!(r["valid"], false, "{r}");
+        assert_eq!(r["errors"], json!(["PO3"]), "{r}");
+
+        let k = |input: Value| -> String {
+            serde_json::from_str(&call_ok(&e, "deriveRkey", &format!("[{input}]"))).unwrap()
+        };
+        let fk = k(json!({"kind": "membership", "forum": forum}));
+        let p = k(json!({"kind": "post", "forum": forum, "tid": "3l2s5xxv2ze2c"}));
+        assert_eq!(p, format!("{fk}-3l2s5xxv2ze2c"));
+        let root = format!("at://did:plc:ewvi7nxzyoun6zhxrhs64oiz/online.7778777.lessdugin.temp.post/{p}");
+        let c = k(json!({"kind": "comment", "root": root, "tid": "3l2s6aaaaaaa2"}));
+        assert_eq!(c, format!("{fk}-3l2s5xxv2ze2c-3l2s6aaaaaaa2"));
+        let o = k(json!({"kind": "opinion", "forum": forum, "subject": root}));
+        assert!(o.starts_with(&format!("{p}-")), "{o}");
+        let m = k(json!({"kind": "modAction", "forum": forum, "scope": "forum",
+            "subject": root, "actionKey": "hide"}));
+        assert!(m.starts_with(&format!("{fk}-")) && m.len() == fk.len() + 17, "{m}");
+        let err = call_err(&e, "deriveRkey", r#"[{"kind": "post", "forum": "x", "tid": "y"}]"#);
+        assert_eq!(err.code, ErrorCode::InvalidInput);
     }
 
     #[test]

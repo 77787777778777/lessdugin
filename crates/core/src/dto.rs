@@ -1160,6 +1160,7 @@ dto! {
         Post { forum: String, tid: String },
         Comment { root: String, tid: String },
         Opinion { forum: String, subject: String },
+        #[serde(rename_all = "camelCase")]
         ModAction { forum: String, scope: ModScope, subject: String, action_key: String },
         Revision { subject: String, tid: String },
     }
