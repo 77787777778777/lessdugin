@@ -518,8 +518,10 @@ impl<'a, H: Host> Runner<'a, H> {
 
     /// Runs the write's protocol.
     pub(crate) async fn run(&mut self) -> Result<Outcome, CallError> {
-        if !matches!(self.w.intent, Intent::Opinion { .. } | Intent::Adopt { .. })
-            && self.w.ops.is_empty()
+        if !matches!(
+            self.w.intent,
+            Intent::Opinion { .. } | Intent::Adopt { .. } | Intent::Redact { subject: Some(_) }
+        ) && self.w.ops.is_empty()
         {
             return Err(invalid("the write has no ops"));
         }
@@ -540,7 +542,7 @@ impl<'a, H: Host> Runner<'a, H> {
             Intent::RemoveModAction { revision_rkey } => {
                 self.remove_mod_action(&revision_rkey).await
             }
-            Intent::Redact => self.redact().await,
+            Intent::Redact { subject } => self.redact(subject.as_deref()).await,
             Intent::Opinion { .. } => self.opinion().await,
             Intent::Adopt { .. } => self.adopt().await,
         }
@@ -1090,7 +1092,17 @@ impl<'a, H: Host> Runner<'a, H> {
         Ok(out)
     }
 
-    async fn redact(&mut self) -> Result<Outcome, CallError> {
+    /// Deletes the revisions the ops name that are still on the PDS and, for an item
+    /// (`subject`), every own revision of it listed now: the history this device never synced
+    /// and the invalid revisions too (`data-model.md` §8 "Redact history").
+    async fn redact(&mut self, subject: Option<&str>) -> Result<Outcome, CallError> {
+        let item = subject
+            .map(|s| {
+                keys::revision_prefix(NS, s)
+                    .map(|p| (s.to_owned(), p))
+                    .map_err(|e| invalid(format!("{s} has no revisions to redact: {e}")))
+            })
+            .transpose()?;
         let wanted: BTreeSet<String> = self
             .w
             .ops
@@ -1110,9 +1122,16 @@ impl<'a, H: Host> Runner<'a, H> {
                     present.insert(r.rkey);
                 }
             }
-            let ops: Vec<BatchOp> = wanted
+            let mut rkeys: BTreeSet<String> = wanted
                 .iter()
                 .filter(|k| present.contains(*k))
+                .cloned()
+                .collect();
+            if let Some((s, p)) = &item {
+                rkeys.extend(self.own_revisions_of(p, s).await?);
+            }
+            let ops: Vec<BatchOp> = rkeys
+                .iter()
                 .map(|k| BatchOp::Delete {
                     collection: nsid::REVISION.to_owned(),
                     rkey: k.clone(),
@@ -1120,15 +1139,24 @@ impl<'a, H: Host> Runner<'a, H> {
                 .collect();
             match self.send_chunks(&ops).await? {
                 None => {
-                    self.w.results = self
-                        .w
-                        .ops
+                    let did = self.did().as_str().to_owned();
+                    // an item's redaction names the item, then the revisions it deleted
+                    let named = item.iter().map(|(s, _)| s.clone());
+                    let deleted = rkeys
                         .iter()
-                        .map(|o| OpResult {
-                            uri: o.uri(self.did().as_str()),
-                            cid: None,
-                        })
-                        .collect();
+                        .map(|k| format!("at://{did}/{}/{k}", nsid::REVISION));
+                    self.w.results = match &item {
+                        Some(_) => named.chain(deleted).map(|uri| OpResult { uri, cid: None }).collect(),
+                        None => self
+                            .w
+                            .ops
+                            .iter()
+                            .map(|o| OpResult {
+                                uri: o.uri(&did),
+                                cid: None,
+                            })
+                            .collect(),
+                    };
                     return Ok(Outcome::Done);
                 }
                 Some(e) => {

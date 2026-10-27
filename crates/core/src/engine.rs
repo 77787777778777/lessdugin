@@ -39,6 +39,7 @@ pub use error::{EngineError, ErrorCode};
 pub use events::{EventCallback, SubscriptionId};
 pub use live::LiveRound;
 pub use local::{EXPORT_VERSION, ExportMember, ExportScope, ImportReport, LocalExport, SETTINGS};
+pub(crate) use local::stored_assisted;
 pub use syncing::ForumSyncOpts;
 
 use crate::dto::{ActorView, VerifyReport};

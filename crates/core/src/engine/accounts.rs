@@ -508,9 +508,11 @@ impl<H: Host> Engine<H> {
     }
 
     /// Forgets an account (emits `Changed [Accounts]`, plus `Outbox` with `purge`). With
-    /// `purge`, also deletes its outbox, write budget and notification state
-    /// (`threat-model.md` AUTH-11). The authorization-server pin is kept. Deleting the
-    /// session secret is the host's job.
+    /// `purge`, also deletes its outbox, write budget, notifications and their baselines, its
+    /// public-action acknowledgements and its drafts (`threat-model.md` AUTH-11): every `loc`
+    /// row keyed by the account. The device-wide lists (read marks, follows, subscriptions,
+    /// bookmarks, mutes) belong to no account and stay. The authorization-server pin is kept.
+    /// Deleting the session secret is the host's job.
     pub async fn remove_account(&self, did: &str, purge: bool) -> Result<(), EngineError> {
         let did = parse_did(did)?;
         if self
@@ -527,10 +529,13 @@ impl<H: Host> Engine<H> {
         if purge {
             // writes, blob chunks, the write budget and the TID meta row
             ops.extend(crate::outbox::purge_ops(did.as_str()));
-            ops.push(KvOp::DeleteRange(KeyRange::prefix(&crate::key!(
-                "notif",
-                did.as_str()
-            ))));
+            for family in ["notif", "nbase", "ack", "draft"] {
+                ops.push(KvOp::DeleteRange(KeyRange::prefix(&crate::key!(
+                    "loc",
+                    family,
+                    did.as_str()
+                ))));
+            }
         }
         ops.push(KvOp::Delete(super::forums::seeded_key(did.as_str())));
         self.state_write(ops).await?;

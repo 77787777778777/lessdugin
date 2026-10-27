@@ -306,8 +306,13 @@ pub enum Intent {
         /// Revision rkey `P(target) + "-" + tid` (W6).
         revision_rkey: String,
     },
-    /// Redact history: `ops = [delete revision…]`, chunked at ≤ 200.
-    Redact,
+    /// Redact history: `ops = [delete revision…]`, chunked at ≤ 200; with `subject`, every own
+    /// revision of that item listed on the PDS when the write is sent is deleted too.
+    Redact {
+        /// The item whose history is redacted (a row written without it deletes its ops).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subject: Option<String>,
+    },
     /// An opinion write (§8.5): `ops = [update opinion]` without a value (it is computed when
     /// sent from the current value and `steps`).
     Opinion {
@@ -376,7 +381,7 @@ impl Intent {
             Self::DeleteContent => "deleteContent",
             Self::DeleteRecord => "deleteRecord",
             Self::RemoveModAction { .. } => "removeModAction",
-            Self::Redact => "redact",
+            Self::Redact { .. } => "redact",
             Self::Opinion { .. } => "opinion",
             Self::Adopt { .. } => "adopt",
         }

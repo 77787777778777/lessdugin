@@ -1241,7 +1241,7 @@ The key of a tuple is the concatenation of its elements. A prefix scan over `(e1
 | state | `("out.meta", account)` | `MetaRow` | the last TID handed out to this account's writes (W6) |
 | state | `("out.blob", account, seq, index, chunk)` | bytes | ≤ 1 MiB chunks of a blob uploaded when write `seq` is sent (`data-model.md` §8.8) |
 | state | `("loc", kind, key…)` | per kind | kinds: `draft`, `read`, `sub`, `follow`, `unfollow`, `bookmark`, `mute`, `setting`, `alias`, `last_listing`, `consent`, `media_host`, `as_pin`, `quarantine`, `account`, `active_account`, `seeded` |
-| state | `("notif", account, ts, id)` | notification | |
+| state | `("loc", kind, account, key…)` | per kind | the rows of one account: `draft` (`id`), `notif` (`id`), `nbase` (forum), `ack` (kind); `logout --purge` deletes them with the account's `out*` rows (`threat-model.md` AUTH-11) |
 | state | `("meta", "schema")` | integer | `state` is migrated, never dropped |
 
 ### 10.5 Row schemas

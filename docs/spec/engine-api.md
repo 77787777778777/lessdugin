@@ -56,6 +56,16 @@ Normative details of the underlying behaviour live in `data-model.md` (records, 
   schema; their TypeScript form `testdata/dto/dto-1.d.ts` is generated from them
   (`crates/wasm/tests/dto_decl.rs`, which fails when it is stale) and the hand-written
   `packages/engine/src/types.ts` must match it field for field (`types.parity.test.ts`).
+- **After the freeze (M4).** Implemented: `drafts`, `save_draft`, `delete_draft`, `settings`,
+  `set_setting`, `export_local`, `import_local`, `prepare_media`, `redact_revision`,
+  `validate_record`, `derive_rkey`. New: `load_media` (§3.4) and the DTOs `LoadedMedia`,
+  `MediaInput`, `Settings`, `IndexerConsent`, `ImportReport`, `ValidationReport`, `RkeyInput`
+  (§4.4). Kept compatible with the v0 declarations: `prepare_media` takes `(bytes, MediaInput?)`
+  and still accepts v0's single `MediaFile` (the TypeScript name `MediaInput` now names the hints,
+  as in Rust; v0's shape is `MediaFile`); `redact_revision` resolves with a `WriteTicket`;
+  `import_local` resolves with an `ImportReport` where v0 declared nothing (the binding also
+  takes an optional second argument, the scope); `set_setting` takes every field of `Settings`
+  with a value of its type.
 - **Errors.** Operations return `Result<T, EngineError>`; `EngineError` serialises as
   `{ "code": <string>, "message": <string>, "retryable": bool, "detail"?: object }` with codes:
   `auth_required`, `not_found`, `invalid_ref`, `invalid_input`, `conflict`, `rate_limited`,
@@ -198,7 +208,8 @@ SyncReport { dto, forum, reposTotal, reposComplete, reposStale, reposUnavailable
 | `bookmarked(uri)` | `bool` |
 | `subscriptions()` | `Vec<SubscriptionEntry>`, oldest first |
 | `mutes()` | `Vec<ActorView>`: the muted actors (the lens, `social.md` §10.3), by DID |
-| `drafts()` | `Vec<DraftEntry>`: the engine's draft store. M4 (§3.9); until then the CLI keeps drafts as files and the SPA in browser storage |
+| `drafts()` | `Vec<DraftEntry>`: the active account's saved drafts (§3.6), newest first; empty without an active account |
+| `load_media(cid, media?: MediaView) -> LoadedMedia` | a media blob for display (`sync.md` §11): fetched from the PDS of the author `media` names (the item's view from `RenderedBody.media`; without it, the active account's own repo), streamed and checked against `cid` by the host, never through wasm memory. No login is needed. In the browser `url` is an object URL the caller revokes; `mime`, when present, is the display type (the sniffed type matches the declared one and is on the display allowlist), absent: a download card, never inline |
 
 `sort`/`filter` values are exactly those of `social.md` §12 (`magic | top | new | old | recentComments`;
 `frontpage | all | curated`; comment sorts `magic | top | new | old | latestReply`).
@@ -256,8 +267,8 @@ emits `Auth { did, state: Expired }`, and the next login of the account (`add_ac
 | `mod_adopt(forum, former) -> WriteTicket` | by an authority: re-issues the departing moderator's (a DID or handle) forum-scope assertions that are in effect (mod-log status `effective` in the actor's fold, after a P0 sync of their range) with `adopts` pointing at each original (`social.md` §4.10); every other one, and what could not be adopted, is reported in the write's result |
 | `wiki_edit(forum, slug, WikiDraft)` | M5 (§3.9) |
 | `seq_create`, `seq_edit`, `seq_add`, `seq_remove`, `seq_move` | M5 |
-| `redact_revision(uri)` | deletes revision records. M4 |
-| `prepare_media(MediaInput) -> MediaRef` | sniff, strip, orient (native), CID; upload happens at publish. M4 |
+| `redact_revision(uri) -> WriteTicket` | the active account's post, comment or sequence `uri` (`blocked`: another account's): deletes every own revision record whose `subject.uri` is the item, as listed on the author's PDS when the write is sent, so revisions this device never synced and invalid ones go too (`data-model.md` §8 "Redact history", `threat-model.md` PRIV-5). The item then reads "history redacted". A forum declaration's or a modAction's revisions are the mod log and are never redacted (`invalid_input`, `detail.kind = "modLog"`; `threat-model.md` SOC-7). The result reports the revisions deleted |
+| `prepare_media(bytes, MediaInput?) -> MediaRef` | sniff, strip, orient, downscale to 5 MiB (`data-model.md` §8.8), CID; the same pipeline natively and in the SPA's wasm. Upload happens at publish. `MediaInput` carries the declared type and the display hints; engine API v0's single `MediaFile { bytes, mime?, name?, alt? }` argument is still accepted (`mime` is the declared type) |
 | `undo(write_id)` | removes a write not sent yet (the undo window), or writes the inverse of a sent opinion (`sync.md` §7.4) |
 | `retry_write(write_id)` | queues a `failed` (or conflicting) write again with its attempts reset; on a write that backs off after a failure, or waits for a login, it is "send now" (queued at once, attempts kept). A write held by the undo window, the write budget or a rate limit is refused (`invalid_input`). Returns its ticket |
 | `write_status(write_id) -> Option<WriteTicket>` | `None`: unknown or pruned |
@@ -288,9 +299,11 @@ Kept in the `state` store of this device, never written to a PDS. Every operatio
 | `public_action_acknowledged(kind) -> bool` | |
 | `acknowledge_public_action(kind)` | per account, shared by every client on this device; `auth_required` without an active account; `Changed [Accounts]` |
 | `karma_notifications() -> KarmaCadence`, `set_karma_notifications(cadence)` | `realtime`, `daily` (the default) or `weekly` (`social.md` §16); `Changed [Notifications]` |
-| `save_draft(Draft) -> draft_id`, `delete_draft(id)` | M4 (§3.9) |
-| `settings()`, `set_setting(key, value)` | M4 |
-| `export_local() -> Json`, `import_local(Json)` | M4 |
+| `save_draft(Draft) -> draft_id`, `delete_draft(id)` | the active account's drafts (`auth_required` without one): every account on a device has its own (`threat-model.md` AUTH-11, PRIV-8). A draft that carries an `id` overwrites that draft, otherwise a new id (a TID, unique on this device) is returned. A draft over `DRAFT_MAX_BYTES` (1,000,000 bytes serialised) is refused (`too_large`); an account keeps its newest `MAX_DRAFTS` (100) drafts. Deleting a missing draft is not an error. `Changed [Drafts]` |
+| `settings() -> Settings` | this device's settings in effect: `sources` (a flag of this invocation, else the stored setting, else the build default; `sync.md` §2.3), `verify` (`pds`: `proof` is Reserved), the stored lists, and the active account's karma cadence and acknowledgements |
+| `set_setting(key, value)` | `key` is a field of `Settings` with a value of its type; `null` returns it to its default. `sources` takes effect at once in the running engine (in `direct` no CORE+ or EXT endpoint is contacted); `verify: "proof"` is refused (`unsupported`, `detail.milestone = "P2"`); `mediaAutoloadHosts` takes host names, `indexers` consents with `https` URLs (`§2.4`), `externalImagesForums` forum at-uris; `karmaNotifications` and `acknowledgedPublicActions` are kept as their own operations keep them (the latter needs an active account, `auth_required`). An unknown key or a value of the wrong shape is refused (`invalid_input`, `detail.kind = "unknownSetting"`). `Changed [Accounts]` |
+| `export_local() -> Json` | this device's local state (the `loc` rows) as one versioned JSON object; `--mine` (the default, PRIV-8) is the active account's state and the rows of no account (`threat-model.md` PRIV-10) |
+| `import_local(Json, scope?) -> ImportReport` | merges an export back (`scope`: `"mine"`, the default, or `"everything"`). An import is a file that may come from someone else, so it writes only local lists and marks, drafts and the settings that name no third party: never a key outside `loc` (the outbox, the write budget), the login state, the acknowledgements, prepared media, or a setting `set_setting` would refuse; those members are counted as `refused`. At most `IMPORT_MAX_MEMBERS` (100,000) members and `IMPORT_MAX_BYTES` (64 MiB of decoded keys and values), else `too_large` before anything is written; a duplicate key: the last one wins. Written in batches of at most 1,000 rows |
 
 **Public actions.** Votes and agreement, reacts, tag votes, joining or applying, and mod actions
 are public (`social.md` §17). Before the first action of a kind, every client shows the "this is
@@ -302,8 +315,13 @@ The engine does not enforce it.
 
 `render(markdown, media, RenderOpts) -> RenderedBody` (media: M4), `safe_href(raw, ctx)`,
 `parse_ref`, `verify(uri, deep) -> VerifyReport` (network, but no state);
-`validate_record(collection, json)` and `derive_rkey(...)` (M4); `run_vector(kind, json) -> json`
-(tests only).
+`validate_record(collection, json) -> ValidationReport` (the rules of `data-model.md` §7 for a
+record of `collection`, an NSID of this build or its last segment such as `post`, before it is
+written: the record key is the canonical one where the value determines it, a fresh TID key
+otherwise, `self` for a profile, the slug `draft` for a forum; the repo is the active account's;
+`errors` are the failing rule IDs, sorted) and `derive_rkey(RkeyInput) -> string` (the canonical
+key, `data-model.md` §3; `invalid_input` when the input names none); `run_vector(kind, json) ->
+json` (tests only).
 
 ### 3.8 Events
 
@@ -358,11 +376,7 @@ a compatible change (§1). Clients hide or stub what they need of them meanwhile
 | `sequences`, `sequence`, `seq_create`, `seq_edit`, `seq_add`, `seq_remove`, `seq_move` | M5 |
 | `user` | M5 (user pages, with profiles) |
 | `search` | M5 |
-| `prepare_media`, `redact_revision`, `render` with media | M4 (the media pipeline; history and redaction) |
-| `drafts`, `save_draft`, `delete_draft` | M4 (the editor; the CLI keeps drafts as files, the SPA in browser storage) |
-| `settings`, `set_setting` | M4 (the media autoload and external-image policies; the karma cadence and the public-action acknowledgements already have their own operations, §3.6) |
-| `export_local`, `import_local` | M4 (`export`) |
-| `validate_record`, `derive_rkey` | M4 |
+| `render` with media | M4 (the media pipeline) |
 | `run_vector` | never in a release module (the social vectors run natively and in the wasm32 test harness) |
 
 **Planned additions** (compatible, not in v0):
@@ -527,6 +541,10 @@ PostDraft     { forum, kind: PostKind, title?, body: BodyDraft, link?: { uri, ti
                 tags?: Vec<slug>, labels?: Vec<string> }
 CommentDraft  { root, parent?, body: BodyDraft, quote?: TextQuote }
 Draft         = { kind: "post", id?, post: PostDraft } | { kind: "comment", id?, comment: CommentDraft }
+DraftEntry    { id, savedAtMs, draft: Draft }
+MediaInput    { declaredMime?, alt?, name?, aspectRatio?: AspectRatio }   // prepare_media's hints
+MediaFile     { bytes, mime?, name?, alt? }        // engine API v0's prepare_media argument, still accepted
+LoadedMedia   { cid, size, url, mime? /* the display type; absent: download only */ }
 EditOpts      { history: bool, summary? }
 OpinionIntent = { kind: "karma", value?: up|down|strongUp|strongDown }      // absent: clear
               | { kind: "agreement", value?: agree|disagree|strongAgree|strongDisagree }
@@ -555,6 +573,16 @@ Subscription  = { kind: "forum", uri } | { kind: "post", uri } | { kind: "user",
               | { kind: "tag", forum, slug } | { kind: "sequence", uri }
 PublicActionKind = vote|react|tagVote|join|modAction
 KarmaCadence  = realtime|daily|weekly
+Settings      { sources: direct|assisted, verify: pds|proof, indexers: Vec<IndexerConsent>,
+                externalImagesForums: Vec<uri>, mediaAutoloadHosts: Vec<host>,
+                karmaNotifications: KarmaCadence, acknowledgedPublicActions: Vec<PublicActionKind> }
+IndexerConsent{ url /* https */, did?, forum?, grantedAtMs }
+ImportReport  { imported, outOfScope, undecodable, refused? /* 0 */,
+                kinds?: Vec<[family, count]> /* the members written per loc family */ }
+ValidationReport { valid: bool, errors: Vec<ruleId> }
+RkeyInput     = { kind: "membership", forum } | { kind: "post", forum, tid } | { kind: "comment", root, tid }
+              | { kind: "opinion", forum, subject } | { kind: "modAction", forum, scope: forum|author,
+                  subject, actionKey } | { kind: "revision", subject, tid }
 EngineError   { code, message, retryable: bool, detail?: object }      // §1
 Event         = { kind: "changed", topics: Vec<Topic> }
               | { kind: "syncProgress", forum, done, total }

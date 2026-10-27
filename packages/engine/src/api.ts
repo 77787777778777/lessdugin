@@ -187,9 +187,8 @@ export interface EngineApi {
   /** Public; paged like `listPosts` (`limit` 0 or absent: the default page). */
   modLog(forum: AtUri, cursor?: string, limit?: number): Promise<ModLog>;
   raw(uri: AtUri): Promise<RawView>;
-  /** Fetches a media blob for display; the URL is an object URL in the browser. `author` is
-   * the DID whose PDS holds the blob (the item's author). */
-  loadMedia(cid: Cid, author?: Did): Promise<LoadedMedia>;
+  /** Fetches a media blob for display; the URL is an object URL in the browser. */
+  loadMedia(cid: Cid): Promise<LoadedMedia>;
   drafts(): Promise<DraftEntry[]>;
   /** Newest first. */
   bookmarks(): Promise<BookmarkEntry[]>;
@@ -270,10 +269,10 @@ export interface EngineApi {
   setSetting<K extends SettingKey>(key: K, value: Settings[K]): Promise<void>;
   /** This device's local state (the active account's, plus the device-wide rows). */
   exportLocal(): Promise<Json>;
-  /** Merges an `exportLocal` result back (`scope` default `"mine"`). Login state, the
+  /** Merges an `exportLocal` result back (the active account's scope). Login state, the
    * acknowledgements and the settings that name third parties are never imported; the report
    * counts what was written and what was left out. */
-  importLocal(json: Json, scope?: "mine" | "everything"): Promise<ImportReport>;
+  importLocal(json: Json): Promise<ImportReport>;
 
   // §3.7 Pure functions -----------------------------------------------------------------------
   render(markdown: string, media: MediaRef[], opts: RenderOpts): Promise<RenderedBody>;

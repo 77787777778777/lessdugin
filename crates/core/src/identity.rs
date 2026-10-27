@@ -87,6 +87,9 @@ pub struct IdentityConfig {
     pub slingshot: Option<url::Url>,
     /// `sources = assisted` (CORE+ allowed).
     pub assisted: bool,
+    /// The stored `sources` setting, read at each use, overrides `assisted` (an engine's
+    /// resolvers, `sync.md` §2.3).
+    pub stored_sources: bool,
     /// Devnet mode: the PDS whose `resolveHandle` resolves every handle (`sync.md` §3.7).
     pub devnet_pds: Option<url::Url>,
 }
@@ -103,6 +106,7 @@ impl Default for IdentityConfig {
             plc: parse_const(DEFAULT_PLC),
             slingshot: Some(parse_const(DEFAULT_SLINGSHOT)),
             assisted: true,
+            stored_sources: false,
             devnet_pds: None,
         }
     }
@@ -117,6 +121,7 @@ impl IdentityConfig {
             plc,
             slingshot: None,
             assisted: false,
+            stored_sources: false,
             devnet_pds: Some(pds),
         }
     }
@@ -586,8 +591,16 @@ impl<H: Host> Resolver<H> {
         self.config.is_devnet()
     }
 
-    fn slingshot(&self) -> Option<&url::Url> {
-        if self.config.assisted && !self.devnet() {
+    async fn slingshot(&self) -> Option<&url::Url> {
+        if self.devnet() || self.config.slingshot.is_none() {
+            return None;
+        }
+        let assisted = if self.config.stored_sources {
+            crate::engine::stored_assisted(self.host.state(), self.config.assisted).await
+        } else {
+            self.config.assisted
+        };
+        if assisted {
             self.config.slingshot.as_ref()
         } else {
             None
@@ -863,7 +876,7 @@ impl<H: Host> Resolver<H> {
     }
 
     async fn minidoc(&self, identifier: &str) -> Option<(doc::MiniDoc, Vec<u8>)> {
-        let base = self.slingshot()?;
+        let base = self.slingshot().await?;
         let path = format!(
             "/xrpc/com.bad-example.identity.resolveMiniDoc?{}",
             query_string(&[("identifier", identifier)])
@@ -947,8 +960,8 @@ impl<H: Host> Resolver<H> {
                 && match r.level {
                     IdentityLevel::Doc => fresh(r.doc_at, now, max_age_ms),
                     IdentityLevel::Hint => {
-                        self.slingshot().is_some()
-                            && fresh(r.doc_at, now, max_age_ms.min(HINT_DOC_TTL_MS))
+                        fresh(r.doc_at, now, max_age_ms.min(HINT_DOC_TTL_MS))
+                            && self.slingshot().await.is_some()
                     }
                 };
             if usable {
@@ -991,8 +1004,8 @@ impl<H: Host> Resolver<H> {
                 && match r.level {
                     IdentityLevel::Doc => fresh(r.doc_at, now, max_age_ms),
                     IdentityLevel::Hint => {
-                        self.slingshot().is_some()
-                            && fresh(r.doc_at, now, max_age_ms.min(HINT_DOC_TTL_MS))
+                        fresh(r.doc_at, now, max_age_ms.min(HINT_DOC_TTL_MS))
+                            && self.slingshot().await.is_some()
                     }
                 };
             if usable {
@@ -1055,7 +1068,7 @@ impl<H: Host> Resolver<H> {
             Err(e) if matches!(e.status(), Some(404 | 410)) => {
                 return Err(IdentityError::DidNotFound(did.to_string()));
             }
-            Err(XrpcCallError::Cors) if src == DocSource::Web && self.slingshot().is_some() => {
+            Err(XrpcCallError::Cors) if src == DocSource::Web && self.slingshot().await.is_some() => {
                 return self.minidoc_row(did, fetched_at).await;
             }
             Err(error) => {

@@ -522,9 +522,7 @@ pub async fn call<H: Host>(engine: &Engine<H>, op: &str, a: &str) -> Result<Stri
             out(&engine.delete(&uri).await?)
         }
         "loadMedia" => {
-            // `author` (the DID whose PDS holds the blob) is optional and read by the media
-            // pipeline's `load_media`
-            let (cid, _author): (String, Option<String>) = padded(op, a, 2)?;
+            let (cid,): (String,) = args(op, a)?;
             out(&engine.load_media(&cid).await?)
         }
         "drafts" => out(&engine.drafts().await?),

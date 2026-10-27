@@ -723,28 +723,18 @@ impl<H: crate::host::Host> Engine<H> {
     /// deletion in a repo the caller does not own (W9). A redaction is itself a delete of each
     /// revision record, so it goes through the outbox like any other write.
     ///
+    /// Which revisions go is decided when the write is sent, from a fresh listing of the
+    /// author's PDS filtered by `subject.uri` (`Outbox::redact_item`), not from this device's
+    /// fold: an invalid revision, one past the fetch caps, or one another device wrote since the
+    /// last sync is deleted too. A forum declaration's or a modAction's revisions are the mod log
+    /// and are refused (`invalid_input`, `detail.kind = "modLog"`, `threat-model.md` SOC-7).
+    ///
     /// The item then reads as "history redacted": it was edited (its own record says so) but no
-    /// revision is left, which is what [`Engine::history`] reports.
+    /// revision is left, which is what [`Engine::history`] reports. Redacting an item without
+    /// history is a write that deletes nothing.
     pub async fn redact_revision(&self, uri: &str) -> Result<Vec<WriteTicket>, EngineError> {
         let u = records::at_uri(uri)?;
         let session = self.session_for(u.did().as_str()).await?;
-        let key = self.forum_of(&u).await?;
-        let l = self.loaded(&key).await?;
-        // every revision record this device knows of for the item, from the fold's own graph
-        let revs: Vec<String> = l
-            .model
-            .view
-            .revisions
-            .get(&u.to_string())
-            .cloned()
-            .unwrap_or_default();
-        if revs.is_empty() {
-            // nothing to do is not an error: "the history is already empty" and "there was never
-            // a revision" are the same state, and a redaction is idempotent
-            return Ok(Vec::new());
-        }
-        // the outbox has a purpose-built path for this: one `applyWrites` of `#delete revision`
-        // ops, chunked at 200, which is what `Intent::Redact` is for
-        Ok(vec![self.outbox.redact(&session, &revs).await?])
+        Ok(vec![self.outbox.redact_item(&session, u.as_str()).await?])
     }
 }
