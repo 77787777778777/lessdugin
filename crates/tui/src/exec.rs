@@ -18,6 +18,7 @@ use lessdugin_core::dto::{
 };
 use lessdugin_core::engine::{Engine, EngineError};
 use lessdugin_core::host::Host;
+use lessdugin_core::outbox::model::OpAction;
 use lessdugin_core::store::records::RecordStore;
 
 use lessdugin_lexicon::collection::nsid;
@@ -28,7 +29,7 @@ use crate::app::{
     ThreadData,
 };
 use crate::body::Body;
-use crate::command::{AccessOp, ForumChanges, RestrictDim};
+use crate::command::{ALL_CAPABILITIES, AccessOp, ForumChanges, RestrictDim};
 
 /// How many queued handle verifications a load runs before showing a view (as the CLI).
 pub const VERIFY_HANDLES: usize = 256;
@@ -795,13 +796,25 @@ pub async fn mod_intent<H: Host>(
     let (held_caps, held_nullify) = held_restrict(engine, forum, *scope, subject).await?;
     match dim {
         RestrictDim::Capabilities => *nullify_votes = held_nullify,
+        RestrictDim::AddCapabilities => {
+            *nullify_votes = held_nullify;
+            let added = std::mem::take(capabilities);
+            *capabilities = ALL_CAPABILITIES
+                .iter()
+                .filter(|c| held_caps.contains(c) || added.contains(c))
+                .cloned()
+                .collect();
+        }
         RestrictDim::Nullify => *capabilities = held_caps,
     }
     Ok(intent)
 }
 
 /// The account's own `#restrict` record on `subject` in `forum` (one per scope, subject and
-/// key, `data-model.md` §6.7) as `(capabilities, nullifyVotes)`; nothing when it has none.
+/// key, `data-model.md` §6.7) as `(capabilities, nullifyVotes)`; nothing when it has none. A
+/// write of that record still in the outbox is newer than the cache, which holds confirmed
+/// writes only (`lessdugin_core::outbox::apply`): the latest such write is the state, so two
+/// restrictions in quick succession, or made offline, keep each other.
 async fn held_restrict<H: Host>(
     engine: &Engine<H>,
     forum: &str,
@@ -834,9 +847,23 @@ async fn held_restrict<H: Host>(
     let Ok(uri) = AtUri::parse(&format!("at://{me}/{}/{rkey}", nsid::MOD_ACTION)) else {
         return Ok((Vec::new(), false));
     };
-    let value = match RecordStore::new(engine.host().cache()).get(&uri).await {
-        Ok(Some(row)) => row.value_json().ok(),
-        _ => None,
+    let pending = engine.outbox().pending(&me).await?;
+    let latest = pending
+        .iter()
+        .rev()
+        .flat_map(|w| w.ops.iter().rev())
+        .find(|op| op.collection == nsid::MOD_ACTION && op.rkey == rkey);
+    let value = match latest {
+        // a retraction on its way: nothing is held
+        Some(op) if op.action == OpAction::Delete => return Ok((Vec::new(), false)),
+        Some(op) => op
+            .value
+            .as_deref()
+            .and_then(|v| serde_json::from_slice::<serde_json::Value>(v).ok()),
+        None => match RecordStore::new(engine.host().cache()).get(&uri).await {
+            Ok(Some(row)) => row.value_json().ok(),
+            _ => None,
+        },
     };
     let Some(action) = value.as_ref().and_then(|v| v.get("action")) else {
         return Ok((Vec::new(), false));

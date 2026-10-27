@@ -3726,7 +3726,8 @@ impl State {
                 ));
             }
             if !own_item {
-                // each sets one dimension of the viewer's `#restrict` and keeps the other
+                // each sets one dimension of the viewer's `#restrict` and keeps the other; the
+                // capability presets add to the capabilities it restricts already
                 let restrict =
                     |label, capabilities: Vec<Capability>, nullify_votes, merge| ModEntry {
                         merge: Some(merge),
@@ -3746,13 +3747,13 @@ impl State {
                     "restrict the author (posting)",
                     vec![Capability::Post, Capability::Comment],
                     false,
-                    RestrictDim::Capabilities,
+                    RestrictDim::AddCapabilities,
                 ));
                 e.push(restrict(
                     "restrict the author (voting, reacting)",
                     vec![Capability::Vote, Capability::React],
                     false,
-                    RestrictDim::Capabilities,
+                    RestrictDim::AddCapabilities,
                 ));
                 e.push(restrict(
                     "nullify the author's votes",
@@ -6256,6 +6257,14 @@ mod tests {
             .find(|e| e.label == "nullify the author's votes")
             .unwrap();
         assert_eq!(nullify.merge, Some(RestrictDim::Nullify));
+        // the capability presets add to what the record restricts already
+        for label in [
+            "restrict the author (posting)",
+            "restrict the author (voting, reacting)",
+        ] {
+            let e = m.entries.iter().find(|e| e.label == label).unwrap();
+            assert_eq!(e.merge, Some(RestrictDim::AddCapabilities), "{label}");
+        }
     }
 
     /// A multi-byte space (NBSP from macOS Option-Space, U+3000 from a CJK IME) before `Tab`

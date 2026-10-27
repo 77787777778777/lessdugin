@@ -532,6 +532,9 @@ impl ModVerb {
 pub enum RestrictDim {
     /// The restricted capabilities.
     Capabilities,
+    /// Capabilities added to the ones the record restricts already (the mod menu's presets:
+    /// "voting" after "posting" restricts both).
+    AddCapabilities,
     /// `nullifyVotes`.
     Nullify,
 }

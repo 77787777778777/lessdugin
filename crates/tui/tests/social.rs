@@ -1323,6 +1323,78 @@ fn restrict_then_nullify_keeps_both() {
     assert_eq!(m.restricted, ["vote"], "{m:?}");
 }
 
+/// bob's membership as alice's engine reads it, its restrictions sorted.
+fn bob_member(t: &Tui, s: &common::Scenario) -> lessdugin_core::dto::MemberView {
+    let mut m = block_on(t.engine().members(&s.forum, &Default::default()))
+        .unwrap()
+        .into_iter()
+        .find(|m| m.actor.did == s.w.bob.did())
+        .unwrap();
+    m.restricted.sort();
+    m
+}
+
+/// The same, when the first write is still in the outbox (not sent, or offline): the second
+/// is completed from the pending write, not from the cache that holds confirmed writes only.
+#[test]
+fn restrict_then_nullify_before_the_first_is_sent_keeps_both() {
+    let s = scenario();
+    let bob = s.w.bob.did();
+    let mut t = alice_tui(&s, 100, 30);
+    block_on(t.start(Some(s.forum.clone())));
+    run_command(&mut t, &format!("mod restrict post,comment {bob}"));
+    run_command(&mut t, &format!("mod nullify {bob}"));
+    assert!(status(&t).contains("Mod action recorded"), "{}", status(&t));
+    block_on(t.engine().outbox_flush()).unwrap();
+    s.w.tick(MINUTE);
+    block_on(t.settle());
+    let m = bob_member(&t, &s);
+    assert!(m.nullified, "{m:?}");
+    assert_eq!(m.restricted, ["comment", "post"], "{m:?}");
+    // and a retraction still in the outbox leaves nothing to keep
+    run_command(&mut t, &format!("mod unrestrict {bob}"));
+    run_command(&mut t, &format!("mod restrict vote {bob}"));
+    block_on(t.engine().outbox_flush()).unwrap();
+    s.w.tick(MINUTE);
+    block_on(t.settle());
+    let m = bob_member(&t, &s);
+    assert!(!m.nullified, "{m:?}");
+    assert_eq!(m.restricted, ["vote"], "{m:?}");
+}
+
+/// The mod menu's capability presets add up: "voting, reacting" after "posting" restricts
+/// both (each states the record's whole set, `social.md` §4.7), even before the first is sent.
+#[test]
+fn the_menu_restrictions_add_up() {
+    let s = scenario();
+    let mut t = alice_tui(&s, 100, 30);
+    block_on(t.start(Some(s.forum.clone())));
+    block_on(t.open_thread(&s.bob_post));
+    let pick = |t: &mut Tui, label: &str| {
+        block_on(t.press("m"));
+        let menu = t.state.mod_menu.as_ref().expect("the menu opened");
+        let n = menu
+            .entries
+            .iter()
+            .position(|e| e.label == label)
+            .unwrap_or_else(|| panic!("no {label:?} in {menu:?}"));
+        for _ in 0..n {
+            block_on(t.press("j"));
+        }
+        block_on(t.press("Enter"));
+        assert!(t.state.prompt.is_some(), "the reason prompt opened");
+        block_on(t.press("Enter"));
+        assert!(status(t).contains("Mod action recorded"), "{}", status(t));
+    };
+    pick(&mut t, "restrict the author (posting)");
+    pick(&mut t, "restrict the author (voting, reacting)");
+    block_on(t.engine().outbox_flush()).unwrap();
+    s.w.tick(MINUTE);
+    block_on(t.settle());
+    let m = bob_member(&t, &s);
+    assert_eq!(m.restricted, ["comment", "post", "react", "vote"], "{m:?}");
+}
+
 /// The "this is public" interstitial (`social.md` §17, `threat-model.md` PRIV-9,
 /// `engine-api.md` §3.6): the first public action of each kind waits behind it; `n` drops it,
 /// `y` sends it and records the acknowledgement, which every client on the device shares.
