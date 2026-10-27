@@ -35,7 +35,15 @@ fn home_without_forums_says_how_to_join_one() {
     block_on(t.start(None));
     let screen = t.render();
     assert!(screen.contains("You follow no forum yet."), "{screen}");
+    // the TUI's own commands, not the CLI's
+    assert!(screen.contains("`:open <owner>/<slug>`"), "{screen}");
+    assert!(screen.contains("`:join`"), "{screen}");
+    assert!(!screen.contains("lessdugin join"), "{screen}");
     insta::assert_snapshot!("home_empty_80x24", screen);
+    // and so does `R`, which has nothing to sync
+    block_on(t.press("R"));
+    let st = t.state.status.as_ref().unwrap().text.to_plain_string();
+    assert!(st.contains("`:open <owner>/<slug>`"), "{st}");
 }
 
 #[test]

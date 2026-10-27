@@ -835,12 +835,8 @@ fn home(state: &State, top: &Screen, s: &HomeScreen, h: usize, lines: &mut Vec<L
     if d.forums.is_empty() {
         lines.push(Line::default());
         message(lines, lit("You follow no forum yet."), bold());
-        message(lines, lit("Join one with `lessdugin join <forum>`,"), dim());
-        message(
-            lines,
-            lit("or open one with `lessdugin tui <forum>`."),
-            dim(),
-        );
+        message(lines, lit("Open one with `:open <owner>/<slug>`,"), dim());
+        message(lines, lit("then `:join` it to post there."), dim());
         return;
     }
     let visible = (h / LIST_ROWS).max(1);
@@ -922,7 +918,7 @@ fn forum(top: &Screen, s: &ForumScreen, h: usize, w: usize, lines: &mut Vec<Line
         }
         message(lines, lit("No posts yet."), bold());
         let hint = match d.view.my_role {
-            ForumRole::None => lit("Join the forum with `lessdugin join` to post in it."),
+            ForumRole::None => lit("Join the forum with `:join` to post in it."),
             _ => lit("Press P to write the first one."),
         };
         message(lines, hint, dim());

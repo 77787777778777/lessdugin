@@ -2827,7 +2827,7 @@ impl State {
                 if forums.is_empty() {
                     self.say(
                         Tone::Info,
-                        lit("You follow no forum yet: run `lessdugin join <forum>`."),
+                        lit("You follow no forum yet: open one with `:open <owner>/<slug>`."),
                     );
                     return;
                 }
