@@ -1525,3 +1525,154 @@ impl<H: crate::host::Host> crate::engine::Engine<H> {
         })
     }
 }
+
+// --- spilled bodies and the autoload inputs of views (`sync.md` §11, `lfm-1.md` §1.3) ---------
+
+impl<H: crate::host::Host> crate::engine::Engine<H> {
+    /// Fetches the spilled bodies (`textBlob`) of the items `uris` of `model` that `renders`
+    /// does not hold yet, so the views render them (`lfm-1.md` §1.3): from the AUTHOR's PDS,
+    /// through the streaming, CID-checked `Host::fetch_blob` with `BLOB_TEXT_MAX_BYTES`, then
+    /// read back through `blob_read` and decoded (UTF-8, one leading U+FEFF stripped). A body
+    /// that cannot be fetched now (the network, a missing blob) stays pending and is asked for
+    /// again after `BODY_BLOB_RETRY_MS`; one that does not match its CID, is not UTF-8 or is too
+    /// large renders as unreadable.
+    pub(crate) async fn load_spilled_bodies(
+        &self,
+        model: &crate::model::ForumModel,
+        uris: &[String],
+        renders: &crate::model::RenderCache,
+    ) {
+        use crate::model::render::text_blob_cid;
+        let Ok(values) = self.values(model, uris).await else {
+            return;
+        };
+        let now = self.host().now_ms();
+        for (uri, v) in &values {
+            let Some(md) = v.get("body").filter(|b| b.get("text").is_none()) else {
+                continue;
+            };
+            let (Some(blob), Some(x)) = (text_blob_cid(md), model.skel(uri)) else {
+                continue;
+            };
+            if renders.contains(&x.cid)
+                || renders.spilled(blob).is_some()
+                || renders.spilled_retry_at(blob).is_some_and(|t| now < t)
+            {
+                continue;
+            }
+            match self.fetch_text_blob(&x.did, blob).await {
+                Ok(s) => renders.put_spilled(blob, s),
+                Err(e) => {
+                    tracing::debug!(uri = %uri, error = %e, "a spilled body stays pending");
+                    renders.spilled_unavailable(
+                        blob,
+                        now.saturating_add(crate::limits::BODY_BLOB_RETRY_MS),
+                    );
+                }
+            }
+        }
+    }
+
+    /// One `textBlob` of `did`, fetched and decoded (`data-model.md` §5.2 rule 3).
+    async fn fetch_text_blob(
+        &self,
+        did: &str,
+        cid: &str,
+    ) -> Result<crate::model::render::Spilled, crate::engine::EngineError> {
+        use crate::host::HostError;
+        use crate::model::render::Spilled;
+        use lessdugin_markdown::BodyError;
+        let did = lessdugin_atp::syntax::Did::parse(did)
+            .map_err(|e| crate::engine::EngineError::invalid_input(format!("{did:?}: {e}")))?;
+        let pds = self.author_pds(&did).await?;
+        let pds = url::Url::parse(&pds).map_err(|e| {
+            crate::engine::EngineError::internal(format!("the PDS URL {pds:?}: {e}"))
+        })?;
+        let max = crate::limits::BLOB_TEXT_MAX_BYTES;
+        let h = match self.host().fetch_blob(pds, did, cid.to_owned(), max).await {
+            Ok(h) => h,
+            Err(HostError::CidMismatch) => return Ok(Spilled::Unverified),
+            Err(HostError::TooLarge) => return Ok(Spilled::Error(BodyError::TooLarge)),
+            Err(e @ HostError::HttpStatus(400, _)) => {
+                // "Blob not found": no copy is kept (sync.md §11.4); it stays pending
+                let _ = self.host().blob_delete(cid).await;
+                return Err(e.into());
+            }
+            Err(e) => return Err(e.into()),
+        };
+        // a copy stored by another fetch is held to the same cap
+        if h.size > max {
+            return Ok(Spilled::Error(BodyError::TooLarge));
+        }
+        let mut bytes = Vec::with_capacity(h.size as usize);
+        while (bytes.len() as u64) < h.size {
+            let w = self
+                .host()
+                .blob_read(&h.cid, bytes.len() as u64, crate::host::BLOB_READ_MAX_BYTES)
+                .await?;
+            if w.is_empty() {
+                break;
+            }
+            bytes.extend_from_slice(&w);
+        }
+        Ok(match lessdugin_markdown::decode_text_blob(&bytes) {
+            Ok(text) => Spilled::Text(text.into()),
+            Err(e) => Spilled::Error(e),
+        })
+    }
+
+    /// The device's media autoload inputs for views over `model` whose bodies are `values`
+    /// (`sync.md` §11.3): the `mediaAutoload` switch (on unless `off`), the `mediaHosts`
+    /// allowlist and, when some body has media, how many participants each PDS host serves by
+    /// their cached identity rows (nothing is resolved here).
+    pub(crate) async fn media_prefs(
+        &self,
+        model: &crate::model::ForumModel,
+        values: &std::collections::BTreeMap<String, serde_json::Value>,
+    ) -> crate::model::render::MediaPrefs {
+        use crate::host::KvStore;
+        let mut prefs = crate::model::render::MediaPrefs::default();
+        let has_media = values.values().any(|v| {
+            v.get("body")
+                .and_then(|b| b.get("media"))
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|m| !m.is_empty())
+        });
+        if !has_media {
+            return prefs;
+        }
+        let switch = self
+            .host()
+            .state()
+            .get_many(vec![crate::key!("loc", "setting", "mediaAutoload")])
+            .await
+            .ok()
+            .and_then(|mut v| v.pop().flatten());
+        prefs.enabled = switch.as_deref() != Some(b"off".as_slice());
+        if !prefs.enabled {
+            return prefs;
+        }
+        prefs.allowlist = self.media_hosts().await.unwrap_or_default();
+        let dids: Vec<lessdugin_atp::syntax::Did> = model
+            .participants()
+            .iter()
+            .filter_map(|d| lessdugin_atp::syntax::Did::parse(d).ok())
+            .collect();
+        let found = futures::future::join_all(dids.iter().map(|d| self.resolver().cached(d))).await;
+        for id in found.into_iter().flatten() {
+            if id.level != crate::identity::IdentityLevel::Doc {
+                continue;
+            }
+            prefs.doc.insert(id.did.to_string());
+            if let Some(host) = id
+                .pds
+                .as_deref()
+                .map(policy::host_of)
+                .filter(|h| !h.is_empty())
+            {
+                *prefs.hosts.entry(host).or_default() += 1;
+            }
+        }
+        prefs
+    }
+}

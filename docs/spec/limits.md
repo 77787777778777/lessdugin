@@ -106,6 +106,7 @@ Every cap counts response bytes (§1) and follows R1–R4. A request that names 
 | `INDEXER_RESPONSE_MAX_BYTES` | 8,388,608 (8 MiB) | S | Every indexer JSON response. Larger: the hint is dropped. | here |
 | `JETSTREAM_MESSAGE_MAX_BYTES` | 1,200,000 | S | One Jetstream WebSocket message. Natively: the WebSocket library's maximum message and frame size. On the v1 wire: also sent as `maxMessageSizeBytes`. In the browser: an oversized message is dropped on receipt and the client fails over to the other endpoint. | `threat-model.md` INFRA-5 |
 | `BLOB_TEXT_MAX_BYTES` | 1,000,000 | S | A `textBlob` body fetch (equal to the lexicon `maxSize`). | `lfm-1.md` §1.3 |
+| `BODY_BLOB_RETRY_MS` | 60,000 (1 min) | O | A `textBlob` that could not be fetched (network, `Blob not found`) leaves its body pending; it is asked for again when a view needs it after this long. A blob that does not match its CID, is not UTF-8 or is larger than `BLOB_TEXT_MAX_BYTES` renders as unreadable instead. | `lfm-1.md` §1.3 |
 | `BLOB_HARD_MAX_BYTES` | 314,572,800 (300 MiB) | S | Any blob fetch or upload. | here |
 | – | min(declared `size`, the field's lexicon `maxSize`, `BLOB_HARD_MAX_BYTES`) | S | The `max` passed to `Host::fetch_blob`. A body longer than the declared size is aborted. | `threat-model.md` §5.6.1 |
 | `BLOB_AUTOLOAD_MAX_BYTES` | 5,242,880 (5 MiB) | O | Inline images up to this size may load without a click (autoload policy); larger ones are click-to-load. | `threat-model.md` PRIV-1 |

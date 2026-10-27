@@ -6,27 +6,33 @@ use lessdugin_core::media::policy::{
     autoload, host_of, is_bluesky_host,
 };
 
+/// An image of `size` bytes (`None`: the record does not say), by alice on `host`.
 fn item<'a>(host: &'a str, labels: &'a [String], size: Option<u64>) -> MediaCandidate<'a> {
     MediaCandidate {
         author: "did:plc:alice",
         visible: true,
         labels,
+        root_labels: &[],
         host,
+        mime: "image/png",
         size_bytes: size,
     }
 }
 
-fn participants(n: usize) -> Vec<String> {
-    (0..n).map(|_| "pds.example.com".to_owned()).collect()
+/// A host that `n` participants of the forum share.
+fn participants(n: usize) -> usize {
+    n
 }
+
+const SMALL: Option<u64> = Some(1_000);
 
 #[test]
 fn every_condition_must_hold_for_an_automatic_load() {
     let none: [String; 0] = [];
     let v = autoload(
-        &item("pds.example.com", &none, None),
+        &item("pds.example.com", &none, SMALL),
         true,
-        &participants(5),
+        participants(5),
         &[],
     );
     assert_eq!(v, Autoload::Yes);
@@ -35,7 +41,7 @@ fn every_condition_must_hold_for_an_automatic_load() {
 #[test]
 fn an_unknown_author_always_asks_first() {
     let none: [String; 0] = [];
-    let v = autoload(&item("pds.host.bsky.network", &none, None), false, &[], &[]);
+    let v = autoload(&item("pds.host.bsky.network", &none, SMALL), false, 0, &[]);
     assert_eq!(
         v,
         Autoload::ClickThrough {
@@ -48,9 +54,9 @@ fn an_unknown_author_always_asks_first() {
 #[test]
 fn a_hidden_item_is_never_fetched() {
     let none: [String; 0] = [];
-    let mut it = item("pds.example.com", &none, None);
+    let mut it = item("pds.example.com", &none, SMALL);
     it.visible = false;
-    let v = autoload(&it, true, &participants(5), &[]);
+    let v = autoload(&it, true, participants(5), &[]);
     assert!(matches!(
         v,
         Autoload::ClickThrough {
@@ -65,9 +71,9 @@ fn a_labelled_item_asks_first() {
     for label in ["sexual", "nudity", "porn", "graphic-media"] {
         let labels = vec![label.to_string()];
         let v = autoload(
-            &item("pds.example.com", &labels, None),
+            &item("pds.example.com", &labels, SMALL),
             true,
-            &participants(9),
+            participants(9),
             &[],
         );
         assert!(
@@ -85,9 +91,9 @@ fn a_labelled_item_asks_first() {
     let labels = vec!["spoiler".to_string()];
     assert_eq!(
         autoload(
-            &item("pds.example.com", &labels, None),
+            &item("pds.example.com", &labels, SMALL),
             true,
-            &participants(5),
+            participants(5),
             &[]
         ),
         Autoload::Yes
@@ -99,9 +105,9 @@ fn a_host_is_known_when_shared_or_bluesky_or_allowlisted() {
     let none: [String; 0] = [];
     // 4 participants is one short of the threshold
     let v = autoload(
-        &item("pds.example.com", &none, None),
+        &item("pds.example.com", &none, SMALL),
         true,
-        &participants(4),
+        participants(4),
         &[],
     );
     assert!(matches!(
@@ -114,22 +120,22 @@ fn a_host_is_known_when_shared_or_bluesky_or_allowlisted() {
     // exactly the threshold is enough
     assert_eq!(
         autoload(
-            &item("pds.example.com", &none, None),
+            &item("pds.example.com", &none, SMALL),
             true,
-            &participants(5),
+            participants(5),
             &[]
         ),
         Autoload::Yes
     );
     // a Bluesky host needs no participants at all
     assert_eq!(
-        autoload(&item("pds.host.bsky.network", &none, None), true, &[], &[]),
+        autoload(&item("pds.host.bsky.network", &none, SMALL), true, 0, &[]),
         Autoload::Yes
     );
     // nor does an allowlisted one
     let allow = vec!["pds.example.com".to_string()];
     assert_eq!(
-        autoload(&item("pds.example.com", &none, None), true, &[], &allow),
+        autoload(&item("pds.example.com", &none, SMALL), true, 0, &allow),
         Autoload::Yes
     );
 }
@@ -140,14 +146,14 @@ fn a_big_image_is_click_to_load() {
     let at = autoload(
         &item("pds.example.com", &none, Some(AUTOLOAD_MAX_BYTES)),
         true,
-        &participants(5),
+        participants(5),
         &[],
     );
     assert_eq!(at, Autoload::Yes, "exactly the limit still autoloads");
     let over = autoload(
         &item("pds.example.com", &none, Some(AUTOLOAD_MAX_BYTES + 1)),
         true,
-        &participants(5),
+        participants(5),
         &[],
     );
     assert!(matches!(
@@ -157,23 +163,26 @@ fn a_big_image_is_click_to_load() {
             ..
         }
     ));
-    // an unknown size is not treated as too large
-    assert_eq!(
+    // m4-4: an unknown size is never loaded without a click
+    assert!(matches!(
         autoload(
             &item("pds.example.com", &none, None),
             true,
-            &participants(5),
+            participants(5),
             &[]
         ),
-        Autoload::Yes
-    );
+        Autoload::ClickThrough {
+            reason: LoadReason::TooLarge,
+            ..
+        }
+    ));
 }
 
 #[test]
 fn the_reason_names_the_first_condition_that_fails() {
     let labels = vec!["porn".to_string()];
     // not established wins over the label, which wins over the host
-    let v = autoload(&item("unknown.example", &labels, None), false, &[], &[]);
+    let v = autoload(&item("unknown.example", &labels, SMALL), false, 0, &[]);
     assert!(matches!(
         v,
         Autoload::ClickThrough {
@@ -181,7 +190,7 @@ fn the_reason_names_the_first_condition_that_fails() {
             ..
         }
     ));
-    let v = autoload(&item("unknown.example", &labels, None), true, &[], &[]);
+    let v = autoload(&item("unknown.example", &labels, SMALL), true, 0, &[]);
     assert!(matches!(
         v,
         Autoload::ClickThrough {
@@ -200,8 +209,69 @@ fn hosts_parse_and_bluesky_hosts_are_recognised() {
     );
     assert_eq!(host_of("not a url"), "");
     assert!(is_bluesky_host("pds.host.bsky.network"));
-    assert!(is_bluesky_host("bsky.network"));
+    // m4-4: the relay is not a PDS host (sync.md §11.3 names `*.host.bsky.network` only)
+    assert!(!is_bluesky_host("bsky.network"));
     assert!(!is_bluesky_host("bsky.network.example.com"));
     assert!(!is_bluesky_host("evil-bsky.network"));
     assert_eq!(HOST_SHARED_BY_PARTICIPANTS, 5);
+}
+
+#[test]
+fn video_and_audio_always_ask_first() {
+    // m4-4 (PRIV-1): only an inline image type autoloads, however small
+    let none: [String; 0] = [];
+    for mime in [
+        "video/mp4",
+        "video/webm",
+        "audio/mpeg",
+        "image/svg+xml",
+        "image/avif",
+        "",
+    ] {
+        let mut it = item("pds.example.com", &none, SMALL);
+        it.mime = mime;
+        assert!(
+            matches!(
+                autoload(&it, true, participants(5), &[]),
+                Autoload::ClickThrough {
+                    reason: LoadReason::NotAnImage,
+                    ..
+                }
+            ),
+            "{mime}"
+        );
+    }
+    let mut it = item("pds.example.com", &none, SMALL);
+    it.mime = "image/JPEG; q=1";
+    assert_eq!(autoload(&it, true, participants(5), &[]), Autoload::Yes);
+}
+
+#[test]
+fn a_comment_under_a_labelled_post_asks_first() {
+    // m4-4: "for a comment, the root post's labels also count" (sync.md §11.3)
+    let none: [String; 0] = [];
+    let root = vec!["graphic-media".to_string()];
+    let mut it = item("pds.example.com", &none, SMALL);
+    it.root_labels = &root;
+    assert!(matches!(
+        autoload(&it, true, participants(5), &[]),
+        Autoload::ClickThrough {
+            reason: LoadReason::Label,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn an_unknown_host_is_never_trusted() {
+    // a PDS the identity rows do not name (""), even with an empty allowlist entry
+    let none: [String; 0] = [];
+    let allow = vec![String::new()];
+    assert!(matches!(
+        autoload(&item("", &none, SMALL), true, participants(9), &allow),
+        Autoload::ClickThrough {
+            reason: LoadReason::HostUnknown,
+            ..
+        }
+    ));
 }

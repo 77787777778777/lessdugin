@@ -228,7 +228,8 @@ impl<H: Host> Engine<H> {
         let (actors, pds) = self.actors(dids).await;
         let values = self.values(m, body_uris).await?;
         let pending = self.pending_uris().await?;
-        let viewer = self.viewer(m, body_uris).await?;
+        let mut viewer = self.viewer(m, body_uris).await?;
+        viewer.media = self.media_prefs(m, &values).await;
         let v = Views {
             model: m,
             actors: &actors,
