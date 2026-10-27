@@ -23,7 +23,7 @@ import type { EngineApi } from "./api.ts";
 import { AuthBridge, NS, type SessionProvider } from "./auth-bridge.ts";
 import { serveBridgePort } from "./bridge-port.ts";
 import type { WorkerInfo, WorkerInit } from "./protocol.ts";
-import type { EngineEvent, EventListener, Unsubscribe, WriteTicket } from "./types.ts";
+import type { EngineEvent, EventListener, MediaFile, Unsubscribe, WriteTicket } from "./types.ts";
 import type { EngineWorkerApi } from "./worker.ts";
 import { workerScriptUrl } from "./workerUrl.ts";
 
@@ -193,7 +193,10 @@ export function startEngine(options: StartEngineOptions = {}): EngineClient {
     // an index-keyed object), so they are flattened to a plain number array here. A Uint8Array
     // that the structured clone left intact is spread just the same.
     async prepareMedia(...args) {
-      const [bytes, input] = args as [Uint8Array | number[] | ArrayLike<number>, unknown];
+      const [bytes, input] = fromMediaFile(args) as [
+        Uint8Array | number[] | ArrayLike<number>,
+        unknown,
+      ];
       return remote.call("prepareMedia", [Array.from(bytes), input ?? null]);
     },
     async grant(...args) {
@@ -213,6 +216,17 @@ export function startEngine(options: StartEngineOptions = {}): EngineClient {
       return (...args: unknown[]) => call(prop, args);
     },
   });
+}
+
+/** `prepareMedia`'s arguments as `(bytes, hints)`: engine API v0's single `MediaFile`
+ * (`mime` is the declared type) is still accepted (engine-api.md §1, §3.5). */
+export function fromMediaFile(args: readonly unknown[]): unknown[] {
+  const [file] = args;
+  if (file === null || typeof file !== "object" || ArrayBuffer.isView(file) || !("bytes" in file)) {
+    return [...args];
+  }
+  const { bytes, mime, name, alt } = file as MediaFile;
+  return [bytes, { declaredMime: mime, name, alt }];
 }
 
 function first(tickets: unknown): WriteTicket {

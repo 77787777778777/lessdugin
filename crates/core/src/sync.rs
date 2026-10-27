@@ -67,7 +67,7 @@ impl SyncConfig {
                 Platform::Browser => NetLimits::BROWSER,
             },
             tuning: ListTuning::default(),
-            assisted: c.sources == Sources::Assisted,
+            assisted: c.sources_flag.unwrap_or(c.sources) == Sources::Assisted,
         }
     }
 }

@@ -122,6 +122,124 @@ pub(crate) fn markdown_body(md: &crate::dto::BodyDraft) -> Result<Md, EngineErro
     Ok(Md::Known(m))
 }
 
+/// The handle-authority `at://` link destinations of `markdown`, which writers rewrite to DIDs
+/// before publishing (`lfm-1.md` §5.2, §12; W7): each as the byte range of the handle in the
+/// source and the handle as written. Only destinations count (an inline link's, an autolink's,
+/// a link reference definition's), parsed under lfm/1's options, so a code span or a code block
+/// that shows such a uri is left alone.
+pub(crate) fn handle_destinations(markdown: &str) -> Vec<(std::ops::Range<usize>, String)> {
+    use pulldown_cmark::{Event, LinkType, Parser, Tag};
+    let mut it = Parser::new_ext(markdown, lessdugin_markdown::OPTIONS).into_offset_iter();
+    // (where the destination is written, the destination)
+    let mut dests: Vec<(std::ops::Range<usize>, String)> = Vec::new();
+    for (ev, range) in &mut it {
+        if let Event::Start(Tag::Link {
+            link_type: LinkType::Inline | LinkType::Autolink,
+            dest_url,
+            ..
+        }) = ev
+        {
+            dests.push((range, dest_url.into_string()));
+        }
+    }
+    for (_, def) in it.reference_definitions().iter() {
+        dests.push((def.span.clone(), def.dest.to_string()));
+    }
+    let mut out: Vec<(std::ops::Range<usize>, String)> = Vec::new();
+    for (range, dest) in dests {
+        let Some(rest) = dest.strip_prefix("at://") else {
+            continue;
+        };
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+        if authority.is_empty() || authority.starts_with("did:") {
+            continue;
+        }
+        let Some(src) = markdown.get(range.clone()) else {
+            continue;
+        };
+        let needle = format!("at://{authority}");
+        for (i, _) in src.match_indices(&needle) {
+            let before = src[..i].chars().next_back();
+            let after = src[i + needle.len()..].chars().next();
+            // the destination itself, not a mention of the uri in the link text or title
+            let opens = before.is_none_or(|c| matches!(c, '(' | '<' | ':') || c.is_whitespace());
+            let ends = after.is_none_or(|c| {
+                matches!(c, '/' | '?' | '#' | ')' | '>' | '"' | '\'') || c.is_whitespace()
+            });
+            if opens && ends {
+                let at = range.start + i + "at://".len();
+                let r = at..at + authority.len();
+                if !out.iter().any(|(o, _)| *o == r) {
+                    out.push((r, authority.to_owned()));
+                }
+            }
+        }
+    }
+    out.sort_by_key(|(r, _)| r.start);
+    out
+}
+
+impl<H: crate::host::Host> Engine<H> {
+    /// `body` with its handle-authority `at://` destinations rewritten to DIDs
+    /// ([`handle_destinations`], W7). A handle is replaced only once it verifies in both
+    /// directions (`sync.md` §3.1); one that does not is refused (`invalid_input`,
+    /// `detail.kind = "unresolvedHandle"`, `detail.handle`), since the link would otherwise be
+    /// published dead (`safe_href` never accepts a handle authority in a body).
+    pub(crate) async fn with_dids(
+        &self,
+        body: &crate::dto::BodyDraft,
+    ) -> Result<crate::dto::BodyDraft, EngineError> {
+        let found = handle_destinations(&body.markdown);
+        if found.is_empty() {
+            return Ok(body.clone());
+        }
+        let mut dids: BTreeMap<String, String> = BTreeMap::new();
+        for (_, h) in &found {
+            let key = h.to_ascii_lowercase();
+            if dids.contains_key(&key) {
+                continue;
+            }
+            let unresolved = |why: String| {
+                EngineError::invalid_input(format!(
+                    "the link to at://{h} names a handle that could not be verified ({why}); \
+                     link to the DID instead"
+                ))
+                .with_detail("kind", "unresolvedHandle")
+                .with_detail("handle", key.clone())
+            };
+            let r = self
+                .resolve_identity(&key)
+                .await
+                .map_err(|e| unresolved(e.message))?;
+            if r.identity.handle_state != crate::dto::HandleState::Verified {
+                return Err(unresolved("it does not verify in both directions".into()));
+            }
+            dids.insert(key, r.identity.did.to_string());
+        }
+        let mut md = body.markdown.clone();
+        for (range, h) in found.iter().rev() {
+            if let Some(did) = dids.get(&h.to_ascii_lowercase()) {
+                md.replace_range(range.clone(), did);
+            }
+        }
+        Ok(crate::dto::BodyDraft {
+            markdown: md,
+            ..body.clone()
+        })
+    }
+
+    /// [`Engine::with_dids`] of an optional body.
+    pub(crate) async fn with_dids_opt(
+        &self,
+        body: Option<&crate::dto::BodyDraft>,
+    ) -> Result<Option<crate::dto::BodyDraft>, EngineError> {
+        match body {
+            Some(b) => Ok(Some(self.with_dids(b).await?)),
+            None => Ok(None),
+        }
+    }
+}
+
 /// The excerpt a spilled body would carry (PO6).
 pub(crate) fn excerpt_of(markdown: &str) -> String {
     lessdugin_markdown::derive_metadata(markdown, &[]).excerpt
@@ -277,7 +395,12 @@ impl<H: Host> Engine<H> {
         };
         let mut forum = Forum::create(draft.name.clone(), now, mode);
         forum.description.clone_from(&draft.description);
-        forum.about = draft.about.as_ref().map(markdown_body).transpose()?;
+        forum.about = self
+            .with_dids_opt(draft.about.as_ref())
+            .await?
+            .as_ref()
+            .map(markdown_body)
+            .transpose()?;
         forum.default_tier = Some(
             match draft.default_tier {
                 DefaultTier::Personal => LexTier::Personal,

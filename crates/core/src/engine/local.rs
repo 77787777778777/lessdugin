@@ -30,6 +30,18 @@
 //! predicate and leaves every other local key alone, so a partial export (or an older one) never
 //! destroys state it does not mention. A key that fails to decode as a store key is skipped and
 //! counted, rather than aborting the whole import.
+//!
+//! **What an import never writes.** An export is a file, and a file can come from someone else
+//! ("my settings backup"). So an import writes only the [`IMPORTABLE`] `loc` families: never a
+//! key outside `loc` (the outbox would send a planted write with the user's session), never the
+//! login state (`account`, `active_account`, the authorization-server pins `as_pin`, `seeded`:
+//! `threat-model.md` ID-11, the rows the `web` bridge keeps read-only), never the public-action
+//! acknowledgements (`ack`, PRIV-9: the interstitials show again), the notifications and their
+//! baselines (`notif`, `nbase`: a planted row would list any text as a notification, or move a
+//! forum's watermark or generation and silence it) or prepared media, and a setting only with a
+//! value `set_setting` accepts, that names no third party, and that makes this device contact
+//! no more endpoints than before (`sources` only as `direct`). Those members are counted as `refused`, and the report counts
+//! what was written per family, so a client can say what changed.
 
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
@@ -58,6 +70,24 @@ pub enum ExportScope {
     /// Every account's state on this device.
     Everything,
 }
+
+/// The `loc` families an import may write (see the module docs): the lists and marks of
+/// `threat-model.md` PRIV-10, follows, drafts and the validated settings. The notifications are
+/// exported but never imported: they are computed again on this device.
+pub const IMPORTABLE: [&str; 12] = [
+    "alias",
+    "bookmark",
+    "draft",
+    "follow",
+    "fvisit",
+    "karmaCadence",
+    "mute",
+    "read",
+    "rejected",
+    "setting",
+    "sub",
+    "unfollow",
+];
 
 /// The keys that carry no account: they are shared by every account on the device.
 const ACCOUNT_FREE: [&str; 5] = [
@@ -98,16 +128,25 @@ pub struct LocalExport {
     pub members: Vec<ExportMember>,
 }
 
-/// `import_local`'s result.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ImportReport {
-    /// Members written.
-    pub imported: usize,
-    /// Members skipped because they were outside the scope.
-    pub out_of_scope: usize,
-    /// Members skipped because their key did not decode as a store key.
-    pub undecodable: usize,
+/// The most members an import takes (`too_large` past it, before anything is written).
+pub const IMPORT_MAX_MEMBERS: usize = 100_000;
+
+/// The most bytes of decoded keys and values an import takes.
+pub const IMPORT_MAX_BYTES: usize = 64 * 1024 * 1024;
+
+/// An import writes at most this many rows per batch.
+const IMPORT_BATCH: usize = 1_000;
+
+fn too_large_import(what: String) -> EngineError {
+    EngineError::new(
+        super::ErrorCode::TooLarge,
+        format!("this export is too large to import: {what}"),
+    )
+    .with_detail("kind", "importTooLarge")
 }
+
+/// `import_local`'s result (a DTO).
+pub use crate::dto::ImportReport;
 
 fn b64() -> base64::engine::general_purpose::GeneralPurpose {
     base64::engine::general_purpose::URL_SAFE_NO_PAD
@@ -126,12 +165,46 @@ fn part_str(p: Option<&Part>) -> Option<&str> {
 fn account_of(parts: &[Part]) -> Option<&str> {
     match part_str(parts.get(1))? {
         // ("loc","account",did), ("loc","as_pin",did), ("loc","seeded",did),
-        // ("loc","ack",account,kind), ("loc","notif",account[,id]), ("loc","nbase",account,forum)
+        // ("loc","ack",account,kind), ("loc","notif",account[,id]), ("loc","nbase",account,forum),
+        // ("loc","draft",account,id)
         "account" | "as_pin" | "seeded" | "ack" | "notif" | "nbase" => part_str(parts.get(2)),
+        // a draft saved before drafts were per account, ("loc","draft",id), names none
+        "draft" if parts.len() == 4 => part_str(parts.get(2)),
         // ("loc","rejected",forum,did) is per forum, not per account
         _ => None,
     }
 }
+
+/// The family of a row an import may write as `v` (see [`IMPORTABLE`]), or `None`.
+fn importable<'a>(parts: &'a [Part], v: &[u8]) -> Option<&'a str> {
+    if part_str(parts.first()) != Some("loc") {
+        return None;
+    }
+    let tag = part_str(parts.get(1)).filter(|t| IMPORTABLE.contains(t))?;
+    if tag == "setting" {
+        let k = part_str(parts.get(2))
+            .filter(|k| SETTINGS.contains(k) && !NOT_IMPORTED.contains(k) && parts.len() == 3)?;
+        let v = std::str::from_utf8(v).ok()?;
+        check_setting_value(k, v).ok()?;
+        if STRICTER_ONLY.iter().any(|(sk, sv)| *sk == k && *sv != v) {
+            return None;
+        }
+    }
+    // a draft of an account, that `drafts()` reads and a save would have stored
+    if tag == "draft"
+        && (parts.len() != 4
+            || v.len() > DRAFT_MAX_BYTES
+            || serde_json::from_slice::<DraftEntryRow>(v).is_err())
+    {
+        return None;
+    }
+    Some(tag)
+}
+
+/// The longest key a `KvStore` must accept (`sync.md` §12.4); the longest value is
+/// [`crate::store::row::KV_VALUE_MAX_BYTES`]. An import refuses a member past either, so one
+/// such member cannot fail a batch after the batches before it were written.
+const KV_KEY_MAX_BYTES: usize = 2_048;
 
 /// True when `parts` is inside `scope`.
 fn in_scope(parts: &[Part], scope: &ExportScope, active: Option<&str>) -> bool {
@@ -219,7 +292,12 @@ impl<H: crate::host::Host> Engine<H> {
     ///
     /// Merging, not replacing: an imported member overwrites the same key, and every local key the
     /// import does not mention is left alone. A member outside `scope` is skipped, so importing a
-    /// `--mine` export cannot write another account's state. Rows are written in one batch.
+    /// `--mine` export cannot write another account's state, and a member of a family an import
+    /// never writes is refused (the module docs). At most [`IMPORT_MAX_MEMBERS`] members and
+    /// [`IMPORT_MAX_BYTES`] (`too_large` otherwise, before anything is written); a duplicate key's
+    /// last member wins. A member whose key or value a store need not accept, or a draft a save
+    /// would refuse, is refused. Rows are written in batches of at most 1,000, then each account's
+    /// drafts are pruned to [`MAX_DRAFTS`].
     pub async fn import_local(
         &self,
         export: &LocalExport,
@@ -237,50 +315,127 @@ impl<H: crate::host::Host> Engine<H> {
             .await?
             .map(|a| a.did.clone())
             .filter(|d| !d.is_empty());
+        if export.members.len() > IMPORT_MAX_MEMBERS {
+            return Err(too_large_import(format!(
+                "{} members (at most {IMPORT_MAX_MEMBERS})",
+                export.members.len()
+            )));
+        }
         let mut report = ImportReport::default();
-        let mut ops: Vec<KvOp> = Vec::new();
+        // by key, the last one winning: a duplicate replaces the row before it
+        let mut rows: std::collections::BTreeMap<Vec<u8>, (Vec<u8>, String)> = Default::default();
+        let mut bytes = 0usize;
         for m in &export.members {
             let (Ok(k), Ok(v)) = (b64().decode(&m.key), b64().decode(&m.value)) else {
                 report.undecodable += 1;
                 continue;
             };
+            bytes = bytes.saturating_add(k.len() + v.len());
+            if bytes > IMPORT_MAX_BYTES {
+                return Err(too_large_import(format!(
+                    "more than {IMPORT_MAX_BYTES} bytes of keys and values"
+                )));
+            }
             let Ok(parts) = key::decode(&k) else {
                 report.undecodable += 1;
+                continue;
+            };
+            if k.len() > KV_KEY_MAX_BYTES || v.len() > crate::store::row::KV_VALUE_MAX_BYTES {
+                report.refused += 1;
+                continue;
+            }
+            let Some(kind) = importable(&parts, &v) else {
+                report.refused += 1;
                 continue;
             };
             if !in_scope(&parts, &scope, active.as_deref()) {
                 report.out_of_scope += 1;
                 continue;
             }
-            // a duplicate key: the last one wins, as in any key-value store
-            ops.retain(|op| !matches!(op, KvOp::Put(prev, _) if prev == &k));
+            rows.insert(k, (v, kind.to_owned()));
+        }
+        let mut kinds: std::collections::BTreeMap<String, usize> = Default::default();
+        for (_, kind) in rows.values() {
+            *kinds.entry(kind.clone()).or_default() += 1;
+        }
+        // the accounts whose drafts this import adds to, pruned to `MAX_DRAFTS` below
+        let drafted: std::collections::BTreeSet<String> = rows
+            .iter()
+            .filter(|(_, (_, kind))| kind == "draft")
+            .filter_map(|(k, _)| account_of(&key::decode(k).ok()?).map(str::to_owned))
+            .collect();
+        report.imported = rows.len();
+        report.kinds = kinds.into_iter().collect();
+        // bounded batches, so one import is never one unbounded transaction
+        let mut ops: Vec<KvOp> = Vec::with_capacity(IMPORT_BATCH.min(rows.len()));
+        for (k, (v, _)) in rows {
             ops.push(KvOp::Put(k, v));
-            report.imported += 1;
+            if ops.len() == IMPORT_BATCH {
+                self.host().state().write(std::mem::take(&mut ops)).await?;
+            }
         }
         if !ops.is_empty() {
             self.host().state().write(ops).await?;
+        }
+        for account in &drafted {
+            self.prune_drafts(account).await?;
+        }
+        if !drafted.is_empty() {
+            self.rt.bus.changed([crate::dto::Topic::Drafts]);
         }
         Ok(report)
     }
 }
 
-/// The settings a client may change (synthesis-v1.md §1.4, §6.12: "accounts, sources,
-/// verification, indexer consent, external images, media autoload hosts").
+/// The stored settings, `("loc", "setting", key)` (synthesis-v1.md §1.4, §6.12: "accounts,
+/// sources, verification, indexer consent, external images, media autoload hosts"), each with
+/// its value as text: the form an export carries.
 ///
 /// These are per device, not per account: they are how this copy of the app behaves, so they
 /// live in the same `loc` state the rest of the local lists use, and they travel with
 /// [`LocalExport`].
-pub const SETTINGS: [&str; 5] = [
+pub const SETTINGS: [&str; 7] = [
     // `direct` or `assisted` (`engine::Sources`).
     "sources",
     // `pds` or `proof` (`engine::VerifyMode`).
     "verify",
     // `off` or `on`: whether media loads at all (3.9's master switch).
     "mediaAutoload",
-    // Extra hosts whose media may load without a click, comma separated (3.9's allowlist).
+    // Extra hosts whose media may load without a click, comma separated (3.9's allowlist;
+    // `Settings.mediaAutoloadHosts`).
     "mediaHosts",
     // `off` or `on`: whether external link cards fetch a preview.
     "externalImages",
+    // `Settings.externalImagesForums`: a JSON array of forum uris.
+    "externalImagesForums",
+    // `Settings.indexers`: a JSON array of `IndexerConsent`.
+    "indexers",
+];
+
+/// The keys of `set_setting` besides [`SETTINGS`]: the fields of the `Settings` object
+/// (`types.ts` `SettingKey`) that are not stored under their own name.
+pub const SETTING_FIELDS: [&str; 7] = [
+    "sources",
+    "verify",
+    "indexers",
+    "externalImagesForums",
+    "mediaAutoloadHosts",
+    "karmaNotifications",
+    "acknowledgedPublicActions",
+];
+
+/// The stored settings an import may not write (sec-9): they name third parties this device
+/// would then contact (media hosts, indexers, forums whose external images load). A backup
+/// cannot add one; the user does, in the settings, where the list is shown.
+const NOT_IMPORTED: [&str; 3] = ["mediaHosts", "externalImagesForums", "indexers"];
+
+/// The stored switches an import may set only to their stricter value, for the same reason: a
+/// file can turn `direct` on (or a fetch off) but never back to `assisted` (Slingshot, `sync.md`
+/// §2.3), even over a choice the user made in the settings.
+const STRICTER_ONLY: [(&str, &str); 3] = [
+    ("sources", "direct"),
+    ("mediaAutoload", "off"),
+    ("externalImages", "off"),
 ];
 
 impl<H: crate::host::Host> Engine<H> {
@@ -290,23 +445,19 @@ impl<H: crate::host::Host> Engine<H> {
     /// It is an OBJECT with four list fields, not a flat key/value map. The client does
     /// `settings.indexers.map(...)`, so returning a map here crashed the settings page - which
     /// is what the CI-only e2e failure turned out to be, and why the client's type wins.
+    ///
+    /// `sources` and `verify` are the ones in effect, not merely the stored rows: `sources` is
+    /// [`Engine::sources`], and `verify` is `pds`, the only mode there is (`proof` is Reserved).
     pub async fn settings(&self) -> Result<crate::dto::Settings, EngineError> {
         let raw = self.stored_settings().await?;
-        let get = |k: &str, d: &str| raw.get(k).map_or_else(|| d.to_owned(), Clone::clone);
         Ok(crate::dto::Settings {
-            sources: match get("sources", "assisted").as_str() {
-                "direct" => crate::dto::Sources::Direct,
-                _ => crate::dto::Sources::Assisted,
+            sources: match self.sources().await? {
+                super::Sources::Direct => crate::dto::Sources::Direct,
+                super::Sources::Assisted => crate::dto::Sources::Assisted,
             },
-            verify: match get("verify", "pds").as_str() {
-                "proof" => crate::dto::VerifyMode::Proof,
-                _ => crate::dto::VerifyMode::Pds,
-            },
-            // nothing has been consented to yet: the indexer consent list and the
-            // external-image forum list are M5 (the indexer) and M4's SPA policy; an empty
-            // list is the honest answer rather than a fabricated default
-            indexers: Vec::new(),
-            external_images_forums: Vec::new(),
+            verify: crate::dto::VerifyMode::Pds,
+            indexers: stored_list(&raw, "indexers"),
+            external_images_forums: stored_list(&raw, "externalImagesForums"),
             media_autoload_hosts: split_hosts(raw.get("mediaHosts")),
             karma_notifications: self.karma_notifications().await?,
             acknowledged_public_actions: self.acknowledged_public_actions().await?,
@@ -328,24 +479,72 @@ impl<H: crate::host::Host> Engine<H> {
         Ok(out)
     }
 
-    /// `set_setting(key, value)`: `None` removes the key (back to its default).
+    /// `set_setting(key, value)` (`engine-api.md` §3.6): `key` is a field of `Settings`
+    /// ([`SETTING_FIELDS`]) with a value of that field's type, or a stored setting
+    /// ([`SETTINGS`]) with its text. `None` (JSON `null`) returns it to its default.
+    /// `karmaNotifications` and `acknowledgedPublicActions` are kept where their own operations
+    /// keep them (the latter needs an active account: `auth_required`).
     ///
-    /// An unknown key is refused rather than stored: a typo would otherwise silently do nothing,
-    /// and the export would carry junk nobody reads.
-    pub async fn set_setting(&self, key: &str, value: Option<&str>) -> Result<(), EngineError> {
-        if !SETTINGS.contains(&key) {
-            return Err(EngineError::invalid_input(format!(
-                "unknown setting {key:?} (known: {})",
-                SETTINGS.join(", ")
-            ))
-            .with_detail("kind", "unknownSetting"));
-        }
-        if let Some(v) = value {
-            check_setting_value(key, v)?;
-        }
-        let k = crate::key!("loc", "setting", key);
-        let op = match value {
-            Some(v) => KvOp::Put(k, v.as_bytes().to_vec()),
+    /// An unknown key, or a value the setting cannot mean, is refused (`invalid_input`, `detail.kind
+    /// = "unknownSetting"`) rather than stored: a typo would otherwise silently do nothing, and
+    /// the export would carry junk nobody reads.
+    pub async fn set_setting(
+        &self,
+        key: &str,
+        value: Option<&serde_json::Value>,
+    ) -> Result<(), EngineError> {
+        use serde_json::Value;
+        let bad = |what: &str| {
+            EngineError::invalid_input(format!("{key} = {} is not {what}", show(value)))
+                .with_detail("kind", "unknownSetting")
+        };
+        // `null` is the default, like an absent value
+        let value = value.filter(|v| !v.is_null());
+        let (name, text): (&str, Option<String>) = match key {
+            "karmaNotifications" => {
+                let c = typed(value, || bad("a karma cadence"))?
+                    .unwrap_or(crate::dto::KarmaCadence::Daily);
+                return self.set_karma_notifications(c).await;
+            }
+            "acknowledgedPublicActions" => {
+                let kinds: Vec<crate::dto::PublicActionKind> =
+                    typed(value, || bad("a list of public actions"))?.unwrap_or_default();
+                return self.set_acknowledged_public_actions(&kinds).await;
+            }
+            "mediaAutoloadHosts" => {
+                let hosts: Vec<String> =
+                    typed(value, || bad("a list of host names"))?.unwrap_or_default();
+                let joined = hosts.join(",");
+                if hosts.iter().any(|h| !is_host(&h.to_ascii_lowercase())) {
+                    return Err(bad("a list of host names"));
+                }
+                ("mediaHosts", (!hosts.is_empty()).then_some(joined))
+            }
+            k if SETTINGS.contains(&k) => match value {
+                None => (k, None),
+                Some(Value::String(v)) if !matches!(k, "externalImagesForums" | "indexers") => {
+                    check_setting_value(k, v)?;
+                    (k, Some(v.clone()))
+                }
+                // the two lists are stored as their JSON text
+                Some(v) if matches!(k, "externalImagesForums" | "indexers") => {
+                    let t = v.to_string();
+                    check_setting_value(k, &t)?;
+                    (k, Some(t))
+                }
+                Some(_) => return Err(bad("a string")),
+            },
+            _ => {
+                return Err(EngineError::invalid_input(format!(
+                    "unknown setting {key:?} (known: {})",
+                    SETTING_FIELDS.join(", ")
+                ))
+                .with_detail("kind", "unknownSetting"));
+            }
+        };
+        let k = crate::key!("loc", "setting", name);
+        let op = match text {
+            Some(v) => KvOp::Put(k, v.into_bytes()),
             None => KvOp::Delete(k),
         };
         self.host().state().write(vec![op]).await?;
@@ -353,11 +552,72 @@ impl<H: crate::host::Host> Engine<H> {
         Ok(())
     }
 
+    /// The `sources` in effect (`sync.md` §2.3, O-3): a flag of this invocation
+    /// ([`EngineConfig::sources_flag`]), else the stored setting, else the build default. The
+    /// engine reads it at each use, so `set_setting("sources", …)` applies at once: in `direct`
+    /// no CORE+ or EXT endpoint (Slingshot, Jetstream, Constellation, a relay, an indexer) is
+    /// contacted.
+    ///
+    /// [`EngineConfig::sources_flag`]: super::EngineConfig::sources_flag
+    pub async fn sources(&self) -> Result<super::Sources, EngineError> {
+        if let Some(s) = self.config.sources_flag {
+            return Ok(s);
+        }
+        let assisted = self.config.sources == super::Sources::Assisted;
+        Ok(if stored_assisted(self.host().state(), assisted).await {
+            super::Sources::Assisted
+        } else {
+            super::Sources::Direct
+        })
+    }
+
     /// `media_hosts()`: the allowlist of 3.9, parsed from `mediaHosts`.
     pub async fn media_hosts(&self) -> Result<Vec<String>, EngineError> {
         let raw = self.stored_settings().await?;
         Ok(split_hosts(raw.get("mediaHosts")))
     }
+}
+
+/// The stored `sources` setting as "assisted", `default` when none is stored. A store that
+/// cannot be read counts as `direct`: no CORE+ endpoint is contacted on a guess.
+pub(crate) async fn stored_assisted<K: KvStore>(state: &K, default: bool) -> bool {
+    match state
+        .get_many(vec![crate::key!("loc", "setting", "sources")])
+        .await
+        .map(|mut v| v.pop().flatten())
+    {
+        Ok(Some(v)) => v != b"direct",
+        Ok(None) => default,
+        Err(e) => {
+            tracing::warn!(error = %e, "the sources setting could not be read: direct");
+            false
+        }
+    }
+}
+
+/// `v` as a `T`, or `bad()`.
+fn typed<T: serde::de::DeserializeOwned>(
+    v: Option<&serde_json::Value>,
+    bad: impl FnOnce() -> EngineError,
+) -> Result<Option<T>, EngineError> {
+    v.map(|v| serde_json::from_value(v.clone()))
+        .transpose()
+        .map_err(|_| bad())
+}
+
+/// A stored setting that holds a JSON list (empty if unset or unreadable).
+fn stored_list<T: serde::de::DeserializeOwned>(
+    raw: &std::collections::BTreeMap<String, String>,
+    k: &str,
+) -> Vec<T> {
+    raw.get(k)
+        .and_then(|v| serde_json::from_str(v).ok())
+        .unwrap_or_default()
+}
+
+/// A setting's value as an error message shows it.
+fn show(v: Option<&serde_json::Value>) -> String {
+    v.map_or_else(|| "null".to_owned(), serde_json::Value::to_string)
 }
 
 /// Splits a stored `mediaHosts` value into hosts: comma separated, trimmed, empties dropped.
@@ -371,7 +631,20 @@ fn split_hosts(v: Option<&String>) -> Vec<String> {
     .unwrap_or_default()
 }
 
-/// Refuses a value that the setting cannot mean, so a stored setting is always usable.
+/// `true` for a host name (`a.example`, `cdn-2.example.com`): no scheme, path, port or space.
+fn is_host(h: &str) -> bool {
+    !h.is_empty()
+        && h.len() <= 253
+        && h.split('.').all(|l| {
+            !l.is_empty()
+                && l.len() <= 63
+                && l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                && !l.starts_with('-')
+                && !l.ends_with('-')
+        })
+}
+
+/// Refuses a stored value that the setting cannot mean, so a stored setting is always usable.
 fn check_setting_value(key: &str, v: &str) -> Result<(), EngineError> {
     let bad = |what: &str| {
         EngineError::invalid_input(format!("{key} = {v:?} is not {what}"))
@@ -383,16 +656,57 @@ fn check_setting_value(key: &str, v: &str) -> Result<(), EngineError> {
             _ => Err(bad("`direct` or `assisted`")),
         },
         "verify" => match v {
-            "pds" | "proof" => Ok(()),
-            _ => Err(bad("`pds` or `proof`")),
+            "pds" => Ok(()),
+            // verifying every displayed item in the background is Reserved (`sync.md` §2.3):
+            // storing it would show a choice that does nothing
+            "proof" => Err(EngineError::new(
+                super::ErrorCode::Unsupported,
+                "verify = \"proof\" (background verification) is not implemented yet",
+            )
+            .with_detail("milestone", "P2")),
+            _ => Err(bad("`pds`")),
         },
         "mediaAutoload" | "externalImages" => match v {
             "on" | "off" => Ok(()),
             _ => Err(bad("`on` or `off`")),
         },
-        "mediaHosts" => Ok(()),
+        "mediaHosts" => {
+            if split_hosts(Some(&v.to_owned()))
+                .iter()
+                .all(|h| is_host(&h.to_ascii_lowercase()))
+            {
+                Ok(())
+            } else {
+                Err(bad("a comma-separated list of host names"))
+            }
+        }
+        "externalImagesForums" => match serde_json::from_str::<Vec<String>>(v) {
+            Ok(l)
+                if l.iter()
+                    .all(|u| lessdugin_atp::syntax::AtUri::parse(u).is_ok()) =>
+            {
+                Ok(())
+            }
+            _ => Err(bad("a list of forum uris")),
+        },
+        "indexers" => match serde_json::from_str::<Vec<crate::dto::IndexerConsent>>(v) {
+            Ok(l) if l.iter().all(|i| is_https_endpoint(&i.url)) => Ok(()),
+            _ => Err(bad("a list of indexer consents with https URLs")),
+        },
         _ => Ok(()),
     }
+}
+
+/// An indexer URL a consent may name (`threat-model.md` §5): `https`, a host name, the default
+/// port, no user info.
+fn is_https_endpoint(raw: &str) -> bool {
+    url::Url::parse(raw).is_ok_and(|u| {
+        u.scheme() == "https"
+            && u.port().is_none()
+            && u.username().is_empty()
+            && u.password().is_none()
+            && u.host_str().is_some_and(is_host)
+    })
 }
 
 /// A saved draft: the `Draft` the composer was working on and when it was last written
@@ -408,19 +722,87 @@ pub struct DraftEntryRow {
     pub draft: crate::dto::Draft,
 }
 
-/// How many drafts are kept. A composer autosaves every second while it is open, so without a
-/// cap a long editing session would accumulate them without limit; the oldest go first.
+/// How many drafts an account keeps. A composer autosaves every second while it is open, so
+/// without a cap a long editing session would accumulate them without limit; the oldest go
+/// first.
 pub const MAX_DRAFTS: usize = 100;
 
+/// The largest draft a save stores (its row, serialised): the SPA's own store had the same
+/// cap, and a value past the host's 2 MiB would fail as a host error instead of `too_large`.
+pub const DRAFT_MAX_BYTES: usize = 1_000_000;
+
+/// `("loc", "draft", account[, id])`: drafts are per account (`threat-model.md` AUTH-11,
+/// PRIV-8), so another account on the device neither lists, exports nor deletes them.
+fn draft_key(account: &str, id: &str) -> Vec<u8> {
+    crate::key!("loc", "draft", account, id)
+}
+
 impl<H: crate::host::Host> Engine<H> {
-    /// `drafts()` (`engine-api.md` §3.6, M4): every saved draft, newest first.
-    pub async fn drafts(&self) -> Result<Vec<DraftEntryRow>, EngineError> {
-        let rows = self.loc_rows(crate::key!("loc", "draft")).await?;
-        let mut out: Vec<DraftEntryRow> = rows
+    /// The active account, which drafts belong to (`auth_required` without one), once it has
+    /// adopted the drafts saved before they were per account.
+    async fn draft_owner(&self) -> Result<String, EngineError> {
+        let me = self.me().await?.ok_or_else(|| {
+            EngineError::new(
+                super::ErrorCode::AuthRequired,
+                "drafts belong to an account; log in first",
+            )
+        })?;
+        self.adopt_legacy_drafts(&me).await?;
+        Ok(me)
+    }
+
+    /// The keys of the drafts saved before drafts were per account, `("loc", "draft", id)`
+    /// (M4's first store, which every account on the device listed), with their values.
+    pub(crate) async fn legacy_drafts(&self) -> Result<Vec<(String, Vec<u8>)>, EngineError> {
+        Ok(self
+            .loc_rows(crate::key!("loc", "draft"))
+            .await?
             .into_iter()
-            .filter_map(|(rest, v)| {
-                let id = rest.first()?.clone();
-                let mut row: DraftEntryRow = serde_json::from_slice(&v).ok()?;
+            .filter_map(|(rest, v)| match <[String; 1]>::try_from(rest) {
+                Ok([id]) => Some((id, v)),
+                Err(_) => None,
+            })
+            .collect())
+    }
+
+    /// Moves the drafts of [`Engine::legacy_drafts`] to `account`, the first one to list or save
+    /// drafts: they were every account's, so the one in use takes them (a draft it already has
+    /// under that id wins), and they are pruned, purged and exported with it from then on.
+    async fn adopt_legacy_drafts(&self, account: &str) -> Result<(), EngineError> {
+        let legacy = self.legacy_drafts().await?;
+        if legacy.is_empty() {
+            return Ok(());
+        }
+        let have: std::collections::BTreeSet<String> = self
+            .draft_rows(account)
+            .await?
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        let mut ops = Vec::with_capacity(legacy.len() * 2);
+        for (id, v) in legacy {
+            if !have.contains(&id) {
+                ops.push(KvOp::Put(draft_key(account, &id), v));
+            }
+            ops.push(KvOp::Delete(crate::key!("loc", "draft", id.as_str())));
+        }
+        self.host().state().write(ops).await?;
+        self.prune_drafts(account).await
+    }
+
+    /// `drafts()` (`engine-api.md` §3.6, M4): the active account's saved drafts, newest first
+    /// (none without an active account).
+    pub async fn drafts(&self) -> Result<Vec<DraftEntryRow>, EngineError> {
+        let Some(me) = self.me().await? else {
+            return Ok(Vec::new());
+        };
+        self.adopt_legacy_drafts(&me).await?;
+        let mut out: Vec<DraftEntryRow> = self
+            .draft_rows(&me)
+            .await?
+            .into_iter()
+            .filter_map(|(id, row)| {
+                let mut row = row?;
                 row.id = id;
                 Some(row)
             })
@@ -429,20 +811,48 @@ impl<H: crate::host::Host> Engine<H> {
         Ok(out)
     }
 
-    /// `saveDraft(draft)` -> its id. A draft that already carries an id is overwritten, which is
-    /// what the composer's autosave does with the id a previous save returned.
+    /// Every stored draft row of `account` by id, `None` for a row that does not decode.
+    async fn draft_rows(
+        &self,
+        account: &str,
+    ) -> Result<Vec<(String, Option<DraftEntryRow>)>, EngineError> {
+        let rows = self.loc_rows(crate::key!("loc", "draft", account)).await?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|(rest, v)| {
+                // rest = [account, id]
+                let id = rest.get(1)?.clone();
+                Some((id, serde_json::from_slice(&v).ok()))
+            })
+            .collect())
+    }
+
+    /// `saveDraft(draft)` -> its id, for the active account (`auth_required` without one). A
+    /// draft that already carries an id is overwritten, which is what the composer's autosave
+    /// does with the id a previous save returned. A draft over [`DRAFT_MAX_BYTES`] is refused
+    /// (`too_large`).
     pub async fn save_draft(&self, draft: &crate::dto::Draft) -> Result<String, EngineError> {
+        let me = self.draft_owner().await?;
         let existing = match draft {
             crate::dto::Draft::Post { id, .. } => id.clone(),
             crate::dto::Draft::Comment { id, .. } => id.clone(),
         };
         let now = self.host.now_ms();
         // a TID-shaped id: sortable by time and valid as an rkey, which is what a draft that is
-        // later published wants its id to resemble
+        // later published wants its id to resemble. The microseconds and the clock id are
+        // random, so two drafts started in the same millisecond (a post and a comment composer
+        // autosaving together) never share an id.
         let id = existing.unwrap_or_else(|| {
+            let mut r = [0u8; 4];
+            self.host.fill_random(&mut r);
+            let micros = u64::from(u16::from_le_bytes([r[0], r[1]]) % 1000);
+            let clock = u16::from_le_bytes([r[2], r[3]]) % 1024;
             lessdugin_atp::tid::Tid::from_parts(
-                u64::try_from(now).unwrap_or(0).saturating_mul(1000),
-                0,
+                u64::try_from(now)
+                    .unwrap_or(0)
+                    .saturating_mul(1000)
+                    .saturating_add(micros),
+                clock,
             )
             .map(|t| t.to_string())
             .unwrap_or_else(|_| format!("{now:013}"))
@@ -454,41 +864,57 @@ impl<H: crate::host::Host> Engine<H> {
         };
         let encoded = serde_json::to_vec(&row)
             .map_err(|e| EngineError::internal(format!("a draft could not be encoded: {e}")))?;
+        if encoded.len() > DRAFT_MAX_BYTES {
+            return Err(EngineError::new(
+                super::ErrorCode::TooLarge,
+                format!(
+                    "a draft is at most {DRAFT_MAX_BYTES} bytes; this one is {}",
+                    encoded.len()
+                ),
+            )
+            .with_detail("kind", "draftTooLarge"));
+        }
         crate::host::KvStore::write(
             self.host().state(),
-            vec![crate::host::KvOp::Put(
-                crate::key!("loc", "draft", id.as_str()),
-                encoded,
-            )],
+            vec![crate::host::KvOp::Put(draft_key(&me, &id), encoded)],
         )
         .await?;
         self.rt.bus.changed([crate::dto::Topic::Drafts]);
-        self.prune_drafts().await?;
+        self.prune_drafts(&me).await?;
         Ok(id)
     }
 
-    /// `deleteDraft(id)`: removes a draft. Deleting what is not there is not an error, because
-    /// the composer deletes on publish whether or not a save landed.
+    /// `deleteDraft(id)`: removes one of the active account's drafts (`auth_required` without
+    /// one). Deleting what is not there is not an error, because the composer deletes on publish
+    /// whether or not a save landed.
     pub async fn delete_draft(&self, id: &str) -> Result<(), EngineError> {
+        let me = self.draft_owner().await?;
         crate::host::KvStore::write(
             self.host().state(),
-            vec![crate::host::KvOp::Delete(crate::key!("loc", "draft", id))],
+            vec![crate::host::KvOp::Delete(draft_key(&me, id))],
         )
         .await?;
         self.rt.bus.changed([crate::dto::Topic::Drafts]);
         Ok(())
     }
 
-    /// Drops the oldest drafts past [`MAX_DRAFTS`].
-    async fn prune_drafts(&self) -> Result<(), EngineError> {
-        let all = self.drafts().await?;
+    /// Drops `account`'s oldest drafts past [`MAX_DRAFTS`]. It counts the stored rows, so a row
+    /// that does not decode (an import, a newer version) counts too, as the oldest.
+    async fn prune_drafts(&self, account: &str) -> Result<(), EngineError> {
+        let mut all: Vec<(i64, String)> = self
+            .draft_rows(account)
+            .await?
+            .into_iter()
+            .map(|(id, row)| (row.map_or(i64::MIN, |r| r.saved_at_ms), id))
+            .collect();
         if all.len() <= MAX_DRAFTS {
             return Ok(());
         }
+        all.sort_by(|a, b| b.cmp(a));
         let ops: Vec<crate::host::KvOp> = all
             .into_iter()
             .skip(MAX_DRAFTS)
-            .map(|d| crate::host::KvOp::Delete(crate::key!("loc", "draft", d.id.as_str())))
+            .map(|(_, id)| crate::host::KvOp::Delete(draft_key(account, &id)))
             .collect();
         crate::host::KvStore::write(self.host().state(), ops).await?;
         Ok(())

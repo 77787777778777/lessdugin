@@ -295,9 +295,10 @@ impl Views<'_> {
             .unwrap_or_else(|| bare_actor(did))
     }
 
-    /// The forum's banners (`newerRules`, `moderationUnavailable`).
+    /// The forum's banners (`newerRules`, `moderationUnavailable`, `authorityInactive`).
     pub fn banners(&self) -> Vec<Banner> {
-        self.model
+        let mut out: Vec<Banner> = self
+            .model
             .view
             .banners
             .iter()
@@ -305,7 +306,15 @@ impl Views<'_> {
                 code: b.code.clone(),
                 message: b.message.clone(),
             })
-            .collect()
+            .collect();
+        if !self.model.inactive.is_empty() {
+            out.push(Banner {
+                code: "authorityInactive".into(),
+                message: "a moderator's account is inactive; their decisions still apply for now"
+                    .into(),
+            });
+        }
+        out
     }
 
     /// The completeness of the forum, `degraded` also when the fold is (§4.11).

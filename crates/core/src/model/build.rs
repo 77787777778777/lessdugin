@@ -11,10 +11,12 @@
 //!          decl      = (F, cid, value) of the admitted, valid declaration row
 //!          records   = eligible rows (§1.5): memberships with rkey fk ∪ the forum-scoped
 //!                      collections of the "{fk}-" range; values without bodies or revision
-//!                      snapshots (no layer reads them; `inputDigest` reads only (uri, cid))
+//!                      snapshots (no layer reads them; `inputDigest` reads only (uri, cid));
+//!                      an authority's modActions while its repo is inactive but retained (§3.4)
 //!          absent    = §5.6.4 for the subjects of the opinions in records, minus records
 //!          obs       = the stored first-seen times (obs_entries), or the injected parity time
-//!          repoStatus= repoStatus(d, fk) for every record owner and authority
+//!          repoStatus= repoStatus(d, fk) for every record owner and authority; an inactive
+//!                      authority is at least Stale while retained, then Unavailable (§3.4)
 //!          now       = injected (tests, parity mode), or the host clock
 //! fold   : Cx::new with the *stored* validity (each row's `valid`/`rule`, decided at admission;
 //!          not recomputed), then fold_cx(cx, Query::default()); the model keeps cx's skeletons
@@ -39,9 +41,10 @@ use crate::social::full::view::{Pending, State};
 use crate::social::full::{self, Cx, ForumView, Query};
 use crate::social::input::{DeclInput, FoldInput, ForumInput, RecordInput, Skel, SkelData};
 use crate::store::records::{
-    Level, RecordStore, StoreError, below_cap_boundary, eligible, fold_rows_capped, obs_entries,
+    Level, RecordStore, StoreError, below_cap_boundary, eligible_in_forum, fold_rows_capped,
+    obs_entries,
 };
-use crate::store::repo::{RepoRow, RepoStatus};
+use crate::store::repo::{AccountStatus, RepoRow, RepoStatus};
 
 /// Why a model could not be built.
 #[derive(Clone, Debug, PartialEq, thiserror::Error)]
@@ -94,6 +97,9 @@ pub struct ForumModel {
     pub rows: BTreeMap<String, RowMeta>,
     /// Repos whose last sync attempt failed (the `[stale]` badge with a non-`Fresh` status).
     pub failing: BTreeSet<String>,
+    /// Authorities whose account is inactive while their modActions are retained (`sync.md`
+    /// §3.4): the `authorityInactive` banner.
+    pub inactive: BTreeSet<String>,
 }
 
 /// A value as the fold input carries it: what the skeletons and the layers read, without the
@@ -193,9 +199,13 @@ impl ForumModel {
         let mut obs: BTreeMap<(String, String), i64> = BTreeMap::new();
         let mut meta: BTreeMap<String, RowMeta> = BTreeMap::new();
         let mut subjects: BTreeSet<String> = BTreeSet::new();
+        let now_ms = now_us.div_euclid(1000);
         for r in &rows {
             let repo = repos.get(&r.key.did);
-            if !eligible(&r.row, repo) || below_cap_boundary(&key.fk, &r.key, repo) {
+            let authority = authorities.contains_key(&r.key.did);
+            if !eligible_in_forum(&r.row, &r.key, repo, authority, now_ms)
+                || below_cap_boundary(&key.fk, &r.key, repo)
+            {
                 continue;
             }
             let uri = r.uri();
@@ -241,12 +251,26 @@ impl ForumModel {
             .filter_map(|u| crate::social::input::split_uri(u).map(|(d, _, _)| d))
             .chain(authorities.keys().map(String::as_str))
             .collect();
+        // an inactive authority (§3.4): its cached assertions apply while retained (at least
+        // Stale), then it is Unavailable and the view degrades (§4.11) instead of opening
+        let mut inactive = BTreeSet::new();
         let repo_status: BTreeMap<String, RepoStatus> = owners
             .iter()
             .map(|d| {
-                let st = repos
-                    .get(*d)
-                    .map_or(RepoStatus::Unavailable, |r| r.repo_status(&key.fk));
+                let st = match repos.get(*d) {
+                    None => RepoStatus::Unavailable,
+                    Some(r)
+                        if r.status == AccountStatus::Inactive && authorities.contains_key(*d) =>
+                    {
+                        if r.inactive_retained(now_ms) {
+                            inactive.insert((*d).to_owned());
+                            r.repo_status(&key.fk).max(RepoStatus::Stale)
+                        } else {
+                            RepoStatus::Unavailable
+                        }
+                    }
+                    Some(r) => r.repo_status(&key.fk),
+                };
                 ((*d).to_owned(), st)
             })
             .collect();
@@ -281,7 +305,10 @@ impl ForumModel {
                 .cloned()
                 .unwrap_or_else(|| (false, Some("missing".into())))
         };
-        Self::from_contract(key.clone(), &input, &stored, decl_row.level, meta, failing)
+        let mut m =
+            Self::from_contract(key.clone(), &input, &stored, decl_row.level, meta, failing)?;
+        m.inactive = inactive;
+        Ok(m)
     }
 
     /// A model over an explicit fold input in contract form with record validity `validity`
@@ -306,6 +333,7 @@ impl ForumModel {
             decl_level,
             rows,
             failing,
+            inactive: BTreeSet::new(),
         })
     }
 

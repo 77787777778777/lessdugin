@@ -9,7 +9,7 @@ use lessdugin_atp::syntax::{AtIdentifier, AtUri, Did, LooseAtUri};
 use lessdugin_lexicon::collection::nsid;
 
 use crate::discovery::forum_ref::ForumKey;
-use crate::dto::{Ref, RefContext};
+use crate::dto::{ModScope, Ref, RefContext, RkeyInput, ValidationReport};
 use crate::host::Host;
 use crate::store::schema::scope_of;
 
@@ -176,6 +176,159 @@ impl<H: Host> Engine<H> {
         }
         Err(bad(input, "not a reference"))
     }
+}
+
+impl<H: Host> Engine<H> {
+    /// `validate_record(collection, json)` (`engine-api.md` §3.7): the validity of `json` as a
+    /// record of `collection` (an NSID of this build's namespace, or its last segment such as
+    /// `post`), by the rules of `data-model.md` §7, before it is written. The record key is the
+    /// canonical one where the value determines it (membership, opinion, modAction), a fresh TID
+    /// key where a writer picks the TID (post, comment, revision, wiki revision, sequence),
+    /// `self` for a profile and the slug `draft` for a forum (whose key is the slug the writer
+    /// chooses); the repo is the active account's. A value whose key cannot be derived fails G5.
+    pub async fn validate_record(
+        &self,
+        collection: &str,
+        value: &serde_json::Value,
+    ) -> Result<ValidationReport, EngineError> {
+        let ns = lessdugin_lexicon::ns::NS;
+        let coll = if collection.contains('.') {
+            collection.to_owned()
+        } else {
+            format!("{ns}.{collection}")
+        };
+        let did = self
+            .me()
+            .await?
+            .unwrap_or_else(|| PLACEHOLDER_DID.to_owned());
+        let tid = lessdugin_atp::tid::Tid::from_parts(
+            u64::try_from(self.host.now_ms())
+                .unwrap_or(0)
+                .saturating_mul(1000),
+            0,
+        )
+        .map_err(|e| EngineError::internal(e.to_string()))?
+        .to_string();
+        let rkey = draft_rkey(ns, &coll, value, &tid).unwrap_or_else(|| "x".to_owned());
+        let uri = AtUri::parse(&format!("at://{did}/{coll}/{rkey}"))
+            .or_else(|_| AtUri::parse(&format!("at://{did}/{coll}/x")))
+            .map_err(|e| EngineError::invalid_input(format!("{collection}: {e}")))?;
+        let v = lessdugin_lexicon::validity::check(&coll, &uri, value);
+        let mut ids = v.rule_ids();
+        ids.sort_unstable();
+        ids.dedup();
+        Ok(ValidationReport {
+            valid: ids.is_empty(),
+            errors: ids.iter().map(ToString::to_string).collect(),
+        })
+    }
+
+    /// `derive_rkey(RkeyInput)` (`engine-api.md` §3.7): the canonical record key
+    /// (`data-model.md` §3), by [`lessdugin_lexicon::keys::derive`]. `invalid_input` when the
+    /// input names no valid key (a non-canonical uri, a root that is not a post keyed `FK-TID`,
+    /// a malformed TID, an `actionKey` no action has).
+    pub fn derive_rkey(&self, input: &RkeyInput) -> Result<String, EngineError> {
+        use lessdugin_lexicon::keys::{self, KeyError, RkeyInput as K};
+        let ns = lessdugin_lexicon::ns::NS;
+        let derive = |k: &K<'_>| keys::derive(ns, k).map(|d| d.rkey);
+        let r = match input {
+            RkeyInput::Membership { forum } => derive(&K::Membership { forum }),
+            RkeyInput::Post { forum, tid } => derive(&K::Post { forum, tid }),
+            // `keys::derive` with the forum the input does not carry: the comment's fk is its
+            // root's, and the root must be a post keyed `FK-TID` (a comment is not a root)
+            RkeyInput::Comment { root, tid } => keys::split_uri(root).and_then(|(_, rc, rk)| {
+                let (fk, t) = keys::split_fk_tid(rk)
+                    .filter(|_| {
+                        lessdugin_lexicon::Collection::from_nsid_in(ns, rc)
+                            == Some(lessdugin_lexicon::Collection::Post)
+                    })
+                    .ok_or(KeyError::Undefined)?;
+                if !keys::is_tid(tid) {
+                    return Err(KeyError::InvalidTid);
+                }
+                Ok(format!("{fk}-{t}-{tid}"))
+            }),
+            RkeyInput::Opinion { forum, subject } => derive(&K::Opinion { forum, subject }),
+            RkeyInput::ModAction {
+                forum,
+                scope,
+                subject,
+                action_key,
+            } => action_with_key(ns, action_key)
+                .ok_or(KeyError::Undefined)
+                .and_then(|action| {
+                    derive(&K::ModAction {
+                        forum,
+                        scope: Some(match scope {
+                            ModScope::Forum => "forum",
+                            ModScope::Author => "author",
+                        }),
+                        subject,
+                        action: &action,
+                    })
+                }),
+            RkeyInput::Revision { subject, tid } => derive(&K::Revision { subject, tid }),
+        };
+        r.map_err(|e| EngineError::invalid_input(format!("no record key: {e}")))
+    }
+}
+
+/// An `action` whose `actionKey` (`data-model.md` §3.2) is `k`, if one has it: the def of the
+/// namespace named `k` (`hide`), or `k` as its `$type` (`pin:forum`, a foreign or unknown
+/// action). None for a key no action has, such as the full `$type` of a known def.
+fn action_with_key(ns: &str, k: &str) -> Option<serde_json::Map<String, serde_json::Value>> {
+    [format!("{ns}.modAction#{k}"), k.to_owned()]
+        .into_iter()
+        .map(|t| serde_json::Map::from_iter([("$type".to_owned(), t.into())]))
+        .find(|a| lessdugin_lexicon::keys::action_key(ns, a).is_ok_and(|ak| ak == k))
+}
+
+/// The repo of a record `validate_record` checks when no account is active.
+const PLACEHOLDER_DID: &str = "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa";
+
+/// The key a record value of `coll` would be written under (see [`Engine::validate_record`]).
+fn draft_rkey(ns: &str, coll: &str, v: &serde_json::Value, tid: &str) -> Option<String> {
+    use lessdugin_lexicon::Collection;
+    use lessdugin_lexicon::keys::{self, RkeyInput as K};
+    let s = |k: &str| v.get(k).and_then(serde_json::Value::as_str);
+    let r = |k: &str| v.get(k)?.get("uri")?.as_str();
+    let input = match Collection::from_nsid_in(ns, coll)? {
+        Collection::Forum => return Some("draft".to_owned()),
+        Collection::Profile => K::Profile,
+        Collection::Membership => K::Membership { forum: s("forum")? },
+        Collection::Post => K::Post {
+            forum: s("forum")?,
+            tid,
+        },
+        Collection::WikiRevision => K::WikiRevision {
+            forum: s("forum")?,
+            tid,
+        },
+        Collection::Sequence => K::Sequence {
+            forum: s("forum")?,
+            tid,
+        },
+        Collection::Comment => K::Comment {
+            forum: s("forum")?,
+            root: r("root")?,
+            tid,
+        },
+        Collection::Revision => K::Revision {
+            subject: r("subject")?,
+            tid,
+        },
+        Collection::Opinion => K::Opinion {
+            forum: s("forum")?,
+            subject: r("subject")?,
+        },
+        Collection::ModAction => K::ModAction {
+            forum: s("forum")?,
+            scope: s("scope"),
+            subject: s("subject")?,
+            action: v.get("action")?.as_object()?,
+        },
+    };
+    keys::derive(ns, &input).ok().map(|d| d.rkey)
 }
 
 #[cfg(test)]
