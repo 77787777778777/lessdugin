@@ -435,6 +435,45 @@ fn a_react_shows_in_the_palette_and_under_the_item() {
     let _ = OpinionIntent::Karma { value: None };
 }
 
+/// Switching a held react's stance is ONE opinion effect: the runtime runs effects as separate
+/// tasks, so a remove-then-add pair could land add-first and the remove would delete the react.
+#[test]
+fn a_stance_switch_is_one_add() {
+    use lessdugin_core::dto::{OpinionIntent, Stance};
+    use lessdugin_tui::{Action, Effect};
+    let s = scenario();
+    let (forum, _, _) = react_forum(&s);
+    let mut t = tui(&s, 80, 24);
+    block_on(t.start(Some(forum.clone())));
+    block_on(t.press("Enter"));
+    // carol reacts "Agreed" for, and the write lands
+    block_on(t.keys(&["x", "Enter"]));
+    block_on(t.engine().outbox_flush()).unwrap();
+    block_on(t.settle());
+    // the palette again, against, Enter: the effects of that one key
+    block_on(t.keys(&["x", "Tab"]));
+    let fx = t
+        .state
+        .update(Action::Key(lessdugin_tui::keys::parse_key("Enter").unwrap()));
+    let opinions: Vec<&OpinionIntent> = fx
+        .iter()
+        .filter_map(|e| match e {
+            Effect::Opinion { intent, .. } => Some(intent),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        opinions,
+        [&OpinionIntent::React {
+            id: "agree".into(),
+            stance: Stance::Against,
+            quote: None,
+            remove: false,
+        }],
+        "{fx:?}"
+    );
+}
+
 #[test]
 fn the_mod_menu_hides_an_item_with_a_reason() {
     use lessdugin_core::dto::{ItemState, ThreadOpts};

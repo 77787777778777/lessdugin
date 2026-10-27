@@ -2466,8 +2466,7 @@ impl State {
     }
 
     /// `Enter`: reacts with the selected palette entry (the viewer's own react of the same
-    /// stance toggles off; a stance switch removes and re-adds, as the engine coalesces the
-    /// two into one opinion record).
+    /// stance toggles off; a stance switch is one add, which replaces the stance in place).
     fn react_choose(&mut self, fx: &mut Vec<Effect>) {
         let Some(o) = self.react.clone() else {
             return;
@@ -2505,12 +2504,10 @@ impl State {
         match existing {
             // the viewer already holds this stance: take it back
             Some(s) if s == o.stance => fx.push(react(o.stance, true)),
-            // the opposite stance: remove it, then add the new one (one opinion record)
-            Some(s) => {
-                fx.push(react(s, true));
-                fx.push(react(o.stance, false));
-            }
-            None => fx.push(react(o.stance, false)),
+            // the opposite stance, or none: one add (AddReact replaces a held stance in place;
+            // a separate remove would be a second task the runtime may run first, and a remove
+            // that lands after the add deletes the react)
+            Some(_) | None => fx.push(react(o.stance, false)),
         }
         self.react = None;
         self.say(Tone::Info, lit("Recording the react..."));
