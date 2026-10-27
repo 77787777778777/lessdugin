@@ -192,8 +192,13 @@ fn ci() -> Result<(), String> {
         ],
     )?;
     // M2 acceptance: the 50-member cold sync in under 5 s, on an optimised build (the debug
-    // run above asserts it only off CI; a release build has devnet mode only with `devnet`)
-    run(
+    // run above asserts it only off CI; a release build has devnet mode only with `devnet`).
+    // As in ci.yml, the release CLI embeds the placeholder page: the test asserts sync timing,
+    // and a test build left in web/dist by an e2e run must not trip build.rs's WEB-5 guard. The
+    // real bundle is checked by the web steps below (`pnpm run build` runs check-release-bundle).
+    let no_dist = target_dir().join("tmp/no-web-dist");
+    std::fs::create_dir_all(&no_dist).map_err(|e| format!("{}: {e}", no_dist.display()))?;
+    run_env(
         "cargo",
         &[
             "test",
@@ -204,6 +209,10 @@ fn ci() -> Result<(), String> {
             "devnet",
             "--test",
             "cold_sync",
+        ],
+        &[
+            ("LESSDUGIN_WEB_DIST".into(), no_dist.display().to_string()),
+            ("LESSDUGIN_WEB_PLACEHOLDER".into(), "1".into()),
         ],
     )?;
     if have(TEST_RUNNER) && have("node") {
@@ -229,8 +238,12 @@ fn ci() -> Result<(), String> {
         );
     }
     if root().join("node_modules").exists() {
+        // the root check is ci.yml's: biome with the root config, over every package
+        run("pnpm", &["run", "check"])?;
         run("pnpm", &["-r", "--if-present", "run", "check"])?;
         run("pnpm", &["-r", "--if-present", "run", "test"])?;
+        // the release bundle, as ci.yml's web job: `vite build` + check-release-bundle
+        run("pnpm", &["run", "build"])?;
     } else {
         eprintln!("(skipping web checks: run `pnpm install` first)");
     }

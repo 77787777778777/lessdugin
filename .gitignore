@@ -11,3 +11,4 @@ dist/
 .env
 __pycache__/
 .rustup/
+.direnv/
