@@ -1125,6 +1125,47 @@ mod tests {
             r#"[{"kind": "post", "forum": "x", "tid": "y"}]"#,
         );
         assert_eq!(err.code, ErrorCode::InvalidInput);
+        // a comment is not a root (data-model.md §3: the root is a post keyed FK-TID)
+        let on_comment = format!(
+            "at://did:plc:ewvi7nxzyoun6zhxrhs64oiz/online.7778777.lessdugin.temp.comment/{c}"
+        );
+        let err = call_err(
+            &e,
+            "deriveRkey",
+            &json!([{"kind": "comment", "root": on_comment, "tid": "3l2s6aaaaaaa3"}]).to_string(),
+        );
+        assert_eq!(err.code, ErrorCode::InvalidInput, "{err:?}");
+        // the actionKey of #pin and of a foreign action; none is the full $type of a known def
+        let mk = |key: &str| {
+            json!([{"kind": "modAction", "forum": forum, "scope": "forum",
+                "subject": root, "actionKey": key}])
+            .to_string()
+        };
+        for key in ["pin:forum", "com.example.action#x"] {
+            assert!(block_on(call(&e, "deriveRkey", &mk(key))).is_ok(), "{key}");
+        }
+        let err = call_err(
+            &e,
+            "deriveRkey",
+            &mk("online.7778777.lessdugin.temp.modAction#hide"),
+        );
+        assert_eq!(err.code, ErrorCode::InvalidInput, "{err:?}");
+        // the same key as the lexicon's derivation from the action itself
+        let action = serde_json::Map::from_iter([(
+            "$type".to_owned(),
+            json!("online.7778777.lessdugin.temp.modAction#hide"),
+        )]);
+        let d = lessdugin_lexicon::keys::derive(
+            lessdugin_lexicon::ns::NS,
+            &lessdugin_lexicon::keys::RkeyInput::ModAction {
+                forum,
+                scope: None,
+                subject: &root,
+                action: &action,
+            },
+        )
+        .unwrap();
+        assert_eq!(m, d.rkey);
     }
 
     #[test]

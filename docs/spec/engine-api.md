@@ -327,7 +327,9 @@ record of `collection`, an NSID of this build or its last segment such as `post`
 written: the record key is the canonical one where the value determines it, a fresh TID key
 otherwise, `self` for a profile, the slug `draft` for a forum; the repo is the active account's;
 `errors` are the failing rule IDs, sorted) and `derive_rkey(RkeyInput) -> string` (the canonical
-key, `data-model.md` §3; `invalid_input` when the input names none); `run_vector(kind, json) ->
+key, `data-model.md` §3; `invalid_input` when the input names none: a comment's `root` must be a
+post keyed `FK-TID`, and a modAction's `actionKey` one an action has, so not the full `$type` of
+a known def); `run_vector(kind, json) ->
 json` (tests only).
 
 ### 3.8 Events

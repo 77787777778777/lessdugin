@@ -224,44 +224,63 @@ impl<H: Host> Engine<H> {
     }
 
     /// `derive_rkey(RkeyInput)` (`engine-api.md` §3.7): the canonical record key
-    /// (`data-model.md` §3). `invalid_input` when the input names no valid key (a non-canonical
-    /// uri, a root that is not a post, a malformed TID).
+    /// (`data-model.md` §3), by [`lessdugin_lexicon::keys::derive`]. `invalid_input` when the
+    /// input names no valid key (a non-canonical uri, a root that is not a post keyed `FK-TID`,
+    /// a malformed TID, an `actionKey` no action has).
     pub fn derive_rkey(&self, input: &RkeyInput) -> Result<String, EngineError> {
-        use lessdugin_lexicon::keys;
+        use lessdugin_lexicon::keys::{self, KeyError, RkeyInput as K};
         let ns = lessdugin_lexicon::ns::NS;
+        let derive = |k: &K<'_>| keys::derive(ns, k).map(|d| d.rkey);
         let r = match input {
-            RkeyInput::Membership { forum } => keys::membership_rkey(forum),
-            RkeyInput::Post { forum, tid } => keys::post_rkey(forum, tid),
-            RkeyInput::Comment { root, tid } => keys::split_uri(root).and_then(|(_, _, rk)| {
-                let fk = keys::fk_of(rk).ok_or(keys::KeyError::Undefined)?;
-                let t = keys::thread_tid(ns, root)?;
+            RkeyInput::Membership { forum } => derive(&K::Membership { forum }),
+            RkeyInput::Post { forum, tid } => derive(&K::Post { forum, tid }),
+            // `keys::derive` with the forum the input does not carry: the comment's fk is its
+            // root's, and the root must be a post keyed `FK-TID` (a comment is not a root)
+            RkeyInput::Comment { root, tid } => keys::split_uri(root).and_then(|(_, rc, rk)| {
+                let (fk, t) = keys::split_fk_tid(rk)
+                    .filter(|_| {
+                        lessdugin_lexicon::Collection::from_nsid_in(ns, rc)
+                            == Some(lessdugin_lexicon::Collection::Post)
+                    })
+                    .ok_or(KeyError::Undefined)?;
                 if !keys::is_tid(tid) {
-                    return Err(keys::KeyError::InvalidTid);
+                    return Err(KeyError::InvalidTid);
                 }
                 Ok(format!("{fk}-{t}-{tid}"))
             }),
-            RkeyInput::Opinion { forum, subject } => keys::opinion_rkey(ns, forum, subject),
+            RkeyInput::Opinion { forum, subject } => derive(&K::Opinion { forum, subject }),
             RkeyInput::ModAction {
                 forum,
                 scope,
                 subject,
                 action_key,
-            } => {
-                let scope = match scope {
-                    ModScope::Forum => "forum",
-                    ModScope::Author => "author",
-                };
-                keys::fk(forum).and_then(|f| {
-                    Ok(format!(
-                        "{f}-{}",
-                        keys::h16("modAction", &[scope, subject, action_key])?
-                    ))
-                })
-            }
-            RkeyInput::Revision { subject, tid } => keys::revision_rkey(ns, subject, tid),
+            } => action_with_key(ns, action_key)
+                .ok_or(KeyError::Undefined)
+                .and_then(|action| {
+                    derive(&K::ModAction {
+                        forum,
+                        scope: Some(match scope {
+                            ModScope::Forum => "forum",
+                            ModScope::Author => "author",
+                        }),
+                        subject,
+                        action: &action,
+                    })
+                }),
+            RkeyInput::Revision { subject, tid } => derive(&K::Revision { subject, tid }),
         };
         r.map_err(|e| EngineError::invalid_input(format!("no record key: {e}")))
     }
+}
+
+/// An `action` whose `actionKey` (`data-model.md` §3.2) is `k`, if one has it: the def of the
+/// namespace named `k` (`hide`), or `k` as its `$type` (`pin:forum`, a foreign or unknown
+/// action). None for a key no action has, such as the full `$type` of a known def.
+fn action_with_key(ns: &str, k: &str) -> Option<serde_json::Map<String, serde_json::Value>> {
+    [format!("{ns}.modAction#{k}"), k.to_owned()]
+        .into_iter()
+        .map(|t| serde_json::Map::from_iter([("$type".to_owned(), t.into())]))
+        .find(|a| lessdugin_lexicon::keys::action_key(ns, a).is_ok_and(|ak| ak == k))
 }
 
 /// The repo of a record `validate_record` checks when no account is active.
