@@ -128,7 +128,9 @@ const JPEG_8X4 =
 
 /** The CIDv1 (raw, sha2-256, base32) of `bytes`. */
 async function rawCid(bytes: Uint8Array): Promise<string> {
-  return rawCidOfDigest(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes as BufferSource)));
+  return rawCidOfDigest(
+    new Uint8Array(await crypto.subtle.digest("SHA-256", bytes as BufferSource)),
+  );
 }
 
 /** The CIDv1 (raw, sha2-256, base32) of a SHA-256 digest. */

@@ -468,25 +468,6 @@ pub struct BodyItem<'a> {
     pub prefs: &'a MediaPrefs,
 }
 
-impl BodyItem<'_> {
-    /// An item whose media never autoload (no policy inputs: tests, previews).
-    pub fn none() -> BodyItem<'static> {
-        static NONE: MediaPrefs = MediaPrefs {
-            enabled: false,
-            allowlist: Vec::new(),
-            hosts: BTreeMap::new(),
-            doc: std::collections::BTreeSet::new(),
-        };
-        BodyItem {
-            established: false,
-            visible: false,
-            labels: &[],
-            root_labels: &[],
-            prefs: &NONE,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

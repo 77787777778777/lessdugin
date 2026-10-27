@@ -53,7 +53,12 @@ function fakeWorker(opts: { failInits?: number } = {}): {
       if (op === "fail") throw { code: "network", message: "down", retryable: true };
       if (op === "loadMedia") {
         const cid = args[0] as string;
-        return { cid, size: 3, url: `idb:${cid}`, ...(cid === "bafkreimp4" ? {} : { mime: "image/png" }) };
+        return {
+          cid,
+          size: 3,
+          url: `idb:${cid}`,
+          ...(cid === "bafkreimp4" ? {} : { mime: "image/png" }),
+        };
       }
       return { op };
     },
