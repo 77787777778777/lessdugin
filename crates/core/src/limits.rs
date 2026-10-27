@@ -18,8 +18,8 @@ pub const BLOB_AUTOLOAD_MAX_BYTES: u64 = 5 * 1024 * 1024;
 pub const BLOB_HARD_MAX_BYTES: u64 = 300 * 1024 * 1024;
 /// Cap on a `textBlob` body fetch: the lexicon's `maxSize` (`limits.md` §5).
 pub const BLOB_TEXT_MAX_BYTES: u64 = 1_000_000;
-/// A spilled body (`textBlob`) that could not be fetched stays pending this long before it is
-/// asked for again (`limits.md` §5).
+/// A spilled body (`textBlob`) that could not be fetched (the network; a missing blob is not
+/// asked for again) stays pending this long before it is asked for again (`limits.md` §5).
 pub const BODY_BLOB_RETRY_MS: i64 = 60_000;
 /// The prefix of a fetched blob whose type is sniffed for display (`limits.md` §5).
 pub const BLOB_SNIFF_PREFIX_BYTES: u32 = 4_096;
