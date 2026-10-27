@@ -26,7 +26,9 @@ import {
   type HttpResult,
   isHostError,
   LEADER_LOCK,
+  MEDIA_WASM_WINDOW_BYTES,
   type PdsRequest,
+  tooLargeForTheBrowser,
   type WorkerInfo,
   type WorkerInit,
 } from "./protocol.ts";
@@ -41,6 +43,8 @@ export interface WasmModule {
 
 export interface WasmEngineLike {
   call(op: string, argsJson: string): Promise<string>;
+  /** `prepare_media` with the bytes as bytes (crates/wasm/src/bindings.rs). */
+  prepareMedia?(bytes: Uint8Array, inputJson: string): Promise<string>;
   subscribe(cb: (eventJson: string) => void): number;
   unsubscribe(id: number): boolean;
   free?(): void;
@@ -303,6 +307,23 @@ export class WorkerEngine {
   /** Runs `op` with `args` (`undefined` becomes `null`); resolves with the parsed result. */
   async call(op: string, args: unknown[]): Promise<unknown> {
     return JSON.parse(await this.callJson(op, JSON.stringify(args))) as unknown;
+  }
+
+  /** `prepareMedia(bytes, input)`: the bytes go into wasm memory once, as bytes (never as a
+   * JSON number array), and only up to `MEDIA_WASM_WINDOW_BYTES` (limits.md §6). */
+  async prepareMedia(bytes: Uint8Array, input: unknown): Promise<unknown> {
+    const engine = this.engine;
+    if (!engine) throw engineError("internal", "the engine worker is not initialised");
+    if (bytes.byteLength > MEDIA_WASM_WINDOW_BYTES) throw tooLargeForTheBrowser(bytes.byteLength);
+    const inputJson = JSON.stringify(input ?? null);
+    if (!engine.prepareMedia) {
+      return this.call("prepareMedia", [Array.from(bytes), input ?? null]);
+    }
+    try {
+      return JSON.parse(await engine.prepareMedia(bytes, inputJson)) as unknown;
+    } catch (e) {
+      throw toEngineError(e);
+    }
   }
 
   /** Stops the long-lived tasks, hands the leadership over and closes the stores. */

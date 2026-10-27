@@ -113,6 +113,11 @@ const api = {
     return current().callJson(op, argsJson);
   },
 
+  /** `prepareMedia` with the bytes structured-cloned as bytes (see worker-core.ts). */
+  prepareMedia(bytes: Uint8Array, input: unknown): Promise<unknown> {
+    return current().prepareMedia(bytes, input);
+  },
+
   /** Whether this worker is the leader tab's. */
   isLeader(): boolean {
     return engine?.isLeader ?? false;

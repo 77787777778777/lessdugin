@@ -278,16 +278,30 @@ describe.runIf(present)("WorkerEngine over the real wasm", () => {
     const seg = [0xff, 0xe1, (app1.length + 2) >> 8, (app1.length + 2) & 0xff, ...app1];
     const photo = Uint8Array.from([...plain.subarray(0, 2), ...seg, ...plain.subarray(2)]);
     const { engine } = await tab(origin(), { elect: false });
-    const ref = (await engine.call("prepareMedia", [
-      Array.from(photo),
-      { declaredMime: "image/jpeg" },
-    ])) as { cid: string; mime: string; sizeBytes: number };
+    const ref = (await engine.prepareMedia(photo, { declaredMime: "image/jpeg" })) as {
+      cid: string;
+      mime: string;
+      sizeBytes: number;
+    };
     expect(ref.mime).toBe("image/jpeg");
     // what stripping alone gives: SOI, then everything after the JFIF APP0 (18 bytes) - the
     // pixels unrotated. The orientation pass re-encodes, so the prepared file is another one.
     const stripped = Uint8Array.from([...plain.subarray(0, 2), ...plain.subarray(20)]);
     expect(ref.cid).not.toBe(await rawCid(stripped));
     expect(ref.sizeBytes).not.toBe(stripped.length);
+  });
+
+  it("prepares media from bytes, within the wasm window only (m4-18)", async () => {
+    const { engine } = await tab(origin(), { elect: false });
+    const plain = Uint8Array.from(atob(JPEG_8X4), (c) => c.charCodeAt(0));
+    // the bytes path and the JSON op give the same reference
+    const a = (await engine.prepareMedia(plain, null)) as { cid: string; sizeBytes: number };
+    const b = (await engine.call("prepareMedia", [Array.from(plain), null])) as { cid: string };
+    expect(a.cid).toBe(b.cid);
+    expect(a.sizeBytes).toBeLessThan(plain.length); // the JFIF APP0 is gone
+    const big = await rejects(engine.prepareMedia(new Uint8Array(64 * 1024 * 1024 + 1), null));
+    expect(big.code).toBe("too_large");
+    expect(big.detail).toMatchObject({ kind: "mediaRejected" });
   });
 
   it("refuses a mismatched namespace, a bad configuration and a second init", async () => {

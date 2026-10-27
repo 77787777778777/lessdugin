@@ -55,6 +55,10 @@ function fakeWorker(opts: { failInits?: number } = {}): {
     async callJson(op: string, argsJson: string) {
       return JSON.stringify({ op, args: JSON.parse(argsJson) });
     },
+    async prepareMedia(bytes: Uint8Array, input: unknown) {
+      state.calls.push(["prepareMedia", [bytes, input]]);
+      return { cid: "bafkreix" };
+    },
     isLeader: () => true,
     async close() {
       state.closed = true;
@@ -124,6 +128,27 @@ describe("startEngine", () => {
     expect(await c.callJson("syncThread", ["at://p"])).toBe(
       '{"op":"syncThread","args":["at://p",null]}',
     );
+  });
+
+  it("sends prepareMedia's bytes as bytes and refuses a file over the wasm window (m4-18)", async () => {
+    const { worker, state } = fakeWorker();
+    const c = start({ worker });
+    expect(await c.prepareMedia(Uint8Array.of(1, 2, 3), { alt: "a" })).toEqual({
+      cid: "bafkreix",
+    });
+    const [op, [bytes, input]] = state.calls.at(-1) as [string, [unknown, unknown]];
+    expect(op).toBe("prepareMedia");
+    // a Uint8Array, not a JSON number array of one element per byte
+    expect(bytes).toBeInstanceOf(Uint8Array);
+    expect(Array.from(bytes as Uint8Array)).toEqual([1, 2, 3]);
+    expect(input).toEqual({ alt: "a" });
+    // limits.md §6: refused on the main thread, before the worker sees a byte
+    const calls = state.calls.length;
+    await expect(c.prepareMedia(new Uint8Array(64 * 1024 * 1024 + 1))).rejects.toMatchObject({
+      code: "too_large",
+      detail: { kind: "mediaRejected", limit: 64 * 1024 * 1024 },
+    });
+    expect(state.calls.length).toBe(calls);
   });
 
   it("is not a thenable", async () => {

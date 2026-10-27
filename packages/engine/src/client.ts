@@ -22,7 +22,12 @@ import * as Comlink from "comlink";
 import type { EngineApi } from "./api.ts";
 import { AuthBridge, NS, type SessionProvider } from "./auth-bridge.ts";
 import { serveBridgePort } from "./bridge-port.ts";
-import type { WorkerInfo, WorkerInit } from "./protocol.ts";
+import {
+  MEDIA_WASM_WINDOW_BYTES,
+  tooLargeForTheBrowser,
+  type WorkerInfo,
+  type WorkerInit,
+} from "./protocol.ts";
 import type { EngineEvent, EventListener, Unsubscribe, WriteTicket } from "./types.ts";
 import type { EngineWorkerApi } from "./worker.ts";
 import { workerScriptUrl } from "./workerUrl.ts";
@@ -189,12 +194,15 @@ export function startEngine(options: StartEngineOptions = {}): EngineClient {
   const special: Record<string, (...args: unknown[]) => Promise<unknown>> = {
     outboxPump: async () => undefined,
     liveTail: async () => undefined,
-    // The bytes cross the worker boundary as a structured-cloned array (a Uint8Array arrives as
-    // an index-keyed object), so they are flattened to a plain number array here. A Uint8Array
-    // that the structured clone left intact is spread just the same.
+    // The bytes cross to the worker as a structured-cloned Uint8Array and into wasm as bytes
+    // (worker-core.ts), never as a JSON number array; a file over MEDIA_WASM_WINDOW_BYTES is
+    // refused here, before it is copied anywhere (limits.md §6).
     async prepareMedia(...args) {
-      const [bytes, input] = args as [Uint8Array | number[] | ArrayLike<number>, unknown];
-      return remote.call("prepareMedia", [Array.from(bytes), input ?? null]);
+      const [given, input] = args as [Uint8Array | ArrayLike<number>, unknown];
+      const bytes = given instanceof Uint8Array ? given : Uint8Array.from(given);
+      if (bytes.byteLength > MEDIA_WASM_WINDOW_BYTES) throw tooLargeForTheBrowser(bytes.byteLength);
+      await start();
+      return remote.prepareMedia(bytes, input ?? null);
     },
     async grant(...args) {
       return first(await call("grant", args));

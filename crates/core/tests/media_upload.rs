@@ -249,3 +249,68 @@ fn an_edit_uploads_the_media_it_adds_and_keeps_the_blob_objects_it_had() {
     assert_eq!(rec["body"]["media"][1]["blob"]["ref"]["$link"], second.cid.as_str());
     assert!(a.acct.serves_blob(&lessdugin_atp::cid::parse(&second.cid).unwrap()));
 }
+
+/// Every `state` row under `prefix`, with its value.
+fn rows(host: &MemHost, prefix: Vec<u8>) -> Vec<(Vec<u8>, Vec<u8>)> {
+    use lessdugin_core::host::{Dir, Host, KeyRange, KvStore};
+    block_on(KvStore::scan(
+        host.state(),
+        KeyRange::prefix(&prefix),
+        Dir::Forward,
+        10_000,
+    ))
+    .unwrap()
+}
+
+#[test]
+fn prepared_bytes_are_raw_chunks_and_go_once_the_write_is_enqueued() {
+    // m4-18: they were one JSON number array per file (3-4 bytes of JSON per byte), kept forever
+    let a = Author::new(PdsConfig::default());
+    let host = a.engine.host().clone();
+    let png = noise_png(920, 920, 9);
+    assert!(png.len() > 2 << 20 && png.len() < 3 << 20);
+    let m = block_on(a.engine.prepare_media(png, &input("noise"))).unwrap();
+    let chunks = rows(&host, lessdugin_core::key!("prep.blob", m.cid.as_str()));
+    assert_eq!(chunks.len(), 3, "1 MiB chunks");
+    let stored: usize = chunks.iter().map(|(_, v)| v.len()).sum();
+    assert!(stored < m.size_bytes as usize + 1024, "{stored} bytes for {}", m.size_bytes);
+    assert!(rows(&host, lessdugin_core::key!("loc", "media")).is_empty());
+
+    let t = a.post_with(&m);
+    // the outbox holds its own copy now
+    assert!(block_on(a.engine.prepared_media(&m.cid)).unwrap().is_none());
+    assert!(rows(&host, lessdugin_core::key!("prep")).is_empty());
+    assert!(rows(&host, lessdugin_core::key!("prep.blob")).is_empty());
+    let uri = a.done(&t);
+    assert_eq!(
+        a.record(&uri)["body"]["media"][0]["blob"]["ref"]["$link"],
+        m.cid.as_str()
+    );
+}
+
+#[test]
+fn prepared_bytes_of_a_draft_never_sent_expire() {
+    let host = MemHost::new();
+    let e = Engine::new(host.clone(), EngineConfig::default());
+    // a row of the first M4 builds' layout is swept too
+    block_on(lessdugin_core::host::KvStore::write(
+        lessdugin_core::host::Host::state(&host),
+        vec![lessdugin_core::host::KvOp::Put(
+            lessdugin_core::key!("loc", "media", "bafkreiold"),
+            br#"{"mime":"image/png","bytes":[1,2,3]}"#.to_vec(),
+        )],
+    ))
+    .unwrap();
+    let old = block_on(e.prepare_media(noise_png(8, 8, 10), &input("old"))).unwrap();
+    assert!(rows(&host, lessdugin_core::key!("loc", "media")).is_empty());
+    host.advance_ms(lessdugin_core::media::PREPARED_MEDIA_TTL_MS);
+    let new = block_on(e.prepare_media(noise_png(8, 8, 11), &input("new"))).unwrap();
+    // exactly the TTL: still kept
+    assert!(block_on(e.prepared_media(&old.cid)).unwrap().is_some());
+    host.advance_ms(1);
+    let newer = block_on(e.prepare_media(noise_png(8, 8, 12), &input("newer"))).unwrap();
+    assert!(block_on(e.prepared_media(&old.cid)).unwrap().is_none());
+    assert!(rows(&host, lessdugin_core::key!("prep.blob", old.cid.as_str())).is_empty());
+    assert!(block_on(e.prepared_media(&new.cid)).unwrap().is_some());
+    assert!(block_on(e.prepared_media(&newer.cid)).unwrap().is_some());
+}
