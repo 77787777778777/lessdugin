@@ -12,7 +12,9 @@
 //!   past them either. A GIF is shown as its first frame: one of the at most 200 decoded.
 //! - The decode and the resize happen OFF the UI thread. A supervisor thread gives each decode
 //!   [`limits::DECODE_TIMEOUT`]; past it the image is abandoned (its placeholder says so) and
-//!   whatever the decoder still produces is dropped.
+//!   whatever the decoder still produces is dropped. An abandoned decoder keeps its slot until
+//!   its thread ends (it still holds its input and its allocation), so at most
+//!   [`limits::MAX_DECODING`] decoders exist at once, however many time out.
 //! - Decoded images are scaled down to [`limits::SHOWN_MAX_SIDE`] and at most
 //!   [`limits::MAX_SHOWN`] are kept; the oldest is dropped first ([`Images::poll`] says which).
 //!
@@ -23,6 +25,7 @@
 
 use std::collections::VecDeque;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 
 use image::DynamicImage;
@@ -47,7 +50,8 @@ pub mod limits {
     pub const MAX_GIF_FRAMES: usize = 200;
     /// A decode that takes longer than this is abandoned (`IMAGE_DECODE_TIMEOUT_MS`).
     pub const DECODE_TIMEOUT: Duration = Duration::from_secs(10);
-    /// Decodes that run at once; the others wait their turn.
+    /// Decoder threads that exist at once (an abandoned one counts until it ends); the other
+    /// decodes wait their turn.
     pub const MAX_DECODING: usize = 2;
     /// Decoded images kept for drawing; past it the oldest is dropped.
     pub const MAX_SHOWN: usize = 8;
@@ -143,6 +147,25 @@ impl std::fmt::Debug for MediaBytes {
 /// loop with it.
 pub type Notify = Arc<dyn Fn() + Send + Sync>;
 
+/// The decode function a worker runs ([`decode`]; tests hand in a slower one).
+pub type Decoder = Arc<dyn Fn(&[u8]) -> Result<DynamicImage, Placeholder> + Send + Sync>;
+
+/// One of the [`limits::MAX_DECODING`] decode slots. The supervisor and the decoder thread each
+/// hold it, so it is handed back only once BOTH have ended: a decoder abandoned past the
+/// timeout keeps it for as long as it runs. Handing it back wakes the loop, whose next
+/// [`Images::poll`] starts a waiting decode.
+struct Slot {
+    live: Arc<AtomicUsize>,
+    notify: Notify,
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.live.fetch_sub(1, Ordering::SeqCst);
+        (self.notify)();
+    }
+}
+
 /// One decoded image, ready to draw, and its resize worker's answers.
 struct Shown {
     cid: String,
@@ -157,10 +180,14 @@ pub struct Images {
     picker: Option<Picker>,
     notify: Notify,
     timeout: std::time::Duration,
+    decoder: Decoder,
     done_tx: Sender<(String, Result<StatefulProtocol, Placeholder>)>,
     done_rx: Receiver<(String, Result<StatefulProtocol, Placeholder>)>,
-    /// Decodes running now.
+    /// Decodes whose outcome [`Images::poll`] has not taken yet.
     running: usize,
+    /// The decode slots taken ([`Slot`]): by the decodes running and the abandoned decoders
+    /// that have not ended yet.
+    live: Arc<AtomicUsize>,
     /// Decodes waiting for a turn.
     queue: VecDeque<(String, MediaBytes)>,
     /// Decoded, oldest first.
@@ -208,9 +235,11 @@ impl Images {
             picker,
             notify,
             timeout: limits::DECODE_TIMEOUT,
+            decoder: Arc::new(decode),
             done_tx,
             done_rx,
             running: 0,
+            live: Arc::new(AtomicUsize::new(0)),
             queue: VecDeque::new(),
             shown: Vec::new(),
             early: Vec::new(),
@@ -222,6 +251,15 @@ impl Images {
     #[must_use]
     pub fn with_timeout(mut self, timeout: std::time::Duration) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    /// The same, with the workers running `decoder` instead of [`decode`] (tests: a decode that
+    /// takes as long as they want).
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_decoder(mut self, decoder: Decoder) -> Self {
+        self.decoder = decoder;
         self
     }
 
@@ -241,7 +279,7 @@ impl Images {
     }
 
     fn start_next(&mut self) {
-        while self.running < limits::MAX_DECODING {
+        while self.live.load(Ordering::SeqCst) < limits::MAX_DECODING {
             let Some((cid, bytes)) = self.queue.pop_front() else {
                 return;
             };
@@ -250,18 +288,30 @@ impl Images {
             };
             let done = self.done_tx.clone();
             let notify = Arc::clone(&self.notify);
+            let decode = Arc::clone(&self.decoder);
             let name = cid.clone();
             let timeout = self.timeout;
+            self.live.fetch_add(1, Ordering::SeqCst);
+            let slot = Arc::new(Slot {
+                live: Arc::clone(&self.live),
+                notify: Arc::clone(&self.notify),
+            });
             // the supervisor waits for the decoder at most DECODE_TIMEOUT; a decoder past it
-            // is left to finish on its own, and its image is dropped
+            // is left to finish on its own, and its image is dropped. Each holds the slot (a
+            // thread that cannot start drops its closure, and the slot with it)
             let started = std::thread::Builder::new()
                 .name("veles-image".to_owned())
                 .spawn(move || {
                     let (tx, rx) = channel();
+                    let held = Arc::clone(&slot);
                     let decoder = std::thread::Builder::new()
                         .name("veles-image-decode".to_owned())
                         .spawn(move || {
-                            let _ = tx.send(decode(&bytes.0));
+                            let result = decode(&bytes.0);
+                            drop(bytes);
+                            // an abandoned decoder's image is dropped here, then its slot
+                            let _ = tx.send(result);
+                            drop(held);
                         });
                     let result = match decoder {
                         Ok(_) => rx.recv_timeout(timeout).unwrap_or(Err(Placeholder::Failed)),
@@ -269,12 +319,18 @@ impl Images {
                     };
                     let _ = done.send((cid, result.map(|img| picker.new_resize_protocol(img))));
                     notify();
+                    drop(slot);
                 });
             match started {
                 Ok(_) => self.running += 1,
                 Err(_) => self.early.push((name, Err(Placeholder::Failed))),
             }
         }
+    }
+
+    /// The decode slots taken: decodes running, and abandoned decoders still running.
+    pub fn decoding(&self) -> usize {
+        self.live.load(Ordering::SeqCst)
     }
 
     /// Takes what the workers finished, never blocking: decoded images become drawable (the

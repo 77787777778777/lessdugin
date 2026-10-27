@@ -179,6 +179,67 @@ fn a_decode_past_the_timeout_is_abandoned() {
     assert!(!img.has("slow"));
 }
 
+/// A decode abandoned past its timeout keeps its slot until its decoder ends (it still holds
+/// its input and its allocation): it counts against `MAX_DECODING`, and the next decode waits
+/// for it rather than adding a thread.
+#[test]
+fn a_timed_out_decode_keeps_its_slot_until_it_ends() {
+    use std::sync::{Condvar, Mutex};
+    // decoders that run until the gate opens
+    let gate = Arc::new((Mutex::new(false), Condvar::new()));
+    let g = Arc::clone(&gate);
+    let mut img = halfblocks()
+        .with_timeout(Duration::from_millis(20))
+        .with_decoder(Arc::new(move |b: &[u8]| {
+            let (open, cv) = &*g;
+            let mut o = open.lock().unwrap();
+            while !*o {
+                o = cv.wait(o).unwrap();
+            }
+            drop(o);
+            decode(b)
+        }));
+    for cid in ["slow1", "slow2"] {
+        img.decode(cid.into(), bytes(png(4, 4)));
+    }
+    let mut got = Vec::new();
+    let end = Instant::now() + Duration::from_secs(10);
+    while got.len() < 2 && Instant::now() < end {
+        got.extend(img.poll().decoded);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    got.sort();
+    assert_eq!(
+        got,
+        [
+            ("slow1".to_owned(), Err(Placeholder::Failed)),
+            ("slow2".to_owned(), Err(Placeholder::Failed))
+        ]
+    );
+    // both decoders still run: they keep their slots, and the next decode waits
+    assert_eq!(img.decoding(), limits::MAX_DECODING);
+    img.decode("next".into(), bytes(png(4, 4)));
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(img.poll().decoded, [], "it waits for a slot");
+    assert_eq!(img.decoding(), limits::MAX_DECODING);
+    assert!(img.busy());
+    // once they end, it runs
+    {
+        let (open, cv) = &*gate;
+        *open.lock().unwrap() = true;
+        cv.notify_all();
+    }
+    assert_eq!(
+        outcome(&mut img, Duration::from_secs(10)),
+        [("next".to_owned(), Ok(()))]
+    );
+    let end = Instant::now() + Duration::from_secs(10);
+    while img.decoding() > 0 && Instant::now() < end {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(img.decoding(), 0, "every slot is handed back");
+}
+
 /// At most `MAX_SHOWN` decoded images are kept; the oldest goes first, and is reported.
 #[test]
 fn the_oldest_image_is_dropped_past_the_cap() {
