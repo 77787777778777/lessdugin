@@ -1237,6 +1237,9 @@ Sequence scores come from opinions on the sequence. They earn no karma.
 Everything in this section is computed locally from the fold and local state. That happens at sync time (CORE), live through Jetstream (CORE+), and offline or across forums through the indexer's `getActivity` (EXT, later), whose results are hints followed by point fetches. Push and email are **Reserved (P8+)**.
 
 **Newness.** An item x is new for the viewer if and only if `t_obs(x) > watermark(viewer)`. `createdAt` is never used, so backdating cannot hide an item.
+- Each computation moves the watermark to the greatest `t_obs` of the forum's records, eligible or not.
+- A new item that is not eligible when the watermark passes it (hidden while an authority's repo is unavailable, hidden by a moderator and then kept by a higher rank, by an author not yet in S ∪ E) is kept **pending** and evaluated again at each later computation, so it is notified once it is eligible. A pending item is dropped once it is Excluded (V1), 7 days (*tunable*) after it was first seen, or beyond the 1,000 (*tunable*) most recently seen per viewer and forum.
+- A stored notification about an item is shown, and counted as unread, only while the item is listed. One about an item hidden, removed or deleted since is left out, with its preview.
 
 **Eligible items.** Only items that are:
 - listed (§10.1);

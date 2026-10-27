@@ -103,14 +103,14 @@ pub struct Baseline {
     /// it was found in, so two computations from one baseline (overlapping refreshes, two
     /// processes over one state store) give it the same id and it is stored once.
     #[serde(default)]
-    pub gen: u64,
+    pub generation: u64,
 }
 
 /// One computed notification.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Note {
     /// A stable id (an item's notification is `n:<uri>`; a change's carries the generation of
-    /// the baseline it was found against, [`Baseline::gen`]).
+    /// the baseline it was found against, [`Baseline::generation`]).
     pub id: String,
     /// The reason.
     pub reason: NotificationReason,
@@ -454,12 +454,12 @@ pub fn compute(inp: &Input<'_>, base: Option<&Baseline>) -> (Vec<Note>, Baseline
                 obs: top,
                 snapshot,
                 pending: BTreeMap::new(),
-                gen: 0,
+                generation: 0,
             },
         );
     };
     let mut notes = Vec::new();
-    let gen = base.gen.saturating_add(1);
+    let g = base.generation.saturating_add(1);
     // new items
     for x in new_items(inp.input, inp.view, inp.me, base) {
         let value = inp.values.get(&x.uri);
@@ -508,7 +508,7 @@ pub fn compute(inp: &Input<'_>, base: Option<&Baseline>) -> (Vec<Note>, Baseline
             .collect();
         if !grown.is_empty() {
             notes.push(Note {
-                id: format!("r:{item}:{gen}"),
+                id: format!("r:{item}:{g}"),
                 reason: NotificationReason::Reacted,
                 at_ms: now,
                 subject: item.clone(),
@@ -535,7 +535,7 @@ pub fn compute(inp: &Input<'_>, base: Option<&Baseline>) -> (Vec<Note>, Baseline
             subject.to_owned()
         };
         notes.push(Note {
-            id: format!("m:{k}:{gen}"),
+            id: format!("m:{k}:{g}"),
             reason: NotificationReason::ModAction,
             at_ms: now,
             subject,
@@ -554,7 +554,7 @@ pub fn compute(inp: &Input<'_>, base: Option<&Baseline>) -> (Vec<Note>, Baseline
         if now.saturating_sub(old.karma_at_ms) >= inp.karma_every_ms {
             let d = snap.karma - old.karma;
             notes.push(Note {
-                id: format!("k:{}:{gen}", inp.input.forum),
+                id: format!("k:{}:{g}", inp.input.forum),
                 reason: NotificationReason::KarmaChange,
                 at_ms: now,
                 subject: inp.input.forum.clone(),
@@ -579,7 +579,7 @@ pub fn compute(inp: &Input<'_>, base: Option<&Baseline>) -> (Vec<Note>, Baseline
             obs: top.max(base.obs),
             snapshot: next,
             pending: pending(inp, base),
-            gen: if changes { gen } else { base.gen },
+            generation: if changes { g } else { base.generation },
         },
     )
 }
