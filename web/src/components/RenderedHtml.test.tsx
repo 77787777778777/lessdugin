@@ -114,6 +114,31 @@ describe("RenderedHtml", () => {
     expect(screen.getByRole("button", { name: /clip\.mp4 \(click to load\)/ })).toBeTruthy();
   });
 
+  it("hides only the footnotes it copied as sidenotes (lfm-1.md §8.1)", async () => {
+    // footnote 2's first reference is gone (a flattened spoiler): it must stay in the section
+    const two = SAFE.replace(
+      "</ol>",
+      '<li id="md-fn-2" dir="auto"><p dir="auto">Orphan.</p>\n</li>\n</ol>',
+    );
+    const { container } = renderWithApp(<RenderedHtml html={two} sidenotes />);
+    const root = await mountedRoot(container);
+    await waitFor(() => expect(root.querySelector(".lfm-sidenote")).not.toBeNull());
+    expect(root.querySelector("#md-fn-1")?.classList.contains("lfm-sidenoted")).toBe(true);
+    expect(root.querySelector("#md-fn-2")?.classList.contains("lfm-sidenoted")).toBe(false);
+    expect(root.querySelector("#md-fn-2")?.getAttribute("value")).toBe("2");
+    expect(root.querySelector("section.footnotes")?.classList.contains("lfm-all-sidenoted")).toBe(
+      false,
+    );
+    // every definition copied: the section goes
+    const one = renderWithApp(<RenderedHtml html={SAFE} sidenotes />);
+    const root1 = await mountedRoot(one.container);
+    await waitFor(() =>
+      expect(
+        root1.querySelector("section.footnotes")?.classList.contains("lfm-all-sidenoted"),
+      ).toBe(true),
+    );
+  });
+
   describe("media (sync.md §11.2, threat-model SPA-7)", () => {
     const CID = "bafkreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy";
     const view = (mime: string): MediaView => ({

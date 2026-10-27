@@ -171,7 +171,10 @@ function labelTaskCheckboxes(root: Element): void {
   }
 }
 
-/** Copies each footnote next to its first reference, for wide screens. */
+/** Copies each footnote next to its first reference, for wide screens. Only the copied
+ * definitions are hidden there: one whose first reference is not in the root (inside a
+ * flattened spoiler, or cut by the output budget) stays in the footnotes section, which is
+ * hidden only when every definition was copied (lfm-1.md §8.1). */
 function addSidenotes(root: Element): void {
   for (const sup of root.querySelectorAll("sup[id]")) {
     const m = /^md-fnref-([1-9][0-9]*)-1$/.exec(sup.id);
@@ -197,6 +200,19 @@ function addSidenotes(root: Element): void {
     }
     for (const withId of note.querySelectorAll("[id]")) withId.removeAttribute("id");
     sup.after(note);
+    li.classList.add("lfm-sidenoted");
+  }
+  for (const section of root.querySelectorAll("section.footnotes")) {
+    const items = [...section.querySelectorAll("li[id]")].filter((li) => /^md-fn-/.test(li.id));
+    if (items.every((li) => li.classList.contains("lfm-sidenoted"))) {
+      section.classList.add("lfm-all-sidenoted");
+      continue;
+    }
+    // the definitions left in the list keep their numbers when the others are hidden
+    for (const li of items) {
+      const n = /^md-fn-([1-9][0-9]*)$/.exec(li.id)?.[1];
+      if (n) li.setAttribute("value", n);
+    }
   }
 }
 

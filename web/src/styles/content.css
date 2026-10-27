@@ -432,7 +432,8 @@
     color: var(--color-text);
   }
 
-  .lfm-sidenotes .lfm section.footnotes {
+  .lfm-sidenotes .lfm section.footnotes.lfm-all-sidenoted,
+  .lfm-sidenotes .lfm section.footnotes li.lfm-sidenoted {
     display: none;
   }
 }
