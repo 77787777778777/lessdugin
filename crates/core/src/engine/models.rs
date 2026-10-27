@@ -150,6 +150,9 @@ pub(crate) struct Runtime {
     pub(crate) gc_at: Mutex<Option<i64>>,
     /// One notification refresh at a time (each reads the baseline the previous one wrote).
     pub(crate) notify: AsyncMutex<()>,
+    /// Authorities whose `forum_open` sync failed, with when (ms): not tried again by
+    /// `forum_open` within [`limits::FORUM_REOPEN_MS`].
+    authority_failed: Mutex<BTreeMap<String, i64>>,
 }
 
 pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -169,6 +172,26 @@ impl Runtime {
             live_wakers: Mutex::new(Vec::new()),
             gc_at: Mutex::new(None),
             notify: AsyncMutex::new(()),
+            authority_failed: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    /// `false` if `forum_open`'s sync of authority `did` failed less than
+    /// [`limits::FORUM_REOPEN_MS`] before `now_ms`.
+    pub(crate) fn authority_due(&self, did: &str, now_ms: i64) -> bool {
+        lock(&self.authority_failed)
+            .get(did)
+            .is_none_or(|at| now_ms.saturating_sub(*at) >= limits::FORUM_REOPEN_MS)
+    }
+
+    /// Records the outcome of `forum_open`'s sync of authority `did` at `now_ms`.
+    pub(crate) fn authority_tried(&self, did: &str, failed: bool, now_ms: i64) {
+        let mut m = lock(&self.authority_failed);
+        m.retain(|_, at| now_ms.saturating_sub(*at) < limits::FORUM_REOPEN_MS);
+        if failed {
+            m.insert(did.to_owned(), now_ms);
+        } else {
+            m.remove(did);
         }
     }
 

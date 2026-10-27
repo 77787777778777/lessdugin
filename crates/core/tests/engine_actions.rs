@@ -1066,6 +1066,35 @@ fn an_inactive_moderators_hides_stay_then_the_view_degrades() {
     assert!(hidden(&state()), "{:?}", state());
 }
 
+/// `forum_open` of a forum with a moderator whose DID never resolves: the view is degraded, and
+/// opening it again neither drops the model nor emits `Changed [Forum]` (a client that
+/// re-queries on `Changed` would loop for ever), nor retries the authority at once.
+#[test]
+fn reopening_a_degraded_forum_announces_no_change() {
+    let w = World::new();
+    let (alice, bob) = (&w.alice, &w.bob);
+    let mut decl = alice.record(nsid::FORUM, "meta").unwrap();
+    decl["moderators"] = json!([{ "did": "did:plc:zzzzzzzzzzzzzzzzzzzzzzzz", "role": "moderator" }]);
+    alice.acct.put(nsid::FORUM, "meta", &decl);
+    w.tick(10 * MINUTE);
+    let first = block_on(bob.engine.forum_open(&w.forum)).unwrap();
+    assert!(first.completeness.degraded, "{first:?}");
+    let forum_changed = |ev: &[Event]| {
+        ev.iter().any(|e| {
+            matches!(e, Event::Changed { topics }
+                if topics.iter().any(|t| matches!(t, Topic::Forum { .. })))
+        })
+    };
+    bob.take_events();
+    for _ in 0..3 {
+        w.tick(1_000);
+        let v = block_on(bob.engine.forum_open(&w.forum)).unwrap();
+        assert!(v.completeness.degraded, "{v:?}");
+        let ev = bob.take_events();
+        assert!(!forum_changed(&ev), "{ev:?}");
+    }
+}
+
 #[test]
 fn mods_rm_does_not_remove_when_adoption_fails() {
     let w = World::new();
