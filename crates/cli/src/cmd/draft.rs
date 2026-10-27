@@ -42,7 +42,7 @@ use lessdugin_native::template::{SCISSORS, neutralise_modelines};
 use serde::Serialize;
 
 use crate::args::{DraftAction, DraftArgs};
-use crate::cmd::{refs, write};
+use crate::cmd::{media, refs, write};
 use crate::ctx::{CliError, Ctx};
 use crate::out::{Style, cat, lit, tt};
 use crate::prompt;
@@ -651,7 +651,7 @@ fn ask_publish() -> Answer {
     }
 }
 
-fn summary(ctx: &Ctx, d: &PostDraft, forum_name: &str) {
+fn summary(ctx: &Ctx, d: &PostDraft, forum_name: &str, attached: &[media::Attached]) {
     let words = lessdugin_markdown::derive_metadata(&d.body.markdown, &[]).word_count;
     let out = &ctx.out;
     out.err_line(&[(lit("About to publish:"), Style::Bold)]);
@@ -675,6 +675,27 @@ fn summary(ctx: &Ctx, d: &PostDraft, forum_name: &str) {
             (tt(&d.tags.join(", ")), Style::Plain),
         ]);
     }
+    // the files of this machine (or prepared on it) that are uploaded with the post
+    for a in attached {
+        out.err_line(&[
+            (lit("  media  "), Style::Dim),
+            (tt(&a.source), Style::Plain),
+            (
+                cat([
+                    lit(" ("),
+                    tt(&a.media.mime),
+                    lit(", "),
+                    media::size(a.media.size_bytes),
+                    lit(if a.media.alt.is_some() {
+                        ")"
+                    } else {
+                        ", no alt text)"
+                    }),
+                ]),
+                Style::Dim,
+            ),
+        ]);
+    }
     out.err_line(&[
         (lit("  words  "), Style::Dim),
         (tt(&words.to_string()), Style::Plain),
@@ -687,6 +708,9 @@ pub struct PostSource {
     pub doc: Doc,
     /// Its draft id, once it is saved as a draft.
     pub draft: Option<String>,
+    /// The directory its relative image paths are in: the post's file's, else the working
+    /// directory (`None`).
+    pub base: Option<PathBuf>,
 }
 
 /// Saves `src` as a draft (a new id the first time); returns the id.
@@ -721,7 +745,7 @@ pub async fn publish_post(ctx: &Ctx, mut src: PostSource, yes: bool) -> Result<(
                 Err(e) => return Err(e),
             },
         };
-        let draft = match post_draft(&src.doc, forum.clone()) {
+        let mut draft = match post_draft(&src.doc, forum.clone()) {
             Ok(d) => d,
             Err(errors) => {
                 let id = keep(ctx, &drafts, &mut src, &errors)?;
@@ -739,6 +763,19 @@ pub async fn publish_post(ctx: &Ctx, mut src: PostSource, yes: bool) -> Result<(
                 ));
             }
         };
+        // draft-local images become `cid:` media (`lfm-1.md` §12)
+        let base = src.base.clone().unwrap_or_else(|| PathBuf::from("."));
+        let attached = match media::attach(ctx, &w.engine, &mut draft.body, &base).await {
+            Ok(a) => a,
+            Err(e) => {
+                if src.draft.is_some()
+                    && let CliError::Engine(err) = &e
+                {
+                    keep(ctx, &drafts, &mut src, std::slice::from_ref(&err.message))?;
+                }
+                return Err(e);
+            }
+        };
         if !yes {
             if !interactive {
                 let id = keep(ctx, &drafts, &mut src, &[])?;
@@ -747,7 +784,7 @@ pub async fn publish_post(ctx: &Ctx, mut src: PostSource, yes: bool) -> Result<(
                      publish it with `lessdugin draft publish {id} --yes`"
                 )));
             }
-            summary(ctx, &draft, forum.as_deref().unwrap_or_default());
+            summary(ctx, &draft, forum.as_deref().unwrap_or_default(), &attached);
             match ask_publish() {
                 Answer::Yes => {}
                 Answer::Edit => {
@@ -935,6 +972,7 @@ pub async fn run(ctx: &Ctx, args: DraftArgs) -> Result<(), CliError> {
                         PostSource {
                             doc,
                             draft: Some(id),
+                            base: None,
                         },
                         yes,
                     )

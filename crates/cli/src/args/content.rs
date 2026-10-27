@@ -463,6 +463,52 @@ pub enum DraftAction {
     },
 }
 
+/// `media`.
+#[derive(Debug, Args)]
+pub struct MediaArgs {
+    /// What to do.
+    #[command(subcommand)]
+    pub action: MediaAction,
+}
+
+/// `media …` (`lfm-1.md` §6.2 numbers a body's media items 1…N).
+#[derive(Debug, Subcommand)]
+pub enum MediaAction {
+    /// Prepare a file (metadata stripped, CID computed) and print the `![…](cid:…)` to put in a
+    /// post; it is uploaded when the post is published from this device. A post can also name
+    /// the file itself: `![alt](./chart.png)`.
+    Add {
+        /// An image, video, audio file or PDF.
+        #[arg(value_name = "FILE")]
+        file: PathBuf,
+        /// The accessible description (shown to readers who cannot see the image).
+        #[arg(long, value_name = "TEXT")]
+        alt: Option<String>,
+    },
+    /// Save a media item of a post or comment as `<cid>.<ext>` (the bytes are checked against
+    /// the CID).
+    Get {
+        /// The post or comment.
+        #[arg(value_name = "REF")]
+        reference: String,
+        /// Which item (`[image 2: …]` is 2).
+        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u16).range(1..))]
+        index: u16,
+        /// Where to save it: a file, or a directory for `<cid>.<ext>` (default: here).
+        #[arg(long, short = 'o', value_name = "PATH")]
+        out: Option<PathBuf>,
+    },
+    /// Open a media item of a post or comment with the system's viewer.
+    Open {
+        /// The post or comment.
+        #[arg(value_name = "REF")]
+        reference: String,
+        /// Which item (`[image 2: …]` is 2).
+        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u16).range(1..))]
+        index: u16,
+    },
+}
+
 /// `outbox`.
 #[derive(Debug, Args)]
 pub struct OutboxArgs {

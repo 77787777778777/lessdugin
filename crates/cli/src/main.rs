@@ -59,6 +59,7 @@ async fn run(ctx: &Ctx, command: Command) -> Result<(), CliError> {
         Command::Mods(a) => cmd::social::mods(ctx, a).await,
         Command::Mod(a) => cmd::social::run(ctx, a).await,
         Command::Draft(a) => cmd::draft::run(ctx, a).await,
+        Command::Media(a) => cmd::media::run(ctx, a).await,
         Command::Outbox(a) => cmd::outbox::run(ctx, a).await,
         Command::Login(a) => cmd::login::run(ctx, a).await,
         Command::Logout(a) => cmd::session::logout(ctx, a).await,

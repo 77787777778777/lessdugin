@@ -162,6 +162,8 @@ pub enum Command {
     Mod(ModArgs),
     /// Drafts kept in the data directory: ls, edit, rm, publish.
     Draft(DraftArgs),
+    /// Media: add a file for a post, get or open a post's attachment.
+    Media(MediaArgs),
     /// Queued writes: ls, flush, retry, undo.
     Outbox(OutboxArgs),
     /// Log in (OAuth in the browser by default; --app-password for bots and headless use).

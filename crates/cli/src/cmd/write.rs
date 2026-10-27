@@ -354,6 +354,15 @@ pub async fn post(ctx: &Ctx, args: PostArgs) -> Result<(), CliError> {
         PostSource {
             doc,
             draft: draft_id,
+            // relative image paths are next to the post's file
+            base: args
+                .file
+                .as_deref()
+                .filter(|f| f.as_os_str() != "-")
+                .map(|f| match f.parent() {
+                    Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+                    _ => std::path::PathBuf::from("."),
+                }),
         },
         args.yes,
     )
