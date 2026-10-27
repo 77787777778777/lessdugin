@@ -39,7 +39,8 @@
 //! acknowledgements (`ack`, PRIV-9: the interstitials show again), the notifications and their
 //! baselines (`notif`, `nbase`: a planted row would list any text as a notification, or move a
 //! forum's watermark or generation and silence it) or prepared media, and a setting only with a
-//! value `set_setting` accepts. Those members are counted as `refused`, and the report counts
+//! value `set_setting` accepts, that names no third party, and that makes this device contact
+//! no more endpoints than before (`sources` only as `direct`). Those members are counted as `refused`, and the report counts
 //! what was written per family, so a client can say what changed.
 
 use base64::Engine as _;
@@ -185,6 +186,9 @@ fn importable<'a>(parts: &'a [Part], v: &[u8]) -> Option<&'a str> {
             .filter(|k| SETTINGS.contains(k) && !NOT_IMPORTED.contains(k) && parts.len() == 3)?;
         let v = std::str::from_utf8(v).ok()?;
         check_setting_value(k, v).ok()?;
+        if STRICTER_ONLY.iter().any(|(sk, sv)| *sk == k && *sv != v) {
+            return None;
+        }
     }
     Some(tag)
 }
@@ -393,6 +397,15 @@ pub const SETTING_FIELDS: [&str; 7] = [
 /// would then contact (media hosts, indexers, forums whose external images load). A backup
 /// cannot add one; the user does, in the settings, where the list is shown.
 const NOT_IMPORTED: [&str; 3] = ["mediaHosts", "externalImagesForums", "indexers"];
+
+/// The stored switches an import may set only to their stricter value, for the same reason: a
+/// file can turn `direct` on (or a fetch off) but never back to `assisted` (Slingshot, `sync.md`
+/// §2.3), even over a choice the user made in the settings.
+const STRICTER_ONLY: [(&str, &str); 3] = [
+    ("sources", "direct"),
+    ("mediaAutoload", "off"),
+    ("externalImages", "off"),
+];
 
 impl<H: crate::host::Host> Engine<H> {
     /// `settings()` (`engine-api.md` §3.6, M4): the whole local picture, in the shape the

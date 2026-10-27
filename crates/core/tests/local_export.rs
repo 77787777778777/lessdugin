@@ -433,3 +433,37 @@ fn a_purge_deletes_the_accounts_notifications_acks_and_drafts() {
         .count();
     assert_eq!(bobs, 2, "bob's rows are not alice's to purge");
 }
+
+/// O-3 (`sync.md` §2.3): an import never makes the device contact more endpoints. `sources` is
+/// imported only as `direct`, the fetch switches only as `off`, so a "settings backup" cannot
+/// turn a user who chose `direct` back to `assisted` (Slingshot).
+#[test]
+fn an_import_sets_the_switches_only_toward_the_stricter_value() {
+    use lessdugin_core::engine::Sources;
+    let (host, _pds, alice, _bob) = setup();
+    let e = engine(&host);
+    block_on(e.add_account(AccountInfo::app_password(alice.did.as_str(), PDS))).unwrap();
+    block_on(e.set_setting("sources", Some(&serde_json::json!("direct")))).unwrap();
+    let mut x = block_on(e.export_local(ExportScope::Mine)).unwrap();
+    x.members = vec![
+        loc_member(&["loc", "setting", "sources"], b"assisted"),
+        loc_member(&["loc", "setting", "mediaAutoload"], b"on"),
+        loc_member(&["loc", "setting", "externalImages"], b"off"),
+    ];
+    let report = block_on(e.import_local(&x, ExportScope::Mine)).unwrap();
+    assert_eq!((report.refused, report.imported), (2, 1), "{report:?}");
+    assert_eq!(block_on(e.sources()).unwrap(), Sources::Direct);
+    let stored = |k: &str| {
+        let k = lessdugin_core::store::key::encode(&["loc".into(), "setting".into(), k.into()]);
+        block_on(host.state().get_many(vec![k])).unwrap().pop().flatten()
+    };
+    assert_eq!(stored("sources").as_deref(), Some(&b"direct"[..]));
+    assert_eq!(stored("mediaAutoload"), None);
+    assert_eq!(stored("externalImages").as_deref(), Some(&b"off"[..]));
+    // the stricter value is taken over the default
+    x.members = vec![loc_member(&["loc", "setting", "sources"], b"direct")];
+    block_on(e.set_setting("sources", None)).unwrap();
+    let report = block_on(e.import_local(&x, ExportScope::Mine)).unwrap();
+    assert_eq!(report.imported, 1, "{report:?}");
+    assert_eq!(stored("sources").as_deref(), Some(&b"direct"[..]));
+}

@@ -224,7 +224,7 @@ The `records` input of the fold (`social.md` §1.1) is built from eligible store
 | `indexer` | `forum`, `none`, or a list of URLs | `forum` | which indexers to use (§2.4); CLI `--indexer <url\|none\|forum>` |
 | `media.hosts` | list of hostnames | empty | the user's media autoload allowlist (§11.3) |
 
-Settings live in the `state` store (`loc`, §10.4). CLI flags override them per invocation. `sources` in effect is a flag of the invocation, else the stored setting, else the build default; the running engine reads it at each use, so `set_setting` applies at once, and in `direct` no CORE+ or EXT endpoint (Slingshot, Jetstream, Constellation, a relay, an indexer) is contacted (`engine-api.md` §3.6). A store that cannot be read counts as `direct`. `verify = proof` is refused by `set_setting` (`unsupported`) while it is Reserved, so a stored choice never claims a mode that does nothing.
+Settings live in the `state` store (`loc`, §10.4). CLI flags override them per invocation. `sources` in effect is a flag of the invocation, else the stored setting, else the build default; the running engine reads it at each use, so `set_setting` applies at once, and in `direct` no CORE+ or EXT endpoint (Slingshot, Jetstream, Constellation, a relay, an indexer) is contacted (`engine-api.md` §3.6). A store that cannot be read counts as `direct`, and an imported file (`import_local`) can set `sources` only to `direct`, never back to `assisted`. `verify = proof` is refused by `set_setting` (`unsupported`) while it is Reserved, so a stored choice never claims a mode that does nothing.
 
 ### 2.4 Endpoints and consent
 
