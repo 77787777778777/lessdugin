@@ -6,7 +6,10 @@
 mod common;
 
 use common::block_on;
-use lessdugin_core::dto::{ForumDraft, MediaInput, MediaRef, PostDraft, WriteState, WriteTicket};
+use lessdugin_core::dto::{
+    CommentDraft, Draft, EditOpts, ForumDraft, MediaInput, MediaRef, PostDraft, WriteState,
+    WriteTicket,
+};
 use lessdugin_core::engine::{AccountInfo, Engine, EngineConfig, ErrorCode};
 use lessdugin_core::media::{Format, sniff};
 use lessdugin_lexicon::collection::nsid;
@@ -200,4 +203,49 @@ fn a_spilled_body_that_names_a_downscaled_image_fails_rather_than_lose_it() {
         }
         other => panic!("the write must fail: {other:?}"),
     }
+}
+
+#[test]
+fn a_comment_uploads_its_media() {
+    // m4-17: comment() sent no blobs, so the record named a blob the PDS never received and the
+    // write failed with BlobNotFound
+    let a = Author::new(PdsConfig::default());
+    let post = a.done(&block_on(a.engine.publish(&PostDraft::article(&a.forum, "t", "b"))).unwrap());
+    let m = block_on(a.engine.prepare_media(noise_png(16, 16, 6), &input("a reply"))).unwrap();
+    let mut d = CommentDraft::new(&post, None, format!("![r](cid:{})", m.cid));
+    d.body.media.push(m.clone());
+    let uri = a.done(&block_on(a.engine.comment(&d)).unwrap());
+    let rec = a
+        .acct
+        .get(nsid::COMMENT, uri.rsplit('/').next().unwrap())
+        .unwrap();
+    assert_eq!(rec["body"]["media"][0]["blob"]["ref"]["$link"], m.cid.as_str());
+    assert!(a.acct.serves_blob(&lessdugin_atp::cid::parse(&m.cid).unwrap()));
+}
+
+#[test]
+fn an_edit_uploads_the_media_it_adds_and_keeps_the_blob_objects_it_had() {
+    // m4-17: edit() sent no blobs either
+    let a = Author::new(PdsConfig::default());
+    let first = block_on(a.engine.prepare_media(noise_png(16, 16, 7), &input("one"))).unwrap();
+    let uri = a.done(&a.post_with(&first));
+    let before = a.record(&uri)["body"]["media"][0].clone();
+    let second = block_on(a.engine.prepare_media(noise_png(16, 16, 8), &input("two"))).unwrap();
+    let mut post = PostDraft::article(
+        &a.forum,
+        "Two pictures",
+        format!("![one](cid:{}) ![two](cid:{})", first.cid, second.cid),
+    );
+    post.body.media = vec![first.clone(), second.clone()];
+    let uploads = a.net.count("com.atproto.repo.uploadBlob");
+    let edit = Draft::Post { id: None, post };
+    let t = block_on(a.engine.edit(&uri, &edit, &EditOpts::default())).unwrap();
+    assert_eq!(a.done(&t), uri);
+    // only the new image went up
+    assert_eq!(a.net.count("com.atproto.repo.uploadBlob") - uploads, 1);
+    let rec = a.record(&uri);
+    assert_eq!(rec["title"], "Two pictures");
+    assert_eq!(rec["body"]["media"][0]["blob"], before["blob"], "kept verbatim");
+    assert_eq!(rec["body"]["media"][1]["blob"]["ref"]["$link"], second.cid.as_str());
+    assert!(a.acct.serves_blob(&lessdugin_atp::cid::parse(&second.cid).unwrap()));
 }
