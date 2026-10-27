@@ -386,3 +386,31 @@ fn filters_and_every_sort_are_reachable() {
         CommentSort::LatestReply
     );
 }
+
+/// An open forum carries the L7 label in its header (`threat-model.md` L7, SOC-13); an
+/// approval forum, complete without third-party servers, does not.
+#[test]
+fn an_open_forum_says_it_relies_on_public_relays() {
+    use lessdugin_core::dto::{DefaultTier, ForumDraft, MembershipMode};
+    use lessdugin_tui::view::OPEN_MODE_LABEL;
+    let s = scenario();
+    let (alice, carol) = (&s.w.alice, &s.w.carol);
+    let mut draft = ForumDraft::new("open", "Open");
+    draft.membership = MembershipMode::Open;
+    draft.default_tier = DefaultTier::Frontpage;
+    let t = block_on(alice.engine.forum_create(&draft)).unwrap();
+    alice.flush();
+    let forum = alice.done(&t);
+    s.w.tick(MINUTE);
+    block_on(carol.engine.forum_follow(&forum, None)).unwrap();
+    carol.sync(&forum);
+
+    let mut t = tui(&s, 80, 24);
+    block_on(t.start(Some(forum.clone())));
+    let screen = t.render();
+    assert!(screen.contains(OPEN_MODE_LABEL), "{screen}");
+    let mut t = tui(&s, 80, 24);
+    block_on(t.start(Some(s.forum.clone())));
+    let screen = t.render();
+    assert!(!screen.contains(OPEN_MODE_LABEL), "{screen}");
+}

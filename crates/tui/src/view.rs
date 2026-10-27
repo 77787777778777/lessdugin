@@ -25,6 +25,13 @@ use crate::text::{
     mod_queue_item, name, notification_line, pad, post_meta, post_title, spans, tt, wrapped,
 };
 
+/// The label open mode carries in the forum header (`threat-model.md` L7): it finds brand-new
+/// members only through third-party infrastructure.
+pub const OPEN_MODE_LABEL: &str = "Open mode relies on Bluesky relay, Jetstream and Constellation";
+
+/// The banner code of that label, should the engine carry it (`relayDependent`).
+const RELAY_DEPENDENT: &str = "relayDependent";
+
 fn dim() -> Style {
     Style::default().add_modifier(Modifier::DIM)
 }
@@ -718,6 +725,21 @@ fn forum(top: &Screen, s: &ForumScreen, h: usize, w: usize, lines: &mut Vec<Line
     };
     for b in banner_lines(&d.list.banners) {
         lines.push(line([(lit("  "), Style::default()), (b, warn_style())]));
+    }
+    // the L7 label of an open forum (`threat-model.md` L7, SOC-13), unless the engine already
+    // carries it as a banner
+    if d.view.forum.membership == MembershipMode::Open
+        && !d
+            .list
+            .banners
+            .iter()
+            .chain(&d.view.banners)
+            .any(|b| b.code == RELAY_DEPENDENT)
+    {
+        lines.push(line([
+            (lit("  "), Style::default()),
+            (cat([lit("! "), lit(OPEN_MODE_LABEL)]), dim()),
+        ]));
     }
     if s.tab == ForumTab::Activity {
         activity(top, s, h, w, lines);
