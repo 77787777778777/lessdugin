@@ -159,7 +159,11 @@ fn importing_a_mine_export_cannot_write_another_accounts_state() {
     block_on(e.add_account(AccountInfo::app_password(alice.did.as_str(), PDS))).unwrap();
     // craft an export that carries bob's draft, as a hand-edited file could
     let mut x = block_on(e.export_local(ExportScope::Mine)).unwrap();
-    put(&host, &["loc", "draft", bob.did.as_str(), "d1"], &draft_row("d1"));
+    put(
+        &host,
+        &["loc", "draft", bob.did.as_str(), "d1"],
+        &draft_row("d1"),
+    );
     x.members = block_on(e.export_local(ExportScope::Everything))
         .unwrap()
         .members;
@@ -455,7 +459,10 @@ fn an_import_sets_the_switches_only_toward_the_stricter_value() {
     assert_eq!(block_on(e.sources()).unwrap(), Sources::Direct);
     let stored = |k: &str| {
         let k = lessdugin_core::store::key::encode(&["loc".into(), "setting".into(), k.into()]);
-        block_on(host.state().get_many(vec![k])).unwrap().pop().flatten()
+        block_on(host.state().get_many(vec![k]))
+            .unwrap()
+            .pop()
+            .flatten()
     };
     assert_eq!(stored("sources").as_deref(), Some(&b"direct"[..]));
     assert_eq!(stored("mediaAutoload"), None);
@@ -480,11 +487,17 @@ fn an_import_caps_drafts_and_values_like_a_save() {
     let did = alice.did.as_str();
     let mut x = block_on(e.export_local(ExportScope::Mine)).unwrap();
     let mut huge = draft_row("huge");
-    huge.splice(1..1, format!(r#""pad":"{}","#, "x".repeat(DRAFT_MAX_BYTES)).into_bytes());
+    huge.splice(
+        1..1,
+        format!(r#""pad":"{}","#, "x".repeat(DRAFT_MAX_BYTES)).into_bytes(),
+    );
     x.members = vec![
         loc_member(&["loc", "draft", did, "huge"], &huge),
         loc_member(&["loc", "draft", did, "junk"], b"not a draft"),
-        loc_member(&["loc", "draft", "3l2s5xxv2ze2c"], &draft_row("3l2s5xxv2ze2c")),
+        loc_member(
+            &["loc", "draft", "3l2s5xxv2ze2c"],
+            &draft_row("3l2s5xxv2ze2c"),
+        ),
         loc_member(&["loc", "follow", "big"], &vec![b'x'; (2 << 20) + 1]),
         loc_member(&["loc", "follow", &"k".repeat(2_100)], b"1"),
         loc_member(&["loc", "follow", "fk"], b"1"),
@@ -512,7 +525,11 @@ fn drafts_saved_before_they_were_per_account_are_adopted_and_purged() {
     let e = engine(&host);
     block_on(e.add_account(AccountInfo::app_password(alice.did.as_str(), PDS))).unwrap();
     let (a, b) = (alice.did.as_str(), bob.did.as_str());
-    put(&host, &["loc", "draft", "3l2s5xxv2ze2c"], &draft_row("3l2s5xxv2ze2c"));
+    put(
+        &host,
+        &["loc", "draft", "3l2s5xxv2ze2c"],
+        &draft_row("3l2s5xxv2ze2c"),
+    );
     let d = block_on(e.drafts()).unwrap();
     assert_eq!(
         d.iter().map(|d| d.id.as_str()).collect::<Vec<_>>(),
@@ -534,7 +551,11 @@ fn drafts_saved_before_they_were_per_account_are_adopted_and_purged() {
 
     // a legacy draft nobody listed yet: a purge removes it as well
     block_on(e.add_account(AccountInfo::app_password(b, PDS))).unwrap();
-    put(&host, &["loc", "draft", "3l2s6aaaaaaa2"], &draft_row("3l2s6aaaaaaa2"));
+    put(
+        &host,
+        &["loc", "draft", "3l2s6aaaaaaa2"],
+        &draft_row("3l2s6aaaaaaa2"),
+    );
     block_on(e.remove_account(b, true)).unwrap();
     assert!(rows(&host).is_empty(), "{:?}", rows(&host));
 }

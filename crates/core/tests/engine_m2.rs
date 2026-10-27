@@ -701,11 +701,7 @@ fn redaction_deletes_unsynced_and_invalid_revisions_too() {
         serde_json::json!({"$type": nsid::REVISION, "op": "update"}),
     );
     // and a revision of a comment of the thread, whose key extends the post's: not the post's
-    let comment = format!(
-        "at://{}/{}/{p}-3l2s5xxv2zaf2",
-        alice.did(),
-        nsid::COMMENT
-    );
+    let comment = format!("at://{}/{}/{p}-3l2s5xxv2zaf2", alice.did(), nsid::COMMENT);
     rev(
         "3l2s5xxv2zaf2-3l2s5xxv2zag2",
         serde_json::json!({"$type": nsid::REVISION, "subject": {"uri": comment, "cid": cid}}),

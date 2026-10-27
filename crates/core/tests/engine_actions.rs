@@ -1476,7 +1476,9 @@ fn notifications_about_hidden_items_are_left_out() {
     assert!(n.items.iter().all(|i| i.subject != spam), "{n:?}");
     assert_eq!(n.unread, 0, "{n:?}");
     assert_eq!(
-        block_on(alice.engine.unread_counts()).unwrap().notifications,
+        block_on(alice.engine.unread_counts())
+            .unwrap()
+            .notifications,
         0
     );
     block_on(alice.engine.forum_follow(&w.forum, None)).unwrap();
