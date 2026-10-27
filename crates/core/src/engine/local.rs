@@ -36,9 +36,11 @@
 //! key outside `loc` (the outbox would send a planted write with the user's session), never the
 //! login state (`account`, `active_account`, the authorization-server pins `as_pin`, `seeded`:
 //! `threat-model.md` ID-11, the rows the `web` bridge keeps read-only), never the public-action
-//! acknowledgements (`ack`, PRIV-9: the interstitials show again) or prepared media, and a
-//! setting only with a value `set_setting` accepts. Those members are counted as `refused`, and
-//! the report counts what was written per family, so a client can say what changed.
+//! acknowledgements (`ack`, PRIV-9: the interstitials show again), the notifications and their
+//! baselines (`notif`, `nbase`: a planted row would list any text as a notification, or move a
+//! forum's watermark or generation and silence it) or prepared media, and a setting only with a
+//! value `set_setting` accepts. Those members are counted as `refused`, and the report counts
+//! what was written per family, so a client can say what changed.
 
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
@@ -69,8 +71,9 @@ pub enum ExportScope {
 }
 
 /// The `loc` families an import may write (see the module docs): the lists and marks of
-/// `threat-model.md` PRIV-10, follows, drafts and the validated settings.
-pub const IMPORTABLE: [&str; 14] = [
+/// `threat-model.md` PRIV-10, follows, drafts and the validated settings. The notifications are
+/// exported but never imported: they are computed again on this device.
+pub const IMPORTABLE: [&str; 12] = [
     "alias",
     "bookmark",
     "draft",
@@ -78,8 +81,6 @@ pub const IMPORTABLE: [&str; 14] = [
     "fvisit",
     "karmaCadence",
     "mute",
-    "nbase",
-    "notif",
     "read",
     "rejected",
     "setting",

@@ -157,9 +157,9 @@ fn importing_a_mine_export_cannot_write_another_accounts_state() {
     let (host, _pds, alice, bob) = setup();
     let e = engine(&host);
     block_on(e.add_account(AccountInfo::app_password(alice.did.as_str(), PDS))).unwrap();
-    // craft an export that carries bob's notification, as a hand-edited file could
+    // craft an export that carries bob's draft, as a hand-edited file could
     let mut x = block_on(e.export_local(ExportScope::Mine)).unwrap();
-    put(&host, &["loc", "notif", bob.did.as_str(), "n1"], b"1");
+    put(&host, &["loc", "draft", bob.did.as_str(), "d1"], &draft_row("d1"));
     x.members = block_on(e.export_local(ExportScope::Everything))
         .unwrap()
         .members;
@@ -241,8 +241,9 @@ fn every_local_family_round_trips() {
 
 /// An export is a file someone can send: an import writes only the local lists and marks.
 /// Never a key outside `loc` (a planted outbox write would be sent with the user's session),
-/// never the login state, the authorization-server pins or the public-action acknowledgements,
-/// and a setting only with a value `set_setting` accepts (`threat-model.md` ID-11, PRIV-9).
+/// never the login state, the authorization-server pins, the public-action acknowledgements or
+/// the notifications and their baselines (a planted notice, a silenced forum), and a setting
+/// only with a value `set_setting` accepts (`threat-model.md` ID-11, PRIV-9).
 #[test]
 fn an_import_never_writes_login_state_outbox_rows_or_bad_settings() {
     let (host, _pds, alice, bob) = setup();
@@ -263,7 +264,21 @@ fn an_import_never_writes_login_state_outbox_rows_or_bad_settings() {
     let p = |s: &[&str]| s.iter().map(|s| (*s).into()).collect::<Vec<_>>();
     let mut out = p(&["out", did]);
     out.push(1i64.into());
+    // a notification with any text, and a baseline that silences the forum: computed on this
+    // device, never imported
+    let forum = "at://did:plc:x/online.7778777.lessdugin.temp.forum/f";
+    let planted = lessdugin_core::store::row::encode(&serde_json::json!({
+        "v": 1, "id": "planted", "reason": "modAction", "atMs": 1,
+        "subject": forum, "forum": forum, "preview": "a planted notice", "read": false,
+    }))
+    .unwrap();
+    let silenced = lessdugin_core::store::row::encode(&serde_json::json!({
+        "v": 1, "obs": i64::MAX, "generation": 0,
+    }))
+    .unwrap();
     let refused = [
+        member(p(&["loc", "notif", did, "planted"]), &planted),
+        member(p(&["loc", "nbase", did, forum]), &silenced),
         member(out, b"a planted write"),
         member(p(&["out.meta", did]), b"x"),
         member(p(&["loc", "as_pin", did]), b"https://evil.example"),
@@ -297,6 +312,21 @@ fn an_import_never_writes_login_state_outbox_rows_or_bad_settings() {
     let s = block_on(e.settings()).unwrap();
     assert_eq!(s.sources, lessdugin_core::dto::Sources::Direct);
     assert_eq!(s.verify, lessdugin_core::dto::VerifyMode::Pds);
+    let n = block_on(e.notifications(&lessdugin_core::dto::NotificationsQuery {
+        all: true,
+        limit: 50,
+    }))
+    .unwrap();
+    assert!(n.items.is_empty() && n.unread == 0, "{n:?}");
+}
+
+/// A stored draft row (`DraftEntryRow`'s JSON) with id `id`.
+fn draft_row(id: &str) -> Vec<u8> {
+    let draft = lessdugin_core::dto::Draft::Comment {
+        id: Some(id.to_owned()),
+        comment: lessdugin_core::dto::CommentDraft::new("at://did:plc:x/p/y", None, "unsent"),
+    };
+    serde_json::to_vec(&serde_json::json!({"id": id, "savedAtMs": 1, "draft": draft})).unwrap()
 }
 
 /// One `loc` member of an export.
