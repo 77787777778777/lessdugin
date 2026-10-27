@@ -253,7 +253,8 @@ fn the_edit_command_edits_a_quick_takes_body() {
     block_on(t.settle());
     let (title, body) = post_of(&s, &take);
     assert_eq!(title, None);
-    assert_eq!(body.trim(), "Sharper:\nA one-line take.", "{body:?}");
+    // (the plain text of the markdown: the two lines are one paragraph)
+    assert_eq!(body.trim(), "Sharper: A one-line take.", "{body:?}");
 
     // an editor that leaves the text as it is keeps the whole take
     let dir = tempfile::tempdir().unwrap();
@@ -264,7 +265,7 @@ fn the_edit_command_edits_a_quick_takes_body() {
     block_on(t.settle());
     let (title, body) = post_of(&s, &take);
     assert_eq!(title, None);
-    assert_eq!(body.trim(), "Sharper:\nA one-line take.", "{body:?}");
+    assert_eq!(body.trim(), "Sharper: A one-line take.", "{body:?}");
 }
 
 /// `:edit` on an article keeps a title the user did not change as it was, a leading `#`
