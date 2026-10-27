@@ -1554,6 +1554,11 @@ impl<H: crate::host::Host> crate::engine::Engine<H> {
     /// renders as unreadable. Only the bodies the views render are fetched: those of items
     /// the fold lists (`sync.md` §11.4, "hidden, provisional and pending content is never
     /// prefetched").
+    ///
+    /// The view waits at most `BODY_BLOB_WAIT_MS` for them: a slow author's PDS leaves its body
+    /// pending (the excerpt shows) rather than hold back the post and everyone's comments. A
+    /// fetch given up on is asked for again after `BODY_BLOB_RETRY_MS`; a copy the host stored
+    /// meanwhile (the browser's download runs on) is taken before then, without a request.
     pub(crate) async fn load_spilled_bodies(
         &self,
         model: &crate::model::ForumModel,
@@ -1566,6 +1571,9 @@ impl<H: crate::host::Host> crate::engine::Engine<H> {
             return;
         };
         let now = self.host().now_ms();
+        let retry = now.saturating_add(crate::limits::BODY_BLOB_RETRY_MS);
+        // (uri, author, blob)
+        let mut wanted: Vec<(&str, &str, &str)> = Vec::new();
         for (uri, v) in &values {
             // the predicate of `Views::body`: an item it renders empty is not asked for
             if !model.displayed(uri).is_some_and(State::listed) {
@@ -1577,20 +1585,35 @@ impl<H: crate::host::Host> crate::engine::Engine<H> {
             let (Some(blob), Some(x)) = (text_blob_cid(md), model.skel(uri)) else {
                 continue;
             };
-            if renders.contains(&x.cid)
-                || renders.spilled(blob).is_some()
-                || renders.spilled_retry_at(blob).is_some_and(|t| now < t)
+            if renders.contains(&x.cid) || renders.spilled(blob).is_some() {
+                continue;
+            }
+            if renders.spilled_retry_at(blob).is_some_and(|t| now < t)
+                && !matches!(self.host().blob_open(blob).await, Ok(Some(_)))
             {
                 continue;
             }
-            match self.fetch_text_blob(&x.did, blob).await {
+            wanted.push((uri, &x.did, blob));
+        }
+        if wanted.is_empty() {
+            return;
+        }
+        let fetches = futures::future::join_all(wanted.iter().map(|&(uri, did, blob)| async move {
+            match self.fetch_text_blob(did, blob).await {
                 Ok(s) => renders.put_spilled(blob, s),
                 Err(e) => {
                     tracing::debug!(uri = %uri, error = %e, "a spilled body stays pending");
-                    renders.spilled_unavailable(
-                        blob,
-                        now.saturating_add(crate::limits::BODY_BLOB_RETRY_MS),
-                    );
+                    renders.spilled_unavailable(blob, retry);
+                }
+            }
+        }));
+        let wait = self.host().sleep(crate::limits::BODY_BLOB_WAIT_MS);
+        let waited = futures::future::select(std::pin::pin!(fetches), std::pin::pin!(wait)).await;
+        if let futures::future::Either::Right(_) = waited {
+            for &(uri, _, blob) in &wanted {
+                if renders.spilled(blob).is_none() {
+                    tracing::debug!(uri = %uri, "a spilled body is slow to come: it stays pending");
+                    renders.spilled_unavailable(blob, retry);
                 }
             }
         }

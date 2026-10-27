@@ -21,6 +21,8 @@ pub const BLOB_TEXT_MAX_BYTES: u64 = 1_000_000;
 /// A spilled body (`textBlob`) that could not be fetched (the network; a missing blob is not
 /// asked for again) stays pending this long before it is asked for again (`limits.md` §5).
 pub const BODY_BLOB_RETRY_MS: i64 = 60_000;
+/// How long a view waits for a spilled body before it renders it pending (`limits.md` §5).
+pub const BODY_BLOB_WAIT_MS: u64 = 3_000;
 /// The prefix of a fetched blob whose type is sniffed for display (`limits.md` §5).
 pub const BLOB_SNIFF_PREFIX_BYTES: u32 = 4_096;
 /// Blob bytes the core may copy into wasm linear memory while preparing an upload; larger files

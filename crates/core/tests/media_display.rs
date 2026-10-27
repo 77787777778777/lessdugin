@@ -429,6 +429,61 @@ fn a_spilled_body_that_cannot_be_fetched_stays_pending_and_is_asked_again_later(
     assert_eq!(pv.body.text, "The whole body");
 }
 
+#[test]
+fn a_slow_authors_pds_does_not_hold_back_the_thread() {
+    // get_thread and get_post waited for the textBlob before they returned anything: a PDS
+    // that trickles bytes held back the post and everyone's comments (natively for up to
+    // BLOB_TOTAL_TIMEOUT_MS, in the browser without a limit)
+    use futures::FutureExt as _;
+    use lessdugin_core::limits::{BODY_BLOB_RETRY_MS, BODY_BLOB_WAIT_MS};
+    let mut n = Net::new();
+    let bob = n
+        .net
+        .add_pds("bob.example.com")
+        .add_account("bob.example.com");
+    let f = forum(&n, &bob);
+    let source = b"# The whole body";
+    let uri = spilled_post(&n, &bob, &f, source);
+    let e = n.device("anon", None);
+    let r = block_on(e.sync_forum(&f, &SyncOpts::default())).unwrap();
+    assert!(r.errors.is_empty(), "{r:?}");
+    // bob's PDS stalls: the view comes back once BODY_BLOB_WAIT_MS is up, with the body pending
+    e.host().hold_blob_fetches(true);
+    e.host().clear_requests();
+    let t = block_on(e.get_thread(&uri, &Default::default()))
+        .unwrap()
+        .post;
+    let lessdugin_core::dto::ThreadRoot::Post(root) = t else {
+        panic!("the thread has its post");
+    };
+    assert_eq!(root.body.notices, [lessdugin_core::model::render::NOTICE_SPILLED]);
+    assert_eq!(root.body.text, "An excerpt");
+    assert_eq!(e.host().sleeps(), [BODY_BLOB_WAIT_MS]);
+    // and the next view does not wait again: polled once, it is ready
+    let pv = e.get_post(&uri).now_or_never().expect("a view that does not wait");
+    assert_eq!(pv.unwrap().body.text, "An excerpt");
+    // a copy the host stored meanwhile (the browser's download ran on) is taken, unasked
+    let blob = lessdugin_atp::cid::for_raw(source).to_string();
+    e.host().put_blob(&blob, source.to_vec());
+    n.net.clear_requests();
+    let pv = block_on(e.get_post(&uri)).unwrap();
+    assert_eq!(pv.body.text, "The whole body");
+    assert!(blob_requests(&n).is_empty());
+
+    // natively the download stops with the wait: it is asked for again later
+    let uri = spilled_post(&n, &bob, &f, b"# Another body");
+    let r = block_on(e.sync_forum(&f, &SyncOpts::default())).unwrap();
+    assert!(r.errors.is_empty(), "{r:?}");
+    assert_eq!(block_on(e.get_post(&uri)).unwrap().body.text, "An excerpt");
+    e.host().hold_blob_fetches(false);
+    n.net.clear_requests();
+    assert_eq!(block_on(e.get_post(&uri)).unwrap().body.text, "An excerpt");
+    assert!(blob_requests(&n).is_empty());
+    n.tick(BODY_BLOB_RETRY_MS);
+    assert_eq!(block_on(e.get_post(&uri)).unwrap().body.text, "Another body");
+    assert_eq!(blob_requests(&n).len(), 1);
+}
+
 // --- the autoload verdict (m4-4) ---------------------------------------------------------------
 
 #[test]
