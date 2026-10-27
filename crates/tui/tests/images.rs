@@ -413,12 +413,15 @@ fn the_autoload_verdict_loads_only_visible_small_images() {
 /// them; then `i` loads.
 #[test]
 fn i_on_a_folded_comment_loads_nothing_until_it_is_expanded() {
-    use lessdugin_core::dto::{CollapseReason, CommentDraft, ItemState, MediaInput, ThreadOpts};
+    use lessdugin_core::dto::{
+        CollapseReason, ItemState, MediaInput, PostDraft, ThreadOpts, ThreadRoot,
+    };
     use lessdugin_tui::app::ThreadData;
     use lessdugin_tui::keys::parse_key;
     use lessdugin_tui::{Action, Effect};
     let s = scenario();
     let (bob, carol) = (&s.w.bob, &s.w.carol);
+    // an image of bob's, on his PDS (a post uploads it)
     let prepared = block_on(bob.engine.prepare_media(
         png(8, 8),
         &MediaInput {
@@ -429,34 +432,40 @@ fn i_on_a_folded_comment_loads_nothing_until_it_is_expanded() {
         },
     ))
     .unwrap();
-    let mut d = CommentDraft::new(&s.welcome, None, format!("![x](cid:{})", prepared.cid));
+    let mut d = PostDraft::article(&s.forum, "Pic", format!("![x](cid:{})", prepared.cid));
     d.body.media.push(prepared);
-    let t = block_on(bob.engine.comment(&d)).unwrap();
+    let t = block_on(bob.engine.publish(&d)).unwrap();
     bob.flush();
-    let comment = bob.done(&t);
+    let post = bob.done(&t);
     carol.sync(&s.forum);
+    let pv = block_on(carol.engine.get_thread(&post, &ThreadOpts::default())).unwrap();
+    let ThreadRoot::Post(p) = pv.post else {
+        panic!("no post")
+    };
+    let media = p.body.media.clone();
+    assert_eq!(media.len(), 1);
+
     let mut t = common::tui(&s, 80, 40);
     block_on(t.start(None));
     block_on(t.open_thread(&s.welcome));
     let screen = t.state.top().unwrap().id;
-    // the fold collapsed bob's comment (as it does a newcomer's, for other readers)
+    // bob's comment carries the image, and the fold collapsed it (as it does a newcomer's,
+    // for other readers)
     let mut view = block_on(carol.engine.get_thread(&s.welcome, &ThreadOpts::default())).unwrap();
     let c = view
         .comments
         .iter_mut()
-        .find(|c| c.uri == comment)
+        .find(|c| c.uri == s.bob_c1)
         .expect("bob's comment");
     c.state = ItemState::Collapsed {
         reason: CollapseReason::NewUser,
     };
-    assert!(!c.body.media.is_empty());
+    c.body.media = media;
+    let bodies = t.state.top_thread().unwrap().data.as_ref().unwrap().bodies.clone();
     let _ = t.state.update(Action::ThreadLoaded {
         screen,
         origin: lessdugin_tui::app::Origin::Live,
-        result: Ok(Box::new(ThreadData {
-            view,
-            bodies: Default::default(),
-        })),
+        result: Ok(Box::new(ThreadData { view, bodies })),
     });
     let fetches = |fx: &[Effect]| {
         fx.iter()
@@ -471,10 +480,11 @@ fn i_on_a_folded_comment_loads_nothing_until_it_is_expanded() {
         .state
         .top_thread()
         .and_then(|th| th.layout.items.get(th.pos.selected))
-        .is_some_and(|i| i.uri != comment)
+        .is_some_and(|i| i.uri != s.bob_c1)
     {
         let _ = key(&mut t, "j");
     }
+    assert!(!t.render().contains("i loads it from"), "{}", t.render());
     assert_eq!(fetches(&key(&mut t, "i")), 0, "{}", t.render());
     let st = t.state.status.as_ref().unwrap().text.to_plain_string();
     assert!(st.contains("collapsed"), "{st}");
