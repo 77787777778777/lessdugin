@@ -129,7 +129,9 @@ fn import_merges_and_leaves_unmentioned_keys_alone() {
     .unwrap();
 
     let report = block_on(e.import_local(&x, ExportScope::Mine)).unwrap();
-    assert_eq!(report.imported, x.members.len());
+    // the login rows (alice's account, the active account) are never imported
+    assert_eq!(report.imported + report.refused, x.members.len(), "{report:?}");
+    assert_eq!(report.refused, 2, "{report:?}");
     assert_eq!(report.undecodable, 0);
     // the imported key is back, and the key the export never mentioned is still there
     let after = block_on(e.export_local(ExportScope::Mine)).unwrap();
@@ -185,7 +187,7 @@ fn a_bad_member_is_counted_not_fatal() {
         value: "x".into(),
     });
     let report = block_on(e.import_local(&x, ExportScope::Mine)).unwrap();
-    assert_eq!(report.imported, good);
+    assert_eq!(report.imported + report.refused, good);
     assert_eq!(report.undecodable, 1);
 }
 
@@ -222,10 +224,68 @@ fn every_local_family_round_trips() {
     let before = x.members.len();
     assert!(before >= 11, "expected every family, got {before}");
     let report = block_on(e.import_local(&x, ExportScope::Mine)).unwrap();
-    assert_eq!(report.imported + report.out_of_scope, before);
+    assert_eq!(
+        report.imported + report.out_of_scope + report.refused,
+        before
+    );
     let again = block_on(e.export_local(ExportScope::Mine)).unwrap();
     assert_eq!(
         serde_json::to_string(&x.members).unwrap(),
         serde_json::to_string(&again.members).unwrap()
     );
+}
+
+/// An export is a file someone can send: an import writes only the local lists and marks.
+/// Never a key outside `loc` (a planted outbox write would be sent with the user's session),
+/// never the login state, the authorization-server pins or the public-action acknowledgements,
+/// and a setting only with a value `set_setting` accepts (`threat-model.md` ID-11, PRIV-9).
+#[test]
+fn an_import_never_writes_login_state_outbox_rows_or_bad_settings() {
+    let (host, _pds, alice, bob) = setup();
+    let e = engine(&host);
+    block_on(e.add_account(AccountInfo::app_password(alice.did.as_str(), PDS))).unwrap();
+    let did = alice.did.as_str();
+    let mut x = block_on(e.export_local(ExportScope::Mine)).unwrap();
+    x.members.clear();
+    let member = |parts: Vec<lessdugin_core::store::key::Part>, value: &[u8]| {
+        use base64::Engine as _;
+        let b = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        lessdugin_core::engine::ExportMember {
+            key: b.encode(lessdugin_core::store::key::encode(&parts)),
+            parts: Vec::new(),
+            value: b.encode(value),
+        }
+    };
+    let p = |s: &[&str]| s.iter().map(|s| (*s).into()).collect::<Vec<_>>();
+    let mut out = p(&["out", did]);
+    out.push(1i64.into());
+    let refused = [
+        member(out, b"a planted write"),
+        member(p(&["out.meta", did]), b"x"),
+        member(p(&["loc", "as_pin", did]), b"https://evil.example"),
+        member(p(&["loc", "account", did]), b"x"),
+        member(p(&["loc", "active_account"]), bob.did.as_str().as_bytes()),
+        member(p(&["loc", "seeded", did]), b"1"),
+        member(p(&["loc", "ack", did, "vote"]), b"1"),
+        member(p(&["loc", "media", "bafy"]), b"x"),
+        member(p(&["loc", "nonsense"]), b"x"),
+        member(p(&["loc", "setting", "verify"]), b"nonsense"),
+        member(p(&["loc", "setting", "unknownKey"]), b"on"),
+    ];
+    let n = refused.len();
+    x.members.extend(refused);
+    x.members.push(member(p(&["loc", "setting", "verify"]), b"proof"));
+    x.members.push(member(p(&["loc", "follow", "fk"]), b"1"));
+    let report = block_on(e.import_local(&x, ExportScope::Mine)).unwrap();
+    assert_eq!((report.refused, report.imported), (n, 2), "{report:?}");
+    assert_eq!(
+        report.kinds,
+        [("follow".to_owned(), 1), ("setting".to_owned(), 1)].into()
+    );
+    assert!(block_on(e.outbox_flush()).unwrap().done == 0);
+    assert!(block_on(e.writes()).unwrap().is_empty());
+    let active = block_on(e.active_account()).unwrap().unwrap();
+    assert_eq!(active.did, did, "the active account did not change");
+    let s = block_on(e.settings()).unwrap();
+    assert_eq!(s.verify, lessdugin_core::dto::VerifyMode::Proof);
 }

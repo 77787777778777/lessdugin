@@ -30,6 +30,15 @@
 //! predicate and leaves every other local key alone, so a partial export (or an older one) never
 //! destroys state it does not mention. A key that fails to decode as a store key is skipped and
 //! counted, rather than aborting the whole import.
+//!
+//! **What an import never writes.** An export is a file, and a file can come from someone else
+//! ("my settings backup"). So an import writes only the [`IMPORTABLE`] `loc` families: never a
+//! key outside `loc` (the outbox would send a planted write with the user's session), never the
+//! login state (`account`, `active_account`, the authorization-server pins `as_pin`, `seeded`:
+//! `threat-model.md` ID-11, the rows the `web` bridge keeps read-only), never the public-action
+//! acknowledgements (`ack`, PRIV-9: the interstitials show again) or prepared media, and a
+//! setting only with a value `set_setting` accepts. Those members are counted as `refused`, and
+//! the report counts what was written per family, so a client can say what changed.
 
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
@@ -58,6 +67,25 @@ pub enum ExportScope {
     /// Every account's state on this device.
     Everything,
 }
+
+/// The `loc` families an import may write (see the module docs): the lists and marks of
+/// `threat-model.md` PRIV-10, follows, drafts and the validated settings.
+pub const IMPORTABLE: [&str; 14] = [
+    "alias",
+    "bookmark",
+    "draft",
+    "follow",
+    "fvisit",
+    "karmaCadence",
+    "mute",
+    "nbase",
+    "notif",
+    "read",
+    "rejected",
+    "setting",
+    "sub",
+    "unfollow",
+];
 
 /// The keys that carry no account: they are shared by every account on the device.
 const ACCOUNT_FREE: [&str; 5] = [
@@ -100,6 +128,7 @@ pub struct LocalExport {
 
 /// `import_local`'s result.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ImportReport {
     /// Members written.
     pub imported: usize,
@@ -107,6 +136,13 @@ pub struct ImportReport {
     pub out_of_scope: usize,
     /// Members skipped because their key did not decode as a store key.
     pub undecodable: usize,
+    /// Members an import never writes: a key outside `loc`, a family not in [`IMPORTABLE`], a
+    /// setting `set_setting` would refuse.
+    #[serde(default)]
+    pub refused: usize,
+    /// The members written per family (`follow`, `setting`, …).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub kinds: std::collections::BTreeMap<String, usize>,
 }
 
 fn b64() -> base64::engine::general_purpose::GeneralPurpose {
@@ -131,6 +167,20 @@ fn account_of(parts: &[Part]) -> Option<&str> {
         // ("loc","rejected",forum,did) is per forum, not per account
         _ => None,
     }
+}
+
+/// The family of a row an import may write as `v` (see [`IMPORTABLE`]), or `None`.
+fn importable<'a>(parts: &'a [Part], v: &[u8]) -> Option<&'a str> {
+    if part_str(parts.first()) != Some("loc") {
+        return None;
+    }
+    let tag = part_str(parts.get(1)).filter(|t| IMPORTABLE.contains(t))?;
+    if tag == "setting" {
+        let k = part_str(parts.get(2)).filter(|k| SETTINGS.contains(k) && parts.len() == 3)?;
+        let v = std::str::from_utf8(v).ok()?;
+        check_setting_value(k, v).ok()?;
+    }
+    Some(tag)
 }
 
 /// True when `parts` is inside `scope`.
@@ -219,7 +269,8 @@ impl<H: crate::host::Host> Engine<H> {
     ///
     /// Merging, not replacing: an imported member overwrites the same key, and every local key the
     /// import does not mention is left alone. A member outside `scope` is skipped, so importing a
-    /// `--mine` export cannot write another account's state. Rows are written in one batch.
+    /// `--mine` export cannot write another account's state, and a member of a family an import
+    /// never writes is refused (the module docs). Rows are written in one batch.
     pub async fn import_local(
         &self,
         export: &LocalExport,
@@ -248,14 +299,22 @@ impl<H: crate::host::Host> Engine<H> {
                 report.undecodable += 1;
                 continue;
             };
+            let Some(kind) = importable(&parts, &v) else {
+                report.refused += 1;
+                continue;
+            };
             if !in_scope(&parts, &scope, active.as_deref()) {
                 report.out_of_scope += 1;
                 continue;
             }
             // a duplicate key: the last one wins, as in any key-value store
+            let dup = ops.iter().any(|op| matches!(op, KvOp::Put(prev, _) if prev == &k));
             ops.retain(|op| !matches!(op, KvOp::Put(prev, _) if prev == &k));
+            if !dup {
+                *report.kinds.entry(kind.to_owned()).or_default() += 1;
+                report.imported += 1;
+            }
             ops.push(KvOp::Put(k, v));
-            report.imported += 1;
         }
         if !ops.is_empty() {
             self.host().state().write(ops).await?;
