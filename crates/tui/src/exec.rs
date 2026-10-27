@@ -11,8 +11,8 @@ use std::collections::BTreeMap;
 
 use lessdugin_atp::syntax::AtUri;
 use lessdugin_core::dto::{
-    ActorView, ListPostsQuery, NotificationsQuery, PostFilter, PostSort, SyncOpts, ThreadOpts,
-    ThreadRoot,
+    ActorView, ListPostsQuery, NotificationsQuery, PostFilter, PostSort, Ref, RefContext, SyncOpts,
+    ThreadOpts, ThreadRoot,
 };
 use lessdugin_core::engine::{Engine, EngineError};
 use lessdugin_core::host::Host;
@@ -116,10 +116,13 @@ pub async fn run<H: Host>(engine: &Engine<H>, effect: Effect, opts: ExecOpts) ->
             screen,
             label,
         } => Action::OpinionDone {
+            result: match item_uri(engine, &subject, &forum).await {
+                Ok(uri) => engine.opinion(&uri, &intent).await,
+                Err(e) => Err(e),
+            },
             forum,
             screen,
             label,
-            result: engine.opinion(&subject, &intent).await,
         },
         Effect::Undo { id, screen } => Action::Undone {
             screen,
@@ -216,6 +219,29 @@ pub async fn run<H: Host>(engine: &Engine<H>, effect: Effect, opts: ExecOpts) ->
         Effect::LoadWrites => Action::WritesLoaded(engine.writes().await),
         Effect::Editor(_) | Effect::Quit => return None,
     })
+}
+
+/// The at-uri of an item a command line named: a canonical uri as it is, anything else through
+/// `parse_ref` (an SPA link, an at-uri with a handle, `handle/rkey` in `forum`).
+pub async fn item_uri<H: Host>(
+    engine: &Engine<H>,
+    subject: &str,
+    forum: &str,
+) -> Result<String, EngineError> {
+    if subject.starts_with("at://did:") {
+        return Ok(subject.to_owned());
+    }
+    let ctx = RefContext {
+        forum: (!forum.is_empty()).then(|| forum.to_owned()),
+    };
+    match engine.parse_ref(subject, &ctx).await? {
+        Ref::Post { uri } | Ref::Comment { uri } | Ref::Sequence { uri } | Ref::Record { uri } => {
+            Ok(uri)
+        }
+        Ref::Forum { .. } | Ref::Actor { .. } => Err(EngineError::invalid_ref(format!(
+            "{subject} is not a post or a comment"
+        ))),
+    }
 }
 
 fn unverified<'a>(mut actors: impl Iterator<Item = &'a ActorView>) -> bool {

@@ -2223,6 +2223,53 @@ impl State {
         }
     }
 
+    /// The item an opinion command acts on, with its forum: the subject the command line named
+    /// (a uri or any reference `parse_ref` takes; its forum when a screen on the stack shows
+    /// it, else none, and the engine checks it), or the selection.
+    fn command_subject(&self, named: Option<&str>) -> Option<(String, String)> {
+        match named {
+            Some(n) => Some((n.to_owned(), self.shown_forum(n).unwrap_or_default())),
+            None => self.opinion_subject(),
+        }
+    }
+
+    /// The forum of `uri` when a screen on the stack shows it (a post in a list or the Activity
+    /// tab, an item of a thread).
+    fn shown_forum(&self, uri: &str) -> Option<String> {
+        self.stack.iter().rev().find_map(|s| match &s.kind {
+            ScreenKind::Forum(f) => {
+                let listed =
+                    f.data
+                        .as_ref()
+                        .is_some_and(|d| d.list.items.iter().any(|p| p.uri == uri))
+                        || f.activity.as_ref().is_some_and(|a| {
+                            a.list.items.iter().any(|i| {
+                                i.post.uri == uri || i.comments.iter().any(|c| c.uri == uri)
+                            })
+                        });
+                listed.then(|| f.uri.clone())
+            }
+            ScreenKind::Thread(t) => {
+                let d = t.data.as_ref()?;
+                let ThreadRoot::Post(p) = &d.view.post else {
+                    return None;
+                };
+                (p.post.uri == uri || d.view.comments.iter().any(|c| c.uri == uri))
+                    .then(|| p.post.forum.clone())
+            }
+            _ => None,
+        })
+    }
+
+    /// True if the thread on top holds `uri` (its react tallies are known).
+    fn thread_holds(&self, uri: &str) -> bool {
+        self.top_thread()
+            .and_then(|t| t.data.as_ref())
+            .is_some_and(|d| {
+                thread::root_uri(d) == uri || d.view.comments.iter().any(|c| c.uri == uri)
+            })
+    }
+
     /// The viewer caps of `forum` from the screens below (a Forum screen has its own).
     fn caps_of(&self, forum: &str) -> Option<&ViewerCaps> {
         self.stack.iter().rev().find_map(|s| match &s.kind {
@@ -3269,26 +3316,32 @@ impl State {
             }
         };
         match cmd.verb {
+            // a subject named on the command line wins over the selection (as `mod`)
             Verb::Vote(v) => {
-                let Some((subject, forum)) = self.opinion_subject() else {
+                let Some((subject, forum)) = self.command_subject(cmd.subject.as_deref()) else {
                     self.say(Tone::Info, lit("Nothing selected to vote on."));
                     return;
                 };
                 self.opinion_intent(vote_intent(v), subject, forum, "Vote", fx);
             }
             Verb::Agree(a) => {
-                let Some((subject, forum)) = self.opinion_subject() else {
+                let Some((subject, forum)) = self.command_subject(cmd.subject.as_deref()) else {
                     self.say(Tone::Info, lit("Nothing selected to vote on."));
                     return;
                 };
                 self.opinion_intent(agree_intent(a), subject, forum, "Vote", fx);
             }
             Verb::React { id, against } => {
-                let Some((subject, forum)) = self.opinion_subject() else {
+                let Some((subject, forum)) = self.command_subject(cmd.subject.as_deref()) else {
                     self.say(Tone::Info, lit("Nothing selected to react to."));
                     return;
                 };
-                if against && !self.react_tallies(&subject).contains_key(&id) {
+                // the tallies are known only for the thread on top; elsewhere the engine says
+                // whether there is anything to react against
+                if against
+                    && self.thread_holds(&subject)
+                    && !self.react_tallies(&subject).contains_key(&id)
+                {
                     self.say(
                         Tone::Warn,
                         tt(&format!(
@@ -3317,12 +3370,18 @@ impl State {
                 );
             }
             Verb::Unreact { id } => {
-                let Some((subject, forum)) = self.opinion_subject() else {
+                let Some((subject, forum)) = self.command_subject(cmd.subject.as_deref()) else {
                     self.say(Tone::Info, lit("Nothing selected to react to."));
                     return;
                 };
-                let Some(stance) = self.react_tallies(&subject).get(&id).and_then(|t| t.mine)
-                else {
+                let held = self.react_tallies(&subject).get(&id).and_then(|t| t.mine);
+                // a removal takes the react back whatever its stance, so an item the screen does
+                // not show is asked for with either; the engine says when there is none
+                let held = match held {
+                    None if !self.thread_holds(&subject) => Some(Stance::For),
+                    h => h,
+                };
+                let Some(stance) = held else {
                     self.say(
                         Tone::Info,
                         tt(&format!(

@@ -1149,3 +1149,68 @@ fn the_read_command_marks_only_the_selected_notification() {
     let n = block_on(t.engine().notifications(&Default::default())).unwrap();
     assert_eq!(n.unread, 0, "{n:?}");
 }
+
+/// Types `line` into the `:` overlay and returns the effects of its Enter (not run).
+fn command_effects(t: &mut Tui, line: &str) -> Vec<lessdugin_tui::Effect> {
+    block_on(t.press(":"));
+    for c in line.chars() {
+        block_on(t.press(&c.to_string()));
+    }
+    t.state.update(lessdugin_tui::Action::Key(
+        lessdugin_tui::keys::parse_key("Enter").unwrap(),
+    ))
+}
+
+/// The opinion subjects of `fx`.
+fn opinion_subjects(fx: &[lessdugin_tui::Effect]) -> Vec<String> {
+    fx.iter()
+        .filter_map(|e| match e {
+            lessdugin_tui::Effect::Opinion { subject, .. } => Some(subject.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// `:vote`, `:agree`, `:react` and `:unreact` act on the subject the command names, not on
+/// the selection; and they work where nothing is selected (the Notifications screen).
+#[test]
+fn opinion_commands_act_on_the_named_subject() {
+    use lessdugin_core::dto::{KarmaValue, ThreadOpts, ThreadRoot};
+    let s = scenario();
+    let mut t = tui(&s, 100, 30);
+    block_on(t.start(Some(s.forum.clone())));
+    // bob's post is selected (the first); the command names the welcome post
+    assert_eq!(
+        t.state.top_forum_screen().unwrap().selected().unwrap().uri,
+        s.bob_post
+    );
+    let fx = command_effects(&mut t, &format!("vote down {}", s.welcome));
+    assert_eq!(opinion_subjects(&fx), [s.welcome.clone()], "{fx:?}");
+    for line in [
+        format!("agree for {}", s.welcome),
+        format!("react agree for {}", s.welcome),
+        format!("unreact agree {}", s.welcome),
+    ] {
+        let fx = command_effects(&mut t, &line);
+        assert_eq!(opinion_subjects(&fx), [s.welcome.clone()], "{line}: {fx:?}");
+    }
+
+    // end to end, from a screen with no selection
+    block_on(t.press("N"));
+    run_command(&mut t, &format!("vote up {}", s.bob_c1));
+    assert!(status(&t).contains("Vote recorded"), "{}", status(&t));
+    block_on(t.engine().outbox_flush()).unwrap();
+    block_on(t.settle());
+    let tv = block_on(t.engine().get_thread(&s.welcome, &ThreadOpts::default())).unwrap();
+    let c = tv.comments.iter().find(|c| c.uri == s.bob_c1).unwrap();
+    assert_eq!(
+        c.score.mine.as_ref().and_then(|m| m.karma),
+        Some(KarmaValue::Up),
+        "{:?}",
+        c.score
+    );
+    let ThreadRoot::Post(p) = &tv.post else {
+        panic!("no post")
+    };
+    assert_eq!(p.post.score.mine.as_ref().and_then(|m| m.karma), None);
+}
