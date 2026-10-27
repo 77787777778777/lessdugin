@@ -862,6 +862,12 @@ impl<H: crate::host::Host> crate::engine::Engine<H> {
         bytes: Vec<u8>,
         input: &MediaInput,
     ) -> Result<MediaRef, crate::engine::EngineError> {
+        // limits.md §6: the SPA's client refuses a larger file before it crosses into wasm; this
+        // is the same line for a caller that sent it anyway (natively there is no window)
+        if cfg!(target_arch = "wasm32") && bytes.len() as u64 > crate::limits::MEDIA_WASM_WINDOW_BYTES
+        {
+            return Err(too_large_for_the_browser(bytes.len() as u64));
+        }
         let sniffed = crate::outbox::blob::normalise_mime(&bytes).ok_or_else(|| {
             crate::engine::EngineError::invalid_input("unsupported media type (data-model.md §8.8)")
                 .with_detail("kind", "mediaRejected")
@@ -1052,62 +1058,203 @@ mod tests {
 pub mod policy;
 pub use policy::{Autoload, LoadReason, MediaCandidate, autoload, host_of, is_bluesky_host};
 
-/// The prepared bytes of a media reference, kept until the write that uses them is sent.
+/// The refusal of a file larger than `MEDIA_WASM_WINDOW_BYTES` in the browser (`limits.md` §6).
+pub fn too_large_for_the_browser(size: u64) -> EngineError {
+    EngineError::new(
+        crate::engine::ErrorCode::TooLarge,
+        "the file is larger than 64 MiB, which the browser does not prepare for upload \
+         (limits.md §6): attach a smaller file or use the CLI",
+    )
+    .with_detail("kind", "mediaRejected")
+    .with_detail("bytes", size)
+    .with_detail("limit", crate::limits::MEDIA_WASM_WINDOW_BYTES)
+}
+
+/// How long prepared bytes are kept for a draft that is never published (`limits.md` §12).
+pub const PREPARED_MEDIA_TTL_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+
+/// `("prep", cid)`: what was prepared under `cid`.
+const PREP: &str = "prep";
+/// `("prep.blob", cid, n)`: its bytes, in chunks of at most 1 MiB (as the outbox keeps them).
+const PREP_BLOB: &str = "prep.blob";
+/// The family the first M4 builds kept prepared bytes in, as one JSON number array per file.
+const LEGACY_MEDIA: (&str, &str) = ("loc", "media");
+
+/// The row of a prepared file (`sync.md` §10.4).
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct PreparedRow {
+    v: u32,
+    mime: String,
+    size: u64,
+    chunks: u32,
+    /// When it was prepared (ms), for [`PREPARED_MEDIA_TTL_MS`].
+    at: i64,
+}
+
+/// The prepared bytes of a media reference, kept until the write that uses them is enqueued.
 ///
 /// A `MediaRef` is only a reference: `prepare_media` computes the CID and returns it, but the
 /// outbox has to upload the bytes when the record write goes out (`data-model.md` §8.8), so they
-/// are stored here under their CID. `publish` reads them back with
-/// [`Engine::prepared_media`] and hands them to the outbox.
+/// are stored here under their CID: raw, in chunks of at most 1 MiB, never as JSON. `publish`,
+/// `comment` and `edit` read them back with [`Engine::prepared_media`] and hand them to the
+/// outbox, which keeps its own copy; then [`Engine::forget_prepared_media`] removes them. Files
+/// prepared for a draft that is never sent are removed after [`PREPARED_MEDIA_TTL_MS`].
 impl<H: crate::host::Host> crate::engine::Engine<H> {
-    /// Stores the prepared bytes under their CID.
+    /// Stores the prepared bytes under their CID, and removes what expired.
     async fn store_prepared_media(
         &self,
         cid: &str,
         bytes: &[u8],
         mime: &str,
     ) -> Result<(), crate::engine::EngineError> {
-        let key = crate::key!("loc", "media", cid);
-        let value = serde_json::json!({ "mime": mime, "bytes": bytes }).to_string();
-        crate::host::KvStore::write(
-            self.host().state(),
-            vec![crate::host::KvOp::Put(key, value.into_bytes())],
-        )
-        .await?;
+        use crate::host::{KvOp, KvStore};
+        let now = self.host().now_ms();
+        let mut ops = self.expired_prepared_media(now).await?;
+        let chunks: Vec<&[u8]> = bytes
+            .chunks(crate::outbox::model::BLOB_CHUNK_BYTES)
+            .collect();
+        let row = PreparedRow {
+            v: 1,
+            mime: mime.to_owned(),
+            size: bytes.len() as u64,
+            chunks: u32::try_from(chunks.len()).unwrap_or(u32::MAX),
+            at: now,
+        };
+        let encode = |e: crate::store::row::RowError| {
+            crate::engine::EngineError::internal(format!("a prepared file: {e}"))
+        };
+        ops.push(KvOp::DeleteRange(crate::host::KeyRange::prefix(
+            &crate::key!(PREP_BLOB, cid),
+        )));
+        for (n, c) in chunks.into_iter().enumerate() {
+            let chunk = crate::outbox::model::ChunkRow {
+                v: 1,
+                b: c.to_vec(),
+            };
+            ops.push(KvOp::Put(
+                crate::key!(PREP_BLOB, cid, n as i64),
+                crate::store::row::encode(&chunk).map_err(encode)?,
+            ));
+        }
+        ops.push(KvOp::Put(
+            crate::key!(PREP, cid),
+            crate::store::row::encode(&row).map_err(encode)?,
+        ));
+        KvStore::write(self.host().state(), ops).await?;
         Ok(())
+    }
+
+    /// The deletions of every prepared file older than [`PREPARED_MEDIA_TTL_MS`], and of the
+    /// legacy rows.
+    async fn expired_prepared_media(
+        &self,
+        now: i64,
+    ) -> Result<Vec<crate::host::KvOp>, crate::engine::EngineError> {
+        use crate::host::{Dir, KeyRange, KvOp, KvStore};
+        let mut ops = vec![KvOp::DeleteRange(KeyRange::prefix(&crate::key!(
+            LEGACY_MEDIA.0,
+            LEGACY_MEDIA.1
+        )))];
+        let mut range = KeyRange::prefix(&crate::key!(PREP));
+        loop {
+            let page = KvStore::scan(self.host().state(), range.clone(), Dir::Forward, 256).await?;
+            let full = page.len() >= 256;
+            let last = page.last().map(|(k, _)| k.clone());
+            for (k, v) in page {
+                let stale = crate::store::row::decode::<PreparedRow>(&v)
+                    .map_or(true, |r| now.saturating_sub(r.at) > PREPARED_MEDIA_TTL_MS);
+                let cid = match crate::store::key::decode(&k).ok().as_deref() {
+                    Some([_, crate::store::key::Part::Bytes(c)]) => {
+                        String::from_utf8(c.clone()).ok()
+                    }
+                    _ => None,
+                };
+                if let (true, Some(cid)) = (stale, cid) {
+                    ops.push(KvOp::Delete(k));
+                    ops.push(KvOp::DeleteRange(KeyRange::prefix(&crate::key!(
+                        PREP_BLOB,
+                        cid.as_str()
+                    ))));
+                }
+            }
+            match last {
+                Some(k) if full => range.start = std::ops::Bound::Excluded(k),
+                _ => break,
+            }
+        }
+        Ok(ops)
     }
 
     /// The prepared bytes of `cid`, as [`crate::outbox::BlobData`] hands them to the outbox.
     ///
-    /// `None` when the bytes are gone (a different device, a cleared store): the caller then
-    /// refuses the publish rather than sending a reference the PDS cannot resolve, which is the
-    /// failure the devnet surfaced as `BlobNotFound (HTTP 400)`.
+    /// `None` when the bytes are gone (a different device, a cleared store, expired, already
+    /// sent): the caller then refuses the publish rather than sending a reference the PDS cannot
+    /// resolve, which is the failure the devnet surfaced as `BlobNotFound (HTTP 400)`.
     pub async fn prepared_media(
         &self,
         cid: &str,
     ) -> Result<Option<crate::outbox::BlobData>, crate::engine::EngineError> {
-        let key = crate::key!("loc", "media", cid);
-        let rows = crate::host::KvStore::get_many(self.host().state(), vec![key]).await?;
+        use crate::host::KvStore;
+        let rows = KvStore::get_many(self.host().state(), vec![crate::key!(PREP, cid)]).await?;
         let Some(Some(raw)) = rows.into_iter().next() else {
             return Ok(None);
         };
-        let Ok(v) = serde_json::from_slice::<serde_json::Value>(&raw) else {
+        let Ok(row) = crate::store::row::decode::<PreparedRow>(&raw) else {
             return Ok(None);
         };
-        let Some(bytes) = v.get("bytes").and_then(|b| b.as_array()) else {
-            return Ok(None);
-        };
-        let bytes: Vec<u8> = bytes
-            .iter()
-            .filter_map(|n| n.as_u64().and_then(|n| u8::try_from(n).ok()))
+        let keys = (0..row.chunks)
+            .map(|n| crate::key!(PREP_BLOB, cid, i64::from(n)))
             .collect();
-        let Some(mime) = v.get("mime").and_then(|m| m.as_str()) else {
+        let mut bytes = Vec::with_capacity(usize::try_from(row.size).unwrap_or(0));
+        for chunk in KvStore::get_many(self.host().state(), keys).await? {
+            let Some(c) = chunk
+                .and_then(|c| crate::store::row::decode::<crate::outbox::model::ChunkRow>(&c).ok())
+            else {
+                return Ok(None);
+            };
+            bytes.extend_from_slice(&c.b);
+        }
+        // a torn or tampered row is not uploaded under a CID it does not have
+        if bytes.len() as u64 != row.size || lessdugin_atp::cid::for_raw(&bytes).to_string() != cid
+        {
             return Ok(None);
-        };
+        }
         Ok(Some(crate::outbox::BlobData {
             cid: cid.to_owned(),
-            mime: mime.to_owned(),
+            mime: row.mime,
             bytes,
         }))
+    }
+
+    /// [`Engine::forget_prepared_media`] after a write is enqueued: the write stands either way,
+    /// so a failure only leaves the rows for the expiry sweep.
+    pub(crate) async fn sent_prepared_media(&self, media: &[crate::dto::MediaRef]) {
+        if let Err(e) = self.forget_prepared_media(media).await {
+            tracing::warn!(error = %e, "prepared media are left for the expiry sweep");
+        }
+    }
+
+    /// Removes the prepared bytes of `media` once a write that uploads them is enqueued: the
+    /// outbox keeps its own copy from then on (`("out.blob", …)`, `sync.md` §10.4).
+    pub(crate) async fn forget_prepared_media(
+        &self,
+        media: &[crate::dto::MediaRef],
+    ) -> Result<(), crate::engine::EngineError> {
+        use crate::host::{KeyRange, KvOp, KvStore};
+        if media.is_empty() {
+            return Ok(());
+        }
+        let ops = media
+            .iter()
+            .flat_map(|m| {
+                [
+                    KvOp::Delete(crate::key!(PREP, m.cid.as_str())),
+                    KvOp::DeleteRange(KeyRange::prefix(&crate::key!(PREP_BLOB, m.cid.as_str()))),
+                ]
+            })
+            .collect();
+        KvStore::write(self.host().state(), ops).await?;
+        Ok(())
     }
 }
 

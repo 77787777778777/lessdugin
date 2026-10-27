@@ -316,7 +316,9 @@ impl<H: Host> Engine<H> {
             blobs: self.media_blobs(&draft.body.media).await?,
             excerpt: Some(excerpt_of(&draft.body.markdown)),
         };
-        self.outbox.create_post(&session, &post, opts).await
+        let t = self.outbox.create_post(&session, &post, opts).await?;
+        self.sent_prepared_media(&draft.body.media).await;
+        Ok(t)
     }
 
     /// The current `(cid, value)` of a cached record.
@@ -392,7 +394,9 @@ impl<H: Host> Engine<H> {
             blobs: self.media_blobs(&draft.body.media).await?,
             excerpt: None,
         };
-        self.outbox.create_comment(&session, &c, opts).await
+        let t = self.outbox.create_comment(&session, &c, opts).await?;
+        self.sent_prepared_media(&draft.body.media).await;
+        Ok(t)
     }
 
     /// `edit(uri, Draft, EditOpts)`: the edit protocol (`data-model.md` §8.3) with a revision
@@ -464,7 +468,9 @@ impl<H: Host> Engine<H> {
             blobs,
             excerpt,
         };
-        self.outbox.edit(&session, uri, &value, &base, o).await
+        let t = self.outbox.edit(&session, uri, &value, &base, o).await?;
+        self.sent_prepared_media(media).await;
+        Ok(t)
     }
 
     /// `retract(uri)`: an edit of an own comment with `retracted: true` (`data-model.md` §8.3).
