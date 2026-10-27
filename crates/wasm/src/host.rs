@@ -52,6 +52,23 @@ extern "C" {
         max_bytes: f64,
     ) -> Result<Promise, JsValue>;
 
+    /// `blobOpen(cid)`: resolves with `{ cid, size, locator }` of a stored blob, or `null`.
+    #[wasm_bindgen(method, catch, js_name = blobOpen)]
+    fn blob_open(this: &JsHostImports, cid: &str) -> Result<Promise, JsValue>;
+
+    /// `blobRead(cid, offset, len)`: resolves with at most `len` bytes from `offset`.
+    #[wasm_bindgen(method, catch, js_name = blobRead)]
+    fn blob_read(
+        this: &JsHostImports,
+        cid: &str,
+        offset: f64,
+        len: u32,
+    ) -> Result<Promise, JsValue>;
+
+    /// `blobDelete(cid)`: resolves once the stored blob is gone.
+    #[wasm_bindgen(method, catch, js_name = blobDelete)]
+    fn blob_delete(this: &JsHostImports, cid: &str) -> Result<Promise, JsValue>;
+
     /// `lock(name, wait)`: resolves with a `JsLockHandle`, or `null` when busy and `!wait`.
     #[wasm_bindgen(method, catch)]
     fn lock(this: &JsHostImports, name: &str, wait: bool) -> Result<Promise, JsValue>;
@@ -444,6 +461,52 @@ impl Host for JsHost {
                 size: h.size() as u64,
                 locator: h.locator(),
             })
+        }
+    }
+
+    fn blob_open(&self, cid: &str) -> impl Future<Output = Result<Option<BlobHandle>, HostError>> {
+        let p = self.imports.blob_open(cid);
+        let want = cid.to_owned();
+        async move {
+            let v = await_promise(p).await?;
+            if v.is_null() || v.is_undefined() {
+                return Ok(None);
+            }
+            let h: JsBlobHandle = v.unchecked_into();
+            if h.cid() != want {
+                return Err(HostError::Other("blobOpen returned another CID".into()));
+            }
+            Ok(Some(BlobHandle {
+                cid: h.cid(),
+                size: h.size() as u64,
+                locator: h.locator(),
+            }))
+        }
+    }
+
+    fn blob_read(
+        &self,
+        cid: &str,
+        offset: u64,
+        len: u32,
+    ) -> impl Future<Output = Result<Vec<u8>, HostError>> {
+        // the JS side slices the stored Blob, so only this window enters wasm memory
+        let len = len.min(lessdugin_core::host::BLOB_READ_MAX_BYTES);
+        let p = self.imports.blob_read(cid, offset as f64, len);
+        async move {
+            let v: Uint8Array = await_promise(p).await?.unchecked_into();
+            if v.length() > len {
+                return Err(HostError::TooLarge);
+            }
+            Ok(v.to_vec())
+        }
+    }
+
+    fn blob_delete(&self, cid: &str) -> impl Future<Output = Result<(), HostError>> {
+        let p = self.imports.blob_delete(cid);
+        async move {
+            await_promise(p).await?;
+            Ok(())
         }
     }
 

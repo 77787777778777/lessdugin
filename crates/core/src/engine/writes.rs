@@ -320,7 +320,9 @@ impl<H: Host> Engine<H> {
             blobs: self.media_blobs(&draft.body.media).await?,
             excerpt: Some(excerpt_of(&draft.body.markdown)),
         };
-        self.outbox.create_post(&session, &post, opts).await
+        let t = self.outbox.create_post(&session, &post, opts).await?;
+        self.sent_prepared_media(&draft.body.media).await;
+        Ok(t)
     }
 
     /// The current `(cid, value)` of a cached record.
@@ -393,9 +395,14 @@ impl<H: Host> Engine<H> {
             .as_ref()
             .map(|q| derived_quote(q, &quoted))
             .transpose()?;
-        self.outbox
-            .create_comment(&session, &c, ContentOpts::default())
-            .await
+        // the comment's media are uploaded with it (data-model.md §8.8)
+        let opts = ContentOpts {
+            blobs: self.media_blobs(&draft.body.media).await?,
+            excerpt: None,
+        };
+        let t = self.outbox.create_comment(&session, &c, opts).await?;
+        self.sent_prepared_media(&draft.body.media).await;
+        Ok(t)
     }
 
     /// `social.md` §4.8 "Composer": a comment on a locked post is refused (`blocked`,
@@ -461,11 +468,16 @@ impl<H: Host> Engine<H> {
                 },
             },
         };
+        let cached = value.clone();
         let coll = u.collection().as_str();
         let obj = value
             .as_object_mut()
             .ok_or_else(|| EngineError::internal(format!("{u} is not an object")))?;
         let mut excerpt = None;
+        let media = match draft {
+            Draft::Post { post, .. } => &post.body.media,
+            Draft::Comment { comment, .. } => &comment.body.media,
+        };
         match draft {
             Draft::Post { post, .. } => {
                 if coll != nsid::POST {
@@ -504,13 +516,18 @@ impl<H: Host> Engine<H> {
                 );
             }
         }
+        // media new in this version are uploaded with the edit; the others keep the blob
+        // objects of the cached version (data-model.md §8.8)
+        let blobs = self.edit_media_blobs(&cached, &mut value, media).await?;
         let o = outbox::EditOpts {
             history: opts.history,
             summary: opts.summary.clone(),
-            blobs: Vec::new(),
+            blobs,
             excerpt,
         };
-        self.outbox.edit(&session, uri, &value, &base, o).await
+        let t = self.outbox.edit(&session, uri, &value, &base, o).await?;
+        self.sent_prepared_media(media).await;
+        Ok(t)
     }
 
     /// `retract(uri)`: an edit of an own comment with `retracted: true` (`data-model.md` §8.3).

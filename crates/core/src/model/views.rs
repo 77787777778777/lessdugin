@@ -49,7 +49,7 @@ use crate::dto::{
 use crate::identity::short_did;
 use crate::model::build::ForumModel;
 use crate::model::palette;
-use crate::model::render::{RenderCache, empty_body, render_md};
+use crate::model::render::{BodyItem, MediaPrefs, RenderCache, empty_body, render_md};
 use crate::social::full::gates::Gate;
 use crate::social::full::moderation::{ModRecord, ModScope};
 use crate::social::full::query::{self, CommentQuery, Query};
@@ -254,6 +254,8 @@ pub struct Viewer {
     /// unread iff `t_obs(c) > lastVisited[root]` (§16). Posts without a mark have no unread
     /// state.
     pub read: BTreeMap<String, i64>,
+    /// The device's media autoload inputs (`sync.md` §11.3).
+    pub media: MediaPrefs,
 }
 
 /// Everything a view needs besides the model.
@@ -589,8 +591,33 @@ impl Views<'_> {
             _ => None,
         };
         let pds = self.pds.get(&x.did).map_or("", String::as_str);
-        self.renders
-            .body(&x.cid, md, &self.model.input.ns, excerpt, &x.did, pds)
+        let root = self
+            .model
+            .comment_root(&x.uri)
+            .and_then(|r| self.model.skel(r));
+        fn labels_of(x: Option<&Skel>) -> &[String] {
+            match x.map(|x| &x.data) {
+                Some(SkelData::Post { labels, .. }) => labels,
+                _ => &[],
+            }
+        }
+        let p = &self.model.view.participation;
+        let item = BodyItem {
+            established: p.s.contains(&x.did) || self.model.in_e(&x.did),
+            visible: self.item_state(&x.uri) == Some(ItemState::Visible),
+            labels: labels_of(Some(x)),
+            root_labels: labels_of(root),
+            prefs: &self.viewer.media,
+        };
+        self.renders.body(
+            &x.cid,
+            md,
+            &self.model.input.ns,
+            excerpt,
+            &x.did,
+            pds,
+            &item,
+        )
     }
 
     /// P of the current body of a listed item whose value was read (`None` for a spilled body
@@ -601,7 +628,9 @@ impl Views<'_> {
             return None;
         }
         let body = self.values.get(uri)?.get("body")?;
-        if body.get("textBlob").is_some() {
+        let fetched = crate::model::render::text_blob_cid(body)
+            .is_some_and(|b| self.renders.spilled(b).is_some() || self.renders.contains(&x.cid));
+        if body.get("textBlob").is_some() && !fetched {
             return None;
         }
         Some(self.body(x, true).text)

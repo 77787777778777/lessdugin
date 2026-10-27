@@ -8,8 +8,9 @@
 //! labels that ask for a click, and its host is one the forum already talks to (or one the
 //! reader allowlisted).
 //!
-//! Everything here is a pure function of what the fold already knows, so the CLI, the TUI
-//! and the SPA reach the same verdict without asking the engine.
+//! Everything here is a pure function of what the fold already knows. The engine computes the
+//! verdict while it builds a view (`MediaView.autoload`, `sync.md` §11.3), so the CLI, the TUI
+//! and the SPA show the same thing.
 
 use url::Url;
 
@@ -17,7 +18,11 @@ use url::Url;
 pub const CLICK_THROUGH_LABELS: [&str; 4] = ["sexual", "nudity", "porn", "graphic-media"];
 
 /// Images at or under this size load by themselves once the other conditions hold.
-pub const AUTOLOAD_MAX_BYTES: u64 = 5 * 1024 * 1024;
+pub const AUTOLOAD_MAX_BYTES: u64 = crate::limits::BLOB_AUTOLOAD_MAX_BYTES;
+
+/// The inline image types (`sync.md` §11.2) - the only ones that ever load without a click.
+/// AVIF is inline in the SPA only and never uploaded, so it is not among them.
+pub const AUTOLOAD_TYPES: [&str; 4] = ["image/png", "image/jpeg", "image/gif", "image/webp"];
 
 /// How many participants a PDS must serve before its host counts as "already talked to".
 pub const HOST_SHARED_BY_PARTICIPANTS: usize = 5;
@@ -44,11 +49,13 @@ pub enum LoadReason {
     AuthorNotEstablished,
     /// The item is not visible (hidden, collapsed, tombstoned, missing).
     NotVisible,
-    /// One of CLICK_THROUGH_LABELS is on the item.
+    /// One of CLICK_THROUGH_LABELS is on the item (or, for a comment, on its root post).
     Label,
     /// The host serves too few participants, is not a Bluesky host, and is not allowlisted.
     HostUnknown,
-    /// The file is larger than AUTOLOAD_MAX_BYTES.
+    /// The file is not an inline image (video, audio and the rest are always click-to-load).
+    NotAnImage,
+    /// The file is larger than AUTOLOAD_MAX_BYTES, or the record does not state its size.
     TooLarge,
 }
 
@@ -61,9 +68,13 @@ pub struct MediaCandidate<'a> {
     pub visible: bool,
     /// The item's self-labels (social.md 17).
     pub labels: &'a [String],
+    /// For a comment, its root post's self-labels, which count too (§11.3); empty otherwise.
+    pub root_labels: &'a [String],
     /// The PDS host that would serve the bytes, as recorded on the author.
     pub host: &'a str,
-    /// The blob size, when the record states it.
+    /// The blob's declared `mimeType`.
+    pub mime: &'a str,
+    /// The blob size, when the record states it (an unknown size never autoloads).
     pub size_bytes: Option<u64>,
 }
 
@@ -75,21 +86,22 @@ pub fn host_of(pds: &str) -> String {
     }
 }
 
-/// True when the host is a Bluesky PDS, which 3.9 always treats as known.
+/// True when the host is a Bluesky PDS (`*.host.bsky.network`), which 3.9 always treats as
+/// known. `bsky.network` itself is the relay, not a PDS host.
 pub fn is_bluesky_host(host: &str) -> bool {
-    host == "bsky.network" || host.ends_with(".host.bsky.network")
+    host.ends_with(".host.bsky.network")
 }
 
 /// The 3.9 autoload verdict. Conditions are checked in the order the spec lists them, so the
 /// reason names the first one that fails.
 ///
 /// established: the author is in S E, as the fold computed it for the forum.
-/// hosts: the PDS host of every participant, so a host "serves >= 5 participants" can be
-/// counted. allowlist: hosts the reader added by hand.
+/// shared: how many of the forum's participants the item's host serves (by the PDS in their
+/// identity rows). allowlist: hosts the reader added by hand.
 pub fn autoload(
     item: &MediaCandidate<'_>,
     established: bool,
-    hosts: &[String],
+    shared: usize,
     allowlist: &[String],
 ) -> Autoload {
     let host = item.host.to_owned();
@@ -108,6 +120,7 @@ pub fn autoload(
     if item
         .labels
         .iter()
+        .chain(item.root_labels)
         .any(|l| CLICK_THROUGH_LABELS.contains(&l.as_str()))
     {
         return Autoload::ClickThrough {
@@ -115,16 +128,24 @@ pub fn autoload(
             host,
         };
     }
-    let known = is_bluesky_host(&host)
-        || allowlist.iter().any(|a| a == &host)
-        || hosts.iter().filter(|h| *h == &host).count() >= HOST_SHARED_BY_PARTICIPANTS;
+    let known = !host.is_empty()
+        && (is_bluesky_host(&host)
+            || allowlist.iter().any(|a| a.eq_ignore_ascii_case(&host))
+            || shared >= HOST_SHARED_BY_PARTICIPANTS);
     if !known {
         return Autoload::ClickThrough {
             reason: LoadReason::HostUnknown,
             host,
         };
     }
-    if item.size_bytes.is_some_and(|n| n > AUTOLOAD_MAX_BYTES) {
+    let mime = item.mime.split(';').next().unwrap_or_default().trim();
+    if !AUTOLOAD_TYPES.iter().any(|t| t.eq_ignore_ascii_case(mime)) {
+        return Autoload::ClickThrough {
+            reason: LoadReason::NotAnImage,
+            host,
+        };
+    }
+    if item.size_bytes.is_none_or(|n| n > AUTOLOAD_MAX_BYTES) {
         return Autoload::ClickThrough {
             reason: LoadReason::TooLarge,
             host,

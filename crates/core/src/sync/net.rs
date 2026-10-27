@@ -1053,6 +1053,26 @@ impl<H: Host> Host for NetHost<H> {
         self.inner.fetch_blob(pds, did, cid, max_bytes)
     }
 
+    fn blob_open(
+        &self,
+        cid: &str,
+    ) -> impl Future<Output = Result<Option<BlobHandle>, HostError>> + MaybeSend {
+        self.inner.blob_open(cid)
+    }
+
+    fn blob_read(
+        &self,
+        cid: &str,
+        offset: u64,
+        len: u32,
+    ) -> impl Future<Output = Result<Vec<u8>, HostError>> + MaybeSend {
+        self.inner.blob_read(cid, offset, len)
+    }
+
+    fn blob_delete(&self, cid: &str) -> impl Future<Output = Result<(), HostError>> + MaybeSend {
+        self.inner.blob_delete(cid)
+    }
+
     fn websocket(
         &self,
         url: url::Url,

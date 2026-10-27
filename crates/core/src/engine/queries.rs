@@ -86,6 +86,7 @@ impl<H: Host> Engine<H> {
             did: self.me().await?,
             muted: self.muted().await?,
             read,
+            media: Default::default(),
         })
     }
 
@@ -155,6 +156,9 @@ impl<H: Host> Engine<H> {
         let l = self.loaded(&key).await?;
         let uri = u.to_string();
         let one = std::slice::from_ref(&uri);
+        // a spilled body is fetched before the view renders it (lfm-1.md §1.3)
+        self.load_spilled_bodies(&l.model, one, &self.rt.renders)
+            .await;
         self.with_views(&l, one, one, |v| v.post_view(&uri))
             .await?
             .ok_or_else(|| EngineError::not_found(format!("no post {uri} in the forum")))
@@ -214,6 +218,9 @@ impl<H: Host> Engine<H> {
             }
         }
         let sort: CommentSort = opts.sort;
+        // only a post's body can spill (data-model.md §5.2 rule 2)
+        self.load_spilled_bodies(m, std::slice::from_ref(&uri), &self.rt.renders)
+            .await;
         let mut view = self
             .with_views(&l, &bodies, &people, |v| v.thread_view(&uri, sort))
             .await?;

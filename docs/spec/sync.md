@@ -1240,6 +1240,9 @@ The key of a tuple is the concatenation of its elements. A prefix scan over `(e1
 | state | `("out.budget", account)` | `BudgetRow` | spent write points with timestamps, for the two sliding windows |
 | state | `("out.meta", account)` | `MetaRow` | the last TID handed out to this account's writes (W6) |
 | state | `("out.blob", account, seq, index, chunk)` | bytes | ≤ 1 MiB chunks of a blob uploaded when write `seq` is sent (`data-model.md` §8.8) |
+| state | `("prep", cid)` | `{v, mime, size, chunks, at}` | a file `prepare_media` prepared, until a write that uploads it is enqueued or `PREPARED_MEDIA_TTL_MS` passes (`data-model.md` §8.8) |
+| state | `("prep.blob", cid, n)` | bytes | its ≤ 1 MiB chunks, raw |
+| state | `("loc", "media", cid)` | legacy | prepared bytes of the first M4 builds: deleted when a file is prepared, and never exported or imported (`export_local`), as they are a copy of a file, not local state |
 | state | `("loc", kind, key…)` | per kind | kinds: `draft`, `read`, `sub`, `follow`, `unfollow`, `bookmark`, `mute`, `setting`, `alias`, `last_listing`, `consent`, `media_host`, `as_pin`, `quarantine`, `account`, `active_account`, `seeded` |
 | state | `("loc", kind, account, key…)` | per kind | the rows of one account: `draft` (`id`), `notif` (`id`), `nbase` (forum), `ack` (kind); `logout --purge` deletes them with the account's `out*` rows (`threat-model.md` AUTH-11). A `("loc", "draft", id)` row (no account, before M4's drafts were per account) is adopted by the first account that uses drafts, or deleted by a purge |
 | state | `("meta", "schema")` | integer | `state` is migrated, never dropped |
@@ -1344,6 +1347,8 @@ Media loads automatically only if all of these hold:
 5. it is an inline image type (§11.2) of at most 5 MiB.
 
 Otherwise the user clicks through a notice: "loads from <host>, which will see your IP". Avatars and forum icons follow the same rules, with the profile or declaration as the item.
+
+The engine decides while it builds a view: `MediaView.autoload` is this verdict for this device (`engine-api.md` §4.1), so every client shows the same thing. Condition 1 also needs the author's identity at level `doc` (§11.1); condition 4 counts the participants' identity rows the cache holds (any level, nothing is resolved for it); condition 5 reads the record's declared `mimeType` and `size`, and a blob whose size the record does not state never autoloads. The `mediaAutoload` setting `off` turns autoload off on the device. `pds` in the view names the host for the notice.
 
 ### 11.4 Caching and purging
 

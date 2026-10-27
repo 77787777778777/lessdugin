@@ -206,6 +206,7 @@ SyncReport { dto, forum, reposTotal, reposComplete, reposStale, reposUnavailable
 | `mod_queue(forum)` | `ModQueue` (`social.md` §4.12): applicants, top-rank unordered conflicts, stale positive assertions and, in open mode, the newest newcomer items. The forum's authorities only (`blocked` for anyone else) |
 | `mod_log(forum, cursor?, limit)` | `ModLog` (`social.md` §4.12), `(time desc, uri asc)`, paged like `list_posts`. Public, except the `reason` of a `#hide` with `showReason: false`, shown to the forum's authorities only |
 | `raw(uri)` | `RawView`: the stored record JSON, its validity violations, every modAction naming it (valid or not, each with its mod-log status), its state and its score. Open to every viewer: the raw view shows everything, hidden content included (`social.md` §10.3) |
+| `load_media(cid, media?)` | `LoadedMedia` (`sync.md` §11.1, M4): fetches a media blob for display from its AUTHOR's PDS, resolved from the author's DID document (`media`: the item's `MediaView`, or only the author's DID; without it, the active account's own repo). Needs no login. The cap is the declared `sizeBytes` (a longer body is aborted, and a copy already stored is held to it too), within `BLOB_HARD_MAX_BYTES`. The host streams and CID-checks the bytes, which never enter wasm memory; the core reads the first 4,096 bytes to sniff the type. `mime` is the §11.2 display type, set only when the sniffed type is on the display allowlist and agrees with the declared one (when the view gives one): absent, the client shows a download card. In the browser `url` is a `blob:` object URL of type `mime` that the main-thread client makes from the verified stored `Blob`; the caller revokes it when the element unmounts. Natively it is the file's path. Errors: `not_found` with `detail.kind = "mediaMissing"` (the PDS has no such blob, and nothing is stored: a blob stored once is not asked for again, `sync.md` §12.2), `network` with `detail.kind = "mediaFailedVerification"` (CID mismatch), `too_large` (above the declared size or 300 MiB) |
 | `bookmarks()` | `Vec<BookmarkEntry>`: newest first, each with the post's summary when its forum's model is cached |
 | `bookmarked(uri)` | `bool` |
 | `subscriptions()` | `Vec<SubscriptionEntry>`, oldest first |
@@ -270,7 +271,7 @@ emits `Auth { did, state: Expired }`, and the next login of the account (`add_ac
 | `wiki_edit(forum, slug, WikiDraft)` | M5 (§3.9) |
 | `seq_create`, `seq_edit`, `seq_add`, `seq_remove`, `seq_move` | M5 |
 | `redact_revision(uri) -> WriteTicket` | a post, comment or sequence `uri` of an account on this device (`auth_required` otherwise: only the author redacts, W9): deletes every own revision record that names the item (`data-model.md` §8.7: any key suffix, any spelling of the repo), as listed on the author's PDS when the write is sent, so revisions this device never synced and invalid ones go too (`data-model.md` §8 "Redact history", `threat-model.md` PRIV-5). The item then reads "history redacted". A forum declaration's or a modAction's revisions are the mod log and are never redacted (`invalid_input`, `detail.kind = "modLog"`; `threat-model.md` SOC-7), as is `delete` of such a revision's uri. The write's `Done` names the item; an item without history is a write that deletes nothing |
-| `prepare_media(bytes, MediaInput?) -> MediaRef` | sniff, strip, orient, downscale to 5 MiB (`data-model.md` §8.8), CID; the same pipeline natively and in the SPA's wasm. Upload happens at publish. `MediaInput` carries the declared type and the display hints; engine API v0's single `MediaFile { bytes, mime?, name?, alt? }` argument is still accepted (`mime` is the declared type) |
+| `prepare_media(bytes, MediaInput?) -> MediaRef` | sniff, strip, orient, downscale to 5 MiB (`data-model.md` §8.8), CID; the same pipeline natively and in the SPA's wasm. Upload happens at publish. `MediaInput` carries the declared type and the display hints; engine API v0's single `MediaFile { bytes, mime?, name?, alt? }` argument is still accepted (`mime` is the declared type). A blank `alt` is no alt (it is never written as `""`), and the reference then carries a `missingAlt` notice, which writers show (`data-model.md` §4) |
 | `undo(write_id)` | removes a write not sent yet (the undo window), or writes the inverse of a sent opinion (`sync.md` §7.4) |
 | `retry_write(write_id)` | queues a `failed` (or conflicting) write again with its attempts reset; on a write that backs off after a failure, or waits for a login, it is "send now" (queued at once, attempts kept). A write held by the undo window, the write budget or a rate limit is refused (`invalid_input`). Returns its ticket |
 | `write_status(write_id) -> Option<WriteTicket>` | `None`: unknown or pruned |
@@ -438,7 +439,7 @@ Anchor        { start: u32, end: u32 } | { orphan: true }    // code-point offse
 RenderedBody  { html, text, toc: Vec<TocEntry>, wordCount, readMinutes, media: Vec<MediaView>,
                 excerpt, notices: Vec<string>, rendererVersion }
 MediaView     { index, cid, mime, alt?, aspectRatio?, durationMs?, name?, author: did, pds,
-                autoload: bool, sizeBytes }
+                autoload: bool /* sync.md §11.3, for this device */, sizeBytes }
 Completeness  { partial: bool, reposComplete, reposTotal, degraded: bool }
 ```
 
@@ -545,7 +546,9 @@ ListPostsQuery { forum, sort: PostSort, filter: PostFilter, tag?: slug, kind?: P
 ThreadOpts    { sort: CommentSort, unreadOnly? /* false */ }
 NotificationsQuery { all? /* false: unread only */, limit }
 BodyDraft     { markdown, media?: Vec<MediaRef> }
-MediaRef      { id, cid, mime, sizeBytes, alt?, aspectRatio?, durationMs?, name? }
+MediaRef      { id, cid, mime, sizeBytes, alt?, aspectRatio?, durationMs?, name?,
+                notices?: Vec<ActionNotice> /* prepare_media: missingAlt when alt is absent */ }
+LoadedMedia   { cid, size, url, mime? /* the §11.2 display type; absent: a download card */ }
 PostDraft     { forum, kind: PostKind, title?, body: BodyDraft, link?: { uri, title?, description? },
                 tags?: Vec<slug>, labels?: Vec<string> }
 CommentDraft  { root, parent?, body: BodyDraft, quote?: TextQuote }
@@ -577,7 +580,7 @@ WriteState    = { kind: "pending", notBeforeMs?, held?: true, throttled?: true, 
                   error?: EngineError } | { kind: "sending" } | { kind: "done", uri, cid? }
               | { kind: "failed", error: EngineError } | { kind: "undone" }
 ActionTicket  { id, state: WriteState, notices?: Vec<ActionNotice> }
-ActionNotice  { code: notEstablished|retroactive|adoptedFirst, message }
+ActionNotice  { code: notEstablished|retroactive|adoptedFirst|missingAlt, message }
 Subscription  = { kind: "forum", uri } | { kind: "post", uri } | { kind: "user", did }
               | { kind: "tag", forum, slug } | { kind: "sequence", uri }
 PublicActionKind = vote|react|tagVote|join|modAction

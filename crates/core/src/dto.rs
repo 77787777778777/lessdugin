@@ -1357,6 +1357,10 @@ dto! {
         pub duration_ms: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub name: Option<String>,
+        /// From `prepare_media`: `missingAlt` when the file has no alt text (writers warn,
+        /// `data-model.md` §4).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub notices: Vec<ActionNotice>,
     }
 }
 
@@ -1392,8 +1396,13 @@ dto! {
         pub cid: String,
         /// The bytes' size.
         pub size: u64,
-        /// A URL the client can put in `img.src` / `video.src` (an object URL in the browser).
+        /// Where the verified bytes are: the host's locator (a file path natively). The SPA's
+        /// client replaces it with a `blob:` object URL of type `mime` (`sync.md` §11.2).
         pub url: String,
+        /// The display type (`sync.md` §11.2): the allowlist's constant string when the sniffed
+        /// type agrees with the declared one; absent: show a download card, never inline.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub mime: Option<String>,
     }
 }
 
@@ -1734,7 +1743,7 @@ dto! {
 
 string_enum! {
     /// What a notice on an action's result is about.
-    pub enum NoticeCode { NotEstablished, Retroactive, AdoptedFirst }
+    pub enum NoticeCode { NotEstablished, Retroactive, AdoptedFirst, MissingAlt }
 }
 
 dto! {

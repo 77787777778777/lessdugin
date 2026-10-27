@@ -639,6 +639,45 @@ async fn fetch_blob_verifies_and_stores() {
 }
 
 #[tokio::test]
+async fn the_core_reads_stored_blobs_through_the_host_trait() {
+    // m4-27: `blob_open`, `blob_read` (≤ 1 MiB a call) and `blob_delete` are `Host` methods, so
+    // the core can sniff a fetched blob, read a `textBlob` and purge a missing one
+    let env = Env::new().await;
+    let did = Did::parse("did:plc:alice").unwrap();
+    let body: Vec<u8> = (0..(3u32 << 19)).map(|i| (i % 251) as u8).collect();
+    let cid = atp_cid::for_raw(&body).to_string();
+    env.srv
+        .blobs
+        .lock()
+        .unwrap()
+        .insert(cid.clone(), (200, body.clone()));
+    assert_eq!(Host::blob_open(&env.host, &cid).await.unwrap(), None);
+    let h = env
+        .host
+        .fetch_blob(env.base.clone(), did, cid.clone(), 1 << 21)
+        .await
+        .unwrap();
+    assert_eq!(Host::blob_open(&env.host, &cid).await.unwrap(), Some(h));
+    assert_eq!(
+        Host::blob_read(&env.host, &cid, 0, 4096).await.unwrap(),
+        body[..4096]
+    );
+    // a window is capped at 1 MiB, and the end is short
+    let w = Host::blob_read(&env.host, &cid, 10, u32::MAX)
+        .await
+        .unwrap();
+    assert_eq!(w.len(), lessdugin_core::host::BLOB_READ_MAX_BYTES as usize);
+    assert_eq!(w[..], body[10..10 + w.len()]);
+    let end = Host::blob_read(&env.host, &cid, body.len() as u64 - 3, 4096)
+        .await
+        .unwrap();
+    assert_eq!(end, body[body.len() - 3..]);
+    Host::blob_delete(&env.host, &cid).await.unwrap();
+    Host::blob_delete(&env.host, &cid).await.unwrap();
+    assert_eq!(Host::blob_open(&env.host, &cid).await.unwrap(), None);
+}
+
+#[tokio::test]
 async fn fetch_blob_does_not_follow_redirects() {
     let env = Env::new().await;
     let did = Did::parse("did:plc:alice").unwrap();
@@ -877,12 +916,8 @@ async fn host_locks_exclude_across_hosts_on_one_data_dir() {
     assert!(mem.clone().lock(name, false).await.unwrap().is_none());
 }
 
-/// `docs/plan.md` M4 acceptance: "a blob at the hard limit (300 MiB) served by FakePds is
-/// fetched and CID-checked by the CLI without being held in memory". The 300 MiB case itself is
-/// too slow for CI, so this pins the PROPERTY that makes it true at any size: the bytes are
-/// written to a file chunk by chunk while they are hashed, so the peak memory does not grow with
-/// the blob. If the implementation ever buffered the body, `h.size` would still be right but the
-/// peak would follow the size, which this test measures.
+/// The bytes of a fetched blob end up in a file whose CID is checked. The M4 acceptance test
+/// itself - 300 MiB from FakePds with the peak heap measured - is `tests/blob_hard_limit.rs`.
 #[tokio::test]
 async fn fetch_blob_streams_to_disk_instead_of_buffering() {
     let env = Env::new().await;

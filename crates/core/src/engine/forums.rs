@@ -346,7 +346,8 @@ impl<H: Host> Engine<H> {
         let (actors, pds) = self.actors(dids).await;
         let values = self.values(m, body_uris).await?;
         let pending = self.pending_uris().await?;
-        let viewer = self.viewer(m, body_uris).await?;
+        let mut viewer = self.viewer(m, body_uris).await?;
+        viewer.media = self.media_prefs(m, &values).await;
         let v = Views {
             model: m,
             actors: &actors,
@@ -813,7 +814,8 @@ fn media_value(m: &crate::dto::MediaRef) -> Result<lessdugin_lexicon::records::M
         size,
         extra: Map::new(),
     });
-    media.alt = m.alt.clone();
+    // a blank alt is no alt (data-model.md §4)
+    media.alt = m.alt.clone().filter(|a| !a.trim().is_empty());
     media.name = m.name.clone();
     media.aspect_ratio = m.aspect_ratio.as_ref().map(|a| LexAspect {
         width: i64::from(a.width),

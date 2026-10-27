@@ -85,7 +85,7 @@ use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use lessdugin_atp::syntax::Did;
 use lessdugin_core::host::{HostError, HttpRequest, HttpResponse};
 
-pub use blob::{sniff_mime, tiny_png};
+pub use blob::{Generated, sniff_mime, tiny_png};
 pub use faults::{CursorMode, Fault, FaultId, FaultRule, ForkSelector, RateLimit};
 pub use handles::{AccountHandle, PdsHandle, RepoWriter};
 pub use log::{LoggedRequest, RepoEvent, RepoEventKind, ServiceKind};
@@ -279,6 +279,11 @@ fn finish_in_memory(
     }
     match out.abort {
         None => Ok(out.resp),
+        Some(Abort::Generate(g)) => {
+            let mut r = out.resp;
+            r.body = g.bytes();
+            Ok(r)
+        }
         Some(Abort::Truncate(n)) => {
             let mut r = out.resp;
             r.body.truncate(n);

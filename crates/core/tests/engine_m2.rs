@@ -519,10 +519,10 @@ fn writes_need_an_account_and_publish_media() {
     // the reference being valid (G2: links must be CIDs). Hand-building the MediaRef skips the
     // store and would make publish refuse - which is the guard that exists because the devnet
     // answered such a publish with `BlobNotFound (HTTP 400)`.
-    let png: &[u8] =
-        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00";
+    // a whole PNG: one the media pipeline cannot parse to its end is refused (fail closed)
+    let png = lessdugin_testkit::fake_pds::tiny_png(1);
     let prepared = block_on(bob.engine.prepare_media(
-        png.to_vec(),
+        png,
         &lessdugin_core::dto::MediaInput {
             declared_mime: Some("image/png".into()),
             alt: Some("an image".into()),

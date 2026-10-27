@@ -12,11 +12,16 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [features]
-default = ["math", "verify"]
+default = ["math", "verify", "orientation"]
 # MathML through math-core (lfm-1.md §7.2); without it the renderer emits `<span data-tex>`.
 math = ["lessdugin-markdown/math"]
 # Record verification (ADR 0002 rule 5: `xtask wasm --report` prints its marginal size).
 verify = ["lessdugin-core/verify"]
+# The media pipeline's pure-Rust decoders (PNG, JPEG, GIF, WebP): EXIF orientation is applied
+# physically and images are downscaled to fit the PDS, in the SPA as natively (the same core
+# code, `threat-model.md` §5.9.1, SUP-9). Without it the SPA strips the orientation tag with the
+# rest of the EXIF and uploads the pixels unrotated.
+orientation = ["lessdugin-core/orientation"]
 # Test-only builds (`cargo xtask wasm --kv-test`): export `kvConformance(store)`, which runs the
 # shared `KvStore` contract and record-store scenario of lessdugin-testkit against a JS store
 # (the IndexedDB store of @lessdugin/engine under vitest). Never part of the SPA's build.

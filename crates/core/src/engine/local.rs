@@ -160,6 +160,12 @@ fn part_str(p: Option<&Part>) -> Option<&str> {
     }
 }
 
+/// `("loc", "media", cid)`: the prepared bytes of the first M4 builds, which the media pipeline
+/// sweeps (`media::LEGACY_MEDIA`). A copy of a file, not local state: never exported or imported.
+fn not_local_state(parts: &[Part]) -> bool {
+    part_str(parts.get(1)) == Some(crate::media::LEGACY_MEDIA.1)
+}
+
 /// The account a `loc` key belongs to, if it names one. The `loc` keys put the account in a fixed
 /// position per family; this reads the families the engine writes.
 fn account_of(parts: &[Part]) -> Option<&str> {
@@ -250,7 +256,7 @@ impl<H: crate::host::Host> Engine<H> {
             let last = page.last().map(|(k, _)| k.clone());
             for (k, v) in page {
                 let Ok(parts) = key::decode(&k) else { continue };
-                if !in_scope(&parts, &scope, active.as_deref()) {
+                if not_local_state(&parts) || !in_scope(&parts, &scope, active.as_deref()) {
                     continue;
                 }
                 rows.push(ExportMember {
@@ -342,6 +348,10 @@ impl<H: crate::host::Host> Engine<H> {
             };
             if k.len() > KV_KEY_MAX_BYTES || v.len() > crate::store::row::KV_VALUE_MAX_BYTES {
                 report.refused += 1;
+                continue;
+            }
+            if not_local_state(&parts) {
+                report.out_of_scope += 1;
                 continue;
             }
             let Some(kind) = importable(&parts, &v) else {

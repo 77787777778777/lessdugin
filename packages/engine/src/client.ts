@@ -22,8 +22,21 @@ import * as Comlink from "comlink";
 import type { EngineApi } from "./api.ts";
 import { AuthBridge, NS, type SessionProvider } from "./auth-bridge.ts";
 import { serveBridgePort } from "./bridge-port.ts";
-import type { WorkerInfo, WorkerInit } from "./protocol.ts";
-import type { EngineEvent, EventListener, MediaFile, Unsubscribe, WriteTicket } from "./types.ts";
+import {
+  MEDIA_WASM_WINDOW_BYTES,
+  tooLargeForTheBrowser,
+  type WorkerInfo,
+  type WorkerInit,
+} from "./protocol.ts";
+import type {
+  EngineError,
+  EngineEvent,
+  EventListener,
+  LoadedMedia,
+  MediaFile,
+  Unsubscribe,
+  WriteTicket,
+} from "./types.ts";
 import type { EngineWorkerApi } from "./worker.ts";
 import { workerScriptUrl } from "./workerUrl.ts";
 
@@ -80,7 +93,7 @@ export const OP_ARITY: Readonly<Record<string, number>> = Object.freeze({
   parseRef: 2,
   // bytes are a separate argument from the hints (engine-api.md §3.6), so two
   prepareMedia: 2,
-  loadMedia: 1,
+  loadMedia: 2,
   forumFollow: 2,
   join: 2,
   members: 2,
@@ -189,15 +202,28 @@ export function startEngine(options: StartEngineOptions = {}): EngineClient {
   const special: Record<string, (...args: unknown[]) => Promise<unknown>> = {
     outboxPump: async () => undefined,
     liveTail: async () => undefined,
-    // The bytes cross the worker boundary as a structured-cloned array (a Uint8Array arrives as
-    // an index-keyed object), so they are flattened to a plain number array here. A Uint8Array
-    // that the structured clone left intact is spread just the same.
+    // The bytes cross to the worker as a structured-cloned Uint8Array and into wasm as bytes
+    // (worker-core.ts), never as a JSON number array; a file over MEDIA_WASM_WINDOW_BYTES is
+    // refused here, before it is copied anywhere (limits.md §6).
     async prepareMedia(...args) {
-      const [bytes, input] = fromMediaFile(args) as [
-        Uint8Array | number[] | ArrayLike<number>,
-        unknown,
-      ];
-      return remote.call("prepareMedia", [Array.from(bytes), input ?? null]);
+      const [given, input] = fromMediaFile(args) as [Uint8Array | ArrayLike<number>, unknown];
+      const bytes = given instanceof Uint8Array ? given : Uint8Array.from(given);
+      if (bytes.byteLength > MEDIA_WASM_WINDOW_BYTES) throw tooLargeForTheBrowser(bytes.byteLength);
+      await start();
+      return remote.prepareMedia(bytes, input ?? null);
+    },
+    // The worker's host streamed the blob, checked it against its CID and stored it (it never
+    // entered wasm memory); here, on the main thread, the stored Blob is typed with the display
+    // type and turned into the `blob:` URL the page can load (sync.md §11.2, CSP `img-src blob:`).
+    // The caller revokes it when the element unmounts.
+    async loadMedia(...args) {
+      const loaded = (await call("loadMedia", args)) as LoadedMedia;
+      const stored = await remote.blob(loaded.cid);
+      if (!stored) {
+        throw engineError("internal", `the verified blob ${loaded.cid} is not stored`);
+      }
+      const typed = new Blob([stored], { type: loaded.mime ?? "application/octet-stream" });
+      return { ...loaded, url: URL.createObjectURL(typed) };
     },
     async grant(...args) {
       return first(await call("grant", args));
@@ -227,6 +253,10 @@ export function fromMediaFile(args: readonly unknown[]): unknown[] {
   }
   const { bytes, mime, name, alt } = file as MediaFile;
   return [bytes, { declaredMime: mime, name, alt }];
+}
+
+function engineError(code: EngineError["code"], message: string): EngineError {
+  return { code, message, retryable: false };
 }
 
 function first(tickets: unknown): WriteTicket {

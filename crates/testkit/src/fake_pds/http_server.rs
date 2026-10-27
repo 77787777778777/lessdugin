@@ -110,6 +110,13 @@ async fn handle(inner: Weak<Inner>, base: String, req: Request) -> Response {
     let fail = || std::io::Error::other("fake network fault");
     let body = match out.abort {
         None => Body::from(out.resp.body),
+        Some(Abort::Generate(g)) => {
+            // streamed a chunk at a time: the blob never sits in memory whole
+            b = b.header("content-length", g.size.to_string());
+            Body::from_stream(futures::stream::iter(
+                (0..g.chunks()).map(move |i| Ok::<_, std::io::Error>(Bytes::from(g.chunk(i)))),
+            ))
+        }
         Some(Abort::Truncate(n)) => {
             let full = out.resp.body.len();
             b = b.header("content-length", full.to_string());

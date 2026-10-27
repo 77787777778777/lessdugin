@@ -44,6 +44,7 @@ import type {
   MediaFile,
   MediaInput,
   MediaRef,
+  MediaView,
   MembersQuery,
   MemberView,
   ModActionIntent,
@@ -187,8 +188,11 @@ export interface EngineApi {
   /** Public; paged like `listPosts` (`limit` 0 or absent: the default page). */
   modLog(forum: AtUri, cursor?: string, limit?: number): Promise<ModLog>;
   raw(uri: AtUri): Promise<RawView>;
-  /** Fetches a media blob for display; the URL is an object URL in the browser. */
-  loadMedia(cid: Cid): Promise<LoadedMedia>;
+  /** Fetches a media blob for display from its author's PDS (sync.md §11.1). `media`: the
+   * item's view from `RenderedBody.media` (its author, declared type and size), or only the
+   * author's DID; without it, the active account's own repo is asked. No login is needed. The
+   * URL is a `blob:` object URL in the browser; see `LoadedMedia`. */
+  loadMedia(cid: Cid, media?: MediaView | Did): Promise<LoadedMedia>;
   drafts(): Promise<DraftEntry[]>;
   /** Newest first. */
   bookmarks(): Promise<BookmarkEntry[]>;
