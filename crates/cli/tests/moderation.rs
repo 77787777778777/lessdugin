@@ -7,7 +7,8 @@
 //!   `lessdugin mod lock`);
 //! - `mods rm` runs `mod adopt` first: the departing moderator's assertions are re-issued
 //!   under the remover (with `adopts` pointing at each original) before the declaration
-//!   edits, and the ticket says so (`adoptedFirst` notice);
+//!   edits, and the ticket says so (`adoptedFirst` notice); `mods rm --skip-adopt` lists the
+//!   assertions that lapse and needs a confirmation;
 //! - a backdated item shows its `t_rank`, not its claimed `createdAt` (`social.md` §2.3).
 //!
 //! All run on the FakePds network (`support/fakenet.rs`) with the real CLI binary.
@@ -303,4 +304,60 @@ fn a_backdated_item_shows_its_t_rank_not_its_claimed_time() {
         !read.contains("2019-03-04"),
         "the claimed time is shown: {read}"
     );
+}
+
+/// `mods rm --skip-adopt` lets the moderator's assertions lapse only after a confirmation that
+/// lists every one of them (`social.md` §4.10, `data-model.md` §8.6): headless, without `--yes`
+/// it is refused and nothing changes; with `--yes` the list is shown and the moderator is
+/// removed without adoption.
+#[test]
+fn mods_rm_skip_adopt_lists_what_lapses_and_needs_a_confirmation() {
+    let net = Net::new();
+    let alice = net.user("alice.test", true);
+    let bob = net.user("bob.test", true);
+    let carol = net.user("carol.test", true);
+    alice.json(&["forum", "create", "meta", "--frontpage"]);
+    for u in [&bob, &carol] {
+        u.json(&["join", "alice.test/meta", "--yes"]);
+    }
+    alice.json(&["approve", "bob.test", "carol.test", "--yes"]);
+    alice.json(&["mods", "add", "bob.test"]);
+    carol.ok(&["sync", "alice.test/meta"]);
+    let f = carol.file("p.md", "---\ntitle: From carol\n---\nHello.\n");
+    let post = carol.json(&["post", s(&f), "--yes"]);
+    let post_uri = post["state"]["uri"].as_str().unwrap().to_owned();
+    bob.ok(&["sync", "alice.test/meta"]);
+    let h = bob.json(&["mod", "hide", &post_uri, "--reason", "spam run", "--yes"]);
+    assert_eq!(h["state"]["kind"], "done", "{h}");
+    let mods_of = |u: &fakenet::User| -> Vec<Value> {
+        let rec = u.account.get(nsid::FORUM, "meta").unwrap();
+        rec.get("moderators")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+    };
+    assert_eq!(mods_of(&alice).len(), 1);
+
+    // headless without --yes: the hide is listed, the removal refused, the declaration kept
+    let out = alice.run(&["mods", "rm", "bob.test", "--skip-adopt"]);
+    assert_eq!(out.status.code(), Some(2), "{}", fakenet::text(&out.stderr));
+    let err = fakenet::text(&out.stderr);
+    assert!(err.contains("lapse") && err.contains("--yes"), "{err}");
+    assert!(err.contains(&post_uri) && err.contains("spam run"), "{err}");
+    assert_eq!(mods_of(&alice).len(), 1, "the declaration changed");
+
+    // confirmed: listed again, then removed without adopting
+    let out = alice.run(&["mods", "rm", "bob.test", "--skip-adopt", "--yes"]);
+    assert!(out.status.success(), "{}", fakenet::text(&out.stderr));
+    let err = fakenet::text(&out.stderr);
+    assert!(err.contains(&post_uri), "{err}");
+    assert!(mods_of(&alice).is_empty());
+    let adopted = alice
+        .account
+        .list(nsid::MOD_ACTION)
+        .iter()
+        .filter_map(|(rkey, _)| alice.account.get(nsid::MOD_ACTION, rkey))
+        .filter(|v| v.get("adopts").is_some())
+        .count();
+    assert_eq!(adopted, 0, "nothing is adopted");
 }

@@ -170,7 +170,8 @@ pub enum ModsAction {
         /// A handle or DID.
         #[arg(value_name = "ACTOR")]
         actor: String,
-        /// Remove without adopting (a rogue moderator: their assertions lapse).
+        /// Remove without adopting (a rogue moderator): their assertions lapse, so they are
+        /// listed first and the removal is confirmed (or --yes).
         #[arg(long)]
         skip_adopt: bool,
     },

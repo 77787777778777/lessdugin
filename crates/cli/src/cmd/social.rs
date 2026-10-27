@@ -332,10 +332,15 @@ pub async fn mods(ctx: &Ctx, args: ModsArgs) -> Result<(), CliError> {
             role: role.into(),
             title: None,
         },
-        ModsAction::Rm { actor, skip_adopt } => ModsChange::Remove {
-            did: actor,
-            skip_adopt,
-        },
+        ModsAction::Rm { actor, skip_adopt } => {
+            if skip_adopt {
+                confirm_lapse(ctx, &w, &forum, &actor, args.yes).await?;
+            }
+            ModsChange::Remove {
+                did: actor,
+                skip_adopt,
+            }
+        }
     };
     let at = w.engine.mods_set(&forum, &change).await?;
     drive_action(
@@ -348,6 +353,66 @@ pub async fn mods(ctx: &Ctx, args: ModsArgs) -> Result<(), CliError> {
         },
     )
     .await
+}
+
+/// The confirmation of `mods rm --skip-adopt` (`social.md` §4.10, `data-model.md` §8.6): lists
+/// every forum-scope assertion of the moderator that counts now and lapses with the removal,
+/// then asks on a terminal; headless use needs `--yes` (`yes`). Nothing to list asks nothing.
+async fn confirm_lapse(
+    ctx: &Ctx,
+    w: &Writer,
+    forum: &str,
+    actor: &str,
+    yes: bool,
+) -> Result<(), CliError> {
+    use lessdugin_core::dto::ModLogStatus;
+    let who = w.engine.resolve_actor(actor).await?;
+    read::sync_forum_quietly(ctx, &w.engine, forum).await;
+    let mut lapsing = Vec::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        let page = w.engine.mod_log(forum, cursor.as_deref(), 200).await?;
+        lapsing.extend(page.entries.into_iter().filter(|e| {
+            e.actor.did == who.did
+                && !e.author_scope
+                && matches!(e.status, ModLogStatus::Effective | ModLogStatus::Overridden)
+        }));
+        match page.cursor {
+            Some(c) => cursor = Some(c),
+            None => break,
+        }
+    }
+    if lapsing.is_empty() {
+        return Ok(());
+    }
+    let n = u32::try_from(lapsing.len()).unwrap_or(u32::MAX);
+    ctx.out.warn(cat([
+        lit("removing without adopting: "),
+        render::count(n, "assertion", "assertions"),
+        lit(" by "),
+        render::actor(&who),
+        lit(" lapse at once:"),
+    ]));
+    for e in &lapsing {
+        let mut parts = vec![tt(&e.action), tt(&e.value), tt(&e.subject)];
+        if let Some(r) = &e.reason {
+            parts.push(tt(r));
+        }
+        ctx.out.warn(cat([lit("  "), cat(intersperse(parts))]));
+    }
+    if yes {
+        return Ok(());
+    }
+    if prompt::stdin_is_tty() && !ctx.out.is_json() {
+        if prompt::confirm("remove without adopting them?") {
+            return Ok(());
+        }
+        return Err(CliError::Reported(1));
+    }
+    Err(CliError::usage(format!(
+        "{n} assertion(s) by {actor} would lapse (listed above): add --yes to remove without \
+         adopting when not running interactively, or drop --skip-adopt to adopt them"
+    )))
 }
 
 // ---------------------------------------------------------------------------------------------
