@@ -774,15 +774,45 @@ pub fn decode_image(bytes: &[u8]) -> Option<image::DynamicImage> {
     reader(bytes)?.decode().ok()
 }
 
+/// True for an animation: a GIF, an APNG (an `acTL` chunk before the first `IDAT`) or an
+/// animated WebP (VP8X's animation flag `0x02`, RFC 9649). The decoders here return its first
+/// frame only, so a re-encode would turn it into a still: it keeps its bytes instead.
+#[cfg(feature = "orientation")]
+fn is_animated(b: &[u8]) -> bool {
+    match sniff(b) {
+        Some(Format::Gif) => true,
+        Some(Format::Png) => {
+            let mut i = 8;
+            while let Some(head) = b.get(i..i + 8) {
+                let len = u32::from_be_bytes([head[0], head[1], head[2], head[3]]) as usize;
+                match &head[4..8] {
+                    b"acTL" => return true,
+                    b"IDAT" | b"IEND" => return false,
+                    _ => {}
+                }
+                let Some(next) = i.checked_add(12).and_then(|v| v.checked_add(len)) else {
+                    return false;
+                };
+                i = next;
+            }
+            false
+        }
+        // VP8X, when present, is the first chunk; byte 0 of its payload holds the flags
+        Some(Format::Webp) => b.get(12..16) == Some(b"VP8X") && b.get(20).is_some_and(|f| f & 0x02 != 0),
+        _ => false,
+    }
+}
+
 /// Applies EXIF orientation physically, by re-encoding the pixels (so no EXIF survives). Returns
 /// the input unchanged when the orientation is 1/absent or the image cannot be decoded.
 ///
 /// Only the formats the `image` crate can decode in this build are handled (PNG, JPEG, GIF, WebP);
-/// anything else keeps its bytes, and the caller still strips its metadata.
+/// anything else keeps its bytes, and the caller still strips its metadata. An animation keeps
+/// its bytes too ([`is_animated`]): its frames stay, unrotated, rather than become one still.
 #[cfg(feature = "orientation")]
 pub fn apply_orientation(bytes: &[u8], orientation: u16) -> Vec<u8> {
     use image::{DynamicImage, ImageFormat};
-    if !(2..=8).contains(&orientation) {
+    if !(2..=8).contains(&orientation) || is_animated(bytes) {
         return bytes.to_vec();
     }
     let Some(img) = decode_image(bytes) else {
@@ -947,17 +977,20 @@ fn fit_to_target(prepared: Vec<u8>) -> Vec<u8> {
 ///
 /// Returns `None` when the bytes are not a decodable image or cannot be made to fit - the caller
 /// then refuses the upload rather than sending something the PDS will reject again (§8.8: "On 413,
-/// the client downscales (images) or refuses"). Audio, video, PDF and text never downscale.
+/// the client downscales (images) or refuses"). Audio, video, PDF and text never downscale, and
+/// neither does an animation (a GIF, APNG or animated WebP, [`is_animated`]): it is not resized
+/// frame by frame here, and its first frame alone is not the file.
 #[cfg(feature = "orientation")]
 pub fn downscale_to_fit(bytes: &[u8], max_bytes: usize) -> Option<Vec<u8>> {
     use image::ImageFormat;
-    let format = sniff(bytes)?;
-    let image_format = match format {
+    if is_animated(bytes) {
+        return None;
+    }
+    let image_format = match sniff(bytes)? {
         Format::Png => ImageFormat::Png,
-        Format::Gif => return None, // an animation is not resized frame by frame here
         Format::Webp => ImageFormat::WebP,
         Format::Jpeg => ImageFormat::Jpeg,
-        Format::Iso => return None,
+        Format::Gif | Format::Iso => return None,
     };
     let mut img = decode_image(bytes)?;
     // bounded: at most 20 halvings (a 2^20-fold reduction), so this cannot spin
