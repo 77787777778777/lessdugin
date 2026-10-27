@@ -1607,8 +1607,10 @@ impl<H: crate::host::Host> crate::engine::Engine<H> {
                 }
             }
         }));
-        let wait = self.host().sleep(crate::limits::BODY_BLOB_WAIT_MS);
-        let waited = futures::future::select(std::pin::pin!(fetches), std::pin::pin!(wait)).await;
+        let wait = std::pin::pin!(self.host().sleep(crate::limits::BODY_BLOB_WAIT_MS));
+        let fetches = std::pin::pin!(fetches);
+        // the fetches first: one that is ready (a stored copy) never waits for the clock
+        let waited = futures::future::select(fetches, wait).await;
         if let futures::future::Either::Right(_) = waited {
             for &(uri, _, blob) in &wanted {
                 if renders.spilled(blob).is_none() {

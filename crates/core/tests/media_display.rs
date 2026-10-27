@@ -447,10 +447,14 @@ fn a_slow_authors_pds_does_not_hold_back_the_thread() {
     let e = n.device("anon", None);
     let r = block_on(e.sync_forum(&f, &SyncOpts::default())).unwrap();
     assert!(r.errors.is_empty(), "{r:?}");
-    // bob's PDS stalls: the view comes back once BODY_BLOB_WAIT_MS is up, with the body pending
+    // bob's PDS stalls: the view comes back once BODY_BLOB_WAIT_MS is up (MemHost's sleep moves
+    // the clock, so one poll does it), with the body pending
     e.host().hold_blob_fetches(true);
     e.host().clear_requests();
-    let t = block_on(e.get_thread(&uri, &Default::default()))
+    let t = e
+        .get_thread(&uri, &Default::default())
+        .now_or_never()
+        .expect("a view that waits only BODY_BLOB_WAIT_MS")
         .unwrap()
         .post;
     let lessdugin_core::dto::ThreadRoot::Post(root) = t else {
