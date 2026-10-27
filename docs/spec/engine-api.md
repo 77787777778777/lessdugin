@@ -138,7 +138,7 @@ when the engine is dropped or the corresponding stop method is called.
 
 | Operation | Result / notes |
 |---|---|
-| `forum_open(ref)` | `ForumView` header (§4.3). Resolves the declaration (first open fetches a proof), schedules authority sync. |
+| `forum_open(ref)` | `ForumView` header (§4.3). Resolves the declaration (first open fetches a proof), schedules authority sync: authorities never synced are synced now (P0), stale ones are queued. It emits `Changed [Forum]` only if that sync changed the cache (a record, or a repo's status), so re-querying on `Changed` cannot loop on an authority that stays unavailable; an authority whose sync failed is not tried again by `forum_open` for `FORUM_REOPEN_MS`. |
 | `forum_discover(q)` | `Vec<ForumSummary>` (relay + owners' listings + indexers; grouped by owner). M5 (§3.9) |
 | `forum_follow(uri, alias?)`, `forum_unfollow(uri)`, `followed()` | local; `followed()` also seeds from the user's own `membership` records |
 | `forum_create(ForumDraft)` | `WriteTicket`; writes the declaration and the owner's membership in one `applyWrites` |
