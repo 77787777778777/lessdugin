@@ -537,10 +537,7 @@ async fn comment_text(
         head.push((lit("[missing comment]"), Style::Dim));
         return line(ctx, &head);
     }
-    let mut meta = vec![
-        render::actor(&c.author),
-        tt(&render::time(c.t_rank_ms)),
-    ];
+    let mut meta = vec![render::actor(&c.author), tt(&render::time(c.t_rank_ms))];
     meta.extend(render::score(&c.score));
     if c.retracted {
         meta.push(lit("retracted"));

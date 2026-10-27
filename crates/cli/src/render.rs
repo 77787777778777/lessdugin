@@ -197,13 +197,22 @@ pub fn react(t: &ReactTally, handle_of: &dyn Fn(&str) -> Option<String>) -> Term
         parts.push(cat([lit(", "), count(seconded, "seconded", "seconded")]));
     }
     if t.against > 0 {
-        parts.push(cat([lit(", "), tt(&t.against.to_string()), lit(" against")]));
+        parts.push(cat([
+            lit(", "),
+            tt(&t.against.to_string()),
+            lit(" against"),
+        ]));
     }
     if let Some(q) = &t.quote {
         if matches!(t.anchor, Some(Anchor::Orphan { .. })) {
             parts.push(lit(" (quoted text no longer present)"));
         } else {
-            parts.push(cat([lit(" on "), tt("\u{201c}"), tt(&q.exact), tt("\u{201d}")]));
+            parts.push(cat([
+                lit(" on "),
+                tt("\u{201c}"),
+                tt(&q.exact),
+                tt("\u{201d}"),
+            ]));
         }
     }
     match t.mine {

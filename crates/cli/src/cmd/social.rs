@@ -893,7 +893,10 @@ async fn keep_restrict_dimension(
         Some(w.engine.resolve_actor(subject).await?.did)
     };
     let mut action = serde_json::Map::new();
-    action.insert("$type".into(), Value::String(nsid::MOD_ACTION_RESTRICT.into()));
+    action.insert(
+        "$type".into(),
+        Value::String(nsid::MOD_ACTION_RESTRICT.into()),
+    );
     let current = match &did {
         Some(did) => {
             let scope = matches!(scope, ModScope::Author).then_some("author");

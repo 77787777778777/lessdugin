@@ -5,6 +5,8 @@
 //! text is warned about (`data-model.md` §4), and a reader saves an item as `<cid>.<ext>`. The
 //! local-file rules are `threat-model.md` FILE-1 to FILE-4.
 
+#![allow(clippy::disallowed_methods)] // a real clock for a real viewer process
+
 #[path = "support/fakenet.rs"]
 mod fakenet;
 
@@ -47,6 +49,9 @@ fn publish_draft(u: &User, md: &str, files: &[(&str, &[u8])]) -> std::process::O
     u.run(&["--json", "draft", "publish", &id, "--yes"])
 }
 
+/// A draft-local path of a case, and the files to put next to the draft.
+type Case<'a> = (String, &'a [(&'a str, &'a [u8])]);
+
 /// The only post record of `u`.
 fn the_post(u: &User) -> Value {
     let posts = u.account.list(nsid::POST);
@@ -85,7 +90,10 @@ fn draft_local_images_become_cid_media_and_save_as_cid_files() {
     let (png, pdf) = (raw_cid(PNG), raw_cid(PDF));
     assert!(md.contains(&format!("![a chart](cid:{png})")), "{md}");
     assert!(md.contains(&format!("![](cid:{pdf})")), "{md}");
-    assert!(!md.contains("img/chart.png") && !md.contains("./report.pdf"), "{md}");
+    assert!(
+        !md.contains("img/chart.png") && !md.contains("./report.pdf"),
+        "{md}"
+    );
     // a path in code is text, not an image
     assert!(md.contains("`![not an image](./missing.png)`"), "{md}");
     let media = body["media"].as_array().unwrap();
@@ -161,9 +169,16 @@ fn media_add_prepares_a_file_that_a_post_names_by_cid() {
         "{}",
         text(&out.stdout)
     );
-    assert!(text(&out.stderr).contains("no alt text"), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).contains("no alt text"),
+        "{}",
+        text(&out.stderr)
+    );
 
-    let f = alice.file("p.md", &format!("---\ntitle: Dot\n---\n![a dot](cid:{cid})\n"));
+    let f = alice.file(
+        "p.md",
+        &format!("---\ntitle: Dot\n---\n![a dot](cid:{cid})\n"),
+    );
     let p = alice.json(&["post", s(&f), "--yes"]);
     assert_eq!(p["state"]["kind"], "done", "{p}");
     let rec = the_post(&alice);
@@ -179,13 +194,16 @@ fn local_files_outside_the_rules_are_refused() {
     let (_net, alice) = forum();
     let outside = alice.path("outside.png");
     std::fs::write(&outside, PNG).unwrap();
-    let cases: Vec<(String, &[(&str, &[u8])])> = vec![
+    let cases: Vec<Case<'_>> = vec![
         (outside.display().to_string(), &[]),
         ("~/a.png".into(), &[]),
         ("../outside.png".into(), &[]),
         ("./gone.png".into(), &[]),
         // a key file: its sniffed type is not on the upload allowlist (PRIV-6)
-        ("id_ed25519".into(), &[("id_ed25519", b"-----BEGIN OPENSSH PRIVATE KEY-----\n")]),
+        (
+            "id_ed25519".into(),
+            &[("id_ed25519", b"-----BEGIN OPENSSH PRIVATE KEY-----\n")],
+        ),
     ];
     for (path, files) in cases {
         let out = publish_draft(

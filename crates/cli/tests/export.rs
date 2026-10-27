@@ -47,7 +47,10 @@ fn export_mine_and_a_forum_as_json_and_markdown() {
     let f = alice.file("p.md", "---\ntitle: Hello\n---\nFirst post.\n");
     let hello = uri(&alice.json(&["post", s(&f), "--yes"]));
     bob.ok(&["sync", "alice.test/meta"]);
-    let f = bob.file("b.md", "---\ntitle: Bob's post\ntags: [intro]\n---\nBob writes.\n");
+    let f = bob.file(
+        "b.md",
+        "---\ntitle: Bob's post\ntags: [intro]\n---\nBob writes.\n",
+    );
     let bobs = uri(&bob.json(&["post", s(&f), "--yes"]));
     let visible = uri(&bob.json(&["comment", &hello, "-m", "A visible reply."]));
     let hidden = uri(&bob.json(&["comment", &hello, "-m", "A hidden reply."]));
@@ -65,13 +68,16 @@ fn export_mine_and_a_forum_as_json_and_markdown() {
     // a forum export is what the forum shows, even for the owner, whose views carry the
     // hidden items' content (PRIV-8)
     let out = alice.ok(&["export", "alice.test/meta"]);
-    assert!(!out.contains("A hidden reply") && !out.contains("Bob writes"), "{out}");
+    assert!(
+        !out.contains("A hidden reply") && !out.contains("Bob writes"),
+        "{out}"
+    );
     assert!(!out.contains("A deleted reply"), "{out}");
     let x: Value = serde_json::from_str(&out).unwrap();
     assert_eq!(x["dto"], 1, "{x}");
     assert_eq!(x["scope"], "forum", "{x}");
-    assert_eq!(uris(&x["posts"]), [hello.clone()], "{x}");
-    assert_eq!(uris(&x["comments"]), [visible.clone()], "{x}");
+    assert_eq!(uris(&x["posts"]), std::slice::from_ref(&hello), "{x}");
+    assert_eq!(uris(&x["comments"]), std::slice::from_ref(&visible), "{x}");
     assert_eq!(x["posts"][0]["markdown"], "First post.\n", "{x}");
     assert_eq!(x["comments"][0]["markdown"], "A visible reply.", "{x}");
     assert_eq!(x["comments"][0]["handle"], "bob.test", "{x}");
@@ -79,21 +85,34 @@ fn export_mine_and_a_forum_as_json_and_markdown() {
 
     // as markdown: one file per thread, the post then its comments
     let dir = alice.path("forum-md");
-    alice.ok(&["export", "alice.test/meta", "--format", "md", "--out", s(&dir)]);
+    alice.ok(&[
+        "export",
+        "alice.test/meta",
+        "--format",
+        "md",
+        "--out",
+        s(&dir),
+    ]);
     let names = files(&dir);
     assert_eq!(names.len(), 1, "{names:?}");
     let md = std::fs::read_to_string(dir.join(&names[0])).unwrap();
     assert!(md.starts_with("---\ntitle: \"Hello\"\n"), "{md}");
-    assert!(md.contains("First post.") && md.contains("A visible reply."), "{md}");
+    assert!(
+        md.contains("First post.") && md.contains("A visible reply."),
+        "{md}"
+    );
     assert!(md.contains("### @bob.test"), "{md}");
-    assert!(!md.contains("A hidden reply") && !md.contains("A deleted reply"), "{md}");
+    assert!(
+        !md.contains("A hidden reply") && !md.contains("A deleted reply"),
+        "{md}"
+    );
 
     // --mine (the default): bob's own posts and comments, from his repository, hidden or not;
     // the deleted comment is no longer in it
     let x: Value = serde_json::from_str(&bob.ok(&["export"])).unwrap();
     assert_eq!(x["scope"], "mine", "{x}");
     assert_eq!(x["account"], bob.did().as_str(), "{x}");
-    assert_eq!(uris(&x["posts"]), [bobs.clone()], "{x}");
+    assert_eq!(uris(&x["posts"]), std::slice::from_ref(&bobs), "{x}");
     let mut want = vec![visible.clone(), hidden.clone()];
     want.sort();
     assert_eq!(uris(&x["comments"]), want, "{x}");

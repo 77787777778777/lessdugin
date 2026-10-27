@@ -498,10 +498,10 @@ fn forum_md(x: &ContentExport, dir: &Path) -> Result<(), CliError> {
             s.push_str("\n## Comments\n");
         }
         for c in thread {
-            let who = c.handle.as_deref().map_or_else(
-                || c.author.clone(),
-                |h| format!("@{h}"),
-            );
+            let who = c
+                .handle
+                .as_deref()
+                .map_or_else(|| c.author.clone(), |h| format!("@{h}"));
             s.push_str(&format!(
                 "\n### {} ({})\n\n<!-- {} -->\n\n{}",
                 who,

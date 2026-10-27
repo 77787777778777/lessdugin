@@ -353,12 +353,7 @@ pub async fn post(ctx: &Ctx, args: PostArgs) -> Result<(), CliError> {
         Some(f) if !from_editor => PostSource::from_file(ctx, doc, f),
         _ => PostSource::draft(ctx, doc, draft_id),
     };
-    draft::publish_post(
-        ctx,
-        src,
-        args.yes,
-    )
-    .await
+    draft::publish_post(ctx, src, args.yes).await
 }
 
 // ---------------------------------------------------------------------------------------------

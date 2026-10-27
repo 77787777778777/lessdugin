@@ -296,7 +296,10 @@ fn a_backdated_item_shows_its_t_rank_not_its_claimed_time() {
     alice.ok(&["sync", &forum]);
     let ls = alice.ok(&["ls", &forum, "--all"]);
     assert!(ls.contains("Old news"), "{ls}");
-    assert!(!ls.contains("2019-03-04"), "the claimed time is shown: {ls}");
+    assert!(
+        !ls.contains("2019-03-04"),
+        "the claimed time is shown: {ls}"
+    );
     assert!(ls.contains(&declared), "{ls}");
     let read = alice.ok(&["read", &uri, "--no-pager"]);
     assert!(read.contains("A reply."), "{read}");

@@ -811,19 +811,18 @@ pub async fn publish_post(ctx: &Ctx, mut src: PostSource, yes: bool) -> Result<(
             }
         };
         // draft-local images become `cid:` media (`lfm-1.md` §12)
-        let attached = match media::attach(ctx, &w.engine, &mut draft.body, src.dir.as_deref())
-            .await
-        {
-            Ok(a) => a,
-            Err(e) => {
-                if src.draft.is_some()
-                    && let CliError::Engine(err) = &e
-                {
-                    keep(ctx, &drafts, &mut src, std::slice::from_ref(&err.message))?;
+        let attached =
+            match media::attach(ctx, &w.engine, &mut draft.body, src.dir.as_deref()).await {
+                Ok(a) => a,
+                Err(e) => {
+                    if src.draft.is_some()
+                        && let CliError::Engine(err) = &e
+                    {
+                        keep(ctx, &drafts, &mut src, std::slice::from_ref(&err.message))?;
+                    }
+                    return Err(e);
                 }
-                return Err(e);
-            }
-        };
+            };
         // FILE-2: the files of this machine a foreign draft uploads are confirmed on a
         // terminal, even with --yes
         let local: Vec<String> = attached
@@ -1031,12 +1030,7 @@ pub async fn run(ctx: &Ctx, args: DraftArgs) -> Result<(), CliError> {
                 .map_err(|e| CliError::Engine(EngineError::invalid_input(e)))?
             {
                 DraftType::Post => {
-                    publish_post(
-                        ctx,
-                        PostSource::draft(ctx, doc, Some(id)),
-                        yes,
-                    )
-                    .await
+                    publish_post(ctx, PostSource::draft(ctx, doc, Some(id)), yes).await
                 }
                 DraftType::Comment => write::publish_comment_draft(ctx, &id, doc).await,
                 DraftType::Edit => write::publish_edit_draft(ctx, &id, doc).await,

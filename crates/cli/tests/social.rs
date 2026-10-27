@@ -347,9 +347,7 @@ fn author_scope_lock_pin_and_removal() {
     // the removal names the author scope (a forum-scope unhide finds nothing to remove)
     let e = w.alice.fails(4, &["mod", "unhide", &comment]);
     assert_eq!(e["code"], "not_found", "{e}");
-    let u = w
-        .alice
-        .json(&["mod", "unhide", &comment, "--author-scope"]);
+    let u = w.alice.json(&["mod", "unhide", &comment, "--author-scope"]);
     assert_eq!(u["state"]["kind"], "done", "{u}");
     assert!(author_records("#hide").is_empty());
 
@@ -484,7 +482,9 @@ fn forum_edit_reject_mute_and_the_karma_cadence() {
     assert!(decl.get("description").is_none(), "{decl}");
     assert_eq!(decl["reportContact"], "mailto:mods@example.com", "{decl}");
     // only the owner edits
-    let e = w.bob.fails(1, &["forum", "edit", "alice.test/meta", "--name", "Mine"]);
+    let e = w
+        .bob
+        .fails(1, &["forum", "edit", "alice.test/meta", "--name", "Mine"]);
     assert_eq!(e["code"], "blocked", "{e}");
 
     // reject: dave applies, and alice dismisses him (on this device: nothing to remove)
@@ -534,7 +534,10 @@ fn forum_edit_reject_mute_and_the_karma_cadence() {
     let m = w.alice.json(&["unmute", "bob.test"]);
     assert!(m["mutes"].as_array().unwrap().is_empty(), "{m}");
     let tv: ThreadView = exact(&w.alice.ok(&["--json", "read", &w.post]));
-    assert_eq!(tv.comments[0].state, lessdugin_core::dto::ItemState::Visible);
+    assert_eq!(
+        tv.comments[0].state,
+        lessdugin_core::dto::ItemState::Visible
+    );
 
     // the karma cadence is saved on this device
     let cadence = || -> Option<String> {
@@ -549,9 +552,14 @@ fn forum_edit_reject_mute_and_the_karma_cadence() {
     assert_eq!(cadence(), None);
     let out = w.alice.run(&["notifications", "--karma-cadence", "weekly"]);
     assert!(out.status.success(), "{}", text(&out.stderr));
-    assert!(text(&out.stderr).contains("weekly"), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).contains("weekly"),
+        "{}",
+        text(&out.stderr)
+    );
     let weekly = cadence().expect("the cadence is saved");
-    w.alice.ok(&["notifications", "--karma-cadence", "realtime"]);
+    w.alice
+        .ok(&["notifications", "--karma-cadence", "realtime"]);
     assert_ne!(cadence().unwrap(), weekly);
 }
 
@@ -564,7 +572,8 @@ fn the_human_thread_shows_agreement_reacts_and_banners() {
     let w = World::new();
     w.bob.json(&["vote", &w.post, "up", "--yes"]);
     w.bob.json(&["agree", &w.post, "strong-agree", "--yes"]);
-    w.carol.json(&["react", &w.post, "crux", "--quote", "First post", "--yes"]);
+    w.carol
+        .json(&["react", &w.post, "crux", "--quote", "First post", "--yes"]);
     w.bob.json(&["react", &w.post, "crux", "--yes"]);
     w.alice.ok(&["sync", &w.forum]);
     let out = w.alice.ok(&["read", &w.post, "--no-pager"]);
@@ -573,7 +582,9 @@ fn the_human_thread_shows_agreement_reacts_and_banners() {
     let carol_short = lessdugin_core::identity::short_did(&w.carol.did());
     let bob_short = lessdugin_core::identity::short_did(&w.bob.did());
     assert!(
-        out.contains(&format!("Crux by {carol_short} on \u{201c}First post\u{201d}")),
+        out.contains(&format!(
+            "Crux by {carol_short} on \u{201c}First post\u{201d}"
+        )),
         "{out}"
     );
     assert!(out.contains(&format!("Crux by {bob_short}\n")), "{out}");

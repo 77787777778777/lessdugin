@@ -222,9 +222,12 @@ fn draft_file(path: &str, dir: &Path) -> Result<PathBuf, EngineError> {
         return Err(bad("must be relative to the draft's directory".into()));
     }
     if path.starts_with('~') {
-        return Err(bad("must be relative to the draft's directory, not to ~".into()));
+        return Err(bad(
+            "must be relative to the draft's directory, not to ~".into()
+        ));
     }
-    if p.components().any(|c| c == Component::ParentDir) || path.split(['/', '\\']).any(|c| c == "..")
+    if p.components().any(|c| c == Component::ParentDir)
+        || path.split(['/', '\\']).any(|c| c == "..")
     {
         return Err(bad("must not leave the draft's directory (..)".into()));
     }
@@ -257,20 +260,20 @@ fn draft_file(path: &str, dir: &Path) -> Result<PathBuf, EngineError> {
 /// The bytes of a media file the user named: a regular file (`fstat`), not a symlink
 /// (`O_NOFOLLOW`), of at most the hard blob limit (`limits.md` §5). `what` names it in errors.
 fn read_media(path: &Path, what: &str) -> Result<Vec<u8>, EngineError> {
-    lessdugin_native::fsutil::read_regular_nofollow(path, BLOB_HARD_MAX_BYTES).map_err(|e| {
-        match e.kind() {
-            std::io::ErrorKind::NotFound => {
-                EngineError::not_found(format!("{what}: {} does not exist", path.display()))
-            }
-            std::io::ErrorKind::InvalidData => EngineError::new(
-                ErrorCode::TooLarge,
-                format!(
-                    "{what} is larger than {} MiB (limits.md §5)",
-                    BLOB_HARD_MAX_BYTES / (1024 * 1024)
-                ),
-            ),
-            _ => EngineError::invalid_input(format!("{what}: {e}")),
+    lessdugin_native::fsutil::read_regular_nofollow(path, BLOB_HARD_MAX_BYTES).map_err(|e| match e
+        .kind()
+    {
+        std::io::ErrorKind::NotFound => {
+            EngineError::not_found(format!("{what}: {} does not exist", path.display()))
         }
+        std::io::ErrorKind::InvalidData => EngineError::new(
+            ErrorCode::TooLarge,
+            format!(
+                "{what} is larger than {} MiB (limits.md §5)",
+                BLOB_HARD_MAX_BYTES / (1024 * 1024)
+            ),
+        ),
+        _ => EngineError::invalid_input(format!("{what}: {e}")),
     })
 }
 
@@ -287,8 +290,10 @@ fn metadata_warning(ctx: &Ctx, what: &str, mime: &str) {
             tt(what),
             lit(" ("),
             tt(mime),
-            lit(") is published as it is: metadata in it (such as PDF author fields or audio \
-                 tags) is not removed"),
+            lit(
+                ") is published as it is: metadata in it (such as PDF author fields or audio \
+                 tags) is not removed",
+            ),
         ]));
     }
 }
@@ -386,7 +391,13 @@ pub async fn attach(
             duration_ms: None,
             name: None,
         };
-        push_media(&mut attached, &mut body.media, format!("cid:{cid}"), None, m);
+        push_media(
+            &mut attached,
+            &mut body.media,
+            format!("cid:{cid}"),
+            None,
+            m,
+        );
     }
     rewrites.sort_by_key(|(r, _)| std::cmp::Reverse(r.start));
     for (r, s) in rewrites {
@@ -466,12 +477,22 @@ async fn add(ctx: &Ctx, file: &Path, alt: Option<String>) -> Result<(), CliError
         (lit("Prepared "), Style::Good),
         (tt(&file.display().to_string()), Style::Bold),
         (
-            cat([lit(" ("), tt(&m.mime), lit(", "), size(m.size_bytes), lit(")")]),
+            cat([
+                lit(" ("),
+                tt(&m.mime),
+                lit(", "),
+                size(m.size_bytes),
+                lit(")"),
+            ]),
             Style::Dim,
         ),
     ]);
     ctx.out.line(&[(
-        tt(&format!("![{}](cid:{})", alt.as_deref().unwrap_or(""), m.cid)),
+        tt(&format!(
+            "![{}](cid:{})",
+            alt.as_deref().unwrap_or(""),
+            m.cid
+        )),
         Style::Plain,
     )]);
     ctx.out.note(&[(
@@ -689,12 +710,7 @@ fn type_warning(ctx: &Ctx, f: &Fetched) {
 }
 
 /// `lessdugin media get <ref> --index N [-o path]`.
-async fn get(
-    ctx: &Ctx,
-    reference: &str,
-    index: u16,
-    out: Option<&Path>,
-) -> Result<(), CliError> {
+async fn get(ctx: &Ctx, reference: &str, index: u16, out: Option<&Path>) -> Result<(), CliError> {
     let f = fetch(ctx, reference, index).await?;
     type_warning(ctx, &f);
     let (to, replace) = match out {
@@ -737,10 +753,9 @@ async fn get(
 async fn open(ctx: &Ctx, reference: &str, index: u16) -> Result<(), CliError> {
     let f = fetch(ctx, reference, index).await?;
     type_warning(ctx, &f);
-    if !f
-        .agreed()
-        .is_some_and(|t| t.starts_with("image/") || t.starts_with("video/") || t.starts_with("audio/"))
-    {
+    if !f.agreed().is_some_and(|t| {
+        t.starts_with("image/") || t.starts_with("video/") || t.starts_with("audio/")
+    }) {
         return Err(EngineError::invalid_input(format!(
             "media item {index} is not an image, video or audio file, so it is not opened; save \
              it with `lessdugin media get {reference} --index {index}`"
@@ -775,14 +790,12 @@ async fn open(ctx: &Ctx, reference: &str, index: u16) -> Result<(), CliError> {
         return Ok(());
     }
     ctx.out.line(&[
-        (
-            lit(if opened { "Opened " } else { "Saved " }),
-            Style::Good,
-        ),
+        (lit(if opened { "Opened " } else { "Saved " }), Style::Good),
         (tt(&target), Style::Bold),
     ]);
     if !opened {
-        ctx.out.warn(lit("no viewer could be started; open the file yourself"));
+        ctx.out
+            .warn(lit("no viewer could be started; open the file yourself"));
     }
     Ok(())
 }
@@ -793,19 +806,33 @@ mod tests {
 
     #[test]
     fn local_destinations() {
-        for p in ["./chart.png", "chart.png", "../img/a.jpg", "/abs/a.png", "~/a.png"] {
+        for p in [
+            "./chart.png",
+            "chart.png",
+            "../img/a.jpg",
+            "/abs/a.png",
+            "~/a.png",
+        ] {
             assert!(is_local(p), "{p}");
         }
         // a Windows drive letter is a path; a scheme is not
         assert!(is_local("C:\\img\\a.png"));
-        for u in ["https://example.com/a.png", "cid:bafkrei", "mailto:a@b", "#x", "//h/a.png"] {
+        for u in [
+            "https://example.com/a.png",
+            "cid:bafkrei",
+            "mailto:a@b",
+            "#x",
+            "//h/a.png",
+        ] {
             assert!(!is_local(u), "{u}");
         }
     }
 
     #[test]
     fn cids_name_files_only_when_valid() {
-        assert!(valid_cid("bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku"));
+        assert!(valid_cid(
+            "bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku"
+        ));
         for bad in ["", "b", "../x", "bafy/../../x", "Bafk", "b1", "bafk.png"] {
             assert!(!valid_cid(bad), "{bad}");
         }
@@ -869,7 +896,11 @@ mod tests {
             "link.png",
         ] {
             let e = draft_file(bad, &dir).unwrap_err();
-            assert!(e.message.contains(&format!("{bad:?}")), "{bad}: {}", e.message);
+            assert!(
+                e.message.contains(&format!("{bad:?}")),
+                "{bad}: {}",
+                e.message
+            );
         }
         assert_eq!(
             draft_file("img/none.png", &dir).unwrap_err().code,

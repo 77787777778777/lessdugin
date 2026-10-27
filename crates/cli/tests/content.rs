@@ -969,7 +969,11 @@ fn open_mode_carries_the_relay_label() {
 
     let out = alice.run(&["forum", "create", "meta"]);
     assert!(out.status.success(), "{}", text(&out.stderr));
-    assert!(!text(&out.stderr).contains("Open mode"), "{}", text(&out.stderr));
+    assert!(
+        !text(&out.stderr).contains("Open mode"),
+        "{}",
+        text(&out.stderr)
+    );
     let show = alice.ok(&["forum", "show", "alice.test/meta"]);
     assert!(!show.contains("Open mode"), "{show}");
 }

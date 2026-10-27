@@ -309,7 +309,10 @@ mod tests {
             read_regular_nofollow(&link, 10).unwrap_err().kind(),
             io::ErrorKind::PermissionDenied
         );
-        assert!(read_regular_nofollow(dir.path(), 10).is_err(), "a directory");
+        assert!(
+            read_regular_nofollow(dir.path(), 10).is_err(),
+            "a directory"
+        );
         // a FIFO is refused without blocking the open
         let fifo = dir.path().join("fifo.png");
         let status = std::process::Command::new("mkfifo")
