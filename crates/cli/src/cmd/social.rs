@@ -20,8 +20,9 @@ use lessdugin_native::host::NativeHost;
 use serde_json::Value;
 
 use crate::args::{
-    ActivityArgs, AgreeArgs, ExportArgs, ExportScopeArg, ModAction, ModArgs, ModSubject,
-    ModsAction, ModsArgs, NotificationsArgs, PinArgs, ReactArgs, VoteArgs, scope_of, stance_of,
+    ActivityArgs, AgreeArgs, ExportArgs, ExportScopeArg, KarmaCadenceArg, ModAction, ModArgs,
+    ModSubject, ModsAction, ModsArgs, MuteArgs, NotificationsArgs, PinArgs, ReactArgs, VoteArgs,
+    scope_of, stance_of,
 };
 use crate::cmd::{read, refs, write};
 use crate::ctx::{CliError, Ctx, Writer};
@@ -224,6 +225,21 @@ pub async fn reacts(ctx: &Ctx) -> Result<(), CliError> {
 /// `lessdugin notifications [--all] [--mark-read]`.
 pub async fn notifications(ctx: &Ctx, args: NotificationsArgs) -> Result<(), CliError> {
     let engine = ctx.reader().await?;
+    if let Some(c) = args.karma_cadence {
+        engine.set_karma_notifications(c.into()).await?;
+        ctx.out.note(&[(
+            cat([
+                lit("Karma changes are notified "),
+                lit(match c {
+                    KarmaCadenceArg::Realtime => "as they happen",
+                    KarmaCadenceArg::Daily => "daily",
+                    KarmaCadenceArg::Weekly => "weekly",
+                }),
+                lit(" (saved)."),
+            ]),
+            Style::Dim,
+        )]);
+    }
     let list = engine
         .notifications(&NotificationsQuery {
             all: args.all,
@@ -279,6 +295,52 @@ pub async fn notifications(ctx: &Ctx, args: NotificationsArgs) -> Result<(), Cli
         )]);
     }
     Ok(())
+}
+
+/// `lessdugin mute|unmute <actor>...` (local: the lens shows a muted author's listed items
+/// collapsed, `social.md` §10.3; nothing is written to any repository).
+pub async fn mute(ctx: &Ctx, args: MuteArgs, on: bool) -> Result<(), CliError> {
+    let engine = ctx.reader().await?;
+    for a in &args.actors {
+        engine.mute(a, on).await?;
+        if !ctx.out.is_json() {
+            ctx.out.line(&[
+                (lit(if on { "Muted " } else { "Unmuted " }), Style::Good),
+                (name(a), Style::Bold),
+            ]);
+        }
+    }
+    if ctx.out.is_json() {
+        print_mutes(ctx, &engine.mutes().await?);
+    }
+    Ok(())
+}
+
+/// `lessdugin mutes`.
+pub async fn mutes(ctx: &Ctx) -> Result<(), CliError> {
+    let engine = ctx.reader().await?;
+    let list = engine.mutes().await?;
+    if ctx.out.is_json() {
+        print_mutes(ctx, &list);
+        return Ok(());
+    }
+    if list.is_empty() {
+        ctx.out.line(&[(lit("You muted nobody."), Style::Dim)]);
+    }
+    for a in &list {
+        ctx.out.line(&[
+            (render::actor(a), Style::Plain),
+            (cat([lit("  "), tt(&a.did)]), Style::Dim),
+        ]);
+    }
+    Ok(())
+}
+
+fn print_mutes(ctx: &Ctx, list: &[lessdugin_core::dto::ActorView]) {
+    ctx.out.json(&serde_json::json!({
+        "dto": lessdugin_core::dto::DTO_VERSION,
+        "mutes": list,
+    }));
 }
 
 /// `lessdugin activity [forum]`: Recent Discussion (`social.md` §12.4).

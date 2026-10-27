@@ -6,7 +6,7 @@
 //! `<handle>/<rkey>`); actor references are a handle or a DID.
 
 use clap::{Args, Subcommand, ValueEnum};
-use lessdugin_core::dto::{AgreementValue, KarmaValue, ModRole, ModScope, Stance};
+use lessdugin_core::dto::{AgreementValue, KarmaCadence, KarmaValue, ModRole, ModScope, Stance};
 
 /// The value of `vote` (the karma axis).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -116,18 +116,50 @@ pub struct ReactArgs {
     pub yes: bool,
 }
 
+/// `--karma-cadence` of `notifications`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum KarmaCadenceArg {
+    /// As soon as your karma changes.
+    Realtime,
+    /// Once a day (the default).
+    Daily,
+    /// Once a week.
+    Weekly,
+}
+
+impl From<KarmaCadenceArg> for KarmaCadence {
+    fn from(c: KarmaCadenceArg) -> Self {
+        match c {
+            KarmaCadenceArg::Realtime => KarmaCadence::Realtime,
+            KarmaCadenceArg::Daily => KarmaCadence::Daily,
+            KarmaCadenceArg::Weekly => KarmaCadence::Weekly,
+        }
+    }
+}
+
 /// `notifications`.
 #[derive(Debug, Args)]
 pub struct NotificationsArgs {
     /// Show read notifications too.
     #[arg(long)]
     pub all: bool,
+    /// How often karma changes are notified, saved on this device (`social.md` §16).
+    #[arg(long, value_enum, value_name = "CADENCE")]
+    pub karma_cadence: Option<KarmaCadenceArg>,
     /// Mark every shown notification read.
     #[arg(long)]
     pub mark_read: bool,
     /// At most this many notifications (1–200).
     #[arg(long, short = 'n', default_value_t = 50, value_parser = clap::value_parser!(u32).range(1..=200))]
     pub limit: u32,
+}
+
+/// `mute` / `unmute`.
+#[derive(Debug, Args)]
+pub struct MuteArgs {
+    /// Handles or DIDs.
+    #[arg(value_name = "ACTOR", required = true, num_args = 1..)]
+    pub actors: Vec<String>,
 }
 
 /// `activity`.

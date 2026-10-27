@@ -9,7 +9,7 @@
 use std::path::PathBuf;
 
 use clap::{Args, Subcommand, ValueEnum};
-use lessdugin_core::dto::{CommentSort, MembershipMode, PostKind, PostSort};
+use lessdugin_core::dto::{CommentSort, DefaultTier, MembershipMode, PostKind, PostSort};
 
 /// `--sort` of `ls`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
@@ -344,6 +344,59 @@ pub enum ForumAction {
         #[arg(long)]
         frontpage: bool,
     },
+    /// Change a forum you own (the old version is kept as a revision); what is not given
+    /// stays as it is. Moderators change with `mods`.
+    Edit(ForumEditArgs),
+}
+
+/// `forum edit`.
+#[derive(Debug, Args)]
+pub struct ForumEditArgs {
+    /// The forum (default: --forum, then the current forum).
+    #[arg(value_name = "FORUM")]
+    pub forum: Option<String>,
+    /// The display name.
+    #[arg(long)]
+    pub name: Option<String>,
+    /// A one-line description (empty removes it).
+    #[arg(long, value_name = "TEXT")]
+    pub description: Option<String>,
+    /// The about text (markdown; empty removes it).
+    #[arg(long, value_name = "MARKDOWN")]
+    pub about: Option<String>,
+    /// Who may take part (to archive an open forum, switch it to approval).
+    #[arg(long, value_enum)]
+    pub mode: Option<ModeArg>,
+    /// Where new posts start.
+    #[arg(long, value_enum)]
+    pub default_tier: Option<DefaultTierArg>,
+    /// A featured tag (repeatable; replaces the list).
+    #[arg(long = "featured-tag", value_name = "TAG")]
+    pub featured_tags: Vec<String>,
+    /// Remove every featured tag.
+    #[arg(long, conflicts_with = "featured_tags")]
+    pub no_featured_tags: bool,
+    /// Where to report problems (empty removes it).
+    #[arg(long, value_name = "CONTACT")]
+    pub report_contact: Option<String>,
+}
+
+/// `--default-tier` of `forum edit`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum DefaultTierArg {
+    /// New posts start on the author's personal tier.
+    Personal,
+    /// New posts start on the frontpage.
+    Frontpage,
+}
+
+impl From<DefaultTierArg> for DefaultTier {
+    fn from(t: DefaultTierArg) -> Self {
+        match t {
+            DefaultTierArg::Personal => DefaultTier::Personal,
+            DefaultTierArg::Frontpage => DefaultTier::Frontpage,
+        }
+    }
 }
 
 /// `members`.
@@ -367,6 +420,14 @@ pub struct ApproveArgs {
     /// interactively).
     #[arg(long, short = 'y')]
     pub yes: bool,
+}
+
+/// `reject`.
+#[derive(Debug, Args)]
+pub struct RejectArgs {
+    /// Handles or DIDs (in --forum, else the current forum).
+    #[arg(value_name = "ACTOR", required = true, num_args = 1..)]
+    pub actors: Vec<String>,
 }
 
 /// `draft`.

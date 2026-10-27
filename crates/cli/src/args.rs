@@ -134,6 +134,8 @@ pub enum Command {
     Members(MembersArgs),
     /// Grant membership to applicants (approval-mode forums; owner and admins).
     Approve(ApproveArgs),
+    /// Dismiss applicants on this device, and remove your grant of them if you made one.
+    Reject(RejectArgs),
     /// Vote on a post or comment (public record).
     Vote(VoteArgs),
     /// Cast an agreement vote (public record).
@@ -144,6 +146,12 @@ pub enum Command {
     Reacts,
     /// Your notifications (computed locally; --mark-read marks them read).
     Notifications(NotificationsArgs),
+    /// Mute authors on this device: their items are shown collapsed (local, not public).
+    Mute(MuteArgs),
+    /// Unmute authors.
+    Unmute(MuteArgs),
+    /// List the authors you muted.
+    Mutes,
     /// Export this device's local state as JSON (or --import it back).
     Export(ExportArgs),
     /// Recent Discussion: the posts with the newest comments.

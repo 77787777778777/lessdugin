@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Forums and membership: `forum ls|show|follow|unfollow|use|create`, `join`, `leave`,
-//! `members`, `approve` and `sync` (synthesis §6.10).
+//! Forums and membership: `forum ls|show|follow|unfollow|use|create|edit`, `join`, `leave`,
+//! `members`, `approve`, `reject` and `sync` (synthesis §6.10).
 //!
 //! `forum create` always writes the membership mode (default `approval`, `docs/plan.md` M2)
 //! and makes the new forum the current one, as `join` does. `--json` prints the engine's DTOs
@@ -20,7 +20,8 @@ use lessdugin_native::host::NativeHost;
 use serde::Serialize;
 
 use crate::args::{
-    ApproveArgs, ForumAction, ForumArgs, JoinArgs, LeaveArgs, MembersArgs, SyncArgs,
+    ApproveArgs, ForumAction, ForumArgs, ForumEditArgs, JoinArgs, LeaveArgs, MembersArgs,
+    RejectArgs, SyncArgs,
 };
 use crate::cmd::{read, refs, social, write};
 use crate::ctx::{CliError, Ctx};
@@ -202,7 +203,80 @@ pub async fn forum(ctx: &Ctx, args: ForumArgs) -> Result<(), CliError> {
             let t = write::drive(ctx, &w, ticket).await?;
             write::report(ctx, &t, "Created")
         }
+        ForumAction::Edit(a) => edit(ctx, a).await,
     }
+}
+
+/// An optional text option: empty removes the field.
+fn text_option(given: Option<String>, current: Option<String>) -> Option<String> {
+    match given {
+        Some(t) if t.trim().is_empty() => None,
+        Some(t) => Some(t),
+        None => current,
+    }
+}
+
+/// `lessdugin forum edit [forum] …` (`engine-api.md` §3.2 `forum_update`): the owner changes
+/// the declaration through the edit protocol; every field not given keeps its current value
+/// (read from the cached declaration).
+async fn edit(ctx: &Ctx, a: ForumEditArgs) -> Result<(), CliError> {
+    let w = ctx.writer().await?;
+    let uri = refs::forum_or_current(ctx, &w.engine, a.forum.as_deref()).await?;
+    // loads (and caches) the declaration
+    w.engine.forum_open(&uri).await?;
+    let (_, decl) = write::cached(&w.engine, &uri).await?;
+    let current: lessdugin_lexicon::records::Forum = serde_json::from_value(decl.clone())
+        .map_err(|e| EngineError::internal(format!("{uri}: {e}")))?;
+    let about = match a.about {
+        Some(t) if t.trim().is_empty() => None,
+        Some(t) => Some(BodyDraft::text(t)),
+        None => match decl.get("about") {
+            None => None,
+            // an inline about without media is kept as it is; anything else (a spilled text,
+            // media) cannot be rewritten from here
+            Some(md) if md.get("textBlob").is_none() && md.get("media").is_none() => md
+                .get("text")
+                .and_then(serde_json::Value::as_str)
+                .map(BodyDraft::text),
+            Some(_) => {
+                return Err(CliError::usage(
+                    "this forum's about text has media or is stored as a blob; pass --about to \
+                     replace it",
+                ));
+            }
+        },
+    };
+    let mut d = ForumDraft::new(String::new(), a.name.unwrap_or(current.name.clone()));
+    d.description = text_option(a.description, current.description.clone());
+    d.about = about;
+    d.membership = match a.mode {
+        Some(m) => m.into(),
+        None => match current.membership_mode().value {
+            lessdugin_lexicon::values::MembershipMode::Open => MembershipMode::Open,
+            lessdugin_lexicon::values::MembershipMode::Approval => MembershipMode::Approval,
+        },
+    };
+    d.default_tier = match a.default_tier {
+        Some(t) => t.into(),
+        None => match current.default_tier().value {
+            lessdugin_lexicon::values::DefaultTier::Frontpage => DefaultTier::Frontpage,
+            lessdugin_lexicon::values::DefaultTier::Personal => DefaultTier::Personal,
+        },
+    };
+    d.featured_tags = if a.no_featured_tags {
+        Vec::new()
+    } else if !a.featured_tags.is_empty() {
+        a.featured_tags
+    } else {
+        current.featured_tags.clone().unwrap_or_default()
+    };
+    d.report_contact = text_option(a.report_contact, current.report_contact.clone());
+    if a.mode.is_some() && d.membership == MembershipMode::Open {
+        ctx.out.warn(lit(OPEN_MODE_LABEL));
+    }
+    let ticket = w.engine.forum_update(&uri, &d).await?;
+    let t = write::drive(ctx, &w, ticket).await?;
+    write::report(ctx, &t, "Updated")
 }
 
 async fn ls(ctx: &Ctx) -> Result<(), CliError> {
@@ -448,7 +522,8 @@ pub async fn approve(ctx: &Ctx, args: ApproveArgs) -> Result<(), CliError> {
     let uri = refs::forum_or_current(ctx, &w.engine, None).await?;
     // a grant is an `#access` mod action (`social.md` §17)
     social::acknowledge(ctx, &w, PublicActionKind::ModAction, args.yes).await?;
-    let tickets = w.engine.grant(&uri, &args.actors).await?;
+    // the grant, and the actors leave this device's rejected list (`reject`)
+    let tickets = w.engine.approve(&uri, &args.actors).await?;
     let mut done = Vec::with_capacity(tickets.len());
     for t in tickets {
         done.push(write::drive(ctx, &w, t).await?);
@@ -495,6 +570,40 @@ pub async fn approve(ctx: &Ctx, args: ApproveArgs) -> Result<(), CliError> {
         }
         None => Ok(()),
     }
+}
+
+/// `lessdugin reject <actor>...` (`engine-api.md` §3.2): dismisses the applicants on this
+/// device (nothing public is written for them; they leave `members --pending`), and removes the
+/// account's own grant of an actor, if it made one.
+pub async fn reject(ctx: &Ctx, args: RejectArgs) -> Result<(), CliError> {
+    let w = ctx.writer().await?;
+    let uri = refs::forum_or_current(ctx, &w.engine, None).await?;
+    let tickets = w.engine.reject(&uri, &args.actors).await?;
+    let mut done = Vec::with_capacity(tickets.len());
+    for t in tickets {
+        done.push(write::drive(ctx, &w, t).await?);
+    }
+    if ctx.out.is_json() {
+        ctx.out.json(&WriteList {
+            dto: DTO_VERSION,
+            writes: &done,
+        });
+        if let Some(e) = done.iter().find_map(|t| match &t.state {
+            lessdugin_core::dto::WriteState::Failed { error } => Some(error.clone()),
+            _ => None,
+        }) {
+            return Err(CliError::Engine(e));
+        }
+        return Ok(());
+    }
+    for actor in &args.actors {
+        ctx.out
+            .line(&[(lit("Rejected "), Style::Good), (name(actor), Style::Bold)]);
+    }
+    for t in &done {
+        write::report(ctx, t, "Removed your grant")?;
+    }
+    Ok(())
 }
 
 /// Shows `SyncProgress` on a terminal's stderr while `sync` runs.
