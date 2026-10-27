@@ -1499,8 +1499,8 @@ impl<H: crate::host::Host> crate::engine::Engine<H> {
         let handle = match self.host().fetch_blob(pds, did, cid.to_owned(), max).await {
             Ok(h) => h,
             Err(HostError::HttpStatus(400, _)) => {
-                // "Blob not found": not retried, and no copy is kept (sync.md §11.4)
-                let _ = self.host().blob_delete(cid).await;
+                // "Blob not found": missing, not retried (sync.md §11.1). Nothing was stored: a
+                // stored copy is returned without a request (§12.2), so there is none to purge
                 return Err(EngineError::not_found(
                     "the author's PDS does not have this file (any more)",
                 )
@@ -1522,6 +1522,14 @@ impl<H: crate::host::Host> crate::engine::Engine<H> {
             }
             Err(e) => return Err(EngineError::from(e)),
         };
+        // a copy stored by another fetch is held to this declaration too
+        if handle.size > max {
+            return Err(EngineError::new(
+                ErrorCode::TooLarge,
+                "the file is larger than it declares",
+            )
+            .with_detail("limit", max));
+        }
         let prefix = self
             .host()
             .blob_read(&handle.cid, 0, crate::limits::BLOB_SNIFF_PREFIX_BYTES)

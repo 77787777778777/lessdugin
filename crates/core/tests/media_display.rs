@@ -212,18 +212,25 @@ fn the_view_is_not_trusted_for_the_pds_and_its_declaration_must_agree() {
     let err = block_on(e.load_media("bafkreiother", Some(MediaOwner::of_view(&view)))).unwrap_err();
     assert_eq!(err.code, ErrorCode::InvalidInput);
 
-    // the declared size is the cap: a body longer than it is aborted, and nothing is kept
-    block_on(e.host().blob_delete(&cid)).unwrap();
+    // the declared size is the cap: a stored copy larger than it is refused (it stays stored
+    // for the record that declares it rightly) ...
     view.mime = "image/png".into();
     view.size_bytes = 10;
+    n.net.clear_requests();
+    let err = block_on(e.load_media(&cid, Some(MediaOwner::of_view(&view)))).unwrap_err();
+    assert_eq!(err.code, ErrorCode::TooLarge);
+    assert!(blob_requests(&n).is_empty());
+    assert!(block_on(e.host().blob_open(&cid)).unwrap().is_some());
+    // ... and a body longer than it is aborted, and nothing is kept
+    block_on(e.host().blob_delete(&cid)).unwrap();
     let err = block_on(e.load_media(&cid, Some(MediaOwner::of_view(&view)))).unwrap_err();
     assert_eq!(err.code, ErrorCode::TooLarge);
     assert_eq!(block_on(e.host().blob_open(&cid)).unwrap(), None);
 }
 
 #[test]
-fn a_blob_the_pds_does_not_have_is_missing_and_purged() {
-    // sync.md §11.4: "Blob not found" is not retried, and a cached copy is deleted
+fn a_blob_the_pds_does_not_have_is_missing() {
+    // sync.md §11.1: "Blob not found" is missing, and nothing is stored
     let mut n = Net::new();
     let bob = n
         .net
@@ -235,6 +242,7 @@ fn a_blob_the_pds_does_not_have_is_missing_and_purged() {
         block_on(e.load_media(&gone, Some(MediaOwner::author(bob.did().as_str())))).unwrap_err();
     assert_eq!(err.code, ErrorCode::NotFound);
     assert_eq!(err.detail.unwrap()["kind"], "mediaMissing");
+    assert_eq!(block_on(e.host().blob_open(&gone)).unwrap(), None);
 }
 
 // --- spilled bodies (m4-5) ---------------------------------------------------------------------
