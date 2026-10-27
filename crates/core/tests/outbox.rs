@@ -738,13 +738,22 @@ fn delete_sends_the_target_first_in_chunks_of_200() {
         .collect();
     let spoof = format!("{p}-{}", tid(3_600_000, 999));
     let nested = format!("{p}-{}-{}", tid(3_600_000, 1_000), tid(3_600_000, 1_001));
+    let comment = format!(
+        "at://{}/{}/{p}-{}",
+        w.alice.did(),
+        nsid::COMMENT,
+        tid(3_600_000, 1_002)
+    );
+    let of_comment = format!("{p}-{}-{}", tid(3_600_000, 1_002), tid(3_600_000, 1_003));
     w.alice.batch(|wr| {
         for (i, k) in revs.iter().enumerate() {
             wr.put(nsid::REVISION, k, &rev(&uri, i as u64));
         }
         // same prefix, another subject: kept (§3.2)
         wr.put(nsid::REVISION, &spoof, &rev(&other, 0));
-        // not exactly P + "-" + TID: kept
+        // a comment's revision under the post's prefix: kept
+        wr.put(nsid::REVISION, &of_comment, &rev(&comment, 0));
+        // not exactly P + "-" + TID, but it names the target: invalid history, deleted (§8.7)
         wr.put(nsid::REVISION, &nested, &rev(&uri, 1));
     });
     w.host.clear_requests();
@@ -756,7 +765,7 @@ fn delete_sends_the_target_first_in_chunks_of_200() {
         .iter()
         .map(|b| b["writes"].as_array().unwrap().len())
         .collect();
-    assert_eq!(sizes, vec![200, 200, 51]);
+    assert_eq!(sizes, vec![200, 200, 52]);
     let first = &bodies[0]["writes"][0];
     assert_eq!(first["$type"], "com.atproto.repo.applyWrites#delete");
     assert_eq!(first["collection"], nsid::POST);
@@ -769,7 +778,7 @@ fn delete_sends_the_target_first_in_chunks_of_200() {
         .into_iter()
         .map(|(k, _)| k)
         .collect();
-    let mut want = vec![spoof, nested];
+    let mut want = vec![spoof, of_comment];
     want.sort();
     let mut left_sorted = left.clone();
     left_sorted.sort();
