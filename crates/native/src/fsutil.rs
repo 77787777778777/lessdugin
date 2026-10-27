@@ -186,6 +186,43 @@ pub fn read_private(path: &Path, max_bytes: u64, strict: bool) -> io::Result<Opt
     Ok(Some(buf))
 }
 
+/// Reads a file the user named (a draft's image, `threat-model.md` FILE-1) of at most
+/// `max_bytes`: a symlink at the final component is refused (`O_NOFOLLOW`), the opened file must
+/// be a regular file (`fstat`), and `O_NONBLOCK` keeps a FIFO from blocking the open.
+pub fn read_regular_nofollow(path: &Path, max_bytes: u64) -> io::Result<Vec<u8>> {
+    refuse_symlink_fallback(path)?;
+    let mut opts = OpenOptions::new();
+    opts.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK);
+    }
+    let file = opts.open(path).map_err(|e| symlink_hint(e, path))?;
+    let meta = file.metadata()?;
+    if !meta.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{} is not a regular file", path.display()),
+        ));
+    }
+    if meta.len() > max_bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{} is larger than {max_bytes} bytes", path.display()),
+        ));
+    }
+    let mut buf = Vec::with_capacity(meta.len() as usize);
+    file.take(max_bytes + 1).read_to_end(&mut buf)?;
+    if buf.len() as u64 > max_bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{} is larger than {max_bytes} bytes", path.display()),
+        ));
+    }
+    Ok(buf)
+}
+
 /// `O_NOFOLLOW` reports a symlink as `ELOOP`; say what happened.
 fn symlink_hint(e: io::Error, path: &Path) -> io::Error {
     #[cfg(unix)]
@@ -256,5 +293,33 @@ mod tests {
             io::ErrorKind::PermissionDenied
         );
         assert!(read_private(&real, 10, false).unwrap().is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn user_files_are_regular_and_not_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("a.png");
+        fs::write(&real, b"png").unwrap();
+        assert_eq!(read_regular_nofollow(&real, 10).unwrap(), b"png");
+        assert!(read_regular_nofollow(&real, 2).is_err(), "size cap");
+        let link = dir.path().join("link.png");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert_eq!(
+            read_regular_nofollow(&link, 10).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert!(read_regular_nofollow(dir.path(), 10).is_err(), "a directory");
+        // a FIFO is refused without blocking the open
+        let fifo = dir.path().join("fifo.png");
+        let status = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert_eq!(
+            read_regular_nofollow(&fifo, 10).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
     }
 }

@@ -675,11 +675,16 @@ fn summary(ctx: &Ctx, d: &PostDraft, forum_name: &str, attached: &[media::Attach
             (tt(&d.tags.join(", ")), Style::Plain),
         ]);
     }
-    // the files of this machine (or prepared on it) that are uploaded with the post
+    // every file of this machine that is uploaded, by its absolute path (`threat-model.md`
+    // FILE-2), and the `cid:` images prepared on this device
     for a in attached {
+        let shown = match &a.file {
+            Some(f) => f.display().to_string(),
+            None => a.source.clone(),
+        };
         out.err_line(&[
             (lit("  media  "), Style::Dim),
-            (tt(&a.source), Style::Plain),
+            (tt(&shown), Style::Plain),
             (
                 cat([
                     lit(" ("),
@@ -708,9 +713,51 @@ pub struct PostSource {
     pub doc: Doc,
     /// Its draft id, once it is saved as a draft.
     pub draft: Option<String>,
-    /// The directory its relative image paths are in: the post's file's, else the working
-    /// directory (`None`).
-    pub base: Option<PathBuf>,
+    /// The directory that contains it, which its image paths must stay in (`threat-model.md`
+    /// FILE-1): the post's file's, or `$DATA/drafts/`; `None` for standard input.
+    pub dir: Option<PathBuf>,
+    /// A foreign draft: a file given to `post` that is not under `$DATA/drafts/`. Its local
+    /// files are confirmed on a terminal even with `--yes` (FILE-2).
+    pub foreign: bool,
+}
+
+impl PostSource {
+    /// A post from `file` (`-`: standard input), possibly a draft file of `ctx`.
+    pub fn from_file(ctx: &Ctx, doc: Doc, file: &Path) -> Self {
+        if file.as_os_str() == "-" {
+            return Self {
+                doc,
+                draft: None,
+                dir: None,
+                foreign: true,
+            };
+        }
+        let dir = match file.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+            _ => PathBuf::from("."),
+        };
+        let drafts = ctx.paths.drafts_dir().canonicalize().ok();
+        let foreign = !matches!(
+            (file.canonicalize(), drafts),
+            (Ok(f), Some(d)) if f.starts_with(&d)
+        );
+        Self {
+            doc,
+            draft: None,
+            dir: Some(dir),
+            foreign,
+        }
+    }
+
+    /// A draft of `ctx`'s draft directory.
+    pub fn draft(ctx: &Ctx, doc: Doc, id: Option<String>) -> Self {
+        Self {
+            doc,
+            draft: id,
+            dir: Some(ctx.paths.drafts_dir()),
+            foreign: false,
+        }
+    }
 }
 
 /// Saves `src` as a draft (a new id the first time); returns the id.
@@ -764,8 +811,9 @@ pub async fn publish_post(ctx: &Ctx, mut src: PostSource, yes: bool) -> Result<(
             }
         };
         // draft-local images become `cid:` media (`lfm-1.md` §12)
-        let base = src.base.clone().unwrap_or_else(|| PathBuf::from("."));
-        let attached = match media::attach(ctx, &w.engine, &mut draft.body, &base).await {
+        let attached = match media::attach(ctx, &w.engine, &mut draft.body, src.dir.as_deref())
+            .await
+        {
             Ok(a) => a,
             Err(e) => {
                 if src.draft.is_some()
@@ -776,7 +824,23 @@ pub async fn publish_post(ctx: &Ctx, mut src: PostSource, yes: bool) -> Result<(
                 return Err(e);
             }
         };
-        if !yes {
+        // FILE-2: the files of this machine a foreign draft uploads are confirmed on a
+        // terminal, even with --yes
+        let local: Vec<String> = attached
+            .iter()
+            .filter_map(|a| Some(a.file.as_ref()?.display().to_string()))
+            .collect();
+        let confirm_files = src.foreign && !local.is_empty();
+        if !yes || confirm_files {
+            if !interactive && confirm_files {
+                return Err(CliError::usage(format!(
+                    "this post would upload files of this machine ({}); that is confirmed on a \
+                     terminal, even with --yes, for a file outside the drafts directory: publish \
+                     it on a terminal, or prepare the files with `lessdugin media add` and name \
+                     them by cid:",
+                    local.join(", ")
+                )));
+            }
             if !interactive {
                 let id = keep(ctx, &drafts, &mut src, &[])?;
                 return Err(CliError::usage(format!(
@@ -969,11 +1033,7 @@ pub async fn run(ctx: &Ctx, args: DraftArgs) -> Result<(), CliError> {
                 DraftType::Post => {
                     publish_post(
                         ctx,
-                        PostSource {
-                            doc,
-                            draft: Some(id),
-                            base: None,
-                        },
+                        PostSource::draft(ctx, doc, Some(id)),
                         yes,
                     )
                     .await

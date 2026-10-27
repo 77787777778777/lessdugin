@@ -349,21 +349,13 @@ pub async fn post(ctx: &Ctx, args: PostArgs) -> Result<(), CliError> {
         }
         return Err(CliError::usage("the draft is empty; nothing was published"));
     }
+    let src = match args.file.as_deref() {
+        Some(f) if !from_editor => PostSource::from_file(ctx, doc, f),
+        _ => PostSource::draft(ctx, doc, draft_id),
+    };
     draft::publish_post(
         ctx,
-        PostSource {
-            doc,
-            draft: draft_id,
-            // relative image paths are next to the post's file
-            base: args
-                .file
-                .as_deref()
-                .filter(|f| f.as_os_str() != "-")
-                .map(|f| match f.parent() {
-                    Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
-                    _ => std::path::PathBuf::from("."),
-                }),
-        },
+        src,
         args.yes,
     )
     .await

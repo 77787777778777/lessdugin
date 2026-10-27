@@ -4,21 +4,28 @@
 //! `docs/plan.md` M4), so the CLI and the SPA publish the same bytes.
 //!
 //! **Draft-local images.** When a post is published (`post`, `draft publish`), every inline
-//! image whose destination is a path on this machine (`![a chart](./chart.png)`: relative to the
-//! post's file, else to the working directory) is prepared, and its destination becomes
-//! `cid:<cid>`. A `cid:` image whose bytes this device prepared (`media add`) is attached too.
-//! The media item carries the image's markdown alt, and an image without one is warned about
-//! (`data-model.md` §4). The draft keeps its paths; the bytes are uploaded when the write is sent
-//! (`data-model.md` §8.8).
+//! image whose destination is a path on this machine (`![a chart](img/chart.png)`) is prepared,
+//! and its destination becomes `cid:<cid>`. A `cid:` image whose bytes this device prepared
+//! (`media add`) is attached too. The media item carries the image's markdown alt, and an image
+//! without one is warned about (`data-model.md` §4). The draft keeps its paths; the bytes are
+//! uploaded when the write is sent (`data-model.md` §8.8). The path is the draft's text, which
+//! may come from anyone (`threat-model.md` F3), so FILE-1 holds: it is relative, without `~` or
+//! `..`, lies inside the canonical directory that contains the draft (the post's file's, or
+//! `$DATA/drafts/`) after canonicalisation, and names a regular file, read with `O_NOFOLLOW` and
+//! checked with `fstat`; anything else is an error naming the reference. The publish summary
+//! lists each file with its absolute path, size and sniffed type (FILE-2, in `draft.rs`).
 //!
 //! **Downloads.** `media get` saves item N of a post or comment (`lfm-1.md` §6.2 numbering) as
-//! `<cid>.<ext-from-sniffed-type>` (`data-model.md` §4), never under the record's `name`, which
-//! the author chose; the CID is checked (`^b[a-z2-7]{1,127}$`) before it names a file. The host
-//! streams the blob from the author's PDS to a file while hashing it, and fails unless the bytes
-//! match the CID (`Host::fetch_blob`); the CLI copies that file and never holds the bytes.
+//! `<cid>.<ext>` (`data-model.md` §4, FILE-3): the extension comes from the sniffed type when the
+//! declared type agrees with it, else `.bin`; never from the record's `name`, which the author
+//! chose; and the CID is checked (`^b[a-z2-7]{1,127}$`) before it names a file. Without `-o` the
+//! file goes to the working directory and never replaces one (`O_EXCL`). The host streams the
+//! blob from the author's PDS to a file while hashing it, and fails unless the bytes match the
+//! CID (`Host::fetch_blob`); the CLI copies that file and never holds the bytes. `media open`
+//! opens only images, video and audio (FILE-4), handing the path to the opener as one argument.
 
 use std::ops::Range;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use lessdugin_atp::syntax::Did;
 use lessdugin_core::dto::{BodyDraft, CommentSort, MediaInput, MediaRef, ThreadOpts, ThreadRoot};
@@ -198,73 +205,140 @@ fn images(src: &str) -> Result<Images, String> {
     Ok(out)
 }
 
-/// A path of a draft: `~/…` under `$HOME`, a relative path under `base`.
-fn resolve(path: &str, base: &Path) -> PathBuf {
-    if let Some(rest) = path.strip_prefix("~/")
-        && let Some(home) = std::env::var_os("HOME")
-    {
-        return PathBuf::from(home).join(rest);
-    }
-    let p = Path::new(path);
-    if p.is_absolute() {
-        p.to_path_buf()
-    } else {
-        base.join(p)
-    }
+/// True for `C:…`, an absolute Windows path on any platform.
+fn drive_letter(p: &str) -> bool {
+    let b = p.as_bytes();
+    b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':'
 }
 
-/// The bytes of a media file (at most the hard blob limit, `limits.md` §5).
-fn read_media(path: &Path) -> Result<Vec<u8>, CliError> {
-    let meta = std::fs::metadata(path).map_err(|e| {
-        let msg = format!("{}: {e}", path.display());
-        if e.kind() == std::io::ErrorKind::NotFound {
-            EngineError::not_found(msg)
-        } else {
-            EngineError::invalid_input(msg)
+/// The file a draft's image path names (`threat-model.md` FILE-1): `path` is relative, without
+/// `~` or `..`, and after canonicalisation lies inside `dir`, the canonical directory that
+/// contains the draft. The final component is not a symlink (the file is then read with
+/// `O_NOFOLLOW`). The error names the reference.
+fn draft_file(path: &str, dir: &Path) -> Result<PathBuf, EngineError> {
+    let bad = |why: String| EngineError::invalid_input(format!("the image path {path:?} {why}"));
+    let p = Path::new(path);
+    if p.has_root() || drive_letter(path) || path.starts_with(['/', '\\']) {
+        return Err(bad("must be relative to the draft's directory".into()));
+    }
+    if path.starts_with('~') {
+        return Err(bad("must be relative to the draft's directory, not to ~".into()));
+    }
+    if p.components().any(|c| c == Component::ParentDir) || path.split(['/', '\\']).any(|c| c == "..")
+    {
+        return Err(bad("must not leave the draft's directory (..)".into()));
+    }
+    let joined = dir.join(p);
+    match std::fs::symlink_metadata(&joined) {
+        Ok(m) if m.file_type().is_symlink() => {
+            return Err(bad("is a symbolic link; name the file itself".into()));
         }
-    })?;
-    if !meta.is_file() {
-        return Err(EngineError::invalid_input(format!("{} is not a file", path.display())).into());
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(EngineError::not_found(format!(
+                "the image path {path:?} names no file ({})",
+                joined.display()
+            )));
+        }
+        Err(e) => return Err(bad(format!("cannot be read: {e}"))),
     }
-    if meta.len() > BLOB_HARD_MAX_BYTES {
-        return Err(EngineError::new(
-            ErrorCode::TooLarge,
-            format!(
-                "{} is larger than {} MiB (limits.md §5)",
-                path.display(),
-                BLOB_HARD_MAX_BYTES / (1024 * 1024)
+    let canon = joined
+        .canonicalize()
+        .map_err(|e| bad(format!("cannot be read: {e}")))?;
+    if !canon.starts_with(dir) {
+        return Err(bad(format!(
+            "leads outside the draft's directory {}",
+            dir.display()
+        )));
+    }
+    Ok(canon)
+}
+
+/// The bytes of a media file the user named: a regular file (`fstat`), not a symlink
+/// (`O_NOFOLLOW`), of at most the hard blob limit (`limits.md` §5). `what` names it in errors.
+fn read_media(path: &Path, what: &str) -> Result<Vec<u8>, EngineError> {
+    lessdugin_native::fsutil::read_regular_nofollow(path, BLOB_HARD_MAX_BYTES).map_err(|e| {
+        match e.kind() {
+            std::io::ErrorKind::NotFound => {
+                EngineError::not_found(format!("{what}: {} does not exist", path.display()))
+            }
+            std::io::ErrorKind::InvalidData => EngineError::new(
+                ErrorCode::TooLarge,
+                format!(
+                    "{what} is larger than {} MiB (limits.md §5)",
+                    BLOB_HARD_MAX_BYTES / (1024 * 1024)
+                ),
             ),
-        )
-        .into());
+            _ => EngineError::invalid_input(format!("{what}: {e}")),
+        }
+    })
+}
+
+/// Names `what` in an error of `prepare_media` (an unsupported type, a container too deep).
+fn naming(what: &str, mut e: EngineError) -> EngineError {
+    e.message = format!("{what}: {}", e.message);
+    e
+}
+
+/// PRIV-7: only images and MP4 are stripped; other files carry their metadata.
+fn metadata_warning(ctx: &Ctx, what: &str, mime: &str) {
+    if !(mime.starts_with("image/") || mime == "video/mp4" || mime == "audio/mp4") {
+        ctx.out.warn(cat([
+            tt(what),
+            lit(" ("),
+            tt(mime),
+            lit(") is published as it is: metadata in it (such as PDF author fields or audio \
+                 tags) is not removed"),
+        ]));
     }
-    std::fs::read(path)
-        .map_err(|e| EngineError::invalid_input(format!("{}: {e}", path.display())).into())
 }
 
 /// One media item a publish attaches (the summary lists them).
 pub struct Attached {
     /// What the text named: the path, or `cid:…`.
     pub source: String,
+    /// The file of a draft-local image (canonical); `None` for a `cid:` image prepared here.
+    pub file: Option<PathBuf>,
     /// The reference in the body.
     pub media: MediaRef,
 }
 
 /// Attaches the media of `body` before it is published: each draft-local image is prepared and
 /// its destination rewritten to `cid:<cid>`, and each `cid:` image whose bytes this device
-/// prepared is added to `body.media` (one item per CID). Returns the attached items in the order
-/// of `body.media`; an image without alt text is warned about.
+/// prepared is added to `body.media` (one item per CID). `dir` is the directory that contains
+/// the draft; `None` (standard input) has none, so a draft-local image is an error. Returns the
+/// attached items in the order of `body.media`; an image without alt text is warned about.
 pub async fn attach(
     ctx: &Ctx,
     engine: &Engine<NativeHost>,
     body: &mut BodyDraft,
-    base: &Path,
+    dir: Option<&Path>,
 ) -> Result<Vec<Attached>, CliError> {
     let found = images(&body.markdown).map_err(EngineError::invalid_input)?;
     let mut attached: Vec<Attached> = Vec::new();
     let mut rewrites: Vec<(Range<usize>, String)> = Vec::new();
     let mut no_alt: Vec<String> = Vec::new();
+    let canon_dir = match (dir, found.local.first()) {
+        (_, None) => None,
+        (None, Some(img)) => {
+            return Err(EngineError::invalid_input(format!(
+                "the image path {:?} names a file, but a text from standard input has no \
+                 directory; prepare the file with `lessdugin media add` and name it by its cid:",
+                img.path
+            ))
+            .into());
+        }
+        (Some(d), Some(_)) => Some(d.canonicalize().map_err(|e| {
+            EngineError::invalid_input(format!("the draft's directory {}: {e}", d.display()))
+        })?),
+    };
     for img in found.local {
-        let bytes = read_media(&resolve(&img.path, base))?;
+        let Some(dir) = canon_dir.as_deref() else {
+            break;
+        };
+        let file = draft_file(&img.path, dir)?;
+        let what = format!("the image {:?}", img.path);
+        let bytes = read_media(&file, &what)?;
         let alt = (!img.alt.is_empty()).then(|| img.alt.clone());
         let m = engine
             .prepare_media(
@@ -276,12 +350,16 @@ pub async fn attach(
                     aspect_ratio: None,
                 },
             )
-            .await?;
+            .await
+            .map_err(|e| naming(&what, e))?;
         rewrites.push((img.dest, format!("cid:{}", m.cid)));
         if img.alt.is_empty() {
             no_alt.push(img.path.clone());
         }
-        push_media(&mut attached, &mut body.media, img.path, m);
+        if !body.media.iter().any(|x| x.cid == m.cid) {
+            metadata_warning(ctx, &img.path, &m.mime);
+        }
+        push_media(&mut attached, &mut body.media, img.path, Some(file), m);
     }
     for (cid, alt) in found.cids {
         if body.media.iter().any(|m| m.cid == cid) {
@@ -308,7 +386,7 @@ pub async fn attach(
             duration_ms: None,
             name: None,
         };
-        push_media(&mut attached, &mut body.media, format!("cid:{cid}"), m);
+        push_media(&mut attached, &mut body.media, format!("cid:{cid}"), None, m);
     }
     rewrites.sort_by_key(|(r, _)| std::cmp::Reverse(r.start));
     for (r, s) in rewrites {
@@ -319,7 +397,7 @@ pub async fn attach(
         ctx.out.warn(cat([
             lit("the image "),
             tt(p),
-            lit(" has no alt text; describe it for readers who cannot see it: ![description](…)"),
+            lit(" has no alt text; describe it for readers who cannot see it: ![description](...)"),
         ]));
     }
     Ok(attached)
@@ -330,16 +408,24 @@ fn push_media(
     attached: &mut Vec<Attached>,
     media: &mut Vec<MediaRef>,
     source: String,
+    file: Option<PathBuf>,
     m: MediaRef,
 ) {
     if let Some(have) = media.iter_mut().find(|x| x.cid == m.cid) {
         if have.alt.is_none() {
-            have.alt = m.alt;
+            have.alt.clone_from(&m.alt);
+            if let Some(a) = attached.iter_mut().find(|a| a.media.cid == m.cid) {
+                a.media.alt = m.alt;
+            }
         }
         return;
     }
     media.push(m.clone());
-    attached.push(Attached { source, media: m });
+    attached.push(Attached {
+        source,
+        file,
+        media: m,
+    });
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -350,7 +436,8 @@ fn push_media(
 /// is published.
 async fn add(ctx: &Ctx, file: &Path, alt: Option<String>) -> Result<(), CliError> {
     let engine = ctx.engine()?;
-    let bytes = read_media(file)?;
+    let what = file.display().to_string();
+    let bytes = read_media(file, &what)?;
     let alt = alt.map(|a| a.trim().to_owned()).filter(|a| !a.is_empty());
     let m = engine
         .prepare_media(
@@ -362,11 +449,13 @@ async fn add(ctx: &Ctx, file: &Path, alt: Option<String>) -> Result<(), CliError
                 aspect_ratio: None,
             },
         )
-        .await?;
+        .await
+        .map_err(|e| naming(&what, e))?;
+    metadata_warning(ctx, &what, &m.mime);
     if alt.is_none() {
         ctx.out.warn(lit(
             "no alt text: describe the file for readers who cannot see it (--alt, or in the \
-             ![…] of the post)",
+             ![...] of the post)",
         ));
     }
     if ctx.out.is_json() {
@@ -438,9 +527,21 @@ struct Fetched {
 }
 
 impl Fetched {
-    /// `<cid>.<ext-from-sniffed-type>`.
+    /// The sniffed type, when the declared type agrees with it (`sync.md` §11.1: both go
+    /// through `data-model.md` §8.8's table, which also names `audio/x-m4a` and
+    /// `application/ogg`).
+    fn agreed(&self) -> Option<&'static str> {
+        let declared = match self.declared.as_str() {
+            "audio/x-m4a" => "audio/mp4",
+            "application/ogg" => "audio/ogg",
+            d => d,
+        };
+        self.sniffed.filter(|s| *s == declared)
+    }
+
+    /// `<cid>.<ext>`: the extension of the agreed type, else `.bin` (FILE-3).
     fn file_name(&self) -> String {
-        format!("{}.{}", self.cid, ext_of(self.sniffed.unwrap_or("")))
+        format!("{}.{}", self.cid, ext_of(self.agreed().unwrap_or("")))
     }
 }
 
@@ -521,23 +622,47 @@ async fn fetch(ctx: &Ctx, reference: &str, index: u16) -> Result<Fetched, CliErr
     })
 }
 
-/// Copies `from` to `to` through a temporary file next to it, so `to` is never half written.
-fn save(from: &Path, to: &Path) -> Result<(), CliError> {
-    let name = to
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let dir = to
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    let part = dir.join(format!(".{name}.part"));
-    std::fs::copy(from, &part)
-        .and_then(|_| std::fs::rename(&part, to))
-        .map_err(|e| {
-            let _ = std::fs::remove_file(&part);
+/// Copies `from` to a new file `to` (`O_EXCL`: an existing file is never replaced, FILE-3), or,
+/// with `replace` (a path the user named with `-o`), through a temporary file renamed over it.
+/// A copy that fails leaves nothing behind.
+fn save(from: &Path, to: &Path, replace: bool) -> Result<(), CliError> {
+    let fail = |e: std::io::Error| -> CliError {
+        if e.kind() == std::io::ErrorKind::AlreadyExists {
+            EngineError::conflict(format!(
+                "{} exists; it is not replaced (name another file with -o)",
+                to.display()
+            ))
+            .into()
+        } else {
             EngineError::invalid_input(format!("could not write {}: {e}", to.display())).into()
-        })
+        }
+    };
+    let target = if replace {
+        lessdugin_native::fsutil::temp_path_for(to)
+    } else {
+        to.to_path_buf()
+    };
+    let mut out = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&target)
+        .map_err(fail)?;
+    let copied = std::fs::File::open(from)
+        .and_then(|mut f| std::io::copy(&mut f, &mut out))
+        .and_then(|_| out.sync_all());
+    drop(out);
+    let done = copied.and_then(|()| {
+        if replace {
+            std::fs::rename(&target, to)
+        } else {
+            Ok(())
+        }
+    });
+    if let Err(e) = done {
+        let _ = std::fs::remove_file(&target);
+        return Err(fail(e));
+    }
+    Ok(())
 }
 
 /// `media get --json`.
@@ -551,9 +676,9 @@ struct Saved {
     path: String,
 }
 
-/// The warning when the declared type is not the sniffed one (`lfm-1.md` §6.2).
+/// The warning when the declared type is not the sniffed one (`sync.md` §11.1).
 fn type_warning(ctx: &Ctx, f: &Fetched) {
-    if f.sniffed != Some(f.declared.as_str()) {
+    if f.agreed().is_none() {
         ctx.out.warn(cat([
             lit("the file is declared as "),
             tt(&f.declared),
@@ -572,17 +697,17 @@ async fn get(
 ) -> Result<(), CliError> {
     let f = fetch(ctx, reference, index).await?;
     type_warning(ctx, &f);
-    let to = match out {
-        Some(p) if p.is_dir() => p.join(f.file_name()),
-        Some(p) => p.to_path_buf(),
-        None => PathBuf::from(f.file_name()),
+    let (to, replace) = match out {
+        Some(p) if p.is_dir() => (p.join(f.file_name()), false),
+        Some(p) => (p.to_path_buf(), true),
+        None => (PathBuf::from(f.file_name()), false),
     };
-    save(&f.file, &to)?;
+    save(&f.file, &to, replace)?;
     if ctx.out.is_json() {
         ctx.out.json(&Saved {
             dto: lessdugin_core::dto::DTO_VERSION,
             cid: f.cid,
-            mime: f.sniffed,
+            mime: f.agreed(),
             size_bytes: f.size,
             path: to.display().to_string(),
         });
@@ -594,7 +719,7 @@ async fn get(
         (
             cat([
                 lit(" ("),
-                tt(f.sniffed.unwrap_or("unknown type")),
+                tt(f.agreed().unwrap_or("unknown type")),
                 lit(", "),
                 size(f.size),
                 lit("; the bytes match the CID)"),
@@ -605,24 +730,36 @@ async fn get(
     Ok(())
 }
 
-/// `lessdugin media open <ref> --index N`: saves the item under the cache directory as
-/// `<cid>.<ext>` and opens it with the system's viewer (`$BROWSER`, then the desktop's). Only a
-/// type of `data-model.md` §8.8's table is opened.
+/// `lessdugin media open <ref> --index N`: saves an image, video or audio item under the cache
+/// directory as `<cid>.<ext>` and opens it with the system's viewer (`$BROWSER`, then the
+/// desktop's opener), the path being one argument of its command line (FILE-4, FILE-5).
+/// Anything else, a PDF included, is save-only (`media get`).
 async fn open(ctx: &Ctx, reference: &str, index: u16) -> Result<(), CliError> {
     let f = fetch(ctx, reference, index).await?;
     type_warning(ctx, &f);
-    if f.sniffed.is_none() {
+    if !f
+        .agreed()
+        .is_some_and(|t| t.starts_with("image/") || t.starts_with("video/") || t.starts_with("audio/"))
+    {
         return Err(EngineError::invalid_input(format!(
-            "media item {index} is of no type this client opens; save it with `lessdugin media \
-             get {reference} --index {index}`"
+            "media item {index} is not an image, video or audio file, so it is not opened; save \
+             it with `lessdugin media get {reference} --index {index}`"
         ))
         .into());
     }
     let dir = ctx.paths.cache_dir.join("open");
-    std::fs::create_dir_all(&dir)
+    lessdugin_native::fsutil::ensure_private_dir(&dir)
         .map_err(|e| EngineError::internal(format!("{}: {e}", dir.display())))?;
     let to = dir.join(f.file_name());
-    save(&f.file, &to)?;
+    save(&f.file, &to, true)?;
+    // Windows: the Mark-of-the-Web, so the opener treats it as downloaded (FILE-4)
+    #[cfg(windows)]
+    {
+        let _ = std::fs::write(
+            format!("{}:Zone.Identifier", to.display()),
+            "[ZoneTransfer]\r\nZoneId=3\r\n",
+        );
+    }
     let target = to.display().to_string();
     let t = target.clone();
     let opened = tokio::task::spawn_blocking(move || webbrowser::open(&t).is_ok())
@@ -699,5 +836,44 @@ mod tests {
         assert_eq!(paths, ["./out.png"]);
         // a reference-style local image cannot be rewritten in place
         assert!(images("![a][r]\n\n[r]: ./a.png\n").is_err());
+    }
+
+    /// `threat-model.md` FILE-1.
+    #[cfg(unix)]
+    #[test]
+    fn draft_paths_stay_in_the_draft_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("draft");
+        std::fs::create_dir_all(dir.join("img")).unwrap();
+        std::fs::write(dir.join("img/a.png"), b"x").unwrap();
+        std::fs::write(root.path().join("secret.png"), b"x").unwrap();
+        std::os::unix::fs::symlink(root.path(), dir.join("up")).unwrap();
+        std::os::unix::fs::symlink(dir.join("img/a.png"), dir.join("link.png")).unwrap();
+        let dir = dir.canonicalize().unwrap();
+        assert_eq!(
+            draft_file("img/a.png", &dir).unwrap(),
+            dir.join("img/a.png")
+        );
+        assert!(draft_file("./img/a.png", &dir).is_ok());
+        for bad in [
+            "/etc/passwd",
+            "~/a.png",
+            "~",
+            "../secret.png",
+            "img/../../secret.png",
+            "C:\\a.png",
+            "\\\\host\\a.png",
+            // a directory symlink that leads out of the draft's directory
+            "up/secret.png",
+            // a symlink as the final component
+            "link.png",
+        ] {
+            let e = draft_file(bad, &dir).unwrap_err();
+            assert!(e.message.contains(&format!("{bad:?}")), "{bad}: {}", e.message);
+        }
+        assert_eq!(
+            draft_file("img/none.png", &dir).unwrap_err().code,
+            ErrorCode::NotFound
+        );
     }
 }

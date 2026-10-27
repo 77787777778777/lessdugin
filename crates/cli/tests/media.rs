@@ -2,7 +2,8 @@
 //! `media add|get|open` and the draft-local images of a post through the real CLI on the
 //! FakePds network (`support/fakenet.rs`): the core's pipeline prepares the files, publishing
 //! rewrites their paths to `cid:` URLs (`lfm-1.md` §12) and uploads them, an image without alt
-//! text is warned about (`data-model.md` §4), and a reader saves an item as `<cid>.<ext>`.
+//! text is warned about (`data-model.md` §4), and a reader saves an item as `<cid>.<ext>`. The
+//! local-file rules are `threat-model.md` FILE-1 to FILE-4.
 
 #[path = "support/fakenet.rs"]
 mod fakenet;
@@ -28,6 +29,24 @@ fn forum() -> (Net, User) {
     (net, alice)
 }
 
+/// Saves `md` as a draft of `u`, puts `files` next to it in the drafts directory, and
+/// publishes it with `--yes` (a draft of the drafts directory is not foreign, FILE-2).
+fn publish_draft(u: &User, md: &str, files: &[(&str, &[u8])]) -> std::process::Output {
+    let f = u.file("draft-src.md", md);
+    let d = u.json(&["post", "--draft", s(&f)]);
+    let id = d["id"].as_str().unwrap().to_owned();
+    let dir = std::path::Path::new(d["path"].as_str().unwrap())
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    for (name, bytes) in files {
+        let p = dir.join(name);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, bytes).unwrap();
+    }
+    u.run(&["--json", "draft", "publish", &id, "--yes"])
+}
+
 /// The only post record of `u`.
 fn the_post(u: &User) -> Value {
     let posts = u.account.list(nsid::POST);
@@ -38,30 +57,23 @@ fn the_post(u: &User) -> Value {
 #[test]
 fn draft_local_images_become_cid_media_and_save_as_cid_files() {
     let (net, alice) = forum();
-    std::fs::create_dir(alice.path("img")).unwrap();
-    std::fs::write(alice.path("img/chart.png"), PNG).unwrap();
-    std::fs::write(alice.path("report.pdf"), PDF).unwrap();
-    let f = alice.file(
-        "p.md",
+    // relative paths are in the draft's directory, whatever the working directory
+    let out = publish_draft(
+        &alice,
         "---\ntitle: Charts\n---\nLook: ![a chart](img/chart.png)\n\n\
          The report: ![](./report.pdf)\n\n`![not an image](./missing.png)`\n",
+        &[("img/chart.png", PNG), ("report.pdf", PDF)],
     );
-    // relative paths are next to the post's file, whatever the working directory
-    let out = alice
-        .cmd()
-        .current_dir(std::env::temp_dir())
-        .args(["--json", "post", s(&f), "--yes"])
-        .write_stdin("")
-        .output()
-        .unwrap();
     assert!(out.status.success(), "{}", text(&out.stderr));
     let stderr = text(&out.stderr);
-    // the image without alt text is warned about, the described one is not
+    // the image without alt text is warned about, the described one is not; the PDF's
+    // metadata is published as it is (PRIV-7)
     assert!(
-        stderr.contains("./report.pdf") && stderr.contains("no alt text"),
+        stderr.contains("the image ./report.pdf has no alt text"),
         "{stderr}"
     );
-    assert!(!stderr.contains("img/chart.png"), "{stderr}");
+    assert!(!stderr.contains("img/chart.png has no alt"), "{stderr}");
+    assert!(stderr.contains("metadata in it"), "{stderr}");
     let t: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(t["state"]["kind"], "done", "{t}");
     let post = t["state"]["uri"].as_str().unwrap().to_owned();
@@ -113,6 +125,18 @@ fn draft_local_images_become_cid_media_and_save_as_cid_files() {
         .collect();
     assert_eq!(names, [format!("{pdf}.pdf")]);
     assert_eq!(std::fs::read(here.join(format!("{pdf}.pdf"))).unwrap(), PDF);
+    // and never replaces a file there (O_EXCL)
+    let out = dave
+        .cmd()
+        .current_dir(&here)
+        .args(["--json", "media", "get", &post, "--index", "2"])
+        .write_stdin("")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(5), "{}", text(&out.stderr));
+    // a PDF is save-only (FILE-4)
+    let e = dave.fails(1, &["media", "open", &post, "--index", "2"]);
+    assert!(e["message"].as_str().unwrap().contains("not opened"), "{e}");
     // an item the body does not have
     let e = dave.fails(4, &["media", "get", &post, "--index", "3"]);
     assert_eq!(e["code"], "not_found", "{e}");
@@ -149,24 +173,80 @@ fn media_add_prepares_a_file_that_a_post_names_by_cid() {
     assert_eq!(media[0]["alt"], "a dot", "{rec}");
 }
 
+/// FILE-1 and FILE-2: every case is an error naming the reference, and nothing is published.
 #[test]
-fn a_missing_local_image_publishes_nothing() {
+fn local_files_outside_the_rules_are_refused() {
     let (_net, alice) = forum();
-    let f = alice.file("p.md", "---\ntitle: Gone\n---\n![a chart](./gone.png)\n");
-    let e = alice.fails(4, &["post", s(&f), "--yes"]);
-    assert!(
-        e["message"].as_str().unwrap().contains("gone.png"),
-        "{e}"
-    );
+    let outside = alice.path("outside.png");
+    std::fs::write(&outside, PNG).unwrap();
+    let cases: Vec<(String, &[(&str, &[u8])])> = vec![
+        (outside.display().to_string(), &[]),
+        ("~/a.png".into(), &[]),
+        ("../outside.png".into(), &[]),
+        ("./gone.png".into(), &[]),
+        // a key file: its sniffed type is not on the upload allowlist (PRIV-6)
+        ("id_ed25519".into(), &[("id_ed25519", b"-----BEGIN OPENSSH PRIVATE KEY-----\n")]),
+    ];
+    for (path, files) in cases {
+        let out = publish_draft(
+            &alice,
+            &format!("---\ntitle: No\n---\n![a chart]({path})\n"),
+            files,
+        );
+        assert!(!out.status.success(), "{path}");
+        let err = text(&out.stderr);
+        assert!(err.contains(path.as_str()), "{path}: {err}");
+    }
+    #[cfg(unix)]
+    {
+        // a symlink out of the drafts directory, and a FIFO
+        let f = alice.file("x.md", "---\ntitle: No\n---\nx\n");
+        let d = alice.json(&["post", "--draft", s(&f)]);
+        let dir = std::path::Path::new(d["path"].as_str().unwrap())
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        std::os::unix::fs::symlink(alice.dir.path(), dir.join("up")).unwrap();
+        let fifo = dir.join("fifo.png");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        for path in ["up/outside.png", "fifo.png"] {
+            let out = publish_draft(
+                &alice,
+                &format!("---\ntitle: No\n---\n![a chart]({path})\n"),
+                &[],
+            );
+            assert!(!out.status.success(), "{path}");
+            let err = text(&out.stderr);
+            assert!(err.contains(path), "{path}: {err}");
+        }
+    }
+    // a foreign draft (a file outside the drafts directory) uploads local files only after a
+    // confirmation on a terminal, which --yes does not replace
+    std::fs::write(alice.path("chart.png"), PNG).unwrap();
+    let f = alice.file("p.md", "---\ntitle: Gone\n---\n![a chart](chart.png)\n");
+    let e = alice.fails(2, &["post", s(&f), "--yes"]);
+    let msg = e["message"].as_str().unwrap();
+    let chart = alice.path("chart.png").canonicalize().unwrap();
+    assert!(msg.contains(&chart.display().to_string()), "{e}");
     assert!(alice.account.list(nsid::POST).is_empty());
 }
 
 #[test]
 fn media_open_hands_the_saved_file_to_the_viewer() {
     let (net, alice) = forum();
-    std::fs::write(alice.path("chart.png"), PNG).unwrap();
-    let f = alice.file("p.md", "---\ntitle: Open\n---\n![a chart](chart.png)\n");
-    let p = alice.json(&["post", s(&f), "--yes"]);
+    let out = publish_draft(
+        &alice,
+        "---\ntitle: Open\n---\n![a chart](chart.png)\n",
+        &[("chart.png", PNG)],
+    );
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let p: Value = serde_json::from_slice(&out.stdout).unwrap();
     let post = p["state"]["uri"].as_str().unwrap().to_owned();
     let dave = net.reader(&alice);
     // a "viewer" that records what it was asked to open
