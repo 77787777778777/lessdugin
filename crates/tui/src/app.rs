@@ -28,6 +28,7 @@ use lessdugin_core::dto::{
 use lessdugin_core::engine::EngineError;
 
 use crate::body::Body;
+use crate::command::RestrictDim;
 use crate::editor;
 use crate::keys::{self, Cmd, Op};
 use crate::text::{TermText, actor, cat, count, lit, post_title, tt};
@@ -241,6 +242,9 @@ pub enum Effect {
         forum: String,
         /// The screen the menu was opened from.
         screen: ScreenId,
+        /// A `#restrict` assertion sets only this dimension; the other keeps the account's
+        /// current value (read when the effect runs).
+        merge: Option<RestrictDim>,
     },
     /// `recent_discussion(forum, None, limit)`: the Forum screen's Activity tab
     /// (`synthesis-v1.md` §6.11, `social.md` §12.5).
@@ -873,6 +877,8 @@ pub struct ModEntry {
     pub queue: bool,
     /// The entry opens the log screen.
     pub log: bool,
+    /// The dimension of `#restrict` the entry sets (the other is kept).
+    pub merge: Option<RestrictDim>,
 }
 
 /// The mod menu overlay (`synthesis-v1.md` §6.11 "Other": `m` mod menu). The entries are the
@@ -905,6 +911,26 @@ pub struct Prompt {
     pub forum: String,
     /// The screen to reload after the write.
     pub screen: ScreenId,
+    /// As [`ModEntry::merge`].
+    pub merge: Option<RestrictDim>,
+}
+
+/// What the mod menu and `:mod` act on: the selected item, its thread's post, and their
+/// authors.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModSubject {
+    /// The selected post or comment.
+    pub item: String,
+    /// Its forum.
+    pub forum: String,
+    /// The item's author.
+    pub author: String,
+    /// The thread's post (the item itself when a post is selected).
+    pub post: String,
+    /// The post's author: the one author moderation belongs to (`social.md` §4.9).
+    pub post_author: String,
+    /// The item is a comment.
+    pub comment: bool,
 }
 
 /// A screen on the stack.
@@ -1129,6 +1155,7 @@ fn complete(line: &mut String) {
         "hide",
         "spam",
         "unhide",
+        "keep",
         "ban",
         "unban",
         "pin",
@@ -1139,6 +1166,7 @@ fn complete(line: &mut String) {
         "restrict",
         "unrestrict",
         "nullify",
+        "unnullify",
         "approve",
         "personal",
         "frontpage",
@@ -2587,45 +2615,51 @@ impl State {
     // -----------------------------------------------------------------------------------------
     // moderation (M3, synthesis-v1.md §6.11, social.md §4.4)
 
-    /// The item and author the mod menu acts on: `(item uri, forum, author did)`. The author
-    /// is the selected comment's author, or the thread's post author, or (on a list) the
-    /// selected post's author.
-    fn mod_subject(&self) -> Option<(String, String, String)> {
+    /// The item and authors the mod menu acts on: the selected comment or post, its thread's
+    /// post and their authors (on a list: the selected post, its own thread).
+    fn mod_subject(&self) -> Option<ModSubject> {
         match &self.stack.last()?.kind {
-            ScreenKind::Forum(s) => s
-                .selected()
-                .map(|p| (p.uri.clone(), p.forum.clone(), p.author.did.clone())),
+            ScreenKind::Forum(s) => s.selected().map(|p| ModSubject {
+                item: p.uri.clone(),
+                forum: p.forum.clone(),
+                author: p.author.did.clone(),
+                post: p.uri.clone(),
+                post_author: p.author.did.clone(),
+                comment: false,
+            }),
             ScreenKind::Thread(t) => {
                 let d = t.data.as_ref()?;
-                let forum = match &d.view.post {
-                    ThreadRoot::Post(p) => p.post.forum.clone(),
-                    ThreadRoot::Missing { .. } => return None,
+                let ThreadRoot::Post(p) = &d.view.post else {
+                    return None;
                 };
                 let uri = t.layout.items.get(t.pos.selected)?.uri.clone();
-                let author = match d.view.comments.iter().find(|c| c.uri == uri) {
-                    Some(c) => c.author.did.clone(),
-                    None => match &d.view.post {
-                        ThreadRoot::Post(p) => p.post.author.did.clone(),
-                        ThreadRoot::Missing { .. } => return None,
-                    },
-                };
-                Some((uri, forum, author))
+                let comment = d.view.comments.iter().find(|c| c.uri == uri);
+                Some(ModSubject {
+                    author: comment
+                        .map_or_else(|| p.post.author.did.clone(), |c| c.author.did.clone()),
+                    comment: comment.is_some(),
+                    item: uri,
+                    forum: p.post.forum.clone(),
+                    post: p.post.uri.clone(),
+                    post_author: p.post.author.did.clone(),
+                })
             }
             _ => None,
         }
     }
 
     /// `m`: opens the mod menu for the selected item (and its author) when the viewer may
-    /// moderate the forum (`ViewerCaps.moderate`, §4.4), else says why not.
+    /// moderate the forum (`ViewerCaps.moderate`, §4.4) or the thread (author moderation, §4.9),
+    /// else says why not.
     fn open_mod_menu(&mut self) {
-        let Some((item, forum, author)) = self.mod_subject() else {
+        let Some(subject) = self.mod_subject() else {
             self.say(Tone::Info, lit("Nothing selected to moderate."));
             return;
         };
-        let caps = self.caps_of(&forum).cloned();
+        let caps = self.caps_of(&subject.forum).cloned();
         let Some(c) = caps.as_ref() else {
             // no forum header on the stack: the engine's own checks decide
-            self.mod_menu = Some(self.mod_menu_for(&forum, &item, &author, None));
+            self.mod_menu = Some(self.mod_menu_for(&subject, None));
             return;
         };
         if !c.moderate && !c.author_mod_personal && !c.author_mod_frontpage {
@@ -2635,48 +2669,37 @@ impl State {
             );
             return;
         }
-        self.mod_menu = Some(self.mod_menu_for(&forum, &item, &author, Some(c)));
+        self.mod_menu = Some(self.mod_menu_for(&subject, Some(c)));
     }
 
-    /// The menu's entries for the selected item and author, from the viewer's caps
-    /// (`ViewerCaps.moderate`/`rank`/`curate`; `social.md` §4.4).
-    fn mod_menu_for(
-        &self,
-        forum: &str,
-        item: &str,
-        author: &str,
-        caps: Option<&ViewerCaps>,
-    ) -> ModMenu {
+    /// The menu's entries for the selected item and authors, from the viewer's caps
+    /// (`ViewerCaps.moderate`/`rank`/`curate`, `social.md` §4.4; the author tier of §4.9 in
+    /// the viewer's own threads). The CLI's meaning of each verb: an override asserts the
+    /// opposite value, a "retract" removes the viewer's own assertion. Nothing is offered whose
+    /// subject would be the viewer.
+    fn mod_menu_for(&self, m: &ModSubject, caps: Option<&ViewerCaps>) -> ModMenu {
         let moderate = caps.is_none_or(|c| c.moderate);
         let curate = caps.is_none_or(|c| c.curate);
+        let author_mod = caps.is_none_or(|c| c.author_mod_personal || c.author_mod_frontpage);
         let me = self.account.as_ref().map(|a| a.did.as_str()).unwrap_or("");
-        let own_thread = me == author;
-        let assert = |action: ModActionValue| ModActionIntent::Assert {
+        // author moderation belongs to the author of the thread's POST (§4.9), and acts on
+        // other people's comments in it
+        let own_thread = !me.is_empty() && me == m.post_author;
+        let own_item = !me.is_empty() && me == m.author;
+        let forum = m.forum.as_str();
+        let assert_on =
+            |scope: ModScope, subject: &str, action: ModActionValue| ModActionIntent::Assert {
+                forum: forum.to_owned(),
+                scope,
+                subject: subject.to_owned(),
+                action,
+                reason: None,
+                until_ms: None,
+            };
+        let remove_on = |scope: ModScope, subject: &str, key: &str| ModActionIntent::Remove {
             forum: forum.to_owned(),
-            scope: ModScope::Forum,
-            subject: item.to_owned(),
-            action,
-            reason: None,
-            until_ms: None,
-        };
-        let remove = |key: &'static str| ModActionIntent::Remove {
-            forum: forum.to_owned(),
-            scope: ModScope::Forum,
-            subject: item.to_owned(),
-            action_key: key.to_owned(),
-        };
-        let user_assert = |action: ModActionValue| ModActionIntent::Assert {
-            forum: forum.to_owned(),
-            scope: ModScope::Forum,
-            subject: author.to_owned(),
-            action,
-            reason: None,
-            until_ms: None,
-        };
-        let user_remove = |key: &'static str| ModActionIntent::Remove {
-            forum: forum.to_owned(),
-            scope: ModScope::Forum,
-            subject: author.to_owned(),
+            scope,
+            subject: subject.to_owned(),
             action_key: key.to_owned(),
         };
         let mut e = Vec::new();
@@ -2685,119 +2708,221 @@ impl State {
             intent: Some(intent),
             queue: false,
             log: false,
+            merge: None,
         };
+        let pin_scope = if m.comment {
+            PinScope::Thread
+        } else {
+            PinScope::Forum
+        };
+        let pin_key = if m.comment { "pin:thread" } else { "pin:forum" };
         if moderate {
+            let f = ModScope::Forum;
+            let hide = |spam| ModActionValue::Hide {
+                hidden: true,
+                spam,
+                show_reason: true,
+            };
+            e.push(entry("hide this item", assert_on(f, &m.item, hide(false))));
+            e.push(entry("hide as spam", assert_on(f, &m.item, hide(true))));
             e.push(entry(
-                "hide this item",
-                assert(ModActionValue::Hide {
-                    hidden: true,
-                    spam: false,
-                    show_reason: true,
-                }),
+                "keep visible (override a hide)",
+                assert_on(
+                    f,
+                    &m.item,
+                    ModActionValue::Hide {
+                        hidden: false,
+                        spam: false,
+                        show_reason: true,
+                    },
+                ),
+            ));
+            e.push(entry("retract your hide", remove_on(f, &m.item, "hide")));
+            if !own_item {
+                e.push(entry(
+                    "ban the author",
+                    assert_on(
+                        f,
+                        &m.author,
+                        ModActionValue::Access {
+                            level: AccessLevel::Banned,
+                        },
+                    ),
+                ));
+                e.push(entry("unban the author", remove_on(f, &m.author, "access")));
+            }
+            e.push(entry(
+                if m.comment {
+                    "pin in the thread"
+                } else {
+                    "pin in the forum"
+                },
+                assert_on(
+                    f,
+                    &m.item,
+                    ModActionValue::Pin {
+                        scope: pin_scope,
+                        pinned: true,
+                    },
+                ),
             ));
             e.push(entry(
-                "hide as spam",
-                assert(ModActionValue::Hide {
-                    hidden: true,
-                    spam: true,
-                    show_reason: true,
-                }),
+                "unpin (override a pin)",
+                assert_on(
+                    f,
+                    &m.item,
+                    ModActionValue::Pin {
+                        scope: pin_scope,
+                        pinned: false,
+                    },
+                ),
             ));
-            e.push(entry("unhide (keep)", remove("hide")));
+            e.push(entry("retract your pin", remove_on(f, &m.item, pin_key)));
+            // locks and tiers belong to the thread's post
             e.push(entry(
-                "ban the author",
-                user_assert(ModActionValue::Access {
-                    level: AccessLevel::Banned,
-                }),
+                "lock the thread",
+                assert_on(f, &m.post, ModActionValue::Lock { locked: true }),
             ));
-            e.push(entry("unban the author", user_remove("access")));
             e.push(entry(
-                "pin in the forum",
-                assert(ModActionValue::Pin {
-                    scope: PinScope::Forum,
-                    pinned: true,
-                }),
+                "unlock (override a lock)",
+                assert_on(f, &m.post, ModActionValue::Lock { locked: false }),
             ));
-            e.push(entry("unpin", remove("pin:forum")));
-            e.push(entry("lock", assert(ModActionValue::Lock { locked: true })));
-            e.push(entry("unlock", remove("lock")));
+            e.push(entry("retract your lock", remove_on(f, &m.post, "lock")));
+            let tier = |t| ModActionValue::Tier {
+                tier: t,
+                notice: None,
+            };
             e.push(entry(
                 "tier: personal",
-                assert(ModActionValue::Tier {
-                    tier: Tier::Personal,
-                    notice: None,
-                }),
+                assert_on(f, &m.post, tier(Tier::Personal)),
             ));
             e.push(entry(
                 "tier: frontpage",
-                assert(ModActionValue::Tier {
-                    tier: Tier::Frontpage,
-                    notice: None,
-                }),
+                assert_on(f, &m.post, tier(Tier::Frontpage)),
             ));
             if curate {
                 e.push(entry(
                     "tier: curated",
-                    assert(ModActionValue::Tier {
-                        tier: Tier::Curated,
-                        notice: None,
-                    }),
+                    assert_on(f, &m.post, tier(Tier::Curated)),
+                ));
+            }
+            if !own_item {
+                // each sets one dimension of the viewer's `#restrict` and keeps the other
+                let restrict =
+                    |label, capabilities: Vec<Capability>, nullify_votes, merge| ModEntry {
+                        merge: Some(merge),
+                        ..entry(
+                            label,
+                            assert_on(
+                                f,
+                                &m.author,
+                                ModActionValue::Restrict {
+                                    capabilities,
+                                    nullify_votes,
+                                },
+                            ),
+                        )
+                    };
+                e.push(restrict(
+                    "restrict the author (posting)",
+                    vec![Capability::Post, Capability::Comment],
+                    false,
+                    RestrictDim::Capabilities,
+                ));
+                e.push(restrict(
+                    "restrict the author (voting, reacting)",
+                    vec![Capability::Vote, Capability::React],
+                    false,
+                    RestrictDim::Capabilities,
+                ));
+                e.push(restrict(
+                    "nullify the author's votes",
+                    Vec::new(),
+                    true,
+                    RestrictDim::Nullify,
+                ));
+                e.push(restrict(
+                    "restore the author's votes",
+                    Vec::new(),
+                    false,
+                    RestrictDim::Nullify,
+                ));
+                e.push(entry(
+                    "retract your restriction",
+                    remove_on(f, &m.author, "restrict"),
+                ));
+            }
+        }
+        if own_thread && author_mod {
+            // the author tier in the viewer's own thread (§4.9): other people's comments, and
+            // the viewer's own post
+            let a = ModScope::Author;
+            if m.comment && !own_item {
+                e.push(entry(
+                    "hide this comment (your thread)",
+                    assert_on(
+                        a,
+                        &m.item,
+                        ModActionValue::Hide {
+                            hidden: true,
+                            spam: false,
+                            show_reason: true,
+                        },
+                    ),
+                ));
+                e.push(entry(
+                    "unhide this comment (your thread)",
+                    remove_on(a, &m.item, "hide"),
+                ));
+                e.push(entry(
+                    "pin this comment (your thread)",
+                    assert_on(
+                        a,
+                        &m.item,
+                        ModActionValue::Pin {
+                            scope: PinScope::Thread,
+                            pinned: true,
+                        },
+                    ),
+                ));
+                e.push(entry(
+                    "unpin this comment (your thread)",
+                    remove_on(a, &m.item, "pin:thread"),
+                ));
+                e.push(entry(
+                    "ban the author from your threads",
+                    assert_on(
+                        a,
+                        &m.author,
+                        ModActionValue::Access {
+                            level: AccessLevel::Banned,
+                        },
+                    ),
+                ));
+                e.push(entry(
+                    "lift your ban of the author",
+                    remove_on(a, &m.author, "access"),
                 ));
             }
             e.push(entry(
-                "restrict the author (posting)",
-                user_assert(ModActionValue::Restrict {
-                    capabilities: vec![Capability::Post, Capability::Comment],
-                    nullify_votes: false,
-                }),
+                "lock your thread",
+                assert_on(a, &m.post, ModActionValue::Lock { locked: true }),
             ));
-            e.push(entry(
-                "nullify the author's votes",
-                user_assert(ModActionValue::Restrict {
-                    capabilities: vec![],
-                    nullify_votes: true,
-                }),
-            ));
-            e.push(entry("unrestrict", user_remove("restrict")));
-        }
-        if !moderate && own_thread {
-            // author scope on one's own thread (social.md §4.9): hide a comment, ban a user
-            let hide = ModActionIntent::Assert {
-                forum: forum.to_owned(),
-                scope: ModScope::Author,
-                subject: item.to_owned(),
-                action: ModActionValue::Hide {
-                    hidden: true,
-                    spam: false,
-                    show_reason: true,
-                },
-                reason: None,
-                until_ms: None,
-            };
-            e.push(entry("hide this comment (your thread)", hide));
-            let ban = ModActionIntent::Assert {
-                forum: forum.to_owned(),
-                scope: ModScope::Author,
-                subject: author.to_owned(),
-                action: ModActionValue::Access {
-                    level: AccessLevel::Banned,
-                },
-                reason: None,
-                until_ms: None,
-            };
-            e.push(entry("ban the author (your threads)", ban));
+            e.push(entry("unlock your thread", remove_on(a, &m.post, "lock")));
         }
         e.push(ModEntry {
             label: "mod queue",
             intent: None,
             queue: true,
             log: false,
+            merge: None,
         });
         e.push(ModEntry {
             label: "mod log",
             intent: None,
             queue: false,
             log: true,
+            merge: None,
         });
         ModMenu {
             forum: forum.to_owned(),
@@ -2870,6 +2995,7 @@ impl State {
         let Some(intent) = e.intent.clone() else {
             return;
         };
+        let merge = e.merge;
         self.mod_menu = None;
         // ask for the optional reason before the write
         self.prompt = Some(Prompt {
@@ -2878,6 +3004,7 @@ impl State {
             intent,
             forum: m.forum.clone(),
             screen: m.screen,
+            merge,
         });
     }
 
@@ -3302,7 +3429,9 @@ impl State {
     /// Runs a `:` command line against the engine through the same effects the keys use
     /// (`synthesis-v1.md` §6.11: the backstop that makes every MVP action reachable).
     fn run_command(&mut self, line: &str, fx: &mut Vec<Effect>) {
-        use crate::command::{ModVerb, Verb, agree_intent, mod_intent, vote_intent};
+        use crate::command::{
+            ModTarget, Verb, agree_intent, mod_intent, restrict_dim, vote_intent,
+        };
         let line = line.trim();
         if line.is_empty() || line == "help" || line == "?" {
             self.say(Tone::Info, tt(&crate::command::usage()));
@@ -3404,18 +3533,14 @@ impl State {
                 );
             }
             Verb::Mod(m) => {
-                // a subject named on the command line wins; else the selection
+                // a subject named on the command line wins; else the selection (the item, its
+                // thread's post or its author, as the verb acts on)
                 let named = cmd.subject.clone();
                 let subject = match named.or_else(|| {
-                    self.mod_subject().map(|(item, _, author)| match m {
-                        // access-scoped actions act on the author, the rest on the item
-                        ModVerb::Ban
-                        | ModVerb::Unban
-                        | ModVerb::Restrict
-                        | ModVerb::Nullify
-                        | ModVerb::Unrestrict
-                        | ModVerb::Approve => author,
-                        _ => item,
+                    self.mod_subject().map(|sel| match m.target() {
+                        ModTarget::Author => sel.author,
+                        ModTarget::Post => sel.post,
+                        ModTarget::Item => sel.item,
                     })
                 }) {
                     Some(s) => s,
@@ -3434,7 +3559,9 @@ impl State {
                 let Some(screen) = self.stack.last().map(|s| s.id) else {
                     return;
                 };
-                if m == ModVerb::Approve {
+                let Some(intent) = mod_intent(&m, &forum, &subject, cmd.reason.clone(), &cmd.opts)
+                else {
+                    // `approve` is a grant
                     fx.push(Effect::Grant {
                         forum,
                         actors: vec![subject],
@@ -3442,13 +3569,13 @@ impl State {
                     });
                     self.say(Tone::Info, lit("Approving..."));
                     return;
-                }
-                let intent = mod_intent(&m, &forum, &subject, cmd.reason.clone());
+                };
                 self.say(Tone::Info, lit("Mod action..."));
                 fx.push(Effect::ModAction {
                     intent,
                     forum,
                     screen,
+                    merge: restrict_dim(&m),
                 });
             }
             Verb::Notifications { all } => self.command_notifications(all, fx),
@@ -3469,7 +3596,7 @@ impl State {
                 self.switch_forum_tab(fx);
             }
             Verb::User { actor } => {
-                let actor = actor.or_else(|| self.mod_subject().map(|(_, _, a)| a));
+                let actor = actor.or_else(|| self.mod_subject().map(|m| m.author));
                 match actor {
                     Some(a) => self.show_user(&a, fx),
                     None => self.say(Tone::Info, lit("Nothing selected: name an actor.")),
@@ -3646,7 +3773,7 @@ impl State {
             .moderators
             .iter()
             .find(|m| m.actor.did == actor || m.actor.handle.as_deref() == Some(actor));
-        let wrote_selected = self.mod_subject().is_some_and(|(_, _, a)| a == actor);
+        let wrote_selected = self.mod_subject().is_some_and(|m| m.author == actor);
         match role {
             Some(m) => {
                 let mut parts = vec![
@@ -3760,6 +3887,7 @@ impl State {
                     intent,
                     forum: p.forum,
                     screen: p.screen,
+                    merge: p.merge,
                 });
             }
             KeyCode::Backspace => {
@@ -4655,6 +4783,170 @@ mod tests {
             },
         );
         assert_eq!(queue_loads(&fx), 0, "another forum: {fx:?}");
+    }
+
+    /// The subject of every mod-menu entry that acts on an actor (a ban, a restriction).
+    fn actor_subjects(m: &ModMenu) -> Vec<(String, ModScope)> {
+        m.entries
+            .iter()
+            .filter_map(|e| match e.intent.as_ref()? {
+                ModActionIntent::Assert {
+                    subject,
+                    scope,
+                    action: ModActionValue::Access { .. } | ModActionValue::Restrict { .. },
+                    ..
+                } => Some((subject.clone(), *scope)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn author_entries(m: &ModMenu) -> Vec<&'static str> {
+        m.entries
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e.intent,
+                    Some(ModActionIntent::Assert {
+                        scope: ModScope::Author,
+                        ..
+                    })
+                )
+            })
+            .map(|e| e.label)
+            .collect()
+    }
+
+    /// Author moderation (`social.md` §4.9) belongs to the author of the thread's POST and acts
+    /// on other people's comments there; nothing in the menu ever names the viewer as the
+    /// subject of a ban or restriction.
+    #[test]
+    fn the_mod_menu_offers_author_moderation_in_the_viewers_own_thread() {
+        let st = State::new(80, 24, Some(me()), true);
+        let author_caps = ViewerCaps {
+            author_mod_personal: true,
+            author_mod_frontpage: true,
+            ..ViewerCaps::default()
+        };
+        let sel = |author: &str, post_author: &str| ModSubject {
+            item: "at://did:plc:x/c/1".into(),
+            forum: "at://f".into(),
+            author: author.into(),
+            post: "at://did:plc:y/p/1".into(),
+            post_author: post_author.into(),
+            comment: true,
+        };
+        // someone else's comment in the viewer's own thread: hide, pin and ban, author scope
+        let m = st.mod_menu_for(&sel("did:plc:other", "did:plc:me"), Some(&author_caps));
+        let labels = author_entries(&m);
+        assert!(
+            labels.contains(&"hide this comment (your thread)"),
+            "{labels:?}"
+        );
+        assert!(
+            labels.contains(&"ban the author from your threads"),
+            "{labels:?}"
+        );
+        assert_eq!(
+            actor_subjects(&m),
+            [("did:plc:other".to_owned(), ModScope::Author)],
+            "{m:?}"
+        );
+        // the viewer's own comment in their own thread: nothing aimed at themselves
+        let m = st.mod_menu_for(&sel("did:plc:me", "did:plc:me"), Some(&author_caps));
+        assert!(actor_subjects(&m).is_empty(), "{m:?}");
+        assert!(
+            !author_entries(&m).contains(&"hide this comment (your thread)"),
+            "{m:?}"
+        );
+        // the viewer's own comment in someone else's thread: no author tier at all
+        let m = st.mod_menu_for(&sel("did:plc:me", "did:plc:other"), Some(&author_caps));
+        assert!(author_entries(&m).is_empty(), "{m:?}");
+        assert!(actor_subjects(&m).is_empty(), "{m:?}");
+        // a moderator on their own item: no forum-tier ban or restriction of themselves
+        let modcaps = ViewerCaps {
+            moderate: true,
+            rank: Some(1),
+            ..ViewerCaps::default()
+        };
+        let m = st.mod_menu_for(&sel("did:plc:me", "did:plc:other"), Some(&modcaps));
+        assert!(actor_subjects(&m).is_empty(), "{m:?}");
+    }
+
+    /// The forum tier's overrides assert the opposite value (`social.md` §4.2); a pin of a
+    /// comment is a thread pin; a lock or a tier acts on the thread's post.
+    #[test]
+    fn the_mod_menu_overrides_assert_and_pins_by_kind() {
+        let st = State::new(80, 24, Some(me()), true);
+        let modcaps = ViewerCaps {
+            moderate: true,
+            rank: Some(2),
+            curate: true,
+            ..ViewerCaps::default()
+        };
+        let m = st.mod_menu_for(
+            &ModSubject {
+                item: "at://did:plc:x/c/1".into(),
+                forum: "at://f".into(),
+                author: "did:plc:x".into(),
+                post: "at://did:plc:y/p/1".into(),
+                post_author: "did:plc:y".into(),
+                comment: true,
+            },
+            Some(&modcaps),
+        );
+        let of = |label: &str| {
+            m.entries
+                .iter()
+                .find(|e| e.label == label)
+                .and_then(|e| e.intent.clone())
+                .unwrap_or_else(|| panic!("no {label:?} in {m:?}"))
+        };
+        assert!(matches!(
+            of("keep visible (override a hide)"),
+            ModActionIntent::Assert {
+                action: ModActionValue::Hide { hidden: false, .. },
+                ..
+            }
+        ));
+        assert!(matches!(
+            of("unlock (override a lock)"),
+            ModActionIntent::Assert {
+                action: ModActionValue::Lock { locked: false },
+                ref subject,
+                ..
+            } if subject == "at://did:plc:y/p/1"
+        ));
+        assert!(matches!(
+            of("pin in the thread"),
+            ModActionIntent::Assert {
+                action: ModActionValue::Pin {
+                    scope: PinScope::Thread,
+                    pinned: true
+                },
+                ..
+            }
+        ));
+        assert!(matches!(
+            of("unpin (override a pin)"),
+            ModActionIntent::Assert {
+                action: ModActionValue::Pin {
+                    scope: PinScope::Thread,
+                    pinned: false
+                },
+                ..
+            }
+        ));
+        assert!(matches!(
+            of("retract your hide"),
+            ModActionIntent::Remove { ref action_key, .. } if action_key == "hide"
+        ));
+        let nullify = m
+            .entries
+            .iter()
+            .find(|e| e.label == "nullify the author's votes")
+            .unwrap();
+        assert_eq!(nullify.merge, Some(RestrictDim::Nullify));
     }
 
     /// A multi-byte space (NBSP from macOS Option-Space, U+3000 from a CJK IME) before `Tab`

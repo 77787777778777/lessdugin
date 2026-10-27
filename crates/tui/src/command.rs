@@ -13,7 +13,7 @@
 //! | `agree for\|against\|strong-for\|strong-against\|clear` | `opinion` (`Agreement`) | `a`/`A`/`z`/`Z`/`0` |
 //! | `react <id> [for\|against]` | `opinion` (`React`) | `x`, then Enter |
 //! | `unreact <id>` | `opinion` (`React`, remove) | `x`, then Enter again |
-//! | `mod <action> [subject] [reason]` | `mod_action` | `m` |
+//! | `mod <action> [subject] [reason] [--until WHEN] [--author]` | `mod_action` | `m` |
 //! | `notifications [all]`, `read`, `read-all` | `notifications`, `mark_notifications_read` | `N`, `a`, `M` |
 //! | `activity` | `recent_discussion` | `Tab` on a forum |
 //! | `user [actor]` | the forum view's `moderators` | - |
@@ -24,7 +24,7 @@
 
 use lessdugin_core::dto::{
     AccessLevel, AgreementValue, Capability, KarmaValue, ModActionIntent, ModActionValue, ModRole,
-    PinScope, Tier,
+    ModScope, PinScope, Tier,
 };
 
 /// What the `:` command line was asked to do, once parsed.
@@ -110,37 +110,95 @@ pub enum Agree {
     Clear,
 }
 
-/// A moderation action (`mod ...`), each of which becomes a [`ModActionIntent`].
+/// A moderation action (`mod ...`), each of which becomes a [`ModActionIntent`]. The verbs and
+/// their meaning are the CLI's (`lessdugin mod ...`): `keep`, `unlock` and `unpin` assert the
+/// opposite value (how a higher rank overrides another moderator, `social.md` §4.2), while
+/// `unhide`, `unban` and `unrestrict` remove the account's own assertion.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ModVerb {
-    /// `hide [reason]`.
+    /// `hide [reason]` (`--spam`: as spam).
     Hide,
     /// `spam [reason]`.
     Spam,
-    /// `unhide`.
+    /// `unhide`: removes your hide.
     Unhide,
+    /// `keep [reason]`: keeps the item visible over a lower rank's hide (`#hide{hidden: false}`).
+    Keep,
     /// `ban [reason]`.
     Ban,
-    /// `unban`.
+    /// `unban`: removes your ban.
     Unban,
-    /// `pin`.
+    /// `pin`: in the forum's lists (a post), or in its thread (a comment).
     Pin,
-    /// `unpin`.
+    /// `unpin`: asserts `pinned: false`.
     Unpin,
     /// `lock`.
     Lock,
-    /// `unlock`.
+    /// `unlock`: asserts `locked: false` (it overrides a lower rank's lock).
     Unlock,
     /// `tier personal|frontpage|curated [reason]`.
     Tier(Tier),
-    /// `restrict [reason]`.
-    Restrict,
-    /// `unrestrict`.
+    /// `restrict [cap,cap...] [reason]`, `--cap <cap>`: the capabilities taken away (every one
+    /// when none is named, as the CLI). A nullification the account already asserted stays.
+    Restrict(Vec<Capability>),
+    /// `unrestrict`: removes your restriction (and nullification).
     Unrestrict,
-    /// `nullify [reason]`.
+    /// `nullify [reason]`: the actor's votes stop counting; a restriction stays.
     Nullify,
+    /// `unnullify`: the actor's votes count again; a restriction stays.
+    Unnullify,
     /// `approve`: grants a membership (`engine.grant`).
     Approve,
+}
+
+/// What a [`ModVerb`] acts on when the command line names no subject.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModTarget {
+    /// The selected item (a post or a comment).
+    Item,
+    /// The selected item's thread post (a lock, a tier).
+    Post,
+    /// The selected item's author (a ban, a restriction, an approval).
+    Author,
+}
+
+impl ModVerb {
+    /// What the verb acts on by default.
+    pub fn target(&self) -> ModTarget {
+        match self {
+            ModVerb::Ban
+            | ModVerb::Unban
+            | ModVerb::Restrict(_)
+            | ModVerb::Unrestrict
+            | ModVerb::Nullify
+            | ModVerb::Unnullify
+            | ModVerb::Approve => ModTarget::Author,
+            ModVerb::Lock | ModVerb::Unlock | ModVerb::Tier(_) => ModTarget::Post,
+            ModVerb::Hide | ModVerb::Spam | ModVerb::Unhide | ModVerb::Keep => ModTarget::Item,
+            ModVerb::Pin | ModVerb::Unpin => ModTarget::Item,
+        }
+    }
+}
+
+/// Which dimension of the account's `#restrict` record an assertion sets. A record states the
+/// complete state of its key (`social.md` §4.2), so the other dimension is read from the
+/// account's current record and sent unchanged: a nullification never lifts a restriction, nor
+/// a restriction a nullification.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RestrictDim {
+    /// The restricted capabilities.
+    Capabilities,
+    /// `nullifyVotes`.
+    Nullify,
+}
+
+/// The options of a `mod` command line (the CLI's flags).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ModOpts {
+    /// `--until <RFC 3339>`: the assertion lapses then.
+    pub until_ms: Option<i64>,
+    /// `--author` (`--author-scope`): act as the post's author (`social.md` §4.9).
+    pub author_scope: bool,
 }
 
 /// One parsed command line: a verb, its optional explicit subject, and an optional reason.
@@ -152,6 +210,8 @@ pub struct Command {
     pub subject: Option<String>,
     /// The reason (a moderation action's `reason`, or the `user`/`mods` selector).
     pub reason: Option<String>,
+    /// A `mod` command's options.
+    pub opts: ModOpts,
 }
 
 /// What a command line said, or why it made no sense.
@@ -172,11 +232,13 @@ pub fn parse(line: &str) -> Parsed {
             verb: Verb::Vote(vote(rest.first().copied())?),
             subject: rest.get(1).map(|s| (*s).to_owned()),
             reason: None,
+            opts: ModOpts::default(),
         }),
         "agree" => Ok(Command {
             verb: Verb::Agree(agree(rest.first().copied())?),
             subject: rest.get(1).map(|s| (*s).to_owned()),
             reason: None,
+            opts: ModOpts::default(),
         }),
         "react" => {
             let Some(id) = rest.first() else {
@@ -196,6 +258,7 @@ pub fn parse(line: &str) -> Parsed {
                 },
                 subject: rest.get(2).map(|s| (*s).to_owned()),
                 reason: None,
+                opts: ModOpts::default(),
             })
         }
         "unreact" => {
@@ -208,6 +271,7 @@ pub fn parse(line: &str) -> Parsed {
                 },
                 subject: rest.get(1).map(|s| (*s).to_owned()),
                 reason: None,
+                opts: ModOpts::default(),
             })
         }
         "mod" | "moderate" => mod_verb(&rest),
@@ -215,17 +279,20 @@ pub fn parse(line: &str) -> Parsed {
             verb: Verb::Activity,
             subject: None,
             reason: None,
+            opts: ModOpts::default(),
         }),
         "notifications" | "notifs" => match rest.first().copied() {
             None | Some("unread") => Ok(Command {
                 verb: Verb::Notifications { all: false },
                 subject: None,
                 reason: None,
+                opts: ModOpts::default(),
             }),
             Some("all") => Ok(Command {
                 verb: Verb::Notifications { all: true },
                 subject: None,
                 reason: None,
+                opts: ModOpts::default(),
             }),
             Some(other) => Err(format!(
                 "notifications takes `all` or `unread`, not `{other}`."
@@ -235,11 +302,13 @@ pub fn parse(line: &str) -> Parsed {
             verb: Verb::Read,
             subject: None,
             reason: None,
+            opts: ModOpts::default(),
         }),
         "read-all" | "mark-read" => Ok(Command {
             verb: Verb::ReadAll,
             subject: None,
             reason: None,
+            opts: ModOpts::default(),
         }),
         "user" | "whoami" => Ok(Command {
             verb: Verb::User {
@@ -247,6 +316,7 @@ pub fn parse(line: &str) -> Parsed {
             },
             subject: None,
             reason: None,
+            opts: ModOpts::default(),
         }),
         "mods" | "moderators" => {
             // `mods`: list them; `mods add <did> [role]` / `mods remove <did>`: `mods_set`
@@ -272,6 +342,7 @@ pub fn parse(line: &str) -> Parsed {
                         },
                         subject: None,
                         reason: None,
+                        opts: ModOpts::default(),
                     })
                 }
                 Some("remove") | Some("rm") => {
@@ -286,12 +357,14 @@ pub fn parse(line: &str) -> Parsed {
                         },
                         subject: None,
                         reason: None,
+                        opts: ModOpts::default(),
                     })
                 }
                 None => Ok(Command {
                     verb: Verb::ModsList { role: None },
                     subject: None,
                     reason: None,
+                    opts: ModOpts::default(),
                 }),
                 Some(role) => Ok(Command {
                     verb: Verb::ModsList {
@@ -299,6 +372,7 @@ pub fn parse(line: &str) -> Parsed {
                     },
                     subject: None,
                     reason: None,
+                    opts: ModOpts::default(),
                 }),
             }
         }
@@ -336,31 +410,104 @@ fn agree(v: Option<&str>) -> Result<Agree, String> {
     }
 }
 
-/// `mod <action> [subject] [reason...]`, `mod tier <tier> [reason...]`.
+/// The capabilities of a `restrict` argument (`vote,react`), if it is a list of them.
+fn capabilities(arg: &str) -> Option<Vec<Capability>> {
+    arg.split(',')
+        .map(|c| serde_json::from_value(serde_json::Value::String(c.to_owned())).ok())
+        .collect()
+}
+
+/// Every capability (`restrict` without a list, as the CLI).
+pub const ALL_CAPABILITIES: [Capability; 7] = [
+    Capability::Post,
+    Capability::Comment,
+    Capability::Vote,
+    Capability::React,
+    Capability::Tag,
+    Capability::Wiki,
+    Capability::Sequence,
+];
+
+/// A `mod` command line's arguments without its flags, its options, `--spam` and the `--cap`
+/// capabilities.
+type ModArgs<'a> = (Vec<&'a str>, ModOpts, bool, Vec<Capability>);
+
+/// Takes the CLI-style flags out of a `mod` command line's arguments.
+fn mod_flags<'a>(args: &[&'a str]) -> Result<ModArgs<'a>, String> {
+    let mut rest = Vec::new();
+    let mut opts = ModOpts::default();
+    let mut spam = false;
+    let mut caps = Vec::new();
+    let mut it = args.iter().copied();
+    while let Some(a) = it.next() {
+        match a {
+            "--until" => {
+                let Some(when) = it.next() else {
+                    return Err(
+                        "--until needs a time (RFC 3339, e.g. 2026-11-01T00:00:00Z).".into(),
+                    );
+                };
+                let d = lessdugin_atp::syntax::Datetime::parse(when)
+                    .map_err(|e| format!("--until {when:?}: {e}"))?;
+                opts.until_ms = Some(d.timestamp_micros() / 1000);
+            }
+            "--author" | "--author-scope" => opts.author_scope = true,
+            "--spam" => spam = true,
+            "--cap" => {
+                let Some(c) = it.next().and_then(capabilities) else {
+                    return Err(
+                        "--cap takes post, comment, vote, react, tag, wiki or sequence.".into(),
+                    );
+                };
+                caps.extend(c);
+            }
+            other => rest.push(other),
+        }
+    }
+    Ok((rest, opts, spam, caps))
+}
+
+/// `mod <action> [subject] [reason...] [flags]`, `mod tier <tier> [reason...]`.
 fn mod_verb(rest: &[&str]) -> Parsed {
     let Some(action) = rest.first().copied() else {
         return Err(format!(
-            "mod needs an action (hide, spam, unhide, ban, unban, pin, unpin, lock, unlock, \
-             tier, restrict, unresrict, nullify, approve).\n{}",
+            "mod needs an action (hide, spam, unhide, keep, ban, unban, pin, unpin, lock, unlock, \
+             tier, restrict, unrestrict, nullify, unnullify, approve).\n{}",
             usage()
         ));
     };
+    let (rest, opts, spam, mut caps) = mod_flags(&rest[1..])?;
     // `mod tier frontpage "because"`: the tier is the first argument, not a subject
-    let mut args = &rest[1..];
+    let mut args = &rest[..];
     let verb = match action {
+        "hide" if spam => ModVerb::Spam,
         "hide" => ModVerb::Hide,
         "spam" => ModVerb::Spam,
-        "unhide" | "keep" => ModVerb::Unhide,
+        "unhide" => ModVerb::Unhide,
+        "keep" => ModVerb::Keep,
         "ban" => ModVerb::Ban,
         "unban" => ModVerb::Unban,
         "pin" => ModVerb::Pin,
         "unpin" => ModVerb::Unpin,
         "lock" => ModVerb::Lock,
         "unlock" => ModVerb::Unlock,
-        "restrict" => ModVerb::Restrict,
+        "restrict" => {
+            // `restrict vote,react ...`: the capabilities come first
+            if let Some(c) = args.first().and_then(|a| capabilities(a)) {
+                caps.extend(c);
+                args = &args[1..];
+            }
+            caps.dedup();
+            ModVerb::Restrict(caps)
+        }
         "unrestrict" => ModVerb::Unrestrict,
         "nullify" => ModVerb::Nullify,
+        "unnullify" => ModVerb::Unnullify,
         "approve" => ModVerb::Approve,
+        // the CLI's tier verbs
+        "personal" => ModVerb::Tier(Tier::Personal),
+        "frontpage" => ModVerb::Tier(Tier::Frontpage),
+        "curate" => ModVerb::Tier(Tier::Curated),
         "tier" => {
             let Some(name) = args.first().copied() else {
                 return Err("mod tier needs personal, frontpage or curated.".into());
@@ -380,8 +527,8 @@ fn mod_verb(rest: &[&str]) -> Parsed {
         }
         other => {
             return Err(format!(
-                "Unknown mod action `{other}`. Try hide, spam, unhide, ban, unban, pin, unpin, \
-                 lock, unlock, tier, restrict, unrestrict, nullify or approve."
+                "Unknown mod action `{other}`. Try hide, spam, unhide, keep, ban, unban, pin, \
+                 unpin, lock, unlock, tier, restrict, unrestrict, nullify, unnullify or approve."
             ));
         }
     };
@@ -390,6 +537,7 @@ fn mod_verb(rest: &[&str]) -> Parsed {
         verb: Verb::Mod(verb),
         subject,
         reason,
+        opts,
     })
 }
 
@@ -446,8 +594,10 @@ pub fn usage() -> String {
         "agree for|strong-for|against|strong-against|clear [subject]",
         "react <id> [for|against] [subject]",
         "unreact <id> [subject]",
-        "mod hide|spam|unhide|ban|unban|pin|unpin|lock|unlock|restrict|unrestrict|nullify|approve [subject] [reason]",
+        "mod hide|spam|unhide|keep|ban|unban|pin|unpin|lock|unlock|unrestrict|nullify|unnullify|approve [subject] [reason]",
+        "mod restrict [cap,cap...] [subject] [reason]",
         "mod tier personal|frontpage|curated [subject] [reason]",
+        "  mod flags: --until <RFC 3339>, --author (author scope), --spam, --cap <cap>",
         "notifications [all|unread]",
         "read",
         "read-all",
@@ -488,29 +638,59 @@ pub fn agree_intent(a: Agree) -> lessdugin_core::dto::OpinionIntent {
     }
 }
 
-/// The `ModActionIntent` a [`ModVerb`] names for `subject` in `forum`, with `reason`.
+/// The pin scope of a subject: a comment is pinned in its thread, anything else in the forum.
+pub fn pin_scope(subject: &str) -> PinScope {
+    // at://<authority>/<collection>/<rkey>, or the SPA's comment link
+    let comment = subject
+        .strip_prefix("at://")
+        .and_then(|rest| rest.split('/').nth(1))
+        == Some(lessdugin_lexicon::collection::nsid::COMMENT)
+        || subject.contains("#/c/");
+    if comment {
+        PinScope::Thread
+    } else {
+        PinScope::Forum
+    }
+}
+
+/// The dimension of the account's `#restrict` record a verb sets, if it is a restriction.
+pub fn restrict_dim(verb: &ModVerb) -> Option<RestrictDim> {
+    match verb {
+        ModVerb::Restrict(_) => Some(RestrictDim::Capabilities),
+        ModVerb::Nullify | ModVerb::Unnullify => Some(RestrictDim::Nullify),
+        _ => None,
+    }
+}
+
+/// The `ModActionIntent` a [`ModVerb`] names for `subject` in `forum`, with `reason` and the
+/// command line's options; `None` for `approve`, which is a grant.
 pub fn mod_intent(
     verb: &ModVerb,
     forum: &str,
     subject: &str,
     reason: Option<String>,
-) -> ModActionIntent {
+    opts: &ModOpts,
+) -> Option<ModActionIntent> {
+    let scope = if opts.author_scope {
+        ModScope::Author
+    } else {
+        ModScope::Forum
+    };
     let assert = |action: ModActionValue| ModActionIntent::Assert {
         forum: forum.to_owned(),
-        // the menu's own scope (social.md §4.4); `author`-scoped actions stay on `m`
-        scope: lessdugin_core::dto::ModScope::Forum,
+        scope,
         subject: subject.to_owned(),
         action,
         reason: reason.clone(),
-        until_ms: None,
+        until_ms: opts.until_ms,
     };
     let remove = |key: &str| ModActionIntent::Remove {
         forum: forum.to_owned(),
-        scope: lessdugin_core::dto::ModScope::Forum,
+        scope,
         subject: subject.to_owned(),
         action_key: key.to_owned(),
     };
-    match verb {
+    Some(match verb {
         ModVerb::Hide => assert(ModActionValue::Hide {
             hidden: true,
             spam: false,
@@ -522,33 +702,49 @@ pub fn mod_intent(
             show_reason: true,
         }),
         ModVerb::Unhide => remove("hide"),
+        ModVerb::Keep => assert(ModActionValue::Hide {
+            hidden: false,
+            spam: false,
+            show_reason: true,
+        }),
         ModVerb::Ban => assert(ModActionValue::Access {
             level: AccessLevel::Banned,
         }),
         ModVerb::Unban => remove("access"),
         ModVerb::Pin => assert(ModActionValue::Pin {
-            scope: PinScope::Forum,
+            scope: pin_scope(subject),
             pinned: true,
         }),
-        ModVerb::Unpin => remove("pin:forum"),
+        ModVerb::Unpin => assert(ModActionValue::Pin {
+            scope: pin_scope(subject),
+            pinned: false,
+        }),
         ModVerb::Lock => assert(ModActionValue::Lock { locked: true }),
-        ModVerb::Unlock => remove("lock"),
+        ModVerb::Unlock => assert(ModActionValue::Lock { locked: false }),
         ModVerb::Tier(tier) => assert(ModActionValue::Tier {
             tier: *tier,
             notice: None,
         }),
-        ModVerb::Restrict => assert(ModActionValue::Restrict {
-            capabilities: vec![Capability::Post, Capability::Comment],
+        ModVerb::Restrict(caps) => assert(ModActionValue::Restrict {
+            capabilities: if caps.is_empty() {
+                ALL_CAPABILITIES.to_vec()
+            } else {
+                caps.clone()
+            },
             nullify_votes: false,
         }),
         ModVerb::Nullify => assert(ModActionValue::Restrict {
             capabilities: vec![],
             nullify_votes: true,
         }),
+        ModVerb::Unnullify => assert(ModActionValue::Restrict {
+            capabilities: vec![],
+            nullify_votes: false,
+        }),
         ModVerb::Unrestrict => remove("restrict"),
         // `approve` is a grant, not a mod action: the caller sends `Effect::Grant` instead
-        ModVerb::Approve => remove("access"),
-    }
+        ModVerb::Approve => return None,
+    })
 }
 
 #[cfg(test)]
@@ -629,6 +825,106 @@ mod tests {
         assert_eq!(c.verb, Verb::Mod(ModVerb::Tier(Tier::Curated)));
         assert_eq!(c.subject, None);
         assert_eq!(c.reason.as_deref(), Some("great"));
+    }
+
+    /// The CLI's meaning of each verb: an override asserts the opposite value (`social.md`
+    /// §4.2), and only `unhide`, `unban`, `unrestrict` remove the account's own record.
+    #[test]
+    fn mod_verbs_mean_what_the_cli_means() {
+        let intent = |line: &str| {
+            let c = parse(line).unwrap();
+            let Verb::Mod(v) = &c.verb else {
+                panic!("{line}")
+            };
+            mod_intent(
+                v,
+                "at://f",
+                c.subject.as_deref().unwrap_or("did:plc:x"),
+                c.reason.clone(),
+                &c.opts,
+            )
+            .unwrap()
+        };
+        let action = |line: &str| match intent(line) {
+            ModActionIntent::Assert { action, .. } => action,
+            r => panic!("{line}: {r:?}"),
+        };
+        assert_eq!(
+            action("mod keep"),
+            ModActionValue::Hide {
+                hidden: false,
+                spam: false,
+                show_reason: true
+            }
+        );
+        assert_eq!(action("mod unlock"), ModActionValue::Lock { locked: false });
+        let comment = format!(
+            "at://did:plc:x/{}/3k",
+            lessdugin_lexicon::collection::nsid::COMMENT
+        );
+        assert_eq!(
+            action(&format!("mod pin {comment}")),
+            ModActionValue::Pin {
+                scope: PinScope::Thread,
+                pinned: true
+            }
+        );
+        assert_eq!(
+            action(&format!("mod unpin {comment}")),
+            ModActionValue::Pin {
+                scope: PinScope::Thread,
+                pinned: false
+            }
+        );
+        assert!(matches!(
+            intent("mod unhide"),
+            ModActionIntent::Remove { action_key, .. } if action_key == "hide"
+        ));
+        // restrict: a capability list, every capability without one
+        assert_eq!(
+            action("mod restrict vote,react did:plc:x"),
+            ModActionValue::Restrict {
+                capabilities: vec![Capability::Vote, Capability::React],
+                nullify_votes: false
+            }
+        );
+        assert_eq!(
+            action("mod restrict --cap wiki did:plc:x"),
+            ModActionValue::Restrict {
+                capabilities: vec![Capability::Wiki],
+                nullify_votes: false
+            }
+        );
+        assert_eq!(
+            action("mod restrict did:plc:x"),
+            ModActionValue::Restrict {
+                capabilities: ALL_CAPABILITIES.to_vec(),
+                nullify_votes: false
+            }
+        );
+        let c = parse("mod restrict vote did:plc:x").unwrap();
+        assert_eq!(c.subject.as_deref(), Some("did:plc:x"));
+        let Verb::Mod(v) = &c.verb else { panic!() };
+        assert_eq!(restrict_dim(v), Some(RestrictDim::Capabilities));
+        // --until and --author
+        match intent("mod hide --until 2026-11-01T00:00:00Z --author \"spam\"") {
+            ModActionIntent::Assert {
+                until_ms,
+                scope,
+                reason,
+                ..
+            } => {
+                assert_eq!(until_ms, Some(1_793_491_200_000));
+                assert_eq!(scope, ModScope::Author);
+                assert_eq!(reason.as_deref(), Some("spam"));
+            }
+            r => panic!("{r:?}"),
+        }
+        assert!(parse("mod hide --until soon").is_err());
+        assert_eq!(
+            parse("mod hide --spam").unwrap().verb,
+            Verb::Mod(ModVerb::Spam)
+        );
     }
 
     #[test]

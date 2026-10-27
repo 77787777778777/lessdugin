@@ -11,15 +11,19 @@ use std::collections::BTreeMap;
 
 use lessdugin_atp::syntax::AtUri;
 use lessdugin_core::dto::{
-    ActorView, ListPostsQuery, NotificationsQuery, PostFilter, PostSort, Ref, RefContext, SyncOpts,
-    ThreadOpts, ThreadRoot,
+    ActorView, Capability, ListPostsQuery, ModActionIntent, ModActionValue, ModScope,
+    NotificationsQuery, PostFilter, PostSort, Ref, RefContext, SyncOpts, ThreadOpts, ThreadRoot,
 };
 use lessdugin_core::engine::{Engine, EngineError};
 use lessdugin_core::host::Host;
 use lessdugin_core::store::records::RecordStore;
 
+use lessdugin_lexicon::collection::nsid;
+use lessdugin_lexicon::ns::NS;
+
 use crate::app::{Action, ActivityData, Effect, ForumData, HomeData, SyncTarget, ThreadData};
 use crate::body::Body;
+use crate::command::RestrictDim;
 
 /// How many queued handle verifications a load runs before showing a view (as the CLI).
 pub const VERIFY_HANDLES: usize = 256;
@@ -148,10 +152,14 @@ pub async fn run<H: Host>(engine: &Engine<H>, effect: Effect, opts: ExecOpts) ->
             intent,
             forum,
             screen,
+            merge,
         } => Action::ModActionDone {
             forum,
             screen,
-            result: engine.mod_action(&intent).await,
+            result: match mod_intent(engine, intent, merge).await {
+                Ok(intent) => engine.mod_action(&intent).await,
+                Err(e) => Err(e),
+            },
         },
         Effect::LoadQueue {
             screen,
@@ -242,6 +250,103 @@ pub async fn item_uri<H: Host>(
             "{subject} is not a post or a comment"
         ))),
     }
+}
+
+/// The intent as the engine takes it: an item subject named by any reference resolved to its
+/// uri, and a `#restrict` assertion that sets one dimension completed with the other from the
+/// account's current record (a record states the whole state of its key, `social.md` §4.2).
+pub async fn mod_intent<H: Host>(
+    engine: &Engine<H>,
+    mut intent: ModActionIntent,
+    merge: Option<RestrictDim>,
+) -> Result<ModActionIntent, EngineError> {
+    let (ModActionIntent::Assert { forum, subject, .. }
+    | ModActionIntent::Remove { forum, subject, .. }) = &mut intent;
+    // a DID, a handle and `tag:` are the engine's; an item named by a link is resolved here
+    let item_ref = subject.starts_with("at://") || subject.contains("#/");
+    if item_ref && !subject.starts_with("at://did:") {
+        *subject = item_uri(engine, subject, forum).await?;
+    }
+    let (
+        Some(dim),
+        ModActionIntent::Assert {
+            forum,
+            scope,
+            subject,
+            action:
+                ModActionValue::Restrict {
+                    capabilities,
+                    nullify_votes,
+                },
+            ..
+        },
+    ) = (merge, &mut intent)
+    else {
+        return Ok(intent);
+    };
+    let (held_caps, held_nullify) = held_restrict(engine, forum, *scope, subject).await?;
+    match dim {
+        RestrictDim::Capabilities => *nullify_votes = held_nullify,
+        RestrictDim::Nullify => *capabilities = held_caps,
+    }
+    Ok(intent)
+}
+
+/// The account's own `#restrict` record on `subject` in `forum` (one per scope, subject and
+/// key, `data-model.md` §6.7) as `(capabilities, nullifyVotes)`; nothing when it has none.
+async fn held_restrict<H: Host>(
+    engine: &Engine<H>,
+    forum: &str,
+    scope: ModScope,
+    subject: &str,
+) -> Result<(Vec<Capability>, bool), EngineError> {
+    let Some(me) = engine.active_account().await?.map(|a| a.did) else {
+        return Ok((Vec::new(), false));
+    };
+    let did = if subject.starts_with("did:") {
+        subject.to_owned()
+    } else {
+        engine.resolve_actor(subject).await?.did
+    };
+    let forum = match engine.parse_ref(forum, &RefContext::default()).await? {
+        Ref::Forum { uri } => uri,
+        _ => forum.to_owned(),
+    };
+    let mut action = serde_json::Map::new();
+    action.insert(
+        "$type".into(),
+        serde_json::Value::String(nsid::MOD_ACTION_RESTRICT.to_owned()),
+    );
+    let scope = match scope {
+        ModScope::Forum => None,
+        ModScope::Author => Some("author"),
+    };
+    let rkey = lessdugin_lexicon::keys::mod_action_rkey(NS, &forum, scope, &did, &action)
+        .map_err(|e| EngineError::invalid_input(e.to_string()))?;
+    let Ok(uri) = AtUri::parse(&format!("at://{me}/{}/{rkey}", nsid::MOD_ACTION)) else {
+        return Ok((Vec::new(), false));
+    };
+    let value = match RecordStore::new(engine.host().cache()).get(&uri).await {
+        Ok(Some(row)) => row.value_json().ok(),
+        _ => None,
+    };
+    let Some(action) = value.as_ref().and_then(|v| v.get("action")) else {
+        return Ok((Vec::new(), false));
+    };
+    let caps = action
+        .get("capabilities")
+        .and_then(serde_json::Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|c| serde_json::from_value(c.clone()).ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    let nullify = action
+        .get("nullifyVotes")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    Ok((caps, nullify))
 }
 
 fn unverified<'a>(mut actors: impl Iterator<Item = &'a ActorView>) -> bool {

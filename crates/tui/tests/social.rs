@@ -1185,14 +1185,22 @@ fn opinion_commands_act_on_the_named_subject() {
         s.bob_post
     );
     let fx = command_effects(&mut t, &format!("vote down {}", s.welcome));
-    assert_eq!(opinion_subjects(&fx), [s.welcome.clone()], "{fx:?}");
+    assert_eq!(
+        opinion_subjects(&fx),
+        std::slice::from_ref(&s.welcome),
+        "{fx:?}"
+    );
     for line in [
         format!("agree for {}", s.welcome),
         format!("react agree for {}", s.welcome),
         format!("unreact agree {}", s.welcome),
     ] {
         let fx = command_effects(&mut t, &line);
-        assert_eq!(opinion_subjects(&fx), [s.welcome.clone()], "{line}: {fx:?}");
+        assert_eq!(
+            opinion_subjects(&fx),
+            std::slice::from_ref(&s.welcome),
+            "{line}: {fx:?}"
+        );
     }
 
     // end to end, from a screen with no selection
@@ -1213,4 +1221,95 @@ fn opinion_commands_act_on_the_named_subject() {
         panic!("no post")
     };
     assert_eq!(p.post.score.mine.as_ref().and_then(|m| m.karma), None);
+}
+
+/// `:mod keep` asserts `#hide{hidden: false}`: the owner overrides a moderator's hide from the
+/// TUI (it was a removal of the owner's own, non-existent hide, refused with `not_found`).
+#[test]
+fn the_owner_keeps_an_item_a_moderator_hid() {
+    use lessdugin_core::dto::{ItemState, ThreadOpts, ThreadRoot};
+    let s = scenario();
+    let (forum, bob_post, _) = react_forum(&s); // carol moderates, alice owns
+    block_on(s.w.carol.engine.mod_action(&ModActionIntent::Assert {
+        forum: forum.clone(),
+        scope: ModScope::Forum,
+        subject: bob_post.clone(),
+        action: ModActionValue::Hide {
+            hidden: true,
+            spam: false,
+            show_reason: true,
+        },
+        reason: None,
+        until_ms: None,
+    }))
+    .unwrap();
+    s.w.carol.flush();
+    s.w.tick(MINUTE);
+    s.w.alice.sync(&forum);
+    let state = |t: &Tui| {
+        let tv = block_on(t.engine().get_thread(&bob_post, &ThreadOpts::default())).unwrap();
+        let ThreadRoot::Post(p) = tv.post else {
+            panic!("no post")
+        };
+        p.post.state
+    };
+    let mut t = alice_tui(&s, 100, 30);
+    block_on(t.start(Some(forum.clone())));
+    assert!(
+        matches!(state(&t), ItemState::Hidden { .. }),
+        "{:?}",
+        state(&t)
+    );
+    run_command(&mut t, &format!("mod keep {bob_post} \"on topic\""));
+    assert!(status(&t).contains("Mod action recorded"), "{}", status(&t));
+    block_on(t.engine().outbox_flush()).unwrap();
+    s.w.tick(MINUTE);
+    block_on(t.settle());
+    assert_eq!(state(&t), ItemState::Visible);
+}
+
+/// A nullification keeps the restriction the same moderator asserted before it, and the other
+/// way round: each sets one dimension of the one `#restrict` record (`social.md` §4.2).
+#[test]
+fn restrict_then_nullify_keeps_both() {
+    use lessdugin_core::dto::MembersQuery;
+    let s = scenario();
+    let bob = s.w.bob.did();
+    let mut t = alice_tui(&s, 100, 30);
+    block_on(t.start(Some(s.forum.clone())));
+    let member = |t: &Tui| {
+        let mut m = block_on(t.engine().members(&s.forum, &MembersQuery::default()))
+            .unwrap()
+            .into_iter()
+            .find(|m| m.actor.did == bob)
+            .unwrap();
+        m.restricted.sort();
+        m
+    };
+    run_command(&mut t, &format!("mod restrict post,comment {bob}"));
+    block_on(t.engine().outbox_flush()).unwrap();
+    s.w.tick(MINUTE);
+    block_on(t.settle());
+    let m = member(&t);
+    assert_eq!(m.restricted, ["comment", "post"], "{m:?}");
+    run_command(&mut t, &format!("mod nullify {bob}"));
+    assert!(status(&t).contains("Mod action recorded"), "{}", status(&t));
+    block_on(t.engine().outbox_flush()).unwrap();
+    s.w.tick(MINUTE);
+    block_on(t.settle());
+    let m = member(&t);
+    assert!(m.nullified, "{m:?}");
+    assert_eq!(
+        m.restricted,
+        ["comment", "post"],
+        "the restriction stays: {m:?}"
+    );
+    // and a restriction keeps the nullification
+    run_command(&mut t, &format!("mod restrict vote {bob}"));
+    block_on(t.engine().outbox_flush()).unwrap();
+    s.w.tick(MINUTE);
+    block_on(t.settle());
+    let m = member(&t);
+    assert!(m.nullified, "the nullification stays: {m:?}");
+    assert_eq!(m.restricted, ["vote"], "{m:?}");
 }

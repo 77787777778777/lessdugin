@@ -5,30 +5,30 @@ expression: t.render()
  lessdugin › React forum › Bob's post                                            @carol.example.com
  React forum · synced
 ▌ Bob's post
-▌ @bob.example.com · 2025-10-09 09:01 UTC · 0 comments · 1 point
-▌
-▌ Bob writes.               ┌ Mod ─────────────────────────────────────┐
-                            │Moderate · Enter run · Esc close          │
-  No comments yet.          │hide this item                            │
+▌ @bob.example.com · 2025-10┌ Mod ─────────────────────────────────────┐
+▌                           │Moderate · Enter run · Esc close          │
+▌ Bob writes.               │hide this item                            │
                             │hide as spam                              │
-                            │unhide (keep)                             │
+  No comments yet.          │keep visible (override a hide)            │
+                            │retract your hide                         │
                             │ban the author                            │
                             │unban the author                          │
                             │pin in the forum                          │
-                            │unpin                                     │
-                            │lock                                      │
-                            │unlock                                    │
+                            │unpin (override a pin)                    │
+                            │retract your pin                          │
+                            │lock the thread                           │
+                            │unlock (override a lock)                  │
+                            │retract your lock                         │
                             │tier: personal                            │
                             │tier: frontpage                           │
                             │restrict the author (posting)             │
+                            │restrict the author (voting, reacting)    │
                             │nullify the author's votes                │
-                            │unrestrict                                │
+                            │restore the author's votes                │
+                            │retract your restriction                  │
                             │mod queue                                 │
                             │mod log                                   │
-                            └ 1-16 of 16 ──────────────────────────────┘
-
-
-
+                            └ 1-21 of 21 ──────────────────────────────┘
 
 
  r reply · c comment · Space fold · p parent · R sync · ? help · h back
