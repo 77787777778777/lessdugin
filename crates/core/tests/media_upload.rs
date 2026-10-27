@@ -112,7 +112,9 @@ impl Author {
     /// The published post's value, as the PDS holds it.
     fn record(&self, uri: &str) -> Value {
         let rkey = uri.rsplit('/').next().unwrap();
-        self.acct.get(nsid::POST, rkey).expect("the post is in the repo")
+        self.acct
+            .get(nsid::POST, rkey)
+            .expect("the post is in the repo")
     }
 }
 
@@ -145,7 +147,11 @@ fn a_413_halves_the_image_until_the_pds_takes_it_and_the_body_follows_the_new_ci
         blob_upload_limit: 40_000,
         ..PdsConfig::default()
     });
-    let m = block_on(a.engine.prepare_media(noise_png(256, 256, 3), &input("noise"))).unwrap();
+    let m = block_on(
+        a.engine
+            .prepare_media(noise_png(256, 256, 3), &input("noise")),
+    )
+    .unwrap();
     let uploads = a.net.count("com.atproto.repo.uploadBlob");
     let uri = a.done(&a.post_with(&m));
     // 196 KB refused, 49 KB refused, 12 KB stored
@@ -169,7 +175,11 @@ fn an_image_still_refused_after_three_halvings_fails_the_write() {
         blob_upload_limit: 1_000,
         ..PdsConfig::default()
     });
-    let m = block_on(a.engine.prepare_media(noise_png(256, 256, 4), &input("noise"))).unwrap();
+    let m = block_on(
+        a.engine
+            .prepare_media(noise_png(256, 256, 4), &input("noise")),
+    )
+    .unwrap();
     let uploads = a.net.count("com.atproto.repo.uploadBlob");
     let t = a.post_with(&m);
     match a.state(&t) {
@@ -188,7 +198,11 @@ fn a_spilled_body_that_names_a_downscaled_image_fails_rather_than_lose_it() {
         blob_upload_limit: 100_000,
         ..PdsConfig::default()
     });
-    let m = block_on(a.engine.prepare_media(noise_png(256, 256, 5), &input("noise"))).unwrap();
+    let m = block_on(
+        a.engine
+            .prepare_media(noise_png(256, 256, 5), &input("noise")),
+    )
+    .unwrap();
     let long = format!("![noise](cid:{})\n\n{}", m.cid, "word ".repeat(14_000));
     let mut d = PostDraft::article(&a.forum, "A long one", long);
     d.body.media.push(m);
@@ -210,8 +224,13 @@ fn a_comment_uploads_its_media() {
     // m4-17: comment() sent no blobs, so the record named a blob the PDS never received and the
     // write failed with BlobNotFound
     let a = Author::new(PdsConfig::default());
-    let post = a.done(&block_on(a.engine.publish(&PostDraft::article(&a.forum, "t", "b"))).unwrap());
-    let m = block_on(a.engine.prepare_media(noise_png(16, 16, 6), &input("a reply"))).unwrap();
+    let post =
+        a.done(&block_on(a.engine.publish(&PostDraft::article(&a.forum, "t", "b"))).unwrap());
+    let m = block_on(
+        a.engine
+            .prepare_media(noise_png(16, 16, 6), &input("a reply")),
+    )
+    .unwrap();
     let mut d = CommentDraft::new(&post, None, format!("![r](cid:{})", m.cid));
     d.body.media.push(m.clone());
     let uri = a.done(&block_on(a.engine.comment(&d)).unwrap());
@@ -219,8 +238,14 @@ fn a_comment_uploads_its_media() {
         .acct
         .get(nsid::COMMENT, uri.rsplit('/').next().unwrap())
         .unwrap();
-    assert_eq!(rec["body"]["media"][0]["blob"]["ref"]["$link"], m.cid.as_str());
-    assert!(a.acct.serves_blob(&lessdugin_atp::cid::parse(&m.cid).unwrap()));
+    assert_eq!(
+        rec["body"]["media"][0]["blob"]["ref"]["$link"],
+        m.cid.as_str()
+    );
+    assert!(
+        a.acct
+            .serves_blob(&lessdugin_atp::cid::parse(&m.cid).unwrap())
+    );
 }
 
 #[test]
@@ -245,9 +270,18 @@ fn an_edit_uploads_the_media_it_adds_and_keeps_the_blob_objects_it_had() {
     assert_eq!(a.net.count("com.atproto.repo.uploadBlob") - uploads, 1);
     let rec = a.record(&uri);
     assert_eq!(rec["title"], "Two pictures");
-    assert_eq!(rec["body"]["media"][0]["blob"], before["blob"], "kept verbatim");
-    assert_eq!(rec["body"]["media"][1]["blob"]["ref"]["$link"], second.cid.as_str());
-    assert!(a.acct.serves_blob(&lessdugin_atp::cid::parse(&second.cid).unwrap()));
+    assert_eq!(
+        rec["body"]["media"][0]["blob"], before["blob"],
+        "kept verbatim"
+    );
+    assert_eq!(
+        rec["body"]["media"][1]["blob"]["ref"]["$link"],
+        second.cid.as_str()
+    );
+    assert!(
+        a.acct
+            .serves_blob(&lessdugin_atp::cid::parse(&second.cid).unwrap())
+    );
 }
 
 /// Every `state` row under `prefix`, with its value.
@@ -273,7 +307,11 @@ fn prepared_bytes_are_raw_chunks_and_go_once_the_write_is_enqueued() {
     let chunks = rows(&host, lessdugin_core::key!("prep.blob", m.cid.as_str()));
     assert_eq!(chunks.len(), 3, "1 MiB chunks");
     let stored: usize = chunks.iter().map(|(_, v)| v.len()).sum();
-    assert!(stored < m.size_bytes as usize + 1024, "{stored} bytes for {}", m.size_bytes);
+    assert!(
+        stored < m.size_bytes as usize + 1024,
+        "{stored} bytes for {}",
+        m.size_bytes
+    );
     assert!(rows(&host, lessdugin_core::key!("loc", "media")).is_empty());
 
     let t = a.post_with(&m);

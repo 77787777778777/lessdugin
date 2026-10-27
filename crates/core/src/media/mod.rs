@@ -864,7 +864,8 @@ impl<H: crate::host::Host> crate::engine::Engine<H> {
     ) -> Result<MediaRef, crate::engine::EngineError> {
         // limits.md §6: the SPA's client refuses a larger file before it crosses into wasm; this
         // is the same line for a caller that sent it anyway (natively there is no window)
-        if cfg!(target_arch = "wasm32") && bytes.len() as u64 > crate::limits::MEDIA_WASM_WINDOW_BYTES
+        if cfg!(target_arch = "wasm32")
+            && bytes.len() as u64 > crate::limits::MEDIA_WASM_WINDOW_BYTES
         {
             return Err(too_large_for_the_browser(bytes.len() as u64));
         }
@@ -1032,13 +1033,19 @@ mod tests {
     fn a_fill_byte_cannot_smuggle_a_frame_past_the_side_cap() {
         let mut jpeg = Vec::new();
         image::DynamicImage::new_rgb8(8, 8)
-            .write_to(&mut std::io::Cursor::new(&mut jpeg), image::ImageFormat::Jpeg)
+            .write_to(
+                &mut std::io::Cursor::new(&mut jpeg),
+                image::ImageFormat::Jpeg,
+            )
             .unwrap();
         let sof = jpeg.windows(2).position(|w| w == [0xFF, 0xC0]).unwrap();
         // SOF0: length (2), precision (1), height (2), width (2)
         jpeg[sof + 5..sof + 9].copy_from_slice(&[0x2E, 0xE0, 0x2E, 0xE0]);
         jpeg.insert(sof, 0xFF);
-        assert!(imagesize::blob_size(&jpeg).is_err(), "the fallback is untested");
+        assert!(
+            imagesize::blob_size(&jpeg).is_err(),
+            "the fallback is untested"
+        );
         assert!(!decoding_allowed(&jpeg));
         assert!(decode_image(&jpeg).is_none());
         assert_eq!(apply_orientation(&jpeg, 6), jpeg);
@@ -1046,12 +1053,18 @@ mod tests {
         // the same fill byte in front of a frame within the caps decodes as before
         let mut small = Vec::new();
         image::DynamicImage::new_rgb8(8, 4)
-            .write_to(&mut std::io::Cursor::new(&mut small), image::ImageFormat::Jpeg)
+            .write_to(
+                &mut std::io::Cursor::new(&mut small),
+                image::ImageFormat::Jpeg,
+            )
             .unwrap();
         let sof = small.windows(2).position(|w| w == [0xFF, 0xC0]).unwrap();
         small.insert(sof, 0xFF);
         assert!(decoding_allowed(&small));
-        assert_eq!(decode_image(&small).map(|i| (i.width(), i.height())), Some((8, 4)));
+        assert_eq!(
+            decode_image(&small).map(|i| (i.width(), i.height())),
+            Some((8, 4))
+        );
     }
 }
 
@@ -1070,7 +1083,6 @@ pub fn too_large_for_the_browser(size: u64) -> EngineError {
     .with_detail("limit", crate::limits::MEDIA_WASM_WINDOW_BYTES)
 }
 
-
 /// `("prep", cid)`: what was prepared under `cid`.
 const PREP: &str = "prep";
 /// `("prep.blob", cid, n)`: its bytes, in chunks of at most 1 MiB (as the outbox keeps them).
@@ -1085,7 +1097,7 @@ struct PreparedRow {
     mime: String,
     size: u64,
     chunks: u32,
-    /// When it was prepared (ms), for [`PREPARED_MEDIA_TTL_MS`].
+    /// When it was prepared (ms), for [`crate::limits::PREPARED_MEDIA_TTL_MS`].
     at: i64,
 }
 
@@ -1160,8 +1172,9 @@ impl<H: crate::host::Host> crate::engine::Engine<H> {
             let full = page.len() >= 256;
             let last = page.last().map(|(k, _)| k.clone());
             for (k, v) in page {
-                let stale = crate::store::row::decode::<PreparedRow>(&v)
-                    .map_or(true, |r| now.saturating_sub(r.at) > crate::limits::PREPARED_MEDIA_TTL_MS);
+                let stale = crate::store::row::decode::<PreparedRow>(&v).map_or(true, |r| {
+                    now.saturating_sub(r.at) > crate::limits::PREPARED_MEDIA_TTL_MS
+                });
                 let cid = match crate::store::key::decode(&k).ok().as_deref() {
                     Some([_, crate::store::key::Part::Bytes(c)]) => {
                         String::from_utf8(c.clone()).ok()
