@@ -433,19 +433,25 @@ fn collapsed_comments_fold_except_the_viewers_own_newcomer_ones() {
     .unwrap();
     let bob = s.w.bob.did();
     assert_eq!(view.comments[0].author.did, bob);
-    let doc = |view: &lessdugin_core::dto::ThreadView, toggled: &BTreeSet<String>, me: Option<&str>| {
-        let c = &view.comments[0];
-        let data = ThreadData {
-            bodies: [(c.uri.clone(), Body::from_record(None, &c.body))].into(),
-            view: view.clone(),
+    let doc =
+        |view: &lessdugin_core::dto::ThreadView, toggled: &BTreeSet<String>, me: Option<&str>| {
+            let c = &view.comments[0];
+            let data = ThreadData {
+                bodies: [(c.uri.clone(), Body::from_record(None, &c.body))].into(),
+                view: view.clone(),
+            };
+            lessdugin_tui::thread::layout_for(&data, toggled, 80, me)
+                .lines
+                .iter()
+                .map(|l| {
+                    l.spans
+                        .iter()
+                        .map(|s| s.content.to_string())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
         };
-        lessdugin_tui::thread::layout_for(&data, toggled, 80, me)
-            .lines
-            .iter()
-            .map(|l| l.spans.iter().map(|s| s.content.to_string()).collect::<String>())
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
     let none = BTreeSet::new();
     let body = "Thanks for the forum!";
     for reason in [CollapseReason::NewUser, CollapseReason::LowScore] {
@@ -455,7 +461,10 @@ fn collapsed_comments_fold_except_the_viewers_own_newcomer_ones() {
             let shown = doc(&view, &none, me.as_deref());
             assert!(shown.contains("collapsed: "), "{shown}");
             assert!(shown.contains("[+]"), "{shown}");
-            assert!(!shown.contains(body), "{reason:?} folds for others:\n{shown}");
+            assert!(
+                !shown.contains(body),
+                "{reason:?} folds for others:\n{shown}"
+            );
             // Space expands it
             let toggled = BTreeSet::from([s.bob_c1.clone()]);
             let shown = doc(&view, &toggled, me.as_deref());
