@@ -16,6 +16,18 @@ pub const INDEXER_BUNDLE_MAX_BYTES: u64 = 8 * 1024 * 1024;
 pub const BLOB_AUTOLOAD_MAX_BYTES: u64 = 5 * 1024 * 1024;
 /// Hard cap on any blob (bytes).
 pub const BLOB_HARD_MAX_BYTES: u64 = 300 * 1024 * 1024;
+/// Cap on a `textBlob` body fetch: the lexicon's `maxSize` (`limits.md` §5).
+pub const BLOB_TEXT_MAX_BYTES: u64 = 1_000_000;
+/// The prefix of a fetched blob whose type is sniffed for display (`limits.md` §5).
+pub const BLOB_SNIFF_PREFIX_BYTES: u32 = 4_096;
+/// Blob bytes the core may copy into wasm linear memory while preparing an upload; larger files
+/// are refused before they cross (`limits.md` §6, INFRA-6).
+pub const MEDIA_WASM_WINDOW_BYTES: u64 = 64 * 1024 * 1024;
+/// The first downscale target of an image upload (`limits.md` §12).
+pub const IMAGE_UPLOAD_TARGET_BYTES: u64 = 5 * 1024 * 1024;
+/// Re-encodings at half the last size after a 413, before the upload is refused (`limits.md`
+/// §12).
+pub const IMAGE_UPLOAD_413_RETRIES: u32 = 3;
 /// Jetstream message cap (bytes).
 pub const JETSTREAM_MESSAGE_MAX_BYTES: u32 = 1_200_000;
 

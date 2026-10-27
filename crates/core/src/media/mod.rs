@@ -875,7 +875,7 @@ impl<H: crate::host::Host> crate::engine::Engine<H> {
                 "prepare_media: the sniffed type wins (data-model.md §8.8)"
             );
         }
-        let prepared = prepare(bytes)?;
+        let prepared = fit_to_target(prepare(bytes)?);
         let mime = crate::outbox::blob::normalise_mime(&prepared).unwrap_or(sniffed);
         let mime = if mime == sniffed {
             sniffed
@@ -903,8 +903,23 @@ impl<H: crate::host::Host> crate::engine::Engine<H> {
 }
 
 /// The upload size the pipeline aims for before trying (§8.8, "downscale (try 5 MiB first, fit on
-/// 413)").
-pub const UPLOAD_TARGET_BYTES: usize = 5 * 1024 * 1024;
+/// 413)"): `limits.md` §12 `IMAGE_UPLOAD_TARGET_BYTES`.
+pub const UPLOAD_TARGET_BYTES: usize = crate::limits::IMAGE_UPLOAD_TARGET_BYTES as usize;
+
+/// §8.8's first step: an image larger than [`UPLOAD_TARGET_BYTES`] is downscaled to it while it is
+/// prepared, so the CID the draft's `cid:` URLs name is the CID that is uploaded. One that cannot
+/// be downscaled (an animation, an image the decoders here do not take) keeps its bytes: the
+/// PDS's answer then decides (a 413 is refused, [`fit_for_upload`]).
+fn fit_to_target(prepared: Vec<u8>) -> Vec<u8> {
+    if prepared.len() <= UPLOAD_TARGET_BYTES {
+        return prepared;
+    }
+    #[cfg(feature = "orientation")]
+    if let Some(smaller) = downscale_to_fit(&prepared, UPLOAD_TARGET_BYTES) {
+        return smaller;
+    }
+    prepared
+}
 
 /// Re-encodes an image smaller so it fits `max_bytes`, halving the longest side until it does.
 ///
@@ -949,7 +964,8 @@ pub fn downscale_to_fit(bytes: &[u8], max_bytes: usize) -> Option<Vec<u8>> {
 }
 
 /// §8.8's upload policy: try the prepared bytes, and on a size refusal downscale an image or give
-/// up. `max_bytes` is the PDS's limit from the 413 (or [`UPLOAD_TARGET_BYTES`] beforehand).
+/// up. `max_bytes` is the target after a 413: half the size of the last encoding (`limits.md`
+/// §12), so a retry never sends the same body again.
 ///
 /// The returned bytes are what should be uploaded, and the caller MUST recompute the CID from
 /// them - the record's `ref.$link` has to be the CID of the bytes the PDS actually stored.

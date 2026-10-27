@@ -171,6 +171,35 @@ pub fn substitute_blob(v: &mut Value, cid: &str, object: &Value) -> usize {
     }
 }
 
+/// Rewrites every `cid:<old>` URL in the inline sources of the `NS.markdown` values in `v` (any
+/// depth) to `cid:<new>`; returns how many were rewritten.
+///
+/// After a 413 downscale (§8.8) the PDS stores the image under another CID, and the record's
+/// `media[]` gets the new blob object ([`substitute_blob`]); `lfm-1.md` §6.1 resolves a `cid:`
+/// URL against `media[i].blob.ref.$link` only, so the body must name the new CID too. A CID is a
+/// fixed-length base32 string, so `cid:<old>` cannot be a prefix of another URL.
+pub fn rewrite_cid_urls(v: &mut Value, old: &str, new: &str) -> usize {
+    let (from, to) = (format!("cid:{old}"), format!("cid:{new}"));
+    fn walk(v: &mut Value, from: &str, to: &str) -> usize {
+        match v {
+            Value::Object(m) => {
+                let mut n = 0;
+                if m.get("$type").and_then(Value::as_str) == Some(nsid::MARKDOWN)
+                    && let Some(Value::String(text)) = m.get_mut("text")
+                    && text.contains(from)
+                {
+                    n += text.matches(from).count();
+                    *text = text.replace(from, to);
+                }
+                n + m.values_mut().map(|x| walk(x, from, to)).sum::<usize>()
+            }
+            Value::Array(a) => a.iter_mut().map(|x| walk(x, from, to)).sum(),
+            _ => 0,
+        }
+    }
+    walk(v, &from, &to)
+}
+
 /// The spillable `md` fields of a collection (`data-model.md` §5.2 rule 2).
 pub fn spillable_fields(collection: &str) -> &'static [&'static str] {
     if collection == nsid::POST || collection == nsid::WIKI_REVISION || collection == nsid::SEQUENCE
@@ -381,5 +410,27 @@ mod tests {
         let ret = json!({"$type": "blob", "ref": {"$link": blobs[0].cid}, "mimeType": "text/plain", "size": 1, "x": 1});
         assert_eq!(substitute_blob(&mut post, &blobs[0].cid, &ret), 1);
         assert_eq!(post["body"]["textBlob"], ret);
+    }
+
+    #[test]
+    fn cid_urls_follow_a_changed_cid() {
+        // m4-8: the image a 413 downscaled is stored under another CID
+        let (old, new) = ("bafkreiold", "bafkreinew");
+        let mut post = json!({
+            "$type": nsid::POST,
+            "title": "cid:bafkreiold is a title, not a body",
+            "body": {
+                "$type": nsid::MARKDOWN,
+                "text": "![a](cid:bafkreiold) and ![b](cid:bafkreiold) but not ![c](cid:bafkreiother)",
+                "media": [{"blob": placeholder(old, "image/png", 9)}],
+            },
+        });
+        assert_eq!(rewrite_cid_urls(&mut post, old, new), 2);
+        assert_eq!(
+            post["body"]["text"],
+            "![a](cid:bafkreinew) and ![b](cid:bafkreinew) but not ![c](cid:bafkreiother)"
+        );
+        assert_eq!(post["title"], "cid:bafkreiold is a title, not a body");
+        assert_eq!(rewrite_cid_urls(&mut post, old, new), 0);
     }
 }

@@ -107,6 +107,11 @@ fn rejected(error: EngineError) -> CallError {
     }
 }
 
+/// True when `hay` contains the bytes of `needle`.
+fn contains_bytes(hay: &[u8], needle: &str) -> bool {
+    hay.windows(needle.len()).any(|w| w == needle.as_bytes())
+}
+
 fn storage(e: impl std::fmt::Display) -> CallError {
     CallError::Read(EngineError::internal(format!("outbox storage: {e}")).with_retryable(true))
 }
@@ -355,11 +360,41 @@ impl<'a, H: Host> Runner<'a, H> {
                     .with_detail("cid", data.cid.clone()),
             ));
         }
+        // A 413 downscale changed the CID (§8.8): the body's `cid:` URLs must follow it, and a
+        // spilled body already holding the old one cannot, so that write fails instead of
+        // publishing an image that no longer resolves inline (`lfm-1.md` §6.1).
+        let moved = stored_cid != data.cid;
+        if moved {
+            let old = format!("cid:{}", data.cid);
+            for i in 0..self.w.blobs.len() {
+                if self.w.blobs[i].mime == blob::TEXT_MARKDOWN
+                    && self.w.blobs[i].cid != data.cid
+                    && contains_bytes(&self.chunks(i).await?, &old)
+                {
+                    return Err(rejected(
+                        EngineError::new(
+                            crate::engine::ErrorCode::TooLarge,
+                            "the PDS took the image only after it was downscaled, and the \
+                             long body that names it cannot follow the new CID: attach a \
+                             smaller image",
+                        )
+                        .with_detail("kind", "mediaRejected")
+                        .with_detail("cid", data.cid.clone()),
+                    ));
+                }
+            }
+        }
         for op in &mut self.w.ops {
-            if let Some(mut v) = op.value_json()
-                && blob::substitute_blob(&mut v, &data.cid, &object) > 0
-            {
-                op.set_value(&v);
+            if let Some(mut v) = op.value_json() {
+                let replaced = blob::substitute_blob(&mut v, &data.cid, &object);
+                let rewritten = if moved {
+                    blob::rewrite_cid_urls(&mut v, &data.cid, &stored_cid)
+                } else {
+                    0
+                };
+                if replaced + rewritten > 0 {
+                    op.set_value(&v);
+                }
             }
         }
         Ok(())
