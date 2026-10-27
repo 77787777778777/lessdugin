@@ -1136,7 +1136,9 @@ const PREP: &str = "prep";
 /// `("prep.blob", cid, n)`: its bytes, in chunks of at most 1 MiB (as the outbox keeps them).
 const PREP_BLOB: &str = "prep.blob";
 /// The family the first M4 builds kept prepared bytes in, as one JSON number array per file.
-const LEGACY_MEDIA: (&str, &str) = ("loc", "media");
+/// Swept when a file is prepared, and never exported (`engine::local`): it is a copy of a file,
+/// not local state.
+pub(crate) const LEGACY_MEDIA: (&str, &str) = ("loc", "media");
 
 /// The row of a prepared file (`sync.md` §10.4).
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
