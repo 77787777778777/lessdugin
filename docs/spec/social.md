@@ -604,7 +604,8 @@ Each (actor, scope, subject, action key) has exactly one record (`data-model.md`
 - The fold cannot tell a former moderator from a DID that never was one, so every forum-scope assertion by an actor ∉ A is `lapsed` (§4.12).
 
 **Adoption**
-- `lessdugin mod adopt <did>` re-issues a former moderator's non-lapsed forum-scope assertions under the adopting authority, with `adopts` pointing at each original (`data-model.md` §8.6).
+- `lessdugin mod adopt <did>` re-issues a departing moderator's forum-scope assertions that are in effect under the adopting authority, with `adopts` pointing at each original (`data-model.md` §8.6).
+- **Only what counted is adopted.** An original is re-issued only if its mod-log status (§4.12) in the adopter's fold is `effective`, with the same CID when the copy is sent, and §4.3 conditions 3 and 4 hold for its own actor. Every other original is reported, not copied: an `unauthorised` record (for example a moderator's ban of the owner) or an `overridden` one (a hide that an admin's keep beats) would otherwise take effect at the adopter's higher rank. A DID already removed from `moderators` has only `lapsed` records (§4.12), so nothing of theirs is adopted.
 - `adopts` is informational. A copy counts only on its own merits: the adopter's rank and role, its own `until`, and its own `subjectCid`.
 
 **Removing a moderator (`mods rm <did>`)**

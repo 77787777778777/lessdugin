@@ -63,8 +63,8 @@ pub use apply::{AppliedRecord, AppliedWrite, ApplyReport, apply_own_write, apply
 pub use blob::BlobData;
 pub use budget::BudgetRow;
 pub use model::{
-    Intent, OnExists, Op, OpAction, OpResult, OpinionStep, PendingBlob, PendingWrite, StoredError,
-    WriteStage, parse_write_id, write_id,
+    Counted, Intent, OnExists, Op, OpAction, OpResult, OpinionStep, PendingBlob, PendingWrite,
+    StoredError, WriteStage, parse_write_id, write_id,
 };
 pub use pds::Session;
 pub use protocol::{BACKOFF_BASE_MS, BACKOFF_MAX_MS, BLOB_REUPLOAD_AFTER_MS, MAX_ATTEMPTS};
@@ -917,9 +917,9 @@ impl<H: Host> Outbox<H> {
         .await
     }
 
-    /// `mod adopt` (§8.6): re-issues the former moderator's forum-scope assertions. `role` is
-    /// the actor's role in the forum (`owner`, `admin` or `moderator`); `former_pds` is the
-    /// former moderator's resolved PDS.
+    /// `mod adopt` (§8.6): re-issues the former moderator's forum-scope assertions that
+    /// `counted` names. `role` is the actor's role in the forum (`owner`, `admin` or
+    /// `moderator`); `former_pds` is the former moderator's resolved PDS.
     pub async fn mod_adopt(
         &self,
         session: &Session,
@@ -927,6 +927,7 @@ impl<H: Host> Outbox<H> {
         former: &Did,
         former_pds: &str,
         role: &str,
+        counted: Counted,
     ) -> Result<WriteTicket, EngineError> {
         if !["owner", "admin", "moderator"].contains(&role) {
             return Err(EngineError::invalid_input(format!(
@@ -946,6 +947,7 @@ impl<H: Host> Outbox<H> {
                     former_pds,
                     role,
                     revision_tid: ctx.tid()?,
+                    counted,
                     report: Vec::new(),
                 },
                 Vec::new(),

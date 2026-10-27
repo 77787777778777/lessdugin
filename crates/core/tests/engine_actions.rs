@@ -906,6 +906,98 @@ fn mods_rm_adopts_first() {
     assert_eq!(decl.get("moderators"), None, "{decl}");
 }
 
+/// `mods rm` re-issues only what counted for the departing moderator (`social.md` §4.10): a
+/// moderator's ban of the owner and hide of the owner's post (both `unauthorised`), and a hide
+/// an admin's keep beats (`overridden`), are reported and never copied at the owner's rank.
+#[test]
+fn mods_rm_adopts_only_what_counted() {
+    use lessdugin_atp::syntax::{AtUri, Datetime};
+    use lessdugin_lexicon::records::{AccessAction, Action, HideAction, ModAction};
+    use lessdugin_lexicon::values::AccessLevel as LexAccess;
+
+    let w = World::new();
+    let (alice, bob, carol, dave) = (&w.alice, &w.bob, &w.carol, &w.dave);
+    for (u, role) in [(bob, ModRole::Moderator), (carol, ModRole::Admin)] {
+        block_on(alice.engine.mods_set(
+            &w.forum,
+            &ModsChange::Add {
+                did: u.did(),
+                role,
+                title: None,
+            },
+        ))
+        .unwrap();
+        alice.flush();
+    }
+    w.sync_all();
+    // in effect: bob bans dave
+    let ban = bob.mod_action(assert_mod(
+        &w.forum,
+        &dave.did(),
+        ModActionValue::Access {
+            level: AccessLevel::Banned,
+        },
+    ));
+    bob.flush();
+    let ban = bob.done(&ban.ticket());
+    // overridden: bob hides his own post, carol (an admin) keeps it
+    let t = bob.mod_action(assert_mod(&w.forum, &w.bob_post, hide()));
+    bob.flush();
+    let hidden = bob.done(&t.ticket());
+    w.resync(&[carol]);
+    let keep = ModActionValue::Hide {
+        hidden: false,
+        spam: false,
+        show_reason: true,
+    };
+    carol.mod_action(assert_mod(&w.forum, &w.bob_post, keep));
+    carol.flush();
+    // unauthorised, written straight to bob's repo: a ban of the owner, a hide of her post
+    let forum = AtUri::parse(&w.forum).unwrap();
+    let at = Datetime::parse("2024-01-01T00:00:00.000Z").unwrap();
+    let mut rogue = Vec::new();
+    for (subject, action) in [
+        (
+            alice.did(),
+            Action::Access(AccessAction::new(LexAccess::Banned)),
+        ),
+        (w.welcome.clone(), Action::Hide(HideAction::hide())),
+    ] {
+        let b = records::mod_action(&ModAction::new(forum.clone(), subject, action, at.clone()))
+            .unwrap();
+        bob.acct.put(nsid::MOD_ACTION, &b.rkey, &b.value);
+        rogue.push(b.rkey);
+    }
+    w.resync(&[alice]);
+
+    let r = block_on(alice.engine.mods_set(
+        &w.forum,
+        &ModsChange::Remove {
+            did: bob.did(),
+            skip_adopt: false,
+        },
+    ))
+    .unwrap();
+    alice.flush();
+    let skipped: Vec<&str> = r.notices.iter().map(|n| n.message.as_str()).collect();
+    assert!(
+        skipped
+            .iter()
+            .any(|m| m.contains("2 unauthorised") && m.contains("1 overridden")),
+        "{skipped:?}"
+    );
+    // only the ban of dave was adopted
+    let rkey = |u: &str| u.rsplit('/').next().unwrap().to_owned();
+    let copy = alice.record(nsid::MOD_ACTION, &rkey(&ban)).unwrap();
+    assert_eq!(copy["adopts"]["uri"], ban.as_str());
+    assert_eq!(alice.record(nsid::MOD_ACTION, &rkey(&hidden)), None);
+    for k in &rogue {
+        assert_eq!(alice.record(nsid::MOD_ACTION, k), None, "{k}");
+    }
+    let decl = alice.record(nsid::FORUM, "meta").unwrap();
+    assert_eq!(decl["moderators"].as_array().unwrap().len(), 1, "{decl}");
+}
+
 #[test]
 fn mods_rm_does_not_remove_when_adoption_fails() {
     let w = World::new();

@@ -1026,14 +1026,20 @@ empty(v) ⇔ v has no field other than $type, subject, forum, createdAt, updated
 
 ### 8.6 Moderation writes
 
-**`mod adopt <former>`.** Re-issues a former (or departing) moderator's forum-scope assertions under the acting authority.
+**`mod adopt <former>`.** Re-issues a departing moderator's forum-scope assertions that are in effect under the acting authority.
+
+When the write is made, the client syncs former's `{fk}-` range (P0) and takes `counted`: the (rkey, cid) of each of former's forum-scope assertions whose mod-log status (`social.md` §4.12) is `effective` in its fold, and the roles of A. Only those count for former. An `unauthorised`, `overridden`, `stale`, `expired` or `reserved/unknown` record never counted, so its copy would act at the adopter's rank where the original never did. A former moderator who is no longer listed in `moderators` has only `lapsed` records, so nothing of theirs can be adopted: `mods rm` adopts before it removes the entry.
 
 ```
-mod_adopt(forum, former):
+mod_adopt(forum, former, counted):
   originals = valid records (§7) in former's NS.modAction "{fk}-" range (fresh, complete listing)
               with scope_eff = forum, not lapsed (until > now)
   own       = fresh, complete listing of own NS.modAction "{fk}-" range
   for o in originals, rkey ascending:
+     if o.rkey ∉ counted:                     report "cannot adopt … never counted"; continue
+     if counted[o.rkey] ≠ o.cid:              report "cannot adopt … changed since"; continue
+     if social.md §4.3 condition 3 (rank) or 4 (role) fails for former as X, under counted's roles:
+                                              report "cannot adopt"; continue
      if the actor's role may not issue o.action (social.md table): report "cannot adopt"; continue
      v = copy of o.value (unknown fields kept) with adopts = {uri: o.uri, cid: o.cid}, createdAt = now, no updatedAt
      k = o.rkey                                  // same (scope, subject, actionKey) ⇒ same key
@@ -1046,6 +1052,8 @@ mod_adopt(forum, former):
   send ops in applyWrites batches of ≤ 200 ops (a revision and its update are never split),
   each with swapCommit = fresh head; on InvalidSwap or HTTP 500 re-list own range, recompute the remaining batches (≤ 3 tries)
 ```
+
+The report keeps its first 100 lines and then one line that counts the rest. `mods rm` also tells the owner, before anything is sent, how many assertions will be adopted and how many will not, by status.
 
 **`mods rm <did>`** is run by the owner, since the declaration is in the owner's repo.
 1. Run `mod adopt <did>` as the owner.
