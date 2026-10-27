@@ -311,6 +311,10 @@ impl<H: Host> Engine<H> {
     pub async fn publish(&self, draft: &PostDraft) -> Result<WriteTicket, EngineError> {
         let session = self.active_session().await?;
         let key = self.forum_key(&draft.forum).await?;
+        let draft = &PostDraft {
+            body: self.with_dids(&draft.body).await?,
+            ..draft.clone()
+        };
         let post = self.post_record(draft, key.uri.clone())?;
         let opts = ContentOpts {
             blobs: self.media_blobs(&draft.body.media).await?,
@@ -350,6 +354,8 @@ impl<H: Host> Engine<H> {
             .and_then(Value::as_str)
             .ok_or_else(|| EngineError::invalid_input(format!("{root} names no forum")))
             .and_then(records::at_uri)?;
+        self.refuse_locked(&forum, &root, session.did.as_str())
+            .await?;
         let mut quoted = root_value.clone();
         let parent = match &draft.parent {
             Some(p) => {
@@ -380,7 +386,7 @@ impl<H: Host> Engine<H> {
             "",
             records::datetime_ms(self.host.now_ms())?,
         );
-        c.body = markdown_body(&draft.body)?;
+        c.body = markdown_body(&self.with_dids(&draft.body).await?)?;
         // the quote's target is the parent if present, else the root (`social.md` §16)
         c.quote = draft
             .quote
@@ -390,6 +396,42 @@ impl<H: Host> Engine<H> {
         self.outbox
             .create_comment(&session, &c, ContentOpts::default())
             .await
+    }
+
+    /// `social.md` §4.8 "Composer": a comment on a locked post is refused (`blocked`,
+    /// `detail.kind = "locked"`) unless the writer is in A, or, for an author lock, is the post's
+    /// author. It would be published and at once be `Hidden(Locked)` for everyone (V7): a new
+    /// comment is never on the allow-list and has no keep. Without a cached model of the forum
+    /// there is nothing to go by, and the comment is written.
+    async fn refuse_locked(
+        &self,
+        forum: &AtUri,
+        root: &AtUri,
+        writer: &str,
+    ) -> Result<(), EngineError> {
+        let Ok(key) = self.forum_key(forum.as_str()).await else {
+            return Ok(());
+        };
+        let Ok(l) = self.loaded(&key).await else {
+            return Ok(());
+        };
+        let v = &l.model.view;
+        if v.authorities.contains_key(writer) {
+            return Ok(());
+        }
+        let forum_lock = v.moderation.lock(root.as_str()).is_some();
+        let author_lock = root.did().as_str() != writer
+            && v
+                .author
+                .as_ref()
+                .is_ok_and(|a| a.locks.contains_key(root.as_str()));
+        if forum_lock || author_lock {
+            return Err(EngineError::blocked(format!(
+                "{root} is locked: a new comment would be hidden from everyone"
+            ))
+            .with_detail("kind", "locked"));
+        }
+        Ok(())
     }
 
     /// `edit(uri, Draft, EditOpts)`: the edit protocol (`data-model.md` §8.3) with a revision
@@ -404,6 +446,22 @@ impl<H: Host> Engine<H> {
         let u = records::at_uri(uri)?;
         let session = self.session_for(u.did().as_str()).await?;
         let (base, mut value) = self.current(&u).await?;
+        let draft = &match draft {
+            Draft::Post { id, post } => Draft::Post {
+                id: id.clone(),
+                post: PostDraft {
+                    body: self.with_dids(&post.body).await?,
+                    ..post.clone()
+                },
+            },
+            Draft::Comment { id, comment } => Draft::Comment {
+                id: id.clone(),
+                comment: CommentDraft {
+                    body: self.with_dids(&comment.body).await?,
+                    ..comment.clone()
+                },
+            },
+        };
         let coll = u.collection().as_str();
         let obj = value
             .as_object_mut()

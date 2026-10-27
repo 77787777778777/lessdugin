@@ -539,7 +539,12 @@ impl<H: Host> Engine<H> {
                     return wrong("a post");
                 }
                 let mut t = TierAction::new(lex_tier(*tier));
-                t.notice = notice.as_ref().map(markdown_body).transpose()?;
+                t.notice = self
+                    .with_dids_opt(notice.as_ref())
+                    .await?
+                    .as_ref()
+                    .map(markdown_body)
+                    .transpose()?;
                 (Action::Tier(t), *tier != Tier::Personal)
             }
             ModActionValue::Pin {
@@ -939,7 +944,12 @@ impl<H: Host> Engine<H> {
             "description",
             draft.description.clone().map(Value::String),
         );
-        let about = draft.about.as_ref().map(markdown_body).transpose()?;
+        let about = self
+            .with_dids_opt(draft.about.as_ref())
+            .await?
+            .as_ref()
+            .map(markdown_body)
+            .transpose()?;
         set(
             o,
             "about",

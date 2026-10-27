@@ -857,6 +857,37 @@ fn author_scope_actions_follow_the_author_table() {
     assert_eq!(e.code, ErrorCode::Blocked);
 }
 
+/// m3-18 (`social.md` §4.8 "Composer"): the engine refuses a comment on a locked post by a
+/// writer outside A, which would be published and hidden from everyone at once (V7); the
+/// forum's authorities may still comment.
+#[test]
+fn a_comment_on_a_locked_post_is_refused_unless_the_writer_is_an_authority() {
+    let w = World::new();
+    let (alice, bob) = (&w.alice, &w.bob);
+    let t = alice.mod_action(assert_mod(
+        &w.forum,
+        &w.bob_post,
+        ModActionValue::Lock { locked: true },
+    ));
+    alice.flush();
+    alice.done(&t.ticket());
+    w.resync(&[alice, bob]);
+    let e = block_on(bob.engine.comment(&CommentDraft::new(&w.bob_post, None, "too late")))
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::Blocked, "{e:?}");
+    assert_eq!(
+        e.detail.as_ref().and_then(|d| d.get("kind")),
+        Some(&json!("locked"))
+    );
+    let pending = block_on(bob.engine.writes()).unwrap();
+    assert!(
+        pending.iter().all(|t| !matches!(t.state, WriteState::Pending { .. })),
+        "nothing was queued: {pending:?}"
+    );
+    // the owner is in A: her comment is exempt from V7
+    alice.comment(&w.bob_post, None, "closing note");
+}
+
 #[test]
 fn mods_rm_adopts_first() {
     let w = World::new();
