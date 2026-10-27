@@ -20,7 +20,15 @@
 //! input (`social_query.rs`), as modules, so the one command CI and `cargo xtask ci` run at the
 //! final namespace (`--features final-ns --test social_vectors`) covers all of them. They stay
 //! runnable alone (`--test social_fold`, `--test social_query`).
+//!
+//! **wasm32.** The same binary also runs on wasm32 under node (`cargo xtask test-wasm`, in both
+//! namespaces; `social.md` §1.3 rule 6, `engine-api.md` §3.9): its results equal the native
+//! run's, which proves native = wasm for the social vectors. There is no filesystem there, so
+//! every social vector file is embedded at compile time from `FILES` (the modules read them
+//! through [`vector_text`]), which `wasm_embeds_every_social_vector_file` keeps equal to the
+//! directory listing; on wasm32 the full fold's runners exist only as modules of this binary.
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
 
 use lessdugin_atp::syntax::AtUri;
@@ -31,6 +39,9 @@ use lessdugin_core::social::time;
 use lessdugin_lexicon::ns::{NS, to_build_nsid};
 use lessdugin_lexicon::{RuleId, keys};
 use serde_json::{Map, Value, json};
+// Natively this is a libtest test; on wasm32 the same body runs under wasm-bindgen-test in node.
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen_test::wasm_bindgen_test as test;
 
 #[cfg(feature = "final-ns")]
 #[path = "social_fold.rs"]
@@ -39,12 +50,96 @@ mod social_fold;
 #[path = "social_query.rs"]
 mod social_query;
 
+/// The social fold vector directories (`social.md` §19; `social_fold.rs` runs all of them).
+#[cfg(not(target_arch = "wasm32"))]
+const DIRS: [&str; 8] = [
+    "time",
+    "modfold",
+    "karma",
+    "reacts",
+    "rank",
+    "visibility",
+    "thread",
+    "fold",
+];
+
+/// `FILES`: every vector file under `testdata/vectors/{DIRS}`, in run order (`DIRS` order, then by
+/// name); on wasm32 also `EMBEDDED`, their text.
+macro_rules! vector_files {
+    ($($rel:literal),* $(,)?) => {
+        const FILES: &[&str] = &[$($rel),*];
+        #[cfg(target_arch = "wasm32")]
+        const EMBEDDED: &[&str] = &[$(
+            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata/vectors/", $rel))
+        ),*];
+    };
+}
+
+vector_files![
+    "time/conversions.json",
+    "time/time.json",
+    "modfold/author.json",
+    "modfold/forum.json",
+    "modfold/participation.json",
+    "karma/gates.json",
+    "karma/power.json",
+    "karma/scores.json",
+    "karma/staged.json",
+    "karma/tags-large.json",
+    "karma/tags.json",
+    "reacts/reacts.json",
+    "rank/rank.json",
+    "visibility/visibility.json",
+    "thread/depth.json",
+    "thread/thread.json",
+    "fold/digest.json",
+];
+
+#[cfg(not(target_arch = "wasm32"))]
+fn vectors_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata/vectors")
+}
+
+/// The text of the vector file `rel` (`dir/name.json`), read from disk.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn vector_text(rel: &str) -> String {
+    let path = vectors_dir().join(rel);
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path:?}: {e}"))
+}
+
+/// The text of the vector file `rel` (`dir/name.json`), embedded at compile time.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn vector_text(rel: &str) -> String {
+    let i = FILES
+        .iter()
+        .position(|f| *f == rel)
+        .unwrap_or_else(|| panic!("{rel} is not in FILES"));
+    EMBEDDED[i].to_owned()
+}
+
+/// The wasm32 run sees exactly the files the native run reads.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn wasm_embeds_every_social_vector_file() {
+    let mut on_disk = Vec::new();
+    for d in DIRS {
+        let mut names: Vec<String> = std::fs::read_dir(vectors_dir().join(d))
+            .unwrap_or_else(|e| panic!("{d}: {e}"))
+            .filter_map(|e| e.ok()?.file_name().into_string().ok())
+            .filter(|n| n.ends_with(".json"))
+            .collect();
+        names.sort();
+        on_disk.extend(names.into_iter().map(|n| format!("{d}/{n}")));
+    }
+    assert_eq!(
+        on_disk, FILES,
+        "tests/social_vectors.rs FILES (embedded for the wasm32 run) must list every social vector \
+         file"
+    );
+}
+
 fn load(rel: &str) -> Value {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../testdata/vectors")
-        .join(rel);
-    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path:?}: {e}"));
-    serde_json::from_str(&text).unwrap()
+    serde_json::from_str(&vector_text(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"))
 }
 
 /// Rules decided by keys that hash the namespace (not checkable after a prefix mapping).

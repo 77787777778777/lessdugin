@@ -5,7 +5,8 @@
 //!   ci                 fmt, clippy (native + wasm32), tests (native + wasm32; the social
 //!                      vectors also with `final-ns`), lexicon lint, web checks
 //!   test-wasm [-- <test args>]   run the interop, vector and property tests of atp, lexicon and
-//!                      markdown on wasm32-unknown-unknown under node (wasm-bindgen-test-runner),
+//!                      markdown, and core's social fold vectors and P9 parity digest (in both
+//!                      namespaces), on wasm32-unknown-unknown under node (wasm-bindgen-test-runner),
 //!                      after checking that the wasm32 test binaries hold the native tests
 //!   wasm [--release|--dev] [--budget] [--report] [--kv-test]
 //!                      build the engine wasm + JS bindings into packages/engine/pkg
@@ -45,6 +46,42 @@ const WASM_SAFE: &[&str] = &[
 /// Crates whose integration tests (interop, vector and property tests) also run on wasm32 under
 /// node (`test-wasm`); every integration test of these crates must build for wasm32.
 const WASM_TESTED: &[&str] = &["lessdugin-atp", "lessdugin-lexicon", "lessdugin-markdown"];
+
+/// Single integration tests of other crates that also run on wasm32 under node (`test-wasm`), as
+/// (package, features, test targets): the social fold vectors (`social_vectors`, which holds the
+/// full fold's runners at the final namespace) and the P9 parity digest (`social_parity`), in the
+/// build namespace and in the final one the vectors are written in (`social.md` §1.3 rule 6 and
+/// §6.3 P9, `engine-api.md` §3.9: native = wasm).
+const WASM_TESTED_TARGETS: &[(&str, &str, &[&str])] = &[
+    ("lessdugin-core", "", &["social_vectors", "social_parity"]),
+    (
+        "lessdugin-core",
+        "final-ns",
+        &["social_vectors", "social_parity"],
+    ),
+];
+
+/// The cargo package and target selections `test-wasm` runs on wasm32: every integration test of
+/// [`WASM_TESTED`], then each entry of [`WASM_TESTED_TARGETS`].
+fn wasm_selections() -> Vec<Vec<&'static str>> {
+    let mut crates = Vec::new();
+    for c in WASM_TESTED {
+        crates.extend(["-p", c]);
+    }
+    crates.extend(["--test", "*"]);
+    let mut all = vec![crates];
+    for (package, features, tests) in WASM_TESTED_TARGETS {
+        let mut sel = vec!["-p", *package];
+        if !features.is_empty() {
+            sel.extend(["--features", *features]);
+        }
+        for t in *tests {
+            sel.extend(["--test", *t]);
+        }
+        all.push(sel);
+    }
+    all
+}
 
 /// The engine wasm's `gzip -9` size (after wasm-opt) above which `wasm --budget` fails. It is a
 /// tripwire for something linked in by mistake (tokio, reqwest, ammonia, debug info), not a
@@ -394,11 +431,11 @@ fn install_runner_hint() -> String {
     }
 }
 
-/// `cargo test` of the `WASM_TESTED` crates' integration tests for wasm32-unknown-unknown, run in
-/// node by wasm-bindgen-test-runner. The tests are the native ones: on wasm32 they are
-/// `#[wasm_bindgen_test]`s and read their fixtures from copies embedded at compile time
-/// ([`check_wasm_parity`] runs first). `args` are passed on to the test binaries (e.g.
-/// `-- --nocapture`).
+/// `cargo test` of the `WASM_TESTED` crates' integration tests and of [`WASM_TESTED_TARGETS`] for
+/// wasm32-unknown-unknown, run in node by wasm-bindgen-test-runner. The tests are the native
+/// ones: on wasm32 they are `#[wasm_bindgen_test]`s and read their fixtures from copies embedded
+/// at compile time ([`check_wasm_parity`] runs first). `args` are passed on to the test binaries
+/// (e.g. `-- --nocapture`).
 fn test_wasm(args: &[String]) -> Result<(), String> {
     let want = wasm_bindgen_version()?;
     let out = Command::new(TEST_RUNNER).arg("--version").output();
@@ -421,41 +458,39 @@ fn test_wasm(args: &[String]) -> Result<(), String> {
         return Err("node not found (the wasm32 tests run in node)".into());
     }
     check_wasm_parity()?;
-    let mut cargo_args = vec!["test", "--target", "wasm32-unknown-unknown"];
-    for c in WASM_TESTED {
-        cargo_args.extend(["-p", c]);
-    }
-    // integration tests only: the crates' unit tests are plain `#[test]`s (native only)
-    cargo_args.extend(["--test", "*"]);
     let rest: Vec<&str> = args
         .iter()
         .map(String::as_str)
         .skip_while(|a| *a == "--")
         .collect();
-    if !rest.is_empty() {
-        cargo_args.push("--");
-        cargo_args.extend(rest);
+    // integration tests only: the crates' unit tests are plain `#[test]`s (native only)
+    for sel in wasm_selections() {
+        let mut cargo_args = vec!["test", "--target", "wasm32-unknown-unknown"];
+        cargo_args.extend(sel);
+        if !rest.is_empty() {
+            cargo_args.push("--");
+            cargo_args.extend(&rest);
+        }
+        eprintln!(
+            "$ cargo {} ({TEST_RUNNER} {want}, node)",
+            cargo_args.join(" ")
+        );
+        let status = Command::new("cargo")
+            .args(&cargo_args)
+            .env("CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER", TEST_RUNNER)
+            .current_dir(root())
+            .status()
+            .map_err(|e| format!("failed to run cargo: {e}"))?;
+        if !status.success() {
+            return Err(format!("wasm32 tests failed: {status}"));
+        }
     }
-    eprintln!(
-        "$ cargo {} ({TEST_RUNNER} {want}, node)",
-        cargo_args.join(" ")
-    );
-    let status = Command::new("cargo")
-        .args(&cargo_args)
-        .env("CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER", TEST_RUNNER)
-        .current_dir(root())
-        .status()
-        .map_err(|e| format!("failed to run cargo: {e}"))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("wasm32 tests failed: {status}"))
-    }
+    Ok(())
 }
 
-/// Integration tests of `WASM_TESTED` that run natively only, as `(test file, test name)`: each
-/// compares a list embedded for wasm32 with a directory on disk. Every other one must also be a
-/// wasm32 test ([`check_wasm_parity`]).
+/// Integration tests of `WASM_TESTED` and [`WASM_TESTED_TARGETS`] that run natively only, as
+/// `(test file, test name)`: each compares a list embedded for wasm32 with a directory on disk.
+/// Every other one must also be a wasm32 test ([`check_wasm_parity`]).
 const NATIVE_ONLY_TESTS: &[(&str, &str)] = &[
     (
         "crates/lexicon/tests/schemas.rs",
@@ -465,45 +500,55 @@ const NATIVE_ONLY_TESTS: &[(&str, &str)] = &[
         "crates/markdown/tests/vectors.rs",
         "wasm_embeds_every_vector_file",
     ),
+    (
+        "crates/core/tests/social_vectors.rs",
+        "wasm_embeds_every_social_vector_file",
+    ),
 ];
 
-/// Checks that the wasm32 test binaries of `WASM_TESTED` hold exactly their native integration
-/// tests, except [`NATIVE_ONLY_TESTS`]. Without it a test file whose tests are not
-/// `#[wasm_bindgen_test]`s on wasm32 would pass silently: the runner says "no tests to run!" and
-/// exits 0 for a binary without any.
+/// Checks that the wasm32 test binaries of every [`wasm_selections`] entry hold exactly their
+/// native integration tests, except [`NATIVE_ONLY_TESTS`]. Without it a test file whose tests are
+/// not `#[wasm_bindgen_test]`s on wasm32 would pass silently: the runner says "no tests to run!"
+/// and exits 0 for a binary without any.
 fn check_wasm_parity() -> Result<(), String> {
-    let mut native_args = vec!["test"];
-    for c in WASM_TESTED {
-        native_args.extend(["-p", c]);
-    }
-    native_args.extend(["--test", "*"]);
-    let mut wasm_args = native_args.clone();
-    wasm_args.extend(["--target", "wasm32-unknown-unknown"]);
-    let native = test_binaries(&native_args)?;
-    let wasm: BTreeMap<String, PathBuf> = test_binaries(&wasm_args)?.into_iter().collect();
     let mut problems = Vec::new();
-    let (mut total, mut native_only) = (0, 0);
-    for (file, exe) in &native {
-        let mut want = listed_tests(Command::new(exe).args(["--list", "--format", "terse"]))?;
-        let before = want.len();
-        want.retain(|t| !NATIVE_ONLY_TESTS.contains(&(file.as_str(), t.as_str())));
-        native_only += before - want.len();
-        let Some(wasm_exe) = wasm.get(file) else {
-            problems.push(format!("{file}: no wasm32 test binary"));
-            continue;
-        };
-        let got = listed_tests(Command::new(TEST_RUNNER).arg(wasm_exe).arg("--list"))?;
-        for t in want.iter().filter(|t| !got.contains(t)) {
-            problems.push(format!("{file}: `{t}` is not a wasm32 test"));
+    let (mut total, mut files) = (0, 0);
+    let mut native_only = std::collections::BTreeSet::new();
+    for sel in wasm_selections() {
+        let mut native_args = vec!["test"];
+        native_args.extend(&sel);
+        let mut wasm_args = native_args.clone();
+        wasm_args.extend(["--target", "wasm32-unknown-unknown"]);
+        let native = test_binaries(&native_args)?;
+        let wasm: BTreeMap<String, PathBuf> = test_binaries(&wasm_args)?.into_iter().collect();
+        for (file, exe) in &native {
+            let mut want = listed_tests(Command::new(exe).args(["--list", "--format", "terse"]))?;
+            want.retain(|t| {
+                let only = NATIVE_ONLY_TESTS.contains(&(file.as_str(), t.as_str()));
+                if only {
+                    native_only.insert((file.clone(), t.clone()));
+                }
+                !only
+            });
+            let Some(wasm_exe) = wasm.get(file) else {
+                problems.push(format!("{file}: no wasm32 test binary"));
+                continue;
+            };
+            let got = listed_tests(Command::new(TEST_RUNNER).arg(wasm_exe).arg("--list"))?;
+            for t in want.iter().filter(|t| !got.contains(t)) {
+                problems.push(format!("{file}: `{t}` is not a wasm32 test"));
+            }
+            for t in got.iter().filter(|t| !want.contains(t)) {
+                problems.push(format!("{file}: `{t}` is a wasm32 test only"));
+            }
+            total += got.len();
         }
-        for t in got.iter().filter(|t| !want.contains(t)) {
-            problems.push(format!("{file}: `{t}` is a wasm32 test only"));
+        for file in wasm.keys().filter(|f| !native.iter().any(|(n, _)| n == *f)) {
+            problems.push(format!("{file}: a wasm32 test binary only"));
         }
-        total += got.len();
+        files += native.len();
     }
-    for file in wasm.keys().filter(|f| !native.iter().any(|(n, _)| n == *f)) {
-        problems.push(format!("{file}: a wasm32 test binary only"));
-    }
+    let native_only = native_only.len();
     if native_only != NATIVE_ONLY_TESTS.len() {
         problems.push(format!(
             "NATIVE_ONLY_TESTS lists {} tests, {native_only} of them exist",
@@ -518,10 +563,7 @@ fn check_wasm_parity() -> Result<(), String> {
             problems.join("\n  ")
         ));
     }
-    eprintln!(
-        "wasm32 has the native tests: {total} in {} test files ({native_only} native-only)",
-        native.len()
-    );
+    eprintln!("wasm32 has the native tests: {total} in {files} test binaries ({native_only} native-only)");
     Ok(())
 }
 
