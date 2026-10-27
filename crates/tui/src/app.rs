@@ -26,10 +26,14 @@ use lessdugin_core::dto::{
     SyncReport, ThreadOpts, ThreadRoot, ThreadView, Tier, Topic, UnreadCounts, ViewerCaps,
     WriteState, WriteTicket,
 };
+use lessdugin_core::dto::{
+    Draft, ForumDraft, ForumRole, KarmaCadence, MemberView, MembershipMode, RawView, Ref,
+    Settings, Subscription, TextQuote,
+};
 use lessdugin_core::engine::EngineError;
 
 use crate::body::Body;
-use crate::command::RestrictDim;
+use crate::command::{AccessOp, ForumChanges, RestrictDim};
 use crate::editor;
 use crate::keys::{self, Cmd, Op};
 use crate::text::{TermText, actor, cat, count, lit, post_title, tt};
@@ -90,7 +94,7 @@ pub enum SyncTarget {
 }
 
 /// What is being written.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Compose {
     /// A comment on `root`, replying to `parent`.
     Comment {
@@ -104,6 +108,14 @@ pub enum Compose {
         /// The forum.
         forum: String,
     },
+    /// An edit of your post or comment `uri` (`:edit`): `base` is its current draft, whose
+    /// text (and a post's title) the editor's text replaces.
+    Edit {
+        /// The item.
+        uri: String,
+        /// Its draft as cached.
+        base: Draft,
+    },
 }
 
 impl Compose {
@@ -114,6 +126,7 @@ impl Compose {
             } => "reply",
             Compose::Comment { parent: None, .. } => "comment",
             Compose::Post { .. } => "post",
+            Compose::Edit { .. } => "edit",
         }
     }
 
@@ -125,6 +138,7 @@ impl Compose {
             } => "r",
             Compose::Comment { parent: None, .. } => "c",
             Compose::Post { .. } => "P",
+            Compose::Edit { .. } => ":edit",
         }
     }
 }
@@ -140,7 +154,7 @@ struct OwnWrite {
 }
 
 /// An `$EDITOR` session to run.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct EditorRequest {
     /// What is written.
     pub compose: Compose,
@@ -323,8 +337,162 @@ pub enum Effect {
         /// The kind.
         kind: PublicActionKind,
     },
+    /// `parse_ref(target)`, then the screen of the forum, post or comment it names (`:open`).
+    Open {
+        /// The reference.
+        target: String,
+    },
+    /// `forum_follow(forum)` or `forum_unfollow(forum)`.
+    Follow {
+        /// The forum.
+        forum: String,
+        /// Follow, or stop.
+        on: bool,
+    },
+    /// `join(forum, note)`: a public action (`PublicActionKind::Join`).
+    Join {
+        /// The forum.
+        forum: String,
+        /// The membership note.
+        note: Option<String>,
+        /// The screen to reload afterwards.
+        screen: ScreenId,
+    },
+    /// `leave(forum)`.
+    Leave {
+        /// The forum.
+        forum: String,
+        /// The screen to reload afterwards.
+        screen: ScreenId,
+    },
+    /// `members(forum, query)`, shown in a panel.
+    LoadMembers {
+        /// The forum.
+        forum: String,
+        /// The role kept.
+        status: Option<ForumRole>,
+        /// The applicants only.
+        pending: bool,
+    },
+    /// `grant`, `revoke`, `approve` or `reject` of `actors`.
+    Access {
+        /// Which.
+        op: AccessOp,
+        /// The forum.
+        forum: String,
+        /// The DIDs or handles.
+        actors: Vec<String>,
+        /// The screen to reload afterwards.
+        screen: ScreenId,
+    },
+    /// `mod_adopt(forum, former)`.
+    Adopt {
+        /// The forum.
+        forum: String,
+        /// The former moderator.
+        former: String,
+        /// The screen to reload afterwards.
+        screen: ScreenId,
+    },
+    /// `forum_create(draft)`.
+    ForumCreate {
+        /// The new forum.
+        draft: ForumDraft,
+    },
+    /// `forum_update(forum, draft)`, the draft being the cached declaration with `changes`.
+    ForumEdit {
+        /// The forum.
+        forum: String,
+        /// What changes.
+        changes: ForumChanges,
+        /// The screen to reload afterwards.
+        screen: ScreenId,
+    },
+    /// Reads your post or comment `uri` from the cache and opens `$EDITOR` on its text.
+    StartEdit {
+        /// The item (or a reference to it).
+        uri: String,
+        /// Its forum, for a reference.
+        forum: String,
+    },
+    /// `edit(uri, draft, EditOpts::default())`: the old version is kept as a revision.
+    Edit {
+        /// The item.
+        uri: String,
+        /// The new draft.
+        draft: Draft,
+        /// The editor's text (offered again if the edit fails).
+        text: String,
+    },
+    /// `delete(uri)`, `retract(uri)` or `redact_revision(uri)` of your post or comment.
+    ItemWrite {
+        /// Which.
+        op: ItemOp,
+        /// The item (or a reference to it).
+        uri: String,
+        /// Its forum, for a reference.
+        forum: String,
+        /// The screen to reload afterwards.
+        screen: ScreenId,
+    },
+    /// `raw(uri)`, shown in a panel.
+    LoadRaw {
+        /// The item (or a reference to it).
+        uri: String,
+        /// Its forum, for a reference.
+        forum: String,
+    },
+    /// `bookmark(uri, on)`.
+    Bookmark {
+        /// The post (or a reference to it).
+        uri: String,
+        /// Its forum, for a reference.
+        forum: String,
+        /// Bookmark, or remove it.
+        on: bool,
+    },
+    /// `subscribe(subscription, on)` (`setSubscription` in TypeScript).
+    Subscribe {
+        /// What.
+        subscription: Subscription,
+        /// Subscribe, or stop.
+        on: bool,
+    },
+    /// `mute(actor, on)`.
+    Mute {
+        /// The DID or handle.
+        actor: String,
+        /// Mute, or unmute.
+        on: bool,
+    },
+    /// `karma_notifications()`, or `set_karma_notifications(cadence)`.
+    KarmaNotifications {
+        /// The cadence to set; `None` shows it.
+        cadence: Option<KarmaCadence>,
+    },
+    /// `settings()`, after `set_setting(key, value)` when a key is given.
+    Settings {
+        /// The key and its value (`None`: the default).
+        set: Option<(String, Option<String>)>,
+    },
+    /// `retry_write(id)`.
+    Retry {
+        /// The write id.
+        id: String,
+    },
     /// Leave the TUI.
     Quit,
+}
+
+/// The writes of `:delete`, `:retract` and `:redact` on your own item.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ItemOp {
+    /// `delete(uri)`.
+    Delete,
+    /// `retract(uri)`.
+    Retract,
+    /// `redact_revision(uri)`.
+    Redact,
 }
 
 impl Effect {
@@ -334,11 +502,77 @@ impl Effect {
     pub fn public_kind(&self) -> Option<PublicActionKind> {
         match self {
             Effect::Opinion { intent, .. } => Some(intent.public_kind()),
-            Effect::ModAction { .. } | Effect::Grant { .. } | Effect::ModsSet { .. } => {
-                Some(PublicActionKind::ModAction)
-            }
+            Effect::ModAction { .. }
+            | Effect::Grant { .. }
+            | Effect::ModsSet { .. }
+            | Effect::Adopt { .. }
+            | Effect::Access {
+                op: AccessOp::Grant | AccessOp::Revoke | AccessOp::Approve,
+                ..
+            } => Some(PublicActionKind::ModAction),
+            Effect::Join { .. } => Some(PublicActionKind::Join),
             _ => None,
         }
+    }
+
+    /// The engine operation (`engine-api.md` §3) the effect calls, by its name there; `None`
+    /// for the ones the runtime handles itself (the editor, quitting).
+    pub fn operation(&self) -> Option<&'static str> {
+        Some(match self {
+            Effect::LoadHome { .. } => "followed",
+            Effect::LoadForum { .. } => "list_posts",
+            Effect::LoadThread { .. } => "get_thread",
+            Effect::Sync { .. } => "sync_forum",
+            Effect::Comment { .. } => "comment",
+            Effect::Publish { .. } => "publish",
+            Effect::Opinion { .. } => "opinion",
+            Effect::Undo { .. } => "undo",
+            Effect::Grant { .. } => "grant",
+            Effect::ModsSet { .. } => "mods_set",
+            Effect::ModAction { .. } => "mod_action",
+            Effect::LoadActivity { .. } => "recent_discussion",
+            Effect::LoadHistory { .. } => "history",
+            Effect::LoadNotifications { .. } => "notifications",
+            Effect::MarkRead { .. } => "mark_notifications_read",
+            Effect::LoadUnread => "unread_counts",
+            Effect::MarkThreadRead { .. } => "mark_read",
+            Effect::LoadQueue { .. } => "mod_queue",
+            Effect::LoadLog { .. } => "mod_log",
+            Effect::LoadWrites => "writes",
+            Effect::LoadAcknowledged => "acknowledged_public_actions",
+            Effect::Acknowledge { .. } => "acknowledge_public_action",
+            Effect::Open { .. } => "forum_open",
+            Effect::Follow { on: true, .. } => "forum_follow",
+            Effect::Follow { on: false, .. } => "forum_unfollow",
+            Effect::Join { .. } => "join",
+            Effect::Leave { .. } => "leave",
+            Effect::LoadMembers { .. } => "members",
+            Effect::Access { op, .. } => match op {
+                AccessOp::Grant => "grant",
+                AccessOp::Revoke => "revoke",
+                AccessOp::Approve => "approve",
+                AccessOp::Reject => "reject",
+            },
+            Effect::Adopt { .. } => "mod_adopt",
+            Effect::ForumCreate { .. } => "forum_create",
+            Effect::ForumEdit { .. } => "forum_update",
+            Effect::StartEdit { .. } | Effect::Edit { .. } => "edit",
+            Effect::ItemWrite { op, .. } => match op {
+                ItemOp::Delete => "delete",
+                ItemOp::Retract => "retract",
+                ItemOp::Redact => "redact_revision",
+            },
+            Effect::LoadRaw { .. } => "raw",
+            Effect::Bookmark { .. } => "bookmark",
+            Effect::Subscribe { .. } => "subscribe",
+            Effect::Mute { .. } => "mute",
+            Effect::KarmaNotifications { cadence: None } => "karma_notifications",
+            Effect::KarmaNotifications { cadence: Some(_) } => "set_karma_notifications",
+            Effect::Settings { set: None } => "settings",
+            Effect::Settings { set: Some(_) } => "set_setting",
+            Effect::Retry { .. } => "retry_write",
+            Effect::Editor(_) | Effect::Quit => return None,
+        })
     }
 }
 
@@ -504,6 +738,27 @@ pub enum Action {
     },
     /// [`Effect::LoadAcknowledged`] finished.
     AcknowledgedLoaded(Result<Vec<PublicActionKind>, EngineError>),
+    /// [`Effect::Open`] resolved its reference.
+    Opened(Result<Ref, EngineError>),
+    /// A write a `:` command queued (or why it was refused); `what` names it.
+    Written {
+        /// What the status line calls it (`"Join"`, `"Delete"`).
+        what: &'static str,
+        /// The screen to reload.
+        screen: Option<ScreenId>,
+        /// The tickets.
+        result: Result<Vec<WriteTicket>, EngineError>,
+    },
+    /// A local-state command finished: what the status line says, or why it failed.
+    LocalDone(Result<String, EngineError>),
+    /// [`Effect::StartEdit`]: the editor session, or why there is none.
+    EditReady(Result<EditorRequest, EngineError>),
+    /// [`Effect::LoadMembers`] finished.
+    MembersLoaded(Result<Vec<MemberView>, EngineError>),
+    /// [`Effect::LoadRaw`] finished.
+    RawLoaded(Result<RawView, EngineError>),
+    /// [`Effect::Settings`] finished.
+    SettingsLoaded(Result<Settings, EngineError>),
 }
 
 /// The tone of a status message.
@@ -963,6 +1218,27 @@ pub struct PublicNotice {
     pub held: Vec<Effect>,
 }
 
+/// A text panel over the screen (`:members`, `:raw`, `:settings`): the navigation keys
+/// scroll it, any other key closes it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Panel {
+    /// Its title.
+    pub title: String,
+    /// Its lines.
+    pub lines: Vec<TermText>,
+    /// The first line shown.
+    pub scroll: usize,
+}
+
+/// A yes/no question before a write that cannot be taken back (`:delete`, `:redact`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Confirm {
+    /// The question.
+    pub text: String,
+    /// What `y` runs.
+    pub effects: Vec<Effect>,
+}
+
 /// What the mod menu and `:mod` act on: the selected item, its thread's post, and their
 /// authors.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1192,6 +1468,34 @@ fn complete(line: &mut String) {
         "sort",
         "filter",
         "user",
+        "open",
+        "follow",
+        "unfollow",
+        "join",
+        "leave",
+        "members",
+        "grant",
+        "revoke",
+        "approve",
+        "reject",
+        "forum",
+        "edit",
+        "delete",
+        "retract",
+        "redact",
+        "raw",
+        "bookmark",
+        "unbookmark",
+        "subscribe",
+        "unsubscribe",
+        "mute",
+        "unmute",
+        "karma-notifications",
+        "settings",
+        "set",
+        "unset",
+        "undo",
+        "retry",
         "help",
     ];
     const ARGS: &[&str] = &[
@@ -1325,6 +1629,10 @@ pub struct State {
     pub command: Option<String>,
     /// The public-action interstitial, while one is open.
     pub public_notice: Option<PublicNotice>,
+    /// A confirmation, while one is open.
+    pub confirm: Option<Confirm>,
+    /// A text panel, while one is open.
+    pub panel: Option<Panel>,
     /// The public actions the account has acknowledged (`None` until loaded: every kind asks).
     pub acknowledged: Option<BTreeSet<PublicActionKind>>,
     /// [`Effect::LoadAcknowledged`] was sent.
@@ -1392,6 +1700,8 @@ impl State {
             prompt: None,
             command: None,
             public_notice: None,
+            confirm: None,
+            panel: None,
             acknowledged: None,
             acknowledged_asked: false,
             unread: None,
@@ -1574,6 +1884,40 @@ impl State {
                 Ok(kinds) => self.acknowledged.get_or_insert_default().extend(kinds),
                 Err(e) => tracing::debug!(error = %e, "acknowledged_public_actions failed"),
             },
+            Action::Opened(result) => match result {
+                Ok(Ref::Forum { uri }) => self.push_forum(uri, &mut fx),
+                Ok(Ref::Post { uri } | Ref::Comment { uri }) => self.push_thread(uri, &mut fx),
+                Ok(_) => self.say(
+                    Tone::Info,
+                    lit("That is not a forum, a post or a comment."),
+                ),
+                Err(e) => self.say(Tone::Error, cat([lit("Cannot open it: "), tt(&e.message)])),
+            },
+            Action::Written {
+                what,
+                screen,
+                result,
+            } => self.written(what, screen, result, &mut fx),
+            Action::LocalDone(result) => match result {
+                Ok(msg) => self.say(Tone::Good, tt(&msg)),
+                Err(e) => self.say(Tone::Error, tt(&e.message)),
+            },
+            Action::EditReady(result) => match result {
+                Ok(req) => fx.push(Effect::Editor(req)),
+                Err(e) => self.say(Tone::Error, cat([lit("Cannot edit it: "), tt(&e.message)])),
+            },
+            Action::MembersLoaded(result) => match result {
+                Ok(m) => self.show_panel("Members", members_lines(&m)),
+                Err(e) => self.say(Tone::Error, tt(&e.message)),
+            },
+            Action::RawLoaded(result) => match result {
+                Ok(r) => self.show_panel("Raw", raw_lines(&r)),
+                Err(e) => self.say(Tone::Error, tt(&e.message)),
+            },
+            Action::SettingsLoaded(result) => match result {
+                Ok(set) => self.show_panel("Settings", settings_lines(&set)),
+                Err(e) => self.say(Tone::Error, tt(&e.message)),
+            },
         }
         self.hold_public(&mut fx);
         self.fit();
@@ -1607,6 +1951,72 @@ impl State {
         }
         notice.kinds.sort();
         self.say(Tone::Warn, lit("This is public: y to go on, n to cancel."));
+    }
+
+    /// A key while a confirmation is open: `y` runs its writes, `n` or Esc drops them.
+    fn confirm_key(&mut self, k: &KeyEvent, fx: &mut Vec<Effect>) {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        if k.modifiers.contains(KeyModifiers::CONTROL) && matches!(k.code, KeyCode::Char('c')) {
+            self.confirm = None;
+            self.quit = true;
+            fx.push(Effect::Quit);
+            return;
+        }
+        match k.code {
+            KeyCode::Char('y' | 'Y') => {
+                if let Some(c) = self.confirm.take() {
+                    self.status = None;
+                    fx.extend(c.effects);
+                }
+            }
+            KeyCode::Char('n' | 'N' | 'q') | KeyCode::Esc => {
+                self.confirm = None;
+                self.say(Tone::Info, lit("Cancelled."));
+            }
+            _ => {}
+        }
+    }
+
+    /// Opens a text panel.
+    fn show_panel(&mut self, title: &str, lines: Vec<TermText>) {
+        self.panel = Some(Panel {
+            title: title.to_owned(),
+            lines,
+            scroll: 0,
+        });
+    }
+
+    /// [`Action::Written`]: the tickets are followed, the screen reloads.
+    fn written(
+        &mut self,
+        what: &'static str,
+        screen: Option<ScreenId>,
+        result: Result<Vec<WriteTicket>, EngineError>,
+        fx: &mut Vec<Effect>,
+    ) {
+        match result {
+            Ok(tickets) => {
+                for t in tickets {
+                    if !matches!(
+                        t.state,
+                        WriteState::Done { .. } | WriteState::Failed { .. } | WriteState::Undone
+                    ) {
+                        self.writes.insert(t.id.clone(), t.state);
+                    }
+                }
+                let msg = if self.offline {
+                    format!("{what}: queued; it is sent when you are online.")
+                } else {
+                    format!("{what}: queued; sending...")
+                };
+                self.say(Tone::Good, tt(&msg));
+                if let Some(i) = screen.and_then(|id| self.index_of(id)) {
+                    self.follow_own = screen;
+                    self.reload(i, Origin::User, fx);
+                }
+            }
+            Err(e) => self.say(Tone::Error, tt(&format!("{what} refused: {}", e.message))),
+        }
     }
 
     /// A key while the interstitial is open: `y` or Enter sends the held writes and records
@@ -1874,9 +2284,13 @@ impl State {
         if k.kind == crossterm::event::KeyEventKind::Release {
             return;
         }
-        // the public-action interstitial is answered before anything else
+        // the public-action interstitial is answered before anything else, then a confirmation
         if self.public_notice.is_some() {
             self.public_notice_key(k, fx);
+            return;
+        }
+        if self.confirm.is_some() {
+            self.confirm_key(k, fx);
             return;
         }
         // a prompt captures the raw keys (it edits a text line)
@@ -1893,6 +2307,19 @@ impl State {
         if cmd == Some(Cmd::Quit) {
             self.quit = true;
             fx.push(Effect::Quit);
+            return;
+        }
+        // a panel scrolls like the help overlay, and any other key closes it
+        if let Some(p) = &mut self.panel {
+            match cmd {
+                Some(Cmd::Down) => p.scroll = p.scroll.saturating_add(1),
+                Some(Cmd::Up) => p.scroll = p.scroll.saturating_sub(1),
+                Some(Cmd::HalfDown) => p.scroll = p.scroll.saturating_add(5),
+                Some(Cmd::HalfUp) => p.scroll = p.scroll.saturating_sub(5),
+                Some(Cmd::Top) => p.scroll = 0,
+                Some(Cmd::Bottom) => p.scroll = usize::MAX,
+                _ => self.panel = None,
+            }
             return;
         }
         // while the help overlay is open, the navigation keys scroll it and any other key
@@ -2382,6 +2809,37 @@ impl State {
                     ]),
                 ),
             },
+            Compose::Edit { uri, base } => {
+                let mut draft = base.clone();
+                match &mut draft {
+                    Draft::Post { post, .. } => match editor::split_post(&text) {
+                        Ok((title, body)) => {
+                            post.title = Some(title);
+                            post.body = lessdugin_core::dto::BodyDraft::text(body);
+                        }
+                        Err(why) => {
+                            self.say(
+                                Tone::Error,
+                                cat([
+                                    lit("Not edited: "),
+                                    tt(why),
+                                    lit(". Run :edit to edit it again."),
+                                ]),
+                            );
+                            return;
+                        }
+                    },
+                    Draft::Comment { comment, .. } => {
+                        comment.body = lessdugin_core::dto::BodyDraft::text(text.clone());
+                    }
+                }
+                self.say(Tone::Info, lit("Queuing the edit..."));
+                fx.push(Effect::Edit {
+                    uri: uri.clone(),
+                    draft,
+                    text,
+                });
+            }
         }
     }
 
@@ -3680,7 +4138,7 @@ impl State {
                 };
                 self.opinion_intent(agree_intent(a), subject, forum, "Vote", fx);
             }
-            Verb::React { id, against } => {
+            Verb::React { id, against, quote } => {
                 let Some((subject, forum)) = self.command_subject(cmd.subject.as_deref()) else {
                     self.say(Tone::Info, lit("Nothing selected to react to."));
                     return;
@@ -3709,7 +4167,13 @@ impl State {
                     OpinionIntent::React {
                         id,
                         stance,
-                        quote: None,
+                        // `exact` only: the engine derives the rest from the item's text
+                        quote: quote.map(|exact| TextQuote {
+                            exact,
+                            prefix: None,
+                            suffix: None,
+                            start: None,
+                        }),
                         remove: false,
                     },
                     subject,
@@ -3873,6 +4337,232 @@ impl State {
                     screen,
                 });
             }
+            other => self.run_more(other, cmd.subject, fx),
+        }
+    }
+
+    /// The `:` verbs past the M3 opinion and moderation set (`engine-api.md` §3.2, §3.5,
+    /// §3.6): forums and membership, your own items, and the local state.
+    fn run_more(
+        &mut self,
+        verb: crate::command::Verb,
+        subject: Option<String>,
+        fx: &mut Vec<Effect>,
+    ) {
+        use crate::command::{SubTarget, Verb};
+        let screen = self.top().map_or(0, |s| s.id);
+        // the forum a membership or forum verb acts on: the one on screen
+        let forum = |st: &mut Self| -> Option<String> {
+            let f = st.top_forum();
+            if f.is_none() {
+                st.say(Tone::Info, lit("Open a forum first."));
+            }
+            f
+        };
+        // the item a verb on one item acts on: the one named, else the selection
+        let item = |st: &mut Self, what: &str| -> Option<(String, String)> {
+            let it = st.command_subject(subject.as_deref());
+            if it.is_none() {
+                st.say(Tone::Info, tt(&format!("Nothing selected to {what}.")));
+            }
+            it
+        };
+        match verb {
+            Verb::Open { target } => fx.push(Effect::Open { target }),
+            Verb::Follow { forum: named, on } => {
+                let Some(f) = named.or_else(|| forum(self)) else {
+                    return;
+                };
+                fx.push(Effect::Follow {
+                    forum: f.clone(),
+                    on,
+                });
+                // a forum followed by name opens
+                if on && !self.stack.iter().any(|s| matches!(&s.kind, ScreenKind::Forum(x) if x.uri == f))
+                {
+                    self.push_forum(f, fx);
+                }
+            }
+            Verb::Join { note } => {
+                let Some(forum) = forum(self) else { return };
+                if self.can_write() {
+                    fx.push(Effect::Join {
+                        forum,
+                        note,
+                        screen,
+                    });
+                }
+            }
+            Verb::Leave => {
+                let Some(forum) = forum(self) else { return };
+                if self.can_write() {
+                    fx.push(Effect::Leave { forum, screen });
+                }
+            }
+            Verb::Members { status, pending } => {
+                let Some(forum) = forum(self) else { return };
+                fx.push(Effect::LoadMembers {
+                    forum,
+                    status,
+                    pending,
+                });
+            }
+            Verb::Access { op, actors } => {
+                let Some(forum) = forum(self) else { return };
+                if self.can_write() {
+                    fx.push(Effect::Access {
+                        op,
+                        forum,
+                        actors,
+                        screen,
+                    });
+                }
+            }
+            Verb::Adopt { former } => {
+                let Some(forum) = forum(self) else { return };
+                if self.can_write() {
+                    fx.push(Effect::Adopt {
+                        forum,
+                        former,
+                        screen,
+                    });
+                }
+            }
+            Verb::ForumCreate { slug, name, open } => {
+                if !self.can_write() {
+                    return;
+                }
+                let mut draft = ForumDraft::new(slug, name);
+                if open {
+                    draft.membership = MembershipMode::Open;
+                }
+                fx.push(Effect::ForumCreate { draft });
+            }
+            Verb::ForumEdit(changes) => {
+                let Some(forum) = forum(self) else { return };
+                if self.can_write() {
+                    fx.push(Effect::ForumEdit {
+                        forum,
+                        changes,
+                        screen,
+                    });
+                }
+            }
+            Verb::Edit => {
+                let Some((uri, forum)) = item(self, "edit") else {
+                    return;
+                };
+                if self.can_write() {
+                    fx.push(Effect::StartEdit { uri, forum });
+                }
+            }
+            Verb::Delete | Verb::Retract | Verb::Redact => {
+                let (op, what) = match verb {
+                    Verb::Delete => (ItemOp::Delete, "delete"),
+                    Verb::Retract => (ItemOp::Retract, "retract"),
+                    _ => (ItemOp::Redact, "redact"),
+                };
+                let Some((uri, forum)) = item(self, what) else {
+                    return;
+                };
+                if !self.can_write() {
+                    return;
+                }
+                let e = Effect::ItemWrite {
+                    op,
+                    uri,
+                    forum,
+                    screen,
+                };
+                // neither a deletion nor a redaction can be undone: ask first
+                let question = match op {
+                    ItemOp::Delete => Some("Delete this item, with its revisions?"),
+                    ItemOp::Redact => Some("Delete this item's version history? It cannot be undone."),
+                    ItemOp::Retract => None,
+                };
+                match question {
+                    Some(q) => {
+                        self.confirm = Some(Confirm {
+                            text: q.to_owned(),
+                            effects: vec![e],
+                        });
+                    }
+                    None => fx.push(e),
+                }
+            }
+            Verb::Raw => {
+                let Some((uri, forum)) = item(self, "show") else {
+                    return;
+                };
+                fx.push(Effect::LoadRaw { uri, forum });
+            }
+            Verb::Bookmark { on } => {
+                let Some((uri, forum)) = item(self, "bookmark") else {
+                    return;
+                };
+                if self.can_write() {
+                    fx.push(Effect::Bookmark { uri, forum, on });
+                }
+            }
+            Verb::Subscribe { target, on } => {
+                let subscription = match target {
+                    SubTarget::Post(named) => {
+                        // a comment's subscription is its thread's post
+                        let post = named.or_else(|| {
+                            self.top_thread()
+                                .and_then(|t| t.post())
+                                .map(|p| p.post.uri.clone())
+                                .or_else(|| self.top_forum_screen()?.selected().map(|p| p.uri.clone()))
+                        });
+                        let Some(uri) = post else {
+                            self.say(Tone::Info, lit("Nothing selected to subscribe to."));
+                            return;
+                        };
+                        Subscription::Post { uri }
+                    }
+                    SubTarget::Forum => {
+                        let Some(uri) = forum(self) else { return };
+                        Subscription::Forum { uri }
+                    }
+                    SubTarget::User(did) => Subscription::User { did },
+                    SubTarget::Tag(slug) => {
+                        let Some(forum) = forum(self) else { return };
+                        Subscription::Tag { forum, slug }
+                    }
+                };
+                if self.can_write() {
+                    fx.push(Effect::Subscribe { subscription, on });
+                }
+            }
+            Verb::Mute { actor, on } => {
+                let Some(actor) = actor.or_else(|| self.mod_subject().map(|m| m.author)) else {
+                    self.say(Tone::Info, lit("Nothing selected: name an actor."));
+                    return;
+                };
+                if self.can_write() {
+                    fx.push(Effect::Mute { actor, on });
+                }
+            }
+            Verb::KarmaNotifications(cadence) => {
+                if cadence.is_none() || self.can_write() {
+                    fx.push(Effect::KarmaNotifications { cadence });
+                }
+            }
+            Verb::Settings { key, value } => fx.push(Effect::Settings {
+                set: key.map(|k| (k, value)),
+            }),
+            Verb::Undo => self.undo_last(fx),
+            Verb::Retry { id } => {
+                let Some(id) = id.or_else(|| self.failed.iter().next_back().cloned()) else {
+                    self.say(Tone::Info, lit("No failed write to send again."));
+                    return;
+                };
+                if self.can_write() {
+                    fx.push(Effect::Retry { id });
+                }
+            }
+            // the M3 verbs are run_command's
+            _ => {}
         }
     }
 
@@ -4542,6 +5232,100 @@ impl State {
             }
         }
     }
+}
+
+/// The `:members` panel: one member per line, with what `MemberView` says of them.
+fn members_lines(members: &[MemberView]) -> Vec<TermText> {
+    if members.is_empty() {
+        return vec![lit("No members match.")];
+    }
+    members
+        .iter()
+        .map(|m| {
+            let role = match m.status {
+                ForumRole::Owner => "owner",
+                ForumRole::Admin => "admin",
+                ForumRole::Moderator => "moderator",
+                ForumRole::Member => "member",
+                ForumRole::Established => "established",
+                ForumRole::Newcomer => "newcomer",
+                ForumRole::None => "not a participant",
+            };
+            let mut parts = vec![actor(&m.actor), lit(role)];
+            if m.applicant {
+                parts.push(lit("applicant"));
+            }
+            if m.granted {
+                parts.push(lit("granted"));
+            }
+            if let Some(k) = m.karma {
+                parts.push(tt(&format!("karma {k}")));
+            }
+            if m.banned {
+                parts.push(lit("banned"));
+            }
+            if m.nullified {
+                parts.push(lit("votes nullified"));
+            }
+            if !m.restricted.is_empty() {
+                parts.push(tt(&format!("restricted: {}", m.restricted.join(", "))));
+            }
+            if let Some(n) = &m.membership_note {
+                parts.push(cat([lit("note: "), tt(n)]));
+            }
+            crate::text::joined(parts)
+        })
+        .collect()
+}
+
+/// The `:raw` panel (`social.md` §10.3, "shows everything, with annotations"): the record's
+/// state, validity and score, the mod actions naming it, and its JSON.
+fn raw_lines(r: &RawView) -> Vec<TermText> {
+    let json = |v: &serde_json::Value| serde_json::to_string_pretty(v).unwrap_or_default();
+    let mut out = vec![tt(&r.uri)];
+    if let Some(c) = &r.cid {
+        out.push(cat([lit("cid "), tt(c)]));
+    }
+    if let Some(st) = &r.state {
+        out.push(cat([
+            lit("state "),
+            tt(&serde_json::to_string(st).unwrap_or_default()),
+        ]));
+    }
+    if let Some(sc) = &r.score {
+        out.push(tt(&format!("score {}", sc.score)));
+    }
+    if r.validity.is_empty() {
+        out.push(lit("valid"));
+    }
+    for v in &r.validity {
+        out.push(cat([lit("violation: "), tt(v)]));
+    }
+    out.push(tt(&format!("{} mod actions name it", r.assertions.len())));
+    for a in &r.assertions {
+        out.extend(json(a).lines().map(|l| cat([lit("  "), tt(l)])));
+    }
+    match &r.record {
+        Some(v) => {
+            out.push(lit("record:"));
+            out.extend(json(v).lines().map(tt));
+        }
+        None => out.push(lit("The record is not cached.")),
+    }
+    out
+}
+
+/// The `:settings` panel.
+fn settings_lines(s: &Settings) -> Vec<TermText> {
+    let v = serde_json::to_value(s).unwrap_or_default();
+    let mut out = Vec::new();
+    if let Some(o) = v.as_object() {
+        for (k, val) in o {
+            out.push(tt(&format!("{k}: {val}")));
+        }
+    }
+    out.push(lit("Change one with `set <key> <value>`; `unset <key>` restores it."));
+    out
 }
 
 fn st_is_ok(s: &SyncStatus) -> bool {
