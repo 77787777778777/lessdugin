@@ -539,7 +539,7 @@ A DID in B (forum tier, `access = banned`, resolved at rank `banRank(d)`):
 - **Allow-lists.** Equal-rank locks intersect their allow-lists. Entries outside p's thread are ignored (MA9).
 - **Unlocking.** The actor deletes their own record, or a higher rank writes `#lock{locked: false}`.
 - **Forum-wide locks** (a forum uri as subject) are **Reserved (P2)** and have no effect. An owner can archive a forum by switching it to approval mode (§3.3).
-- **Composer.** Clients refuse to compose a comment on a locked post, unless the writer is in A or the comment would be exempt. This is UX, not security.
+- **Composer.** Clients refuse to compose a comment on a locked post, unless the writer is in A or the comment would be exempt. A new comment is never on the allow-list and has no keep, so the engine's `comment` refuses it unless the writer is in A, or is the post's author under an author lock (`engine-api.md` §3.5). This is UX, not security.
 
 ### 4.9 Author moderation (L5)
 

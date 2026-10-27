@@ -259,7 +259,7 @@ emits `Auth { did, state: Expired }`, and the next login of the account (`add_ac
 | Operation | Notes |
 |---|---|
 | `publish(PostDraft)` | `PostDraft { forum, kind, title?, body: BodyDraft, link?, tags?, labels? }`; adds membership on first content (`data-model.md` §8) |
-| `comment(CommentDraft)` | `{ root, parent?, body, quote? }` |
+| `comment(CommentDraft)` | `{ root, parent?, body, quote? }`; on a locked post (forum tier, or an author lock by someone else) refused unless the writer is in A (`blocked`, `detail.kind = "locked"`; `social.md` §4.8 "Composer"): it would be published and hidden from everyone at once |
 | `edit(uri, Draft, EditOpts { history: bool, summary? })` | edit protocol with revision snapshot |
 | `delete(uri)` / `retract(uri)` | |
 | `opinion(subject_uri, OpinionIntent) -> ActionTicket` | the active account's opinion on a cached post, comment, wiki revision or sequence (`data-model.md` §8.5): `Karma { value? }`, `Agreement { value? }` (an absent value clears the axis), `React { id, stance, quote?, remove? }` (`quote.exact` only: the engine derives `prefix`, `suffix` and `start` from the item's current text), `Tag { slug, value? }`. Held for the 4 s undo window (`OPINION_UNDO_WINDOW_MS`, `Pending { held }`); an intent on a subject whose write is still held joins it (the ticket is that write's). When sent, the record is re-read and the intents re-applied per axis, so two devices' opinions merge; an opinion left empty is deleted; `subject.cid` is the cached version's. Refused before enqueueing when it could never count: `blocked` (banned, nullified, restricted, a gate of `ViewerCaps`), `invalid_input` (an own item, a forum without agreement or reacts, an unknown react, nothing to react against, an unknown value), `invalid_ref` (not an opinion subject), `not_found` (not cached). A vote that does not carry weight yet is recorded with a `notEstablished` notice ("recorded; will count once you're established"). A public action (§3.6) |
@@ -276,6 +276,11 @@ emits `Auth { did, state: Expired }`, and the next login of the account (`add_ac
 
 `BodyDraft { markdown, media?: Vec<MediaRef> }` — the engine performs spill-to-blob, mention
 rewriting (`at://handle` → DID), derived `mentions`/`links`, and validation before persisting.
+The rewriting covers every handle-authority `at://` link destination (inline links, autolinks,
+link reference definitions; not code) of every body a write carries (posts, comments, edits, a
+forum's `about`, a tier notice): a handle that does not verify in both directions refuses the
+write (`invalid_input`, `detail.kind = "unresolvedHandle"`, `detail.handle`), since its link
+would be published dead (`lfm-1.md` §5.2).
 
 **`ActionTicket { id, state, notices? }`** is a `WriteTicket` (same `id`, same `state`, the same
 `Write` events) plus the notices clients show with the result: `ActionNotice { code, message }`

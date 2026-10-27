@@ -712,3 +712,45 @@ fn the_mod_log_is_never_redacted() {
     let uri = format!("at://{did}/{}/{p}-3l2s5xxv2zab2", nsid::REVISION);
     block_on(alice.engine.delete(&uri)).unwrap();
 }
+
+/// m4-14 (`lfm-1.md` §5.2, §12; W7): a writer rewrites handle-authority `at://` destinations
+/// to DIDs before publishing, so the link renders and the mention is derived; a uri shown in
+/// code stays as written, and a handle that does not verify is refused.
+#[test]
+fn handle_links_are_published_with_dids() {
+    let s = scenario();
+    let (alice, bob) = (&s.w.alice, &s.w.bob);
+    let bob_rkey = s.bob_post.rsplit('/').next().unwrap();
+    let md = format!(
+        "Hi [@bob](at://bob.example.com), see [his post](at://bob.example.com/{}/{bob_rkey}) \
+         and [ref].\n\nCode: `at://bob.example.com` stays.\n\n[ref]: at://Bob.Example.com\n",
+        nsid::POST
+    );
+    let t = block_on(alice.engine.publish(&PostDraft::article(&s.forum, "Links", &md))).unwrap();
+    alice.flush();
+    let uri = alice.done(&t);
+    let rec = alice.acct.get(nsid::POST, uri.rsplit('/').next().unwrap()).unwrap();
+    let text = rec["body"]["text"].as_str().unwrap();
+    let did = bob.did();
+    assert!(text.contains(&format!("[@bob](at://{did})")), "{text}");
+    assert!(text.contains(&format!("(at://{did}/{}/{bob_rkey})", nsid::POST)), "{text}");
+    assert!(text.contains(&format!("[ref]: at://{did}\n")), "{text}");
+    assert!(text.contains("`at://bob.example.com`"), "code is not a link: {text}");
+    assert_eq!(rec["body"]["mentions"], serde_json::json!([did]));
+    assert_eq!(
+        rec["body"]["links"],
+        serde_json::json!([format!("at://{did}/{}/{bob_rkey}", nsid::POST)])
+    );
+
+    let err = block_on(alice.engine.publish(&PostDraft::article(
+        &s.forum,
+        "Dead",
+        "[who](at://nobody.example.com)",
+    )))
+    .unwrap_err();
+    assert_eq!(err.code, ErrorCode::InvalidInput, "{err:?}");
+    assert_eq!(
+        err.detail.as_ref().and_then(|d| d.get("kind")),
+        Some(&serde_json::json!("unresolvedHandle"))
+    );
+}
