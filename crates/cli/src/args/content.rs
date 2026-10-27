@@ -97,7 +97,8 @@ pub enum ModeArg {
     /// Members need a grant from the owner or an admin (`approve`).
     #[default]
     Approval,
-    /// Anyone who joins is a member.
+    /// Anyone who joins is a member. Open mode relies on Bluesky relay, Jetstream and
+    /// Constellation (or an indexer) to find new members; approval mode needs no third party.
     Open,
 }
 

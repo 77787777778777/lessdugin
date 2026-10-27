@@ -952,3 +952,24 @@ fn t_uri(u: &User) -> String {
     let (rkey, _) = &u.account.list(nsid::POST)[0];
     format!("at://{}/{}/{rkey}", u.did(), nsid::POST)
 }
+
+/// Open mode carries the L7 label (`threat-model.md` L7, SOC-13): `forum create --mode open`
+/// prints it, and so does the forum header (`forum show`). Approval mode, complete without
+/// third-party servers, does not.
+#[test]
+fn open_mode_carries_the_relay_label() {
+    const LABEL: &str = "Open mode relies on Bluesky relay, Jetstream and Constellation";
+    let net = Net::new();
+    let alice = net.user("alice.test", true);
+    let out = alice.run(&["forum", "create", "lounge", "--mode", "open"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(text(&out.stderr).contains(LABEL), "{}", text(&out.stderr));
+    let show = alice.ok(&["forum", "show", "alice.test/lounge"]);
+    assert!(show.contains(LABEL), "{show}");
+
+    let out = alice.run(&["forum", "create", "meta"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(!text(&out.stderr).contains("Open mode"), "{}", text(&out.stderr));
+    let show = alice.ok(&["forum", "show", "alice.test/meta"]);
+    assert!(!show.contains("Open mode"), "{show}");
+}

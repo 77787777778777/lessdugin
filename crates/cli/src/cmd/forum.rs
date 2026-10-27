@@ -27,6 +27,14 @@ use crate::ctx::{CliError, Ctx};
 use crate::out::{Style, TermText, cat, lit, name, tt};
 use crate::render;
 
+/// The L7 label of an open forum (`threat-model.md` L7, SOC-13): only approval mode is complete
+/// without third-party servers.
+const OPEN_MODE_LABEL: &str = "Open mode relies on Bluesky relay, Jetstream and Constellation \
+                               (or an indexer) to find new members.";
+
+/// The banner code of the same label, should the engine carry it (shown once).
+const RELAY_DEPENDENT: &str = "relayDependent";
+
 fn mode(m: MembershipMode) -> &'static str {
     match m {
         MembershipMode::Open => "open",
@@ -173,6 +181,9 @@ pub async fn forum(ctx: &Ctx, args: ForumArgs) -> Result<(), CliError> {
             let w = ctx.writer().await?;
             let mut d = ForumDraft::new(slug.clone(), name.unwrap_or_else(|| slug.clone()));
             d.membership = mode.into();
+            if d.membership == MembershipMode::Open {
+                ctx.out.warn(lit(OPEN_MODE_LABEL));
+            }
             d.description = description;
             d.about = about.map(BodyDraft::text);
             d.default_tier = if frontpage {
@@ -280,6 +291,9 @@ async fn show(ctx: &Ctx, forum: Option<&str>) -> Result<(), CliError> {
     out.field("uri", 11, tt(&f.uri));
     out.field("owner", 11, render::actor(&f.owner));
     out.field("membership", 11, lit(mode(f.membership)));
+    if f.membership == MembershipMode::Open {
+        out.field("", 11, lit(OPEN_MODE_LABEL));
+    }
     out.field("your role", 11, lit(role(v.my_role)));
     out.field(
         "followed",
@@ -321,7 +335,7 @@ async fn show(ctx: &Ctx, forum: Option<&str>) -> Result<(), CliError> {
             }),
         ]),
     );
-    for b in &v.banners {
+    for b in v.banners.iter().filter(|b| b.code != RELAY_DEPENDENT) {
         out.warn(tt(&b.message));
     }
     if v.about.is_some() {
