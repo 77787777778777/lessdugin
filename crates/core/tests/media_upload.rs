@@ -357,15 +357,17 @@ fn prepared_bytes_of_a_draft_never_sent_expire() {
 fn legacy_prepared_rows_are_neither_exported_nor_imported() {
     // they were swept only when the next file was prepared, so until then export_local carried
     // the bytes of every file prepared by the first M4 builds, and import_local brought them back
+    use base64::Engine as _;
     use lessdugin_core::engine::ExportScope;
     use lessdugin_core::host::{Host as _, KvOp, KvStore as _};
+    let b64 = |b: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b);
     let host = MemHost::new();
     let e = Engine::new(host.clone(), EngineConfig::default());
     let legacy = lessdugin_core::key!("loc", "media", "bafkreiold");
-    let follow = lessdugin_core::key!("loc", "bookmark", "at://did:plc:x/p/1");
+    let bookmark = lessdugin_core::key!("loc", "bookmark", "at://did:plc:x/p/1");
     block_on(host.state().write(vec![
         KvOp::Put(legacy.clone(), br#"{"mime":"image/png","bytes":[1,2,3]}"#.to_vec()),
-        KvOp::Put(follow.clone(), b"1".to_vec()),
+        KvOp::Put(bookmark.clone(), b"1".to_vec()),
     ]))
     .unwrap();
     let export = block_on(e.export_local(ExportScope::Everything)).unwrap();
@@ -377,27 +379,14 @@ fn legacy_prepared_rows_are_neither_exported_nor_imported() {
     let f = Engine::new(fresh.clone(), EngineConfig::default());
     let mut old = export.clone();
     old.members.push(lessdugin_core::engine::ExportMember {
-        key: base64_url(&legacy),
+        key: b64(&legacy),
         parts: Vec::new(),
-        value: base64_url(b"[1,2,3]"),
+        value: b64(b"[1,2,3]"),
     });
     let report = block_on(f.import_local(&old, ExportScope::Everything)).unwrap();
     assert_eq!(report.out_of_scope, 1);
     assert!(rows(&fresh, lessdugin_core::key!("loc", "media")).is_empty());
-    assert_eq!(rows(&fresh, follow).len(), 1);
-}
-
-/// base64url without padding, as exports write keys and values.
-fn base64_url(b: &[u8]) -> String {
-    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-    let mut out = String::new();
-    for c in b.chunks(3) {
-        let n = c.iter().enumerate().fold(0u32, |n, (i, &x)| n | u32::from(x) << (16 - 8 * i));
-        for i in 0..=c.len() {
-            out.push(A[(n >> (18 - 6 * i) & 63) as usize] as char);
-        }
-    }
-    out
+    assert_eq!(rows(&fresh, bookmark).len(), 1);
 }
 
 #[test]
