@@ -11,8 +11,10 @@ use std::collections::BTreeMap;
 
 use lessdugin_atp::syntax::AtUri;
 use lessdugin_core::dto::{
-    ActorView, Capability, ListPostsQuery, ModActionIntent, ModActionValue, ModScope,
-    NotificationsQuery, PostFilter, PostSort, Ref, RefContext, SyncOpts, ThreadOpts, ThreadRoot,
+    ActorView, BodyDraft, Capability, CommentDraft, DefaultTier, Draft, EditOpts,
+    ExternalLinkDraft, ForumDraft, KarmaCadence, ListPostsQuery, MembersQuery, MembershipMode,
+    ModActionIntent, ModActionValue, ModScope, NotificationsQuery, PostDraft, PostFilter,
+    PostKind, PostSort, Ref, RefContext, SyncOpts, TextQuote, ThreadOpts, ThreadRoot,
 };
 use lessdugin_core::engine::{Engine, EngineError};
 use lessdugin_core::host::Host;
@@ -21,9 +23,12 @@ use lessdugin_core::store::records::RecordStore;
 use lessdugin_lexicon::collection::nsid;
 use lessdugin_lexicon::ns::NS;
 
-use crate::app::{Action, ActivityData, Effect, ForumData, HomeData, SyncTarget, ThreadData};
+use crate::app::{
+    Action, ActivityData, Compose, EditorRequest, Effect, ForumData, HomeData, ItemOp, SyncTarget,
+    ThreadData,
+};
 use crate::body::Body;
-use crate::command::RestrictDim;
+use crate::command::{AccessOp, ForumChanges, RestrictDim};
 
 /// How many queued handle verifications a load runs before showing a view (as the CLI).
 pub const VERIFY_HANDLES: usize = 256;
@@ -239,7 +244,350 @@ pub async fn run<H: Host>(engine: &Engine<H>, effect: Effect, opts: ExecOpts) ->
             }
             return None;
         }
+        Effect::Open { target } => {
+            Action::Opened(engine.parse_ref(&target, &RefContext::default()).await)
+        }
+        Effect::Follow { forum, on } => Action::LocalDone(if on {
+            engine
+                .forum_follow(&forum, None)
+                .await
+                .map(|()| "Following the forum.".to_owned())
+        } else {
+            engine
+                .forum_unfollow(&forum)
+                .await
+                .map(|()| "No longer following the forum.".to_owned())
+        }),
+        Effect::Join {
+            forum,
+            note,
+            screen,
+        } => Action::Written {
+            what: "Join",
+            screen: Some(screen),
+            result: engine.join(&forum, note.as_deref()).await.map(|t| vec![t]),
+        },
+        Effect::Leave { forum, screen } => Action::Written {
+            what: "Leave",
+            screen: Some(screen),
+            result: engine.leave(&forum).await.map(|t| vec![t]),
+        },
+        Effect::LoadMembers {
+            forum,
+            status,
+            pending,
+        } => Action::MembersLoaded(
+            engine
+                .members(
+                    &forum,
+                    &MembersQuery {
+                        status,
+                        pending: pending.then_some(true),
+                    },
+                )
+                .await,
+        ),
+        Effect::Access {
+            op,
+            forum,
+            actors,
+            screen,
+        } => {
+            let (what, result) = match op {
+                AccessOp::Grant => ("Grant", engine.grant(&forum, &actors).await),
+                AccessOp::Revoke => ("Revoke", engine.revoke(&forum, &actors).await),
+                AccessOp::Approve => ("Approve", engine.approve(&forum, &actors).await),
+                AccessOp::Reject => ("Reject", engine.reject(&forum, &actors).await),
+            };
+            Action::Written {
+                what,
+                screen: Some(screen),
+                result,
+            }
+        }
+        Effect::Adopt {
+            forum,
+            former,
+            screen,
+        } => Action::Written {
+            what: "Adoption",
+            screen: Some(screen),
+            result: engine.mod_adopt(&forum, &former).await.map(|t| vec![t]),
+        },
+        Effect::ForumCreate { draft } => Action::Written {
+            what: "New forum",
+            screen: None,
+            result: engine.forum_create(&draft).await.map(|t| vec![t]),
+        },
+        Effect::ForumEdit {
+            forum,
+            changes,
+            screen,
+        } => Action::Written {
+            what: "Forum edit",
+            screen: Some(screen),
+            result: match forum_draft(engine, &forum, &changes).await {
+                Ok(d) => engine.forum_update(&forum, &d).await.map(|t| vec![t]),
+                Err(e) => Err(e),
+            },
+        },
+        Effect::StartEdit { uri, forum } => Action::EditReady(start_edit(engine, &uri, &forum).await),
+        Effect::Edit { uri, draft, text } => Action::Queued {
+            compose: Compose::Edit {
+                uri: uri.clone(),
+                base: draft.clone(),
+            },
+            text,
+            result: engine.edit(&uri, &draft, &EditOpts::default()).await,
+        },
+        Effect::ItemWrite {
+            op,
+            uri,
+            forum,
+            screen,
+        } => {
+            let what = match op {
+                ItemOp::Delete => "Delete",
+                ItemOp::Retract => "Retract",
+                ItemOp::Redact => "Redaction",
+            };
+            let result = match item_uri(engine, &uri, &forum).await {
+                Ok(uri) => match op {
+                    ItemOp::Delete => engine.delete(&uri).await.map(|t| vec![t]),
+                    ItemOp::Retract => engine.retract(&uri).await.map(|t| vec![t]),
+                    ItemOp::Redact => engine.redact_revision(&uri).await,
+                },
+                Err(e) => Err(e),
+            };
+            Action::Written {
+                what,
+                screen: Some(screen),
+                result,
+            }
+        }
+        Effect::LoadRaw { uri, forum } => Action::RawLoaded(match item_uri(engine, &uri, &forum).await {
+            Ok(uri) => engine.raw(&uri).await,
+            Err(e) => Err(e),
+        }),
+        Effect::Bookmark { uri, forum, on } => {
+            Action::LocalDone(match item_uri(engine, &uri, &forum).await {
+                Ok(uri) => engine.bookmark(&uri, on).await.map(|()| {
+                    if on { "Bookmarked." } else { "Bookmark removed." }.to_owned()
+                }),
+                Err(e) => Err(e),
+            })
+        }
+        Effect::Subscribe { subscription, on } => Action::LocalDone(
+            engine
+                .set_subscription(&subscription, on)
+                .await
+                .map(|()| if on { "Subscribed." } else { "Unsubscribed." }.to_owned()),
+        ),
+        Effect::Mute { actor, on } => Action::LocalDone(
+            engine
+                .mute(&actor, on)
+                .await
+                .map(|()| if on { "Muted." } else { "Unmuted." }.to_owned()),
+        ),
+        Effect::KarmaNotifications { cadence } => Action::LocalDone(match cadence {
+            Some(c) => engine
+                .set_karma_notifications(c)
+                .await
+                .map(|()| format!("Karma notifications: {}.", cadence_name(c))),
+            None => engine
+                .karma_notifications()
+                .await
+                .map(|c| format!("Karma notifications: {}.", cadence_name(c))),
+        }),
+        Effect::Settings { set } => {
+            if let Some((key, value)) = set
+                && let Err(e) = engine.set_setting(&key, value.as_deref()).await
+            {
+                return Some(Action::LocalDone(Err(e)));
+            }
+            Action::SettingsLoaded(engine.settings().await)
+        }
+        Effect::Retry { id } => Action::Written {
+            what: "Retry",
+            screen: None,
+            result: engine.retry_write(&id).await.map(|t| vec![t]),
+        },
         Effect::Editor(_) | Effect::Quit => return None,
+    })
+}
+
+fn cadence_name(c: KarmaCadence) -> &'static str {
+    match c {
+        KarmaCadence::Realtime => "realtime",
+        KarmaCadence::Daily => "daily",
+        KarmaCadence::Weekly => "weekly",
+    }
+}
+
+/// The cached record of `uri` as JSON.
+async fn cached<H: Host>(
+    engine: &Engine<H>,
+    uri: &str,
+) -> Result<serde_json::Value, EngineError> {
+    let u = AtUri::parse(uri).map_err(|e| EngineError::invalid_ref(format!("{uri:?}: {e}")))?;
+    let row = RecordStore::new(engine.host().cache())
+        .get(&u)
+        .await
+        .map_err(|e| EngineError::internal(e.to_string()))?
+        .ok_or_else(|| EngineError::not_found(format!("{uri} is not available")))?;
+    row.value_json()
+        .map_err(|e| EngineError::internal(format!("{uri}: {e}")))
+}
+
+/// The markdown of a cached body (`""` for none); a body stored as a blob is not edited here,
+/// as in the CLI.
+fn body_markdown(v: &serde_json::Value) -> Result<String, EngineError> {
+    let body = v.get("body");
+    match body.and_then(|b| b.get("text")).and_then(serde_json::Value::as_str) {
+        Some(t) => Ok(t.to_owned()),
+        None if body.is_none() => Ok(String::new()),
+        None => Err(EngineError::invalid_input(
+            "this body is stored as a blob; edit it with `lessdugin edit`",
+        )),
+    }
+}
+
+/// `:edit`: your post or comment's draft as cached (the fields the CLI's `edit` keeps) and the
+/// editor session on its text.
+async fn start_edit<H: Host>(
+    engine: &Engine<H>,
+    uri: &str,
+    forum: &str,
+) -> Result<EditorRequest, EngineError> {
+    let uri = item_uri(engine, uri, forum).await?;
+    let me = engine.active_account().await?.map(|a| a.did);
+    let u = AtUri::parse(&uri).map_err(|e| EngineError::invalid_ref(format!("{uri:?}: {e}")))?;
+    if me.as_deref() != Some(u.did().as_str()) {
+        return Err(EngineError::invalid_input("only your own posts and comments can be edited"));
+    }
+    let v = cached(engine, &uri).await?;
+    let markdown = body_markdown(&v)?;
+    let s = |k: &str| v.get(k).and_then(serde_json::Value::as_str).map(str::to_owned);
+    let strong = |k: &str| {
+        v.get(k)
+            .and_then(|r| r.get("uri"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+    };
+    let (base, prefill, context, post) = match u.collection().as_str() {
+        nsid::POST => {
+            let kind = s("kind")
+                .and_then(|k| serde_json::from_value::<PostKind>(serde_json::Value::String(k)).ok())
+                .unwrap_or(PostKind::Article);
+            let title = s("title").unwrap_or_default();
+            let draft = PostDraft {
+                forum: s("forum").unwrap_or_default(),
+                kind,
+                title: Some(title.clone()),
+                body: BodyDraft::text(markdown.clone()),
+                link: strong("link").map(|uri| ExternalLinkDraft {
+                    uri,
+                    title: None,
+                    description: None,
+                }),
+                tags: strs(v.get("tags")),
+                labels: v
+                    .get("labels")
+                    .and_then(|l| l.get("values"))
+                    .and_then(serde_json::Value::as_array)
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.get("val")?.as_str().map(str::to_owned))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            };
+            (
+                Draft::Post { id: None, post: draft },
+                format!("{title}\n\n{markdown}"),
+                vec![format!("Editing your post: {title}")],
+                true,
+            )
+        }
+        nsid::COMMENT => (
+            Draft::Comment {
+                id: None,
+                comment: CommentDraft {
+                    root: strong("root").unwrap_or_default(),
+                    parent: strong("parent"),
+                    body: BodyDraft::text(markdown.clone()),
+                    quote: v
+                        .get("quote")
+                        .and_then(|q| serde_json::from_value::<TextQuote>(q.clone()).ok()),
+                },
+            },
+            markdown,
+            vec!["Editing your comment".to_owned()],
+            false,
+        ),
+        _ => return Err(EngineError::invalid_ref(format!("{uri} is not a post or a comment"))),
+    };
+    Ok(EditorRequest {
+        compose: Compose::Edit { uri, base },
+        template: crate::editor::edit_template(&prefill, &context, post),
+    })
+}
+
+fn strs(v: Option<&serde_json::Value>) -> Vec<String> {
+    v.and_then(serde_json::Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// `:forum edit`: the forum's cached declaration as a draft, with `changes` applied
+/// (`forum_update` writes every field it carries).
+async fn forum_draft<H: Host>(
+    engine: &Engine<H>,
+    forum: &str,
+    changes: &ForumChanges,
+) -> Result<ForumDraft, EngineError> {
+    let v = cached(engine, forum).await?;
+    let s = |k: &str| v.get(k).and_then(serde_json::Value::as_str).map(str::to_owned);
+    let about = match v.get("about") {
+        None => None,
+        Some(b) => match b.get("text").and_then(serde_json::Value::as_str) {
+            Some(t) => Some(BodyDraft::text(t)),
+            None => {
+                return Err(EngineError::invalid_input(
+                    "the forum's about text is stored as a blob; edit the forum in the web app",
+                ));
+            }
+        },
+    };
+    let empty_is_none = |o: &Option<String>| o.clone().filter(|t| !t.is_empty());
+    Ok(ForumDraft {
+        // the slug is fixed; empty keeps it
+        slug: String::new(),
+        name: changes.name.clone().or_else(|| s("name")).unwrap_or_default(),
+        description: match &changes.description {
+            Some(_) => empty_is_none(&changes.description),
+            None => s("description"),
+        },
+        about,
+        membership: changes.membership.unwrap_or(match s("membership").as_deref() {
+            Some("open") => MembershipMode::Open,
+            _ => MembershipMode::Approval,
+        }),
+        default_tier: changes.default_tier.unwrap_or(match s("defaultTier").as_deref() {
+            Some("frontpage") => DefaultTier::Frontpage,
+            _ => DefaultTier::Personal,
+        }),
+        featured_tags: strs(v.get("featuredTags")),
+        // an empty list keeps the moderators (they change through mods_set)
+        moderators: Vec::new(),
+        report_contact: match &changes.report_contact {
+            Some(_) => empty_is_none(&changes.report_contact),
+            None => s("reportContact"),
+        },
     })
 }
 
