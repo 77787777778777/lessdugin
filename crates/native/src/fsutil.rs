@@ -313,16 +313,8 @@ mod tests {
             read_regular_nofollow(dir.path(), 10).is_err(),
             "a directory"
         );
-        // a FIFO is refused without blocking the open
-        let fifo = dir.path().join("fifo.png");
-        let status = std::process::Command::new("mkfifo")
-            .arg(&fifo)
-            .status()
-            .unwrap();
-        assert!(status.success());
-        assert_eq!(
-            read_regular_nofollow(&fifo, 10).unwrap_err().kind(),
-            io::ErrorKind::InvalidInput
-        );
+        // a FIFO: tests/fsutil.rs, since making one here would spawn mkfifo(1) (the crate
+        // forbids the unsafe mkfifo(3)), and a child between fork and exec holds a copy of
+        // another test's flock (config::tests::sync_leader_lock_is_exclusive)
     }
 }

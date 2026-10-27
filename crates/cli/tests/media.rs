@@ -226,13 +226,9 @@ fn local_files_outside_the_rules_are_refused() {
             .to_path_buf();
         std::os::unix::fs::symlink(alice.dir.path(), dir.join("up")).unwrap();
         let fifo = dir.join("fifo.png");
-        assert!(
-            std::process::Command::new("mkfifo")
-                .arg(&fifo)
-                .status()
-                .unwrap()
-                .success()
-        );
+        let fifo = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: a NUL-terminated path that outlives the call.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
         for path in ["up/outside.png", "fifo.png"] {
             let out = publish_draft(
                 &alice,

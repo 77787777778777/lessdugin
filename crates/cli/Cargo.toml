@@ -58,3 +58,7 @@ reqwest.workspace = true
 # Forum and content commands against a FakePds network served over HTTP (tests/content.rs).
 lessdugin-testkit = { workspace = true, features = ["http"] }
 insta = { workspace = true, features = ["filters"] }
+
+[target.'cfg(unix)'.dev-dependencies]
+# tests/media.rs: a FIFO among a draft's files.
+libc.workspace = true
