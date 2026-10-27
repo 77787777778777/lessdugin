@@ -41,6 +41,8 @@ impl Incoming<'_> {
 /// How the transport must deliver an answer.
 #[derive(Debug)]
 pub(crate) enum Abort {
+    /// Not an abort: the body is this generated blob, streamed (HTTP) or built (in memory).
+    Generate(super::blob::Generated),
     /// Drop the connection without an answer.
     Disconnect,
     /// Deliver only this many body bytes.
@@ -72,6 +74,8 @@ struct Ctx<'a> {
     caller: &'a str,
     fork: bool,
     auth: Option<String>,
+    /// The answer's body is this generated blob (`getBlob` of one).
+    generated: Option<super::blob::Generated>,
 }
 
 const PROCEDURES: &[&str] = &[
@@ -413,6 +417,7 @@ impl NetState {
             caller: inc.caller,
             fork: false,
             auth: route.userpds.clone(),
+            generated: None,
         };
         let mut abort = None;
         let mut extra_headers = Vec::new();
@@ -447,6 +452,11 @@ impl NetState {
         };
         let mut resp = resp;
         resp.headers.extend(extra_headers);
+        if abort.is_none()
+            && let Some(g) = ctx.generated
+        {
+            abort = Some(Abort::Generate(g));
+        }
         if abort.is_none()
             && let Some(n) = truncate
         {
@@ -599,7 +609,7 @@ impl NetState {
             "com.atproto.sync.getRecord" => self.sync_get_record(base, p, ctx),
             "com.atproto.sync.getRepo" => self.get_repo(base, p, ctx),
             "com.atproto.sync.getRepoStatus" => self.get_repo_status(base, p, ctx),
-            "com.atproto.sync.getBlob" => self.get_blob(base, p),
+            "com.atproto.sync.getBlob" => self.get_blob(base, p, ctx),
             "com.atproto.sync.listBlobs" => self.list_blobs(base, p),
             "com.atproto.identity.resolveHandle" => self.resolve_handle(p),
             "com.atproto.server.describeServer" => Ok(self.describe_server(base)),
@@ -880,7 +890,7 @@ impl NetState {
         Ok(resp::ok_json(&Value::Object(out)))
     }
 
-    fn get_blob(&mut self, base: &str, p: &BTreeMap<String, String>) -> R {
+    fn get_blob(&mut self, base: &str, p: &BTreeMap<String, String>, ctx: &mut Ctx<'_>) -> R {
         let (did, cid) = (need(p, "did")?, need(p, "cid")?);
         let cid = lessdugin_atp::cid::parse(cid).map_err(|_| bad("Invalid cid"))?;
         match self.accounts.get(did) {
@@ -889,9 +899,18 @@ impl NetState {
             _ => return Err(repo_not_found(did)),
         }
         let a = &self.accounts[did];
-        match a.blobs.get(&cid).filter(|b| b.permanent) {
-            Some(b) => {
-                let mut r = resp::bytes(200, &b.mime, b.bytes.as_ref().clone());
+        let served = a.blobs.get(&cid).filter(|b| b.permanent).map(|b| {
+            (b.mime.clone(), b.bytes.as_ref().clone())
+        });
+        let served = served.or_else(|| {
+            let (g, mime) = a.generated.get(&cid)?;
+            // the transport makes the body (Abort::Generate), a chunk at a time
+            ctx.generated = Some(*g);
+            Some((mime.clone(), Vec::new()))
+        });
+        match served {
+            Some((mime, bytes)) => {
+                let mut r = resp::bytes(200, &mime, bytes);
                 r.headers
                     .push(("x-content-type-options".to_owned(), "nosniff".to_owned()));
                 r.headers.push((
