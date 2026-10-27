@@ -461,6 +461,31 @@ impl Host for MemHost {
         })
     }
 
+    async fn blob_open(&self, cid: &str) -> Result<Option<BlobHandle>, HostError> {
+        Ok(self.blob(cid).map(|bytes| BlobHandle {
+            cid: cid.to_owned(),
+            size: bytes.len() as u64,
+            locator: format!("mem:{cid}"),
+        }))
+    }
+
+    async fn blob_read(&self, cid: &str, offset: u64, len: u32) -> Result<Vec<u8>, HostError> {
+        let bytes = lock(&self.inner.blobs)
+            .get(cid)
+            .map(|b| {
+                let start = usize::try_from(offset).unwrap_or(usize::MAX).min(b.len());
+                let n = len.min(lessdugin_core::host::BLOB_READ_MAX_BYTES) as usize;
+                b[start..b.len().min(start.saturating_add(n))].to_vec()
+            })
+            .ok_or_else(|| HostError::Storage(format!("blob {cid} is not stored")))?;
+        Ok(bytes)
+    }
+
+    async fn blob_delete(&self, cid: &str) -> Result<(), HostError> {
+        lock(&self.inner.blobs).remove(cid);
+        Ok(())
+    }
+
     async fn websocket(&self, url: url::Url, max_message_bytes: u32) -> Result<MemWs, HostError> {
         let s = url.to_string();
         let script = lock(&self.inner.ws)
