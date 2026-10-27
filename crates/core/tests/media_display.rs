@@ -308,19 +308,9 @@ fn a_hidden_spilled_post_is_never_fetched() {
         .net
         .add_pds("bob.example.com")
         .add_account("bob.example.com");
-    let carol = n
-        .net
-        .add_pds("carol.example.com")
-        .add_account("carol.example.com");
     let f = forum(&n, &bob);
-    carol.put(
-        nsid::MEMBERSHIP,
-        &keys::membership_rkey(&f).unwrap(),
-        &json!({"$type": nsid::MEMBERSHIP, "forum": f, "createdAt": dt(n.now())}),
-    );
-    n.tick(MINUTE);
-    let uri = spilled_post(&n, &carol, &f, b"# Spam\n\nBuy now.");
-    // bob, the forum's owner, hides it
+    let uri = spilled_post(&n, &bob, &f, b"# Spam\n\nBuy now.");
+    // bob, the forum's owner, hides it (forum scope)
     let action = json!({"$type": format!("{}#hide", nsid::MOD_ACTION), "hidden": true});
     let rkey = keys::mod_action_rkey(
         lessdugin_lexicon::ns::NS,
@@ -343,7 +333,9 @@ fn a_hidden_spilled_post_is_never_fetched() {
     let r = block_on(e.sync_forum(&f, &SyncOpts::default())).unwrap();
     assert!(r.errors.is_empty(), "{r:?}");
     n.net.clear_requests();
-    let _ = block_on(e.get_post(&uri));
+    // the view lists nothing of it, and nothing was asked of bob's PDS
+    let pv = block_on(e.get_post(&uri)).unwrap();
+    assert_eq!((pv.body.text.as_str(), pv.body.html.as_str()), ("", ""));
     let _ = block_on(e.get_thread(&uri, &Default::default()));
     assert!(blob_requests(&n).is_empty(), "{:?}", blob_requests(&n));
     let blob = lessdugin_atp::cid::for_raw(b"# Spam\n\nBuy now.").to_string();
