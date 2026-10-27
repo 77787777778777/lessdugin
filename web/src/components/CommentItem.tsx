@@ -23,7 +23,7 @@ import styles from "./CommentTree.module.css";
 import { LazyComposer } from "./LazyComposer.tsx";
 import { ModMenu } from "./ModMenu.tsx";
 import { OwnCommentActions } from "./OwnCommentActions.tsx";
-import { COLLAPSE_LABEL } from "./PostMeta.tsx";
+import { collapseNote } from "./PostMeta.tsx";
 import { ReactBar } from "./Reacts.tsx";
 import { RecordLink } from "./RecordLink.tsx";
 import { RenderedHtml, type RenderedHtmlHandle } from "./RenderedHtml.tsx";
@@ -276,12 +276,15 @@ export function CommentItem({
         {version && <span className={styles.note}>{version}</span>}
         {node.orphaned && <span className={styles.note}>re-attached reply</span>}
         {node.retracted && <span className={styles.note}>retracted</span>}
+        {!row.collapsed && collapsedReason && (
+          <span className={styles.note}>{collapseNote(collapsedReason, mine)}</span>
+        )}
         <Badges badges={node.badges} pending={mine && pending} />
       </header>
       {row.collapsed ? (
         <p className={styles.reason}>
           {collapsedReason
-            ? `Collapsed: ${COLLAPSE_LABEL[collapsedReason]}. `
+            ? `${collapseNote(collapsedReason, mine)}. `
             : row.authorOverflow !== undefined
               ? `Collapsed: more than ${THREAD_AUTHOR_EXPANDED_MAX} comments by this author. `
               : "Collapsed. "}

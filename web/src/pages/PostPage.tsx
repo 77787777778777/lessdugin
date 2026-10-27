@@ -17,7 +17,7 @@ import { Dialog } from "../components/Dialog.tsx";
 import { LazyComposer } from "../components/LazyComposer.tsx";
 import { ModMenu } from "../components/ModMenu.tsx";
 import {
-  COLLAPSE_LABEL,
+  collapseNote,
   KindBadge,
   postTitle,
   TagChips,
@@ -305,9 +305,7 @@ function PostBodyView({
             <TierBadge tier={post.tier} />
             {post.pinned && <span>📌 Pinned</span>}
             {post.locked && <span>🔒 Comments locked</span>}
-            {post.state.kind === "collapsed" && (
-              <span>Collapsed: {COLLAPSE_LABEL[post.state.reason]}</span>
-            )}
+            {post.state.kind === "collapsed" && <span>{collapseNote(post.state.reason, own)}</span>}
             <Badges badges={post.badges} pending={own && pending} />
             <HistoryButton
               uri={post.uri}

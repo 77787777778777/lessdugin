@@ -25,6 +25,13 @@ export const COLLAPSE_LABEL: Record<CollapseReason, string> = {
   muted: "you muted this author",
 };
 
+/** The collapse note; on the viewer's own newcomer items (lib/lens.ts) it says who sees them
+ * collapsed. */
+export function collapseNote(reason: CollapseReason, own: boolean): string {
+  const who = own && reason === "newUser" ? "Collapsed for other readers" : "Collapsed";
+  return `${who}: ${COLLAPSE_LABEL[reason]}`;
+}
+
 /** The title of a post for display; quick takes have none, so their excerpt stands in. */
 export function postTitle(post: PostSummary): string {
   if (post.kind !== "quickTake" && post.title) return cleanName(post.title, 300);

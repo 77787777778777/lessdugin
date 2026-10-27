@@ -71,6 +71,23 @@ const uris = (rows: ReturnType<typeof buildRows>) =>
   rows.map((r) => (r.kind === "comment" ? r.node.uri : `continue:${r.parentUri}`));
 
 describe("thread rows", () => {
+  it("expands the viewer's own newcomer comments only (social.md §10.3)", () => {
+    const me = "did:plc:abcdefghijklmnopqrstuvwx";
+    const c = thread[2] as CommentNode;
+    expect(collapsedByDefault(c, new Set(), me)).toBe(false);
+    expect(collapsedByDefault(c, new Set(), "did:plc:someoneelseeeeeeeeeeeeee")).toBe(true);
+    const lowScore = node("x", 1, undefined, { kind: "collapsed", reason: "lowScore" });
+    expect(collapsedByDefault(lowScore, new Set(), me)).toBe(true);
+    expect(uris(buildRows(thread, new Set(), { viewer: me }))).toEqual([
+      "a",
+      "b",
+      "c",
+      "d",
+      "e",
+      "f",
+    ]);
+  });
+
   it("collapses fold-collapsed comments by default and hides their replies", () => {
     expect(collapsedByDefault(thread[2] as CommentNode)).toBe(true);
     const rows = buildRows(thread, new Set());

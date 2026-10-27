@@ -988,6 +988,7 @@ The lens is applied after the fold, from local state only. It never changes any 
 - **Raw view.** Shows everything, with annotations (§4.12).
 - **"My view".** A local alternative algorithm (§6.4).
 - **Display limit.** Clients show at most 50 comments per author per thread expanded, in `(t_rank, uri)` order. The rest collapse behind "show N more by @x" (`limits.md`). This is presentation only.
+- **Own newcomer items.** Clients show the viewer's own `Collapsed(NewUser)` items expanded, with the label kept ("collapsed for other readers"). The state itself stays viewer-independent (V8); this is presentation only (§20.2 item 6).
 
 ---
 
@@ -1509,3 +1510,4 @@ These choices fill gaps in the sources or resolve ambiguities. Each takes the si
 3. **Author moderation requires E (§4.9).** This tightens the gate beyond the synthesis. The alternative is to drop it and weaken P7 to exclude visibility inside outsiders' own threads.
 4. *(Resolved: forum-pinned posts are exempt from the magic cutoff, matching ForumMagnum's sticky posts; see 20.1 item 18.)*
 5. *(Resolved: CO5 compares only a valid root; see 20.1 item 51.)*
+6. **Own newcomer items are shown expanded (§10.3; orchestrator decision O-4, M3–M6 review).** V8 collapses a newcomer's items for every viewer, the newcomer included, so a newcomer could not see what they had just written. Clients now show the viewer's own `Collapsed(NewUser)` items expanded with the label kept, matching the M3 banner "collapsed for other readers". For the U7 review.
