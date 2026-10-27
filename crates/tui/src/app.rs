@@ -4578,7 +4578,7 @@ impl State {
                         .iter()
                         .any(|s| matches!(&s.kind, ScreenKind::Forum(x) if x.uri == f))
                 {
-                    self.push_forum(f, fx);
+                    fx.push(Effect::Open { target: f });
                 }
             }
             Verb::Join { note } => {

@@ -248,9 +248,16 @@ pub async fn run<H: Host>(engine: &Engine<H>, effect: Effect, opts: ExecOpts) ->
             }
             return None;
         }
-        Effect::Open { target } => {
-            Action::Opened(engine.parse_ref(&target, &RefContext::default()).await)
-        }
+        Effect::Open { target } => Action::Opened(
+            match engine.parse_ref(&target, &RefContext::default()).await {
+                Ok(r @ (Ref::Forum { .. } | Ref::Post { .. } | Ref::Comment { .. })) => Ok(r),
+                // a forum reference parse_ref does not take (`owner/slug`)
+                other => match engine.forum_open(&target).await {
+                    Ok(v) => Ok(Ref::Forum { uri: v.forum.uri }),
+                    Err(_) => other,
+                },
+            },
+        ),
         Effect::Follow { forum, on } => Action::LocalDone(if on {
             engine
                 .forum_follow(&forum, None)

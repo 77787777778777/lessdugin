@@ -99,7 +99,8 @@ pub enum Verb {
         /// Remove instead of add.
         remove: bool,
     },
-    /// `open <ref>`: a forum, post or comment by any reference `parse_ref` takes.
+    /// `open <ref>`: a forum, post or comment by any reference `parse_ref` takes, or a forum
+    /// as `owner/slug`.
     Open {
         /// The reference.
         target: String,
@@ -256,7 +257,7 @@ pub enum Reach {
 /// three clients (in the TUI at least through the `:` command line)".
 pub const REACH: &[(&str, Reach)] = &[
     // §3.2
-    ("forum_open", Reach::Command("open meta")),
+    ("forum_open", Reach::Command("open alice.example.com/meta")),
     ("forum_discover", Reach::NotHere("M5 (engine-api.md §3.9)")),
     ("forum_follow", Reach::Command("follow")),
     ("forum_unfollow", Reach::Command("unfollow")),
@@ -824,7 +825,10 @@ fn more(verb: &str, rest: &[&str]) -> Option<Parsed> {
                 },
                 None,
             ),
-            None => Err("open needs a forum, post or comment (a link or an at:// uri).".into()),
+            None => Err(
+                "open needs a forum (owner/slug), a post or a comment (a link or an at:// uri)."
+                    .into(),
+            ),
         },
         "follow" | "unfollow" => bare(
             Verb::Follow {
@@ -1262,7 +1266,7 @@ pub fn usage() -> String {
         "mods add <did|handle> [admin|moderator]",
         "mods remove <did|handle>",
         "mod adopt <did|handle>",
-        "open <forum|post|comment>",
+        "open <owner/slug|post|comment>",
         "follow [forum], unfollow [forum]",
         "join [note], leave",
         "members [pending|owner|admin|moderator|member|established|newcomer|none]",

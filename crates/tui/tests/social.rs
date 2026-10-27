@@ -1632,6 +1632,20 @@ fn the_command_line_reaches_membership_items_and_local_state() {
     let view = block_on(carol.engine.get_thread(&s.welcome, &ThreadOpts::default())).unwrap();
     assert!(view.comments.iter().all(|c| c.uri != mine), "{view:?}");
 
+    // `:open` takes a forum as owner/slug, and a post by its link
+    run_command(&mut t, "open alice.example.com/meta");
+    assert!(
+        t.state.top_forum_screen().is_some_and(|f| f.uri == s.forum),
+        "{}\n{}",
+        status(&t),
+        t.render()
+    );
+    run_command(&mut t, &format!("open {}", s.bob_post));
+    assert_eq!(
+        t.state.top_thread().map(|th| th.uri.clone()),
+        Some(s.bob_post.clone())
+    );
+
     // alice renames her forum with `:forum edit`
     let mut ta = alice_tui(&s, 100, 30);
     block_on(ta.start(Some(s.forum.clone())));
