@@ -304,3 +304,70 @@ fn join_and_approve_ask_for_the_public_interstitial_once() {
     let m = carol.json(&["mods", "add", "bob.test"]);
     assert_eq!(m["state"]["kind"], "done", "{m}");
 }
+
+/// Author moderation (`social.md` §4.9) reaches every author-scope action and its undo: the
+/// post's author hides a comment in their thread and removes that hide again (the scope is
+/// part of the record's key, `data-model.md` §6.7), pins a comment and locks their own post,
+/// each with `--author-scope`.
+#[test]
+fn author_scope_lock_pin_and_removal() {
+    use lessdugin_lexicon::collection::nsid;
+    let w = World::new();
+    let c = w.bob.json(&["comment", &w.post, "-m", "A reply."]);
+    assert_eq!(c["state"]["kind"], "done", "{c}");
+    let comment = c["state"]["uri"].as_str().unwrap().to_owned();
+    w.alice.ok(&["sync", &w.forum]);
+    // alice's author-scope records, by action
+    let author_records = |what: &str| -> Vec<Value> {
+        w.alice
+            .account
+            .list(nsid::MOD_ACTION)
+            .iter()
+            .filter_map(|(rkey, _)| w.alice.account.get(nsid::MOD_ACTION, rkey))
+            .filter(|v| {
+                v["scope"] == "author"
+                    && v["action"]["$type"]
+                        .as_str()
+                        .is_some_and(|t| t.ends_with(what))
+            })
+            .collect()
+    };
+
+    let h = w.alice.json(&[
+        "mod",
+        "hide",
+        &comment,
+        "--author-scope",
+        "--reason",
+        "off topic",
+        "--yes",
+    ]);
+    assert_eq!(h["state"]["kind"], "done", "{h}");
+    assert_eq!(author_records("#hide").len(), 1);
+    // the removal names the author scope (a forum-scope unhide finds nothing to remove)
+    let e = w.alice.fails(1, &["mod", "unhide", &comment]);
+    assert_eq!(e["code"], "not_found", "{e}");
+    let u = w
+        .alice
+        .json(&["mod", "unhide", &comment, "--author-scope"]);
+    assert_eq!(u["state"]["kind"], "done", "{u}");
+    assert!(author_records("#hide").is_empty());
+
+    let p = w.alice.json(&["mod", "pin", &comment, "--author-scope"]);
+    assert_eq!(p["state"]["kind"], "done", "{p}");
+    let pins = author_records("#pin");
+    assert_eq!(pins.len(), 1);
+    assert_eq!(pins[0]["action"]["scope"], "thread", "{}", pins[0]);
+
+    let l = w.alice.json(&["mod", "lock", &w.post, "--author-scope"]);
+    assert_eq!(l["state"]["kind"], "done", "{l}");
+    let locks = author_records("#lock");
+    assert_eq!(locks.len(), 1);
+    assert_eq!(locks[0]["subject"], w.post.as_str(), "{}", locks[0]);
+
+    // a grant is a forum action only
+    let e = w
+        .alice
+        .fails(2, &["mod", "approve", "bob.test", "--author-scope"]);
+    assert_eq!(e["code"], "usage", "{e}");
+}
