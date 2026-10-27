@@ -1550,7 +1550,9 @@ impl<H: crate::host::Host> crate::engine::Engine<H> {
     /// read back through `blob_read` and decoded (UTF-8, one leading U+FEFF stripped). A body
     /// that cannot be fetched now (the network, a missing blob) stays pending and is asked for
     /// again after `BODY_BLOB_RETRY_MS`; one that does not match its CID, is not UTF-8 or is too
-    /// large renders as unreadable.
+    /// large renders as unreadable. Only the bodies the views render are fetched: those of items
+    /// the fold lists (`sync.md` §11.4, "hidden, provisional and pending content is never
+    /// prefetched").
     pub(crate) async fn load_spilled_bodies(
         &self,
         model: &crate::model::ForumModel,
@@ -1558,11 +1560,16 @@ impl<H: crate::host::Host> crate::engine::Engine<H> {
         renders: &crate::model::RenderCache,
     ) {
         use crate::model::render::text_blob_cid;
+        use crate::social::full::view::State;
         let Ok(values) = self.values(model, uris).await else {
             return;
         };
         let now = self.host().now_ms();
         for (uri, v) in &values {
+            // the predicate of `Views::body`: an item it renders empty is not asked for
+            if !model.displayed(uri).is_some_and(State::listed) {
+                continue;
+            }
             let Some(md) = v.get("body").filter(|b| b.get("text").is_none()) else {
                 continue;
             };

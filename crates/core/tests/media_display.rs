@@ -300,6 +300,57 @@ fn a_spilled_body_is_fetched_from_its_authors_pds_and_rendered() {
 }
 
 #[test]
+fn a_hidden_spilled_post_is_never_fetched() {
+    // sync.md §11.4: hidden content is never prefetched. get_post fetched the textBlob of any
+    // post it was asked for, and kept it, while the view rendered the hidden post empty
+    let mut n = Net::new();
+    let bob = n
+        .net
+        .add_pds("bob.example.com")
+        .add_account("bob.example.com");
+    let carol = n
+        .net
+        .add_pds("carol.example.com")
+        .add_account("carol.example.com");
+    let f = forum(&n, &bob);
+    carol.put(
+        nsid::MEMBERSHIP,
+        &keys::membership_rkey(&f).unwrap(),
+        &json!({"$type": nsid::MEMBERSHIP, "forum": f, "createdAt": dt(n.now())}),
+    );
+    n.tick(MINUTE);
+    let uri = spilled_post(&n, &carol, &f, b"# Spam\n\nBuy now.");
+    // bob, the forum's owner, hides it
+    let action = json!({"$type": format!("{}#hide", nsid::MOD_ACTION), "hidden": true});
+    let rkey = keys::mod_action_rkey(
+        lessdugin_lexicon::ns::NS,
+        &f,
+        None,
+        &uri,
+        action.as_object().unwrap(),
+    )
+    .unwrap();
+    bob.put(
+        nsid::MOD_ACTION,
+        &rkey,
+        &json!({
+            "$type": nsid::MOD_ACTION, "forum": f, "subject": uri, "action": action,
+            "createdAt": dt(n.now()),
+        }),
+    );
+    n.tick(MINUTE);
+    let e = n.device("anon", None);
+    let r = block_on(e.sync_forum(&f, &SyncOpts::default())).unwrap();
+    assert!(r.errors.is_empty(), "{r:?}");
+    n.net.clear_requests();
+    let _ = block_on(e.get_post(&uri));
+    let _ = block_on(e.get_thread(&uri, &Default::default()));
+    assert!(blob_requests(&n).is_empty(), "{:?}", blob_requests(&n));
+    let blob = lessdugin_atp::cid::for_raw(b"# Spam\n\nBuy now.").to_string();
+    assert_eq!(block_on(e.host().blob_open(&blob)).unwrap(), None);
+}
+
+#[test]
 fn a_spilled_body_that_is_not_utf8_is_unreadable() {
     // data-model.md §5.2 rule 3: invalid UTF-8 renders the "unreadable body" placeholder
     let mut n = Net::new();
