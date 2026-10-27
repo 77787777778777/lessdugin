@@ -425,8 +425,78 @@ pub async fn run<H: Host>(engine: &Engine<H>, effect: Effect, opts: ExecOpts) ->
             screen: None,
             result: engine.retry_write(&id).await.map(|t| vec![t]),
         },
-        Effect::Editor(_) | Effect::Quit => return None,
+        Effect::FetchMedia { cid, did, pds } => Action::MediaFetched {
+            result: fetch_media(engine, &cid, &did, &pds).await,
+            cid,
+        },
+        Effect::Editor(_) | Effect::DecodeMedia { .. } | Effect::Quit => return None,
     })
+}
+
+/// The bytes of the image blob `cid` in `did`'s repo at `pds`, for the decoder: fetched with
+/// `Host::fetch_blob` (streamed and CID-checked; a blob the host already holds is not fetched
+/// again), at most the decoder's input cap. A native host keeps the verified blob in a file
+/// (`sync.md` §11.2), read here; a host that keeps it elsewhere (the test host) is asked for it
+/// again into memory, capped and CID-checked the same way.
+pub async fn fetch_media<H: Host>(
+    engine: &Engine<H>,
+    cid: &str,
+    did: &str,
+    pds: &str,
+) -> Result<crate::image::MediaBytes, EngineError> {
+    use std::io::Read as _;
+    let max = crate::image::limits::MAX_INPUT_BYTES as u64;
+    let pds = url::Url::parse(pds)
+        .map_err(|e| EngineError::invalid_input(format!("the author's PDS {pds:?}: {e}")))?;
+    let repo = lessdugin_atp::syntax::Did::parse(did)
+        .map_err(|e| EngineError::invalid_input(format!("{did:?}: {e}")))?;
+    let h = engine
+        .host()
+        .fetch_blob(pds.clone(), repo, cid.to_owned(), max)
+        .await
+        .map_err(|e| EngineError::internal(format!("the image could not be fetched: {e}")))?;
+    if h.cid != cid {
+        return Err(EngineError::internal("the host returned another blob"));
+    }
+    // (a task of the runtime, not the UI thread, and the read is capped)
+    let path = std::path::Path::new(&h.locator);
+    if path.is_absolute()
+        && let Ok(f) = std::fs::File::open(path)
+    {
+        let mut bytes = Vec::new();
+        f.take(max + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|e| EngineError::internal(format!("reading the image: {e}")))?;
+        if bytes.len() as u64 > max {
+            return Err(EngineError::invalid_input("the image is over the 64 MiB cap"));
+        }
+        return Ok(crate::image::MediaBytes(std::sync::Arc::new(bytes)));
+    }
+    let parsed = lessdugin_atp::cid::parse(cid)
+        .map_err(|e| EngineError::invalid_input(format!("{cid:?}: {e}")))?;
+    let qs = lessdugin_atp::xrpc::query_string(&[("did", did), ("cid", cid)]);
+    let url = url::Url::parse(&format!(
+        "{}/xrpc/com.atproto.sync.getBlob?{qs}",
+        pds.as_str().trim_end_matches('/')
+    ))
+    .map_err(|e| EngineError::internal(e.to_string()))?;
+    let resp = engine
+        .host()
+        .http(
+            lessdugin_core::host::HttpRequest::get(lessdugin_core::host::Target::Anon(url))
+                .with_max_bytes(max),
+        )
+        .await
+        .map_err(|e| EngineError::internal(format!("the image could not be fetched: {e}")))?;
+    if !(200..300).contains(&resp.status) {
+        return Err(EngineError::internal(format!(
+            "the image could not be fetched: HTTP {}",
+            resp.status
+        )));
+    }
+    lessdugin_atp::cid::verify(&parsed, &resp.body)
+        .map_err(|_| EngineError::internal("the image does not match its CID"))?;
+    Ok(crate::image::MediaBytes(std::sync::Arc::new(resp.body)))
 }
 
 fn cadence_name(c: KarmaCadence) -> &'static str {

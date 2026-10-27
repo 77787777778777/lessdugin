@@ -440,7 +440,7 @@ fn collapsed_comments_fold_except_the_viewers_own_newcomer_ones() {
                 bodies: [(c.uri.clone(), Body::from_record(None, &c.body))].into(),
                 view: view.clone(),
             };
-            lessdugin_tui::thread::layout_for(&data, toggled, 80, me)
+            lessdugin_tui::thread::layout_for(&data, toggled, 80, me, &Default::default())
                 .lines
                 .iter()
                 .map(|l| {

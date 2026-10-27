@@ -5,7 +5,8 @@
 //! [`Headless::settle`] runs every queued effect and engine event until nothing is left, so a
 //! sequence of key presses is deterministic. Engine calls are awaited in place; `$EDITOR`
 //! runs without a terminal to suspend; after a write is queued the outbox is flushed (as the
-//! runtime's pump would), unless [`HeadlessOpts::flush_writes`] is off.
+//! runtime's pump would), unless [`HeadlessOpts::flush_writes`] is off. Images decode (in
+//! halfblocks) only with [`HeadlessOpts::images`]; `settle` then waits for their workers.
 //!
 //! [`capture_thread`] is the parity hook (`docs/plan.md` §4.2): it opens the Thread screen
 //! for a uri and returns what the screen shows and the exact `ThreadView` it holds, as dto/1
@@ -44,6 +45,8 @@ pub struct HeadlessOpts {
     pub flush_writes: bool,
     /// The editor (`None`: editing fails with a message).
     pub editor: Option<EditorConfig>,
+    /// Decode and draw images, in halfblocks (off: no image is decoded).
+    pub images: bool,
 }
 
 impl Default for HeadlessOpts {
@@ -55,6 +58,7 @@ impl Default for HeadlessOpts {
             auto_sync: true,
             flush_writes: true,
             editor: None,
+            images: false,
         }
     }
 }
@@ -69,6 +73,8 @@ pub struct Headless<H: Host> {
     events: Arc<Mutex<Vec<Event>>>,
     sub: SubscriptionId,
     queue: VecDeque<Effect>,
+    /// The image decoder and the decoded images.
+    pub images: crate::image::Images,
 }
 
 impl<H: Host> Drop for Headless<H> {
@@ -93,6 +99,14 @@ impl<H: Host> Headless<H> {
         state.auto_sync = opts.auto_sync;
         let terminal = Terminal::new(TestBackend::new(opts.width, opts.height))
             .map_err(|e| EngineError::internal(e.to_string()))?;
+        let images = if opts.images {
+            crate::image::Images::new(
+                ratatui_image::picker::Picker::halfblocks(),
+                std::sync::Arc::new(|| {}),
+            )
+        } else {
+            crate::image::Images::disabled()
+        };
         Ok(Self {
             engine,
             state,
@@ -101,6 +115,7 @@ impl<H: Host> Headless<H> {
             events,
             sub,
             queue: VecDeque::new(),
+            images,
         })
     }
 
@@ -175,12 +190,17 @@ impl<H: Host> Headless<H> {
         loop {
             self.drain_events();
             let Some(effect) = self.queue.pop_front() else {
+                // the image workers' results, waited for (each decode has its own timeout)
+                if self.wait_for_images() {
+                    continue;
+                }
                 break;
             };
             steps += 1;
             assert!(steps < MAX_STEPS, "the TUI does not settle");
             match effect {
                 Effect::Quit => {}
+                Effect::DecodeMedia { cid, bytes } => self.images.decode(cid, bytes),
                 Effect::Editor(req) => {
                     let result = match &self.opts.editor {
                         Some(cfg) => cfg.edit(&req.template),
@@ -212,11 +232,52 @@ impl<H: Host> Headless<H> {
         }
     }
 
-    /// Draws the frame; returns the screen as text (rows without trailing blanks).
+    /// Waits for the decodes under way and hands their outcomes to the state; `true` if there
+    /// were any.
+    fn wait_for_images(&mut self) -> bool {
+        let deadline =
+            std::time::Instant::now() + crate::image::limits::DECODE_TIMEOUT * 2;
+        loop {
+            let polled = self.images.poll();
+            if !polled.decoded.is_empty() || !polled.evicted.is_empty() {
+                for (cid, result) in polled.decoded {
+                    self.act(Action::MediaDecoded { cid, result });
+                }
+                for cid in polled.evicted {
+                    self.act(Action::MediaEvicted { cid });
+                }
+                return true;
+            }
+            if !self.images.busy() || std::time::Instant::now() > deadline {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    /// Draws the frame (with the decoded images); returns the screen as text (rows without
+    /// trailing blanks).
     pub fn render(&mut self) -> String {
-        let state = &self.state;
-        let _ = self.terminal.draw(|f| crate::view::draw(state, f));
+        let (state, images) = (&self.state, &mut self.images);
+        let _ = self
+            .terminal
+            .draw(|f| crate::view::draw_with(state, Some(images), f));
         buffer_text(self.terminal.backend().buffer())
+    }
+
+    /// [`Headless::render`] once the resizes it asked the image workers for are done (the
+    /// first draw of an image only asks for its size).
+    pub fn render_images(&mut self) -> String {
+        let mut screen = self.render();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            if self.images.poll().redraw {
+                screen = self.render();
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        screen
     }
 
     /// The `ThreadView` the Thread screen on top holds.
@@ -334,6 +395,7 @@ pub async fn capture_thread<H: Host>(
             auto_sync: opts.sync,
             flush_writes: false,
             editor: None,
+            images: false,
         },
     )
     .await?;

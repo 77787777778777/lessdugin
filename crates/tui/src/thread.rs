@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use lessdugin_core::dto::{CollapseReason, CommentNode, ItemState, ThreadRoot};
+use lessdugin_core::dto::{CollapseReason, CommentNode, ItemState, MediaView, ThreadRoot};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
 
@@ -55,6 +55,93 @@ pub struct Layout {
     pub lines: Vec<Line<'static>>,
     /// The items, in order.
     pub items: Vec<ItemSpan>,
+    /// The lines kept blank for decoded images, which the view draws over them.
+    pub images: Vec<ImageSlot>,
+}
+
+/// Where a decoded image is drawn: `rows` blank lines from `start`, `indent` columns in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImageSlot {
+    /// The blob's CID.
+    pub cid: String,
+    /// The first line.
+    pub start: usize,
+    /// How many lines.
+    pub rows: usize,
+    /// The columns before it (after the gutter).
+    pub indent: usize,
+    /// Its width in columns.
+    pub width: usize,
+}
+
+/// The lines an image takes when it is shown.
+pub const IMAGE_ROWS: usize = 12;
+
+/// Where one image of a thread is (`sync.md` §11): absent until it is asked for (a key, or the
+/// autoload policy).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MediaState {
+    /// Being fetched from its author's PDS (streamed and CID-checked by the host).
+    Fetching,
+    /// Being decoded, off the UI thread.
+    Decoding,
+    /// Decoded: drawn in its slot.
+    Shown,
+    /// Not shown, and why.
+    Failed(String),
+}
+
+/// True for the types the terminal draws inline (`sync.md` §11.2: AVIF is inline in the SPA
+/// only), compared exactly as `lfm-1.md` §6.2 compares them.
+pub fn inline_image(mime: &str) -> bool {
+    matches!(mime, "image/png" | "image/jpeg" | "image/gif" | "image/webp")
+}
+
+/// The lines under an item's body for its images: a caption that says how to load each one, or
+/// how it is going, and the blank slot of a shown one.
+fn media_lines(
+    media: &[MediaView],
+    states: &BTreeMap<String, MediaState>,
+    indent: usize,
+    width: usize,
+    lines: &mut Vec<Line<'static>>,
+    slots: &mut Vec<ImageSlot>,
+) {
+    for m in media.iter().filter(|m| inline_image(&m.mime)) {
+        let n = u32::from(m.index) + 1;
+        let label = match m.alt.as_deref().map(str::trim).filter(|a| !a.is_empty()) {
+            Some(alt) => crate::text::cat([tt(&format!("[image {n}: ")), tt(alt), lit("]")]),
+            None => tt(&format!("[image {n}]")),
+        };
+        let status = match states.get(&m.cid) {
+            None if m.size_bytes > crate::image::limits::MAX_INPUT_BYTES as u64 => {
+                lit("too large to show here")
+            }
+            None => tt(&format!(
+                "i loads it from {}, which sees your address",
+                lessdugin_core::media::host_of(&m.pds)
+            )),
+            Some(MediaState::Fetching) => lit("fetching..."),
+            Some(MediaState::Decoding) => lit("decoding..."),
+            Some(MediaState::Shown) => TermText::empty(),
+            Some(MediaState::Failed(why)) => tt(why),
+        };
+        lines.push(line([
+            (pad(indent), Style::default()),
+            (label, dim()),
+            (crate::text::cat([lit("  "), status]), dim()),
+        ]));
+        if states.get(&m.cid) == Some(&MediaState::Shown) {
+            slots.push(ImageSlot {
+                cid: m.cid.clone(),
+                start: lines.len(),
+                rows: IMAGE_ROWS,
+                indent,
+                width,
+            });
+            lines.extend(std::iter::repeat_n(Line::default(), IMAGE_ROWS));
+        }
+    }
 }
 
 impl Layout {
@@ -134,25 +221,28 @@ pub fn collapsed_by_default(c: &CommentNode, viewer: Option<&str>) -> bool {
     }
 }
 
-/// Lays out `data` for a screen `width` columns wide, as a reader without an account sees it
-/// (see [`layout_for`]).
+/// Lays out `data` for a screen `width` columns wide, as a reader without an account sees it,
+/// no image asked for (see [`layout_for`]).
 pub fn layout(data: &ThreadData, toggled: &BTreeSet<String>, width: u16) -> Layout {
-    layout_for(data, toggled, width, None)
+    layout_for(data, toggled, width, None, &BTreeMap::new())
 }
 
 /// Lays out `data` for `viewer` on a screen `width` columns wide. `toggled` holds the comments
 /// whose fold the reader switched with `Space`: a comment collapsed by default
-/// ([`collapsed_by_default`]) expands, any other one folds its replies.
+/// ([`collapsed_by_default`]) expands, any other one folds its replies. `media` says where each
+/// image asked for is.
 pub fn layout_for(
     data: &ThreadData,
     toggled: &BTreeSet<String>,
     width: u16,
     viewer: Option<&str>,
+    media: &BTreeMap<String, MediaState>,
 ) -> Layout {
     let text_w = usize::from(width.saturating_sub(GUTTER)).max(20);
     let handles = handles(data);
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut items = Vec::new();
+    let mut images = Vec::new();
 
     // the forum's banners (moderationUnavailable, newerRules)
     for b in banner_lines(&data.view.banners) {
@@ -188,6 +278,14 @@ pub fn layout_for(
                     lines.push(Line::default());
                     lines.extend(body_lines);
                 }
+                media_lines(
+                    &p.body.media,
+                    media,
+                    0,
+                    text_w.min(MAX_BODY),
+                    &mut lines,
+                    &mut images,
+                );
             }
             // the react tallies under the post (social.md §9.2: "anchored reacts are listed
             // under the item")
@@ -267,6 +365,7 @@ pub fn layout_for(
         {
             let w = text_w.saturating_sub(indent + 2).min(MAX_BODY);
             lines.extend(body.lines(w, indent + 2, &handles));
+            media_lines(&c.body.media, media, indent + 2, w, &mut lines, &mut images);
         }
         // the react tallies under the comment (social.md §9.2)
         if matches!(c.state, ItemState::Visible | ItemState::Collapsed { .. })
@@ -292,6 +391,7 @@ pub fn layout_for(
         width,
         lines,
         items,
+        images,
     }
 }
 
@@ -486,6 +586,7 @@ mod tests {
                     collapsed: false,
                 })
                 .collect(),
+            images: Vec::new(),
         }
     }
 

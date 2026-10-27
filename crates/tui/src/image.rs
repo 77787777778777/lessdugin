@@ -87,11 +87,20 @@ impl Placeholder {
 /// [`Placeholder::TooLarge`] past a cap, [`Placeholder::Unsupported`] for anything that is not a
 /// PNG, JPEG, GIF or WebP, [`Placeholder::Failed`] for a file the decoder rejects.
 pub fn decode(bytes: &[u8]) -> Result<DynamicImage, Placeholder> {
-    use image::{ImageFormat, ImageReader, Limits};
     // the input cap and the header check come before any decoder sees the bytes
     if bytes.len() > limits::MAX_INPUT_BYTES || !lessdugin_core::media::decoding_allowed(bytes) {
         return Err(Placeholder::TooLarge);
     }
+    capped_decode(bytes)
+}
+
+/// The decode itself, under the decoder's own [`image::Limits`]: they hold even for a header
+/// [`lessdugin_core::media::decoding_allowed`] could not read (it lets those through).
+///
+/// # Errors
+/// As [`decode`].
+pub fn capped_decode(bytes: &[u8]) -> Result<DynamicImage, Placeholder> {
+    use image::{ImageFormat, ImageReader, Limits};
     let format = image::guess_format(bytes).map_err(|_| Placeholder::Unsupported)?;
     if !matches!(
         format,
@@ -147,6 +156,7 @@ pub struct Images {
     /// `None`: nothing is decoded (a pipe, a test backend).
     picker: Option<Picker>,
     notify: Notify,
+    timeout: std::time::Duration,
     done_tx: Sender<(String, Result<StatefulProtocol, Placeholder>)>,
     done_rx: Receiver<(String, Result<StatefulProtocol, Placeholder>)>,
     /// Decodes running now.
@@ -197,6 +207,7 @@ impl Images {
         Self {
             picker,
             notify,
+            timeout: limits::DECODE_TIMEOUT,
             done_tx,
             done_rx,
             running: 0,
@@ -204,6 +215,14 @@ impl Images {
             shown: Vec::new(),
             early: Vec::new(),
         }
+    }
+
+    /// The same, with decodes abandoned after `timeout` instead of [`limits::DECODE_TIMEOUT`]
+    /// (tests).
+    #[must_use]
+    pub fn with_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.timeout = timeout;
+        self
     }
 
     /// Starts decoding the blob `cid` off the UI thread; [`Images::poll`] reports how it went.
@@ -232,6 +251,7 @@ impl Images {
             let done = self.done_tx.clone();
             let notify = Arc::clone(&self.notify);
             let name = cid.clone();
+            let timeout = self.timeout;
             // the supervisor waits for the decoder at most DECODE_TIMEOUT; a decoder past it
             // is left to finish on its own, and its image is dropped
             let started = std::thread::Builder::new()
@@ -244,9 +264,7 @@ impl Images {
                             let _ = tx.send(decode(&bytes.0));
                         });
                     let result = match decoder {
-                        Ok(_) => rx
-                            .recv_timeout(limits::DECODE_TIMEOUT)
-                            .unwrap_or(Err(Placeholder::Failed)),
+                        Ok(_) => rx.recv_timeout(timeout).unwrap_or(Err(Placeholder::Failed)),
                         Err(_) => Err(Placeholder::Failed),
                     };
                     let _ = done.send((cid, result.map(|img| picker.new_resize_protocol(img))));

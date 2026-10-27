@@ -37,7 +37,8 @@ use crate::command::{AccessOp, ForumChanges, RestrictDim};
 use crate::editor;
 use crate::keys::{self, Cmd, Op};
 use crate::text::{TermText, actor, cat, count, lit, post_title, tt};
-use crate::thread::{self, Layout, Pos};
+use crate::image::{MediaBytes, Placeholder};
+use crate::thread::{self, Layout, MediaState, Pos};
 
 /// Identifies a screen instance (results for a screen that was closed are dropped).
 pub type ScreenId = u64;
@@ -485,6 +486,23 @@ pub enum Effect {
         /// The write id.
         id: String,
     },
+    /// `Host::fetch_blob` of an image from its author's PDS (streamed and CID-checked), then
+    /// its bytes for the decoder.
+    FetchMedia {
+        /// The blob's CID.
+        cid: String,
+        /// Its author (the repo it is in).
+        did: String,
+        /// The author's PDS.
+        pds: String,
+    },
+    /// Decodes a fetched image off the UI thread: the runtime's [`crate::image::Images`].
+    DecodeMedia {
+        /// The blob's CID.
+        cid: String,
+        /// Its bytes.
+        bytes: MediaBytes,
+    },
     /// Leave the TUI.
     Quit,
 }
@@ -522,7 +540,8 @@ impl Effect {
 
     /// The engine operation (`engine-api.md` §3) the effect calls, by its name there (for an
     /// editor session, the write it leads to; for `Open`, the screen's `forum_open` or
-    /// `get_thread`); `None` for quitting.
+    /// `get_thread`; `fetch_blob` is the host's); `None` for what the runtime does itself
+    /// (decoding an image, quitting).
     pub fn operation(&self) -> Option<&'static str> {
         Some(match self {
             Effect::Editor(req) => match req.compose {
@@ -583,7 +602,8 @@ impl Effect {
             Effect::Settings { set: None } => "settings",
             Effect::Settings { set: Some(_) } => "set_setting",
             Effect::Retry { .. } => "retry_write",
-            Effect::Quit => return None,
+            Effect::FetchMedia { .. } => "fetch_blob",
+            Effect::DecodeMedia { .. } | Effect::Quit => return None,
         })
     }
 }
@@ -771,6 +791,27 @@ pub enum Action {
     RawLoaded(Result<RawView, EngineError>),
     /// [`Effect::Settings`] finished.
     SettingsLoaded(Result<Settings, EngineError>),
+    /// [`Effect::FetchMedia`] finished.
+    MediaFetched {
+        /// The blob's CID.
+        cid: String,
+        /// Its bytes, or why there are none.
+        result: Result<MediaBytes, EngineError>,
+    },
+    /// An image's decode finished: it is drawn, or why not.
+    MediaDecoded {
+        /// The blob's CID.
+        cid: String,
+        /// The outcome.
+        result: Result<(), Placeholder>,
+    },
+    /// A decoded image was dropped to bound memory: it loads again on request.
+    MediaEvicted {
+        /// The blob's CID.
+        cid: String,
+    },
+    /// An image worker has a result: the runtime polls its images (the state has nothing to do).
+    ImagesReady,
 }
 
 /// The tone of a status message.
@@ -1010,6 +1051,8 @@ pub struct ThreadScreen {
     pub collapsed: BTreeSet<String>,
     /// The viewer's DID: their own `Collapsed(NewUser)` comments show expanded.
     pub viewer: Option<String>,
+    /// The images asked for, by blob CID.
+    pub media: BTreeMap<String, MediaState>,
     /// The selection and scroll.
     pub pos: Pos,
     /// The layout for the current width.
@@ -1033,7 +1076,13 @@ impl ThreadScreen {
             .items
             .get(self.pos.selected)
             .map(|i| (i.uri.clone(), i.start as isize - self.pos.scroll as isize));
-        self.layout = thread::layout_for(data, &self.collapsed, width, self.viewer.as_deref());
+        self.layout = thread::layout_for(
+            data,
+            &self.collapsed,
+            width,
+            self.viewer.as_deref(),
+            &self.media,
+        );
         if let Some((uri, row)) = before {
             if let Some(i) = self.layout.index_of(&uri) {
                 self.pos.selected = i;
@@ -1927,6 +1976,28 @@ impl State {
                 Ok(set) => self.show_panel("Settings", settings_lines(&set)),
                 Err(e) => self.say(Tone::Error, tt(&e.message)),
             },
+            Action::MediaFetched { cid, result } => {
+                let next = match result {
+                    Ok(bytes) => {
+                        fx.push(Effect::DecodeMedia {
+                            cid: cid.clone(),
+                            bytes,
+                        });
+                        Some(MediaState::Decoding)
+                    }
+                    Err(e) => Some(MediaState::Failed(format!("could not load: {}", e.message))),
+                };
+                self.set_media(&cid, next);
+            }
+            Action::MediaDecoded { cid, result } => {
+                let next = match result {
+                    Ok(()) => MediaState::Shown,
+                    Err(p) => MediaState::Failed(p.text().to_owned()),
+                };
+                self.set_media(&cid, Some(next));
+            }
+            Action::MediaEvicted { cid } => self.set_media(&cid, None),
+            Action::ImagesReady => {}
         }
         self.hold_public(&mut fx);
         self.fit();
@@ -1983,6 +2054,117 @@ impl State {
                 self.say(Tone::Info, lit("Cancelled."));
             }
             _ => {}
+        }
+    }
+
+    /// Sets where the image `cid` is on every thread screen that asked for it (`None`: not
+    /// asked for any more), and lays the screens out again.
+    fn set_media(&mut self, cid: &str, state: Option<MediaState>) {
+        let (w, h) = (self.width, self.content_height());
+        for s in &mut self.stack {
+            if let ScreenKind::Thread(t) = &mut s.kind
+                && t.media.contains_key(cid)
+            {
+                match &state {
+                    Some(st) => {
+                        t.media.insert(cid.to_owned(), st.clone());
+                    }
+                    None => {
+                        t.media.remove(cid);
+                    }
+                }
+                t.relayout(w, h);
+            }
+        }
+    }
+
+    /// `i`: loads the selected item's images. The key is the reader's consent (`sync.md`
+    /// §11.3: what the autoload policy does not load is "click to load"): their author's PDS
+    /// sees this device's address.
+    fn load_media(&mut self, fx: &mut Vec<Effect>) {
+        let Some(t) = self.top_thread() else {
+            self.say(Tone::Info, lit("Open a post to load its images."));
+            return;
+        };
+        let Some(uri) = t.layout.items.get(t.pos.selected).map(|i| i.uri.clone()) else {
+            return;
+        };
+        let media: Vec<lessdugin_core::dto::MediaView> = t
+            .data
+            .as_ref()
+            .map(|d| item_media(d, &uri, false))
+            .unwrap_or_default();
+        if media.is_empty() {
+            self.say(Tone::Info, lit("The selected item has no image to load."));
+            return;
+        }
+        let n = self.request_media(media, fx);
+        if n == 0 {
+            self.say(Tone::Info, lit("Its images are already loaded or loading."));
+        } else {
+            self.say(Tone::Info, cat([lit("Loading "), count(n, "image", "images"), lit("...")]));
+        }
+    }
+
+    /// Asks for each image of `media` the top thread does not have yet (one over the input cap
+    /// is marked so, never fetched); returns how many were asked for.
+    fn request_media(
+        &mut self,
+        media: Vec<lessdugin_core::dto::MediaView>,
+        fx: &mut Vec<Effect>,
+    ) -> u32 {
+        let (w, h) = (self.width, self.content_height());
+        let Some(ScreenKind::Thread(t)) = self.stack.last_mut().map(|s| &mut s.kind) else {
+            return 0;
+        };
+        let mut n = 0;
+        for m in media {
+            if matches!(
+                t.media.get(&m.cid),
+                Some(MediaState::Fetching | MediaState::Decoding | MediaState::Shown)
+            ) {
+                continue;
+            }
+            if m.size_bytes > crate::image::limits::MAX_INPUT_BYTES as u64 {
+                t.media.insert(
+                    m.cid.clone(),
+                    MediaState::Failed(Placeholder::TooLarge.text().to_owned()),
+                );
+                continue;
+            }
+            t.media.insert(m.cid.clone(), MediaState::Fetching);
+            fx.push(Effect::FetchMedia {
+                cid: m.cid,
+                did: m.author,
+                pds: m.pds,
+            });
+            n += 1;
+        }
+        t.relayout(w, h);
+        n
+    }
+
+    /// The images of the thread on top that load without a key (`sync.md` §11.3,
+    /// `threat-model.md` PRIV-1): the engine's verdict (`MediaView.autoload`), only for a
+    /// `Visible` item, an inline image type and at most `BLOB_AUTOLOAD_MAX_BYTES`.
+    fn autoload_media(&mut self, fx: &mut Vec<Effect>) {
+        let Some(t) = self.top_thread() else {
+            return;
+        };
+        let Some(d) = &t.data else {
+            return;
+        };
+        let wanted: Vec<lessdugin_core::dto::MediaView> = thread::item_uris(d)
+            .iter()
+            .flat_map(|uri| item_media(d, uri, true))
+            .filter(|m| {
+                m.autoload
+                    && m.size_bytes <= lessdugin_core::media::policy::AUTOLOAD_MAX_BYTES
+                    && !t.media.contains_key(&m.cid)
+            })
+            .collect();
+        if !wanted.is_empty() {
+            self.request_media(wanted, fx);
         }
     }
 
@@ -2387,6 +2569,7 @@ impl State {
             Cmd::Undo => self.undo_last(fx),
             Cmd::ReactPalette => self.open_react(),
             Cmd::History => self.open_history(fx),
+            Cmd::LoadMedia => self.load_media(fx),
             Cmd::ModMenu => self.open_mod_menu(),
             Cmd::Notifications => self.open_notifications(fx),
             Cmd::Command => self.command = Some(String::new()),
@@ -5052,6 +5235,10 @@ impl State {
         if let (Some(msg), true, Origin::User) = (failed, is_top, origin) {
             self.say(Tone::Error, msg);
         }
+        // the thread on top shows what it now holds: what the autoload policy loads, loads
+        if is_top && matches!(self.stack[i].kind, ScreenKind::Thread(_)) {
+            self.autoload_media(fx);
+        }
     }
 
     fn synced(
@@ -5251,6 +5438,32 @@ impl State {
             }
         }
     }
+}
+
+/// The inline images of the item `uri` of a thread, when its body shows (`visible_only`: only
+/// for a `Visible` item, as autoload requires).
+fn item_media(d: &ThreadData, uri: &str, visible_only: bool) -> Vec<lessdugin_core::dto::MediaView> {
+    use lessdugin_core::dto::ItemState;
+    let shown = |st: &ItemState| match st {
+        ItemState::Visible => true,
+        ItemState::Collapsed { .. } => !visible_only,
+        _ => false,
+    };
+    let media = match &d.view.post {
+        ThreadRoot::Post(p) if p.post.uri == uri => shown(&p.post.state).then_some(&p.body.media),
+        _ => d
+            .view
+            .comments
+            .iter()
+            .find(|c| c.uri == uri && !c.missing)
+            .and_then(|c| shown(&c.state).then_some(&c.body.media)),
+    };
+    media
+        .into_iter()
+        .flatten()
+        .filter(|m| thread::inline_image(&m.mime))
+        .cloned()
+        .collect()
 }
 
 /// The `:members` panel: one member per line, with what `MemberView` says of them.

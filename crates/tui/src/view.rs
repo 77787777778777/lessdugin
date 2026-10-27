@@ -63,8 +63,14 @@ fn gutter(on: bool) -> (TermText, Style) {
     }
 }
 
-/// Draws the whole frame.
+/// Draws the whole frame, without images (a pipe, a test backend).
 pub fn draw(state: &State, f: &mut Frame<'_>) {
+    draw_with(state, None, f);
+}
+
+/// Draws the whole frame, and the decoded images of the thread on top from `images` into the
+/// slots its layout keeps for them (under any overlay).
+pub fn draw_with(state: &State, images: Option<&mut crate::image::Images>, f: &mut Frame<'_>) {
     let area = f.area();
     let [header, info, content, status] = Split::vertical([
         Constraint::Length(1),
@@ -83,6 +89,9 @@ pub fn draw(state: &State, f: &mut Frame<'_>) {
         f.render_widget(Paragraph::new(Text::from(lines)), content);
     }
     f.render_widget(Paragraph::new(status_lines(state)), status);
+    if let (Some(images), Some(t)) = (images, state.top_thread()) {
+        draw_images(t, images, content, f);
+    }
     if state.help {
         help(f, state, area);
     }
@@ -165,6 +174,35 @@ fn confirm(f: &mut Frame<'_>, c: &Confirm, area: Rect) {
         .title(line([(lit(" Confirm "), warn_style())]));
     f.render_widget(Clear, r);
     f.render_widget(Paragraph::new(Text::from(lines)).block(block), r);
+}
+
+/// The decoded images of thread `t` whose slot shows whole in `content` (one cut by the edge
+/// would be drawn rescaled, and jump as it scrolls in).
+fn draw_images(t: &ThreadScreen, images: &mut crate::image::Images, content: Rect, f: &mut Frame<'_>) {
+    if t.history.is_some() {
+        return;
+    }
+    let (top, h) = (t.pos.scroll, usize::from(content.height));
+    for slot in &t.layout.images {
+        if slot.start < top || slot.start + slot.rows > top + h {
+            continue;
+        }
+        let x = usize::from(crate::thread::GUTTER) + slot.indent;
+        let (Ok(x), Ok(y), Ok(w), Ok(rows)) = (
+            u16::try_from(x),
+            u16::try_from(slot.start - top),
+            u16::try_from(slot.width),
+            u16::try_from(slot.rows),
+        ) else {
+            continue;
+        };
+        let w = w.min(content.width.saturating_sub(x));
+        if w == 0 {
+            continue;
+        }
+        let r = Rect::new(content.x + x, content.y + y, w, rows);
+        images.render(&slot.cid, r, f.buffer_mut());
+    }
 }
 
 /// What the interstitial says of a kind (`social.md` §17), as the CLI and the SPA say it.
