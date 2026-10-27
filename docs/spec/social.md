@@ -1510,3 +1510,4 @@ These choices fill gaps in the sources or resolve ambiguities. Each takes the si
 3. **Author moderation requires E (§4.9).** This tightens the gate beyond the synthesis. The alternative is to drop it and weaken P7 to exclude visibility inside outsiders' own threads.
 4. *(Resolved: forum-pinned posts are exempt from the magic cutoff, matching ForumMagnum's sticky posts; see 20.1 item 18.)*
 5. *(Resolved: CO5 compares only a valid root; see 20.1 item 51.)*
+6. **The viewer's own newcomer items (§10.3; orchestrator decision O-4, for the U7 review).** V8 stays viewer-independent in the fold; clients show the viewer's own `Collapsed(NewUser)` items expanded, with the label kept, as the "collapsed for other readers" notice says. The alternative is to show them collapsed like everyone else's.
