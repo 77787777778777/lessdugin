@@ -872,8 +872,11 @@ fn a_comment_on_a_locked_post_is_refused_unless_the_writer_is_an_authority() {
     alice.flush();
     alice.done(&t.ticket());
     w.resync(&[alice, bob]);
-    let e = block_on(bob.engine.comment(&CommentDraft::new(&w.bob_post, None, "too late")))
-        .unwrap_err();
+    let e = block_on(
+        bob.engine
+            .comment(&CommentDraft::new(&w.bob_post, None, "too late")),
+    )
+    .unwrap_err();
     assert_eq!(e.code, ErrorCode::Blocked, "{e:?}");
     assert_eq!(
         e.detail.as_ref().and_then(|d| d.get("kind")),
@@ -881,7 +884,9 @@ fn a_comment_on_a_locked_post_is_refused_unless_the_writer_is_an_authority() {
     );
     let pending = block_on(bob.engine.writes()).unwrap();
     assert!(
-        pending.iter().all(|t| !matches!(t.state, WriteState::Pending { .. })),
+        pending
+            .iter()
+            .all(|t| !matches!(t.state, WriteState::Pending { .. })),
         "nothing was queued: {pending:?}"
     );
     // the owner is in A: her comment is exempt from V7
@@ -1105,7 +1110,8 @@ fn reopening_a_degraded_forum_announces_no_change() {
     let w = World::new();
     let (alice, bob) = (&w.alice, &w.bob);
     let mut decl = alice.record(nsid::FORUM, "meta").unwrap();
-    decl["moderators"] = json!([{ "did": "did:plc:zzzzzzzzzzzzzzzzzzzzzzzz", "role": "moderator" }]);
+    decl["moderators"] =
+        json!([{ "did": "did:plc:zzzzzzzzzzzzzzzzzzzzzzzz", "role": "moderator" }]);
     alice.acct.put(nsid::FORUM, "meta", &decl);
     w.tick(10 * MINUTE);
     let first = block_on(bob.engine.forum_open(&w.forum)).unwrap();
@@ -1451,7 +1457,11 @@ fn notifications_about_hidden_items_are_left_out() {
     assert!(n.items.iter().all(|i| i.subject != spam), "{n:?}");
     assert_eq!(n.unread, 0, "{n:?}");
     let u = block_on(alice.engine.unread_counts()).unwrap();
-    assert_eq!((u.notifications, u.forums[0].notifications), (0, 0), "{u:?}");
+    assert_eq!(
+        (u.notifications, u.forums[0].notifications),
+        (0, 0),
+        "{u:?}"
+    );
     // unhidden: listed again, so is its notification
     let rm = ModActionIntent::Remove {
         forum: w.forum.clone(),
@@ -1524,7 +1534,10 @@ fn a_change_is_stored_once_when_refreshes_overlap() {
     w.resync(&[bob]);
     let k = lessdugin_core::key!("loc", "nbase", bob.did().as_str(), w.forum.as_str());
     let kv = bob.host.state_kv();
-    let before = block_on(kv.get_many(vec![k.clone()])).unwrap().pop().flatten();
+    let before = block_on(kv.get_many(vec![k.clone()]))
+        .unwrap()
+        .pop()
+        .flatten();
     let n = notes(bob, false);
     let reacted = |n: &lessdugin_core::dto::NotificationList| {
         n.items

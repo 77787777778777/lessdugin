@@ -604,8 +604,7 @@ pub fn unread_comments(
             let Some(mark) = marks.get(&root.uri) else {
                 return false;
             };
-            input.records.get(&root.uri).is_some_and(is_post)
-                && obs(x).is_some_and(|t| t > *mark)
+            input.records.get(&root.uri).is_some_and(is_post) && obs(x).is_some_and(|t| t > *mark)
         })
         .filter(|x| listed(view, &x.uri))
         .count();

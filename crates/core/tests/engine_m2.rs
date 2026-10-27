@@ -653,7 +653,9 @@ fn redaction_deletes_unsynced_and_invalid_revisions_too() {
     let welcome = s.welcome.clone();
     let p = welcome.rsplit('/').next().unwrap().to_owned();
     let rev = |tid: &str, value: serde_json::Value| {
-        alice.acct.put(nsid::REVISION, &format!("{p}-{tid}"), &value);
+        alice
+            .acct
+            .put(nsid::REVISION, &format!("{p}-{tid}"), &value);
     };
     // invalid (no snapshot of the old version): the fold leaves it out, then a sync caches it
     rev(
@@ -677,11 +679,18 @@ fn redaction_deletes_unsynced_and_invalid_revisions_too() {
             "createdAt": "2024-01-02T00:00:00.000Z",
         }),
     );
-    assert!(own_revisions(alice, &welcome).len() >= 3, "the fixture's revision and two more");
+    assert!(
+        own_revisions(alice, &welcome).len() >= 3,
+        "the fixture's revision and two more"
+    );
     let t = block_on(alice.engine.redact_revision(&welcome)).unwrap();
     alice.flush();
     assert_eq!(alice.done(&t[0]), welcome);
-    assert_eq!(own_revisions(alice, &welcome), Vec::<String>::new(), "every revision is gone");
+    assert_eq!(
+        own_revisions(alice, &welcome),
+        Vec::<String>::new(),
+        "every revision is gone"
+    );
 }
 
 /// M4R-7 (`threat-model.md` SOC-7): a forum declaration's and a modAction's revisions are the
@@ -726,16 +735,30 @@ fn handle_links_are_published_with_dids() {
          and [ref].\n\nCode: `at://bob.example.com` stays.\n\n[ref]: at://Bob.Example.com\n",
         nsid::POST
     );
-    let t = block_on(alice.engine.publish(&PostDraft::article(&s.forum, "Links", &md))).unwrap();
+    let t = block_on(
+        alice
+            .engine
+            .publish(&PostDraft::article(&s.forum, "Links", &md)),
+    )
+    .unwrap();
     alice.flush();
     let uri = alice.done(&t);
-    let rec = alice.acct.get(nsid::POST, uri.rsplit('/').next().unwrap()).unwrap();
+    let rec = alice
+        .acct
+        .get(nsid::POST, uri.rsplit('/').next().unwrap())
+        .unwrap();
     let text = rec["body"]["text"].as_str().unwrap();
     let did = bob.did();
     assert!(text.contains(&format!("[@bob](at://{did})")), "{text}");
-    assert!(text.contains(&format!("(at://{did}/{}/{bob_rkey})", nsid::POST)), "{text}");
+    assert!(
+        text.contains(&format!("(at://{did}/{}/{bob_rkey})", nsid::POST)),
+        "{text}"
+    );
     assert!(text.contains(&format!("[ref]: at://{did}\n")), "{text}");
-    assert!(text.contains("`at://bob.example.com`"), "code is not a link: {text}");
+    assert!(
+        text.contains("`at://bob.example.com`"),
+        "code is not a link: {text}"
+    );
     assert_eq!(rec["body"]["mentions"], serde_json::json!([did]));
     assert_eq!(
         rec["body"]["links"],

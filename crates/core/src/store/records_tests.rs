@@ -929,7 +929,11 @@ fn eligibility_and_fold_rows() {
     let mut repo = RepoRow::new("https://pds.example");
     repo.set_status(AccountStatus::Inactive, Some("takendown".into()), 1_000);
     repo.set_status(AccountStatus::Inactive, Some("takendown".into()), 5_000);
-    assert_eq!(repo.inactive_since, Some(1_000), "kept from the first check");
+    assert_eq!(
+        repo.inactive_since,
+        Some(1_000),
+        "kept from the first check"
+    );
     let m = version(&uri_in(DID, "modAction", &format!("{FK}-x")), 1, "3l2a", 1);
     let (ms, _) = admit(Slot::Empty, m);
     let mrow = rec(&ms).clone();
@@ -938,8 +942,14 @@ fn eligibility_and_fold_rows() {
     let at = |t| eligible_in_forum(&mrow, &mkey, Some(&repo), true, t);
     assert!(at(1_000 + week - 1));
     assert!(!at(1_000 + week), "retention over");
-    assert!(!eligible_in_forum(&mrow, &mkey, Some(&repo), false, 2_000), "not an authority");
-    assert!(!eligible_in_forum(&row, &pkey, Some(&repo), true, 2_000), "not a modAction");
+    assert!(
+        !eligible_in_forum(&mrow, &mkey, Some(&repo), false, 2_000),
+        "not an authority"
+    );
+    assert!(
+        !eligible_in_forum(&row, &pkey, Some(&repo), true, 2_000),
+        "not a modAction"
+    );
     repo.set_status(AccountStatus::Active, None, 6_000);
     assert_eq!(repo.inactive_since, None);
     assert!(!repo.inactive_retained(6_000));

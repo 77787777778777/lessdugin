@@ -636,7 +636,12 @@ fn check_setting_value(key: &str, v: &str) -> Result<(), EngineError> {
             }
         }
         "externalImagesForums" => match serde_json::from_str::<Vec<String>>(v) {
-            Ok(l) if l.iter().all(|u| lessdugin_atp::syntax::AtUri::parse(u).is_ok()) => Ok(()),
+            Ok(l)
+                if l.iter()
+                    .all(|u| lessdugin_atp::syntax::AtUri::parse(u).is_ok()) =>
+            {
+                Ok(())
+            }
             _ => Err(bad("a list of forum uris")),
         },
         "indexers" => match serde_json::from_str::<Vec<crate::dto::IndexerConsent>>(v) {
@@ -723,9 +728,7 @@ impl<H: crate::host::Host> Engine<H> {
         &self,
         account: &str,
     ) -> Result<Vec<(String, Option<DraftEntryRow>)>, EngineError> {
-        let rows = self
-            .loc_rows(crate::key!("loc", "draft", account))
-            .await?;
+        let rows = self.loc_rows(crate::key!("loc", "draft", account)).await?;
         Ok(rows
             .into_iter()
             .filter_map(|(rest, v)| {

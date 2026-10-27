@@ -233,7 +233,10 @@ impl ForumState {
         decl: &Forum,
         now_us: i64,
     ) -> Result<Self, StoreError> {
-        let (a, now_ms) = (&roster::authorities(&key.owner, decl), now_us.div_euclid(1000));
+        let (a, now_ms) = (
+            &roster::authorities(&key.owner, decl),
+            now_us.div_euclid(1000),
+        );
         let all = |_: &str| true;
         let mut recs = forum_records(kv, &key.fk, nsid::MOD_ACTION, all, a, now_ms).await?;
         recs.extend(forum_records(kv, &key.fk, nsid::MEMBERSHIP, all, a, now_ms).await?);

@@ -110,7 +110,10 @@ fn verify_proof_is_refused_rather_than_stored() {
     let e = engine();
     let err = set(&e, "verify", Some("proof")).unwrap_err();
     assert_eq!(err.code, ErrorCode::Unsupported, "{err:?}");
-    assert_eq!(err.detail.as_ref().and_then(|d| d.get("milestone")), Some(&json!("P2")));
+    assert_eq!(
+        err.detail.as_ref().and_then(|d| d.get("milestone")),
+        Some(&json!("P2"))
+    );
     assert_eq!(
         block_on(e.settings()).unwrap().verify,
         lessdugin_core::dto::VerifyMode::Pds
@@ -126,7 +129,10 @@ fn slingshot_only_handle(host: &MemHost) {
     install_nxdomain(host, DOH, "alice.example.com");
     host.respond_get("https://alice.example.com/", resp::status(404));
     host.respond_get(
-        &format!("{}/xrpc/com.bad-example.identity.resolveMiniDoc", common::SLINGSHOT),
+        &format!(
+            "{}/xrpc/com.bad-example.identity.resolveMiniDoc",
+            common::SLINGSHOT
+        ),
         resp::ok_json(&json!({
             "did": alice.did.as_str(),
             "handle": alice.handle,
@@ -145,7 +151,10 @@ fn the_sources_setting_applies_at_once_and_after_a_restart() {
     slingshot_only_handle(&host);
     let e = Engine::new(host.clone(), EngineConfig::default());
     set(&e, "sources", Some("direct")).unwrap();
-    assert_eq!(block_on(e.settings()).unwrap().sources, lessdugin_core::dto::Sources::Direct);
+    assert_eq!(
+        block_on(e.settings()).unwrap().sources,
+        lessdugin_core::dto::Sources::Direct
+    );
     assert!(block_on(e.resolve_actor("alice.example.com")).is_err());
     assert!(
         host.requests_to(common::SLINGSHOT).is_empty(),
@@ -160,7 +169,12 @@ fn the_sources_setting_applies_at_once_and_after_a_restart() {
     // the same stored setting under a flag of the invocation: the flag wins
     let host = MemHost::new();
     slingshot_only_handle(&host);
-    set(&Engine::new(host.clone(), EngineConfig::default()), "sources", Some("direct")).unwrap();
+    set(
+        &Engine::new(host.clone(), EngineConfig::default()),
+        "sources",
+        Some("direct"),
+    )
+    .unwrap();
     let flagged = Engine::new(
         host.clone(),
         EngineConfig {
@@ -184,7 +198,12 @@ fn the_media_allowlist_parses_trimmed_and_nonempty() {
         block_on(e.media_hosts()).unwrap().is_empty(),
         "no allowlist yet"
     );
-    set(&e, "mediaHosts", Some("a.example, b.example ,,  ,c.example ")).unwrap();
+    set(
+        &e,
+        "mediaHosts",
+        Some("a.example, b.example ,,  ,c.example "),
+    )
+    .unwrap();
     assert_eq!(
         block_on(e.media_hosts()).unwrap(),
         vec!["a.example", "b.example", "c.example"]
@@ -352,7 +371,10 @@ fn every_settings_field_persists_through_set_setting() {
     assert_eq!(s.karma_notifications, KarmaCadence::Daily);
     // values of the wrong shape are refused
     for (k, v) in [
-        ("indexers", json!([{ "url": "http://plain.example", "grantedAtMs": 1 }])),
+        (
+            "indexers",
+            json!([{ "url": "http://plain.example", "grantedAtMs": 1 }]),
+        ),
         ("mediaAutoloadHosts", json!(["https://cdn.example/x"])),
         ("externalImagesForums", json!(["not a uri"])),
         ("karmaNotifications", json!("hourly")),
@@ -389,11 +411,17 @@ fn drafts_belong_to_the_account_that_saved_them() {
     let bob = common::bob();
     bob.install(&host, PLC, DOH);
     block_on(e.add_account(AccountInfo::app_password(bob.did.as_str(), common::PDS))).unwrap();
-    assert!(block_on(e.drafts()).unwrap().is_empty(), "bob sees no draft");
+    assert!(
+        block_on(e.drafts()).unwrap().is_empty(),
+        "bob sees no draft"
+    );
     block_on(e.delete_draft(&id)).unwrap();
     let mine = block_on(e.export_local(ExportScope::Mine)).unwrap();
     assert!(
-        !mine.members.iter().any(|m| m.parts.get(1).is_some_and(|t| t == "draft")),
+        !mine
+            .members
+            .iter()
+            .any(|m| m.parts.get(1).is_some_and(|t| t == "draft")),
         "bob's export carries no draft: {:?}",
         mine.members
     );
@@ -454,5 +482,8 @@ fn drafts_are_capped_in_size_and_number_and_never_share_an_id() {
     ))
     .unwrap();
     assert_eq!(rows.len(), MAX_DRAFTS, "every row counts toward the cap");
-    assert!(rows.iter().all(|(_, v)| v.as_slice() != b"not json"), "the junk went first");
+    assert!(
+        rows.iter().all(|(_, v)| v.as_slice() != b"not json"),
+        "the junk went first"
+    );
 }

@@ -707,10 +707,19 @@ mod tests {
         rt.invalidate(f);
         let after = (rt.gen_of(f), 120);
         rt.put(f, loaded(gen_before, 150), gen_before);
-        assert!(rt.cached(f, 150).is_none(), "raced an invalidation: not cached");
+        assert!(
+            rt.cached(f, 150).is_none(),
+            "raced an invalidation: not cached"
+        );
         assert!(rt.built_since(f, waiter).is_some(), "the waiter reuses it");
-        assert!(rt.built_since(f, after).is_none(), "a later query builds again");
+        assert!(
+            rt.built_since(f, after).is_none(),
+            "a later query builds again"
+        );
         let late = (gen_before, 200);
-        assert!(rt.built_since(f, late).is_none(), "built before the query arrived");
+        assert!(
+            rt.built_since(f, late).is_none(),
+            "built before the query arrived"
+        );
     }
 }

@@ -130,7 +130,11 @@ fn import_merges_and_leaves_unmentioned_keys_alone() {
 
     let report = block_on(e.import_local(&x, ExportScope::Mine)).unwrap();
     // the login rows (alice's account, the active account) are never imported
-    assert_eq!(report.imported + report.refused, x.members.len(), "{report:?}");
+    assert_eq!(
+        report.imported + report.refused,
+        x.members.len(),
+        "{report:?}"
+    );
     assert_eq!(report.refused, 2, "{report:?}");
     assert_eq!(report.undecodable, 0);
     // the imported key is back, and the key the export never mentioned is still there
@@ -275,8 +279,10 @@ fn an_import_never_writes_login_state_outbox_rows_or_bad_settings() {
     // `verify = proof` is Reserved and refused below too
     let n = refused.len() + 1;
     x.members.extend(refused);
-    x.members.push(member(p(&["loc", "setting", "verify"]), b"proof"));
-    x.members.push(member(p(&["loc", "setting", "sources"]), b"direct"));
+    x.members
+        .push(member(p(&["loc", "setting", "verify"]), b"proof"));
+    x.members
+        .push(member(p(&["loc", "setting", "sources"]), b"direct"));
     x.members.push(member(p(&["loc", "follow", "fk"]), b"1"));
     let report = block_on(e.import_local(&x, ExportScope::Mine)).unwrap();
     assert_eq!((report.refused, report.imported), (n, 2), "{report:?}");
@@ -317,7 +323,8 @@ fn an_import_is_capped_deduplicated_and_written_in_batches() {
     x.members = (0..2_500)
         .map(|i| loc_member(&["loc", "follow", &format!("fk{i:05}")], b"1"))
         .collect();
-    x.members.push(loc_member(&["loc", "follow", "fk00007"], b"2"));
+    x.members
+        .push(loc_member(&["loc", "follow", "fk00007"], b"2"));
     let report = block_on(e.import_local(&x, ExportScope::Mine)).unwrap();
     assert_eq!(report.imported, 2_500, "{report:?}");
     assert_eq!(report.kinds, [("follow".to_owned(), 2_500)]);
@@ -330,16 +337,32 @@ fn an_import_is_capped_deduplicated_and_written_in_batches() {
         .map(|i| loc_member(&["loc", "follow", &format!("big{i}")], b"1"))
         .collect();
     let err = block_on(e.import_local(&big, ExportScope::Mine)).unwrap_err();
-    assert_eq!(err.code, lessdugin_core::engine::ErrorCode::TooLarge, "{err:?}");
+    assert_eq!(
+        err.code,
+        lessdugin_core::engine::ErrorCode::TooLarge,
+        "{err:?}"
+    );
     let k = lessdugin_core::store::key::encode(&["loc".into(), "follow".into(), "big0".into()]);
-    assert_eq!(block_on(host.state().get_many(vec![k])).unwrap(), vec![None]);
+    assert_eq!(
+        block_on(host.state().get_many(vec![k])).unwrap(),
+        vec![None]
+    );
 
     let mut heavy = x;
     heavy.members = (0..70)
-        .map(|i| loc_member(&["loc", "follow", &format!("heavy{i}")], &vec![b'x'; 1 << 20]))
+        .map(|i| {
+            loc_member(
+                &["loc", "follow", &format!("heavy{i}")],
+                &vec![b'x'; 1 << 20],
+            )
+        })
         .collect();
     let err = block_on(e.import_local(&heavy, ExportScope::Mine)).unwrap_err();
-    assert_eq!(err.code, lessdugin_core::engine::ErrorCode::TooLarge, "{err:?}");
+    assert_eq!(
+        err.code,
+        lessdugin_core::engine::ErrorCode::TooLarge,
+        "{err:?}"
+    );
 }
 
 /// M4R-3 (`threat-model.md` AUTH-11): `remove_account(purge)` deletes every `loc` row keyed by
@@ -369,7 +392,10 @@ fn a_purge_deletes_the_accounts_notifications_acks_and_drafts() {
         .map(|m| &m.parts)
         .filter(|p| p.get(2).is_some_and(|d| d == a) && p.get(1).is_some_and(|t| t != "as_pin"))
         .collect();
-    assert!(alices.is_empty(), "alice's rows survived the purge: {alices:?}");
+    assert!(
+        alices.is_empty(),
+        "alice's rows survived the purge: {alices:?}"
+    );
     let bobs = left
         .members
         .iter()

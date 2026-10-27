@@ -259,7 +259,9 @@ impl ForumModel {
             .map(|d| {
                 let st = match repos.get(*d) {
                     None => RepoStatus::Unavailable,
-                    Some(r) if r.status == AccountStatus::Inactive && authorities.contains_key(*d) => {
+                    Some(r)
+                        if r.status == AccountStatus::Inactive && authorities.contains_key(*d) =>
+                    {
                         if r.inactive_retained(now_ms) {
                             inactive.insert((*d).to_owned());
                             r.repo_status(&key.fk).max(RepoStatus::Stale)

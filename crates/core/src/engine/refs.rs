@@ -217,9 +217,14 @@ impl<H: Host> Engine<H> {
         } else {
             format!("{ns}.{collection}")
         };
-        let did = self.me().await?.unwrap_or_else(|| PLACEHOLDER_DID.to_owned());
+        let did = self
+            .me()
+            .await?
+            .unwrap_or_else(|| PLACEHOLDER_DID.to_owned());
         let tid = lessdugin_atp::tid::Tid::from_parts(
-            u64::try_from(self.host.now_ms()).unwrap_or(0).saturating_mul(1000),
+            u64::try_from(self.host.now_ms())
+                .unwrap_or(0)
+                .saturating_mul(1000),
             0,
         )
         .map_err(|e| EngineError::internal(e.to_string()))?
@@ -247,15 +252,14 @@ impl<H: Host> Engine<H> {
         let r = match input {
             RkeyInput::Membership { forum } => keys::membership_rkey(forum),
             RkeyInput::Post { forum, tid } => keys::post_rkey(forum, tid),
-            RkeyInput::Comment { root, tid } => keys::split_uri(root)
-                .and_then(|(_, _, rk)| {
-                    let fk = keys::fk_of(rk).ok_or(keys::KeyError::Undefined)?;
-                    let t = keys::thread_tid(ns, root)?;
-                    if !keys::is_tid(tid) {
-                        return Err(keys::KeyError::InvalidTid);
-                    }
-                    Ok(format!("{fk}-{t}-{tid}"))
-                }),
+            RkeyInput::Comment { root, tid } => keys::split_uri(root).and_then(|(_, _, rk)| {
+                let fk = keys::fk_of(rk).ok_or(keys::KeyError::Undefined)?;
+                let t = keys::thread_tid(ns, root)?;
+                if !keys::is_tid(tid) {
+                    return Err(keys::KeyError::InvalidTid);
+                }
+                Ok(format!("{fk}-{t}-{tid}"))
+            }),
             RkeyInput::Opinion { forum, subject } => keys::opinion_rkey(ns, forum, subject),
             RkeyInput::ModAction {
                 forum,

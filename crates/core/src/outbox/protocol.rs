@@ -1146,7 +1146,10 @@ impl<'a, H: Host> Runner<'a, H> {
                         .iter()
                         .map(|k| format!("at://{did}/{}/{k}", nsid::REVISION));
                     self.w.results = match &item {
-                        Some(_) => named.chain(deleted).map(|uri| OpResult { uri, cid: None }).collect(),
+                        Some(_) => named
+                            .chain(deleted)
+                            .map(|uri| OpResult { uri, cid: None })
+                            .collect(),
                         None => self
                             .w
                             .ops

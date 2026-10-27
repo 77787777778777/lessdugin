@@ -1068,7 +1068,9 @@ impl<H: Host> Resolver<H> {
             Err(e) if matches!(e.status(), Some(404 | 410)) => {
                 return Err(IdentityError::DidNotFound(did.to_string()));
             }
-            Err(XrpcCallError::Cors) if src == DocSource::Web && self.slingshot().await.is_some() => {
+            Err(XrpcCallError::Cors)
+                if src == DocSource::Web && self.slingshot().await.is_some() =>
+            {
                 return self.minidoc_row(did, fetched_at).await;
             }
             Err(error) => {

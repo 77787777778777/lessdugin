@@ -876,7 +876,10 @@ mod tests {
         body.lines()
             .filter_map(|l| {
                 let (k, v) = l.trim().split_once(':')?;
-                Some((k.trim().to_owned(), v.trim().trim_end_matches(',').parse().ok()?))
+                Some((
+                    k.trim().to_owned(),
+                    v.trim().trim_end_matches(',').parse().ok()?,
+                ))
             })
             .collect()
     }
@@ -1020,7 +1023,11 @@ mod tests {
     fn local_state_operations_take_the_declared_shapes() {
         let e = engine();
         assert_eq!(
-            call_ok(&e, "setSetting", r#"["mediaAutoloadHosts", ["cdn.example"]]"#),
+            call_ok(
+                &e,
+                "setSetting",
+                r#"["mediaAutoloadHosts", ["cdn.example"]]"#
+            ),
             "null"
         );
         call_ok(&e, "setSetting", r#"["karmaNotifications", "weekly"]"#);
@@ -1031,8 +1038,8 @@ mod tests {
         assert_eq!(err.code, ErrorCode::InvalidInput);
 
         let x = call_ok(&e, "exportLocal", "[]");
-        let r: Value = serde_json::from_str(&call_ok(&e, "importLocal", &format!("[{x}]")))
-            .unwrap();
+        let r: Value =
+            serde_json::from_str(&call_ok(&e, "importLocal", &format!("[{x}]"))).unwrap();
         assert!(r["imported"].as_u64().unwrap() > 0, "{r}");
         assert_eq!(r["outOfScope"], 0, "{r}");
 
@@ -1054,15 +1061,21 @@ mod tests {
             "prepareMedia",
             &format!(r#"[{bytes}, {{"declaredMime": "image/png", "alt": "a dot"}}]"#),
         );
-        let (v0, now): (Value, Value) =
-            (serde_json::from_str(&v0).unwrap(), serde_json::from_str(&now).unwrap());
-        assert_eq!((&v0["cid"], &v0["mime"], &v0["alt"]), (&now["cid"], &now["mime"], &now["alt"]));
+        let (v0, now): (Value, Value) = (
+            serde_json::from_str(&v0).unwrap(),
+            serde_json::from_str(&now).unwrap(),
+        );
+        assert_eq!(
+            (&v0["cid"], &v0["mime"], &v0["alt"]),
+            (&now["cid"], &now["mime"], &now["alt"])
+        );
     }
 
     #[test]
     fn validate_record_and_derive_rkey() {
         let e = engine();
-        let forum = "at://did:plc:ewvi7nxzyoun6zhxrhs64oiz/online.7778777.lessdugin.temp.forum/meta";
+        let forum =
+            "at://did:plc:ewvi7nxzyoun6zhxrhs64oiz/online.7778777.lessdugin.temp.forum/meta";
         let post = json!({
             "$type": "online.7778777.lessdugin.temp.post",
             "forum": forum,
@@ -1095,15 +1108,25 @@ mod tests {
         let fk = k(json!({"kind": "membership", "forum": forum}));
         let p = k(json!({"kind": "post", "forum": forum, "tid": "3l2s5xxv2ze2c"}));
         assert_eq!(p, format!("{fk}-3l2s5xxv2ze2c"));
-        let root = format!("at://did:plc:ewvi7nxzyoun6zhxrhs64oiz/online.7778777.lessdugin.temp.post/{p}");
+        let root =
+            format!("at://did:plc:ewvi7nxzyoun6zhxrhs64oiz/online.7778777.lessdugin.temp.post/{p}");
         let c = k(json!({"kind": "comment", "root": root, "tid": "3l2s6aaaaaaa2"}));
         assert_eq!(c, format!("{fk}-3l2s5xxv2ze2c-3l2s6aaaaaaa2"));
         let o = k(json!({"kind": "opinion", "forum": forum, "subject": root}));
         assert!(o.starts_with(&format!("{p}-")), "{o}");
-        let m = k(json!({"kind": "modAction", "forum": forum, "scope": "forum",
-            "subject": root, "actionKey": "hide"}));
-        assert!(m.starts_with(&format!("{fk}-")) && m.len() == fk.len() + 17, "{m}");
-        let err = call_err(&e, "deriveRkey", r#"[{"kind": "post", "forum": "x", "tid": "y"}]"#);
+        let m = k(
+            json!({"kind": "modAction", "forum": forum, "scope": "forum",
+            "subject": root, "actionKey": "hide"}),
+        );
+        assert!(
+            m.starts_with(&format!("{fk}-")) && m.len() == fk.len() + 17,
+            "{m}"
+        );
+        let err = call_err(
+            &e,
+            "deriveRkey",
+            r#"[{"kind": "post", "forum": "x", "tid": "y"}]"#,
+        );
         assert_eq!(err.code, ErrorCode::InvalidInput);
     }
 

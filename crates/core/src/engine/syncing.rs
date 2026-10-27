@@ -24,8 +24,8 @@ use crate::dto::{self, DtoVersion, Event, SyncIssue, SyncReport, Topic};
 use crate::host::Host;
 use crate::limits;
 use crate::store::RepoStatus;
-use crate::store::repo::AccountStatus;
 use crate::store::records::RecordStore;
+use crate::store::repo::AccountStatus;
 use crate::store::schema::{GLOBAL_SCOPE, scope_of};
 use crate::sync::queue::ready_time;
 use crate::sync::{

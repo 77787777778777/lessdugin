@@ -317,7 +317,6 @@ fn lock<T>(m: &StdMutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-
 /// `true` for the rkey of a revision of a forum declaration or of a modAction: those revisions
 /// are the mod log, which keeps every prior state (`threat-model.md` SOC-7), so they are never
 /// redacted or deleted one by one.
@@ -870,8 +869,11 @@ impl<H: Host> Outbox<H> {
         if ops.is_empty() {
             return Err(EngineError::invalid_input("nothing to redact"));
         }
-        self.enqueue(session, NewWrite::new(Intent::Redact { subject: None }, ops))
-            .await
+        self.enqueue(
+            session,
+            NewWrite::new(Intent::Redact { subject: None }, ops),
+        )
+        .await
     }
 
     /// Redacts the history of the own item `subject` (a post, comment or sequence): when the

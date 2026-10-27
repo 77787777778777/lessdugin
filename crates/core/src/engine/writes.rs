@@ -421,8 +421,7 @@ impl<H: Host> Engine<H> {
         }
         let forum_lock = v.moderation.lock(root.as_str()).is_some();
         let author_lock = root.did().as_str() != writer
-            && v
-                .author
+            && v.author
                 .as_ref()
                 .is_ok_and(|a| a.locks.contains_key(root.as_str()));
         if forum_lock || author_lock {
