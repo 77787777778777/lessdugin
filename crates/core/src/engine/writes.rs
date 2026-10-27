@@ -17,8 +17,8 @@
 //! progress arrives as `Write` events, and a confirmed write as `Changed` for its forum and
 //! thread. Bodies are LFM/1 markdown with the derived `mentions`/`links` (W8); media are
 //! refused until M4 (`unsupported`). A comment's or react's quote gets its derived
-//! `prefix`/`suffix`/`start` from P of the target's cached version (W8). TODO(M4):
-//! `at://handle` mention rewriting (W7).
+//! `prefix`/`suffix`/`start` from P of the target's cached version (W8). Handle-authority
+//! `at://` destinations are rewritten to verified DIDs first (W7, `Engine::with_dids`).
 
 use futures::StreamExt;
 use futures::future::join_all;
