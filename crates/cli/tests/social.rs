@@ -372,21 +372,34 @@ fn author_scope_lock_pin_and_removal() {
     assert_eq!(e["code"], "usage", "{e}");
 }
 
-/// Reading a thread sets its read mark (`social.md` §16, `engine-api.md` §3.6 `mark_read`): the
-/// first `read` shows the new comment unread, the next one shows it read, and the post's
-/// unread count in `ls` drops to zero.
+/// Reading a thread sets its read mark (`social.md` §16, `engine-api.md` §3.6 `mark_read`): a
+/// comment that arrives after a `read` shows unread on the next one (and in `ls`), and read on
+/// the one after. A thread never read has no read mark, so nothing in it is unread.
 #[test]
 fn reading_a_thread_marks_it_read() {
     let w = World::new();
+    let unread = |tv: &ThreadView| -> Vec<bool> { tv.comments.iter().map(|c| c.unread).collect() };
     let c = w.bob.json(&["comment", &w.post, "-m", "A reply."]);
     assert_eq!(c["state"]["kind"], "done", "{c}");
     w.alice.ok(&["sync", &w.forum]);
-    let unread = |tv: &ThreadView| -> Vec<bool> { tv.comments.iter().map(|c| c.unread).collect() };
-
     let first: ThreadView = exact(&w.alice.ok(&["--json", "read", &w.post]));
-    assert_eq!(unread(&first), [true], "{:?}", first.comments);
-    let again: ThreadView = exact(&w.alice.ok(&["--json", "read", &w.post]));
-    assert_eq!(unread(&again), [false], "{:?}", again.comments);
+    assert_eq!(unread(&first), [false], "{:?}", first.comments);
+
+    let c = w.carol.json(&["comment", &w.post, "-m", "Another reply."]);
+    assert_eq!(c["state"]["kind"], "done", "{c}");
+    w.alice.ok(&["sync", &w.forum]);
     let pl: PostList = exact(&w.alice.ok(&["--json", "ls", "--all"]));
-    assert_eq!(pl.items[0].unread_comments.unwrap_or(0), 0, "{:?}", pl.items[0]);
+    assert_eq!(pl.items[0].unread_comments, Some(1), "{:?}", pl.items[0]);
+    let second: ThreadView = exact(&w.alice.ok(&["--json", "read", &w.post]));
+    let new: Vec<bool> = second
+        .comments
+        .iter()
+        .filter(|c| c.body.text.contains("Another"))
+        .map(|c| c.unread)
+        .collect();
+    assert_eq!(new, [true], "{:?}", second.comments);
+    let third: ThreadView = exact(&w.alice.ok(&["--json", "read", &w.post]));
+    assert_eq!(unread(&third), [false, false], "{:?}", third.comments);
+    let pl: PostList = exact(&w.alice.ok(&["--json", "ls", "--all"]));
+    assert_eq!(pl.items[0].unread_comments, Some(0), "{:?}", pl.items[0]);
 }
