@@ -210,7 +210,7 @@ pub struct ModArgs {
 /// `mod …` (`social.md` §4; every action is a public record, `data-model.md` §6.7).
 #[derive(Debug, Subcommand)]
 pub enum ModAction {
-    /// Hide an item (with an optional reason; spam hides it everywhere).
+    /// Hide an item (with an optional reason; --spam also voids the votes on it).
     Hide(ModCommon),
     /// Remove your hide assertion.
     Unhide(ModSubject),
@@ -238,7 +238,8 @@ pub enum ModAction {
     Pin(PinArgs),
     /// Unpin an item.
     Unpin(PinArgs),
-    /// Lock a post (comments stay only for its allow-list) or the forum (read-only).
+    /// Lock a post: only the comments visible now stay (forum-wide locks are reserved; to
+    /// archive a forum, switch it to approval mode).
     Lock(ModSubject),
     /// Unlock.
     Unlock(ModSubject),
@@ -278,6 +279,10 @@ pub struct ModSubject {
     /// The forum (default: --forum, then the current forum, else the subject's forum).
     #[arg(long, value_name = "FORUM")]
     pub forum: Option<String>,
+    /// Act as the post's author, not as the forum (author moderation, `social.md` §4.9): the
+    /// author's lock of their post, or the removal of an author-scope assertion.
+    #[arg(long)]
+    pub author_scope: bool,
 }
 
 /// A mod action with the common options.
@@ -292,7 +297,8 @@ pub struct ModCommon {
     /// Why (a public record; shown according to the forum's policy).
     #[arg(long, value_name = "TEXT")]
     pub reason: Option<String>,
-    /// Hide as spam (`mod hide` only: spam hides the author's content forum-wide).
+    /// Mark the item as spam (`mod hide` only): the votes on it stop counting. It hides only
+    /// this item; `mod ban` hides all of an author's content.
     #[arg(long)]
     pub spam: bool,
     /// Act as the post's author, not as the forum (author moderation, `social.md` §4.9).
@@ -376,6 +382,9 @@ pub struct PinArgs {
     /// Why (public).
     #[arg(long, value_name = "TEXT")]
     pub reason: Option<String>,
+    /// Pin as the post's author: a comment in your own post's thread (`social.md` §4.9).
+    #[arg(long)]
+    pub author_scope: bool,
 }
 
 /// `--scope` of `mod pin`.

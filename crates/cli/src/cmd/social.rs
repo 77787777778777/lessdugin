@@ -649,7 +649,7 @@ async fn assert_or_remove(ctx: &Ctx, action: ModAction, yes: bool) -> Result<(),
         ModAction::Lock(s) => (
             s.subject.clone(),
             s.forum.clone(),
-            ModScope::Forum,
+            scope_of(s.author_scope),
             ModActionValue::Lock { locked: true },
             None,
             None,
@@ -658,7 +658,7 @@ async fn assert_or_remove(ctx: &Ctx, action: ModAction, yes: bool) -> Result<(),
         ModAction::Unlock(s) => (
             s.subject.clone(),
             s.forum.clone(),
-            ModScope::Forum,
+            scope_of(s.author_scope),
             ModActionValue::Lock { locked: false },
             None,
             None,
@@ -674,6 +674,11 @@ async fn assert_or_remove(ctx: &Ctx, action: ModAction, yes: bool) -> Result<(),
             return removal(ctx, &w, s, "restrict", "Unrestricted", yes).await;
         }
         ModAction::Approve(s) => {
+            if s.author_scope {
+                return Err(CliError::usage(
+                    "a grant is a forum action; --author-scope does not apply",
+                ));
+            }
             let forum = refs::forum_or_current(ctx, &w.engine, s.forum.as_deref()).await?;
             // a grant is an `#access` mod action (`social.md` §17)
             acknowledge(ctx, &w, PublicActionKind::ModAction, yes).await?;
@@ -739,7 +744,7 @@ async fn tier(
         w,
         assert(
             forum,
-            ModScope::Forum,
+            scope_of(s.author_scope),
             subject,
             ModActionValue::Tier { tier, notice: None },
             None,
@@ -761,7 +766,7 @@ async fn pin(ctx: &Ctx, w: &Writer, a: PinArgs, pinned: bool, yes: bool) -> Resu
         w,
         assert(
             forum,
-            ModScope::Forum,
+            scope_of(a.author_scope),
             subject,
             ModActionValue::Pin {
                 scope: a.scope.into(),
@@ -776,7 +781,8 @@ async fn pin(ctx: &Ctx, w: &Writer, a: PinArgs, pinned: bool, yes: bool) -> Resu
     .await
 }
 
-/// A removal of one of the account's assertions (`mod unhide|unban|unrestrict`).
+/// A removal of one of the account's assertions (`mod unhide|unban|unrestrict`), of the forum
+/// or (`--author-scope`) the author scope: the scope is part of the record's key.
 async fn removal(
     ctx: &Ctx,
     w: &Writer,
@@ -790,7 +796,7 @@ async fn removal(
     mod_action(
         ctx,
         w,
-        remove(forum, ModScope::Forum, subject, action_key),
+        remove(forum, scope_of(s.author_scope), subject, action_key),
         done,
         yes,
     )
