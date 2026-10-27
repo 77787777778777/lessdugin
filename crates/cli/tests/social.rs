@@ -538,7 +538,7 @@ fn forum_edit_reject_mute_and_the_karma_cadence() {
 
     // the karma cadence is saved on this device
     let cadence = || -> Option<String> {
-        let x = w.alice.json(&["export"]);
+        let x = w.alice.json(&["export", "--local"]);
         x["members"]
             .as_array()
             .unwrap()

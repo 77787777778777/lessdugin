@@ -3,6 +3,7 @@
 
 pub mod doctor;
 pub mod draft;
+pub mod export;
 pub mod forum;
 pub mod identity;
 pub mod login;

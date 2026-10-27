@@ -1015,12 +1015,16 @@ async fn removal(
     .await
 }
 
-/// `export`: this device's local state as JSON, or `--import` to merge one back
-/// (`engine-api.md` §3.6, `synthesis-v1.md` §6.10, `threat-model.md` PRIV-8/PRIV-10).
+/// `export`: content (`cmd/export.rs`), or with `--local` this device's local state as JSON,
+/// or `--import` to merge one back (`engine-api.md` §3.6, `threat-model.md` PRIV-8/PRIV-10).
 ///
-/// `--mine` is the default: the active account's state plus the rows that belong to no account.
-/// An import merges, so a partial or older export never destroys state it does not mention.
+/// `--local --scope mine` is the default: the active account's state plus the rows that belong
+/// to no account. An import merges, so a partial or older export never destroys state it does
+/// not mention.
 pub async fn export(ctx: &Ctx, args: ExportArgs) -> Result<(), CliError> {
+    if !args.local && args.import.is_none() {
+        return crate::cmd::export::content(ctx, args).await;
+    }
     let engine = ctx.reader().await?;
     if let Some(path) = args.import {
         let text = std::fs::read_to_string(&path)

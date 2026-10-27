@@ -458,7 +458,7 @@ pub fn stance_of(against: bool) -> Stance {
     }
 }
 
-/// Which local state `export` covers.
+/// Which local state `export --local` covers.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
 pub enum ExportScopeArg {
     /// Your own state (the default, `threat-model.md` PRIV-8).
@@ -468,16 +468,40 @@ pub enum ExportScopeArg {
     Everything,
 }
 
-/// `export`: write this device's local state as JSON.
+/// `--format` of `export`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+pub enum ExportFormatArg {
+    /// One JSON document.
+    #[default]
+    Json,
+    /// Markdown files with YAML frontmatter.
+    Md,
+}
+
+/// `export`: posts and comments (yours by default, or a forum's), or this device's local state.
 #[derive(Debug, Args)]
 pub struct ExportArgs {
-    /// What to export.
-    #[arg(long, value_enum, default_value_t = ExportScopeArg::Mine)]
-    pub scope: ExportScopeArg,
-    /// Write to this file instead of stdout.
+    /// A forum to export as it shows (hidden and deleted content is left out); without one,
+    /// your own posts and comments.
+    #[arg(value_name = "FORUM", conflicts_with_all = ["mine", "local", "import"])]
+    pub forum: Option<String>,
+    /// Your own posts and comments, in every forum (the default, `threat-model.md` PRIV-8).
+    #[arg(long)]
+    pub mine: bool,
+    /// The format.
+    #[arg(long, value_enum, default_value_t = ExportFormatArg::Json)]
+    pub format: ExportFormatArg,
+    /// Where to write: a directory (`export.json`, or the markdown files), or with --local a
+    /// file. Without it JSON goes to standard output.
     #[arg(long, short = 'o', value_name = "PATH")]
     pub out: Option<std::path::PathBuf>,
-    /// Import instead: merge a file written by `export` back into this device.
-    #[arg(long, value_name = "PATH", conflicts_with_all = ["scope", "out"])]
+    /// This device's local state instead (read marks, mutes, settings, ...), as JSON.
+    #[arg(long, conflicts_with_all = ["mine", "format"])]
+    pub local: bool,
+    /// Which local state --local covers.
+    #[arg(long, value_enum, default_value_t = ExportScopeArg::Mine, requires = "local")]
+    pub scope: ExportScopeArg,
+    /// Import instead: merge a file written by `export --local` back into this device.
+    #[arg(long, value_name = "PATH", conflicts_with_all = ["mine", "format", "local", "scope", "out"])]
     pub import: Option<std::path::PathBuf>,
 }

@@ -152,7 +152,8 @@ pub enum Command {
     Unmute(MuteArgs),
     /// List the authors you muted.
     Mutes,
-    /// Export this device's local state as JSON (or --import it back).
+    /// Export your posts and comments, or a forum, as JSON or markdown (--local: this device's
+    /// local state, which --import merges back).
     Export(ExportArgs),
     /// Recent Discussion: the posts with the newest comments.
     Activity(ActivityArgs),
