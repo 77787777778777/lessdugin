@@ -720,28 +720,58 @@ const DECODE_MAX_SIDE: usize = 8_192;
 const DECODE_MAX_ALLOC_BYTES: usize = 256 * 1024 * 1024;
 
 /// True when SUP-9 lets us decode `bytes` at all. A hostile header can declare an enormous frame,
-/// and `image::load_from_memory` would allocate it, so the caps are checked BEFORE any pixels are
-/// read. `imagesize` parses only the container header, which costs no decode.
+/// and a decoder would allocate it, so the caps are checked BEFORE any pixels are read: the frame
+/// size comes from `imagesize` (the container header only), and when it cannot parse the header,
+/// from the decoder's own header parse ([`image::ImageReader::into_dimensions`], no pixels).
+/// Their walkers differ (a JPEG fill byte before a marker throws `imagesize` off, while the
+/// decoder accepts it), so a header neither can measure is refused: fail closed (F35/F36).
 ///
-/// A header `imagesize` cannot parse is not a cap violation: the decode below then decides, which
-/// is what already happens for an undecodable file (the metadata is still stripped, and
-/// orientation and downscaling no-op).
+/// The three caps are 64 MiB of input, 8192 pixels per side, and a 256 MiB allocation at 4 bytes
+/// a pixel. Public so every surface that decodes media - the pipeline here, and the TUI's image
+/// widget - uses ONE policy; [`decode_image`] applies the same caps inside the decoder too.
 #[cfg(feature = "orientation")]
-/// True when the bytes may be handed to a decoder: the three SUP-9 caps hold (64 MiB of input,
-/// 8192 pixels per side, a 256 MiB allocation at 4 bytes a pixel). Public so every surface that
-/// decodes media - the pipeline here, and the TUI's image widget - uses ONE policy.
 pub fn decoding_allowed(bytes: &[u8]) -> bool {
     if bytes.len() > DECODE_MAX_INPUT_BYTES {
         return false;
     }
-    let Ok(size) = imagesize::blob_size(bytes) else {
-        return true;
+    let (width, height) = match imagesize::blob_size(bytes) {
+        Ok(size) => (size.width, size.height),
+        Err(_) => match reader(bytes).and_then(|r| r.into_dimensions().ok()) {
+            Some((w, h)) => (w as usize, h as usize),
+            None => return false,
+        },
     };
-    if size.width.max(size.height) > DECODE_MAX_SIDE {
+    if width.max(height) > DECODE_MAX_SIDE {
         return false;
     }
     // RGBA is the largest allocation the decoders here make per pixel.
-    size.width.saturating_mul(size.height).saturating_mul(4) <= DECODE_MAX_ALLOC_BYTES
+    width.saturating_mul(height).saturating_mul(4) <= DECODE_MAX_ALLOC_BYTES
+}
+
+/// An image reader over `bytes` with SUP-9's caps as the decoder's own limits, so a frame past
+/// them fails inside the decoder even if a header check was fooled (the `image` crate's default
+/// is 512 MiB of allocation and no side cap).
+#[cfg(feature = "orientation")]
+fn reader(bytes: &[u8]) -> Option<image::ImageReader<std::io::Cursor<&[u8]>>> {
+    let mut r = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(DECODE_MAX_SIDE as u32);
+    limits.max_image_height = Some(DECODE_MAX_SIDE as u32);
+    limits.max_alloc = Some(DECODE_MAX_ALLOC_BYTES as u64);
+    r.limits(limits);
+    Some(r)
+}
+
+/// Decodes `bytes` under SUP-9: `None` unless [`decoding_allowed`] holds and the decoder, run
+/// with the same caps as its limits, succeeds. Every decode of the pipeline goes through here.
+#[cfg(feature = "orientation")]
+pub fn decode_image(bytes: &[u8]) -> Option<image::DynamicImage> {
+    if !decoding_allowed(bytes) {
+        return None;
+    }
+    reader(bytes)?.decode().ok()
 }
 
 /// Applies EXIF orientation physically, by re-encoding the pixels (so no EXIF survives). Returns
@@ -755,10 +785,7 @@ pub fn apply_orientation(bytes: &[u8], orientation: u16) -> Vec<u8> {
     if !(2..=8).contains(&orientation) {
         return bytes.to_vec();
     }
-    if !decoding_allowed(bytes) {
-        return bytes.to_vec();
-    }
-    let Ok(img) = image::load_from_memory(bytes) else {
+    let Some(img) = decode_image(bytes) else {
         return bytes.to_vec();
     };
     // Orientations 5-8 swap the axes, so they are 90/270 rotations plus flips.
@@ -895,10 +922,7 @@ pub fn downscale_to_fit(bytes: &[u8], max_bytes: usize) -> Option<Vec<u8>> {
         Format::Jpeg => ImageFormat::Jpeg,
         Format::Iso => return None,
     };
-    if !decoding_allowed(bytes) {
-        return None;
-    }
-    let mut img = image::load_from_memory(bytes).ok()?;
+    let mut img = decode_image(bytes)?;
     // bounded: at most 20 halvings (a 2^20-fold reduction), so this cannot spin
     for _ in 0..20 {
         let mut out = Vec::new();
@@ -974,8 +998,38 @@ mod tests {
         assert!(!decoding_allowed(&png_claiming(1, 8_193)));
         // within the side cap but past the allocation cap
         assert!(!decoding_allowed(&png_claiming(8_192, 8_193)));
-        // a header imagesize cannot parse is not a cap violation: the decode decides
-        assert!(decoding_allowed(b"not an image at all"));
+        // a header nothing can measure is refused (fail closed, F3)
+        assert!(!decoding_allowed(b"not an image at all"));
+        assert!(!decoding_allowed(&[0xFF, 0xD8, 0xFF, 0xFF, 0xFF]));
+    }
+
+    /// F3: a real JPEG whose SOF0 declares 12000×12000 behind one fill byte (legal, T.81 B.1.1.2).
+    /// `imagesize` loses its way at the fill byte, the decoder does not: without a fallback the
+    /// guard said "allowed" and the decoder allocated the frame.
+    #[test]
+    fn a_fill_byte_cannot_smuggle_a_frame_past_the_side_cap() {
+        let mut jpeg = Vec::new();
+        image::DynamicImage::new_rgb8(8, 8)
+            .write_to(&mut std::io::Cursor::new(&mut jpeg), image::ImageFormat::Jpeg)
+            .unwrap();
+        let sof = jpeg.windows(2).position(|w| w == [0xFF, 0xC0]).unwrap();
+        // SOF0: length (2), precision (1), height (2), width (2)
+        jpeg[sof + 5..sof + 9].copy_from_slice(&[0x2E, 0xE0, 0x2E, 0xE0]);
+        jpeg.insert(sof, 0xFF);
+        assert!(imagesize::blob_size(&jpeg).is_err(), "the fallback is untested");
+        assert!(!decoding_allowed(&jpeg));
+        assert!(decode_image(&jpeg).is_none());
+        assert_eq!(apply_orientation(&jpeg, 6), jpeg);
+        assert_eq!(downscale_to_fit(&jpeg, 1), None);
+        // the same fill byte in front of a frame within the caps decodes as before
+        let mut small = Vec::new();
+        image::DynamicImage::new_rgb8(8, 4)
+            .write_to(&mut std::io::Cursor::new(&mut small), image::ImageFormat::Jpeg)
+            .unwrap();
+        let sof = small.windows(2).position(|w| w == [0xFF, 0xC0]).unwrap();
+        small.insert(sof, 0xFF);
+        assert!(decoding_allowed(&small));
+        assert_eq!(decode_image(&small).map(|i| (i.width(), i.height())), Some((8, 4)));
     }
 }
 

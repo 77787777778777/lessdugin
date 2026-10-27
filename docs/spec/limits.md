@@ -125,8 +125,8 @@ Every cap counts response bytes (§1) and follows R1–R4. A request that names 
 | `FRONTMATTER_DEPTH_MAX` | 32 | S | YAML nesting depth in frontmatter. | `threat-model.md` TERM-10 |
 | `FRONTMATTER_ALIASES_MAX` | 0 | S | YAML anchors and aliases are rejected. | `threat-model.md` TERM-10 |
 | `IMAGE_DECODE_MAX_INPUT_BYTES` | 67,108,864 (64 MiB) | S | Encoded image bytes given to a decoder (TUI display, native upload pipeline). Larger: placeholder (display) or refusal (upload). | `threat-model.md` SUP-9 |
-| `IMAGE_DECODE_MAX_SIDE` | 8,192 | S | Width and height in pixels, each. | `threat-model.md` SUP-9 |
-| `IMAGE_DECODE_MAX_ALLOC` | 268,435,456 (256 MiB) | S | Decoder allocation limit (one 8,192² RGBA frame). | `threat-model.md` SUP-9 |
+| `IMAGE_DECODE_MAX_SIDE` | 8,192 | S | Width and height in pixels, each, read from the header before any pixel is decoded and also set as the decoder's own limit. A header whose frame size cannot be read is refused like one past the cap (fail closed). | `threat-model.md` SUP-9 |
+| `IMAGE_DECODE_MAX_ALLOC` | 268,435,456 (256 MiB) | S | Decoder allocation limit (one 8,192² RGBA frame), set explicitly on every decode (a decoder library's default does not count). | `threat-model.md` SUP-9 |
 | `GIF_DECODE_MAX_FRAMES` | 200 | S | Frames decoded from one GIF. | `threat-model.md` SUP-9 |
 | `IMAGE_DECODE_TIMEOUT_MS` | 10,000 (10 s) | S | Wall time of one off-thread decode. Longer: abort; placeholder or refusal. | `threat-model.md` SUP-9 |
 | `MEDIA_CONTAINER_MAX_DEPTH` | 32 | S | Nesting of MP4 boxes and RIFF chunks walked by the sniffer and the strippers. Deeper: the file is refused for upload, or treated as an unknown type for display. | `threat-model.md` §5.9.1 |
