@@ -2110,15 +2110,25 @@ impl State {
 
     /// `i`: loads the selected item's images. The key is the reader's consent (`sync.md`
     /// §11.3: what the autoload policy does not load is "click to load"): their author's PDS
-    /// sees this device's address.
+    /// sees this device's address. A comment folded by the fold shows neither its images nor
+    /// the host they load from, so it is expanded first.
     fn load_media(&mut self, fx: &mut Vec<Effect>) {
         let Some(t) = self.top_thread() else {
             self.say(Tone::Info, lit("Open a post to load its images."));
             return;
         };
-        let Some(uri) = t.layout.items.get(t.pos.selected).map(|i| i.uri.clone()) else {
+        let Some(span) = t.layout.items.get(t.pos.selected) else {
             return;
         };
+        let uri = span.uri.clone();
+        if span.collapsed && !t.collapsed.contains(&uri) {
+            self.say(
+                Tone::Info,
+                lit("This comment is collapsed: press Space to show it, and where its images \
+                     load from, first."),
+            );
+            return;
+        }
         let media: Vec<lessdugin_core::dto::MediaView> = t
             .data
             .as_ref()

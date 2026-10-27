@@ -407,3 +407,79 @@ fn the_autoload_verdict_loads_only_visible_small_images() {
         "it is already loading"
     );
 }
+
+/// `i` on a comment the fold collapsed loads nothing: its body, its images and the host they
+/// load from are folded, so the reader has not seen where the request would go. Space shows
+/// them; then `i` loads.
+#[test]
+fn i_on_a_folded_comment_loads_nothing_until_it_is_expanded() {
+    use lessdugin_core::dto::{CollapseReason, CommentDraft, ItemState, MediaInput, ThreadOpts};
+    use lessdugin_tui::app::ThreadData;
+    use lessdugin_tui::keys::parse_key;
+    use lessdugin_tui::{Action, Effect};
+    let s = scenario();
+    let (bob, carol) = (&s.w.bob, &s.w.carol);
+    let prepared = block_on(bob.engine.prepare_media(
+        png(8, 8),
+        &MediaInput {
+            declared_mime: Some("image/png".into()),
+            alt: None,
+            name: None,
+            aspect_ratio: None,
+        },
+    ))
+    .unwrap();
+    let mut d = CommentDraft::new(&s.welcome, None, format!("![x](cid:{})", prepared.cid));
+    d.body.media.push(prepared);
+    let t = block_on(bob.engine.comment(&d)).unwrap();
+    bob.flush();
+    let comment = bob.done(&t);
+    carol.sync(&s.forum);
+    let mut t = common::tui(&s, 80, 40);
+    block_on(t.start(None));
+    block_on(t.open_thread(&s.welcome));
+    let screen = t.state.top().unwrap().id;
+    // the fold collapsed bob's comment (as it does a newcomer's, for other readers)
+    let mut view = block_on(carol.engine.get_thread(&s.welcome, &ThreadOpts::default())).unwrap();
+    let c = view
+        .comments
+        .iter_mut()
+        .find(|c| c.uri == comment)
+        .expect("bob's comment");
+    c.state = ItemState::Collapsed {
+        reason: CollapseReason::NewUser,
+    };
+    assert!(!c.body.media.is_empty());
+    let _ = t.state.update(Action::ThreadLoaded {
+        screen,
+        origin: lessdugin_tui::app::Origin::Live,
+        result: Ok(Box::new(ThreadData {
+            view,
+            bodies: Default::default(),
+        })),
+    });
+    let fetches = |fx: &[Effect]| {
+        fx.iter()
+            .filter(|e| matches!(e, Effect::FetchMedia { .. }))
+            .count()
+    };
+    let key = |t: &mut lessdugin_tui::Headless<lessdugin_testkit::MemHost>, k: &str| {
+        t.state.update(Action::Key(parse_key(k).unwrap()))
+    };
+    // select bob's comment
+    while t
+        .state
+        .top_thread()
+        .and_then(|th| th.layout.items.get(th.pos.selected))
+        .is_some_and(|i| i.uri != comment)
+    {
+        let _ = key(&mut t, "j");
+    }
+    assert_eq!(fetches(&key(&mut t, "i")), 0, "{}", t.render());
+    let st = t.state.status.as_ref().unwrap().text.to_plain_string();
+    assert!(st.contains("collapsed"), "{st}");
+    // expanded, it says where its image loads from, and `i` loads it
+    let _ = key(&mut t, "Space");
+    assert!(t.render().contains("i loads it from"), "{}", t.render());
+    assert_eq!(fetches(&key(&mut t, "i")), 1);
+}
