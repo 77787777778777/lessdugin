@@ -7,7 +7,8 @@
 //! [`TermText`](crate::text::TermText) turned into spans by [`crate::text`].
 
 use lessdugin_core::dto::{
-    CommentSort, ForumRole, HistoryView, MembershipMode, PostFilter, PostSort, Stance,
+    CommentSort, ForumRole, HistoryView, MembershipMode, PostFilter, PostSort, PublicActionKind,
+    Stance,
 };
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout as Split, Rect};
@@ -17,7 +18,8 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use crate::app::{
     ForumScreen, ForumTab, HomeScreen, LIST_ROWS, ModMenu, ModScreen, ModTab, NotificationsScreen,
-    Prompt, ReactOverlay, Screen, ScreenKind, State, SyncStatus, ThreadScreen, Tone, status_text,
+    Prompt, PublicNotice, ReactOverlay, Screen, ScreenKind, State, SyncStatus, ThreadScreen, Tone,
+    status_text,
 };
 use crate::keys::HELP;
 use crate::text::{
@@ -96,6 +98,60 @@ pub fn draw(state: &State, f: &mut Frame<'_>) {
     if let Some(c) = &state.command {
         command_line(f, c, area);
     }
+    if let Some(n) = &state.public_notice {
+        public_notice(f, n, area);
+    }
+}
+
+/// What the interstitial says of a kind (`social.md` §17), as the CLI and the SPA say it.
+pub fn public_notice_text(kind: PublicActionKind) -> &'static str {
+    match kind {
+        PublicActionKind::Vote => {
+            "Your votes are public records in your repository: everyone can see what you voted \
+             on and how. Each vote is held for 4 seconds before it is sent; Backspace undoes it."
+        }
+        PublicActionKind::React => {
+            "Your reacts are public records in your repository, including the quoted passage."
+        }
+        PublicActionKind::TagVote => "Your tag votes are public records in your repository.",
+        PublicActionKind::Join => {
+            "Your membership (and its note) is a public record in your repository."
+        }
+        PublicActionKind::ModAction => {
+            "Moderation actions are public records in your repository, with their reasons: \
+             they appear in the forum's mod log."
+        }
+    }
+}
+
+/// The "this is public" interstitial (`threat-model.md` PRIV-9): shown once per kind of public
+/// action, before the first one is written.
+fn public_notice(f: &mut Frame<'_>, n: &PublicNotice, area: Rect) {
+    let width = 60.min(area.width);
+    let inner = usize::from(width.saturating_sub(2)).max(1);
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    for k in &n.kinds {
+        for t in crate::body::wrap(public_notice_text(*k), inner) {
+            lines.push(line([(tt(&t), Style::default())]));
+        }
+        lines.push(Line::default());
+    }
+    lines.push(line([(
+        lit("You are asked once for each kind of public action."),
+        dim(),
+    )]));
+    lines.push(line([(lit("y go on \u{b7} n cancel"), bold())]));
+    let height = u16::try_from(lines.len() + 2)
+        .unwrap_or(u16::MAX)
+        .min(area.height);
+    let x = area.x + (area.width - width) / 2;
+    let y = area.y + (area.height - height) / 2;
+    let r = Rect::new(x, y, width, height);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(line([(lit(" This is public "), warn_style())]));
+    f.render_widget(Clear, r);
+    f.render_widget(Paragraph::new(Text::from(lines)).block(block), r);
 }
 
 /// The `m` mod menu overlay: the forum-tier actions of `ViewerCaps.moderate`/`rank` (plus the

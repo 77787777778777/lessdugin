@@ -229,6 +229,16 @@ pub async fn run<H: Host>(engine: &Engine<H>, effect: Effect, opts: ExecOpts) ->
             return None;
         }
         Effect::LoadWrites => Action::WritesLoaded(engine.writes().await),
+        Effect::LoadAcknowledged => {
+            Action::AcknowledgedLoaded(engine.acknowledged_public_actions().await)
+        }
+        Effect::Acknowledge { kind } => {
+            // not stored: the next session asks again; this one already let the write go
+            if let Err(e) = engine.acknowledge_public_action(kind).await {
+                tracing::debug!(error = %e, ?kind, "acknowledge_public_action failed");
+            }
+            return None;
+        }
         Effect::Editor(_) | Effect::Quit => return None,
     })
 }

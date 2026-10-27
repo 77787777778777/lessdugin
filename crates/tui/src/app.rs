@@ -22,9 +22,9 @@ use lessdugin_core::dto::{
     AccessLevel, AccountView, ActionTicket, AgreementValue, Capability, CommentDraft, CommentSort,
     DiscussionList, Event, ForumSummary, ForumView, HistoryView, KarmaValue, ModActionIntent,
     ModActionValue, ModLog, ModQueue, ModScope, ModsChange, NotificationList, OpinionIntent,
-    PinScope, PostDraft, PostFilter, PostList, PostSort, ReactTally, Stance, SyncReport,
-    ThreadOpts, ThreadRoot, ThreadView, Tier, Topic, UnreadCounts, ViewerCaps, WriteState,
-    WriteTicket,
+    PinScope, PostDraft, PostFilter, PostList, PostSort, PublicActionKind, ReactTally, Stance,
+    SyncReport, ThreadOpts, ThreadRoot, ThreadView, Tier, Topic, UnreadCounts, ViewerCaps,
+    WriteState, WriteTicket,
 };
 use lessdugin_core::engine::EngineError;
 
@@ -315,8 +315,31 @@ pub enum Effect {
     /// `writes()`: the outbox as it is at start (writes queued or failed before this
     /// session).
     LoadWrites,
+    /// `acknowledged_public_actions()`: the "this is public" interstitials the account has
+    /// seen (`engine-api.md` §3.6).
+    LoadAcknowledged,
+    /// `acknowledge_public_action(kind)`: the user went past the interstitial of `kind`.
+    Acknowledge {
+        /// The kind.
+        kind: PublicActionKind,
+    },
     /// Leave the TUI.
     Quit,
+}
+
+impl Effect {
+    /// The public action this effect writes (`social.md` §17), whose first-use interstitial
+    /// must have been seen before it runs: an opinion by its intent; a mod action, an
+    /// `#access` grant or a moderator change is a mod action.
+    pub fn public_kind(&self) -> Option<PublicActionKind> {
+        match self {
+            Effect::Opinion { intent, .. } => Some(intent.public_kind()),
+            Effect::ModAction { .. } | Effect::Grant { .. } | Effect::ModsSet { .. } => {
+                Some(PublicActionKind::ModAction)
+            }
+            _ => None,
+        }
+    }
 }
 
 /// Something that happened.
@@ -479,6 +502,8 @@ pub enum Action {
         /// The log.
         result: Result<ModLog, EngineError>,
     },
+    /// [`Effect::LoadAcknowledged`] finished.
+    AcknowledgedLoaded(Result<Vec<PublicActionKind>, EngineError>),
 }
 
 /// The tone of a status message.
@@ -927,6 +952,17 @@ pub struct Prompt {
     pub merge: Option<RestrictDim>,
 }
 
+/// The "this is public" interstitial (`social.md` §17, `threat-model.md` PRIV-9): the first
+/// public action of a kind the account has not acknowledged waits behind it until the user
+/// goes on (`y`) or cancels (`n`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct PublicNotice {
+    /// The kinds it covers, in [`PublicActionKind`] order (one, unless one key queued two).
+    pub kinds: Vec<PublicActionKind>,
+    /// The writes it holds.
+    pub held: Vec<Effect>,
+}
+
 /// What the mod menu and `:mod` act on: the selected item, its thread's post, and their
 /// authors.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1287,6 +1323,12 @@ pub struct State {
     pub prompt: Option<Prompt>,
     /// The `:` command line overlay (`synthesis-v1.md` §6.11 Overlays): the text so far.
     pub command: Option<String>,
+    /// The public-action interstitial, while one is open.
+    pub public_notice: Option<PublicNotice>,
+    /// The public actions the account has acknowledged (`None` until loaded: every kind asks).
+    pub acknowledged: Option<BTreeSet<PublicActionKind>>,
+    /// [`Effect::LoadAcknowledged`] was sent.
+    acknowledged_asked: bool,
     /// The unread counts (`unread_counts()`): the header's notification badge and the Home
     /// screen's per-forum new counts.
     pub unread: Option<UnreadCounts>,
@@ -1349,6 +1391,9 @@ impl State {
             mod_menu: None,
             prompt: None,
             command: None,
+            public_notice: None,
+            acknowledged: None,
+            acknowledged_asked: false,
             unread: None,
             help_scroll: 0,
             status: None,
@@ -1523,9 +1568,79 @@ impl State {
                     self.unread = Some(u);
                 }
             }
+            Action::AcknowledgedLoaded(result) => match result {
+                // acknowledgements are never withdrawn, and one made here may not be stored
+                // yet when this list was read: keep both
+                Ok(kinds) => self.acknowledged.get_or_insert_default().extend(kinds),
+                Err(e) => tracing::debug!(error = %e, "acknowledged_public_actions failed"),
+            },
         }
+        self.hold_public(&mut fx);
         self.fit();
         fx
+    }
+
+    /// Takes the public writes of a kind the account has not acknowledged out of `fx` and
+    /// holds them behind the interstitial (`engine-api.md` §3.6: every client shows it before
+    /// the first action of a kind; the engine does not enforce it). Every write the TUI makes
+    /// passes here, whatever key or command queued it.
+    fn hold_public(&mut self, fx: &mut Vec<Effect>) {
+        let acked = self.acknowledged.clone().unwrap_or_default();
+        let (held, rest): (Vec<Effect>, Vec<Effect>) = std::mem::take(fx)
+            .into_iter()
+            .partition(|e| e.public_kind().is_some_and(|k| !acked.contains(&k)));
+        *fx = rest;
+        if held.is_empty() {
+            return;
+        }
+        let notice = self.public_notice.get_or_insert(PublicNotice {
+            kinds: Vec::new(),
+            held: Vec::new(),
+        });
+        for e in held {
+            if let Some(k) = e.public_kind()
+                && !notice.kinds.contains(&k)
+            {
+                notice.kinds.push(k);
+            }
+            notice.held.push(e);
+        }
+        notice.kinds.sort();
+        self.say(
+            Tone::Warn,
+            lit("This is public: y to go on, n to cancel."),
+        );
+    }
+
+    /// A key while the interstitial is open: `y` or Enter sends the held writes and records
+    /// the acknowledgement, `n` or Esc drops them.
+    fn public_notice_key(&mut self, k: &KeyEvent, fx: &mut Vec<Effect>) {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        if k.modifiers.contains(KeyModifiers::CONTROL) && matches!(k.code, KeyCode::Char('c')) {
+            self.public_notice = None;
+            self.quit = true;
+            fx.push(Effect::Quit);
+            return;
+        }
+        match k.code {
+            KeyCode::Char('y' | 'Y') | KeyCode::Enter => {
+                let Some(n) = self.public_notice.take() else {
+                    return;
+                };
+                let acked = self.acknowledged.get_or_insert_default();
+                for kind in n.kinds {
+                    acked.insert(kind);
+                    fx.push(Effect::Acknowledge { kind });
+                }
+                self.status = None;
+                fx.extend(n.held);
+            }
+            KeyCode::Char('n' | 'N' | 'q') | KeyCode::Esc => {
+                self.public_notice = None;
+                self.say(Tone::Info, lit("Cancelled: nothing was published."));
+            }
+            _ => {}
+        }
     }
 
     /// Keeps the top screen consistent with the terminal size: the thread laid out for the
@@ -1582,6 +1697,11 @@ impl State {
         });
         let i = self.stack.len() - 1;
         self.reload(i, Origin::User, fx);
+        // the acknowledgements the interstitial needs, once there is an account to ask about
+        if self.account.is_some() && !self.acknowledged_asked {
+            self.acknowledged_asked = true;
+            fx.push(Effect::LoadAcknowledged);
+        }
         i
     }
 
@@ -1755,6 +1875,11 @@ impl State {
 
     fn key(&mut self, k: &KeyEvent, fx: &mut Vec<Effect>) {
         if k.kind == crossterm::event::KeyEventKind::Release {
+            return;
+        }
+        // the public-action interstitial is answered before anything else
+        if self.public_notice.is_some() {
+            self.public_notice_key(k, fx);
             return;
         }
         // a prompt captures the raw keys (it edits a text line)
@@ -4350,6 +4475,10 @@ impl State {
                     )
                 }) {
                     fx.push(Effect::LoadUnread);
+                }
+                // another client on this device may have acknowledged an interstitial
+                if self.account.is_some() && topics.contains(&Topic::Accounts) {
+                    fx.push(Effect::LoadAcknowledged);
                 }
             }
             Event::SyncProgress { forum, done, total } => {
