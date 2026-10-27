@@ -1076,7 +1076,7 @@ delete(target):                                  // post | comment | sequence | 
 ### 8.8 Blobs and MIME normalisation
 
 **Upload**
-- Blobs are uploaded only at publish time, after the media pipeline (strip, orient, downscale; `sync.md` and `threat-model.md`).
+- Blobs are uploaded only at publish time, after the media pipeline (strip, orient, downscale; `sync.md` and `threat-model.md`). An image or MP4 the pipeline cannot parse is refused (`invalid_input`, `detail.kind = "mediaRejected"`), never uploaded with its metadata (`threat-model.md` §5.9.1).
 - The record embeds the blob object returned by `uploadBlob` **verbatim**. The locally computed CID is for preview only and MUST equal the returned `ref.$link`; if it does not, the write fails.
 - On 413, the client downscales (images) or refuses.
 - A blob that is not referenced is garbage-collected by the PDS after about an hour. So the write that references a blob MUST follow its upload within the same `PendingWrite`.

@@ -18,13 +18,18 @@
 //! | GIF | the header, logical screen descriptor, global colour table, graphic control extensions, image descriptors with local colour tables and image data, the `NETSCAPE2.0` application extension, trailer | comment and plain-text extensions, other application extensions (XMP), anything after the trailer |
 //! | MP4 / MOV | **every byte** — offsets must never shift | every `udta` and `meta` box at any depth, overwritten with a `free` box whose payload is zeroed |
 //!
-//! **Orientation.** An EXIF orientation other than 1 is applied physically (the pixels are
-//! rotated and re-encoded) before the EXIF is dropped, so a rotated photo keeps looking right
-//! (`sync.md`, PRIV-4).
+//! **Orientation.** An EXIF orientation other than 1 (from a JPEG's APP1, a PNG's `eXIf` or a
+//! WebP's `EXIF` chunk) is applied physically (the pixels are rotated and re-encoded) before the
+//! EXIF is dropped, so a rotated photo keeps looking right (`sync.md`, PRIV-4).
+//!
+//! **Fail closed.** A container of the table that the walk cannot parse (a truncated stream, a
+//! length past the end, a byte that is no marker, a missing end marker) is reported `malformed`
+//! and refused for upload by [`prepare`]: nothing proves that what the table drops is gone, and
+//! browsers display such files anyway, so uploading them as they are would publish their EXIF.
 //!
 //! **Bounded walks.** Every walk is iterative and capped (`limits.md` §6), so a truncated or
 //! cyclic container cannot hang or overflow the stack: a walk that runs off the end stops and
-//! treats the file as unstrippable rather than looping.
+//! treats the file as malformed rather than looping.
 
 use crate::engine::EngineError;
 
@@ -79,37 +84,37 @@ pub struct Stripped {
     /// The container nests deeper than [`MEDIA_CONTAINER_MAX_DEPTH`], so §6 refuses it for
     /// upload. The bytes are the input's, unmodified; this is not a "nothing to drop" answer.
     pub too_deep: bool,
+    /// The container is one of the table's but the walk could not parse it, so nothing proves
+    /// that its metadata is gone: [`prepare`] refuses it for upload (fail closed). The bytes are
+    /// the input's, unmodified; this is not a "nothing to drop" answer either.
+    pub malformed: bool,
 }
 
 /// Nesting of MP4 boxes (and RIFF chunks) walked by the sniffer and the strippers
 /// (`limits.md` §6, `MEDIA_CONTAINER_MAX_DEPTH`). Deeper: the file is refused for upload.
 pub const MEDIA_CONTAINER_MAX_DEPTH: u32 = 32;
 
-/// Strips metadata from `b` by allowlist rebuild (§5.9.1). A format outside the table, or one the
-/// walk cannot parse, is returned unchanged with `changed: false`: the pipeline never destroys a
-/// file it does not understand, and PRIV-7 says the others upload as they are. A container nested
-/// past [`MEDIA_CONTAINER_MAX_DEPTH`] sets `too_deep` instead (§6: refused for upload).
+/// Strips metadata from `b` by allowlist rebuild (§5.9.1). A format outside the table is returned
+/// unchanged with `changed: false` (PRIV-7: the others upload as they are). A container of the
+/// table that the walk cannot parse comes back unchanged too, but `malformed` (the pipeline never
+/// destroys a file it does not understand, and never uploads it either); one nested past
+/// [`MEDIA_CONTAINER_MAX_DEPTH`] sets `too_deep` instead (§6: refused for upload).
 pub fn strip_metadata(b: &[u8]) -> Stripped {
+    let format = sniff(b);
     if b.len() > MAX_SCAN_BYTES {
+        // never walked, so never vouched for
         return Stripped {
-            bytes: b.to_vec(),
-            changed: false,
-            orientation: None,
-            too_deep: false,
+            malformed: format.is_some(),
+            ..unchanged(b)
         };
     }
-    match sniff(b) {
+    match format {
         Some(Format::Jpeg) => strip_jpeg(b),
         Some(Format::Png) => strip_png(b),
         Some(Format::Webp) => strip_webp(b),
         Some(Format::Gif) => strip_gif(b),
         Some(Format::Iso) => strip_iso(b),
-        None => Stripped {
-            bytes: b.to_vec(),
-            changed: false,
-            orientation: None,
-            too_deep: false,
-        },
+        None => unchanged(b),
     }
 }
 
@@ -119,6 +124,18 @@ fn unchanged(b: &[u8]) -> Stripped {
         changed: false,
         orientation: None,
         too_deep: false,
+        malformed: false,
+    }
+}
+
+/// The result of a rebuild that dropped something (or not) and parsed to the end.
+fn rebuilt(bytes: Vec<u8>, changed: bool, orientation: Option<u16>) -> Stripped {
+    Stripped {
+        bytes,
+        changed,
+        orientation,
+        too_deep: false,
+        malformed: false,
     }
 }
 
@@ -126,10 +143,16 @@ fn unchanged(b: &[u8]) -> Stripped {
 /// upload with its bytes unmodified rather than half-processed.
 fn refused_too_deep(b: &[u8]) -> Stripped {
     Stripped {
-        bytes: b.to_vec(),
-        changed: false,
-        orientation: None,
         too_deep: true,
+        ..unchanged(b)
+    }
+}
+
+/// The walk could not parse `b`: its bytes unmodified, refused for upload by [`prepare`].
+fn malformed(b: &[u8]) -> Stripped {
+    Stripped {
+        malformed: true,
+        ..unchanged(b)
     }
 }
 
@@ -156,7 +179,7 @@ fn jpeg_kept(marker: u8) -> bool {
 /// MPF APP2, and anything after EOI.
 fn strip_jpeg(b: &[u8]) -> Stripped {
     if b.len() < 4 {
-        return unchanged(b);
+        return malformed(b);
     }
     let mut out = Vec::with_capacity(b.len());
     out.extend_from_slice(&b[0..2]); // SOI
@@ -167,7 +190,7 @@ fn strip_jpeg(b: &[u8]) -> Stripped {
     // input unchanged rather than emitting a half-stripped file.
     while i < b.len() {
         if b[i] != 0xFF {
-            return unchanged(b);
+            return malformed(b);
         }
         // Skip fill bytes (a run of 0xFF before a marker is legal padding). Collapsing them
         // is a change to the file, so it must be reported as one: `changed == false` promises
@@ -180,19 +203,14 @@ fn strip_jpeg(b: &[u8]) -> Stripped {
             changed = true;
         }
         let Some(&marker) = b.get(i) else {
-            return unchanged(b);
+            return malformed(b);
         };
         i += 1;
         match marker {
             0xD9 => {
                 // EOI: nothing after it survives
                 out.extend_from_slice(&[0xFF, 0xD9]);
-                return Stripped {
-                    bytes: out,
-                    changed: changed || i != b.len(),
-                    orientation,
-                    too_deep: false,
-                };
+                return rebuilt(out, changed || i != b.len(), orientation);
             }
             0xD8 => {
                 out.extend_from_slice(&[0xFF, 0xD8]);
@@ -201,11 +219,11 @@ fn strip_jpeg(b: &[u8]) -> Stripped {
             0xDA => {
                 // SOS: its header segment, then the entropy-coded data up to the next marker.
                 let Some(len_at) = b.get(i..i + 2) else {
-                    return unchanged(b);
+                    return malformed(b);
                 };
                 let len = u16::from_be_bytes([len_at[0], len_at[1]]) as usize;
                 if len < 2 || i + len > b.len() {
-                    return unchanged(b);
+                    return malformed(b);
                 }
                 out.extend_from_slice(&[0xFF, 0xDA]);
                 out.extend_from_slice(&b[i..i + len]);
@@ -213,7 +231,7 @@ fn strip_jpeg(b: &[u8]) -> Stripped {
                 // entropy-coded data: copy until a marker that is not a stuffed 0x00 and not RSTn
                 loop {
                     let Some(&c) = b.get(i) else {
-                        return unchanged(b);
+                        return malformed(b);
                     };
                     if c != 0xFF {
                         out.push(c);
@@ -221,7 +239,7 @@ fn strip_jpeg(b: &[u8]) -> Stripped {
                         continue;
                     }
                     let Some(&n) = b.get(i + 1) else {
-                        return unchanged(b);
+                        return malformed(b);
                     };
                     if n == 0x00 {
                         out.extend_from_slice(&[0xFF, 0x00]);
@@ -241,11 +259,11 @@ fn strip_jpeg(b: &[u8]) -> Stripped {
             _ => {}
         }
         let Some(len_at) = b.get(i..i + 2) else {
-            return unchanged(b);
+            return malformed(b);
         };
         let len = u16::from_be_bytes([len_at[0], len_at[1]]) as usize;
         if len < 2 || i + len > b.len() {
-            return unchanged(b);
+            return malformed(b);
         }
         let payload = &b[i + 2..i + len];
         let keep = if jpeg_kept(marker) {
@@ -272,13 +290,23 @@ fn strip_jpeg(b: &[u8]) -> Stripped {
         i += len;
     }
     // no EOI: a truncated stream
-    unchanged(b)
+    malformed(b)
 }
 
 /// The EXIF orientation tag (0x0112) from an APP1 payload, if present and sane.
 fn exif_orientation(app1: &[u8]) -> Option<u16> {
     // "Exif\0\0" then a TIFF header ("II"/"MM", 42, offset to IFD0)
-    let tiff = app1.strip_prefix(b"Exif\0\0")?;
+    tiff_orientation(app1.strip_prefix(b"Exif\0\0")?)
+}
+
+/// The orientation tag of a PNG `eXIf` or WebP `EXIF` chunk: the TIFF structure itself, which
+/// some writers still prefix with JPEG's `Exif\0\0`.
+fn chunk_orientation(payload: &[u8]) -> Option<u16> {
+    tiff_orientation(payload.strip_prefix(b"Exif\0\0").unwrap_or(payload))
+}
+
+/// The orientation tag (0x0112) of IFD0 of a TIFF structure, if present and sane.
+fn tiff_orientation(tiff: &[u8]) -> Option<u16> {
     let little = match tiff.get(0..2)? {
         b"II" => true,
         b"MM" => false,
@@ -332,38 +360,41 @@ fn strip_png(b: &[u8]) -> Stripped {
 
     // signature is 8 bytes
     if b.len() < 8 {
-        return unchanged(b);
+        return malformed(b);
     }
     let mut out = Vec::with_capacity(b.len());
     out.extend_from_slice(&b[0..8]);
     let mut i = 8;
     let mut changed = false;
+    let mut orientation = None;
     while i + 8 <= b.len() {
         let len = u32::from_be_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]) as usize;
         let kind = &b[i + 4..i + 8];
         // len + type + data + CRC, with a bound so a corrupt length cannot overflow
         let Some(end) = i.checked_add(12).and_then(|v| v.checked_add(len)) else {
-            return unchanged(b);
+            return malformed(b);
         };
         if end > b.len() {
-            return unchanged(b);
+            return malformed(b);
         }
         match kind {
             b"IEND" => {
                 out.extend_from_slice(&b[i..end]);
-                return Stripped {
-                    bytes: out,
-                    changed: changed || end != b.len(),
-                    orientation: None,
-                    too_deep: false,
-                };
+                return rebuilt(out, changed || end != b.len(), orientation);
             }
             k if KEEP.iter().any(|x| **x == *k) => out.extend_from_slice(&b[i..end]),
-            _ => changed = true,
+            k => {
+                // eXIf is dropped like the rest, but its orientation is applied first
+                if k == b"eXIf" && orientation.is_none() {
+                    orientation = chunk_orientation(&b[i + 8..i + 8 + len]);
+                }
+                changed = true;
+            }
         }
         i = end;
     }
-    unchanged(b)
+    // no IEND: a truncated stream
+    malformed(b)
 }
 
 // --- WebP -----------------------------------------------------------------------------------
@@ -380,31 +411,33 @@ fn webp_kept(id: &[u8]) -> bool {
 /// XMP flag bits (`threat-model.md` §5.9.1).
 fn strip_webp(b: &[u8]) -> Stripped {
     if b.len() < 12 {
-        return unchanged(b);
+        return malformed(b);
     }
     let mut out = Vec::with_capacity(b.len());
     out.extend_from_slice(&b[0..12]);
     let mut i = 12;
     let mut changed = false;
+    let mut orientation = None;
     while i + 8 <= b.len() {
         let id = &b[i..i + 4];
         let len = u32::from_le_bytes([b[i + 4], b[i + 5], b[i + 6], b[i + 7]]) as usize;
         // chunks are padded to an even size
         let padded = len + (len & 1);
         let Some(end) = i.checked_add(8).and_then(|v| v.checked_add(padded)) else {
-            return unchanged(b);
+            return malformed(b);
         };
         if end > b.len() {
-            return unchanged(b);
+            return malformed(b);
         }
         if webp_kept(id) {
             if id == b"VP8X" && len >= 1 {
-                // byte 0 holds the flag bits: bit 3 = EXIF, bit 4 = XMP (RFC 9649)
+                // byte 0 holds the flag bits, MSB first `Rsv Rsv I L E X A R` (RFC 9649):
+                // ICC 0x20, alpha 0x10, EXIF 0x08, XMP 0x04, animation 0x02
                 let mut chunk = b[i..end].to_vec();
                 let mut flags = chunk[8];
                 let before = flags;
-                flags &= !(1 << 3); // EXIF
-                flags &= !(1 << 4); // XMP
+                flags &= !0x08; // EXIF
+                flags &= !0x04; // XMP
                 if flags != before {
                     chunk[8] = flags;
                     changed = true;
@@ -414,7 +447,10 @@ fn strip_webp(b: &[u8]) -> Stripped {
                 out.extend_from_slice(&b[i..end]);
             }
         } else {
-            // EXIF, XMP and every other chunk
+            // EXIF, XMP and every other chunk; EXIF's orientation is applied first
+            if id == b"EXIF" && orientation.is_none() {
+                orientation = chunk_orientation(&b[i + 8..i + 8 + len]);
+            }
             changed = true;
         }
         i = end;
@@ -425,16 +461,13 @@ fn strip_webp(b: &[u8]) -> Stripped {
     }
     // recompute the RIFF size: everything after the first 8 bytes
     if out.len() < 8 {
-        return unchanged(b);
+        return malformed(b);
     }
-    let size = (out.len() - 8) as u32;
-    out[4..8].copy_from_slice(&size.to_le_bytes());
-    Stripped {
-        bytes: out,
-        changed,
-        orientation: None,
-        too_deep: false,
-    }
+    let size = ((out.len() - 8) as u32).to_le_bytes();
+    // a header that misstated the size is a change too (`changed: false` promises the input)
+    changed |= out[4..8] != size;
+    out[4..8].copy_from_slice(&size);
+    rebuilt(out, changed, orientation)
 }
 
 // --- GIF ------------------------------------------------------------------------------------
@@ -451,7 +484,7 @@ fn is_netscape_loop(blocks: &[u8]) -> bool {
 /// extension (XMP) are dropped, as is anything after the trailer.
 fn strip_gif(b: &[u8]) -> Stripped {
     if b.len() < 13 {
-        return unchanged(b);
+        return malformed(b);
     }
     let mut out = Vec::with_capacity(b.len());
     // header (6) + logical screen descriptor (7)
@@ -463,10 +496,10 @@ fn strip_gif(b: &[u8]) -> Stripped {
     if packed & 0x80 != 0 {
         let entries = 1usize << ((packed & 0x07) + 1);
         let Some(end) = i.checked_add(entries * 3) else {
-            return unchanged(b);
+            return malformed(b);
         };
         if end > b.len() {
-            return unchanged(b);
+            return malformed(b);
         }
         out.extend_from_slice(&b[i..end]);
         i = end;
@@ -476,23 +509,23 @@ fn strip_gif(b: &[u8]) -> Stripped {
     while i < b.len() {
         guard += 1;
         if guard > 1_000_000 {
-            return unchanged(b);
+            return malformed(b);
         }
         match b[i] {
             0x21 => {
                 // extension: label, then sub-blocks
                 let Some(&label) = b.get(i + 1) else {
-                    return unchanged(b);
+                    return malformed(b);
                 };
                 let Some(start) = i.checked_add(2) else {
-                    return unchanged(b);
+                    return malformed(b);
                 };
                 // walk the sub-block chain to find the end
                 let mut j = start;
                 let mut blocks = Vec::new();
                 loop {
                     let Some(&sz) = b.get(j) else {
-                        return unchanged(b);
+                        return malformed(b);
                     };
                     let sz = sz as usize;
                     if sz == 0 {
@@ -501,10 +534,10 @@ fn strip_gif(b: &[u8]) -> Stripped {
                         break;
                     }
                     let Some(end) = j.checked_add(1).and_then(|v| v.checked_add(sz)) else {
-                        return unchanged(b);
+                        return malformed(b);
                     };
                     if end > b.len() {
-                        return unchanged(b);
+                        return malformed(b);
                     }
                     blocks.extend_from_slice(&b[j..end]);
                     j = end;
@@ -531,31 +564,31 @@ fn strip_gif(b: &[u8]) -> Stripped {
             0x2C => {
                 // image descriptor (9 bytes) + optional local colour table + LZW sub-blocks
                 let Some(start) = i.checked_add(10) else {
-                    return unchanged(b);
+                    return malformed(b);
                 };
                 if start > b.len() {
-                    return unchanged(b);
+                    return malformed(b);
                 }
                 let mut j = start;
                 let lp = b[i + 9];
                 if lp & 0x80 != 0 {
                     let entries = 1usize << ((lp & 0x07) + 1);
                     let Some(e) = j.checked_add(entries * 3) else {
-                        return unchanged(b);
+                        return malformed(b);
                     };
                     if e > b.len() {
-                        return unchanged(b);
+                        return malformed(b);
                     }
                     j = e;
                 }
                 // LZW minimum code size, then sub-blocks
                 let Some(_mcs) = b.get(j) else {
-                    return unchanged(b);
+                    return malformed(b);
                 };
                 j += 1;
                 loop {
                     let Some(&sz) = b.get(j) else {
-                        return unchanged(b);
+                        return malformed(b);
                     };
                     let sz = sz as usize;
                     if sz == 0 {
@@ -563,10 +596,10 @@ fn strip_gif(b: &[u8]) -> Stripped {
                         break;
                     }
                     let Some(e) = j.checked_add(1).and_then(|v| v.checked_add(sz)) else {
-                        return unchanged(b);
+                        return malformed(b);
                     };
                     if e > b.len() {
-                        return unchanged(b);
+                        return malformed(b);
                     }
                     j = e;
                 }
@@ -576,17 +609,13 @@ fn strip_gif(b: &[u8]) -> Stripped {
             0x3B => {
                 // trailer
                 out.push(0x3B);
-                return Stripped {
-                    bytes: out,
-                    changed: changed || i + 1 != b.len(),
-                    orientation: None,
-                    too_deep: false,
-                };
+                return rebuilt(out, changed || i + 1 != b.len(), None);
             }
-            _ => return unchanged(b),
+            _ => return malformed(b),
         }
     }
-    unchanged(b)
+    // no trailer: a truncated stream
+    malformed(b)
 }
 
 // --- MP4 / ISO-BMFF -------------------------------------------------------------------------
@@ -613,7 +642,7 @@ fn strip_iso(b: &[u8]) -> Stripped {
         while i + 8 <= end {
             guard += 1;
             if guard > 1_000_000 {
-                return unchanged(b);
+                return malformed(b);
             }
             let size32 = u32::from_be_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]) as u64;
             let kind = &b[i + 4..i + 8];
@@ -622,14 +651,16 @@ fn strip_iso(b: &[u8]) -> Stripped {
                 1 => {
                     // 64-bit size follows the type
                     let Some(l) = b.get(i + 8..i + 16) else {
-                        break;
+                        return malformed(b);
                     };
                     (u64::from_be_bytes(l.try_into().unwrap()), 16usize)
                 }
                 n => (n, 8usize),
             };
+            // A size smaller than its own header leaves the rest of this level unframed: a
+            // `udta` or `meta` in it could not be found, so the walk cannot vouch for the file.
             if size < header as u64 {
-                break;
+                return malformed(b);
             }
             let box_end = match (i as u64).checked_add(size) {
                 Some(v) if v <= end as u64 => v as usize,
@@ -670,12 +701,7 @@ fn strip_iso(b: &[u8]) -> Stripped {
         }
     }
     if changed {
-        Stripped {
-            bytes: out,
-            changed,
-            orientation: None,
-            too_deep: false,
-        }
+        rebuilt(out, true, None)
     } else {
         unchanged(b)
     }
@@ -774,6 +800,16 @@ pub fn prepare(bytes: Vec<u8>) -> Result<Vec<u8>, EngineError> {
         ))
         .with_detail("kind", "mediaRejected"));
     }
+    // Fail closed (PRIV-4, §5.9.1 "the output keeps only what the table allows"): a damaged
+    // image or MP4 is not uploaded with its metadata, it is refused.
+    if stripped.malformed {
+        return Err(EngineError::invalid_input(
+            "the file is damaged (truncated or not well formed), so its metadata cannot be \
+             removed safely: re-save it with an image or video editor and attach it again",
+        )
+        .with_detail("kind", "mediaRejected")
+        .with_detail("reason", "malformed"));
+    }
     #[cfg(feature = "orientation")]
     if let Some(o) = stripped.orientation.filter(|o| *o != 1) {
         return Ok(apply_orientation(&stripped.bytes, o));
@@ -790,9 +826,8 @@ use crate::dto::{MediaInput, MediaRef};
 ///
 /// The declared type is checked against the sniffed one through §8.8's table, which is also what
 /// decides whether the type is acceptable at all; a type outside the table is refused rather than
-/// uploaded as something the reader will not accept. A file whose metadata cannot be parsed is
-/// still returned (the pipeline never destroys a file it does not understand, PRIV-7), but it is
-/// returned with the bytes it came in with.
+/// uploaded as something the reader will not accept. An image or MP4 whose container cannot be
+/// parsed is refused too (fail closed, [`prepare`]): its metadata could not be removed.
 impl<H: crate::host::Host> crate::engine::Engine<H> {
     /// See [`prepare_media`](Self::prepare_media).
     pub async fn prepare_media(
