@@ -371,3 +371,22 @@ fn author_scope_lock_pin_and_removal() {
         .fails(2, &["mod", "approve", "bob.test", "--author-scope"]);
     assert_eq!(e["code"], "usage", "{e}");
 }
+
+/// Reading a thread sets its read mark (`social.md` §16, `engine-api.md` §3.6 `mark_read`): the
+/// first `read` shows the new comment unread, the next one shows it read, and the post's
+/// unread count in `ls` drops to zero.
+#[test]
+fn reading_a_thread_marks_it_read() {
+    let w = World::new();
+    let c = w.bob.json(&["comment", &w.post, "-m", "A reply."]);
+    assert_eq!(c["state"]["kind"], "done", "{c}");
+    w.alice.ok(&["sync", &w.forum]);
+    let unread = |tv: &ThreadView| -> Vec<bool> { tv.comments.iter().map(|c| c.unread).collect() };
+
+    let first: ThreadView = exact(&w.alice.ok(&["--json", "read", &w.post]));
+    assert_eq!(unread(&first), [true], "{:?}", first.comments);
+    let again: ThreadView = exact(&w.alice.ok(&["--json", "read", &w.post]));
+    assert_eq!(unread(&again), [false], "{:?}", again.comments);
+    let pl: PostList = exact(&w.alice.ok(&["--json", "ls", "--all"]));
+    assert_eq!(pl.items[0].unread_comments.unwrap_or(0), 0, "{:?}", pl.items[0]);
+}

@@ -342,6 +342,16 @@ pub async fn read(ctx: &Ctx, args: ReadArgs) -> Result<(), CliError> {
             tt(&e.to_string()),
         ]));
     }
+    // viewing a thread sets its read mark (`social.md` §16); this view keeps its unread marks
+    if !args.no_comments
+        && let ThreadRoot::Post(p) = &thread.post
+        && let Err(e) = engine.mark_read(&p.post.uri).await
+    {
+        ctx.out.warn(cat([
+            lit("could not mark the thread read: "),
+            tt(&e.message),
+        ]));
+    }
     if ctx.out.is_json() {
         if args.no_comments {
             match &thread.post {
