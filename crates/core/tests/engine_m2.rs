@@ -644,8 +644,9 @@ fn own_revisions(u: &User, item: &str) -> Vec<String> {
 }
 
 /// M4R-2: a redaction deletes every own revision of the item that the author's PDS lists when
-/// it is sent, not just the ones this device folded: an invalid revision (which the fold drops)
-/// and one another device wrote after the last sync go too.
+/// it is sent, not just the ones this device folded: an invalid revision (which the fold drops),
+/// one another device wrote after the last sync, and malformed records keyed to the item go
+/// too; a comment's revision under the post's prefix stays.
 #[test]
 fn redaction_deletes_unsynced_and_invalid_revisions_too() {
     let s = scenario();
@@ -683,6 +684,32 @@ fn redaction_deletes_unsynced_and_invalid_revisions_too() {
         own_revisions(alice, &welcome).len() >= 3,
         "the fixture's revision and two more"
     );
+    // malformed own records under the item's prefix are its history too: a key whose suffix is
+    // no TID, a subject spelled with the handle, a record keyed to the item that names nothing
+    let cid = "bafyreie5737gdxlw5i64vzichcalba3z2v5n6icifvx5xytvske7mr3hpm";
+    let by_handle = welcome.replacen(alice.did().as_str(), "alice.example.com", 1);
+    rev(
+        "notatid",
+        serde_json::json!({"$type": nsid::REVISION, "subject": {"uri": welcome, "cid": cid}}),
+    );
+    rev(
+        "3l2s5xxv2zad2",
+        serde_json::json!({"$type": nsid::REVISION, "subject": {"uri": by_handle, "cid": cid}}),
+    );
+    rev(
+        "3l2s5xxv2zae2",
+        serde_json::json!({"$type": nsid::REVISION, "op": "update"}),
+    );
+    // and a revision of a comment of the thread, whose key extends the post's: not the post's
+    let comment = format!(
+        "at://{}/{}/{p}-3l2s5xxv2zaf2",
+        alice.did(),
+        nsid::COMMENT
+    );
+    rev(
+        "3l2s5xxv2zaf2-3l2s5xxv2zag2",
+        serde_json::json!({"$type": nsid::REVISION, "subject": {"uri": comment, "cid": cid}}),
+    );
     let t = block_on(alice.engine.redact_revision(&welcome)).unwrap();
     alice.flush();
     assert_eq!(alice.done(&t[0]), welcome);
@@ -691,6 +718,14 @@ fn redaction_deletes_unsynced_and_invalid_revisions_too() {
         Vec::<String>::new(),
         "every revision is gone"
     );
+    let left: Vec<String> = alice
+        .acct
+        .list(nsid::REVISION)
+        .into_iter()
+        .map(|(rkey, _)| rkey)
+        .filter(|k| k.starts_with(&format!("{p}-")))
+        .collect();
+    assert_eq!(left, [format!("{p}-3l2s5xxv2zaf2-3l2s5xxv2zag2")]);
 }
 
 /// M4R-7 (`threat-model.md` SOC-7): a forum declaration's and a modAction's revisions are the

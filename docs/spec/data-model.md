@@ -985,7 +985,7 @@ edit(target, base, newValue, summary?):          // base = CID the user edited; 
 | Remove modAction (unhide, unban, unpin, unlock, unrestrict, …) | `applyWrites[#create revision{subject: {uri, cid: cur.cid}, op: "delete", record: cur.value}, #delete modAction]` with `swapCommit` = fresh head, retried as in §8.3. |
 | `mod adopt` | §8.6. |
 | Profile | No record: create-if-absent of `self`. Otherwise `putRecord(self, swapRecord = cid)`. Profiles have no revisions. |
-| Redact history | an own post, comment or sequence `x`: when the write is sent, `listRecords(revision, prefix = P(x) + "-")` filtered by `subject.uri = x` (as §8.7), then `applyWrites[#delete revision …]` of every one listed, chunked at ≤ 200 ops; so revisions the writer's device never synced, and invalid ones, go too. A forum's and a modAction's revisions are the mod log and are never redacted (`threat-model.md` SOC-7). |
+| Redact history | an own post, comment or sequence `x`: when the write is sent, `listRecords(revision, prefix = P(x) + "-")` filtered to the records that name `x` (as §8.7: any key suffix, any spelling of the repo), then `applyWrites[#delete revision …]` of every one listed, chunked at ≤ 200 ops; so revisions the writer's device never synced, and invalid ones, go too. A forum's and a modAction's revisions are the mod log and are never redacted (`threat-model.md` SOC-7). |
 | Blob | §8.8. |
 
 **PDS semantics (ADR 0005, spike S12, reference PDS).**
@@ -1069,14 +1069,17 @@ The CLI enforces this order. It MAY offer an explicit opt-out (for example for a
 
 ```
 delete(target):                                  // post | comment | sequence | forum
-  revs = fresh listing of own NS.revision records with rkey matching exactly P(target) + "-" + TID
-         and value.subject.uri = target           // the prefix alone is not enough (§3.2)
+  revs = fresh listing of own NS.revision records with rkey prefix P(target) + "-" that name target:
+         collection and rkey of value.subject.uri = those of target (any key suffix, any
+         spelling of the repo), or no value.subject.uri and rkey exactly P(target) + "-" + TID
+                                                  // the prefix alone is not enough (§3.2)
   chunk 1  = [#delete target] ++ first 199 of revs
   chunk i  = the next 200 of revs
   send the chunks in order with applyWrites (no swapCommit); on failure re-list, recompute the remaining chunks, retry with backoff
 ```
 
 **Notes**
+- `revs` takes the own records that name the target even when they are invalid (a malformed key suffix, RV1, RV3, no subject): they are its history as far as anyone can tell. A record of another subject under the prefix (a comment's revision under its post's prefix) never names the target.
 - The target is always deleted in the first chunk. A partial failure therefore leaves only orphaned revisions, and the persisted `PendingWrite` keeps retrying them.
 - Deleting a forum declaration does not delete other repos' content. Clients treat a forum with no declaration as unavailable.
 - ModActions are never deleted with this protocol (§8.4).

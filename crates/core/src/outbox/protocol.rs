@@ -1071,20 +1071,30 @@ impl<'a, H: Host> Runner<'a, H> {
         }
     }
 
-    /// The own revisions of `subject`: rkey exactly `P + "-" + TID` and `subject.uri` equal (the
-    /// prefix alone is not enough, §3.2), ascending.
+    /// The own revision records of `subject` under `P + "-"`, ascending: those whose
+    /// `subject.uri` names it, whatever their key's suffix and however the uri spells the repo
+    /// (same collection and rkey: an invalid revision, RV1 or RV3, is history too), and those
+    /// keyed exactly `P + "-" + TID` that name no subject. The prefix alone is not enough
+    /// (§3.2): a comment's key extends its post's, so its revisions are under the post's prefix.
     async fn own_revisions_of(&mut self, p: &str, subject: &str) -> Result<Vec<String>, CallError> {
         let prefix = format!("{p}-");
         let rows = self.pds.list_prefix(nsid::REVISION, &prefix, None).await?;
+        let item = keys::split_uri(subject).ok().map(|(_, c, k)| (c, k));
         let mut out: Vec<String> = rows
             .into_iter()
             .filter(|r| {
-                keys::split_revision_key(&r.rkey).is_some_and(|(rp, _)| rp == p)
-                    && r.value
-                        .get("subject")
-                        .and_then(|s| s.get("uri"))
-                        .and_then(Value::as_str)
-                        == Some(subject)
+                match r
+                    .value
+                    .get("subject")
+                    .and_then(|s| s.get("uri"))
+                    .and_then(Value::as_str)
+                {
+                    Some(u) => {
+                        u == subject
+                            || keys::split_uri(u).is_ok_and(|(_, c, k)| Some((c, k)) == item)
+                    }
+                    None => keys::split_revision_key(&r.rkey).is_some_and(|(rp, _)| rp == p),
+                }
             })
             .map(|r| r.rkey)
             .collect();
