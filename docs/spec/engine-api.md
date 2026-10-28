@@ -71,7 +71,9 @@ Normative details of the underlying behaviour live in `data-model.md` (records, 
   account's current value instead of resetting it, since the reset silently lifted the
   account's own restriction or nullification of the user (it still means none when there is no
   current record). New operation: `edit_preflight` (§3.5), with the notice code
-  `suspendsAssertions`; new banner code: `relayDependent` (§4.2).
+  `suspendsAssertions`; new banner code: `relayDependent` (§4.2). `render` takes media (each a
+  `MediaRef` or a stored `defs#media` value) where v0 refused any, and `RenderOpts` gains an
+  optional `profile`.
 - **Errors.** Operations return `Result<T, EngineError>`; `EngineError` serialises as
   `{ "code": <string>, "message": <string>, "retryable": bool, "detail"?: object }` with codes:
   `auth_required`, `not_found`, `invalid_ref`, `invalid_input`, `conflict`, `rate_limited`,
@@ -329,7 +331,10 @@ The engine does not enforce it.
 
 ### 3.7 Pure functions (also exported to wasm)
 
-`render(markdown, media, RenderOpts) -> RenderedBody` (media: M4), `safe_href(raw, ctx)`,
+`render(markdown, media, RenderOpts) -> RenderedBody` (each `media` item a `MediaRef` from
+`prepare_media`, rendered as the `defs#media` value `publish` writes, or a `defs#media` value as a
+record stores it, an object with a `blob`; `RenderOpts.profile?` is the body's, absent `lfm/1`;
+`invalid_input` for an item that is neither), `safe_href(raw, ctx)`,
 `parse_ref`, `verify(uri, deep) -> VerifyReport` (network, but no state);
 `validate_record(collection, json) -> ValidationReport` (the rules of `data-model.md` §7 for a
 record of `collection`, an NSID of this build or its last segment such as `post`, before it is
@@ -394,7 +399,6 @@ a compatible change (§1). Clients hide or stub what they need of them meanwhile
 | `sequences`, `sequence`, `seq_create`, `seq_edit`, `seq_add`, `seq_remove`, `seq_move` | M5 |
 | `user` | M5 (user pages, with profiles) |
 | `search` | M5 |
-| `render` with media | M4 (the media pipeline) |
 | `run_vector` | never in a release module (the social vectors run natively and in the wasm32 test harness) |
 
 **Planned additions** (compatible, not in v0):

@@ -717,20 +717,23 @@ pub async fn call<H: Host>(engine: &Engine<H>, op: &str, a: &str) -> Result<Stri
 
         // §3.7 Pure functions
         "render" => {
-            let (markdown, media, _opts): (String, Option<Vec<Value>>, Option<Value>) =
-                args(op, a)?;
-            if media.as_ref().is_some_and(|m| !m.is_empty()) {
-                // MediaRef → defs#media arrives with the media pipeline (M4)
-                return Err(EngineError::new(
-                    ErrorCode::Unsupported,
-                    "render: media is not supported yet",
-                ));
-            }
-            out(&lessdugin_core::model::render::render_markdown(
+            // `[markdown, media, opts]`: media as `MediaRef`s or `defs#media` values, and the
+            // body's `profile` in `opts` (absent: lfm/1)
+            let (markdown, media, opts): (String, Option<Vec<Value>>, Option<Value>) = args(op, a)?;
+            let profile = match opts.as_ref().and_then(|o| o.get("profile")) {
+                None | Some(Value::Null) => None,
+                Some(Value::String(p)) => Some(p.as_str()),
+                Some(other) => {
+                    return Err(EngineError::invalid_input(format!(
+                        "{op}: opts.profile is not a string: {other}"
+                    )));
+                }
+            };
+            out(&lessdugin_core::engine::render_draft(
                 &markdown,
-                &Value::Array(Vec::new()),
-                None,
-            ))
+                &media.unwrap_or_default(),
+                profile,
+            )?)
         }
         "safeHref" => {
             let (raw, ctx): (String, String) = args(op, a)?;
@@ -1001,8 +1004,42 @@ mod tests {
             "{body}"
         );
         assert_eq!(body["wordCount"], 2);
+        // media (m4-20): a defs#media value as a record stores it, or a MediaRef from
+        // prepareMedia, which renders as the value publish writes
+        let cid = "bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku";
+        let text = format!("![shown](cid:{cid})\n");
+        let stored = json!([{"blob": {"$type": "blob", "ref": {"$link": cid},
+            "mimeType": "image/png", "size": 1234}, "alt": "media alt",
+            "aspectRatio": {"width": 800, "height": 600}}]);
+        let prepared = json!([{"id": "m", "cid": cid, "mime": "image/png", "sizeBytes": 1234,
+            "alt": "media alt", "aspectRatio": {"width": 800, "height": 600}}]);
+        let html = format!(
+            "<div class=\"lfm\" dir=\"auto\">\n<p dir=\"auto\"><img data-cid=\"{cid}\" \
+             alt=\"shown\" width=\"800\" height=\"600\"></p>\n</div>\n"
+        );
+        for media in [&stored, &prepared] {
+            let body: Value = serde_json::from_str(&call_ok(
+                &e,
+                "render",
+                &json!([text, media, null]).to_string(),
+            ))
+            .unwrap();
+            assert_eq!(body["html"], html, "{media}");
+            assert_eq!(body["media"][0]["cid"], cid, "{body}");
+            assert_eq!(body["media"][0]["alt"], "media alt", "{body}");
+        }
         let err = call_err(&e, "render", r#"["x", [{"id":"m"}], null]"#);
-        assert_eq!(err.code, ErrorCode::Unsupported);
+        assert_eq!(err.code, ErrorCode::InvalidInput, "{err:?}");
+        // the body's profile, in the options
+        let body: Value = serde_json::from_str(&call_ok(
+            &e,
+            "render",
+            r#"["text\n", [], {"html": true, "text": true, "styled": false, "profile": "lfm/2"}]"#,
+        ))
+        .unwrap();
+        assert_eq!(body["notices"].as_array().unwrap().len(), 1, "{body}");
+        let err = call_err(&e, "render", r#"["x", [], {"profile": 2}]"#);
+        assert_eq!(err.code, ErrorCode::InvalidInput, "{err:?}");
 
         let h: Value = serde_json::from_str(&call_ok(
             &e,

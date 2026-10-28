@@ -1192,6 +1192,8 @@ export interface RenderOpts {
   html: boolean;
   text: boolean;
   styled: boolean;
+  /** The body's `profile` (lfm-1.md §1.4); absent: `lfm/1`. */
+  profile?: string;
 }
 
 export interface ValidationReport {

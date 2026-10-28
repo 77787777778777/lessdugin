@@ -37,6 +37,7 @@ pub use config::{
 };
 pub use error::{EngineError, ErrorCode};
 pub use events::{EventCallback, SubscriptionId};
+pub use forums::render_draft;
 pub use live::LiveRound;
 pub(crate) use local::stored_assisted;
 pub use local::{
