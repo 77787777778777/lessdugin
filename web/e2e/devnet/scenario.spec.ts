@@ -646,14 +646,14 @@ async function runScenario(
     if (approval) {
       // carol, a granted member, is established: her upvote and agreement count
       expect(score.score, `the counted upvote: ${JSON.stringify(score)}`).toBeGreaterThan(0);
-      expect(score.agreement, `the counted agreement: ${JSON.stringify(score)}`).toBeGreaterThan(
-        0,
-      );
+      expect(score.agreement, `the counted agreement: ${JSON.stringify(score)}`).toBeGreaterThan(0);
       expect(score.unweighted).toBe(0);
     } else {
       // alice, the owner, is a seed (S ⊆ E): her upvote counts; carol is a newcomer, so her
       // vote is one not yet counted and her agreement carries no weight
-      expect(score.score, `the owner's counted upvote: ${JSON.stringify(score)}`).toBeGreaterThan(0);
+      expect(score.score, `the owner's counted upvote: ${JSON.stringify(score)}`).toBeGreaterThan(
+        0,
+      );
       expect(score.unweighted, `carol's uncounted vote: ${JSON.stringify(score)}`).toBe(1);
       expect(score.agreement ?? 0, `no counted agreement: ${JSON.stringify(score)}`).toBe(0);
     }
