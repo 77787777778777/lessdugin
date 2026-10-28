@@ -215,6 +215,38 @@ describe("MockEngine writes", () => {
     expect(await state()).toEqual({ restricted: ["comment"], nullified: true });
     await expect(restrict({})).rejects.toMatchObject({ code: "invalid_input" });
   });
+
+  it("adopts before removing a moderator, says so, and reports what it did not adopt (sec-8)", async () => {
+    const e = new MockEngine({ sendMs: 10 });
+    // the fixture's former moderator, whose forum pin has lapsed
+    const lapsed = (await e.modLog(FORUM_URI)).entries.find((x) => x.lapsed);
+    if (lapsed === undefined) throw new Error("no lapsed entry");
+    const adoption = await e.modAdopt(FORUM_URI, lapsed.actor.did);
+    await vi.advanceTimersByTimeAsync(50);
+    expect((await e.writeStatus(adoption.id))?.state).toMatchObject({
+      kind: "done",
+      report: [`cannot adopt ${lapsed.uri}: not in effect`],
+    });
+    // a removal adopts first: the ticket's notice names the adoption's write
+    const ticket = await e.forumCreate({
+      slug: "mods",
+      name: "Mods",
+      membership: "open",
+      defaultTier: "frontpage",
+      featuredTags: [],
+      moderators: [],
+    });
+    await vi.advanceTimersByTimeAsync(50);
+    const uri = (await e.followed()).find((f) => f.name === "Mods")?.uri ?? "";
+    expect(ticket.state.kind).toBe("pending");
+    const did = lapsed.actor.did;
+    await e.modsSet(uri, { kind: "add", did, role: "moderator" });
+    await vi.advanceTimersByTimeAsync(50);
+    const removal = await e.modsSet(uri, { kind: "remove", did });
+    expect(removal.notices?.map((n) => n.code)).toEqual(["adoptedFirst"]);
+    expect(removal.notices?.[0]?.message).toMatch(/^mod adopt runs first \(write w-\d+, 0 /);
+    expect((await e.modsSet(uri, { kind: "remove", did, skipAdopt: true })).notices).toBeUndefined();
+  });
 });
 
 describe("MockEngine local state and declarations", () => {

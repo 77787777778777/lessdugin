@@ -43,6 +43,7 @@ import { paletteReact } from "./palette.ts";
 import {
   type AccountInfo,
   type AccountView,
+  type ActionNotice,
   type ActionTicket,
   type ActorView,
   type Anchor,
@@ -1249,11 +1250,29 @@ export class MockEngine implements EngineApi {
     return [...(this.rejected.get(uri) ?? [])].sort();
   }
 
-  async modsSet(uri: AtUri, change: ModsChange): Promise<WriteTicket> {
+  async modsSet(uri: AtUri, change: ModsChange): Promise<ActionTicket> {
     const f = this.forumRec(uri);
     if (f.summary.owner !== this.me())
       throw err("blocked", "Only the owner can change moderators.");
-    return this.write(false, () => {
+    // Removing a moderator adopts their assertions first, and the ticket says so
+    // (engine-api.md §3.2 `mods_set`)
+    const notices: ActionNotice[] = [];
+    if (change.kind === "remove" && change.skipAdopt !== true) {
+      const theirs = (this.s.modLog.get(uri) ?? []).filter((e) => e.actor === change.did);
+      const lapsed = theirs.filter((e) => e.lapsed).length;
+      const adoption = await this.modAdopt(uri, change.did);
+      notices.push({
+        code: "adoptedFirst",
+        message: `mod adopt runs first (write ${adoption.id}, ${theirs.length - lapsed} assertion(s) in effect); the moderator is removed only once it completes`,
+      });
+      if (lapsed > 0) {
+        notices.push({
+          code: "adoptedFirst",
+          message: `not adopted, since they are not in effect: ${lapsed} lapsed`,
+        });
+      }
+    }
+    const ticket = this.write(false, () => {
       if (change.kind === "add") {
         f.moderators = f.moderators.filter((m) => m.did !== change.did);
         const m: ForumRec["moderators"][number] = {
@@ -1270,6 +1289,7 @@ export class MockEngine implements EngineApi {
       }
       return { uri, cid: fakeCid(`${uri}@${this.tick()}`), topics: [{ kind: "forum", uri }] };
     });
+    return notices.length > 0 ? { ...ticket, notices } : ticket;
   }
 
   // =============================================================================== §3.3
