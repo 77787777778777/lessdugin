@@ -486,15 +486,11 @@ pub enum Effect {
         /// The write id.
         id: String,
     },
-    /// `Host::fetch_blob` of an image from its author's PDS (streamed and CID-checked), then
-    /// its bytes for the decoder.
+    /// `load_media(cid, media)` of an image from its author's PDS (streamed and CID-checked by
+    /// the host), then its bytes for the decoder.
     FetchMedia {
-        /// The blob's CID.
-        cid: String,
-        /// Its author (the repo it is in).
-        did: String,
-        /// The author's PDS.
-        pds: String,
+        /// The image as the item's body lists it (its CID, author, declared type and size).
+        media: Box<lessdugin_core::dto::MediaView>,
     },
     /// Decodes a fetched image off the UI thread: the runtime's [`crate::image::Images`].
     DecodeMedia {
@@ -540,7 +536,7 @@ impl Effect {
 
     /// The engine operation (`engine-api.md` §3) the effect calls, by its name there (for an
     /// editor session, the write it leads to; for `Open`, the screen's `forum_open` or
-    /// `get_thread`; `fetch_blob` is the host's); `None` for what the runtime does itself
+    /// `get_thread`); `None` for what the runtime does itself
     /// (decoding an image, quitting).
     pub fn operation(&self) -> Option<&'static str> {
         Some(match self {
@@ -602,7 +598,7 @@ impl Effect {
             Effect::Settings { set: None } => "settings",
             Effect::Settings { set: Some(_) } => "set_setting",
             Effect::Retry { .. } => "retry_write",
-            Effect::FetchMedia { .. } => "fetch_blob",
+            Effect::FetchMedia { .. } => "load_media",
             Effect::DecodeMedia { .. } | Effect::Quit => return None,
         })
     }
@@ -2176,11 +2172,7 @@ impl State {
                 continue;
             }
             t.media.insert(m.cid.clone(), MediaState::Fetching);
-            fx.push(Effect::FetchMedia {
-                cid: m.cid,
-                did: m.author,
-                pds: m.pds,
-            });
+            fx.push(Effect::FetchMedia { media: Box::new(m) });
             n += 1;
         }
         t.relayout(w, h);

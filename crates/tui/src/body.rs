@@ -2,7 +2,8 @@
 //! Bodies: the LFM/1 terminal projection (`StyledDoc`, `lfm-1.md` §9.2) laid out at a width.
 //!
 //! A body is rendered from the markdown source of the cached record when its CID is the one
-//! the view shows (as the CLI does); otherwise the view's plain text P is shown. The
+//! the view shows (as the CLI does), or of its spilled `textBlob` once the engine fetched it;
+//! otherwise the view's plain text P is shown. The
 //! `StyledDoc` is width-independent and kept in the screen state; [`Body::lines`] lays it out
 //! for the current width with the core's printer (`lfm-1.md` §9.4, SGR only, no OSC 8 here)
 //! and turns its SGR runs into ratatui styles. The printer's output is checked with
@@ -47,9 +48,18 @@ impl Body {
     /// The body of an item from its cached record value (when it holds the CID the view shows)
     /// or the view.
     pub fn from_record(record: Option<&Value>, view: &RenderedBody) -> Self {
+        Self::from_source(record, None, view)
+    }
+
+    /// The same, where `spilled` is the source of the record's `textBlob` when its body is
+    /// spilled and the view was rendered from that source.
+    pub fn from_source(record: Option<&Value>, spilled: Option<&str>, view: &RenderedBody) -> Self {
         let doc = record
             .and_then(|v| v.get("body"))
-            .and_then(styled_doc)
+            .and_then(|md| match spilled {
+                Some(src) if md.get("text").is_none() => styled_doc_of(md, src),
+                _ => styled_doc(md),
+            })
             .map(BodyDoc::Styled)
             .unwrap_or_else(|| {
                 if view.text.is_empty() {
@@ -120,11 +130,18 @@ impl Body {
 /// The `StyledDoc` of an `NS.markdown` value (inline text only); `None` for any other value
 /// (a spilled or unknown body).
 pub fn styled_doc(md: &Value) -> Option<StyledDoc> {
+    let text = md.get("text")?.as_str()?;
+    styled_doc_of(md, text)
+}
+
+/// The `StyledDoc` of the `NS.markdown` value `md` whose source is `text`: its inline `text`,
+/// or the fetched source of its `textBlob` (a spilled body, `lfm-1.md` §1.3); `None` for a
+/// value of another type.
+pub fn styled_doc_of(md: &Value, text: &str) -> Option<StyledDoc> {
     let ty = md.get("$type")?.as_str()?;
     if ty != nsid::MARKDOWN && ty.strip_suffix("#main") != Some(nsid::MARKDOWN) {
         return None;
     }
-    let text = md.get("text")?.as_str()?;
     let media: Vec<MediaItem> = md
         .get("media")
         .and_then(Value::as_array)

@@ -539,3 +539,43 @@ fn the_thread_screen_shows_the_viewers_own_newcomer_comment_expanded() {
         assert_eq!(shown.contains(body), own, "own: {own}\n{shown}");
     }
 }
+
+/// A post over 64 KiB spills its body into a `textBlob` (`data-model.md` §5.3). The engine
+/// fetches it for the view (m4-5); the Thread screen styles that source as it styles an inline
+/// body (headings, emphasis), rather than showing the view's plain text.
+#[test]
+fn a_spilled_body_is_styled_from_its_fetched_source() {
+    use lessdugin_core::dto::{BodyDraft, ThreadOpts, ThreadRoot};
+    use lessdugin_tui::body::BodyDoc;
+    let s = scenario();
+    let bob = &s.w.bob;
+    let mut source = "# Chapter one\n\nIt was a **dark** night.\n\n".to_owned();
+    while source.len() <= 65_536 {
+        source.push_str("More words in the long body. ");
+    }
+    let mut d = PostDraft::article(&s.forum, "Long", "");
+    d.body = BodyDraft::text(source);
+    let w = block_on(bob.engine.publish(&d)).unwrap();
+    bob.flush();
+    let post = bob.done(&w);
+    s.w.carol.sync(&s.forum);
+    // the record carries the blob, not the text
+    let pv = block_on(s.w.carol.engine.get_thread(&post, &ThreadOpts::default())).unwrap();
+    let ThreadRoot::Post(p) = pv.post else {
+        panic!("no post")
+    };
+    assert!(p.body.notices.is_empty(), "{:?}", p.body.notices);
+    assert!(p.body.text.starts_with("Chapter one"), "{}", &p.body.text[..80]);
+
+    let mut t = tui(&s, 80, 40);
+    block_on(t.start(None));
+    block_on(t.open_thread(&post));
+    let body = &t.state.top_thread().unwrap().data.as_ref().unwrap().bodies[&post];
+    assert!(matches!(body.doc, BodyDoc::Styled(_)), "{:?}", body.doc);
+    assert!(body.notices.is_empty(), "{:?}", body.notices);
+    let screen = t.render();
+    assert!(screen.contains("Chapter one"), "{screen}");
+    // the heading's `#` and the emphasis markers are styling, not text
+    assert!(!screen.contains("# Chapter"), "{screen}");
+    assert!(!screen.contains("**dark**"), "{screen}");
+}
