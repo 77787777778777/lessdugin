@@ -147,7 +147,9 @@ on RecordNotFound: tombstone (§5.6); drop p
 ```
 eligible(v) ⇔ (v.level = pds ∨ (v.level = proven ∧ current(v)))
               ∧ ¬v.idHint                                   // identity level doc (§1.3)
-              ∧ status(did(v.uri)) ≠ inactive                // I8, §3.4
+              ∧ (status(did(v.uri)) ≠ inactive ∨ retained(v)) // I8, §3.4
+retained(v) ⇔ coll(v) = NS.modAction ∧ did(v.uri) ∈ A(F)     // the authority exception, §3.4
+              ∧ now < inactiveSince(did(v.uri)) + INACTIVE_RETENTION_MS
 ```
 
 The `records` input of the fold (`social.md` §1.1) is built from eligible stored versions only, after the fetch caps (§5.4). Invalid records are eligible and are fold inputs (the fold excludes them in V1).
@@ -222,7 +224,7 @@ The `records` input of the fold (`social.md` §1.1) is built from eligible store
 | `indexer` | `forum`, `none`, or a list of URLs | `forum` | which indexers to use (§2.4); CLI `--indexer <url\|none\|forum>` |
 | `media.hosts` | list of hostnames | empty | the user's media autoload allowlist (§11.3) |
 
-Settings live in the `state` store (`loc`, §10.4). CLI flags override them per invocation.
+Settings live in the `state` store (`loc`, §10.4). CLI flags override them per invocation. `sources` in effect is a flag of the invocation, else the stored setting, else the build default; the running engine reads it at each use, so `set_setting` applies at once, and in `direct` no CORE+ or EXT endpoint (Slingshot, Jetstream, Constellation, a relay, an indexer) is contacted (`engine-api.md` §3.6). A store that cannot be read counts as `direct`, and an imported file (`import_local`) can set `sources` only to `direct`, never back to `assisted`. `verify = proof` is refused by `set_setting` (`unsupported`) while it is Reserved, so a stored choice never claims a mode that does nothing.
 
 ### 2.4 Endpoints and consent
 
@@ -325,7 +327,8 @@ DIDs that merely appear in records are never resolved eagerly.
   - after the errors listed in §3.3;
   - by the daily reconcile (§6.8).
 - The DID is **inactive** if `active = false` and `status` ∈ {`takendown`, `suspended`, `deleted`, `deactivated`} or `status` is absent. `desynchronized` and `throttled` are temporary: the repo is treated as failing (its cached records stay, `[stale]` badge), not as inactive.
-- Records of an inactive DID are excluded from every fold input (I8) and hidden. They stay in the cache for 7 days (*tunable*), then are purged. If the account is active again within that time, a P1 sync restores them.
+- Records of an inactive DID are excluded from every fold input (I8) and hidden. They stay in the cache for 7 days (`INACTIVE_RETENTION_MS`, *tunable*, counted from `inactiveSince`, when the DID was first found inactive), then are purged. If the account is active again within that time, a P1 sync restores them.
+- **Authority exception.** A DID in A(F) (`social.md` §4.1) is the forum's moderation, which must not vanish with its account (`threat-model.md` G2, SOC-6): a moderator can be taken down, suspended or deactivated by a host, or deactivate themselves. For the folds of F, its cached `NS.modAction` records stay fold inputs for those 7 days, and `repoStatus(d, fk)` is at least `Stale`, so its assertions keep applying and the view carries an `authorityInactive` banner. Its other records are excluded as usual. After the 7 days, none of its records is a fold input and `repoStatus(d, fk) = Unavailable`, so the view is degraded (`social.md` §4.11) until the owner removes it from the declaration or the account is active again.
 - Status changes are never taken from a hint: a Jetstream `account` event only triggers the check.
 
 ### 3.5 PLC pacing
@@ -1203,7 +1206,7 @@ Native paths: `~/.cache/lessdugin/{cache.sqlite, blobs/}`, `~/.local/share/lessd
 | I5 | The record store holds only `pds` and `proven` versions (and `idHint` rows, marked). Hints, `[stale]` proofs and pending writes live only in memory or in the outbox, and are never persisted as records. For the same `(uri, cid)`, the level only increases. |
 | I6 | A completeness claim requires every repo in the completeness set to be `Fresh` for that forum (§4.5, §5.9); otherwise the view shows `[partial k/n]`. |
 | I7 | Moderation inputs are read only from the record store, through the eligibility filter (§1.5). |
-| I8 | Records of DIDs that are not active (§3.4) are excluded from every fold input. |
+| I8 | Records of DIDs that are not active (§3.4) are excluded from every fold input, except an authority's modActions during the retention time (§3.4). |
 | I9 | One background-sync leader per cache (§10.6). Other processes and tabs do only P0 fetches, under per-repo locks. All writes are idempotent and order-key-monotonic (§5.6.2). Changes are broadcast (§10.6). |
 
 ### 10.3 Key encoding
@@ -1237,8 +1240,11 @@ The key of a tuple is the concatenation of its elements. A prefix scan over `(e1
 | state | `("out.budget", account)` | `BudgetRow` | spent write points with timestamps, for the two sliding windows |
 | state | `("out.meta", account)` | `MetaRow` | the last TID handed out to this account's writes (W6) |
 | state | `("out.blob", account, seq, index, chunk)` | bytes | ≤ 1 MiB chunks of a blob uploaded when write `seq` is sent (`data-model.md` §8.8) |
+| state | `("prep", cid)` | `{v, mime, size, chunks, at}` | a file `prepare_media` prepared, until a write that uploads it is enqueued or `PREPARED_MEDIA_TTL_MS` passes (`data-model.md` §8.8) |
+| state | `("prep.blob", cid, n)` | bytes | its ≤ 1 MiB chunks, raw |
+| state | `("loc", "media", cid)` | legacy | prepared bytes of the first M4 builds: deleted when a file is prepared, and never exported or imported (`export_local`), as they are a copy of a file, not local state |
 | state | `("loc", kind, key…)` | per kind | kinds: `draft`, `read`, `sub`, `follow`, `unfollow`, `bookmark`, `mute`, `setting`, `alias`, `last_listing`, `consent`, `media_host`, `as_pin`, `quarantine`, `account`, `active_account`, `seeded` |
-| state | `("notif", account, ts, id)` | notification | |
+| state | `("loc", kind, account, key…)` | per kind | the rows of one account: `draft` (`id`), `notif` (`id`), `nbase` (forum), `ack` (kind); `logout --purge` deletes them with the account's `out*` rows (`threat-model.md` AUTH-11). A `("loc", "draft", id)` row (no account, before M4's drafts were per account) is adopted by the first account that uses drafts, or deleted by a purge |
 | state | `("meta", "schema")` | integer | `state` is migrated, never dropped |
 
 ### 10.5 Row schemas
@@ -1255,7 +1261,7 @@ RepoRow    { pds: url, rev: TID | "", commit?: CID, headSeen?: {rev, cid, sentAt
              listed: {scope → TID}, capped: {scope → {nsid → boundary rkey}}, byteCapped: {scope → bool},
              marks: {uri → TID} (≤ 1000), marksOverflow: bool,
              checkedAt, lastOk, nextCheck: ms, fails: int, unstable: int, class: string,
-             status: "active" | "inactive" | "temporary", statusDetail?: string, statusAt: ms,
+             status: "active" | "inactive" | "temporary", statusDetail?: string, statusAt: ms, inactiveSince?: ms,
              rollbackSince?: ms, lastChangeAt: ms, lastReconcile: ms }
 IdentityRow{ doc: bytes (JSON), level: "doc" | "hint", src: "plc" | "web" | "slingshot" | "devnet",
              pds?: url, key?: string (multikey), aka?: handle, hstate: "verified" | "unverified" | "invalid",
@@ -1341,6 +1347,8 @@ Media loads automatically only if all of these hold:
 5. it is an inline image type (§11.2) of at most 5 MiB.
 
 Otherwise the user clicks through a notice: "loads from <host>, which will see your IP". Avatars and forum icons follow the same rules, with the profile or declaration as the item.
+
+The engine decides while it builds a view: `MediaView.autoload` is this verdict for this device (`engine-api.md` §4.1), so every client shows the same thing. Condition 1 also needs the author's identity at level `doc` (§11.1); condition 4 counts the participants' identity rows the cache holds (any level, nothing is resolved for it); condition 5 reads the record's declared `mimeType` and `size`, and a blob whose size the record does not state never autoloads. The `mediaAutoload` setting `off` turns autoload off on the device. `pds` in the view names the host for the notice.
 
 ### 11.4 Caching and purging
 
@@ -1639,3 +1647,4 @@ These choices fill gaps or resolve ambiguities in the sources. Each takes the si
 3. Does Jetstream's DID filter also filter `identity` and `account` events? This document drops unknown DIDs client-side either way. M5 should measure it, because it changes browser bandwidth.
 4. ADR 0004's per-host verdict is statistical (rotating egress IPs). The M1 fixed-IP check may still show a shared budget, which would change §9.2 and §14.
 5. ADR 0003 asks whether the public v1 Jetstream hosts will be retired. If they are, filters of more than 150 DIDs need several v2 connections of at most 150 DIDs each.
+6. *(Orchestrator decision O-3, for the U7 review.)* The `sources` setting is honoured at runtime by the running engine, with the precedence flag > stored setting > build default (§2.3). In `direct`, no CORE+ or EXT endpoint is contacted. The native configuration file sets the build default (`EngineConfig.sources`), so a stored setting overrides it; a client that wants its file to pin `sources` passes it as `EngineConfig.sources_flag`.

@@ -30,6 +30,62 @@ pub fn sniff_mime(bytes: &[u8], declared: &str) -> String {
     }
 }
 
+/// A blob `getBlob` serves from a generator, never held whole in memory: `size` deterministic
+/// bytes from `seed` (the M4 acceptance test of a blob at `BLOB_HARD_MAX_BYTES`, `docs/plan.md`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Generated {
+    /// Its length in bytes.
+    pub size: u64,
+    /// What decides its bytes.
+    pub seed: u64,
+}
+
+impl Generated {
+    /// The bytes of one chunk.
+    pub const CHUNK: usize = 64 * 1024;
+
+    /// How many chunks the blob has.
+    pub fn chunks(&self) -> u64 {
+        self.size.div_ceil(Self::CHUNK as u64)
+    }
+
+    /// Chunk `i`: a block of splitmix64 output from the seed, with the chunk's index mixed into
+    /// its first 8 bytes so no two chunks are alike; the last one is cut at `size`.
+    pub fn chunk(&self, i: u64) -> Vec<u8> {
+        let start = i.saturating_mul(Self::CHUNK as u64);
+        let len = self.size.saturating_sub(start).min(Self::CHUNK as u64) as usize;
+        let mut x = self.seed;
+        let mut out = Vec::with_capacity(Self::CHUNK);
+        while out.len() < Self::CHUNK {
+            x = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = x;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            out.extend_from_slice(&(z ^ (z >> 31)).to_le_bytes());
+        }
+        for (b, m) in out.iter_mut().zip(i.to_le_bytes()) {
+            *b ^= m;
+        }
+        out.truncate(len);
+        out
+    }
+
+    /// Its CID (raw, sha2-256), hashed a chunk at a time.
+    pub fn cid(&self) -> lessdugin_atp::Cid {
+        use k256::sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        for i in 0..self.chunks() {
+            h.update(self.chunk(i));
+        }
+        lessdugin_atp::cid::from_sha256_digest(lessdugin_atp::cid::RAW, h.finalize().into())
+    }
+
+    /// Every byte at once (the in-memory transport only; HTTP streams the chunks).
+    pub fn bytes(&self) -> Vec<u8> {
+        (0..self.chunks()).flat_map(|i| self.chunk(i)).collect()
+    }
+}
+
 /// A tiny valid PNG (1×1, RGBA) whose last pixel byte is `seed`, for upload tests.
 pub fn tiny_png(seed: u8) -> Vec<u8> {
     fn crc32(data: &[u8]) -> u32 {
@@ -82,6 +138,21 @@ pub fn tiny_png(seed: u8) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn generated_blobs_are_deterministic_and_hash_like_their_bytes() {
+        let g = Generated {
+            size: 3 * Generated::CHUNK as u64 + 5,
+            seed: 7,
+        };
+        assert_eq!(g.chunks(), 4);
+        assert_eq!(g.chunk(3).len(), 5);
+        assert_ne!(g.chunk(0), g.chunk(1));
+        let all = g.bytes();
+        assert_eq!(all.len() as u64, g.size);
+        assert_eq!(g.cid(), lessdugin_atp::cid::for_raw(&all));
+        assert_ne!(g.cid(), Generated { seed: 8, ..g }.cid());
+    }
 
     #[test]
     fn sniffing() {

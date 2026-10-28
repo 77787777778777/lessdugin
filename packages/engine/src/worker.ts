@@ -113,6 +113,17 @@ const api = {
     return current().callJson(op, argsJson);
   },
 
+  /** A stored, CID-verified blob (`loadMedia` stored it), structured-cloned to the main thread
+   * (a `Blob` clone shares its bytes); `null` when it is not stored. */
+  blob(cid: string): Promise<Blob | null> {
+    return current().blob(cid);
+  },
+
+  /** `prepareMedia` with the bytes structured-cloned as bytes (see worker-core.ts). */
+  prepareMedia(bytes: Uint8Array, input: unknown): Promise<unknown> {
+    return current().prepareMedia(bytes, input);
+  },
+
   /** Whether this worker is the leader tab's. */
   isLeader(): boolean {
     return engine?.isLeader ?? false;

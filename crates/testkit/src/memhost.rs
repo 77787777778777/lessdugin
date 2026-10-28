@@ -90,8 +90,10 @@ struct Inner {
     sleeps: Mutex<Vec<u64>>,
     /// Sleeps wait for the clock instead of moving it.
     park: AtomicBool,
-    /// Wakers of parked sleeps (woken when the clock moves).
+    /// Wakers of parked sleeps (woken when the clock moves) and of held blob fetches.
     parked: Mutex<Vec<Waker>>,
+    /// Blob fetches of blobs not stored yet are pending: a PDS that stalls.
+    hold_blobs: AtomicBool,
     rng: Mutex<u64>,
     txt: Mutex<BTreeMap<String, TxtAnswer>>,
     blobs: Mutex<BTreeMap<String, Vec<u8>>>,
@@ -150,6 +152,7 @@ impl MemHost {
                 now: AtomicI64::new(DEFAULT_NOW_MS),
                 sleeps: Mutex::new(Vec::new()),
                 park: AtomicBool::new(false),
+                hold_blobs: AtomicBool::new(false),
                 parked: Mutex::new(Vec::new()),
                 rng: Mutex::new(0),
                 txt: Mutex::new(BTreeMap::new()),
@@ -317,6 +320,13 @@ impl MemHost {
         self.wake_parked();
     }
 
+    /// With `true`, [`Host::fetch_blob`] of a blob that is not stored is pending (a PDS that
+    /// stalls before it answers) until this is called with `false`; then it is sent.
+    pub fn hold_blob_fetches(&self, hold: bool) {
+        self.inner.hold_blobs.store(hold, Ordering::SeqCst);
+        self.wake_parked();
+    }
+
     fn wake_parked(&self) {
         let wakers = std::mem::take(&mut *lock(&self.inner.parked));
         for w in wakers {
@@ -437,6 +447,20 @@ impl Host for MemHost {
                     && c.hash().code() == lessdugin_atp::cid::SHA2_256
             })
             .ok_or_else(|| HostError::Unsupported(format!("not a raw sha2-256 CID: {cid}")))?;
+        std::future::poll_fn(|cx| {
+            let held = || self.inner.hold_blobs.load(Ordering::SeqCst);
+            if !held() {
+                return Poll::Ready(());
+            }
+            // registered before the second check, so a release in between still wakes this task
+            lock(&self.inner.parked).push(cx.waker().clone());
+            if held() {
+                Poll::Pending
+            } else {
+                Poll::Ready(())
+            }
+        })
+        .await;
         let qs = lessdugin_atp::xrpc::query_string(&[("did", did.as_str()), ("cid", cid.as_str())]);
         let url = format!(
             "{}/xrpc/com.atproto.sync.getBlob?{qs}",
@@ -459,6 +483,31 @@ impl Host for MemHost {
             size,
             locator: format!("mem:{cid}"),
         })
+    }
+
+    async fn blob_open(&self, cid: &str) -> Result<Option<BlobHandle>, HostError> {
+        Ok(self.blob(cid).map(|bytes| BlobHandle {
+            cid: cid.to_owned(),
+            size: bytes.len() as u64,
+            locator: format!("mem:{cid}"),
+        }))
+    }
+
+    async fn blob_read(&self, cid: &str, offset: u64, len: u32) -> Result<Vec<u8>, HostError> {
+        let bytes = lock(&self.inner.blobs)
+            .get(cid)
+            .map(|b| {
+                let start = usize::try_from(offset).unwrap_or(usize::MAX).min(b.len());
+                let n = len.min(lessdugin_core::host::BLOB_READ_MAX_BYTES) as usize;
+                b[start..b.len().min(start.saturating_add(n))].to_vec()
+            })
+            .ok_or_else(|| HostError::Storage(format!("blob {cid} is not stored")))?;
+        Ok(bytes)
+    }
+
+    async fn blob_delete(&self, cid: &str) -> Result<(), HostError> {
+        lock(&self.inner.blobs).remove(cid);
+        Ok(())
     }
 
     async fn websocket(&self, url: url::Url, max_message_bytes: u32) -> Result<MemWs, HostError> {

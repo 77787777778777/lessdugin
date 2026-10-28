@@ -62,8 +62,11 @@ pub struct IndexerConsent {
 pub struct EngineConfig {
     /// Production or devnet.
     pub network: Network,
-    /// `sources`.
+    /// `sources`: the build default (`sync.md` §2.3). The stored setting overrides it, and is
+    /// read at each use, so a change applies to the running engine (`set_setting`).
     pub sources: Sources,
+    /// `sources` as a flag of this invocation fixes it: it wins over the stored setting.
+    pub sources_flag: Option<Sources>,
     /// `verify`.
     pub verify: VerifyMode,
     /// `network.doh`.
@@ -112,6 +115,7 @@ impl Default for EngineConfig {
         Self {
             network: Network::Production,
             sources: Sources::Assisted,
+            sources_flag: None,
             verify: VerifyMode::Pds,
             doh: DEFAULT_DOH.iter().map(|s| url(s)).collect(),
             dns: DnsMode::Doh,
@@ -143,6 +147,8 @@ impl EngineConfig {
                 pds,
             },
             sources: Sources::Direct,
+            // a devnet never uses CORE+, whatever a stored setting says
+            sources_flag: Some(Sources::Direct),
             doh: Vec::new(),
             plc,
             relays: Vec::new(),
@@ -170,7 +176,8 @@ impl EngineConfig {
                 },
                 plc: self.plc.clone(),
                 slingshot: self.slingshot.clone(),
-                assisted: self.sources == Sources::Assisted,
+                assisted: self.sources_flag.unwrap_or(self.sources) == Sources::Assisted,
+                stored_sources: self.sources_flag.is_none(),
                 devnet_pds: None,
             },
         }

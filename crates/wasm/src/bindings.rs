@@ -78,6 +78,36 @@ impl WasmEngine {
         })
     }
 
+    /// `prepareMedia(bytes, inputJson)`: `prepare_media` with the bytes as a `Uint8Array`
+    /// (one copy into wasm memory) rather than a JSON number array; `inputJson` is the
+    /// `MediaInput` (or `null`). Resolves with the `MediaRef`'s dto/1 JSON. The worker refuses a
+    /// file over `MEDIA_WASM_WINDOW_BYTES` before calling this (`limits.md` §6).
+    #[wasm_bindgen(js_name = prepareMedia)]
+    pub fn prepare_media(&self, bytes: Vec<u8>, input_json: String) -> Promise {
+        let engine = self.engine.clone();
+        future_to_promise(async move {
+            let input: Option<lessdugin_core::dto::MediaInput> = serde_json::from_str(&input_json)
+                .map_err(|e| {
+                    error_json(&EngineError::invalid_input(format!(
+                        "prepareMedia: bad arguments: {e}"
+                    )))
+                })?;
+            let input = input.unwrap_or(lessdugin_core::dto::MediaInput {
+                declared_mime: None,
+                alt: None,
+                name: None,
+                aspect_ratio: None,
+            });
+            let r = engine
+                .prepare_media(bytes, &input)
+                .await
+                .map_err(|e| error_json(&e))?;
+            serde_json::to_string(&r)
+                .map(|s| JsValue::from_str(&s))
+                .map_err(|e| error_json(&EngineError::internal(e.to_string())))
+        })
+    }
+
     /// `subscribe(cb)`: `cb(eventJson)` receives every engine event as dto/1 JSON, in order and
     /// never re-entrantly. Returns the subscription id for `unsubscribe`.
     pub fn subscribe(&self, cb: Function) -> f64 {

@@ -45,11 +45,10 @@ const TS_ONLY: Readonly<Record<string, string>> = {
   SequencePosition: "sequences (M5)",
   WikiDraft: "the wiki (M5)",
   TagVoteValue: "alias of KarmaValue",
-  RkeyInput: "deriveRkey (M4)",
+  MediaFile: "prepareMedia's engine API v0 argument (the bytes are a Uint8Array)",
   DraftEntry: "drafts (M4)",
   SettingKey: "settings (M4)",
   RenderOpts: "an argument of render",
-  ValidationReport: "validateRecord (M4)",
   EventListener: "the client's event callback",
   Unsubscribe: "the client's event callback",
 };

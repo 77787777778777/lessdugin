@@ -114,6 +114,8 @@ pub const OPS: &[&str] = &[
     // §3.7
     "render",
     "safeHref",
+    "validateRecord",
+    "deriveRkey",
     "verify",
     // host glue
     "externalChange",
@@ -139,11 +141,6 @@ pub const UNSUPPORTED: &[(&str, &str)] = &[
     ("seqAdd", "M5"),
     ("seqRemove", "M5"),
     ("seqMove", "M5"),
-    // §3.6: the engine's draft store, settings and local export (M4, with the editor, the
-    // media policy and `export`)
-    // §3.7
-    ("validateRecord", "M4"),
-    ("deriveRkey", "M4"),
     // test builds only (the social vectors run natively and in the wasm32 test harness)
     ("runVector", "tests"),
 ];
@@ -177,6 +174,18 @@ fn args<T: DeserializeOwned>(op: &str, json: &str) -> Result<T, EngineError> {
         s => s,
     };
     serde_json::from_str(json)
+        .map_err(|e| EngineError::invalid_input(format!("{op}: bad arguments: {e}")))
+}
+
+/// [`args`] for an operation whose trailing parameters are optional in `EngineApi`: an array
+/// shorter than `n` is padded with `null`, so a caller may leave them out (as `OP_ARITY` does in
+/// the client for the operations it lists).
+fn padded<T: DeserializeOwned>(op: &str, json: &str, n: usize) -> Result<T, EngineError> {
+    let mut v: Vec<Value> = args(op, json)?;
+    while v.len() < n {
+        v.push(Value::Null);
+    }
+    serde_json::from_value(Value::Array(v))
         .map_err(|e| EngineError::invalid_input(format!("{op}: bad arguments: {e}")))
 }
 
@@ -226,6 +235,35 @@ fn safe_href(raw: &str, ctx: HrefCtx) -> Result<Value, EngineError> {
     }
     tagged.extend(fields);
     Ok(Value::Object(tagged))
+}
+
+/// `prepareMedia`'s engine API v0 argument, `MediaFile { bytes, mime?, name?, alt? }` (`mime` is
+/// the declared type), as the bytes and the hints of the current form.
+fn media_file(
+    op: &str,
+    mut file: serde_json::Map<String, Value>,
+) -> Result<(Vec<u8>, Option<MediaInput>), EngineError> {
+    let bad = |e: String| EngineError::invalid_input(format!("{op}: bad arguments: {e}"));
+    let bytes = match file.remove("bytes") {
+        // a Uint8Array that crossed a structured clone arrives as an index-keyed object
+        Some(Value::Object(m)) => {
+            let mut v: Vec<(usize, Value)> = m
+                .into_iter()
+                .map(|(k, b)| k.parse().map(|i| (i, b)).map_err(|_| bad("bytes".into())))
+                .collect::<Result<_, _>>()?;
+            v.sort_by_key(|(i, _)| *i);
+            Value::Array(v.into_iter().map(|(_, b)| b).collect())
+        }
+        Some(b) => b,
+        None => return Err(bad("a MediaFile without bytes".into())),
+    };
+    let bytes: Vec<u8> = serde_json::from_value(bytes).map_err(|e| bad(e.to_string()))?;
+    if let Some(m) = file.remove("mime") {
+        file.entry("declaredMime").or_insert(m);
+    }
+    let hints: MediaInput =
+        serde_json::from_value(Value::Object(file)).map_err(|e| bad(e.to_string()))?;
+    Ok((bytes, Some(hints)))
 }
 
 /// Runs `op` with `args` (a JSON array) on `engine`; the result as dto/1 JSON.
@@ -484,8 +522,33 @@ pub async fn call<H: Host>(engine: &Engine<H>, op: &str, a: &str) -> Result<Stri
             out(&engine.delete(&uri).await?)
         }
         "loadMedia" => {
-            let (cid,): (String,) = args(op, a)?;
-            out(&engine.load_media(&cid).await?)
+            // `[cid, media?]`: the item's MediaView, or only its author's DID, names the author
+            // whose PDS has the blob (sync.md §11.1); absent, the active account's own repo
+            let v: Vec<Value> = args(op, a)?;
+            let cid = v.first().and_then(Value::as_str).ok_or_else(|| {
+                EngineError::invalid_input(format!("{op}: bad arguments: no cid"))
+            })?;
+            let view = match v.get(1) {
+                Some(m @ Value::Object(_)) => Some(
+                    serde_json::from_value::<lessdugin_core::dto::MediaView>(m.clone()).map_err(
+                        |e| EngineError::invalid_input(format!("{op}: bad arguments: {e}")),
+                    )?,
+                ),
+                _ => None,
+            };
+            let owner = match (v.get(1), &view) {
+                (_, Some(m)) => Some(lessdugin_core::media::MediaOwner::of_view(m)),
+                (Some(Value::String(did)), None) => {
+                    Some(lessdugin_core::media::MediaOwner::author(did))
+                }
+                (None | Some(Value::Null), None) => None,
+                (Some(_), None) => {
+                    return Err(EngineError::invalid_input(format!(
+                        "{op}: bad arguments: the second is a MediaView or a DID"
+                    )));
+                }
+            };
+            out(&engine.load_media(cid, owner).await?)
         }
         "drafts" => out(&engine.drafts().await?),
         "saveDraft" => {
@@ -499,11 +562,11 @@ pub async fn call<H: Host>(engine: &Engine<H>, op: &str, a: &str) -> Result<Stri
         }
         "settings" => out(&engine.settings().await?),
         "setSetting" => {
-            // §3.6: `value: null` removes the key, which is how a client returns a setting to
-            // its default
-            let (key, value): (String, Option<String>) = args(op, a)?;
-            engine.set_setting(&key, value.as_deref()).await?;
-            out(&())
+            // §3.6: a field of `Settings` and a value of its type; `null` returns it to its
+            // default
+            let (key, value): (String, Option<Value>) = padded(op, a, 2)?;
+            engine.set_setting(&key, value.as_ref()).await?;
+            Ok(NULL.into())
         }
         "exportLocal" => {
             // the client's declaration takes no scope, so the server default applies
@@ -512,9 +575,9 @@ pub async fn call<H: Host>(engine: &Engine<H>, op: &str, a: &str) -> Result<Stri
                 .await?)
         }
         "importLocal" => {
-            // `{ scope, export }`: importing is a decision about what to overwrite, so the scope
-            // travels with the data rather than defaulting silently
-            let (json, scope): (lessdugin_core::engine::LocalExport, Option<String>) = args(op, a)?;
+            // `(export, scope?)`: `EngineApi.importLocal(json)` may leave the scope out
+            let (json, scope): (lessdugin_core::engine::LocalExport, Option<String>) =
+                padded(op, a, 2)?;
             // `ExportScope` is a plain enum with no serde form, so the client names it: "mine"
             // (the default, PRIV-8) or "everything"
             let scope = match scope.as_deref() {
@@ -524,24 +587,35 @@ pub async fn call<H: Host>(engine: &Engine<H>, op: &str, a: &str) -> Result<Stri
             out(&engine.import_local(&json, scope).await?)
         }
         "redactRevision" => {
-            // The engine returns one batched write (the outbox chunks the deletes), and the
-            // client's declaration is a single WriteTicket, so the first is the one.
+            // Always one write (engine-api.md §3.5), the client's single WriteTicket (engine API
+            // v0): it lists the item's revisions from the PDS when it is sent, so an item
+            // without history is a write that deletes nothing.
             let (uri,): (String,) = args(op, a)?;
             let tickets = engine.redact_revision(&uri).await?;
-            // nothing to redact is the state the caller asked for, so it is `null`, not an
-            // invented ticket and not an error
-            match tickets.into_iter().next() {
-                Some(t) => out(&t),
-                None => out(&Option::<lessdugin_core::dto::WriteTicket>::None),
-            }
+            let t = tickets
+                .into_iter()
+                .next()
+                .ok_or_else(|| EngineError::internal("redact_revision queued no write"))?;
+            out(&t)
         }
         "prepareMedia" => {
             // The bytes are a separate argument from the hints (engine-api.md §3.6), so
             // this op takes them as a number array: the bridge serialises a Uint8Array
             // that way, and `prepare_media` is synchronous - it allocates nothing large and
             // touches no network, so it does not need the outbox.
-            let (bytes, input): (Vec<u8>, Option<MediaInput>) = args(op, a)?;
-            let hints = input.unwrap_or(MediaInput {
+            // Engine API v0's form, one `MediaFile { bytes, mime?, name?, alt? }`, is accepted
+            // too.
+            let (first, input): (Value, Option<MediaInput>) = padded(op, a, 2)?;
+            let (bytes, hints) = match first {
+                Value::Object(file) => media_file(op, file)?,
+                bytes => (
+                    serde_json::from_value::<Vec<u8>>(bytes).map_err(|e| {
+                        EngineError::invalid_input(format!("{op}: bad arguments: {e}"))
+                    })?,
+                    input,
+                ),
+            };
+            let hints = hints.unwrap_or(MediaInput {
                 declared_mime: None,
                 alt: None,
                 name: None,
@@ -657,6 +731,14 @@ pub async fn call<H: Host>(engine: &Engine<H>, op: &str, a: &str) -> Result<Stri
             let (raw, ctx): (String, String) = args(op, a)?;
             out(&safe_href(&raw, href_ctx(&ctx)?)?)
         }
+        "validateRecord" => {
+            let (collection, json): (String, Value) = args(op, a)?;
+            out(&engine.validate_record(&collection, &json).await?)
+        }
+        "deriveRkey" => {
+            let (input,): (lessdugin_core::dto::RkeyInput,) = args(op, a)?;
+            out(&engine.derive_rkey(&input)?)
+        }
         "verify" => {
             let (uri, deep): (String, Option<bool>) = args(op, a)?;
             out(&engine.verify(&uri, deep.unwrap_or(false)).await?)
@@ -744,6 +826,117 @@ mod tests {
                 api.iter().any(|a| a == m) || glue.contains(m),
                 "OPS lists {m}, which EngineApi does not declare"
             );
+        }
+    }
+
+    /// `(name, required, total)` parameter counts of every `EngineApi` method (the first
+    /// declaration of an overloaded one), from `api.ts`.
+    fn api_arities() -> Vec<(String, usize, usize)> {
+        let src = include_str!("../../../packages/engine/src/api.ts");
+        let body = &src[src.find("export interface EngineApi").expect("EngineApi")..];
+        let body = &body[..body.find("\n}\n").expect("end of EngineApi")];
+        let mut out: Vec<(String, usize, usize)> = Vec::new();
+        for name in api_methods() {
+            let at = body
+                .find(&format!("\n  {name}("))
+                .or_else(|| body.find(&format!("\n  {name}<")))
+                .expect(&name);
+            let rest = &body[at..];
+            let open = rest.find('(').expect("(");
+            // the parameter list, to the matching parenthesis
+            let (mut depth, mut end) = (0i32, open);
+            for (i, c) in rest[open..].char_indices() {
+                match c {
+                    '(' | '<' | '{' | '[' => depth += 1,
+                    ')' | '>' | '}' | ']' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = open + i;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let list = &rest[open + 1..end];
+            let (mut params, mut depth, mut cur) = (Vec::new(), 0i32, String::new());
+            for c in list.chars() {
+                match c {
+                    '(' | '<' | '{' | '[' => depth += 1,
+                    ')' | '>' | '}' | ']' => depth -= 1,
+                    ',' if depth == 0 => {
+                        params.push(std::mem::take(&mut cur));
+                        continue;
+                    }
+                    _ => {}
+                }
+                cur.push(c);
+            }
+            params.push(cur);
+            let params: Vec<String> = params
+                .into_iter()
+                .map(|p| p.trim().to_owned())
+                .filter(|p| !p.is_empty())
+                .collect();
+            let optional = params
+                .iter()
+                .filter(|p| p.split(':').next().is_some_and(|n| n.ends_with('?')))
+                .count();
+            if !out.iter().any(|(n, _, _)| n == &name) {
+                out.push((name, params.len() - optional, params.len()));
+            }
+        }
+        out
+    }
+
+    /// `OP_ARITY` of `packages/engine/src/client.ts`: the operations the client pads to their
+    /// full arity with `null`.
+    fn client_padding() -> Vec<(String, usize)> {
+        let src = include_str!("../../../packages/engine/src/client.ts");
+        let body = &src[src.find("OP_ARITY").expect("OP_ARITY")..];
+        let body = &body[body.find('{').expect("{") + 1..body.find("});").expect("});")];
+        body.lines()
+            .filter_map(|l| {
+                let (k, v) = l.trim().split_once(':')?;
+                Some((
+                    k.trim().to_owned(),
+                    v.trim().trim_end_matches(',').parse().ok()?,
+                ))
+            })
+            .collect()
+    }
+
+    /// The wasm dispatcher accepts every arity `EngineApi` lets a client send: the required
+    /// parameters only (or `OP_ARITY`'s padding), and all of them. Every argument is `null`, so
+    /// an operation fails on a type, never on the length of its argument tuple (`importLocal(json)`
+    /// once rejected every call that left the scope out).
+    #[test]
+    fn every_api_arity_is_accepted() {
+        let e = engine();
+        let pads = client_padding();
+        assert!(pads.iter().any(|(n, _)| n == "parseRef"), "{pads:?}");
+        // long-lived, or not dispatched here
+        let skip = ["liveTail", "outboxPump", "backgroundVerify"];
+        let arities = api_arities();
+        assert!(arities.len() > 60, "{}", arities.len());
+        for (op, required, total) in &arities {
+            if skip.contains(&op.as_str()) || unsupported_until(op).is_some() || *total == 0 {
+                continue;
+            }
+            let sent = pads
+                .iter()
+                .find(|(n, _)| n == op)
+                .map_or(*required, |(_, n)| *n);
+            for n in [sent, *total] {
+                let nulls = format!("[{}]", vec!["null"; n].join(","));
+                if let Err(err) = block_on(call(&e, op, &nulls)) {
+                    assert!(
+                        !err.message.contains("invalid length"),
+                        "{op} with {n} of {total} arguments: {}",
+                        err.message
+                    );
+                }
+            }
         }
     }
 
@@ -843,6 +1036,161 @@ mod tests {
             let err = call_err(&e, op, a);
             assert_eq!(err.code, ErrorCode::InvalidInput, "{op} {a}: {err:?}");
         }
+    }
+
+    /// The M4 local-state operations keep `EngineApi`'s shapes (engine API v0): `setSetting` takes
+    /// a field of `Settings` with a typed value, `importLocal` its export alone and reports what
+    /// it wrote, `prepareMedia` the v0 `MediaFile` too.
+    #[test]
+    fn local_state_operations_take_the_declared_shapes() {
+        let e = engine();
+        assert_eq!(
+            call_ok(
+                &e,
+                "setSetting",
+                r#"["mediaAutoloadHosts", ["cdn.example"]]"#
+            ),
+            "null"
+        );
+        call_ok(&e, "setSetting", r#"["karmaNotifications", "weekly"]"#);
+        let s: Value = serde_json::from_str(&call_ok(&e, "settings", "[]")).unwrap();
+        assert_eq!(s["mediaAutoloadHosts"], json!(["cdn.example"]));
+        assert_eq!(s["karmaNotifications"], "weekly");
+        let err = call_err(&e, "setSetting", r#"["noSuchSetting", 1]"#);
+        assert_eq!(err.code, ErrorCode::InvalidInput);
+
+        let x = call_ok(&e, "exportLocal", "[]");
+        let r: Value =
+            serde_json::from_str(&call_ok(&e, "importLocal", &format!("[{x}]"))).unwrap();
+        assert!(r["imported"].as_u64().unwrap() > 0, "{r}");
+        assert_eq!(r["outOfScope"], 0, "{r}");
+
+        // a 1x1 PNG, as engine API v0's `prepareMedia({ bytes, mime })`
+        let png: Vec<u8> = vec![
+            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0x0d, 0x49, 0x48, 0x44, 0x52,
+            0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 0x1f, 0x15, 0xc4, 0x89, 0, 0, 0, 0x0d, 0x49,
+            0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0xf8, 0xcf, 0xc0, 0xf0, 0x1f, 0, 5, 0, 1, 0xff,
+            0x89, 0x99, 0x3d, 0x1d, 0, 0, 0, 0, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+        ];
+        let bytes = serde_json::to_string(&png).unwrap();
+        let v0 = call_ok(
+            &e,
+            "prepareMedia",
+            &format!(r#"[{{"bytes": {bytes}, "mime": "image/png", "alt": "a dot"}}]"#),
+        );
+        let now = call_ok(
+            &e,
+            "prepareMedia",
+            &format!(r#"[{bytes}, {{"declaredMime": "image/png", "alt": "a dot"}}]"#),
+        );
+        let (v0, now): (Value, Value) = (
+            serde_json::from_str(&v0).unwrap(),
+            serde_json::from_str(&now).unwrap(),
+        );
+        assert_eq!(
+            (&v0["cid"], &v0["mime"], &v0["alt"]),
+            (&now["cid"], &now["mime"], &now["alt"])
+        );
+    }
+
+    #[test]
+    fn validate_record_and_derive_rkey() {
+        let e = engine();
+        let forum =
+            "at://did:plc:ewvi7nxzyoun6zhxrhs64oiz/online.7778777.lessdugin.temp.forum/meta";
+        let post = json!({
+            "$type": "online.7778777.lessdugin.temp.post",
+            "forum": forum,
+            "kind": "article",
+            "title": "Hello",
+            "body": {"$type": "online.7778777.lessdugin.temp.markdown", "text": "Hi."},
+            "createdAt": "2024-01-01T00:00:00.000Z",
+        });
+        let r: Value = serde_json::from_str(&call_ok(
+            &e,
+            "validateRecord",
+            &format!(r#"["post", {post}]"#),
+        ))
+        .unwrap();
+        assert_eq!(r, json!({"valid": true, "errors": []}));
+        let mut untitled = post.clone();
+        untitled.as_object_mut().unwrap().remove("title");
+        let r: Value = serde_json::from_str(&call_ok(
+            &e,
+            "validateRecord",
+            &format!(r#"["online.7778777.lessdugin.temp.post", {untitled}]"#),
+        ))
+        .unwrap();
+        assert_eq!(r["valid"], false, "{r}");
+        assert_eq!(r["errors"], json!(["PO3"]), "{r}");
+
+        let k = |input: Value| -> String {
+            serde_json::from_str(&call_ok(&e, "deriveRkey", &format!("[{input}]"))).unwrap()
+        };
+        let fk = k(json!({"kind": "membership", "forum": forum}));
+        let p = k(json!({"kind": "post", "forum": forum, "tid": "3l2s5xxv2ze2c"}));
+        assert_eq!(p, format!("{fk}-3l2s5xxv2ze2c"));
+        let root =
+            format!("at://did:plc:ewvi7nxzyoun6zhxrhs64oiz/online.7778777.lessdugin.temp.post/{p}");
+        let c = k(json!({"kind": "comment", "root": root, "tid": "3l2s6aaaaaaa2"}));
+        assert_eq!(c, format!("{fk}-3l2s5xxv2ze2c-3l2s6aaaaaaa2"));
+        let o = k(json!({"kind": "opinion", "forum": forum, "subject": root}));
+        assert!(o.starts_with(&format!("{p}-")), "{o}");
+        let m = k(
+            json!({"kind": "modAction", "forum": forum, "scope": "forum",
+            "subject": root, "actionKey": "hide"}),
+        );
+        assert!(
+            m.starts_with(&format!("{fk}-")) && m.len() == fk.len() + 17,
+            "{m}"
+        );
+        let err = call_err(
+            &e,
+            "deriveRkey",
+            r#"[{"kind": "post", "forum": "x", "tid": "y"}]"#,
+        );
+        assert_eq!(err.code, ErrorCode::InvalidInput);
+        // a comment is not a root (data-model.md §3: the root is a post keyed FK-TID)
+        let on_comment = format!(
+            "at://did:plc:ewvi7nxzyoun6zhxrhs64oiz/online.7778777.lessdugin.temp.comment/{c}"
+        );
+        let err = call_err(
+            &e,
+            "deriveRkey",
+            &json!([{"kind": "comment", "root": on_comment, "tid": "3l2s6aaaaaaa3"}]).to_string(),
+        );
+        assert_eq!(err.code, ErrorCode::InvalidInput, "{err:?}");
+        // the actionKey of #pin and of a foreign action; none is the full $type of a known def
+        let mk = |key: &str| {
+            json!([{"kind": "modAction", "forum": forum, "scope": "forum",
+                "subject": root, "actionKey": key}])
+            .to_string()
+        };
+        for key in ["pin:forum", "com.example.action#x"] {
+            assert!(block_on(call(&e, "deriveRkey", &mk(key))).is_ok(), "{key}");
+        }
+        let err = call_err(
+            &e,
+            "deriveRkey",
+            &mk("online.7778777.lessdugin.temp.modAction#hide"),
+        );
+        assert_eq!(err.code, ErrorCode::InvalidInput, "{err:?}");
+        // the same key as the lexicon's derivation from the action itself
+        let action = serde_json::Map::from_iter([(
+            "$type".to_owned(),
+            json!("online.7778777.lessdugin.temp.modAction#hide"),
+        )]);
+        let d = lessdugin_lexicon::keys::derive(
+            lessdugin_lexicon::ns::NS,
+            &lessdugin_lexicon::keys::RkeyInput::ModAction {
+                forum,
+                scope: None,
+                subject: &root,
+                action: &action,
+            },
+        )
+        .unwrap();
+        assert_eq!(m, d.rkey);
     }
 
     #[test]

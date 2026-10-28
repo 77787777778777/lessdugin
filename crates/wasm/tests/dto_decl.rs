@@ -116,6 +116,8 @@ fn all() -> Vec<(&'static str, &'static str)> {
         AccountView,
         Ref,
         RefContext,
+        ValidationReport,
+        RkeyInput,
         // §3.5 writes, operation inputs
         WriteState,
         WriteTicket,
@@ -159,6 +161,7 @@ fn all() -> Vec<(&'static str, &'static str)> {
         BookmarkEntry,
         ForumUnread,
         UnreadCounts,
+        ImportReport,
         // §3.8 events
         Topic,
         AuthState,

@@ -737,8 +737,9 @@ fn wasm_build(args: &[String]) -> Result<Option<String>, String> {
     }
     if o.report && !o.dev {
         let tmp = root().join("target/wasm-report/no-verify");
+        // every default feature but `verify`, so the marginal is verify's alone
         let nv = build_wasm(
-            &["--no-default-features", "--features", "math"],
+            &["--no-default-features", "--features", "math,orientation"],
             profile,
             &tmp,
             true,
