@@ -754,10 +754,8 @@ mod tests {
         // Leading code points that are not name characters do not hide the host (red-team F2):
         // wrapping punctuation, symbols, emoji and blanks that are neither White_Space nor
         // Default_Ignorable (U+2800 braille blank, U+1D159 musical null notehead).
-        for lead in [
-            "(", "\"", "[", "\u{A1}", "\u{2192} ", "\u{2022} ", "\u{1F512} ", "\u{2800}",
-            "\u{1D159}", "...", "@(", "<@",
-        ] {
+        let leads = "(|\"|[|\u{A1}|\u{2192} |\u{2022} |\u{1F512} |\u{2800}|\u{1D159}|...|@(|<@";
+        for lead in leads.split('|') {
             let text = format!("{lead}google.com)");
             assert!(html_host_suffix(&text, "evil.com"), "{text:?}");
             assert!(!html_host_suffix(&text, "google.com"), "{text:?}");
