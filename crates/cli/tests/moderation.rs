@@ -356,7 +356,7 @@ fn mods_rm_skip_adopt_lists_what_lapses_and_needs_a_confirmation() {
     assert!(err.contains("2 assertions"), "{err}");
     assert!(
         err.lines()
-            .any(|l| l.contains(&kept) && l.contains("keep") && l.contains("stale")),
+            .any(|l| l.contains(&kept) && l.contains("visible") && l.contains("stale")),
         "{err}"
     );
     assert_eq!(mods_of(&alice).len(), 1, "the declaration changed");
@@ -377,8 +377,9 @@ fn mods_rm_skip_adopt_lists_what_lapses_and_needs_a_confirmation() {
     assert_eq!(adopted, 0, "nothing is adopted");
 }
 
-/// `bob` (a moderator) keeps a new post of `carol`, who then edits it: the keep names the old
-/// version, so it is `stale` in the mod log (`social.md` §4.5). Returns the post's uri.
+/// `bob` (a moderator) keeps (`#hide` visible) a new post of `carol`, who then edits it: the
+/// keep names the old version, so it is `stale` in the mod log (`social.md` §4.5). Returns the
+/// post's uri.
 fn stale_keep(bob: &fakenet::User, carol: &fakenet::User) -> String {
     let f = carol.file("kept.md", "---\ntitle: Kept\n---\nAs it was.\n");
     let post = carol.json(&["post", s(&f), "--yes"]);
@@ -445,5 +446,5 @@ fn adopting_reports_what_it_did_not_adopt() {
         .filter(|v| v.get("adopts").is_some())
         .collect();
     assert_eq!(adopted.len(), 1, "{adopted:?}");
-    assert_eq!(adopted[0]["subject"]["uri"], hidden.as_str(), "{adopted:?}");
+    assert_eq!(adopted[0]["subject"], hidden.as_str(), "{adopted:?}");
 }
