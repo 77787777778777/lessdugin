@@ -325,7 +325,12 @@ fn the_edit_command_edits_a_spilled_body() {
     while source.len() <= 65_536 {
         source.push_str("More words in the long body. ");
     }
-    let t = block_on(carol.engine.publish(&PostDraft::article(&s.forum, "Long", source))).unwrap();
+    let t = block_on(
+        carol
+            .engine
+            .publish(&PostDraft::article(&s.forum, "Long", source)),
+    )
+    .unwrap();
     carol.flush();
     let post = carol.done(&t);
     let record = |uri: &str| {
@@ -339,10 +344,18 @@ fn the_edit_command_edits_a_spilled_body() {
         .value_json()
         .unwrap()
     };
-    assert!(record(&post)["body"].get("textBlob").is_some(), "it spilled");
+    assert!(
+        record(&post)["body"].get("textBlob").is_some(),
+        "it spilled"
+    );
 
     let dir = tempfile::tempdir().unwrap();
-    let mut t = tui_with_sed(&s, dir.path(), "s/The old opening./The new opening./", false);
+    let mut t = tui_with_sed(
+        &s,
+        dir.path(),
+        "s/The old opening./The new opening./",
+        false,
+    );
     block_on(t.start(None));
     run(&mut t, &format!("edit {post}"));
     let st = t.state.status.as_ref().unwrap().text.to_plain_string();
@@ -351,8 +364,15 @@ fn the_edit_command_edits_a_spilled_body() {
     block_on(t.settle());
     let (title, body) = post_of(&s, &post);
     assert_eq!(title.as_deref(), Some("Long"));
-    assert!(body.starts_with("The new opening. More words"), "{}", &body[..80]);
-    assert!(record(&post)["body"].get("textBlob").is_some(), "it spilled again");
+    assert!(
+        body.starts_with("The new opening. More words"),
+        "{}",
+        &body[..80]
+    );
+    assert!(
+        record(&post)["body"].get("textBlob").is_some(),
+        "it spilled again"
+    );
 }
 
 /// `:edit` on an article keeps a title the user did not change as it was, a leading `#`

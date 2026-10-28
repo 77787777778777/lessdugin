@@ -2120,8 +2120,10 @@ impl State {
         if span.collapsed && !t.collapsed.contains(&uri) {
             self.say(
                 Tone::Info,
-                lit("This comment is collapsed: press Space to show it, and where its images \
-                     load from, first."),
+                lit(
+                    "This comment is collapsed: press Space to show it, and where its images \
+                     load from, first.",
+                ),
             );
             return;
         }

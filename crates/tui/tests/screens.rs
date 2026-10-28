@@ -528,7 +528,15 @@ fn the_thread_screen_shows_the_viewers_own_newcomer_comment_expanded() {
         c.state = ItemState::Collapsed {
             reason: CollapseReason::NewUser,
         };
-        let bodies = t.state.top_thread().unwrap().data.as_ref().unwrap().bodies.clone();
+        let bodies = t
+            .state
+            .top_thread()
+            .unwrap()
+            .data
+            .as_ref()
+            .unwrap()
+            .bodies
+            .clone();
         let _ = t.state.update(Action::ThreadLoaded {
             screen,
             origin: Origin::Live,
@@ -565,7 +573,11 @@ fn a_spilled_body_is_styled_from_its_fetched_source() {
         panic!("no post")
     };
     assert!(p.body.notices.is_empty(), "{:?}", p.body.notices);
-    assert!(p.body.text.starts_with("Chapter one"), "{}", &p.body.text[..80]);
+    assert!(
+        p.body.text.starts_with("Chapter one"),
+        "{}",
+        &p.body.text[..80]
+    );
 
     let mut t = tui(&s, 80, 40);
     block_on(t.start(None));

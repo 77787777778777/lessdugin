@@ -1520,10 +1520,7 @@ fn a_join_and_a_queue_approval_ask_first() {
     let fx = t.state.update(lessdugin_tui::Action::Key(
         lessdugin_tui::keys::parse_key("Enter").unwrap(),
     ));
-    assert!(
-        !fx.iter().any(|e| e.operation() == Some("grant")),
-        "{fx:?}"
-    );
+    assert!(!fx.iter().any(|e| e.operation() == Some("grant")), "{fx:?}");
     let n = t.state.public_notice.as_ref().expect("the approval asks");
     assert_eq!(n.kinds, [PublicActionKind::ModAction]);
     assert!(
@@ -1566,7 +1563,11 @@ fn another_active_account_asks_again() {
     .unwrap();
     block_on(t.settle());
     block_on(t.press("d"));
-    let n = t.state.public_notice.as_ref().expect("erin's first vote asks");
+    let n = t
+        .state
+        .public_notice
+        .as_ref()
+        .expect("erin's first vote asks");
     assert_eq!(n.kinds, [PublicActionKind::Vote]);
 }
 
@@ -1781,7 +1782,12 @@ fn the_command_line_reaches_membership_items_and_local_state() {
         "{}",
         status(&t)
     );
-    assert_eq!(st.media_autoload_hosts, ["cdn.example.com"], "{}", status(&t));
+    assert_eq!(
+        st.media_autoload_hosts,
+        ["cdn.example.com"],
+        "{}",
+        status(&t)
+    );
     set(&mut t, "unset mediaAutoloadHosts");
     let st = block_on(carol.engine.settings()).unwrap();
     assert!(st.media_autoload_hosts.is_empty(), "{}", status(&t));

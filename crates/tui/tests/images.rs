@@ -460,7 +460,15 @@ fn i_on_a_folded_comment_loads_nothing_until_it_is_expanded() {
         reason: CollapseReason::NewUser,
     };
     c.body.media = media;
-    let bodies = t.state.top_thread().unwrap().data.as_ref().unwrap().bodies.clone();
+    let bodies = t
+        .state
+        .top_thread()
+        .unwrap()
+        .data
+        .as_ref()
+        .unwrap()
+        .bodies
+        .clone();
     let _ = t.state.update(Action::ThreadLoaded {
         screen,
         origin: lessdugin_tui::app::Origin::Live,
@@ -593,7 +601,15 @@ fn i_loads_from_the_authors_pds_whatever_the_view_says() {
         panic!("no post")
     };
     p.body.media[0].pds = "https://elsewhere.example".into();
-    let bodies = t.state.top_thread().unwrap().data.as_ref().unwrap().bodies.clone();
+    let bodies = t
+        .state
+        .top_thread()
+        .unwrap()
+        .data
+        .as_ref()
+        .unwrap()
+        .bodies
+        .clone();
     let _ = t.state.update(Action::ThreadLoaded {
         screen,
         origin: Origin::Live,

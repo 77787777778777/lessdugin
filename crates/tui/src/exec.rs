@@ -483,7 +483,11 @@ pub async fn fetch_media<H: Host>(
             Some(lessdugin_core::media::MediaOwner::of_view(media)),
         )
         .await?;
-    if !loaded.mime.as_deref().is_some_and(crate::thread::inline_image) {
+    if !loaded
+        .mime
+        .as_deref()
+        .is_some_and(crate::thread::inline_image)
+    {
         return Err(EngineError::invalid_input(
             "the file is not the image it says it is",
         ));
