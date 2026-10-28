@@ -245,7 +245,9 @@ describe("MockEngine writes", () => {
     const removal = await e.modsSet(uri, { kind: "remove", did });
     expect(removal.notices?.map((n) => n.code)).toEqual(["adoptedFirst"]);
     expect(removal.notices?.[0]?.message).toMatch(/^mod adopt runs first \(write w-\d+, 0 /);
-    expect((await e.modsSet(uri, { kind: "remove", did, skipAdopt: true })).notices).toBeUndefined();
+    expect(
+      (await e.modsSet(uri, { kind: "remove", did, skipAdopt: true })).notices,
+    ).toBeUndefined();
   });
 });
 

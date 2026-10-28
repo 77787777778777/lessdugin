@@ -7,8 +7,8 @@ import type { ForumView } from "@lessdugin/engine/types";
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { renderWithApp } from "../../test/render.tsx";
-import { ForumContext } from "./forumContext.tsx";
 import { ForumSettingsPage } from "./ForumSettingsPage.tsx";
+import { ForumContext } from "./forumContext.tsx";
 
 describe("ForumSettingsPage", () => {
   it("shows the engine's adoption notices when the owner removes a moderator", async () => {
