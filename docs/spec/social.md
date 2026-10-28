@@ -386,7 +386,7 @@ An **assertion** is a modAction m that meets all of these:
 
 Its **actor** is `did(m.uri)` and its subject is `m.subject`.
 
-A record states the **complete desired state** of its action key. Each dimension of its action is asserted with the field's value, or with the field's default when the field is absent. The one exception is `tag.head`, which is asserted only when `head` is present. To override another actor's assertion, write your own record with the opposite value (`data-model.md` §6.7).
+A record states the **complete desired state** of its action key. Each dimension of its action is asserted with the field's value, or with the field's default when the field is absent. The one exception is `tag.head`, which is asserted only when `head` is present. To override another actor's assertion, write your own record with the opposite value (`data-model.md` §6.7). Since one `#restrict` record carries both `restrict` and `nullify`, a writer that changes one of them writes the other as its own current record states it (the engine merges, `engine-api.md` §3.5 `mod_action`): restricting never lifts the writer's nullification, and nullifying never lifts its restriction.
 
 | Action | Dimension asserted | Value asserted | Order (safe value first) | Positive, so CID-bound |
 |---|---|---|---|---|

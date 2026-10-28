@@ -125,7 +125,7 @@ impl World {
 
 fn done(t: &WriteTicket) -> (String, String) {
     match &t.state {
-        WriteState::Done { uri, cid } => (uri.clone(), cid.clone().unwrap_or_default()),
+        WriteState::Done { uri, cid, .. } => (uri.clone(), cid.clone().unwrap_or_default()),
         other => panic!("write {} is {other:?}", t.id),
     }
 }

@@ -537,13 +537,14 @@ pub fn mod_intent(
             tier: *tier,
             notice: None,
         }),
+        // the engine keeps the dimension a verb leaves out (m3r-2)
         ModVerb::Restrict => assert(ModActionValue::Restrict {
-            capabilities: vec![Capability::Post, Capability::Comment],
-            nullify_votes: false,
+            capabilities: Some(vec![Capability::Post, Capability::Comment]),
+            nullify_votes: None,
         }),
         ModVerb::Nullify => assert(ModActionValue::Restrict {
-            capabilities: vec![],
-            nullify_votes: true,
+            capabilities: None,
+            nullify_votes: Some(true),
         }),
         ModVerb::Unrestrict => remove("restrict"),
         // `approve` is a grant, not a mod action: the caller sends `Effect::Grant` instead

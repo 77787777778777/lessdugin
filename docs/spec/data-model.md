@@ -1054,7 +1054,7 @@ mod_adopt(forum, former, counted):
   each with swapCommit = fresh head; on InvalidSwap or HTTP 500 re-list own range, recompute the remaining batches (≤ 3 tries)
 ```
 
-The report keeps its first 100 lines and then one line that counts the rest. `mods rm` also tells the owner, before anything is sent, how many assertions will be adopted and how many will not, by status.
+The report keeps its first 100 lines and then one line that counts the rest; it is the write's result (`engine-api.md` §3.5: `WriteState.done.report`). `mods rm` also tells the owner, before anything is sent, how many assertions will be adopted and how many will not, by status.
 
 **`mods rm <did>`** is run by the owner, since the declaration is in the owner's repo.
 1. Run `mod adopt <did>` as the owner.

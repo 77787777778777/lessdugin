@@ -35,13 +35,14 @@ use crate::discovery::forum_ref::{ForumKey, parse_forum_ref};
 use crate::discovery::state::{self, ForumState};
 use crate::discovery::{DeclProof, DiscoveryError, OpenedForum};
 use crate::dto::{ActorView, Completeness};
-use crate::host::Host;
+use crate::host::{Host, HostError};
 use crate::identity::HANDLE_TTL_MS;
 use crate::limits;
 use crate::model::render::RenderCache;
 use crate::model::views::bare_actor;
 use crate::model::{ForumModel, ModelError};
 use crate::social::input::SkelData;
+use crate::store::blob;
 use crate::store::records::{RecordStore, StoreError};
 use crate::store::schema::RecKey;
 use crate::sync::{Priority, Stats};
@@ -523,6 +524,7 @@ impl<H: Host> Engine<H> {
             }
             r => r?,
         };
+        self.sync_blob_refs(&model).await;
         let st = ForumState::load(kv, key, &model.decl, now_us)
             .await
             .map_err(store_error)?;
@@ -540,6 +542,29 @@ impl<H: Host> Engine<H> {
         self.rt.register(key);
         self.rt.put(f, l.clone(), gen_before);
         Ok(l)
+    }
+
+    /// Brings the cache's blob references of `model`'s forum in step with its fold, and deletes
+    /// the stored bytes no forum references any more (`sync.md` §11.4, `threat-model.md`
+    /// PRIV-2): an item hidden or deleted since the last build loses its references. A failure
+    /// is logged; the rows are a cache, and the next build writes them again.
+    async fn sync_blob_refs(&self, model: &ForumModel) {
+        let Some(refs) = model.blob_refs() else {
+            return;
+        };
+        let gone = match blob::set_forum_blob_refs(self.host.cache(), &model.key.fk, &refs).await {
+            Ok(g) => g,
+            Err(e) => {
+                tracing::warn!(forum = %model.key.uri, error = %e, "blob references");
+                return;
+            }
+        };
+        for cid in gone {
+            match self.host.blob_delete(&cid).await {
+                Ok(()) | Err(HostError::Unsupported(_)) => {}
+                Err(e) => tracing::warn!(cid = %cid, error = %e, "deleting an unreferenced blob"),
+            }
+        }
     }
 
     /// Actor views and PDS origins of `dids` from the identity cache (no network: a DID
