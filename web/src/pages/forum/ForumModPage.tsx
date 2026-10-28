@@ -20,6 +20,7 @@ import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-quer
 import { useState } from "react";
 import { ActorName } from "../../components/ActorName.tsx";
 import { useSendModAction } from "../../components/ModMenu.tsx";
+import { usePublicAck } from "../../components/PublicAck.tsx";
 import { RecordLink } from "../../components/RecordLink.tsx";
 import { ErrorView, errorMessage, Loading } from "../../components/Status.tsx";
 import { toasts } from "../../components/Toast.tsx";
@@ -77,6 +78,7 @@ function QueueAction({
   reason: string;
 }) {
   const engine = useEngine();
+  const requestAck = usePublicAck();
   const send = useSendModAction();
   const [busy, setBusy] = useState(false);
   const run = (f: () => Promise<void>) => (): void => {
@@ -108,9 +110,11 @@ function QueueAction({
             type="button"
             className={ui.ghost}
             disabled={busy}
-            onClick={run(() =>
-              engine.approve(forum, [item.subject]).then((t) => settle(t, "Applicant approved")),
-            )}
+            onClick={run(async () => {
+              // approving writes a public `#access` record; rejecting is local
+              if (!(await requestAck("modAction"))) return;
+              await settle(await engine.approve(forum, [item.subject]), "Applicant approved");
+            })}
           >
             Approve
           </button>
@@ -247,9 +251,12 @@ function ModQueue({ uri, authority }: { uri: string; authority: boolean }) {
 /** Re-issues a former moderator's assertions that are in effect (social.md §4.10). */
 function Adopt({ uri }: { uri: string }) {
   const engine = useEngine();
+  const requestAck = usePublicAck();
   const [former, setFormer] = useState("");
   const [busy, setBusy] = useState(false);
   const adopt = async (): Promise<void> => {
+    // the copies are the adopter's own public modActions
+    if (!(await requestAck("modAction"))) return;
     setBusy(true);
     try {
       await settle([await engine.modAdopt(uri, former.trim())], "Assertions adopted");

@@ -174,6 +174,24 @@ describe("ForumModPage", () => {
       target: { value: OTHER },
     });
     fireEvent.click(screen.getByRole("button", { name: "Adopt" }));
+    expect(adopt).not.toHaveBeenCalled();
+    await acknowledge();
     await waitFor(() => expect(adopt).toHaveBeenCalledWith(forum, OTHER));
+  });
+
+  it("approves an applicant from the queue only after the interstitial (m3-4, sec-4)", async () => {
+    const engine = new MockEngine({ holdMs: 0, sendMs: 0 });
+    const applicant = "did:plc:applicantapplicantapplic";
+    vi.spyOn(engine, "modQueue").mockResolvedValue({
+      dto: DTO_VERSION,
+      items: [{ kind: "applicant", subject: applicant, reason: "applied to join" }],
+    });
+    const approve = vi.spyOn(engine, "approve").mockResolvedValue([]);
+    const { forum } = await setup(engine);
+    fireEvent.click(await screen.findByRole("button", { name: "Approve" }));
+    expect(await screen.findByRole("dialog", { name: "Moderation actions are public" })).toBeTruthy();
+    expect(approve).not.toHaveBeenCalled();
+    await acknowledge();
+    await waitFor(() => expect(approve).toHaveBeenCalledWith(forum, [applicant]));
   });
 });

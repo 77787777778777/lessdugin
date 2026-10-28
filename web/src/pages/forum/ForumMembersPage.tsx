@@ -2,6 +2,8 @@
 import type { MemberView } from "@lessdugin/engine/types";
 import { useQuery } from "@tanstack/react-query";
 import { ActorName } from "../../components/ActorName.tsx";
+import { useSendModAction } from "../../components/ModMenu.tsx";
+import { usePublicAck } from "../../components/PublicAck.tsx";
 import { ErrorView, errorMessage, Loading } from "../../components/Status.tsx";
 import { toasts } from "../../components/Toast.tsx";
 import { useEngine } from "../../engine/context.tsx";
@@ -13,16 +15,18 @@ import { isAuthorityRole, useForumView } from "./forumContext.tsx";
 
 /** What an authority can do about a member: approve or reject an applicant, unban (the
  * removal of one's own `#access` record: a ban is not lifted by granting, which would make the
- * user a seed, social.md §4.6), lift one's own restriction, or grant and revoke membership. */
+ * user a seed, social.md §4.6), lift one's own restriction, or grant and revoke membership.
+ * All but `reject` (local) write or remove a public modAction, so they pass the moderation
+ * interstitial first (social.md §17). */
 type MemberAction = "grant" | "revoke" | "unban" | "approve" | "reject" | "unrestrict";
 
-const DONE: Record<MemberAction, string> = {
+/** `unrestrict` goes through the moderation path, which reports its own outcome. */
+const DONE: Record<Exclude<MemberAction, "unrestrict">, string> = {
   grant: "Membership granted",
   revoke: "Grant revoked",
   unban: "Your ban was removed",
   approve: "Applicant approved",
   reject: "Applicant rejected",
-  unrestrict: "Your restriction was removed",
 };
 
 const LABEL: Record<MemberAction, string> = {
@@ -41,6 +45,8 @@ const TITLE: Partial<Record<MemberAction, string>> = {
 
 export function ForumMembersPage() {
   const engine = useEngine();
+  const requestAck = usePublicAck();
+  const sendModAction = useSendModAction();
   const view = useForumView();
   const uri = view.forum.uri;
   const authority = view.viewer !== undefined ? view.viewer.moderate : isAuthorityRole(view.myRole);
@@ -49,27 +55,26 @@ export function ForumMembersPage() {
   if (q.isError) return <ErrorView error={q.error} />;
   const act = async (did: string, action: MemberAction): Promise<void> => {
     try {
+      if (action === "unrestrict") {
+        // the interstitial, the write and the engine's notices, as in the moderation dialog
+        await sendModAction(
+          { kind: "remove", forum: uri, scope: "forum", subject: did, actionKey: "restrict" },
+          LABEL.unrestrict,
+        );
+        return;
+      }
+      if (action !== "reject" && !(await requestAck("modAction"))) return;
       const tickets =
         action === "approve"
           ? await engine.approve(uri, [did])
           : action === "reject"
             ? await engine.reject(uri, [did])
-            : action === "unrestrict"
-              ? [
-                  await engine.modAction({
-                    kind: "remove",
-                    forum: uri,
-                    scope: "forum",
-                    subject: did,
-                    actionKey: "restrict",
-                  }),
-                ]
-              : [
-                  await (action === "grant"
-                    ? engine.grant(uri, [did])
-                    : // `revoke` deletes the account's own `#access` record, a ban included
-                      engine.revoke(uri, [did])),
-                ];
+            : [
+                await (action === "grant"
+                  ? engine.grant(uri, [did])
+                  : // `revoke` deletes the account's own `#access` record, a ban included
+                    engine.revoke(uri, [did])),
+              ];
       let undone = false;
       for (const t of tickets) {
         writeStore.track(t);
