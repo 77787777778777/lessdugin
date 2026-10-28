@@ -42,6 +42,7 @@ import { paletteReact } from "./palette.ts";
 import {
   type AccountInfo,
   type AccountView,
+  type ActionNotice,
   type ActorView,
   type Anchor,
   type AtUri,
@@ -1942,6 +1943,13 @@ export class MockEngine implements EngineApi {
       if (a.status === "none") a.status = "newcomer";
       return { uri, cid: rec.cid, topics: this.threadTopics(root.uri) };
     });
+  }
+
+  /** The mock tracks no CID-bound assertions: nothing to suspend. */
+  async editPreflight(uri: AtUri): Promise<ActionNotice[]> {
+    if (!this.s.posts.has(uri) && !this.s.comments.has(uri))
+      throw err("not_found", `No record ${uri}`);
+    return [];
   }
 
   async edit(uri: AtUri, draft: Draft, opts: EditOpts): Promise<WriteTicket> {

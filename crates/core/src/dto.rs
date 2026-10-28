@@ -1751,7 +1751,7 @@ dto! {
 
 string_enum! {
     /// What a notice on an action's result is about.
-    pub enum NoticeCode { NotEstablished, Retroactive, AdoptedFirst, MissingAlt }
+    pub enum NoticeCode { NotEstablished, Retroactive, AdoptedFirst, MissingAlt, SuspendsAssertions }
 }
 
 dto! {

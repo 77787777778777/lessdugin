@@ -482,7 +482,7 @@ keepRank(x) = r  if resolve(x.uri, hidden) = Resolved{false, r, _}
 - produces a mod-queue item "edited since <action>" (§4.12);
 - makes the tier fall back, the pin drop and the keep stop, until an authority re-asserts it on the new version.
 
-Before an author edits an item that carries positive assertions, their client warns that the edit will suspend them.
+Before an author edits an item that carries positive assertions, their client warns that the edit will suspend them (the engine names them: `engine-api.md` §3.5 `edit_preflight`).
 
 **Negative assertions** take effect whatever their `subjectCid`. On DID and `tag:` subjects, `subjectCid` is ignored.
 

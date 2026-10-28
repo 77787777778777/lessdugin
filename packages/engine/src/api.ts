@@ -15,6 +15,7 @@
 
 import type {
   AccountInfo,
+  ActionNotice,
   AccountView,
   ActionTicket,
   ActorView,
@@ -206,6 +207,10 @@ export interface EngineApi {
   publish(draft: PostDraft): Promise<WriteTicket>;
   comment(draft: CommentDraft): Promise<WriteTicket>;
   edit(uri: AtUri, draft: Draft, opts: EditOpts): Promise<WriteTicket>;
+  /** What to confirm before `edit` of `uri`: a `suspendsAssertions` notice when the item
+   * carries positive assertions in effect (a keep, a frontpage or curated tier, a pin), which
+   * the edit suspends until an authority asserts them again (social.md §4.5). Empty: none. */
+  editPreflight(uri: AtUri): Promise<ActionNotice[]>;
   delete(uri: AtUri): Promise<WriteTicket>;
   retract(uri: AtUri): Promise<WriteTicket>;
   /** A public action (`acknowledgePublicAction(vote | react | tagVote)` first). Held for

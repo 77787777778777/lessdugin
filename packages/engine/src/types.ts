@@ -1059,7 +1059,13 @@ export interface WriteTicket {
   state: WriteState;
 }
 
-export type NoticeCode = "notEstablished" | "retroactive" | "adoptedFirst" | "missingAlt";
+export type NoticeCode =
+  | "notEstablished"
+  | "retroactive"
+  | "adoptedFirst"
+  | "missingAlt"
+  /** `editPreflight`: the edit suspends the item's positive assertions (social.md §4.5). */
+  | "suspendsAssertions";
 
 /** A notice to show with an action's result, e.g. "recorded; will count once you're
  * established". */

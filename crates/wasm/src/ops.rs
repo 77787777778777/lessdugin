@@ -80,6 +80,7 @@ pub const OPS: &[&str] = &[
     "publish",
     "comment",
     "edit",
+    "editPreflight",
     "delete",
     "retract",
     "opinion",
@@ -516,6 +517,10 @@ pub async fn call<H: Host>(engine: &Engine<H>, op: &str, a: &str) -> Result<Stri
         "edit" => {
             let (uri, draft, opts): (String, Draft, Option<EditOpts>) = args(op, a)?;
             out(&engine.edit(&uri, &draft, &opts.unwrap_or_default()).await?)
+        }
+        "editPreflight" => {
+            let (uri,): (String,) = args(op, a)?;
+            out(&engine.edit_preflight(&uri).await?)
         }
         "delete" => {
             let (uri,): (String,) = args(op, a)?;

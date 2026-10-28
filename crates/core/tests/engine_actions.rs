@@ -15,10 +15,10 @@ use std::sync::{Arc, Mutex};
 
 use common::block_on;
 use lessdugin_core::dto::{
-    AccessLevel, ActionTicket, AgreementValue, Capability, CommentDraft, Event, ForumDraft,
-    KarmaCadence, KarmaValue, MembershipMode, ModActionIntent, ModActionValue, ModRole, ModScope,
-    ModsChange, NoticeCode, NotificationReason, NotificationsQuery, OpinionIntent, PinScope,
-    PostDraft, PublicActionKind, Stance, Subscription, SyncOpts, TextQuote, Tier, Topic,
+    AccessLevel, ActionTicket, AgreementValue, Capability, CommentDraft, Draft, EditOpts, Event,
+    ForumDraft, KarmaCadence, KarmaValue, MembershipMode, ModActionIntent, ModActionValue, ModRole,
+    ModScope, ModsChange, NoticeCode, NotificationReason, NotificationsQuery, OpinionIntent,
+    PinScope, PostDraft, PublicActionKind, Stance, Subscription, SyncOpts, TextQuote, Tier, Topic,
     WriteState, WriteTicket,
 };
 use lessdugin_core::engine::{AccountInfo, Engine, EngineConfig, ErrorCode};
@@ -921,6 +921,70 @@ fn author_scope_actions_follow_the_author_table() {
     assert_eq!(e.code, ErrorCode::InvalidInput, "{}", e.message);
     assert_eq!(e.detail.as_ref().unwrap()["kind"], "selfSubject");
     bob.mod_action(author(&carol.did(), ban()));
+}
+
+/// sec-7 (`social.md` §4.5, SOC-3): before an author edits an item that carries positive
+/// assertions, `edit_preflight` names what the edit will suspend, so the client can ask first.
+#[test]
+fn edit_preflight_names_the_assertions_an_edit_suspends() {
+    let w = World::new();
+    let (alice, bob) = (&w.alice, &w.bob);
+    let c = w.carol.comment(&w.bob_post, None, "a fine comment");
+    w.resync(&[alice, bob]);
+    let preflight = |u: &str| block_on(bob.engine.edit_preflight(u)).unwrap();
+    assert!(preflight(&w.bob_post).is_empty());
+    // the owner curates, pins and (after a hide by nobody) keeps bob's post
+    for action in [
+        ModActionValue::Tier {
+            tier: Tier::Frontpage,
+            notice: None,
+        },
+        ModActionValue::Pin {
+            scope: PinScope::Forum,
+            pinned: true,
+        },
+        ModActionValue::Hide {
+            hidden: false,
+            spam: false,
+            show_reason: true,
+        },
+    ] {
+        alice.mod_action(assert_mod(&w.forum, &w.bob_post, action));
+    }
+    // a hide of the comment is negative: nothing to suspend there
+    alice.mod_action(assert_mod(&w.forum, &c, hide()));
+    alice.flush();
+    w.resync(&[bob]);
+    let n = preflight(&w.bob_post);
+    assert_eq!(n.len(), 1, "{n:?}");
+    assert_eq!(n[0].code, NoticeCode::SuspendsAssertions);
+    assert!(
+        n[0].message
+            .starts_with("editing suspends a moderator's keep, its frontpage tier and its pin:"),
+        "{}",
+        n[0].message
+    );
+    assert!(
+        block_on(w.carol.engine.edit_preflight(&c))
+            .unwrap()
+            .is_empty()
+    );
+    // once edited, they no longer count (stale): nothing is left to suspend
+    let t = block_on(bob.engine.edit(
+        &w.bob_post,
+        &Draft::Post {
+            id: None,
+            post: PostDraft::article(&w.forum, "Bob's", "Edited"),
+        },
+        &EditOpts::default(),
+    ))
+    .unwrap();
+    bob.flush();
+    bob.done(&t);
+    w.resync(&[bob]);
+    assert!(preflight(&w.bob_post).is_empty());
+    let e = block_on(bob.engine.edit_preflight(&format!("{}x", w.bob_post))).unwrap_err();
+    assert_eq!(e.code, ErrorCode::NotFound, "{e:?}");
 }
 
 /// m3-18 (`social.md` §4.8 "Composer"): the engine refuses a comment on a locked post by a
