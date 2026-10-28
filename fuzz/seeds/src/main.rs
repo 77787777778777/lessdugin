@@ -17,6 +17,7 @@
 //! | `lexicon` | every record in the shared vectors (in their own and in the build namespace) and the live record |
 //! | `render` | every LFM/1, XSS, terminal and MathML vector input (bodies, TeX, URLs, quote targets, names) |
 //! | `mst` | none: its input is structured (`arbitrary`) |
+//! | `media` | the SPA's e2e image fixture, and one small file per format the strippers walk (JPEG, PNG, WebP, GIF, MP4), each carrying the metadata they drop |
 
 #[allow(dead_code)] // shared with the fuzz targets, which use the rest
 #[path = "../../src/common.rs"]
@@ -34,7 +35,9 @@ use lessdugin_atp::syntax::{Did, Tid};
 use lessdugin_atp::{Cid, Ipld, cid, dagcbor, mst};
 use serde_json::Value;
 
-const TARGETS: &[&str] = &["car", "commit", "dagcbor", "lexicon", "mst", "render"];
+const TARGETS: &[&str] = &[
+    "car", "commit", "dagcbor", "lexicon", "mst", "render", "media",
+];
 /// The render target's `-max_len` (longer generated inputs are cut at a char boundary).
 const RENDER_MAX: usize = 32 * 1024;
 /// Lexicon seeds kept (the vectors hold thousands of near-identical records).
@@ -411,6 +414,91 @@ fn seeds_render() -> Vec<Vec<u8>> {
     out
 }
 
+/// The media strippers' formats (`lessdugin_core::media`, `threat-model.md` §5.9.1), each with
+/// the segments, chunks or boxes the walk drops or keeps, so that libFuzzer starts inside every
+/// walker rather than at the format sniff.
+fn seeds_media() -> Vec<Vec<u8>> {
+    let jpeg_seg = |marker: u8, payload: &[u8]| {
+        let mut v = vec![0xFF, marker];
+        v.extend_from_slice(&u16::try_from(payload.len() + 2).unwrap().to_be_bytes());
+        v.extend_from_slice(payload);
+        v
+    };
+    let mut jpeg = vec![0xFF, 0xD8];
+    jpeg.extend(jpeg_seg(0xE0, b"JFIF\0\x01\x02\0\0\x01\0\x01\0\0"));
+    // EXIF: IFD0 with one Orientation entry (6)
+    let mut exif = b"Exif\0\0II\x2a\x00\x08\0\0\0\x01\0\x12\x01\x03\0\x01\0\0\0\x06\0\0\0".to_vec();
+    exif.extend_from_slice(&[0, 0, 0, 0]);
+    jpeg.extend(jpeg_seg(0xE1, &exif));
+    jpeg.extend(jpeg_seg(0xE2, b"ICC_PROFILE\0\x01\x01icc"));
+    jpeg.extend(jpeg_seg(0xED, b"Photoshop 3.0\0IPTC"));
+    jpeg.extend(jpeg_seg(0xFE, b"comment"));
+    jpeg.extend(jpeg_seg(0xDB, &[0, 1, 2, 3, 4, 5, 6, 7]));
+    jpeg.extend(jpeg_seg(0xC0, &[8, 0, 8, 0, 8, 1, 1, 0x11, 0]));
+    jpeg.extend(jpeg_seg(0xC4, &[0, 0, 1, 0, 1, 0, 0, 0]));
+    jpeg.extend(jpeg_seg(0xDA, &[1, 1, 0, 0, 63, 0]));
+    jpeg.extend_from_slice(&[0x12, 0xFF, 0x00, 0x56, 0xFF, 0xD0, 0x78, 0xFF, 0xD9]);
+    jpeg.extend_from_slice(b"after-eoi");
+
+    let png_chunk = |kind: &[u8; 4], data: &[u8]| {
+        let mut v = u32::try_from(data.len()).unwrap().to_be_bytes().to_vec();
+        v.extend_from_slice(kind);
+        v.extend_from_slice(data);
+        v.extend_from_slice(&[0, 0, 0, 0]);
+        v
+    };
+    let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+    png.extend(png_chunk(b"IHDR", &[0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0]));
+    png.extend(png_chunk(b"tEXt", b"Author\0name"));
+    png.extend(png_chunk(b"eXIf", b"II\x2a\x00"));
+    png.extend(png_chunk(b"acTL", &[0, 0, 0, 1, 0, 0, 0, 0]));
+    png.extend(png_chunk(b"IDAT", b"pixels"));
+    png.extend(png_chunk(b"IEND", b""));
+    png.extend_from_slice(b"after-iend");
+
+    let riff_chunk = |id: &[u8; 4], data: &[u8]| {
+        let mut v = id.to_vec();
+        v.extend_from_slice(&u32::try_from(data.len()).unwrap().to_le_bytes());
+        v.extend_from_slice(data);
+        if data.len() % 2 == 1 {
+            v.push(0);
+        }
+        v
+    };
+    let mut body = riff_chunk(b"VP8X", &[0x3C, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    body.extend(riff_chunk(b"ICCP", b"icc"));
+    body.extend(riff_chunk(b"EXIF", b"Exif\0\0"));
+    body.extend(riff_chunk(b"XMP ", b"<x/>"));
+    body.extend(riff_chunk(b"ALPH", b"\x00a"));
+    body.extend(riff_chunk(b"VP8 ", b"\x00\x01\x02\x03"));
+    let mut webp = b"RIFF".to_vec();
+    webp.extend_from_slice(&u32::try_from(body.len() + 4).unwrap().to_le_bytes());
+    webp.extend_from_slice(b"WEBP");
+    webp.extend_from_slice(&body);
+
+    let mut gif = b"GIF89a\x01\0\x01\0\0\0\0".to_vec();
+    gif.extend_from_slice(b"\x21\xFF\x0BNETSCAPE2.0\x03\x01\0\0\0");
+    gif.extend_from_slice(b"\x21\xFE\x07comment\0");
+    gif.extend_from_slice(b"\x21\xFF\x0BXMP DataXMP\x01x\0");
+    gif.extend_from_slice(b"\x21\xF9\x04\0\0\0\0\0");
+    gif.extend_from_slice(b"\x2C\0\0\0\0\x01\0\x01\0\0\x02\x02\x44\x01\0\x3B");
+    gif.extend_from_slice(b"after-trailer");
+
+    let mp4_box = |kind: &[u8; 4], payload: &[u8]| {
+        let mut v = u32::try_from(payload.len() + 8).unwrap().to_be_bytes().to_vec();
+        v.extend_from_slice(kind);
+        v.extend_from_slice(payload);
+        v
+    };
+    let mut moov = mp4_box(b"mvhd", &[0u8; 20]);
+    moov.extend(mp4_box(b"udta", &mp4_box(b"meta", b"\0\0\0\0location")));
+    let mut mp4 = mp4_box(b"ftyp", b"isom\0\0\x02\0isomiso2");
+    mp4.extend(mp4_box(b"moov", &moov));
+    mp4.extend(mp4_box(b"mdat", b"video"));
+
+    vec![read("web/e2e/fixtures/pixel.png"), jpeg, png, webp, gif, mp4]
+}
+
 fn regressions(target: &str) -> Vec<Vec<u8>> {
     let dir = root().join("fuzz/regressions").join(target);
     let mut files: Vec<PathBuf> = fs::read_dir(dir)
@@ -440,6 +528,7 @@ fn main() {
             "lexicon" => seeds_lexicon(),
             "render" => seeds_render(),
             "mst" => Vec::new(),
+            "media" => seeds_media(),
             other => {
                 eprintln!("unknown target {other:?} (known: {})", TARGETS.join(", "));
                 std::process::exit(2);

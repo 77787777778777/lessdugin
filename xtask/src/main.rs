@@ -3,7 +3,8 @@
 //!
 //! Commands:
 //!   ci                 fmt, clippy (native + wasm32), tests (native + wasm32; the social
-//!                      vectors also with `final-ns`), lexicon lint, web checks
+//!                      vectors also with `final-ns`, the markdown vectors also with `ammonia`),
+//!                      lexicon lint, web checks
 //!   test-wasm [-- <test args>]   run the interop, vector and property tests of atp, lexicon and
 //!                      markdown, and core's social fold vectors and P9 parity digest (in both
 //!                      namespaces), on wasm32-unknown-unknown under node (wasm-bindgen-test-runner),
@@ -82,6 +83,21 @@ fn wasm_selections() -> Vec<Vec<&'static str>> {
     }
     all
 }
+
+/// M4 acceptance, `ammonia(html) == html` for every render vector (`lfm-1.md` §8.5): the
+/// markdown vector and property tests with the native-only `ammonia` feature, which no default
+/// build enables (`ci` and ci.yml's rust job).
+const AMMONIA_TESTS: &[&str] = &[
+    "test",
+    "-p",
+    "lessdugin-markdown",
+    "--features",
+    "ammonia",
+    "--test",
+    "vectors",
+    "--test",
+    "props",
+];
 
 /// The engine wasm's `gzip -9` size (after wasm-opt) above which `wasm --budget` fails. It is a
 /// tripwire for something linked in by mistake (tokio, reqwest, ammonia, debug info), not a
@@ -228,6 +244,7 @@ fn ci() -> Result<(), String> {
             "dto_decl",
         ],
     )?;
+    run("cargo", AMMONIA_TESTS)?;
     // M2 acceptance: the 50-member cold sync in under 5 s, on an optimised build (the debug
     // run above asserts it only off CI; a release build has devnet mode only with `devnet`).
     // As in ci.yml, the release CLI embeds the placeholder page: the test asserts sync timing,
@@ -275,9 +292,9 @@ fn ci() -> Result<(), String> {
         );
     }
     if root().join("node_modules").exists() {
-        // the root check is ci.yml's: biome with the root config, over every package
+        // the root check is ci.yml's: biome with the root config over every package, then each
+        // package's own `check` (tsc, its biome run, the web package's raw-href guard)
         run("pnpm", &["run", "check"])?;
-        run("pnpm", &["-r", "--if-present", "run", "check"])?;
         run("pnpm", &["-r", "--if-present", "run", "test"])?;
         // the release bundle, as ci.yml's web job: `vite build` + check-release-bundle
         run("pnpm", &["run", "build"])?;
@@ -1157,5 +1174,106 @@ fn fuzz(args: &[String]) -> Result<(), String> {
              `cargo +nightly fuzz run <target> <input>`, minimise with `cargo +nightly fuzz tmin`)",
             failed.join(", ")
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! The CI wiring: the workflows and the root `package.json` run what this file says they run
+    //! (each of these checks was once missing from CI).
+
+    use super::*;
+
+    fn file(rel: &str) -> String {
+        std::fs::read_to_string(root().join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"))
+    }
+
+    /// The single-line `run:` commands of job `job` in workflow `rel`, in order.
+    fn job_runs(rel: &str, job: &str) -> Vec<String> {
+        let text = file(rel);
+        let header = format!("  {job}:");
+        let mut lines = text.lines().skip_while(|l| *l != header);
+        assert!(lines.next().is_some(), "{rel} has no job `{job}`");
+        lines
+            .take_while(|l| !(l.starts_with("  ") && !l.starts_with("   ") && l.ends_with(':')))
+            .filter_map(|l| l.trim_start().strip_prefix("- run: "))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    fn cargo(args: &[&str]) -> String {
+        format!("cargo {}", args.join(" "))
+    }
+
+    /// acc-m3-2, acc-m3-5: core's social vectors and the P9 digest run on wasm32 in both
+    /// namespaces, in ci.yml's wasm-tests job.
+    #[test]
+    fn the_social_vectors_and_p9_run_on_wasm32_in_ci() {
+        assert!(job_runs(".github/workflows/ci.yml", "wasm-tests").contains(&"cargo xtask test-wasm".into()));
+        let sels = wasm_selections();
+        for features in [None, Some("final-ns")] {
+            let found = sels.iter().any(|s| {
+                s.windows(2).any(|w| w == ["-p", "lessdugin-core"])
+                    && s.windows(2).any(|w| w == ["--test", "social_vectors"])
+                    && s.windows(2).any(|w| w == ["--test", "social_parity"])
+                    && match features {
+                        None => !s.contains(&"--features"),
+                        Some(f) => s.windows(2).any(|w| w == ["--features", f]),
+                    }
+            });
+            assert!(found, "no wasm32 run of social_vectors and social_parity with {features:?}");
+        }
+    }
+
+    /// acc-m4-7: ammonia's equality runs in ci.yml's rust job (and in `ci`, which runs
+    /// [`AMMONIA_TESTS`]).
+    #[test]
+    fn the_ammonia_equality_runs_in_ci() {
+        let runs = job_runs(".github/workflows/ci.yml", "rust");
+        assert!(runs.contains(&cargo(AMMONIA_TESTS)), "ci.yml rust: {runs:#?}");
+    }
+
+    /// own-3: the web job's `pnpm run check` runs every package's own `check` (tsc, biome and the
+    /// web package's raw-href guard), not only `typecheck`.
+    #[test]
+    fn the_root_check_runs_every_package_check() {
+        assert!(job_runs(".github/workflows/ci.yml", "web").contains(&"pnpm run check".into()));
+        let pkg = file("package.json");
+        let check = pkg
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("\"check\": \""))
+            .expect("a root check script");
+        assert!(
+            check.contains("pnpm -r --if-present run check"),
+            "the root check script is {check}"
+        );
+        for p in ["web/package.json", "packages/engine/package.json"] {
+            assert!(file(p).contains("\"check\": "), "{p} has no check script");
+        }
+        assert!(file("web/package.json").contains("check-no-raw-href.mjs"));
+    }
+
+    /// acc-m4-12: fuzz.yml runs every target `cargo xtask fuzz` knows, and the seed generator
+    /// seeds each of them.
+    #[test]
+    fn fuzz_yml_runs_every_fuzz_target() {
+        let wf = file(".github/workflows/fuzz.yml");
+        let matrix = wf
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("target: ["))
+            .and_then(|l| l.strip_suffix(']'))
+            .expect("a target matrix");
+        let mut listed: Vec<&str> = matrix.split(',').map(str::trim).collect();
+        let mut known: Vec<&str> = FUZZ_TARGETS.iter().map(|t| t.0).collect();
+        listed.sort();
+        known.sort();
+        assert_eq!(listed, known, "fuzz.yml matrix vs FUZZ_TARGETS");
+        let seeds = file("fuzz/seeds/src/main.rs");
+        for t in &known {
+            assert!(
+                seeds.contains(&format!("\"{t}\" => ")),
+                "fuzz/seeds/src/main.rs has no seeds for {t}"
+            );
+        }
     }
 }

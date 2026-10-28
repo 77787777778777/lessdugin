@@ -7,7 +7,11 @@
 //   2. bob, SPA (this browser, OAuth at the devnet PDS): joins and posts;
 //   3. carol, TUI (crates/tui/examples/parity_driver.rs, the headless TUI over the session the
 //      CLI's `login` stored): opens the forum and the post, presses `c`, writes in $EDITOR;
-//   6. bob, SPA: edits the post, which creates a revision.
+//   4. carol, TUI: votes, agrees and reacts through the keys;
+//   5. alice, CLI: hides carol's comment and pins the post;
+//   6. bob, SPA: edits the post, which creates a revision;
+//   6b. alice, CLI: pins the edited post again (a pin is bound to the version it was made on,
+//      social.md §4.5, so the edit suspended step 5's pin), so the compared views carry it.
 //
 // Alice also writes one post straight to her PDS whose TID and `createdAt` are an hour ahead of
 // the real clock (the parity canary, conformance review M3): a client that ignored parity mode
@@ -50,7 +54,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { type Browser, expect, type Page, type TestInfo, test } from "@playwright/test";
-import { login as atpLogin, createPostAt, fk } from "./atp.mjs";
+import { login as atpLogin, createPostAt, fk, NS, xrpc } from "./atp.mjs";
 import { e2eState, route, signIn, watchStrict, withDevnet } from "./state.ts";
 
 const s = e2eState();
@@ -192,6 +196,13 @@ async function hook(page: Page, op: string, args: unknown[]): Promise<string> {
 interface Outputs {
   thread: string;
   list: string;
+}
+
+/** The fields of a dto/1 `MediaView` the scenario checks. */
+interface MediaItem {
+  cid: string;
+  mime: string;
+  author: string;
 }
 
 /** Compares the three clients' outputs; on a mismatch writes unified diffs (attached). */
@@ -502,6 +513,38 @@ async function runScenario(
     });
     await ctx.close();
 
+    // 6b. step 5's pin is bound to the CID it was made on (social.md §4.5): the edit suspended
+    // it "until an authority re-asserts it on the new version", which alice does here, so the
+    // compared views show a pin (and the moderator's own view shows the suspension first)
+    await step("6b. alice (CLI): pins the edited post again", async () => {
+      await alice.cli("sync-after-edit", ["--json", "sync", forum]);
+      const own = JSON.parse(await alice.cli("read-after-edit", ["--json", "read", post])) as {
+        post: { post: { title?: string; pinned: boolean } };
+      };
+      expect(own.post.post.title).toBe(EDITED_TITLE);
+      expect(own.post.post.pinned, "the edit suspends the pin of the earlier version").toBe(false);
+      await alice.cli("mod-repin", [
+        "--json",
+        "mod",
+        "pin",
+        post,
+        "--scope",
+        "forum",
+        "--reason",
+        "still a good question",
+      ]);
+      await alice.cli("sync-after-repin", ["--json", "sync", forum]);
+    });
+
+    // the blob the SPA prepared and uploaded in step 2, as bob's post record names it (the edit
+    // keeps the blob object verbatim, data-model.md §8.8)
+    const rkey = post.split("/").pop() ?? "";
+    const record = (await xrpc(s.devnet.pds, "com.atproto.repo.getRecord", {
+      query: { repo: s.devnet.accounts.bob.did, collection: `${NS}.post`, rkey },
+    })) as { value: { body: { media?: { blob: { ref: { $link: string } } }[] } } };
+    expect(record.value.body.media?.length, "bob's post carries the attached image").toBe(1);
+    const mediaCid = record.value.body.media?.[0]?.blob.ref.$link ?? "";
+
     // the anonymous readers, each on a fresh data directory or profile
     const cli = user("anon-cli");
     const tuiReader = user("anon-tui");
@@ -568,7 +611,7 @@ async function runScenario(
     ];
     writeFileSync(
       join(out, "result.json"),
-      `${JSON.stringify({ parityNowMs: t, forum, post, reply, socialVote, identical: problems.length === 0, problems }, null, 2)}\n`,
+      `${JSON.stringify({ parityNowMs: t, forum, post, reply, mediaCid, socialVote, identical: problems.length === 0, problems }, null, 2)}\n`,
     );
     expect(problems, `the clients disagree; diffs in ${out}`).toEqual([]);
 
@@ -579,6 +622,42 @@ async function runScenario(
     expect(thread.post.post.author.handle).toBe("bob.test");
     expect(thread.post.body.text).toContain(EDIT_TAIL);
     expect(thread.post.history.revisions).toBe(1);
+    // step 2's media subset (M4): every compared thread view holds the one image bob attached,
+    // by the CID his record names, and its body places it (the gallery's placeholder)
+    for (const [client, text] of [
+      ["CLI", cliOut.thread],
+      ["TUI", tuiOut.thread.compact],
+      ["SPA", spaOut.thread],
+    ] as const) {
+      const body = (JSON.parse(text) as { post: { body: { html: string; media: MediaItem[] } } })
+        .post.body;
+      expect(
+        body.media.map((m) => [m.cid, m.mime, m.author]),
+        `${client}: the attached image`,
+      ).toEqual([[mediaCid, "image/png", s.devnet.accounts.bob.did]]);
+      expect(body.html, `${client}: the image in the body`).toContain(`data-cid="${mediaCid}"`);
+    }
+    // steps 4 and 5 (the social subset, M3): the counted opinions and the pin
+    const score = thread.post.post.score as {
+      score: number;
+      agreement?: number;
+      unweighted: number;
+    };
+    if (approval) {
+      // carol, a granted member, is established: her upvote and agreement count
+      expect(score.score, `the counted upvote: ${JSON.stringify(score)}`).toBeGreaterThan(0);
+      expect(score.agreement, `the counted agreement: ${JSON.stringify(score)}`).toBeGreaterThan(
+        0,
+      );
+      expect(score.unweighted).toBe(0);
+    } else {
+      // alice, the owner, is a seed (S ⊆ E): her upvote counts; carol is a newcomer, so her
+      // vote is one not yet counted and her agreement carries no weight
+      expect(score.score, `the owner's counted upvote: ${JSON.stringify(score)}`).toBeGreaterThan(0);
+      expect(score.unweighted, `carol's uncounted vote: ${JSON.stringify(score)}`).toBe(1);
+      expect(score.agreement ?? 0, `no counted agreement: ${JSON.stringify(score)}`).toBe(0);
+    }
+    expect(thread.post.post.pinned, "step 6b's pin of the edited post").toBe(true);
     // carol's reply was HIDDEN by step 5's mod action, and the fold drops a hidden comment
     // from the anonymous view entirely: it is not listed, and no part of its body survives. This
     // is as much a parity assertion as the byte comparison above - all three clients must agree
@@ -605,12 +684,17 @@ async function runScenario(
     const list = JSON.parse(tuiOut.list.compact) as {
       items: {
         uri: string;
+        pinned: boolean;
         createdAtMs: number;
         tRankMs: number;
         badges: Record<string, unknown>;
       }[];
     };
-    expect(list.items.map((p) => p.uri).sort()).toEqual([post, canary].sort());
+    // the pinned post comes first (social.md §12), whatever the canary's rank
+    expect(list.items.map((p) => [p.uri, p.pinned])).toEqual([
+      [post, true],
+      [canary, false],
+    ]);
     // parity mode reached every client: under the injected `now` and `obs` the canary is not
     // future-dated and ranks by its own date (byte equality above holds it for all three)
     const c = list.items.find((p) => p.uri === canary);

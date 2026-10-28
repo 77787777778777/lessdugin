@@ -38,8 +38,12 @@ jobs:
       - run: cargo test -p lessdugin-core --features final-ns --test social_vectors --test social_fold --test social_query --test model_reorder
       # testdata/dto/dto-1.d.ts is what the Rust DTOs generate (types.parity.test.ts compares types.ts with it)
       - run: cargo test -p lessdugin-wasm --features dto-decl --test dto_decl
-  # The interop, vector and property tests of atp, lexicon and markdown on wasm32-unknown-unknown,
-  # in node through wasm-bindgen-test-runner (same version as the workspace wasm-bindgen pin).
+      # M4 acceptance: `ammonia(html) == html` for every render vector and the linked-host
+      # property (lfm-1.md §8.5; the feature is native-only, so no default build enables it)
+      - run: cargo test -p lessdugin-markdown --features ammonia --test vectors --test props
+  # The interop, vector and property tests of atp, lexicon and markdown, and core's social fold
+  # vectors and P9 parity digest (both namespaces), on wasm32-unknown-unknown in node through
+  # wasm-bindgen-test-runner (same version as the workspace wasm-bindgen pin): native = wasm.
   wasm-tests:
     runs-on: ubuntu-latest
     steps:
@@ -94,6 +98,7 @@ jobs:
         continue-on-error: true
       # the KV conformance module the engine package's tests run (packages/engine/pkg/kvtest)
       - run: cargo xtask wasm --kv-test
+      # root biome, then every package's `check` (tsc, biome, web's check-no-raw-href.mjs)
       - run: pnpm run check
       - run: pnpm run test
       - run: pnpm run build
