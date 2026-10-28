@@ -437,8 +437,8 @@ pub trait Host: MaybeSendSync + 'static {
         async { Err(HostError::Unsupported("this host stores no blobs".into())) }
     }
 
-    /// Removes the stored blob `cid` (no error when it is absent): a blob the PDS reports
-    /// missing, or one no stored record references any more (`sync.md` §11.4, PRIV-2).
+    /// Removes the stored blob `cid` (no error when it is absent): one that no forum's shown
+    /// record references any more (`sync.md` §11.4, PRIV-2).
     fn blob_delete(&self, cid: &str) -> impl Future<Output = Result<(), HostError>> + MaybeSend {
         let _ = cid;
         async { Err(HostError::Unsupported("this host stores no blobs".into())) }

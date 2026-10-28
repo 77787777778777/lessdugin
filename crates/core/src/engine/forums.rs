@@ -377,6 +377,8 @@ impl<H: Host> Engine<H> {
         let opened = self.open_key(&key, false).await?;
         self.sync_authorities(&opened).await;
         let l = self.loaded(&key).await?;
+        // a spilled `about` is fetched before the header renders it (lfm-1.md §1.3)
+        self.load_spilled_about(&l.model, &self.rt.renders).await;
         let me = self.me().await?;
         let (followed, alias) = self.follow_state(key.uri.as_str()).await?;
         self.with_views(&l, &[], &[], |v| {
@@ -789,6 +791,39 @@ impl<H: Host> Engine<H> {
         }
         Ok(out)
     }
+}
+
+/// `render(markdown, media, RenderOpts)` (`engine-api.md` §3.7): what a draft renders to, as
+/// a composer previews it. Each `media` item is a [`crate::dto::MediaRef`] from `prepare_media`,
+/// which becomes the `defs#media` value `publish` writes, or a `defs#media` value as a record
+/// stores it (an object with a `blob`), taken as it is; `profile` is the body's (`lfm-1.md`
+/// §1.4; absent: `lfm/1`). `invalid_input` for an item that is neither.
+pub fn render_draft(
+    markdown: &str,
+    media: &[Value],
+    profile: Option<&str>,
+) -> Result<crate::dto::RenderedBody, EngineError> {
+    let mut items = Vec::with_capacity(media.len());
+    for m in media {
+        if m.get("blob").is_some_and(Value::is_object) {
+            items.push(m.clone());
+            continue;
+        }
+        let r: crate::dto::MediaRef = serde_json::from_value(m.clone()).map_err(|e| {
+            EngineError::invalid_input(format!(
+                "render: a media item is neither a MediaRef nor a defs#media value: {e}"
+            ))
+        })?;
+        items.push(
+            serde_json::to_value(media_value(&r)?)
+                .map_err(|e| EngineError::internal(e.to_string()))?,
+        );
+    }
+    Ok(crate::model::render::render_markdown(
+        markdown,
+        &Value::Array(items),
+        profile,
+    ))
 }
 
 /// A [`crate::dto::MediaRef`] as the record's `defs#media` value (`data-model.md` §4).

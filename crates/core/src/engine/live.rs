@@ -272,6 +272,13 @@ impl<H: Host> Engine<H> {
         }
         self.rt.bus.changed(topics);
 
+        // spilled bodies views left pending (lfm-1.md §1.3): one that arrives is announced, so a
+        // client shows it without being asked again
+        let arrived = self.retry_spilled_bodies(&self.rt.renders).await;
+        if !arrived.is_empty() {
+            self.rt.bus.changed(arrived);
+        }
+
         // handles of shown authors
         out.verified = self.verify_handles(limits::HANDLE_VERIFY_BATCH).await;
 
@@ -304,6 +311,10 @@ impl<H: Host> Engine<H> {
                 // a poll that is still due (it failed) waits a little, not a whole idle time
                 next = next.min(at.max(now.saturating_add(1_000)));
             }
+        }
+        // a pending spilled body is asked for again when its retry time comes
+        for (_, p) in self.rt.renders.spilled_pending() {
+            next = next.min(p.at_ms.max(now.saturating_add(1_000)));
         }
         out.next_ms = next.saturating_sub(now).max(1);
         Ok(out)

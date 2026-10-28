@@ -1004,11 +1004,13 @@ export type AccessLevel = "banned" | "member";
 export type PinScope = "forum" | "thread";
 
 /** A modAction `action` as a client asks for it (data-model.md §6.7): the complete desired state
- * of its action key. Defaults: `spam` false, `showReason` true, `nullifyVotes` false. */
+ * of its action key. Defaults: `spam` false, `showReason` true. One `#restrict` record holds both
+ * `capabilities` and `nullifyVotes`: the one a `restrict` leaves out keeps the account's current
+ * value (none yet: no capability, `false`); naming neither is refused. */
 export type ModActionValue =
   | { kind: "hide"; hidden: boolean; spam?: boolean; showReason?: boolean }
   | { kind: "access"; level: AccessLevel }
-  | { kind: "restrict"; capabilities: Capability[]; nullifyVotes?: boolean }
+  | { kind: "restrict"; capabilities?: Capability[]; nullifyVotes?: boolean }
   | { kind: "tier"; tier: Tier; notice?: BodyDraft }
   | { kind: "pin"; scope: PinScope; pinned: boolean }
   | { kind: "lock"; locked: boolean }
@@ -1046,8 +1048,9 @@ export type WriteState =
       error?: EngineError;
     }
   | { kind: "sending" }
-  /** `cid` is absent for deletes. */
-  | { kind: "done"; uri: AtUri; cid?: Cid }
+  /** `cid` is absent for deletes. `report`: a done `modAdopt` (also the one `modsSet` runs
+   * first) lists, one line each, the assertions it did not adopt or kept. */
+  | { kind: "done"; uri: AtUri; cid?: Cid; report?: string[] }
   | { kind: "failed"; error: EngineError }
   | { kind: "undone" };
 
@@ -1056,7 +1059,13 @@ export interface WriteTicket {
   state: WriteState;
 }
 
-export type NoticeCode = "notEstablished" | "retroactive" | "adoptedFirst" | "missingAlt";
+export type NoticeCode =
+  | "notEstablished"
+  | "retroactive"
+  | "adoptedFirst"
+  | "missingAlt"
+  /** `editPreflight`: the edit suspends the item's positive assertions (social.md §4.5). */
+  | "suspendsAssertions";
 
 /** A notice to show with an action's result, e.g. "recorded; will count once you're
  * established". */
@@ -1183,6 +1192,8 @@ export interface RenderOpts {
   html: boolean;
   text: boolean;
   styled: boolean;
+  /** The body's `profile` (lfm-1.md §1.4); absent: `lfm/1`. */
+  profile?: string;
 }
 
 export interface ValidationReport {

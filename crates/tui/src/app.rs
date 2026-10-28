@@ -262,8 +262,7 @@ pub enum Effect {
         forum: String,
         /// The screen the menu was opened from.
         screen: ScreenId,
-        /// A `#restrict` assertion sets only this dimension; the other keeps the account's
-        /// current value (read when the effect runs).
+        /// How a `#restrict` assertion is completed (read when the effect runs).
         merge: Option<RestrictDim>,
     },
     /// `recent_discussion(forum, None, limit)`: the Forum screen's Activity tab
@@ -1238,7 +1237,8 @@ pub struct ModEntry {
     pub queue: bool,
     /// The entry opens the log screen.
     pub log: bool,
-    /// The dimension of `#restrict` the entry sets (the other is kept).
+    /// How the entry's `#restrict` assertion is completed (the engine keeps the dimension it
+    /// leaves out).
     pub merge: Option<RestrictDim>,
 }
 
@@ -3730,46 +3730,46 @@ impl State {
                 ));
             }
             if !own_item {
-                // each sets one dimension of the viewer's `#restrict` and keeps the other; the
-                // capability presets add to the capabilities it restricts already
-                let restrict =
-                    |label, capabilities: Vec<Capability>, nullify_votes, merge| ModEntry {
-                        merge: Some(merge),
-                        ..entry(
-                            label,
-                            assert_on(
-                                f,
-                                &m.author,
-                                ModActionValue::Restrict {
-                                    capabilities,
-                                    nullify_votes,
-                                },
-                            ),
-                        )
-                    };
+                // each sets one dimension of the viewer's `#restrict` and the engine keeps the
+                // other (m3r-2); the capability presets add to the capabilities it restricts
+                // already
+                let restrict = |label, capabilities, nullify_votes, merge| ModEntry {
+                    merge,
+                    ..entry(
+                        label,
+                        assert_on(
+                            f,
+                            &m.author,
+                            ModActionValue::Restrict {
+                                capabilities,
+                                nullify_votes,
+                            },
+                        ),
+                    )
+                };
                 e.push(restrict(
                     "restrict the author (posting)",
-                    vec![Capability::Post, Capability::Comment],
-                    false,
-                    RestrictDim::AddCapabilities,
+                    Some(vec![Capability::Post, Capability::Comment]),
+                    None,
+                    Some(RestrictDim::AddCapabilities),
                 ));
                 e.push(restrict(
                     "restrict the author (voting, reacting)",
-                    vec![Capability::Vote, Capability::React],
-                    false,
-                    RestrictDim::AddCapabilities,
+                    Some(vec![Capability::Vote, Capability::React]),
+                    None,
+                    Some(RestrictDim::AddCapabilities),
                 ));
                 e.push(restrict(
                     "nullify the author's votes",
-                    Vec::new(),
-                    true,
-                    RestrictDim::Nullify,
+                    None,
+                    Some(true),
+                    None,
                 ));
                 e.push(restrict(
                     "restore the author's votes",
-                    Vec::new(),
-                    false,
-                    RestrictDim::Nullify,
+                    None,
+                    Some(false),
+                    None,
                 ));
                 e.push(entry(
                     "retract your restriction",
@@ -4343,9 +4343,7 @@ impl State {
     /// Runs a `:` command line against the engine through the same effects the keys use
     /// (`synthesis-v1.md` §6.11: the backstop that makes every MVP action reachable).
     fn run_command(&mut self, line: &str, fx: &mut Vec<Effect>) {
-        use crate::command::{
-            ModTarget, Verb, agree_intent, mod_intent, restrict_dim, vote_intent,
-        };
+        use crate::command::{ModTarget, Verb, agree_intent, mod_intent, vote_intent};
         let line = line.trim();
         if line.is_empty() || line == "help" || line == "?" {
             self.say(Tone::Info, tt(&crate::command::usage()));
@@ -4495,7 +4493,7 @@ impl State {
                     intent,
                     forum,
                     screen,
-                    merge: restrict_dim(&m),
+                    merge: None,
                 });
             }
             Verb::Notifications { all } => self.command_notifications(all, fx),
@@ -5661,6 +5659,7 @@ mod tests {
             state: WriteState::Done {
                 uri: "at://did:plc:x/c/1".into(),
                 cid: None,
+                report: Vec::new(),
             },
         }))
     }
@@ -5838,6 +5837,7 @@ mod tests {
                 state: WriteState::Done {
                     uri: "at://x".into(),
                     cid: None,
+                    report: Vec::new(),
                 },
             },
         ])));
@@ -6255,12 +6255,27 @@ mod tests {
             of("retract your hide"),
             ModActionIntent::Remove { ref action_key, .. } if action_key == "hide"
         ));
-        let nullify = m
-            .entries
-            .iter()
-            .find(|e| e.label == "nullify the author's votes")
-            .unwrap();
-        assert_eq!(nullify.merge, Some(RestrictDim::Nullify));
+        // a nullification names only nullifyVotes: the engine keeps the restriction (m3r-2)
+        assert!(matches!(
+            of("nullify the author's votes"),
+            ModActionIntent::Assert {
+                action: ModActionValue::Restrict {
+                    capabilities: None,
+                    nullify_votes: Some(true)
+                },
+                ..
+            }
+        ));
+        assert!(matches!(
+            of("restore the author's votes"),
+            ModActionIntent::Assert {
+                action: ModActionValue::Restrict {
+                    capabilities: None,
+                    nullify_votes: Some(false)
+                },
+                ..
+            }
+        ));
         // the capability presets add to what the record restricts already
         for label in [
             "restrict the author (posting)",

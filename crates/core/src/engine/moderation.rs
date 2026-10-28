@@ -324,6 +324,17 @@ fn author_scope_checks(
             immune(s.author().unwrap_or_default())?;
             gate(&p)
         }
+        // the fold does not exempt the actor's own comments (§4.9 authorBanned), so a self-ban
+        // would hide every comment X wrote in X's own threads
+        (
+            ModActionValue::Access {
+                level: AccessLevel::Banned,
+            },
+            Subject::Did(d),
+        ) if d == me => Err(EngineError::invalid_input(
+            "author moderation cannot ban yourself from your own threads",
+        )
+        .with_detail("kind", "selfSubject")),
         (
             ModActionValue::Access {
                 level: AccessLevel::Banned,
@@ -383,6 +394,64 @@ impl<H: Host> Engine<H> {
             return Ok(Subject::Did(d.to_string()));
         }
         Ok(Subject::Did(self.resolve_actor(input).await?.did))
+    }
+
+    /// The acting account's `#restrict` of `s` in `scope` as it now stands, `(capabilities,
+    /// nullifyVotes)`: the value of its latest unfinished write of that record (none after a
+    /// pending removal), else the cached record. A record whose `until` has passed is none.
+    async fn own_restrict(
+        &self,
+        key: &ForumKey,
+        me: &str,
+        scope: ModScope,
+        s: &Subject,
+    ) -> Result<Option<(BTreeSet<LexCapability>, bool)>, EngineError> {
+        use lessdugin_lexicon::validity::entry::restrict_capabilities;
+        let action = action_of_key("restrict").unwrap_or_default();
+        let rkey = keys::mod_action_rkey(
+            NS,
+            key.uri.as_str(),
+            scope_field(scope).as_deref(),
+            s.as_str(),
+            &action,
+        )
+        .map_err(|e| EngineError::invalid_input(e.to_string()))?;
+        let pending = self.outbox.pending(me).await?;
+        let queued = pending
+            .iter()
+            .rev()
+            .flat_map(|w| w.ops.iter().rev())
+            .find(|o| o.collection == nsid::MOD_ACTION && o.rkey == rkey);
+        let value = match queued {
+            Some(o) => o
+                .value
+                .as_deref()
+                .and_then(|b| serde_json::from_slice::<Value>(b).ok()),
+            None => {
+                let u = records::at_uri(&format!("at://{me}/{}/{rkey}", nsid::MOD_ACTION))?;
+                RecordStore::new(self.host.cache())
+                    .get(&u)
+                    .await
+                    .map_err(store_error)?
+                    .and_then(|r| r.value_json().ok())
+            }
+        };
+        let Some(m) = value.and_then(|v| serde_json::from_value::<ModAction>(v).ok()) else {
+            return Ok(None);
+        };
+        let now_us = self.host.now_ms().saturating_mul(1000);
+        if m.until
+            .as_ref()
+            .is_some_and(|u| u.timestamp_micros() <= now_us)
+        {
+            return Ok(None);
+        }
+        Ok(match &m.action {
+            Action::Restrict(r) => {
+                Some((restrict_capabilities(r), r.nullify_votes.unwrap_or(false)))
+            }
+            _ => None,
+        })
     }
 
     /// The cached CID of `uri`, if cached.
@@ -456,7 +525,10 @@ impl<H: Host> Engine<H> {
                     .await?;
                 let mut t = ActionTicket::new(self.outbox.mod_assert(&session, &m).await?);
                 match action {
-                    ModActionValue::Restrict { capabilities, .. } if !capabilities.is_empty() => {
+                    ModActionValue::Restrict {
+                        capabilities: Some(c),
+                        ..
+                    } if !c.is_empty() => {
                         t = t.with_notice(NoticeCode::Retroactive, RETROACTIVE_RESTRICT);
                     }
                     ModActionValue::Access {
@@ -526,13 +598,25 @@ impl<H: Host> Engine<H> {
                 if !matches!(s, Subject::Did(_)) {
                     return wrong("a user (DID)");
                 }
-                let caps: BTreeSet<LexCapability> =
-                    capabilities.iter().copied().map(lex_capability).collect();
+                if capabilities.is_none() && nullify_votes.is_none() {
+                    return Err(EngineError::invalid_input(
+                        "restrict names neither capabilities nor nullifyVotes",
+                    ));
+                }
+                // one record states both dimensions (social.md §4.2): the one the intent
+                // leaves out keeps the account's current value
+                let current = if capabilities.is_none() || nullify_votes.is_none() {
+                    self.own_restrict(key, me, scope, s).await?
+                } else {
+                    None
+                };
+                let caps: BTreeSet<LexCapability> = match capabilities {
+                    Some(c) => c.iter().copied().map(lex_capability).collect(),
+                    None => current.as_ref().map(|c| c.0.clone()).unwrap_or_default(),
+                };
+                let nullify = nullify_votes.or(current.map(|c| c.1)).unwrap_or(false);
                 let caps: Vec<LexCapability> = caps.into_iter().collect();
-                (
-                    Action::Restrict(RestrictAction::new(&caps, *nullify_votes)),
-                    false,
-                )
+                (Action::Restrict(RestrictAction::new(&caps, nullify)), false)
             }
             ModActionValue::Tier { tier, notice } => {
                 if s.uri_of(&[POST]).is_none() {

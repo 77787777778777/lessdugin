@@ -784,8 +784,9 @@ pub async fn item_uri<H: Host>(
 }
 
 /// The intent as the engine takes it: an item subject named by any reference resolved to its
-/// uri, and a `#restrict` assertion that sets one dimension completed with the other from the
-/// account's current record (a record states the whole state of its key, `social.md` §4.2).
+/// uri, and a `#restrict` assertion that adds capabilities completed with the ones the
+/// account's current record restricts (the engine keeps the dimension an assertion leaves out,
+/// `engine-api.md` §3.5).
 pub async fn mod_intent<H: Host>(
     engine: &Engine<H>,
     mut intent: ModActionIntent,
@@ -799,15 +800,15 @@ pub async fn mod_intent<H: Host>(
         *subject = item_uri(engine, subject, forum).await?;
     }
     let (
-        Some(dim),
+        Some(RestrictDim::AddCapabilities),
         ModActionIntent::Assert {
             forum,
             scope,
             subject,
             action:
                 ModActionValue::Restrict {
-                    capabilities,
-                    nullify_votes,
+                    capabilities: Some(capabilities),
+                    ..
                 },
             ..
         },
@@ -815,36 +816,29 @@ pub async fn mod_intent<H: Host>(
     else {
         return Ok(intent);
     };
-    let (held_caps, held_nullify) = held_restrict(engine, forum, *scope, subject).await?;
-    match dim {
-        RestrictDim::Capabilities => *nullify_votes = held_nullify,
-        RestrictDim::AddCapabilities => {
-            *nullify_votes = held_nullify;
-            let added = std::mem::take(capabilities);
-            *capabilities = ALL_CAPABILITIES
-                .iter()
-                .filter(|c| held_caps.contains(c) || added.contains(c))
-                .cloned()
-                .collect();
-        }
-        RestrictDim::Nullify => *capabilities = held_caps,
-    }
+    let held = held_capabilities(engine, forum, *scope, subject).await?;
+    let added = std::mem::take(capabilities);
+    *capabilities = ALL_CAPABILITIES
+        .iter()
+        .filter(|c| held.contains(c) || added.contains(c))
+        .cloned()
+        .collect();
     Ok(intent)
 }
 
-/// The account's own `#restrict` record on `subject` in `forum` (one per scope, subject and
-/// key, `data-model.md` §6.7) as `(capabilities, nullifyVotes)`; nothing when it has none. A
+/// The capabilities the account's own `#restrict` record on `subject` in `forum` restricts (one
+/// record per scope, subject and key, `data-model.md` §6.7); none when it has no record. A
 /// write of that record still in the outbox is newer than the cache, which holds confirmed
 /// writes only (`lessdugin_core::outbox::apply`): the latest such write is the state, so two
 /// restrictions in quick succession, or made offline, keep each other.
-async fn held_restrict<H: Host>(
+async fn held_capabilities<H: Host>(
     engine: &Engine<H>,
     forum: &str,
     scope: ModScope,
     subject: &str,
-) -> Result<(Vec<Capability>, bool), EngineError> {
+) -> Result<Vec<Capability>, EngineError> {
     let Some(me) = engine.active_account().await?.map(|a| a.did) else {
-        return Ok((Vec::new(), false));
+        return Ok(Vec::new());
     };
     let did = if subject.starts_with("did:") {
         subject.to_owned()
@@ -867,7 +861,7 @@ async fn held_restrict<H: Host>(
     let rkey = lessdugin_lexicon::keys::mod_action_rkey(NS, &forum, scope, &did, &action)
         .map_err(|e| EngineError::invalid_input(e.to_string()))?;
     let Ok(uri) = AtUri::parse(&format!("at://{me}/{}/{rkey}", nsid::MOD_ACTION)) else {
-        return Ok((Vec::new(), false));
+        return Ok(Vec::new());
     };
     let pending = engine.outbox().pending(&me).await?;
     let latest = pending
@@ -877,7 +871,7 @@ async fn held_restrict<H: Host>(
         .find(|op| op.collection == nsid::MOD_ACTION && op.rkey == rkey);
     let value = match latest {
         // a retraction on its way: nothing is held
-        Some(op) if op.action == OpAction::Delete => return Ok((Vec::new(), false)),
+        Some(op) if op.action == OpAction::Delete => return Ok(Vec::new()),
         Some(op) => op
             .value
             .as_deref()
@@ -888,9 +882,9 @@ async fn held_restrict<H: Host>(
         },
     };
     let Some(action) = value.as_ref().and_then(|v| v.get("action")) else {
-        return Ok((Vec::new(), false));
+        return Ok(Vec::new());
     };
-    let caps = action
+    Ok(action
         .get("capabilities")
         .and_then(serde_json::Value::as_array)
         .map(|a| {
@@ -898,12 +892,7 @@ async fn held_restrict<H: Host>(
                 .filter_map(|c| serde_json::from_value(c.clone()).ok())
                 .collect()
         })
-        .unwrap_or_default();
-    let nullify = action
-        .get("nullifyVotes")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false);
-    Ok((caps, nullify))
+        .unwrap_or_default())
 }
 
 fn unverified<'a>(mut actors: impl Iterator<Item = &'a ActorView>) -> bool {

@@ -584,7 +584,7 @@ async fn assert_or_remove(ctx: &Ctx, action: ModAction) -> Result<(), CliError> 
             a.forum.clone(),
             scope_of(a.author_scope),
             ModActionValue::Restrict {
-                capabilities: if a.capabilities.is_empty() {
+                capabilities: Some(if a.capabilities.is_empty() {
                     vec![
                         Capability::Post,
                         Capability::Comment,
@@ -596,8 +596,9 @@ async fn assert_or_remove(ctx: &Ctx, action: ModAction) -> Result<(), CliError> 
                     ]
                 } else {
                     a.capabilities.iter().map(|c| (*c).into()).collect()
-                },
-                nullify_votes: false,
+                }),
+                // the engine keeps the current nullification (m3r-2)
+                nullify_votes: None,
             },
             a.reason.clone(),
             until_ms(a.until.as_deref())?,
@@ -608,8 +609,9 @@ async fn assert_or_remove(ctx: &Ctx, action: ModAction) -> Result<(), CliError> 
             a.forum.clone(),
             scope_of(a.author_scope),
             ModActionValue::Restrict {
-                capabilities: Vec::new(),
-                nullify_votes: true,
+                // the engine keeps the current restriction (m3r-2)
+                capabilities: None,
+                nullify_votes: Some(true),
             },
             a.reason.clone(),
             until_ms(a.until.as_deref())?,

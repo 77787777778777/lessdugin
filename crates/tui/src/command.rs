@@ -524,19 +524,15 @@ impl ModVerb {
     }
 }
 
-/// Which dimension of the account's `#restrict` record an assertion sets. A record states the
-/// complete state of its key (`social.md` §4.2), so the other dimension is read from the
-/// account's current record and sent unchanged: a nullification never lifts a restriction, nor
-/// a restriction a nullification.
+/// How a `#restrict` assertion is completed before it is sent. A record states the complete
+/// state of its key (`social.md` §4.2); the engine keeps the dimension an assertion leaves out
+/// (`engine-api.md` §3.5), so a nullification never lifts a restriction, nor a restriction a
+/// nullification. Adding to the capabilities restricted already is the TUI's own.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RestrictDim {
-    /// The restricted capabilities.
-    Capabilities,
     /// Capabilities added to the ones the record restricts already (the mod menu's presets:
     /// "voting" after "posting" restricts both).
     AddCapabilities,
-    /// `nullifyVotes`.
-    Nullify,
 }
 
 /// The options of a `mod` command line (the CLI's flags).
@@ -1331,15 +1327,6 @@ pub fn pin_scope(subject: &str) -> PinScope {
     }
 }
 
-/// The dimension of the account's `#restrict` record a verb sets, if it is a restriction.
-pub fn restrict_dim(verb: &ModVerb) -> Option<RestrictDim> {
-    match verb {
-        ModVerb::Restrict(_) => Some(RestrictDim::Capabilities),
-        ModVerb::Nullify | ModVerb::Unnullify => Some(RestrictDim::Nullify),
-        _ => None,
-    }
-}
-
 /// The `ModActionIntent` a [`ModVerb`] names for `subject` in `forum`, with `reason` and the
 /// command line's options; `None` for `approve`, which is a grant.
 pub fn mod_intent(
@@ -1403,21 +1390,22 @@ pub fn mod_intent(
             tier: *tier,
             notice: None,
         }),
+        // the engine keeps the dimension a verb leaves out (m3r-2)
         ModVerb::Restrict(caps) => assert(ModActionValue::Restrict {
-            capabilities: if caps.is_empty() {
+            capabilities: Some(if caps.is_empty() {
                 ALL_CAPABILITIES.to_vec()
             } else {
                 caps.clone()
-            },
-            nullify_votes: false,
+            }),
+            nullify_votes: None,
         }),
         ModVerb::Nullify => assert(ModActionValue::Restrict {
-            capabilities: vec![],
-            nullify_votes: true,
+            capabilities: None,
+            nullify_votes: Some(true),
         }),
         ModVerb::Unnullify => assert(ModActionValue::Restrict {
-            capabilities: vec![],
-            nullify_votes: false,
+            capabilities: None,
+            nullify_votes: Some(false),
         }),
         ModVerb::Unrestrict => remove("restrict"),
         // `approve` is a grant, not a mod action: the caller sends `Effect::Grant` instead
@@ -1560,32 +1548,44 @@ mod tests {
             intent("mod unhide"),
             ModActionIntent::Remove { action_key, .. } if action_key == "hide"
         ));
-        // restrict: a capability list, every capability without one
+        // restrict: a capability list, every capability without one; each verb names only its
+        // own dimension and the engine keeps the other (m3r-2)
         assert_eq!(
             action("mod restrict vote,react did:plc:x"),
             ModActionValue::Restrict {
-                capabilities: vec![Capability::Vote, Capability::React],
-                nullify_votes: false
+                capabilities: Some(vec![Capability::Vote, Capability::React]),
+                nullify_votes: None
             }
         );
         assert_eq!(
             action("mod restrict --cap wiki did:plc:x"),
             ModActionValue::Restrict {
-                capabilities: vec![Capability::Wiki],
-                nullify_votes: false
+                capabilities: Some(vec![Capability::Wiki]),
+                nullify_votes: None
             }
         );
         assert_eq!(
             action("mod restrict did:plc:x"),
             ModActionValue::Restrict {
-                capabilities: ALL_CAPABILITIES.to_vec(),
-                nullify_votes: false
+                capabilities: Some(ALL_CAPABILITIES.to_vec()),
+                nullify_votes: None
             }
         );
+        for (line, nullify) in [
+            ("mod nullify did:plc:x", true),
+            ("mod unnullify did:plc:x", false),
+        ] {
+            assert_eq!(
+                action(line),
+                ModActionValue::Restrict {
+                    capabilities: None,
+                    nullify_votes: Some(nullify)
+                },
+                "{line}"
+            );
+        }
         let c = parse("mod restrict vote did:plc:x").unwrap();
         assert_eq!(c.subject.as_deref(), Some("did:plc:x"));
-        let Verb::Mod(v) = &c.verb else { panic!() };
-        assert_eq!(restrict_dim(v), Some(RestrictDim::Capabilities));
         // --until and --author
         match intent("mod hide --until 2026-11-01T00:00:00Z --author \"spam\"") {
             ModActionIntent::Assert {

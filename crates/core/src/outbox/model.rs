@@ -566,6 +566,10 @@ impl PendingWrite {
                         .or_else(|| self.primary_uri())
                         .unwrap_or_default(),
                     cid: first.and_then(|r| r.cid.clone()),
+                    report: match &self.intent {
+                        Intent::Adopt { report, .. } => report.clone(),
+                        _ => Vec::new(),
+                    },
                 }
             }
             WriteStage::Conflict | WriteStage::Failed => WriteState::Failed {
