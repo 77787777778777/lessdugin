@@ -7,9 +7,10 @@
 //! - PURE-RUST decoders only (`image-defaults`): no C library is linked for this path.
 //! - At most 64 MiB of input, 8192 pixels per side, a 256 MiB decode allocation and 200 GIF frames
 //!   (`limits.md` §6). The pixel caps are checked from the HEADER, through
-//!   [`lessdugin_core::media::decoding_allowed`], BEFORE any pixels are allocated, and again by
-//!   the decoder's own [`image::Limits`], so a header the pre-check cannot read does not get
-//!   past them either. A GIF is shown as its first frame: one of the at most 200 decoded.
+//!   [`lessdugin_core::media::decoding_allowed`], BEFORE any pixels are allocated (a header it
+//!   cannot measure is refused), and again by the decoder's own limits, in
+//!   [`lessdugin_core::media::decode_image`]. A GIF is shown as its first frame: one of the at
+//!   most 200 decoded.
 //! - The decode and the resize happen OFF the UI thread. A supervisor thread gives each decode
 //!   [`limits::DECODE_TIMEOUT`]; past it the image is abandoned (its placeholder says so) and
 //!   whatever the decoder still produces is dropped. An abandoned decoder keeps its slot until
@@ -63,7 +64,8 @@ pub mod limits {
 /// Why a cell has no image.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Placeholder {
-    /// Over a limit: show why instead of decoding.
+    /// Over a limit, or a frame size the header does not let us read: show why instead of
+    /// decoding.
     TooLarge,
     /// The format is one this client will not decode.
     Unsupported,
@@ -87,24 +89,20 @@ impl Placeholder {
 
 /// Decodes `bytes` under the caps, on the CALLER's thread ([`Images`] calls it on a worker).
 ///
-/// # Errors
-/// [`Placeholder::TooLarge`] past a cap, [`Placeholder::Unsupported`] for anything that is not a
-/// PNG, JPEG, GIF or WebP, [`Placeholder::Failed`] for a file the decoder rejects.
-pub fn decode(bytes: &[u8]) -> Result<DynamicImage, Placeholder> {
-    // the input cap and the header check come before any decoder sees the bytes
-    if bytes.len() > limits::MAX_INPUT_BYTES || !lessdugin_core::media::decoding_allowed(bytes) {
-        return Err(Placeholder::TooLarge);
-    }
-    capped_decode(bytes)
-}
-
-/// The decode itself, under the decoder's own [`image::Limits`]: they hold even for a header
-/// [`lessdugin_core::media::decoding_allowed`] could not read (it lets those through).
+/// Only PNG, JPEG, GIF and WebP are handed on, to the core's decode
+/// ([`lessdugin_core::media::decode_image`]): SUP-9's header check, then the decoder under the
+/// same caps as its own limits, the one policy every surface that decodes media uses.
 ///
 /// # Errors
-/// As [`decode`].
-pub fn capped_decode(bytes: &[u8]) -> Result<DynamicImage, Placeholder> {
-    use image::{ImageFormat, ImageReader, Limits};
+/// [`Placeholder::TooLarge`] past a cap (or for a header whose frame size cannot be read: it is
+/// refused, F35/F36 fail closed), [`Placeholder::Unsupported`] for anything that is not a PNG,
+/// JPEG, GIF or WebP, [`Placeholder::Failed`] for a file the decoder rejects.
+pub fn decode(bytes: &[u8]) -> Result<DynamicImage, Placeholder> {
+    use image::ImageFormat;
+    // the input cap comes before anything parses the bytes
+    if bytes.len() > limits::MAX_INPUT_BYTES {
+        return Err(Placeholder::TooLarge);
+    }
     let format = image::guess_format(bytes).map_err(|_| Placeholder::Unsupported)?;
     if !matches!(
         format,
@@ -112,18 +110,12 @@ pub fn capped_decode(bytes: &[u8]) -> Result<DynamicImage, Placeholder> {
     ) {
         return Err(Placeholder::Unsupported);
     }
-    let mut reader = ImageReader::with_format(std::io::Cursor::new(bytes), format);
-    let mut caps = Limits::default();
-    caps.max_image_width = Some(limits::MAX_SIDE);
-    caps.max_image_height = Some(limits::MAX_SIDE);
-    caps.max_alloc = Some(limits::MAX_ALLOC);
-    reader.limits(caps);
+    // the header check before any decoder sees the bytes (`decode_image` makes it again)
+    if !lessdugin_core::media::decoding_allowed(bytes) {
+        return Err(Placeholder::TooLarge);
+    }
     // a GIF decodes to its first frame here
-    let img = reader.decode().map_err(|e| match e {
-        image::ImageError::Limits(_) => Placeholder::TooLarge,
-        image::ImageError::Unsupported(_) => Placeholder::Unsupported,
-        _ => Placeholder::Failed,
-    })?;
+    let img = lessdugin_core::media::decode_image(bytes).ok_or(Placeholder::Failed)?;
     if img.width() > limits::MAX_SIDE || img.height() > limits::MAX_SIDE {
         return Err(Placeholder::TooLarge);
     }

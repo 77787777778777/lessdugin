@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common::{block_on, scenario};
-use lessdugin_tui::image::{Images, MediaBytes, Placeholder, capped_decode, decode, limits};
+use lessdugin_tui::image::{Images, MediaBytes, Placeholder, decode, limits};
 use lessdugin_tui::thread::MediaState;
 
 /// A PNG whose IHDR declares `w` x `h` and whose body is a single IDAT chunk. The pixels are not
@@ -78,15 +78,19 @@ fn a_huge_declared_frame_is_refused_from_the_header() {
     assert_eq!(Placeholder::TooLarge.text(), "[image too large]");
 }
 
-/// The decoder enforces the side cap itself (`image::Limits`), so a header the pre-check
-/// cannot read (it lets those through, F3) still cannot make it allocate past the caps.
+/// The side cap holds for a real image one pixel past it, and one at the cap decodes (through
+/// the core's `decode_image`, F3) and is scaled down to what a terminal can show. A header no
+/// walker can measure is refused, not handed to a decoder.
 #[test]
 fn the_decoder_applies_the_caps_itself() {
     let wide = png(limits::MAX_SIDE + 1, 1);
-    assert_eq!(capped_decode(&wide).unwrap_err(), Placeholder::TooLarge);
-    let ok = capped_decode(&png(limits::MAX_SIDE, 1)).unwrap();
-    // decoded, then scaled down to what a terminal can show
+    assert_eq!(decode(&wide).unwrap_err(), Placeholder::TooLarge);
+    let ok = decode(&png(limits::MAX_SIDE, 1)).unwrap();
     assert!(ok.width() <= limits::SHOWN_MAX_SIDE, "{}", ok.width());
+    // a PNG signature and no IHDR: its frame size cannot be read
+    let mut headless = png(4, 4)[..8].to_vec();
+    headless.extend_from_slice(&[0u8; 32]);
+    assert_eq!(decode(&headless).unwrap_err(), Placeholder::TooLarge);
 }
 
 #[test]
