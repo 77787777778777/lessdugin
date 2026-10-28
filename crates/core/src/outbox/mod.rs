@@ -45,6 +45,7 @@ use futures::lock::Mutex as AsyncMutex;
 use lessdugin_atp::syntax::{AtUri, Datetime, Did};
 use lessdugin_atp::tid::{Tid, TidGenerator};
 use lessdugin_lexicon::collection::nsid;
+use lessdugin_lexicon::keys;
 use lessdugin_lexicon::records::{
     Action, Comment, Forum, ModAction, Opinion, Post, Profile, Sequence, WikiRevision,
 };
@@ -63,8 +64,8 @@ pub use apply::{AppliedRecord, AppliedWrite, ApplyReport, apply_own_write, apply
 pub use blob::BlobData;
 pub use budget::BudgetRow;
 pub use model::{
-    Intent, OnExists, Op, OpAction, OpResult, OpinionStep, PendingBlob, PendingWrite, StoredError,
-    WriteStage, parse_write_id, write_id,
+    Counted, Intent, OnExists, Op, OpAction, OpResult, OpinionStep, PendingBlob, PendingWrite,
+    StoredError, WriteStage, parse_write_id, write_id,
 };
 pub use pds::Session;
 pub use protocol::{BACKOFF_BASE_MS, BACKOFF_MAX_MS, BLOB_REUPLOAD_AFTER_MS, MAX_ATTEMPTS};
@@ -314,6 +315,26 @@ fn storage<E: std::fmt::Display>(e: E) -> EngineError {
 
 fn lock<T>(m: &StdMutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// `true` for the rkey of a revision of a forum declaration or of a modAction: those revisions
+/// are the mod log, which keeps every prior state (`threat-model.md` SOC-7), so they are never
+/// redacted or deleted one by one.
+fn is_mod_log_revision(rkey: &str) -> bool {
+    keys::split_revision_key(rkey).is_some_and(|(p, _)| {
+        keys::is_fk(p)
+            || matches!(
+                keys::split_mod_action_key(p),
+                Some(keys::ModActionKey::Assertion { .. })
+            )
+    })
+}
+
+fn mod_log_error(uri: &str) -> EngineError {
+    EngineError::invalid_input(format!(
+        "{uri}: a forum's and a modAction's revisions are the mod log and are never redacted"
+    ))
+    .with_detail("kind", "modLog")
 }
 
 /// The own record `uri` of `session` (W9: never another repo).
@@ -813,7 +834,12 @@ impl<H: Host> Outbox<H> {
                 c if c == nsid::MOD_ACTION => Intent::RemoveModAction {
                     revision_rkey: records::revision_rkey(&uri, &ctx.tid()?)?,
                 },
-                c if c == nsid::REVISION => Intent::Redact,
+                c if c == nsid::REVISION => {
+                    if is_mod_log_revision(&rkey) {
+                        return Err(mod_log_error(&uri));
+                    }
+                    Intent::Redact { subject: None }
+                }
                 _ => Intent::DeleteRecord,
             };
             Ok(NewWrite::new(intent, vec![op]))
@@ -835,13 +861,48 @@ impl<H: Host> Outbox<H> {
                     "{uri} is not a revision"
                 )));
             }
+            if is_mod_log_revision(u.rkey().as_str()) {
+                return Err(mod_log_error(uri));
+            }
             ops.push(Op::delete(nsid::REVISION, u.rkey().as_str()));
         }
         if ops.is_empty() {
             return Err(EngineError::invalid_input("nothing to redact"));
         }
-        self.enqueue(session, NewWrite::new(Intent::Redact, ops))
-            .await
+        self.enqueue(
+            session,
+            NewWrite::new(Intent::Redact { subject: None }, ops),
+        )
+        .await
+    }
+
+    /// Redacts the history of the own item `subject` (a post, comment or sequence): when the
+    /// write is sent, every own revision record whose `subject.uri` is the item, as the PDS lists
+    /// them then, is deleted, whether or not this device synced it and whether or not it is
+    /// valid (`data-model.md` §8 "Redact history"). A forum's or a modAction's revisions are the
+    /// mod log and are refused (`threat-model.md` SOC-7).
+    pub async fn redact_item(
+        &self,
+        session: &Session,
+        subject: &str,
+    ) -> Result<WriteTicket, EngineError> {
+        let u = own_uri(session, subject)?;
+        let c = u.collection().as_str();
+        if c == nsid::FORUM || c == nsid::MOD_ACTION {
+            return Err(mod_log_error(subject));
+        }
+        if ![nsid::POST, nsid::COMMENT, nsid::SEQUENCE].contains(&c) {
+            return Err(EngineError::invalid_input(format!(
+                "{subject} has no history to redact"
+            )));
+        }
+        let w = NewWrite::new(
+            Intent::Redact {
+                subject: Some(u.to_string()),
+            },
+            Vec::new(),
+        );
+        self.enqueue(session, w).await
     }
 
     /// Writes the own profile: create-if-absent without `base` (an existing profile is a
@@ -917,9 +978,9 @@ impl<H: Host> Outbox<H> {
         .await
     }
 
-    /// `mod adopt` (§8.6): re-issues the former moderator's forum-scope assertions. `role` is
-    /// the actor's role in the forum (`owner`, `admin` or `moderator`); `former_pds` is the
-    /// former moderator's resolved PDS.
+    /// `mod adopt` (§8.6): re-issues the former moderator's forum-scope assertions that
+    /// `counted` names. `role` is the actor's role in the forum (`owner`, `admin` or
+    /// `moderator`); `former_pds` is the former moderator's resolved PDS.
     pub async fn mod_adopt(
         &self,
         session: &Session,
@@ -927,6 +988,7 @@ impl<H: Host> Outbox<H> {
         former: &Did,
         former_pds: &str,
         role: &str,
+        counted: Counted,
     ) -> Result<WriteTicket, EngineError> {
         if !["owner", "admin", "moderator"].contains(&role) {
             return Err(EngineError::invalid_input(format!(
@@ -946,6 +1008,7 @@ impl<H: Host> Outbox<H> {
                     former_pds,
                     role,
                     revision_tid: ctx.tid()?,
+                    counted,
                     report: Vec::new(),
                 },
                 Vec::new(),

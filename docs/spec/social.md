@@ -126,7 +126,7 @@ Query = the requested list, sort, filter or thread (§12); it never changes any 
 - records of `post`, `comment`, `revision`, `opinion`, `modAction`, `wikiRevision` or `sequence` in the `{fk}-` key range, after the normative fetch caps (`data-model.md` §7.4).
 
 The following are never members:
-- records of inactive repos;
+- records of inactive repos, except a member of A's `modAction` records while its account has been inactive for less than 7 days (`sync.md` §3.4; its `repoStatus` is then at least `Stale`, and `Unavailable` afterwards);
 - hints (Jetstream, Constellation, relay, Slingshot, indexer JSON);
 - third-party proofs whose rev is below the author PDS's `getLatestCommit` head (`[stale]`).
 
@@ -539,7 +539,7 @@ A DID in B (forum tier, `access = banned`, resolved at rank `banRank(d)`):
 - **Allow-lists.** Equal-rank locks intersect their allow-lists. Entries outside p's thread are ignored (MA9).
 - **Unlocking.** The actor deletes their own record, or a higher rank writes `#lock{locked: false}`.
 - **Forum-wide locks** (a forum uri as subject) are **Reserved (P2)** and have no effect. An owner can archive a forum by switching it to approval mode (§3.3).
-- **Composer.** Clients refuse to compose a comment on a locked post, unless the writer is in A or the comment would be exempt. This is UX, not security.
+- **Composer.** Clients refuse to compose a comment on a locked post, unless the writer is in A or the comment would be exempt. A new comment is never on the allow-list and has no keep, so the engine's `comment` refuses it unless the writer is in A, or is the post's author under an author lock (`engine-api.md` §3.5). This is UX, not security.
 
 ### 4.9 Author moderation (L5)
 
@@ -604,7 +604,8 @@ Each (actor, scope, subject, action key) has exactly one record (`data-model.md`
 - The fold cannot tell a former moderator from a DID that never was one, so every forum-scope assertion by an actor ∉ A is `lapsed` (§4.12).
 
 **Adoption**
-- `lessdugin mod adopt <did>` re-issues a former moderator's non-lapsed forum-scope assertions under the adopting authority, with `adopts` pointing at each original (`data-model.md` §8.6).
+- `lessdugin mod adopt <did>` re-issues a departing moderator's forum-scope assertions that are in effect under the adopting authority, with `adopts` pointing at each original (`data-model.md` §8.6).
+- **Only what counted is adopted.** An original is re-issued only if its mod-log status (§4.12) in the adopter's fold is `effective`, with the same CID when the copy is sent, and §4.3 conditions 3 and 4 hold for its own actor. Every other original is reported, not copied: an `unauthorised` record (for example a moderator's ban of the owner) or an `overridden` one (a hide that an admin's keep beats) would otherwise take effect at the adopter's higher rank. A DID already removed from `moderators` has only `lapsed` records (§4.12), so nothing of theirs is adopted.
 - `adopts` is informational. A copy counts only on its own merits: the adopter's rank and role, its own `until`, and its own `subjectCid`.
 
 **Removing a moderator (`mods rm <did>`)**
@@ -626,7 +627,7 @@ degraded ⇔ ∃ a ∈ A : repoStatus[a] = Unavailable
 - Rule V2 also hides every item whose author is not in S, as `Hidden(ModerationUnavailable)`.
 - A banner says "moderation data unavailable".
 
-**What does not cause degradation.** A `Stale` authority repo does not degrade the view: its cached assertions apply. Moderation never vanishes because a PDS is down, so hidden spam is never resurrected.
+**What does not cause degradation.** A `Stale` authority repo does not degrade the view: its cached assertions apply. Moderation never vanishes because a PDS is down, so hidden spam is never resurrected. The same holds for an authority whose account is inactive (taken down, suspended, deactivated or deleted), for 7 days: its cached assertions apply, with an `authorityInactive` banner. After that its repo is `Unavailable` and the view degrades (`sync.md` §3.4).
 
 ### 4.12 Mod log, mod queue, raw view
 
@@ -1237,6 +1238,9 @@ Sequence scores come from opinions on the sequence. They earn no karma.
 Everything in this section is computed locally from the fold and local state. That happens at sync time (CORE), live through Jetstream (CORE+), and offline or across forums through the indexer's `getActivity` (EXT, later), whose results are hints followed by point fetches. Push and email are **Reserved (P8+)**.
 
 **Newness.** An item x is new for the viewer if and only if `t_obs(x) > watermark(viewer)`. `createdAt` is never used, so backdating cannot hide an item.
+- Each computation moves the watermark to the greatest `t_obs` of the forum's records, eligible or not.
+- A new item that is not eligible when the watermark passes it (hidden while an authority's repo is unavailable, hidden by a moderator and then kept by a higher rank, by an author not yet in S ∪ E) is kept **pending** and evaluated again at each later computation, so it is notified once it is eligible. A pending item is dropped once it is Excluded (V1), 7 days (*tunable*) after it was first seen, or beyond the 1,000 (*tunable*) most recently seen per viewer and forum. The cap counts every candidate that is not eligible, including ones that may never be (a newcomer's items, every non-seed item while the view is degraded), so more than 1,000 newer ones in one forum push an older pending item out and it is never notified: an accepted limit of the bound.
+- A stored notification about an item is shown, and counted as unread, only while the item is listed. One about an item hidden, removed or deleted since is left out, with its preview. This fails closed: while the item's forum is not followed or its view cannot be computed, nothing shows the item is listed, so the notification is left out until the forum's view is back.
 
 **Eligible items.** Only items that are:
 - listed (§10.1);

@@ -1065,6 +1065,24 @@ pub fn eligible(row: &RecordRow, repo: Option<&RepoRow>) -> bool {
     !row.id_hint && repo.is_none_or(|r| r.status != AccountStatus::Inactive)
 }
 
+/// [`eligible`] for a fold input of a forum, with I8's authority exception (`sync.md` §3.4): a
+/// modAction of one of the forum's authorities stays eligible while its repo is
+/// [`RepoRow::inactive_retained`] at `now_ms`, so the authority's decisions do not vanish
+/// with its account.
+pub fn eligible_in_forum(
+    row: &RecordRow,
+    key: &RecKey,
+    repo: Option<&RepoRow>,
+    authority: bool,
+    now_ms: i64,
+) -> bool {
+    eligible(row, repo)
+        || (authority
+            && !row.id_hint
+            && schema::is_mod_action(&key.collection)
+            && repo.is_some_and(|r| r.inactive_retained(now_ms)))
+}
+
 /// The stored rows of forum `fk` that may enter the fold's `records` (§13, `data-model.md`
 /// §7.4): membership rows with rkey `fk`, and the `RANGED` rows of the `{fk}-` range, keeping for
 /// each `(did, collection)` the first `cap(collection)` keys in descending rkey order. Every

@@ -22,6 +22,7 @@ use lessdugin_lexicon::records::{Action, Opinion, OpinionIntent, StrongRef, Text
 use lessdugin_lexicon::values::{Agreement, RevisionOp, Stance, Tier, VoteValue};
 use serde_json::Value;
 
+use crate::discovery::roster::{RANK_ADMIN, RANK_MODERATOR, RANK_OWNER};
 use crate::engine::{EngineError, ErrorCode};
 use crate::host::{Host, KvOp, KvStore};
 use crate::limits;
@@ -33,6 +34,7 @@ use crate::outbox::model::{
 };
 use crate::outbox::pds::{BatchOp, CallError, Current, PdsClient, Session, Swap, Written};
 use crate::outbox::records;
+use crate::social::full::authority;
 use crate::store::admit::LexiconValidator;
 use crate::store::records::RecordStore;
 use crate::store::row;
@@ -70,6 +72,9 @@ pub const BLOB_REUPLOAD_AFTER_MS: i64 = 30 * 60 * 1000;
 /// Bytes reserved for the `applyWrites` envelope (`repo`, `swapCommit`, brackets) when adopt
 /// batches are sized.
 const ADOPT_BODY_ENVELOPE: usize = 1_000;
+/// The adopt report keeps this many lines, then one that counts the rest (the former writes as
+/// many records as they like, and the report is stored in the write's row).
+const ADOPT_REPORT_MAX: usize = 100;
 
 /// `false` for 400 error names that say nothing about `swapRecord: null` (media, auth, size):
 /// those never mark a host as not supporting null swaps (§8.4, ADR 0005).
@@ -105,6 +110,11 @@ fn rejected(error: EngineError) -> CallError {
         name: None,
         error,
     }
+}
+
+/// True when `hay` contains the bytes of `needle`.
+fn contains_bytes(hay: &[u8], needle: &str) -> bool {
+    hay.windows(needle.len()).any(|w| w == needle.as_bytes())
 }
 
 fn storage(e: impl std::fmt::Display) -> CallError {
@@ -355,11 +365,41 @@ impl<'a, H: Host> Runner<'a, H> {
                     .with_detail("cid", data.cid.clone()),
             ));
         }
+        // A 413 downscale changed the CID (§8.8): the body's `cid:` URLs must follow it, and a
+        // spilled body already holding the old one cannot, so that write fails instead of
+        // publishing an image that no longer resolves inline (`lfm-1.md` §6.1).
+        let moved = stored_cid != data.cid;
+        if moved {
+            let old = format!("cid:{}", data.cid);
+            for i in 0..self.w.blobs.len() {
+                if self.w.blobs[i].mime == blob::TEXT_MARKDOWN
+                    && self.w.blobs[i].cid != data.cid
+                    && contains_bytes(&self.chunks(i).await?, &old)
+                {
+                    return Err(rejected(
+                        EngineError::new(
+                            crate::engine::ErrorCode::TooLarge,
+                            "the PDS took the image only after it was downscaled, and the \
+                             long body that names it cannot follow the new CID: attach a \
+                             smaller image",
+                        )
+                        .with_detail("kind", "mediaRejected")
+                        .with_detail("cid", data.cid.clone()),
+                    ));
+                }
+            }
+        }
         for op in &mut self.w.ops {
-            if let Some(mut v) = op.value_json()
-                && blob::substitute_blob(&mut v, &data.cid, &object) > 0
-            {
-                op.set_value(&v);
+            if let Some(mut v) = op.value_json() {
+                let replaced = blob::substitute_blob(&mut v, &data.cid, &object);
+                let rewritten = if moved {
+                    blob::rewrite_cid_urls(&mut v, &data.cid, &stored_cid)
+                } else {
+                    0
+                };
+                if replaced + rewritten > 0 {
+                    op.set_value(&v);
+                }
             }
         }
         Ok(())
@@ -513,8 +553,10 @@ impl<'a, H: Host> Runner<'a, H> {
 
     /// Runs the write's protocol.
     pub(crate) async fn run(&mut self) -> Result<Outcome, CallError> {
-        if !matches!(self.w.intent, Intent::Opinion { .. } | Intent::Adopt { .. })
-            && self.w.ops.is_empty()
+        if !matches!(
+            self.w.intent,
+            Intent::Opinion { .. } | Intent::Adopt { .. } | Intent::Redact { subject: Some(_) }
+        ) && self.w.ops.is_empty()
         {
             return Err(invalid("the write has no ops"));
         }
@@ -535,7 +577,7 @@ impl<'a, H: Host> Runner<'a, H> {
             Intent::RemoveModAction { revision_rkey } => {
                 self.remove_mod_action(&revision_rkey).await
             }
-            Intent::Redact => self.redact().await,
+            Intent::Redact { subject } => self.redact(subject.as_deref()).await,
             Intent::Opinion { .. } => self.opinion().await,
             Intent::Adopt { .. } => self.adopt().await,
         }
@@ -1064,20 +1106,30 @@ impl<'a, H: Host> Runner<'a, H> {
         }
     }
 
-    /// The own revisions of `subject`: rkey exactly `P + "-" + TID` and `subject.uri` equal (the
-    /// prefix alone is not enough, §3.2), ascending.
+    /// The own revision records of `subject` under `P + "-"`, ascending: those whose
+    /// `subject.uri` names it, whatever their key's suffix and however the uri spells the repo
+    /// (same collection and rkey: an invalid revision, RV1 or RV3, is history too), and those
+    /// keyed exactly `P + "-" + TID` that name no subject. The prefix alone is not enough
+    /// (§3.2): a comment's key extends its post's, so its revisions are under the post's prefix.
     async fn own_revisions_of(&mut self, p: &str, subject: &str) -> Result<Vec<String>, CallError> {
         let prefix = format!("{p}-");
         let rows = self.pds.list_prefix(nsid::REVISION, &prefix, None).await?;
+        let item = keys::split_uri(subject).ok().map(|(_, c, k)| (c, k));
         let mut out: Vec<String> = rows
             .into_iter()
             .filter(|r| {
-                keys::split_revision_key(&r.rkey).is_some_and(|(rp, _)| rp == p)
-                    && r.value
-                        .get("subject")
-                        .and_then(|s| s.get("uri"))
-                        .and_then(Value::as_str)
-                        == Some(subject)
+                match r
+                    .value
+                    .get("subject")
+                    .and_then(|s| s.get("uri"))
+                    .and_then(Value::as_str)
+                {
+                    Some(u) => {
+                        u == subject
+                            || keys::split_uri(u).is_ok_and(|(_, c, k)| Some((c, k)) == item)
+                    }
+                    None => keys::split_revision_key(&r.rkey).is_some_and(|(rp, _)| rp == p),
+                }
             })
             .map(|r| r.rkey)
             .collect();
@@ -1085,7 +1137,17 @@ impl<'a, H: Host> Runner<'a, H> {
         Ok(out)
     }
 
-    async fn redact(&mut self) -> Result<Outcome, CallError> {
+    /// Deletes the revisions the ops name that are still on the PDS and, for an item
+    /// (`subject`), every own revision of it listed now: the history this device never synced
+    /// and the invalid revisions too (`data-model.md` §8 "Redact history").
+    async fn redact(&mut self, subject: Option<&str>) -> Result<Outcome, CallError> {
+        let item = subject
+            .map(|s| {
+                keys::revision_prefix(NS, s)
+                    .map(|p| (s.to_owned(), p))
+                    .map_err(|e| invalid(format!("{s} has no revisions to redact: {e}")))
+            })
+            .transpose()?;
         let wanted: BTreeSet<String> = self
             .w
             .ops
@@ -1105,9 +1167,16 @@ impl<'a, H: Host> Runner<'a, H> {
                     present.insert(r.rkey);
                 }
             }
-            let ops: Vec<BatchOp> = wanted
+            let mut rkeys: BTreeSet<String> = wanted
                 .iter()
                 .filter(|k| present.contains(*k))
+                .cloned()
+                .collect();
+            if let Some((s, p)) = &item {
+                rkeys.extend(self.own_revisions_of(p, s).await?);
+            }
+            let ops: Vec<BatchOp> = rkeys
+                .iter()
                 .map(|k| BatchOp::Delete {
                     collection: nsid::REVISION.to_owned(),
                     rkey: k.clone(),
@@ -1115,15 +1184,27 @@ impl<'a, H: Host> Runner<'a, H> {
                 .collect();
             match self.send_chunks(&ops).await? {
                 None => {
-                    self.w.results = self
-                        .w
-                        .ops
+                    let did = self.did().as_str().to_owned();
+                    // an item's redaction names the item, then the revisions it deleted
+                    let named = item.iter().map(|(s, _)| s.clone());
+                    let deleted = rkeys
                         .iter()
-                        .map(|o| OpResult {
-                            uri: o.uri(self.did().as_str()),
-                            cid: None,
-                        })
-                        .collect();
+                        .map(|k| format!("at://{did}/{}/{k}", nsid::REVISION));
+                    self.w.results = match &item {
+                        Some(_) => named
+                            .chain(deleted)
+                            .map(|uri| OpResult { uri, cid: None })
+                            .collect(),
+                        None => self
+                            .w
+                            .ops
+                            .iter()
+                            .map(|o| OpResult {
+                                uri: o.uri(&did),
+                                cid: None,
+                            })
+                            .collect(),
+                    };
                     return Ok(Outcome::Done);
                 }
                 Some(e) => {
@@ -1389,6 +1470,7 @@ impl<'a, H: Host> Runner<'a, H> {
             former_pds,
             role,
             revision_tid,
+            counted,
             ..
         } = self.w.intent.clone()
         else {
@@ -1426,6 +1508,29 @@ impl<'a, H: Host> Runner<'a, H> {
             originals.sort_by(|a, b| a.rkey.cmp(&b.rkey));
             for o in originals {
                 let o_uri = format!("at://{former}/{}/{}", nsid::MOD_ACTION, o.rkey);
+                // only what counted for the former is re-issued (social.md §4.10)
+                match counted.originals.get(&o.rkey) {
+                    None => {
+                        report.push(format!(
+                            "cannot adopt {o_uri}: it was not in effect when the adoption was \
+                             requested (never counted)"
+                        ));
+                        continue;
+                    }
+                    Some(cid) if *cid != o.cid => {
+                        report.push(format!(
+                            "cannot adopt {o_uri}: changed since the adoption was requested"
+                        ));
+                        continue;
+                    }
+                    Some(_) => {}
+                }
+                if !counts_for(&counted.roles, &former, &o.value) {
+                    report.push(format!(
+                        "cannot adopt {o_uri}: not allowed for the former moderator"
+                    ));
+                    continue;
+                }
                 if !role_may_issue(&role, &o.value) {
                     report.push(format!("cannot adopt {o_uri}: not allowed for a {role}"));
                     continue;
@@ -1558,6 +1663,11 @@ impl<'a, H: Host> Runner<'a, H> {
                 // re-list the own range and recompute the remaining batches
                 self.jitter().await;
                 continue;
+            }
+            if report.len() > ADOPT_REPORT_MAX {
+                let more = report.len() - ADOPT_REPORT_MAX;
+                report.truncate(ADOPT_REPORT_MAX);
+                report.push(format!("… and {more} more"));
             }
             if let Intent::Adopt { report: r, .. } = &mut self.w.intent {
                 *r = report;
@@ -1735,6 +1845,33 @@ fn is_adoptable(rkey: &str, v: &Value, now_us: i64) -> bool {
         .and_then(|u| Datetime::parse(u).ok())
         .is_some_and(|u| u.timestamp_micros() <= now_us);
     assertion && scope == "forum" && !lapsed
+}
+
+/// `social.md` §4.3 conditions 3 (rank) and 4 (role) for an original `v` by the former moderator
+/// `x`, under the roles the adoption was requested with: a copy never does what the original
+/// could not.
+fn counts_for(roles: &BTreeMap<String, String>, x: &str, v: &Value) -> bool {
+    let a: BTreeMap<String, u8> = roles
+        .iter()
+        .filter_map(|(d, role)| {
+            let r = match role.as_str() {
+                "owner" => RANK_OWNER,
+                "admin" => RANK_ADMIN,
+                "moderator" => RANK_MODERATOR,
+                _ => return None,
+            };
+            Some((d.clone(), r))
+        })
+        .collect();
+    let Some(role) = roles.get(x).filter(|_| a.contains_key(x)) else {
+        return false;
+    };
+    let subject = v.get("subject").and_then(Value::as_str).unwrap_or_default();
+    let r = authority::rank(&a, x);
+    let rank_ok = r == RANK_OWNER
+        || authority::subject_author(subject) == Some(x)
+        || r > authority::subject_rank(&a, subject);
+    rank_ok && role_may_issue(role, v)
 }
 
 /// The `mod/1` role table (`social.md` §4.3): owners and admins may issue every known action;

@@ -315,7 +315,7 @@ The rules live in `social.md`; this table lists what they defend against.
 
 #### 5.9.1 Metadata stripping
 
-The output keeps only what the table allows, in the original order; everything else, including any data after the end marker, is dropped. Walks are iterative and bounded (`limits.md` §6). Images whose EXIF orientation is not 1 are first physically rotated and re-encoded (the media pipeline, `sync.md`), which drops all metadata.
+The output keeps only what the table allows, in the original order; everything else, including any data after the end marker, is dropped. Walks are iterative and bounded (`limits.md` §6). A file of the table that the walk cannot parse to its end (truncated, a length past the end, a byte that is no marker, no end marker) is refused for upload (`mediaRejected`), never uploaded as it is: browsers display such files, so their metadata would be published. Images whose EXIF orientation is not 1 (JPEG APP1, PNG `eXIf`, WebP `EXIF`) are first physically rotated and re-encoded (the media pipeline, `sync.md`), which drops all metadata; an animation (APNG, animated WebP) is stripped but not re-encoded, so it keeps its frames (`data-model.md` §8.8).
 
 | Format | Kept | Dropped (examples) |
 |---|---|---|
