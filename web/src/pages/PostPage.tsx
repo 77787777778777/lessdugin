@@ -380,10 +380,11 @@ function PostBodyView({
             />
           )}
           {own && <OwnPostActions uri={post.uri} forum={post.forum} />}
-          {ctx.isAuthority && (
+          {(ctx.isAuthority || (own && ctx.authorGate === true)) && (
             <ModMenu
               forum={post.forum}
               canCurate={ctx.canCurate}
+              scope={ctx.isAuthority ? "forum" : "author"}
               subject={{
                 kind: "post",
                 uri: post.uri,
@@ -461,6 +462,10 @@ export function PostThread({ uri }: { uri: string }) {
     isAuthority: viewer !== undefined ? viewer.moderate : isAuthorityRole(role),
     canCurate: viewer !== undefined ? viewer.curate : role === "owner" || role === "admin",
     caps: viewer,
+    postAuthor: postView?.post.author.did,
+    authorGate:
+      viewer !== undefined &&
+      (postView?.post.tier === "personal" ? viewer.authorModPersonal : viewer.authorModFrontpage),
   };
   const canComment =
     myDid !== null && (!ctx.locked || ctx.isAuthority) && allows(ctx.caps, "comment");

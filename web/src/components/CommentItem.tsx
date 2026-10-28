@@ -40,6 +40,10 @@ export interface ThreadContext {
   myDid: string | null;
   isAuthority: boolean;
   canCurate: boolean;
+  /** The thread's post author, and whether the viewer passes the author gate for that post
+   * (social.md §4.9): a post's author moderates their own thread in author scope. */
+  postAuthor?: string | undefined;
+  authorGate?: boolean | undefined;
   /** `ForumView.viewer` (social.md §8): gates voting, reacts and commenting. Absent signed
    * out, which never disables an action (the sign-in affordance carries that case). */
   caps?: ViewerCaps | undefined;
@@ -353,10 +357,15 @@ export function CommentItem({
               </button>
             )}
             {mine && <OwnCommentActions node={node} postUri={ctx.postUri} />}
-            {ctx.isAuthority && (
+            {(ctx.isAuthority ||
+              (ctx.authorGate === true &&
+                ctx.myDid !== null &&
+                ctx.postAuthor === ctx.myDid &&
+                !mine)) && (
               <ModMenu
                 forum={ctx.forum}
                 canCurate={ctx.canCurate}
+                scope={ctx.isAuthority ? "forum" : "author"}
                 subject={{
                   kind: "comment",
                   uri: node.uri,

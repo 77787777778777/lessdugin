@@ -42,6 +42,7 @@ import { paletteReact } from "./palette.ts";
 import {
   type AccountInfo,
   type AccountView,
+  type ActionTicket,
   type ActorView,
   type Anchor,
   type AtUri,
@@ -169,6 +170,11 @@ const PUBLIC_ACTION_KINDS: readonly PublicActionKind[] = [
 ];
 const RANK: Record<string, number> = { owner: 3, admin: 2, moderator: 1 };
 
+/** The engine's retroactivity notices (crates/core/src/engine/moderation.rs). */
+const RETROACTIVE_RESTRICT =
+  "this restriction is retroactive: it also hides the user's earlier items of the restricted kinds";
+const RETROACTIVE_BAN =
+  "a ban is retroactive: it hides all of the user's items in this forum, unless they are kept";
 /** The engine's `missingAlt` notice (crates/core/src/media/mod.rs). */
 const MISSING_ALT =
   "this file has no alt text: readers who cannot see it will not know what it shows";
@@ -2091,7 +2097,22 @@ export class MockEngine implements EngineApi {
     });
   }
 
-  async modAction(intent: ModActionIntent): Promise<WriteTicket> {
+  async modAction(intent: ModActionIntent): Promise<ActionTicket> {
+    const ticket = await this.modActionWrite(intent);
+    // bans and restrictions are retroactive, and the engine says so (social.md §4.6, §4.7)
+    if (intent.kind === "assert") {
+      const a = intent.action;
+      if (a.kind === "access" && a.level === "banned") {
+        return { ...ticket, notices: [{ code: "retroactive", message: RETROACTIVE_BAN }] };
+      }
+      if (a.kind === "restrict" && a.capabilities.length > 0) {
+        return { ...ticket, notices: [{ code: "retroactive", message: RETROACTIVE_RESTRICT }] };
+      }
+    }
+    return ticket;
+  }
+
+  private async modActionWrite(intent: ModActionIntent): Promise<WriteTicket> {
     const me = this.me();
     const f = this.forumRec(intent.forum);
     const role = this.myRole(f);
