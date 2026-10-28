@@ -1764,6 +1764,25 @@ fn the_command_line_reaches_membership_items_and_local_state() {
     let mutes = block_on(carol.engine.mutes()).unwrap();
     assert!(mutes.iter().any(|m| m.did == s.w.bob.did()), "{mutes:?}");
 
+    // `:set` takes a word as the text it is and a list as JSON; `:unset` resets
+    run_command(&mut t, "set sources direct");
+    run_command(&mut t, r#"set mediaAutoloadHosts ["cdn.example.com"]"#);
+    block_on(t.settle());
+    let st = block_on(carol.engine.settings()).unwrap();
+    assert_eq!(
+        serde_json::to_value(st.sources).unwrap(),
+        "direct",
+        "{}",
+        status(&t)
+    );
+    assert_eq!(st.media_autoload_hosts, ["cdn.example.com"], "{}", status(&t));
+    run_command(&mut t, "unset mediaAutoloadHosts");
+    block_on(t.settle());
+    let st = block_on(carol.engine.settings()).unwrap();
+    assert!(st.media_autoload_hosts.is_empty(), "{}", status(&t));
+    run_command(&mut t, "unset sources");
+    block_on(t.settle());
+
     // `:delete` asks first: `n` keeps the comment, `y` deletes it
     let t2 = block_on(
         carol

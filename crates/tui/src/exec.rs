@@ -437,7 +437,9 @@ pub async fn run<H: Host>(engine: &Engine<H>, effect: Effect, opts: ExecOpts) ->
         }),
         Effect::Settings { set } => {
             if let Some((key, value)) = set
-                && let Err(e) = engine.set_setting(&key, value.as_deref()).await
+                && let Err(e) = engine
+                    .set_setting(&key, value.as_deref().map(setting_value).as_ref())
+                    .await
             {
                 return Some(Action::LocalDone(Err(e)));
             }
@@ -522,6 +524,18 @@ pub async fn fetch_media<H: Host>(
     lessdugin_atp::cid::verify(&parsed, &resp.body)
         .map_err(|_| EngineError::internal("the image does not match its CID"))?;
     Ok(crate::image::MediaBytes(std::sync::Arc::new(resp.body)))
+}
+
+/// A setting's value as the `:` line types it: a JSON list, object or quoted string as
+/// written (`mediaAutoloadHosts ["cdn.example"]`), anything else as the text it is
+/// (`mediaAutoload off`). `set_setting` checks it against the setting's type.
+pub fn setting_value(text: &str) -> serde_json::Value {
+    if text.starts_with(['[', '{', '"'])
+        && let Ok(v) = serde_json::from_str(text)
+    {
+        return v;
+    }
+    serde_json::Value::String(text.to_owned())
 }
 
 fn cadence_name(c: KarmaCadence) -> &'static str {
