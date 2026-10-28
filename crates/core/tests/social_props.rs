@@ -400,7 +400,7 @@ proptest! {
             // build some intermediate models: no build may leave state behind
             if rng.chance(1, 8) && probes < 3 {
                 probes += 1;
-                let _ = engine.view(&Query::default());
+                let _ = engine.model();
             }
             if n + 1 == stream.len() {
                 // resume from an earlier cursor: the last events are delivered again
@@ -413,9 +413,16 @@ proptest! {
         }
         let batch = reference.batch_input();
         prop_assert_eq!(batch.records.len(), f.recs.len());
-        let inc = engine.view(&Query::default());
+        let model = engine.model();
         let bat = fold(&batch, &Query::default());
-        prop_assert!(serialize(&inc) == serialize(&bat), "the store-built model differs from the batch fold");
+        prop_assert!(
+            serialize(&model.view) == serialize(&bat),
+            "the store-built model differs from the batch fold"
+        );
+        // other queries re-rank the model's cached layers (no refold)
+        for q in queries(first_post(&f).as_deref()).into_iter().skip(1).take(3) {
+            prop_assert!(model.orderings(&q) == fold(&batch, &q).orderings, "query {:?}", q);
+        }
         // the same record set folded from the generator's own input: only the first-seen
         // times differ (earlier versions were seen first) and the never-synced uris the
         // complete listings confirm absent, so only `t_rank`, the orderings, `absent` and the
@@ -847,7 +854,7 @@ impl Refold {
         let mut f = self.forum.clone();
         f.deleted = self.tombstones.clone();
         let listed = |u: &str| {
-            let Some((did, coll, rkey)) = lessdugin_lexicon::keys::split_uri(u) else {
+            let Ok((did, coll, rkey)) = lessdugin_lexicon::keys::split_uri(u) else {
                 return false;
             };
             let ranged = [
@@ -927,7 +934,6 @@ struct StoreDriver {
 
 impl StoreDriver {
     fn new(f: &Forum) -> Self {
-        let block_on = futures::executor::block_on;
         let kv = MemKv::new();
         let store = RecordStore::new(&kv);
         let mut b = store.batch();
@@ -972,19 +978,15 @@ impl StoreDriver {
         }
     }
 
-    /// The model the engine builds from the store, folded for `q` (the base query only: other
-    /// queries re-rank the cached layers).
-    fn view(&mut self, q: &Query) -> ForumView {
-        assert_eq!(q, &Query::default());
-        futures::executor::block_on(ForumModel::build(&self.kv, &self.key, self.now))
-            .expect("the model builds")
-            .view
+    /// The model the engine builds from the store: the fold for the base query, and the
+    /// orderings of others from its cached layers.
+    fn model(&self) -> ForumModel {
+        block_on(ForumModel::build(&self.kv, &self.key, self.now)).expect("the model builds")
     }
 }
 
 impl Incremental for StoreDriver {
     fn apply(&mut self, n: usize, change: &Change) {
-        let block_on = futures::executor::block_on;
         self.clock += social_gen::MINUTE;
         let now_ms = self.clock / 1000;
         let store = RecordStore::new(&self.kv);
@@ -1010,6 +1012,10 @@ impl Incremental for StoreDriver {
         }
         block_on(b.commit()).unwrap();
     }
+}
+
+fn block_on<F: std::future::Future>(f: F) -> F::Output {
+    futures::executor::block_on(f)
 }
 
 /// `value` at `uri` with CID `cid`, through the sync layer's admission (`sync.md` §5.5).
@@ -1055,12 +1061,18 @@ fn change_stream(f: &Forum, rng: &mut Rng) -> Vec<Change> {
         ch.push(Change::Put(r.clone()));
         per_uri.push(ch);
     }
-    // deleted items that were once seen (their absence is confirmed by the tombstone)
+    // deleted items that were once seen (their absence is confirmed by the tombstone), as some
+    // version of the uri's collection
     for u in &f.deleted {
+        let coll = u.split('/').nth(3).unwrap();
+        let value =
+            json!({"$type": coll, "forum": f.uri, "title": "gone", "createdAt": social_gen::at(0)});
         let rec = Rec {
             uri: u.clone(),
-            cid: f.ghost_cids[u].clone(),
-            value: json!({"$type": format!("{NS}.post"), "forum": f.uri, "title": "gone", "createdAt": social_gen::at(0)}),
+            cid: lessdugin_atp::datamodel::record_cid(&value)
+                .unwrap()
+                .to_string(),
+            value,
             author: u.split('/').nth(2).unwrap().to_owned(),
             kind: Kind::Post,
             valid: true,
