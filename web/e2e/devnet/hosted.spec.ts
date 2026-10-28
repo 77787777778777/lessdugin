@@ -170,10 +170,16 @@ test("bob signs in with OAuth, joins, comments, publishes a post and edits it (a
   expect(m?.[1]).toBe(bob.did);
   const postUri = `at://${m?.[1]}/online.7778777.lessdugin.temp.post/${m?.[2]}`;
 
-  // The attached image, on click: fetched, CID-checked and sniffed, then shown from a typed
-  // object URL (sync.md §11.2, threat-model SPA-7; the CSP allows `img-src blob:` only).
-  await page.getByRole("button", { name: /click to load/ }).click();
+  // The attached image, on click (or by the engine's autoload verdict, sync.md §11.3): fetched,
+  // CID-checked and sniffed, then shown from a typed object URL (sync.md §11.2, threat-model
+  // SPA-7; the CSP allows `img-src blob:` only).
+  const load = page.getByRole("button", { name: /click to load/ });
   const shown = page.locator("[data-rendered-root] img[data-cid]");
+  await expect(load.or(shown)).toBeVisible();
+  if (await load.isVisible()) {
+    await expect(load).toContainText("which will see your IP");
+    await load.click();
+  }
   await expect(shown).toHaveAttribute("src", /^blob:/);
   await expect.poll(() => shown.evaluate((img: HTMLImageElement) => img.naturalWidth)).toBe(8);
 

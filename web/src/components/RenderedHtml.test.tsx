@@ -111,7 +111,7 @@ describe("RenderedHtml", () => {
     await waitFor(() => expect(root.querySelector(".lfm-sidenote")).not.toBeNull());
     expect(root.querySelector(".lfm-sidenote")?.textContent).toContain("A footnote.");
     expect(root.querySelector(".lfm-sidenote [id]")).toBeNull();
-    expect(screen.getByRole("button", { name: /clip\.mp4 \(click to load\)/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /clip\.mp4 \(click to load;/ })).toBeTruthy();
   });
 
   it("hides only the footnotes it copied as sidenotes (lfm-1.md §8.1)", async () => {
@@ -205,6 +205,40 @@ describe("RenderedHtml", () => {
       expect(a.getAttribute("href")).toBe("blob:t/3");
       expect(a.download).toBe(`${CID}.bin`);
       save.mockRestore();
+    });
+
+    it("names the host that will see the reader's address (sync.md §11.3)", async () => {
+      const engine = new MockEngine();
+      const spy = vi.spyOn(engine, "loadMedia");
+      renderWithApp(<RenderedHtml html={IMG} media={[view("image/png")]} />, { engine });
+      const button = await screen.findByRole("button", { name: /click to load/ });
+      expect(button.textContent).toContain("loads from pds.test, which will see your IP");
+      expect(spy).not.toHaveBeenCalled();
+    });
+
+    it("loads without a click what the engine lets autoload", async () => {
+      URL.revokeObjectURL = vi.fn();
+      const engine = new MockEngine();
+      const spy = vi
+        .spyOn(engine, "loadMedia")
+        .mockResolvedValue({ cid: CID, size: 12, url: "blob:t/5", mime: "image/png" });
+      const auto = { ...view("image/png"), autoload: true };
+      const { container } = renderWithApp(<RenderedHtml html={IMG} media={[auto]} />, {
+        engine,
+      });
+      const root = await mountedRoot(container);
+      await waitFor(() => expect(root.querySelector("img")?.getAttribute("src")).toBe("blob:t/5"));
+      expect(spy).toHaveBeenCalledWith(CID, auto);
+      expect(screen.queryByRole("button", { name: /click to load/ })).toBeNull();
+    });
+
+    it("loads nothing by itself inside a hover preview", async () => {
+      const engine = new MockEngine();
+      const spy = vi.spyOn(engine, "loadMedia");
+      const auto = { ...view("image/png"), autoload: true };
+      renderWithApp(<RenderedHtml html={IMG} media={[auto]} preview />, { engine });
+      expect(await screen.findByRole("button", { name: /click to load/ })).toBeTruthy();
+      expect(spy).not.toHaveBeenCalled();
     });
 
     it("gives a PDF a download card, not a player", async () => {

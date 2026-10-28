@@ -37,19 +37,28 @@ const EXT: Record<string, string> = {
   "audio/ogg": "ogg",
 };
 
-/** `LoadedMedia` with its display type (engine-api.md §3.4 `load_media`). */
-export type LoadedForDisplay = LoadedMedia & { mime?: string };
-
-/** `loadMedia(cid, media?)`: the item's view names its author, declared type and size. */
-type LoadMedia = (cid: Cid, media?: MediaView) => Promise<LoadedForDisplay>;
-
-/** Fetches the media `cid` of the item `view` for display (a click is the consent). */
+/** Fetches the media `cid` of the item `view` for display (a click, or the engine's autoload
+ * verdict, is the consent): the view names its author, declared type and size. */
 export function loadMediaFor(
   engine: EngineApi,
   cid: string,
   view: MediaView | undefined,
-): Promise<LoadedForDisplay> {
-  return (engine.loadMedia as LoadMedia).call(engine, cid as Cid, view);
+): Promise<LoadedMedia> {
+  return engine.loadMedia(cid as Cid, view);
+}
+
+/** The notice of a placeholder that waits for a click (sync.md §11.3): the host that serves
+ * the bytes, from the view's `pds`, learns the reader's address. */
+export function mediaHostNotice(view: MediaView | undefined): string {
+  let host = "";
+  try {
+    host = view ? new URL(view.pds).host : "";
+  } catch {
+    host = "";
+  }
+  return host !== ""
+    ? `loads from ${host}, which will see your IP`
+    : "the author's server will see your IP";
 }
 
 /** `filename` is what a download card saves: `<cid>.<ext>`, `bin` when the type is unknown. */
@@ -59,7 +68,7 @@ export type MediaDisplay =
 
 /** What `loaded` may become in a placeholder of kind `placeholder` (sync.md §11.1: else
  * "download card only"). */
-export function mediaDisplay(loaded: LoadedForDisplay, placeholder: "img" | "span"): MediaDisplay {
+export function mediaDisplay(loaded: LoadedMedia, placeholder: "img" | "span"): MediaDisplay {
   // a CID is base32 (lowercase letters and 2–7): nothing else reaches the file name
   const name = /^b[a-z2-7]{8,100}$/.test(loaded.cid) ? loaded.cid : "media";
   const mime = loaded.mime ?? "";
