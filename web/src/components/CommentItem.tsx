@@ -17,7 +17,7 @@ import type { VotingMode } from "../lib/policy.ts";
 import { quoteFromSelection } from "../lib/quote.ts";
 import { fullDate, shortAge } from "../lib/time.ts";
 import ui from "../styles/ui.module.css";
-import { ActorName, actorLabel } from "./ActorName.tsx";
+import { ActorName, actorText } from "./ActorName.tsx";
 import { Badges } from "./Badges.tsx";
 import styles from "./CommentTree.module.css";
 import { LazyComposer } from "./LazyComposer.tsx";
@@ -103,7 +103,7 @@ function ReplyBox({
     <LazyComposer
       compact
       autoFocus
-      label={`Reply to ${actorLabel(node.author)}`}
+      label={`Reply to ${actorText(node.author)}`}
       submitLabel="Publish reply"
       placeholder="Write a reply…"
       initial={draft?.markdown ?? ""}
@@ -246,7 +246,7 @@ export function CommentItem({
         focused && styles.focused,
         mine && styles.mine,
       )}
-      aria-label={`Comment by ${actorLabel(node.author)}${node.unread ? " (new)" : ""}`}
+      aria-label={`Comment by ${actorText(node.author)}${node.unread ? " (new)" : ""}`}
     >
       <header className={styles.header}>
         <button
@@ -301,7 +301,7 @@ export function CommentItem({
                 className={ui.link}
                 onClick={() => onShowAuthor(node.author.did)}
               >
-                Show {row.authorOverflow} more by <bdi>{actorLabel(node.author)}</bdi>
+                Show {row.authorOverflow} more by <bdi>{actorText(node.author)}</bdi>
               </button>
             </>
           )}

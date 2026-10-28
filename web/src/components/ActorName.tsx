@@ -20,6 +20,14 @@ export function actorLabel(actor: ActorView): string {
   return name !== "" ? name : actorIdent(actor);
 }
 
+/** `ActorName` as plain text, for labels about another user: the display name followed by the
+ * identity, or the identity alone, never the display name alone (ID-5). */
+export function actorText(actor: ActorView): string {
+  const name = actor.displayName ? cleanName(actor.displayName) : "";
+  const ident = actorIdent(actor);
+  return name !== "" ? `${name} (${ident})` : ident;
+}
+
 export function ActorName({
   actor,
   link = true,
