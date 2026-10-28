@@ -1065,6 +1065,54 @@ mod tests {
         );
     }
 
+    /// m4-20, acc-m4-6: the render vectors with media or a profile (which `render` refused, so
+    /// the SPA's sanitiser check could not render them) render through the op to their
+    /// expected html, with their `defs#media` values as they are.
+    #[test]
+    fn render_takes_the_media_and_profile_vectors() {
+        let e = engine();
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata/vectors");
+        let mut checked = 0;
+        for dir in ["lfm1", "xss"] {
+            let mut files: Vec<_> = std::fs::read_dir(format!("{root}/{dir}"))
+                .unwrap()
+                .map(|f| f.unwrap().path())
+                .filter(|p| p.extension().is_some_and(|x| x == "json"))
+                .collect();
+            files.sort();
+            for path in files {
+                let file: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                for v in file["vectors"].as_array().into_iter().flatten() {
+                    let input = &v["input"];
+                    let (Some(text), Some(html)) =
+                        (input["text"].as_str(), v["expected"]["html"].as_str())
+                    else {
+                        continue;
+                    };
+                    let media = input["media"].as_array().filter(|m| !m.is_empty());
+                    let profile = input["profile"].as_str();
+                    if media.is_none() && profile.is_none() {
+                        continue;
+                    }
+                    let opts = json!({"html": true, "text": true, "styled": false,
+                        "profile": profile});
+                    let args = json!([text, media.cloned().unwrap_or_default(), opts]);
+                    let body: Value =
+                        serde_json::from_str(&call_ok(&e, "render", &args.to_string())).unwrap();
+                    assert_eq!(
+                        body["html"].as_str(),
+                        Some(html),
+                        "{}#{}",
+                        path.display(),
+                        v["name"]
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 40, "{checked} vectors");
+    }
+
     #[test]
     fn bad_arguments_are_invalid_input() {
         let e = engine();
