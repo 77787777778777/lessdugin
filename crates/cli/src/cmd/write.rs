@@ -941,31 +941,39 @@ pub async fn retract(ctx: &Ctx, args: RefArgs) -> Result<(), CliError> {
 /// `redact`: delete an item's version history (`engine-api.md` §3.6, M4).
 ///
 /// Only the author may do it (the outbox enforces that the uri is in their repo, W9), and the
-/// deletion cannot be undone, so `--yes` is required. Without it the command reports what would
-/// go, which also makes it the way to check before redacting.
+/// deletion cannot be undone, so `--yes` is required. Without it the command reports what this
+/// device's view holds, which also makes it the way to check before redacting. With it the
+/// redaction is always sent, whatever that view shows (decision O-10): the engine lists the
+/// author's PDS when the write is sent and deletes every revision that names the item, also
+/// those a failed sync or an invalid key keeps out of the view.
 pub async fn redact(ctx: &Ctx, args: RedactArgs) -> Result<(), CliError> {
     let reader = ctx.reader().await?;
     let (uri, _) = refs::post_or_comment(ctx, &reader, &args.reference).await?;
     let w = ctx.writer_for(&owner_of(&uri)?).await?;
     read::sync_thread_quietly(ctx, &w.engine, &uri).await;
 
-    let h = w.engine.history(&uri).await?;
-    if h.versions.is_empty() {
-        ctx.out.line(&[
-            (lit("no history to redact: "), Style::Plain),
-            (tt(&uri), Style::Dim),
-        ]);
-        return Ok(());
-    }
     if !args.yes {
-        ctx.out.line(&[
-            (lit("would delete "), Style::Plain),
-            (tt(&h.versions.len().to_string()), Style::Bold),
-            (lit(" revision(s) of "), Style::Plain),
-            (tt(&uri), Style::Dim),
-        ]);
+        // an item this device has not cached has no history in its view
+        let shown = w.engine.history(&uri).await.map_or(0, |h| h.versions.len());
+        if shown == 0 {
+            ctx.out.line(&[
+                (lit("no revisions of "), Style::Plain),
+                (tt(&uri), Style::Dim),
+                (lit(" in this device's view"), Style::Plain),
+            ]);
+        } else {
+            ctx.out.line(&[
+                (lit("would delete "), Style::Plain),
+                (tt(&shown.to_string()), Style::Bold),
+                (lit(" revision(s) of "), Style::Plain),
+                (tt(&uri), Style::Dim),
+            ]);
+        }
         ctx.out.line(&[(
-            lit("pass --yes to delete them (this cannot be undone)"),
+            lit(
+                "pass --yes to delete every revision your PDS lists for it (this cannot be \
+                 undone)",
+            ),
             Style::Dim,
         )]);
         return Ok(());

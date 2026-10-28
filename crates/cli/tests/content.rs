@@ -1008,3 +1008,30 @@ fn a_spilled_body_is_edited_as_its_text() {
     assert_eq!(rec["body"]["text"], "Short now.\n", "{}", rec["body"]);
     assert!(rec["body"].get("textBlob").is_none(), "{}", rec["body"]);
 }
+
+/// `redact --yes` is always sent (decision O-10): the engine lists the author's PDS when the
+/// write is sent and deletes every revision that names the item, also when this device's view
+/// shows none (here another device of the author, offline, so its sync fails quietly).
+#[test]
+fn redact_deletes_what_the_pds_lists_whatever_the_view_shows() {
+    let net = Net::new();
+    let alice = net.user("alice.test", true);
+    alice.json(&["forum", "create", "meta", "--frontpage"]);
+    let f = alice.file("p.md", "---\ntitle: Drafty\n---\nFirst words.\n");
+    let p = alice.json(&["post", s(&f), "--yes"]);
+    let post = p["state"]["uri"].as_str().unwrap().to_owned();
+    let e = alice.json(&["edit", &post, "-m", "Second words."]);
+    assert_eq!(e["state"]["kind"], "done", "{e}");
+    assert_eq!(alice.account.list(nsid::REVISION).len(), 1);
+
+    let other = net.second_device(&alice);
+    let out = other.ok(&["--offline", "redact", &post]);
+    assert!(out.contains("no revisions of"), "{out}");
+    let r = other.json(&["--offline", "redact", &post, "--yes"]);
+    assert_eq!(r["state"]["kind"], "pending", "{r}");
+    let flushed = other.json(&["outbox", "flush"]);
+    let sent = flushed["writes"].as_array().unwrap();
+    assert!(sent.iter().all(|x| x["state"]["kind"] == "done"), "{flushed}");
+    assert!(alice.account.list(nsid::REVISION).is_empty());
+    assert_eq!(alice.account.list(nsid::POST).len(), 1);
+}
