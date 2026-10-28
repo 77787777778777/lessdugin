@@ -66,9 +66,20 @@ export function recordActionValue(record: Json | undefined): ModActionValue | nu
         : null;
     case "lock":
       return { kind: "lock", locked: bool("locked", true) };
+    case "tag": {
+      // `head` is a strongRef; asserting it again binds it to the revision's current CID
+      const head = isObj(a.head) && typeof a.head.uri === "string" ? a.head.uri : undefined;
+      return { kind: "tag", removed: bool("removed", false), ...(head ? { head } : {}) };
+    }
     default:
       return null;
   }
+}
+
+/** The slug of a `"tag:" + slug` subject (data-model.md §6.7, G8), or null. */
+export function tagSlug(subject: string): string | null {
+  const slug = subject.startsWith("tag:") ? subject.slice(4) : "";
+  return /^[a-z0-9]+(-[a-z0-9]+)*$/.test(slug) ? slug : null;
 }
 
 /** A positive assertion of social.md §4.2: a keep, a tier of frontpage or curated, a pin. */

@@ -128,6 +128,53 @@ describe("ForumModPage", () => {
     );
   });
 
+  it("asserts a stale #tag.head again, and opens the tag of a head conflict (m3-11)", async () => {
+    const engine = new MockEngine({ holdMs: 0, sendMs: 0 });
+    const ns = "online.7778777.lessdugin.temp";
+    const stale = `at://${OTHER}/${ns}.modAction/tag-1`;
+    const head = `at://did:plc:abcdefghijklmnopqrstuvwx/${ns}.wikiRevision/3kabc`;
+    vi.spyOn(engine, "modQueue").mockResolvedValue({
+      dto: DTO_VERSION,
+      items: [
+        {
+          kind: "conflict",
+          subject: "tag:causal-models",
+          reason: "conflicting tag heads at rank 2",
+        },
+        { kind: "stale", subject: "tag:decision-theory", reason: "edited since", uri: stale },
+      ],
+    });
+    vi.spyOn(engine, "raw").mockResolvedValue({
+      dto: DTO_VERSION,
+      uri: stale,
+      level: "pds",
+      validity: [],
+      assertions: [],
+      record: {
+        $type: `${ns}.modAction`,
+        subject: "tag:decision-theory",
+        action: { $type: `${ns}.modAction#tag`, head: { uri: head, cid: "bafyold" } },
+      },
+    });
+    const mod = vi
+      .spyOn(engine, "modAction")
+      .mockResolvedValue({ id: "w1", state: { kind: "sending" } });
+    const { forum } = await setup(engine);
+    const open = await screen.findByRole("link", { name: "Open the tag" });
+    expect(open.getAttribute("href")).toMatch(/\/t\/causal-models$/);
+    fireEvent.click(screen.getByRole("button", { name: "Assert again on this version" }));
+    await acknowledge();
+    await waitFor(() =>
+      expect(mod).toHaveBeenCalledWith({
+        kind: "assert",
+        forum,
+        scope: "forum",
+        subject: "tag:decision-theory",
+        action: { kind: "tag", removed: false, head },
+      }),
+    );
+  });
+
   it("removes the viewer's own assertion from the log", async () => {
     const engine = new MockEngine({ holdMs: 0, sendMs: 0 });
     const me = (await engine.activeAccount())?.did ?? "";

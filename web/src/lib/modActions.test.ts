@@ -7,6 +7,7 @@ import {
   positiveAssertions,
   recordActionValue,
   suspensionWarning,
+  tagSlug,
 } from "./modActions.ts";
 
 const NS = "online.7778777.lessdugin.temp";
@@ -68,6 +69,28 @@ describe("recordActionValue", () => {
       tier: "curated",
     });
     expect(recordActionValue(record(action("tier", { tier: "gold" })))).toBeNull();
+  });
+
+  it("reads a #tag action, its head by uri (a stale head is asserted again, m3-11)", () => {
+    const head = `at://did:plc:abcdefghijklmnopqrstuvwx/${NS}.wikiRevision/3kabc`;
+    expect(recordActionValue(record(action("tag", { head: { uri: head, cid: "bafy" } })))).toEqual({
+      kind: "tag",
+      removed: false,
+      head,
+    });
+    expect(recordActionValue(record(action("tag", { removed: true })))).toEqual({
+      kind: "tag",
+      removed: true,
+    });
+  });
+});
+
+describe("tagSlug", () => {
+  it("names the slug of a tag: subject only", () => {
+    expect(tagSlug("tag:decision-theory")).toBe("decision-theory");
+    expect(tagSlug("tag:Decision")).toBeNull();
+    expect(tagSlug("tag:")).toBeNull();
+    expect(tagSlug(POST)).toBeNull();
   });
 });
 

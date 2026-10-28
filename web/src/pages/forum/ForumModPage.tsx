@@ -3,7 +3,8 @@
 // authorities-only: the engine answers `blocked` for anyone else, which this page shows as an
 // explanation rather than an error. Each queue item takes one action, with the reason typed
 // above the queue: approve or reject an applicant, keep or hide a newcomer's item, assert a
-// stale positive assertion again on the item's new version. Log entries carry their status
+// stale positive assertion (or `#tag.head`) again on the item's new version, open the tag of a
+// tag-head conflict. Log entries carry their status
 // (effective, overridden, lapsed, ...), the winning rank of an override and whether the
 // assertion was author-scope; the log pages through the engine's cursor, and the viewer's own
 // assertions can be removed from it. Authorities can also adopt a former moderator's
@@ -17,6 +18,7 @@ import {
   type WriteTicket,
 } from "@lessdugin/engine/types";
 import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Link } from "@tanstack/react-router";
 import { useState } from "react";
 import { ActorName } from "../../components/ActorName.tsx";
 import { useSendModAction } from "../../components/ModMenu.tsx";
@@ -27,7 +29,7 @@ import { toasts } from "../../components/Toast.tsx";
 import { useEngine } from "../../engine/context.tsx";
 import { qk, useActiveAccount } from "../../engine/queries.ts";
 import { writeStore } from "../../engine/writes.ts";
-import { entryActionKey, recordActionValue } from "../../lib/modActions.ts";
+import { entryActionKey, recordActionValue, tagSlug } from "../../lib/modActions.ts";
 import { fullDate } from "../../lib/time.ts";
 import { isDid, parseAtUri } from "../../lib/uri.ts";
 import ui from "../../styles/ui.module.css";
@@ -161,6 +163,22 @@ function QueueAction({
           Assert again on this version
         </button>
       );
+    case "conflict": {
+      // unordered `#tag.head` assertions at the top rank (social.md §4.5). Resolving it means
+      // naming one revision in an own `#tag.head`, which takes the tag's wiki history (M5);
+      // the queue opens the tag
+      const slug = tagSlug(item.subject);
+      const f = parseAtUri(forum);
+      return slug === null || !f ? null : (
+        <Link
+          to="/f/$owner/$slug/t/$tag"
+          params={{ owner: f.did, slug: f.rkey, tag: slug }}
+          className={ui.link}
+        >
+          Open the tag
+        </Link>
+      );
+    }
     default:
       return null;
   }
