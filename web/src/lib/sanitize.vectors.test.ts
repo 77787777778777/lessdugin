@@ -84,38 +84,64 @@ function inputText(input: RenderInput): string {
   return `${g.prefix ?? ""}${(g.repeat ?? "").repeat(g.times ?? 1)}${g.suffix ?? ""}`;
 }
 
-/** The render and terminal vectors, split into what the `render` operation can take (markdown
- * only: it refuses media items and takes no profile; an encoding error is not markdown) and the
- * rest. */
-function renderInputs(): { id: string; text: string }[][] {
-  const take: { id: string; text: string }[] = [];
-  const rest: { id: string; text: string }[] = [];
+interface RenderCase {
+  id: string;
+  text: string;
+  /** `expected.html`, when the vector has one. */
+  expected?: string;
+}
+
+/** The render and terminal vectors the `render` operation can take (markdown only: it refuses
+ * media items and takes no profile, and an encoding error is not markdown), and the ids of the
+ * others that have no expected html either. */
+function renderInputs(): { take: RenderCase[]; uncovered: string[] } {
+  const take: RenderCase[] = [];
+  const uncovered: string[] = [];
   for (const { id, json } of vectorFiles(["lfm1", "xss", "terminal"])) {
     for (const v of json.vectors ?? []) {
       const kind = v.kind ?? json.kind;
       if ((kind !== "render" && kind !== "terminal") || !v.input) continue;
       const i = v.input;
-      const one = { id: `${id}#${v.name}`, text: i.encoding_error ? "" : inputText(i) };
       if ((i.media?.length ?? 0) > 0 || i.profile !== undefined || i.encoding_error) {
-        rest.push(one);
+        if (typeof v.expected?.html !== "string") uncovered.push(`${id}#${v.name}`);
       } else {
-        take.push(one);
+        const html = v.expected?.html;
+        take.push({
+          id: `${id}#${v.name}`,
+          text: inputText(i),
+          ...(typeof html === "string" ? { expected: html } : {}),
+        });
       }
     }
   }
-  return [take, rest];
+  return { take, uncovered };
 }
 
 /** `html` as jsdom serialises it: `<` and `>` unescaped inside attribute values (the renderer, and
  * the pinned browser, write `&lt;` and `&gt;` there). */
 function jsdomForm(html: string): string {
-  return html.replace(/(<[a-zA-Z][^\s/>]*)((?:\s+[^\s=/>]+(?:="[^"]*")?)*)(\s*\/?>)/g, (_, tag, attrs, end) => {
-    const a = (attrs as string).replace(
-      /="([^"]*)"/g,
-      (_m: string, v: string) => `="${v.replaceAll("&lt;", "<").replaceAll("&gt;", ">")}"`,
-    );
-    return `${tag}${a}${end}`;
-  });
+  return html.replace(
+    /(<[a-zA-Z][^\s/>]*)((?:\s+[^\s=/>]+(?:="[^"]*")?)*)(\s*\/?>)/g,
+    (_, tag, attrs, end) => {
+      const a = (attrs as string).replace(
+        /="([^"]*)"/g,
+        (_m: string, v: string) => `="${v.replaceAll("&lt;", "<").replaceAll("&gt;", ">")}"`,
+      );
+      return `${tag}${a}${end}`;
+    },
+  );
+}
+
+/** Above this many elements an output is not sanitised in jsdom (see the render test). */
+const MAX_JSDOM_ELEMENTS = 200_000;
+
+/** The number of start tags in `html` (an upper bound on its elements). */
+function elements(html: string): number {
+  let n = 0;
+  for (let i = html.indexOf("<"); i !== -1; i = html.indexOf("<", i + 1)) {
+    if (html.charCodeAt(i + 1) !== 47) n++;
+  }
+  return n;
 }
 
 /** The sanitiser's changes to `vs`, as ids. */
@@ -127,14 +153,18 @@ interface RenderEngine {
   call(op: string, argsJson: string): Promise<string>;
 }
 
-/** The release engine (no host is used: `render` is a pure operation). */
+/** The release engine. `render` is a pure operation, so the host has only what constructing
+ * the engine reads (its random seed). */
 async function engine(): Promise<RenderEngine> {
   const m = (await import(/* @vite-ignore */ pathToFileURL(`${PKG}lessdugin_engine.js`).href)) as {
     initSync(input: { module: BufferSource }): unknown;
     WasmEngine: new (configJson: string, host: object) => RenderEngine;
   };
   m.initSync({ module: readFileSync(WASM) });
-  return new m.WasmEngine("{}", {});
+  return new m.WasmEngine("{}", {
+    now: () => Date.now(),
+    random: (n: number) => crypto.getRandomValues(new Uint8Array(n)),
+  });
 }
 
 describe("LFM vectors through the sanitiser (jsdom)", () => {
@@ -148,14 +178,14 @@ describe("LFM vectors through the sanitiser (jsdom)", () => {
     expect(changedBySanitiser(vectors)).toEqual([]);
   });
 
-  it("compares with the renderer's escaping, not with a re-serialisation", () => {
-    // a renderer output the parser would rewrite is a change, even if DOMPurify keeps it
-    expect(changedBySanitiser([{ id: "unquoted", html: "<p class=x>a</p>" }])).toEqual([
-      "unquoted",
-    ]);
-    expect(changedBySanitiser([{ id: "lt", html: '<a title="a&lt;b" href="#x">a&lt;b</a>' }])).toEqual(
-      [],
-    );
+  it("compares with the renderer's own bytes, not with a re-serialisation", () => {
+    // an output the parser would rewrite (here an unquoted attribute) is a change, even when
+    // DOMPurify keeps everything in it
+    const unquoted = '<div class="lfm" dir=auto><p>a</p></div>';
+    expect(changedBySanitiser([{ id: "unquoted", html: unquoted }])).toEqual(["unquoted"]);
+    // the one serialiser difference allowed: `<` and `>` inside attribute values
+    const v = vectors.find((x) => x.id === "lfm1/serialise.json#attribute-escaping:html");
+    expect(v !== undefined && jsdomForm(v.html) !== v.html).toBe(true);
   });
 
   it.skipIf(!wasmPresent && !wasmRequired)(
@@ -163,18 +193,31 @@ describe("LFM vectors through the sanitiser (jsdom)", () => {
     async () => {
       expect(wasmPresent, `${WASM} is missing: run \`cargo xtask wasm\``).toBe(true);
       const e = await engine();
-      const [take, rest] = renderInputs();
-      expect(take.length).toBeGreaterThan(550);
-      // media items (until `render` takes MediaRefs), the render profile and the encoding
-      // error are rendered by crates/markdown/tests/vectors.rs only (check_html and ammonia)
-      expect(rest.length).toBeLessThan(15);
+      const { take, uncovered } = renderInputs();
+      expect(take.length).toBeGreaterThan(500);
+      // with media items (until `render` takes MediaRefs) or a render profile, and without an
+      // expected html: only crates/markdown/tests/vectors.rs renders these (check_html, ammonia)
+      expect(uncovered.length).toBeLessThan(15);
       const rendered: Vector[] = [];
+      const notBlessed: string[] = [];
+      const tooLarge: string[] = [];
       for (const v of take) {
         const body = JSON.parse(await e.call("render", JSON.stringify([v.text, [], null]))) as {
           html: string;
         };
-        rendered.push({ id: v.id, html: body.html });
+        if (v.expected !== undefined && body.html !== v.expected) notBlessed.push(v.id);
+        if (elements(body.html) > MAX_JSDOM_ELEMENTS) tooLarge.push(v.id);
+        else rendered.push({ id: v.id, html: body.html });
       }
+      // it is the renderer the vectors bless (native = wasm, crates/markdown/tests/vectors.rs)
+      expect(notBlessed).toEqual([]);
+      // the output-budget cases (7.7 to 16.8 MB, 700,000 elements and more) need several GB of
+      // jsdom heap each: crates/markdown/tests/vectors.rs checks them (check_html, ammonia)
+      expect(
+        tooLarge.every((id) => /budget|event-cap/.test(id)),
+        tooLarge.join(", "),
+      ).toBe(true);
+      expect(tooLarge.length).toBeLessThan(8);
       // the vectors without an expected html are among them
       expect(rendered.some((r) => r.id.startsWith("lfm1/limits.json#"))).toBe(true);
       expect(rendered.some((r) => r.id.startsWith("terminal/escapes.json#"))).toBe(true);
