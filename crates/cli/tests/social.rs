@@ -679,7 +679,10 @@ fn forum_edit_keeps_a_spilled_about_and_its_media() {
     assert_eq!(decl["name"], "Big", "{decl}");
     assert_eq!(decl["about"]["textBlob"]["ref"], text_blob, "{decl}");
     assert!(decl["about"].get("text").is_none(), "{decl}");
-    let media = decl["about"]["media"].as_array().cloned().unwrap_or_default();
+    let media = decl["about"]["media"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
     assert_eq!(media.len(), 1, "{decl}");
     assert_eq!(media[0]["blob"]["ref"], png["ref"], "{decl}");
     assert_eq!(media[0]["alt"], "a dot", "{decl}");

@@ -846,9 +846,13 @@ async fn suspended_by_edit(engine: &Engine<NativeHost>, uri: &str) -> Vec<&'stat
     }
     // in one order, whatever the order of the records
     out.sort_by_key(|w| {
-        ["a moderator's keep", "its frontpage or curated tier", "its pin"]
-            .iter()
-            .position(|k| k == w)
+        [
+            "a moderator's keep",
+            "its frontpage or curated tier",
+            "its pin",
+        ]
+        .iter()
+        .position(|k| k == w)
     });
     out
 }
@@ -881,8 +885,10 @@ async fn confirm_suspension(
         tt(uri),
         lit(" suspends "),
         tt(&named),
-        lit(": they apply to the version a moderator saw, and stop until one asserts them again \
-             on the new version"),
+        lit(
+            ": they apply to the version a moderator saw, and stop until one asserts them again \
+             on the new version",
+        ),
     ]));
     if yes {
         return Ok(());

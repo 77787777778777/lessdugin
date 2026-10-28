@@ -574,9 +574,8 @@ async fn report_adoption(
     ]));
     for e in skipped {
         let why = match e.status {
-            ModLogStatus::Effective => reported_reason(report, &e.uri).unwrap_or_else(|| {
-                "cannot adopt (rank or role), or kept own assertion".to_owned()
-            }),
+            ModLogStatus::Effective => reported_reason(report, &e.uri)
+                .unwrap_or_else(|| "cannot adopt (rank or role), or kept own assertion".to_owned()),
             s => format!("never counted ({})", status_name(s)),
         };
         let mut parts = vec![tt(&e.action), tt(&e.value), tt(&e.subject)];

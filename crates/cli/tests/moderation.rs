@@ -500,9 +500,9 @@ fn adopting_names_the_engines_reason() {
     let j = alice.json(&["mod", "adopt", "bob.test", "--yes"]);
     let report = j["state"]["report"].as_array().cloned().unwrap_or_default();
     assert!(
-        report
-            .iter()
-            .any(|l| l.as_str().is_some_and(|l| l.starts_with("kept own assertion for "))),
+        report.iter().any(|l| l
+            .as_str()
+            .is_some_and(|l| l.starts_with("kept own assertion for "))),
         "{j}"
     );
     check(&["mods", "rm", "bob.test", "--yes"]);
