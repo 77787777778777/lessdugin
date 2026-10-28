@@ -445,7 +445,13 @@ export function Composer({
       ) : null}
       {showPreview && preview && (
         <section className={styles.preview} aria-label="Preview">
-          <RenderedHtml html={preview.html} media={preview.media} preview className="lfm-compact" />
+          <RenderedHtml
+            html={preview.html}
+            media={preview.media}
+            preview
+            autoload={false}
+            className="lfm-compact"
+          />
           {preview.notices.map((n) => (
             <p key={n} className={styles.notice}>
               {n}

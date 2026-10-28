@@ -11,7 +11,8 @@
 // - `a[data-anchor]`: scrolls inside this root only (lfm-1.md §4.6; never `location.hash`);
 // - `[data-cid]` media: "click to load" placeholders naming the host that will see the reader's
 //   address (sync.md §11.3); a click is the consent (synthesis-v1.md 3.9), or the engine's
-//   `MediaView.autoload` verdict outside previews, and the bytes then come from the author's
+//   `MediaView.autoload` verdict for the item (a hover preview's target is the item, lfm-1.md
+//   §5.3; the composer's preview never autoloads), and the bytes then come from the author's
 //   PDS through `engine.loadMedia`, which streams, CID-checks and sniffs them and hands back a
 //   `blob:` URL with the display type. An image or a player gets that URL (lib/media.ts,
 //   lib/mediaUrl.ts), anything else becomes a download card; the URL is revoked with the
@@ -271,6 +272,7 @@ export function RenderedHtml({
   media,
   className,
   preview = false,
+  autoload = true,
   sidenotes = false,
   ref,
 }: {
@@ -281,6 +283,9 @@ export function RenderedHtml({
   className?: string | undefined;
   /** Inside a hover preview: no nested previews (depth 1). */
   preview?: boolean | undefined;
+  /** false: the media load only on a click, whatever their `MediaView.autoload` (the
+   * composer's preview of an unpublished draft). */
+  autoload?: boolean | undefined;
   sidenotes?: boolean | undefined;
   ref?: Ref<RenderedHtmlHandle> | undefined;
 }) {
@@ -322,9 +327,10 @@ export function RenderedHtml({
       addSidenotes(el);
       makeAnchorsFocusable(el);
     }
-    // the engine's autoload verdict (sync.md §11.3); a preview loads nothing by itself (§5.3)
+    // the engine's autoload verdict (sync.md §11.3), inside a hover preview too (lfm-1.md §5.3:
+    // the views are the target item's)
     const shown = revokers.current;
-    if (!preview) {
+    if (autoload) {
       for (const button of auto) {
         const cid = button.getAttribute("data-media-cid");
         loadPlaceholder(
@@ -340,7 +346,7 @@ export function RenderedHtml({
     return () => {
       for (const revoke of shown.splice(0)) revoke();
     };
-  }, [html, sidenotes, preview, engine]);
+  }, [html, sidenotes, autoload, engine]);
 
   // Mentions: substitute handles verified both ways (§5.4). Eager resolution covers only the
   // participants among the first 16 distinct mentioned DIDs; the others are substituted only

@@ -232,11 +232,28 @@ describe("RenderedHtml", () => {
       expect(screen.queryByRole("button", { name: /click to load/ })).toBeNull();
     });
 
-    it("loads nothing by itself inside a hover preview", async () => {
+    it("follows the autoload verdict inside a hover preview (lfm-1.md §5.3)", async () => {
+      URL.revokeObjectURL = vi.fn();
+      const engine = new MockEngine();
+      const spy = vi
+        .spyOn(engine, "loadMedia")
+        .mockResolvedValue({ cid: CID, size: 12, url: "blob:t/6", mime: "image/png" });
+      const auto = { ...view("image/png"), autoload: true };
+      const { container } = renderWithApp(<RenderedHtml html={IMG} media={[auto]} preview />, {
+        engine,
+      });
+      const root = await mountedRoot(container);
+      await waitFor(() => expect(root.querySelector("img")?.getAttribute("src")).toBe("blob:t/6"));
+      expect(spy).toHaveBeenCalledWith(CID, auto);
+    });
+
+    it("loads nothing by itself when autoload is off (the composer's preview)", async () => {
       const engine = new MockEngine();
       const spy = vi.spyOn(engine, "loadMedia");
       const auto = { ...view("image/png"), autoload: true };
-      renderWithApp(<RenderedHtml html={IMG} media={[auto]} preview />, { engine });
+      renderWithApp(<RenderedHtml html={IMG} media={[auto]} preview autoload={false} />, {
+        engine,
+      });
       expect(await screen.findByRole("button", { name: /click to load/ })).toBeTruthy();
       expect(spy).not.toHaveBeenCalled();
     });
