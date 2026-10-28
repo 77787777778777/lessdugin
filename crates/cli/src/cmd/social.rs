@@ -412,6 +412,7 @@ pub async fn mods(ctx: &Ctx, args: ModsArgs) -> Result<(), CliError> {
         }
     };
     let at = w.engine.mods_set(&forum, &change).await?;
+    let edit_id = at.id.clone();
     let done = drive_action(
         ctx,
         &w,
@@ -423,9 +424,49 @@ pub async fn mods(ctx: &Ctx, args: ModsArgs) -> Result<(), CliError> {
     )
     .await?;
     if let (Some((who, originals)), true) = (adopting, done) {
-        report_adoption(ctx, &w, &forum, &who, &originals).await?;
+        let report = adoption_report(&w, &edit_id).await?;
+        report_adoption(ctx, &w, &forum, &who, &originals, &report).await?;
     }
     Ok(())
+}
+
+/// The adopt report (`WriteState.done.report`, `engine-api.md` §3.2) of the `mod adopt` that
+/// `mods rm` ran first: the declaration edit `edit_id` is sent only after that write (its
+/// `after`), whose ticket is still in the outbox once the edit is done.
+async fn adoption_report(w: &Writer, edit_id: &str) -> Result<Vec<String>, CliError> {
+    use lessdugin_core::outbox::model::write_id;
+    let Some(adopt) = w
+        .engine
+        .outbox()
+        .get(edit_id)
+        .await?
+        .and_then(|p| Some(write_id(&p.account, p.after?)))
+    else {
+        return Ok(Vec::new());
+    };
+    Ok(match w.engine.write_status(&adopt).await? {
+        Some(lessdugin_core::dto::WriteTicket {
+            state: WriteState::Done { report, .. },
+            ..
+        }) => report,
+        _ => Vec::new(),
+    })
+}
+
+/// Why the adopt report names the original `uri` (`cannot adopt <uri>: <why>`, `kept own
+/// assertion for <uri>`, `engine-api.md` §3.5 `mod_adopt`), if it does.
+fn reported_reason(report: &[String], uri: &str) -> Option<String> {
+    report.iter().find_map(|l| {
+        if let Some(why) = l
+            .strip_prefix("cannot adopt ")
+            .and_then(|r| r.strip_prefix(uri))
+            .and_then(|r| r.strip_prefix(": "))
+        {
+            return Some(format!("cannot adopt: {why}"));
+        }
+        (l.strip_prefix("kept own assertion for ") == Some(uri))
+            .then(|| "kept own assertion".to_owned())
+    })
 }
 
 /// The name of a mod-log status, as `dto/1` spells it.
@@ -473,19 +514,21 @@ async fn originals_of(
 }
 
 /// After `mod adopt` or `mods rm` sent its write: the former moderator's `originals` that no
-/// own record adopts now (one whose `adopts` names it). The adopt protocol reports them
-/// ("cannot adopt", "kept own assertion", `data-model.md` §8.6) but the engine does not hand
-/// that report out, so the CLI reads the outcome from the mod log after a sync. They lapse
-/// with the former's role.
+/// own record adopts now (one whose `adopts` names it), read from the mod log after a sync.
+/// They lapse with the former's role. Each says why: an original that never counted names its
+/// status, one in effect the reason of the engine's adopt `report` ("cannot adopt …", "kept
+/// own assertion", `data-model.md` §8.6); a report line naming no listed original is shown
+/// as it is.
 async fn report_adoption(
     ctx: &Ctx,
     w: &Writer,
     forum: &str,
     who: &lessdugin_core::dto::ActorView,
     originals: &[lessdugin_core::dto::ModLogEntry],
+    report: &[String],
 ) -> Result<(), CliError> {
     use lessdugin_core::dto::ModLogStatus;
-    if originals.is_empty() {
+    if originals.is_empty() && report.is_empty() {
         return Ok(());
     }
     let mine = originals_of(ctx, w, forum, &w.account.did).await?;
@@ -497,9 +540,17 @@ async fn report_adoption(
         .iter()
         .filter(|o| !adopted.contains(o.uri.as_str()))
         .collect();
+    let unlisted: Vec<&String> = report
+        .iter()
+        .filter(|l| {
+            !originals
+                .iter()
+                .any(|o| reported_reason(std::slice::from_ref(l), &o.uri).is_some())
+        })
+        .collect();
     let n = u32::try_from(originals.len()).unwrap_or(u32::MAX);
     let k = u32::try_from(originals.len() - skipped.len()).unwrap_or(u32::MAX);
-    if skipped.is_empty() {
+    if skipped.is_empty() && unlisted.is_empty() {
         ctx.out.note(&[(
             cat([
                 lit("Adopted all "),
@@ -523,9 +574,9 @@ async fn report_adoption(
     ]));
     for e in skipped {
         let why = match e.status {
-            ModLogStatus::Effective => {
+            ModLogStatus::Effective => reported_reason(report, &e.uri).unwrap_or_else(|| {
                 "cannot adopt (rank or role), or kept own assertion".to_owned()
-            }
+            }),
             s => format!("never counted ({})", status_name(s)),
         };
         let mut parts = vec![tt(&e.action), tt(&e.value), tt(&e.subject)];
@@ -534,6 +585,9 @@ async fn report_adoption(
         }
         parts.push(tt(&why));
         ctx.out.warn(cat([lit("  "), cat(intersperse(parts))]));
+    }
+    for l in unlisted {
+        ctx.out.warn(cat([lit("  "), tt(l)]));
     }
     Ok(())
 }
@@ -788,8 +842,8 @@ async fn adopt(ctx: &Ctx, actor: &str, forum: Option<&str>, yes: bool) -> Result
     let ticket = w.engine.mod_adopt(&forum, actor).await?;
     let t = write::drive(ctx, &w, ticket).await?;
     write::report(ctx, &t, "Adopted")?;
-    if matches!(t.state, WriteState::Done { .. }) {
-        report_adoption(ctx, &w, &forum, &who, &originals).await?;
+    if let WriteState::Done { report, .. } = &t.state {
+        report_adoption(ctx, &w, &forum, &who, &originals, report).await?;
     }
     Ok(())
 }

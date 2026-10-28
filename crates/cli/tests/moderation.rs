@@ -393,8 +393,7 @@ fn stale_keep(bob: &fakenet::User, carol: &fakenet::User) -> String {
 }
 
 /// `mod adopt` and `mods rm` say which of the former moderator's assertions they did not
-/// adopt (`data-model.md` §8.6 "cannot adopt … never counted"): those lapse with the role,
-/// and the engine keeps its report to itself.
+/// adopt (`data-model.md` §8.6 "cannot adopt … never counted"): those lapse with the role.
 #[test]
 fn adopting_reports_what_it_did_not_adopt() {
     let net = Net::new();
@@ -447,4 +446,55 @@ fn adopting_reports_what_it_did_not_adopt() {
         .collect();
     assert_eq!(adopted.len(), 1, "{adopted:?}");
     assert_eq!(adopted[0]["subject"], hidden.as_str(), "{adopted:?}");
+}
+
+/// An assertion in effect that the adoption skips is listed with the reason of the engine's
+/// adopt report (`WriteState.done.report`, sec-8), for `mod adopt` and for the adoption `mods
+/// rm` runs first: here the owner's own hide of the same post, which the adoption keeps.
+#[test]
+fn adopting_names_the_engines_reason() {
+    let net = Net::new();
+    let alice = net.user("alice.test", true);
+    let bob = net.user("bob.test", true);
+    let carol = net.user("carol.test", true);
+    alice.json(&["forum", "create", "meta", "--frontpage"]);
+    for u in [&bob, &carol] {
+        u.json(&["join", "alice.test/meta", "--yes"]);
+    }
+    alice.json(&["approve", "bob.test", "carol.test", "--yes"]);
+    alice.json(&["mods", "add", "bob.test", "--yes"]);
+    carol.ok(&["sync", "alice.test/meta"]);
+    let f = carol.file("p.md", "---\ntitle: From carol\n---\nHello.\n");
+    let post = carol.json(&["post", s(&f), "--yes"]);
+    let hidden = post["state"]["uri"].as_str().unwrap().to_owned();
+    bob.ok(&["sync", "alice.test/meta"]);
+    let h = bob.json(&["mod", "hide", &hidden, "--yes"]);
+    assert_eq!(h["state"]["kind"], "done", "{h}");
+    alice.ok(&["sync", "alice.test/meta"]);
+    let h = alice.json(&["mod", "hide", &hidden, "--reason", "mine", "--yes"]);
+    assert_eq!(h["state"]["kind"], "done", "{h}");
+
+    let check = |args: &[&str]| {
+        let out = alice.run(args);
+        assert!(out.status.success(), "{}", fakenet::text(&out.stderr));
+        let err = fakenet::text(&out.stderr);
+        assert!(err.contains("adopted 0 of 1 assertion"), "{err}");
+        let line = err
+            .lines()
+            .find(|l| l.contains(&hidden))
+            .unwrap_or_else(|| panic!("the hide is not reported: {err}"));
+        assert!(line.contains("kept own assertion"), "{line}");
+        assert!(!line.contains("rank or role"), "{line}");
+    };
+    check(&["mod", "adopt", "bob.test", "--yes"]);
+    // the adopt write's report also travels with `mod adopt --json`
+    let j = alice.json(&["mod", "adopt", "bob.test", "--yes"]);
+    let report = j["state"]["report"].as_array().cloned().unwrap_or_default();
+    assert!(
+        report
+            .iter()
+            .any(|l| l.as_str().is_some_and(|l| l.starts_with("kept own assertion for "))),
+        "{j}"
+    );
+    check(&["mods", "rm", "bob.test", "--yes"]);
 }
