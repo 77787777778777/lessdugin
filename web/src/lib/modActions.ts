@@ -87,3 +87,22 @@ export function positiveAssertions(raw: RawView): PositiveKind[] {
   }
   return [...out];
 }
+
+const POSITIVE_TEXT: Record<PositiveKind, string> = {
+  keep: "a moderator's keep",
+  tier: "its frontpage or curated tier",
+  pin: "its pin",
+};
+
+/** What an author is told before editing an item that carries positive assertions (social.md
+ * §4.5), or null when it carries none. */
+export function suspensionWarning(
+  kinds: readonly PositiveKind[],
+  what: "post" | "comment",
+): string | null {
+  if (kinds.length === 0) return null;
+  const list = kinds.map((k) => POSITIVE_TEXT[k]);
+  const named =
+    list.length === 1 ? list[0] : `${list.slice(0, -1).join(", ")} and ${list[list.length - 1]}`;
+  return `Editing this ${what} suspends ${named}: they apply to the version a moderator saw, and stop until one asserts them again on the new version.`;
+}

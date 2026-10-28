@@ -1713,6 +1713,46 @@ export class MockEngine implements EngineApi {
     return { dto: DTO_VERSION, entries };
   }
 
+  /** The modActions naming `uri`, as the engine's raw view lists them: one record per (actor,
+   * action key), the latest, unless it was removed (`{uri, cid, valid, record, status}`). */
+  private rawAssertions(uri: AtUri): Json[] {
+    const naming = (this.s.modLog.get(FORUM_URI) ?? []).filter((e) => e.subject === uri);
+    const latest = new Map(naming.map((e) => [`${e.actor} ${e.action}`, e] as const));
+    const t = (name: string, fields: { [k: string]: Json }): Json => ({
+      $type: `${COLL.modAction}#${name}`,
+      ...fields,
+    });
+    const action = (key: string, value: string): Json => {
+      if (key === "hide")
+        return t("hide", value === "keep" ? { hidden: false } : { spam: value.includes("spam") });
+      if (key === "tier") return t("tier", { tier: value });
+      if (key.startsWith("pin:"))
+        return t("pin", { scope: key.slice(4), pinned: value === "pinned" });
+      if (key === "lock") return t("lock", { locked: value === "locked" });
+      return t(key, {});
+    };
+    return [...latest.values()]
+      .filter((e) => e.value !== "removed")
+      .map((e) => {
+        const auri = atUri(e.actor, COLL.modAction, `${FK}-${b32hash(`${e.action}:${uri}`, 16)}`);
+        const record: { [k: string]: Json } = {
+          $type: COLL.modAction,
+          forum: FORUM_URI,
+          subject: uri,
+          action: action(e.action, e.value),
+          createdAt: new Date(FIXTURE_NOW).toISOString(),
+        };
+        if (e.reason !== undefined) record.reason = e.reason;
+        return {
+          uri: auri,
+          cid: fakeCid(auri),
+          valid: true,
+          record,
+          status: e.lapsed ? "lapsed" : "effective",
+        };
+      });
+  }
+
   async raw(uri: AtUri): Promise<RawView> {
     const p = this.s.posts.get(uri);
     const c = this.s.comments.get(uri);
@@ -1793,15 +1833,7 @@ export class MockEngine implements EngineApi {
       level: "pds",
       record,
       validity: [],
-      assertions: (this.s.modLog.get(FORUM_URI) ?? [])
-        .filter((e) => e.subject === uri)
-        .map((e) => ({
-          uri: atUri(e.actor, COLL.modAction, `${FK}-${b32hash(`${e.action}:${e.subject}`, 16)}`),
-          actor: e.actor,
-          action: e.action,
-          value: e.value,
-          status: e.lapsed ? "lapsed" : "effective",
-        })),
+      assertions: this.rawAssertions(uri),
     };
     if (cid !== undefined) view.cid = cid;
     if (c) view.root = c.root;

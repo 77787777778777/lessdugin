@@ -20,6 +20,7 @@ import { qk, useActiveAccount } from "../../engine/queries.ts";
 import { useAnnounceQueued } from "../../engine/queued.ts";
 import { writeStore } from "../../engine/writes.ts";
 import { capReason } from "../../lib/caps.ts";
+import { positiveAssertions, suspensionWarning } from "../../lib/modActions.ts";
 import {
   markdownOf,
   mediaRefsOf,
@@ -70,11 +71,14 @@ function PostForm({
   initial,
   draftId,
   editing,
+  suspends,
 }: {
   initial: PostDraft | null;
   draftId: string | undefined;
   /** The uri of the own post being edited (edit mode), if any. */
   editing?: string | undefined;
+  /** Edit mode: the warning that the edit suspends the post's positive assertions. */
+  suspends?: string | null | undefined;
 }) {
   const engine = useEngine();
   const { forum } = useForumView();
@@ -231,6 +235,11 @@ function PostForm({
       </fieldset>
       <div className={ui.field}>
         <span className={ui.label}>Body</span>
+        {suspends && (
+          <p className={ui.notice} role="note" data-testid="edit-suspends">
+            {suspends}
+          </p>
+        )}
         <LazyComposer
           label="Post body"
           initial={initial?.body.markdown ?? ""}
@@ -303,7 +312,13 @@ function EditPost({ uri }: { uri: string }) {
   return (
     <section className={ui.page} aria-label="Edit post">
       <h2 className={ui.sectionTitle}>Edit post</h2>
-      <PostForm key={uri} initial={draft} draftId={undefined} editing={uri} />
+      <PostForm
+        key={uri}
+        initial={draft}
+        draftId={undefined}
+        editing={uri}
+        suspends={suspensionWarning(positiveAssertions(raw.data), "post")}
+      />
     </section>
   );
 }
