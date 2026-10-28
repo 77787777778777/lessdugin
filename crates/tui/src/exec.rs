@@ -547,20 +547,35 @@ async fn cached<H: Host>(engine: &Engine<H>, uri: &str) -> Result<serde_json::Va
         .map_err(|e| EngineError::internal(format!("{uri}: {e}")))
 }
 
-/// The markdown of a cached body (`""` for none); a body stored as a blob is not edited here,
-/// as in the CLI.
-fn body_markdown(v: &serde_json::Value) -> Result<String, EngineError> {
+/// The markdown of the cached body of `uri` (`""` for none). A body stored as a blob (spilled,
+/// `lfm-1.md` §1.3) is its source as the engine fetched it for the thread's view: the thread is
+/// read first, which fetches it when the host does not hold it yet.
+async fn body_markdown<H: Host>(
+    engine: &Engine<H>,
+    uri: &str,
+    v: &serde_json::Value,
+) -> Result<String, EngineError> {
     let body = v.get("body");
     match body
         .and_then(|b| b.get("text"))
         .and_then(serde_json::Value::as_str)
     {
-        Some(t) => Ok(t.to_owned()),
-        None if body.is_none() => Ok(String::new()),
-        None => Err(EngineError::invalid_input(
-            "this body is stored as a blob; edit it with `lessdugin edit`",
-        )),
+        Some(t) => return Ok(t.to_owned()),
+        None if body.is_none() => return Ok(String::new()),
+        None => {}
     }
+    let blob = body
+        .and_then(lessdugin_core::model::render::text_blob_cid)
+        .ok_or_else(|| EngineError::invalid_input("this body is not one the TUI can edit"))?;
+    if let Some(src) = stored_text_blob(engine, blob).await {
+        return Ok(src);
+    }
+    engine.get_thread(uri, &ThreadOpts::default()).await?;
+    stored_text_blob(engine, blob).await.ok_or_else(|| {
+        EngineError::invalid_input(
+            "this body is stored as a blob that could not be loaded; try again later",
+        )
+    })
 }
 
 /// `:edit`: your post or comment's draft as cached (the fields the CLI's `edit` keeps) and the
@@ -579,7 +594,7 @@ async fn start_edit<H: Host>(
         ));
     }
     let v = cached(engine, &uri).await?;
-    let markdown = body_markdown(&v)?;
+    let markdown = body_markdown(engine, &uri, &v).await?;
     let s = |k: &str| {
         v.get(k)
             .and_then(serde_json::Value::as_str)
@@ -1052,6 +1067,13 @@ async fn spilled_source<H: Host>(
     }) {
         return None;
     }
+    stored_text_blob(engine, blob).await
+}
+
+/// The source of the `textBlob` `blob` the host holds (it stored it CID-checked when the engine
+/// fetched it), at most `BLOB_TEXT_MAX_BYTES`, decoded as the engine decodes it (UTF-8, one
+/// leading U+FEFF stripped); `None` when the host does not hold it or it is not a body.
+async fn stored_text_blob<H: Host>(engine: &Engine<H>, blob: &str) -> Option<String> {
     let h = engine.host().blob_open(blob).await.ok()??;
     let max = lessdugin_core::limits::BLOB_TEXT_MAX_BYTES;
     if h.cid != blob || h.size > max {

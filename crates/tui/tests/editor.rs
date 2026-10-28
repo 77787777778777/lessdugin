@@ -266,6 +266,92 @@ fn the_edit_command_edits_a_quick_takes_body() {
     let (title, body) = post_of(&s, &take);
     assert_eq!(title, None);
     assert_eq!(body.trim(), "Sharper: A one-line take.", "{body:?}");
+
+    // and the editor is given the take as it is, with no (empty) title line above it
+    let dir = tempfile::tempdir().unwrap();
+    let mut t = tui_with_sed(&s, dir.path(), "s/Sharper:/Sharper:/", true);
+    block_on(t.start(None));
+    run(&mut t, &format!("edit {take}"));
+    let seen = std::fs::read_to_string(dir.path().join("seen.txt")).unwrap();
+    assert!(seen.starts_with("Sharper:\n"), "{seen:?}");
+    assert!(!seen.contains("the first line is the title"), "{seen}");
+    assert!(!seen.contains("The first line is the title"), "{seen}");
+}
+
+/// carol's TUI with an `$EDITOR` that runs `sed -e <expr>` over the file (and, with `record`,
+/// keeps a copy of what it was given in `seen.txt`).
+fn tui_with_sed(
+    s: &common::Scenario,
+    dir: &std::path::Path,
+    expr: &str,
+    record: bool,
+) -> Headless<lessdugin_testkit::MemHost> {
+    let script = dir.join("sed-editor.sh");
+    let keep = if record {
+        format!("cp \"$1\" '{}'\n", dir.join("seen.txt").display())
+    } else {
+        String::new()
+    };
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nset -e\n{keep}sed -e '{expr}' \"$1\" > \"$1.new\"\nmv \"$1.new\" \"$1\"\n"
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    block_on(Headless::new(
+        s.w.carol.engine.clone(),
+        HeadlessOpts {
+            editor: Some(editor(dir, &script)),
+            ..HeadlessOpts::default()
+        },
+    ))
+    .unwrap()
+}
+
+/// `:edit` on a post whose body spilled into a blob (over 64 KiB, `data-model.md` §5.3) edits
+/// its source as the engine fetched it, and the new version spills again.
+#[test]
+fn the_edit_command_edits_a_spilled_body() {
+    use lessdugin_core::dto::PostDraft;
+    let s = scenario();
+    let carol = &s.w.carol;
+    let mut source = "The old opening.\n\n".to_owned();
+    while source.len() <= 65_536 {
+        source.push_str("More words in the long body. ");
+    }
+    let t = block_on(carol.engine.publish(&PostDraft::article(&s.forum, "Long", source))).unwrap();
+    carol.flush();
+    let post = carol.done(&t);
+    let record = |uri: &str| {
+        let u = lessdugin_atp::syntax::AtUri::parse(uri).unwrap();
+        block_on(
+            lessdugin_core::store::records::RecordStore::new(carol.engine.host().cache()).get(&u),
+        )
+        .unwrap()
+        .unwrap()
+        .value_json()
+        .unwrap()
+    };
+    assert!(record(&post)["body"].get("textBlob").is_some(), "it spilled");
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut t = tui_with_sed(&s, dir.path(), "s/The old opening./The new opening./", false);
+    block_on(t.start(None));
+    run(&mut t, &format!("edit {post}"));
+    let st = t.state.status.as_ref().unwrap().text.to_plain_string();
+    assert!(!st.contains("blob"), "{st}");
+    block_on(t.engine().outbox_flush()).unwrap();
+    block_on(t.settle());
+    let (title, body) = post_of(&s, &post);
+    assert_eq!(title.as_deref(), Some("Long"));
+    assert!(body.starts_with("The new opening. More words"), "{}", &body[..80]);
+    assert!(record(&post)["body"].get("textBlob").is_some(), "it spilled again");
 }
 
 /// `:edit` on an article keeps a title the user did not change as it was, a leading `#`
