@@ -449,7 +449,7 @@ fn media_get_streams_a_blob_at_the_hard_limit() {
     use std::io::{Read, Seek, SeekFrom};
     /// The resident set the whole CLI may reach: its code, the store and a few chunks; a
     /// buffering implementation needs the blob's 300 MiB on top.
-    const RSS_BUDGET: u64 = 160 * 1024 * 1024;
+    const RSS_BUDGET: u64 = 128 * 1024 * 1024;
 
     let (net, alice) = forum();
     let out = publish_draft(
