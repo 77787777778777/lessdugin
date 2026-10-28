@@ -230,20 +230,17 @@ async fn edit(ctx: &Ctx, a: ForumEditArgs) -> Result<(), CliError> {
     let about = match a.about {
         Some(t) if t.trim().is_empty() => None,
         Some(t) => Some(BodyDraft::text(t)),
+        // the current about is kept: its text (a spilled one fetched from the owner's PDS) and
+        // its media
         None => match decl.get("about") {
             None => None,
-            // an inline about without media is kept as it is; anything else (a spilled text,
-            // media) cannot be rewritten from here
-            Some(md) if md.get("textBlob").is_none() && md.get("media").is_none() => md
-                .get("text")
-                .and_then(serde_json::Value::as_str)
-                .map(BodyDraft::text),
-            Some(_) => {
+            Some(md) if md.get("text").is_none() && md.get("textBlob").is_none() => {
                 return Err(CliError::usage(
-                    "this forum's about text has media or is stored as a blob; pass --about to \
-                     replace it",
+                    "this forum's about text is in a format this client cannot keep; pass \
+                     --about to replace it",
                 ));
             }
+            Some(md) => Some(write::kept_body(&w, &uri, md).await?),
         },
     };
     let mut d = ForumDraft::new(String::new(), a.name.unwrap_or(current.name.clone()));
@@ -412,16 +409,22 @@ async fn show(ctx: &Ctx, forum: Option<&str>) -> Result<(), CliError> {
     for b in v.banners.iter().filter(|b| b.code != RELAY_DEPENDENT) {
         out.warn(tt(&b.message));
     }
-    if v.about.is_some() {
+    if let Some(view) = &v.about {
         let style = render::BodyStyle {
             color: out.color(),
             hyperlinks: out.color() && out.stdout_is_tty(),
             width: render::width(out.stdout_is_tty()),
         };
-        if let Ok((_, decl)) = write::cached(&engine, &f.uri).await
-            && let Some(about) = decl.get("about")
-            && let Some(text) = render::markdown(about, &style, 2, &|_| None)
-        {
+        // the cached markdown, else (a spilled about) what the view shows: its excerpt and
+        // notice
+        let local = match write::cached(&engine, &f.uri).await {
+            Ok((_, decl)) => decl
+                .get("about")
+                .and_then(|about| render::markdown(about, &style, 2, &|_| None)),
+            Err(_) => None,
+        };
+        let text = local.unwrap_or_else(|| render::view_body(view, &style, 2));
+        if !text.trim().is_empty() {
             out.page(&format!("\n{text}"), false);
         }
     }

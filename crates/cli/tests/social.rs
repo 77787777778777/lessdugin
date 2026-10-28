@@ -643,3 +643,44 @@ fn the_human_thread_shows_agreement_reacts_and_banners() {
     let out = dave.ok(&["--offline", "ls", &w.forum, "--all"]);
     assert!(out.contains("moderation data unavailable"), "{out}");
 }
+
+/// `forum edit` keeps the about it is not asked to change, also a spilled one (`textBlob`,
+/// over 64 KiB, `data-model.md` §5.3) and its media: the text is fetched from the owner's PDS
+/// and spilled again, the media sent again as references (m4-5). `forum show` gives a spilled
+/// about's notice rather than nothing.
+#[test]
+fn forum_edit_keeps_a_spilled_about_and_its_media() {
+    use lessdugin_lexicon::collection::nsid;
+    const PNG: &[u8] = b"\x89PNG\r\n\x1a\n\
+        \x00\x00\x00\x0dIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\
+        \x00\x00\x00\x0bIDAT\x78\xda\x63\x60\x00\x02\x00\x00\x05\x00\x01\xe9\xfa\xdc\xd8\
+        \x00\x00\x00\x00IEND\xae\x42\x60\x82";
+    let net = Net::new();
+    let alice = net.user("alice.test", true);
+    let about = format!("# About\n\n{}\n", "All about it. ".repeat(5_000));
+    assert!(about.len() > 65_536);
+    let c = alice.json(&["forum", "create", "big", "--about", &about]);
+    assert_eq!(c["state"]["kind"], "done", "{c}");
+    let mut decl = alice.account.get(nsid::FORUM, "big").unwrap();
+    let text_blob = decl["about"]["textBlob"]["ref"].clone();
+    assert!(text_blob.is_object(), "spilled: {decl}");
+    // another client adds an image to the about
+    let png = alice.account.upload_blob(PNG.to_vec(), "image/png");
+    decl["about"]["media"] = serde_json::json!([{ "blob": png, "alt": "a dot" }]);
+    alice.account.put(nsid::FORUM, "big", &decl);
+    alice.ok(&["sync", "alice.test/big"]);
+
+    let out = alice.ok(&["forum", "show", "alice.test/big"]);
+    assert!(out.contains("stored as a blob"), "{out}");
+
+    let e = alice.json(&["forum", "edit", "alice.test/big", "--name", "Big"]);
+    assert_eq!(e["state"]["kind"], "done", "{e}");
+    let decl = alice.account.get(nsid::FORUM, "big").unwrap();
+    assert_eq!(decl["name"], "Big", "{decl}");
+    assert_eq!(decl["about"]["textBlob"]["ref"], text_blob, "{decl}");
+    assert!(decl["about"].get("text").is_none(), "{decl}");
+    let media = decl["about"]["media"].as_array().cloned().unwrap_or_default();
+    assert_eq!(media.len(), 1, "{decl}");
+    assert_eq!(media[0]["blob"]["ref"], png["ref"], "{decl}");
+    assert_eq!(media[0]["alt"], "a dot", "{decl}");
+}

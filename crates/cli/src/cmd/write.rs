@@ -647,6 +647,32 @@ async fn spilled_markdown(w: &Writer, uri: &str, blob: &Value) -> Result<String,
     })
 }
 
+/// The markdown source of `md`, an `md` field of the writer's own record `uri`, as an edit
+/// starts from it: its inline `text`, or its spilled `textBlob` fetched ([`spilled_markdown`];
+/// the outbox spills the new text again if it must, `data-model.md` §5.3).
+async fn body_markdown(w: &Writer, uri: &str, md: &Value) -> Result<String, CliError> {
+    if let Some(t) = md.get("text").and_then(Value::as_str) {
+        return Ok(t.to_owned());
+    }
+    match md.get("textBlob") {
+        Some(blob) => spilled_markdown(w, uri, blob).await,
+        None => Err(EngineError::new(
+            ErrorCode::Unsupported,
+            format!("{uri}: this body has neither text nor a text blob to edit"),
+        )
+        .into()),
+    }
+}
+
+/// An `md` field of the writer's own record `uri` as the draft that keeps it: its markdown
+/// ([`body_markdown`]) and its media, sent again as references (`data-model.md` §8.8).
+pub async fn kept_body(w: &Writer, uri: &str, md: &Value) -> Result<BodyDraft, CliError> {
+    Ok(BodyDraft {
+        markdown: body_markdown(w, uri, md).await?,
+        media: media_of(uri, Some(md))?,
+    })
+}
+
 async fn current(w: &Writer, uri: &str) -> Result<Current, CliError> {
     let u = AtUri::parse(uri).map_err(|e| EngineError::invalid_ref(format!("{uri:?}: {e}")))?;
     let coll = u.collection().as_str();
@@ -656,21 +682,9 @@ async fn current(w: &Writer, uri: &str) -> Result<Current, CliError> {
     }
     let (_, v) = cached(&w.engine, uri).await?;
     let body = v.get("body");
-    let markdown = match body.and_then(|b| b.get("text")).and_then(Value::as_str) {
-        Some(t) => t.to_owned(),
-        None if body.is_none() => String::new(),
-        // a spilled body is edited as its text; the engine spills the new one again if it
-        // must (`data-model.md` §5.2)
-        None => match body.and_then(|b| b.get("textBlob")) {
-            Some(blob) => spilled_markdown(w, uri, blob).await?,
-            None => {
-                return Err(EngineError::new(
-                    ErrorCode::Unsupported,
-                    format!("{uri}: this body has neither text nor a text blob to edit"),
-                )
-                .into());
-            }
-        },
+    let markdown = match body {
+        Some(b) => body_markdown(w, uri, b).await?,
+        None => String::new(),
     };
     let s = |k: &str| v.get(k).and_then(Value::as_str).map(str::to_owned);
     Ok(Current {

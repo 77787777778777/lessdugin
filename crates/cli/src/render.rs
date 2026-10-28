@@ -310,6 +310,12 @@ pub async fn body<H: Host>(
     {
         return with_notices(s, view, style, indent_by);
     }
+    view_body(view, style, indent_by)
+}
+
+/// A rendered body as the view gives it: its plain text and notices (a body the CLI does not
+/// render from its markdown, such as a spilled one).
+pub fn view_body(view: &RenderedBody, style: &BodyStyle, indent_by: usize) -> String {
     let mut s = String::new();
     if !view.text.is_empty() {
         s = indent(
