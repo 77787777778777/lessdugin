@@ -788,7 +788,10 @@ fn restrict_and_nullify_keep_each_others_dimension() {
             .unwrap();
         (
             rec["action"]["capabilities"].clone(),
-            rec["action"].get("nullifyVotes").cloned().unwrap_or(json!(false)),
+            rec["action"]
+                .get("nullifyVotes")
+                .cloned()
+                .unwrap_or(json!(false)),
         )
     };
     let t = alice.mod_action(restrict(

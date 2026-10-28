@@ -429,14 +429,16 @@ impl<H: Host> Engine<H> {
             return Ok(None);
         };
         let now_us = self.host.now_ms().saturating_mul(1000);
-        if m.until.as_ref().is_some_and(|u| u.timestamp_micros() <= now_us) {
+        if m.until
+            .as_ref()
+            .is_some_and(|u| u.timestamp_micros() <= now_us)
+        {
             return Ok(None);
         }
         Ok(match &m.action {
-            Action::Restrict(r) => Some((
-                restrict_capabilities(r),
-                r.nullify_votes.unwrap_or(false),
-            )),
+            Action::Restrict(r) => {
+                Some((restrict_capabilities(r), r.nullify_votes.unwrap_or(false)))
+            }
             _ => None,
         })
     }
@@ -601,9 +603,7 @@ impl<H: Host> Engine<H> {
                     Some(c) => c.iter().copied().map(lex_capability).collect(),
                     None => current.as_ref().map(|c| c.0.clone()).unwrap_or_default(),
                 };
-                let nullify = nullify_votes
-                    .or(current.map(|c| c.1))
-                    .unwrap_or(false);
+                let nullify = nullify_votes.or(current.map(|c| c.1)).unwrap_or(false);
                 let caps: Vec<LexCapability> = caps.into_iter().collect();
                 (Action::Restrict(RestrictAction::new(&caps, nullify)), false)
             }

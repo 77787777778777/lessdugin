@@ -360,7 +360,7 @@ export type MembershipMode = "open" | "approval";
 
 export type ModActionIntent = { kind: "assert"; forum: string; scope: ModScope; subject: string; action: ModActionValue; reason?: string; untilMs?: number } | { kind: "remove"; forum: string; scope: ModScope; subject: string; actionKey: string };
 
-export type ModActionValue = { kind: "hide"; hidden: boolean; spam?: boolean; showReason?: boolean } | { kind: "access"; level: AccessLevel } | { kind: "restrict"; capabilities: Capability[]; nullifyVotes?: boolean } | { kind: "tier"; tier: Tier; notice?: BodyDraft } | { kind: "pin"; scope: PinScope; pinned: boolean } | { kind: "lock"; locked: boolean } | { kind: "tag"; removed: boolean; head?: string };
+export type ModActionValue = { kind: "hide"; hidden: boolean; spam?: boolean; showReason?: boolean } | { kind: "access"; level: AccessLevel } | { kind: "restrict"; capabilities?: Capability[]; nullifyVotes?: boolean } | { kind: "tier"; tier: Tier; notice?: BodyDraft } | { kind: "pin"; scope: PinScope; pinned: boolean } | { kind: "lock"; locked: boolean } | { kind: "tag"; removed: boolean; head?: string };
 
 export interface ModLog {
     dto: DtoVersion;
