@@ -85,13 +85,13 @@ pub(crate) async fn acknowledge(
 }
 
 /// Drives an action's write, prints its outcome and notices, and (in JSON mode) the
-/// `ActionTicket` with its final state.
+/// `ActionTicket` with its final state; returns true when the write is done.
 async fn drive_action(
     ctx: &Ctx,
     w: &Writer,
     at: ActionTicket,
     done: &'static str,
-) -> Result<(), CliError> {
+) -> Result<bool, CliError> {
     let notices = at.notices.clone();
     let t = write::drive(ctx, w, at.ticket()).await?;
     if ctx.out.is_json() {
@@ -108,13 +108,13 @@ async fn drive_action(
         if let WriteState::Failed { error } = &t.state {
             return Err(CliError::Engine(error.clone()));
         }
-        return Ok(());
+        return Ok(matches!(t.state, WriteState::Done { .. }));
     }
     write::report(ctx, &t, done)?;
     for n in &notices {
         ctx.out.note(&[(tt(&n.message), Style::Dim)]);
     }
-    Ok(())
+    Ok(matches!(t.state, WriteState::Done { .. }))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -187,7 +187,8 @@ async fn opinion(
     read::sync_thread_quietly(ctx, &w.engine, &uri).await;
     acknowledge(ctx, &w, intent.public_kind(), yes).await?;
     let at = w.engine.opinion(&uri, &intent).await?;
-    drive_action(ctx, &w, at, done).await
+    drive_action(ctx, &w, at, done).await?;
+    Ok(())
 }
 
 /// `lessdugin reacts`: the `default/1` palette (`social.md` §9.1).
@@ -388,6 +389,8 @@ pub async fn mods(ctx: &Ctx, args: ModsArgs) -> Result<(), CliError> {
     let w = ctx.writer().await?;
     let forum = refs::forum_or_current(ctx, &w.engine, None).await?;
     acknowledge(ctx, &w, PublicActionKind::ModAction, args.yes).await?;
+    // a removal that adopts: whom, and what they asserted (reported once it is sent)
+    let mut adopting = None;
     let change = match args.action {
         ModsAction::Add { actor, role } => ModsChange::Add {
             did: actor,
@@ -395,8 +398,12 @@ pub async fn mods(ctx: &Ctx, args: ModsArgs) -> Result<(), CliError> {
             title: None,
         },
         ModsAction::Rm { actor, skip_adopt } => {
+            let who = w.engine.resolve_actor(&actor).await?;
+            let originals = originals_of(ctx, &w, &forum, &who.did).await?;
             if skip_adopt {
-                confirm_lapse(ctx, &w, &forum, &actor, args.yes).await?;
+                confirm_lapse(ctx, &who, &actor, &originals, args.yes)?;
+            } else {
+                adopting = Some((who, originals));
             }
             ModsChange::Remove {
                 did: actor,
@@ -405,7 +412,7 @@ pub async fn mods(ctx: &Ctx, args: ModsArgs) -> Result<(), CliError> {
         }
     };
     let at = w.engine.mods_set(&forum, &change).await?;
-    drive_action(
+    let done = drive_action(
         ctx,
         &w,
         at,
@@ -414,36 +421,134 @@ pub async fn mods(ctx: &Ctx, args: ModsArgs) -> Result<(), CliError> {
             ModsChange::Remove { .. } => "Removed",
         },
     )
-    .await
+    .await?;
+    if let (Some((who, originals)), true) = (adopting, done) {
+        report_adoption(ctx, &w, &forum, &who, &originals).await?;
+    }
+    Ok(())
 }
 
-/// The confirmation of `mods rm --skip-adopt` (`social.md` §4.10, `data-model.md` §8.6): lists
-/// every forum-scope assertion of the moderator that counts now and lapses with the removal,
-/// then asks on a terminal; headless use needs `--yes` (`yes`). Nothing to list asks nothing.
-async fn confirm_lapse(
+/// The name of a mod-log status, as `dto/1` spells it.
+fn status_name(s: lessdugin_core::dto::ModLogStatus) -> String {
+    serde_json::to_value(s)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .unwrap_or_default()
+}
+
+/// The moderator `did`'s forum-scope assertions that a removal from `moderators` ends
+/// (`data-model.md` §8.6 `originals`: valid, scope forum, not lapsed or expired), from the mod
+/// log after a sync of the forum: those that count now (`effective`) and those that never did
+/// (`overridden`, `stale`, `unauthorised`, `reservedUnknown`), which lapse just the same.
+async fn originals_of(
     ctx: &Ctx,
     w: &Writer,
     forum: &str,
-    actor: &str,
-    yes: bool,
-) -> Result<(), CliError> {
+    did: &str,
+) -> Result<Vec<lessdugin_core::dto::ModLogEntry>, CliError> {
     use lessdugin_core::dto::ModLogStatus;
-    let who = w.engine.resolve_actor(actor).await?;
     read::sync_forum_quietly(ctx, &w.engine, forum).await;
-    let mut lapsing = Vec::new();
+    let mut out = Vec::new();
     let mut cursor: Option<String> = None;
     loop {
         let page = w.engine.mod_log(forum, cursor.as_deref(), 200).await?;
-        lapsing.extend(page.entries.into_iter().filter(|e| {
-            e.actor.did == who.did
+        out.extend(page.entries.into_iter().filter(|e| {
+            e.actor.did == did
                 && !e.author_scope
-                && matches!(e.status, ModLogStatus::Effective | ModLogStatus::Overridden)
+                // a revision entry is not an assertion; a lapsed or expired one ended already
+                && !matches!(
+                    e.status,
+                    ModLogStatus::Lapsed
+                        | ModLogStatus::Expired
+                        | ModLogStatus::Edited
+                        | ModLogStatus::Removed
+                )
         }));
         match page.cursor {
             Some(c) => cursor = Some(c),
             None => break,
         }
     }
+    Ok(out)
+}
+
+/// After `mod adopt` or `mods rm` sent its write: the former moderator's `originals` that no
+/// own record adopts now (one whose `adopts` names it). The adopt protocol reports them
+/// ("cannot adopt", "kept own assertion", `data-model.md` §8.6) but the engine does not hand
+/// that report out, so the CLI reads the outcome from the mod log after a sync. They lapse
+/// with the former's role.
+async fn report_adoption(
+    ctx: &Ctx,
+    w: &Writer,
+    forum: &str,
+    who: &lessdugin_core::dto::ActorView,
+    originals: &[lessdugin_core::dto::ModLogEntry],
+) -> Result<(), CliError> {
+    use lessdugin_core::dto::ModLogStatus;
+    if originals.is_empty() {
+        return Ok(());
+    }
+    let mine = originals_of(ctx, w, forum, &w.account.did).await?;
+    let adopted: std::collections::BTreeSet<&str> = mine
+        .iter()
+        .filter_map(|e| e.adopted_from.as_deref())
+        .collect();
+    let skipped: Vec<_> = originals
+        .iter()
+        .filter(|o| !adopted.contains(o.uri.as_str()))
+        .collect();
+    let n = u32::try_from(originals.len()).unwrap_or(u32::MAX);
+    let k = u32::try_from(originals.len() - skipped.len()).unwrap_or(u32::MAX);
+    if skipped.is_empty() {
+        ctx.out.note(&[(
+            cat([
+                lit("Adopted all "),
+                render::count(n, "assertion", "assertions"),
+                lit(" by "),
+                render::actor(who),
+                lit("."),
+            ]),
+            Style::Dim,
+        )]);
+        return Ok(());
+    }
+    ctx.out.warn(cat([
+        lit("adopted "),
+        tt(&k.to_string()),
+        lit(" of "),
+        render::count(n, "assertion", "assertions"),
+        lit(" by "),
+        render::actor(who),
+        lit("; not adopted (they lapse with the role):"),
+    ]));
+    for e in skipped {
+        let why = match e.status {
+            ModLogStatus::Effective => {
+                "cannot adopt (rank or role), or kept own assertion".to_owned()
+            }
+            s => format!("never counted ({})", status_name(s)),
+        };
+        let mut parts = vec![tt(&e.action), tt(&e.value), tt(&e.subject)];
+        if let Some(r) = &e.reason {
+            parts.push(tt(r));
+        }
+        parts.push(tt(&why));
+        ctx.out.warn(cat([lit("  "), cat(intersperse(parts))]));
+    }
+    Ok(())
+}
+
+/// The confirmation of `mods rm --skip-adopt` (`social.md` §4.10, `data-model.md` §8.6): lists
+/// every forum-scope assertion of the moderator that lapses with the removal (`lapsing`, from
+/// [`originals_of`]), then asks on a terminal; headless use needs `--yes` (`yes`). Nothing to
+/// list asks nothing.
+fn confirm_lapse(
+    ctx: &Ctx,
+    who: &lessdugin_core::dto::ActorView,
+    actor: &str,
+    lapsing: &[lessdugin_core::dto::ModLogEntry],
+    yes: bool,
+) -> Result<(), CliError> {
     if lapsing.is_empty() {
         return Ok(());
     }
@@ -452,14 +557,15 @@ async fn confirm_lapse(
         lit("removing without adopting: "),
         render::count(n, "assertion", "assertions"),
         lit(" by "),
-        render::actor(&who),
+        render::actor(who),
         lit(" lapse at once:"),
     ]));
-    for e in &lapsing {
+    for e in lapsing {
         let mut parts = vec![tt(&e.action), tt(&e.value), tt(&e.subject)];
         if let Some(r) = &e.reason {
             parts.push(tt(r));
         }
+        parts.push(tt(&status_name(e.status)));
         ctx.out.warn(cat([lit("  "), cat(intersperse(parts))]));
     }
     if yes {
@@ -556,7 +662,8 @@ async fn mod_action(
 ) -> Result<(), CliError> {
     acknowledge(ctx, w, PublicActionKind::ModAction, yes).await?;
     let at = w.engine.mod_action(&intent).await?;
-    drive_action(ctx, w, at, done).await
+    drive_action(ctx, w, at, done).await?;
+    Ok(())
 }
 
 fn assert(
@@ -676,9 +783,15 @@ async fn adopt(ctx: &Ctx, actor: &str, forum: Option<&str>, yes: bool) -> Result
     let w = ctx.writer().await?;
     let forum = refs::forum_or_current(ctx, &w.engine, forum).await?;
     acknowledge(ctx, &w, PublicActionKind::ModAction, yes).await?;
+    let who = w.engine.resolve_actor(actor).await?;
+    let originals = originals_of(ctx, &w, &forum, &who.did).await?;
     let ticket = w.engine.mod_adopt(&forum, actor).await?;
     let t = write::drive(ctx, &w, ticket).await?;
-    write::report(ctx, &t, "Adopted")
+    write::report(ctx, &t, "Adopted")?;
+    if matches!(t.state, WriteState::Done { .. }) {
+        report_adoption(ctx, &w, &forum, &who, &originals).await?;
+    }
+    Ok(())
 }
 
 /// Every `mod <verb> <subject>` that asserts or removes one action.

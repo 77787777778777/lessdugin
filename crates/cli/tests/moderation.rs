@@ -332,6 +332,9 @@ fn mods_rm_skip_adopt_lists_what_lapses_and_needs_a_confirmation() {
     bob.ok(&["sync", "alice.test/meta"]);
     let h = bob.json(&["mod", "hide", &post_uri, "--reason", "spam run", "--yes"]);
     assert_eq!(h["state"]["kind"], "done", "{h}");
+    // a keep of a post edited since (a stale positive assertion, social.md §4.5): it counts
+    // for nothing now, and lapses with the removal all the same
+    let kept = stale_keep(&bob, &carol);
     let mods_of = |u: &fakenet::User| -> Vec<Value> {
         let rec = u.account.get(nsid::FORUM, "meta").unwrap();
         rec.get("moderators")
@@ -350,13 +353,19 @@ fn mods_rm_skip_adopt_lists_what_lapses_and_needs_a_confirmation() {
     let err = fakenet::text(&out.stderr);
     assert!(err.contains("lapse") && err.contains("--yes"), "{err}");
     assert!(err.contains(&post_uri) && err.contains("spam run"), "{err}");
+    assert!(err.contains("2 assertions"), "{err}");
+    assert!(
+        err.lines()
+            .any(|l| l.contains(&kept) && l.contains("keep") && l.contains("stale")),
+        "{err}"
+    );
     assert_eq!(mods_of(&alice).len(), 1, "the declaration changed");
 
     // confirmed: listed again, then removed without adopting
     let out = alice.run(&["mods", "rm", "bob.test", "--skip-adopt", "--yes"]);
     assert!(out.status.success(), "{}", fakenet::text(&out.stderr));
     let err = fakenet::text(&out.stderr);
-    assert!(err.contains(&post_uri), "{err}");
+    assert!(err.contains(&post_uri) && err.contains(&kept), "{err}");
     assert!(mods_of(&alice).is_empty());
     let adopted = alice
         .account
@@ -366,4 +375,75 @@ fn mods_rm_skip_adopt_lists_what_lapses_and_needs_a_confirmation() {
         .filter(|v| v.get("adopts").is_some())
         .count();
     assert_eq!(adopted, 0, "nothing is adopted");
+}
+
+/// `bob` (a moderator) keeps a new post of `carol`, who then edits it: the keep names the old
+/// version, so it is `stale` in the mod log (`social.md` §4.5). Returns the post's uri.
+fn stale_keep(bob: &fakenet::User, carol: &fakenet::User) -> String {
+    let f = carol.file("kept.md", "---\ntitle: Kept\n---\nAs it was.\n");
+    let post = carol.json(&["post", s(&f), "--yes"]);
+    let uri = post["state"]["uri"].as_str().unwrap().to_owned();
+    bob.ok(&["sync", "alice.test/meta"]);
+    let k = bob.json(&["mod", "keep", &uri, "--yes"]);
+    assert_eq!(k["state"]["kind"], "done", "{k}");
+    let e = carol.json(&["edit", &uri, "-m", "As it is now."]);
+    assert_eq!(e["state"]["kind"], "done", "{e}");
+    uri
+}
+
+/// `mod adopt` and `mods rm` say which of the former moderator's assertions they did not
+/// adopt (`data-model.md` §8.6 "cannot adopt … never counted"): those lapse with the role,
+/// and the engine keeps its report to itself.
+#[test]
+fn adopting_reports_what_it_did_not_adopt() {
+    let net = Net::new();
+    let alice = net.user("alice.test", true);
+    let bob = net.user("bob.test", true);
+    let carol = net.user("carol.test", true);
+    alice.json(&["forum", "create", "meta", "--frontpage"]);
+    for u in [&bob, &carol] {
+        u.json(&["join", "alice.test/meta", "--yes"]);
+    }
+    alice.json(&["approve", "bob.test", "carol.test", "--yes"]);
+    alice.json(&["mods", "add", "bob.test", "--yes"]);
+    carol.ok(&["sync", "alice.test/meta"]);
+    let f = carol.file("p.md", "---\ntitle: From carol\n---\nHello.\n");
+    let post = carol.json(&["post", s(&f), "--yes"]);
+    let hidden = post["state"]["uri"].as_str().unwrap().to_owned();
+    bob.ok(&["sync", "alice.test/meta"]);
+    let h = bob.json(&["mod", "hide", &hidden, "--reason", "spam run", "--yes"]);
+    assert_eq!(h["state"]["kind"], "done", "{h}");
+    let kept = stale_keep(&bob, &carol);
+
+    // the effective hide is adopted; the stale keep never counted, so it is not
+    let out = alice.run(&["mod", "adopt", "bob.test", "--yes"]);
+    assert!(out.status.success(), "{}", fakenet::text(&out.stderr));
+    let err = fakenet::text(&out.stderr);
+    assert!(err.contains("adopted 1 of 2 assertions"), "{err}");
+    let line = err
+        .lines()
+        .find(|l| l.contains(&kept))
+        .unwrap_or_else(|| panic!("the keep is not reported: {err}"));
+    assert!(line.contains("never counted (stale)"), "{line}");
+    assert!(!err.lines().any(|l| l.contains(&hidden)), "{err}");
+
+    // `mods rm` adopts again (nothing new) and says the same before the keep lapses
+    let out = alice.run(&["mods", "rm", "bob.test", "--yes"]);
+    assert!(out.status.success(), "{}", fakenet::text(&out.stderr));
+    let err = fakenet::text(&out.stderr);
+    assert!(err.contains("adopted 1 of 2 assertions"), "{err}");
+    assert!(
+        err.lines()
+            .any(|l| l.contains(&kept) && l.contains("never counted (stale)")),
+        "{err}"
+    );
+    let adopted: Vec<Value> = alice
+        .account
+        .list(nsid::MOD_ACTION)
+        .iter()
+        .filter_map(|(rkey, _)| alice.account.get(nsid::MOD_ACTION, rkey))
+        .filter(|v| v.get("adopts").is_some())
+        .collect();
+    assert_eq!(adopted.len(), 1, "{adopted:?}");
+    assert_eq!(adopted[0]["subject"]["uri"], hidden.as_str(), "{adopted:?}");
 }
