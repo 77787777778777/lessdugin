@@ -245,6 +245,71 @@ fn a_blob_the_pds_does_not_have_is_missing() {
     assert_eq!(block_on(e.host().blob_open(&gone)).unwrap(), None);
 }
 
+// --- reference counting and purging (m4-27) ------------------------------------------------------
+
+/// `owner` hides `uri` in forum scope, straight in their repo.
+fn hide_in(n: &Net, owner: &AccountHandle, f: &str, uri: &str) {
+    let action = json!({"$type": format!("{}#hide", nsid::MOD_ACTION), "hidden": true});
+    let rkey = keys::mod_action_rkey(
+        lessdugin_lexicon::ns::NS,
+        f,
+        None,
+        uri,
+        action.as_object().unwrap(),
+    )
+    .unwrap();
+    owner.put(
+        nsid::MOD_ACTION,
+        &rkey,
+        &json!({
+            "$type": nsid::MOD_ACTION, "forum": f, "subject": uri, "action": action,
+            "createdAt": dt(n.now()),
+        }),
+    );
+    n.tick(MINUTE);
+}
+
+#[test]
+fn a_loaded_image_is_deleted_once_nothing_shown_references_it() {
+    // m4-27: nothing deleted a stored blob, so an image a reader loaded from a post that a
+    // moderator then hid, or its author deleted, stayed on the reader's device for good
+    // (sync.md §11.4, threat-model.md PRIV-2)
+    let mut n = Net::new();
+    let bob = n
+        .net
+        .add_pds("bob.example.com")
+        .add_account("bob.example.com");
+    let f = forum(&n, &bob);
+    let blob = bob.upload_blob(tiny_png(9), "image/png");
+    let cid = blob["ref"]["$link"].as_str().unwrap().to_owned();
+    let first = post(&n, &bob, &f, image_body(&blob));
+    let second = post(&n, &bob, &f, image_body(&blob));
+    let other = bob.upload_blob(tiny_png(10), "image/png");
+    let other_cid = other["ref"]["$link"].as_str().unwrap().to_owned();
+    let third = post(&n, &bob, &f, image_body(&other));
+    let e = n.device("anon", None);
+    let stored = |c: &str| block_on(e.host().blob_open(c)).unwrap().is_some();
+    for (uri, c) in [(&first, &cid), (&third, &other_cid)] {
+        let view = read(&e, &f, uri).body.media[0].clone();
+        block_on(e.load_media(c, Some(MediaOwner::of_view(&view)))).unwrap();
+        assert!(stored(c));
+    }
+    // the first post is hidden: the second still shows the image, so it stays
+    hide_in(&n, &bob, &f, &first);
+    assert_eq!(read(&e, &f, &first).body.html, "");
+    assert!(stored(&cid));
+    // the second is deleted by its author: nothing shown references it any more
+    bob.delete(nsid::POST, second.rsplit('/').next().unwrap());
+    n.tick(MINUTE);
+    read(&e, &f, &third);
+    assert!(!stored(&cid), "the image of a hidden and a deleted post is still stored");
+    assert!(stored(&other_cid), "a listed post's image is kept");
+    // the third is hidden too
+    hide_in(&n, &bob, &f, &third);
+    assert_eq!(read(&e, &f, &third).body.html, "");
+    assert!(!stored(&other_cid));
+}
+
 // --- spilled bodies (m4-5) ---------------------------------------------------------------------
 
 /// A spilled body of `source` bytes, uploaded to `who`'s PDS.

@@ -21,6 +21,9 @@
 //! fold   : Cx::new with the *stored* validity (each row's `valid`/`rule`, decided at admission;
 //!          not recomputed), then fold_cx(cx, Query::default()); the model keeps cx's skeletons
 //!          and typed declaration, and re-ranks other queries with full::reorder (no refold)
+//! blobs  : the CIDs each record of records (and the declaration) references, read from the
+//!          whole value before the bodies are dropped; blob_refs counts those the fold shows
+//!          (sync.md §11.4)
 //! ```
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -100,6 +103,36 @@ pub struct ForumModel {
     /// Authorities whose account is inactive while their modActions are retained (`sync.md`
     /// §3.4): the `authorityInactive` banner.
     pub inactive: BTreeSet<String>,
+    /// The blobs each record of the fold input (and the declaration) references, by uri: the
+    /// CIDs of every blob object in its value, revision snapshots included. Records without
+    /// one are left out.
+    pub blobs: BTreeMap<String, BTreeSet<String>>,
+}
+
+/// The CIDs of the blobs `v` references: every `{"$type": "blob", "ref": {"$link": cid}}` in
+/// it, at any depth (media, `textBlob`, an icon, a revision's snapshot).
+pub(crate) fn blob_cids(v: &Value) -> BTreeSet<String> {
+    fn walk(v: &Value, out: &mut BTreeSet<String>) {
+        match v {
+            Value::Object(m) => {
+                if m.get("$type").and_then(Value::as_str) == Some("blob")
+                    && let Some(cid) = m
+                        .get("ref")
+                        .and_then(|r| r.get("$link"))
+                        .and_then(Value::as_str)
+                {
+                    out.insert(cid.to_owned());
+                    return;
+                }
+                m.values().for_each(|x| walk(x, out));
+            }
+            Value::Array(a) => a.iter().for_each(|x| walk(x, out)),
+            _ => {}
+        }
+    }
+    let mut out = BTreeSet::new();
+    walk(v, &mut out);
+    out
 }
 
 /// A value as the fold input carries it: what the skeletons and the layers read, without the
@@ -198,6 +231,7 @@ impl ForumModel {
         let mut validity: BTreeMap<String, (bool, Option<String>)> = BTreeMap::new();
         let mut obs: BTreeMap<(String, String), i64> = BTreeMap::new();
         let mut meta: BTreeMap<String, RowMeta> = BTreeMap::new();
+        let mut blobs: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         let mut subjects: BTreeSet<String> = BTreeSet::new();
         let now_ms = now_us.div_euclid(1000);
         for r in &rows {
@@ -230,6 +264,10 @@ impl ForumModel {
             }
             validity.insert(uri.clone(), (r.row.valid, r.row.rule.clone()));
             meta.insert(uri.clone(), RowMeta { level: r.row.level });
+            let cids = blob_cids(&value);
+            if !cids.is_empty() {
+                blobs.insert(uri.clone(), cids);
+            }
             records.insert(
                 uri,
                 RecordInput {
@@ -286,6 +324,10 @@ impl ForumModel {
             obs.entry(k).and_modify(|e| *e = (*e).min(t)).or_insert(t);
         }
         validity.insert(key.uri.to_string(), (true, None));
+        let decl_blobs = blob_cids(&decl_value);
+        if !decl_blobs.is_empty() {
+            blobs.insert(key.uri.to_string(), decl_blobs);
+        }
         let input = FoldInput {
             decl: DeclInput {
                 uri: key.uri.to_string(),
@@ -308,6 +350,7 @@ impl ForumModel {
         let mut m =
             Self::from_contract(key.clone(), &input, &stored, decl_row.level, meta, failing)?;
         m.inactive = inactive;
+        m.blobs = blobs;
         Ok(m)
     }
 
@@ -334,7 +377,47 @@ impl ForumModel {
             rows,
             failing,
             inactive: BTreeSet::new(),
+            blobs: BTreeMap::new(),
         })
+    }
+
+    /// The blob references this fold counts (`sync.md` §11.4): CID → how many of the forum's
+    /// stored, eligible records that reference it are counted. Counted: the declaration; a
+    /// post, comment, sequence or wiki revision while it is listed (`Visible` or `Collapsed`,
+    /// `social.md` §10.1, before the thread pass); a revision while its subject is counted;
+    /// every other record of the input (memberships, opinions, modActions). A hidden, excluded
+    /// or deleted item's blobs are not counted, nor its revisions'. `None` while the visibility
+    /// layer is pending: nothing is decided then.
+    pub fn blob_refs(&self) -> Option<BTreeMap<String, u32>> {
+        let states = &self.view.visibility.as_ref().ok()?.states;
+        let decl = self.key.uri.as_str();
+        let counted = |uri: &str| {
+            uri == decl
+                || self.skel(uri).is_some_and(|x| match x.coll {
+                    Some(
+                        Collection::Post
+                        | Collection::Comment
+                        | Collection::Sequence
+                        | Collection::WikiRevision,
+                    ) => states.get(uri).is_some_and(State::listed),
+                    _ => true,
+                })
+        };
+        let mut out: BTreeMap<String, u32> = BTreeMap::new();
+        for (uri, cids) in &self.blobs {
+            let yes = match self.skel(uri).map(|x| &x.data) {
+                Some(SkelData::Revision { subject, .. }) => {
+                    subject.as_ref().is_some_and(|s| counted(&s.uri))
+                }
+                _ => counted(uri),
+            };
+            if yes {
+                for c in cids {
+                    *out.entry(c.clone()).or_insert(0) += 1;
+                }
+            }
+        }
+        Some(out)
     }
 
     /// The orderings of `query` (`social.md` §12) from the cached layers, without folding
