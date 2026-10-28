@@ -1079,12 +1079,10 @@ mod tests {
         }
         use proptest::prelude::*;
         // Domains (with and without the trailing dot that fails the second check), the boundary
-        // characters and what `trim_trailing` drops or keeps.
-        let unit = prop::sample::select(vec![
-            "www.a.b", "www.a.b.", "WWW.a.b_", "http://a.b", "https://b1.a-b.", "www.", "a", ".",
-            "_", "(", "(", ")", ")", ")", "*", "~", ";", "&", "&amp;", "&x;", "?", "!", "'", ":",
-            "/", " ", "<", "\u{a0}", "é",
-        ]);
+        // characters and what `trim_trailing` drops or keeps, separated by `|`.
+        let units = "www.a.b|www.a.b.|WWW.a.b_|http://a.b|https://b1.a-b.|www.|a|.|_|(|(|)|)|)|*|~|;\
+                     |&|&amp;|&x;|?|!|'|:|/| |<|\u{a0}|é";
+        let unit = prop::sample::select(units.split('|').collect::<Vec<_>>());
         let mut runner = proptest::test_runner::TestRunner::new(ProptestConfig {
             cases: 4096,
             failure_persistence: None,
