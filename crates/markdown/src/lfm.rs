@@ -363,8 +363,9 @@ struct Run {
     stop: usize,
     /// The `)` that walk dropped, in walk order.
     parens: Vec<usize>,
-    /// `closes − opens` over `t[from..end]`.
+    /// The latest candidate's start.
     from: usize,
+    /// `closes − opens` over `t[from..end]`.
     balance: isize,
 }
 
