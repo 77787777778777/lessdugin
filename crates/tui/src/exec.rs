@@ -832,10 +832,10 @@ pub async fn mod_intent<H: Host>(
 }
 
 /// The capabilities the account's own `#restrict` record on `subject` in `forum` restricts (one
-/// record per scope, subject and key, `data-model.md` §6.7); none when it has no record. A
-/// write of that record still in the outbox is newer than the cache, which holds confirmed
-/// writes only (`lessdugin_core::outbox::apply`): the latest such write is the state, so two
-/// restrictions in quick succession, or made offline, keep each other.
+/// record per scope, subject and key, `data-model.md` §6.7); none when it has no record, or its
+/// `until` has passed. A write of that record still in the outbox is newer than the cache,
+/// which holds confirmed writes only (`lessdugin_core::outbox::apply`): the latest such write
+/// is the state, so two restrictions in quick succession, or made offline, keep each other.
 async fn held_capabilities<H: Host>(
     engine: &Engine<H>,
     forum: &str,
@@ -889,6 +889,15 @@ async fn held_capabilities<H: Host>(
     let Some(action) = value.as_ref().and_then(|v| v.get("action")) else {
         return Ok(Vec::new());
     };
+    // a restriction whose `until` passed holds nothing, as the engine reads it (`social.md` §4.2)
+    let until = value
+        .as_ref()
+        .and_then(|v| v.get("until"))
+        .and_then(serde_json::Value::as_str)
+        .and_then(|u| lessdugin_atp::syntax::Datetime::parse(u).ok());
+    if until.is_some_and(|u| u.timestamp_micros() <= engine.host().now_ms().saturating_mul(1000)) {
+        return Ok(Vec::new());
+    }
     Ok(action
         .get("capabilities")
         .and_then(serde_json::Value::as_array)

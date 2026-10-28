@@ -1395,6 +1395,80 @@ fn the_menu_restrictions_add_up() {
     assert_eq!(m.restricted, ["comment", "post", "react", "vote"], "{m:?}");
 }
 
+/// `--until` a few minutes from alice's clock, as `mod` takes it.
+fn until_soon(s: &common::Scenario) -> String {
+    use lessdugin_core::host::Host as _;
+    let at = s.w.alice.host.now_ms() + 2 * MINUTE;
+    lessdugin_atp::syntax::Datetime::from_millis(at)
+        .unwrap()
+        .as_str()
+        .to_owned()
+}
+
+/// m3r-2: a nullification names only `nullifyVotes` and the engine fills the capabilities from
+/// the account's record as it reads it, so a restriction whose `until` passed stays lapsed
+/// (the TUI used to send the capabilities it read back, and so re-imposed it for good).
+#[test]
+fn a_nullification_does_not_reimpose_a_lapsed_restriction() {
+    let s = scenario();
+    let bob = s.w.bob.did();
+    let mut t = alice_tui(&s, 100, 30);
+    block_on(t.start(Some(s.forum.clone())));
+    let until = until_soon(&s);
+    run_command(
+        &mut t,
+        &format!("mod restrict post,comment --until {until} {bob}"),
+    );
+    block_on(t.engine().outbox_flush()).unwrap();
+    s.w.tick(MINUTE);
+    block_on(t.settle());
+    assert_eq!(bob_member(&t, &s).restricted, ["comment", "post"]);
+    s.w.tick(5 * MINUTE);
+    run_command(&mut t, &format!("mod nullify {bob}"));
+    block_on(t.engine().outbox_flush()).unwrap();
+    s.w.tick(MINUTE);
+    block_on(t.settle());
+    let m = bob_member(&t, &s);
+    assert!(m.nullified, "{m:?}");
+    assert!(m.restricted.is_empty(), "it stays lapsed: {m:?}");
+}
+
+/// The mod menu's capability presets add to the capabilities restricted now: one whose `until`
+/// passed restricts nothing, so it is not re-imposed with the preset's.
+#[test]
+fn the_menu_presets_add_only_to_a_restriction_in_effect() {
+    let s = scenario();
+    let bob = s.w.bob.did();
+    let mut t = alice_tui(&s, 100, 30);
+    block_on(t.start(Some(s.forum.clone())));
+    let until = until_soon(&s);
+    run_command(
+        &mut t,
+        &format!("mod restrict post,comment --until {until} {bob}"),
+    );
+    block_on(t.engine().outbox_flush()).unwrap();
+    s.w.tick(MINUTE);
+    block_on(t.settle());
+    assert_eq!(bob_member(&t, &s).restricted, ["comment", "post"]);
+    s.w.tick(5 * MINUTE);
+    block_on(t.open_thread(&s.bob_post));
+    block_on(t.press("m"));
+    let menu = t.state.mod_menu.as_ref().expect("the menu opened");
+    let label = "restrict the author (voting, reacting)";
+    let n = menu.entries.iter().position(|e| e.label == label).unwrap();
+    for _ in 0..n {
+        block_on(t.press("j"));
+    }
+    block_on(t.press("Enter"));
+    block_on(t.press("Enter"));
+    assert!(status(&t).contains("Mod action recorded"), "{}", status(&t));
+    block_on(t.engine().outbox_flush()).unwrap();
+    s.w.tick(MINUTE);
+    block_on(t.settle());
+    let m = bob_member(&t, &s);
+    assert_eq!(m.restricted, ["react", "vote"], "{m:?}");
+}
+
 /// The "this is public" interstitial (`social.md` §17, `threat-model.md` PRIV-9,
 /// `engine-api.md` §3.6): the first public action of each kind waits behind it; `n` drops it,
 /// `y` sends it and records the acknowledgement, which every client on the device shares.
