@@ -429,11 +429,11 @@ fn the_edit_command_asks_before_suspending_a_pin() {
     use lessdugin_core::dto::{ModActionIntent, ModActionValue, ModScope, PinScope, PostDraft};
     let s = scenario();
     let (alice, carol) = (&s.w.alice, &s.w.carol);
-    let t = block_on(
-        carol
-            .engine
-            .publish(&PostDraft::article(&s.forum, "Pinned", "The old body.")),
-    )
+    let t = block_on(carol.engine.publish(&PostDraft::article(
+        &s.forum,
+        "Pinned",
+        "The old body.",
+    )))
     .unwrap();
     carol.flush();
     let post = carol.done(&t);
@@ -459,7 +459,11 @@ fn the_edit_command_asks_before_suspending_a_pin() {
     block_on(t.start(None));
     run(&mut t, &format!("edit {post}"));
     let c = t.state.confirm.as_ref().expect("a confirmation");
-    assert!(c.text.starts_with("Editing suspends its pin:"), "{}", c.text);
+    assert!(
+        c.text.starts_with("Editing suspends its pin:"),
+        "{}",
+        c.text
+    );
     assert!(t.render().contains("Editing suspends its pin"));
     block_on(t.press("n"));
     assert!(t.state.confirm.is_none());
