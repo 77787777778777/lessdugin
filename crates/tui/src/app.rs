@@ -19,12 +19,12 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crossterm::event::KeyEvent;
 use lessdugin_core::dto::{
-    AccessLevel, AccountView, ActionNotice, ActionTicket, AgreementValue, Capability, CommentDraft, CommentSort,
-    DiscussionList, Event, ForumSummary, ForumView, HistoryView, KarmaValue, ModActionIntent,
-    ModActionValue, ModLog, ModQueue, ModScope, ModsChange, NotificationList, OpinionIntent,
-    PinScope, PostDraft, PostFilter, PostList, PostSort, PublicActionKind, ReactTally, Stance,
-    SyncReport, ThreadOpts, ThreadRoot, ThreadView, Tier, Topic, UnreadCounts, ViewerCaps,
-    WriteState, WriteTicket,
+    AccessLevel, AccountView, ActionNotice, ActionTicket, AgreementValue, Capability, CommentDraft,
+    CommentSort, DiscussionList, Event, ForumSummary, ForumView, HistoryView, KarmaValue,
+    ModActionIntent, ModActionValue, ModLog, ModQueue, ModScope, ModsChange, NotificationList,
+    OpinionIntent, PinScope, PostDraft, PostFilter, PostList, PostSort, PublicActionKind,
+    ReactTally, Stance, SyncReport, ThreadOpts, ThreadRoot, ThreadView, Tier, Topic, UnreadCounts,
+    ViewerCaps, WriteState, WriteTicket,
 };
 use lessdugin_core::dto::{
     Draft, ForumDraft, ForumRole, KarmaCadence, MemberView, MembershipMode, PostKind, RawView, Ref,
