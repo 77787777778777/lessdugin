@@ -3,10 +3,10 @@
 //!
 //! A body is rendered from the markdown source of the cached record when its CID is the one
 //! the view shows (as the CLI does), or of its spilled `textBlob` once the engine fetched it;
-//! otherwise the view's plain text P is shown. The
-//! `StyledDoc` is width-independent and kept in the screen state; [`Body::lines`] lays it out
-//! for the current width with the core's printer (`lfm-1.md` §9.4, SGR only, no OSC 8 here)
-//! and turns its SGR runs into ratatui styles. The printer's output is checked with
+//! otherwise the view's plain text P is shown. The `StyledDoc` is width-independent and kept
+//! in the screen state; [`Body::lines`] lays it out for the current width with the core's
+//! printer (`lfm-1.md` §9.4, SGR only, no OSC 8 here) and turns its SGR runs into ratatui
+//! styles. The printer's output is checked with
 //! [`check_printer_output`] first; anything unexpected falls back to the plain (colourless)
 //! printing, which contains no escape sequence at all.
 
