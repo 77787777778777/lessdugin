@@ -324,6 +324,17 @@ fn author_scope_checks(
             immune(s.author().unwrap_or_default())?;
             gate(&p)
         }
+        // the fold does not exempt the actor's own comments (§4.9 authorBanned), so a self-ban
+        // would hide every comment X wrote in X's own threads
+        (
+            ModActionValue::Access {
+                level: AccessLevel::Banned,
+            },
+            Subject::Did(d),
+        ) if d == me => Err(EngineError::invalid_input(
+            "author moderation cannot ban yourself from your own threads",
+        )
+        .with_detail("kind", "selfSubject")),
         (
             ModActionValue::Access {
                 level: AccessLevel::Banned,

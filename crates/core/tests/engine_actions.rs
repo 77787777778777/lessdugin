@@ -912,6 +912,15 @@ fn author_scope_actions_follow_the_author_table() {
     // not someone else's post
     let e = alice.mod_err(author(&w.bob_post, ModActionValue::Lock { locked: true }));
     assert_eq!(e.code, ErrorCode::Blocked);
+    // m3-2: an author ban of oneself would hide every comment bob wrote in his own threads
+    // (the fold does not exempt them); a ban of someone else goes through
+    let ban = || ModActionValue::Access {
+        level: AccessLevel::Banned,
+    };
+    let e = bob.mod_err(author(&bob.did(), ban()));
+    assert_eq!(e.code, ErrorCode::InvalidInput, "{}", e.message);
+    assert_eq!(e.detail.as_ref().unwrap()["kind"], "selfSubject");
+    bob.mod_action(author(&carol.did(), ban()));
 }
 
 /// m3-18 (`social.md` §4.8 "Composer"): the engine refuses a comment on a locked post by a
