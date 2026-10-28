@@ -580,7 +580,9 @@ fn check_wasm_parity() -> Result<(), String> {
             problems.join("\n  ")
         ));
     }
-    eprintln!("wasm32 has the native tests: {total} in {files} test binaries ({native_only} native-only)");
+    eprintln!(
+        "wasm32 has the native tests: {total} in {files} test binaries ({native_only} native-only)"
+    );
     Ok(())
 }
 
@@ -1209,7 +1211,10 @@ mod tests {
     /// namespaces, in ci.yml's wasm-tests job.
     #[test]
     fn the_social_vectors_and_p9_run_on_wasm32_in_ci() {
-        assert!(job_runs(".github/workflows/ci.yml", "wasm-tests").contains(&"cargo xtask test-wasm".into()));
+        assert!(
+            job_runs(".github/workflows/ci.yml", "wasm-tests")
+                .contains(&"cargo xtask test-wasm".into())
+        );
         let sels = wasm_selections();
         for features in [None, Some("final-ns")] {
             let found = sels.iter().any(|s| {
@@ -1221,7 +1226,10 @@ mod tests {
                         Some(f) => s.windows(2).any(|w| w == ["--features", f]),
                     }
             });
-            assert!(found, "no wasm32 run of social_vectors and social_parity with {features:?}");
+            assert!(
+                found,
+                "no wasm32 run of social_vectors and social_parity with {features:?}"
+            );
         }
     }
 
@@ -1230,7 +1238,10 @@ mod tests {
     #[test]
     fn the_ammonia_equality_runs_in_ci() {
         let runs = job_runs(".github/workflows/ci.yml", "rust");
-        assert!(runs.contains(&cargo(AMMONIA_TESTS)), "ci.yml rust: {runs:#?}");
+        assert!(
+            runs.contains(&cargo(AMMONIA_TESTS)),
+            "ci.yml rust: {runs:#?}"
+        );
     }
 
     /// own-3: the web job's `pnpm run check` runs every package's own `check` (tsc, biome and the

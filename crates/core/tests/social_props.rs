@@ -910,7 +910,6 @@ impl Incremental for Refold {
             }
         }
     }
-
 }
 
 /// The incremental side of P8: the engine's own path from changes to a fold. Each put is
@@ -935,8 +934,13 @@ impl StoreDriver {
         // the declaration, first seen at T0 (as in every generated input)
         let decl = admitted(&f.uri, &f.decl_cid, &f.decl);
         let t0_ms = social_gen::T0 / 1000;
-        block_on(b.put_version(decl.into_version(Observation::listing(&rev(0), t0_ms, true, t0_ms))))
-            .unwrap();
+        block_on(b.put_version(decl.into_version(Observation::listing(
+            &rev(0),
+            t0_ms,
+            true,
+            t0_ms,
+        ))))
+        .unwrap();
         // every repo listed at its status: fresh (at the latest head), stale (a later head was
         // seen) or unavailable (never listed: no row)
         let last = rev(usize::MAX >> 16);
@@ -947,7 +951,10 @@ impl StoreDriver {
                 Some("unavailable") => continue,
                 Some("stale") => {
                     row.listed.insert(f.fk.clone(), last.clone());
-                    row.add_mark(&format!("at://{did}/{NS}.post/{}-later", f.fk), &rev(usize::MAX >> 15));
+                    row.add_mark(
+                        &format!("at://{did}/{NS}.post/{}-later", f.fk),
+                        &rev(usize::MAX >> 15),
+                    );
                 }
                 _ => {
                     row.listed.insert(f.fk.clone(), last.clone());
@@ -984,8 +991,12 @@ impl Incremental for StoreDriver {
         let mut b = store.batch();
         match change {
             Change::Put(r) => {
-                let v = admitted(&r.uri, &r.cid, &r.value)
-                    .into_version(Observation::listing(&rev(n), now_ms, true, now_ms));
+                let v = admitted(&r.uri, &r.cid, &r.value).into_version(Observation::listing(
+                    &rev(n),
+                    now_ms,
+                    true,
+                    now_ms,
+                ));
                 block_on(b.put_version(v)).unwrap();
             }
             Change::Delete(u) => {
@@ -1011,8 +1022,15 @@ fn admitted(uri: &str, cid: &str, value: &Value) -> lessdugin_core::store::Admit
         rkey: Some(at.rkey().as_str()),
     };
     let len = serde_json::to_vec(value).unwrap().len();
-    admit_value(Some(uri), Some(cid), Some(value), len, &expect, &LexiconValidator)
-        .unwrap_or_else(|e| panic!("{uri} is not admitted: {e}"))
+    admit_value(
+        Some(uri),
+        Some(cid),
+        Some(value),
+        len,
+        &expect,
+        &LexiconValidator,
+    )
+    .unwrap_or_else(|e| panic!("{uri} is not admitted: {e}"))
 }
 
 /// A random stream that ends in `f`'s record set: earlier versions put first (edits), records
