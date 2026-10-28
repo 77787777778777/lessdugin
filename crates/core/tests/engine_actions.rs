@@ -820,6 +820,112 @@ fn restrict_and_nullify_keep_each_others_dimension() {
     assert_eq!(e.code, ErrorCode::InvalidInput, "{e:?}");
 }
 
+/// The `#restrict` record's `until` and `reason` are shared by both dimensions too (`social.md`
+/// §4.2): an intent that leaves `untilMs` out keeps the record's `until` while the dimension it
+/// carries is in effect, so nullifying never makes a temporary restriction permanent; an `untilMs`
+/// that moves the carried dimension's expiry says so (`sharedExpiry`).
+#[test]
+fn restrict_and_nullify_keep_the_records_until_and_reason() {
+    let w = World::new();
+    let (alice, dave) = (&w.alice, &w.dave);
+    let restrict = |capabilities: Option<Vec<Capability>>,
+                    nullify_votes: Option<bool>,
+                    until_ms: Option<i64>,
+                    reason: Option<&str>| ModActionIntent::Assert {
+        forum: w.forum.clone(),
+        scope: ModScope::Forum,
+        subject: dave.did(),
+        action: ModActionValue::Restrict {
+            capabilities,
+            nullify_votes,
+        },
+        reason: reason.map(str::to_owned),
+        until_ms,
+    };
+    let sent = |t: &ActionTicket| -> Value {
+        alice.flush();
+        let uri = alice.done(&t.ticket());
+        alice
+            .record(nsid::MOD_ACTION, uri.rsplit('/').next().unwrap())
+            .unwrap()
+    };
+    let shared = |t: &ActionTicket| -> Option<String> {
+        t.notices
+            .iter()
+            .find(|n| n.code == NoticeCode::SharedExpiry)
+            .map(|n| n.message.clone())
+    };
+    let week = alice.host.now() + 7 * 24 * 60 * MINUTE;
+    let day = alice.host.now() + 24 * 60 * MINUTE;
+    // a seven-day restriction, then a nullification that names no until
+    let t = alice.mod_action(restrict(
+        Some(vec![Capability::Post, Capability::Comment]),
+        None,
+        Some(week),
+        Some("spam links"),
+    ));
+    assert_eq!(shared(&t), None, "{t:?}");
+    let rec = sent(&t);
+    let until = rec["until"].as_str().unwrap().to_owned();
+    let t = alice.mod_action(restrict(None, Some(true), None, None));
+    let rec = sent(&t);
+    assert_eq!(rec["action"]["capabilities"], json!(["post", "comment"]));
+    assert_eq!(rec["action"]["nullifyVotes"], true);
+    assert_eq!(rec["until"], until, "the restriction stays temporary");
+    assert_eq!(rec["reason"], "spam links");
+    let n = shared(&t).expect("the nullification now ends with the restriction");
+    assert!(
+        n.contains("this nullification ends with your restriction") && n.contains(&until),
+        "{n}"
+    );
+    // a restriction with an until of its own moves the nullification's too, and says so
+    let t = alice.mod_action(restrict(
+        Some(vec![Capability::Comment]),
+        None,
+        Some(day),
+        None,
+    ));
+    let rec = sent(&t);
+    let until = rec["until"].as_str().unwrap().to_owned();
+    assert_eq!(rec["action"]["nullifyVotes"], true);
+    assert_eq!(rec["reason"], "spam links");
+    let n = shared(&t).expect("the nullification's expiry moved");
+    assert!(
+        n.contains("your nullification now also ends at") && n.contains(&until),
+        "{n}"
+    );
+    // lifting the nullification keeps the restriction's until, with nothing to announce
+    let t = alice.mod_action(restrict(None, Some(false), None, None));
+    let rec = sent(&t);
+    assert_eq!(rec["action"]["capabilities"], json!(["comment"]));
+    assert_eq!(rec["until"], until);
+    assert_eq!(shared(&t), None, "{t:?}");
+    // with no nullification left to carry, a restriction without until is permanent
+    let t = alice.mod_action(restrict(
+        Some(vec![Capability::Comment, Capability::Post]),
+        None,
+        None,
+        None,
+    ));
+    let rec = sent(&t);
+    assert_eq!(rec.get("until"), None, "{rec}");
+    assert_eq!(rec.get("reason"), None, "{rec}");
+    assert_eq!(shared(&t), None, "{t:?}");
+    // an intent that names both dimensions states the whole record
+    alice.mod_action(restrict(None, Some(true), Some(week), Some("again")));
+    alice.flush();
+    let t = alice.mod_action(restrict(
+        Some(vec![Capability::Comment]),
+        Some(true),
+        None,
+        None,
+    ));
+    let rec = sent(&t);
+    assert_eq!(rec.get("until"), None, "{rec}");
+    assert_eq!(rec.get("reason"), None, "{rec}");
+    assert_eq!(shared(&t), None, "{t:?}");
+}
+
 #[test]
 fn a_lock_keeps_the_visible_comments_and_is_refused_above_5000() {
     let w = World::new();

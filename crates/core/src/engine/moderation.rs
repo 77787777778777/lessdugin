@@ -23,7 +23,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use lessdugin_atp::syntax::{AtUri, Did};
+use lessdugin_atp::syntax::{AtUri, Datetime, Did};
 use lessdugin_lexicon::collection::nsid;
 use lessdugin_lexicon::keys;
 use lessdugin_lexicon::ns::NS;
@@ -78,6 +78,20 @@ pub const RETROACTIVE_RESTRICT: &str = "this restriction is retroactive: it also
 /// The notice for a ban (`social.md` §4.6).
 pub const RETROACTIVE_BAN: &str =
     "a ban is retroactive: it hides all of the user's items in this forum, unless they are kept";
+
+/// The acting account's `#restrict` of a subject as it now stands ([`Engine::own_restrict`]).
+struct OwnRestrict {
+    caps: BTreeSet<LexCapability>,
+    nullify: bool,
+    until: Option<Datetime>,
+    reason: Option<String>,
+}
+
+/// The [`NoticeCode::SharedExpiry`] notice: one `#restrict` record holds both dimensions, so they
+/// share its `until` (`social.md` §4.2).
+fn shared_expiry(what: &str) -> String {
+    format!("one record holds both your restriction and your nullification of this user, so {what}")
+}
 
 /// A modAction subject, normalised (`data-model.md` §6.7: a DID, a canonical at-uri or
 /// `tag:` + slug).
@@ -396,16 +410,16 @@ impl<H: Host> Engine<H> {
         Ok(Subject::Did(self.resolve_actor(input).await?.did))
     }
 
-    /// The acting account's `#restrict` of `s` in `scope` as it now stands, `(capabilities,
-    /// nullifyVotes)`: the value of its latest unfinished write of that record (none after a
-    /// pending removal), else the cached record. A record whose `until` has passed is none.
+    /// The acting account's `#restrict` of `s` in `scope` as it now stands: the value of its
+    /// latest unfinished write of that record (none after a pending removal), else the cached
+    /// record. A record whose `until` has passed is none.
     async fn own_restrict(
         &self,
         key: &ForumKey,
         me: &str,
         scope: ModScope,
         s: &Subject,
-    ) -> Result<Option<(BTreeSet<LexCapability>, bool)>, EngineError> {
+    ) -> Result<Option<OwnRestrict>, EngineError> {
         use lessdugin_lexicon::validity::entry::restrict_capabilities;
         let action = action_of_key("restrict").unwrap_or_default();
         let rkey = keys::mod_action_rkey(
@@ -447,9 +461,12 @@ impl<H: Host> Engine<H> {
             return Ok(None);
         }
         Ok(match &m.action {
-            Action::Restrict(r) => {
-                Some((restrict_capabilities(r), r.nullify_votes.unwrap_or(false)))
-            }
+            Action::Restrict(r) => Some(OwnRestrict {
+                caps: restrict_capabilities(r),
+                nullify: r.nullify_votes.unwrap_or(false),
+                until: m.until,
+                reason: m.reason,
+            }),
             _ => None,
         })
     }
@@ -520,7 +537,7 @@ impl<H: Host> Engine<H> {
                 let key = self.forum_key(forum).await?;
                 let l = self.loaded(&key).await?;
                 let s = self.mod_subject(subject).await?;
-                let m = self
+                let (m, shared) = self
                     .assertion(&key, &l, &me, *scope, &s, action, reason, *until_ms)
                     .await?;
                 let mut t = ActionTicket::new(self.outbox.mod_assert(&session, &m).await?);
@@ -535,6 +552,9 @@ impl<H: Host> Engine<H> {
                         level: AccessLevel::Banned,
                     } => t = t.with_notice(NoticeCode::Retroactive, RETROACTIVE_BAN),
                     _ => {}
+                }
+                if let Some(n) = shared {
+                    t = t.with_notice(NoticeCode::SharedExpiry, n);
                 }
                 Ok(t)
             }
@@ -553,9 +573,11 @@ impl<H: Host> Engine<H> {
         action: &ModActionValue,
         reason: &Option<String>,
         until_ms: Option<i64>,
-    ) -> Result<ModAction, EngineError> {
+    ) -> Result<(ModAction, Option<String>), EngineError> {
         use nsid::{COMMENT, POST, SEQUENCE, WIKI_REVISION};
         let v = &l.model.view;
+        // a restrict's current record, when the dimension it leaves out is in effect there
+        let mut carried: Option<OwnRestrict> = None;
         let wrong = |what: &str| {
             Err(EngineError::invalid_input(format!(
                 "{} applies to {what}, not {}",
@@ -612,9 +634,16 @@ impl<H: Host> Engine<H> {
                 };
                 let caps: BTreeSet<LexCapability> = match capabilities {
                     Some(c) => c.iter().copied().map(lex_capability).collect(),
-                    None => current.as_ref().map(|c| c.0.clone()).unwrap_or_default(),
+                    None => current.as_ref().map(|c| c.caps.clone()).unwrap_or_default(),
                 };
-                let nullify = nullify_votes.or(current.map(|c| c.1)).unwrap_or(false);
+                let nullify = nullify_votes
+                    .or(current.as_ref().map(|c| c.nullify))
+                    .unwrap_or(false);
+                // ... and so do its until and reason, while the dimension carried is in effect
+                carried = current.filter(|c| match capabilities {
+                    None => !c.caps.is_empty(),
+                    Some(_) => c.nullify,
+                });
                 let caps: Vec<LexCapability> = caps.into_iter().collect();
                 (Action::Restrict(RestrictAction::new(&caps, nullify)), false)
             }
@@ -728,7 +757,46 @@ impl<H: Host> Engine<H> {
         }
         m.reason = reason.clone().filter(|r| !r.trim().is_empty());
         m.until = until_ms.map(records::datetime_ms).transpose()?;
-        Ok(m)
+        let notice = match (carried, action) {
+            (
+                Some(c),
+                ModActionValue::Restrict {
+                    capabilities,
+                    nullify_votes,
+                },
+            ) => {
+                m.reason = m.reason.or(c.reason);
+                let (named, other, named_in_effect) = match capabilities {
+                    Some(n) => ("restriction", "nullification", !n.is_empty()),
+                    None => ("nullification", "restriction", *nullify_votes == Some(true)),
+                };
+                match &m.until {
+                    // the record keeps its until: the dimension named now ends then too
+                    None => {
+                        m.until = c.until;
+                        m.until.as_ref().filter(|_| named_in_effect).map(|t| {
+                            shared_expiry(&format!(
+                                "this {named} ends with your {other}, at {}",
+                                t.as_str()
+                            ))
+                        })
+                    }
+                    // the record takes the intent's until: so does the dimension carried
+                    Some(u)
+                        if c.until.as_ref().map(|t| t.timestamp_micros())
+                            != Some(u.timestamp_micros()) =>
+                    {
+                        Some(shared_expiry(&format!(
+                            "your {other} now also ends at {}",
+                            u.as_str()
+                        )))
+                    }
+                    Some(_) => None,
+                }
+            }
+            _ => None,
+        };
+        Ok((m, notice))
     }
 
     /// The active account's role in a loaded forum, if it is an authority.

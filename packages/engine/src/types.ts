@@ -1065,7 +1065,10 @@ export type NoticeCode =
   | "adoptedFirst"
   | "missingAlt"
   /** `editPreflight`: the edit suspends the item's positive assertions (social.md §4.5). */
-  | "suspendsAssertions";
+  | "suspendsAssertions"
+  /** `modAction` restrict: the `#restrict` record's one `until` now also applies to the
+   * dimension the intent left out, or to the one it named (social.md §4.2). */
+  | "sharedExpiry";
 
 /** A notice to show with an action's result, e.g. "recorded; will count once you're
  * established". */
