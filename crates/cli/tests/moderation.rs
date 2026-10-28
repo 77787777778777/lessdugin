@@ -550,7 +550,7 @@ fn editing_a_kept_item_says_what_it_suspends_first() {
     assert!(out.status.success(), "{}", fakenet::text(&out.stderr));
     let err = fakenet::text(&out.stderr);
     assert!(err.contains("suspends a moderator's keep"), "{err}");
-    assert_eq!(body(), json!("As it is now."));
+    assert_eq!(body(), json!("As it is now.\n"));
 
     // nothing positive on it: no warning, no --yes
     let out = carol.run(&["edit", &plain, "-m", "Changed."]);
