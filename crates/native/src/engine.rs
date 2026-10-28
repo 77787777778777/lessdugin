@@ -27,10 +27,12 @@ pub fn engine_config(cfg: &Config) -> EngineConfig {
     match &cfg.network {
         NetworkProfile::Devnet(d) => EngineConfig::devnet(d.plc.clone(), d.pds.clone()),
         NetworkProfile::Production => EngineConfig {
-            sources: match cfg.sources {
+            // a `sources` the file states pins it like a flag (O-9): a CLI flag, then
+            // config.toml, then the stored setting, then the build default (`sync.md` §2.3)
+            sources_flag: cfg.sources.map(|s| match s {
                 Sources::Direct => EngineSources::Direct,
                 Sources::Assisted => EngineSources::Assisted,
-            },
+            }),
             verify: match cfg.verify {
                 VerifyMode::Pds => EngineVerifyMode::Pds,
                 VerifyMode::Proof => EngineVerifyMode::Proof,
@@ -61,4 +63,47 @@ pub fn open_engine(paths: &Paths, config: &Config) -> Result<Engine<NativeHost>,
             ..engine_config(config)
         },
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// O-9: a `sources` in config.toml wins over the stored setting; without one the stored
+    /// setting decides.
+    #[tokio::test]
+    async fn config_sources_pin_the_stored_setting() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::under(dir.path());
+        let pinned = Config::from_toml_str("sources = \"direct\"").unwrap();
+        assert_eq!(
+            engine_config(&pinned).sources_flag,
+            Some(EngineSources::Direct)
+        );
+        let engine = open_engine(&paths, &pinned).unwrap();
+        let assisted = serde_json::json!("assisted");
+        engine
+            .set_setting("sources", Some(&assisted))
+            .await
+            .unwrap();
+        assert_eq!(
+            engine.settings().await.unwrap().sources,
+            lessdugin_core::dto::Sources::Direct
+        );
+        drop(engine);
+        // the same stored setting, with a file that does not state `sources`
+        let free = Config::default();
+        assert_eq!(engine_config(&free).sources_flag, None);
+        let engine = open_engine(&paths, &free).unwrap();
+        assert_eq!(
+            engine.settings().await.unwrap().sources,
+            lessdugin_core::dto::Sources::Assisted
+        );
+        let direct = serde_json::json!("direct");
+        engine.set_setting("sources", Some(&direct)).await.unwrap();
+        assert_eq!(
+            engine.settings().await.unwrap().sources,
+            lessdugin_core::dto::Sources::Direct
+        );
+    }
 }

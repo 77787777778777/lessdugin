@@ -418,7 +418,7 @@ pub enum IndexerMode {
 /// `config.toml`. Every field has a default, so an empty or missing file is valid.
 ///
 /// ```toml
-/// sources = "assisted"            # direct | assisted
+/// sources = "assisted"            # direct | assisted; set, it pins the stored setting
 /// verify = "pds"                  # pds | proof
 /// dns = "doh"                     # doh | system
 /// doh = ["https://cloudflare-dns.com/dns-query", "https://dns.google/resolve"]
@@ -433,8 +433,11 @@ pub enum IndexerMode {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    /// Sources (`direct`, `assisted`).
-    pub sources: Sources,
+    /// Sources (`direct`, `assisted`). When the file states it, it pins `sources` like a flag
+    /// (`EngineConfig::sources_flag`, decision O-9): it wins over the stored setting. Absent,
+    /// the stored setting decides, else the build default (`sync.md` §2.3).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sources: Option<Sources>,
     /// Verification mode.
     pub verify: VerifyMode,
     /// DNS mode for handle TXT lookups.
@@ -467,7 +470,7 @@ fn url(s: &str) -> Url {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            sources: Sources::default(),
+            sources: None,
             verify: VerifyMode::default(),
             dns: DnsMode::default(),
             doh: vec![
@@ -726,7 +729,7 @@ mod tests {
             pds = "http://localhost:2583"
         "#;
         let cfg = Config::from_toml_str(text).unwrap();
-        assert_eq!(cfg.sources, Sources::Direct);
+        assert_eq!(cfg.sources, Some(Sources::Direct));
         assert!(cfg.is_devnet());
         assert_eq!(cfg.effective_plc().as_str(), "http://localhost:2582/");
         assert!(matches!(cfg.indexer, IndexerSetting::Urls(ref u) if u.len() == 1));
