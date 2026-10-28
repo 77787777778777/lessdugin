@@ -210,6 +210,10 @@ F("lfm1/autolink.json", "render", [
     R("in-heading-and-table", "# www.a.com\n\n| www.b.com |\n|---|\n| http://c.com |\n", "html", "toc"),
     R("adjacent-links", "www.a.com www.b.com\n"),
     R("multibyte-before", "é www.a.com ü\n"),
+    # Candidates that pass the first valid_domain check and fail the second (red-team F1: the
+    # scan must stay linear over one whitespace-free run).
+    R("failed-candidates-share-a-run", "(www.a.b.(www.a.b.(www.a.b. (www.a.b.)(www.c.d.)) (www.e.f.&amp;(www.g.h)\n"),
+    G("failed-candidates-long-run", {"prefix": "", "repeat": "(www.a.b.", "times": 2000, "suffix": "\n"}, "html_bytes", "html_tail"),
 ])
 
 # ------------------------------------------------------------------ spoiler-details.json

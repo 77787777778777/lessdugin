@@ -94,6 +94,8 @@ SL ──► HTML writer (§8) ──► html, anchors, flags.math_errors       
 
 Every stage MUST be one or more forward iterations over an event vector, with explicit stacks. No code path may recurse in proportion to input nesting (F8). This covers every pass, both writers, P, and the MathML filter and serialiser. The math engine is a third-party recursive parser: §7.2 bounds the nesting of what it is given.
 
+Every stage MUST also run in time linear in its input, up to fixed caps such as the 253-character domain of §4.1 (PILL-1). Where the pseudocode in this document rescans the rest of the input for each position, as §4.1's `autolink` does, it defines the result, not the algorithm.
+
 Every stage MUST be deterministic, on every target. Implementations MUST NOT key hash maps or sets by author-controlled strings, nor iterate them: Rust's `RandomState` has fixed keys on wasm32, so an author could make labels collide on purpose. Footnote labels, slugs and `media_used` use ordered maps and sets. Residual: pulldown-cmark 0.13.4 itself keeps link reference and footnote definitions in `HashMap`s keyed by labels from the input; only an upstream change can remove that slow path.
 
 ### 1.6 `derive_metadata`
@@ -235,6 +237,7 @@ Position 0 of every `Text` event counts as a boundary. Prefixes are recognised w
 
 - The 253 cap applies to the whole domain run, trailing dots included; an implementation may stop scanning after 254 characters.
 - The first `valid_domain` check ignores the trailing `.` and `_` that `trim_trailing` drops, so a domain at the end of a sentence links, as in GFM: `Visit www.example.com.` links `www.example.com` (`autolink.json#trailing-punctuation`). The second check still matters: a domain followed by a path may not end in `.` (`www.a.com./x` is not linked).
+- **Linear time (§1.5).** As written, every candidate that passes the first check scans to the end of its whitespace-free run and counts its brackets, so a run of candidates that fail the second check, such as `(www.a.b.` repeated, costs quadratic time. Implementations MUST give the same result in linear time. The run end `e₀` is the same for every candidate in the run. `trim_trailing(t[i..e₀])` walks back from `e₀` over the same characters for every `i`, never past the candidate's domain, and depends on `i` only through `closes − opens` over `t[i..e₀]`: with a balance of `x` it drops the first `max(x, 0)` of the `)` it meets and stops at the next one. So one walk per run, dropping every `)` and noting where each was, plus a running bracket balance, gives every candidate's `e`. A failed candidate may also skip to `d1`: any start inside its domain is a `www.` after a `_` with the same `d1`, run and balance, so it fails too (`autolink.json#failed-candidates-*`).
 
 ### 4.2 Pass 2: spoiler and details blocks
 
@@ -1153,7 +1156,7 @@ lcp_prefix(a, b) = length of the longest common prefix of a and b
 | `options.json` | each enabled extension; each disabled one rendering literally (smart punctuation, heading attributes, YAML and `+++` blocks, definition lists, `^sup^`, `~sub~` as strikethrough, `[[wikilinks]]`, old-footnote syntax) |
 | `raw-html.json` | HTML blocks of every CommonMark type, inline HTML, comments, `<script>`/`<style>`, entities, multi-line inline HTML, autolinks not applied to literals |
 | `normalise.json` | CR, CRLF and NUL in the source (step 0) and from character references (step 3) in every payload kind, text coalescing, the event cap (exactly 2^20 events, and 2^20 + 1 with tag closing), dangling footnote references after truncation |
-| `autolink.json` | `www.`/`http://`/`https://`, letter case, boundaries (`*_~(`, start of event), trailing punctuation (including a sentence-final `.` and trailing dots before a path), `;` entities, unbalanced `)`, `<`, `_` in the last two segments, no period, a domain longer than 253, inside links, images, code and literals |
+| `autolink.json` | `www.`/`http://`/`https://`, letter case, boundaries (`*_~(`, start of event), trailing punctuation (including a sentence-final `.` and trailing dots before a path), `;` entities, unbalanced `)`, `<`, `_` in the last two segments, no period, a domain longer than 253, inside links, images, code and literals, runs of candidates that fail the second `valid_domain` check (§1.5 linear time) |
 | `spoiler-details.json` | marker case, a rest of line that is not blank, a marker as a whole paragraph, an empty summary, an inline-formatted summary, nesting (also inside alerts and list items), alerts untouched, a marker made into a link by a reference definition, P and P_x |
 | `figure.json` | title and no title, extra text, two images, an image in a link, a whitespace-only title, tight and loose list items, a `cid:` miss and a non-image media item as the figure's media |
 | `mention.json` | did:plc, did:web, other methods, handle authority, text not starting with `@`, formatted inner text, the inner text replaced in HTML but kept in P, the 128 cap, mentions in summaries and spoilers, `short_did` |

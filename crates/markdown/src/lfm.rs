@@ -349,37 +349,85 @@ fn valid_domain(d: &[char]) -> bool {
     segs[segs.len() - 2..].iter().all(|s| !s.contains(&'_'))
 }
 
-/// cmark-gfm `autolink_delim`, linear form. Returns the kept length.
-fn trim_trailing(s: &[char]) -> usize {
-    let opens = s.iter().filter(|&&c| c == '(').count();
-    let mut closes = s.iter().filter(|&&c| c == ')').count();
-    let mut len = s.len();
-    while len > 0 {
-        let c = s[len - 1];
-        if matches!(
-            c,
-            '?' | '!' | '.' | ',' | ':' | '*' | '_' | '~' | '\'' | '"'
-        ) {
-            len -= 1;
-        } else if c == ';' {
-            let semi = len - 1;
-            let mut k = semi;
-            while k > 0 && s[k - 1].is_ascii_alphabetic() {
-                k -= 1;
-            }
-            if k < semi && k > 0 && s[k - 1] == '&' {
-                len = k - 1;
-            } else {
+/// The whitespace-free run `t[from..end]` of an autolink candidate, scanned once for every
+/// candidate in it so that pass 1 stays linear (§1.5; red-team F1).
+///
+/// `trim_trailing(t[i..end])` (cmark-gfm `autolink_delim`) walks back from `end` over the same
+/// characters for every start `i` in the run, and never past the start's domain, whose last
+/// character it keeps. It depends on `i` only through the bracket balance of `t[i..end]`: with
+/// `closes − opens = x` it drops the first `x` of the `)` it meets and stops at the next. So the
+/// walk is taken once, dropping every `)`, and `parens` keeps where they were.
+struct Run {
+    end: usize,
+    /// Where the walk that drops every `)` stops.
+    stop: usize,
+    /// The `)` that walk dropped, in walk order.
+    parens: Vec<usize>,
+    /// `closes − opens` over `t[from..end]`.
+    from: usize,
+    balance: isize,
+}
+
+impl Run {
+    /// The run of the candidate at `from` whose domain ends at `d1`.
+    fn new(t: &[char], from: usize, d1: usize) -> Self {
+        let mut end = d1;
+        while end < t.len() && !t[end].is_whitespace() && t[end] != '<' {
+            end += 1;
+        }
+        let balance = t[from..end].iter().map(|&c| paren(c)).sum();
+        let mut parens = Vec::new();
+        let mut len = end;
+        while len > from {
+            let c = t[len - 1];
+            if matches!(
+                c,
+                '?' | '!' | '.' | ',' | ':' | '*' | '_' | '~' | '\'' | '"'
+            ) {
                 len -= 1;
+            } else if c == ';' {
+                let semi = len - 1;
+                let mut k = semi;
+                while k > from && t[k - 1].is_ascii_alphabetic() {
+                    k -= 1;
+                }
+                if k < semi && k > from && t[k - 1] == '&' {
+                    len = k - 1;
+                } else {
+                    len -= 1;
+                }
+            } else if c == ')' {
+                len -= 1;
+                parens.push(len);
+            } else {
+                break;
             }
-        } else if c == ')' && closes > opens {
-            len -= 1;
-            closes -= 1;
-        } else {
-            break;
+        }
+        Self {
+            end,
+            stop: len,
+            parens,
+            from,
+            balance,
         }
     }
-    len
+
+    /// `i + trim_trailing(t[i..end])` for a candidate at `i`; starts only move forward.
+    fn kept(&mut self, t: &[char], i: usize) -> usize {
+        self.balance -= t[self.from..i].iter().map(|&c| paren(c)).sum::<isize>();
+        self.from = i;
+        let dropped = usize::try_from(self.balance).unwrap_or(0);
+        self.parens.get(dropped).map_or(self.stop, |&p| p + 1)
+    }
+}
+
+/// A character's share of `closes − opens`.
+fn paren(c: char) -> isize {
+    match c {
+        ')' => 1,
+        '(' => -1,
+        _ => 0,
+    }
 }
 
 fn autolink(text: &str, out: &mut Vec<Ev>) {
@@ -387,6 +435,7 @@ fn autolink(text: &str, out: &mut Vec<Ev>) {
     let n = t.len();
     let mut last = 0usize;
     let mut i = 0usize;
+    let mut run: Option<Run> = None;
     let collect = |a: usize, b: usize| -> String { t[a..b].iter().collect() };
     while i < n {
         if boundary(&t, i)
@@ -408,11 +457,12 @@ fn autolink(text: &str, out: &mut Vec<Ev>) {
                 d1t -= 1;
             }
             if d1 - d0 <= 253 && valid_domain(&t[d0..d1t]) {
-                let mut e = d1;
-                while e < n && !t[e].is_whitespace() && t[e] != '<' {
-                    e += 1;
-                }
-                let e = i + trim_trailing(&t[i..e]);
+                // A candidate past the end of the cached run starts a new run.
+                let r = match &mut run {
+                    Some(r) if i < r.end => r,
+                    r => r.insert(Run::new(&t, i, d1)),
+                };
+                let e = r.kept(&t, i);
                 if e > d0 && valid_domain(&t[d0..d1.min(e)]) {
                     if i > last {
                         push_text(out, &collect(last, i));
@@ -436,6 +486,10 @@ fn autolink(text: &str, out: &mut Vec<Ev>) {
                     i = e;
                     continue;
                 }
+                // No start inside the domain can link either: one there is a `www.` after a
+                // `_`, with this candidate's run, domain end and bracket balance.
+                i = d1;
+                continue;
             }
         }
         i += 1;
@@ -911,6 +965,138 @@ mod tests {
             autolink(s, &mut out);
             assert_eq!(out, vec![Ev::Text(s.into())], "{s}");
         }
+    }
+
+    /// §4.1 `autolink` as written: the run end and `trim_trailing` per candidate (quadratic).
+    fn autolink_spec(text: &str) -> Vec<Ev> {
+        fn trim_trailing(s: &[char]) -> usize {
+            let opens = s.iter().filter(|&&c| c == '(').count();
+            let mut closes = s.iter().filter(|&&c| c == ')').count();
+            let mut len = s.len();
+            while len > 0 {
+                let c = s[len - 1];
+                if matches!(
+                    c,
+                    '?' | '!' | '.' | ',' | ':' | '*' | '_' | '~' | '\'' | '"'
+                ) {
+                    len -= 1;
+                } else if c == ';' {
+                    let semi = len - 1;
+                    let mut k = semi;
+                    while k > 0 && s[k - 1].is_ascii_alphabetic() {
+                        k -= 1;
+                    }
+                    if k < semi && k > 0 && s[k - 1] == '&' {
+                        len = k - 1;
+                    } else {
+                        len -= 1;
+                    }
+                } else if c == ')' && closes > opens {
+                    len -= 1;
+                    closes -= 1;
+                } else {
+                    break;
+                }
+            }
+            len
+        }
+        let t: Vec<char> = text.chars().collect();
+        let n = t.len();
+        let (mut out, mut last, mut i) = (Vec::new(), 0usize, 0usize);
+        while i < n {
+            if boundary(&t, i)
+                && let Some(plen) = prefix_at(&t, i)
+            {
+                let d0 = if plen == 4 { i } else { i + plen };
+                let mut d1 = d0;
+                while d1 < n && is_domain_char(t[d1]) {
+                    d1 += 1;
+                }
+                let mut d1t = d1;
+                while d1t > d0 && matches!(t[d1t - 1], '.' | '_') {
+                    d1t -= 1;
+                }
+                if d1 - d0 <= 253 && valid_domain(&t[d0..d1t]) {
+                    let mut e = d1;
+                    while e < n && !t[e].is_whitespace() && t[e] != '<' {
+                        e += 1;
+                    }
+                    let e = i + trim_trailing(&t[i..e]);
+                    if e > d0 && valid_domain(&t[d0..d1.min(e)]) {
+                        if i > last {
+                            out.push(format!("T({})", t[last..i].iter().collect::<String>()));
+                        }
+                        out.push(format!("A({})", t[i..e].iter().collect::<String>()));
+                        last = e;
+                        i = e;
+                        continue;
+                    }
+                }
+            }
+            i += 1;
+        }
+        if last < n {
+            out.push(format!("T({})", t[last..].iter().collect::<String>()));
+        }
+        out.into_iter().map(Ev::Text).collect()
+    }
+
+    /// `autolink` with each link as `A(text)`, comparable with `autolink_spec`.
+    fn autolink_flat(text: &str) -> Vec<Ev> {
+        let mut out = Vec::new();
+        autolink(text, &mut out);
+        let mut flat = Vec::new();
+        let mut it = out.into_iter();
+        while let Some(e) = it.next() {
+            flat.push(Ev::Text(match e {
+                Ev::Text(s) => format!("T({s})"),
+                Ev::Start(Tag::Link(_)) => {
+                    let Some(Ev::Text(s)) = it.next() else {
+                        panic!("link text")
+                    };
+                    assert_eq!(it.next(), Some(Ev::End(TagKind::Link)));
+                    format!("A({s})")
+                }
+                other => panic!("{other:?}"),
+            }));
+        }
+        flat
+    }
+
+    /// The linear scan (one `Run` per whitespace-free run, the skip past a failed domain) gives
+    /// exactly the links of the §4.1 pseudocode.
+    #[test]
+    fn autolink_matches_spec() {
+        for s in [
+            "(www.a.b.(www.a.b.(www.a.b.",
+            "(www.a.b.(www.a.b)",
+            "(www.a.b.)(www.c.d.)) (www.e.f.)))",
+            "www.x_www.a.b. www.x_www.a.b.c",
+            "(www.a.b.&amp;(www.c.d&x;",
+            "~www.a.b._(http://c.d./_www.e.f.",
+        ] {
+            assert_eq!(autolink_flat(s), autolink_spec(s), "{s}");
+        }
+        use proptest::prelude::*;
+        // Domains (with and without the trailing dot that fails the second check), the boundary
+        // characters and what `trim_trailing` drops or keeps.
+        let unit = prop::sample::select(vec![
+            "www.a.b", "www.a.b.", "WWW.a.b_", "http://a.b", "https://b1.a-b.", "www.", "a", ".",
+            "_", "(", "(", ")", ")", ")", "*", "~", ";", "&", "&amp;", "&x;", "?", "!", "'", ":",
+            "/", " ", "<", "\u{a0}", "é",
+        ]);
+        let mut runner = proptest::test_runner::TestRunner::new(ProptestConfig {
+            cases: 4096,
+            failure_persistence: None,
+            ..ProptestConfig::default()
+        });
+        runner
+            .run(&prop::collection::vec(unit, 0..40), |units| {
+                let s = units.concat();
+                prop_assert_eq!(autolink_flat(&s), autolink_spec(&s), "{:?}", s);
+                Ok(())
+            })
+            .expect("linear autolink equals the §4.1 pseudocode");
     }
 
     #[test]
