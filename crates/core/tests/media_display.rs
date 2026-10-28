@@ -256,18 +256,31 @@ fn a_download_card_carries_the_sniffed_type() {
         .net
         .add_pds("bob.example.com")
         .add_account("bob.example.com");
+    let files: Vec<Value> = [
+        (b"%PDF-1.7\n%binary\n".to_vec(), "application/pdf"),
+        (tiny_png(15), "image/png"),
+        (b"just some bytes".to_vec(), "application/octet-stream"),
+    ]
+    .into_iter()
+    .map(|(bytes, declared)| bob.upload_blob(bytes, declared))
+    .collect();
+    // a PDS serves only the blobs a record references
+    bob.put("com.example.files", "self", &json!({ "files": files }));
+    bob.commit_now();
     let e = n.device("anon", None);
-    let load = |bytes: &[u8], declared: &str| {
-        let blob = bob.upload_blob(bytes.to_vec(), declared);
-        let cid = blob["ref"]["$link"].as_str().unwrap().to_owned();
-        block_on(e.load_media(&cid, Some(MediaOwner::author(bob.did().as_str())))).unwrap()
+    let load = |i: usize| {
+        let cid = files[i]["ref"]["$link"].as_str().unwrap();
+        block_on(e.load_media(cid, Some(MediaOwner::author(bob.did().as_str())))).unwrap()
     };
-    let pdf = load(b"%PDF-1.7\n%binary\n", "application/pdf");
-    assert_eq!((pdf.mime, pdf.sniffed.as_deref()), (None, Some("application/pdf")));
-    let png = load(&tiny_png(15), "image/png");
+    let pdf = load(0);
+    assert_eq!(
+        (pdf.mime, pdf.sniffed.as_deref()),
+        (None, Some("application/pdf"))
+    );
+    let png = load(1);
     assert_eq!(png.mime.as_deref(), Some("image/png"));
     assert_eq!(png.sniffed.as_deref(), Some("image/png"));
-    let unknown = load(b"just some bytes", "application/octet-stream");
+    let unknown = load(2);
     assert_eq!((unknown.mime, unknown.sniffed), (None, None));
 }
 

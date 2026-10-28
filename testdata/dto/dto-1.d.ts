@@ -303,6 +303,7 @@ export interface LoadedMedia {
     size: number;
     url: string;
     mime?: string;
+    sniffed?: string;
 }
 
 export interface MediaInput {
