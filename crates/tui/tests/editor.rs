@@ -329,6 +329,7 @@ fn the_edit_command_edits_a_spilled_body() {
     carol.flush();
     let post = carol.done(&t);
     let record = |uri: &str| {
+        use lessdugin_core::host::Host as _;
         let u = lessdugin_atp::syntax::AtUri::parse(uri).unwrap();
         block_on(
             lessdugin_core::store::records::RecordStore::new(carol.engine.host().cache()).get(&u),
