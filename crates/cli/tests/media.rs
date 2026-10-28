@@ -365,7 +365,9 @@ fn an_edit_keeps_the_media_and_attaches_new_images() {
     // an edit draft of the drafts directory attaches its new image and keeps the old one
     let id = save_draft(
         &alice,
-        &format!("---\ntype: edit\ntarget: {post}\n---\n![a chart](cid:{png})\n\n![red](red.png)\n"),
+        &format!(
+            "---\ntype: edit\ntarget: {post}\n---\n![a chart](cid:{png})\n\n![red](red.png)\n"
+        ),
         &[("red.png", RED)],
     );
     let out = alice.run(&["--json", "draft", "publish", &id, "--yes"]);
@@ -404,7 +406,11 @@ fn a_comment_attaches_its_draft_local_images() {
     assert_eq!(comments.len(), 1, "{comments:?}");
     let rec = alice.account.get(nsid::COMMENT, &comments[0].0).unwrap();
     let body = &rec["body"];
-    assert_eq!(body["text"], format!("Here: ![a dot](cid:{png})\n"), "{body}");
+    assert_eq!(
+        body["text"],
+        format!("Here: ![a dot](cid:{png})\n"),
+        "{body}"
+    );
     let media = body["media"].as_array().unwrap();
     assert_eq!(media.len(), 1, "{body}");
     assert_eq!(media[0]["blob"]["ref"]["$link"], png.as_str(), "{body}");
@@ -417,10 +423,7 @@ fn a_comment_attaches_its_draft_local_images() {
     std::fs::create_dir(&into).unwrap();
     let g = dave.json(&["media", "get", &comment, "--index", "1", "-o", s(&into)]);
     assert_eq!(g["mime"], "image/png", "{g}");
-    assert_eq!(
-        std::fs::read(into.join(format!("{png}.png"))).unwrap(),
-        PNG
-    );
+    assert_eq!(std::fs::read(into.join(format!("{png}.png"))).unwrap(), PNG);
 
     // headless, without --yes, the draft's file is not uploaded, and the draft is kept
     let id = save_draft(
@@ -484,7 +487,16 @@ fn media_get_streams_a_blob_at_the_hard_limit() {
     std::fs::create_dir(&into).unwrap();
     let mut child = dave
         .std_cmd()
-        .args(["--json", "media", "get", &post, "--index", "1", "-o", s(&into)])
+        .args([
+            "--json",
+            "media",
+            "get",
+            &post,
+            "--index",
+            "1",
+            "-o",
+            s(&into),
+        ])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -498,8 +510,18 @@ fn media_get_streams_a_blob_at_the_hard_limit() {
     // the call. The child's output fits its pipes (a line of JSON, a few warnings).
     assert_eq!(unsafe { libc::wait4(pid, &mut status, 0, &mut usage) }, pid);
     let (mut stdout, mut stderr) = (String::new(), String::new());
-    child.stdout.take().unwrap().read_to_string(&mut stdout).unwrap();
-    child.stderr.take().unwrap().read_to_string(&mut stderr).unwrap();
+    child
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_string(&mut stdout)
+        .unwrap();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut stderr)
+        .unwrap();
     assert!(
         libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
         "{status}: {stderr}"
@@ -522,7 +544,8 @@ fn media_get_streams_a_blob_at_the_hard_limit() {
     for i in [0, g.chunks() / 2, g.chunks() - 1] {
         let want = g.chunk(i);
         let mut got = vec![0u8; want.len()];
-        f.seek(SeekFrom::Start(i * Generated::CHUNK as u64)).unwrap();
+        f.seek(SeekFrom::Start(i * Generated::CHUNK as u64))
+            .unwrap();
         f.read_exact(&mut got).unwrap();
         assert!(got == want, "chunk {i} differs");
     }

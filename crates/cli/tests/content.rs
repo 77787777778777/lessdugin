@@ -1000,7 +1000,11 @@ fn a_spilled_body_is_edited_as_its_text() {
     assert_eq!(e["state"]["kind"], "done", "{e}");
     let rec = alice.account.get(nsid::POST, &rkey).unwrap();
     assert_eq!(rec["title"], "Long, retitled", "{rec}");
-    assert_eq!(rec["body"]["textBlob"]["ref"]["$link"], blob, "{}", rec["body"]);
+    assert_eq!(
+        rec["body"]["textBlob"]["ref"]["$link"], blob,
+        "{}",
+        rec["body"]
+    );
 
     let e = alice.json(&["edit", &post, "-m", "Short now."]);
     assert_eq!(e["state"]["kind"], "done", "{e}");
@@ -1031,7 +1035,10 @@ fn redact_deletes_what_the_pds_lists_whatever_the_view_shows() {
     assert_eq!(r["state"]["kind"], "pending", "{r}");
     let flushed = other.json(&["outbox", "flush"]);
     let sent = flushed["writes"].as_array().unwrap();
-    assert!(sent.iter().all(|x| x["state"]["kind"] == "done"), "{flushed}");
+    assert!(
+        sent.iter().all(|x| x["state"]["kind"] == "done"),
+        "{flushed}"
+    );
     assert!(alice.account.list(nsid::REVISION).is_empty());
     assert_eq!(alice.account.list(nsid::POST).len(), 1);
 }

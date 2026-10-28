@@ -584,13 +584,14 @@ fn media_of(uri: &str, body: Option<&Value>) -> Result<Vec<MediaRef>, CliError> 
     })?;
     let mut out = Vec::with_capacity(items.len());
     for (i, item) in items.iter().enumerate() {
-        let m = serde_json::from_value::<lessdugin_lexicon::records::Media>(item.clone())
-            .map_err(|e| {
+        let m = serde_json::from_value::<lessdugin_lexicon::records::Media>(item.clone()).map_err(
+            |e| {
                 EngineError::invalid_input(format!(
                     "{uri}: media item {} cannot be read ({e}); an edit would drop it",
                     i + 1
                 ))
-            })?;
+            },
+        )?;
         let cid = m.blob.r#ref.link.clone();
         out.push(MediaRef {
             id: cid.clone(),
@@ -850,7 +851,16 @@ pub async fn edit(ctx: &Ctx, args: EditArgs) -> Result<(), CliError> {
                 post.title = Some(t.clone());
             }
             let dir = ctx.paths.drafts_dir();
-            attach_media(ctx, &w, body_mut(&mut d), Some(&dir), false, false, Some(&id)).await?;
+            attach_media(
+                ctx,
+                &w,
+                body_mut(&mut d),
+                Some(&dir),
+                false,
+                false,
+                Some(&id),
+            )
+            .await?;
             return queue_from_draft(ctx, &w, &id, w.engine.edit(&uri, &d, &opts), "Edited").await;
         }
     };
@@ -866,18 +876,22 @@ pub async fn edit(ctx: &Ctx, args: EditArgs) -> Result<(), CliError> {
     }
     // a new title alone leaves the text as it is
     if body_given {
-        attach_media(ctx, &w, body_mut(&mut d), dir.as_deref(), foreign, false, None).await?;
+        attach_media(
+            ctx,
+            &w,
+            body_mut(&mut d),
+            dir.as_deref(),
+            foreign,
+            false,
+            None,
+        )
+        .await?;
     }
     send_edit(ctx, &w, &uri, &d, &opts).await
 }
 
 /// `draft publish` of an edit draft (`yes`: `--yes`, which confirms its local files).
-pub async fn publish_edit_draft(
-    ctx: &Ctx,
-    id: &str,
-    doc: Doc,
-    yes: bool,
-) -> Result<(), CliError> {
+pub async fn publish_edit_draft(ctx: &Ctx, id: &str, doc: Doc, yes: bool) -> Result<(), CliError> {
     let uri = doc
         .get("target")
         .ok_or_else(|| EngineError::invalid_input(format!("draft {id} has no `target`")))?
