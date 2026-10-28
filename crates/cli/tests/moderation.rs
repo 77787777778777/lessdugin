@@ -387,7 +387,8 @@ fn stale_keep(bob: &fakenet::User, carol: &fakenet::User) -> String {
     bob.ok(&["sync", "alice.test/meta"]);
     let k = bob.json(&["mod", "keep", &uri, "--yes"]);
     assert_eq!(k["state"]["kind"], "done", "{k}");
-    let e = carol.json(&["edit", &uri, "-m", "As it is now."]);
+    // the edit suspends the keep, which the author confirms
+    let e = carol.json(&["edit", &uri, "-m", "As it is now.", "--yes"]);
     assert_eq!(e["state"]["kind"], "done", "{e}");
     uri
 }
@@ -505,4 +506,54 @@ fn adopting_names_the_engines_reason() {
         "{j}"
     );
     check(&["mods", "rm", "bob.test", "--yes"]);
+}
+
+/// An edit suspends the positive assertions on the item's current version (`social.md` §4.5,
+/// `threat-model.md` SOC-3: a keep, a frontpage or curated tier, a pin stop until an authority
+/// asserts them again), so the author is told first: off a terminal the edit needs `--yes`
+/// (sec-7). An item without one edits as before.
+#[test]
+fn editing_a_kept_item_says_what_it_suspends_first() {
+    let net = Net::new();
+    let alice = net.user("alice.test", true);
+    let carol = net.user("carol.test", true);
+    alice.json(&["forum", "create", "meta"]);
+    carol.json(&["join", "alice.test/meta", "--yes"]);
+    alice.json(&["approve", "carol.test", "--yes"]);
+    carol.ok(&["sync", "alice.test/meta"]);
+    let post = |name: &str| {
+        let f = carol.file(name, "---\ntitle: From carol\n---\nAs it was.\n");
+        let p = carol.json(&["post", s(&f), "--yes"]);
+        p["state"]["uri"].as_str().unwrap().to_owned()
+    };
+    let (kept, plain) = (post("kept.md"), post("plain.md"));
+    alice.ok(&["sync", "alice.test/meta"]);
+    for verb in ["keep", "curate"] {
+        let k = alice.json(&["mod", verb, &kept, "--yes"]);
+        assert_eq!(k["state"]["kind"], "done", "{verb}: {k}");
+    }
+    let body = || {
+        let rkey = kept.rsplit('/').next().unwrap();
+        carol.account.get(nsid::POST, rkey).unwrap()["body"]["text"].clone()
+    };
+
+    let e = carol.fails(2, &["edit", &kept, "-m", "As it is now."]);
+    let msg = e["message"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("suspends a moderator's keep and its frontpage or curated tier"),
+        "{e}"
+    );
+    assert!(msg.contains("--yes"), "{e}");
+    assert_eq!(body(), json!("As it was.\n"), "nothing was sent");
+
+    let out = carol.run(&["edit", &kept, "-m", "As it is now.", "--yes"]);
+    assert!(out.status.success(), "{}", fakenet::text(&out.stderr));
+    let err = fakenet::text(&out.stderr);
+    assert!(err.contains("suspends a moderator's keep"), "{err}");
+    assert_eq!(body(), json!("As it is now."));
+
+    // nothing positive on it: no warning, no --yes
+    let out = carol.run(&["edit", &plain, "-m", "Changed."]);
+    assert!(out.status.success(), "{}", fakenet::text(&out.stderr));
+    assert!(!fakenet::text(&out.stderr).contains("suspends"));
 }

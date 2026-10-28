@@ -226,6 +226,10 @@ pub struct EditArgs {
     /// Do not keep the old version as a revision.
     #[arg(long)]
     pub no_history: bool,
+    /// Do not ask for confirmation when the edit suspends a keep, a frontpage or curated tier
+    /// or a pin of the item (needed then when not running interactively).
+    #[arg(long, short = 'y')]
+    pub yes: bool,
 }
 
 /// `delete`.

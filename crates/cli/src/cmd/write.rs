@@ -797,6 +797,83 @@ fn body_mut(d: &mut Draft) -> &mut BodyDraft {
     }
 }
 
+/// What an edit of `uri` suspends (`social.md` §4.5, `threat-model.md` SOC-3): the positive
+/// assertions in effect on its current version (a keep, a frontpage or curated tier, a pin),
+/// as the raw view lists them. They name that version's CID, so they stop counting until an
+/// authority asserts them again on the new one.
+async fn suspended_by_edit(engine: &Engine<NativeHost>, uri: &str) -> Vec<&'static str> {
+    use lessdugin_lexicon::records::{Action, ModAction};
+    use lessdugin_lexicon::values::Tier;
+    let Ok(raw) = engine.raw(uri).await else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for a in &raw.assertions {
+        if a.get("status").and_then(Value::as_str) != Some("effective") {
+            continue;
+        }
+        let Some(m) = a
+            .get("record")
+            .and_then(|r| serde_json::from_value::<ModAction>(r.clone()).ok())
+        else {
+            continue;
+        };
+        let what = match &m.action {
+            Action::Hide(h) if !h.hidden() => "a moderator's keep",
+            Action::Tier(t) if t.tier().is_some_and(|t| t != Tier::Personal) => {
+                "its frontpage or curated tier"
+            }
+            Action::Pin(p) if p.pinned() => "its pin",
+            _ => continue,
+        };
+        if !out.contains(&what) {
+            out.push(what);
+        }
+    }
+    out
+}
+
+/// Before an edit of an item that carries positive assertions (`social.md` §4.5): says what
+/// the edit suspends ([`suspended_by_edit`]), then asks on a terminal; headless use needs
+/// `--yes` (`yes`). An item with none asks nothing.
+async fn confirm_suspension(
+    ctx: &Ctx,
+    engine: &Engine<NativeHost>,
+    uri: &str,
+    yes: bool,
+) -> Result<(), CliError> {
+    let what = suspended_by_edit(engine, uri).await;
+    let Some((last, rest)) = what.split_last() else {
+        return Ok(());
+    };
+    let named = if rest.is_empty() {
+        (*last).to_owned()
+    } else {
+        format!("{} and {last}", rest.join(", "))
+    };
+    ctx.out.warn(cat([
+        lit("editing "),
+        tt(uri),
+        lit(" suspends "),
+        tt(&named),
+        lit(": they apply to the version a moderator saw, and stop until one asserts them again \
+             on the new version"),
+    ]));
+    if yes {
+        return Ok(());
+    }
+    if prompt::stdin_is_tty() && !ctx.out.is_json() {
+        if prompt::confirm("edit it anyway?") {
+            return Ok(());
+        }
+        return Err(CliError::Reported(1));
+    }
+    Err(CliError::usage(format!(
+        "editing {uri} suspends {named} (see above): add --yes to edit it when not running \
+         interactively"
+    )))
+}
+
 async fn send_edit(
     ctx: &Ctx,
     w: &Writer,
@@ -816,6 +893,7 @@ pub async fn edit(ctx: &Ctx, args: EditArgs) -> Result<(), CliError> {
     let w = ctx.writer_for(&owner_of(&uri)?).await?;
     read::sync_thread_quietly(ctx, &w.engine, &uri).await;
     let c = current(&w, &uri).await?;
+    confirm_suspension(ctx, &w.engine, &uri, args.yes).await?;
     let mut opts = EditOpts {
         history: !args.no_history,
         summary: args.summary.clone(),
@@ -890,7 +968,8 @@ pub async fn edit(ctx: &Ctx, args: EditArgs) -> Result<(), CliError> {
     send_edit(ctx, &w, &uri, &d, &opts).await
 }
 
-/// `draft publish` of an edit draft (`yes`: `--yes`, which confirms its local files).
+/// `draft publish` of an edit draft (`yes`: `--yes`, which confirms its local files and what
+/// the edit suspends).
 pub async fn publish_edit_draft(ctx: &Ctx, id: &str, doc: Doc, yes: bool) -> Result<(), CliError> {
     let uri = doc
         .get("target")
@@ -899,6 +978,7 @@ pub async fn publish_edit_draft(ctx: &Ctx, id: &str, doc: Doc, yes: bool) -> Res
     let w = ctx.writer_for(&owner_of(&uri)?).await?;
     read::sync_thread_quietly(ctx, &w.engine, &uri).await;
     let c = current(&w, &uri).await?;
+    confirm_suspension(ctx, &w.engine, &uri, yes).await?;
     let mut d = edit_draft(&c, &doc, Some(doc.body_text()))?;
     let dir = ctx.paths.drafts_dir();
     attach_media(ctx, &w, body_mut(&mut d), Some(&dir), false, yes, Some(id)).await?;
