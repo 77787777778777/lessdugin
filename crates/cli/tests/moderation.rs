@@ -450,7 +450,8 @@ fn adopting_reports_what_it_did_not_adopt() {
 
 /// An assertion in effect that the adoption skips is listed with the reason of the engine's
 /// adopt report (`WriteState.done.report`, sec-8), for `mod adopt` and for the adoption `mods
-/// rm` runs first: here the owner's own hide of the same post, which the adoption keeps.
+/// rm` runs first: here the owner's own (expired) hide of the same post, which the adoption
+/// keeps instead of overwriting it.
 #[test]
 fn adopting_names_the_engines_reason() {
     let net = Net::new();
@@ -471,7 +472,14 @@ fn adopting_names_the_engines_reason() {
     let h = bob.json(&["mod", "hide", &hidden, "--yes"]);
     assert_eq!(h["state"]["kind"], "done", "{h}");
     alice.ok(&["sync", "alice.test/meta"]);
-    let h = alice.json(&["mod", "hide", &hidden, "--reason", "mine", "--yes"]);
+    let h = alice.json(&[
+        "mod",
+        "hide",
+        &hidden,
+        "--until",
+        "2001-01-01T00:00:00.000Z",
+        "--yes",
+    ]);
     assert_eq!(h["state"]["kind"], "done", "{h}");
 
     let check = |args: &[&str]| {
