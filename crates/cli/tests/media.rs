@@ -436,3 +436,94 @@ fn a_comment_attaches_its_draft_local_images() {
     assert!(e["message"].as_str().unwrap().contains("./dot.png"), "{e}");
     assert_eq!(alice.account.list(nsid::COMMENT).len(), 1);
 }
+
+/// `docs/plan.md` M4 acceptance: a blob at the hard limit (300 MiB, `limits.md` §5) that
+/// FakePds generates a chunk at a time is fetched and CID-checked by `lessdugin media get`
+/// without being held in memory (`threat-model.md` INFRA-6): the CLI process's peak resident
+/// set, from `wait4`, stays far below the blob.
+#[cfg(target_os = "linux")]
+#[test]
+fn media_get_streams_a_blob_at_the_hard_limit() {
+    use lessdugin_core::limits::BLOB_HARD_MAX_BYTES;
+    use lessdugin_testkit::fake_pds::Generated;
+    use std::io::{Read, Seek, SeekFrom};
+    /// The resident set the whole CLI may reach: its code, the store and a few chunks; a
+    /// buffering implementation needs the blob's 300 MiB on top.
+    const RSS_BUDGET: u64 = 160 * 1024 * 1024;
+
+    let (net, alice) = forum();
+    let out = publish_draft(
+        &alice,
+        "---\ntitle: A film\n---\n![a film](film.png)\n",
+        &[("film.png", PNG)],
+    );
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let p: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let post = p["state"]["uri"].as_str().unwrap().to_owned();
+    // the post's one media item becomes a generated blob of 300 MiB
+    let size = BLOB_HARD_MAX_BYTES;
+    let g = Generated { size, seed: 0x5EED };
+    let big = alice
+        .account
+        .serve_generated_blob(size, g.seed, "video/mp4")
+        .to_string();
+    let rkey = alice.account.list(nsid::POST)[0].0.clone();
+    let mut rec = alice.account.get(nsid::POST, &rkey).unwrap();
+    let text_md = rec["body"]["text"]
+        .as_str()
+        .unwrap()
+        .replace(&raw_cid(PNG), &big);
+    rec["body"]["text"] = Value::String(text_md);
+    rec["body"]["media"][0]["blob"] = serde_json::json!({
+        "$type": "blob", "ref": { "$link": big }, "mimeType": "video/mp4", "size": size,
+    });
+    alice.account.put(nsid::POST, &rkey, &rec);
+
+    let dave = net.reader(&alice);
+    let into = dave.path("downloads");
+    std::fs::create_dir(&into).unwrap();
+    let mut child = dave
+        .std_cmd()
+        .args(["--json", "media", "get", &post, "--index", "1", "-o", s(&into)])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let pid = libc::pid_t::try_from(child.id()).unwrap();
+    let mut status = 0;
+    // SAFETY: an all-zero `rusage` is a valid value of the plain C struct.
+    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+    // SAFETY: `pid` is this process's child, not waited for yet; both pointers are valid for
+    // the call. The child's output fits its pipes (a line of JSON, a few warnings).
+    assert_eq!(unsafe { libc::wait4(pid, &mut status, 0, &mut usage) }, pid);
+    let (mut stdout, mut stderr) = (String::new(), String::new());
+    child.stdout.take().unwrap().read_to_string(&mut stdout).unwrap();
+    child.stderr.take().unwrap().read_to_string(&mut stderr).unwrap();
+    assert!(
+        libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
+        "{status}: {stderr}"
+    );
+    // Linux counts `ru_maxrss` in KiB
+    let peak = u64::try_from(usage.ru_maxrss).unwrap() * 1024;
+    eprintln!("media get of {size} bytes: peak RSS {peak} bytes");
+    assert!(
+        peak < RSS_BUDGET,
+        "the CLI reached {peak} bytes of resident memory for a {size}-byte blob: it was buffered"
+    );
+
+    // saved as <cid>.bin (the declared type is not what the bytes sniff as), whole
+    let v: Value = serde_json::from_str(stdout.trim()).unwrap();
+    let saved = into.join(format!("{big}.bin"));
+    assert_eq!(v["path"], saved.display().to_string(), "{v}");
+    assert_eq!(v["sizeBytes"], size, "{v}");
+    let mut f = std::fs::File::open(&saved).unwrap();
+    assert_eq!(f.metadata().unwrap().len(), size);
+    for i in [0, g.chunks() / 2, g.chunks() - 1] {
+        let want = g.chunk(i);
+        let mut got = vec![0u8; want.len()];
+        f.seek(SeekFrom::Start(i * Generated::CHUNK as u64)).unwrap();
+        f.read_exact(&mut got).unwrap();
+        assert!(got == want, "chunk {i} differs");
+    }
+}
