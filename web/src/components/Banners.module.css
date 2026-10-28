@@ -23,6 +23,7 @@
   background: var(--color-surface-2);
 }
 
+/* the banner's own colour: a dimmed muted text on surface-2 fails WCAG AA contrast */
 .hint {
-  opacity: 0.85;
+  font-style: italic;
 }
