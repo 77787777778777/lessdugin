@@ -1867,3 +1867,62 @@ fn the_command_line_reaches_membership_items_and_local_state() {
     assert!(status(&ta).contains("New forum"), "{}", status(&ta));
     assert!(!status(&ta).contains(label), "{}", status(&ta));
 }
+
+/// sec-8 (`engine-api.md` §3.5 `mod_adopt`, `data-model.md` §8.6): what an adoption did not
+/// adopt comes back in its `done` state, and the TUI lists it: here bob's hide, which alice's
+/// keep overrode, so it never counted.
+#[test]
+fn mod_adopt_lists_what_it_did_not_adopt() {
+    use lessdugin_core::dto::{ModRole, ModsChange};
+    let s = scenario();
+    let (alice, bob) = (&s.w.alice, &s.w.bob);
+    block_on(alice.engine.mods_set(
+        &s.forum,
+        &ModsChange::Add {
+            did: bob.did(),
+            role: ModRole::Moderator,
+            title: None,
+        },
+    ))
+    .unwrap();
+    alice.flush();
+    s.w.tick(MINUTE);
+    bob.sync(&s.forum);
+    let hide = |hidden| ModActionIntent::Assert {
+        forum: s.forum.clone(),
+        scope: ModScope::Forum,
+        subject: s.bob_c1.clone(),
+        action: ModActionValue::Hide {
+            hidden,
+            spam: false,
+            show_reason: true,
+        },
+        reason: None,
+        until_ms: None,
+    };
+    block_on(bob.engine.mod_action(&hide(true))).unwrap();
+    bob.flush();
+    s.w.tick(MINUTE);
+    alice.sync(&s.forum);
+    block_on(alice.engine.mod_action(&hide(false))).unwrap();
+    alice.flush();
+    s.w.tick(MINUTE);
+    alice.sync(&s.forum);
+
+    let mut t = alice_tui(&s, 100, 30);
+    block_on(t.start(Some(s.forum.clone())));
+    run_command(&mut t, &format!("mod adopt {}", bob.did()));
+    block_on(t.engine().outbox_flush()).unwrap();
+    block_on(t.settle());
+    let st = status(&t);
+    assert!(st.contains("1 assertion not adopted"), "{st}");
+    let p = t.state.panel.as_ref().expect("the report");
+    assert_eq!(p.title, "Adoption report");
+    let lines: Vec<String> = p.lines.iter().map(|l| l.to_plain_string()).collect();
+    let prefix = format!("cannot adopt at://{}/", bob.did());
+    assert!(
+        lines.len() == 1 && lines[0].starts_with(&prefix),
+        "{lines:?}"
+    );
+    assert!(t.render().contains("cannot adopt"), "{}", t.render());
+}

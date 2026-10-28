@@ -5452,7 +5452,7 @@ impl State {
                     self.failed.remove(&id);
                     self.writes.insert(id, state);
                 }
-                WriteState::Done { .. } => {
+                WriteState::Done { report, .. } => {
                     self.writes.remove(&id);
                     self.failed.remove(&id);
                     self.op_writes.retain(|x| *x != id);
@@ -5466,6 +5466,21 @@ impl State {
                         None => {
                             self.finished.insert(id);
                         }
+                    }
+                    // an adoption's report (`mod adopt`, `mods remove`, `data-model.md` §8.6):
+                    // what it did not adopt lapses with the former moderator unless the
+                    // adopter's own assertion stands, so it is listed
+                    if !report.is_empty() {
+                        let n = u32::try_from(report.len()).unwrap_or(u32::MAX);
+                        self.say(
+                            Tone::Warn,
+                            cat([
+                                lit("Adoption sent; "),
+                                count(n, "assertion", "assertions"),
+                                lit(" not adopted (listed)."),
+                            ]),
+                        );
+                        self.show_panel("Adoption report", report.iter().map(|l| tt(l)).collect());
                     }
                 }
                 WriteState::Failed { error } => {
