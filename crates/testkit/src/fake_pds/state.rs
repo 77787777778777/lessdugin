@@ -76,6 +76,8 @@ pub(crate) struct Account {
     pub doc_override: Option<Value>,
     pub repo: Repo,
     pub blobs: BTreeMap<Cid, StoredBlob>,
+    /// Blobs `getBlob` streams from a generator (with their MIME type), never stored.
+    pub generated: BTreeMap<Cid, (super::blob::Generated, String)>,
     pub cursor_mode: Option<CursorMode>,
     pub fork: Option<Fork>,
     pub clock_id: u16,

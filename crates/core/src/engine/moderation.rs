@@ -21,7 +21,7 @@
 //! Local rows (`state` store): `("loc", "rejected", F, did)`, applicants dismissed by
 //! [`Engine::reject`] on this device.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use lessdugin_atp::syntax::{AtUri, Did};
 use lessdugin_lexicon::collection::nsid;
@@ -48,10 +48,12 @@ use crate::host::{Dir, Host, KeyRange, KvOp, KvStore};
 use crate::limits;
 use crate::outbox::{self, parse_write_id, records};
 use crate::social::full::ForumView;
-use crate::social::full::view::State;
+use crate::social::full::moderation::ModScope as FoldScope;
+use crate::social::full::view::{ModStatus, State};
 use crate::social::input::{Skel, split_uri};
 use crate::store::records::RecordStore;
 use crate::store::row;
+use crate::sync::{Reason, SyncRequest};
 
 use super::forums::markdown_body;
 use super::models::{Loaded, store_error};
@@ -537,7 +539,12 @@ impl<H: Host> Engine<H> {
                     return wrong("a post");
                 }
                 let mut t = TierAction::new(lex_tier(*tier));
-                t.notice = notice.as_ref().map(markdown_body).transpose()?;
+                t.notice = self
+                    .with_dids_opt(notice.as_ref())
+                    .await?
+                    .as_ref()
+                    .map(markdown_body)
+                    .transpose()?;
                 (Action::Tier(t), *tier != Tier::Personal)
             }
             ModActionValue::Pin {
@@ -646,8 +653,8 @@ impl<H: Host> Engine<H> {
     }
 
     /// `mod_adopt(forum, former)` (`data-model.md` §8.6, `social.md` §4.10): the active account,
-    /// an authority of the forum, re-issues the former (or departing) moderator's non-lapsed
-    /// forum-scope assertions with `adopts` pointing at each original. `former` is a DID or a
+    /// an authority of the forum, re-issues the departing moderator's forum-scope assertions
+    /// that are in effect, with `adopts` pointing at each original. `former` is a DID or a
     /// handle; its PDS is resolved now. What could not be adopted is reported in the write's
     /// result (`cannot adopt …`, `kept own assertion …`).
     pub async fn mod_adopt(&self, forum: &str, former: &str) -> Result<WriteTicket, EngineError> {
@@ -658,9 +665,62 @@ impl<H: Host> Engine<H> {
             EngineError::blocked("only the forum's owner, admins and moderators can adopt")
         })?;
         let (did, pds) = self.did_and_pds(former).await?;
+        let (counted, _) = self.adoptable(&key, &did).await?;
         self.outbox
-            .mod_adopt(&session, &key.uri, &did, &pds, role)
+            .mod_adopt(&session, &key.uri, &did, &pds, role, counted)
             .await
+    }
+
+    /// What `mod adopt` of `former` may re-issue (`social.md` §4.10): the former's forum-scope
+    /// assertions whose mod-log status is `effective` in the actor's fold, after a P0 sync of
+    /// the former's forum range so that the fold judges what is there now, with A's ranks; and
+    /// how many of the former's other forum-scope records will not be adopted, by status.
+    async fn adoptable(
+        &self,
+        key: &ForumKey,
+        former: &Did,
+    ) -> Result<(outbox::Counted, BTreeMap<&'static str, usize>), EngineError> {
+        let s = self.p0_session(None, Some(limits::FORUM_OPEN_SYNC_BUDGET_MS));
+        let req = SyncRequest::forum(former.clone(), &key.fk, Reason::Authority).explicit();
+        let r = self.syncer().sync_repo(&s, &req).await;
+        if let Some(e) = &r.error {
+            tracing::warn!(did = %former, error = %e, "adopt: sync");
+        }
+        if r.changed > 0 {
+            self.rt.invalidate(key.uri.as_str());
+            self.rt.bus.changed([Topic::Forum {
+                uri: key.uri.to_string(),
+            }]);
+        }
+        let l = self.loaded(key).await?;
+        let m = &l.model.view.moderation;
+        let mut counted = outbox::Counted {
+            originals: BTreeMap::new(),
+            roles: l
+                .model
+                .view
+                .authorities
+                .iter()
+                .map(|(d, r)| (d.clone(), role_name(*r).to_owned()))
+                .collect(),
+        };
+        let mut skipped: BTreeMap<&'static str, usize> = BTreeMap::new();
+        for x in m.records.values() {
+            if x.actor != former.as_str() || x.scope != FoldScope::Forum {
+                continue;
+            }
+            match (m.forum_status.get(&x.uri), split_uri(&x.uri)) {
+                (Some(ModStatus::Effective), Some((_, _, rkey))) => {
+                    counted.originals.insert(rkey.to_owned(), x.cid.clone());
+                }
+                (st, _) => {
+                    *skipped
+                        .entry(st.map_or("reserved/unknown", |s| s.name()))
+                        .or_default() += 1;
+                }
+            }
+        }
+        Ok((counted, skipped))
     }
 
     /// The DID and PDS of an actor.
@@ -770,16 +830,26 @@ impl<H: Host> Engine<H> {
                     let pds = self.did_and_pds(&target).await?.1;
                     let former =
                         Did::parse(&target).map_err(|e| EngineError::internal(e.to_string()))?;
+                    let (counted, skipped) = self.adoptable(&key, &former).await?;
+                    let n = counted.originals.len();
                     let t = self
                         .outbox
-                        .mod_adopt(&session, &key.uri, &former, &pds, "owner")
+                        .mod_adopt(&session, &key.uri, &former, &pds, "owner", counted)
                         .await?;
                     after = parse_write_id(&t.id).map(|(_, seq)| seq);
                     notices.push(format!(
-                        "mod adopt runs first (write {}); the moderator is removed only once it \
-                         completes",
+                        "mod adopt runs first (write {}, {n} assertion(s) in effect); the \
+                         moderator is removed only once it completes",
                         t.id
                     ));
+                    if !skipped.is_empty() {
+                        let by: Vec<String> =
+                            skipped.iter().map(|(s, k)| format!("{k} {s}")).collect();
+                        notices.push(format!(
+                            "not adopted, since they are not in effect: {}",
+                            by.join(", ")
+                        ));
+                    }
                 }
             }
         }
@@ -874,7 +944,12 @@ impl<H: Host> Engine<H> {
             "description",
             draft.description.clone().map(Value::String),
         );
-        let about = draft.about.as_ref().map(markdown_body).transpose()?;
+        let about = self
+            .with_dids_opt(draft.about.as_ref())
+            .await?
+            .as_ref()
+            .map(markdown_body)
+            .transpose()?;
         set(
             o,
             "about",

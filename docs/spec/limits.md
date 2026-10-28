@@ -106,6 +106,8 @@ Every cap counts response bytes (§1) and follows R1–R4. A request that names 
 | `INDEXER_RESPONSE_MAX_BYTES` | 8,388,608 (8 MiB) | S | Every indexer JSON response. Larger: the hint is dropped. | here |
 | `JETSTREAM_MESSAGE_MAX_BYTES` | 1,200,000 | S | One Jetstream WebSocket message. Natively: the WebSocket library's maximum message and frame size. On the v1 wire: also sent as `maxMessageSizeBytes`. In the browser: an oversized message is dropped on receipt and the client fails over to the other endpoint. | `threat-model.md` INFRA-5 |
 | `BLOB_TEXT_MAX_BYTES` | 1,000,000 | S | A `textBlob` body fetch (equal to the lexicon `maxSize`). | `lfm-1.md` §1.3 |
+| `BODY_BLOB_RETRY_MS` | 60,000 (1 min) | O | A `textBlob` that could not be fetched (the network) leaves its body pending; it is asked for again when a view needs it after this long. A blob the PDS reports missing (`Blob not found`) renders as missing and is not asked for again (`sync.md` §11.1); one that does not match its CID, is not UTF-8 or is larger than `BLOB_TEXT_MAX_BYTES` renders as unreadable. | `lfm-1.md` §1.3 |
+| `BODY_BLOB_WAIT_MS` | 3,000 (3 s) | O | How long `get_post` and `get_thread` wait for a spilled body before they return it pending (the excerpt shows), so a slow author's PDS does not hold back the post and its comments. The fetch is given up on (in the browser the download runs on, and a later view takes its stored copy without a request) and asked for again after `BODY_BLOB_RETRY_MS`. | `lfm-1.md` §1.3 |
 | `BLOB_HARD_MAX_BYTES` | 314,572,800 (300 MiB) | S | Any blob fetch or upload. | here |
 | – | min(declared `size`, the field's lexicon `maxSize`, `BLOB_HARD_MAX_BYTES`) | S | The `max` passed to `Host::fetch_blob`. A body longer than the declared size is aborted. | `threat-model.md` §5.6.1 |
 | `BLOB_AUTOLOAD_MAX_BYTES` | 5,242,880 (5 MiB) | O | Inline images up to this size may load without a click (autoload policy); larger ones are click-to-load. | `threat-model.md` PRIV-1 |
@@ -125,8 +127,8 @@ Every cap counts response bytes (§1) and follows R1–R4. A request that names 
 | `FRONTMATTER_DEPTH_MAX` | 32 | S | YAML nesting depth in frontmatter. | `threat-model.md` TERM-10 |
 | `FRONTMATTER_ALIASES_MAX` | 0 | S | YAML anchors and aliases are rejected. | `threat-model.md` TERM-10 |
 | `IMAGE_DECODE_MAX_INPUT_BYTES` | 67,108,864 (64 MiB) | S | Encoded image bytes given to a decoder (TUI display, native upload pipeline). Larger: placeholder (display) or refusal (upload). | `threat-model.md` SUP-9 |
-| `IMAGE_DECODE_MAX_SIDE` | 8,192 | S | Width and height in pixels, each. | `threat-model.md` SUP-9 |
-| `IMAGE_DECODE_MAX_ALLOC` | 268,435,456 (256 MiB) | S | Decoder allocation limit (one 8,192² RGBA frame). | `threat-model.md` SUP-9 |
+| `IMAGE_DECODE_MAX_SIDE` | 8,192 | S | Width and height in pixels, each, read from the header before any pixel is decoded and also set as the decoder's own limit. A header whose frame size cannot be read is refused like one past the cap (fail closed). | `threat-model.md` SUP-9 |
+| `IMAGE_DECODE_MAX_ALLOC` | 268,435,456 (256 MiB) | S | Decoder allocation limit (one 8,192² RGBA frame), set explicitly on every decode (a decoder library's default does not count). | `threat-model.md` SUP-9 |
 | `GIF_DECODE_MAX_FRAMES` | 200 | S | Frames decoded from one GIF. | `threat-model.md` SUP-9 |
 | `IMAGE_DECODE_TIMEOUT_MS` | 10,000 (10 s) | S | Wall time of one off-thread decode. Longer: abort; placeholder or refusal. | `threat-model.md` SUP-9 |
 | `MEDIA_CONTAINER_MAX_DEPTH` | 32 | S | Nesting of MP4 boxes and RIFF chunks walked by the sniffer and the strippers. Deeper: the file is refused for upload, or treated as an unknown type for display. | `threat-model.md` §5.9.1 |
@@ -289,6 +291,7 @@ The 1 %-per-hour automatic audit and automatic demotion (above 2 % contradiction
 |---|---|---|---|---|
 | `IMAGE_UPLOAD_TARGET_BYTES` | 5,242,880 (5 MiB) | O | first downscale target for images (the default self-hosted PDS upload limit). On a 413, the target becomes half the size of the last encoding and the image is re-encoded, at most `IMAGE_UPLOAD_413_RETRIES` times; then the upload is refused. | `sync.md` (media pipeline) |
 | `IMAGE_UPLOAD_413_RETRIES` | 3 | O | see above | here |
+| `PREPARED_MEDIA_TTL_MS` | 604,800,000 (7 days) | O | the prepared bytes of a file (`prepare_media`) are kept until a write that uploads them is enqueued (the outbox then holds its own copy), or this long for a draft that is never sent; then the draft's reference is refused with `mediaBytesMissing` ("prepare the file again") | `data-model.md` §8.8 |
 | `AUTOLOAD_HOST_MIN_PARTICIPANTS` | 5 | O | a PDS host qualifies for media autoload if it serves at least this many participants of the forum | `threat-model.md` PRIV-1 |
 | `ASPECT_RATIO_MAX` | 20 | P | `aspectRatio` is clamped to between 1:20 and 20:1 for display | `lfm-1.md` §6.2 |
 

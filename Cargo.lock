@@ -3102,6 +3102,7 @@ dependencies = [
  "lessdugin-testkit",
  "libm",
  "proptest",
+ "pulldown-cmark",
  "serde",
  "serde_bytes",
  "serde_json",

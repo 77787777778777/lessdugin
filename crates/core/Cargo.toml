@@ -25,6 +25,8 @@ tsify = ["dep:tsify", "dep:wasm-bindgen"]
 lessdugin-atp.workspace = true
 lessdugin-lexicon.workspace = true
 lessdugin-markdown.workspace = true
+# the link destinations a writer rewrites (handle authorities to DIDs, W7), under lfm/1's options
+pulldown-cmark.workspace = true
 futures.workspace = true
 http.workspace = true
 url.workspace = true

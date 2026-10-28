@@ -234,6 +234,18 @@ impl<K: KvStore + 'static> Host for NativeHost<K> {
             .await
     }
 
+    async fn blob_open(&self, cid: &str) -> Result<Option<BlobHandle>, HostError> {
+        self.blobs.open(cid).await
+    }
+
+    async fn blob_read(&self, cid: &str, offset: u64, len: u32) -> Result<Vec<u8>, HostError> {
+        self.blobs.read(cid, offset, len).await
+    }
+
+    async fn blob_delete(&self, cid: &str) -> Result<(), HostError> {
+        self.blobs.delete(cid).await
+    }
+
     async fn websocket(
         &self,
         url: url::Url,

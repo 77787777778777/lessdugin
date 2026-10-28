@@ -77,6 +77,11 @@ pub fn is_membership(coll: &str) -> bool {
     ns_short(coll) == Some("membership")
 }
 
+/// `true` if `coll` is this build's `NS.modAction`.
+pub fn is_mod_action(coll: &str) -> bool {
+    ns_short(coll) == Some("modAction")
+}
+
 /// The `RANGED` cap of `data-model.md` §7.4 for `coll`: 100,000 for `opinion`, 20,000 otherwise.
 pub fn fetch_cap(coll: &str) -> u32 {
     if ns_short(coll) == Some("opinion") {

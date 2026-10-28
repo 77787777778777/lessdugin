@@ -6,7 +6,11 @@
 //! first-seen time on this device and `baseline` the greatest `t_obs` already considered for the
 //! viewer in this forum. `createdAt` is never used, so backdating cannot hide an item. The first
 //! computation for a (viewer, forum) only records the baseline and a snapshot: what was synced
-//! before is not news (a new device does not replay a forum's history).
+//! before is not news (a new device does not replay a forum's history). An item that is new but
+//! not eligible yet (hidden while a moderator's repo is unavailable, hidden and then kept, by an
+//! author not yet in S ∪ E) is kept *pending* in the baseline and considered again at each
+//! computation, so the baseline moving past it does not lose it ([`PENDING_MAX`] items, for
+//! [`PENDING_MAX_US`] after they were first seen).
 //!
 //! **Eligible items** are posts and comments that are listed (`Visible` or `Collapsed`), not by
 //! the viewer, and by someone in S ∪ E (the default filter). Each gives at most one
@@ -43,6 +47,11 @@ pub const BASELINE_V: u32 = 1;
 
 /// Previews are cut to this many characters.
 pub const PREVIEW_CHARS: usize = 140;
+
+/// At most this many pending items are kept per (viewer, forum), the latest first seen.
+pub const PENDING_MAX: usize = 1_000;
+/// A pending item is dropped this long after it was first seen (µs).
+pub const PENDING_MAX_US: i64 = 7 * 24 * 60 * 60 * 1_000_000;
 
 /// What the viewer subscribed to, as it concerns one forum.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -86,12 +95,22 @@ pub struct Baseline {
     /// The snapshot of the change reasons.
     #[serde(default)]
     pub snapshot: Snapshot,
+    /// New items that were not eligible when considered: uri → `t_obs` (µs). They are
+    /// considered again at the next computation.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub pending: BTreeMap<String, i64>,
+    /// Counts the computations that notified a change: a change's id carries the generation
+    /// it was found in, so two computations from one baseline (overlapping refreshes, two
+    /// processes over one state store) give it the same id and it is stored once.
+    #[serde(default)]
+    pub generation: u64,
 }
 
 /// One computed notification.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Note {
-    /// A stable id (an item's notification is `n:<uri>`; a change's carries the time).
+    /// A stable id (an item's notification is `n:<uri>`; a change's carries the generation of
+    /// the baseline it was found against, [`Baseline::generation`]).
     pub id: String,
     /// The reason.
     pub reason: NotificationReason,
@@ -128,7 +147,8 @@ pub fn obs(x: &Skel) -> Option<i64> {
     x.times.obs
 }
 
-fn listed(view: &ForumView, uri: &str) -> bool {
+/// `true` if `uri` is listed (`Visible` or `Collapsed`, `social.md` §10.1) in `view`.
+pub fn listed(view: &ForumView, uri: &str) -> bool {
     view.visibility
         .as_ref()
         .ok()
@@ -149,25 +169,52 @@ pub fn max_obs(input: &ForumInput) -> i64 {
     input.records.values().filter_map(obs).max().unwrap_or(0)
 }
 
-/// The eligible items first seen after `baseline` (µs), by uri.
-pub fn new_items<'a>(
-    input: &'a ForumInput,
-    view: &ForumView,
-    me: &str,
-    baseline: i64,
-) -> Vec<&'a Skel> {
-    let established: Option<&BTreeSet<String>> = view.karma.as_ref().ok().map(|k| &k.e);
+/// The posts and comments first seen after `base`, or pending in it.
+fn candidates<'a>(input: &'a ForumInput, base: &'a Baseline) -> impl Iterator<Item = &'a Skel> {
     input
         .records
         .values()
         .filter(|x| is_post(x) || is_comment(x))
-        .filter(|x| obs(x).is_some_and(|t| t > baseline))
-        .filter(|x| x.did != me)
-        .filter(|x| {
-            view.participation.s.contains(&x.did) || established.is_some_and(|e| e.contains(&x.did))
-        })
-        .filter(|x| listed(view, &x.uri))
+        .filter(|x| obs(x).is_some_and(|t| t > base.obs) || base.pending.contains_key(&x.uri))
+}
+
+/// `true` if `x` is eligible (§16): listed, not by `me`, by someone in S ∪ E.
+fn eligible(view: &ForumView, me: &str, x: &Skel) -> bool {
+    let established = view.karma.as_ref().ok().map(|k| &k.e);
+    x.did != me
+        && (view.participation.s.contains(&x.did)
+            || established.is_some_and(|e| e.contains(&x.did)))
+        && listed(view, &x.uri)
+}
+
+/// The eligible items first seen after `base`, or pending in it, by uri.
+pub fn new_items<'a>(
+    input: &'a ForumInput,
+    view: &ForumView,
+    me: &str,
+    base: &'a Baseline,
+) -> Vec<&'a Skel> {
+    candidates(input, base)
+        .filter(|x| eligible(view, me, x))
         .collect()
+}
+
+/// The next pending set: the candidates that are not eligible now, unless they are mine, V1
+/// excluded for good, or first seen more than [`PENDING_MAX_US`] ago; the latest
+/// [`PENDING_MAX`].
+fn pending(inp: &Input<'_>, base: &Baseline) -> BTreeMap<String, i64> {
+    let floor = inp
+        .now_ms
+        .saturating_mul(1000)
+        .saturating_sub(PENDING_MAX_US);
+    let mut p: Vec<(i64, &str)> = candidates(inp.input, base)
+        .filter(|x| x.did != inp.me && !inp.view.excluded.contains(&x.uri))
+        .filter(|x| !eligible(inp.view, inp.me, x))
+        .filter_map(|x| Some((obs(x).filter(|t| *t > floor)?, x.uri.as_str())))
+        .collect();
+    p.sort_unstable_by(|a, b| b.cmp(a));
+    p.truncate(PENDING_MAX);
+    p.into_iter().map(|(t, u)| (u.to_owned(), t)).collect()
 }
 
 fn author_of(uri: &str) -> Option<&str> {
@@ -406,12 +453,15 @@ pub fn compute(inp: &Input<'_>, base: Option<&Baseline>) -> (Vec<Note>, Baseline
                 v: BASELINE_V,
                 obs: top,
                 snapshot,
+                pending: BTreeMap::new(),
+                generation: 0,
             },
         );
     };
     let mut notes = Vec::new();
+    let g = base.generation.saturating_add(1);
     // new items
-    for x in new_items(inp.input, inp.view, inp.me, base.obs) {
+    for x in new_items(inp.input, inp.view, inp.me, base) {
         let value = inp.values.get(&x.uri);
         let meta = value
             .and_then(body_src)
@@ -436,6 +486,7 @@ pub fn compute(inp: &Input<'_>, base: Option<&Baseline>) -> (Vec<Note>, Baseline
             preview,
         });
     }
+    let items = notes.len();
     let old = &base.snapshot;
     // reacts: per item, the reacts whose supporters grew
     for (item, now_counts) in &snap.reacts {
@@ -457,7 +508,7 @@ pub fn compute(inp: &Input<'_>, base: Option<&Baseline>) -> (Vec<Note>, Baseline
             .collect();
         if !grown.is_empty() {
             notes.push(Note {
-                id: format!("r:{item}:{now}"),
+                id: format!("r:{item}:{g}"),
                 reason: NotificationReason::Reacted,
                 at_ms: now,
                 subject: item.clone(),
@@ -484,7 +535,7 @@ pub fn compute(inp: &Input<'_>, base: Option<&Baseline>) -> (Vec<Note>, Baseline
             subject.to_owned()
         };
         notes.push(Note {
-            id: format!("m:{k}:{now}"),
+            id: format!("m:{k}:{g}"),
             reason: NotificationReason::ModAction,
             at_ms: now,
             subject,
@@ -503,7 +554,7 @@ pub fn compute(inp: &Input<'_>, base: Option<&Baseline>) -> (Vec<Note>, Baseline
         if now.saturating_sub(old.karma_at_ms) >= inp.karma_every_ms {
             let d = snap.karma - old.karma;
             notes.push(Note {
-                id: format!("k:{}:{now}", inp.input.forum),
+                id: format!("k:{}:{g}", inp.input.forum),
                 reason: NotificationReason::KarmaChange,
                 at_ms: now,
                 subject: inp.input.forum.clone(),
@@ -520,36 +571,41 @@ pub fn compute(inp: &Input<'_>, base: Option<&Baseline>) -> (Vec<Note>, Baseline
             next.karma = old.karma;
         }
     }
+    let changes = notes.len() > items;
     (
         notes,
         Baseline {
             v: BASELINE_V,
             obs: top.max(base.obs),
             snapshot: next,
+            pending: pending(inp, base),
+            generation: if changes { g } else { base.generation },
         },
     )
 }
 
-/// The listed comments of `post`'s thread first seen after `mark` (µs), not by `me`
-/// (`social.md` §16 read state: a comment is unread if `t_obs(c) > lastVisited[root]`).
+/// The listed comments, not by `me`, of the threads in `marks` (post → `lastVisited`, µs)
+/// first seen after their thread's mark (`social.md` §16 read state: a comment is unread if
+/// `t_obs(c) > lastVisited[root]`), in one pass over the forum's records.
 pub fn unread_comments(
     input: &ForumInput,
     view: &ForumView,
-    post: &str,
-    mark: i64,
+    marks: &BTreeMap<String, i64>,
     me: Option<&str>,
 ) -> u32 {
     let n = input
         .records
         .values()
-        .filter(|x| is_comment(x))
+        .filter(|x| is_comment(x) && Some(x.did.as_str()) != me)
         .filter(|x| {
-            x.comment_refs()
-                .and_then(|(r, _)| r)
-                .is_some_and(|r| r.uri == post)
+            let Some(root) = x.comment_refs().and_then(|(r, _)| r) else {
+                return false;
+            };
+            let Some(mark) = marks.get(&root.uri) else {
+                return false;
+            };
+            input.records.get(&root.uri).is_some_and(is_post) && obs(x).is_some_and(|t| t > *mark)
         })
-        .filter(|x| Some(x.did.as_str()) != me)
-        .filter(|x| obs(x).is_some_and(|t| t > mark))
         .filter(|x| listed(view, &x.uri))
         .count();
     u32::try_from(n).unwrap_or(u32::MAX)

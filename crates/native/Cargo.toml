@@ -46,7 +46,7 @@ base64.workspace = true
 libc.workspace = true
 
 [dev-dependencies]
-lessdugin-testkit = { path = "../testkit", default-features = false }
+lessdugin-testkit = { path = "../testkit", default-features = false, features = ["http"] }
 tempfile.workspace = true
 axum.workspace = true
 flate2.workspace = true
