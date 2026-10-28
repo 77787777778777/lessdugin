@@ -131,7 +131,8 @@ describe("ForumModPage", () => {
   it("removes the viewer's own assertion from the log", async () => {
     const engine = new MockEngine({ holdMs: 0, sendMs: 0 });
     const me = (await engine.activeAccount())?.did ?? "";
-    const comment = "at://did:plc:abcdefghijklmnopqrstuvwx/online.7778777.lessdugin.temp.comment/3kabc";
+    const comment =
+      "at://did:plc:abcdefghijklmnopqrstuvwx/online.7778777.lessdugin.temp.comment/3kabc";
     vi.spyOn(engine, "modLog").mockResolvedValue({
       dto: DTO_VERSION,
       entries: [
