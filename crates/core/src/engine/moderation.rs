@@ -492,7 +492,9 @@ impl<H: Host> Engine<H> {
     /// kind for the action, an action author scope does not allow, a lock that would keep more
     /// than 5,000 comments (detail `hint: "useHide"`: hide the thread instead). `not_found`: a
     /// positive assertion on an uncached subject, or a removal of an assertion the account does
-    /// not have. Restrictions and bans carry a [`NoticeCode::Retroactive`] notice.
+    /// not have. Restrictions and bans carry a [`NoticeCode::Retroactive`] notice, and a
+    /// `restrict` that changes the expiry of a dimension of its record a
+    /// [`NoticeCode::SharedExpiry`] one.
     pub async fn mod_action(&self, intent: &ModActionIntent) -> Result<ActionTicket, EngineError> {
         let session = self.active_session().await?;
         let me = session.did.as_str().to_owned();

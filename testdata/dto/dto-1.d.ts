@@ -426,7 +426,7 @@ export interface MyOpinion {
     notYetCounted?: boolean;
 }
 
-export type NoticeCode = "notEstablished" | "retroactive" | "adoptedFirst" | "missingAlt" | "suspendsAssertions";
+export type NoticeCode = "notEstablished" | "retroactive" | "adoptedFirst" | "missingAlt" | "suspendsAssertions" | "sharedExpiry";
 
 export interface NotificationList {
     dto: DtoVersion;
