@@ -593,3 +593,46 @@ fn a_spilled_body_is_styled_from_its_fetched_source() {
     assert!(screen.contains("It was a dark night."), "{screen}");
     assert!(!screen.contains("**dark**"), "{screen}");
 }
+
+/// m4-5 (`engine-api.md` §3.8 "Spilled bodies"): a spilled body the thread showed pending (the
+/// author's PDS stalled) is fetched again by `live_tail`, which announces it; the open thread
+/// re-queries and shows it.
+#[test]
+fn a_pending_spilled_body_shows_when_it_arrives() {
+    use lessdugin_core::dto::PostDraft;
+    use lessdugin_core::limits::BODY_BLOB_RETRY_MS;
+    use lessdugin_core::model::render::NOTICE_SPILLED;
+    let s = scenario();
+    let (bob, carol) = (&s.w.bob, &s.w.carol);
+    let mut source = "The opening.\n\n".to_owned();
+    while source.len() <= 65_536 {
+        source.push_str("More words in the long body. ");
+    }
+    source.push_str("\n\nThe last words.");
+    let t = block_on(
+        bob.engine
+            .publish(&PostDraft::article(&s.forum, "Long", source)),
+    )
+    .unwrap();
+    bob.flush();
+    let post = bob.done(&t);
+    s.w.tick(MINUTE);
+    carol.host.hold_blob_fetches(true);
+    carol.sync(&s.forum);
+
+    let mut t = tui(&s, 100, 30);
+    block_on(t.start(Some(s.forum.clone())));
+    block_on(t.open_thread(&post));
+    let doc = t.thread_document().unwrap();
+    assert!(doc.contains(NOTICE_SPILLED), "{doc}");
+    assert!(!doc.contains("The last words."), "{doc}");
+
+    // the PDS answers again; the round after the retry time fetches the body
+    carol.host.hold_blob_fetches(false);
+    s.w.tick(BODY_BLOB_RETRY_MS);
+    block_on(t.engine().live_step()).unwrap();
+    block_on(t.settle());
+    let doc = t.thread_document().unwrap();
+    assert!(!doc.contains(NOTICE_SPILLED), "{doc}");
+    assert!(doc.contains("The last words."), "{doc}");
+}
