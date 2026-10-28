@@ -573,9 +573,10 @@ fn a_spilled_body_is_styled_from_its_fetched_source() {
     let body = &t.state.top_thread().unwrap().data.as_ref().unwrap().bodies[&post];
     assert!(matches!(body.doc, BodyDoc::Styled(_)), "{:?}", body.doc);
     assert!(body.notices.is_empty(), "{:?}", body.notices);
+    // the terminal projection: a heading line of its own (the view's plain text runs it into
+    // the paragraph), and the emphasis markers are styling, not text
     let screen = t.render();
-    assert!(screen.contains("Chapter one"), "{screen}");
-    // the heading's `#` and the emphasis markers are styling, not text
-    assert!(!screen.contains("# Chapter"), "{screen}");
+    assert!(screen.contains("# Chapter one\n"), "{screen}");
+    assert!(screen.contains("It was a dark night."), "{screen}");
     assert!(!screen.contains("**dark**"), "{screen}");
 }

@@ -1764,10 +1764,16 @@ fn the_command_line_reaches_membership_items_and_local_state() {
     let mutes = block_on(carol.engine.mutes()).unwrap();
     assert!(mutes.iter().any(|m| m.did == s.w.bob.did()), "{mutes:?}");
 
-    // `:set` takes a word as the text it is and a list as JSON; `:unset` resets
-    run_command(&mut t, "set sources direct");
-    run_command(&mut t, r#"set mediaAutoloadHosts ["cdn.example.com"]"#);
-    block_on(t.settle());
+    // `:set` takes a word as the text it is and a list as JSON; `:unset` resets. Each shows
+    // the settings in a panel, which a key closes
+    let set = |t: &mut Tui, line: &str| {
+        run_command(t, line);
+        block_on(t.settle());
+        assert!(t.state.panel.is_some(), "{line}: {}", status(t));
+        block_on(t.press("q"));
+    };
+    set(&mut t, "set sources direct");
+    set(&mut t, r#"set mediaAutoloadHosts ["cdn.example.com"]"#);
     let st = block_on(carol.engine.settings()).unwrap();
     assert_eq!(
         serde_json::to_value(st.sources).unwrap(),
@@ -1776,12 +1782,10 @@ fn the_command_line_reaches_membership_items_and_local_state() {
         status(&t)
     );
     assert_eq!(st.media_autoload_hosts, ["cdn.example.com"], "{}", status(&t));
-    run_command(&mut t, "unset mediaAutoloadHosts");
-    block_on(t.settle());
+    set(&mut t, "unset mediaAutoloadHosts");
     let st = block_on(carol.engine.settings()).unwrap();
     assert!(st.media_autoload_hosts.is_empty(), "{}", status(&t));
-    run_command(&mut t, "unset sources");
-    block_on(t.settle());
+    set(&mut t, "unset sources");
 
     // `:delete` asks first: `n` keeps the comment, `y` deletes it
     let t2 = block_on(

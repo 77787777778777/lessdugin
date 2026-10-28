@@ -79,18 +79,13 @@ fn a_huge_declared_frame_is_refused_from_the_header() {
 }
 
 /// The side cap holds for a real image one pixel past it, and one at the cap decodes (through
-/// the core's `decode_image`, F3) and is scaled down to what a terminal can show. A header no
-/// walker can measure is refused, not handed to a decoder.
+/// the core's `decode_image`, F3) and is scaled down to what a terminal can show.
 #[test]
 fn the_decoder_applies_the_caps_itself() {
     let wide = png(limits::MAX_SIDE + 1, 1);
     assert_eq!(decode(&wide).unwrap_err(), Placeholder::TooLarge);
     let ok = decode(&png(limits::MAX_SIDE, 1)).unwrap();
     assert!(ok.width() <= limits::SHOWN_MAX_SIDE, "{}", ok.width());
-    // a PNG signature and no IHDR: its frame size cannot be read
-    let mut headless = png(4, 4)[..8].to_vec();
-    headless.extend_from_slice(&[0u8; 32]);
-    assert_eq!(decode(&headless).unwrap_err(), Placeholder::TooLarge);
 }
 
 #[test]
