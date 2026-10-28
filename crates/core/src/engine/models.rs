@@ -552,8 +552,7 @@ impl<H: Host> Engine<H> {
         let Some(refs) = model.blob_refs() else {
             return;
         };
-        let gone = match blob::set_forum_blob_refs(self.host.cache(), &model.key.fk, &refs).await
-        {
+        let gone = match blob::set_forum_blob_refs(self.host.cache(), &model.key.fk, &refs).await {
             Ok(g) => g,
             Err(e) => {
                 tracing::warn!(forum = %model.key.uri, error = %e, "blob references");

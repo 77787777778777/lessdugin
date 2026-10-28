@@ -537,6 +537,22 @@ mod tests {
     }
 
     #[test]
+    fn blob_cids_are_found_at_any_depth() {
+        let blob = |c: &str| serde_json::json!({"$type": "blob", "ref": {"$link": c}, "size": 1});
+        let rev = serde_json::json!({
+            "op": "update",
+            "record": {"body": {"textBlob": blob("a"), "media": [{"blob": blob("b")}]}},
+            "icon": blob("c"),
+            "notBlob": {"$type": "other", "ref": {"$link": "d"}},
+        });
+        assert_eq!(
+            blob_cids(&rev).into_iter().collect::<Vec<_>>(),
+            ["a", "b", "c"]
+        );
+        assert!(blob_cids(&serde_json::json!({"text": "x"})).is_empty());
+    }
+
+    #[test]
     fn input_sets() {
         assert!(in_input_sets(Some(Collection::Membership), "abc", "abc"));
         assert!(!in_input_sets(Some(Collection::Membership), "abc-x", "abc"));

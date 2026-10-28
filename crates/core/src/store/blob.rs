@@ -139,8 +139,7 @@ pub async fn set_forum_blob_refs<K: KvStore>(
     }
     let mut ops = ops.into_iter().peekable();
     while ops.peek().is_some() {
-        kv.write(ops.by_ref().take(REF_WRITE_OPS).collect())
-            .await?;
+        kv.write(ops.by_ref().take(REF_WRITE_OPS).collect()).await?;
     }
     let mut gone = Vec::new();
     for cid in lost {
@@ -154,10 +153,7 @@ pub async fn set_forum_blob_refs<K: KvStore>(
 
 /// Drops every blob reference of forum `fk`, the blob step of evicting it (§10.7). Returns the
 /// CIDs no forum references now, as [`set_forum_blob_refs`] does.
-pub async fn drop_forum_blob_refs<K: KvStore>(
-    kv: &K,
-    fk: &str,
-) -> Result<Vec<String>, StoreError> {
+pub async fn drop_forum_blob_refs<K: KvStore>(kv: &K, fk: &str) -> Result<Vec<String>, StoreError> {
     set_forum_blob_refs(kv, fk, &BTreeMap::new()).await
 }
 
@@ -255,18 +251,30 @@ mod tests {
             };
             assert!(set(f, refs(&[("x", 2), ("y", 1)])).await.is_empty());
             assert!(set(g, refs(&[("x", 1)])).await.is_empty());
-            assert_eq!(forum_blob_refs(&kv, f).await.unwrap(), refs(&[("x", 2), ("y", 1)]));
+            assert_eq!(
+                forum_blob_refs(&kv, f).await.unwrap(),
+                refs(&[("x", 2), ("y", 1)])
+            );
             // the same references again write nothing
-            let before = kv.scan(KeyRange::prefix(b""), Dir::Forward, 100).await.unwrap();
+            let before = kv
+                .scan(KeyRange::prefix(b""), Dir::Forward, 100)
+                .await
+                .unwrap();
             assert!(set(f, refs(&[("x", 2), ("y", 1)])).await.is_empty());
-            let after = kv.scan(KeyRange::prefix(b""), Dir::Forward, 100).await.unwrap();
+            let after = kv
+                .scan(KeyRange::prefix(b""), Dir::Forward, 100)
+                .await
+                .unwrap();
             assert_eq!(before, after);
             // f stops referencing both: y is gone, x is still g's
             assert_eq!(set(f, refs(&[("x", 0)])).await, ["y"]);
             assert_eq!(forum_blob_refs(&kv, f).await.unwrap(), refs(&[]));
             // evicting g lets x go
             assert_eq!(drop_forum_blob_refs(&kv, g).await.unwrap(), ["x"]);
-            let left = kv.scan(KeyRange::prefix(b""), Dir::Forward, 100).await.unwrap();
+            let left = kv
+                .scan(KeyRange::prefix(b""), Dir::Forward, 100)
+                .await
+                .unwrap();
             assert!(left.is_empty(), "{left:?}");
         });
     }
@@ -278,7 +286,12 @@ mod tests {
             let fk = "aaaaaaaaaaaa";
             let many: BTreeMap<String, u32> =
                 (0..2_500).map(|i| (format!("bafk{i:05}"), 1)).collect();
-            assert!(set_forum_blob_refs(&kv, fk, &many).await.unwrap().is_empty());
+            assert!(
+                set_forum_blob_refs(&kv, fk, &many)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
             assert_eq!(forum_blob_refs(&kv, fk).await.unwrap(), many);
             let gone = drop_forum_blob_refs(&kv, fk).await.unwrap();
             assert_eq!(gone.len(), 2_500);

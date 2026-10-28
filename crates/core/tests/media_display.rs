@@ -302,12 +302,65 @@ fn a_loaded_image_is_deleted_once_nothing_shown_references_it() {
     bob.delete(nsid::POST, second.rsplit('/').next().unwrap());
     n.tick(MINUTE);
     read(&e, &f, &third);
-    assert!(!stored(&cid), "the image of a hidden and a deleted post is still stored");
+    assert!(
+        !stored(&cid),
+        "the image of a hidden and a deleted post is still stored"
+    );
     assert!(stored(&other_cid), "a listed post's image is kept");
     // the third is hidden too
     hide_in(&n, &bob, &f, &third);
     assert_eq!(read(&e, &f, &third).body.html, "");
     assert!(!stored(&other_cid));
+}
+
+#[test]
+fn an_image_an_edit_dropped_is_kept_by_its_revision_until_the_post_is_hidden() {
+    // m4-27: a revision's snapshot references the old version's blobs; it counts while its
+    // subject is listed (sync.md §11.4)
+    use lessdugin_atp::syntax::{AtUri, Datetime};
+    use lessdugin_core::outbox::records;
+    use lessdugin_lexicon::records::StrongRef;
+    use lessdugin_lexicon::values::RevisionOp;
+
+    let mut n = Net::new();
+    let bob = n
+        .net
+        .add_pds("bob.example.com")
+        .add_account("bob.example.com");
+    let f = forum(&n, &bob);
+    let blob = bob.upload_blob(tiny_png(11), "image/png");
+    let cid = blob["ref"]["$link"].as_str().unwrap().to_owned();
+    let uri = post(&n, &bob, &f, image_body(&blob));
+    let e = n.device("anon", None);
+    let stored = || block_on(e.host().blob_open(&cid)).unwrap().is_some();
+    let view = read(&e, &f, &uri).body.media[0].clone();
+    block_on(e.load_media(&cid, Some(MediaOwner::of_view(&view)))).unwrap();
+    assert!(stored());
+    // bob edits the image out, keeping the old version in a revision
+    let rkey = uri.rsplit('/').next().unwrap().to_owned();
+    let old = bob.get(nsid::POST, &rkey).unwrap();
+    let old_cid = bob.cid(nsid::POST, &rkey).unwrap();
+    let mut new = old.clone();
+    new["body"] = json!({"$type": nsid::MARKDOWN, "profile": "lfm/1", "text": "No picture."});
+    new["updatedAt"] = json!(dt(n.now()));
+    let rev = records::revision(
+        StrongRef::new(AtUri::parse(&uri).unwrap(), old_cid.to_string()),
+        RevisionOp::Update,
+        old.as_object().unwrap().clone(),
+        None,
+        &Datetime::from_millis(n.now()).unwrap(),
+        &records::revision_rkey(&uri, tid_at_ms(n.now()).as_str()).unwrap(),
+    )
+    .unwrap();
+    bob.put(rev.collection, &rev.rkey, &rev.value);
+    bob.put(nsid::POST, &rkey, &new);
+    n.tick(MINUTE);
+    let pv = read(&e, &f, &uri);
+    assert!(pv.body.media.is_empty(), "{:?}", pv.body.media);
+    assert!(stored(), "the revision still references the image");
+    hide_in(&n, &bob, &f, &uri);
+    read(&e, &f, &uri);
+    assert!(!stored(), "a hidden post's revisions count for nothing");
 }
 
 // --- spilled bodies (m4-5) ---------------------------------------------------------------------

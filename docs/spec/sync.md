@@ -1232,6 +1232,8 @@ The key of a tuple is the concatenation of its elements. A prefix scan over `(e1
 | cache | `("id", "handle", handle)` | `HandleRow` | |
 | cache | `("disc", fk, did)` | `DiscRow` | discovery candidates; not records |
 | cache | `("blob", cid)` | `BlobRow` | the bytes live in the host's blob storage (§12.2) |
+| cache | `("blob.ref", cid, fk)` | `BlobRefRow` | how many of forum fk's counted records reference the CID (§11.4); absent at 0 |
+| cache | `("blob.forum", fk, cid)` | `BlobRefRow` | the same row, by forum: what the next build of fk and its eviction start from |
 | cache | `("cur", source)` | `CursorRow` | `source` = `"jetstream"` or `"indexer:" + did + ":" + fk` |
 | cache | `("host", origin)` | `HostRow` | |
 | cache | `("forum", fk)` | `ForumRow` | `{uri, lastViewed}` for eviction |
@@ -1269,6 +1271,8 @@ IdentityRow{ doc: bytes (JSON), level: "doc" | "hint", src: "plc" | "web" | "sli
 HandleRow  { result: "did" | "none" | "invalid", did?: did, method: "doh" | "system" | "wellknown" | "hint" | "devnet", at: ms }
 DiscRow    { src: [string], first: ms, state: "candidate" | "confirmed" | "rejected", at: ms }
 BlobRow    { did, mime: string (declared), sniff?: string, size: int, stored: bool, refs: int, at: ms, used: ms }
+             (v1 writes none: the references are the BlobRefRows, §11.4)
+BlobRefRow { n: int (≥ 1) }
 CursorRow  { wire?: "v1" | "v2", instance?: host, seq?: int, timeUs?: µs, at: ms }
 HostRow    { rangeCursor: "unknown" | "yes" | "no", rcAt: ms, shortPageEnds: bool, nullSwap?: bool,
              breaker: {state, failures, until, openMs}, budget?: {limit, est, resetAt}, strikes: int }
@@ -1291,9 +1295,9 @@ HostRow    { rangeCursor: "unknown" | "yes" | "no", rcAt: ms, shortPageEnds: boo
 ### 10.7 Eviction
 
 - **Budget** (*tunable*): 2 GB native, 500 MB browser, measured as SQLite page count × page size plus the blob directory (native) or `navigator.storage.estimate().usage` (browser).
-- Above the budget, whole forums are evicted, least recently viewed (`ForumRow.lastViewed`) first, until usage is below 80% of the budget. Evicting forum `fk` deletes `("rec", fk, …)`, `("tomb", fk, …)` and `("disc", fk, …)`, resets `listed[fk]` in every repo row, and drops blob references held by the deleted rows.
+- Above the budget, whole forums are evicted, least recently viewed (`ForumRow.lastViewed`) first, until usage is below 80% of the budget. Evicting forum `fk` deletes `("rec", fk, …)`, `("tomb", fk, …)` and `("disc", fk, …)`, resets `listed[fk]` in every repo row, and drops the forum's blob references (its `("blob.forum", fk, ·)` and `("blob.ref", ·, fk)` rows).
 - **Never evicted:** identity rows; the user's own repo rows; the repos of authorities of followed forums. Evicting a forum skips their `(fk, coll, did)` sub-ranges.
-- Blobs whose `refs` falls to 0 are deleted with `Host::blob_delete` (§11.4).
+- Blobs that no forum references any more are deleted with `Host::blob_delete` (§11.4).
 - The SPA calls `navigator.storage.persist()` at startup.
 
 ---
@@ -1313,7 +1317,8 @@ fetch_media(did, blobRef, policy):
                                                                           // streamed and hashed by the host; a body
                                                                           // longer than the declared size is aborted
      CidMismatch → discard; strike against the host; show "media failed verification"
-     HTTP 400 "Blob not found" → missing: not retried; purge any cached copy (ADR 0005)
+     HTTP 400 "Blob not found" → missing: not retried (ADR 0005); nothing is stored, and a
+                                  stored CID is never asked for (§12.2), so there is no copy to purge
   sniff = sniff_type(Host::blob_read(h.cid, 0, 4096))
   require normalise(declared blobRef.mimeType) = normalise(sniff) ∧ that type is on the display allowlist (§11.2)
           else: download card only
@@ -1353,8 +1358,10 @@ The engine decides while it builds a view: `MediaView.autoload` is this verdict 
 ### 11.4 Caching and purging
 
 - Hidden, provisional and pending content is never prefetched.
-- `BlobRow.refs` counts the stored, eligible records that reference the CID and are not `Hidden(*)` in the current fold (the ForumModel updates it). When an item becomes hidden or is deleted, its blobs lose a reference; at 0 the bytes are deleted.
-- Blobs are also deleted with their forum on eviction (§10.7), and when `getBlob` reports them missing.
+- **References.** A blob is referenced by every blob object (`{"$type": "blob", "ref": {"$link": cid}}`, at any depth: media, `textBlob`, an icon, a revision's snapshot) in the value of a stored, eligible record of a forum's fold input, or of its declaration. A reference **counts** while its record is shown: the declaration; a post, comment, sequence or wiki revision while it is listed (`Visible` or `Collapsed(*)`, `social.md` §10.1, before the thread pass, so a `Tombstone` counts for nothing); a revision while its subject counts; every other record (membership, opinion, modAction). `("blob.ref", cid, fk)` holds how many of forum fk's records count for the CID, and `("blob.forum", fk, cid)` the same by forum.
+- **Updates.** Every build of a forum's model rewrites the forum's rows that changed, whole (two processes building the same forum write the same rows), unless the visibility layer is pending. When an item becomes hidden or excluded, or is deleted, its blobs lose its references; a CID that no forum references any more has its stored bytes deleted (`Host::blob_delete`, `threat-model.md` PRIV-2), right after the build that saw it lose them. A blob stays stored while any forum's shown record references it, and is fetched again (from the author's PDS) if it is wanted after a deletion.
+- Blobs are also deleted with their forum on eviction (§10.7), when no other forum references them.
+- **Limits.** The count follows the fold of the last build of each forum: a forum not opened again keeps its rows until it is. A blob stored while no counted reference exists (loaded through a view older than the fold that hid its item) is not counted, so it is deleted only once a forum counts and then drops it, or with the cache.
 
 ---
 
