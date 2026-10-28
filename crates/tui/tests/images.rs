@@ -492,3 +492,119 @@ fn i_on_a_folded_comment_loads_nothing_until_it_is_expanded() {
     assert!(t.render().contains("i loads it from"), "{}", t.render());
     assert_eq!(fetches(&key(&mut t, "i")), 1);
 }
+
+/// bob's post with one small PNG, as carol has synced it: `(post uri, image cid)`.
+fn bobs_picture(s: &common::Scenario) -> (String, String) {
+    use lessdugin_core::dto::{MediaInput, PostDraft};
+    let (bob, carol) = (&s.w.bob, &s.w.carol);
+    let prepared = block_on(bob.engine.prepare_media(
+        png(8, 8),
+        &MediaInput {
+            declared_mime: Some("image/png".into()),
+            alt: Some("a gradient".into()),
+            name: None,
+            aspect_ratio: None,
+        },
+    ))
+    .unwrap();
+    let cid = prepared.cid.clone();
+    let mut d = PostDraft::article(&s.forum, "Picture", format!("![g](cid:{cid})"));
+    d.body.media.push(prepared);
+    let t = block_on(bob.engine.publish(&d)).unwrap();
+    bob.flush();
+    let post = bob.done(&t);
+    carol.sync(&s.forum);
+    (post, cid)
+}
+
+/// The engine's own verdict (`MediaView.autoload`, `sync.md` §11.3) decides: once carol lists
+/// the author's PDS host as one whose media may load by itself, bob's image in a visible post
+/// loads when the thread opens, with no `i`; without it, it waits for `i` (m4-4).
+#[test]
+fn the_engines_autoload_verdict_loads_an_image_by_itself() {
+    let s = scenario();
+    let (post, cid) = bobs_picture(&s);
+    let carol = &s.w.carol;
+    let open = || {
+        let mut t = block_on(lessdugin_tui::Headless::new(
+            carol.engine.clone(),
+            lessdugin_tui::HeadlessOpts {
+                width: 80,
+                height: 40,
+                images: true,
+                ..lessdugin_tui::HeadlessOpts::default()
+            },
+        ))
+        .unwrap();
+        block_on(t.start(None));
+        block_on(t.open_thread(&post));
+        t
+    };
+    let mut t = open();
+    assert_eq!(t.state.top_thread().unwrap().media.get(&cid), None);
+    assert!(t.render().contains("i loads it from"), "{}", t.render());
+
+    let host = lessdugin_core::media::host_of(&s.w.bob.acct.pds_base());
+    block_on(
+        carol
+            .engine
+            .set_setting("mediaAutoloadHosts", Some(&serde_json::json!([host]))),
+    )
+    .unwrap();
+    let pv = block_on(carol.engine.get_thread(&post, &Default::default())).unwrap();
+    let lessdugin_core::dto::ThreadRoot::Post(p) = pv.post else {
+        panic!("no post")
+    };
+    assert!(p.body.media[0].autoload, "{:?}", p.body.media[0]);
+    let mut t = open();
+    block_on(t.settle());
+    let shown = t.render();
+    assert_eq!(
+        t.state.top_thread().unwrap().media.get(&cid),
+        Some(&MediaState::Shown),
+        "{shown}"
+    );
+}
+
+/// `i` loads an image from its author's PDS as their DID document names it (`load_media`,
+/// `sync.md` §11.1), not from wherever a view says.
+#[test]
+fn i_loads_from_the_authors_pds_whatever_the_view_says() {
+    use lessdugin_core::dto::{ThreadOpts, ThreadRoot};
+    use lessdugin_tui::Action;
+    use lessdugin_tui::app::{Origin, ThreadData};
+    let s = scenario();
+    let (post, cid) = bobs_picture(&s);
+    let mut t = block_on(lessdugin_tui::Headless::new(
+        s.w.carol.engine.clone(),
+        lessdugin_tui::HeadlessOpts {
+            width: 80,
+            height: 40,
+            images: true,
+            ..lessdugin_tui::HeadlessOpts::default()
+        },
+    ))
+    .unwrap();
+    block_on(t.start(None));
+    block_on(t.open_thread(&post));
+    let screen = t.state.top().unwrap().id;
+    let mut view = block_on(s.w.carol.engine.get_thread(&post, &ThreadOpts::default())).unwrap();
+    let ThreadRoot::Post(p) = &mut view.post else {
+        panic!("no post")
+    };
+    p.body.media[0].pds = "https://elsewhere.example".into();
+    let bodies = t.state.top_thread().unwrap().data.as_ref().unwrap().bodies.clone();
+    let _ = t.state.update(Action::ThreadLoaded {
+        screen,
+        origin: Origin::Live,
+        result: Ok(Box::new(ThreadData { view, bodies })),
+    });
+    block_on(t.press("i"));
+    block_on(t.settle());
+    let shown = t.render();
+    assert_eq!(
+        t.state.top_thread().unwrap().media.get(&cid),
+        Some(&MediaState::Shown),
+        "{shown}"
+    );
+}
