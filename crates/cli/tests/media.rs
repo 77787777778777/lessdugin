@@ -20,6 +20,11 @@ const PNG: &[u8] = b"\x89PNG\r\n\x1a\n\
     \x00\x00\x00\x0dIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\
     \x00\x00\x00\x0bIDAT\x78\xda\x63\x60\x00\x02\x00\x00\x05\x00\x01\xe9\xfa\xdc\xd8\
     \x00\x00\x00\x00IEND\xae\x42\x60\x82";
+/// A 1x1 red PNG (RGB): another file than [`PNG`].
+const RED: &[u8] = b"\x89PNG\r\n\x1a\n\
+    \x00\x00\x00\x0dIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90\x77\x53\xde\
+    \x00\x00\x00\x0cIDAT\x78\xda\x63\xf8\xcf\xc0\x00\x00\x03\x01\x01\x00\xf7\x03\x41\x43\
+    \x00\x00\x00\x00IEND\xae\x42\x60\x82";
 const PDF: &[u8] = b"%PDF-1.4\n% a report\n%%EOF\n";
 
 fn raw_cid(b: &[u8]) -> String {
@@ -34,9 +39,9 @@ fn forum() -> (Net, User) {
     (net, alice)
 }
 
-/// Saves `md` as a draft of `u`, puts `files` next to it in the drafts directory, and
-/// publishes it with `--yes` (a draft of the drafts directory is not foreign, FILE-2).
-fn publish_draft(u: &User, md: &str, files: &[(&str, &[u8])]) -> std::process::Output {
+/// Saves `md` as a draft of `u` (its frontmatter `type` says what it is: a post, a comment, an
+/// edit) and puts `files` next to it in the drafts directory; returns its id.
+fn save_draft(u: &User, md: &str, files: &[(&str, &[u8])]) -> String {
     let f = u.file("draft-src.md", md);
     let d = u.json(&["post", "--draft", s(&f)]);
     let id = d["id"].as_str().unwrap().to_owned();
@@ -49,6 +54,13 @@ fn publish_draft(u: &User, md: &str, files: &[(&str, &[u8])]) -> std::process::O
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
         std::fs::write(p, bytes).unwrap();
     }
+    id
+}
+
+/// [`save_draft`], then publishes it with `--yes` (a draft of the drafts directory is not
+/// foreign, FILE-2).
+fn publish_draft(u: &User, md: &str, files: &[(&str, &[u8])]) -> std::process::Output {
+    let id = save_draft(u, md, files);
     u.run(&["--json", "draft", "publish", &id, "--yes"])
 }
 
@@ -301,4 +313,126 @@ fn media_open_hands_the_saved_file_to_the_viewer() {
     }
     let arg = std::fs::read_to_string(&opened).unwrap_or_default();
     assert!(arg.ends_with(&format!("{}.png", raw_cid(PNG))), "{arg:?}");
+}
+
+/// An edit keeps the item's media (the engine keeps their blob objects, `data-model.md` §8.8),
+/// so editing a post the CLI published with an image never drops it; a draft-local image of
+/// the new text is attached; an image path in a text given with -m has no directory.
+#[test]
+fn an_edit_keeps_the_media_and_attaches_new_images() {
+    let (_net, alice) = forum();
+    let out = publish_draft(
+        &alice,
+        "---\ntitle: Charts\n---\nLook: ![a chart](img/chart.png)\n",
+        &[("img/chart.png", PNG)],
+    );
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let p: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let post = p["state"]["uri"].as_str().unwrap().to_owned();
+    let (png, red) = (raw_cid(PNG), raw_cid(RED));
+    let media_of = |rec: &Value| -> Vec<(String, Value)> {
+        rec["body"]["media"]
+            .as_array()
+            .unwrap_or_else(|| panic!("no media: {rec}"))
+            .iter()
+            .map(|m| {
+                (
+                    m["blob"]["ref"]["$link"].as_str().unwrap().to_owned(),
+                    m["alt"].clone(),
+                )
+            })
+            .collect()
+    };
+
+    // a text that no longer shows the image keeps it (the gallery shows it)
+    let e = alice.json(&["edit", &post, "-m", "Only words now."]);
+    assert_eq!(e["state"]["kind"], "done", "{e}");
+    let rec = the_post(&alice);
+    assert_eq!(rec["body"]["text"], "Only words now.\n", "{rec}");
+    assert_eq!(media_of(&rec), [(png.clone(), "a chart".into())]);
+    // a new title alone keeps the text and the media
+    alice.json(&["edit", &post, "--title", "Charts, again"]);
+    let rec = the_post(&alice);
+    assert_eq!(rec["title"], "Charts, again", "{rec}");
+    assert_eq!(rec["body"]["text"], "Only words now.\n", "{rec}");
+    assert_eq!(media_of(&rec), [(png.clone(), "a chart".into())]);
+
+    // -m has no directory for an image path: refused, naming it, and nothing is written
+    let e = alice.fails(1, &["edit", &post, "-m", "A dot: ![red](red.png)"]);
+    assert!(e["message"].as_str().unwrap().contains("red.png"), "{e}");
+    assert_eq!(the_post(&alice)["body"]["text"], "Only words now.\n");
+
+    // an edit draft of the drafts directory attaches its new image and keeps the old one
+    let id = save_draft(
+        &alice,
+        &format!("---\ntype: edit\ntarget: {post}\n---\n![a chart](cid:{png})\n\n![red](red.png)\n"),
+        &[("red.png", RED)],
+    );
+    let out = alice.run(&["--json", "draft", "publish", &id, "--yes"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let rec = the_post(&alice);
+    let md = rec["body"]["text"].as_str().unwrap();
+    assert!(md.contains(&format!("![a chart](cid:{png})")), "{md}");
+    assert!(md.contains(&format!("![red](cid:{red})")), "{md}");
+    assert_eq!(
+        media_of(&rec),
+        [(png.clone(), "a chart".into()), (red.clone(), "red".into())]
+    );
+    assert!(alice.account.serves_blob(&red.parse().unwrap()));
+}
+
+/// A comment's draft-local images become `cid:` media like a post's (the engine uploads a
+/// comment's media, `data-model.md` §8.8), and a reader saves them from the comment. Its local
+/// files are confirmed (FILE-2): `draft publish --yes` does, a headless publish without it
+/// does not; and a text given with -m has no directory for an image path.
+#[test]
+fn a_comment_attaches_its_draft_local_images() {
+    let (net, alice) = forum();
+    let f = alice.file("p.md", "---\ntitle: Dots\n---\nShow me a dot.\n");
+    let p = alice.json(&["post", s(&f), "--yes"]);
+    let post = p["state"]["uri"].as_str().unwrap().to_owned();
+    let png = raw_cid(PNG);
+
+    let id = save_draft(
+        &alice,
+        &format!("---\ntype: comment\nroot: {post}\n---\nHere: ![a dot](dot.png)\n"),
+        &[("dot.png", PNG)],
+    );
+    let out = alice.run(&["--json", "draft", "publish", &id, "--yes"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let comments = alice.account.list(nsid::COMMENT);
+    assert_eq!(comments.len(), 1, "{comments:?}");
+    let rec = alice.account.get(nsid::COMMENT, &comments[0].0).unwrap();
+    let body = &rec["body"];
+    assert_eq!(body["text"], format!("Here: ![a dot](cid:{png})\n"), "{body}");
+    let media = body["media"].as_array().unwrap();
+    assert_eq!(media.len(), 1, "{body}");
+    assert_eq!(media[0]["blob"]["ref"]["$link"], png.as_str(), "{body}");
+    assert_eq!(media[0]["alt"], "a dot", "{body}");
+
+    // a reader saves it from the comment
+    let dave = net.reader(&alice);
+    let comment = alice.account.uri(nsid::COMMENT, &comments[0].0);
+    let into = dave.path("downloads");
+    std::fs::create_dir(&into).unwrap();
+    let g = dave.json(&["media", "get", &comment, "--index", "1", "-o", s(&into)]);
+    assert_eq!(g["mime"], "image/png", "{g}");
+    assert_eq!(
+        std::fs::read(into.join(format!("{png}.png"))).unwrap(),
+        PNG
+    );
+
+    // headless, without --yes, the draft's file is not uploaded, and the draft is kept
+    let id = save_draft(
+        &alice,
+        &format!("---\ntype: comment\nroot: {post}\n---\nAgain: ![red](red.png)\n"),
+        &[("red.png", RED)],
+    );
+    let e = alice.fails(2, &["draft", "publish", &id]);
+    assert!(e["message"].as_str().unwrap().contains("red.png"), "{e}");
+    assert!(alice.ok(&["draft", "ls"]).contains(&id));
+    // -m has no directory for an image path
+    let e = alice.fails(1, &["comment", &post, "-m", "A dot: ![a dot](./dot.png)"]);
+    assert!(e["message"].as_str().unwrap().contains("./dot.png"), "{e}");
+    assert_eq!(alice.account.list(nsid::COMMENT).len(), 1);
 }

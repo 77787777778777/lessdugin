@@ -977,3 +977,34 @@ fn open_mode_carries_the_relay_label() {
     let show = alice.ok(&["forum", "show", "alice.test/meta"]);
     assert!(!show.contains("Open mode"), "{show}");
 }
+
+/// A body over the spill threshold is written as a `textBlob` (`data-model.md` §5.2). `edit`
+/// fetches its text from the PDS and edits that: a new title alone keeps it (spilled again, to
+/// the same blob), and a new text replaces it.
+#[test]
+fn a_spilled_body_is_edited_as_its_text() {
+    let net = Net::new();
+    let alice = net.user("alice.test", true);
+    alice.json(&["forum", "create", "meta", "--frontpage"]);
+    let long = "word ".repeat(14_000);
+    let f = alice.file("long.md", &format!("---\ntitle: Long\n---\n{long}\n"));
+    let p = alice.json(&["post", s(&f), "--yes"]);
+    let post = p["state"]["uri"].as_str().unwrap().to_owned();
+    let rkey = alice.account.list(nsid::POST)[0].0.clone();
+    let rec = alice.account.get(nsid::POST, &rkey).unwrap();
+    assert!(rec["body"].get("text").is_none(), "{}", rec["body"]);
+    let blob = rec["body"]["textBlob"]["ref"]["$link"].clone();
+    assert!(blob.is_string(), "{}", rec["body"]);
+
+    let e = alice.json(&["edit", &post, "--title", "Long, retitled"]);
+    assert_eq!(e["state"]["kind"], "done", "{e}");
+    let rec = alice.account.get(nsid::POST, &rkey).unwrap();
+    assert_eq!(rec["title"], "Long, retitled", "{rec}");
+    assert_eq!(rec["body"]["textBlob"]["ref"]["$link"], blob, "{}", rec["body"]);
+
+    let e = alice.json(&["edit", &post, "-m", "Short now."]);
+    assert_eq!(e["state"]["kind"], "done", "{e}");
+    let rec = alice.account.get(nsid::POST, &rkey).unwrap();
+    assert_eq!(rec["body"]["text"], "Short now.\n", "{}", rec["body"]);
+    assert!(rec["body"].get("textBlob").is_none(), "{}", rec["body"]);
+}
