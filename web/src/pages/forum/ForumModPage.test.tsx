@@ -189,7 +189,9 @@ describe("ForumModPage", () => {
     const approve = vi.spyOn(engine, "approve").mockResolvedValue([]);
     const { forum } = await setup(engine);
     fireEvent.click(await screen.findByRole("button", { name: "Approve" }));
-    expect(await screen.findByRole("dialog", { name: "Moderation actions are public" })).toBeTruthy();
+    expect(
+      await screen.findByRole("dialog", { name: "Moderation actions are public" }),
+    ).toBeTruthy();
     expect(approve).not.toHaveBeenCalled();
     await acknowledge();
     await waitFor(() => expect(approve).toHaveBeenCalledWith(forum, [applicant]));
