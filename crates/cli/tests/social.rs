@@ -404,7 +404,9 @@ fn reading_a_thread_marks_it_read() {
 
 /// `#restrict` holds both the capability set and `nullifyVotes` in one record, which states
 /// the complete desired state of its key (`social.md` §4.2, §4.7): `mod nullify` keeps the
-/// moderator's restriction, and `mod restrict` keeps the nullification.
+/// moderator's restriction, and `mod restrict` keeps the nullification. The engine merges the
+/// dimension a verb leaves out (`engine-api.md` §3.5); the CLI syncs the forum first, so a
+/// record written from another device is the one it merges with (m3r-2).
 #[test]
 fn restrict_and_nullify_keep_each_other() {
     use lessdugin_lexicon::collection::nsid;
