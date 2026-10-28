@@ -90,10 +90,9 @@ export function PublicAckProvider({ children }: { children: ReactNode }) {
     if (ok) {
       acknowledged.current.add(p.kind);
       try {
-        const s = await engine.settings();
-        await engine.setSetting("acknowledgedPublicActions", [
-          ...new Set([...s.acknowledgedPublicActions, p.kind]),
-        ]);
+        // the engine keeps it per account, for every client on this device (engine-api.md
+        // §3.6), and adds the one kind: no read-modify-write that a second answer could undo
+        await engine.acknowledgePublicAction(p.kind);
         await qc.invalidateQueries({ queryKey: qk.settings() });
       } catch {
         // Remembered for this session only; the dialog shows again after a reload.
