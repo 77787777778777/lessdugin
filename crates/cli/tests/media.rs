@@ -485,6 +485,8 @@ fn media_get_streams_a_blob_at_the_hard_limit() {
     let dave = net.reader(&alice);
     let into = dave.path("downloads");
     std::fs::create_dir(&into).unwrap();
+    // reaped below by wait4(2), which also gives its resource usage
+    #[allow(clippy::zombie_processes)]
     let mut child = dave
         .std_cmd()
         .args([

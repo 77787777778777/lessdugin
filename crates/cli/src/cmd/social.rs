@@ -1073,8 +1073,7 @@ async fn queued_value(w: &Writer, uri: &str) -> Result<Option<Option<Value>>, Cl
     let last = pending
         .iter()
         .flat_map(|p| p.ops.iter().map(move |o| (p, o)))
-        .filter(|(p, o)| o.uri(&p.account) == uri)
-        .last();
+        .rfind(|(p, o)| o.uri(&p.account) == uri);
     Ok(last.map(|(_, o)| match o.action {
         OpAction::Delete => None,
         OpAction::Create | OpAction::Update => o
