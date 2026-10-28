@@ -6,6 +6,15 @@
 // application/octet-stream). The SPA shows the blob as an image or a player only when that type
 // is also on its own copy of the allowlist and the placeholder is of that kind; everything else,
 // SVG and PDF included, is a download card saved as `<cid>.<ext>`.
+//
+// A download card's URL is application/octet-stream, as SPA-7 asks, except for a display type in
+// a placeholder of the other kind (an image type in a `span.media`, whose declared type was not
+// written exactly as the table's, lfm-1.md §6.2; a player type in an `img`). That URL keeps the
+// allowlist constant: never the declared string, and a type the browser could show inline
+// anyway. The card's anchor carries `download`, so the bytes are saved and never opened. The SPA
+// cannot re-type the blob: CSP `connect-src` has no `blob:`. A download without a display type is
+// saved as `<cid>.bin`, because `LoadedMedia` carries no sniffed type for it (sync.md §11.2 wants
+// that type's extension; the field is the engine's to add).
 
 import type { EngineApi } from "@lessdugin/engine/api";
 import type { Cid, LoadedMedia, MediaView } from "@lessdugin/engine/types";
