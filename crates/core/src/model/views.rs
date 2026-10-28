@@ -64,6 +64,11 @@ use crate::store::records::Level;
 /// The newest newcomer items the mod queue lists (open mode, `social.md` §4.12).
 pub const NEWCOMER_QUEUE_MAX: usize = 100;
 
+/// The open-mode label of the forum header (`threat-model.md` L7, SOC-13; `social.md` §3.2), as
+/// the `relayDependent` banner: open mode finds brand-new members only through third-party
+/// infrastructure.
+pub const OPEN_MODE_LABEL: &str = "Open mode relies on Bluesky relay, Jetstream and Constellation";
+
 /// An actor view with only the DID (no cached identity).
 pub fn bare_actor(did: &str) -> ActorView {
     ActorView {
@@ -1165,6 +1170,12 @@ impl Views<'_> {
             })
             .collect();
         let mut banners = self.banners();
+        if self.model.view.policy.membership == MembershipMode::Open {
+            banners.push(Banner {
+                code: "relayDependent".into(),
+                message: OPEN_MODE_LABEL.into(),
+            });
+        }
         banners.extend(warnings.iter().map(|w| Banner {
             code: "warning".into(),
             message: w.clone(),

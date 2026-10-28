@@ -384,7 +384,19 @@ fn forum_open_syncs_the_authorities_and_reuses_the_declaration() {
     let bob = Device::new(&f.net, "bob", 2);
     let v = block_on(bob.engine.forum_open(&f.forum)).unwrap();
     assert!(!v.completeness.degraded, "{v:?}");
-    assert!(v.banners.is_empty(), "{:?}", v.banners);
+    // an open forum's header carries the L7 label (threat-model.md L7, sec-6), nothing else
+    let banners: Vec<(&str, &str)> = v
+        .banners
+        .iter()
+        .map(|b| (b.code.as_str(), b.message.as_str()))
+        .collect();
+    assert_eq!(
+        banners,
+        [(
+            "relayDependent",
+            "Open mode relies on Bluesky relay, Jetstream and Constellation"
+        )]
+    );
     // opening it again within the reopen time costs no request
     let n = bob.host.requests().len();
     block_on(bob.engine.forum_open(&f.forum)).unwrap();

@@ -331,7 +331,7 @@ newcomer(d) ⇔ d ∈ P ∖ (S ∪ E)                                    // both
 | Eligible voters E | E = S, because P ∖ S ⊆ B ∪ N. `establish` and `establishSeeds` have no effect. | S plus established users (§6.2) |
 | Newcomer content | none | collapsed by default, labelled "new user", per `display.newUsers` (V8) |
 | Completeness | provable at CORE | S ∪ E is complete at CORE thanks to the closure (`sync.md`); newcomers are best effort (CORE+) |
-| UI label | – | "relies on public relay infrastructure (Bluesky relay, Jetstream, Constellation)" |
+| UI label | – | "relies on public relay infrastructure (Bluesky relay, Jetstream, Constellation)": the forum header's `relayDependent` banner, "Open mode relies on Bluesky relay, Jetstream and Constellation" (`threat-model.md` L7) |
 
 `forum create` always writes the mode explicitly. With no flag it writes `approval`.
 

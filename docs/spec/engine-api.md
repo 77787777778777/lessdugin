@@ -475,7 +475,8 @@ ThreadView    { dto, post: PostView | { missing: uri }, comments: Vec<CommentNod
 DiscussionList{ dto, items: Vec<{ post: PostSummary, comments: Vec<CommentNode> }>, cursor?, completeness,
                 banners?: Vec<Banner> }
 Banner        { code: "moderationUnavailable" /* degraded, social.md §4.11 */ | "newerRules"
-                      | "authorityInactive" /* an authority's account is inactive; its cached assertions still apply, sync.md §3.4 */, message }
+                      | "authorityInactive" /* an authority's account is inactive; its cached assertions still apply, sync.md §3.4 */
+                      | "relayDependent" /* ForumView of an open forum: the L7 label, threat-model.md L7, social.md §3.2 */, message }
 HistoryView   { dto, uri, versions: Vec<{ n, cid, createdAtMs, summary?, available: bool }> }
 ```
 
