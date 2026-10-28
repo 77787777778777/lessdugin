@@ -18,8 +18,8 @@ import { writeStore } from "../engine/writes.ts";
 import { allows, capReason } from "../lib/caps.ts";
 import { cx } from "../lib/cx.ts";
 import type { QuoteSelection } from "../lib/quote.ts";
-import { cleanName } from "../lib/text.ts";
 import { isDid } from "../lib/uri.ts";
+import { actorIdent } from "./ActorName.tsx";
 import { Badges } from "./Badges.tsx";
 import { usePublicAck } from "./PublicAck.tsx";
 import styles from "./Reacts.module.css";
@@ -133,8 +133,10 @@ export function ReactPalette({
   );
 }
 
-/** A react's creator as a short label. Creators are voters, hence forum participants, so their
- * identities may be resolved eagerly (lfm-1.md §5.4 / F16). */
+/** A react's creator as a short label: the verified handle or the short DID, never the
+ * self-chosen display name, which could name someone else (threat-model ID-5). Creators are
+ * voters, hence forum participants, so their identities may be resolved eagerly (lfm-1.md §5.4
+ * / F16). */
 function useCreatorLabel(did: string | undefined): string | null {
   const engine = useEngine();
   const q = useQuery({
@@ -145,9 +147,7 @@ function useCreatorLabel(did: string | undefined): string | null {
   });
   if (!did) return null;
   const actor: ActorView | undefined = q.data;
-  if (actor?.handleState === "verified" && actor.handle) return `@${actor.handle}`;
-  if (actor?.displayName) return cleanName(actor.displayName);
-  return actor?.shortDid ?? did;
+  return actor ? actorIdent(actor) : did;
 }
 
 /** One stance change in flight: the deltas it applies to the shown tally. */
@@ -271,6 +271,9 @@ export function ReactBar({
   const [pending, setPending] = useState<Pending>({});
   const awaiting = useRef(new Set<string>());
   const anchorRef = useRef<HTMLDivElement>(null);
+  // the server's tallies, for the deltas and for settling (`reacts` is what the engine says)
+  const serverRef = useRef(reacts);
+  serverRef.current = reacts;
 
   useEffect(() => {
     void reacts;
@@ -296,11 +299,20 @@ export function ReactBar({
     if (!allows(caps, "react")) return;
     if (!(await requestAck("react"))) return;
     const key = tallyKey(id, q);
-    const forDelta = (stance === "for" ? 1 : 0) - (current === "for" ? 1 : 0);
-    const againstDelta = (stance === "against" ? 1 : 0) - (current === "against" ? 1 : 0);
-    setPending((p) => ({ ...p, [key]: { forDelta, againstDelta, mine: stance } }));
+    // The deltas are applied to the server's tally, so they are taken against the server's
+    // stance, not the shown one: toggling a react on and off again within the hold nets to
+    // nothing instead of one less (review finding m3r-11).
+    const serverMine = (): Stance | null =>
+      serverRef.current.find((t) => tallyKey(t.react, t.quote) === key)?.mine ?? null;
+    const base = serverMine();
+    const forDelta = (stance === "for" ? 1 : 0) - (base === "for" ? 1 : 0);
+    const againstDelta = (stance === "against" ? 1 : 0) - (base === "against" ? 1 : 0);
+    const entry = { forDelta, againstDelta, mine: stance };
+    setPending((p) => ({ ...p, [key]: entry }));
+    /** Drops this call's pending stance (a later click's stays). */
     const drop = (): void =>
       setPending((p) => {
+        if (p[key] !== entry) return p;
         const next = { ...p };
         delete next[key];
         return next;
@@ -332,8 +344,11 @@ export function ReactBar({
         },
       });
       const final = await writeStore.wait(ticket.id);
-      if (final.kind === "done") awaiting.current.add(key);
-      else drop();
+      // Settled: once the server's tally already shows the stance (a write that changed
+      // nothing leaves `reacts` as it was, so no refetch would clear it), the pending stance
+      // goes now; otherwise when the refetched tallies arrive.
+      if (final.kind !== "done" || serverMine() === stance) drop();
+      else awaiting.current.add(key);
     } catch (e) {
       drop();
       toasts.show({ message: errorMessage(e), tone: "error" });

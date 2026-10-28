@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { MockEngine } from "@lessdugin/engine/mock";
-import type { PostSummary } from "@lessdugin/engine/types";
+import type { PostSummary, ReactTally } from "@lessdugin/engine/types";
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type { QuoteSelection } from "../lib/quote.ts";
@@ -86,5 +86,60 @@ describe("ReactBar palette", () => {
     fireEvent.click(within(ack).getByRole("button", { name: "I understand, continue" }));
     await waitFor(() => expect(opinion).toHaveBeenCalledTimes(1));
     expect(opinion.mock.calls[0]?.[1]).toMatchObject({ kind: "react", quote: anchored.quote });
+  });
+});
+
+describe("ReactBar tallies", () => {
+  const tally = (over: Partial<ReactTally> = {}): ReactTally => ({
+    react: "insightful",
+    label: "Insightful",
+    glyph: "💡",
+    for: 1,
+    against: 0,
+    creator: "did:plc:abcdefghijklmnopqrstuvwx",
+    ...over,
+  });
+
+  it("names a creator by verified handle or short DID, never by display name (sec-11)", async () => {
+    const engine = new MockEngine();
+    const post = await otherPost(engine);
+    vi.spyOn(engine, "resolveActor").mockResolvedValue({
+      did: "did:plc:abcdefghijklmnopqrstuvwx",
+      shortDid: "did:plc:abcd…uvwx",
+      handleState: "unverified",
+      displayName: "@alice.bsky.social",
+    });
+    renderWithApp(<ReactBar subject={post.uri} reacts={[tally()]} getQuote={() => null} />, {
+      engine,
+    });
+    const button = await screen.findByRole("button", { name: /^Insightful/ });
+    await waitFor(() => expect(button.title).toContain("added by did:plc:abcd…uvwx"));
+    expect(button.textContent).not.toContain("alice");
+  });
+
+  it("toggling on and off within the hold shows the server's count again (m3r-11)", async () => {
+    const engine = new MockEngine({ holdMs: 200, sendMs: 0 });
+    const post = await otherPost(engine);
+    const reacts = [tally()];
+    renderWithApp(<ReactBar subject={post.uri} reacts={reacts} getQuote={() => null} />, {
+      engine,
+    });
+    const tallyButton = (): HTMLElement => screen.getByRole("button", { name: /^Insightful/ });
+    // the button's third span is the `for` count
+    const shownFor = (): string | null | undefined =>
+      tallyButton().querySelectorAll(":scope > span")[2]?.textContent;
+    fireEvent.click(await screen.findByRole("button", { name: /^Insightful/ }));
+    const ack = await screen.findByRole("dialog", { name: "Reacts are public" });
+    fireEvent.click(within(ack).getByRole("button", { name: "I understand, continue" }));
+    await waitFor(() => expect(tallyButton().getAttribute("aria-pressed")).toBe("true"));
+    expect(shownFor()).toBe("2");
+    fireEvent.click(tallyButton());
+    await waitFor(() => expect(tallyButton().getAttribute("aria-pressed")).toBe("false"));
+    // the server's tally (1), not one less
+    expect(shownFor()).toBe("1");
+    // the writes settle with nothing changed, and `reacts` stays the same array: the pending
+    // badge still goes
+    await waitFor(() => expect(screen.queryByText("[pending]")).toBeNull(), { timeout: 3000 });
+    expect(shownFor()).toBe("1");
   });
 });
