@@ -203,10 +203,12 @@ fn the_view_is_not_trusted_for_the_pds_and_its_declaration_must_agree() {
     block_on(e.load_media(&cid, Some(MediaOwner::of_view(&view)))).unwrap();
     assert_eq!(blob_requests(&n)[0].0, bob.pds_base());
 
-    // a declared type the bytes do not have: a download card, never inline
+    // a declared type the bytes do not have: a download card, never inline, named from what
+    // the bytes are
     view.mime = "video/mp4".into();
     let card = block_on(e.load_media(&cid, Some(MediaOwner::of_view(&view)))).unwrap();
     assert_eq!(card.mime, None);
+    assert_eq!(card.sniffed.as_deref(), Some("image/png"));
 
     // a view of another blob is refused
     let err = block_on(e.load_media("bafkreiother", Some(MediaOwner::of_view(&view)))).unwrap_err();
@@ -243,6 +245,30 @@ fn a_blob_the_pds_does_not_have_is_missing() {
     assert_eq!(err.code, ErrorCode::NotFound);
     assert_eq!(err.detail.unwrap()["kind"], "mediaMissing");
     assert_eq!(block_on(e.host().blob_open(&gone)).unwrap(), None);
+}
+
+#[test]
+fn a_download_card_carries_the_sniffed_type() {
+    // a file outside the display allowlist was saved as <cid>.bin: LoadedMedia carried a type
+    // only for display, so no client could pick the extension from the sniffed type (§11.2)
+    let mut n = Net::new();
+    let bob = n
+        .net
+        .add_pds("bob.example.com")
+        .add_account("bob.example.com");
+    let e = n.device("anon", None);
+    let load = |bytes: &[u8], declared: &str| {
+        let blob = bob.upload_blob(bytes.to_vec(), declared);
+        let cid = blob["ref"]["$link"].as_str().unwrap().to_owned();
+        block_on(e.load_media(&cid, Some(MediaOwner::author(bob.did().as_str())))).unwrap()
+    };
+    let pdf = load(b"%PDF-1.7\n%binary\n", "application/pdf");
+    assert_eq!((pdf.mime, pdf.sniffed.as_deref()), (None, Some("application/pdf")));
+    let png = load(&tiny_png(15), "image/png");
+    assert_eq!(png.mime.as_deref(), Some("image/png"));
+    assert_eq!(png.sniffed.as_deref(), Some("image/png"));
+    let unknown = load(b"just some bytes", "application/octet-stream");
+    assert_eq!((unknown.mime, unknown.sniffed), (None, None));
 }
 
 // --- reference counting and purging (m4-27) ------------------------------------------------------

@@ -1384,26 +1384,36 @@ impl<H: crate::host::Host> crate::engine::Engine<H> {
     }
 }
 
-/// The type a fetched blob is displayed as (`sync.md` §11.2): the §8.8 table of the sniffed
-/// prefix, plus AVIF (inline in the SPA only, never uploaded), or `None` (a download card).
+/// The type a fetched blob's prefix sniffs as: the §8.8 table, plus AVIF (which is never
+/// uploaded), or `None`. A download card names its file from it (`sync.md` §11.2).
+pub fn sniffed_type(prefix: &[u8]) -> Option<&'static str> {
+    crate::outbox::blob::normalise_mime(prefix).or_else(|| {
+        (prefix.len() >= 12
+            && &prefix[4..8] == b"ftyp"
+            && matches!(&prefix[8..12], b"avif" | b"avis"))
+        .then_some("image/avif")
+    })
+}
+
+/// The type a fetched blob is displayed as (`sync.md` §11.2): the [`sniffed_type`] of its
+/// prefix when it is on the display allowlist (AVIF: inline in the SPA only), or `None` (a
+/// download card).
 pub fn display_type(prefix: &[u8]) -> Option<&'static str> {
-    if let Some(t) = crate::outbox::blob::normalise_mime(prefix) {
-        return matches!(
-            t,
+    sniffed_type(prefix).filter(|t| {
+        matches!(
+            *t,
             "image/png"
                 | "image/jpeg"
                 | "image/gif"
                 | "image/webp"
+                | "image/avif"
                 | "video/mp4"
                 | "video/webm"
                 | "audio/mp4"
                 | "audio/mpeg"
                 | "audio/ogg"
         )
-        .then_some(t);
-    }
-    (prefix.len() >= 12 && &prefix[4..8] == b"ftyp" && matches!(&prefix[8..12], b"avif" | b"avis"))
-        .then_some("image/avif")
+    })
 }
 
 /// A declared `mimeType` through §8.8's names: parameters and case dropped, and the aliases the
@@ -1583,6 +1593,7 @@ impl<H: crate::host::Host> crate::engine::Engine<H> {
             size: handle.size,
             url: handle.locator,
             mime: mime.map(str::to_owned),
+            sniffed: sniffed_type(&prefix).map(str::to_owned),
         })
     }
 }

@@ -1120,12 +1120,16 @@ export interface SubscriptionEntry {
  * `mime` (or `application/octet-stream`); the caller owns it and revokes it
  * (`URL.revokeObjectURL`) when the element unmounts. `mime` is the display type: present only
  * when the sniffed type matches the declared one and is on the display allowlist (inline image,
- * or a click-to-play video/audio); absent, show a download card, never inline. */
+ * or a click-to-play video/audio); absent, show a download card, never inline. `sniffed` is the
+ * type the bytes sniff as (data-model.md §8.8's table, or `image/avif`), whatever was declared:
+ * a download card saves the file as `<cid>.<ext>` from it (sync.md §11.2); never display it by
+ * it. */
 export interface LoadedMedia {
   cid: string;
   size: number;
   url: string;
   mime?: string;
+  sniffed?: string;
 }
 
 export interface DraftEntry {

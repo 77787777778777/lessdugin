@@ -75,7 +75,8 @@ Normative details of the underlying behaviour live in `data-model.md` (records, 
   (§3.5 `mod_action`). New operation: `edit_preflight` (§3.5), with the notice code
   `suspendsAssertions`; new banner code: `relayDependent` (§4.2). `render` takes media (each a
   `MediaRef` or a stored `defs#media` value) where v0 refused any, and `RenderOpts` gains an
-  optional `profile`.
+  optional `profile`. `LoadedMedia` gains an optional `sniffed` (the type a download card names
+  its file from, §3.4).
 - **Errors.** Operations return `Result<T, EngineError>`; `EngineError` serialises as
   `{ "code": <string>, "message": <string>, "retryable": bool, "detail"?: object }` with codes:
   `auth_required`, `not_found`, `invalid_ref`, `invalid_input`, `conflict`, `rate_limited`,
@@ -217,13 +218,13 @@ SyncReport { dto, forum, reposTotal, reposComplete, reposStale, reposUnavailable
 | `mod_queue(forum)` | `ModQueue` (`social.md` §4.12): applicants, top-rank unordered conflicts, stale positive assertions and, in open mode, the newest newcomer items. The forum's authorities only (`blocked` for anyone else) |
 | `mod_log(forum, cursor?, limit)` | `ModLog` (`social.md` §4.12), `(time desc, uri asc)`, paged like `list_posts`. Public, except the `reason` of a `#hide` with `showReason: false`, shown to the forum's authorities only |
 | `raw(uri)` | `RawView`: the stored record JSON, its validity violations, every modAction naming it (valid or not, each with its mod-log status), its state and its score. Open to every viewer: the raw view shows everything, hidden content included (`social.md` §10.3) |
-| `load_media(cid, media?)` | `LoadedMedia` (`sync.md` §11.1, M4): fetches a media blob for display from its AUTHOR's PDS, resolved from the author's DID document (`media`: the item's `MediaView`, or only the author's DID; without it, the active account's own repo). Needs no login. The cap is the declared `sizeBytes` (a longer body is aborted, and a copy already stored is held to it too), within `BLOB_HARD_MAX_BYTES`. The host streams and CID-checks the bytes, which never enter wasm memory; the core reads the first 4,096 bytes to sniff the type. `mime` is the §11.2 display type, set only when the sniffed type is on the display allowlist and agrees with the declared one (when the view gives one): absent, the client shows a download card. In the browser `url` is a `blob:` object URL of type `mime` that the main-thread client makes from the verified stored `Blob`; the caller revokes it when the element unmounts. Natively it is the file's path. Errors: `not_found` with `detail.kind = "mediaMissing"` (the PDS has no such blob, and nothing is stored: a blob stored once is not asked for again, `sync.md` §12.2), `network` with `detail.kind = "mediaFailedVerification"` (CID mismatch), `too_large` (above the declared size or 300 MiB) |
+| `load_media(cid, media?)` | `LoadedMedia` (`sync.md` §11.1, M4): fetches a media blob for display from its AUTHOR's PDS, resolved from the author's DID document (`media`: the item's `MediaView`, or only the author's DID; without it, the active account's own repo). Needs no login. The cap is the declared `sizeBytes` (a longer body is aborted, and a copy already stored is held to it too), within `BLOB_HARD_MAX_BYTES`. The host streams and CID-checks the bytes, which never enter wasm memory; the core reads the first 4,096 bytes to sniff the type. `mime` is the §11.2 display type, set only when the sniffed type is on the display allowlist and agrees with the declared one (when the view gives one): absent, the client shows a download card. `sniffed` is the type the bytes sniff as (`data-model.md` §8.8's table, or `image/avif`), whatever was declared: a download card names the saved file `<cid>.<ext>` from it (`sync.md` §11.2); it is never a display type. In the browser `url` is a `blob:` object URL of type `mime` that the main-thread client makes from the verified stored `Blob`; the caller revokes it when the element unmounts. Natively it is the file's path. Errors: `not_found` with `detail.kind = "mediaMissing"` (the PDS has no such blob, and nothing is stored: a blob stored once is not asked for again, `sync.md` §12.2), `network` with `detail.kind = "mediaFailedVerification"` (CID mismatch), `too_large` (above the declared size or 300 MiB) |
 | `bookmarks()` | `Vec<BookmarkEntry>`: newest first, each with the post's summary when its forum's model is cached |
 | `bookmarked(uri)` | `bool` |
 | `subscriptions()` | `Vec<SubscriptionEntry>`, oldest first |
 | `mutes()` | `Vec<ActorView>`: the muted actors (the lens, `social.md` §10.3), by DID |
 | `drafts()` | `Vec<DraftEntry>`: the active account's saved drafts (§3.6), newest first; empty without an active account |
-| `load_media(cid, media?: MediaView) -> LoadedMedia` | a media blob for display (`sync.md` §11): fetched from the PDS of the author `media` names (the item's view from `RenderedBody.media`; without it, the active account's own repo), streamed and checked against `cid` by the host, never through wasm memory. No login is needed. In the browser `url` is an object URL the caller revokes; `mime`, when present, is the display type (the sniffed type matches the declared one and is on the display allowlist), absent: a download card, never inline |
+| `load_media(cid, media?: MediaView) -> LoadedMedia` | a media blob for display (`sync.md` §11): fetched from the PDS of the author `media` names (the item's view from `RenderedBody.media`; without it, the active account's own repo), streamed and checked against `cid` by the host, never through wasm memory. No login is needed. In the browser `url` is an object URL the caller revokes; `mime`, when present, is the display type (the sniffed type matches the declared one and is on the display allowlist), absent: a download card, never inline; `sniffed`, when present, is the type the bytes sniff as, which names a download's file |
 
 `sort`/`filter` values are exactly those of `social.md` §12 (`magic | top | new | old | recentComments`;
 `frontpage | all | curated`; comment sorts `magic | top | new | old | latestReply`).
@@ -570,7 +571,8 @@ NotificationsQuery { all? /* false: unread only */, limit }
 BodyDraft     { markdown, media?: Vec<MediaRef> }
 MediaRef      { id, cid, mime, sizeBytes, alt?, aspectRatio?, durationMs?, name?,
                 notices?: Vec<ActionNotice> /* prepare_media: missingAlt when alt is absent */ }
-LoadedMedia   { cid, size, url, mime? /* the §11.2 display type; absent: a download card */ }
+LoadedMedia   { cid, size, url, mime? /* the §11.2 display type; absent: a download card */,
+                sniffed? /* the sniffed type, for a download card's file name */ }
 PostDraft     { forum, kind: PostKind, title?, body: BodyDraft, link?: { uri, title?, description? },
                 tags?: Vec<slug>, labels?: Vec<string> }
 CommentDraft  { root, parent?, body: BodyDraft, quote?: TextQuote }
@@ -578,7 +580,8 @@ Draft         = { kind: "post", id?, post: PostDraft } | { kind: "comment", id?,
 DraftEntry    { id, savedAtMs, draft: Draft }
 MediaInput    { declaredMime?, alt?, name?, aspectRatio?: AspectRatio }   // prepare_media's hints
 MediaFile     { bytes, mime?, name?, alt? }        // engine API v0's prepare_media argument, still accepted
-LoadedMedia   { cid, size, url, mime? /* the display type; absent: download only */ }
+LoadedMedia   { cid, size, url, mime? /* the display type; absent: download only */,
+                sniffed? /* for the download's file name only */ }
 EditOpts      { history: bool, summary? }
 OpinionIntent = { kind: "karma", value?: up|down|strongUp|strongDown }      // absent: clear
               | { kind: "agreement", value?: agree|disagree|strongAgree|strongDisagree }
