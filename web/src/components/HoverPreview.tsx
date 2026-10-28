@@ -4,10 +4,11 @@
 // The target is re-parsed by the engine before use (F5). Bodies (and titles) are shown only for
 // posts that resolve as visible or collapsed; everything else gets a metadata card with "open":
 // kind, author and forum (§5.3, fail closed). DID cards resolve the identity lazily, at hover
-// time; the resolved identity also lets mentions of that DID show its handle (§5.4).
+// time; the resolved identity also lets mentions of that DID show its handle (§5.4). Forum
+// cards come from the cache: a hover never opens a forum.
 
 import type { Ref as EngineRef } from "@lessdugin/engine/types";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { type ReactNode, useEffect, useLayoutEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 import { useEngine } from "../engine/context.tsx";
@@ -94,26 +95,19 @@ function PostPreview({ uri }: { uri: string }) {
 
 function UserCard({ did }: { did: string }) {
   const engine = useEngine();
-  const qc = useQueryClient();
+  // Identity resolution only, at hover time (F16): the result lands in the identity cache that
+  // mention substitution reads (§5.4). The bio needs the `user` op, which is M5.
   const q = useQuery({
-    queryKey: qk.user(did, undefined),
-    queryFn: async () => {
-      const user = await engine.user(undefined, did);
-      // Hover time is when a non-participant's identity may be resolved (F16); share it with
-      // mention substitution.
-      if (user.actor.did === did) qc.setQueryData(qk.actor(did), user.actor);
-      return user;
-    },
+    queryKey: qk.actor(did),
+    queryFn: () => engine.resolveActor(did),
+    staleTime: 5 * 60_000,
   });
   if (q.isPending) return <p className={styles.muted}>Loading…</p>;
   if (q.isError || !q.data) return <p className={styles.muted}>Unknown user.</p>;
   return (
-    <>
-      <p className={styles.title}>
-        <ActorName actor={q.data.actor} showIdent />
-      </p>
-      {q.data.bio && <p className={styles.excerpt}>{q.data.bio.excerpt}</p>}
-    </>
+    <p className={styles.title}>
+      <ActorName actor={q.data} showIdent />
+    </p>
   );
 }
 
@@ -153,9 +147,15 @@ function SequencePreview({ uri }: { uri: string }) {
   );
 }
 
+/** A forum, from the cache only: a hover opens no forum and syncs no authority (§5.3), so a
+ * forum not opened before gets the metadata card, whose "open" does that. */
 function ForumPreview({ uri }: { uri: string }) {
   const engine = useEngine();
-  const q = useQuery({ queryKey: qk.forumRef(uri), queryFn: () => engine.forumOpen(uri) });
+  const q = useQuery({
+    queryKey: qk.forumRef(uri),
+    queryFn: () => engine.forumOpen(uri),
+    enabled: false,
+  });
   if (!q.data) return <MetaCard uri={uri} />;
   return (
     <>
