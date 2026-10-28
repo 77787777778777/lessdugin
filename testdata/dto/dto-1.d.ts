@@ -786,7 +786,7 @@ export interface ViewerCaps {
 
 export type WarningKind = "equivocation" | "indexerContradiction" | "degraded" | "renderFailure" | "other";
 
-export type WriteState = { kind: "pending"; notBeforeMs?: number; held?: boolean; throttled?: boolean; needsLogin?: boolean; error?: EngineError } | { kind: "sending" } | { kind: "done"; uri: string; cid?: string } | { kind: "failed"; error: EngineError } | { kind: "undone" };
+export type WriteState = { kind: "pending"; notBeforeMs?: number; held?: boolean; throttled?: boolean; needsLogin?: boolean; error?: EngineError } | { kind: "sending" } | { kind: "done"; uri: string; cid?: string; report?: string[] } | { kind: "failed"; error: EngineError } | { kind: "undone" };
 
 export interface WriteTicket {
     id: string;
