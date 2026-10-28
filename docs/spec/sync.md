@@ -1234,6 +1234,7 @@ The key of a tuple is the concatenation of its elements. A prefix scan over `(e1
 | cache | `("blob", cid)` | `BlobRow` | the bytes live in the host's blob storage (§12.2) |
 | cache | `("blob.ref", cid, fk)` | `BlobRefRow` | how many of forum fk's counted records reference the CID (§11.4); absent at 0 |
 | cache | `("blob.forum", fk, cid)` | `BlobRefRow` | the same row, by forum: what the next build of fk and its eviction start from |
+| cache | `("blob.loose", cid)` | `LooseBlobRow` | a blob the host stored while no forum counted a reference to it (§11.4) |
 | cache | `("cur", source)` | `CursorRow` | `source` = `"jetstream"` or `"indexer:" + did + ":" + fk` |
 | cache | `("host", origin)` | `HostRow` | |
 | cache | `("forum", fk)` | `ForumRow` | `{uri, lastViewed}` for eviction |
@@ -1273,6 +1274,7 @@ DiscRow    { src: [string], first: ms, state: "candidate" | "confirmed" | "rejec
 BlobRow    { did, mime: string (declared), sniff?: string, size: int, stored: bool, refs: int, at: ms, used: ms }
              (v1 writes none: the references are the BlobRefRows, §11.4)
 BlobRefRow { n: int (≥ 1) }
+LooseBlobRow { at: ms (when stored) }
 CursorRow  { wire?: "v1" | "v2", instance?: host, seq?: int, timeUs?: µs, at: ms }
 HostRow    { rangeCursor: "unknown" | "yes" | "no", rcAt: ms, shortPageEnds: bool, nullSwap?: bool,
              breaker: {state, failures, until, openMs}, budget?: {limit, est, resetAt}, strikes: int }
@@ -1361,7 +1363,8 @@ The engine decides while it builds a view: `MediaView.autoload` is this verdict 
 - **References.** A blob is referenced by every blob object (`{"$type": "blob", "ref": {"$link": cid}}`, at any depth: media, `textBlob`, an icon, a revision's snapshot) in the value of a stored, eligible record of a forum's fold input, or of its declaration. A reference **counts** while its record is shown: the declaration; a post, comment, sequence or wiki revision while it is listed (`Visible` or `Collapsed(*)`, `social.md` §10.1, before the thread pass, so a `Tombstone` counts for nothing); a revision while its subject counts; every other record (membership, opinion, modAction). `("blob.ref", cid, fk)` holds how many of forum fk's records count for the CID, and `("blob.forum", fk, cid)` the same by forum.
 - **Updates.** Every build of a forum's model rewrites the forum's rows that changed, whole (two processes building the same forum write the same rows), unless the visibility layer is pending. When an item becomes hidden or excluded, or is deleted, its blobs lose its references; a CID that no forum references any more has its stored bytes deleted (`Host::blob_delete`, `threat-model.md` PRIV-2), right after the build that saw it lose them. A blob stays stored while any forum's shown record references it, and is fetched again (from the author's PDS) if it is wanted after a deletion.
 - Blobs are also deleted with their forum on eviction (§10.7), when no other forum references them.
-- **Limits.** The count follows the fold of the last build of each forum: a forum not opened again keeps its rows until it is. A blob stored while no counted reference exists (loaded through a view older than the fold that hid its item) is not counted, so it is deleted only once a forum counts and then drops it, or with the cache.
+- **Loose blobs.** A blob the host stores (`load_media`, a spilled body) while no forum counts a reference to it (media loaded for an item that is already hidden: from the mod queue, or through a view older than the fold that hid it) is marked `("blob.loose", cid)`. The next build of a forum that references it without counting it deletes its stored bytes, when no forum counts it by then, and drops the mark; the mark also goes once some forum counts it, which then deletes it as above. A loose blob no forum references (the account's own, loaded with no owner) stays marked.
+- **Limits.** The count follows the fold of the last build of each forum: a forum not opened again keeps its rows, and a loose blob it references stays stored, until it is.
 
 ---
 

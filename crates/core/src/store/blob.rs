@@ -379,7 +379,9 @@ mod tests {
                 .into()
             };
             // x is counted by g: storing it marks nothing
-            set_forum_blob_refs(&kv, g, &refs(&[("x", 1)])).await.unwrap();
+            set_forum_blob_refs(&kv, g, &refs(&[("x", 1)]))
+                .await
+                .unwrap();
             for c in ["x", "y", "z"] {
                 note_stored(&kv, c, 1).await.unwrap();
             }
@@ -391,11 +393,15 @@ mod tests {
             assert!(!loose("x").await && loose("y").await && loose("z").await);
             // a build of f, which references x and y and counts neither: y goes, x is g's, and z
             // waits for a forum that references it
-            let gone = loose_blobs(&kv, &by_uri(&["x", "y"]), &refs(&[])).await.unwrap();
+            let gone = loose_blobs(&kv, &by_uri(&["x", "y"]), &refs(&[]))
+                .await
+                .unwrap();
             assert_eq!(gone, ["y"]);
             assert!(!loose("y").await && loose("z").await);
             // a forum that counts z keeps it, and the mark goes
-            set_forum_blob_refs(&kv, f, &refs(&[("z", 1)])).await.unwrap();
+            set_forum_blob_refs(&kv, f, &refs(&[("z", 1)]))
+                .await
+                .unwrap();
             let gone = loose_blobs(&kv, &by_uri(&["z"]), &refs(&[("z", 1)]))
                 .await
                 .unwrap();
