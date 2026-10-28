@@ -964,7 +964,9 @@ async fn assert_or_remove(ctx: &Ctx, action: ModAction, yes: bool) -> Result<(),
     let subject = subject_of(ctx, &w.engine, &subject).await?;
     read::sync_thread_quietly(ctx, &w.engine, &subject).await;
     let value = match restrict_names_caps {
-        Some(caps) => keep_restrict_dimension(&w, &forum, scope, &subject, value, caps).await?,
+        Some(caps) => {
+            keep_restrict_dimension(ctx, &w, &forum, scope, &subject, value, caps).await?
+        }
         None => value,
     };
     mod_action(
@@ -981,9 +983,12 @@ async fn assert_or_remove(ctx: &Ctx, action: ModAction, yes: bool) -> Result<(),
 /// `nullifyVotes`, and a record states the complete desired state of its key (`social.md` §4.2,
 /// §4.7). So `mod restrict` keeps the account's current nullification of the subject, and `mod
 /// nullify` its current capability set (`names_caps`: the verb names the capabilities): neither
-/// silently lifts the other. The current record is the cached one; without one, the other
-/// dimension is its default.
+/// silently lifts the other. The current record is the last write of it this device queued and
+/// has not sent (the outbox sends in order, so this one follows it), else the cached one after
+/// a sync of the forum (a record written from another device); without one, or after a queued
+/// removal, the other dimension is its default.
 async fn keep_restrict_dimension(
+    ctx: &Ctx,
     w: &Writer,
     forum: &str,
     scope: ModScope,
@@ -1010,21 +1015,26 @@ async fn keep_restrict_dimension(
         "$type".into(),
         Value::String(nsid::MOD_ACTION_RESTRICT.into()),
     );
-    let current = match &did {
-        Some(did) => {
-            let scope = matches!(scope, ModScope::Author).then_some("author");
-            match lessdugin_lexicon::keys::mod_action_rkey(
-                lessdugin_lexicon::ns::NS,
-                forum,
-                scope,
-                did,
-                &action,
-            ) {
-                Ok(rkey) => {
-                    let uri = format!("at://{}/{}/{rkey}", w.account.did, nsid::MOD_ACTION);
+    let rkey = did.as_deref().and_then(|did| {
+        let scope = matches!(scope, ModScope::Author).then_some("author");
+        lessdugin_lexicon::keys::mod_action_rkey(
+            lessdugin_lexicon::ns::NS,
+            forum,
+            scope,
+            did,
+            &action,
+        )
+        .ok()
+    });
+    let current = match rkey {
+        Some(rkey) => {
+            let uri = format!("at://{}/{}/{rkey}", w.account.did, nsid::MOD_ACTION);
+            match queued_value(w, &uri).await? {
+                Some(queued) => queued,
+                None => {
+                    read::sync_forum_quietly(ctx, &w.engine, forum).await;
                     write::cached(&w.engine, &uri).await.ok().map(|(_, v)| v)
                 }
-                Err(_) => None,
             }
         }
         None => None,
@@ -1053,6 +1063,25 @@ async fn keep_restrict_dimension(
             nullify_votes,
         }
     })
+}
+
+/// The value the last pending write of the account's outbox gives the record `uri`: `None`
+/// when no pending write touches it, `Some(None)` when that write deletes it.
+async fn queued_value(w: &Writer, uri: &str) -> Result<Option<Option<Value>>, CliError> {
+    use lessdugin_core::outbox::model::OpAction;
+    let pending = w.engine.outbox().pending(&w.account.did).await?;
+    let last = pending
+        .iter()
+        .flat_map(|p| p.ops.iter().map(move |o| (p, o)))
+        .filter(|(p, o)| o.uri(&p.account) == uri)
+        .last();
+    Ok(last.map(|(_, o)| match o.action {
+        OpAction::Delete => None,
+        OpAction::Create | OpAction::Update => o
+            .value
+            .as_deref()
+            .and_then(|b| serde_json::from_slice(b).ok()),
+    }))
 }
 
 /// A tier action (`mod personal|frontpage|curate`): an assertion on the item.

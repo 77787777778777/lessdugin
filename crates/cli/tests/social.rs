@@ -409,18 +409,20 @@ fn reading_a_thread_marks_it_read() {
 fn restrict_and_nullify_keep_each_other() {
     use lessdugin_lexicon::collection::nsid;
     let w = World::new();
-    let restrict = || -> Value {
+    let restrict_of = |did: &str| -> Value {
         let mut recs: Vec<Value> = w
             .alice
             .account
             .list(nsid::MOD_ACTION)
             .iter()
             .filter_map(|(rkey, _)| w.alice.account.get(nsid::MOD_ACTION, rkey))
-            .filter(|v| v["action"]["$type"] == nsid::MOD_ACTION_RESTRICT)
+            .filter(|v| v["action"]["$type"] == nsid::MOD_ACTION_RESTRICT && v["subject"] == did)
             .collect();
         assert_eq!(recs.len(), 1, "{recs:?}");
         recs.remove(0)["action"].clone()
     };
+    let bob = w.bob.did();
+    let restrict = || restrict_of(&bob);
     let r = w
         .alice
         .json(&["mod", "restrict", "bob.test", "--cap", "post", "--yes"]);
@@ -437,6 +439,32 @@ fn restrict_and_nullify_keep_each_other() {
     assert_eq!(r["state"]["kind"], "done", "{r}");
     let a = restrict();
     assert_eq!(a["capabilities"], serde_json::json!(["comment"]), "{a}");
+    assert_eq!(a["nullifyVotes"], true, "{a}");
+
+    // a restriction still queued in the outbox (offline) is the one the next verb keeps
+    let carol = w.carol.did();
+    let r = w
+        .alice
+        .json(&["--offline", "mod", "restrict", &carol, "--cap", "vote"]);
+    assert_eq!(r["state"]["kind"], "pending", "{r}");
+    let n = w.alice.json(&["--offline", "mod", "nullify", &carol]);
+    assert_eq!(n["state"]["kind"], "pending", "{n}");
+    let f = w.alice.json(&["outbox", "flush"]);
+    let sent = f["writes"].as_array().unwrap();
+    assert!(sent.iter().all(|x| x["state"]["kind"] == "done"), "{f}");
+    let a = restrict_of(&carol);
+    assert_eq!(a["capabilities"], serde_json::json!(["vote"]), "{a}");
+    assert_eq!(a["nullifyVotes"], true, "{a}");
+
+    // and one written from another device, which this one has not synced since
+    let dave = w.net.user("dave.test", true).did();
+    let other = w.net.second_device(&w.alice);
+    let r = other.json(&["mod", "restrict", &dave, "--cap", "post", "--yes"]);
+    assert_eq!(r["state"]["kind"], "done", "{r}");
+    let n = w.alice.json(&["mod", "nullify", &dave]);
+    assert_eq!(n["state"]["kind"], "done", "{n}");
+    let a = restrict_of(&dave);
+    assert_eq!(a["capabilities"], serde_json::json!(["post"]), "{a}");
     assert_eq!(a["nullifyVotes"], true, "{a}");
 }
 
