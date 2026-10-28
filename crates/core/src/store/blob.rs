@@ -10,8 +10,13 @@
 //! returned, and the engine deletes its bytes (`threat-model.md` PRIV-2); eviction drops a
 //! forum's references the same way ([`drop_forum_blob_refs`], §10.7). Every row is written
 //! whole, never adjusted, so two processes updating the same forum converge.
+//!
+//! A blob stored while no forum counts a reference to it (media loaded for an item that is
+//! already hidden) never loses a counted reference, so it is marked loose instead
+//! ([`note_stored`], `("blob.loose", cid)`); the next build of a forum that references it
+//! without counting it deletes it ([`loose_blobs`]).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound;
 
 use serde::{Deserialize, Serialize};
@@ -77,6 +82,16 @@ pub struct BlobRefRow {
     pub v: u32,
     /// The forum's counted records that reference the CID (at least 1; a row is deleted at 0).
     pub n: u32,
+}
+
+/// `LooseBlobRow`, at `("blob.loose", cid)`: the host stored the blob while no forum counted a
+/// reference to it (§11.4).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LooseBlobRow {
+    /// Row version.
+    pub v: u32,
+    /// When it was stored (ms).
+    pub at: i64,
 }
 
 /// The blob references of forum `fk` (§11.4): CID → how many of its counted records reference it.
@@ -147,6 +162,78 @@ pub async fn set_forum_blob_refs<K: KvStore>(
         if kv.scan(others, Dir::Forward, 1).await?.is_empty() {
             gone.push(cid.clone());
         }
+    }
+    Ok(gone)
+}
+
+/// `true` if some forum counts a reference to `cid`.
+async fn counted_anywhere<K: KvStore>(kv: &K, cid: &str) -> Result<bool, StoreError> {
+    let range = KeyRange::prefix(&schema::prefix(tag::BLOB_REF, &[cid]));
+    Ok(!kv.scan(range, Dir::Forward, 1).await?.is_empty())
+}
+
+/// Records that the host has just stored `cid` (a fetch, §11.1): when no forum counts a
+/// reference to it, it is marked loose, for the next build of a forum that references it.
+pub async fn note_stored<K: KvStore>(kv: &K, cid: &str, now_ms: i64) -> Result<(), StoreError> {
+    if counted_anywhere(kv, cid).await? {
+        return Ok(());
+    }
+    let r = row::encode(&LooseBlobRow {
+        v: ROW_VERSION,
+        at: now_ms,
+    })?;
+    kv.write(vec![KvOp::Put(schema::blob_loose_key(cid), r)])
+        .await?;
+    Ok(())
+}
+
+/// The loose blobs to delete after a build of a forum whose records reference the CIDs
+/// `references` (by uri, [`crate::model::ForumModel::blobs`]) and count the references `refs`
+/// (written first, [`set_forum_blob_refs`]): every loose CID that the forum references, does
+/// not count, and that no forum counts. Their marks are dropped, and so are those of the loose
+/// CIDs some forum now counts (they leave through [`set_forum_blob_refs`]). The others stay
+/// for the forums that reference them.
+pub async fn loose_blobs<K: KvStore>(
+    kv: &K,
+    references: &BTreeMap<String, BTreeSet<String>>,
+    refs: &BTreeMap<String, u32>,
+) -> Result<Vec<String>, StoreError> {
+    let mut range = KeyRange::prefix(&schema::prefix(tag::BLOB_LOOSE, &[]));
+    let mut loose = Vec::new();
+    loop {
+        let page = kv.scan(range.clone(), Dir::Forward, REF_SCAN_PAGE).await?;
+        for (k, _) in &page {
+            if let Ok(mut parts) = key::decode(k)
+                && let Some(Part::Bytes(cid)) = parts.pop()
+                && let Ok(cid) = String::from_utf8(cid)
+            {
+                loose.push(cid);
+            }
+        }
+        match page.last() {
+            Some((last, _)) if page.len() == REF_SCAN_PAGE as usize => {
+                range.start = Bound::Excluded(last.clone());
+            }
+            _ => break,
+        }
+    }
+    if loose.is_empty() {
+        return Ok(Vec::new());
+    }
+    let referenced: BTreeSet<&str> = references.values().flatten().map(String::as_str).collect();
+    let (mut gone, mut ops) = (Vec::new(), Vec::new());
+    for cid in loose {
+        let counted = refs.get(&cid).is_some_and(|n| *n > 0) || counted_anywhere(kv, &cid).await?;
+        if counted || referenced.contains(cid.as_str()) {
+            ops.push(KvOp::Delete(schema::blob_loose_key(&cid)));
+            if !counted {
+                gone.push(cid);
+            }
+        }
+    }
+    let mut ops = ops.into_iter().peekable();
+    while ops.peek().is_some() {
+        kv.write(ops.by_ref().take(REF_WRITE_OPS).collect()).await?;
     }
     Ok(gone)
 }
@@ -276,6 +363,44 @@ mod tests {
                 .await
                 .unwrap();
             assert!(left.is_empty(), "{left:?}");
+        });
+    }
+
+    #[test]
+    fn a_loose_blob_goes_with_the_next_build_of_a_forum_that_does_not_count_it() {
+        futures::executor::block_on(async {
+            let kv = MemKv::new();
+            let (f, g) = ("aaaaaaaaaaaa", "bbbbbbbbbbbb");
+            let by_uri = |cids: &[&str]| -> BTreeMap<String, BTreeSet<String>> {
+                [(
+                    "at://did:plc:x/c/s".to_owned(),
+                    cids.iter().map(|c| (*c).to_owned()).collect(),
+                )]
+                .into()
+            };
+            // x is counted by g: storing it marks nothing
+            set_forum_blob_refs(&kv, g, &refs(&[("x", 1)])).await.unwrap();
+            for c in ["x", "y", "z"] {
+                note_stored(&kv, c, 1).await.unwrap();
+            }
+            let loose = |c: &str| {
+                let kv = &kv;
+                let k = schema::blob_loose_key(c);
+                async move { kv.get_many(vec![k]).await.unwrap()[0].is_some() }
+            };
+            assert!(!loose("x").await && loose("y").await && loose("z").await);
+            // a build of f, which references x and y and counts neither: y goes, x is g's, and z
+            // waits for a forum that references it
+            let gone = loose_blobs(&kv, &by_uri(&["x", "y"]), &refs(&[])).await.unwrap();
+            assert_eq!(gone, ["y"]);
+            assert!(!loose("y").await && loose("z").await);
+            // a forum that counts z keeps it, and the mark goes
+            set_forum_blob_refs(&kv, f, &refs(&[("z", 1)])).await.unwrap();
+            let gone = loose_blobs(&kv, &by_uri(&["z"]), &refs(&[("z", 1)]))
+                .await
+                .unwrap();
+            assert!(gone.is_empty(), "{gone:?}");
+            assert!(!loose("z").await);
         });
     }
 

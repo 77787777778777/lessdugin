@@ -1559,6 +1559,7 @@ impl<H: crate::host::Host> crate::engine::Engine<H> {
             }
             Err(e) => return Err(EngineError::from(e)),
         };
+        self.note_stored(&handle.cid).await;
         // a copy stored by another fetch is held to this declaration too
         if handle.size > max {
             return Err(EngineError::new(
@@ -1773,6 +1774,16 @@ impl<H: crate::host::Host> crate::engine::Engine<H> {
         topics
     }
 
+    /// Marks `cid`, which the host has just stored, loose when no forum counts a reference to
+    /// it (`sync.md` §11.4): the next build of a forum that references it deletes it. A failure
+    /// is logged; the blob then stays until the cache is cleared.
+    async fn note_stored(&self, cid: &str) {
+        let now = self.host().now_ms();
+        if let Err(e) = crate::store::blob::note_stored(self.host().cache(), cid, now).await {
+            tracing::warn!(cid = %cid, error = %e, "marking a stored blob");
+        }
+    }
+
     /// One `textBlob` of `did`, fetched and decoded (`data-model.md` §5.2 rule 3).
     async fn fetch_text_blob(
         &self,
@@ -1797,6 +1808,7 @@ impl<H: crate::host::Host> crate::engine::Engine<H> {
             Err(HostError::HttpStatus(400, _)) => return Ok(Spilled::Missing),
             Err(e) => return Err(e.into()),
         };
+        self.note_stored(&h.cid).await;
         // a copy stored by another fetch is held to the same cap
         if h.size > max {
             return Ok(Spilled::Error(BodyError::TooLarge));

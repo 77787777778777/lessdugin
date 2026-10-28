@@ -546,14 +546,26 @@ impl<H: Host> Engine<H> {
 
     /// Brings the cache's blob references of `model`'s forum in step with its fold, and deletes
     /// the stored bytes no forum references any more (`sync.md` §11.4, `threat-model.md`
-    /// PRIV-2): an item hidden or deleted since the last build loses its references. A failure
-    /// is logged; the rows are a cache, and the next build writes them again.
+    /// PRIV-2): an item hidden or deleted since the last build loses its references, and a
+    /// loose blob (stored while nothing counted it) that the forum references without counting
+    /// is deleted too. A failure is logged; the rows are a cache, and the next build writes
+    /// them again.
     async fn sync_blob_refs(&self, model: &ForumModel) {
         let Some(refs) = model.blob_refs() else {
             return;
         };
-        let gone = match blob::set_forum_blob_refs(self.host.cache(), &model.key.fk, &refs).await {
-            Ok(g) => g,
+        let kv = self.host.cache();
+        let gone = match blob::set_forum_blob_refs(kv, &model.key.fk, &refs).await {
+            Ok(mut g) => match blob::loose_blobs(kv, &model.blobs, &refs).await {
+                Ok(l) => {
+                    g.extend(l);
+                    g
+                }
+                Err(e) => {
+                    tracing::warn!(forum = %model.key.uri, error = %e, "loose blobs");
+                    g
+                }
+            },
             Err(e) => {
                 tracing::warn!(forum = %model.key.uri, error = %e, "blob references");
                 return;

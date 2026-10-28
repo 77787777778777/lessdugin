@@ -314,6 +314,51 @@ fn a_loaded_image_is_deleted_once_nothing_shown_references_it() {
 }
 
 #[test]
+fn an_image_loaded_for_a_hidden_post_is_deleted_by_the_next_build() {
+    // m4-27: a blob stored while nothing counted a reference to it (media loaded for an item
+    // already hidden, through a view from before the hide or from the mod queue) never lost a
+    // counted reference, so nothing deleted it (sync.md §11.4, threat-model.md PRIV-2)
+    let mut n = Net::new();
+    let bob = n
+        .net
+        .add_pds("bob.example.com")
+        .add_account("bob.example.com");
+    let f = forum(&n, &bob);
+    let blob = bob.upload_blob(tiny_png(13), "image/png");
+    let cid = blob["ref"]["$link"].as_str().unwrap().to_owned();
+    let uri = post(&n, &bob, &f, image_body(&blob));
+    let shown = bob.upload_blob(tiny_png(14), "image/png");
+    let shown_cid = shown["ref"]["$link"].as_str().unwrap().to_owned();
+    let listed = post(&n, &bob, &f, image_body(&shown));
+    let e = n.device("anon", None);
+    let stored = |c: &str| block_on(e.host().blob_open(c)).unwrap().is_some();
+    let view = read(&e, &f, &uri).body.media[0].clone();
+    let shown_view = read(&e, &f, &listed).body.media[0].clone();
+    hide_in(&n, &bob, &f, &uri);
+    assert_eq!(read(&e, &f, &uri).body.html, "");
+    // the view from before the hide still loads the image, as does the listed post's
+    block_on(e.load_media(&cid, Some(MediaOwner::of_view(&view)))).unwrap();
+    block_on(e.load_media(&shown_cid, Some(MediaOwner::of_view(&shown_view)))).unwrap();
+    assert!(stored(&cid) && stored(&shown_cid));
+    let text = |t: &str| json!({"$type": nsid::MARKDOWN, "profile": "lfm/1", "text": t});
+    // the next build of the forum deletes the hidden post's image, and keeps the listed one's
+    post(&n, &bob, &f, text("Something new."));
+    read(&e, &f, &listed);
+    assert!(
+        !stored(&cid),
+        "an image loaded for a hidden post is still stored"
+    );
+    assert!(stored(&shown_cid), "a listed post's image is kept");
+    // loaded again, it goes again
+    block_on(e.load_media(&cid, Some(MediaOwner::of_view(&view)))).unwrap();
+    assert!(stored(&cid));
+    post(&n, &bob, &f, text("And more."));
+    read(&e, &f, &listed);
+    assert!(!stored(&cid));
+    assert!(stored(&shown_cid));
+}
+
+#[test]
 fn an_image_an_edit_dropped_is_kept_by_its_revision_until_the_post_is_hidden() {
     // m4-27: a revision's snapshot references the old version's blobs; it counts while its
     // subject is listed (sync.md §11.4)

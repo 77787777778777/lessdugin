@@ -9,6 +9,7 @@
 //! | `("host", origin)` | [`super::repo::HostRow`] | [`super::repo`] |
 //! | `("blob", cid)` | [`super::blob::BlobRow`] | [`super::blob`] |
 //! | `("blob.ref", cid, fk)`, `("blob.forum", fk, cid)` | [`super::blob::BlobRefRow`] | [`super::blob`] |
+//! | `("blob.loose", cid)` | [`super::blob::LooseBlobRow`] | [`super::blob`] |
 //! | `("cur", source)` | [`super::blob::CursorRow`] | [`super::blob`] |
 //! | `("forum", fk)` | [`super::blob::ForumRow`] | [`super::blob`] |
 //! | `("meta", "schema")` | integer | [`open_cache`] |
@@ -59,6 +60,8 @@ pub mod tag {
     pub const BLOB_REF: &str = "blob.ref";
     /// Blob references, by forum then CID.
     pub const BLOB_FORUM: &str = "blob.forum";
+    /// Blobs stored while no forum counted a reference to them.
+    pub const BLOB_LOOSE: &str = "blob.loose";
     /// Live-source cursors.
     pub const CUR: &str = "cur";
     /// Forum access times.
@@ -166,6 +169,11 @@ pub fn blob_ref_key(cid: &str, fk: &str) -> Vec<u8> {
 /// `("blob.forum", fk, cid)`.
 pub fn blob_forum_key(fk: &str, cid: &str) -> Vec<u8> {
     crate::key!(tag::BLOB_FORUM, fk, cid)
+}
+
+/// `("blob.loose", cid)`.
+pub fn blob_loose_key(cid: &str) -> Vec<u8> {
+    crate::key!(tag::BLOB_LOOSE, cid)
 }
 
 /// `("cur", source)`: `source` = `"jetstream"` or `"indexer:" + did + ":" + fk`.
