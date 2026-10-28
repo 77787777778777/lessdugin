@@ -19,7 +19,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crossterm::event::KeyEvent;
 use lessdugin_core::dto::{
-    AccessLevel, AccountView, ActionTicket, AgreementValue, Capability, CommentDraft, CommentSort,
+    AccessLevel, AccountView, ActionNotice, ActionTicket, AgreementValue, Capability, CommentDraft, CommentSort,
     DiscussionList, Event, ForumSummary, ForumView, HistoryView, KarmaValue, ModActionIntent,
     ModActionValue, ModLog, ModQueue, ModScope, ModsChange, NotificationList, OpinionIntent,
     PinScope, PostDraft, PostFilter, PostList, PostSort, PublicActionKind, ReactTally, Stance,
@@ -783,8 +783,9 @@ pub enum Action {
     },
     /// A local-state command finished: what the status line says, or why it failed.
     LocalDone(Result<String, EngineError>),
-    /// [`Effect::StartEdit`]: the editor session, or why there is none.
-    EditReady(Result<EditorRequest, EngineError>),
+    /// [`Effect::StartEdit`]: the editor session and what the edit would suspend
+    /// (`edit_preflight`), or why there is none.
+    EditReady(Result<(EditorRequest, Vec<ActionNotice>), EngineError>),
     /// [`Effect::LoadMembers`] finished.
     MembersLoaded(Result<Vec<MemberView>, EngineError>),
     /// [`Effect::LoadRaw`] finished.
@@ -1299,7 +1300,8 @@ pub struct Panel {
     pub scroll: usize,
 }
 
-/// A yes/no question before a write that cannot be taken back (`:delete`, `:redact`).
+/// A yes/no question before a write that cannot be taken back (`:delete`, `:redact`), or an
+/// edit that suspends a moderator's assertions (`:edit`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Confirm {
     /// The question.
@@ -1978,7 +1980,23 @@ impl State {
                 Err(e) => self.say(Tone::Error, tt(&e.message)),
             },
             Action::EditReady(result) => match result {
-                Ok(req) => fx.push(Effect::Editor(req)),
+                Ok((req, notices)) if notices.is_empty() => fx.push(Effect::Editor(req)),
+                // an edit suspends the keep, tier or pin in effect on the item: ask first
+                // (`social.md` §4.5, `threat-model.md` SOC-3)
+                Ok((req, notices)) => {
+                    let mut text = String::new();
+                    for n in &notices {
+                        let mut c = n.message.chars();
+                        text.extend(c.next().map(|f| f.to_ascii_uppercase()));
+                        text.push_str(c.as_str());
+                        text.push_str(". ");
+                    }
+                    text.push_str("Edit it anyway?");
+                    self.confirm = Some(Confirm {
+                        text,
+                        effects: vec![Effect::Editor(req)],
+                    });
+                }
                 Err(e) => self.say(Tone::Error, cat([lit("Cannot edit it: "), tt(&e.message)])),
             },
             Action::MembersLoaded(result) => match result {

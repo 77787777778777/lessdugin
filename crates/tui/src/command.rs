@@ -304,6 +304,10 @@ pub const REACH: &[(&str, Reach)] = &[
     ("publish", Reach::Keys(&["P"])),
     ("comment", Reach::Keys(&["r"])),
     ("edit", Reach::Command("edit")),
+    (
+        "edit_preflight",
+        Reach::Automatic("`:edit` asks first when the edit suspends a keep, tier or pin"),
+    ),
     ("delete", Reach::Command("delete")),
     ("retract", Reach::Command("retract")),
     ("opinion", Reach::Keys(&["u"])),

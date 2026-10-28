@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 
 use lessdugin_atp::syntax::AtUri;
 use lessdugin_core::dto::{
-    ActorView, BodyDraft, Capability, CommentDraft, DefaultTier, Draft, EditOpts,
+    ActionNotice, ActorView, BodyDraft, Capability, CommentDraft, DefaultTier, Draft, EditOpts,
     ExternalLinkDraft, ForumDraft, KarmaCadence, ListPostsQuery, MembersQuery, MembershipMode,
     ModActionIntent, ModActionValue, ModScope, NotificationsQuery, PostDraft, PostFilter, PostKind,
     PostSort, Ref, RefContext, SyncOpts, TextQuote, ThreadOpts, ThreadRoot,
@@ -583,12 +583,13 @@ async fn body_markdown<H: Host>(
 }
 
 /// `:edit`: your post or comment's draft as cached (the fields the CLI's `edit` keeps) and the
-/// editor session on its text.
+/// editor session on its text, with what the edit would suspend (`edit_preflight`, `social.md`
+/// §4.5) for the user to confirm first.
 async fn start_edit<H: Host>(
     engine: &Engine<H>,
     uri: &str,
     forum: &str,
-) -> Result<EditorRequest, EngineError> {
+) -> Result<(EditorRequest, Vec<ActionNotice>), EngineError> {
     let uri = item_uri(engine, uri, forum).await?;
     let me = engine.active_account().await?.map(|a| a.did);
     let u = AtUri::parse(&uri).map_err(|e| EngineError::invalid_ref(format!("{uri:?}: {e}")))?;
@@ -681,13 +682,17 @@ async fn start_edit<H: Host>(
             )));
         }
     };
-    Ok(EditorRequest {
-        compose: Compose::Edit {
-            uri,
-            base: Box::new(base),
+    let notices = engine.edit_preflight(&uri).await?;
+    Ok((
+        EditorRequest {
+            compose: Compose::Edit {
+                uri,
+                base: Box::new(base),
+            },
+            template: crate::editor::edit_template(&prefill, &context, post),
         },
-        template: crate::editor::edit_template(&prefill, &context, post),
-    })
+        notices,
+    ))
 }
 
 fn strs(v: Option<&serde_json::Value>) -> Vec<String> {

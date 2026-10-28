@@ -420,3 +420,59 @@ fn the_edit_command_keeps_an_unchanged_title() {
     assert_eq!(title.as_deref(), Some("#1 rule: be kind"));
     assert_eq!(body.trim(), "The new body.", "{body:?}");
 }
+
+/// sec-7 (`social.md` §4.5, `threat-model.md` SOC-3): `:edit` on an item a moderator pinned
+/// says the edit suspends the pin and asks first; `n` opens no editor and sends nothing, `y`
+/// edits.
+#[test]
+fn the_edit_command_asks_before_suspending_a_pin() {
+    use lessdugin_core::dto::{ModActionIntent, ModActionValue, ModScope, PinScope, PostDraft};
+    let s = scenario();
+    let (alice, carol) = (&s.w.alice, &s.w.carol);
+    let t = block_on(
+        carol
+            .engine
+            .publish(&PostDraft::article(&s.forum, "Pinned", "The old body.")),
+    )
+    .unwrap();
+    carol.flush();
+    let post = carol.done(&t);
+    alice.sync(&s.forum);
+    block_on(alice.engine.mod_action(&ModActionIntent::Assert {
+        forum: s.forum.clone(),
+        scope: ModScope::Forum,
+        subject: post.clone(),
+        action: ModActionValue::Pin {
+            scope: PinScope::Forum,
+            pinned: true,
+        },
+        reason: None,
+        until_ms: None,
+    }))
+    .unwrap();
+    alice.flush();
+    s.w.tick(common::MINUTE);
+    carol.sync(&s.forum);
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut t = tui_with_sed(&s, dir.path(), "s/The old body./The new body./", true);
+    block_on(t.start(None));
+    run(&mut t, &format!("edit {post}"));
+    let c = t.state.confirm.as_ref().expect("a confirmation");
+    assert!(c.text.starts_with("Editing suspends its pin:"), "{}", c.text);
+    assert!(t.render().contains("Editing suspends its pin"));
+    block_on(t.press("n"));
+    assert!(t.state.confirm.is_none());
+    assert!(!dir.path().join("seen.txt").exists(), "no editor ran");
+    block_on(t.engine().outbox_flush()).unwrap();
+    block_on(t.settle());
+    assert_eq!(post_of(&s, &post).1.trim(), "The old body.");
+
+    run(&mut t, &format!("edit {post}"));
+    assert!(t.state.confirm.is_some());
+    block_on(t.press("y"));
+    assert!(dir.path().join("seen.txt").exists(), "the editor ran");
+    block_on(t.engine().outbox_flush()).unwrap();
+    block_on(t.settle());
+    assert_eq!(post_of(&s, &post).1.trim(), "The new body.");
+}
