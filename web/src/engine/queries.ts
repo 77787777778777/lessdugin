@@ -38,6 +38,8 @@ export const qk = {
   sequence: (uri: string) => ["sequence", uri] as const,
   user: (actor: string, forum: string | undefined) => ["user", actor, forum ?? null] as const,
   actor: (input: string) => ["actor", input] as const,
+  /** Under `user`, so a `user` topic refreshes it. */
+  mutes: () => ["user", "mutes"] as const,
   search: (q: string, forum: string | undefined) => ["search", q, forum ?? null] as const,
   notifications: (all: boolean) => ["notifications", all] as const,
   drafts: () => ["drafts"] as const,
