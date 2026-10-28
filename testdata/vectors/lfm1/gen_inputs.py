@@ -334,6 +334,9 @@ F("lfm1/links.json", "render", [
     R("host-display-invisible-characters", "[google.com&#8203;](https://evil.com) [goo&#173;gle.com](https://evil.com) [goo\u2060gle.com](https://evil.com) [\ufeffgoogle.com](https://evil.com) [evil\u200b.com](https://evil.com)\n", *LK),
     R("host-display-trailing-punctuation", "[google.com!](https://evil.com) [google.com.](https://evil.com) [google.com/x](https://evil.com) [evil.com.](https://evil.com) [evil.com!](https://evil.com)\n", *LK),
     R("host-display-lookalikes", "[\u0261oogle.com](https://evil.com) [g\u043e\u043egle.com](https://evil.com) [\uff47\uff4f\uff4f\uff47\uff4c\uff45\uff0e\uff43\uff4f\uff4d](https://evil.com) [google\u3002com](https://evil.com) [\uff45\uff56\uff49\uff4c\uff0e\uff43\uff4f\uff4d](https://evil.com)\n", *LK),
+    # Leading code points that are not name characters (punctuation, symbols, emoji, U+2800) do
+    # not hide the host (red-team F2).
+    R("host-display-leading-non-name", "[(google.com)](https://evil.com) [\"google.com\"](https://evil.com) [\u00a1google.com!](https://evil.com) [\u2192 google.com](https://evil.com) [\u2800google.com](https://evil.com) [\U0001f512 https://www.google.com](https://evil.com) [(evil.com)](https://evil.com) [(https://www.evil.com/x)](https://evil.com) [(click here)](https://evil.com)\n", *LK),
     R("mailto-empty-address-dropped", "[support@google.com](mailto:?to=attacker@evil.com)\n", *LK),
     R("mailto-recipient-fields-dropped", "[a](mailto:a@evil.com?cc=b@google.com) [b](mailto:a@evil.com?BCC=b@google.com) [c](mailto:a@evil.com?subject=x&%74o=b@google.com)\n", *LK),
     R("mailto-multiple-recipients-dropped", "[google.com](mailto:a@evil.com,b@google.com) [x](mailto:a@evil.com;b@google.com) [y](mailto:a%40evil.com@google.com)\n", *LK),

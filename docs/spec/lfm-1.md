@@ -471,11 +471,11 @@ These two attributes are all a hover preview (§5.3) needs: `data-at-uri` names 
 **HTML.** For an `External`/`Mailto` link, including `ext-image`, compute `t` from the link's visible text `v`: `plain(inner)` for a link, the alt for an `ext-image` (never the `image: …` label, which is not host-like). The test runs on the text as it is displayed, so invisible and compatibility characters cannot hide a host:
 1. remove every Default_Ignorable_Code_Point (U+00AD, U+034F, U+061C, U+115F–U+1160, U+17B4–U+17B5, U+180B–U+180F, U+200B–U+200F, U+202A–U+202E, U+2060–U+206F, U+3164, U+FE00–U+FE0F, U+FEFF, U+FFA0, U+FFF0–U+FFF8, U+1BCA0–U+1BCA3, U+1D173–U+1D17A, U+E0000–U+E0FFF);
 2. NFKC (fullwidth `ｇｏｏｇｌｅ．ｃｏｍ` becomes `google.com`), then map U+3002 and U+FF61 (ideographic full stops, which IDNA treats as dots) to `.`;
-3. trim White_Space and ASCII-lowercase;
-4. strip one leading `@`; if `t` still contains `@`, keep only the part after the last `@`;
-5. strip one `http://`, `https://` or `mailto:` prefix, then one `www.` prefix.
+3. ASCII-lowercase, then drop every leading code point that is not a name character (below): White_Space, `@`, punctuation such as `(`, `"` or `¡`, symbols, arrows and emoji, and code points that look blank without being White_Space or Default_Ignorable, such as U+2800 BRAILLE PATTERN BLANK. A name wrapped in or preceded by any of them is still tested;
+4. if `t` contains `@`, keep only the part after the last `@`;
+5. strip one `http://`, `https://` or `mailto:` prefix, then one `www.` prefix, then drop the leading code points that are not name characters again (`https://(google.com)`).
 
-**Host-like test.** A *name character* is a code point of General_Category L*, M*, Nd, Nl or No, or `_` or `-`; lookalikes of any script count (`ɡoogle.com`, Cyrillic `gооgle.com`). `t` is host-like if its first code point is a name character and the code point after its first `.` is a name character, whatever follows (`google.com!` and `not.a host` are host-like, `a..b` is not).
+**Host-like test.** A *name character* is a code point of General_Category L*, M*, Nd, Nl or No, or `_` or `-`; lookalikes of any script count (`ɡoogle.com`, Cyrillic `gооgle.com`). `t` is host-like if its first code point is a name character and the code point after its first `.` is a name character, whatever follows (`google.com!` and `not.a host` are host-like, `a..b` is not). After steps 3 and 5, `t` is empty or starts with a name character, so text such as `(google.com)` is host-like (`links.json#host-display-leading-non-name`).
 
 Let `m` be the longest prefix of `t` made of name characters and `.`, with its trailing `.` removed. If `t` is host-like and `m ≠ host` (with one `www.` stripped from `host` too), the writer appends `<span class="link-host">host</span>` inside the `<a>`, after its content. So the span is left out only when the text starts with exactly the link's host followed by something other than a name character or a dot (`links.json#host-display-*`).
 
@@ -1242,7 +1242,7 @@ These resolve ambiguities in the design. Each takes the simplest safe option.
 27. **Flattening keeps references.** `flat()` (§8.4) keeps images and footnote references as the leaves they are, and a figure's caption as text, so a flattened block still shows its media and every rendered footnote keeps its reference (and its sidenote). It drops a spoiler's content, which flat markup could not hide.
 28. **Output budget.** A 48 MiB estimate-based cut of SL (§8.4) bounds what fixed markup and record fields can expand a 1 MB body into; it is presentation, so it may change with `RENDERER_VERSION`, and it never changes an `lfm/1` value.
 29. **`mailto:` addresses one mailbox** (§5.1): the host shown next to a link must be the only domain the mail can go to.
-30. **The real-host test runs on the displayed text** (§5.5): invisible characters removed, NFKC, names of any script. An ASCII-only test missed `gооgle.com` (Cyrillic) and `google.com&#8203;`.
+30. **The real-host test runs on the displayed text** (§5.5): invisible characters removed, NFKC, names of any script. An ASCII-only test missed `gооgle.com` (Cyrillic) and `google.com&#8203;`. *`RENDERER_VERSION` 4:* leading code points that are not name characters are dropped before the test (and again after the `http://` and `www.` prefixes). Before, any of them (a `(`, a quotation mark, an arrow, an emoji, U+2800) made the text not host-like, so a trusted name in parentheses could link elsewhere with no host shown (red-team F2). The change only adds spans: text that was host-like is unchanged.
 31. **Sanitiser configuration** (§8.5): `SAFE_FOR_XML: false` and `ADD_URI_SAFE_ATTR` are needed for `DOMPurify(html) === html`; neither weakens the allowlist, because the renderer escapes `<` and `>` in every attribute and emits only allowlisted attributes.
 
 **Open questions**

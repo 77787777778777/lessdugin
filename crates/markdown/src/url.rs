@@ -467,9 +467,11 @@ fn starts_host_like(t: &str) -> bool {
 /// The visible text is first normalised the way it is displayed: NFKC (fullwidth and other
 /// compatibility forms become ASCII), Default_Ignorable code points removed (invisible
 /// characters cannot split a name), the ideographic full stops IDNA treats as dots mapped to
-/// `.`. It is host-like if it starts with a dotted name of any script; the host is then shown
-/// unless the text starts with exactly the link's host (one `www.` stripped from both), followed
-/// by something other than a name character or a dot.
+/// `.`. Leading code points that are not name characters are dropped, so that wrapping
+/// punctuation, symbols and blank-looking code points cannot hide a name. It is host-like if it
+/// then starts with a dotted name of any script; the host is then shown unless the text starts
+/// with exactly the link's host (one `www.` stripped from both), followed by something other
+/// than a name character or a dot.
 pub(crate) fn html_host_suffix(inner: &str, host: &str) -> bool {
     let visible: String = inner
         .chars()
@@ -483,10 +485,9 @@ pub(crate) fn html_host_suffix(inner: &str, host: &str) -> bool {
             }
         })
         .collect();
-    let mut t = visible.trim().to_ascii_lowercase();
-    if let Some(s) = t.strip_prefix('@') {
-        t = s.to_owned();
-    }
+    // White_Space, `(`, `"`, `@`, emoji, U+2800 BRAILLE PATTERN BLANK, ... (red-team F2).
+    let skip = |s: &str| s.trim_start_matches(|c| !is_name_char(c)).to_owned();
+    let mut t = skip(&visible.to_ascii_lowercase());
     if let Some(i) = t.rfind('@') {
         t = t[i + 1..].to_owned();
     }
@@ -499,6 +500,7 @@ pub(crate) fn html_host_suffix(inner: &str, host: &str) -> bool {
     if let Some(s) = t.strip_prefix("www.") {
         t = s.to_owned();
     }
+    t = skip(&t);
     if !starts_host_like(&t) {
         return false;
     }
@@ -749,6 +751,28 @@ mod tests {
         assert!(!html_host_suffix("click here", "evil.com"));
         assert!(html_host_suffix("@bob@google.com", "evil.com"));
         assert!(!html_host_suffix("example.com", "www.example.com"));
+        // Leading code points that are not name characters do not hide the host (red-team F2):
+        // wrapping punctuation, symbols, emoji and blanks that are neither White_Space nor
+        // Default_Ignorable (U+2800 braille blank, U+1D159 musical null notehead).
+        for lead in [
+            "(", "\"", "[", "\u{A1}", "\u{2192} ", "\u{2022} ", "\u{1F512} ", "\u{2800}",
+            "\u{1D159}", "...", "@(", "<@",
+        ] {
+            let text = format!("{lead}google.com)");
+            assert!(html_host_suffix(&text, "evil.com"), "{text:?}");
+            assert!(!html_host_suffix(&text, "google.com"), "{text:?}");
+        }
+        // ... after the `@`, `http://` and `www.` steps too.
+        for text in [
+            "bob@(google.com",
+            "https://(google.com)",
+            "(https://www.google.com)",
+            "www.\u{2800}google.com",
+        ] {
+            assert!(html_host_suffix(text, "evil.com"), "{text:?}");
+            assert!(!html_host_suffix(text, "google.com"), "{text:?}");
+        }
+        assert!(!html_host_suffix("(click here)", "evil.com"));
         assert!(term_shows_host("click", "https://x.com"));
         assert!(!term_shows_host("https://www.x.com/", "https://x.com"));
     }

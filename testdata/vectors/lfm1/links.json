@@ -405,6 +405,16 @@
       }
     },
     {
+      "name": "host-display-leading-non-name",
+      "input": {
+        "text": "[(google.com)](https://evil.com) [\"google.com\"](https://evil.com) [¡google.com!](https://evil.com) [→ google.com](https://evil.com) [⠀google.com](https://evil.com) [🔒 https://www.google.com](https://evil.com) [(evil.com)](https://evil.com) [(https://www.evil.com/x)](https://evil.com) [(click here)](https://evil.com)\n"
+      },
+      "expected": {
+        "html": "<div class=\"lfm\" dir=\"auto\">\n<p dir=\"auto\"><a href=\"https://evil.com\" rel=\"nofollow ugc noopener noreferrer\">(google.com)<span class=\"link-host\">evil.com</span></a> <a href=\"https://evil.com\" rel=\"nofollow ugc noopener noreferrer\">\"google.com\"<span class=\"link-host\">evil.com</span></a> <a href=\"https://evil.com\" rel=\"nofollow ugc noopener noreferrer\">¡google.com!<span class=\"link-host\">evil.com</span></a> <a href=\"https://evil.com\" rel=\"nofollow ugc noopener noreferrer\">→ google.com<span class=\"link-host\">evil.com</span></a> <a href=\"https://evil.com\" rel=\"nofollow ugc noopener noreferrer\">⠀google.com<span class=\"link-host\">evil.com</span></a> <a href=\"https://evil.com\" rel=\"nofollow ugc noopener noreferrer\">🔒 https://www.google.com<span class=\"link-host\">evil.com</span></a> <a href=\"https://evil.com\" rel=\"nofollow ugc noopener noreferrer\">(evil.com)</a> <a href=\"https://evil.com\" rel=\"nofollow ugc noopener noreferrer\">(https://www.evil.com/x)</a> <a href=\"https://evil.com\" rel=\"nofollow ugc noopener noreferrer\">(click here)</a></p>\n</div>\n",
+        "text": "(google.com) \"google.com\" ¡google.com! → google.com ⠀google.com 🔒 https://www.google.com (evil.com) (https://www.evil.com/x) (click here)"
+      }
+    },
+    {
       "name": "mailto-empty-address-dropped",
       "input": {
         "text": "[support@google.com](mailto:?to=attacker@evil.com)\n"
