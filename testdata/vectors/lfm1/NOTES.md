@@ -56,8 +56,10 @@ M1.
     nothing. → §8.4 (`limits.json#link-dropped-at-boundary`, `#leaf-exemption`,
     `#flattened-empty-emits-nothing`).
 14. **Real host.** The test runs on the displayed text (Default_Ignorable removed, NFKC,
-    U+3002/U+FF61, names of any script); the `ext-image` text is its alt. → §5.5, §14 30
-    (`links.json#host-display-*`).
+    U+3002/U+FF61 and the other lookalike dots, gaps next to a dot removed, names of any
+    script) and tests every dotted name the text names, except mailboxes and path names; a link
+    with images is also tested without their alts; the `ext-image` text is its alt. → §5.5,
+    §14 30 (`links.json#host-display-*`).
 15. **Gallery items with odd CIDs** render as `span.media-missing`. → §6.3.
 16. **MathML normaliser.** *Changed at M4 (ADR 0002):* math-core 0.9's closed set of `style`
     values becomes `mc-*` classes (styled by `crates/markdown/assets/mathml.css` after

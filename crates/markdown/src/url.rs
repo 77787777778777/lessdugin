@@ -453,63 +453,169 @@ fn is_name_char(c: char) -> bool {
         )
 }
 
-/// True if `t` starts with a dotted name: two or more non-empty runs of name characters
-/// joined by `.`, whatever follows (`google.com!` is host-like).
-fn starts_host_like(t: &str) -> bool {
-    let mut segs = t.split('.');
-    let name = |s: Option<&str>| s.and_then(|s| s.chars().next()).is_some_and(is_name_char);
-    name(segs.next()) && name(segs.next())
+/// `.` and the code points that read as one (§5.5 step 2): the ideographic full stops IDNA
+/// treats as dots, and the rest of what UTS #39 `confusables.txt` maps to U+002E (U+2024, U+FE52
+/// and U+FF0E are `.` after NFKC already).
+fn is_dot(c: char) -> bool {
+    matches!(
+        c,
+        '.' | '\u{3002}'
+            | '\u{FF61}'
+            | '\u{0660}'
+            | '\u{06F0}'
+            | '\u{0701}'
+            | '\u{0702}'
+            | '\u{A4F8}'
+            | '\u{A60E}'
+            | '\u{ABEC}'
+            | '\u{10A50}'
+            | '\u{1D16D}'
+            | '\u{1ECAE}'
+    )
+}
+
+/// The RFC 3986 delimiters, `%` and `~`: with name characters and `.`, the code points of a URL
+/// run (§5.5).
+fn is_url_char(c: char) -> bool {
+    matches!(
+        c,
+        '!' | '#'
+            | '$'
+            | '%'
+            | '&'
+            | '\''
+            | '('
+            | ')'
+            | '*'
+            | '+'
+            | ','
+            | '/'
+            | ':'
+            | ';'
+            | '='
+            | '?'
+            | '@'
+            | '['
+            | ']'
+            | '~'
+    )
+}
+
+/// The end of the run of name characters starting at `t[i]`.
+fn name_end(t: &[char], i: usize) -> usize {
+    t[i..]
+        .iter()
+        .position(|&c| !is_name_char(c))
+        .map_or(t.len(), |n| i + n)
+}
+
+/// The end of the dotted name starting at `t[i]`, if one does: two or more runs of name
+/// characters joined by single dots, as long as possible.
+fn dotted_end(t: &[char], i: usize) -> Option<usize> {
+    let first = name_end(t, i);
+    let mut end = first;
+    while first > i && t.get(end) == Some(&'.') && t.get(end + 1).is_some_and(|&c| is_name_char(c))
+    {
+        end = name_end(t, end + 1);
+    }
+    (end > first).then_some(end)
 }
 
 /// The HTML real-host rule (§5.5, F9): true when a `<span class="link-host">` must be
 /// appended to an external link whose visible text is `inner` (`plain(inner)`, unnormalised).
 ///
-/// The visible text is first normalised the way it is displayed: NFKC (fullwidth and other
-/// compatibility forms become ASCII), Default_Ignorable code points removed (invisible
-/// characters cannot split a name), the ideographic full stops IDNA treats as dots mapped to
-/// `.`. Leading code points that are not name characters are dropped, so that wrapping
-/// punctuation, symbols and blank-looking code points cannot hide a name. It is host-like if it
-/// then starts with a dotted name of any script; the host is then shown unless the text starts
-/// with exactly the link's host (one `www.` stripped from both), followed by something other
-/// than a name character or a dot.
+/// The visible text is first normalised the way it is displayed: Default_Ignorable code points
+/// removed (invisible characters cannot split a name), NFKC (fullwidth and other compatibility
+/// forms become ASCII), the code points that read as a dot mapped to `.`, and blanks, symbols
+/// and other gaps next to a dot removed (`google.⠀com`). Every dotted name of any script in it
+/// is then a host the text names, except an e-mail address's mailbox and the names in a URL's
+/// path, query or fragment. The host is shown unless every name the text names is exactly the
+/// link's host (one `www.` stripped from both): wherever a name stands in the text, a
+/// different one cannot go unflagged (red-team F2).
 pub(crate) fn html_host_suffix(inner: &str, host: &str) -> bool {
-    let visible: String = inner
-        .chars()
-        .filter(|&c| !is_default_ignorable(c))
-        .nfkc()
-        .map(|c| {
-            if matches!(c, '\u{3002}' | '\u{FF61}') {
+    // Steps 1-3. White_Space is kept out of NFKC, which would turn the narrow spaces into the
+    // U+0020 that step 4 keeps.
+    fn push_nfkc(t: &mut Vec<char>, s: &str) {
+        t.extend(s.nfkc().map(|c| {
+            if is_dot(c) {
                 '.'
             } else {
-                c
+                c.to_ascii_lowercase()
             }
-        })
-        .collect();
-    // White_Space, `(`, `"`, `@`, emoji, U+2800 BRAILLE PATTERN BLANK, ... (red-team F2).
-    let skip = |s: &str| s.trim_start_matches(|c| !is_name_char(c)).to_owned();
-    let mut t = skip(&visible.to_ascii_lowercase());
-    if let Some(i) = t.rfind('@') {
-        t = t[i + 1..].to_owned();
+        }));
     }
-    for p in ["http://", "https://", "mailto:"] {
-        if let Some(s) = t.strip_prefix(p) {
-            t = s.to_owned();
-            break;
+    let mut t: Vec<char> = Vec::with_capacity(inner.len());
+    let mut word = String::new();
+    for c in inner.chars().filter(|&c| !is_default_ignorable(c)) {
+        if c.is_whitespace() {
+            push_nfkc(&mut t, &word);
+            word.clear();
+            t.push(c);
+        } else {
+            word.push(c);
         }
     }
-    if let Some(s) = t.strip_prefix("www.") {
-        t = s.to_owned();
+    push_nfkc(&mut t, &word);
+    // Step 4: remove every gap (a run of code points that are not name characters, `.`, URL
+    // characters or ASCII whitespace) next to a `.`: U+2800 BRAILLE PATTERN BLANK, U+200A HAIR
+    // SPACE, an emoji.
+    let gap = |c: char| {
+        c != '.'
+            && !is_name_char(c)
+            && !is_url_char(c)
+            && !matches!(c, '\t' | '\n' | '\x0C' | '\r' | ' ')
+    };
+    let mut u: Vec<char> = Vec::with_capacity(t.len());
+    let mut i = 0;
+    while i < t.len() {
+        let j = t[i..]
+            .iter()
+            .position(|&c| !gap(c))
+            .map_or(t.len(), |n| i + n);
+        if j == i {
+            u.push(t[i]);
+            i += 1;
+            continue;
+        }
+        if u.last() != Some(&'.') && t.get(j) != Some(&'.') {
+            u.extend_from_slice(&t[i..j]);
+        }
+        i = j;
     }
-    t = skip(&t);
-    if !starts_host_like(&t) {
-        return false;
-    }
-    let end = t
-        .find(|c: char| c != '.' && !is_name_char(c))
-        .unwrap_or(t.len());
-    let m = t[..end].trim_end_matches('.');
+    // Step 5. `seen`: the current URL run has had a dotted name; `path`: a `/`, `?` or `#`
+    // has followed one, so the names after it are in a path, query or fragment.
     let h = host.strip_prefix("www.").unwrap_or(host);
-    m != h
+    let (mut seen, mut path) = (false, false);
+    let mut i = 0;
+    while i < u.len() {
+        let c = u[i];
+        if !is_name_char(c) {
+            if matches!(c, '/' | '?' | '#') {
+                path |= seen;
+            } else if c != '.' && !is_url_char(c) {
+                (seen, path) = (false, false);
+            }
+            i += 1;
+            continue;
+        }
+        let Some(end) = dotted_end(&u, i) else {
+            i = name_end(&u, i);
+            continue;
+        };
+        // `first.last@corp.com` names only `corp.com`; a user name after `//` is no mailbox.
+        let mailbox = u.get(end) == Some(&'@')
+            && dotted_end(&u, end + 1).is_some()
+            && !(i >= 2 && u[i - 2..i] == ['/', '/']);
+        if !mailbox && !path {
+            let d: String = u[i..end].iter().collect();
+            if d.strip_prefix("www.").unwrap_or(&d) != h {
+                return true;
+            }
+        }
+        seen = true;
+        i = end;
+    }
+    false
 }
 
 /// The terminal real-host rule (§9.4, F1): print ` ⟨host⟩` after the link text unless
@@ -771,6 +877,59 @@ mod tests {
             assert!(!html_host_suffix(text, "google.com"), "{text:?}");
         }
         assert!(!html_host_suffix("(click here)", "evil.com"));
+        // Every dotted name the text names is tested, wherever it stands, and a gap or a
+        // lookalike next to or in place of its dot does not hide it (red-team F2): a sentence
+        // before it, an `@` after it, U+2800, U+1D159, U+200A HAIR SPACE, U+00A0 or U+3000 next
+        // to the dot, U+A4F8, U+0701, U+0660 or U+1D16D in its place.
+        for text in [
+            "See. google.com",
+            "docs. (google.com)",
+            "google.com (ask bob@corp)",
+            "google.com@corp",
+            "@google.com",
+            "google.\u{2800}com",
+            "google.\u{1D159}com",
+            "google\u{2800}.com",
+            "google\u{1F512}.\u{2800}com",
+            "google.\u{200A}com",
+            "google.\u{A0}com",
+            "google\u{3000}.com",
+            "google\u{A4F8}com",
+            "google\u{0701}com",
+            "google\u{0660}com",
+            "google\u{1D16D}com",
+            "https://www.google\u{A4F8}com/x",
+        ] {
+            assert!(html_host_suffix(text, "evil.com"), "{text:?}");
+            assert!(!html_host_suffix(text, "google.com"), "{text:?}");
+        }
+        // Two names: the span shows whichever one the link does not go to.
+        for text in [
+            "evil.com google.com",
+            "evil.com, not google.com",
+            "evil.com. google.com",
+            "evil.com\u{2800}google.com",
+            "https://google.com@evil.com/",
+            "evil.com/x google.com",
+        ] {
+            assert!(html_host_suffix(text, "evil.com"), "{text:?}");
+            assert!(html_host_suffix(text, "google.com"), "{text:?}");
+        }
+        // Mailboxes and path, query or fragment names are not hosts; ASCII whitespace still
+        // ends a name, so prose is not one.
+        for (text, host) in [
+            ("https://example.com/index.html?v=1.2#sec.3", "example.com"),
+            ("example.com/a/b.c", "example.com"),
+            ("first.last@corp.com", "corp.com"),
+            ("mailto:first.last@corp.com", "corp.com"),
+            ("see example.com", "example.com"),
+            ("example.com./x", "example.com"),
+            ("Hello. World", "evil.com"),
+            ("google. com", "evil.com"),
+            ("a..b", "evil.com"),
+        ] {
+            assert!(!html_host_suffix(text, host), "{text:?} {host}");
+        }
         assert!(term_shows_host("click", "https://x.com"));
         assert!(!term_shows_host("https://www.x.com/", "https://x.com"));
     }

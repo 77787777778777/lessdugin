@@ -314,8 +314,12 @@ impl Writer<'_> {
                         match res {
                             LinkRes::External { url, host } | LinkRes::Mailto { url, host } => {
                                 self.external_open(url, None);
-                                let host = (!host.is_empty() && html_host_suffix(&d.inner, host))
-                                    .then(|| host.clone());
+                                // Also as shown once its pictures load: an image covers its alt.
+                                let shows = |t: &str| html_host_suffix(t, host);
+                                let host = (!host.is_empty()
+                                    && (shows(&d.inner)
+                                        || d.inner_no_alts.as_deref().is_some_and(shows)))
+                                .then(|| host.clone());
                                 in_link += 1;
                                 stack.push(Close::Link {
                                     emitted: true,

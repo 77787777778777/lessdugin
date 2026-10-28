@@ -337,6 +337,12 @@ F("lfm1/links.json", "render", [
     # Leading code points that are not name characters (punctuation, symbols, emoji, U+2800) do
     # not hide the host (red-team F2).
     R("host-display-leading-non-name", "[(google.com)](https://evil.com) [\"google.com\"](https://evil.com) [\u00a1google.com!](https://evil.com) [\u2192 google.com](https://evil.com) [\u2800google.com](https://evil.com) [\U0001f512 https://www.google.com](https://evil.com) [(evil.com)](https://evil.com) [(https://www.evil.com/x)](https://evil.com) [(click here)](https://evil.com)\n", *LK),
+    # Every dotted name the text names is tested, wherever it stands; mailboxes and path names
+    # are not hosts; gaps and lookalikes next to or in place of a dot do not hide a name; an
+    # image covers its alt (red-team F2).
+    R("host-display-anywhere-in-text", "[See. google.com](https://evil.com) [google.com (ask bob@corp)](https://evil.com) [google.com@corp](https://evil.com) [evil.com, not google.com](https://evil.com) [https://google.com@evil.com/](https://evil.com) [see evil.com](https://evil.com) [https://evil.com/a.html?v=1.2#s.3](https://evil.com) [first.last@evil.com](mailto:first.last@evil.com) [Hello. World](https://evil.com)\n", *LK),
+    R("host-display-gaps-and-lookalike-dots", "[google.\u2800com](https://evil.com) [google.\U0001d159com](https://evil.com) [google\u2800.com](https://evil.com) [google.\u200acom](https://evil.com) [google\ua4f8com](https://evil.com) [google\u0701com](https://evil.com) [evil.\u2800com](https://evil.com) [evil\ua4f8com](https://evil.com) [google. com](https://evil.com)\n", *LK),
+    R("host-display-image-in-link", f"[![evil.com](cid:{CID1})/google.com](https://evil.com) [google.com@![evil.com](cid:{CID1})](https://evil.com) [![a](cid:{CID1}) evil.com](https://evil.com)\n", *LK, media=[media(CID1)]),
     R("mailto-empty-address-dropped", "[support@google.com](mailto:?to=attacker@evil.com)\n", *LK),
     R("mailto-recipient-fields-dropped", "[a](mailto:a@evil.com?cc=b@google.com) [b](mailto:a@evil.com?BCC=b@google.com) [c](mailto:a@evil.com?subject=x&%74o=b@google.com)\n", *LK),
     R("mailto-multiple-recipients-dropped", "[google.com](mailto:a@evil.com,b@google.com) [x](mailto:a@evil.com;b@google.com) [y](mailto:a%40evil.com@google.com)\n", *LK),
