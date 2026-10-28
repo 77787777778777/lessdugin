@@ -637,26 +637,26 @@ async function runScenario(
       ).toEqual([[mediaCid, "image/png", s.devnet.accounts.bob.did]]);
       expect(body.html, `${client}: the image in the body`).toContain(`data-cid="${mediaCid}"`);
     }
-    // steps 4 and 5 (the social subset, M3): the counted opinions and the pin
+    // steps 4 and 5 (the social subset, M3): the counted opinions and the pin. One weighted
+    // vote, cast before bob's edit, in both modes: in approval mode carol's (a granted member is
+    // established), with her agreement; in open mode alice's seed upvote (the owner is a seed),
+    // and carol's vote is in no reader's input at all, since the readers do not fetch a
+    // newcomer's repo whose only content is hidden (reposTotal 2 below)
     const score = thread.post.post.score as {
       score: number;
       agreement?: number;
       unweighted: number;
+      earlierVersionVotes: number;
+      weightedVotes?: number;
     };
-    if (approval) {
-      // carol, a granted member, is established: her upvote and agreement count
-      expect(score.score, `the counted upvote: ${JSON.stringify(score)}`).toBeGreaterThan(0);
-      expect(score.agreement, `the counted agreement: ${JSON.stringify(score)}`).toBeGreaterThan(0);
-      expect(score.unweighted).toBe(0);
-    } else {
-      // alice, the owner, is a seed (S ⊆ E): her upvote counts; carol is a newcomer, so her
-      // vote is one not yet counted and her agreement carries no weight
-      expect(score.score, `the owner's counted upvote: ${JSON.stringify(score)}`).toBeGreaterThan(
-        0,
-      );
-      expect(score.unweighted, `carol's uncounted vote: ${JSON.stringify(score)}`).toBe(1);
-      expect(score.agreement ?? 0, `no counted agreement: ${JSON.stringify(score)}`).toBe(0);
-    }
+    const shown = JSON.stringify(score);
+    expect(score.score, `the counted upvote: ${shown}`).toBeGreaterThan(0);
+    expect([score.weightedVotes, score.earlierVersionVotes, score.unweighted], shown).toEqual([
+      1, 1, 0,
+    ]);
+    expect(score.agreement, `carol's agreement counts only when she is established: ${shown}`).toBe(
+      approval ? 1 : 0,
+    );
     expect(thread.post.post.pinned, "step 6b's pin of the edited post").toBe(true);
     // carol's reply was HIDDEN by step 5's mod action, and the fold drops a hidden comment
     // from the anonymous view entirely: it is not listed, and no part of its body survives. This
