@@ -721,30 +721,33 @@ pub struct PostSource {
     pub foreign: bool,
 }
 
+/// The directory a text read from `file` (`-`: standard input, which has none) keeps its image
+/// paths in (`threat-model.md` FILE-1), and whether it is foreign: not under `$DATA/drafts/`
+/// (FILE-2).
+pub fn file_dir(ctx: &Ctx, file: &Path) -> (Option<PathBuf>, bool) {
+    if file.as_os_str() == "-" {
+        return (None, true);
+    }
+    let dir = match file.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
+    let drafts = ctx.paths.drafts_dir().canonicalize().ok();
+    let foreign = !matches!(
+        (file.canonicalize(), drafts),
+        (Ok(f), Some(d)) if f.starts_with(&d)
+    );
+    (Some(dir), foreign)
+}
+
 impl PostSource {
     /// A post from `file` (`-`: standard input), possibly a draft file of `ctx`.
     pub fn from_file(ctx: &Ctx, doc: Doc, file: &Path) -> Self {
-        if file.as_os_str() == "-" {
-            return Self {
-                doc,
-                draft: None,
-                dir: None,
-                foreign: true,
-            };
-        }
-        let dir = match file.parent() {
-            Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
-            _ => PathBuf::from("."),
-        };
-        let drafts = ctx.paths.drafts_dir().canonicalize().ok();
-        let foreign = !matches!(
-            (file.canonicalize(), drafts),
-            (Ok(f), Some(d)) if f.starts_with(&d)
-        );
+        let (dir, foreign) = file_dir(ctx, file);
         Self {
             doc,
             draft: None,
-            dir: Some(dir),
+            dir,
             foreign,
         }
     }
@@ -825,10 +828,7 @@ pub async fn publish_post(ctx: &Ctx, mut src: PostSource, yes: bool) -> Result<(
             };
         // FILE-2: the files of this machine a foreign draft uploads are confirmed on a
         // terminal, even with --yes
-        let local: Vec<String> = attached
-            .iter()
-            .filter_map(|a| Some(a.file.as_ref()?.display().to_string()))
-            .collect();
+        let local = media::local_files(&attached);
         let confirm_files = src.foreign && !local.is_empty();
         if !yes || confirm_files {
             if !interactive && confirm_files {
@@ -1032,8 +1032,8 @@ pub async fn run(ctx: &Ctx, args: DraftArgs) -> Result<(), CliError> {
                 DraftType::Post => {
                     publish_post(ctx, PostSource::draft(ctx, doc, Some(id)), yes).await
                 }
-                DraftType::Comment => write::publish_comment_draft(ctx, &id, doc).await,
-                DraftType::Edit => write::publish_edit_draft(ctx, &id, doc).await,
+                DraftType::Comment => write::publish_comment_draft(ctx, &id, doc, yes).await,
+                DraftType::Edit => write::publish_edit_draft(ctx, &id, doc, yes).await,
             }
         }
     }

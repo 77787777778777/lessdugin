@@ -3,17 +3,19 @@
 //! (`lfm-1.md` §12). The pipeline is the core's (`prepare_media`: sniff, strip, orient, CID,
 //! `docs/plan.md` M4), so the CLI and the SPA publish the same bytes.
 //!
-//! **Draft-local images.** When a post is published (`post`, `draft publish`), every inline
-//! image whose destination is a path on this machine (`![a chart](img/chart.png)`) is prepared,
-//! and its destination becomes `cid:<cid>`. A `cid:` image whose bytes this device prepared
-//! (`media add`) is attached too. The media item carries the image's markdown alt, and an image
-//! without one is warned about (`data-model.md` §4). The draft keeps its paths; the bytes are
-//! uploaded when the write is sent (`data-model.md` §8.8). The path is the draft's text, which
-//! may come from anyone (`threat-model.md` F3), so FILE-1 holds: it is relative, without `~` or
-//! `..`, lies inside the canonical directory that contains the draft (the post's file's, or
+//! **Draft-local images.** When a post is published (`post`, `draft publish`), and when a
+//! comment or an edit is written, every inline image whose destination is a path on this
+//! machine (`![a chart](img/chart.png)`) is prepared, and its destination becomes `cid:<cid>`.
+//! A `cid:` image whose bytes this device prepared (`media add`) is attached too. The media item
+//! carries the image's markdown alt, and an image without one is warned about (`data-model.md`
+//! §4). An edit keeps the item's media. The draft keeps its paths; the bytes are uploaded when
+//! the write is sent (`data-model.md` §8.8). The path is the draft's text, which may come from
+//! anyone (`threat-model.md` F3), so FILE-1 holds: it is relative, without `~` or `..`, lies
+//! inside the canonical directory that contains the draft (the text's file's, or
 //! `$DATA/drafts/`) after canonicalisation, and names a regular file, read with `O_NOFOLLOW` and
 //! checked with `fstat`; anything else is an error naming the reference. The publish summary
-//! lists each file with its absolute path, size and sniffed type (FILE-2, in `draft.rs`).
+//! lists each file with its absolute path, size and sniffed type (FILE-2, in `draft.rs`); a
+//! comment or an edit lists them and asks ([`confirm_uploads`]).
 //!
 //! **Downloads.** `media get` saves item N of a post or comment (`lfm-1.md` §6.2 numbering) as
 //! `<cid>.<ext>` (`data-model.md` §4, FILE-3): the extension comes from the sniffed type when the
@@ -330,7 +332,7 @@ pub async fn attach(
         (_, None) => None,
         (None, Some(img)) => {
             return Err(EngineError::invalid_input(format!(
-                "the image path {:?} names a file, but a text from standard input has no \
+                "the image path {:?} names a file, but a text from -m or standard input has no \
                  directory; prepare the file with `lessdugin media add` and name it by its cid:",
                 img.path
             ))
@@ -448,6 +450,66 @@ fn push_media(
         file,
         media: m,
     });
+}
+
+/// The files of this machine that `attached` uploads, by absolute path.
+pub fn local_files(attached: &[Attached]) -> Vec<String> {
+    attached
+        .iter()
+        .filter_map(|a| Some(a.file.as_ref()?.display().to_string()))
+        .collect()
+}
+
+/// FILE-2 for a write without a publish summary (a comment, an edit): the files of this machine
+/// it uploads are listed with their absolute path, type and size, and confirmed on a terminal.
+/// `yes` (`draft publish --yes`) confirms them for a draft of the drafts directory, never for a
+/// foreign one; headless use otherwise goes through `media add` and a `cid:` reference.
+pub fn confirm_uploads(
+    ctx: &Ctx,
+    attached: &[Attached],
+    foreign: bool,
+    yes: bool,
+) -> Result<(), CliError> {
+    let local = local_files(attached);
+    if local.is_empty() || (yes && !foreign) {
+        return Ok(());
+    }
+    if !crate::prompt::stdin_is_tty() || ctx.out.is_json() {
+        return Err(CliError::usage(format!(
+            "this would upload files of this machine ({}); that is confirmed on a terminal{}: \
+             write it there, or prepare the files with `lessdugin media add` and name them by \
+             cid:",
+            local.join(", "),
+            if foreign {
+                ", even with --yes, for a file outside the drafts directory"
+            } else {
+                " (or with `lessdugin draft publish <id> --yes`)"
+            }
+        )));
+    }
+    ctx.out.err_line(&[(lit("Uploads:"), Style::Bold)]);
+    for a in attached {
+        let Some(f) = &a.file else { continue };
+        ctx.out.err_line(&[
+            (lit("  media  "), Style::Dim),
+            (tt(&f.display().to_string()), Style::Plain),
+            (
+                cat([
+                    lit(" ("),
+                    tt(&a.media.mime),
+                    lit(", "),
+                    size(a.media.size_bytes),
+                    lit(")"),
+                ]),
+                Style::Dim,
+            ),
+        ]);
+    }
+    if crate::prompt::confirm("Upload these files?") {
+        Ok(())
+    } else {
+        Err(CliError::Reported(1))
+    }
 }
 
 // ---------------------------------------------------------------------------------------------

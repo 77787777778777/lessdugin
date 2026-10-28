@@ -14,8 +14,8 @@
 
 use lessdugin_atp::syntax::AtUri;
 use lessdugin_core::dto::{
-    BodyDraft, CommentDraft, Draft, EditOpts, ExternalLinkDraft, PostDraft, TextQuote, WriteState,
-    WriteTicket,
+    AspectRatio, BodyDraft, CommentDraft, Draft, EditOpts, ExternalLinkDraft, MediaRef, PostDraft,
+    TextQuote, WriteState, WriteTicket,
 };
 use lessdugin_core::engine::{Engine, EngineError, ErrorCode};
 use lessdugin_core::host::Host;
@@ -27,7 +27,7 @@ use serde_json::Value;
 
 use crate::args::{CommentArgs, DeleteArgs, EditArgs, PostArgs, RedactArgs, RefArgs};
 use crate::cmd::draft::{self, Doc, Drafts, PostSource, kind_str, parse_kind};
-use crate::cmd::{read, refs};
+use crate::cmd::{media, read, refs};
 use crate::ctx::{CliError, Ctx, Writer};
 use crate::out::{Style, cat, dto, lit, tt};
 use crate::prompt;
@@ -383,6 +383,42 @@ async fn send_comment(ctx: &Ctx, w: &Writer, d: &CommentDraft) -> Result<(), Cli
     report(ctx, &t, "Commented")
 }
 
+/// Attaches the media of a comment's or an edit's `body` (`media::attach`: its draft-local
+/// images, read from `dir`, become `cid:` media) and confirms the files of this machine it
+/// uploads (FILE-2, `media::confirm_uploads`). A draft `id` the text came from is kept, and the
+/// note says so, when that fails.
+async fn attach_media(
+    ctx: &Ctx,
+    w: &Writer,
+    body: &mut BodyDraft,
+    dir: Option<&std::path::Path>,
+    foreign: bool,
+    yes: bool,
+    id: Option<&str>,
+) -> Result<(), CliError> {
+    let attached = media::attach(ctx, &w.engine, body, dir)
+        .await
+        .and_then(|a| media::confirm_uploads(ctx, &a, foreign, yes));
+    if let (Err(_), Some(id)) = (&attached, id) {
+        kept_note(ctx, id);
+    }
+    attached
+}
+
+/// Where the text of a comment or an edit comes from: `-m` and standard input have no
+/// directory for image paths; a file has its own (foreign unless it is under the drafts
+/// directory, `threat-model.md` FILE-2).
+fn text_dir(
+    ctx: &Ctx,
+    message: Option<&String>,
+    file: Option<&std::path::Path>,
+) -> (Option<std::path::PathBuf>, bool) {
+    match (message, file) {
+        (None, Some(f)) => draft::file_dir(ctx, f),
+        _ => (None, true),
+    }
+}
+
 /// Queues the write `queue` makes from draft `id`, and removes the draft as soon as the write
 /// is in the outbox: the outbox sends it from then on (also after Ctrl-C or `kill -9` during
 /// the send), so the draft must not be published a second time. A write that could not be
@@ -448,6 +484,7 @@ pub async fn comment(ctx: &Ctx, args: CommentArgs) -> Result<(), CliError> {
     let (uri, is_comment) = refs::post_or_comment(ctx, &w.engine, &args.reference).await?;
     read::sync_thread_quietly(ctx, &w.engine, &uri).await;
     let (root, parent) = thread_of(&w.engine, &uri, is_comment).await?;
+    let (dir, foreign) = text_dir(ctx, args.message.as_ref(), args.file.as_deref());
     let text = text_arg(args.message, args.file.as_deref())?;
     let text = match text {
         Some(t) => t,
@@ -469,18 +506,27 @@ pub async fn comment(ctx: &Ctx, args: CommentArgs) -> Result<(), CliError> {
                 drafts.remove(&id)?;
                 return Err(CliError::usage("the comment is empty; nothing was posted"));
             }
-            let d = CommentDraft::new(root, parent, doc.body_text());
+            let mut d = CommentDraft::new(root, parent, doc.body_text());
+            let dir = ctx.paths.drafts_dir();
+            attach_media(ctx, &w, &mut d.body, Some(&dir), false, false, Some(&id)).await?;
             return queue_from_draft(ctx, &w, &id, w.engine.comment(&d), "Commented").await;
         }
     };
     if text.trim().is_empty() {
         return Err(CliError::usage("the comment is empty; nothing was posted"));
     }
-    send_comment(ctx, &w, &CommentDraft::new(root, parent, text)).await
+    let mut d = CommentDraft::new(root, parent, text);
+    attach_media(ctx, &w, &mut d.body, dir.as_deref(), foreign, false, None).await?;
+    send_comment(ctx, &w, &d).await
 }
 
-/// `draft publish` of a comment draft.
-pub async fn publish_comment_draft(ctx: &Ctx, id: &str, doc: Doc) -> Result<(), CliError> {
+/// `draft publish` of a comment draft (`yes`: `--yes`, which confirms its local files).
+pub async fn publish_comment_draft(
+    ctx: &Ctx,
+    id: &str,
+    doc: Doc,
+    yes: bool,
+) -> Result<(), CliError> {
     let w = ctx.writer().await?;
     let root = doc
         .get("root")
@@ -490,7 +536,9 @@ pub async fn publish_comment_draft(ctx: &Ctx, id: &str, doc: Doc) -> Result<(), 
         return Err(EngineError::invalid_input(format!("draft {id} is empty")).into());
     }
     read::sync_thread_quietly(ctx, &w.engine, doc.get("parent").unwrap_or(&root)).await;
-    let d = CommentDraft::new(root, doc.get("parent").map(str::to_owned), doc.body_text());
+    let mut d = CommentDraft::new(root, doc.get("parent").map(str::to_owned), doc.body_text());
+    let dir = ctx.paths.drafts_dir();
+    attach_media(ctx, &w, &mut d.body, Some(&dir), false, yes, Some(id)).await?;
     queue_from_draft(ctx, &w, id, w.engine.comment(&d), "Commented").await
 }
 
@@ -502,6 +550,9 @@ struct Current {
     is_post: bool,
     forum: String,
     markdown: String,
+    /// The body's media items: an edit keeps them (the engine keeps their blob objects,
+    /// `data-model.md` §8.8), so a `cid:` image of the text still resolves.
+    media: Vec<MediaRef>,
     title: Option<String>,
     kind: String,
     link: Option<String>,
@@ -522,30 +573,109 @@ fn strs(v: Option<&Value>) -> Vec<String> {
         .unwrap_or_default()
 }
 
-async fn current(engine: &Engine<NativeHost>, uri: &str) -> Result<Current, CliError> {
+/// The media items of a cached body as the references an edit sends again. An item that does
+/// not read as `defs#media` refuses the edit: leaving it out would delete it.
+fn media_of(uri: &str, body: Option<&Value>) -> Result<Vec<MediaRef>, CliError> {
+    let Some(items) = body.and_then(|b| b.get("media")) else {
+        return Ok(Vec::new());
+    };
+    let items = items.as_array().ok_or_else(|| {
+        EngineError::invalid_input(format!("{uri}: the body's media is not a list"))
+    })?;
+    let mut out = Vec::with_capacity(items.len());
+    for (i, item) in items.iter().enumerate() {
+        let m = serde_json::from_value::<lessdugin_lexicon::records::Media>(item.clone())
+            .map_err(|e| {
+                EngineError::invalid_input(format!(
+                    "{uri}: media item {} cannot be read ({e}); an edit would drop it",
+                    i + 1
+                ))
+            })?;
+        let cid = m.blob.r#ref.link.clone();
+        out.push(MediaRef {
+            id: cid.clone(),
+            cid,
+            mime: m.blob.mime_type.clone(),
+            size_bytes: u64::try_from(m.blob.size).unwrap_or(0),
+            alt: m.alt.clone(),
+            aspect_ratio: m.aspect_ratio.as_ref().and_then(|a| {
+                Some(AspectRatio {
+                    width: u32::try_from(a.width).ok()?,
+                    height: u32::try_from(a.height).ok()?,
+                })
+            }),
+            duration_ms: m.duration_ms.and_then(|d| u64::try_from(d).ok()),
+            name: m.name.clone(),
+            notices: Vec::new(),
+        });
+    }
+    Ok(out)
+}
+
+/// The markdown of a spilled body (`textBlob`, `lfm-1.md` §1.3) of the writer's own item `uri`:
+/// fetched from the writer's PDS, CID-checked by the host, at most `BLOB_TEXT_MAX_BYTES`, and
+/// decoded as the engine decodes it (UTF-8, one leading U+FEFF stripped).
+async fn spilled_markdown(w: &Writer, uri: &str, blob: &Value) -> Result<String, CliError> {
+    let unreadable = |why: String| EngineError::invalid_input(format!("{uri}: the body {why}"));
+    let cid = blob
+        .get("ref")
+        .and_then(|r| r.get("$link"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| unreadable("blob has no CID".into()))?;
+    let pds = url::Url::parse(&w.account.pds)
+        .map_err(|e| EngineError::internal(format!("the PDS {}: {e}", w.account.pds)))?;
+    let did = lessdugin_atp::syntax::Did::parse(&w.account.did)
+        .map_err(|e| EngineError::internal(e.to_string()))?;
+    let h = w
+        .engine
+        .host()
+        .fetch_blob(
+            pds,
+            did,
+            cid.to_owned(),
+            lessdugin_core::limits::BLOB_TEXT_MAX_BYTES,
+        )
+        .await
+        .map_err(EngineError::from)?;
+    let bytes = std::fs::read(&h.locator)
+        .map_err(|e| EngineError::internal(format!("{}: {e}", h.locator)))?;
+    let text = String::from_utf8(bytes).map_err(|_| unreadable("blob is not UTF-8".into()))?;
+    Ok(match text.strip_prefix('\u{feff}') {
+        Some(t) => t.to_owned(),
+        None => text,
+    })
+}
+
+async fn current(w: &Writer, uri: &str) -> Result<Current, CliError> {
     let u = AtUri::parse(uri).map_err(|e| EngineError::invalid_ref(format!("{uri:?}: {e}")))?;
     let coll = u.collection().as_str();
     let is_post = coll == nsid::POST;
     if !is_post && coll != nsid::COMMENT {
         return Err(EngineError::invalid_ref(format!("{uri} is not a post or a comment")).into());
     }
-    let (_, v) = cached(engine, uri).await?;
+    let (_, v) = cached(&w.engine, uri).await?;
     let body = v.get("body");
     let markdown = match body.and_then(|b| b.get("text")).and_then(Value::as_str) {
         Some(t) => t.to_owned(),
         None if body.is_none() => String::new(),
-        None => {
-            return Err(EngineError::new(
-                ErrorCode::Unsupported,
-                "this body is stored as a blob; editing it arrives with media support (M4)",
-            )
-            .into());
-        }
+        // a spilled body is edited as its text; the engine spills the new one again if it
+        // must (`data-model.md` §5.2)
+        None => match body.and_then(|b| b.get("textBlob")) {
+            Some(blob) => spilled_markdown(w, uri, blob).await?,
+            None => {
+                return Err(EngineError::new(
+                    ErrorCode::Unsupported,
+                    format!("{uri}: this body has neither text nor a text blob to edit"),
+                )
+                .into());
+            }
+        },
     };
     let s = |k: &str| v.get(k).and_then(Value::as_str).map(str::to_owned);
     Ok(Current {
         is_post,
         forum: s("forum").unwrap_or_default(),
+        media: media_of(uri, body)?,
         markdown,
         title: s("title"),
         kind: s("kind").unwrap_or_else(|| "article".into()),
@@ -603,9 +733,13 @@ fn edit_doc(uri: &str, c: &Current) -> Doc {
     doc
 }
 
-/// The engine draft of an edit: `doc`'s fields over the current ones.
+/// The engine draft of an edit: `doc`'s fields over the current ones, and the current media.
 fn edit_draft(c: &Current, doc: &Doc, body: Option<String>) -> Result<Draft, CliError> {
     let markdown = body.unwrap_or_else(|| c.markdown.clone());
+    let body = BodyDraft {
+        markdown,
+        media: c.media.clone(),
+    };
     if c.is_post {
         let kind = match doc.get("kind") {
             Some(k) => parse_kind(k).map_err(EngineError::invalid_input)?,
@@ -627,7 +761,7 @@ fn edit_draft(c: &Current, doc: &Doc, body: Option<String>) -> Result<Draft, Cli
                 } else {
                     c.title.clone()
                 },
-                body: BodyDraft::text(markdown),
+                body,
                 link: link.map(|uri| ExternalLinkDraft {
                     uri,
                     title: None,
@@ -647,10 +781,18 @@ fn edit_draft(c: &Current, doc: &Doc, body: Option<String>) -> Result<Draft, Cli
             comment: CommentDraft {
                 root: c.root.clone().unwrap_or_default(),
                 parent: c.parent.clone(),
-                body: BodyDraft::text(markdown),
+                body,
                 quote: c.quote.clone(),
             },
         })
+    }
+}
+
+/// The body of an edit draft.
+fn body_mut(d: &mut Draft) -> &mut BodyDraft {
+    match d {
+        Draft::Post { post, .. } => &mut post.body,
+        Draft::Comment { comment, .. } => &mut comment.body,
     }
 }
 
@@ -672,11 +814,12 @@ pub async fn edit(ctx: &Ctx, args: EditArgs) -> Result<(), CliError> {
     let (uri, _) = refs::post_or_comment(ctx, &reader, &args.reference).await?;
     let w = ctx.writer_for(&owner_of(&uri)?).await?;
     read::sync_thread_quietly(ctx, &w.engine, &uri).await;
-    let c = current(&w.engine, &uri).await?;
+    let c = current(&w, &uri).await?;
     let mut opts = EditOpts {
         history: !args.no_history,
         summary: args.summary.clone(),
     };
+    let (dir, foreign) = text_dir(ctx, args.message.as_ref(), args.file.as_deref());
     let given = text_arg(args.message, args.file.as_deref())?;
     let (doc, body) = match given {
         Some(text) => {
@@ -706,9 +849,12 @@ pub async fn edit(ctx: &Ctx, args: EditArgs) -> Result<(), CliError> {
             if let (Some(t), Draft::Post { post, .. }) = (&args.title, &mut d) {
                 post.title = Some(t.clone());
             }
+            let dir = ctx.paths.drafts_dir();
+            attach_media(ctx, &w, body_mut(&mut d), Some(&dir), false, false, Some(&id)).await?;
             return queue_from_draft(ctx, &w, &id, w.engine.edit(&uri, &d, &opts), "Edited").await;
         }
     };
+    let body_given = body.is_some();
     let mut d = edit_draft(&c, &doc, body)?;
     if let Some(t) = &args.title {
         match &mut d {
@@ -718,19 +864,30 @@ pub async fn edit(ctx: &Ctx, args: EditArgs) -> Result<(), CliError> {
             }
         }
     }
+    // a new title alone leaves the text as it is
+    if body_given {
+        attach_media(ctx, &w, body_mut(&mut d), dir.as_deref(), foreign, false, None).await?;
+    }
     send_edit(ctx, &w, &uri, &d, &opts).await
 }
 
-/// `draft publish` of an edit draft.
-pub async fn publish_edit_draft(ctx: &Ctx, id: &str, doc: Doc) -> Result<(), CliError> {
+/// `draft publish` of an edit draft (`yes`: `--yes`, which confirms its local files).
+pub async fn publish_edit_draft(
+    ctx: &Ctx,
+    id: &str,
+    doc: Doc,
+    yes: bool,
+) -> Result<(), CliError> {
     let uri = doc
         .get("target")
         .ok_or_else(|| EngineError::invalid_input(format!("draft {id} has no `target`")))?
         .to_owned();
     let w = ctx.writer_for(&owner_of(&uri)?).await?;
     read::sync_thread_quietly(ctx, &w.engine, &uri).await;
-    let c = current(&w.engine, &uri).await?;
-    let d = edit_draft(&c, &doc, Some(doc.body_text()))?;
+    let c = current(&w, &uri).await?;
+    let mut d = edit_draft(&c, &doc, Some(doc.body_text()))?;
+    let dir = ctx.paths.drafts_dir();
+    attach_media(ctx, &w, body_mut(&mut d), Some(&dir), false, yes, Some(id)).await?;
     let opts = EditOpts {
         history: doc.get("history") != Some("false"),
         summary: doc.get("summary").map(str::to_owned),
