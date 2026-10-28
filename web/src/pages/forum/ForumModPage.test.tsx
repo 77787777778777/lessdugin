@@ -226,6 +226,24 @@ describe("ForumModPage", () => {
     await waitFor(() => expect(adopt).toHaveBeenCalledWith(forum, OTHER));
   });
 
+  it("lists what the adoption did not adopt, from the write's report (sec-8)", async () => {
+    const engine = new MockEngine({ holdMs: 0, sendMs: 0 });
+    const forum = (await engine.followed())[0]?.uri ?? "";
+    // the fixture's former moderator, whose forum pin has lapsed
+    const lapsed = (await engine.modLog(forum)).entries.find((e) => e.lapsed);
+    if (lapsed === undefined) throw new Error("no lapsed entry");
+    await setup(engine);
+    fireEvent.change(await screen.findByRole("textbox", { name: /Former moderator/ }), {
+      target: { value: lapsed.actor.did },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Adopt" }));
+    await acknowledge();
+    const list = await screen.findByRole("region", { name: "Not adopted" });
+    expect(within(list).getByRole("listitem").textContent).toBe(
+      `cannot adopt ${lapsed.uri}: not in effect`,
+    );
+  });
+
   it("approves an applicant from the queue only after the interstitial (m3-4, sec-4)", async () => {
     const engine = new MockEngine({ holdMs: 0, sendMs: 0 });
     const applicant = "did:plc:applicantapplicantapplic";

@@ -16,6 +16,7 @@ import type {
   CommentRec,
   ForumRec,
   MockState,
+  ModLogEntryRec,
   MyOpinionRec,
   PolicyRec,
   PostRec,
@@ -154,7 +155,16 @@ interface WriteRec {
   timer?: Timer;
   /** The subject an opinion write is about (`MyOpinion.pending`). */
   subject?: AtUri;
-  apply: () => { uri: AtUri; cid: string; topics: Topic[] };
+  apply: () => Applied;
+}
+
+/** What a write did. `report`: a `modAdopt`'s lines on what it did not adopt or kept
+ * (`WriteState.done.report`). */
+interface Applied {
+  uri: AtUri;
+  cid: string;
+  topics: Topic[];
+  report?: string[];
 }
 
 const RENDER_NOTICE = "Rendered by the mock engine's minimal markdown renderer.";
@@ -830,10 +840,7 @@ export class MockEngine implements EngineApi {
 
   // ------------------------------------------------------------------------------- writes
 
-  private write(
-    undoable: boolean,
-    apply: () => { uri: AtUri; cid: string; topics: Topic[] },
-  ): WriteTicket {
+  private write(undoable: boolean, apply: () => Applied): WriteTicket {
     const id = this.nextId("w");
     const rec: WriteRec = { id, state: { kind: "pending" }, undoable, apply };
     this.writeRecs.set(id, rec);
@@ -852,6 +859,7 @@ export class MockEngine implements EngineApi {
       try {
         const r = rec.apply();
         rec.state = { kind: "done", uri: r.uri, cid: r.cid };
+        if (r.report !== undefined && r.report.length > 0) rec.state.report = r.report;
         this.emit({ kind: "write", id, state: clone(rec.state) });
         this.changed(...r.topics, { kind: "outbox" });
       } catch (e) {
@@ -1702,15 +1710,19 @@ export class MockEngine implements EngineApi {
       .sort((a, b) => b.atMs - a.atMs || (a.subject < b.subject ? -1 : 1))
       .map((e) => ({
         ...clone(e),
-        uri: atUri(
-          e.actor,
-          COLL.modAction,
-          `${this.fkOf(forum)}-${b32hash(`${e.action}:${e.subject}`, 16)}`,
-        ),
+        uri: this.logEntryUri(forum, e),
         actor: this.actor(e.actor),
         status: e.lapsed ? ("lapsed" as const) : ("effective" as const),
       }));
     return { dto: DTO_VERSION, entries };
+  }
+
+  private logEntryUri(forum: AtUri, e: ModLogEntryRec): AtUri {
+    return atUri(
+      e.actor,
+      COLL.modAction,
+      `${this.fkOf(forum)}-${b32hash(`${e.action}:${e.subject}`, 16)}`,
+    );
   }
 
   /** The modActions naming `uri`, as the engine's raw view lists them: one record per (actor,
@@ -2323,12 +2335,28 @@ export class MockEngine implements EngineApi {
 
   async modAdopt(forum: AtUri, formerMod: Did): Promise<WriteTicket> {
     if (!this.isAuthority(forum)) throw err("blocked", "Only authorities can adopt assertions.");
+    const me = this.me();
     return this.write(false, () => {
       const t = this.tick();
-      for (const e of this.s.modLog.get(forum) ?? []) {
-        if (e.actor === formerMod) e.lapsed = true;
+      const log = this.s.modLog.get(forum) ?? [];
+      // What is not adopted is the write's report (engine-api.md §3.2 `mod_adopt`)
+      const report: string[] = [];
+      for (const e of log) {
+        if (e.actor !== formerMod) continue;
+        const own = log.some(
+          (x) =>
+            x.actor === me &&
+            x.action === e.action &&
+            x.subject === e.subject &&
+            !x.lapsed &&
+            x.value !== "removed",
+        );
+        if (e.lapsed) report.push(`cannot adopt ${this.logEntryUri(forum, e)}: not in effect`);
+        else if (own) report.push(`kept own assertion for ${this.logEntryUri(forum, e)}`);
+        e.lapsed = true;
       }
       return {
+        report,
         uri: atUri(
           this.me(),
           COLL.modAction,

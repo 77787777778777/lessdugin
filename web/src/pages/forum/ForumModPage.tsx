@@ -59,14 +59,18 @@ export function isBlocked(e: unknown): boolean {
   return isEngineError(e) && e.code === "blocked";
 }
 
-/** Waits for each write and says how it ended. */
-async function settle(tickets: WriteTicket[], done: string): Promise<void> {
+/** Waits for each write and says how it ended; resolves with the lines of their `report`s
+ * (what a `modAdopt` did not adopt or kept, engine-api.md §3.5). */
+async function settle(tickets: WriteTicket[], done: string): Promise<string[]> {
+  const report: string[] = [];
   for (const t of tickets) {
     writeStore.track(t);
     const final = await writeStore.wait(t.id);
     if (final.kind === "failed") throw final.error;
+    if (final.kind === "done") report.push(...(final.report ?? []));
   }
   toasts.show({ message: done, tone: "success" });
+  return report;
 }
 
 /** The one action of a queue item (social.md §4.12). */
@@ -124,9 +128,9 @@ function QueueAction({
             type="button"
             className={ui.ghost}
             disabled={busy}
-            onClick={run(() =>
-              engine.reject(forum, [item.subject]).then((t) => settle(t, "Applicant rejected")),
-            )}
+            onClick={run(async () => {
+              await settle(await engine.reject(forum, [item.subject]), "Applicant rejected");
+            })}
           >
             Reject
           </button>
@@ -266,18 +270,22 @@ function ModQueue({ uri, authority }: { uri: string; authority: boolean }) {
   );
 }
 
-/** Re-issues a former moderator's assertions that are in effect (social.md §4.10). */
+/** Re-issues a former moderator's assertions that are in effect (social.md §4.10), and lists
+ * what was not adopted or was kept as the adopter's own (the write's report, data-model.md
+ * §8.6): those lapse or stay as they are. */
 function Adopt({ uri }: { uri: string }) {
   const engine = useEngine();
   const requestAck = usePublicAck();
   const [former, setFormer] = useState("");
   const [busy, setBusy] = useState(false);
+  const [report, setReport] = useState<string[]>([]);
   const adopt = async (): Promise<void> => {
     // the copies are the adopter's own public modActions
     if (!(await requestAck("modAction"))) return;
     setBusy(true);
+    setReport([]);
     try {
-      await settle([await engine.modAdopt(uri, former.trim())], "Assertions adopted");
+      setReport(await settle([await engine.modAdopt(uri, former.trim())], "Assertions adopted"));
       setFormer("");
     } catch (e) {
       toasts.show({ message: errorMessage(e), tone: "error" });
@@ -309,6 +317,20 @@ function Adopt({ uri }: { uri: string }) {
           Adopt
         </button>
       </div>
+      {report.length > 0 && (
+        <section aria-label="Not adopted">
+          <p className={ui.small}>
+            Not adopted ({report.length}): these lapse, or stay as your own records.
+          </p>
+          <ul className={ui.small}>
+            {report.map((line) => (
+              <li key={line} className={ui.mono}>
+                {line}
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
     </>
   );
 }
