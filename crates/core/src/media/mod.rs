@@ -1728,7 +1728,8 @@ impl<H: crate::host::Host> crate::engine::Engine<H> {
     /// each one the host has stored meanwhile (the browser's download ran on), or whose retry
     /// time has come. Returns the topics of the items whose body arrived (fetched, or found
     /// missing or unreadable), for `Changed`: their thread and their forum, so a client shows
-    /// the body without being asked again.
+    /// the body without being asked again. The forums' fetches run together, so stalled PDSes
+    /// hold the round back by one `BODY_BLOB_WAIT_MS` at most, however many forums wait.
     pub(crate) async fn retry_spilled_bodies(
         &self,
         renders: &crate::model::RenderCache,
@@ -1741,8 +1742,7 @@ impl<H: crate::host::Host> crate::engine::Engine<H> {
                 due.push((blob, p));
             }
         }
-        let mut topics: Vec<Topic> = Vec::new();
-        for (forum, items) in due.iter().fold(
+        let by_forum = due.iter().fold(
             std::collections::BTreeMap::<&str, Vec<(&str, &str, &str)>>::new(),
             |mut by, (blob, p)| {
                 by.entry(p.forum.as_str()).or_default().push((
@@ -1752,26 +1752,28 @@ impl<H: crate::host::Host> crate::engine::Engine<H> {
                 ));
                 by
             },
-        ) {
-            self.fetch_spilled(forum, &items, renders).await;
-            let mut arrived = false;
-            for &(uri, _, blob) in &items {
-                if renders.spilled(blob).is_some() {
-                    arrived = true;
-                    if uri != forum {
-                        topics.push(Topic::Thread {
-                            uri: uri.to_owned(),
-                        });
-                    }
+        );
+        futures::future::join_all(by_forum.iter().map(|(&forum, items)| async move {
+            self.fetch_spilled(forum, items, renders).await;
+            let mut topics: Vec<Topic> = Vec::new();
+            for &(uri, _, blob) in items {
+                if renders.spilled(blob).is_some() && uri != forum {
+                    topics.push(Topic::Thread {
+                        uri: uri.to_owned(),
+                    });
                 }
             }
-            if arrived {
+            if items.iter().any(|&(_, _, blob)| renders.spilled(blob).is_some()) {
                 topics.push(Topic::Forum {
                     uri: forum.to_owned(),
                 });
             }
-        }
-        topics
+            topics
+        }))
+        .await
+        .into_iter()
+        .flatten()
+        .collect()
     }
 
     /// Marks `cid`, which the host has just stored, loose when no forum counts a reference to

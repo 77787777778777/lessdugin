@@ -737,6 +737,50 @@ fn a_pending_spilled_body_that_arrives_is_announced() {
 }
 
 #[test]
+fn stalled_pdses_hold_a_live_round_back_by_one_wait() {
+    // m4-5: live_step fetched the pending bodies one forum at a time, each waiting up to
+    // BODY_BLOB_WAIT_MS, so k forums whose PDSes stall held the round back k times as long
+    use futures::FutureExt as _;
+    use lessdugin_core::limits::{BODY_BLOB_RETRY_MS, BODY_BLOB_WAIT_MS};
+    use std::task::{Context, Poll};
+    let mut n = Net::new();
+    let mut posts = Vec::new();
+    for name in ["bob", "carol", "dave"] {
+        let who = n
+            .net
+            .add_pds(&format!("{name}.example.com"))
+            .add_account(&format!("{name}.example.com"));
+        let f = forum(&n, &who);
+        let uri = spilled_post(&n, &who, &f, format!("# {name}'s body").as_bytes());
+        posts.push((f, uri));
+    }
+    let e = n.device("anon", None);
+    // every PDS stalls: each view leaves its body pending
+    e.host().hold_blob_fetches(true);
+    for (f, uri) in &posts {
+        let r = block_on(e.sync_forum(f, &SyncOpts::default())).unwrap();
+        assert!(r.errors.is_empty(), "{r:?}");
+        assert_eq!(block_on(e.get_post(uri)).unwrap().body.text, "An excerpt");
+    }
+    n.tick(BODY_BLOB_RETRY_MS);
+    // the retry round: its waits run together, so one BODY_BLOB_WAIT_MS lets it finish
+    e.host().park_sleeps(true);
+    let mut round = Box::pin(e.live_step());
+    let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+    assert!(round.poll_unpin(&mut cx).is_pending());
+    n.tick(BODY_BLOB_WAIT_MS as i64);
+    assert!(
+        matches!(round.poll_unpin(&mut cx), Poll::Ready(Ok(_))),
+        "the round still waits after one BODY_BLOB_WAIT_MS"
+    );
+    e.host().park_sleeps(false);
+    // and the bodies stay pending, for the next retry
+    for (_, uri) in &posts {
+        assert_eq!(block_on(e.get_post(uri)).unwrap().body.text, "An excerpt");
+    }
+}
+
+#[test]
 fn a_spilled_forum_about_is_fetched_from_the_owners_pds() {
     // m4-5: the forum header rendered a spilled `about` as its pending notice for good
     let mut n = Net::new();
