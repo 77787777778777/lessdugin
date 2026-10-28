@@ -15,8 +15,8 @@
 
 import type {
   AccountInfo,
-  ActionNotice,
   AccountView,
+  ActionNotice,
   ActionTicket,
   ActorView,
   AtUri,
@@ -288,7 +288,7 @@ export interface EngineApi {
   // §3.7 Pure functions -----------------------------------------------------------------------
   /** `media`: the draft's `MediaRef`s (rendered as `publish` writes them), or `defs#media`
    * values as a record stores them (objects with a `blob`); `opts.profile` is the body's. */
-  render(markdown: string, media: (MediaRef | Json)[], opts: RenderOpts): Promise<RenderedBody>;
+  render(markdown: string, media: MediaRef[] | Json[], opts: RenderOpts): Promise<RenderedBody>;
   safeHref(raw: string, ctx: HrefContext): Promise<Href | null>;
   validateRecord(collection: string, json: Json): Promise<ValidationReport>;
   deriveRkey(input: RkeyInput): Promise<string>;
