@@ -21,7 +21,7 @@ import { qk } from "../engine/queries.ts";
 import { cx } from "../lib/cx.ts";
 import { applyMention, type MentionCandidate, mentionAt, rankMentions } from "../lib/mentions.ts";
 import ui from "../styles/ui.module.css";
-import { type Attachment, Attachments } from "./Attachments.tsx";
+import { type Attachment, Attachments, type AttachmentsHandle } from "./Attachments.tsx";
 import styles from "./Composer.module.css";
 import { RenderedHtml } from "./RenderedHtml.tsx";
 import { errorMessage } from "./Status.tsx";
@@ -157,6 +157,8 @@ export function Composer({
   );
   const hostRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
+  // where files pasted or dropped into the editor go (null without the attachment picker)
+  const attachmentsRef = useRef<AttachmentsHandle>(null);
   const [text, setText] = useState(initial);
   const [preview, setPreview] = useState<RenderedBody | null>(null);
   const [showPreview, setShowPreview] = useState(true);
@@ -191,6 +193,14 @@ export function Composer({
     const parent = document.createElement("div");
     shadow.replaceChildren(parent);
     const { initial, placeholder, autoFocus, label } = mountOptions.current;
+    /** A pasted or dropped file becomes an attachment; text is left to the editor. */
+    const takeFiles = (files: FileList | null | undefined, e: Event): boolean => {
+      const target = attachmentsRef.current;
+      if (!target || !files || files.length === 0) return false;
+      e.preventDefault();
+      target.add(Array.from(files));
+      return true;
+    };
     const view = new EditorView({
       parent,
       root: shadow,
@@ -259,6 +269,10 @@ export function Composer({
           // The editable element lives in a shadow root, so `aria-labelledby` cannot reach a
           // label in the document: name it directly.
           EditorView.contentAttributes.of({ "aria-label": label, "aria-multiline": "true" }),
+          EditorView.domEventHandlers({
+            paste: (e) => takeFiles(e.clipboardData?.files, e),
+            drop: (e) => takeFiles(e.dataTransfer?.files, e),
+          }),
           EditorView.updateListener.of((u) => {
             if (u.docChanged) setText(u.state.doc.toString());
             // completion follows the caret, so it is recomputed on selection changes too
@@ -426,7 +440,9 @@ export function Composer({
           ))}
         </ul>
       )}
-      {attachments ? <Attachments value={files} onChange={setFiles} disabled={busy} /> : null}
+      {attachments ? (
+        <Attachments ref={attachmentsRef} value={files} onChange={setFiles} disabled={busy} />
+      ) : null}
       {showPreview && preview && (
         <section className={styles.preview} aria-label="Preview">
           <RenderedHtml html={preview.html} media={preview.media} preview className="lfm-compact" />

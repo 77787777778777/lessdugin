@@ -74,6 +74,7 @@ import {
   type KarmaCadence,
   type ListPostsQuery,
   type LoadedMedia,
+  type MediaFile,
   type MediaInput,
   type MediaRef,
   type MembersQuery,
@@ -167,6 +168,9 @@ const PUBLIC_ACTION_KINDS: readonly PublicActionKind[] = [
   "modAction",
 ];
 const RANK: Record<string, number> = { owner: 3, admin: 2, moderator: 1 };
+
+/** The engine's `missingAlt` notice (crates/core/src/media/mod.rs). */
+const MISSING_ALT = "this file has no alt text: readers who cannot see it will not know what it shows";
 
 function err(code: EngineErrorCode, message: string, retryable = false): EngineError {
   return { code, message, retryable };
@@ -2381,8 +2385,17 @@ export class MockEngine implements EngineApi {
     });
   }
 
-  async prepareMedia(bytes: Uint8Array, input: MediaInput = {}): Promise<MediaRef> {
-    const b = bytes;
+  async prepareMedia(bytes: Uint8Array | MediaFile, hints: MediaInput = {}): Promise<MediaRef> {
+    // engine API v0 passed one MediaFile (`mime` is the declared type)
+    const file = bytes instanceof Uint8Array ? null : bytes;
+    const b = file ? file.bytes : (bytes as Uint8Array);
+    const input: MediaInput = file
+      ? {
+          ...(file.mime !== undefined ? { declaredMime: file.mime } : {}),
+          ...(file.name !== undefined ? { name: file.name } : {}),
+          ...(file.alt !== undefined ? { alt: file.alt } : {}),
+        }
+      : hints;
     // the declared type is only a hint: the sniffed one wins (data-model.md §8.8)
     let mime = input.declaredMime ?? "application/octet-stream";
     if (b[0] === 0x89 && b[1] === 0x50) mime = "image/png";
@@ -2395,7 +2408,9 @@ export class MockEngine implements EngineApi {
       mime,
       sizeBytes: b.length,
     };
-    if (input.alt !== undefined) ref.alt = input.alt;
+    // a blank alt is no alt, and writers warn when it is missing (data-model.md §4)
+    if (input.alt !== undefined && input.alt.trim() !== "") ref.alt = input.alt;
+    else ref.notices = [{ code: "missingAlt", message: MISSING_ALT }];
     if (input.name !== undefined) ref.name = input.name;
     return ref;
   }
