@@ -175,7 +175,8 @@ test("bob signs in with OAuth, joins, comments, publishes a post and edits it (a
   // SPA-7; the CSP allows `img-src blob:` only).
   const load = page.getByRole("button", { name: /click to load/ });
   const shown = page.locator("[data-rendered-root] img[data-cid]");
-  await expect(load.or(shown)).toBeVisible();
+  // the placeholder's own img stays in the DOM, hidden, until the bytes arrive
+  await expect(load.or(shown.and(page.locator(":not(.lfm-media-pending)")))).toBeVisible();
   if (await load.isVisible()) {
     await expect(load).toContainText("which will see your IP");
     await load.click();
