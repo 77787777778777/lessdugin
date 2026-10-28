@@ -49,7 +49,7 @@ use crate::dto::{
 use crate::identity::short_did;
 use crate::model::build::ForumModel;
 use crate::model::palette;
-use crate::model::render::{BodyItem, MediaPrefs, RenderCache, empty_body, render_md};
+use crate::model::render::{BodyItem, MediaPrefs, RenderCache, empty_body};
 use crate::social::full::gates::Gate;
 use crate::social::full::moderation::{ModRecord, ModScope};
 use crate::social::full::query::{self, CommentQuery, Query};
@@ -1155,7 +1155,7 @@ impl Views<'_> {
         let d = &self.model.decl;
         let about = d.about.as_ref().and_then(|md| {
             let v = serde_json::to_value(md).ok()?;
-            Some(render_md(&v, &self.model.input.ns, None))
+            Some(self.renders.uncached(&v, &self.model.input.ns))
         });
         let moderators = lessdugin_lexicon::validity::entry::moderators(d, &self.model.key.owner)
             .into_iter()

@@ -626,6 +626,99 @@ fn a_slow_authors_pds_does_not_hold_back_the_thread() {
     assert_eq!(blob_requests(&n).len(), 1);
 }
 
+#[test]
+fn a_pending_spilled_body_that_arrives_is_announced() {
+    // m4-5: a body a view left pending showed only once the client asked again, from the retry
+    // window on; live_tail now fetches it and emits Changed for its thread and forum
+    use futures::FutureExt as _;
+    use lessdugin_core::dto::{Event, Topic};
+    use lessdugin_core::limits::BODY_BLOB_RETRY_MS;
+    use std::sync::{Arc, Mutex};
+    let mut n = Net::new();
+    let bob = n
+        .net
+        .add_pds("bob.example.com")
+        .add_account("bob.example.com");
+    let f = forum(&n, &bob);
+    let source = b"# The whole body";
+    let uri = spilled_post(&n, &bob, &f, source);
+    let e = n.device("anon", None);
+    let r = block_on(e.sync_forum(&f, &SyncOpts::default())).unwrap();
+    assert!(r.errors.is_empty(), "{r:?}");
+    let events: Arc<Mutex<Vec<Event>>> = Arc::default();
+    let sink = Arc::clone(&events);
+    e.subscribe(move |ev| sink.lock().unwrap().push(ev));
+    let announced = |uri: &str| {
+        events.lock().unwrap().drain(..).any(|ev| match ev {
+            Event::Changed { topics } => topics.contains(&Topic::Thread {
+                uri: uri.to_owned(),
+            }),
+            _ => false,
+        })
+    };
+    // bob's PDS stalls: the view shows the excerpt
+    e.host().hold_blob_fetches(true);
+    let pv = e.get_post(&uri).now_or_never().unwrap().unwrap();
+    assert_eq!(pv.body.text, "An excerpt");
+    // a round with nothing new announces nothing
+    e.live_step().now_or_never().unwrap().unwrap();
+    assert!(!announced(&uri));
+    // the browser's download ran on and stored it: the next round announces it
+    let blob = lessdugin_atp::cid::for_raw(source).to_string();
+    e.host().put_blob(&blob, source.to_vec());
+    block_on(e.live_step()).unwrap();
+    assert!(announced(&uri), "no Changed for the thread");
+    assert_eq!(
+        block_on(e.get_post(&uri)).unwrap().body.text,
+        "The whole body"
+    );
+
+    // natively the download stopped with the wait: the round after the retry time fetches it
+    let uri = spilled_post(&n, &bob, &f, b"# Another body");
+    let r = block_on(e.sync_forum(&f, &SyncOpts::default())).unwrap();
+    assert!(r.errors.is_empty(), "{r:?}");
+    assert_eq!(block_on(e.get_post(&uri)).unwrap().body.text, "An excerpt");
+    e.host().hold_blob_fetches(false);
+    block_on(e.live_step()).unwrap();
+    assert!(!announced(&uri), "asked again before the retry time");
+    n.tick(BODY_BLOB_RETRY_MS);
+    let round = block_on(e.live_step()).unwrap();
+    assert!(announced(&uri), "no Changed once the retry time came");
+    assert_eq!(
+        block_on(e.get_post(&uri)).unwrap().body.text,
+        "Another body"
+    );
+    assert!(round.next_ms > 0);
+}
+
+#[test]
+fn a_spilled_forum_about_is_fetched_from_the_owners_pds() {
+    // m4-5: the forum header rendered a spilled `about` as its pending notice for good
+    let mut n = Net::new();
+    let bob = n
+        .net
+        .add_pds("bob.example.com")
+        .add_account("bob.example.com");
+    let f = forum(&n, &bob);
+    let mut decl = bob.get(nsid::FORUM, "meta").unwrap();
+    decl["about"] = spilled_body(&bob, b"# About this forum\n\nBe kind.");
+    bob.put(nsid::FORUM, "meta", &decl);
+    n.tick(MINUTE);
+    let e = n.device("anon", None);
+    n.net.clear_requests();
+    let v = block_on(e.forum_open(&f)).unwrap();
+    let about = v.about.expect("the forum has an about");
+    assert_eq!(about.notices, Vec::<String>::new(), "{:?}", about.notices);
+    assert!(about.html.contains("About this forum"), "{}", about.html);
+    assert_eq!(
+        blob_requests(&n)
+            .into_iter()
+            .filter(|(_, d)| d == bob.did().as_str())
+            .count(),
+        1
+    );
+}
+
 // --- the autoload verdict (m4-4) ---------------------------------------------------------------
 
 #[test]

@@ -377,6 +377,8 @@ impl<H: Host> Engine<H> {
         let opened = self.open_key(&key, false).await?;
         self.sync_authorities(&opened).await;
         let l = self.loaded(&key).await?;
+        // a spilled `about` is fetched before the header renders it (lfm-1.md §1.3)
+        self.load_spilled_about(&l.model, &self.rt.renders).await;
         let me = self.me().await?;
         let (followed, alias) = self.follow_state(key.uri.as_str()).await?;
         self.with_views(&l, &[], &[], |v| {

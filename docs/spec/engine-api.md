@@ -372,6 +372,11 @@ UIs re-query on `Changed` and never move the user's cursor on live updates (TUI 
 - **`Write`.** Every outbox state change emits `Write { id, state }`, then `Changed [Outbox]`.
   For an applied own write, the forum, thread and user topics come after `Write { done }`, so a
   re-query no longer shows the item as pending.
+- **Spilled bodies.** A spilled body (`textBlob`) a view returned pending (`limits.md`
+  `BODY_BLOB_WAIT_MS`) is fetched again by `live_tail`: from the host's stored copy as soon as
+  there is one, else once `BODY_BLOB_RETRY_MS` has passed. When it arrives (rendered, or found
+  missing or unreadable), `live_tail` emits `Changed [Thread(post), Forum]` (a spilled `about`:
+  `Changed [Forum]`), so a client re-queries and shows it.
 - **Accounts.** `add_account`, `record_account`, `set_active_account` and `remove_account` emit
   `Changed [Accounts]` (plus `Outbox` when a purge dropped writes).
 - **`Auth`.** `Auth { did, state: Expired }` is emitted when the outbox finds the account's
