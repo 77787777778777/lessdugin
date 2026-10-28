@@ -8,7 +8,9 @@
 //   the URI regexp, and hooks that enforce per-element attributes, class tokens, value grammars
 //   and whole-element shapes. `ALLOW_ARIA_ATTR: false` and `ADD_URI_SAFE_ATTR` keep it exact:
 //   without the latter DOMPurify would test every non-URL attribute value (`dir="auto"`, `rel`,
-//   …) against the URI regexp and drop it.
+//   …) against the URI regexp and drop it. Its tags, attributes (per element), class tokens
+//   and URI pattern are the tables `allowlist::dompurify_config_json()` is built from, which
+//   sanitize.vectors.test.ts compares entry for entry with crates/markdown, both ways.
 // - The sanitiser is a dedicated DOMPurify instance, configured once with `setConfig`: its hooks
 //   and configuration never leak into (or from) any other user of the shared default instance.
 // - The Trusted Types policy `lessdugin-md` wraps `sanitize(html)`. It is created once, at
@@ -143,7 +145,7 @@ const MATH_LENGTH_ATTRS = [
   "voffset",
 ] as const;
 
-const MATHML_ATTRS = [
+export const MATHML_ATTRS = [
   "display",
   ...MATH_BOOLEAN_ATTRS,
   "scriptlevel",
@@ -249,20 +251,37 @@ const HEADING: Record<string, Check> = { id: (v) => /^md-h-[\p{L}\p{N}_-]*$/u.te
 const EXTERNAL_HREF = /^(?:https?:\/\/|mailto:)/;
 const WEB_HREF = /^https?:\/\//;
 
-const HTML_RULES: Record<string, Record<string, Check>> = {
+/** Class tokens per element (lfm-1.md §8.2; `code` also takes `language-*` inside `pre`). The
+ * same table as `allowlist::CLASS_ALLOWLIST` (checked by sanitize.vectors.test.ts). */
+export const HTML_CLASS_TOKENS: Readonly<Record<string, readonly string[]>> = {
+  div: [
+    "lfm",
+    "alert-note",
+    "alert-tip",
+    "alert-important",
+    "alert-warning",
+    "alert-caution",
+    "gallery",
+  ],
+  p: ["notice"],
+  th: ["ta-l", "ta-c", "ta-r"],
+  td: ["ta-l", "ta-c", "ta-r"],
+  code: ["math-error"],
+  a: ["at-link", "mention", "ext-image", "fn-back"],
+  details: ["spoiler"],
+  span: ["media", "media-missing", "link-host"],
+  section: ["footnotes"],
+};
+
+const classOf = (tag: string): Check => oneOf(...(HTML_CLASS_TOKENS[tag] ?? []));
+
+/** Per element, its attributes (exactly `allowlist::HTML_ALLOWLIST`'s) and their grammars. */
+export const HTML_RULES: Readonly<Record<string, Record<string, Check>>> = {
   div: {
-    class: oneOf(
-      "lfm",
-      "alert-note",
-      "alert-tip",
-      "alert-important",
-      "alert-warning",
-      "alert-caution",
-      "gallery",
-    ),
+    class: classOf("div"),
     dir: (v, el) => v === "auto" && el.getAttribute("class") === "lfm",
   },
-  p: { class: oneOf("notice"), dir: AUTO },
+  p: { class: classOf("p"), dir: AUTO },
   h1: HEADING,
   h2: HEADING,
   h3: HEADING,
@@ -271,12 +290,12 @@ const HTML_RULES: Record<string, Record<string, Check>> = {
   h6: HEADING,
   li: { id: (v) => /^md-fn-[1-9][0-9]*$/.test(v), dir: AUTO },
   ol: { start: (v) => /^(0|[1-9][0-9]{0,9})$/.test(v) },
-  th: { class: oneOf("ta-l", "ta-c", "ta-r"), dir: AUTO },
-  td: { class: oneOf("ta-l", "ta-c", "ta-r"), dir: AUTO },
+  th: { class: classOf("th"), dir: AUTO },
+  td: { class: classOf("td"), dir: AUTO },
   input: { type: oneOf("checkbox"), checked: EMPTY, disabled: EMPTY },
   code: {
     class: (v, el) =>
-      v === "math-error" ||
+      (HTML_CLASS_TOKENS.code ?? []).includes(v) ||
       (/^language-[a-z0-9_+-]{1,32}$/.test(v) && el.parentElement?.localName === "pre"),
   },
   sup: { id: (v) => /^md-fnref-[1-9][0-9]*-[1-9][0-9]*$/.test(v) },
@@ -285,19 +304,19 @@ const HTML_RULES: Record<string, Record<string, Check>> = {
     "data-at-uri": isRecordUri,
     "data-did": isDid,
     "data-anchor": (v) => /^[\p{L}\p{N}_-]{1,512}$/u.test(v),
-    class: oneOf("at-link", "mention", "ext-image", "fn-back"),
+    class: classOf("a"),
     rel: oneOf("nofollow ugc noopener noreferrer"),
   },
-  details: { class: oneOf("spoiler") },
+  details: { class: classOf("details") },
   summary: { dir: AUTO },
   figcaption: { dir: AUTO },
   img: { "data-cid": CID, alt: ANY, width: DIMENSION, height: DIMENSION },
   span: {
-    class: oneOf("media", "media-missing", "link-host"),
+    class: classOf("span"),
     "data-cid": (v, el) => CID(v, el) && el.getAttribute("class") === "media",
     "data-tex": (v, el) => (v === "inline" || v === "block") && !el.hasAttribute("class"),
   },
-  section: { class: oneOf("footnotes") },
+  section: { class: classOf("section") },
 };
 
 const isMathBoolean = (v: string): boolean => v === "true" || v === "false";
