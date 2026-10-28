@@ -695,6 +695,26 @@ async fn start_edit<H: Host>(
     ))
 }
 
+/// The source of the forum's spilled `about` `md`: the `textBlob` the host holds, else as
+/// `forum_open` fetches it (it waits for the owner's PDS as a thread does for a body).
+async fn spilled_about<H: Host>(
+    engine: &Engine<H>,
+    forum: &str,
+    md: &serde_json::Value,
+) -> Result<String, EngineError> {
+    let blob = lessdugin_core::model::render::text_blob_cid(md)
+        .ok_or_else(|| EngineError::invalid_input("the forum's about text is not one the TUI can edit"))?;
+    if let Some(src) = stored_text_blob(engine, blob).await {
+        return Ok(src);
+    }
+    engine.forum_open(forum).await?;
+    stored_text_blob(engine, blob).await.ok_or_else(|| {
+        EngineError::invalid_input(
+            "the forum's about text is stored as a blob that could not be loaded; try again later",
+        )
+    })
+}
+
 fn strs(v: Option<&serde_json::Value>) -> Vec<String> {
     v.and_then(serde_json::Value::as_array)
         .map(|a| {
@@ -722,11 +742,9 @@ async fn forum_draft<H: Host>(
         None => None,
         Some(b) => match b.get("text").and_then(serde_json::Value::as_str) {
             Some(t) => Some(BodyDraft::text(t)),
-            None => {
-                return Err(EngineError::invalid_input(
-                    "the forum's about text is stored as a blob; edit the forum in the web app",
-                ));
-            }
+            // a spilled `about` (`data-model.md` §5.3) is sent as its source, which the outbox
+            // spills again: as `forum_open` fetched it from the owner's PDS for the header
+            None => Some(BodyDraft::text(spilled_about(engine, forum, b).await?)),
         },
     };
     let empty_is_none = |o: &Option<String>| o.clone().filter(|t| !t.is_empty());

@@ -2000,3 +2000,50 @@ fn mod_adopt_lists_what_it_did_not_adopt() {
     );
     assert!(t.render().contains("cannot adopt"), "{}", t.render());
 }
+
+/// m4-5: `:forum edit` on a forum whose `about` spilled into a blob (over 64 KiB,
+/// `data-model.md` §5.3) keeps it: its source goes back to the engine, and spills again into
+/// the same blob.
+#[test]
+fn forum_edit_keeps_a_spilled_about() {
+    use lessdugin_core::dto::{BodyDraft, ForumDraft};
+    let s = scenario();
+    let alice = &s.w.alice;
+    let mut about = "# Rules\n\n".to_owned();
+    while about.len() <= 65_536 {
+        about.push_str("Be kind to each other. ");
+    }
+    let mut draft = ForumDraft::new("long", "Long");
+    draft.about = Some(BodyDraft::text(about));
+    let t = block_on(alice.engine.forum_create(&draft)).unwrap();
+    alice.flush();
+    let forum = alice.done(&t);
+    let blob_of = || {
+        use lessdugin_core::host::Host as _;
+        let u = lessdugin_atp::syntax::AtUri::parse(&forum).unwrap();
+        let v = block_on(
+            lessdugin_core::store::records::RecordStore::new(alice.engine.host().cache()).get(&u),
+        )
+        .unwrap()
+        .unwrap()
+        .value_json()
+        .unwrap();
+        (v["name"].clone(), v["about"]["textBlob"].clone())
+    };
+    let (_, spilled) = blob_of();
+    assert!(spilled.is_object(), "it spilled: {spilled}");
+
+    let mut ta = alice_tui(&s, 100, 30);
+    block_on(ta.start(Some(forum.clone())));
+    run_command(&mut ta, "forum edit --name Longer");
+    assert!(
+        status(&ta).contains("Forum edit: queued"),
+        "{}",
+        status(&ta)
+    );
+    block_on(ta.engine().outbox_flush()).unwrap();
+    block_on(alice.engine.forum_open(&forum)).unwrap();
+    let (name, again) = blob_of();
+    assert_eq!(name, "Longer");
+    assert_eq!(again, spilled, "the same source, spilled again");
+}
