@@ -19,19 +19,22 @@
 //! `<cid>.<ext>` (`data-model.md` §4, FILE-3): the extension comes from the sniffed type when the
 //! declared type agrees with it, else `.bin`; never from the record's `name`, which the author
 //! chose; and the CID is checked (`^b[a-z2-7]{1,127}$`) before it names a file. Without `-o` the
-//! file goes to the working directory and never replaces one (`O_EXCL`). The host streams the
-//! blob from the author's PDS to a file while hashing it, and fails unless the bytes match the
-//! CID (`Host::fetch_blob`); the CLI copies that file and never holds the bytes. `media open`
-//! opens only images, video and audio (FILE-4), handing the path to the opener as one argument.
+//! file goes to the working directory and never replaces one (`O_EXCL`). The engine's
+//! `load_media` fetches the blob from the author's PDS (from their DID document), at most its
+//! declared size, and the host streams it to a file while hashing it, failing unless the bytes
+//! match the CID (`Host::fetch_blob`); the CLI copies that file and never holds the bytes.
+//! `media open` opens only images, video and audio (FILE-4), handing the path to the opener as
+//! one argument.
 
 use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
 
-use lessdugin_atp::syntax::Did;
-use lessdugin_core::dto::{BodyDraft, CommentSort, MediaInput, MediaRef, ThreadOpts, ThreadRoot};
+use lessdugin_core::dto::{
+    BodyDraft, CommentSort, MediaInput, MediaRef, NoticeCode, ThreadOpts, ThreadRoot,
+};
 use lessdugin_core::engine::{Engine, EngineError, ErrorCode};
-use lessdugin_core::host::Host;
 use lessdugin_core::limits::BLOB_HARD_MAX_BYTES;
+use lessdugin_core::media::MediaOwner;
 use lessdugin_core::outbox::blob::normalise_mime;
 use lessdugin_native::host::NativeHost;
 use pulldown_cmark::{Event, LinkType, Parser, Tag, TagEnd};
@@ -358,7 +361,8 @@ pub async fn attach(
             .await
             .map_err(|e| naming(&what, e))?;
         rewrites.push((img.dest, format!("cid:{}", m.cid)));
-        if img.alt.is_empty() {
+        // the core says when a file has no alt text (`data-model.md` §4)
+        if m.notices.iter().any(|n| n.code == NoticeCode::MissingAlt) {
             no_alt.push(img.path.clone());
         }
         if !body.media.iter().any(|x| x.cid == m.cid) {
@@ -367,8 +371,10 @@ pub async fn attach(
         push_media(&mut attached, &mut body.media, img.path, Some(file), m);
     }
     for (cid, alt) in found.cids {
-        if body.media.iter().any(|m| m.cid == cid) {
-            if alt.is_empty() {
+        // an item the body has (attached above, or kept by an edit): its own alt describes it
+        // when the markdown has none (`lfm-1.md` §6.2)
+        if let Some(have) = body.media.iter().find(|m| m.cid == cid) {
+            if alt.is_empty() && have.alt.is_none() {
                 no_alt.push(format!("cid:{cid}"));
             }
             continue;
@@ -390,6 +396,7 @@ pub async fn attach(
             aspect_ratio: None,
             duration_ms: None,
             name: None,
+            notices: Vec::new(),
         };
         push_media(
             &mut attached,
@@ -431,6 +438,10 @@ fn push_media(
         }
         return;
     }
+    let m = MediaRef {
+        notices: Vec::new(),
+        ..m
+    };
     media.push(m.clone());
     attached.push(Attached {
         source,
@@ -463,11 +474,14 @@ async fn add(ctx: &Ctx, file: &Path, alt: Option<String>) -> Result<(), CliError
         .await
         .map_err(|e| naming(&what, e))?;
     metadata_warning(ctx, &what, &m.mime);
-    if alt.is_none() {
-        ctx.out.warn(lit(
-            "no alt text: describe the file for readers who cannot see it (--alt, or in the \
-             ![...] of the post)",
-        ));
+    for n in &m.notices {
+        ctx.out.warn(cat([
+            tt(&n.message),
+            lit(match n.code {
+                NoticeCode::MissingAlt => " (describe it with --alt, or in the ![...] of the post)",
+                _ => "",
+            }),
+        ]));
     }
     if ctx.out.is_json() {
         ctx.out.json(&dto(&m));
@@ -580,16 +594,16 @@ async fn fetch(ctx: &Ctx, reference: &str, index: u16) -> Result<Fetched, CliErr
             },
         )
         .await?;
-    let (author, body) = if is_comment {
+    let body = if is_comment {
         let c = thread
             .comments
             .iter()
             .find(|c| c.uri == uri)
             .ok_or_else(|| EngineError::not_found(format!("{uri} is not in its thread")))?;
-        (c.author.did.clone(), &c.body)
+        &c.body
     } else {
         match &thread.post {
-            ThreadRoot::Post(p) => (p.post.author.did.clone(), &p.body),
+            ThreadRoot::Post(p) => &p.body,
             ThreadRoot::Missing { missing } => {
                 return Err(EngineError::not_found(format!("{missing} is missing")).into());
             }
@@ -611,22 +625,11 @@ async fn fetch(ctx: &Ctx, reference: &str, index: u16) -> Result<Fetched, CliErr
         ))
         .into());
     }
-    let id = engine.resolve_identity(&author).await?;
-    let pds = id
-        .identity
-        .pds
-        .as_deref()
-        .and_then(|p| url::Url::parse(p).ok())
-        .ok_or_else(|| {
-            EngineError::not_found(format!("the DID document of {author} names no PDS"))
-        })?;
-    let did = Did::parse(&author).map_err(|e| EngineError::internal(e.to_string()))?;
+    // from the author's PDS (their DID document's), capped at the declared size
     let h = engine
-        .host()
-        .fetch_blob(pds, did, m.cid.clone(), BLOB_HARD_MAX_BYTES)
-        .await
-        .map_err(EngineError::from)?;
-    let file = PathBuf::from(&h.locator);
+        .load_media(&m.cid, Some(MediaOwner::of_view(m)))
+        .await?;
+    let file = PathBuf::from(&h.url);
     let mut head = Vec::with_capacity(64);
     {
         use std::io::Read;

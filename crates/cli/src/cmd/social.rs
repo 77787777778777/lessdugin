@@ -1041,8 +1041,8 @@ pub async fn export(ctx: &Ctx, args: ExportArgs) -> Result<(), CliError> {
         } else {
             ctx.out.line(&[(
                 crate::out::tt(&format!(
-                    "Imported {} rows ({} out of scope, {} unreadable).",
-                    report.imported, report.out_of_scope, report.undecodable
+                    "Imported {} rows ({} out of scope, {} unreadable, {} refused).",
+                    report.imported, report.out_of_scope, report.undecodable, report.refused
                 )),
                 crate::out::Style::Plain,
             )]);
