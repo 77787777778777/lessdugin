@@ -1763,7 +1763,10 @@ impl<H: crate::host::Host> crate::engine::Engine<H> {
                     });
                 }
             }
-            if items.iter().any(|&(_, _, blob)| renders.spilled(blob).is_some()) {
+            if items
+                .iter()
+                .any(|&(_, _, blob)| renders.spilled(blob).is_some())
+            {
                 topics.push(Topic::Forum {
                     uri: forum.to_owned(),
                 });

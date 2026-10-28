@@ -378,7 +378,9 @@ UIs re-query on `Changed` and never move the user's cursor on live updates (TUI 
   `BODY_BLOB_WAIT_MS`) is fetched again by `live_tail`: from the host's stored copy as soon as
   there is one, else once `BODY_BLOB_RETRY_MS` has passed. When it arrives (rendered, or found
   missing or unreadable), `live_tail` emits `Changed [Thread(post), Forum]` (a spilled `about`:
-  `Changed [Forum]`), so a client re-queries and shows it.
+  `Changed [Forum]`), so a client re-queries and shows it. A round fetches all its due bodies
+  together, so stalled PDSes hold it back by one `BODY_BLOB_WAIT_MS` at most, however many
+  forums they serve.
 - **Accounts.** `add_account`, `record_account`, `set_active_account` and `remove_account` emit
   `Changed [Accounts]` (plus `Outbox` when a purge dropped writes).
 - **`Auth`.** `Auth { did, state: Expired }` is emitted when the outbox finds the account's
