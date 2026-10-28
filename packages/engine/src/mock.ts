@@ -170,7 +170,8 @@ const PUBLIC_ACTION_KINDS: readonly PublicActionKind[] = [
 const RANK: Record<string, number> = { owner: 3, admin: 2, moderator: 1 };
 
 /** The engine's `missingAlt` notice (crates/core/src/media/mod.rs). */
-const MISSING_ALT = "this file has no alt text: readers who cannot see it will not know what it shows";
+const MISSING_ALT =
+  "this file has no alt text: readers who cannot see it will not know what it shows";
 
 function err(code: EngineErrorCode, message: string, retryable = false): EngineError {
   return { code, message, retryable };

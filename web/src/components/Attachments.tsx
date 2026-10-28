@@ -38,7 +38,9 @@ export const ATTACHMENT_ACCEPT = "image/*,video/*,audio/*,application/pdf";
 
 function acceptable(file: File): boolean {
   // an unknown type goes to the engine, which sniffs it
-  return file.type === "" || /^(image|video|audio)\//.test(file.type) || file.type === "application/pdf";
+  return (
+    file.type === "" || /^(image|video|audio)\//.test(file.type) || file.type === "application/pdf"
+  );
 }
 
 /** The file name as `#media.name` may carry it, or null when readers would ignore it: a

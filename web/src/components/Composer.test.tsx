@@ -115,7 +115,9 @@ describe("Composer", () => {
       type: "image/png",
     });
     fireEvent.paste(view.contentDOM, { clipboardData: { files: [shot], types: ["Files"] } });
-    await waitFor(() => expect(screen.getByTestId("attachment-list").textContent).toContain("ready"));
+    await waitFor(() =>
+      expect(screen.getByTestId("attachment-list").textContent).toContain("ready"),
+    );
     expect(prepare).toHaveBeenCalledTimes(1);
     expect(view.state.doc.toString()).toBe("");
     const drop = new File([new Uint8Array([0xff, 0xd8, 0xff])], "drop.jpg", { type: "image/jpeg" });
