@@ -532,6 +532,8 @@ fn editing_a_kept_item_says_what_it_suspends_first() {
         let k = alice.json(&["mod", verb, &kept, "--yes"]);
         assert_eq!(k["state"]["kind"], "done", "{verb}: {k}");
     }
+    // carol's view has them (an edit syncs the forum only when it was not synced lately)
+    carol.ok(&["sync", "alice.test/meta"]);
     let body = || {
         let rkey = kept.rsplit('/').next().unwrap();
         carol.account.get(nsid::POST, rkey).unwrap()["body"]["text"].clone()

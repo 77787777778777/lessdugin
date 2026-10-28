@@ -858,19 +858,15 @@ async fn suspended_by_edit(engine: &Engine<NativeHost>, uri: &str) -> Vec<&'stat
 }
 
 /// Before an edit of an item that carries positive assertions (`social.md` §4.5): says what
-/// the edit suspends ([`suspended_by_edit`], after a sync of the item's `forum`, which brings
-/// the authorities' latest assertions), then asks on a terminal; headless use needs `--yes`
-/// (`yes`). An item with none asks nothing.
+/// the edit suspends ([`suspended_by_edit`], in the view [`read::sync_for_read`] brought up
+/// to date, as `read` shows it), then asks on a terminal; headless use needs `--yes` (`yes`).
+/// An item with none asks nothing.
 async fn confirm_suspension(
     ctx: &Ctx,
     engine: &Engine<NativeHost>,
     uri: &str,
-    forum: &str,
     yes: bool,
 ) -> Result<(), CliError> {
-    if !forum.is_empty() {
-        read::sync_forum_quietly(ctx, engine, forum).await;
-    }
     let what = suspended_by_edit(engine, uri).await;
     let Some((last, rest)) = what.split_last() else {
         return Ok(());
@@ -922,9 +918,10 @@ pub async fn edit(ctx: &Ctx, args: EditArgs) -> Result<(), CliError> {
     let reader = ctx.reader().await?;
     let (uri, _) = refs::post_or_comment(ctx, &reader, &args.reference).await?;
     let w = ctx.writer_for(&owner_of(&uri)?).await?;
-    read::sync_thread_quietly(ctx, &w.engine, &uri).await;
+    // the thread, and the forum's assertions unless synced lately
+    read::sync_for_read(ctx, &w.engine, &uri).await;
     let c = current(&w, &uri).await?;
-    confirm_suspension(ctx, &w.engine, &uri, &c.forum, args.yes).await?;
+    confirm_suspension(ctx, &w.engine, &uri, args.yes).await?;
     let mut opts = EditOpts {
         history: !args.no_history,
         summary: args.summary.clone(),
@@ -1007,9 +1004,9 @@ pub async fn publish_edit_draft(ctx: &Ctx, id: &str, doc: Doc, yes: bool) -> Res
         .ok_or_else(|| EngineError::invalid_input(format!("draft {id} has no `target`")))?
         .to_owned();
     let w = ctx.writer_for(&owner_of(&uri)?).await?;
-    read::sync_thread_quietly(ctx, &w.engine, &uri).await;
+    read::sync_for_read(ctx, &w.engine, &uri).await;
     let c = current(&w, &uri).await?;
-    confirm_suspension(ctx, &w.engine, &uri, &c.forum, yes).await?;
+    confirm_suspension(ctx, &w.engine, &uri, yes).await?;
     let mut d = edit_draft(&c, &doc, Some(doc.body_text()))?;
     let dir = ctx.paths.drafts_dir();
     attach_media(ctx, &w, body_mut(&mut d), Some(&dir), false, yes, Some(id)).await?;
