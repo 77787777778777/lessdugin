@@ -1207,8 +1207,8 @@ mod tests {
         format!("cargo {}", args.join(" "))
     }
 
-    /// acc-m3-2, acc-m3-5: core's social vectors and the P9 digest run on wasm32 in both
-    /// namespaces, in ci.yml's wasm-tests job.
+    /// Native = wasm for the social fold (`social.md` §1.3 rule 6, §6.3 P9): core's social
+    /// vectors and the P9 digest run on wasm32 in both namespaces, in ci.yml's wasm-tests job.
     #[test]
     fn the_social_vectors_and_p9_run_on_wasm32_in_ci() {
         assert!(
@@ -1233,7 +1233,7 @@ mod tests {
         }
     }
 
-    /// acc-m4-7: ammonia's equality runs in ci.yml's rust job (and in `ci`, which runs
+    /// `ammonia(html) == html` (M4 acceptance) runs in ci.yml's rust job (and in `ci`, which runs
     /// [`AMMONIA_TESTS`]).
     #[test]
     fn the_ammonia_equality_runs_in_ci() {
@@ -1244,8 +1244,8 @@ mod tests {
         );
     }
 
-    /// own-3: the web job's `pnpm run check` runs every package's own `check` (tsc, biome and the
-    /// web package's raw-href guard), not only `typecheck`.
+    /// The web job's `pnpm run check` runs every package's own `check` (tsc, biome and the web
+    /// package's raw-href guard), not only `typecheck`.
     #[test]
     fn the_root_check_runs_every_package_check() {
         assert!(job_runs(".github/workflows/ci.yml", "web").contains(&"pnpm run check".into()));
@@ -1264,8 +1264,8 @@ mod tests {
         assert!(file("web/package.json").contains("check-no-raw-href.mjs"));
     }
 
-    /// acc-m4-12: fuzz.yml runs every target `cargo xtask fuzz` knows, and the seed generator
-    /// seeds each of them.
+    /// fuzz.yml runs every target `cargo xtask fuzz` knows, and the seed generator seeds each of
+    /// them (without seeds `cargo xtask fuzz` stops at the target).
     #[test]
     fn fuzz_yml_runs_every_fuzz_target() {
         let wf = file(".github/workflows/fuzz.yml");

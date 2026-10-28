@@ -485,7 +485,10 @@ fn seeds_media() -> Vec<Vec<u8>> {
     gif.extend_from_slice(b"after-trailer");
 
     let mp4_box = |kind: &[u8; 4], payload: &[u8]| {
-        let mut v = u32::try_from(payload.len() + 8).unwrap().to_be_bytes().to_vec();
+        let mut v = u32::try_from(payload.len() + 8)
+            .unwrap()
+            .to_be_bytes()
+            .to_vec();
         v.extend_from_slice(kind);
         v.extend_from_slice(payload);
         v
@@ -496,7 +499,14 @@ fn seeds_media() -> Vec<Vec<u8>> {
     mp4.extend(mp4_box(b"moov", &moov));
     mp4.extend(mp4_box(b"mdat", b"video"));
 
-    vec![read("web/e2e/fixtures/pixel.png"), jpeg, png, webp, gif, mp4]
+    vec![
+        read("web/e2e/fixtures/pixel.png"),
+        jpeg,
+        png,
+        webp,
+        gif,
+        mp4,
+    ]
 }
 
 fn regressions(target: &str) -> Vec<Vec<u8>> {
