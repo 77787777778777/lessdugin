@@ -63,21 +63,37 @@ describe("ModMenu", () => {
     expect(await screen.findByText("a ban is retroactive (engine)")).toBeTruthy();
   });
 
-  it("restricts with the chosen capabilities and can nullify votes", async () => {
+  it("restricts with the chosen capabilities only, so a nullification stays (m3r-2)", async () => {
     const { modAction } = setup();
     const dialog = await choose("Restrict the author");
     expect(within(dialog).getByTestId("mod-retroactive").textContent).toBe(RETROACTIVE.restrict);
     fireEvent.click(within(dialog).getByRole("checkbox", { name: "posts" }));
     fireEvent.click(within(dialog).getByRole("checkbox", { name: "votes" }));
-    fireEvent.click(within(dialog).getByRole("checkbox", { name: /Nullify their votes/ }));
     await apply(dialog);
     await waitFor(() => expect(modAction).toHaveBeenCalledTimes(1));
     expect(sent(modAction)).toMatchObject({
       kind: "assert",
       scope: "forum",
       subject: SUBJECT.author,
-      action: { kind: "restrict", capabilities: ["comment", "vote"], nullifyVotes: true },
     });
+    // `nullifyVotes` left out: the engine keeps the moderator's current value of it
+    expect(sent(modAction)).toHaveProperty("action", {
+      kind: "restrict",
+      capabilities: ["comment", "vote"],
+    });
+  });
+
+  it.each([
+    [/^Nullify the author's votes/, true],
+    ["Let the author's votes count again", false],
+  ])("%s sends only nullifyVotes, so a restriction stays (m3r-2)", async (label, nullifyVotes) => {
+    const { modAction } = setup();
+    const dialog = await choose(label);
+    expect(within(dialog).queryByRole("checkbox", { name: "posts" })).toBeNull();
+    await apply(dialog);
+    await waitFor(() => expect(modAction).toHaveBeenCalledTimes(1));
+    expect(sent(modAction)).toMatchObject({ kind: "assert", subject: SUBJECT.author });
+    expect(sent(modAction)).toHaveProperty("action", { kind: "restrict", nullifyVotes });
   });
 
   it("unbans by removing the moderator's own #access record", async () => {

@@ -186,6 +186,35 @@ describe("MockEngine writes", () => {
     expect((await e.getPost(post.uri)).post.commentCount).toBe(post.commentCount + 1);
     expect(ticket.state.kind).toBe("pending");
   });
+
+  it("keeps the #restrict dimension an intent leaves out, as the engine merges (m3r-2)", async () => {
+    const e = new MockEngine({ sendMs: 10 });
+    const target = (await e.members(FORUM_URI, {})).find(
+      (m) => m.banned !== true && m.nullified !== true && m.restricted === undefined,
+    )?.actor.did;
+    if (target === undefined) throw new Error("no unmoderated member");
+    const restrict = (action: { capabilities?: ("post" | "comment")[]; nullifyVotes?: boolean }) =>
+      e.modAction({
+        kind: "assert",
+        forum: FORUM_URI,
+        scope: "forum",
+        subject: target,
+        action: { kind: "restrict", ...action },
+      });
+    const state = async () => {
+      const m = (await e.members(FORUM_URI, {})).find((x) => x.actor.did === target);
+      return { restricted: m?.restricted, nullified: m?.nullified === true };
+    };
+    await restrict({ capabilities: ["post", "comment"] });
+    await vi.advanceTimersByTimeAsync(50);
+    await restrict({ nullifyVotes: true });
+    await vi.advanceTimersByTimeAsync(50);
+    expect(await state()).toEqual({ restricted: ["post", "comment"], nullified: true });
+    await restrict({ capabilities: ["comment"] });
+    await vi.advanceTimersByTimeAsync(50);
+    expect(await state()).toEqual({ restricted: ["comment"], nullified: true });
+    await expect(restrict({})).rejects.toMatchObject({ code: "invalid_input" });
+  });
 });
 
 describe("MockEngine local state and declarations", () => {

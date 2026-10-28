@@ -2137,7 +2137,7 @@ export class MockEngine implements EngineApi {
       if (a.kind === "access" && a.level === "banned") {
         return { ...ticket, notices: [{ code: "retroactive", message: RETROACTIVE_BAN }] };
       }
-      if (a.kind === "restrict" && a.capabilities.length > 0) {
+      if (a.kind === "restrict" && (a.capabilities?.length ?? 0) > 0) {
         return { ...ticket, notices: [{ code: "retroactive", message: RETROACTIVE_RESTRICT }] };
       }
     }
@@ -2158,6 +2158,14 @@ export class MockEngine implements EngineApi {
       role === "moderator"
     ) {
       throw err("blocked", "Only admins and the owner can curate.");
+    }
+    if (
+      intent.kind === "assert" &&
+      intent.action.kind === "restrict" &&
+      intent.action.capabilities === undefined &&
+      intent.action.nullifyVotes === undefined
+    ) {
+      throw err("invalid_input", "A restriction names its capabilities or nullifyVotes.");
     }
     const rank = RANK[role] ?? 0;
     const copy = clone(intent);
@@ -2215,13 +2223,21 @@ export class MockEngine implements EngineApi {
             break;
           }
           case "restrict": {
+            // one record holds both dimensions: the one left out keeps its current value, as
+            // the engine merges (engine-api.md §3.5 `mod_action`)
+            const target = this.actorRec(subject);
+            const caps = a.capabilities ?? target.restricted ?? [];
+            const nullify = a.nullifyVotes ?? target.nullified === true;
+            if (caps.length > 0) target.restricted = [...caps];
+            else delete target.restricted;
+            if (nullify) target.nullified = true;
+            else delete target.nullified;
             for (const x of [...this.s.posts.values(), ...this.s.comments.values()]) {
               if (x.author !== subject || !listed(x.state)) continue;
               const cap = this.s.posts.has(x.uri) ? "post" : "comment";
-              if ((a.capabilities ?? []).includes(cap))
-                x.state = { kind: "hidden", reason: { kind: "restricted" } };
+              if (caps.includes(cap)) x.state = { kind: "hidden", reason: { kind: "restricted" } };
             }
-            value = (a.capabilities ?? []).join(",") || "none";
+            value = `restrict:${caps.join("+")},${nullify ? "nullify" : "unnullify"}`;
             break;
           }
           case "tier":
@@ -2260,6 +2276,11 @@ export class MockEngine implements EngineApi {
         if (post && copy.actionKey === "pin:forum") post.pinned = false;
         if (comment && copy.actionKey === "pin:thread") comment.pinned = false;
         if (post && copy.actionKey === "lock") post.locked = false;
+        if (copy.actionKey === "restrict" && isDid(subject)) {
+          const target = this.actorRec(subject);
+          delete target.restricted;
+          delete target.nullified;
+        }
         if (copy.actionKey === "access") {
           for (const x of [...this.s.posts.values(), ...this.s.comments.values()]) {
             if (

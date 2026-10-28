@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Moderation actions (data-model.md §6.7; social.md §4): for authorities, hide or keep, ban or
-// restrict the author (nullifying their votes), pin, set the tier, lock; for a post's author
+// restrict the author or nullify their votes, pin, set the tier, lock; for a post's author
 // (author scope, social.md §4.9), hide or pin a comment in their thread, ban its author from
 // their threads, lock their post. Each action is a public record with an optional reason. A ban
 // and a restriction are retroactive, which the dialog says before sending (§4.7); the engine's
-// notices are shown after. Undoing one's own action removes one's own record (§4.4: writing the
-// opposite value does not lift an equal-rank ban, and a keep is not an unhide).
+// notices are shown after. Restricting and nullifying share one `#restrict` record: each sends
+// only its own dimension, and the engine keeps the other as the moderator's record states it
+// (§4.2), so restricting never lifts a nullification nor nullifying a restriction. Undoing one's
+// own action removes one's own record (§4.4: writing the opposite value does not lift an
+// equal-rank ban, and a keep is not an unhide).
 
 import type {
   ActionTicket,
@@ -31,6 +34,8 @@ type Assert =
   | "keep"
   | "ban"
   | "restrict"
+  | "nullify"
+  | "unnullify"
   | "pin"
   | "unpin"
   | "tierPersonal"
@@ -56,6 +61,8 @@ const LABELS: Record<Choice, string> = {
   keep: "Keep (override hides and collapses)",
   ban: "Ban the author from this forum",
   restrict: "Restrict the author",
+  nullify: "Nullify the author's votes (they carry no weight)",
+  unnullify: "Let the author's votes count again",
   pin: "Pin",
   unpin: "Unpin",
   tierPersonal: "Tier: personal",
@@ -65,7 +72,7 @@ const LABELS: Record<Choice, string> = {
   unlock: "Unlock comments",
   removeHide: "Remove my hide or keep",
   removeAccess: "Remove my ban of the author (unban)",
-  removeRestrict: "Remove my restriction of the author",
+  removeRestrict: "Remove my restriction of the author (and my nullification of their votes)",
   removePin: "Remove my pin",
   removeTier: "Remove my tier",
   removeLock: "Remove my lock",
@@ -121,7 +128,7 @@ const isRemove = (c: Choice): c is Remove => c.startsWith("remove");
 function actionFor(
   choice: Assert,
   subject: ModSubject,
-  restrict: { capabilities: Capability[]; nullifyVotes: boolean },
+  capabilities: Capability[],
 ): { subject: string; action: ModActionValue } {
   const tier = (t: Tier): { subject: string; action: ModActionValue } => ({
     subject: subject.uri,
@@ -146,15 +153,13 @@ function actionFor(
       };
     case "ban":
       return { subject: subject.author, action: { kind: "access", level: "banned" } };
+    // one dimension each: the engine keeps the other as the moderator's record states it
     case "restrict":
-      return {
-        subject: subject.author,
-        action: {
-          kind: "restrict",
-          capabilities: restrict.capabilities,
-          nullifyVotes: restrict.nullifyVotes,
-        },
-      };
+      return { subject: subject.author, action: { kind: "restrict", capabilities } };
+    case "nullify":
+      return { subject: subject.author, action: { kind: "restrict", nullifyVotes: true } };
+    case "unnullify":
+      return { subject: subject.author, action: { kind: "restrict", nullifyVotes: false } };
     case "pin":
       return { subject: subject.uri, action: { kind: "pin", scope: pinScope, pinned: true } };
     case "unpin":
@@ -191,6 +196,8 @@ export function modChoices(subject: ModSubject, scope: ModScope, canCurate: bool
     "keep",
     "ban",
     "restrict",
+    "nullify",
+    "unnullify",
     subject.pinned ? "unpin" : "pin",
   ];
   if (subject.kind === "post") {
@@ -240,7 +247,6 @@ export function ModMenu({
   const [reason, setReason] = useState("");
   const [showReason, setShowReason] = useState(true);
   const [capabilities, setCapabilities] = useState<Capability[]>(["post", "comment"]);
-  const [nullifyVotes, setNullifyVotes] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -263,10 +269,7 @@ export function ModMenu({
       if (isRemove(choice)) {
         intent = { kind: "remove", forum, scope, ...REMOVE_KEY[choice](subject) };
       } else {
-        const { subject: target, action } = actionFor(choice, subject, {
-          capabilities,
-          nullifyVotes,
-        });
+        const { subject: target, action } = actionFor(choice, subject, capabilities);
         if (action.kind === "hide") action.showReason = showReason;
         intent = {
           kind: "assert",
@@ -336,14 +339,6 @@ export function ModMenu({
                 {what}
               </label>
             ))}
-            <label className={styles.choice}>
-              <input
-                type="checkbox"
-                checked={nullifyVotes}
-                onChange={(e) => setNullifyVotes(e.target.checked)}
-              />
-              Nullify their votes (they carry no weight)
-            </label>
           </fieldset>
         )}
         {!isRemove(choice) && (
@@ -386,7 +381,7 @@ export function ModMenu({
           <button
             type="button"
             className={ui.primary}
-            disabled={busy || (choice === "restrict" && capabilities.length === 0 && !nullifyVotes)}
+            disabled={busy || (choice === "restrict" && capabilities.length === 0)}
             onClick={() => void submit()}
           >
             Apply
