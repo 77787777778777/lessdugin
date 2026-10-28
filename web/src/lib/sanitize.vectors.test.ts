@@ -11,15 +11,7 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
-import {
-  HTML_CLASS_TOKENS,
-  HTML_RULES,
-  LFM_CONFIG,
-  LFM_URI_REGEXP,
-  MATHML_ATTRS,
-  MATHML_CLASSES,
-  sanitizeLfm,
-} from "./sanitize.ts";
+import { MATHML_CLASSES, sanitizeLfm } from "./sanitize.ts";
 
 // vitest runs from web/ (jsdom's import.meta.url is not a file: URL).
 const VECTORS = `${resolve(process.cwd(), "../testdata/vectors")}/`;
@@ -110,74 +102,5 @@ describe("MathML classes", () => {
     expect([...used].filter((t) => !MATHML_CLASSES.has(t))).toEqual([]);
     // the corpus exercises every token (testdata/vectors/mathml/gen_mathml.py)
     expect([...MATHML_CLASSES].filter((t) => !used.has(t))).toEqual([]);
-  });
-});
-
-// lfm-1.md §8.5: the DOMPurify configuration is the §8.2/§7.3 allowlist and nothing else, the
-// tables `allowlist::dompurify_config_json()` is built from (crates/markdown/src/allowlist.rs,
-// src/math/normalize.rs). The vectors above catch a sanitiser that is too strict; these catch one
-// that is too loose: a tag, attribute, class token or URI scheme removed from the Rust tables
-// must be removed here too (review finding m4-25).
-describe("the DOMPurify configuration is the Rust allowlist", () => {
-  const allowlist = (): string => readFileSync(`${CRATE}src/allowlist.rs`, "utf8");
-  const normalize = (): string => readFileSync(`${CRATE}src/math/normalize.rs`, "utf8");
-  const strings = (text: string): string[] =>
-    [...text.matchAll(/"([^"]*)"/g)].map((m) => m[1] as string);
-  /** A `&[(&str, &[&str])]` table as tag → strings. */
-  const pairs = (src: string, name: string): Map<string, string[]> => {
-    const start = src.indexOf(`pub const ${name}: &[(&str, &[&str])] = &[`);
-    const end = src.indexOf("\n];", start);
-    expect(start).toBeGreaterThan(-1);
-    const body = src.slice(start, end);
-    const out = new Map<string, string[]>();
-    for (const m of body.matchAll(/\(\s*"([a-z0-9-]+)",\s*&\[([^\]]*)\],?\s*\)/g)) {
-      out.set(m[1] as string, strings(m[2] as string));
-    }
-    return out;
-  };
-  const list = (src: string, decl: string): string[] => {
-    const start = src.indexOf(decl);
-    expect(start).toBeGreaterThan(-1);
-    return strings(src.slice(start, src.indexOf("];", start)));
-  };
-  const sorted = (xs: Iterable<string>): string[] => [...new Set(xs)].sort();
-
-  const html = pairs(allowlist(), "HTML_ALLOWLIST");
-  const mathTags = list(normalize(), "const ALLOWED: &[&str] = &[");
-  const mathAttrs = list(normalize(), "pub const MATHML_ATTRIBUTES: &[&str] = &[");
-
-  it("allows exactly the Rust tags and attributes", () => {
-    expect(html.size).toBeGreaterThan(30);
-    expect(sorted(LFM_CONFIG.ALLOWED_TAGS)).toEqual(sorted([...html.keys(), ...mathTags]));
-    const attrs = sorted([...[...html.values()].flat(), ...mathAttrs]);
-    expect(sorted(LFM_CONFIG.ALLOWED_ATTR)).toEqual(attrs);
-    expect(sorted(LFM_CONFIG.ADD_URI_SAFE_ATTR)).toEqual(attrs.filter((a) => a !== "href"));
-    expect(sorted(MATHML_ATTRS)).toEqual(sorted(mathAttrs));
-  });
-
-  it("gives each HTML element exactly its Rust attributes", () => {
-    for (const [tag, attrs] of html) {
-      expect({ tag, attrs: sorted(Object.keys(HTML_RULES[tag] ?? {})) }).toEqual({
-        tag,
-        attrs: sorted(attrs),
-      });
-    }
-    // an element without attributes has no rules
-    const withAttrs = [...html].filter(([, attrs]) => attrs.length > 0).map(([tag]) => tag);
-    expect(sorted(Object.keys(HTML_RULES))).toEqual(sorted(withAttrs));
-  });
-
-  it("allows exactly the Rust class tokens", () => {
-    const classes = pairs(allowlist(), "CLASS_ALLOWLIST");
-    expect(classes.size).toBeGreaterThan(5);
-    expect(
-      Object.fromEntries(Object.entries(HTML_CLASS_TOKENS).map(([t, c]) => [t, sorted(c)])),
-    ).toEqual(Object.fromEntries([...classes].map(([t, c]) => [t, sorted(c)])));
-  });
-
-  it("uses the Rust URI pattern", () => {
-    const rust = /pub const ALLOWED_URI_REGEXP: &str = "([^"]*)";/.exec(allowlist())?.[1];
-    expect(rust).toBeDefined();
-    expect(LFM_URI_REGEXP.source).toBe(new RegExp(rust ?? "").source);
   });
 });

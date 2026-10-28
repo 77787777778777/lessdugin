@@ -8,9 +8,10 @@
 //   the URI regexp, and hooks that enforce per-element attributes, class tokens, value grammars
 //   and whole-element shapes. `ALLOW_ARIA_ATTR: false` and `ADD_URI_SAFE_ATTR` keep it exact:
 //   without the latter DOMPurify would test every non-URL attribute value (`dir="auto"`, `rel`,
-//   …) against the URI regexp and drop it. Its tags, attributes (per element), class tokens
-//   and URI pattern are the tables `allowlist::dompurify_config_json()` is built from, which
-//   sanitize.vectors.test.ts compares entry for entry with crates/markdown, both ways.
+//   …) against the URI regexp and drop it. Its tags, attributes (per element), class tokens,
+//   URI pattern and options are the tables and values `allowlist::dompurify_config_json()` is
+//   built from, which sanitize.allowlist.test.ts compares entry for entry with crates/markdown,
+//   both ways; it probes the value grammars against the patterns of lfm-1.md §8.2.
 // - The sanitiser is a dedicated DOMPurify instance, configured once with `setConfig`: its hooks
 //   and configuration never leak into (or from) any other user of the shared default instance.
 // - The Trusted Types policy `lessdugin-md` wraps `sanitize(html)`. It is created once, at
@@ -252,7 +253,7 @@ const EXTERNAL_HREF = /^(?:https?:\/\/|mailto:)/;
 const WEB_HREF = /^https?:\/\//;
 
 /** Class tokens per element (lfm-1.md §8.2; `code` also takes `language-*` inside `pre`). The
- * same table as `allowlist::CLASS_ALLOWLIST` (checked by sanitize.vectors.test.ts). */
+ * same table as `allowlist::CLASS_ALLOWLIST` (checked by sanitize.allowlist.test.ts). */
 export const HTML_CLASS_TOKENS: Readonly<Record<string, readonly string[]>> = {
   div: [
     "lfm",
