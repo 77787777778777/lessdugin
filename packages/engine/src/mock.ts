@@ -2218,10 +2218,10 @@ export class MockEngine implements EngineApi {
             for (const x of [...this.s.posts.values(), ...this.s.comments.values()]) {
               if (x.author !== subject || !listed(x.state)) continue;
               const cap = this.s.posts.has(x.uri) ? "post" : "comment";
-              if (a.capabilities.includes(cap))
+              if ((a.capabilities ?? []).includes(cap))
                 x.state = { kind: "hidden", reason: { kind: "restricted" } };
             }
-            value = a.capabilities.join(",") || "none";
+            value = (a.capabilities ?? []).join(",") || "none";
             break;
           }
           case "tier":

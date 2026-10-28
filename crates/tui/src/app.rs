@@ -2672,16 +2672,17 @@ impl State {
             }
             e.push(entry(
                 "restrict the author (posting)",
+                // the engine keeps the dimension an entry leaves out (m3r-2)
                 user_assert(ModActionValue::Restrict {
-                    capabilities: vec![Capability::Post, Capability::Comment],
-                    nullify_votes: false,
+                    capabilities: Some(vec![Capability::Post, Capability::Comment]),
+                    nullify_votes: None,
                 }),
             ));
             e.push(entry(
                 "nullify the author's votes",
                 user_assert(ModActionValue::Restrict {
-                    capabilities: vec![],
-                    nullify_votes: true,
+                    capabilities: None,
+                    nullify_votes: Some(true),
                 }),
             ));
             e.push(entry("unrestrict", user_remove("restrict")));
@@ -4083,6 +4084,7 @@ mod tests {
             state: WriteState::Done {
                 uri: "at://did:plc:x/c/1".into(),
                 cid: None,
+                report: Vec::new(),
             },
         }))
     }
@@ -4260,6 +4262,7 @@ mod tests {
                 state: WriteState::Done {
                     uri: "at://x".into(),
                     cid: None,
+                    report: Vec::new(),
                 },
             },
         ])));
