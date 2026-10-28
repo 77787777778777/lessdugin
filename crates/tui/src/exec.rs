@@ -702,8 +702,9 @@ async fn spilled_about<H: Host>(
     forum: &str,
     md: &serde_json::Value,
 ) -> Result<String, EngineError> {
-    let blob = lessdugin_core::model::render::text_blob_cid(md)
-        .ok_or_else(|| EngineError::invalid_input("the forum's about text is not one the TUI can edit"))?;
+    let blob = lessdugin_core::model::render::text_blob_cid(md).ok_or_else(|| {
+        EngineError::invalid_input("the forum's about text is not one the TUI can edit")
+    })?;
     if let Some(src) = stored_text_blob(engine, blob).await {
         return Ok(src);
     }
