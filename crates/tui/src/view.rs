@@ -31,7 +31,7 @@ use crate::text::{
 /// members only through third-party infrastructure.
 pub const OPEN_MODE_LABEL: &str = "Open mode relies on Bluesky relay, Jetstream and Constellation";
 
-/// The banner code of that label, should the engine carry it (`relayDependent`).
+/// The banner code of that label in the engine's forum view (`relayDependent`).
 const RELAY_DEPENDENT: &str = "relayDependent";
 
 fn dim() -> Style {
@@ -885,20 +885,20 @@ fn forum(top: &Screen, s: &ForumScreen, h: usize, w: usize, lines: &mut Vec<Line
     for b in banner_lines(&d.list.banners) {
         lines.push(line([(lit("  "), Style::default()), (b, warn_style())]));
     }
-    // the L7 label of an open forum (`threat-model.md` L7, SOC-13), unless the engine already
-    // carries it as a banner
-    if d.view.forum.membership == MembershipMode::Open
-        && !d
-            .list
-            .banners
-            .iter()
-            .chain(&d.view.banners)
-            .any(|b| b.code == RELAY_DEPENDENT)
-    {
-        lines.push(line([
-            (lit("  "), Style::default()),
-            (cat([lit("! "), lit(OPEN_MODE_LABEL)]), dim()),
-        ]));
+    // the L7 label of an open forum (`threat-model.md` L7, SOC-13): the forum view's
+    // `relayDependent` banner, or the TUI's own when the engine carries none (once: the list's
+    // banners are drawn above)
+    if !d.list.banners.iter().any(|b| b.code == RELAY_DEPENDENT) {
+        let label = match d.view.banners.iter().find(|b| b.code == RELAY_DEPENDENT) {
+            Some(b) => Some(tt(&b.message)),
+            None => (d.view.forum.membership == MembershipMode::Open).then(|| lit(OPEN_MODE_LABEL)),
+        };
+        if let Some(label) = label {
+            lines.push(line([
+                (lit("  "), Style::default()),
+                (cat([lit("! "), label]), dim()),
+            ]));
+        }
     }
     if s.tab == ForumTab::Activity {
         activity(top, s, h, w, lines);

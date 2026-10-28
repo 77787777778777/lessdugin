@@ -416,7 +416,8 @@ fn an_open_forum_says_it_relies_on_public_relays() {
     let mut t = tui(&s, 80, 24);
     block_on(t.start(Some(forum.clone())));
     let screen = t.render();
-    assert!(screen.contains(OPEN_MODE_LABEL), "{screen}");
+    // the engine's `relayDependent` banner, shown once
+    assert_eq!(screen.matches(OPEN_MODE_LABEL).count(), 1, "{screen}");
     let mut t = tui(&s, 80, 24);
     block_on(t.start(Some(s.forum.clone())));
     let screen = t.render();
