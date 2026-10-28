@@ -1127,6 +1127,16 @@ fn fuzz(args: &[String]) -> Result<(), String> {
     ];
     seed_args.extend(targets.iter().copied());
     run("cargo", &seed_args)?;
+    // the targets link libFuzzer's C++ runtime dynamically; where the loader has no global
+    // library path (NixOS, the flake's `ci` shell) it is found next to the compiler's
+    let mut vars = Vec::new();
+    if let Some(dir) = cxx_runtime_dir() {
+        let mut path = dir.display().to_string();
+        if let Some(old) = env::var_os("LD_LIBRARY_PATH").filter(|v| !v.is_empty()) {
+            path = format!("{path}:{}", old.to_string_lossy());
+        }
+        vars.push(("LD_LIBRARY_PATH".to_owned(), path));
+    }
     let mut failed = Vec::new();
     for t in &targets {
         let (_, max_len, timeout) = FUZZ_TARGETS
@@ -1164,7 +1174,7 @@ fn fuzz(args: &[String]) -> Result<(), String> {
         }
         a.extend(extra.iter().cloned());
         let a: Vec<&str> = a.iter().map(String::as_str).collect();
-        if run("cargo", &a).is_err() {
+        if run_env("cargo", &a, &vars).is_err() {
             failed.push(*t);
         }
     }
@@ -1177,6 +1187,21 @@ fn fuzz(args: &[String]) -> Result<(), String> {
             failed.join(", ")
         ))
     }
+}
+
+/// The directory of the C++ runtime (`libstdc++.so.6`) the C++ compiler links, as
+/// `g++ -print-file-name` (or `c++`) names it; `None` when neither gives a path that exists.
+fn cxx_runtime_dir() -> Option<PathBuf> {
+    ["g++", "c++"].into_iter().find_map(|cxx| {
+        let out = Command::new(cxx)
+            .arg("-print-file-name=libstdc++.so.6")
+            .output()
+            .ok()?;
+        let p = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+        (p.is_absolute() && p.exists())
+            .then(|| p.parent().map(Path::to_path_buf))
+            .flatten()
+    })
 }
 
 #[cfg(test)]
