@@ -4083,6 +4083,7 @@ mod tests {
             state: WriteState::Done {
                 uri: "at://did:plc:x/c/1".into(),
                 cid: None,
+                report: Vec::new(),
             },
         }))
     }
@@ -4260,6 +4261,7 @@ mod tests {
                 state: WriteState::Done {
                     uri: "at://x".into(),
                     cid: None,
+                    report: Vec::new(),
                 },
             },
         ])));

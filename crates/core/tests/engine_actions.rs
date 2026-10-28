@@ -1032,6 +1032,24 @@ fn mods_rm_adopts_only_what_counted() {
     }
     let decl = alice.record(nsid::FORUM, "meta").unwrap();
     assert_eq!(decl["moderators"].as_array().unwrap().len(), 1, "{decl}");
+    // what was not adopted is in the adoption's result (engine-api.md §3.5, sec-8)
+    let report: Vec<String> = block_on(alice.engine.writes())
+        .unwrap()
+        .into_iter()
+        .flat_map(|t| match t.state {
+            WriteState::Done { report, .. } => report,
+            _ => Vec::new(),
+        })
+        .collect();
+    for k in rogue.iter().chain([&rkey(&hidden)]) {
+        assert!(
+            report
+                .iter()
+                .any(|l| l.starts_with("cannot adopt") && l.contains(k.as_str())),
+            "{k}: {report:?}"
+        );
+    }
+    assert_eq!(report.len(), 3, "{report:?}");
 }
 
 /// A moderator whose account is taken down keeps moderating for the retention time (`sync.md`

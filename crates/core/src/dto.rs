@@ -1174,7 +1174,9 @@ dto! {
     /// `pending` may say why it waits (held for the undo window, throttled by the write budget,
     /// a rate limit or a back-off, or `needsLogin`: the account's session was refused and the
     /// write waits until the account logs in again), until when, and the `error` that caused
-    /// the wait; a conflict is `failed` with code `conflict`.
+    /// the wait; a conflict is `failed` with code `conflict`. A done `mod_adopt` (also the one
+    /// `mods_set` runs first) carries its `report`: one line per assertion it did not adopt or
+    /// kept (`data-model.md` §8.6).
     pub enum WriteState {
         #[serde(rename_all = "camelCase")]
         Pending {
@@ -1195,6 +1197,8 @@ dto! {
             uri: String,
             #[serde(default, skip_serializing_if = "Option::is_none")]
             cid: Option<String>,
+            #[serde(default, skip_serializing_if = "Vec::is_empty")]
+            report: Vec<String>,
         },
         Failed { error: crate::engine::EngineError },
         Undone,
@@ -1992,11 +1996,23 @@ mod tests {
         let done = WriteState::Done {
             uri: "at://x/y/z".into(),
             cid: None,
+            report: Vec::new(),
         };
         assert_eq!(
             serde_json::to_string(&done).unwrap(),
             r#"{"kind":"done","uri":"at://x/y/z"}"#
         );
+        let adopted = WriteState::Done {
+            uri: "at://x/y/z".into(),
+            cid: None,
+            report: vec!["kept own assertion for at://x/y/1".into()],
+        };
+        let json = serde_json::to_string(&adopted).unwrap();
+        assert_eq!(
+            json,
+            r#"{"kind":"done","uri":"at://x/y/z","report":["kept own assertion for at://x/y/1"]}"#
+        );
+        assert_eq!(serde_json::from_str::<WriteState>(&json).unwrap(), adopted);
         assert_eq!(
             serde_json::to_string(&WriteState::Undone).unwrap(),
             r#"{"kind":"undone"}"#

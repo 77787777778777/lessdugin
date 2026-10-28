@@ -1046,8 +1046,9 @@ export type WriteState =
       error?: EngineError;
     }
   | { kind: "sending" }
-  /** `cid` is absent for deletes. */
-  | { kind: "done"; uri: AtUri; cid?: Cid }
+  /** `cid` is absent for deletes. `report`: a done `modAdopt` (also the one `modsSet` runs
+   * first) lists, one line each, the assertions it did not adopt or kept. */
+  | { kind: "done"; uri: AtUri; cid?: Cid; report?: string[] }
   | { kind: "failed"; error: EngineError }
   | { kind: "undone" };
 
