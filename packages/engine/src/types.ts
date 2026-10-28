@@ -1004,11 +1004,13 @@ export type AccessLevel = "banned" | "member";
 export type PinScope = "forum" | "thread";
 
 /** A modAction `action` as a client asks for it (data-model.md §6.7): the complete desired state
- * of its action key. Defaults: `spam` false, `showReason` true, `nullifyVotes` false. */
+ * of its action key. Defaults: `spam` false, `showReason` true. One `#restrict` record holds both
+ * `capabilities` and `nullifyVotes`: the one a `restrict` leaves out keeps the account's current
+ * value (none yet: no capability, `false`); naming neither is refused. */
 export type ModActionValue =
   | { kind: "hide"; hidden: boolean; spam?: boolean; showReason?: boolean }
   | { kind: "access"; level: AccessLevel }
-  | { kind: "restrict"; capabilities: Capability[]; nullifyVotes?: boolean }
+  | { kind: "restrict"; capabilities?: Capability[]; nullifyVotes?: boolean }
   | { kind: "tier"; tier: Tier; notice?: BodyDraft }
   | { kind: "pin"; scope: PinScope; pinned: boolean }
   | { kind: "lock"; locked: boolean }

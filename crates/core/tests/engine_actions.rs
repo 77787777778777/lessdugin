@@ -551,8 +551,8 @@ fn opinion_checks_refuse_what_could_never_count() {
         &w.forum,
         &bob.did(),
         ModActionValue::Restrict {
-            capabilities: vec![Capability::Vote],
-            nullify_votes: false,
+            capabilities: Some(vec![Capability::Vote]),
+            nullify_votes: Some(false),
         },
     ));
     alice.flush();
@@ -749,8 +749,8 @@ fn rank_role_and_subject_rules() {
         &w.forum,
         &w.dave.did(),
         ModActionValue::Restrict {
-            capabilities: vec![Capability::Comment, Capability::Post],
-            nullify_votes: true,
+            capabilities: Some(vec![Capability::Comment, Capability::Post]),
+            nullify_votes: Some(true),
         },
     ));
     assert_eq!(t.notices[0].code, NoticeCode::Retroactive);
@@ -761,6 +761,60 @@ fn rank_role_and_subject_rules() {
         .unwrap();
     assert_eq!(rec["action"]["capabilities"], json!(["post", "comment"]));
     assert_eq!(rec["action"]["nullifyVotes"], true);
+}
+
+/// `restrict` and `nullify` edit the one `#restrict` record of (moderator, subject) (`social.md`
+/// §4.2): each keeps the dimension it leaves out, from the cached record or from a write of it
+/// not sent yet, so nullifying never lifts a restriction and restricting never lifts a
+/// nullification (m3r-2).
+#[test]
+fn restrict_and_nullify_keep_each_others_dimension() {
+    let w = World::new();
+    let (alice, dave) = (&w.alice, &w.dave);
+    let restrict = |capabilities: Option<Vec<Capability>>, nullify_votes: Option<bool>| {
+        assert_mod(
+            &w.forum,
+            &dave.did(),
+            ModActionValue::Restrict {
+                capabilities,
+                nullify_votes,
+            },
+        )
+    };
+    let sent = |t: &ActionTicket| -> (Value, Value) {
+        let uri = alice.done(&t.ticket());
+        let rec = alice
+            .record(nsid::MOD_ACTION, uri.rsplit('/').next().unwrap())
+            .unwrap();
+        (
+            rec["action"]["capabilities"].clone(),
+            rec["action"].get("nullifyVotes").cloned().unwrap_or(json!(false)),
+        )
+    };
+    let t = alice.mod_action(restrict(
+        Some(vec![Capability::Post, Capability::Comment]),
+        None,
+    ));
+    assert_eq!(t.notices[0].code, NoticeCode::Retroactive);
+    alice.flush();
+    assert_eq!(sent(&t), (json!(["post", "comment"]), json!(false)));
+    // nullify: the restriction stays (no retroactivity notice: it restricts nothing new)
+    let t = alice.mod_action(restrict(None, Some(true)));
+    assert!(t.notices.is_empty(), "{t:?}");
+    alice.flush();
+    assert_eq!(sent(&t), (json!(["post", "comment"]), json!(true)));
+    // restrict again: the nullification stays
+    let t = alice.mod_action(restrict(Some(vec![Capability::Vote]), None));
+    alice.flush();
+    assert_eq!(sent(&t), (json!(["vote"]), json!(true)));
+    // both queued before either is sent: the second builds on the first
+    alice.mod_action(restrict(Some(vec![Capability::Comment]), Some(false)));
+    let t = alice.mod_action(restrict(None, Some(true)));
+    alice.flush();
+    assert_eq!(sent(&t), (json!(["comment"]), json!(true)));
+    // a restrict that names neither dimension is refused
+    let e = alice.mod_err(restrict(None, None));
+    assert_eq!(e.code, ErrorCode::InvalidInput, "{e:?}");
 }
 
 #[test]

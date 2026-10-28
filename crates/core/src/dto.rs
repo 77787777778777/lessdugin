@@ -1641,9 +1641,12 @@ fn yes() -> bool {
 dto! {
     /// A modAction `action` as a client asks for it (`data-model.md` §6.7). A record states the
     /// complete desired state of its action key (`social.md` §4.2): a `restrict` lists every
-    /// capability, a `hide` says whether it is spam. `lock.allowed` is computed by the engine
-    /// from its view of the thread (`data-model.md` §8.6); `tag.head` is a wikiRevision uri
-    /// (its CID is the cached version's).
+    /// capability, a `hide` says whether it is spam. One `#restrict` record carries both
+    /// dimensions, so a `restrict` that leaves `capabilities` or `nullifyVotes` out keeps the
+    /// acting account's current value of it (restricting does not lift a nullification, nor
+    /// nullifying a restriction). `lock.allowed` is computed by the engine from its view of the
+    /// thread (`data-model.md` §8.6); `tag.head` is a wikiRevision uri (its CID is the cached
+    /// version's).
     pub enum ModActionValue {
         #[serde(rename_all = "camelCase")]
         Hide {
@@ -1656,9 +1659,10 @@ dto! {
         Access { level: AccessLevel },
         #[serde(rename_all = "camelCase")]
         Restrict {
-            capabilities: Vec<Capability>,
-            #[serde(default)]
-            nullify_votes: bool,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            capabilities: Option<Vec<Capability>>,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            nullify_votes: Option<bool>,
         },
         Tier {
             tier: Tier,
