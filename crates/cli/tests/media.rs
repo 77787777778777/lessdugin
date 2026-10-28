@@ -14,9 +14,12 @@ use fakenet::{Net, User, s, text};
 use lessdugin_lexicon::collection::nsid;
 use serde_json::Value;
 
-/// A PNG signature and header: the pipeline sniffs it, and there is nothing to strip.
-const PNG: &[u8] =
-    b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00";
+/// A 1x1 PNG (IHDR, IDAT, IEND): the pipeline sniffs and walks it (a file it cannot walk is
+/// refused, `data-model.md` §8.8), and there is nothing to strip.
+const PNG: &[u8] = b"\x89PNG\r\n\x1a\n\
+    \x00\x00\x00\x0dIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\
+    \x00\x00\x00\x0bIDAT\x78\xda\x63\x60\x00\x02\x00\x00\x05\x00\x01\xe9\xfa\xdc\xd8\
+    \x00\x00\x00\x00IEND\xae\x42\x60\x82";
 const PDF: &[u8] = b"%PDF-1.4\n% a report\n%%EOF\n";
 
 fn raw_cid(b: &[u8]) -> String {
@@ -161,7 +164,8 @@ fn media_add_prepares_a_file_that_a_post_names_by_cid() {
     assert_eq!(m["cid"], cid.as_str(), "{m}");
     assert_eq!(m["mime"], "image/png", "{m}");
     assert_eq!(m["sizeBytes"], PNG.len(), "{m}");
-    // the human output is the line to put in a post; no alt text is warned about
+    // the human output is the line to put in a post; no alt text is warned about, with the
+    // core's missingAlt notice (every client says the same)
     let out = alice.run(&["media", "add", s(&file)]);
     assert!(out.status.success(), "{}", text(&out.stderr));
     assert!(
@@ -170,10 +174,12 @@ fn media_add_prepares_a_file_that_a_post_names_by_cid() {
         text(&out.stdout)
     );
     assert!(
-        text(&out.stderr).contains("no alt text"),
+        text(&out.stderr).contains(lessdugin_core::media::MISSING_ALT),
         "{}",
         text(&out.stderr)
     );
+    let m = alice.json(&["media", "add", s(&file), "--alt", " "]);
+    assert_eq!(m["notices"][0]["code"], "missingAlt", "{m}");
 
     let f = alice.file(
         "p.md",
