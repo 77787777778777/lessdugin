@@ -488,12 +488,11 @@ impl<H: Host> Engine<H> {
             };
             match &a.action {
                 Action::Hide(h) if !h.hidden() => keep = true,
-                Action::Tier(t) => match t.tier() {
-                    Some(t @ (LexTier::Frontpage | LexTier::Curated)) => {
+                Action::Tier(t) => {
+                    if let Some(t @ (LexTier::Frontpage | LexTier::Curated)) = t.tier() {
                         tier = tier.max(Some(t));
                     }
-                    _ => {}
-                },
+                }
                 Action::Pin(p) if p.pinned() => pin = true,
                 _ => {}
             }
