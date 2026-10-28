@@ -738,9 +738,7 @@ impl<H: Host> Syncer<H> {
                         Err(_) => return,
                     };
                     if let Ok((status, detail)) = self.repo_status_at(s, &svc, did).await {
-                        repo.status = status;
-                        repo.status_detail = detail;
-                        repo.status_at = now;
+                        repo.set_status(status, detail, now);
                     }
                 }
                 None => {}
@@ -787,9 +785,7 @@ impl<H: Host> Syncer<H> {
             .repo(did.as_str())
             .await?
             .unwrap_or_else(|| RepoRow::new(&pds));
-        repo.status = status;
-        repo.status_detail = detail;
-        repo.status_at = s.host().now_ms();
+        repo.set_status(status, detail, s.host().now_ms());
         let mut b = store.batch();
         b.put_repo(did.as_str(), &repo)?;
         b.commit().await?;
@@ -865,6 +861,7 @@ impl<H: Host> Syncer<H> {
                 // later)
                 repo.status = AccountStatus::Active;
                 repo.status_detail = None;
+                repo.inactive_since = None;
             }
         }
 

@@ -25,6 +25,7 @@ use crate::host::Host;
 use crate::limits;
 use crate::store::RepoStatus;
 use crate::store::records::RecordStore;
+use crate::store::repo::AccountStatus;
 use crate::store::schema::{GLOBAL_SCOPE, scope_of};
 use crate::sync::queue::ready_time;
 use crate::sync::{
@@ -259,11 +260,31 @@ impl<H: Host> Engine<H> {
         Ok(jobs)
     }
 
+    /// The repo status in scope `fk` and the account status of each of `dids`.
+    async fn repo_states(
+        &self,
+        fk: &str,
+        dids: &[&str],
+    ) -> Result<Vec<Option<(RepoStatus, AccountStatus)>>, EngineError> {
+        let repos = RecordStore::new(self.host.cache())
+            .repos(dids)
+            .await
+            .map_err(store_error)?;
+        Ok(repos
+            .into_iter()
+            .map(|r| r.map(|r| (r.repo_status(fk), r.status)))
+            .collect())
+    }
+
     /// The authority step `forum_open` schedules (`engine-api.md` §3.2): authorities never
     /// synced are synced now at P0 within [`limits::FORUM_OPEN_SYNC_BUDGET_MS`], stale ones
     /// are queued for `live_tail`. Failures are logged (the header then shows the forum as
-    /// degraded). Returns whether the cache changed.
+    /// degraded), and a failed authority is not tried again by `forum_open` within
+    /// [`limits::FORUM_REOPEN_MS`]. Returns whether the cache changed (a record, or a repo's
+    /// status); only then is the model dropped and `Changed [Forum]` emitted, so a client that
+    /// re-queries on `Changed` does not loop on an authority that stays unavailable.
     pub(crate) async fn sync_authorities(&self, opened: &OpenedForum) -> bool {
+        let now = self.host.now_ms();
         let jobs = match self.authority_jobs(opened, false).await {
             Ok(j) => j,
             Err(e) => {
@@ -271,21 +292,35 @@ impl<H: Host> Engine<H> {
                 return false;
             }
         };
+        let jobs: Vec<SyncRequest> = jobs
+            .into_iter()
+            .filter(|r| self.rt.authority_due(r.did.as_str(), now))
+            .collect();
         if jobs.is_empty() {
             return false;
         }
+        let fk = opened.key.fk.as_str();
+        let dids: Vec<&str> = jobs.iter().map(|r| r.did.as_str()).collect();
+        let before = self.repo_states(fk, &dids).await;
         let s = self.p0_session(None, Some(limits::FORUM_OPEN_SYNC_BUDGET_MS));
         let sy = self.syncer();
         let reports = join_all(jobs.iter().map(|r| sy.sync_repo(&s, r))).await;
+        let at = self.host.now_ms();
         for r in &reports {
             if let Some(e) = &r.error {
                 tracing::warn!(did = %r.did, error = %e, "authority sync");
             }
+            self.rt.authority_tried(&r.did, r.error.is_some(), at);
         }
-        let f = opened.key.uri.as_str();
-        self.rt.invalidate(f);
-        self.rt.bus.changed([Topic::Forum { uri: f.to_owned() }]);
-        true
+        let changed = reports.iter().any(|r| r.changed > 0)
+            || before.is_err()
+            || self.repo_states(fk, &dids).await.ok() != before.ok();
+        if changed {
+            let f = opened.key.uri.as_str();
+            self.rt.invalidate(f);
+            self.rt.bus.changed([Topic::Forum { uri: f.to_owned() }]);
+        }
+        changed
     }
 
     /// `sync_thread(uri, SyncOpts)` (`engine-api.md` §3.3) for a post or a comment (its

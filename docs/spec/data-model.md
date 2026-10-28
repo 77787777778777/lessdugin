@@ -365,7 +365,7 @@ The same `b32s` implementation reproduces the superseded draft vectors (`ncepyao
 
 **`#media`**
 - `blob` holds the object returned by `uploadBlob`, verbatim (§8.8).
-- `alt` is the accessible description. Writers warn when it is missing.
+- `alt` is the accessible description. Writers warn when it is missing, and write a blank one as absent, never as `""` (the engine's `prepare_media` reports it with a `missingAlt` notice).
 - `aspectRatio` is a layout hint. Display clamps it to between 1:20 and 20:1.
 - `durationMs` applies to audio and video.
 - `name` is opt-in, display-only, and a basename only. Readers MUST ignore a `name` that contains `/`, `\`, a C0 or C1 control, or U+2028/U+2029.
@@ -408,6 +408,7 @@ The same `b32s` implementation reproduces the superseded draft vectors (`ncepyao
    - Readers fetch the blob from the author's PDS through the streaming, CID-checked `Host::fetch_blob` (`sync.md`), so no blob bytes pass through wasm memory unbounded.
    - Readers accept any `text/*`, decode the bytes as UTF-8 whatever the charset parameter says, and strip one leading U+FEFF.
    - Invalid UTF-8, or a fetched blob whose sha256 does not match its CID, renders an "unreadable body" placeholder. The record stays valid.
+   - Until the blob is fetched the body is pending (`lfm-1.md` §1.3): the record's `excerpt` shows with a notice. A blob that cannot be fetched now (the network, or not within `BODY_BLOB_WAIT_MS`, which is as long as a view waits for it) keeps it pending and is asked for again after `BODY_BLOB_RETRY_MS` (`limits.md` §5). A blob the author's PDS reports missing (HTTP 400 "Blob not found") is missing, as for media (`sync.md` §11.1): it renders a "missing body" placeholder and is not asked for again. The engine fetches the spilled body of a post it shows (`get_post`, `get_thread`) when the fold lists that post (`Visible` or `Collapsed`), never of hidden, provisional or pending content (`sync.md` §11.4), and never for a post list, whose `excerpt` is all a list shows.
 4. `cid:` image URLs resolve only against `media[].blob.ref` of the same object (`lfm-1.md`). Media that the text does not reference renders as a gallery after the body.
 5. An unknown `profile` value is rendered as `lfm/1` with a badge (§13.3).
 6. An `md` union member with an unknown `$type` is not rendered: the UI shows "unsupported body format", and the record stays valid.
@@ -746,7 +747,7 @@ A record is considered at all only if it was admitted at trust level `pds` or `p
 - **`pds`:** fetched from the author's PDS (the one in the DID doc) over TLS, with JSON → DAG-CBOR → CIDv1 (dag-cbor, sha256) equal to the returned CID.
 - **`proven`:** proven by `proofs/1`.
 
-A third-party proof counts as current only if its rev is at least the head returned by the author PDS's `getLatestCommit`. Otherwise it is `[stale]` and is not a fold input. Hints (Jetstream, Constellation, relay, Slingshot, indexer JSON) are never fold inputs. Records of inactive repos are excluded (`sync.md`).
+A third-party proof counts as current only if its rev is at least the head returned by the author PDS's `getLatestCommit`. Otherwise it is `[stale]` and is not a fold input. Hints (Jetstream, Constellation, relay, Slingshot, indexer JSON) are never fold inputs. Records of inactive repos are excluded (`sync.md`), except an authority's modActions for a retention time (`sync.md` §3.4).
 
 ### 7.2 Generic rules (every collection)
 
@@ -985,7 +986,7 @@ edit(target, base, newValue, summary?):          // base = CID the user edited; 
 | Remove modAction (unhide, unban, unpin, unlock, unrestrict, …) | `applyWrites[#create revision{subject: {uri, cid: cur.cid}, op: "delete", record: cur.value}, #delete modAction]` with `swapCommit` = fresh head, retried as in §8.3. |
 | `mod adopt` | §8.6. |
 | Profile | No record: create-if-absent of `self`. Otherwise `putRecord(self, swapRecord = cid)`. Profiles have no revisions. |
-| Redact history | `applyWrites[#delete revision …]`, chunked at ≤ 200 ops. |
+| Redact history | an own post, comment or sequence `x`: when the write is sent, `listRecords(revision, prefix = P(x) + "-")` filtered to the records that name `x` (as §8.7: any key suffix, any spelling of the repo), then `applyWrites[#delete revision …]` of every one listed, chunked at ≤ 200 ops; so revisions the writer's device never synced, and invalid ones, go too. A forum's and a modAction's revisions are the mod log and are never redacted (`threat-model.md` SOC-7). |
 | Blob | §8.8. |
 
 **PDS semantics (ADR 0005, spike S12, reference PDS).**
@@ -1026,14 +1027,20 @@ empty(v) ⇔ v has no field other than $type, subject, forum, createdAt, updated
 
 ### 8.6 Moderation writes
 
-**`mod adopt <former>`.** Re-issues a former (or departing) moderator's forum-scope assertions under the acting authority.
+**`mod adopt <former>`.** Re-issues a departing moderator's forum-scope assertions that are in effect under the acting authority.
+
+When the write is made, the client syncs former's `{fk}-` range (P0) and takes `counted`: the (rkey, cid) of each of former's forum-scope assertions whose mod-log status (`social.md` §4.12) is `effective` in its fold, and the roles of A. Only those count for former. An `unauthorised`, `overridden`, `stale`, `expired` or `reserved/unknown` record never counted, so its copy would act at the adopter's rank where the original never did. A former moderator who is no longer listed in `moderators` has only `lapsed` records, so nothing of theirs can be adopted: `mods rm` adopts before it removes the entry.
 
 ```
-mod_adopt(forum, former):
+mod_adopt(forum, former, counted):
   originals = valid records (§7) in former's NS.modAction "{fk}-" range (fresh, complete listing)
               with scope_eff = forum, not lapsed (until > now)
   own       = fresh, complete listing of own NS.modAction "{fk}-" range
   for o in originals, rkey ascending:
+     if o.rkey ∉ counted:                     report "cannot adopt … never counted"; continue
+     if counted[o.rkey] ≠ o.cid:              report "cannot adopt … changed since"; continue
+     if social.md §4.3 condition 3 (rank) or 4 (role) fails for former as X, under counted's roles:
+                                              report "cannot adopt"; continue
      if the actor's role may not issue o.action (social.md table): report "cannot adopt"; continue
      v = copy of o.value (unknown fields kept) with adopts = {uri: o.uri, cid: o.cid}, createdAt = now, no updatedAt
      k = o.rkey                                  // same (scope, subject, actionKey) ⇒ same key
@@ -1046,6 +1053,8 @@ mod_adopt(forum, former):
   send ops in applyWrites batches of ≤ 200 ops (a revision and its update are never split),
   each with swapCommit = fresh head; on InvalidSwap or HTTP 500 re-list own range, recompute the remaining batches (≤ 3 tries)
 ```
+
+The report keeps its first 100 lines and then one line that counts the rest. `mods rm` also tells the owner, before anything is sent, how many assertions will be adopted and how many will not, by status.
 
 **`mods rm <did>`** is run by the owner, since the declaration is in the owner's repo.
 1. Run `mod adopt <did>` as the owner.
@@ -1061,14 +1070,17 @@ The CLI enforces this order. It MAY offer an explicit opt-out (for example for a
 
 ```
 delete(target):                                  // post | comment | sequence | forum
-  revs = fresh listing of own NS.revision records with rkey matching exactly P(target) + "-" + TID
-         and value.subject.uri = target           // the prefix alone is not enough (§3.2)
+  revs = fresh listing of own NS.revision records with rkey prefix P(target) + "-" that name target:
+         collection and rkey of value.subject.uri = those of target (any key suffix, any
+         spelling of the repo), or no value.subject.uri and rkey exactly P(target) + "-" + TID
+                                                  // the prefix alone is not enough (§3.2)
   chunk 1  = [#delete target] ++ first 199 of revs
   chunk i  = the next 200 of revs
   send the chunks in order with applyWrites (no swapCommit); on failure re-list, recompute the remaining chunks, retry with backoff
 ```
 
 **Notes**
+- `revs` takes the own records that name the target even when they are invalid (a malformed key suffix, RV1, RV3, no subject): they are its history as far as anyone can tell. A record of another subject under the prefix (a comment's revision under its post's prefix) never names the target.
 - The target is always deleted in the first chunk. A partial failure therefore leaves only orphaned revisions, and the persisted `PendingWrite` keeps retrying them.
 - Deleting a forum declaration does not delete other repos' content. Clients treat a forum with no declaration as unavailable.
 - ModActions are never deleted with this protocol (§8.4).
@@ -1076,10 +1088,12 @@ delete(target):                                  // post | comment | sequence | 
 ### 8.8 Blobs and MIME normalisation
 
 **Upload**
-- Blobs are uploaded only at publish time, after the media pipeline (strip, orient, downscale; `sync.md` and `threat-model.md`).
-- The record embeds the blob object returned by `uploadBlob` **verbatim**. The locally computed CID is for preview only and MUST equal the returned `ref.$link`; if it does not, the write fails.
-- On 413, the client downscales (images) or refuses.
+- Blobs are uploaded only at publish time, after the media pipeline (strip, orient, downscale; `sync.md` and `threat-model.md`). An image or MP4 the pipeline cannot parse is refused (`invalid_input`, `detail.kind = "mediaRejected"`), never uploaded with its metadata (`threat-model.md` §5.9.1).
+- Downscaling happens when the file is prepared: an image larger than `IMAGE_UPLOAD_TARGET_BYTES` (5 MiB, `limits.md` §12) is re-encoded to fit it, so the CID a draft's `cid:` URLs name is the CID that is uploaded. An image the pipeline cannot downscale keeps its bytes: a format without a decoder, and an animation (a GIF, an APNG with `acTL`, a WebP with VP8X's animation flag), whose first frame alone is not the file. An animation is not re-encoded for its EXIF orientation either: the orientation tag is dropped with the rest of its metadata, and its frames stay as they are.
+- The record embeds the blob object returned by `uploadBlob` **verbatim**. Its `ref.$link` MUST equal the CID of the bytes that were sent; if it does not, the write fails.
+- On 413, an image is re-encoded at half the size of the last encoding and sent again, at most `IMAGE_UPLOAD_413_RETRIES` (3) times; any other type, or an image still refused, fails the write (`too_large`, `detail.kind = "mediaRejected"`). A re-encoded image has a new CID: the blob object replaces the placeholder of the old CID, and every `cid:<old>` URL in the write's inline `NS.markdown` sources becomes `cid:<new>` (`lfm-1.md` §6.1 resolves `cid:` against `media[i].blob.ref.$link`). When a spilled `textBlob` of the same write names the old CID, the write fails instead, as its blob cannot follow.
 - A blob that is not referenced is garbage-collected by the PDS after about an hour. So the write that references a blob MUST follow its upload within the same `PendingWrite`.
+- Until then the prepared bytes are kept on the device under their CID, raw in ≤ 1 MiB chunks (`sync.md` §10.4 `prep`), and handed to the outbox when `publish`, `comment` or `edit` enqueues the write that uploads them; from then on the outbox's copy is the only one. An `edit` uploads only the media its cached version does not hold, and keeps the cached blob objects of the others verbatim. In the browser a file larger than `MEDIA_WASM_WINDOW_BYTES` (64 MiB, `limits.md` §6) is refused before its bytes are copied into wasm memory (`too_large`, `detail.kind = "mediaRejected"`).
 
 **MIME normalisation.** The declared `mimeType` sent to `uploadBlob` is normalised from the **sniffed** type, so that it falls within the requested blob scopes (§10.3):
 
@@ -1087,7 +1101,8 @@ delete(target):                                  // post | comment | sequence | 
 |---|---|---|
 | JPEG / PNG / WebP / GIF | `image/jpeg` / `image/png` / `image/webp` / `image/gif` | `blob:image/*` |
 | ISO-BMFF (MP4) with major brand `M4A ` or `M4B ` (`.m4a`, also sniffed as `audio/x-m4a`) | `audio/mp4` | `blob:audio/*` |
-| ISO-BMFF (MP4), any other brand | `video/mp4` | `blob:video/*` |
+| ISO-BMFF (MP4, MOV, 3GP) with a video major brand: `isom`, `iso2`–`iso9`, `isml`, `mp41`, `mp42`, `mp71`, `avc1`, `qt  `, `M4V `, `M4VH`, `M4VP`, `dash`, `msnv`, `MSNV`, `XAVC`, `mmp4`, `F4V `, `f4v `, `NDAS`, `kddi`, `CAEP`, `MP4 `, `3ge6`, `3gp?`, `3g2?` | `video/mp4` | `blob:video/*` |
+| ISO-BMFF naming an image brand as its major or a compatible brand (`heic`, `heix`, `hevc`, `hevx`, `heim`, `heis`, `hevm`, `hevs`, `mif1`, `mif2`, `msf1`, `miaf`, `avif`, `avis`, `avio`, `crx `: HEIF, HEIC, AVIF, CR3), or with another major brand | refused: the EXIF of a HEIF image is an item in `mdat`, which the MP4 pass of `threat-model.md` §5.9.1 does not reach | – |
 | WebM / Matroska | `video/webm` | `blob:video/*` |
 | MP3 (ID3 or MPEG audio frame sync) | `audio/mpeg` | `blob:audio/*` |
 | Ogg (`OggS`; also sniffed as `application/ogg`) | `audio/ogg` | `blob:audio/*` |

@@ -519,10 +519,10 @@ fn writes_need_an_account_and_publish_media() {
     // the reference being valid (G2: links must be CIDs). Hand-building the MediaRef skips the
     // store and would make publish refuse - which is the guard that exists because the devnet
     // answered such a publish with `BlobNotFound (HTTP 400)`.
-    let png: &[u8] =
-        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00";
+    // a whole PNG: one the media pipeline cannot parse to its end is refused (fail closed)
+    let png = lessdugin_testkit::fake_pds::tiny_png(1);
     let prepared = block_on(bob.engine.prepare_media(
-        png.to_vec(),
+        png,
         &lessdugin_core::dto::MediaInput {
             declared_mime: Some("image/png".into()),
             alt: Some("an image".into()),
@@ -621,11 +621,190 @@ fn redact_revision_removes_the_history_and_only_the_author_may() {
         other => panic!("{other:?}"),
     }
 
-    // and a second redaction is a no-op rather than an error: the state is already what the
-    // caller asked for
+    // and a second redaction is not an error: it is a write that finds nothing left to delete
+    let again = block_on(alice.engine.redact_revision(&welcome)).unwrap();
+    assert_eq!(again.len(), 1);
+    alice.flush();
+    assert_eq!(alice.done(&again[0]), welcome, "the write names the item");
+}
+
+/// The revision records of `item` in its author's repo, by rkey.
+fn own_revisions(u: &User, item: &str) -> Vec<String> {
+    u.acct
+        .list(nsid::REVISION)
+        .into_iter()
+        .filter(|(rkey, _)| {
+            u.acct
+                .get(nsid::REVISION, rkey)
+                .and_then(|v| v["subject"]["uri"].as_str().map(|s| s == item))
+                .unwrap_or(false)
+        })
+        .map(|(rkey, _)| rkey)
+        .collect()
+}
+
+/// M4R-2: a redaction deletes every own revision of the item that the author's PDS lists when
+/// it is sent, not just the ones this device folded: an invalid revision (which the fold drops),
+/// one another device wrote after the last sync, and malformed records keyed to the item go
+/// too; a comment's revision under the post's prefix stays.
+#[test]
+fn redaction_deletes_unsynced_and_invalid_revisions_too() {
+    let s = scenario();
+    let alice = &s.w.alice;
+    let welcome = s.welcome.clone();
+    let p = welcome.rsplit('/').next().unwrap().to_owned();
+    let rev = |tid: &str, value: serde_json::Value| {
+        alice
+            .acct
+            .put(nsid::REVISION, &format!("{p}-{tid}"), &value);
+    };
+    // invalid (no snapshot of the old version): the fold leaves it out, then a sync caches it
+    rev(
+        "3l2s5xxv2zab2",
+        serde_json::json!({
+            "$type": nsid::REVISION,
+            "subject": { "uri": welcome, "cid": "bafyreie5737gdxlw5i64vzichcalba3z2v5n6icifvx5xytvske7mr3hpm" },
+            "op": "update",
+            "createdAt": "2024-01-01T00:00:00.000Z",
+        }),
+    );
+    alice.sync(&s.forum);
+    // and one "another device" wrote after that sync
+    rev(
+        "3l2s5xxv2zac2",
+        serde_json::json!({
+            "$type": nsid::REVISION,
+            "subject": { "uri": welcome, "cid": "bafyreie5737gdxlw5i64vzichcalba3z2v5n6icifvx5xytvske7mr3hpm" },
+            "op": "update",
+            "record": { "title": "an older title" },
+            "createdAt": "2024-01-02T00:00:00.000Z",
+        }),
+    );
     assert!(
-        block_on(alice.engine.redact_revision(&welcome))
-            .unwrap()
-            .is_empty()
+        own_revisions(alice, &welcome).len() >= 3,
+        "the fixture's revision and two more"
+    );
+    // malformed own records under the item's prefix are its history too: a key whose suffix is
+    // no TID, a subject spelled with the handle, a record keyed to the item that names nothing
+    let cid = "bafyreie5737gdxlw5i64vzichcalba3z2v5n6icifvx5xytvske7mr3hpm";
+    let by_handle = welcome.replacen(alice.did().as_str(), "alice.example.com", 1);
+    rev(
+        "notatid",
+        serde_json::json!({"$type": nsid::REVISION, "subject": {"uri": welcome, "cid": cid}}),
+    );
+    rev(
+        "3l2s5xxv2zad2",
+        serde_json::json!({"$type": nsid::REVISION, "subject": {"uri": by_handle, "cid": cid}}),
+    );
+    rev(
+        "3l2s5xxv2zae2",
+        serde_json::json!({"$type": nsid::REVISION, "op": "update"}),
+    );
+    // and a revision of a comment of the thread, whose key extends the post's: not the post's
+    let comment = format!("at://{}/{}/{p}-3l2s5xxv2zaf2", alice.did(), nsid::COMMENT);
+    rev(
+        "3l2s5xxv2zaf2-3l2s5xxv2zag2",
+        serde_json::json!({"$type": nsid::REVISION, "subject": {"uri": comment, "cid": cid}}),
+    );
+    let t = block_on(alice.engine.redact_revision(&welcome)).unwrap();
+    alice.flush();
+    assert_eq!(alice.done(&t[0]), welcome);
+    assert_eq!(
+        own_revisions(alice, &welcome),
+        Vec::<String>::new(),
+        "every revision is gone"
+    );
+    let left: Vec<String> = alice
+        .acct
+        .list(nsid::REVISION)
+        .into_iter()
+        .map(|(rkey, _)| rkey)
+        .filter(|k| k.starts_with(&format!("{p}-")))
+        .collect();
+    assert_eq!(left, [format!("{p}-3l2s5xxv2zaf2-3l2s5xxv2zag2")]);
+}
+
+/// M4R-7 (`threat-model.md` SOC-7): a forum declaration's and a modAction's revisions are the
+/// mod log; neither `redact_revision` nor `delete` of a revision uri removes them.
+#[test]
+fn the_mod_log_is_never_redacted() {
+    let s = scenario();
+    let alice = &s.w.alice;
+    let did = alice.did();
+    let err = block_on(alice.engine.redact_revision(&s.forum)).unwrap_err();
+    assert_eq!(err.code, ErrorCode::InvalidInput, "{err:?}");
+    assert_eq!(
+        err.detail.as_ref().and_then(|d| d.get("kind")),
+        Some(&serde_json::json!("modLog"))
+    );
+    let fk = lessdugin_lexicon::keys::fk(&s.forum).unwrap();
+    let h16 = "a".repeat(16);
+    for p in [fk.clone(), format!("{fk}-{h16}")] {
+        let uri = format!("at://{did}/{}/{p}-3l2s5xxv2zab2", nsid::REVISION);
+        let err = block_on(alice.engine.delete(&uri)).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidInput, "{uri}: {err:?}");
+    }
+    let m = format!("at://{did}/{}/{fk}-{h16}", nsid::MOD_ACTION);
+    let err = block_on(alice.engine.redact_revision(&m)).unwrap_err();
+    assert_eq!(err.code, ErrorCode::InvalidInput, "{err:?}");
+    // a post's revision is still the author's to delete
+    let p = s.welcome.rsplit('/').next().unwrap();
+    let uri = format!("at://{did}/{}/{p}-3l2s5xxv2zab2", nsid::REVISION);
+    block_on(alice.engine.delete(&uri)).unwrap();
+}
+
+/// m4-14 (`lfm-1.md` §5.2, §12; W7): a writer rewrites handle-authority `at://` destinations
+/// to DIDs before publishing, so the link renders and the mention is derived; a uri shown in
+/// code stays as written, and a handle that does not verify is refused.
+#[test]
+fn handle_links_are_published_with_dids() {
+    let s = scenario();
+    let (alice, bob) = (&s.w.alice, &s.w.bob);
+    let bob_rkey = s.bob_post.rsplit('/').next().unwrap();
+    let md = format!(
+        "Hi [@bob](at://bob.example.com), see [his post](at://bob.example.com/{}/{bob_rkey}) \
+         and [ref].\n\nCode: `at://bob.example.com` stays.\n\n[ref]: at://Bob.Example.com\n",
+        nsid::POST
+    );
+    let t = block_on(
+        alice
+            .engine
+            .publish(&PostDraft::article(&s.forum, "Links", &md)),
+    )
+    .unwrap();
+    alice.flush();
+    let uri = alice.done(&t);
+    let rec = alice
+        .acct
+        .get(nsid::POST, uri.rsplit('/').next().unwrap())
+        .unwrap();
+    let text = rec["body"]["text"].as_str().unwrap();
+    let did = bob.did();
+    assert!(text.contains(&format!("[@bob](at://{did})")), "{text}");
+    assert!(
+        text.contains(&format!("(at://{did}/{}/{bob_rkey})", nsid::POST)),
+        "{text}"
+    );
+    assert!(text.contains(&format!("[ref]: at://{did}\n")), "{text}");
+    assert!(
+        text.contains("`at://bob.example.com`"),
+        "code is not a link: {text}"
+    );
+    assert_eq!(rec["body"]["mentions"], serde_json::json!([did]));
+    assert_eq!(
+        rec["body"]["links"],
+        serde_json::json!([format!("at://{did}/{}/{bob_rkey}", nsid::POST)])
+    );
+
+    let err = block_on(alice.engine.publish(&PostDraft::article(
+        &s.forum,
+        "Dead",
+        "[who](at://nobody.example.com)",
+    )))
+    .unwrap_err();
+    assert_eq!(err.code, ErrorCode::InvalidInput, "{err:?}");
+    assert_eq!(
+        err.detail.as_ref().and_then(|d| d.get("kind")),
+        Some(&serde_json::json!("unresolvedHandle"))
     );
 }
