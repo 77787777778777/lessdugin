@@ -118,7 +118,8 @@ describe("ReactBar tallies", () => {
   });
 
   it("toggling on and off within the hold shows the server's count again (m3r-11)", async () => {
-    const engine = new MockEngine({ holdMs: 200, sendMs: 0 });
+    // a hold longer than the checks below: the counts are read while both writes are held
+    const engine = new MockEngine({ holdMs: 2500, sendMs: 0 });
     const post = await otherPost(engine);
     const reacts = [tally()];
     renderWithApp(<ReactBar subject={post.uri} reacts={reacts} getQuote={() => null} />, {
@@ -134,12 +135,17 @@ describe("ReactBar tallies", () => {
     await waitFor(() => expect(tallyButton().getAttribute("aria-pressed")).toBe("true"));
     expect(shownFor()).toBe("2");
     fireEvent.click(tallyButton());
-    await waitFor(() => expect(tallyButton().getAttribute("aria-pressed")).toBe("false"));
-    // the server's tally (1), not one less
+    // Still within the hold (the pending badge is up): the delta is taken against the server's
+    // stance, so the tally shows the server's 1. Against the shown stance it would be 0 and
+    // the tally would leave the list until the writes settled.
+    await waitFor(() => expect(tallyButton().getAttribute("aria-pressed")).toBe("false"), {
+      timeout: 1000,
+    });
     expect(shownFor()).toBe("1");
+    expect(screen.getByText("[pending]")).toBeTruthy();
     // the writes settle with nothing changed, and `reacts` stays the same array: the pending
     // badge still goes
-    await waitFor(() => expect(screen.queryByText("[pending]")).toBeNull(), { timeout: 3000 });
+    await waitFor(() => expect(screen.queryByText("[pending]")).toBeNull(), { timeout: 6000 });
     expect(shownFor()).toBe("1");
-  });
+  }, 10_000);
 });
