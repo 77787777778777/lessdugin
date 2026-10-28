@@ -797,12 +797,7 @@ async fn adopt(ctx: &Ctx, actor: &str, forum: Option<&str>, yes: bool) -> Result
 /// Every `mod <verb> <subject>` that asserts or removes one action.
 async fn assert_or_remove(ctx: &Ctx, action: ModAction, yes: bool) -> Result<(), CliError> {
     let w = ctx.writer().await?;
-    // the `#restrict` dimension the verb names: `true` the capabilities, `false` nullifyVotes
-    let restrict_names_caps = match &action {
-        ModAction::Restrict(_) => Some(true),
-        ModAction::Nullify(_) => Some(false),
-        _ => None,
-    };
+    let is_restrict = matches!(&action, ModAction::Restrict(_) | ModAction::Nullify(_));
     let (subject, forum_opt, scope, value, reason, until, done) = match action {
         ModAction::Hide(a) => (
             a.subject.clone(),
@@ -965,12 +960,13 @@ async fn assert_or_remove(ctx: &Ctx, action: ModAction, yes: bool) -> Result<(),
     let forum = mod_forum(ctx, &w.engine, forum_opt.as_deref(), &subject).await?;
     let subject = subject_of(ctx, &w.engine, &subject).await?;
     read::sync_thread_quietly(ctx, &w.engine, &subject).await;
-    let value = match restrict_names_caps {
-        Some(caps) => {
-            keep_restrict_dimension(ctx, &w, &forum, scope, &subject, value, caps).await?
-        }
-        None => value,
-    };
+    if is_restrict {
+        // `#restrict` is one record per (actor, scope, subject) carrying both the capability
+        // set and `nullifyVotes`; the engine keeps the dimension the verb leaves out from the
+        // account's last unsent write of it, else the cached record (`engine-api.md` §3.5,
+        // m3r-2). A record written from another device reaches the cache by this sync.
+        read::sync_forum_quietly(ctx, &w.engine, &forum).await;
+    }
     mod_action(
         ctx,
         &w,
@@ -979,110 +975,6 @@ async fn assert_or_remove(ctx: &Ctx, action: ModAction, yes: bool) -> Result<(),
         yes,
     )
     .await
-}
-
-/// `#restrict` is one record per (actor, scope, subject) carrying both the capability set and
-/// `nullifyVotes`, and a record states the complete desired state of its key (`social.md` §4.2,
-/// §4.7). So `mod restrict` keeps the account's current nullification of the subject, and `mod
-/// nullify` its current capability set (`names_caps`: the verb names the capabilities): neither
-/// silently lifts the other. The current record is the last write of it this device queued and
-/// has not sent (the outbox sends in order, so this one follows it), else the cached one after
-/// a sync of the forum (a record written from another device); without one, or after a queued
-/// removal, the other dimension is its default.
-async fn keep_restrict_dimension(
-    ctx: &Ctx,
-    w: &Writer,
-    forum: &str,
-    scope: ModScope,
-    subject: &str,
-    value: ModActionValue,
-    names_caps: bool,
-) -> Result<ModActionValue, CliError> {
-    use lessdugin_lexicon::collection::nsid;
-    let ModActionValue::Restrict {
-        capabilities,
-        nullify_votes,
-    } = value
-    else {
-        return Ok(value);
-    };
-    // a restriction names a user; anything else is the engine's to refuse
-    let did = if subject.starts_with("at://") || subject.starts_with("tag:") {
-        None
-    } else {
-        Some(w.engine.resolve_actor(subject).await?.did)
-    };
-    let mut action = serde_json::Map::new();
-    action.insert(
-        "$type".into(),
-        Value::String(nsid::MOD_ACTION_RESTRICT.into()),
-    );
-    let rkey = did.as_deref().and_then(|did| {
-        let scope = matches!(scope, ModScope::Author).then_some("author");
-        lessdugin_lexicon::keys::mod_action_rkey(
-            lessdugin_lexicon::ns::NS,
-            forum,
-            scope,
-            did,
-            &action,
-        )
-        .ok()
-    });
-    let current = match rkey {
-        Some(rkey) => {
-            let uri = format!("at://{}/{}/{rkey}", w.account.did, nsid::MOD_ACTION);
-            match queued_value(w, &uri).await? {
-                Some(queued) => queued,
-                None => {
-                    read::sync_forum_quietly(ctx, &w.engine, forum).await;
-                    write::cached(&w.engine, &uri).await.ok().map(|(_, v)| v)
-                }
-            }
-        }
-        None => None,
-    };
-    let current = current.as_ref().map(|v| &v["action"]);
-    Ok(if names_caps {
-        ModActionValue::Restrict {
-            capabilities,
-            nullify_votes: current
-                .and_then(|a| a.get("nullifyVotes"))
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-        }
-    } else {
-        ModActionValue::Restrict {
-            // the known capabilities (unknown ones have no dto value)
-            capabilities: current
-                .and_then(|a| a.get("capabilities"))
-                .and_then(Value::as_array)
-                .map(|caps| {
-                    caps.iter()
-                        .filter_map(|c| serde_json::from_value::<Capability>(c.clone()).ok())
-                        .collect()
-                })
-                .unwrap_or_default(),
-            nullify_votes,
-        }
-    })
-}
-
-/// The value the last pending write of the account's outbox gives the record `uri`: `None`
-/// when no pending write touches it, `Some(None)` when that write deletes it.
-async fn queued_value(w: &Writer, uri: &str) -> Result<Option<Option<Value>>, CliError> {
-    use lessdugin_core::outbox::model::OpAction;
-    let pending = w.engine.outbox().pending(&w.account.did).await?;
-    let last = pending
-        .iter()
-        .flat_map(|p| p.ops.iter().map(move |o| (p, o)))
-        .rfind(|(p, o)| o.uri(&p.account) == uri);
-    Ok(last.map(|(_, o)| match o.action {
-        OpAction::Delete => None,
-        OpAction::Create | OpAction::Update => o
-            .value
-            .as_deref()
-            .and_then(|b| serde_json::from_slice(b).ok()),
-    }))
 }
 
 /// A tier action (`mod personal|frontpage|curate`): an assertion on the item.
