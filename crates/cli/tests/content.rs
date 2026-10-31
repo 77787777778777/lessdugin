@@ -259,6 +259,7 @@ fn approval_mode_with_three_users_and_anonymous_reading() {
         "I would like to post",
         "--alias",
         "m",
+        "--yes",
     ]);
     assert_eq!(t["state"]["kind"], "done", "{t}");
     let fl = bob.json(&["forum", "ls"]);
@@ -267,7 +268,7 @@ fn approval_mode_with_three_users_and_anonymous_reading() {
     // a devnet does not have, so the owner names them)
     let pending = alice.json(&["members", "--pending"]);
     assert_eq!(pending["dto"], 1);
-    let a = alice.json(&["approve", "bob.test", &carol.did()]);
+    let a = alice.json(&["approve", "bob.test", &carol.did(), "--yes"]);
     let w = a["writes"].as_array().unwrap();
     assert_eq!(w.len(), 2);
     assert!(w.iter().all(|t| t["state"]["kind"] == "done"), "{a}");
@@ -907,9 +908,9 @@ fn outbox_undo_retry_and_partial_sync() {
     assert_eq!(alice.account.list(nsid::POST).len(), 1);
 
     // sync --full, and a member whose repository cannot be read: partial, exit 6
-    let a = alice.json(&["approve", "bob.test"]);
+    let a = alice.json(&["approve", "bob.test", "--yes"]);
     assert_eq!(a["writes"][0]["state"]["kind"], "done", "{a}");
-    let t = bob.json(&["join", "alice.test/lounge"]);
+    let t = bob.json(&["join", "alice.test/lounge", "--yes"]);
     assert_eq!(t["state"]["kind"], "done", "{t}");
     let t = bob.json(&["comment", &t_uri(&alice), "-m", "Hi."]);
     assert_eq!(t["state"]["kind"], "done", "{t}");
@@ -950,4 +951,94 @@ fn outbox_undo_retry_and_partial_sync() {
 fn t_uri(u: &User) -> String {
     let (rkey, _) = &u.account.list(nsid::POST)[0];
     format!("at://{}/{}/{rkey}", u.did(), nsid::POST)
+}
+
+/// Open mode carries the L7 label (`threat-model.md` L7, SOC-13): `forum create --mode open`
+/// prints it, and so does the forum header (`forum show`). Approval mode, complete without
+/// third-party servers, does not.
+#[test]
+fn open_mode_carries_the_relay_label() {
+    const LABEL: &str = "Open mode relies on Bluesky relay, Jetstream and Constellation";
+    let net = Net::new();
+    let alice = net.user("alice.test", true);
+    let out = alice.run(&["forum", "create", "lounge", "--mode", "open"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(text(&out.stderr).contains(LABEL), "{}", text(&out.stderr));
+    let show = alice.ok(&["forum", "show", "alice.test/lounge"]);
+    assert!(show.contains(LABEL), "{show}");
+
+    let out = alice.run(&["forum", "create", "meta"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(
+        !text(&out.stderr).contains("Open mode"),
+        "{}",
+        text(&out.stderr)
+    );
+    let show = alice.ok(&["forum", "show", "alice.test/meta"]);
+    assert!(!show.contains("Open mode"), "{show}");
+}
+
+/// A body over the spill threshold is written as a `textBlob` (`data-model.md` §5.2). `edit`
+/// fetches its text from the PDS and edits that: a new title alone keeps it (spilled again, to
+/// the same blob), and a new text replaces it.
+#[test]
+fn a_spilled_body_is_edited_as_its_text() {
+    let net = Net::new();
+    let alice = net.user("alice.test", true);
+    alice.json(&["forum", "create", "meta", "--frontpage"]);
+    let long = "word ".repeat(14_000);
+    let f = alice.file("long.md", &format!("---\ntitle: Long\n---\n{long}\n"));
+    let p = alice.json(&["post", s(&f), "--yes"]);
+    let post = p["state"]["uri"].as_str().unwrap().to_owned();
+    let rkey = alice.account.list(nsid::POST)[0].0.clone();
+    let rec = alice.account.get(nsid::POST, &rkey).unwrap();
+    assert!(rec["body"].get("text").is_none(), "{}", rec["body"]);
+    let blob = rec["body"]["textBlob"]["ref"]["$link"].clone();
+    assert!(blob.is_string(), "{}", rec["body"]);
+
+    let e = alice.json(&["edit", &post, "--title", "Long, retitled"]);
+    assert_eq!(e["state"]["kind"], "done", "{e}");
+    let rec = alice.account.get(nsid::POST, &rkey).unwrap();
+    assert_eq!(rec["title"], "Long, retitled", "{rec}");
+    assert_eq!(
+        rec["body"]["textBlob"]["ref"]["$link"], blob,
+        "{}",
+        rec["body"]
+    );
+
+    let e = alice.json(&["edit", &post, "-m", "Short now."]);
+    assert_eq!(e["state"]["kind"], "done", "{e}");
+    let rec = alice.account.get(nsid::POST, &rkey).unwrap();
+    assert_eq!(rec["body"]["text"], "Short now.\n", "{}", rec["body"]);
+    assert!(rec["body"].get("textBlob").is_none(), "{}", rec["body"]);
+}
+
+/// `redact --yes` is always sent (decision O-10): the engine lists the author's PDS when the
+/// write is sent and deletes every revision that names the item, also when this device's view
+/// shows none (here another device of the author, offline, so its sync fails quietly).
+#[test]
+fn redact_deletes_what_the_pds_lists_whatever_the_view_shows() {
+    let net = Net::new();
+    let alice = net.user("alice.test", true);
+    alice.json(&["forum", "create", "meta", "--frontpage"]);
+    let f = alice.file("p.md", "---\ntitle: Drafty\n---\nFirst words.\n");
+    let p = alice.json(&["post", s(&f), "--yes"]);
+    let post = p["state"]["uri"].as_str().unwrap().to_owned();
+    let e = alice.json(&["edit", &post, "-m", "Second words."]);
+    assert_eq!(e["state"]["kind"], "done", "{e}");
+    assert_eq!(alice.account.list(nsid::REVISION).len(), 1);
+
+    let other = net.second_device(&alice);
+    let out = other.ok(&["--offline", "redact", &post]);
+    assert!(out.contains("no revisions of"), "{out}");
+    let r = other.json(&["--offline", "redact", &post, "--yes"]);
+    assert_eq!(r["state"]["kind"], "pending", "{r}");
+    let flushed = other.json(&["outbox", "flush"]);
+    let sent = flushed["writes"].as_array().unwrap();
+    assert!(
+        sent.iter().all(|x| x["state"]["kind"] == "done"),
+        "{flushed}"
+    );
+    assert!(alice.account.list(nsid::REVISION).is_empty());
+    assert_eq!(alice.account.list(nsid::POST).len(), 1);
 }

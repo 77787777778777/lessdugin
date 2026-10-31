@@ -344,6 +344,7 @@ async function runScenario(
               "approve",
               "bob.test",
               "carol.test",
+              "--yes",
             ]),
           ) as { writes: { state: { kind: string } }[] };
           expect(approved.writes.map((w) => w.state.kind)).toEqual(["done", "done"]);
@@ -410,7 +411,7 @@ async function runScenario(
         // has just arrived, so the owner's seed upvote is what makes him established
         // (E = S ∪ {seedUp ≥ establishSeeds}, §6.2) and his post visible to every client.
         // Without it the open variant would compare three empty views and prove nothing.
-        await alice.cli("seed-vote", ["--json", "vote", post, "up"]);
+        await alice.cli("seed-vote", ["--json", "vote", post, "up", "--yes"]);
         await alice.cli("sync", ["--json", "sync", forum]);
       }
     });
@@ -466,7 +467,15 @@ async function runScenario(
     // record update, and both must show up identically in all three clients.
     await step("5. alice (CLI): hides a comment and pins the post", async () => {
       const hidden = JSON.parse(
-        await alice.cli("mod-hide", ["--json", "mod", "hide", reply, "--reason", "off topic"]),
+        await alice.cli("mod-hide", [
+          "--json",
+          "mod",
+          "hide",
+          reply,
+          "--reason",
+          "off topic",
+          "--yes",
+        ]),
       ) as unknown;
       expect(hidden).toBeTruthy();
       const pinned = JSON.parse(

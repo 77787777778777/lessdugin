@@ -80,6 +80,26 @@ fn help_lists_the_commands_and_no_password_option() {
     assert!(String::from_utf8_lossy(&out.stdout).starts_with("lessdugin "));
 }
 
+/// The moderation help says what the actions do (`social.md` §4.2, §4.8): forum-wide locks
+/// are reserved, and spam voids the votes on one item (hiding an author's content is a ban).
+#[test]
+fn mod_help_describes_lock_and_spam_as_they_work() {
+    let dir = tempfile::tempdir().unwrap();
+    let help = |args: &[&str]| {
+        let out = bin(dir.path()).args(args).output().unwrap();
+        assert!(out.status.success());
+        String::from_utf8(out.stdout).unwrap()
+    };
+    let lock = help(&["mod", "lock", "--help"]);
+    assert!(!lock.contains("or the forum (read-only)"), "{lock}");
+    assert!(lock.contains("approval mode"), "{lock}");
+    let hide = help(&["mod", "hide", "--help"]);
+    assert!(!hide.contains("forum-wide"), "{hide}");
+    assert!(hide.contains("mod ban"), "{hide}");
+    let list = help(&["mod", "--help"]);
+    assert!(!list.contains("spam hides it everywhere"), "{list}");
+}
+
 #[test]
 fn usage_errors_exit_2() {
     let dir = tempfile::tempdir().unwrap();

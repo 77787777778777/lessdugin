@@ -14,8 +14,8 @@
 
 use lessdugin_atp::syntax::AtUri;
 use lessdugin_core::dto::{
-    BodyDraft, CommentDraft, Draft, EditOpts, ExternalLinkDraft, PostDraft, TextQuote, WriteState,
-    WriteTicket,
+    AspectRatio, BodyDraft, CommentDraft, Draft, EditOpts, ExternalLinkDraft, MediaRef, PostDraft,
+    TextQuote, WriteState, WriteTicket,
 };
 use lessdugin_core::engine::{Engine, EngineError, ErrorCode};
 use lessdugin_core::host::Host;
@@ -27,7 +27,7 @@ use serde_json::Value;
 
 use crate::args::{CommentArgs, DeleteArgs, EditArgs, PostArgs, RedactArgs, RefArgs};
 use crate::cmd::draft::{self, Doc, Drafts, PostSource, kind_str, parse_kind};
-use crate::cmd::{read, refs};
+use crate::cmd::{media, read, refs};
 use crate::ctx::{CliError, Ctx, Writer};
 use crate::out::{Style, cat, dto, lit, tt};
 use crate::prompt;
@@ -349,15 +349,11 @@ pub async fn post(ctx: &Ctx, args: PostArgs) -> Result<(), CliError> {
         }
         return Err(CliError::usage("the draft is empty; nothing was published"));
     }
-    draft::publish_post(
-        ctx,
-        PostSource {
-            doc,
-            draft: draft_id,
-        },
-        args.yes,
-    )
-    .await
+    let src = match args.file.as_deref() {
+        Some(f) if !from_editor => PostSource::from_file(ctx, doc, f),
+        _ => PostSource::draft(ctx, doc, draft_id),
+    };
+    draft::publish_post(ctx, src, args.yes).await
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -385,6 +381,42 @@ async fn send_comment(ctx: &Ctx, w: &Writer, d: &CommentDraft) -> Result<(), Cli
     let ticket = w.engine.comment(d).await?;
     let t = drive(ctx, w, ticket).await?;
     report(ctx, &t, "Commented")
+}
+
+/// Attaches the media of a comment's or an edit's `body` (`media::attach`: its draft-local
+/// images, read from `dir`, become `cid:` media) and confirms the files of this machine it
+/// uploads (FILE-2, `media::confirm_uploads`). A draft `id` the text came from is kept, and the
+/// note says so, when that fails.
+async fn attach_media(
+    ctx: &Ctx,
+    w: &Writer,
+    body: &mut BodyDraft,
+    dir: Option<&std::path::Path>,
+    foreign: bool,
+    yes: bool,
+    id: Option<&str>,
+) -> Result<(), CliError> {
+    let attached = media::attach(ctx, &w.engine, body, dir)
+        .await
+        .and_then(|a| media::confirm_uploads(ctx, &a, foreign, yes));
+    if let (Err(_), Some(id)) = (&attached, id) {
+        kept_note(ctx, id);
+    }
+    attached
+}
+
+/// Where the text of a comment or an edit comes from: `-m` and standard input have no
+/// directory for image paths; a file has its own (foreign unless it is under the drafts
+/// directory, `threat-model.md` FILE-2).
+fn text_dir(
+    ctx: &Ctx,
+    message: Option<&String>,
+    file: Option<&std::path::Path>,
+) -> (Option<std::path::PathBuf>, bool) {
+    match (message, file) {
+        (None, Some(f)) => draft::file_dir(ctx, f),
+        _ => (None, true),
+    }
 }
 
 /// Queues the write `queue` makes from draft `id`, and removes the draft as soon as the write
@@ -452,6 +484,7 @@ pub async fn comment(ctx: &Ctx, args: CommentArgs) -> Result<(), CliError> {
     let (uri, is_comment) = refs::post_or_comment(ctx, &w.engine, &args.reference).await?;
     read::sync_thread_quietly(ctx, &w.engine, &uri).await;
     let (root, parent) = thread_of(&w.engine, &uri, is_comment).await?;
+    let (dir, foreign) = text_dir(ctx, args.message.as_ref(), args.file.as_deref());
     let text = text_arg(args.message, args.file.as_deref())?;
     let text = match text {
         Some(t) => t,
@@ -473,18 +506,27 @@ pub async fn comment(ctx: &Ctx, args: CommentArgs) -> Result<(), CliError> {
                 drafts.remove(&id)?;
                 return Err(CliError::usage("the comment is empty; nothing was posted"));
             }
-            let d = CommentDraft::new(root, parent, doc.body_text());
+            let mut d = CommentDraft::new(root, parent, doc.body_text());
+            let dir = ctx.paths.drafts_dir();
+            attach_media(ctx, &w, &mut d.body, Some(&dir), false, false, Some(&id)).await?;
             return queue_from_draft(ctx, &w, &id, w.engine.comment(&d), "Commented").await;
         }
     };
     if text.trim().is_empty() {
         return Err(CliError::usage("the comment is empty; nothing was posted"));
     }
-    send_comment(ctx, &w, &CommentDraft::new(root, parent, text)).await
+    let mut d = CommentDraft::new(root, parent, text);
+    attach_media(ctx, &w, &mut d.body, dir.as_deref(), foreign, false, None).await?;
+    send_comment(ctx, &w, &d).await
 }
 
-/// `draft publish` of a comment draft.
-pub async fn publish_comment_draft(ctx: &Ctx, id: &str, doc: Doc) -> Result<(), CliError> {
+/// `draft publish` of a comment draft (`yes`: `--yes`, which confirms its local files).
+pub async fn publish_comment_draft(
+    ctx: &Ctx,
+    id: &str,
+    doc: Doc,
+    yes: bool,
+) -> Result<(), CliError> {
     let w = ctx.writer().await?;
     let root = doc
         .get("root")
@@ -494,7 +536,9 @@ pub async fn publish_comment_draft(ctx: &Ctx, id: &str, doc: Doc) -> Result<(), 
         return Err(EngineError::invalid_input(format!("draft {id} is empty")).into());
     }
     read::sync_thread_quietly(ctx, &w.engine, doc.get("parent").unwrap_or(&root)).await;
-    let d = CommentDraft::new(root, doc.get("parent").map(str::to_owned), doc.body_text());
+    let mut d = CommentDraft::new(root, doc.get("parent").map(str::to_owned), doc.body_text());
+    let dir = ctx.paths.drafts_dir();
+    attach_media(ctx, &w, &mut d.body, Some(&dir), false, yes, Some(id)).await?;
     queue_from_draft(ctx, &w, id, w.engine.comment(&d), "Commented").await
 }
 
@@ -506,6 +550,9 @@ struct Current {
     is_post: bool,
     forum: String,
     markdown: String,
+    /// The body's media items: an edit keeps them (the engine keeps their blob objects,
+    /// `data-model.md` §8.8), so a `cid:` image of the text still resolves.
+    media: Vec<MediaRef>,
     title: Option<String>,
     kind: String,
     link: Option<String>,
@@ -526,30 +573,124 @@ fn strs(v: Option<&Value>) -> Vec<String> {
         .unwrap_or_default()
 }
 
-async fn current(engine: &Engine<NativeHost>, uri: &str) -> Result<Current, CliError> {
+/// The media items of a cached body as the references an edit sends again. An item that does
+/// not read as `defs#media` refuses the edit: leaving it out would delete it.
+fn media_of(uri: &str, body: Option<&Value>) -> Result<Vec<MediaRef>, CliError> {
+    let Some(items) = body.and_then(|b| b.get("media")) else {
+        return Ok(Vec::new());
+    };
+    let items = items.as_array().ok_or_else(|| {
+        EngineError::invalid_input(format!("{uri}: the body's media is not a list"))
+    })?;
+    let mut out = Vec::with_capacity(items.len());
+    for (i, item) in items.iter().enumerate() {
+        let m = serde_json::from_value::<lessdugin_lexicon::records::Media>(item.clone()).map_err(
+            |e| {
+                EngineError::invalid_input(format!(
+                    "{uri}: media item {} cannot be read ({e}); an edit would drop it",
+                    i + 1
+                ))
+            },
+        )?;
+        let cid = m.blob.r#ref.link.clone();
+        out.push(MediaRef {
+            id: cid.clone(),
+            cid,
+            mime: m.blob.mime_type.clone(),
+            size_bytes: u64::try_from(m.blob.size).unwrap_or(0),
+            alt: m.alt.clone(),
+            aspect_ratio: m.aspect_ratio.as_ref().and_then(|a| {
+                Some(AspectRatio {
+                    width: u32::try_from(a.width).ok()?,
+                    height: u32::try_from(a.height).ok()?,
+                })
+            }),
+            duration_ms: m.duration_ms.and_then(|d| u64::try_from(d).ok()),
+            name: m.name.clone(),
+            notices: Vec::new(),
+        });
+    }
+    Ok(out)
+}
+
+/// The markdown of a spilled body (`textBlob`, `lfm-1.md` §1.3) of the writer's own item `uri`:
+/// fetched from the writer's PDS, CID-checked by the host, at most `BLOB_TEXT_MAX_BYTES`, and
+/// decoded as the engine decodes it (UTF-8, one leading U+FEFF stripped).
+async fn spilled_markdown(w: &Writer, uri: &str, blob: &Value) -> Result<String, CliError> {
+    let unreadable = |why: String| EngineError::invalid_input(format!("{uri}: the body {why}"));
+    let cid = blob
+        .get("ref")
+        .and_then(|r| r.get("$link"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| unreadable("blob has no CID".into()))?;
+    let pds = url::Url::parse(&w.account.pds)
+        .map_err(|e| EngineError::internal(format!("the PDS {}: {e}", w.account.pds)))?;
+    let did = lessdugin_atp::syntax::Did::parse(&w.account.did)
+        .map_err(|e| EngineError::internal(e.to_string()))?;
+    let h = w
+        .engine
+        .host()
+        .fetch_blob(
+            pds,
+            did,
+            cid.to_owned(),
+            lessdugin_core::limits::BLOB_TEXT_MAX_BYTES,
+        )
+        .await
+        .map_err(EngineError::from)?;
+    let bytes = std::fs::read(&h.locator)
+        .map_err(|e| EngineError::internal(format!("{}: {e}", h.locator)))?;
+    let text = String::from_utf8(bytes).map_err(|_| unreadable("blob is not UTF-8".into()))?;
+    Ok(match text.strip_prefix('\u{feff}') {
+        Some(t) => t.to_owned(),
+        None => text,
+    })
+}
+
+/// The markdown source of `md`, an `md` field of the writer's own record `uri`, as an edit
+/// starts from it: its inline `text`, or its spilled `textBlob` fetched ([`spilled_markdown`];
+/// the outbox spills the new text again if it must, `data-model.md` §5.3).
+async fn body_markdown(w: &Writer, uri: &str, md: &Value) -> Result<String, CliError> {
+    if let Some(t) = md.get("text").and_then(Value::as_str) {
+        return Ok(t.to_owned());
+    }
+    match md.get("textBlob") {
+        Some(blob) => spilled_markdown(w, uri, blob).await,
+        None => Err(EngineError::new(
+            ErrorCode::Unsupported,
+            format!("{uri}: this body has neither text nor a text blob to edit"),
+        )
+        .into()),
+    }
+}
+
+/// An `md` field of the writer's own record `uri` as the draft that keeps it: its markdown
+/// ([`body_markdown`]) and its media, sent again as references (`data-model.md` §8.8).
+pub async fn kept_body(w: &Writer, uri: &str, md: &Value) -> Result<BodyDraft, CliError> {
+    Ok(BodyDraft {
+        markdown: body_markdown(w, uri, md).await?,
+        media: media_of(uri, Some(md))?,
+    })
+}
+
+async fn current(w: &Writer, uri: &str) -> Result<Current, CliError> {
     let u = AtUri::parse(uri).map_err(|e| EngineError::invalid_ref(format!("{uri:?}: {e}")))?;
     let coll = u.collection().as_str();
     let is_post = coll == nsid::POST;
     if !is_post && coll != nsid::COMMENT {
         return Err(EngineError::invalid_ref(format!("{uri} is not a post or a comment")).into());
     }
-    let (_, v) = cached(engine, uri).await?;
+    let (_, v) = cached(&w.engine, uri).await?;
     let body = v.get("body");
-    let markdown = match body.and_then(|b| b.get("text")).and_then(Value::as_str) {
-        Some(t) => t.to_owned(),
-        None if body.is_none() => String::new(),
-        None => {
-            return Err(EngineError::new(
-                ErrorCode::Unsupported,
-                "this body is stored as a blob; editing it arrives with media support (M4)",
-            )
-            .into());
-        }
+    let markdown = match body {
+        Some(b) => body_markdown(w, uri, b).await?,
+        None => String::new(),
     };
     let s = |k: &str| v.get(k).and_then(Value::as_str).map(str::to_owned);
     Ok(Current {
         is_post,
         forum: s("forum").unwrap_or_default(),
+        media: media_of(uri, body)?,
         markdown,
         title: s("title"),
         kind: s("kind").unwrap_or_else(|| "article".into()),
@@ -607,9 +748,13 @@ fn edit_doc(uri: &str, c: &Current) -> Doc {
     doc
 }
 
-/// The engine draft of an edit: `doc`'s fields over the current ones.
+/// The engine draft of an edit: `doc`'s fields over the current ones, and the current media.
 fn edit_draft(c: &Current, doc: &Doc, body: Option<String>) -> Result<Draft, CliError> {
     let markdown = body.unwrap_or_else(|| c.markdown.clone());
+    let body = BodyDraft {
+        markdown,
+        media: c.media.clone(),
+    };
     if c.is_post {
         let kind = match doc.get("kind") {
             Some(k) => parse_kind(k).map_err(EngineError::invalid_input)?,
@@ -631,7 +776,7 @@ fn edit_draft(c: &Current, doc: &Doc, body: Option<String>) -> Result<Draft, Cli
                 } else {
                     c.title.clone()
                 },
-                body: BodyDraft::text(markdown),
+                body,
                 link: link.map(|uri| ExternalLinkDraft {
                     uri,
                     title: None,
@@ -651,11 +796,109 @@ fn edit_draft(c: &Current, doc: &Doc, body: Option<String>) -> Result<Draft, Cli
             comment: CommentDraft {
                 root: c.root.clone().unwrap_or_default(),
                 parent: c.parent.clone(),
-                body: BodyDraft::text(markdown),
+                body,
                 quote: c.quote.clone(),
             },
         })
     }
+}
+
+/// The body of an edit draft.
+fn body_mut(d: &mut Draft) -> &mut BodyDraft {
+    match d {
+        Draft::Post { post, .. } => &mut post.body,
+        Draft::Comment { comment, .. } => &mut comment.body,
+    }
+}
+
+/// What an edit of `uri` suspends (`social.md` §4.5, `threat-model.md` SOC-3): the positive
+/// assertions in effect on its current version (a keep, a frontpage or curated tier, a pin),
+/// as the raw view lists them. They name that version's CID, so they stop counting until an
+/// authority asserts them again on the new one.
+async fn suspended_by_edit(engine: &Engine<NativeHost>, uri: &str) -> Vec<&'static str> {
+    use lessdugin_lexicon::records::{Action, ModAction};
+    use lessdugin_lexicon::values::Tier;
+    let Ok(raw) = engine.raw(uri).await else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for a in &raw.assertions {
+        if a.get("status").and_then(Value::as_str) != Some("effective") {
+            continue;
+        }
+        let Some(m) = a
+            .get("record")
+            .and_then(|r| serde_json::from_value::<ModAction>(r.clone()).ok())
+        else {
+            continue;
+        };
+        let what = match &m.action {
+            Action::Hide(h) if !h.hidden() => "a moderator's keep",
+            Action::Tier(t) if t.tier().is_some_and(|t| t != Tier::Personal) => {
+                "its frontpage or curated tier"
+            }
+            Action::Pin(p) if p.pinned() => "its pin",
+            _ => continue,
+        };
+        if !out.contains(&what) {
+            out.push(what);
+        }
+    }
+    // in one order, whatever the order of the records
+    out.sort_by_key(|w| {
+        [
+            "a moderator's keep",
+            "its frontpage or curated tier",
+            "its pin",
+        ]
+        .iter()
+        .position(|k| k == w)
+    });
+    out
+}
+
+/// Before an edit of an item that carries positive assertions (`social.md` §4.5): says what
+/// the edit suspends ([`suspended_by_edit`], in the view [`read::sync_for_read`] brought up
+/// to date, as `read` shows it), then asks on a terminal; headless use needs `--yes` (`yes`).
+/// An item with none asks nothing.
+async fn confirm_suspension(
+    ctx: &Ctx,
+    engine: &Engine<NativeHost>,
+    uri: &str,
+    yes: bool,
+) -> Result<(), CliError> {
+    let what = suspended_by_edit(engine, uri).await;
+    let Some((last, rest)) = what.split_last() else {
+        return Ok(());
+    };
+    let named = if rest.is_empty() {
+        (*last).to_owned()
+    } else {
+        format!("{} and {last}", rest.join(", "))
+    };
+    ctx.out.warn(cat([
+        lit("editing "),
+        tt(uri),
+        lit(" suspends "),
+        tt(&named),
+        lit(
+            ": they apply to the version a moderator saw, and stop until one asserts them again \
+             on the new version",
+        ),
+    ]));
+    if yes {
+        return Ok(());
+    }
+    if prompt::stdin_is_tty() && !ctx.out.is_json() {
+        if prompt::confirm("edit it anyway?") {
+            return Ok(());
+        }
+        return Err(CliError::Reported(1));
+    }
+    Err(CliError::usage(format!(
+        "editing {uri} suspends {named} (see above): add --yes to edit it when not running \
+         interactively"
+    )))
 }
 
 async fn send_edit(
@@ -675,12 +918,15 @@ pub async fn edit(ctx: &Ctx, args: EditArgs) -> Result<(), CliError> {
     let reader = ctx.reader().await?;
     let (uri, _) = refs::post_or_comment(ctx, &reader, &args.reference).await?;
     let w = ctx.writer_for(&owner_of(&uri)?).await?;
-    read::sync_thread_quietly(ctx, &w.engine, &uri).await;
-    let c = current(&w.engine, &uri).await?;
+    // the thread, and the forum's assertions unless synced lately
+    read::sync_for_read(ctx, &w.engine, &uri).await;
+    let c = current(&w, &uri).await?;
+    confirm_suspension(ctx, &w.engine, &uri, args.yes).await?;
     let mut opts = EditOpts {
         history: !args.no_history,
         summary: args.summary.clone(),
     };
+    let (dir, foreign) = text_dir(ctx, args.message.as_ref(), args.file.as_deref());
     let given = text_arg(args.message, args.file.as_deref())?;
     let (doc, body) = match given {
         Some(text) => {
@@ -710,9 +956,21 @@ pub async fn edit(ctx: &Ctx, args: EditArgs) -> Result<(), CliError> {
             if let (Some(t), Draft::Post { post, .. }) = (&args.title, &mut d) {
                 post.title = Some(t.clone());
             }
+            let dir = ctx.paths.drafts_dir();
+            attach_media(
+                ctx,
+                &w,
+                body_mut(&mut d),
+                Some(&dir),
+                false,
+                false,
+                Some(&id),
+            )
+            .await?;
             return queue_from_draft(ctx, &w, &id, w.engine.edit(&uri, &d, &opts), "Edited").await;
         }
     };
+    let body_given = body.is_some();
     let mut d = edit_draft(&c, &doc, body)?;
     if let Some(t) = &args.title {
         match &mut d {
@@ -722,19 +980,36 @@ pub async fn edit(ctx: &Ctx, args: EditArgs) -> Result<(), CliError> {
             }
         }
     }
+    // a new title alone leaves the text as it is
+    if body_given {
+        attach_media(
+            ctx,
+            &w,
+            body_mut(&mut d),
+            dir.as_deref(),
+            foreign,
+            false,
+            None,
+        )
+        .await?;
+    }
     send_edit(ctx, &w, &uri, &d, &opts).await
 }
 
-/// `draft publish` of an edit draft.
-pub async fn publish_edit_draft(ctx: &Ctx, id: &str, doc: Doc) -> Result<(), CliError> {
+/// `draft publish` of an edit draft (`yes`: `--yes`, which confirms its local files and what
+/// the edit suspends).
+pub async fn publish_edit_draft(ctx: &Ctx, id: &str, doc: Doc, yes: bool) -> Result<(), CliError> {
     let uri = doc
         .get("target")
         .ok_or_else(|| EngineError::invalid_input(format!("draft {id} has no `target`")))?
         .to_owned();
     let w = ctx.writer_for(&owner_of(&uri)?).await?;
-    read::sync_thread_quietly(ctx, &w.engine, &uri).await;
-    let c = current(&w.engine, &uri).await?;
-    let d = edit_draft(&c, &doc, Some(doc.body_text()))?;
+    read::sync_for_read(ctx, &w.engine, &uri).await;
+    let c = current(&w, &uri).await?;
+    confirm_suspension(ctx, &w.engine, &uri, yes).await?;
+    let mut d = edit_draft(&c, &doc, Some(doc.body_text()))?;
+    let dir = ctx.paths.drafts_dir();
+    attach_media(ctx, &w, body_mut(&mut d), Some(&dir), false, yes, Some(id)).await?;
     let opts = EditOpts {
         history: doc.get("history") != Some("false"),
         summary: doc.get("summary").map(str::to_owned),
@@ -788,31 +1063,39 @@ pub async fn retract(ctx: &Ctx, args: RefArgs) -> Result<(), CliError> {
 /// `redact`: delete an item's version history (`engine-api.md` §3.6, M4).
 ///
 /// Only the author may do it (the outbox enforces that the uri is in their repo, W9), and the
-/// deletion cannot be undone, so `--yes` is required. Without it the command reports what would
-/// go, which also makes it the way to check before redacting.
+/// deletion cannot be undone, so `--yes` is required. Without it the command reports what this
+/// device's view holds, which also makes it the way to check before redacting. With it the
+/// redaction is always sent, whatever that view shows (decision O-10): the engine lists the
+/// author's PDS when the write is sent and deletes every revision that names the item, also
+/// those a failed sync or an invalid key keeps out of the view.
 pub async fn redact(ctx: &Ctx, args: RedactArgs) -> Result<(), CliError> {
     let reader = ctx.reader().await?;
     let (uri, _) = refs::post_or_comment(ctx, &reader, &args.reference).await?;
     let w = ctx.writer_for(&owner_of(&uri)?).await?;
     read::sync_thread_quietly(ctx, &w.engine, &uri).await;
 
-    let h = w.engine.history(&uri).await?;
-    if h.versions.is_empty() {
-        ctx.out.line(&[
-            (lit("no history to redact: "), Style::Plain),
-            (tt(&uri), Style::Dim),
-        ]);
-        return Ok(());
-    }
     if !args.yes {
-        ctx.out.line(&[
-            (lit("would delete "), Style::Plain),
-            (tt(&h.versions.len().to_string()), Style::Bold),
-            (lit(" revision(s) of "), Style::Plain),
-            (tt(&uri), Style::Dim),
-        ]);
+        // an item this device has not cached has no history in its view
+        let shown = w.engine.history(&uri).await.map_or(0, |h| h.versions.len());
+        if shown == 0 {
+            ctx.out.line(&[
+                (lit("no revisions of "), Style::Plain),
+                (tt(&uri), Style::Dim),
+                (lit(" in this device's view"), Style::Plain),
+            ]);
+        } else {
+            ctx.out.line(&[
+                (lit("would delete "), Style::Plain),
+                (tt(&shown.to_string()), Style::Bold),
+                (lit(" revision(s) of "), Style::Plain),
+                (tt(&uri), Style::Dim),
+            ]);
+        }
         ctx.out.line(&[(
-            lit("pass --yes to delete them (this cannot be undone)"),
+            lit(
+                "pass --yes to delete every revision your PDS lists for it (this cannot be \
+                 undone)",
+            ),
             Style::Dim,
         )]);
         return Ok(());

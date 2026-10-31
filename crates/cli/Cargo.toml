@@ -39,6 +39,8 @@ serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 lessdugin-markdown.workspace = true
+# `media`: the image destinations of a draft, found as `lfm/1` parses them.
+pulldown-cmark.workspace = true
 lessdugin-atp.workspace = true
 lessdugin-lexicon.workspace = true
 crossterm.workspace = true
@@ -56,3 +58,7 @@ reqwest.workspace = true
 # Forum and content commands against a FakePds network served over HTTP (tests/content.rs).
 lessdugin-testkit = { workspace = true, features = ["http"] }
 insta = { workspace = true, features = ["filters"] }
+
+[target.'cfg(unix)'.dev-dependencies]
+# tests/media.rs: a FIFO among a draft's files.
+libc.workspace = true

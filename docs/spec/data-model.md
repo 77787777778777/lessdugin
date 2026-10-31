@@ -1529,3 +1529,4 @@ These choices fill gaps or resolve ambiguities in the sources. Each takes the si
 - confirm item 6 (quickTake requires a body);
 - confirm the opt-out in item 11;
 - `goat lex validate` rejects every record whose union holds `com.atproto.label.defs#selfLabels` ("NSID syntax didn't validate via regex"), `app.bsky.feed.post` included. This is a goat bug. Spike S4 should record it, and no lessdugin check may rely on `goat lex validate` for `post`.
+- *(Orchestrator decision O-10, for the U7 review.)* "Redact history" (§8) is decided by the listing made when the write is sent, so a client never refuses a redaction because its cached view shows no history (a sync that failed quietly, a device that never synced the item, invalid revisions): the CLI's `redact --yes` always sends it, and without `--yes` only reports what its view holds.

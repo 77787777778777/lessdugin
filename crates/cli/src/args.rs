@@ -134,6 +134,8 @@ pub enum Command {
     Members(MembersArgs),
     /// Grant membership to applicants (approval-mode forums; owner and admins).
     Approve(ApproveArgs),
+    /// Dismiss applicants on this device, and remove your grant of them if you made one.
+    Reject(RejectArgs),
     /// Vote on a post or comment (public record).
     Vote(VoteArgs),
     /// Cast an agreement vote (public record).
@@ -144,7 +146,14 @@ pub enum Command {
     Reacts,
     /// Your notifications (computed locally; --mark-read marks them read).
     Notifications(NotificationsArgs),
-    /// Export this device's local state as JSON (or --import it back).
+    /// Mute authors on this device: their items are shown collapsed (local, not public).
+    Mute(MuteArgs),
+    /// Unmute authors.
+    Unmute(MuteArgs),
+    /// List the authors you muted.
+    Mutes,
+    /// Export your posts and comments, or a forum, as JSON or markdown (--local: this device's
+    /// local state, which --import merges back).
     Export(ExportArgs),
     /// Recent Discussion: the posts with the newest comments.
     Activity(ActivityArgs),
@@ -154,6 +163,8 @@ pub enum Command {
     Mod(ModArgs),
     /// Drafts kept in the data directory: ls, edit, rm, publish.
     Draft(DraftArgs),
+    /// Media: add a file for a post, get or open a post's attachment.
+    Media(MediaArgs),
     /// Queued writes: ls, flush, retry, undo.
     Outbox(OutboxArgs),
     /// Log in (OAuth in the browser by default; --app-password for bots and headless use).

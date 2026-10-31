@@ -9,7 +9,7 @@
 use std::path::PathBuf;
 
 use clap::{Args, Subcommand, ValueEnum};
-use lessdugin_core::dto::{CommentSort, MembershipMode, PostKind, PostSort};
+use lessdugin_core::dto::{CommentSort, DefaultTier, MembershipMode, PostKind, PostSort};
 
 /// `--sort` of `ls`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
@@ -97,7 +97,8 @@ pub enum ModeArg {
     /// Members need a grant from the owner or an admin (`approve`).
     #[default]
     Approval,
-    /// Anyone who joins is a member.
+    /// Anyone who joins is a member. Open mode relies on Bluesky relay, Jetstream and
+    /// Constellation (or an indexer) to find new members; approval mode needs no third party.
     Open,
 }
 
@@ -225,6 +226,10 @@ pub struct EditArgs {
     /// Do not keep the old version as a revision.
     #[arg(long)]
     pub no_history: bool,
+    /// Do not ask for confirmation when the edit suspends a keep, a frontpage or curated tier
+    /// or a pin of the item (needed then when not running interactively).
+    #[arg(long, short = 'y')]
+    pub yes: bool,
 }
 
 /// `delete`.
@@ -269,6 +274,10 @@ pub struct JoinArgs {
     /// A short local name for the forum.
     #[arg(long, value_name = "ALIAS")]
     pub alias: Option<String>,
+    /// Confirm the public membership without asking (the first join needs it when not running
+    /// interactively).
+    #[arg(long, short = 'y')]
+    pub yes: bool,
 }
 
 /// `leave`.
@@ -339,6 +348,59 @@ pub enum ForumAction {
         #[arg(long)]
         frontpage: bool,
     },
+    /// Change a forum you own (the old version is kept as a revision); what is not given
+    /// stays as it is. Moderators change with `mods`.
+    Edit(ForumEditArgs),
+}
+
+/// `forum edit`.
+#[derive(Debug, Args)]
+pub struct ForumEditArgs {
+    /// The forum (default: --forum, then the current forum).
+    #[arg(value_name = "FORUM")]
+    pub forum: Option<String>,
+    /// The display name.
+    #[arg(long)]
+    pub name: Option<String>,
+    /// A one-line description (empty removes it).
+    #[arg(long, value_name = "TEXT")]
+    pub description: Option<String>,
+    /// The about text (markdown; empty removes it).
+    #[arg(long, value_name = "MARKDOWN")]
+    pub about: Option<String>,
+    /// Who may take part (to archive an open forum, switch it to approval).
+    #[arg(long, value_enum)]
+    pub mode: Option<ModeArg>,
+    /// Where new posts start.
+    #[arg(long, value_enum)]
+    pub default_tier: Option<DefaultTierArg>,
+    /// A featured tag (repeatable; replaces the list).
+    #[arg(long = "featured-tag", value_name = "TAG")]
+    pub featured_tags: Vec<String>,
+    /// Remove every featured tag.
+    #[arg(long, conflicts_with = "featured_tags")]
+    pub no_featured_tags: bool,
+    /// Where to report problems, a URI such as `mailto:…` or `https://…` (empty removes it).
+    #[arg(long, value_name = "URI")]
+    pub report_contact: Option<String>,
+}
+
+/// `--default-tier` of `forum edit`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum DefaultTierArg {
+    /// New posts start on the author's personal tier.
+    Personal,
+    /// New posts start on the frontpage.
+    Frontpage,
+}
+
+impl From<DefaultTierArg> for DefaultTier {
+    fn from(t: DefaultTierArg) -> Self {
+        match t {
+            DefaultTierArg::Personal => DefaultTier::Personal,
+            DefaultTierArg::Frontpage => DefaultTier::Frontpage,
+        }
+    }
 }
 
 /// `members`.
@@ -355,6 +417,18 @@ pub struct MembersArgs {
 /// `approve`.
 #[derive(Debug, Args)]
 pub struct ApproveArgs {
+    /// Handles or DIDs (in --forum, else the current forum).
+    #[arg(value_name = "ACTOR", required = true, num_args = 1..)]
+    pub actors: Vec<String>,
+    /// Confirm the public grant without asking (the first mod action needs it when not running
+    /// interactively).
+    #[arg(long, short = 'y')]
+    pub yes: bool,
+}
+
+/// `reject`.
+#[derive(Debug, Args)]
+pub struct RejectArgs {
     /// Handles or DIDs (in --forum, else the current forum).
     #[arg(value_name = "ACTOR", required = true, num_args = 1..)]
     pub actors: Vec<String>,
@@ -390,6 +464,52 @@ pub enum DraftAction {
         /// Publish without asking.
         #[arg(long, short = 'y')]
         yes: bool,
+    },
+}
+
+/// `media`.
+#[derive(Debug, Args)]
+pub struct MediaArgs {
+    /// What to do.
+    #[command(subcommand)]
+    pub action: MediaAction,
+}
+
+/// `media …` (`lfm-1.md` §6.2 numbers a body's media items 1…N).
+#[derive(Debug, Subcommand)]
+pub enum MediaAction {
+    /// Prepare a file (metadata stripped, CID computed) and print the `![…](cid:…)` to put in a
+    /// post; it is uploaded when the post is published from this device. A post can also name
+    /// the file itself: `![alt](./chart.png)`.
+    Add {
+        /// An image, video, audio file or PDF.
+        #[arg(value_name = "FILE")]
+        file: PathBuf,
+        /// The accessible description (shown to readers who cannot see the image).
+        #[arg(long, value_name = "TEXT")]
+        alt: Option<String>,
+    },
+    /// Save a media item of a post or comment as `<cid>.<ext>` (the bytes are checked against
+    /// the CID).
+    Get {
+        /// The post or comment.
+        #[arg(value_name = "REF")]
+        reference: String,
+        /// Which item (`[image 2: …]` is 2).
+        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u16).range(1..))]
+        index: u16,
+        /// Where to save it: a file, or a directory for `<cid>.<ext>` (default: here).
+        #[arg(long, short = 'o', value_name = "PATH")]
+        out: Option<PathBuf>,
+    },
+    /// Open a media item of a post or comment with the system's viewer.
+    Open {
+        /// The post or comment.
+        #[arg(value_name = "REF")]
+        reference: String,
+        /// Which item (`[image 2: …]` is 2).
+        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u16).range(1..))]
+        index: u16,
     },
 }
 

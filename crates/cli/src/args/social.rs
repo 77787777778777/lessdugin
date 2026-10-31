@@ -6,7 +6,7 @@
 //! `<handle>/<rkey>`); actor references are a handle or a DID.
 
 use clap::{Args, Subcommand, ValueEnum};
-use lessdugin_core::dto::{AgreementValue, KarmaValue, ModRole, ModScope, Stance};
+use lessdugin_core::dto::{AgreementValue, KarmaCadence, KarmaValue, ModRole, ModScope, Stance};
 
 /// The value of `vote` (the karma axis).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -71,6 +71,10 @@ pub struct VoteArgs {
     /// The vote.
     #[arg(value_enum)]
     pub value: KarmaArg,
+    /// Confirm the public action without asking (the first one of its kind needs it when not
+    /// running interactively).
+    #[arg(long, short = 'y')]
+    pub yes: bool,
 }
 
 /// `agree`.
@@ -82,6 +86,10 @@ pub struct AgreeArgs {
     /// The agreement vote.
     #[arg(value_enum)]
     pub value: AgreementArg,
+    /// Confirm the public action without asking (the first one of its kind needs it when not
+    /// running interactively).
+    #[arg(long, short = 'y')]
+    pub yes: bool,
 }
 
 /// `react`.
@@ -102,6 +110,31 @@ pub struct ReactArgs {
     /// Remove your react (with the same quote, if it was anchored).
     #[arg(long)]
     pub remove: bool,
+    /// Confirm the public action without asking (the first one of its kind needs it when not
+    /// running interactively).
+    #[arg(long, short = 'y')]
+    pub yes: bool,
+}
+
+/// `--karma-cadence` of `notifications`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum KarmaCadenceArg {
+    /// As soon as your karma changes.
+    Realtime,
+    /// Once a day (the default).
+    Daily,
+    /// Once a week.
+    Weekly,
+}
+
+impl From<KarmaCadenceArg> for KarmaCadence {
+    fn from(c: KarmaCadenceArg) -> Self {
+        match c {
+            KarmaCadenceArg::Realtime => KarmaCadence::Realtime,
+            KarmaCadenceArg::Daily => KarmaCadence::Daily,
+            KarmaCadenceArg::Weekly => KarmaCadence::Weekly,
+        }
+    }
 }
 
 /// `notifications`.
@@ -110,12 +143,23 @@ pub struct NotificationsArgs {
     /// Show read notifications too.
     #[arg(long)]
     pub all: bool,
+    /// How often karma changes are notified, saved on this device (`social.md` §16).
+    #[arg(long, value_enum, value_name = "CADENCE")]
+    pub karma_cadence: Option<KarmaCadenceArg>,
     /// Mark every shown notification read.
     #[arg(long)]
     pub mark_read: bool,
     /// At most this many notifications (1–200).
     #[arg(long, short = 'n', default_value_t = 50, value_parser = clap::value_parser!(u32).range(1..=200))]
     pub limit: u32,
+}
+
+/// `mute` / `unmute`.
+#[derive(Debug, Args)]
+pub struct MuteArgs {
+    /// Handles or DIDs.
+    #[arg(value_name = "ACTOR", required = true, num_args = 1..)]
+    pub actors: Vec<String>,
 }
 
 /// `activity`.
@@ -135,6 +179,10 @@ pub struct ModsArgs {
     /// What to do.
     #[command(subcommand)]
     pub action: ModsAction,
+    /// Confirm without asking: the public-action notice, and a removal that lets
+    /// assertions lapse (needed when not running interactively).
+    #[arg(long, short = 'y', global = true)]
+    pub yes: bool,
 }
 
 /// `mods …` (`social.md` §4.3; a removal runs `mod adopt` first, `data-model.md` §8.6).
@@ -154,7 +202,8 @@ pub enum ModsAction {
         /// A handle or DID.
         #[arg(value_name = "ACTOR")]
         actor: String,
-        /// Remove without adopting (a rogue moderator: their assertions lapse).
+        /// Remove without adopting (a rogue moderator): their assertions lapse, so they are
+        /// listed first and the removal is confirmed (or --yes).
         #[arg(long)]
         skip_adopt: bool,
     },
@@ -185,12 +234,16 @@ pub struct ModArgs {
     /// What to do.
     #[command(subcommand)]
     pub action: ModAction,
+    /// Confirm the public action without asking (the first mod action needs it when not
+    /// running interactively).
+    #[arg(long, short = 'y', global = true)]
+    pub yes: bool,
 }
 
 /// `mod …` (`social.md` §4; every action is a public record, `data-model.md` §6.7).
 #[derive(Debug, Subcommand)]
 pub enum ModAction {
-    /// Hide an item (with an optional reason; spam hides it everywhere).
+    /// Hide an item (with an optional reason; --spam also voids the votes on it).
     Hide(ModCommon),
     /// Remove your hide assertion.
     Unhide(ModSubject),
@@ -202,11 +255,12 @@ pub enum ModAction {
     Unban(ModSubject),
     /// Approve an applicant (the grant; same as `approve`).
     Approve(ModSubject),
-    /// Restrict an actor's capabilities.
+    /// Restrict an actor's capabilities (replacing your current set; a nullification stays).
     Restrict(RestrictArgs),
     /// Remove your restriction (also lifts a nullification).
     Unrestrict(ModSubject),
-    /// Nullify an actor's votes (a restrict with `nullifyVotes`; their opinions stop counting).
+    /// Nullify an actor's votes (a restrict with `nullifyVotes`; their opinions stop counting;
+    /// your restriction of their capabilities stays).
     Nullify(ModCommon),
     /// Move your own item to the personal tier.
     Personal(ModSubject),
@@ -218,7 +272,8 @@ pub enum ModAction {
     Pin(PinArgs),
     /// Unpin an item.
     Unpin(PinArgs),
-    /// Lock a post (comments stay only for its allow-list) or the forum (read-only).
+    /// Lock a post: only the comments visible now stay (forum-wide locks are reserved; to
+    /// archive a forum, switch it to approval mode).
     Lock(ModSubject),
     /// Unlock.
     Unlock(ModSubject),
@@ -258,6 +313,10 @@ pub struct ModSubject {
     /// The forum (default: --forum, then the current forum, else the subject's forum).
     #[arg(long, value_name = "FORUM")]
     pub forum: Option<String>,
+    /// Act as the post's author, not as the forum (author moderation, `social.md` §4.9): the
+    /// author's lock of their post, or the removal of an author-scope assertion.
+    #[arg(long)]
+    pub author_scope: bool,
 }
 
 /// A mod action with the common options.
@@ -272,7 +331,8 @@ pub struct ModCommon {
     /// Why (a public record; shown according to the forum's policy).
     #[arg(long, value_name = "TEXT")]
     pub reason: Option<String>,
-    /// Hide as spam (`mod hide` only: spam hides the author's content forum-wide).
+    /// Mark the item as spam (`mod hide` only): the votes on it stop counting. It hides only
+    /// this item; `mod ban` hides all of an author's content.
     #[arg(long)]
     pub spam: bool,
     /// Act as the post's author, not as the forum (author moderation, `social.md` §4.9).
@@ -356,6 +416,9 @@ pub struct PinArgs {
     /// Why (public).
     #[arg(long, value_name = "TEXT")]
     pub reason: Option<String>,
+    /// Pin as the post's author: a comment in your own post's thread (`social.md` §4.9).
+    #[arg(long)]
+    pub author_scope: bool,
 }
 
 /// `--scope` of `mod pin`.
@@ -395,7 +458,7 @@ pub fn stance_of(against: bool) -> Stance {
     }
 }
 
-/// Which local state `export` covers.
+/// Which local state `export --local` covers.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
 pub enum ExportScopeArg {
     /// Your own state (the default, `threat-model.md` PRIV-8).
@@ -405,16 +468,40 @@ pub enum ExportScopeArg {
     Everything,
 }
 
-/// `export`: write this device's local state as JSON.
+/// `--format` of `export`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+pub enum ExportFormatArg {
+    /// One JSON document.
+    #[default]
+    Json,
+    /// Markdown files with YAML frontmatter.
+    Md,
+}
+
+/// `export`: posts and comments (yours by default, or a forum's), or this device's local state.
 #[derive(Debug, Args)]
 pub struct ExportArgs {
-    /// What to export.
-    #[arg(long, value_enum, default_value_t = ExportScopeArg::Mine)]
-    pub scope: ExportScopeArg,
-    /// Write to this file instead of stdout.
+    /// A forum to export as it shows (hidden and deleted content is left out); without one,
+    /// your own posts and comments.
+    #[arg(value_name = "FORUM", conflicts_with_all = ["mine", "local", "import"])]
+    pub forum: Option<String>,
+    /// Your own posts and comments, in every forum (the default, `threat-model.md` PRIV-8).
+    #[arg(long)]
+    pub mine: bool,
+    /// The format.
+    #[arg(long, value_enum, default_value_t = ExportFormatArg::Json)]
+    pub format: ExportFormatArg,
+    /// Where to write: a directory (`export.json`, or the markdown files), or with --local a
+    /// file. Without it JSON goes to standard output.
     #[arg(long, short = 'o', value_name = "PATH")]
     pub out: Option<std::path::PathBuf>,
-    /// Import instead: merge a file written by `export` back into this device.
-    #[arg(long, value_name = "PATH", conflicts_with_all = ["scope", "out"])]
+    /// This device's local state instead (read marks, mutes, settings, ...), as JSON.
+    #[arg(long, conflicts_with_all = ["mine", "format"])]
+    pub local: bool,
+    /// Which local state --local covers.
+    #[arg(long, value_enum, default_value_t = ExportScopeArg::Mine, requires = "local")]
+    pub scope: ExportScopeArg,
+    /// Import instead: merge a file written by `export --local` back into this device.
+    #[arg(long, value_name = "PATH", conflicts_with_all = ["mine", "format", "local", "scope", "out"])]
     pub import: Option<std::path::PathBuf>,
 }

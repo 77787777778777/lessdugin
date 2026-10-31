@@ -42,7 +42,7 @@ use lessdugin_native::template::{SCISSORS, neutralise_modelines};
 use serde::Serialize;
 
 use crate::args::{DraftAction, DraftArgs};
-use crate::cmd::{refs, write};
+use crate::cmd::{media, refs, write};
 use crate::ctx::{CliError, Ctx};
 use crate::out::{Style, cat, lit, tt};
 use crate::prompt;
@@ -651,7 +651,7 @@ fn ask_publish() -> Answer {
     }
 }
 
-fn summary(ctx: &Ctx, d: &PostDraft, forum_name: &str) {
+fn summary(ctx: &Ctx, d: &PostDraft, forum_name: &str, attached: &[media::Attached]) {
     let words = lessdugin_markdown::derive_metadata(&d.body.markdown, &[]).word_count;
     let out = &ctx.out;
     out.err_line(&[(lit("About to publish:"), Style::Bold)]);
@@ -675,6 +675,32 @@ fn summary(ctx: &Ctx, d: &PostDraft, forum_name: &str) {
             (tt(&d.tags.join(", ")), Style::Plain),
         ]);
     }
+    // every file of this machine that is uploaded, by its absolute path (`threat-model.md`
+    // FILE-2), and the `cid:` images prepared on this device
+    for a in attached {
+        let shown = match &a.file {
+            Some(f) => f.display().to_string(),
+            None => a.source.clone(),
+        };
+        out.err_line(&[
+            (lit("  media  "), Style::Dim),
+            (tt(&shown), Style::Plain),
+            (
+                cat([
+                    lit(" ("),
+                    tt(&a.media.mime),
+                    lit(", "),
+                    media::size(a.media.size_bytes),
+                    lit(if a.media.alt.is_some() {
+                        ")"
+                    } else {
+                        ", no alt text)"
+                    }),
+                ]),
+                Style::Dim,
+            ),
+        ]);
+    }
     out.err_line(&[
         (lit("  words  "), Style::Dim),
         (tt(&words.to_string()), Style::Plain),
@@ -687,6 +713,54 @@ pub struct PostSource {
     pub doc: Doc,
     /// Its draft id, once it is saved as a draft.
     pub draft: Option<String>,
+    /// The directory that contains it, which its image paths must stay in (`threat-model.md`
+    /// FILE-1): the post's file's, or `$DATA/drafts/`; `None` for standard input.
+    pub dir: Option<PathBuf>,
+    /// A foreign draft: a file given to `post` that is not under `$DATA/drafts/`. Its local
+    /// files are confirmed on a terminal even with `--yes` (FILE-2).
+    pub foreign: bool,
+}
+
+/// The directory a text read from `file` (`-`: standard input, which has none) keeps its image
+/// paths in (`threat-model.md` FILE-1), and whether it is foreign: not under `$DATA/drafts/`
+/// (FILE-2).
+pub fn file_dir(ctx: &Ctx, file: &Path) -> (Option<PathBuf>, bool) {
+    if file.as_os_str() == "-" {
+        return (None, true);
+    }
+    let dir = match file.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
+    let drafts = ctx.paths.drafts_dir().canonicalize().ok();
+    let foreign = !matches!(
+        (file.canonicalize(), drafts),
+        (Ok(f), Some(d)) if f.starts_with(&d)
+    );
+    (Some(dir), foreign)
+}
+
+impl PostSource {
+    /// A post from `file` (`-`: standard input), possibly a draft file of `ctx`.
+    pub fn from_file(ctx: &Ctx, doc: Doc, file: &Path) -> Self {
+        let (dir, foreign) = file_dir(ctx, file);
+        Self {
+            doc,
+            draft: None,
+            dir,
+            foreign,
+        }
+    }
+
+    /// A draft of `ctx`'s draft directory.
+    pub fn draft(ctx: &Ctx, doc: Doc, id: Option<String>) -> Self {
+        Self {
+            doc,
+            draft: id,
+            dir: Some(ctx.paths.drafts_dir()),
+            foreign: false,
+        }
+    }
 }
 
 /// Saves `src` as a draft (a new id the first time); returns the id.
@@ -721,7 +795,7 @@ pub async fn publish_post(ctx: &Ctx, mut src: PostSource, yes: bool) -> Result<(
                 Err(e) => return Err(e),
             },
         };
-        let draft = match post_draft(&src.doc, forum.clone()) {
+        let mut draft = match post_draft(&src.doc, forum.clone()) {
             Ok(d) => d,
             Err(errors) => {
                 let id = keep(ctx, &drafts, &mut src, &errors)?;
@@ -739,7 +813,33 @@ pub async fn publish_post(ctx: &Ctx, mut src: PostSource, yes: bool) -> Result<(
                 ));
             }
         };
-        if !yes {
+        // draft-local images become `cid:` media (`lfm-1.md` §12)
+        let attached =
+            match media::attach(ctx, &w.engine, &mut draft.body, src.dir.as_deref()).await {
+                Ok(a) => a,
+                Err(e) => {
+                    if src.draft.is_some()
+                        && let CliError::Engine(err) = &e
+                    {
+                        keep(ctx, &drafts, &mut src, std::slice::from_ref(&err.message))?;
+                    }
+                    return Err(e);
+                }
+            };
+        // FILE-2: the files of this machine a foreign draft uploads are confirmed on a
+        // terminal, even with --yes
+        let local = media::local_files(&attached);
+        let confirm_files = src.foreign && !local.is_empty();
+        if !yes || confirm_files {
+            if !interactive && confirm_files {
+                return Err(CliError::usage(format!(
+                    "this post would upload files of this machine ({}); that is confirmed on a \
+                     terminal, even with --yes, for a file outside the drafts directory: publish \
+                     it on a terminal, or prepare the files with `lessdugin media add` and name \
+                     them by cid:",
+                    local.join(", ")
+                )));
+            }
             if !interactive {
                 let id = keep(ctx, &drafts, &mut src, &[])?;
                 return Err(CliError::usage(format!(
@@ -747,7 +847,7 @@ pub async fn publish_post(ctx: &Ctx, mut src: PostSource, yes: bool) -> Result<(
                      publish it with `lessdugin draft publish {id} --yes`"
                 )));
             }
-            summary(ctx, &draft, forum.as_deref().unwrap_or_default());
+            summary(ctx, &draft, forum.as_deref().unwrap_or_default(), &attached);
             match ask_publish() {
                 Answer::Yes => {}
                 Answer::Edit => {
@@ -930,18 +1030,10 @@ pub async fn run(ctx: &Ctx, args: DraftArgs) -> Result<(), CliError> {
                 .map_err(|e| CliError::Engine(EngineError::invalid_input(e)))?
             {
                 DraftType::Post => {
-                    publish_post(
-                        ctx,
-                        PostSource {
-                            doc,
-                            draft: Some(id),
-                        },
-                        yes,
-                    )
-                    .await
+                    publish_post(ctx, PostSource::draft(ctx, doc, Some(id)), yes).await
                 }
-                DraftType::Comment => write::publish_comment_draft(ctx, &id, doc).await,
-                DraftType::Edit => write::publish_edit_draft(ctx, &id, doc).await,
+                DraftType::Comment => write::publish_comment_draft(ctx, &id, doc, yes).await,
+                DraftType::Edit => write::publish_edit_draft(ctx, &id, doc, yes).await,
             }
         }
     }
