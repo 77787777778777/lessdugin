@@ -21,6 +21,7 @@ import type {
   ActorView,
   AtUri,
   BodyDraft,
+  BodySource,
   BookmarkEntry,
   Cid,
   CommentDraft,
@@ -189,6 +190,14 @@ export interface EngineApi {
   /** Public; paged like `listPosts` (`limit` 0 or absent: the default page). */
   modLog(forum: AtUri, cursor?: string, limit?: number): Promise<ModLog>;
   raw(uri: AtUri): Promise<RawView>;
+  /** The markdown source of a post's or comment's body, or of a forum's `about`, as a composer
+   * edits it (`""` for an item without one): the inline text, or the spilled `textBlob` as the
+   * host holds it, fetched from the author's PDS when it does not (waiting at most
+   * `BODY_BLOB_WAIT_MS`, like a view). Open to every viewer, like `raw`. Rejects while it cannot
+   * be had: `network` with `detail.kind: "bodyPending"` (retryable), `not_found` with
+   * `"bodyMissing"`, `network` with `"bodyFailedVerification"`, `too_large` or `invalid_input`
+   * with `"bodyUnreadable"`. */
+  bodySource(uri: AtUri): Promise<BodySource>;
   /** Fetches a media blob for display from its author's PDS (sync.md §11.1). `media`: the
    * item's view from `RenderedBody.media` (its author, declared type and size), or only the
    * author's DID; without it, the active account's own repo is asked. No login is needed. The

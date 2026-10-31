@@ -883,6 +883,18 @@ export interface NotificationsQuery {
   limit: number;
 }
 
+/** `bodySource`'s result (engine-api.md §3.4): a body's markdown source, as a composer edits
+ * it. */
+export interface BodySource {
+  /** The inline `text`, or the spilled `textBlob` decoded (UTF-8, one leading U+FEFF stripped);
+   * `""` for an item without a body. */
+  markdown: string;
+  /** The body's `profile` as the record states it (absent: `lfm/1`). */
+  profile?: string;
+  /** Stored as a `textBlob` (lfm-1.md §1.3): a kept source is spilled again when it must. */
+  spilled: boolean;
+}
+
 // ---------------------------------------------------------------------------------------------
 // §3.5 Writes
 // ---------------------------------------------------------------------------------------------

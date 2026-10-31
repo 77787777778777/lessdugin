@@ -1691,7 +1691,7 @@ impl<H: crate::host::Host> crate::engine::Engine<H> {
     /// `BODY_BLOB_WAIT_MS`: one that does not come in time, or cannot be fetched now, is left
     /// pending until `BODY_BLOB_RETRY_MS` from now, with its item, for `live_tail`
     /// ([`Self::retry_spilled_bodies`]).
-    async fn fetch_spilled(
+    pub(crate) async fn fetch_spilled(
         &self,
         forum: &str,
         wanted: &[(&str, &str, &str)],
