@@ -1,14 +1,30 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // @vitest-environment jsdom
 // Writing and editing a post: the edit warning comes from the engine's editPreflight
-// (social.md §4.5; review finding robustness-6).
+// (social.md §4.5; review finding robustness-6), and a submission sent again after a refusal
+// lists its attachments once (robustness-5).
+import { EditorView } from "@codemirror/view";
 import { MockEngine } from "@lessdugin/engine/mock";
 import type { ForumView } from "@lessdugin/engine/types";
-import { screen } from "@testing-library/react";
+import { fireEvent, screen, waitFor } from "@testing-library/react";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { renderWithApp } from "../../test/render.tsx";
-import { EditPost } from "./ForumNewPostPage.tsx";
+import { EditPost, PostForm } from "./ForumNewPostPage.tsx";
 import { ForumContext } from "./forumContext.tsx";
+
+/** The CodeMirror view inside the composer's shadow root (as Composer.test.tsx finds it). */
+async function editor(container: HTMLElement): Promise<EditorView> {
+  return waitFor(
+    () => {
+      const host = container.querySelector('[data-testid="composer-editor"]');
+      const content = host?.shadowRoot?.querySelector(".cm-content");
+      const view = content instanceof HTMLElement ? EditorView.findFromDOM(content) : null;
+      if (!view) throw new Error("editor not mounted");
+      return view;
+    },
+    { timeout: 10_000 },
+  );
+}
 
 async function ownPost(engine: MockEngine): Promise<{ view: ForumView; uri: string }> {
   const me = (await engine.activeAccount())?.did;
@@ -20,12 +36,52 @@ async function ownPost(engine: MockEngine): Promise<{ view: ForumView; uri: stri
   return { view, uri: own.uri };
 }
 
-describe("EditPost", () => {
-  // the composer focuses CodeMirror, which calls execCommand; jsdom has none
-  beforeAll(() => {
-    Object.defineProperty(document, "execCommand", { value: () => false, configurable: true });
-  });
+// the composer focuses CodeMirror, which calls execCommand; jsdom has none
+beforeAll(() => {
+  Object.defineProperty(document, "execCommand", { value: () => false, configurable: true });
+});
 
+describe("PostForm", () => {
+  it("lists a prepared attachment once when a refused publish is sent again (robustness-5)", async () => {
+    const engine = new MockEngine({ holdMs: 0, sendMs: 0 });
+    const forum = (await engine.followed())[0]?.uri ?? "";
+    const view = await engine.forumOpen(forum);
+    const refused = { code: "invalid_input", message: "The title is too long.", retryable: false };
+    const publish = vi
+      .spyOn(engine, "publish")
+      .mockRejectedValueOnce(refused)
+      .mockRejectedValueOnce(refused);
+    const { container } = renderWithApp(
+      <ForumContext value={view}>
+        <PostForm initial={null} draftId={undefined} />
+      </ForumContext>,
+      { engine },
+    );
+    fireEvent.change(await screen.findByLabelText("Title"), { target: { value: "T" } });
+    const cm = await editor(container);
+    cm.dispatch({ changes: { from: 0, insert: "A body." } });
+    const shot = new File([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], "shot.png", {
+      type: "image/png",
+    });
+    fireEvent.paste(cm.contentDOM, { clipboardData: { files: [shot], types: ["Files"] } });
+    await waitFor(() =>
+      expect(screen.getByTestId("attachment-list").textContent).toContain("ready"),
+    );
+    // refused before it is enqueued: the composer keeps the text and the attachment
+    fireEvent.click(screen.getByRole("button", { name: "Publish" }));
+    await screen.findByRole("alert");
+    await waitFor(() => expect(publish).toHaveBeenCalledTimes(1));
+    expect(publish.mock.calls[0]?.[0].body.media).toHaveLength(1);
+    // sent again: the same attachment, once
+    fireEvent.click(screen.getByRole("button", { name: "Publish" }));
+    await waitFor(() => expect(publish).toHaveBeenCalledTimes(2));
+    const media = publish.mock.calls[1]?.[0].body.media ?? [];
+    expect(media).toHaveLength(1);
+    expect(media[0]?.cid).toBe(publish.mock.calls[0]?.[0].body.media?.[0]?.cid);
+  });
+});
+
+describe("EditPost", () => {
   it("warns with the engine's editPreflight notice (robustness-6)", async () => {
     const engine = new MockEngine();
     const { view, uri } = await ownPost(engine);

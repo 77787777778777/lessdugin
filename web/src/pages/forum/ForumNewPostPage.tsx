@@ -100,12 +100,12 @@ export function PostForm({
   const linkMeta = useRef(initial?.link);
 
   const draftFor = useCallback(
-    (markdown: string): PostDraft => {
+    (markdown: string, withMedia: MediaRef[] = media.current): PostDraft => {
       const { kind: k, title: t, link: l, tags: tg } = latest.current;
       const d: PostDraft = {
         forum: forum.uri,
         kind: k,
-        body: { markdown, media: media.current },
+        body: { markdown, media: withMedia },
         tags: tg,
         labels: labels.current,
       };
@@ -132,26 +132,32 @@ export function PostForm({
     // the prepared refs the composer collected (docs/plan.md M4); a refused file is never
     // already in the draft, and one whose row was removed is not either
     const prepared = attached.flatMap((a) => (a.kind === "ready" ? [a.ref] : []));
-    media.current = [...media.current, ...prepared];
+    // This submission's media: the kept ones and the prepared ones. `media.current` takes them
+    // only once the write is accepted: the composer keeps its attachments after a refusal or a
+    // failure, and the engine does not deduplicate `body.media`, so a submission sent again
+    // would otherwise list them twice.
+    const withMedia = [...media.current, ...prepared];
     const ticket = editing
       ? await engine.edit(
           editing,
-          { kind: "post", post: draftFor(markdown) },
+          { kind: "post", post: draftFor(markdown, withMedia) },
           {
             history: keepHistory,
             ...(keepHistory && summary.trim() !== "" ? { summary: summary.trim() } : {}),
           },
         )
-      : await engine.publish(draftFor(markdown));
+      : await engine.publish(draftFor(markdown, withMedia));
     writeStore.track(ticket, editing);
     const final = await writeStore.settle(ticket.id);
     if (final.kind === "failed") throw final.error;
     if (final.kind === "queued") {
+      media.current = withMedia;
       announceQueued(editing ? "Your edit" : "Your post", final.state);
       void navigate({ to: "/outbox" });
       return true;
     }
     if (final.kind !== "done") return false;
+    media.current = withMedia;
     toasts.show({ message: editing ? "Post updated" : "Published", tone: "success" });
     const p = parseAtUri(final.uri);
     if (p) void navigate({ to: "/p/$author/$rkey", params: { author: p.did, rkey: p.rkey } });
