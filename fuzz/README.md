@@ -3,9 +3,10 @@
 # Fuzzing
 
 [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz) (libFuzzer) targets for every surface that
-parses untrusted bytes: repo CARs and proofs, DAG-CBOR, commits, MST walks, lexicon records and
-LFM/1 bodies. They cover the M4 acceptance item "a 10-minute fuzz run (CAR, CBOR, MST, lexicon
-validator, renderer) without panics" (`docs/plan.md`).
+parses untrusted bytes: repo CARs and proofs, DAG-CBOR, commits, MST walks, lexicon records,
+LFM/1 bodies and media attachments. They cover the M4 acceptance item "a 10-minute fuzz run (CAR,
+CBOR, MST, lexicon validator, renderer) without panics" (`docs/plan.md`), and the media strippers
+(threat-model PILL-6).
 
 This directory is its own Cargo workspace, outside the main one: cargo-fuzz needs a nightly
 toolchain and sanitizer flags. `Cargo.lock` started as a copy of the main lock, so the crates
@@ -55,6 +56,7 @@ Some targets also assert properties the crates document.
 | `mst` | structured (`arbitrary`) | a repo built from the input with every link computed: the canonical tree of a key set (`mst::build`) or hand-built nodes (wrong layers, prefixes and field types; dangling and wrong-codec links; chains past the depth limit). A signed commit, or a broken one. Dropped, corrupted and duplicated blocks. `mst::prove`, `mst::list_entries`, `verify_proof`, `verify_proof_in` with read caps, and indexer bundles | for a clean canonical repo, the walk is exact: listing, presence and absence, the proven record CID, and bundle claims. Read caps only ever turn a verdict into a cap error |
 | `lexicon` | raw JSON (a record) | `validate::Validator` (record, defs, defaults, capped options); `validity::check`; `Record` (de)serialisation; the record's data model and CID. The collection comes from `$type` (either namespace) or from the input | the `Options` caps hold; an encoded record decodes back to the same value |
 | `render` | raw body bytes (a `textBlob`) | `render` (and `render_error` for invalid UTF-8); math-core and Temml modes; the printer (colour, plain and narrow; with handles); `term_sanitize`; `derive_metadata`; `plain_projection`; `excerpt`; `build_quote` / `resolve_quote` / `qkey`; `safe_href`, `short_did`, `osc8_uri`. Media items are created for every `cid:` reference in the input | the HTML passes `check_html` and `ammonia(html) == html`; P and the excerpt hold no controls or non-space whitespace; the excerpt is at most 500 graphemes and 5,000 bytes; no terminal control appears in the `StyledDoc` or the `TermText`; printed output passes `check_printer_output`, and has no escape at all without colour; `derive_metadata` equals `render`; a quote built from a selection of P resolves to that selection |
+| `media` | raw file bytes (an attachment) | `media::strip_metadata` and `media::sniff` (JPEG, PNG, WebP, GIF, MP4/ISO-BMFF walks) | a strip is a fixed point (stripping its output changes nothing); the sniffed format is kept; an MP4 keeps its length (boxes are overwritten in place); the output never grows; `changed: false` means byte-identical output |
 
 Limits, set per target by `cargo xtask fuzz`:
 
@@ -66,6 +68,7 @@ Limits, set per target by `cargo xtask fuzz`:
 | `lexicon` | 16,384 | 10 |
 | `mst` | 16,384 | 10 |
 | `render` | 32,768 | 10 |
+| `media` | 65,536 | 10 |
 
 `-rss_limit_mb=2048` applies to every target, and with it `-malloc_limit_mb`, so under
 AddressSanitizer a single allocation over 2 GiB is reported at once. That makes the
@@ -83,6 +86,7 @@ milliseconds natively, so anything near 10 s under instrumentation is super-line
 | `lexicon` | the records in the shared vectors, in their own and the build namespace (up to 3,000), and the live record |
 | `render` | every input of the `lfm1/`, `xss/`, `terminal/` and `mathml/` vectors (bodies, TeX, URLs, quote targets, names) |
 | `mst` | none: the input is structured, and libFuzzer finds the shapes |
+| `media` | `web/e2e/fixtures/pixel.png`, and one small file per walked format (JPEG, PNG, WebP, GIF, MP4) carrying the metadata the strippers drop |
 
 `dicts/<target>.dict` holds the tokens of each format: CBOR heads, CID prefixes and field names;
 JSON tokens and the lexicons' property names, NSIDs and known values; LFM/1 constructs.
@@ -93,7 +97,7 @@ JSON tokens and the lexicons' property names, NSIDs and known values; LFM/1 cons
 
 1. Reproduce: `cargo +nightly fuzz run --fuzz-dir fuzz <target> fuzz/artifacts/<target>/<file>`.
 2. Minimise: `cargo +nightly fuzz tmin --fuzz-dir fuzz <target> <file>`.
-3. Fix the cause in the crate (`crates/atp`, `crates/lexicon`, `crates/markdown`), not in the
+3. Fix the cause in the crate (`crates/atp`, `crates/lexicon`, `crates/markdown`, `crates/core`), not in the
    harness, unless the harness asserted something the spec does not promise. Add a regression
    test there with the minimised input.
 4. Keep the minimised input as `regressions/<target>/<short-name>`. Seeding copies it into the

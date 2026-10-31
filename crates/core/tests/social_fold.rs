@@ -19,10 +19,14 @@
 //! **Namespace.** The vectors are in the final namespace (`ns`), which every key and CID hashes,
 //! so this runner exists only in a `final-ns` build:
 //! `cargo test -p lessdugin-core --features final-ns --test social_fold -- --nocapture`.
+//!
+//! **wasm32.** On wasm32 (no filesystem) this runner is a module of `social_vectors.rs`, which
+//! embeds the vector files (`cargo xtask test-wasm` runs it there under node).
 
 #![cfg(feature = "final-ns")]
 
 use std::collections::BTreeMap;
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
 
 use lessdugin_core::social::full::karma;
@@ -31,6 +35,9 @@ use lessdugin_core::social::input::FoldInput;
 use lessdugin_core::social::time;
 use lessdugin_lexicon::ns::NS;
 use serde_json::{Value, json};
+// Natively this is a libtest test; on wasm32 the same body runs under wasm-bindgen-test in node.
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen_test::wasm_bindgen_test as test;
 
 /// The vector directories of `social.md` §19.
 const DIRS: [&str; 8] = [
@@ -69,10 +76,12 @@ const MUST_PASS: &[&str] = &[
 /// workspace `Cargo.toml` (`social.md` §1.3 rule 3).
 const HOT_BITS_SOURCE: &str = "rust-libm-0.2.16";
 
+#[cfg(not(target_arch = "wasm32"))]
 fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata/vectors")
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn files() -> Vec<String> {
     let mut out = Vec::new();
     for d in DIRS {
@@ -87,6 +96,24 @@ fn files() -> Vec<String> {
     }
     out
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+fn read(rel: &str) -> String {
+    std::fs::read_to_string(root().join(rel)).unwrap()
+}
+
+/// The files of `DIRS`, as embedded by `social_vectors.rs` (in the same order).
+#[cfg(target_arch = "wasm32")]
+fn files() -> Vec<String> {
+    crate::FILES
+        .iter()
+        .filter(|f| DIRS.iter().any(|d| f.starts_with(&format!("{d}/"))))
+        .map(|f| (*f).to_owned())
+        .collect()
+}
+
+#[cfg(target_arch = "wasm32")]
+use crate::vector_text as read;
 
 /// The outcome of one vector.
 enum Outcome {
@@ -230,7 +257,7 @@ fn social_fold_vectors() {
     let mut stub_fields: BTreeMap<String, std::collections::BTreeSet<String>> = BTreeMap::new();
     let mut total = 0;
     for rel in files() {
-        let text = std::fs::read_to_string(root().join(&rel)).unwrap();
+        let text = read(&rel);
         let f: Value = serde_json::from_str(&text).unwrap_or_else(|e| panic!("{rel}: {e}"));
         let kind = f["kind"].as_str().unwrap_or_default().to_owned();
         let ns = f["ns"].as_str().unwrap_or_default();

@@ -229,7 +229,7 @@ A claim is valid only while the implementation passes every normative vector of 
 
 ### 5.3 Runners and blessing
 
-- The Rust runner (`lessdugin-testkit`) and the TypeScript runner (vitest, calling `runVector` in a `vectors`-feature wasm build) run every vector. Their results MUST be equal, which proves native = wasm.
+- The Rust runners (the vector tests of each crate) run every vector natively. The same tests, built for wasm32-unknown-unknown, run under node (`cargo xtask test-wasm`, in CI): the vectors of `lessdugin-atp`, `lessdugin-lexicon` and `lessdugin-markdown`, and the social fold vectors and the P9 digest of `lessdugin-core` in both namespaces. Both runs check the same expected outputs, which proves native = wasm. (A TypeScript runner calling `runVector` in a `vectors`-feature wasm build is not needed for that, and none is built.)
 - `cargo xtask vectors --bless` regenerates expected outputs. Every blessed diff is reviewed, and lands in the same commit as the spec change that explains it.
 - Before M7, any expected output MAY change under that rule. After M7, the rules of §3.3 apply.
 - Property tests (proptest; `social.md` §19) complement the vectors: permutation invariance, idempotence, layering, the pair and sybil bounds, incremental = batch, native = wasm.

@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # End-to-end tests against the local devnet (packages/e2e/devnet.mjs: PLC + PDS with alice, bob
 # and carol; ADR 0006). The same runs locally with `cargo xtask e2e` (packages/e2e/README.md).
+# GitHub registers a workflow (its schedule, workflow_dispatch and pull_request runs) only once
+# the file is on the default branch: until then nothing runs it, and the local run is the record.
 name: e2e
 on:
   pull_request:
