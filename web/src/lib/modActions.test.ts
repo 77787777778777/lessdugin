@@ -1,14 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import type { Json, ModLogEntry, RawView } from "@lessdugin/engine/types";
-import { DTO_VERSION } from "@lessdugin/engine/types";
+import type { Json, ModLogEntry } from "@lessdugin/engine/types";
 import { describe, expect, it } from "vitest";
-import {
-  entryActionKey,
-  positiveAssertions,
-  recordActionValue,
-  suspensionWarning,
-  tagSlug,
-} from "./modActions.ts";
+import { entryActionKey, recordActionValue, suspendsNotice, tagSlug } from "./modActions.ts";
 
 const NS = "online.7778777.lessdugin.temp";
 const COMMENT = `at://did:plc:abcdefghijklmnopqrstuvwx/${NS}.comment/3kabc`;
@@ -94,46 +87,15 @@ describe("tagSlug", () => {
   });
 });
 
-describe("positiveAssertions (social.md §4.5)", () => {
-  const raw = (assertions: Json[]): RawView => ({
-    dto: DTO_VERSION,
-    uri: POST,
-    level: "pds",
-    validity: [],
-    assertions,
-  });
-  const a = (act: Json, status = "effective"): Json => ({
-    uri: "at://x",
-    cid: "c",
-    valid: true,
-    record: record(act),
-    status,
-  });
-
-  it("lists the keeps, tiers above personal and pins in effect", () => {
-    const view = raw([
-      a(action("hide", { hidden: false })),
-      a(action("tier", { tier: "frontpage" })),
-      a(action("pin", { scope: "forum" })),
-    ]);
-    expect(positiveAssertions(view)).toEqual(["keep", "tier", "pin"]);
-  });
-
-  it("ignores negative assertions and ones not in effect", () => {
-    const view = raw([
-      a(action("hide")),
-      a(action("tier", { tier: "personal" })),
-      a(action("pin", { scope: "forum", pinned: false })),
-      a(action("hide", { hidden: false }), "stale"),
-      a(action("tier", { tier: "curated" }), "overridden"),
-    ]);
-    expect(positiveAssertions(view)).toEqual([]);
-  });
-
-  it("words the warning an author sees before an edit", () => {
-    expect(suspensionWarning([], "post")).toBeNull();
-    expect(suspensionWarning(["keep", "pin"], "comment")).toMatch(
-      /^Editing this comment suspends a moderator's keep and its pin:/,
-    );
+describe("suspendsNotice (social.md §4.5)", () => {
+  it("passes on the engine's suspendsAssertions notice and nothing else", () => {
+    expect(suspendsNotice([])).toBeNull();
+    expect(suspendsNotice([{ code: "retroactive", message: "x" }])).toBeNull();
+    expect(
+      suspendsNotice([
+        { code: "notEstablished", message: "recorded" },
+        { code: "suspendsAssertions", message: "editing suspends a moderator's keep and its pin" },
+      ]),
+    ).toBe("editing suspends a moderator's keep and its pin");
   });
 });

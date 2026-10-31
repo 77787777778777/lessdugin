@@ -2,13 +2,14 @@
 // Edit, retract and delete for the viewer's own comments (data-model.md §8.3, §8.7). Edits keep
 // a public revision; retraction keeps the comment, struck through. An edit rebuilds the draft
 // from the record itself, so the parent, the quote and the body's media survive it. Before an
-// edit, the author is told when it will suspend a keep or a pin (social.md §4.5).
+// edit, the author is told when it will suspend a keep or a pin (social.md §4.5; the engine
+// says which, `editPreflight`).
 
 import type { CommentNode, MediaRef, TextQuote } from "@lessdugin/engine/types";
 import { useState } from "react";
 import { useEngine } from "../engine/context.tsx";
 import { writeStore } from "../engine/writes.ts";
-import { positiveAssertions, suspensionWarning } from "../lib/modActions.ts";
+import { suspendsNotice } from "../lib/modActions.ts";
 import { markdownOf, mediaRefsOf, objectField, refUri, textQuoteOf } from "../lib/records.ts";
 import ui from "../styles/ui.module.css";
 import { Dialog } from "./Dialog.tsx";
@@ -65,7 +66,10 @@ export function OwnCommentActions({ node, postUri }: { node: CommentNode; postUr
       const raw = await engine.raw(node.uri);
       const source = commentSourceOf(raw.record);
       if (!source) throw new Error("The comment's source is not available.");
-      setSuspends(suspensionWarning(positiveAssertions(raw), "comment"));
+      // the engine names what the edit suspends (social.md §4.5); without an answer, the edit
+      // goes ahead with no warning
+      const notices = await engine.editPreflight(node.uri).catch(() => []);
+      setSuspends(suspendsNotice(notices));
       setEditing(source);
     } catch (e) {
       toasts.show({ message: errorMessage(e), tone: "error" });

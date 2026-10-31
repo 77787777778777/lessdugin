@@ -20,7 +20,7 @@ import { qk, useActiveAccount } from "../../engine/queries.ts";
 import { useAnnounceQueued } from "../../engine/queued.ts";
 import { writeStore } from "../../engine/writes.ts";
 import { capReason } from "../../lib/caps.ts";
-import { positiveAssertions, suspensionWarning } from "../../lib/modActions.ts";
+import { suspendsNotice } from "../../lib/modActions.ts";
 import {
   markdownOf,
   mediaRefsOf,
@@ -67,7 +67,7 @@ export function postDraftOf(record: unknown, forum: string): PostDraft | null {
   return d;
 }
 
-function PostForm({
+export function PostForm({
   initial,
   draftId,
   editing,
@@ -291,13 +291,19 @@ function PostForm({
   );
 }
 
-/** Edit mode: loads the viewer's own post record. */
-function EditPost({ uri }: { uri: string }) {
+/** Edit mode: loads the viewer's own post record (exported for its tests). */
+export function EditPost({ uri }: { uri: string }) {
   const engine = useEngine();
   const { forum } = useForumView();
   const active = useActiveAccount();
   const raw = useQuery({ queryKey: qk.raw(uri), queryFn: () => engine.raw(uri) });
-  if (raw.isPending || active.isPending) return <Loading />;
+  // what the edit suspends, from the engine (social.md §4.5); an error means no warning
+  const preflight = useQuery({
+    queryKey: qk.editPreflight(uri),
+    queryFn: () => engine.editPreflight(uri),
+    retry: false,
+  });
+  if (raw.isPending || active.isPending || preflight.isPending) return <Loading />;
   if (raw.isError) return <ErrorView error={raw.error} title="This post cannot be edited" />;
   const author = parseAtUri(uri)?.did;
   const draft = postDraftOf(raw.data.record, forum.uri);
@@ -317,7 +323,7 @@ function EditPost({ uri }: { uri: string }) {
         initial={draft}
         draftId={undefined}
         editing={uri}
-        suspends={suspensionWarning(positiveAssertions(raw.data), "post")}
+        suspends={preflight.data ? suspendsNotice(preflight.data) : null}
       />
     </section>
   );
