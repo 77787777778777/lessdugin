@@ -20,6 +20,7 @@ import { useEngine } from "../engine/context.tsx";
 import { qk } from "../engine/queries.ts";
 import { cx } from "../lib/cx.ts";
 import { applyMention, type MentionCandidate, mentionAt, rankMentions } from "../lib/mentions.ts";
+import { cleanName } from "../lib/text.ts";
 import ui from "../styles/ui.module.css";
 import { type Attachment, Attachments, type AttachmentsHandle } from "./Attachments.tsx";
 import styles from "./Composer.module.css";
@@ -144,17 +145,13 @@ export function Composer({
   // the first candidate, for the keyboard; set below once `mentions` is known
   const pendingMention = useRef<MentionCandidate | null>(null);
   const acceptMentionRef = useRef<(c: MentionCandidate) => void>(() => {});
-  candidatesRef.current = (members.data ?? []).flatMap((m) =>
-    m.actor.handle !== undefined && m.actor.handleState === "verified"
-      ? [
-          {
-            did: m.actor.did,
-            handle: m.actor.handle,
-            ...(m.actor.displayName ? { label: m.actor.displayName } : {}),
-          },
-        ]
-      : [],
-  );
+  candidatesRef.current = (members.data ?? []).flatMap((m) => {
+    if (m.actor.handle === undefined || m.actor.handleState !== "verified") return [];
+    // the display name as every other name is shown (threat-model SPA-5, ID-5): bidi controls,
+    // zero-width characters and badge glyphs removed, and dropped when nothing is left
+    const label = m.actor.displayName ? cleanName(m.actor.displayName) : "";
+    return [{ did: m.actor.did, handle: m.actor.handle, ...(label !== "" ? { label } : {}) }];
+  });
   const hostRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
   // where files pasted or dropped into the editor go (null without the attachment picker)
@@ -434,7 +431,11 @@ export function Composer({
                 }}
               >
                 <span className={styles.mentionHandle}>@{c.handle}</span>
-                {c.label && <span className={styles.mentionLabel}>{c.label}</span>}
+                {c.label && (
+                  <span className={styles.mentionLabel}>
+                    <bdi>{c.label}</bdi>
+                  </span>
+                )}
               </button>
             </li>
           ))}

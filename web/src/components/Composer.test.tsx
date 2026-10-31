@@ -4,8 +4,8 @@
 
 import { EditorView } from "@codemirror/view";
 import { MockEngine } from "@lessdugin/engine/mock";
-import type { Draft } from "@lessdugin/engine/types";
-import { fireEvent, screen, waitFor } from "@testing-library/react";
+import type { Draft, MemberView } from "@lessdugin/engine/types";
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { renderWithApp } from "../test/render.tsx";
 import { Composer } from "./Composer.tsx";
@@ -123,5 +123,43 @@ describe("Composer", () => {
     const drop = new File([new Uint8Array([0xff, 0xd8, 0xff])], "drop.jpg", { type: "image/jpeg" });
     fireEvent.drop(view.contentDOM, { dataTransfer: { files: [drop], types: ["Files"] } });
     await waitFor(() => expect(prepare).toHaveBeenCalledTimes(2));
+  });
+
+  it("shows a mention candidate's display name cleaned and isolated, like every name (security-4)", async () => {
+    const engine = new MockEngine();
+    const forum = (await engine.followed())[0]?.uri ?? "";
+    const member = (did: string, handle: string, displayName: string): MemberView => ({
+      actor: { did, shortDid: did.slice(0, 12), handle, handleState: "verified", displayName },
+      status: "member",
+      granted: false,
+      joinedAtMs: 0,
+    });
+    vi.spyOn(engine, "members").mockResolvedValue([
+      // a bidi override, a zero-width space and a verified-badge glyph next to a lookalike handle
+      member("did:plc:aaaaaaaaaaaaaaaaaaaaaaaa", "alice.test", "‮@carol.test​ ✓"),
+      // nothing but glyphs and controls: no label at all
+      member("did:plc:bbbbbbbbbbbbbbbbbbbbbbbb", "bob.test", "✓​‮"),
+    ]);
+    const { container } = renderWithApp(
+      <Composer label="Comment" forumUri={forum} onSubmit={async () => true} />,
+      { engine },
+    );
+    const view = await editor(container);
+    view.dispatch({ changes: { from: 0, insert: "@" }, selection: { anchor: 1 } });
+    // the members arrive after the keystroke: the completion follows the caret, so a selection
+    // update recomputes it
+    const menu = await waitFor(() => {
+      view.dispatch({ selection: { anchor: 1 } });
+      return screen.getByTestId("mention-menu");
+    });
+    const rows = within(menu).getAllByRole("listitem");
+    const alice = rows.find((r) => r.textContent?.startsWith("@alice.test"));
+    const bob = rows.find((r) => r.textContent?.startsWith("@bob.test"));
+    if (!alice || !bob) throw new Error(`candidates missing: ${menu.textContent}`);
+    const label = alice.querySelector("bdi");
+    expect(label?.textContent).toBe("@carol.test");
+    expect(alice.textContent).toBe("@alice.test@carol.test");
+    expect(bob.querySelector("bdi")).toBeNull();
+    expect(bob.textContent).toBe("@bob.test");
   });
 });
