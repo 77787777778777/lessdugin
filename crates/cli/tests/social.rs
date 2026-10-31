@@ -646,8 +646,8 @@ fn the_human_thread_shows_agreement_reacts_and_banners() {
 
 /// `forum edit` keeps the about it is not asked to change, also a spilled one (`textBlob`,
 /// over 64 KiB, `data-model.md` §5.3) and its media: the text is fetched from the owner's PDS
-/// and spilled again, the media sent again as references (m4-5). `forum show` gives a spilled
-/// about's notice rather than nothing.
+/// and spilled again, the media sent again as references (m4-5). `forum show` shows a spilled
+/// about's text, which the engine fetches from the owner's PDS (m4-5, engine part).
 #[test]
 fn forum_edit_keeps_a_spilled_about_and_its_media() {
     use lessdugin_lexicon::collection::nsid;
@@ -671,7 +671,8 @@ fn forum_edit_keeps_a_spilled_about_and_its_media() {
     alice.ok(&["sync", "alice.test/big"]);
 
     let out = alice.ok(&["forum", "show", "alice.test/big"]);
-    assert!(out.contains("stored as a blob"), "{out}");
+    assert!(out.contains("All about it."), "{out}");
+    assert!(!out.contains("stored as a blob"), "{out}");
 
     let e = alice.json(&["forum", "edit", "alice.test/big", "--name", "Big"]);
     assert_eq!(e["state"]["kind"], "done", "{e}");
