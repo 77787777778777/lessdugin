@@ -485,6 +485,32 @@ fn deep_nesting_is_fast() {
     }
 }
 
+/// The extended-autolink scan is linear (§1.5, §4.1, PILL-1). Every `www.a.b.` below passes the
+/// first `valid_domain` check and fails the second, so a scan that looks at the rest of the
+/// whitespace-free run once per candidate is quadratic (red-team F1: 67 s for 1 MB). Eight
+/// times the input must cost about eight times as much, not 64 (bound generous for noise).
+#[test]
+fn autolink_scan_is_linear() {
+    let time = |times: usize| {
+        let src = "(www.a.b.".repeat(times);
+        (0..3)
+            .map(|_| {
+                let t = Stopwatch::start();
+                let m = derive_metadata(&src, &[]);
+                let el = t.elapsed();
+                assert!(m.error.is_none());
+                el
+            })
+            .min()
+            .expect("three runs")
+    };
+    let (small, large) = (time(2_000), time(16_000));
+    assert!(
+        large < small * 24 + std::time::Duration::from_millis(250),
+        "18 kB took {small:?}, 144 kB took {large:?}"
+    );
+}
+
 /// The SKind enum is exhaustively exercised by the vectors; this guards the empty case.
 #[test]
 fn empty_and_error_docs() {

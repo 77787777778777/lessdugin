@@ -405,6 +405,58 @@
       }
     },
     {
+      "name": "host-display-leading-non-name",
+      "input": {
+        "text": "[(google.com)](https://evil.com) [\"google.com\"](https://evil.com) [¡google.com!](https://evil.com) [→ google.com](https://evil.com) [⠀google.com](https://evil.com) [🔒 https://www.google.com](https://evil.com) [(evil.com)](https://evil.com) [(https://www.evil.com/x)](https://evil.com) [(click here)](https://evil.com)\n"
+      },
+      "expected": {
+        "html": "<div class=\"lfm\" dir=\"auto\">\n<p dir=\"auto\"><a href=\"https://evil.com\" rel=\"nofollow ugc noopener noreferrer\">(google.com)<span class=\"link-host\">evil.com</span></a> <a href=\"https://evil.com\" rel=\"nofollow ugc noopener noreferrer\">\"google.com\"<span class=\"link-host\">evil.com</span></a> <a href=\"https://evil.com\" rel=\"nofollow ugc noopener noreferrer\">¡google.com!<span class=\"link-host\">evil.com</span></a> <a href=\"https://evil.com\" rel=\"nofollow ugc noopener noreferrer\">→ google.com<span class=\"link-host\">evil.com</span></a> <a href=\"https://evil.com\" rel=\"nofollow ugc noopener noreferrer\">⠀google.com<span class=\"link-host\">evil.com</span></a> <a href=\"https://evil.com\" rel=\"nofollow ugc noopener noreferrer\">🔒 https://www.google.com<span class=\"link-host\">evil.com</span></a> <a href=\"https://evil.com\" rel=\"nofollow ugc noopener noreferrer\">(evil.com)</a> <a href=\"https://evil.com\" rel=\"nofollow ugc noopener noreferrer\">(https://www.evil.com/x)</a> <a href=\"https://evil.com\" rel=\"nofollow ugc noopener noreferrer\">(click here)</a></p>\n</div>\n",
+        "text": "(google.com) \"google.com\" ¡google.com! → google.com ⠀google.com 🔒 https://www.google.com (evil.com) (https://www.evil.com/x) (click here)"
+      }
+    },
+    {
+      "name": "host-display-anywhere-in-text",
+      "input": {
+        "text": "[See. google.com](https://evil.com) [google.com (ask bob@corp)](https://evil.com) [google.com@corp](https://evil.com) [evil.com, not google.com](https://evil.com) [https://google.com@evil.com/](https://evil.com) [see evil.com](https://evil.com) [https://evil.com/a.html?v=1.2#s.3](https://evil.com) [first.last@evil.com](mailto:first.last@evil.com) [Hello. World](https://evil.com)\n"
+      },
+      "expected": {
+        "html": "<div class=\"lfm\" dir=\"auto\">\n<p dir=\"auto\"><a href=\"https://evil.com\" rel=\"nofollow ugc noopener noreferrer\">See. google.com<span class=\"link-host\">evil.com</span></a> <a href=\"https://evil.com\" rel=\"nofollow ugc noopener noreferrer\">google.com (ask bob@corp)<span class=\"link-host\">evil.com</span></a> <a href=\"https://evil.com\" rel=\"nofollow ugc noopener noreferrer\">google.com@corp<span class=\"link-host\">evil.com</span></a> <a href=\"https://evil.com\" rel=\"nofollow ugc noopener noreferrer\">evil.com, not google.com<span class=\"link-host\">evil.com</span></a> <a href=\"https://evil.com\" rel=\"nofollow ugc noopener noreferrer\">https://google.com@evil.com/<span class=\"link-host\">evil.com</span></a> <a href=\"https://evil.com\" rel=\"nofollow ugc noopener noreferrer\">see evil.com</a> <a href=\"https://evil.com\" rel=\"nofollow ugc noopener noreferrer\">https://evil.com/a.html?v=1.2#s.3</a> <a href=\"mailto:first.last@evil.com\" rel=\"nofollow ugc noopener noreferrer\">first.last@evil.com</a> <a href=\"https://evil.com\" rel=\"nofollow ugc noopener noreferrer\">Hello. World</a></p>\n</div>\n",
+        "text": "See. google.com google.com (ask bob@corp) google.com@corp evil.com, not google.com https://google.com@evil.com/ see evil.com https://evil.com/a.html?v=1.2#s.3 first.last@evil.com Hello. World"
+      }
+    },
+    {
+      "name": "host-display-gaps-and-lookalike-dots",
+      "input": {
+        "text": "[google.⠀com](https://evil.com) [google.𝅙com](https://evil.com) [google⠀.com](https://evil.com) [google.\u200acom](https://evil.com) [googleꓸcom](https://evil.com) [google܁com](https://evil.com) [evil.⠀com](https://evil.com) [evilꓸcom](https://evil.com) [google. com](https://evil.com)\n"
+      },
+      "expected": {
+        "html": "<div class=\"lfm\" dir=\"auto\">\n<p dir=\"auto\"><a href=\"https://evil.com\" rel=\"nofollow ugc noopener noreferrer\">google.⠀com<span class=\"link-host\">evil.com</span></a> <a href=\"https://evil.com\" rel=\"nofollow ugc noopener noreferrer\">google.𝅙com<span class=\"link-host\">evil.com</span></a> <a href=\"https://evil.com\" rel=\"nofollow ugc noopener noreferrer\">google⠀.com<span class=\"link-host\">evil.com</span></a> <a href=\"https://evil.com\" rel=\"nofollow ugc noopener noreferrer\">google.\u200acom<span class=\"link-host\">evil.com</span></a> <a href=\"https://evil.com\" rel=\"nofollow ugc noopener noreferrer\">googleꓸcom<span class=\"link-host\">evil.com</span></a> <a href=\"https://evil.com\" rel=\"nofollow ugc noopener noreferrer\">google܁com<span class=\"link-host\">evil.com</span></a> <a href=\"https://evil.com\" rel=\"nofollow ugc noopener noreferrer\">evil.⠀com</a> <a href=\"https://evil.com\" rel=\"nofollow ugc noopener noreferrer\">evilꓸcom</a> <a href=\"https://evil.com\" rel=\"nofollow ugc noopener noreferrer\">google. com</a></p>\n</div>\n",
+        "text": "google.⠀com google.𝅙com google⠀.com google. com googleꓸcom google܁com evil.⠀com evilꓸcom google. com"
+      }
+    },
+    {
+      "name": "host-display-image-in-link",
+      "input": {
+        "text": "[![evil.com](cid:bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku)/google.com](https://evil.com) [google.com@![evil.com](cid:bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku)](https://evil.com) [![a](cid:bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku) evil.com](https://evil.com)\n",
+        "media": [
+          {
+            "blob": {
+              "$type": "blob",
+              "ref": {
+                "$link": "bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku"
+              },
+              "mimeType": "image/png",
+              "size": 1234
+            }
+          }
+        ]
+      },
+      "expected": {
+        "html": "<div class=\"lfm\" dir=\"auto\">\n<p dir=\"auto\"><a href=\"https://evil.com\" rel=\"nofollow ugc noopener noreferrer\"><img data-cid=\"bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku\" alt=\"evil.com\">/google.com<span class=\"link-host\">evil.com</span></a> <a href=\"https://evil.com\" rel=\"nofollow ugc noopener noreferrer\">google.com@<img data-cid=\"bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku\" alt=\"evil.com\"><span class=\"link-host\">evil.com</span></a> <a href=\"https://evil.com\" rel=\"nofollow ugc noopener noreferrer\"><img data-cid=\"bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku\" alt=\"a\"> evil.com</a></p>\n</div>\n",
+        "text": "evil.com/google.com google.com@evil.com a evil.com"
+      }
+    },
+    {
       "name": "mailto-empty-address-dropped",
       "input": {
         "text": "[support@google.com](mailto:?to=attacker@evil.com)\n"

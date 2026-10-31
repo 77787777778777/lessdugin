@@ -18,15 +18,19 @@ use crate::styled::{StyledDoc, build, error_doc};
 /// Builds without the `math` feature use the Temml fallback (§7.5); that mode is part of the
 /// version, so it sets the top bit.
 ///
+/// `4`: the real-host span (§5.5, F9) tests every dotted name the link text names, wherever it
+/// stands, with gaps and lookalikes next to a dot read as part of the name; before, only a name
+/// at the very start of the text counted, so a leading `(` or U+2800, an earlier sentence, a
+/// later `@`, `google.⠀com` or a covered image alt could hide one (red-team F2).
 /// `3` at M4: the math normaliser changed presentation (ADR 0002 decision 3, §7.3 — math-core
 /// 0.9's closed `style` set becomes `mc-*` classes and `mathcolor`), and §1.2 requires the bump
 /// in the same commit as the re-blessed vectors and the regenerated sanitiser configurations
 /// (which here derive from `allowlist`'s tables at run time, so they follow automatically).
 /// `2` was the last version without the normaliser.
 pub const RENDERER_VERSION: u32 = if matches!(MATH_MODE, MathMode::MathCore) {
-    3
+    4
 } else {
-    3 | (1 << 31)
+    4 | (1 << 31)
 };
 
 /// Sources longer than this are not parsed (§1.3).

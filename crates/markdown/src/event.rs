@@ -109,6 +109,9 @@ pub(crate) struct LinkData {
     pub title: String,
     /// `plain(inner events)` (§10.1, no normalisation); filled by pass 5.
     pub inner: String,
+    /// `inner` without the alts of the images in it, if there are any: the text the link shows
+    /// once its pictures load (the host test, §5.5); filled by pass 5.
+    pub inner_no_alts: Option<String>,
     pub res: LinkRes,
 }
 
