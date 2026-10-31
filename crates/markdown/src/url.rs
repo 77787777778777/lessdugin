@@ -528,10 +528,11 @@ fn dotted_end(t: &[char], i: usize) -> Option<usize> {
 /// removed (invisible characters cannot split a name), NFKC (fullwidth and other compatibility
 /// forms become ASCII), the code points that read as a dot mapped to `.`, and blanks, symbols
 /// and other gaps next to a dot removed (`google.⠀com`). Every dotted name of any script in it
-/// is then a host the text names, except an e-mail address's mailbox and the names in a URL's
-/// path, query or fragment. The host is shown unless every name the text names is exactly the
-/// link's host (one `www.` stripped from both): wherever a name stands in the text, a
-/// different one cannot go unflagged (red-team F2).
+/// is then a host the text names, except an e-mail address's mailbox (never one in a URL's
+/// authority, after `//`) and the names in a URL's path, query or fragment. The host is shown
+/// unless every name the text names is exactly the link's host (one `www.` stripped from
+/// both): wherever a name stands in the text, a different one cannot go unflagged (red-team
+/// F2).
 pub(crate) fn html_host_suffix(inner: &str, host: &str) -> bool {
     // Steps 1-3. White_Space is kept out of NFKC, which would turn the narrow spaces into the
     // U+0020 that step 4 keeps.
@@ -583,17 +584,20 @@ pub(crate) fn html_host_suffix(inner: &str, host: &str) -> bool {
         i = j;
     }
     // Step 5. `seen`: the current URL run has had a dotted name; `path`: a `/`, `?` or `#`
-    // has followed one, so the names after it are in a path, query or fragment.
+    // has followed one, so the names after it are in a path, query or fragment; `authority`:
+    // the run has had `//`, so every name before that `/`, `?` or `#` is a host, whatever
+    // stands between the `//` and it (`https://u@google.com@evil.com` names both).
     let h = host.strip_prefix("www.").unwrap_or(host);
-    let (mut seen, mut path) = (false, false);
+    let (mut seen, mut path, mut authority) = (false, false, false);
     let mut i = 0;
     while i < u.len() {
         let c = u[i];
         if !is_name_char(c) {
             if matches!(c, '/' | '?' | '#') {
                 path |= seen;
+                authority |= c == '/' && i >= 1 && u[i - 1] == '/';
             } else if c != '.' && !is_url_char(c) {
-                (seen, path) = (false, false);
+                (seen, path, authority) = (false, false, false);
             }
             i += 1;
             continue;
@@ -602,10 +606,9 @@ pub(crate) fn html_host_suffix(inner: &str, host: &str) -> bool {
             i = name_end(&u, i);
             continue;
         };
-        // `first.last@corp.com` names only `corp.com`; a user name after `//` is no mailbox.
-        let mailbox = u.get(end) == Some(&'@')
-            && dotted_end(&u, end + 1).is_some()
-            && !(i >= 2 && u[i - 2..i] == ['/', '/']);
+        // `first.last@corp.com` names only `corp.com`; in a URL's authority no name is a mailbox.
+        let mailbox =
+            u.get(end) == Some(&'@') && dotted_end(&u, end + 1).is_some() && !authority;
         if !mailbox && !path {
             let d: String = u[i..end].iter().collect();
             if d.strip_prefix("www.").unwrap_or(&d) != h {
@@ -915,6 +918,22 @@ mod tests {
             assert!(html_host_suffix(text, "evil.com"), "{text:?}");
             assert!(html_host_suffix(text, "google.com"), "{text:?}");
         }
+        // In a URL's authority (after `//`) no name is a mailbox, whatever stands between the
+        // `//` and it: the exception for a name directly after `//` was bypassed by one `@` or a
+        // user name (post-fix review security-3).
+        for text in [
+            "https://@google.com@evil.com",
+            "https://u@google.com@evil.com",
+            "https://u:p@google.com@evil.com",
+            "https://x@google.com@evil.com/path",
+            "//google.com@evil.com",
+            "(https://@google.com@evil.com)",
+        ] {
+            assert!(html_host_suffix(text, "evil.com"), "{text:?}");
+        }
+        // ... while outside one the mailbox rule stands, and a user name is no host.
+        assert!(!html_host_suffix("https://u:p@evil.com", "evil.com"));
+        assert!(!html_host_suffix("bob@google.com@evil.com", "evil.com"));
         // Mailboxes and path, query or fragment names are not hosts; ASCII whitespace still
         // ends a name, so prose is not one.
         for (text, host) in [

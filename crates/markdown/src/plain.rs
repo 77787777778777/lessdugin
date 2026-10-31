@@ -81,34 +81,6 @@ pub(crate) fn plain_raw(evs: &[Ev], skip_spoilers: bool) -> String {
     out
 }
 
-/// `plain_raw(evs, false)` without the alts of the images in `evs`, or `None` if there are no
-/// images: the text a link shows once its pictures load, which the host test also reads (§5.5).
-pub(crate) fn plain_without_alts(evs: &[Ev]) -> Option<String> {
-    let mut out: Option<String> = None;
-    let (mut depth, mut from) = (0usize, 0);
-    for (k, e) in evs.iter().enumerate() {
-        match e {
-            Ev::Start(Tag::Image(_)) => {
-                if depth == 0 {
-                    out.get_or_insert_default()
-                        .push_str(&plain_raw(&evs[from..k], false));
-                }
-                depth += 1;
-            }
-            Ev::End(TagKind::Image) if depth > 0 => {
-                depth -= 1;
-                from = k + 1;
-            }
-            _ => {}
-        }
-    }
-    let mut out = out?;
-    if depth == 0 {
-        out.push_str(&plain_raw(&evs[from..], false));
-    }
-    Some(out)
-}
-
 fn contributes_newline(k: TagKind) -> bool {
     matches!(
         k,

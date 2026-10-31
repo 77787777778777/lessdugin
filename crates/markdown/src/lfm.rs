@@ -14,7 +14,7 @@ use crate::event::{
     match_indices, push_literal, push_text,
 };
 use crate::media::MediaItem;
-use crate::plain::{plain_raw, plain_without_alts, slug};
+use crate::plain::{plain_raw, slug};
 use crate::url::{Href, HrefCtx, cid_of, safe_href};
 
 /// The pulldown-cmark options of `lfm/1` (§2): exactly the six named "on" flags, `0x0C1E`.
@@ -155,8 +155,6 @@ fn map_tag(t: PTag<'_>) -> Option<Tag> {
             kind: link_kind(link_type)?,
             dest: norm_nl(&dest_url),
             title: norm_nl(&title),
-            inner: String::new(),
-            inner_no_alts: None,
             res: LinkRes::Pending,
         })),
         PTag::Image {
@@ -479,8 +477,6 @@ fn autolink(text: &str, out: &mut Vec<Ev>) {
                         kind: LinkKind::ExtAutolink,
                         dest,
                         title: String::new(),
-                        inner: String::new(),
-                        inner_no_alts: None,
                         res: LinkRes::Pending,
                     }))));
                     out.push(Ev::Text(lit));
@@ -678,9 +674,6 @@ pub(crate) fn pass45(s: &mut [Ev], media: &[MediaItem]) {
     for i in 0..s.len() {
         match &s[i] {
             Ev::Start(Tag::Link(_)) => {
-                let end = m[i].min(s.len());
-                let inner = plain_raw(&s[i + 1..end], false);
-                let inner_no_alts = plain_without_alts(&s[i + 1..end]);
                 let first_at = matches!(s.get(i + 1), Some(Ev::Text(t)) if t.starts_with('@'));
                 if let Ev::Start(Tag::Link(d)) = &mut s[i] {
                     let dest = if d.kind == LinkKind::Email {
@@ -688,8 +681,6 @@ pub(crate) fn pass45(s: &mut [Ev], media: &[MediaItem]) {
                     } else {
                         d.dest.clone()
                     };
-                    d.inner = inner;
-                    d.inner_no_alts = inner_no_alts;
                     d.res = match safe_href(&dest, HrefCtx::Markdown) {
                         Some(Href::External { url, host }) => LinkRes::External { url, host },
                         Some(Href::Mailto { url, host }) => LinkRes::Mailto { url, host },
