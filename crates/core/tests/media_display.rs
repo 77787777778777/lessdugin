@@ -915,7 +915,10 @@ fn body_source_gives_the_markdown_of_inline_and_spilled_bodies() {
     n.tick(MINUTE);
     let e3 = n.device("anon3", None);
     let s = block_on(e3.body_source(&f)).unwrap();
-    assert_eq!((s.markdown.as_str(), s.profile, s.spilled), ("Be kind.", None, false));
+    assert_eq!(
+        (s.markdown.as_str(), s.profile, s.spilled),
+        ("Be kind.", None, false)
+    );
     decl["about"] = spilled_body(&bob, b"# About this forum\n\nBe kind.");
     bob.put(nsid::FORUM, "meta", &decl);
     n.tick(MINUTE);

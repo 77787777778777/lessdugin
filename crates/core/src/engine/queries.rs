@@ -398,7 +398,11 @@ impl<H: Host> Engine<H> {
             let v = values
                 .remove(&uri)
                 .ok_or_else(|| EngineError::not_found(format!("{uri} is not available")))?;
-            (key.uri.to_string(), u.did().to_string(), v.get("body").cloned())
+            (
+                key.uri.to_string(),
+                u.did().to_string(),
+                v.get("body").cloned(),
+            )
         } else {
             return Err(EngineError::invalid_ref(format!(
                 "{u} is not a post, a comment or a forum"
@@ -434,7 +438,9 @@ impl<H: Host> Engine<H> {
         let Some(spilled) = renders.spilled(blob) else {
             return Err(EngineError::new(
                 ErrorCode::Network,
-                format!("{u}: the body is stored as a blob that is not loaded yet; try again later"),
+                format!(
+                    "{u}: the body is stored as a blob that is not loaded yet; try again later"
+                ),
             )
             .with_retryable(true)
             .with_detail("kind", "bodyPending"));
