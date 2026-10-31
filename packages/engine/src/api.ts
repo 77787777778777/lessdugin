@@ -16,6 +16,7 @@
 import type {
   AccountInfo,
   AccountView,
+  ActionNotice,
   ActionTicket,
   ActorView,
   AtUri,
@@ -206,6 +207,10 @@ export interface EngineApi {
   publish(draft: PostDraft): Promise<WriteTicket>;
   comment(draft: CommentDraft): Promise<WriteTicket>;
   edit(uri: AtUri, draft: Draft, opts: EditOpts): Promise<WriteTicket>;
+  /** What to confirm before `edit` of `uri`: a `suspendsAssertions` notice when the item
+   * carries positive assertions in effect (a keep, a frontpage or curated tier, a pin), which
+   * the edit suspends until an authority asserts them again (social.md §4.5). Empty: none. */
+  editPreflight(uri: AtUri): Promise<ActionNotice[]>;
   delete(uri: AtUri): Promise<WriteTicket>;
   retract(uri: AtUri): Promise<WriteTicket>;
   /** A public action (`acknowledgePublicAction(vote | react | tagVote)` first). Held for
@@ -281,7 +286,9 @@ export interface EngineApi {
   importLocal(json: Json): Promise<ImportReport>;
 
   // §3.7 Pure functions -----------------------------------------------------------------------
-  render(markdown: string, media: MediaRef[], opts: RenderOpts): Promise<RenderedBody>;
+  /** `media`: the draft's `MediaRef`s (rendered as `publish` writes them), or `defs#media`
+   * values as a record stores them (objects with a `blob`); `opts.profile` is the body's. */
+  render(markdown: string, media: MediaRef[] | Json[], opts: RenderOpts): Promise<RenderedBody>;
   safeHref(raw: string, ctx: HrefContext): Promise<Href | null>;
   validateRecord(collection: string, json: Json): Promise<ValidationReport>;
   deriveRkey(input: RkeyInput): Promise<string>;

@@ -1384,26 +1384,36 @@ impl<H: crate::host::Host> crate::engine::Engine<H> {
     }
 }
 
-/// The type a fetched blob is displayed as (`sync.md` §11.2): the §8.8 table of the sniffed
-/// prefix, plus AVIF (inline in the SPA only, never uploaded), or `None` (a download card).
+/// The type a fetched blob's prefix sniffs as: the §8.8 table, plus AVIF (which is never
+/// uploaded), or `None`. A download card names its file from it (`sync.md` §11.2).
+pub fn sniffed_type(prefix: &[u8]) -> Option<&'static str> {
+    crate::outbox::blob::normalise_mime(prefix).or_else(|| {
+        (prefix.len() >= 12
+            && &prefix[4..8] == b"ftyp"
+            && matches!(&prefix[8..12], b"avif" | b"avis"))
+        .then_some("image/avif")
+    })
+}
+
+/// The type a fetched blob is displayed as (`sync.md` §11.2): the [`sniffed_type`] of its
+/// prefix when it is on the display allowlist (AVIF: inline in the SPA only), or `None` (a
+/// download card).
 pub fn display_type(prefix: &[u8]) -> Option<&'static str> {
-    if let Some(t) = crate::outbox::blob::normalise_mime(prefix) {
-        return matches!(
-            t,
+    sniffed_type(prefix).filter(|t| {
+        matches!(
+            *t,
             "image/png"
                 | "image/jpeg"
                 | "image/gif"
                 | "image/webp"
+                | "image/avif"
                 | "video/mp4"
                 | "video/webm"
                 | "audio/mp4"
                 | "audio/mpeg"
                 | "audio/ogg"
         )
-        .then_some(t);
-    }
-    (prefix.len() >= 12 && &prefix[4..8] == b"ftyp" && matches!(&prefix[8..12], b"avif" | b"avis"))
-        .then_some("image/avif")
+    })
 }
 
 /// A declared `mimeType` through §8.8's names: parameters and case dropped, and the aliases the
@@ -1559,6 +1569,7 @@ impl<H: crate::host::Host> crate::engine::Engine<H> {
             }
             Err(e) => return Err(EngineError::from(e)),
         };
+        self.note_stored(&handle.cid).await;
         // a copy stored by another fetch is held to this declaration too
         if handle.size > max {
             return Err(EngineError::new(
@@ -1582,6 +1593,7 @@ impl<H: crate::host::Host> crate::engine::Engine<H> {
             size: handle.size,
             url: handle.locator,
             mime: mime.map(str::to_owned),
+            sniffed: sniffed_type(&prefix).map(str::to_owned),
         })
     }
 }
@@ -1616,7 +1628,6 @@ impl<H: crate::host::Host> crate::engine::Engine<H> {
             return;
         };
         let now = self.host().now_ms();
-        let retry = now.saturating_add(crate::limits::BODY_BLOB_RETRY_MS);
         // (uri, author, blob)
         let mut wanted: Vec<(&str, &str, &str)> = Vec::new();
         for (uri, v) in &values {
@@ -1640,16 +1651,73 @@ impl<H: crate::host::Host> crate::engine::Engine<H> {
             }
             wanted.push((uri, &x.did, blob));
         }
+        self.fetch_spilled(model.key.uri.as_str(), &wanted, renders)
+            .await;
+    }
+
+    /// [`Self::load_spilled_bodies`] for the forum's `about`, a body of its owner's.
+    pub(crate) async fn load_spilled_about(
+        &self,
+        model: &crate::model::ForumModel,
+        renders: &crate::model::RenderCache,
+    ) {
+        use crate::model::render::text_blob_cid;
+        let Some(md) = model
+            .decl
+            .about
+            .as_ref()
+            .and_then(|a| serde_json::to_value(a).ok())
+            .filter(|md| md.get("text").is_none())
+        else {
+            return;
+        };
+        let Some(blob) = text_blob_cid(&md) else {
+            return;
+        };
+        let now = self.host().now_ms();
+        if renders.spilled(blob).is_some()
+            || renders.spilled_retry_at(blob).is_some_and(|t| now < t)
+                && !matches!(self.host().blob_open(blob).await, Ok(Some(_)))
+        {
+            return;
+        }
+        let forum = model.key.uri.as_str();
+        let owner = model.key.owner.as_str();
+        self.fetch_spilled(forum, &[(forum, owner, blob)], renders)
+            .await;
+    }
+
+    /// Fetches the spilled bodies `wanted` (item uri, author, blob) of `forum`, waiting at most
+    /// `BODY_BLOB_WAIT_MS`: one that does not come in time, or cannot be fetched now, is left
+    /// pending until `BODY_BLOB_RETRY_MS` from now, with its item, for `live_tail`
+    /// ([`Self::retry_spilled_bodies`]).
+    async fn fetch_spilled(
+        &self,
+        forum: &str,
+        wanted: &[(&str, &str, &str)],
+        renders: &crate::model::RenderCache,
+    ) {
+        use crate::model::render::PendingSpilled;
         if wanted.is_empty() {
             return;
         }
+        let retry = self
+            .host()
+            .now_ms()
+            .saturating_add(crate::limits::BODY_BLOB_RETRY_MS);
+        let pending = |uri: &str, did: &str| PendingSpilled {
+            at_ms: retry,
+            forum: forum.to_owned(),
+            uri: uri.to_owned(),
+            did: did.to_owned(),
+        };
         let fetches =
             futures::future::join_all(wanted.iter().map(|&(uri, did, blob)| async move {
                 match self.fetch_text_blob(did, blob).await {
                     Ok(s) => renders.put_spilled(blob, s),
                     Err(e) => {
                         tracing::debug!(uri = %uri, error = %e, "a spilled body stays pending");
-                        renders.spilled_unavailable(blob, retry);
+                        renders.spilled_unavailable(blob, pending(uri, did));
                     }
                 }
             }));
@@ -1658,12 +1726,77 @@ impl<H: crate::host::Host> crate::engine::Engine<H> {
         // the fetches first: one that is ready (a stored copy) never waits for the clock
         let waited = futures::future::select(fetches, wait).await;
         if let futures::future::Either::Right(_) = waited {
-            for &(uri, _, blob) in &wanted {
+            for &(uri, did, blob) in wanted {
                 if renders.spilled(blob).is_none() {
                     tracing::debug!(uri = %uri, "a spilled body is slow to come: it stays pending");
-                    renders.spilled_unavailable(blob, retry);
+                    renders.spilled_unavailable(blob, pending(uri, did));
                 }
             }
+        }
+    }
+
+    /// The spilled bodies views left pending, fetched again by `live_tail` (`lfm-1.md` §1.3):
+    /// each one the host has stored meanwhile (the browser's download ran on), or whose retry
+    /// time has come. Returns the topics of the items whose body arrived (fetched, or found
+    /// missing or unreadable), for `Changed`: their thread and their forum, so a client shows
+    /// the body without being asked again. The forums' fetches run together, so stalled PDSes
+    /// hold the round back by one `BODY_BLOB_WAIT_MS` at most, however many forums wait.
+    pub(crate) async fn retry_spilled_bodies(
+        &self,
+        renders: &crate::model::RenderCache,
+    ) -> Vec<crate::dto::Topic> {
+        use crate::dto::Topic;
+        let now = self.host().now_ms();
+        let mut due: Vec<(String, crate::model::render::PendingSpilled)> = Vec::new();
+        for (blob, p) in renders.spilled_pending() {
+            if now >= p.at_ms || matches!(self.host().blob_open(&blob).await, Ok(Some(_))) {
+                due.push((blob, p));
+            }
+        }
+        let by_forum = due.iter().fold(
+            std::collections::BTreeMap::<&str, Vec<(&str, &str, &str)>>::new(),
+            |mut by, (blob, p)| {
+                by.entry(p.forum.as_str()).or_default().push((
+                    p.uri.as_str(),
+                    p.did.as_str(),
+                    blob.as_str(),
+                ));
+                by
+            },
+        );
+        futures::future::join_all(by_forum.iter().map(|(&forum, items)| async move {
+            self.fetch_spilled(forum, items, renders).await;
+            let mut topics: Vec<Topic> = Vec::new();
+            for &(uri, _, blob) in items {
+                if renders.spilled(blob).is_some() && uri != forum {
+                    topics.push(Topic::Thread {
+                        uri: uri.to_owned(),
+                    });
+                }
+            }
+            if items
+                .iter()
+                .any(|&(_, _, blob)| renders.spilled(blob).is_some())
+            {
+                topics.push(Topic::Forum {
+                    uri: forum.to_owned(),
+                });
+            }
+            topics
+        }))
+        .await
+        .into_iter()
+        .flatten()
+        .collect()
+    }
+
+    /// Marks `cid`, which the host has just stored, loose when no forum counts a reference to
+    /// it (`sync.md` §11.4): the next build of a forum that references it deletes it. A failure
+    /// is logged; the blob then stays until the cache is cleared.
+    async fn note_stored(&self, cid: &str) {
+        let now = self.host().now_ms();
+        if let Err(e) = crate::store::blob::note_stored(self.host().cache(), cid, now).await {
+            tracing::warn!(cid = %cid, error = %e, "marking a stored blob");
         }
     }
 
@@ -1691,6 +1824,7 @@ impl<H: crate::host::Host> crate::engine::Engine<H> {
             Err(HostError::HttpStatus(400, _)) => return Ok(Spilled::Missing),
             Err(e) => return Err(e.into()),
         };
+        self.note_stored(&h.cid).await;
         // a copy stored by another fetch is held to the same cap
         if h.size > max {
             return Ok(Spilled::Error(BodyError::TooLarge));

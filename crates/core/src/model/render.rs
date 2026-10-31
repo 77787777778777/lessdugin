@@ -271,17 +271,36 @@ impl Lru {
 }
 
 /// The spilled bodies fetched (by blob CID), at most [`SPILLED_ENTRIES`], oldest dropped first,
-/// and the ones that could not be fetched, with the time to ask again.
+/// and the ones that could not be fetched, with the time to ask again and whose they are, at
+/// most [`SPILLED_PENDING_ENTRIES`], the soonest due dropped first.
 #[derive(Default)]
 struct SpilledMap {
     tick: u64,
     texts: BTreeMap<String, (u64, Arc<Spilled>)>,
-    retry_at: BTreeMap<String, i64>,
+    pending: BTreeMap<String, PendingSpilled>,
 }
 
 /// Spilled sources kept in memory: each is at most `BLOB_TEXT_MAX_BYTES`, and once rendered the
 /// body is in the LRU anyway (the host still has the verified bytes).
 pub const SPILLED_ENTRIES: usize = 16;
+
+/// Pending spilled bodies remembered for `live_tail` to fetch again (a view asks for one it
+/// does not remember at once).
+pub const SPILLED_PENDING_ENTRIES: usize = 64;
+
+/// A spilled body a view left pending (`lfm-1.md` §1.3): when it may be asked for again, and
+/// the item it is the body of, so `live_tail` can fetch it and announce it (`Changed`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingSpilled {
+    /// When it may be asked for again (ms).
+    pub at_ms: i64,
+    /// The forum's uri.
+    pub forum: String,
+    /// The item's uri (a post, or the forum for its `about`).
+    pub uri: String,
+    /// Its author, whose PDS has the blob.
+    pub did: String,
+}
 
 /// The render cache: `(cid, RENDERER_VERSION) → RenderedBody`, least recently used dropped
 /// first, and the fetched sources of spilled bodies.
@@ -350,7 +369,7 @@ impl RenderCache {
         let mut m = self.spilled_map();
         m.tick += 1;
         let tick = m.tick;
-        m.retry_at.remove(blob);
+        m.pending.remove(blob);
         m.texts.insert(blob.to_owned(), (tick, Arc::new(v)));
         while m.texts.len() > SPILLED_ENTRIES {
             let Some(oldest) = m
@@ -367,12 +386,33 @@ impl RenderCache {
 
     /// When the blob `blob`, which could not be fetched, may be asked for again (ms).
     pub fn spilled_retry_at(&self, blob: &str) -> Option<i64> {
-        self.spilled_map().retry_at.get(blob).copied()
+        self.spilled_map().pending.get(blob).map(|p| p.at_ms)
     }
 
-    /// The blob `blob` could not be fetched: it stays pending until `at_ms`.
-    pub fn spilled_unavailable(&self, blob: &str, at_ms: i64) {
-        self.spilled_map().retry_at.insert(blob.to_owned(), at_ms);
+    /// The blob `blob` could not be fetched: it stays pending until `p.at_ms`.
+    pub fn spilled_unavailable(&self, blob: &str, p: PendingSpilled) {
+        let mut m = self.spilled_map();
+        m.pending.insert(blob.to_owned(), p);
+        while m.pending.len() > SPILLED_PENDING_ENTRIES {
+            let Some(soonest) = m
+                .pending
+                .iter()
+                .min_by_key(|(_, p)| p.at_ms)
+                .map(|(k, _)| k.clone())
+            else {
+                break;
+            };
+            m.pending.remove(&soonest);
+        }
+    }
+
+    /// The spilled bodies left pending, by blob CID.
+    pub fn spilled_pending(&self) -> Vec<(String, PendingSpilled)> {
+        self.spilled_map()
+            .pending
+            .iter()
+            .map(|(b, p)| (b.clone(), p.clone()))
+            .collect()
     }
 
     /// Entries held.
@@ -399,6 +439,16 @@ impl RenderCache {
         let v = Arc::new(render());
         self.lock().put(key, Arc::clone(&v));
         v
+    }
+
+    /// A body with no record CID of its own to cache it under (a forum's `about`), rendered
+    /// each time: a spilled one from its fetched source, while that is pending the pending body.
+    pub fn uncached(&self, md: &Value, ns: &str) -> RenderedBody {
+        let spilled = text_blob_cid(md).filter(|_| md.get("text").is_none());
+        match spilled.and_then(|b| self.spilled(b)) {
+            Some(v) => render_spilled(md, &v),
+            None => render_md(md, ns, None),
+        }
     }
 
     /// The body of the record `cid` (whose body is `md`), with media views attributed to

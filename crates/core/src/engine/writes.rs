@@ -23,6 +23,7 @@
 use futures::StreamExt;
 use futures::future::join_all;
 use lessdugin_atp::syntax::AtUri;
+use lessdugin_lexicon::Collection;
 use lessdugin_lexicon::collection::nsid;
 use lessdugin_lexicon::records::{
     Comment, ExternalLink, Labels, Post, SelfLabels, StrongRef, TextQuote as LexQuote,
@@ -30,8 +31,8 @@ use lessdugin_lexicon::records::{
 use serde_json::{Map, Value};
 
 use crate::dto::{
-    ActionTicket, AgreementValue, CommentDraft, Draft, EditOpts, KarmaValue, NoticeCode,
-    OpinionIntent, PostDraft, PostKind, Stance, TextQuote, WriteTicket,
+    ActionNotice, ActionTicket, AgreementValue, CommentDraft, Draft, EditOpts, KarmaValue,
+    NoticeCode, OpinionIntent, PostDraft, PostKind, Stance, TextQuote, WriteTicket,
 };
 use crate::host::Host;
 use crate::outbox::{
@@ -40,6 +41,7 @@ use crate::outbox::{
 use crate::social::full::ForumView;
 use crate::social::full::gates::{Gate, passes};
 use crate::social::full::reacts::palette;
+use crate::social::full::view::ModStatus;
 use crate::social::input::split_uri;
 use crate::store::records::RecordStore;
 
@@ -438,6 +440,84 @@ impl<H: Host> Engine<H> {
             .with_detail("kind", "locked"));
         }
         Ok(())
+    }
+
+    /// `edit_preflight(uri)` (`social.md` §4.5, `threat-model.md` SOC-3): the notices to show,
+    /// and confirm, before `edit` of `uri` is sent. An edit gives the item a new CID, so the
+    /// positive assertions in effect on it (a keep, a tier of `frontpage` or `curated`, a pin;
+    /// mod-log status `effective`) stop counting until an authority asserts them again on the
+    /// new version: one `suspendsAssertions` notice names them. Empty when there are none, or
+    /// while the forum's moderation layer is pending. `not_found` when `uri` is not cached.
+    pub async fn edit_preflight(&self, uri: &str) -> Result<Vec<ActionNotice>, EngineError> {
+        use lessdugin_lexicon::records::{Action, ModAction};
+        use lessdugin_lexicon::values::Tier as LexTier;
+        let u = records::at_uri(uri)?;
+        if RecordStore::new(self.host.cache())
+            .get(&u)
+            .await
+            .map_err(store_error)?
+            .is_none()
+        {
+            return Err(EngineError::not_found(format!("{u} is not in the cache")));
+        }
+        let key = self.forum_of(&u).await?;
+        let l = self.loaded(&key).await?;
+        let m = &l.model;
+        let Ok(log) = m.view.mod_log.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let uri = u.as_str();
+        // (keep, tier, pin): the positive dimensions of social.md §4.2 in effect on the item
+        let (mut keep, mut tier, mut pin) = (false, None::<LexTier>, false);
+        for x in m.input.records.values() {
+            if x.coll != Some(Collection::ModAction) {
+                continue;
+            }
+            let Some(v) = x.value() else { continue };
+            if v.get("subject").and_then(Value::as_str) != Some(uri) {
+                continue;
+            }
+            let effective = log
+                .iter()
+                .any(|e| e.uri == x.uri && e.status == ModStatus::Effective);
+            let Some(a) = effective
+                .then(|| serde_json::from_value::<ModAction>(v.clone()).ok())
+                .flatten()
+            else {
+                continue;
+            };
+            match &a.action {
+                Action::Hide(h) if !h.hidden() => keep = true,
+                Action::Tier(t) => {
+                    if let Some(t @ (LexTier::Frontpage | LexTier::Curated)) = t.tier() {
+                        tier = tier.max(Some(t));
+                    }
+                }
+                Action::Pin(p) if p.pinned() => pin = true,
+                _ => {}
+            }
+        }
+        let tier = tier.map(|t| format!("its {} tier", t.as_str()));
+        let named: Vec<&str> = [keep.then_some("a moderator's keep"), tier.as_deref()]
+            .into_iter()
+            .flatten()
+            .chain(pin.then_some("its pin"))
+            .collect();
+        let Some((last, rest)) = named.split_last() else {
+            return Ok(Vec::new());
+        };
+        let list = if rest.is_empty() {
+            (*last).to_owned()
+        } else {
+            format!("{} and {last}", rest.join(", "))
+        };
+        Ok(vec![ActionNotice {
+            code: NoticeCode::SuspendsAssertions,
+            message: format!(
+                "editing suspends {list}: they apply to the version a moderator saw, and stop \
+                 until one asserts them again on the new version"
+            ),
+        }])
     }
 
     /// `edit(uri, Draft, EditOpts)`: the edit protocol (`data-model.md` §8.3) with a revision

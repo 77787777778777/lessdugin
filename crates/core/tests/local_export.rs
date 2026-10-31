@@ -290,7 +290,6 @@ fn an_import_never_writes_login_state_outbox_rows_or_bad_settings() {
         member(p(&["loc", "active_account"]), bob.did.as_str().as_bytes()),
         member(p(&["loc", "seeded", did]), b"1"),
         member(p(&["loc", "ack", did, "vote"]), b"1"),
-        member(p(&["loc", "media", "bafy"]), b"x"),
         member(p(&["loc", "nonsense"]), b"x"),
         member(p(&["loc", "setting", "verify"]), b"nonsense"),
         member(p(&["loc", "setting", "unknownKey"]), b"on"),
@@ -303,8 +302,15 @@ fn an_import_never_writes_login_state_outbox_rows_or_bad_settings() {
     x.members
         .push(member(p(&["loc", "setting", "sources"]), b"direct"));
     x.members.push(member(p(&["loc", "follow", "fk"]), b"1"));
+    // the prepared bytes of the first M4 builds: a copy of a file, not local state, so out of
+    // scope rather than refused (sync.md §10.4)
+    x.members.push(member(p(&["loc", "media", "bafy"]), b"x"));
     let report = block_on(e.import_local(&x, ExportScope::Mine)).unwrap();
-    assert_eq!((report.refused, report.imported), (n, 2), "{report:?}");
+    assert_eq!(
+        (report.refused, report.imported, report.out_of_scope),
+        (n, 2, 1),
+        "{report:?}"
+    );
     assert_eq!(
         report.kinds,
         [("follow".to_owned(), 1), ("setting".to_owned(), 1)]

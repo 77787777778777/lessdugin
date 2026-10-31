@@ -203,10 +203,12 @@ fn the_view_is_not_trusted_for_the_pds_and_its_declaration_must_agree() {
     block_on(e.load_media(&cid, Some(MediaOwner::of_view(&view)))).unwrap();
     assert_eq!(blob_requests(&n)[0].0, bob.pds_base());
 
-    // a declared type the bytes do not have: a download card, never inline
+    // a declared type the bytes do not have: a download card, never inline, named from what
+    // the bytes are
     view.mime = "video/mp4".into();
     let card = block_on(e.load_media(&cid, Some(MediaOwner::of_view(&view)))).unwrap();
     assert_eq!(card.mime, None);
+    assert_eq!(card.sniffed.as_deref(), Some("image/png"));
 
     // a view of another blob is refused
     let err = block_on(e.load_media("bafkreiother", Some(MediaOwner::of_view(&view)))).unwrap_err();
@@ -243,6 +245,206 @@ fn a_blob_the_pds_does_not_have_is_missing() {
     assert_eq!(err.code, ErrorCode::NotFound);
     assert_eq!(err.detail.unwrap()["kind"], "mediaMissing");
     assert_eq!(block_on(e.host().blob_open(&gone)).unwrap(), None);
+}
+
+#[test]
+fn a_download_card_carries_the_sniffed_type() {
+    // a file outside the display allowlist was saved as <cid>.bin: LoadedMedia carried a type
+    // only for display, so no client could pick the extension from the sniffed type (§11.2)
+    let mut n = Net::new();
+    let bob = n
+        .net
+        .add_pds("bob.example.com")
+        .add_account("bob.example.com");
+    let files: Vec<Value> = [
+        (b"%PDF-1.7\n%binary\n".to_vec(), "application/pdf"),
+        (tiny_png(15), "image/png"),
+        (b"just some bytes".to_vec(), "application/octet-stream"),
+    ]
+    .into_iter()
+    .map(|(bytes, declared)| bob.upload_blob(bytes, declared))
+    .collect();
+    // a PDS serves only the blobs a record references
+    bob.put("com.example.files", "self", &json!({ "files": files }));
+    bob.commit_now();
+    let e = n.device("anon", None);
+    let load = |i: usize| {
+        let cid = files[i]["ref"]["$link"].as_str().unwrap();
+        block_on(e.load_media(cid, Some(MediaOwner::author(bob.did().as_str())))).unwrap()
+    };
+    let pdf = load(0);
+    assert_eq!(
+        (pdf.mime, pdf.sniffed.as_deref()),
+        (None, Some("application/pdf"))
+    );
+    let png = load(1);
+    assert_eq!(png.mime.as_deref(), Some("image/png"));
+    assert_eq!(png.sniffed.as_deref(), Some("image/png"));
+    let unknown = load(2);
+    assert_eq!((unknown.mime, unknown.sniffed), (None, None));
+}
+
+// --- reference counting and purging (m4-27) ------------------------------------------------------
+
+/// `owner` hides `uri` in forum scope, straight in their repo.
+fn hide_in(n: &Net, owner: &AccountHandle, f: &str, uri: &str) {
+    let action = json!({"$type": format!("{}#hide", nsid::MOD_ACTION), "hidden": true});
+    let rkey = keys::mod_action_rkey(
+        lessdugin_lexicon::ns::NS,
+        f,
+        None,
+        uri,
+        action.as_object().unwrap(),
+    )
+    .unwrap();
+    owner.put(
+        nsid::MOD_ACTION,
+        &rkey,
+        &json!({
+            "$type": nsid::MOD_ACTION, "forum": f, "subject": uri, "action": action,
+            "createdAt": dt(n.now()),
+        }),
+    );
+    n.tick(MINUTE);
+}
+
+#[test]
+fn a_loaded_image_is_deleted_once_nothing_shown_references_it() {
+    // m4-27: nothing deleted a stored blob, so an image a reader loaded from a post that a
+    // moderator then hid, or its author deleted, stayed on the reader's device for good
+    // (sync.md §11.4, threat-model.md PRIV-2)
+    let mut n = Net::new();
+    let bob = n
+        .net
+        .add_pds("bob.example.com")
+        .add_account("bob.example.com");
+    let f = forum(&n, &bob);
+    let blob = bob.upload_blob(tiny_png(9), "image/png");
+    let cid = blob["ref"]["$link"].as_str().unwrap().to_owned();
+    let first = post(&n, &bob, &f, image_body(&blob));
+    let second = post(&n, &bob, &f, image_body(&blob));
+    let other = bob.upload_blob(tiny_png(10), "image/png");
+    let other_cid = other["ref"]["$link"].as_str().unwrap().to_owned();
+    let third = post(&n, &bob, &f, image_body(&other));
+    let e = n.device("anon", None);
+    let stored = |c: &str| block_on(e.host().blob_open(c)).unwrap().is_some();
+    for (uri, c) in [(&first, &cid), (&third, &other_cid)] {
+        let view = read(&e, &f, uri).body.media[0].clone();
+        block_on(e.load_media(c, Some(MediaOwner::of_view(&view)))).unwrap();
+        assert!(stored(c));
+    }
+    // the first post is hidden: the second still shows the image, so it stays
+    hide_in(&n, &bob, &f, &first);
+    assert_eq!(read(&e, &f, &first).body.html, "");
+    assert!(stored(&cid));
+    // the second is deleted by its author: nothing shown references it any more
+    bob.delete(nsid::POST, second.rsplit('/').next().unwrap());
+    n.tick(MINUTE);
+    read(&e, &f, &third);
+    assert!(
+        !stored(&cid),
+        "the image of a hidden and a deleted post is still stored"
+    );
+    assert!(stored(&other_cid), "a listed post's image is kept");
+    // the third is hidden too
+    hide_in(&n, &bob, &f, &third);
+    assert_eq!(read(&e, &f, &third).body.html, "");
+    assert!(!stored(&other_cid));
+}
+
+#[test]
+fn an_image_loaded_for_a_hidden_post_is_deleted_by_the_next_build() {
+    // m4-27: a blob stored while nothing counted a reference to it (media loaded for an item
+    // already hidden, through a view from before the hide or from the mod queue) never lost a
+    // counted reference, so nothing deleted it (sync.md §11.4, threat-model.md PRIV-2)
+    let mut n = Net::new();
+    let bob = n
+        .net
+        .add_pds("bob.example.com")
+        .add_account("bob.example.com");
+    let f = forum(&n, &bob);
+    let blob = bob.upload_blob(tiny_png(13), "image/png");
+    let cid = blob["ref"]["$link"].as_str().unwrap().to_owned();
+    let uri = post(&n, &bob, &f, image_body(&blob));
+    let shown = bob.upload_blob(tiny_png(14), "image/png");
+    let shown_cid = shown["ref"]["$link"].as_str().unwrap().to_owned();
+    let listed = post(&n, &bob, &f, image_body(&shown));
+    let e = n.device("anon", None);
+    let stored = |c: &str| block_on(e.host().blob_open(c)).unwrap().is_some();
+    let view = read(&e, &f, &uri).body.media[0].clone();
+    let shown_view = read(&e, &f, &listed).body.media[0].clone();
+    hide_in(&n, &bob, &f, &uri);
+    assert_eq!(read(&e, &f, &uri).body.html, "");
+    // the view from before the hide still loads the image, as does the listed post's
+    block_on(e.load_media(&cid, Some(MediaOwner::of_view(&view)))).unwrap();
+    block_on(e.load_media(&shown_cid, Some(MediaOwner::of_view(&shown_view)))).unwrap();
+    assert!(stored(&cid) && stored(&shown_cid));
+    let text = |t: &str| json!({"$type": nsid::MARKDOWN, "profile": "lfm/1", "text": t});
+    // the next build of the forum deletes the hidden post's image, and keeps the listed one's
+    post(&n, &bob, &f, text("Something new."));
+    read(&e, &f, &listed);
+    assert!(
+        !stored(&cid),
+        "an image loaded for a hidden post is still stored"
+    );
+    assert!(stored(&shown_cid), "a listed post's image is kept");
+    // loaded again, it goes again
+    block_on(e.load_media(&cid, Some(MediaOwner::of_view(&view)))).unwrap();
+    assert!(stored(&cid));
+    post(&n, &bob, &f, text("And more."));
+    read(&e, &f, &listed);
+    assert!(!stored(&cid));
+    assert!(stored(&shown_cid));
+}
+
+#[test]
+fn an_image_an_edit_dropped_is_kept_by_its_revision_until_the_post_is_hidden() {
+    // m4-27: a revision's snapshot references the old version's blobs; it counts while its
+    // subject is listed (sync.md §11.4)
+    use lessdugin_atp::syntax::{AtUri, Datetime};
+    use lessdugin_core::outbox::records;
+    use lessdugin_lexicon::records::StrongRef;
+    use lessdugin_lexicon::values::RevisionOp;
+
+    let mut n = Net::new();
+    let bob = n
+        .net
+        .add_pds("bob.example.com")
+        .add_account("bob.example.com");
+    let f = forum(&n, &bob);
+    let blob = bob.upload_blob(tiny_png(11), "image/png");
+    let cid = blob["ref"]["$link"].as_str().unwrap().to_owned();
+    let uri = post(&n, &bob, &f, image_body(&blob));
+    let e = n.device("anon", None);
+    let stored = || block_on(e.host().blob_open(&cid)).unwrap().is_some();
+    let view = read(&e, &f, &uri).body.media[0].clone();
+    block_on(e.load_media(&cid, Some(MediaOwner::of_view(&view)))).unwrap();
+    assert!(stored());
+    // bob edits the image out, keeping the old version in a revision
+    let rkey = uri.rsplit('/').next().unwrap().to_owned();
+    let old = bob.get(nsid::POST, &rkey).unwrap();
+    let old_cid = bob.cid(nsid::POST, &rkey).unwrap();
+    let mut new = old.clone();
+    new["body"] = json!({"$type": nsid::MARKDOWN, "profile": "lfm/1", "text": "No picture."});
+    new["updatedAt"] = json!(dt(n.now()));
+    let rev = records::revision(
+        StrongRef::new(AtUri::parse(&uri).unwrap(), old_cid.to_string()),
+        RevisionOp::Update,
+        old.as_object().unwrap().clone(),
+        None,
+        &Datetime::from_millis(n.now()).unwrap(),
+        &records::revision_rkey(&uri, tid_at_ms(n.now()).as_str()).unwrap(),
+    )
+    .unwrap();
+    bob.put(rev.collection, &rev.rkey, &rev.value);
+    bob.put(nsid::POST, &rkey, &new);
+    n.tick(MINUTE);
+    let pv = read(&e, &f, &uri);
+    assert!(pv.body.media.is_empty(), "{:?}", pv.body.media);
+    assert!(stored(), "the revision still references the image");
+    hide_in(&n, &bob, &f, &uri);
+    read(&e, &f, &uri);
+    assert!(!stored(), "a hidden post's revisions count for nothing");
 }
 
 // --- spilled bodies (m4-5) ---------------------------------------------------------------------
@@ -506,6 +708,143 @@ fn a_slow_authors_pds_does_not_hold_back_the_thread() {
         "Another body"
     );
     assert_eq!(blob_requests(&n).len(), 1);
+}
+
+#[test]
+fn a_pending_spilled_body_that_arrives_is_announced() {
+    // m4-5: a body a view left pending showed only once the client asked again, from the retry
+    // window on; live_tail now fetches it and emits Changed for its thread and forum
+    use futures::FutureExt as _;
+    use lessdugin_core::dto::{Event, Topic};
+    use lessdugin_core::limits::BODY_BLOB_RETRY_MS;
+    use std::sync::{Arc, Mutex};
+    let mut n = Net::new();
+    let bob = n
+        .net
+        .add_pds("bob.example.com")
+        .add_account("bob.example.com");
+    let f = forum(&n, &bob);
+    let source = b"# The whole body";
+    let uri = spilled_post(&n, &bob, &f, source);
+    let e = n.device("anon", None);
+    let r = block_on(e.sync_forum(&f, &SyncOpts::default())).unwrap();
+    assert!(r.errors.is_empty(), "{r:?}");
+    let events: Arc<Mutex<Vec<Event>>> = Arc::default();
+    let sink = Arc::clone(&events);
+    e.subscribe(move |ev| sink.lock().unwrap().push(ev));
+    let announced = |uri: &str| {
+        events.lock().unwrap().drain(..).any(|ev| match ev {
+            Event::Changed { topics } => topics.contains(&Topic::Thread {
+                uri: uri.to_owned(),
+            }),
+            _ => false,
+        })
+    };
+    // bob's PDS stalls: the view shows the excerpt
+    e.host().hold_blob_fetches(true);
+    let pv = e.get_post(&uri).now_or_never().unwrap().unwrap();
+    assert_eq!(pv.body.text, "An excerpt");
+    // a round with nothing new announces nothing
+    e.live_step().now_or_never().unwrap().unwrap();
+    assert!(!announced(&uri));
+    // the browser's download ran on and stored it: the next round announces it
+    let blob = lessdugin_atp::cid::for_raw(source).to_string();
+    e.host().put_blob(&blob, source.to_vec());
+    block_on(e.live_step()).unwrap();
+    assert!(announced(&uri), "no Changed for the thread");
+    assert_eq!(
+        block_on(e.get_post(&uri)).unwrap().body.text,
+        "The whole body"
+    );
+
+    // natively the download stopped with the wait: the round after the retry time fetches it
+    let uri = spilled_post(&n, &bob, &f, b"# Another body");
+    let r = block_on(e.sync_forum(&f, &SyncOpts::default())).unwrap();
+    assert!(r.errors.is_empty(), "{r:?}");
+    assert_eq!(block_on(e.get_post(&uri)).unwrap().body.text, "An excerpt");
+    e.host().hold_blob_fetches(false);
+    block_on(e.live_step()).unwrap();
+    assert!(!announced(&uri), "asked again before the retry time");
+    n.tick(BODY_BLOB_RETRY_MS);
+    let round = block_on(e.live_step()).unwrap();
+    assert!(announced(&uri), "no Changed once the retry time came");
+    assert_eq!(
+        block_on(e.get_post(&uri)).unwrap().body.text,
+        "Another body"
+    );
+    assert!(round.next_ms > 0);
+}
+
+#[test]
+fn stalled_pdses_hold_a_live_round_back_by_one_wait() {
+    // m4-5: live_step fetched the pending bodies one forum at a time, each waiting up to
+    // BODY_BLOB_WAIT_MS, so k forums whose PDSes stall held the round back k times as long
+    use futures::FutureExt as _;
+    use lessdugin_core::limits::{BODY_BLOB_RETRY_MS, BODY_BLOB_WAIT_MS};
+    use std::task::{Context, Poll};
+    let mut n = Net::new();
+    let mut posts = Vec::new();
+    for name in ["bob", "carol", "dave"] {
+        let who = n
+            .net
+            .add_pds(&format!("{name}.example.com"))
+            .add_account(&format!("{name}.example.com"));
+        let f = forum(&n, &who);
+        let uri = spilled_post(&n, &who, &f, format!("# {name}'s body").as_bytes());
+        posts.push((f, uri));
+    }
+    let e = n.device("anon", None);
+    // every PDS stalls: each view leaves its body pending
+    e.host().hold_blob_fetches(true);
+    for (f, uri) in &posts {
+        let r = block_on(e.sync_forum(f, &SyncOpts::default())).unwrap();
+        assert!(r.errors.is_empty(), "{r:?}");
+        assert_eq!(block_on(e.get_post(uri)).unwrap().body.text, "An excerpt");
+    }
+    n.tick(BODY_BLOB_RETRY_MS);
+    // the retry round: its waits run together, so one BODY_BLOB_WAIT_MS lets it finish
+    e.host().park_sleeps(true);
+    let mut round = Box::pin(e.live_step());
+    let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+    assert!(round.poll_unpin(&mut cx).is_pending());
+    n.tick(BODY_BLOB_WAIT_MS as i64);
+    assert!(
+        matches!(round.poll_unpin(&mut cx), Poll::Ready(Ok(_))),
+        "the round still waits after one BODY_BLOB_WAIT_MS"
+    );
+    e.host().park_sleeps(false);
+    // and the bodies stay pending, for the next retry
+    for (_, uri) in &posts {
+        assert_eq!(block_on(e.get_post(uri)).unwrap().body.text, "An excerpt");
+    }
+}
+
+#[test]
+fn a_spilled_forum_about_is_fetched_from_the_owners_pds() {
+    // m4-5: the forum header rendered a spilled `about` as its pending notice for good
+    let mut n = Net::new();
+    let bob = n
+        .net
+        .add_pds("bob.example.com")
+        .add_account("bob.example.com");
+    let f = forum(&n, &bob);
+    let mut decl = bob.get(nsid::FORUM, "meta").unwrap();
+    decl["about"] = spilled_body(&bob, b"# About this forum\n\nBe kind.");
+    bob.put(nsid::FORUM, "meta", &decl);
+    n.tick(MINUTE);
+    let e = n.device("anon", None);
+    n.net.clear_requests();
+    let v = block_on(e.forum_open(&f)).unwrap();
+    let about = v.about.expect("the forum has an about");
+    assert_eq!(about.notices, Vec::<String>::new(), "{:?}", about.notices);
+    assert!(about.html.contains("About this forum"), "{}", about.html);
+    assert_eq!(
+        blob_requests(&n)
+            .into_iter()
+            .filter(|(_, d)| d == bob.did().as_str())
+            .count(),
+        1
+    );
 }
 
 // --- the autoload verdict (m4-4) ---------------------------------------------------------------

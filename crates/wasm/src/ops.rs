@@ -80,6 +80,7 @@ pub const OPS: &[&str] = &[
     "publish",
     "comment",
     "edit",
+    "editPreflight",
     "delete",
     "retract",
     "opinion",
@@ -517,6 +518,10 @@ pub async fn call<H: Host>(engine: &Engine<H>, op: &str, a: &str) -> Result<Stri
             let (uri, draft, opts): (String, Draft, Option<EditOpts>) = args(op, a)?;
             out(&engine.edit(&uri, &draft, &opts.unwrap_or_default()).await?)
         }
+        "editPreflight" => {
+            let (uri,): (String,) = args(op, a)?;
+            out(&engine.edit_preflight(&uri).await?)
+        }
         "delete" => {
             let (uri,): (String,) = args(op, a)?;
             out(&engine.delete(&uri).await?)
@@ -712,20 +717,23 @@ pub async fn call<H: Host>(engine: &Engine<H>, op: &str, a: &str) -> Result<Stri
 
         // §3.7 Pure functions
         "render" => {
-            let (markdown, media, _opts): (String, Option<Vec<Value>>, Option<Value>) =
-                args(op, a)?;
-            if media.as_ref().is_some_and(|m| !m.is_empty()) {
-                // MediaRef → defs#media arrives with the media pipeline (M4)
-                return Err(EngineError::new(
-                    ErrorCode::Unsupported,
-                    "render: media is not supported yet",
-                ));
-            }
-            out(&lessdugin_core::model::render::render_markdown(
+            // `[markdown, media, opts]`: media as `MediaRef`s or `defs#media` values, and the
+            // body's `profile` in `opts` (absent: lfm/1)
+            let (markdown, media, opts): (String, Option<Vec<Value>>, Option<Value>) = args(op, a)?;
+            let profile = match opts.as_ref().and_then(|o| o.get("profile")) {
+                None | Some(Value::Null) => None,
+                Some(Value::String(p)) => Some(p.as_str()),
+                Some(other) => {
+                    return Err(EngineError::invalid_input(format!(
+                        "{op}: opts.profile is not a string: {other}"
+                    )));
+                }
+            };
+            out(&lessdugin_core::engine::render_draft(
                 &markdown,
-                &Value::Array(Vec::new()),
-                None,
-            ))
+                &media.unwrap_or_default(),
+                profile,
+            )?)
         }
         "safeHref" => {
             let (raw, ctx): (String, String) = args(op, a)?;
@@ -996,8 +1004,42 @@ mod tests {
             "{body}"
         );
         assert_eq!(body["wordCount"], 2);
+        // media (m4-20): a defs#media value as a record stores it, or a MediaRef from
+        // prepareMedia, which renders as the value publish writes
+        let cid = "bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku";
+        let text = format!("![shown](cid:{cid})\n");
+        let stored = json!([{"blob": {"$type": "blob", "ref": {"$link": cid},
+            "mimeType": "image/png", "size": 1234}, "alt": "media alt",
+            "aspectRatio": {"width": 800, "height": 600}}]);
+        let prepared = json!([{"id": "m", "cid": cid, "mime": "image/png", "sizeBytes": 1234,
+            "alt": "media alt", "aspectRatio": {"width": 800, "height": 600}}]);
+        let html = format!(
+            "<div class=\"lfm\" dir=\"auto\">\n<p dir=\"auto\"><img data-cid=\"{cid}\" \
+             alt=\"shown\" width=\"800\" height=\"600\"></p>\n</div>\n"
+        );
+        for media in [&stored, &prepared] {
+            let body: Value = serde_json::from_str(&call_ok(
+                &e,
+                "render",
+                &json!([text, media, null]).to_string(),
+            ))
+            .unwrap();
+            assert_eq!(body["html"], html, "{media}");
+            assert_eq!(body["media"][0]["cid"], cid, "{body}");
+            assert_eq!(body["media"][0]["alt"], "media alt", "{body}");
+        }
         let err = call_err(&e, "render", r#"["x", [{"id":"m"}], null]"#);
-        assert_eq!(err.code, ErrorCode::Unsupported);
+        assert_eq!(err.code, ErrorCode::InvalidInput, "{err:?}");
+        // the body's profile, in the options
+        let body: Value = serde_json::from_str(&call_ok(
+            &e,
+            "render",
+            r#"["text\n", [], {"html": true, "text": true, "styled": false, "profile": "lfm/2"}]"#,
+        ))
+        .unwrap();
+        assert_eq!(body["notices"].as_array().unwrap().len(), 1, "{body}");
+        let err = call_err(&e, "render", r#"["x", [], {"profile": 2}]"#);
+        assert_eq!(err.code, ErrorCode::InvalidInput, "{err:?}");
 
         let h: Value = serde_json::from_str(&call_ok(
             &e,
@@ -1021,6 +1063,54 @@ mod tests {
             call_err(&e, "safeHref", r#"["https://x.y/", "html"]"#).code,
             ErrorCode::InvalidInput
         );
+    }
+
+    /// m4-20, acc-m4-6: the render vectors with media or a profile (which `render` refused, so
+    /// the SPA's sanitiser check could not render them) render through the op to their
+    /// expected html, with their `defs#media` values as they are.
+    #[test]
+    fn render_takes_the_media_and_profile_vectors() {
+        let e = engine();
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata/vectors");
+        let mut checked = 0;
+        for dir in ["lfm1", "xss"] {
+            let mut files: Vec<_> = std::fs::read_dir(format!("{root}/{dir}"))
+                .unwrap()
+                .map(|f| f.unwrap().path())
+                .filter(|p| p.extension().is_some_and(|x| x == "json"))
+                .collect();
+            files.sort();
+            for path in files {
+                let file: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                for v in file["vectors"].as_array().into_iter().flatten() {
+                    let input = &v["input"];
+                    let (Some(text), Some(html)) =
+                        (input["text"].as_str(), v["expected"]["html"].as_str())
+                    else {
+                        continue;
+                    };
+                    let media = input["media"].as_array().filter(|m| !m.is_empty());
+                    let profile = input["profile"].as_str();
+                    if media.is_none() && profile.is_none() {
+                        continue;
+                    }
+                    let opts = json!({"html": true, "text": true, "styled": false,
+                        "profile": profile});
+                    let args = json!([text, media.cloned().unwrap_or_default(), opts]);
+                    let body: Value =
+                        serde_json::from_str(&call_ok(&e, "render", &args.to_string())).unwrap();
+                    assert_eq!(
+                        body["html"].as_str(),
+                        Some(html),
+                        "{}#{}",
+                        path.display(),
+                        v["name"]
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 40, "{checked} vectors");
     }
 
     #[test]

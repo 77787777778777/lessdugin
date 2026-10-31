@@ -331,7 +331,7 @@ newcomer(d) ⇔ d ∈ P ∖ (S ∪ E)                                    // both
 | Eligible voters E | E = S, because P ∖ S ⊆ B ∪ N. `establish` and `establishSeeds` have no effect. | S plus established users (§6.2) |
 | Newcomer content | none | collapsed by default, labelled "new user", per `display.newUsers` (V8) |
 | Completeness | provable at CORE | S ∪ E is complete at CORE thanks to the closure (`sync.md`); newcomers are best effort (CORE+) |
-| UI label | – | "relies on public relay infrastructure (Bluesky relay, Jetstream, Constellation)" |
+| UI label | – | "relies on public relay infrastructure (Bluesky relay, Jetstream, Constellation)": the forum header's `relayDependent` banner, "Open mode relies on Bluesky relay, Jetstream and Constellation" (`threat-model.md` L7) |
 
 `forum create` always writes the mode explicitly. With no flag it writes `approval`.
 
@@ -386,7 +386,7 @@ An **assertion** is a modAction m that meets all of these:
 
 Its **actor** is `did(m.uri)` and its subject is `m.subject`.
 
-A record states the **complete desired state** of its action key. Each dimension of its action is asserted with the field's value, or with the field's default when the field is absent. The one exception is `tag.head`, which is asserted only when `head` is present. To override another actor's assertion, write your own record with the opposite value (`data-model.md` §6.7).
+A record states the **complete desired state** of its action key. Each dimension of its action is asserted with the field's value, or with the field's default when the field is absent. The one exception is `tag.head`, which is asserted only when `head` is present. To override another actor's assertion, write your own record with the opposite value (`data-model.md` §6.7). Since one `#restrict` record carries both `restrict` and `nullify`, a writer that changes one of them writes the other as its own current record states it (the engine merges, `engine-api.md` §3.5 `mod_action`): restricting never lifts the writer's nullification, and nullifying never lifts its restriction. The record's one `until` and `reason` belong to both: a change that states no `until` keeps the record's while the other dimension is in effect, so a temporary restriction stays temporary after a nullification (and the reverse), and a change that states one moves the other dimension's expiry with it, which the engine announces (`sharedExpiry`).
 
 | Action | Dimension asserted | Value asserted | Order (safe value first) | Positive, so CID-bound |
 |---|---|---|---|---|
@@ -482,7 +482,7 @@ keepRank(x) = r  if resolve(x.uri, hidden) = Resolved{false, r, _}
 - produces a mod-queue item "edited since <action>" (§4.12);
 - makes the tier fall back, the pin drop and the keep stop, until an authority re-asserts it on the new version.
 
-Before an author edits an item that carries positive assertions, their client warns that the edit will suspend them.
+Before an author edits an item that carries positive assertions, their client warns that the edit will suspend them (the engine names them: `engine-api.md` §3.5 `edit_preflight`).
 
 **Negative assertions** take effect whatever their `subjectCid`. On DID and `tag:` subjects, `subjectCid` is ignored.
 

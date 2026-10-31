@@ -303,6 +303,7 @@ export interface LoadedMedia {
     size: number;
     url: string;
     mime?: string;
+    sniffed?: string;
 }
 
 export interface MediaInput {
@@ -360,7 +361,7 @@ export type MembershipMode = "open" | "approval";
 
 export type ModActionIntent = { kind: "assert"; forum: string; scope: ModScope; subject: string; action: ModActionValue; reason?: string; untilMs?: number } | { kind: "remove"; forum: string; scope: ModScope; subject: string; actionKey: string };
 
-export type ModActionValue = { kind: "hide"; hidden: boolean; spam?: boolean; showReason?: boolean } | { kind: "access"; level: AccessLevel } | { kind: "restrict"; capabilities: Capability[]; nullifyVotes?: boolean } | { kind: "tier"; tier: Tier; notice?: BodyDraft } | { kind: "pin"; scope: PinScope; pinned: boolean } | { kind: "lock"; locked: boolean } | { kind: "tag"; removed: boolean; head?: string };
+export type ModActionValue = { kind: "hide"; hidden: boolean; spam?: boolean; showReason?: boolean } | { kind: "access"; level: AccessLevel } | { kind: "restrict"; capabilities?: Capability[]; nullifyVotes?: boolean } | { kind: "tier"; tier: Tier; notice?: BodyDraft } | { kind: "pin"; scope: PinScope; pinned: boolean } | { kind: "lock"; locked: boolean } | { kind: "tag"; removed: boolean; head?: string };
 
 export interface ModLog {
     dto: DtoVersion;
@@ -426,7 +427,7 @@ export interface MyOpinion {
     notYetCounted?: boolean;
 }
 
-export type NoticeCode = "notEstablished" | "retroactive" | "adoptedFirst" | "missingAlt";
+export type NoticeCode = "notEstablished" | "retroactive" | "adoptedFirst" | "missingAlt" | "suspendsAssertions" | "sharedExpiry";
 
 export interface NotificationList {
     dto: DtoVersion;
@@ -786,7 +787,7 @@ export interface ViewerCaps {
 
 export type WarningKind = "equivocation" | "indexerContradiction" | "degraded" | "renderFailure" | "other";
 
-export type WriteState = { kind: "pending"; notBeforeMs?: number; held?: boolean; throttled?: boolean; needsLogin?: boolean; error?: EngineError } | { kind: "sending" } | { kind: "done"; uri: string; cid?: string } | { kind: "failed"; error: EngineError } | { kind: "undone" };
+export type WriteState = { kind: "pending"; notBeforeMs?: number; held?: boolean; throttled?: boolean; needsLogin?: boolean; error?: EngineError } | { kind: "sending" } | { kind: "done"; uri: string; cid?: string; report?: string[] } | { kind: "failed"; error: EngineError } | { kind: "undone" };
 
 export interface WriteTicket {
     id: string;

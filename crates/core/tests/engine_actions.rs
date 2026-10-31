@@ -15,10 +15,10 @@ use std::sync::{Arc, Mutex};
 
 use common::block_on;
 use lessdugin_core::dto::{
-    AccessLevel, ActionTicket, AgreementValue, Capability, CommentDraft, Event, ForumDraft,
-    KarmaCadence, KarmaValue, MembershipMode, ModActionIntent, ModActionValue, ModRole, ModScope,
-    ModsChange, NoticeCode, NotificationReason, NotificationsQuery, OpinionIntent, PinScope,
-    PostDraft, PublicActionKind, Stance, Subscription, SyncOpts, TextQuote, Tier, Topic,
+    AccessLevel, ActionTicket, AgreementValue, Capability, CommentDraft, Draft, EditOpts, Event,
+    ForumDraft, KarmaCadence, KarmaValue, MembershipMode, ModActionIntent, ModActionValue, ModRole,
+    ModScope, ModsChange, NoticeCode, NotificationReason, NotificationsQuery, OpinionIntent,
+    PinScope, PostDraft, PublicActionKind, Stance, Subscription, SyncOpts, TextQuote, Tier, Topic,
     WriteState, WriteTicket,
 };
 use lessdugin_core::engine::{AccountInfo, Engine, EngineConfig, ErrorCode};
@@ -551,8 +551,8 @@ fn opinion_checks_refuse_what_could_never_count() {
         &w.forum,
         &bob.did(),
         ModActionValue::Restrict {
-            capabilities: vec![Capability::Vote],
-            nullify_votes: false,
+            capabilities: Some(vec![Capability::Vote]),
+            nullify_votes: Some(false),
         },
     ));
     alice.flush();
@@ -749,8 +749,8 @@ fn rank_role_and_subject_rules() {
         &w.forum,
         &w.dave.did(),
         ModActionValue::Restrict {
-            capabilities: vec![Capability::Comment, Capability::Post],
-            nullify_votes: true,
+            capabilities: Some(vec![Capability::Comment, Capability::Post]),
+            nullify_votes: Some(true),
         },
     ));
     assert_eq!(t.notices[0].code, NoticeCode::Retroactive);
@@ -761,6 +761,169 @@ fn rank_role_and_subject_rules() {
         .unwrap();
     assert_eq!(rec["action"]["capabilities"], json!(["post", "comment"]));
     assert_eq!(rec["action"]["nullifyVotes"], true);
+}
+
+/// `restrict` and `nullify` edit the one `#restrict` record of (moderator, subject) (`social.md`
+/// §4.2): each keeps the dimension it leaves out, from the cached record or from a write of it
+/// not sent yet, so nullifying never lifts a restriction and restricting never lifts a
+/// nullification (m3r-2).
+#[test]
+fn restrict_and_nullify_keep_each_others_dimension() {
+    let w = World::new();
+    let (alice, dave) = (&w.alice, &w.dave);
+    let restrict = |capabilities: Option<Vec<Capability>>, nullify_votes: Option<bool>| {
+        assert_mod(
+            &w.forum,
+            &dave.did(),
+            ModActionValue::Restrict {
+                capabilities,
+                nullify_votes,
+            },
+        )
+    };
+    let sent = |t: &ActionTicket| -> (Value, Value) {
+        let uri = alice.done(&t.ticket());
+        let rec = alice
+            .record(nsid::MOD_ACTION, uri.rsplit('/').next().unwrap())
+            .unwrap();
+        (
+            rec["action"]["capabilities"].clone(),
+            rec["action"]
+                .get("nullifyVotes")
+                .cloned()
+                .unwrap_or(json!(false)),
+        )
+    };
+    let t = alice.mod_action(restrict(
+        Some(vec![Capability::Post, Capability::Comment]),
+        None,
+    ));
+    assert_eq!(t.notices[0].code, NoticeCode::Retroactive);
+    alice.flush();
+    assert_eq!(sent(&t), (json!(["post", "comment"]), json!(false)));
+    // nullify: the restriction stays (no retroactivity notice: it restricts nothing new)
+    let t = alice.mod_action(restrict(None, Some(true)));
+    assert!(t.notices.is_empty(), "{t:?}");
+    alice.flush();
+    assert_eq!(sent(&t), (json!(["post", "comment"]), json!(true)));
+    // restrict again: the nullification stays
+    let t = alice.mod_action(restrict(Some(vec![Capability::Vote]), None));
+    alice.flush();
+    assert_eq!(sent(&t), (json!(["vote"]), json!(true)));
+    // both queued before either is sent: the second builds on the first
+    alice.mod_action(restrict(Some(vec![Capability::Comment]), Some(false)));
+    let t = alice.mod_action(restrict(None, Some(true)));
+    alice.flush();
+    assert_eq!(sent(&t), (json!(["comment"]), json!(true)));
+    // a restrict that names neither dimension is refused
+    let e = alice.mod_err(restrict(None, None));
+    assert_eq!(e.code, ErrorCode::InvalidInput, "{e:?}");
+}
+
+/// The `#restrict` record's `until` and `reason` are shared by both dimensions too (`social.md`
+/// §4.2): an intent that leaves `untilMs` out keeps the record's `until` while the dimension it
+/// carries is in effect, so nullifying never makes a temporary restriction permanent; an `untilMs`
+/// that moves the carried dimension's expiry says so (`sharedExpiry`).
+#[test]
+fn restrict_and_nullify_keep_the_records_until_and_reason() {
+    let w = World::new();
+    let (alice, dave) = (&w.alice, &w.dave);
+    let restrict = |capabilities: Option<Vec<Capability>>,
+                    nullify_votes: Option<bool>,
+                    until_ms: Option<i64>,
+                    reason: Option<&str>| ModActionIntent::Assert {
+        forum: w.forum.clone(),
+        scope: ModScope::Forum,
+        subject: dave.did(),
+        action: ModActionValue::Restrict {
+            capabilities,
+            nullify_votes,
+        },
+        reason: reason.map(str::to_owned),
+        until_ms,
+    };
+    let sent = |t: &ActionTicket| -> Value {
+        alice.flush();
+        let uri = alice.done(&t.ticket());
+        alice
+            .record(nsid::MOD_ACTION, uri.rsplit('/').next().unwrap())
+            .unwrap()
+    };
+    let shared = |t: &ActionTicket| -> Option<String> {
+        t.notices
+            .iter()
+            .find(|n| n.code == NoticeCode::SharedExpiry)
+            .map(|n| n.message.clone())
+    };
+    let week = alice.host.now() + 7 * 24 * 60 * MINUTE;
+    let day = alice.host.now() + 24 * 60 * MINUTE;
+    // a seven-day restriction, then a nullification that names no until
+    let t = alice.mod_action(restrict(
+        Some(vec![Capability::Post, Capability::Comment]),
+        None,
+        Some(week),
+        Some("spam links"),
+    ));
+    assert_eq!(shared(&t), None, "{t:?}");
+    let rec = sent(&t);
+    let until = rec["until"].as_str().unwrap().to_owned();
+    let t = alice.mod_action(restrict(None, Some(true), None, None));
+    let rec = sent(&t);
+    assert_eq!(rec["action"]["capabilities"], json!(["post", "comment"]));
+    assert_eq!(rec["action"]["nullifyVotes"], true);
+    assert_eq!(rec["until"], until, "the restriction stays temporary");
+    assert_eq!(rec["reason"], "spam links");
+    let n = shared(&t).expect("the nullification now ends with the restriction");
+    assert!(
+        n.contains("this nullification ends with your restriction") && n.contains(&until),
+        "{n}"
+    );
+    // a restriction with an until of its own moves the nullification's too, and says so
+    let t = alice.mod_action(restrict(
+        Some(vec![Capability::Comment]),
+        None,
+        Some(day),
+        None,
+    ));
+    let rec = sent(&t);
+    let until = rec["until"].as_str().unwrap().to_owned();
+    assert_eq!(rec["action"]["nullifyVotes"], true);
+    assert_eq!(rec["reason"], "spam links");
+    let n = shared(&t).expect("the nullification's expiry moved");
+    assert!(
+        n.contains("your nullification now also ends at") && n.contains(&until),
+        "{n}"
+    );
+    // lifting the nullification keeps the restriction's until, with nothing to announce
+    let t = alice.mod_action(restrict(None, Some(false), None, None));
+    let rec = sent(&t);
+    assert_eq!(rec["action"]["capabilities"], json!(["comment"]));
+    assert_eq!(rec["until"], until);
+    assert_eq!(shared(&t), None, "{t:?}");
+    // with no nullification left to carry, a restriction without until is permanent
+    let t = alice.mod_action(restrict(
+        Some(vec![Capability::Comment, Capability::Post]),
+        None,
+        None,
+        None,
+    ));
+    let rec = sent(&t);
+    assert_eq!(rec.get("until"), None, "{rec}");
+    assert_eq!(rec.get("reason"), None, "{rec}");
+    assert_eq!(shared(&t), None, "{t:?}");
+    // an intent that names both dimensions states the whole record
+    alice.mod_action(restrict(None, Some(true), Some(week), Some("again")));
+    alice.flush();
+    let t = alice.mod_action(restrict(
+        Some(vec![Capability::Comment]),
+        Some(true),
+        None,
+        None,
+    ));
+    let rec = sent(&t);
+    assert_eq!(rec.get("until"), None, "{rec}");
+    assert_eq!(rec.get("reason"), None, "{rec}");
+    assert_eq!(shared(&t), None, "{t:?}");
 }
 
 #[test]
@@ -855,6 +1018,79 @@ fn author_scope_actions_follow_the_author_table() {
     // not someone else's post
     let e = alice.mod_err(author(&w.bob_post, ModActionValue::Lock { locked: true }));
     assert_eq!(e.code, ErrorCode::Blocked);
+    // m3-2: an author ban of oneself would hide every comment bob wrote in his own threads
+    // (the fold does not exempt them); a ban of someone else goes through
+    let ban = || ModActionValue::Access {
+        level: AccessLevel::Banned,
+    };
+    let e = bob.mod_err(author(&bob.did(), ban()));
+    assert_eq!(e.code, ErrorCode::InvalidInput, "{}", e.message);
+    assert_eq!(e.detail.as_ref().unwrap()["kind"], "selfSubject");
+    bob.mod_action(author(&carol.did(), ban()));
+}
+
+/// sec-7 (`social.md` §4.5, SOC-3): before an author edits an item that carries positive
+/// assertions, `edit_preflight` names what the edit will suspend, so the client can ask first.
+#[test]
+fn edit_preflight_names_the_assertions_an_edit_suspends() {
+    let w = World::new();
+    let (alice, bob) = (&w.alice, &w.bob);
+    let c = w.carol.comment(&w.bob_post, None, "a fine comment");
+    w.resync(&[alice, bob]);
+    let preflight = |u: &str| block_on(bob.engine.edit_preflight(u)).unwrap();
+    assert!(preflight(&w.bob_post).is_empty());
+    // the owner curates, pins and (after a hide by nobody) keeps bob's post
+    for action in [
+        ModActionValue::Tier {
+            tier: Tier::Frontpage,
+            notice: None,
+        },
+        ModActionValue::Pin {
+            scope: PinScope::Forum,
+            pinned: true,
+        },
+        ModActionValue::Hide {
+            hidden: false,
+            spam: false,
+            show_reason: true,
+        },
+    ] {
+        alice.mod_action(assert_mod(&w.forum, &w.bob_post, action));
+    }
+    // a hide of the comment is negative: nothing to suspend there
+    alice.mod_action(assert_mod(&w.forum, &c, hide()));
+    alice.flush();
+    w.resync(&[bob]);
+    let n = preflight(&w.bob_post);
+    assert_eq!(n.len(), 1, "{n:?}");
+    assert_eq!(n[0].code, NoticeCode::SuspendsAssertions);
+    assert!(
+        n[0].message
+            .starts_with("editing suspends a moderator's keep, its frontpage tier and its pin:"),
+        "{}",
+        n[0].message
+    );
+    assert!(
+        block_on(w.carol.engine.edit_preflight(&c))
+            .unwrap()
+            .is_empty()
+    );
+    // once edited, they no longer count (stale): nothing is left to suspend
+    let t = block_on(bob.engine.edit(
+        &w.bob_post,
+        &Draft::Post {
+            id: None,
+            post: PostDraft::article(&w.forum, "Bob's", "Edited"),
+        },
+        &EditOpts::default(),
+    ))
+    .unwrap();
+    bob.flush();
+    bob.done(&t);
+    w.resync(&[bob]);
+    assert!(preflight(&w.bob_post).is_empty());
+    let e = block_on(bob.engine.edit_preflight(&format!("{}x", w.bob_post))).unwrap_err();
+    assert_eq!(e.code, ErrorCode::NotFound, "{e:?}");
 }
 
 /// m3-18 (`social.md` §4.8 "Composer"): the engine refuses a comment on a locked post by a
@@ -1032,6 +1268,24 @@ fn mods_rm_adopts_only_what_counted() {
     }
     let decl = alice.record(nsid::FORUM, "meta").unwrap();
     assert_eq!(decl["moderators"].as_array().unwrap().len(), 1, "{decl}");
+    // what was not adopted is in the adoption's result (engine-api.md §3.5, sec-8)
+    let report: Vec<String> = block_on(alice.engine.writes())
+        .unwrap()
+        .into_iter()
+        .flat_map(|t| match t.state {
+            WriteState::Done { report, .. } => report,
+            _ => Vec::new(),
+        })
+        .collect();
+    for k in rogue.iter().chain([&rkey(&hidden)]) {
+        assert!(
+            report
+                .iter()
+                .any(|l| l.starts_with("cannot adopt") && l.contains(k.as_str())),
+            "{k}: {report:?}"
+        );
+    }
+    assert_eq!(report.len(), 3, "{report:?}");
 }
 
 /// A moderator whose account is taken down keeps moderating for the retention time (`sync.md`

@@ -1174,7 +1174,9 @@ dto! {
     /// `pending` may say why it waits (held for the undo window, throttled by the write budget,
     /// a rate limit or a back-off, or `needsLogin`: the account's session was refused and the
     /// write waits until the account logs in again), until when, and the `error` that caused
-    /// the wait; a conflict is `failed` with code `conflict`.
+    /// the wait; a conflict is `failed` with code `conflict`. A done `mod_adopt` (also the one
+    /// `mods_set` runs first) carries its `report`: one line per assertion it did not adopt or
+    /// kept (`data-model.md` §8.6).
     pub enum WriteState {
         #[serde(rename_all = "camelCase")]
         Pending {
@@ -1195,6 +1197,8 @@ dto! {
             uri: String,
             #[serde(default, skip_serializing_if = "Option::is_none")]
             cid: Option<String>,
+            #[serde(default, skip_serializing_if = "Vec::is_empty")]
+            report: Vec<String>,
         },
         Failed { error: crate::engine::EngineError },
         Undone,
@@ -1403,6 +1407,11 @@ dto! {
         /// type agrees with the declared one; absent: show a download card, never inline.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub mime: Option<String>,
+        /// The type the bytes sniff as (`data-model.md` §8.8's table, or `image/avif`), whatever
+        /// was declared: a download card names the saved file `<cid>.<ext>` from it (§11.2).
+        /// Never a display type; absent when the bytes match no entry.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub sniffed: Option<String>,
     }
 }
 
@@ -1637,9 +1646,12 @@ fn yes() -> bool {
 dto! {
     /// A modAction `action` as a client asks for it (`data-model.md` §6.7). A record states the
     /// complete desired state of its action key (`social.md` §4.2): a `restrict` lists every
-    /// capability, a `hide` says whether it is spam. `lock.allowed` is computed by the engine
-    /// from its view of the thread (`data-model.md` §8.6); `tag.head` is a wikiRevision uri
-    /// (its CID is the cached version's).
+    /// capability, a `hide` says whether it is spam. One `#restrict` record carries both
+    /// dimensions, so a `restrict` that leaves `capabilities` or `nullifyVotes` out keeps the
+    /// acting account's current value of it (restricting does not lift a nullification, nor
+    /// nullifying a restriction). `lock.allowed` is computed by the engine from its view of the
+    /// thread (`data-model.md` §8.6); `tag.head` is a wikiRevision uri (its CID is the cached
+    /// version's).
     pub enum ModActionValue {
         #[serde(rename_all = "camelCase")]
         Hide {
@@ -1652,9 +1664,10 @@ dto! {
         Access { level: AccessLevel },
         #[serde(rename_all = "camelCase")]
         Restrict {
-            capabilities: Vec<Capability>,
-            #[serde(default)]
-            nullify_votes: bool,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            capabilities: Option<Vec<Capability>>,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            nullify_votes: Option<bool>,
         },
         Tier {
             tier: Tier,
@@ -1743,7 +1756,9 @@ dto! {
 
 string_enum! {
     /// What a notice on an action's result is about.
-    pub enum NoticeCode { NotEstablished, Retroactive, AdoptedFirst, MissingAlt }
+    pub enum NoticeCode {
+        NotEstablished, Retroactive, AdoptedFirst, MissingAlt, SuspendsAssertions, SharedExpiry,
+    }
 }
 
 dto! {
@@ -1992,11 +2007,23 @@ mod tests {
         let done = WriteState::Done {
             uri: "at://x/y/z".into(),
             cid: None,
+            report: Vec::new(),
         };
         assert_eq!(
             serde_json::to_string(&done).unwrap(),
             r#"{"kind":"done","uri":"at://x/y/z"}"#
         );
+        let adopted = WriteState::Done {
+            uri: "at://x/y/z".into(),
+            cid: None,
+            report: vec!["kept own assertion for at://x/y/1".into()],
+        };
+        let json = serde_json::to_string(&adopted).unwrap();
+        assert_eq!(
+            json,
+            r#"{"kind":"done","uri":"at://x/y/z","report":["kept own assertion for at://x/y/1"]}"#
+        );
+        assert_eq!(serde_json::from_str::<WriteState>(&json).unwrap(), adopted);
         assert_eq!(
             serde_json::to_string(&WriteState::Undone).unwrap(),
             r#"{"kind":"undone"}"#
@@ -2033,6 +2060,28 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(serde_json::to_string(&b).unwrap(), r#"{"edited":true}"#);
+    }
+
+    #[test]
+    fn loaded_media_sniffed_is_optional() {
+        // v0 output (no sniffed type) still parses, and an absent one is not written
+        let v0: LoadedMedia =
+            serde_json::from_str(r#"{"cid":"bafk","size":3,"url":"/b/bafk"}"#).unwrap();
+        assert_eq!(v0.sniffed, None);
+        assert_eq!(
+            serde_json::to_string(&v0).unwrap(),
+            r#"{"cid":"bafk","size":3,"url":"/b/bafk"}"#
+        );
+        let card = LoadedMedia {
+            sniffed: Some("application/pdf".into()),
+            ..v0
+        };
+        let json = serde_json::to_string(&card).unwrap();
+        assert_eq!(
+            json,
+            r#"{"cid":"bafk","size":3,"url":"/b/bafk","sniffed":"application/pdf"}"#
+        );
+        assert_eq!(serde_json::from_str::<LoadedMedia>(&json).unwrap(), card);
     }
 
     #[test]

@@ -42,6 +42,7 @@ import { paletteReact } from "./palette.ts";
 import {
   type AccountInfo,
   type AccountView,
+  type ActionNotice,
   type ActorView,
   type Anchor,
   type AtUri,
@@ -1944,6 +1945,13 @@ export class MockEngine implements EngineApi {
     });
   }
 
+  /** The mock tracks no CID-bound assertions: nothing to suspend. */
+  async editPreflight(uri: AtUri): Promise<ActionNotice[]> {
+    if (!this.s.posts.has(uri) && !this.s.comments.has(uri))
+      throw err("not_found", `No record ${uri}`);
+    return [];
+  }
+
   async edit(uri: AtUri, draft: Draft, opts: EditOpts): Promise<WriteTicket> {
     const me = this.me();
     const p = this.s.posts.get(uri);
@@ -2160,10 +2168,10 @@ export class MockEngine implements EngineApi {
             for (const x of [...this.s.posts.values(), ...this.s.comments.values()]) {
               if (x.author !== subject || !listed(x.state)) continue;
               const cap = this.s.posts.has(x.uri) ? "post" : "comment";
-              if (a.capabilities.includes(cap))
+              if ((a.capabilities ?? []).includes(cap))
                 x.state = { kind: "hidden", reason: { kind: "restricted" } };
             }
-            value = a.capabilities.join(",") || "none";
+            value = (a.capabilities ?? []).join(",") || "none";
             break;
           }
           case "tier":
