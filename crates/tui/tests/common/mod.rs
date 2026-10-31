@@ -8,7 +8,8 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 
 use lessdugin_core::dto::{
-    BodyDraft, CommentDraft, DefaultTier, ForumDraft, PostDraft, SyncOpts, WriteState, WriteTicket,
+    BodyDraft, CommentDraft, DefaultTier, ForumDraft, PostDraft, PublicActionKind, SyncOpts,
+    WriteState, WriteTicket,
 };
 use lessdugin_core::engine::{AccountInfo, Engine, EngineConfig};
 use lessdugin_testkit::fake_pds::AccountHandle;
@@ -122,12 +123,35 @@ pub const WELCOME_MD: &str = "Hello **everyone**, and welcome to the forum.\n\n\
 ```\nlessdugin tui\n```\n";
 
 /// alice's approval-mode forum (bob and carol granted) with her welcome post; bob's post and
-/// his comment on the welcome. carol follows the forum and has synced it.
+/// his comment on the welcome. carol follows the forum and has synced it. Every user has seen
+/// every "this is public" interstitial, so the tests of the actions are not about it
+/// ([`scenario_unacknowledged`] is).
 pub fn scenario() -> Scenario {
     scenario_with(EngineConfig::default())
 }
 
 pub fn scenario_with(config: EngineConfig) -> Scenario {
+    let s = scenario_unacknowledged_with(config);
+    for u in [&s.w.alice, &s.w.bob, &s.w.carol] {
+        for k in [
+            PublicActionKind::Vote,
+            PublicActionKind::React,
+            PublicActionKind::TagVote,
+            PublicActionKind::Join,
+            PublicActionKind::ModAction,
+        ] {
+            block_on(u.engine.acknowledge_public_action(k)).unwrap();
+        }
+    }
+    s
+}
+
+/// [`scenario`], where nobody has acknowledged a public-action interstitial yet.
+pub fn scenario_unacknowledged() -> Scenario {
+    scenario_unacknowledged_with(EngineConfig::default())
+}
+
+fn scenario_unacknowledged_with(config: EngineConfig) -> Scenario {
     let w = World::with_config(config);
     let (alice, bob, carol) = (&w.alice, &w.bob, &w.carol);
     let mut draft = ForumDraft::new("meta", "Meta");

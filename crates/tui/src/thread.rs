@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use lessdugin_core::dto::{CommentNode, ItemState, ThreadRoot};
+use lessdugin_core::dto::{CollapseReason, CommentNode, ItemState, MediaView, ThreadRoot};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
 
@@ -41,6 +41,9 @@ pub struct ItemSpan {
     pub hidden: usize,
     /// Replies under it (descendants).
     pub replies: usize,
+    /// A comment the fold collapsed (`Collapsed`, `social.md` §10.2): it shows folded, header
+    /// and reason only, until `Space` expands it.
+    pub collapsed: bool,
 }
 
 /// A thread laid out at a width.
@@ -52,6 +55,97 @@ pub struct Layout {
     pub lines: Vec<Line<'static>>,
     /// The items, in order.
     pub items: Vec<ItemSpan>,
+    /// The lines kept blank for decoded images, which the view draws over them.
+    pub images: Vec<ImageSlot>,
+}
+
+/// Where a decoded image is drawn: `rows` blank lines from `start`, `indent` columns in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImageSlot {
+    /// The blob's CID.
+    pub cid: String,
+    /// The first line.
+    pub start: usize,
+    /// How many lines.
+    pub rows: usize,
+    /// The columns before it (after the gutter).
+    pub indent: usize,
+    /// Its width in columns.
+    pub width: usize,
+}
+
+/// The lines an image takes when it is shown.
+pub const IMAGE_ROWS: usize = 12;
+
+/// Where one image of a thread is (`sync.md` §11): absent until it is asked for (a key, or the
+/// autoload policy).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MediaState {
+    /// Being fetched from its author's PDS (streamed and CID-checked by the host).
+    Fetching,
+    /// Being decoded, off the UI thread.
+    Decoding,
+    /// Decoded: drawn in its slot.
+    Shown,
+    /// Not shown, and why.
+    Failed(String),
+}
+
+/// True for the types the terminal draws inline (`sync.md` §11.2: AVIF is inline in the SPA
+/// only), compared exactly as `lfm-1.md` §6.2 compares them.
+pub fn inline_image(mime: &str) -> bool {
+    matches!(
+        mime,
+        "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+    )
+}
+
+/// The lines under an item's body for its images: a caption that says how to load each one, or
+/// how it is going, and the blank slot of a shown one.
+fn media_lines(
+    media: &[MediaView],
+    states: &BTreeMap<String, MediaState>,
+    indent: usize,
+    width: usize,
+    lines: &mut Vec<Line<'static>>,
+    slots: &mut Vec<ImageSlot>,
+) {
+    for m in media.iter().filter(|m| inline_image(&m.mime)) {
+        let n = u32::from(m.index) + 1;
+        let label = match m.alt.as_deref().map(str::trim).filter(|a| !a.is_empty()) {
+            Some(alt) => crate::text::cat([tt(&format!("[image {n}: ")), tt(alt), lit("]")]),
+            None => tt(&format!("[image {n}]")),
+        };
+        let status = match states.get(&m.cid) {
+            None if m.size_bytes > crate::image::limits::MAX_INPUT_BYTES as u64 => {
+                lit("too large to show here")
+            }
+            // the notice of `sync.md` §11.3
+            None => tt(&format!(
+                "i loads it from {}, which will see your IP",
+                lessdugin_core::media::host_of(&m.pds)
+            )),
+            Some(MediaState::Fetching) => lit("fetching..."),
+            Some(MediaState::Decoding) => lit("decoding..."),
+            Some(MediaState::Shown) => TermText::empty(),
+            Some(MediaState::Failed(why)) => tt(why),
+        };
+        // word-wrapped as plain text, each piece sanitised again (as the plain bodies)
+        let caption = crate::text::cat([label, lit("  "), status]).to_plain_string();
+        for piece in crate::body::wrap(&caption, width.max(10)) {
+            lines.push(line([(pad(indent), Style::default()), (tt(&piece), dim())]));
+        }
+        if states.get(&m.cid) == Some(&MediaState::Shown) {
+            slots.push(ImageSlot {
+                cid: m.cid.clone(),
+                start: lines.len(),
+                rows: IMAGE_ROWS,
+                indent,
+                width,
+            });
+            lines.extend(std::iter::repeat_n(Line::default(), IMAGE_ROWS));
+        }
+    }
 }
 
 impl Layout {
@@ -117,12 +211,42 @@ pub fn root_uri(data: &ThreadData) -> String {
     }
 }
 
-/// Lays out `data` for a screen `width` columns wide.
-pub fn layout(data: &ThreadData, collapsed: &BTreeSet<String>, width: u16) -> Layout {
+/// True if comment `c` shows folded until the reader expands it: listed items the fold
+/// collapsed "render collapsed, with their reason" (`social.md` §10.2), except the viewer's own
+/// `Collapsed(NewUser)` items, which the viewer sees expanded with the label kept (the
+/// newcomer collapse is for other readers, §10.3).
+pub fn collapsed_by_default(c: &CommentNode, viewer: Option<&str>) -> bool {
+    match &c.state {
+        ItemState::Collapsed {
+            reason: CollapseReason::NewUser,
+        } => viewer != Some(c.author.did.as_str()),
+        ItemState::Collapsed { .. } => true,
+        _ => false,
+    }
+}
+
+/// Lays out `data` for a screen `width` columns wide, as a reader without an account sees it,
+/// no image asked for (see [`layout_for`]).
+pub fn layout(data: &ThreadData, toggled: &BTreeSet<String>, width: u16) -> Layout {
+    layout_for(data, toggled, width, None, &BTreeMap::new())
+}
+
+/// Lays out `data` for `viewer` on a screen `width` columns wide. `toggled` holds the comments
+/// whose fold the reader switched with `Space`: a comment collapsed by default
+/// ([`collapsed_by_default`]) expands, any other one folds its replies. `media` says where each
+/// image asked for is.
+pub fn layout_for(
+    data: &ThreadData,
+    toggled: &BTreeSet<String>,
+    width: u16,
+    viewer: Option<&str>,
+    media: &BTreeMap<String, MediaState>,
+) -> Layout {
     let text_w = usize::from(width.saturating_sub(GUTTER)).max(20);
     let handles = handles(data);
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut items = Vec::new();
+    let mut images = Vec::new();
 
     // the forum's banners (moderationUnavailable, newerRules)
     for b in banner_lines(&data.view.banners) {
@@ -158,6 +282,14 @@ pub fn layout(data: &ThreadData, collapsed: &BTreeSet<String>, width: u16) -> La
                     lines.push(Line::default());
                     lines.extend(body_lines);
                 }
+                media_lines(
+                    &p.body.media,
+                    media,
+                    0,
+                    text_w.min(MAX_BODY),
+                    &mut lines,
+                    &mut images,
+                );
             }
             // the react tallies under the post (social.md §9.2: "anchored reacts are listed
             // under the item")
@@ -183,6 +315,7 @@ pub fn layout(data: &ThreadData, collapsed: &BTreeSet<String>, width: u16) -> La
         comment: false,
         hidden: 0,
         replies: data.view.comments.len(),
+        collapsed: false,
     });
 
     // the comments
@@ -210,7 +343,12 @@ pub fn layout(data: &ThreadData, collapsed: &BTreeSet<String>, width: u16) -> La
             }
             skip_until_depth = None;
         }
-        let folded = collapsed.contains(&c.uri) && desc[i] > 0;
+        let by_default = !c.missing && collapsed_by_default(c, viewer);
+        let toggled_here = toggled.contains(&c.uri);
+        // a collapsed comment hides its body and its replies; a reader's fold of another one
+        // hides its replies only
+        let body_hidden = by_default && !toggled_here;
+        let folded = (by_default != toggled_here) && desc[i] > 0;
         if folded {
             skip_until_depth = Some(c.depth);
         }
@@ -218,16 +356,26 @@ pub fn layout(data: &ThreadData, collapsed: &BTreeSet<String>, width: u16) -> La
         let indent = (depth * 2).min(max_indent);
         lines.push(Line::default());
         let start = lines.len();
-        lines.push(comment_header(c, indent, folded.then_some(desc[i])));
+        let marker = match (folded, body_hidden) {
+            (true, _) => Some(desc[i]),
+            (false, true) => Some(0),
+            (false, false) => None,
+        };
+        lines.push(comment_header(c, indent, marker));
         if matches!(c.state, ItemState::Visible | ItemState::Collapsed { .. })
             && !c.missing
+            && !body_hidden
             && let Some(body) = data.bodies.get(&c.uri)
         {
             let w = text_w.saturating_sub(indent + 2).min(MAX_BODY);
             lines.extend(body.lines(w, indent + 2, &handles));
+            media_lines(&c.body.media, media, indent + 2, w, &mut lines, &mut images);
         }
         // the react tallies under the comment (social.md §9.2)
-        if matches!(c.state, ItemState::Visible | ItemState::Collapsed { .. }) && !c.missing {
+        if matches!(c.state, ItemState::Visible | ItemState::Collapsed { .. })
+            && !c.missing
+            && !body_hidden
+        {
             for t in react_lines(&c.reacts, indent + 2, &handles) {
                 lines.push(line([(t, dim())]));
             }
@@ -240,12 +388,14 @@ pub fn layout(data: &ThreadData, collapsed: &BTreeSet<String>, width: u16) -> La
             comment: true,
             hidden: if folded { desc[i] } else { 0 },
             replies: desc[i],
+            collapsed: by_default,
         });
     }
     Layout {
         width,
         lines,
         items,
+        images,
     }
 }
 
@@ -256,7 +406,8 @@ fn comment_header(c: &CommentNode, indent: usize, folded: Option<usize>) -> Line
         return line(parts);
     }
     parts.push((actor(&c.author), bold()));
-    let mut meta = vec![TermText::empty(), tt(&time(c.created_at_ms))];
+    // t_rank, not the claimed createdAt (`social.md` §2.3)
+    let mut meta = vec![TermText::empty(), tt(&time(c.t_rank_ms))];
     meta.extend(score_parts(&c.score));
     if c.retracted {
         meta.push(lit("retracted"));
@@ -269,10 +420,16 @@ fn comment_header(c: &CommentNode, indent: usize, folded: Option<usize>) -> Line
     }
     meta.extend(badges(&c.badges));
     parts.push((joined(meta), dim()));
+    // `[+n]`: n replies folded under it; `[+]`: its own body is folded (a collapsed comment)
     if let Some(n) = folded {
         parts.push((lit("  "), Style::default()));
+        let count = if n > 0 {
+            tt(&n.to_string())
+        } else {
+            TermText::empty()
+        };
         parts.push((
-            crate::text::cat([lit("[+"), tt(&n.to_string()), lit("]")]),
+            crate::text::cat([lit("[+"), count, lit("]")]),
             Style::default().add_modifier(Modifier::REVERSED),
         ));
     }
@@ -430,8 +587,10 @@ mod tests {
                     comment: i > 0,
                     hidden: 0,
                     replies: 0,
+                    collapsed: false,
                 })
                 .collect(),
+            images: Vec::new(),
         }
     }
 

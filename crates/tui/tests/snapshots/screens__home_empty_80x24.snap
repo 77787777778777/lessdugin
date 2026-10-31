@@ -6,8 +6,8 @@ expression: screen
  Forums you follow
 
   You follow no forum yet.
-  Join one with `lessdugin join <forum>`,
-  or open one with `lessdugin tui <forum>`.
+  Open one with `:open <owner>/<slug>`,
+  then `:join` it to post there.
 
 
 

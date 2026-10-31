@@ -6,7 +6,10 @@
 //! update), the content, and a status line (the last message, or the keys). Every string is a
 //! [`TermText`](crate::text::TermText) turned into spans by [`crate::text`].
 
-use lessdugin_core::dto::{ForumRole, HistoryView, MembershipMode, PostSort, Stance};
+use lessdugin_core::dto::{
+    CommentSort, ForumRole, HistoryView, MembershipMode, PostFilter, PostSort, PublicActionKind,
+    Stance,
+};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout as Split, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -14,14 +17,22 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use crate::app::{
-    ForumScreen, ForumTab, HomeScreen, LIST_ROWS, ModMenu, ModScreen, ModTab, NotificationsScreen,
-    Prompt, ReactOverlay, Screen, ScreenKind, State, SyncStatus, ThreadScreen, Tone, status_text,
+    Confirm, ForumScreen, ForumTab, HomeScreen, LIST_ROWS, ModMenu, ModScreen, ModTab,
+    NotificationsScreen, Panel, Prompt, PublicNotice, ReactOverlay, Screen, ScreenKind, State,
+    SyncStatus, ThreadScreen, Tone, status_text,
 };
 use crate::keys::HELP;
 use crate::text::{
     TermText, actor, banner_lines, cat, clock, count, joined, line, lit, mod_log_entry,
     mod_queue_item, name, notification_line, pad, post_meta, post_title, spans, tt, wrapped,
 };
+
+/// The label open mode carries in the forum header (`threat-model.md` L7): it finds brand-new
+/// members only through third-party infrastructure.
+pub const OPEN_MODE_LABEL: &str = "Open mode relies on Bluesky relay, Jetstream and Constellation";
+
+/// The banner code of that label in the engine's forum view (`relayDependent`).
+const RELAY_DEPENDENT: &str = "relayDependent";
 
 fn dim() -> Style {
     Style::default().add_modifier(Modifier::DIM)
@@ -52,8 +63,14 @@ fn gutter(on: bool) -> (TermText, Style) {
     }
 }
 
-/// Draws the whole frame.
+/// Draws the whole frame, without images (a pipe, a test backend).
 pub fn draw(state: &State, f: &mut Frame<'_>) {
+    draw_with(state, None, f);
+}
+
+/// Draws the whole frame, and the decoded images of the thread on top from `images` into the
+/// slots its layout keeps for them (under any overlay).
+pub fn draw_with(state: &State, images: Option<&mut crate::image::Images>, f: &mut Frame<'_>) {
     let area = f.area();
     let [header, info, content, status] = Split::vertical([
         Constraint::Length(1),
@@ -72,6 +89,9 @@ pub fn draw(state: &State, f: &mut Frame<'_>) {
         f.render_widget(Paragraph::new(Text::from(lines)), content);
     }
     f.render_widget(Paragraph::new(status_lines(state)), status);
+    if let (Some(images), Some(t)) = (images, state.top_thread()) {
+        draw_images(t, images, content, f);
+    }
     if state.help {
         help(f, state, area);
     }
@@ -87,6 +107,158 @@ pub fn draw(state: &State, f: &mut Frame<'_>) {
     if let Some(c) = &state.command {
         command_line(f, c, area);
     }
+    if let Some(p) = &state.panel {
+        panel(f, p, area);
+    }
+    if let Some(c) = &state.confirm {
+        confirm(f, c, area);
+    }
+    if let Some(n) = &state.public_notice {
+        public_notice(f, n, area);
+    }
+}
+
+/// A text panel (`:members`, `:raw`, `:settings`): it scrolls like the help overlay.
+fn panel(f: &mut Frame<'_>, p: &Panel, area: Rect) {
+    let width = 76.min(area.width);
+    let inner = usize::from(width.saturating_sub(2)).max(1);
+    let lines: Vec<Line<'static>> = p
+        .lines
+        .iter()
+        .flat_map(|t| wrapped(t, Style::default(), inner))
+        .collect();
+    let rows = usize::from(area.height.saturating_sub(4)).max(1);
+    let max_scroll = lines.len().saturating_sub(rows);
+    let scroll = p.scroll.min(max_scroll);
+    let total = lines.len();
+    let shown: Vec<Line<'static>> = lines.into_iter().skip(scroll).take(rows).collect();
+    let height = u16::try_from(shown.len() + 2)
+        .unwrap_or(u16::MAX)
+        .min(area.height);
+    let x = area.x + (area.width - width) / 2;
+    let y = area.y + (area.height - height) / 2;
+    let r = Rect::new(x, y, width, height);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(line([(tt(&format!(" {} ", p.title)), bold())]))
+        .title_bottom(line([(
+            tt(&format!(
+                " {}-{} of {} \u{b7} any key closes ",
+                (scroll + 1).min(total),
+                (scroll + rows).min(total),
+                total
+            )),
+            dim(),
+        )]));
+    f.render_widget(Clear, r);
+    f.render_widget(Paragraph::new(Text::from(shown)).block(block), r);
+}
+
+/// A yes/no question before a write that cannot be taken back.
+fn confirm(f: &mut Frame<'_>, c: &Confirm, area: Rect) {
+    let width = 60.min(area.width);
+    let inner = usize::from(width.saturating_sub(2)).max(1);
+    let mut lines: Vec<Line<'static>> = crate::body::wrap(&c.text, inner)
+        .iter()
+        .map(|t| line([(tt(t), Style::default())]))
+        .collect();
+    lines.push(line([(tt("y yes \u{b7} n no"), bold())]));
+    let height = u16::try_from(lines.len() + 2)
+        .unwrap_or(u16::MAX)
+        .min(area.height);
+    let x = area.x + (area.width - width) / 2;
+    let y = area.y + (area.height - height) / 2;
+    let r = Rect::new(x, y, width, height);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(line([(lit(" Confirm "), warn_style())]));
+    f.render_widget(Clear, r);
+    f.render_widget(Paragraph::new(Text::from(lines)).block(block), r);
+}
+
+/// The decoded images of thread `t` whose slot shows whole in `content` (one cut by the edge
+/// would be drawn rescaled, and jump as it scrolls in).
+fn draw_images(
+    t: &ThreadScreen,
+    images: &mut crate::image::Images,
+    content: Rect,
+    f: &mut Frame<'_>,
+) {
+    if t.history.is_some() {
+        return;
+    }
+    let (top, h) = (t.pos.scroll, usize::from(content.height));
+    for slot in &t.layout.images {
+        if slot.start < top || slot.start + slot.rows > top + h {
+            continue;
+        }
+        let x = usize::from(crate::thread::GUTTER) + slot.indent;
+        let (Ok(x), Ok(y), Ok(w), Ok(rows)) = (
+            u16::try_from(x),
+            u16::try_from(slot.start - top),
+            u16::try_from(slot.width),
+            u16::try_from(slot.rows),
+        ) else {
+            continue;
+        };
+        let w = w.min(content.width.saturating_sub(x));
+        if w == 0 {
+            continue;
+        }
+        let r = Rect::new(content.x + x, content.y + y, w, rows);
+        images.render(&slot.cid, r, f.buffer_mut());
+    }
+}
+
+/// What the interstitial says of a kind (`social.md` §17), as the CLI and the SPA say it.
+pub fn public_notice_text(kind: PublicActionKind) -> &'static str {
+    match kind {
+        PublicActionKind::Vote => {
+            "Your votes are public records in your repository: everyone can see what you voted \
+             on and how. Each vote is held for 4 seconds before it is sent; Backspace undoes it."
+        }
+        PublicActionKind::React => {
+            "Your reacts are public records in your repository, including the quoted passage."
+        }
+        PublicActionKind::TagVote => "Your tag votes are public records in your repository.",
+        PublicActionKind::Join => {
+            "Your membership (and its note) is a public record in your repository."
+        }
+        PublicActionKind::ModAction => {
+            "Moderation actions are public records in your repository, with their reasons: \
+             they appear in the forum's mod log."
+        }
+    }
+}
+
+/// The "this is public" interstitial (`threat-model.md` PRIV-9): shown once per kind of public
+/// action, before the first one is written.
+fn public_notice(f: &mut Frame<'_>, n: &PublicNotice, area: Rect) {
+    let width = 60.min(area.width);
+    let inner = usize::from(width.saturating_sub(2)).max(1);
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    for k in &n.kinds {
+        for t in crate::body::wrap(public_notice_text(*k), inner) {
+            lines.push(line([(tt(&t), Style::default())]));
+        }
+        lines.push(Line::default());
+    }
+    lines.push(line([(
+        lit("You are asked once for each kind of public action."),
+        dim(),
+    )]));
+    lines.push(line([(tt("y go on \u{b7} n cancel"), bold())]));
+    let height = u16::try_from(lines.len() + 2)
+        .unwrap_or(u16::MAX)
+        .min(area.height);
+    let x = area.x + (area.width - width) / 2;
+    let y = area.y + (area.height - height) / 2;
+    let r = Rect::new(x, y, width, height);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(line([(lit(" This is public "), warn_style())]));
+    f.render_widget(Clear, r);
+    f.render_widget(Paragraph::new(Text::from(lines)).block(block), r);
 }
 
 /// The `m` mod menu overlay: the forum-tier actions of `ViewerCaps.moderate`/`rank` (plus the
@@ -438,22 +610,27 @@ fn info_line(state: &State, top: &Screen) -> Line<'static> {
                     ));
                 }
             }
-            let sorts = [
-                (PostSort::Magic, "magic"),
-                (PostSort::Top, "top"),
-                (PostSort::New, "new"),
-                (PostSort::Old, "old"),
-            ];
-            parts.push((lit(" sort: "), dim()));
-            for (sort, label) in sorts {
-                let style = if f.sort == sort && f.tab == ForumTab::Posts {
+            // the Posts tab's sort (`s`) and filter (`f`): the current ones, which is what
+            // fits in 80 columns next to the completeness marker and the sync state
+            let on = |posts: bool| {
+                if posts {
                     Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
                 } else {
                     dim()
-                };
-                parts.push((cat([lit(" "), lit(label), lit(" ")]), style));
-            }
-            parts.push((lit("  filter: frontpage "), dim()));
+                }
+            };
+            let posts = f.tab == ForumTab::Posts;
+            parts.push((lit(" sort: "), dim()));
+            parts.push((
+                cat([lit(" "), lit(post_sort_label(f.sort)), lit(" ")]),
+                on(posts),
+            ));
+            parts.push((lit("  filter: "), dim()));
+            parts.push((
+                cat([lit(" "), lit(post_filter_label(f.filter)), lit(" ")]),
+                on(posts),
+            ));
+            parts.push((lit(" "), dim()));
             if let Some(s) = sync_text(state.sync.get(&f.uri)) {
                 info.push(s);
             }
@@ -462,6 +639,13 @@ fn info_line(state: &State, top: &Screen) -> Line<'static> {
             if let Some(p) = t.post() {
                 if let Some(n) = forum_name(state, &p.post.forum) {
                     info.push(n);
+                }
+                // the comment sort (`s`), when it is not the default
+                if t.opts.sort != CommentSort::Magic {
+                    info.push(cat([
+                        lit("comments: "),
+                        lit(comment_sort_label(t.opts.sort)),
+                    ]));
                 }
                 if let Some(d) = &t.data {
                     let c = &d.view.completeness;
@@ -515,6 +699,37 @@ fn info_line(state: &State, top: &Screen) -> Line<'static> {
     line(parts)
 }
 
+/// A post sort's name (`social.md` §12.2).
+pub fn post_sort_label(s: PostSort) -> &'static str {
+    match s {
+        PostSort::Magic => "magic",
+        PostSort::Top => "top",
+        PostSort::New => "new",
+        PostSort::Old => "old",
+        PostSort::RecentComments => "recent comments",
+    }
+}
+
+/// A post filter's name (`social.md` §12.3).
+pub fn post_filter_label(f: PostFilter) -> &'static str {
+    match f {
+        PostFilter::Frontpage => "frontpage",
+        PostFilter::All => "all",
+        PostFilter::Curated => "curated",
+    }
+}
+
+/// A comment sort's name (`social.md` §12.4).
+pub fn comment_sort_label(s: CommentSort) -> &'static str {
+    match s {
+        CommentSort::Magic => "magic",
+        CommentSort::Top => "top",
+        CommentSort::New => "new",
+        CommentSort::Old => "old",
+        CommentSort::LatestReply => "latest reply",
+    }
+}
+
 fn forum_name(state: &State, uri: &str) -> Option<TermText> {
     state.stack.iter().find_map(|s| match &s.kind {
         ScreenKind::Forum(f) if f.uri == uri => f.name().map(name),
@@ -547,7 +762,7 @@ fn status_lines(state: &State) -> Text<'static> {
             " Enter open \u{b7} R sync \u{b7} P post \u{b7} ? help \u{b7} q quit"
         }
         Some(ScreenKind::Forum(_)) => {
-            " Enter open \u{b7} s sort \u{b7} P post \u{b7} R sync \u{b7} ? help \u{b7} h back"
+            " Enter open \u{b7} s sort \u{b7} f filter \u{b7} P post \u{b7} R sync \u{b7} ? help \u{b7} h back"
         }
         Some(ScreenKind::Thread(_)) => {
             " r reply \u{b7} c comment \u{b7} Space fold \u{b7} p parent \u{b7} R sync \u{b7} ? help \u{b7} h back"
@@ -620,12 +835,8 @@ fn home(state: &State, top: &Screen, s: &HomeScreen, h: usize, lines: &mut Vec<L
     if d.forums.is_empty() {
         lines.push(Line::default());
         message(lines, lit("You follow no forum yet."), bold());
-        message(lines, lit("Join one with `lessdugin join <forum>`,"), dim());
-        message(
-            lines,
-            lit("or open one with `lessdugin tui <forum>`."),
-            dim(),
-        );
+        message(lines, lit("Open one with `:open <owner>/<slug>`,"), dim());
+        message(lines, lit("then `:join` it to post there."), dim());
         return;
     }
     let visible = (h / LIST_ROWS).max(1);
@@ -674,15 +885,40 @@ fn forum(top: &Screen, s: &ForumScreen, h: usize, w: usize, lines: &mut Vec<Line
     for b in banner_lines(&d.list.banners) {
         lines.push(line([(lit("  "), Style::default()), (b, warn_style())]));
     }
+    // the L7 label of an open forum (`threat-model.md` L7, SOC-13): the forum view's
+    // `relayDependent` banner, or the TUI's own when the engine carries none (once: the list's
+    // banners are drawn above)
+    if !d.list.banners.iter().any(|b| b.code == RELAY_DEPENDENT) {
+        let label = match d.view.banners.iter().find(|b| b.code == RELAY_DEPENDENT) {
+            Some(b) => Some(tt(&b.message)),
+            None => (d.view.forum.membership == MembershipMode::Open).then(|| lit(OPEN_MODE_LABEL)),
+        };
+        if let Some(label) = label {
+            lines.push(line([
+                (lit("  "), Style::default()),
+                (cat([lit("! "), label]), dim()),
+            ]));
+        }
+    }
     if s.tab == ForumTab::Activity {
         activity(top, s, h, w, lines);
         return;
     }
     if d.list.items.is_empty() {
         lines.push(Line::default());
+        if s.filter != PostFilter::All {
+            // a new forum's posts start in `personal`: the frontpage may well be empty
+            message(
+                lines,
+                cat([lit("No "), lit(post_filter_label(s.filter)), lit(" posts.")]),
+                bold(),
+            );
+            message(lines, lit("Press f to list all posts."), dim());
+            return;
+        }
         message(lines, lit("No posts yet."), bold());
         let hint = match d.view.my_role {
-            ForumRole::None => lit("Join the forum with `lessdugin join` to post in it."),
+            ForumRole::None => lit("Join the forum with `:join` to post in it."),
             _ => lit("Press P to write the first one."),
         };
         message(lines, hint, dim());
@@ -755,7 +991,7 @@ fn activity(top: &Screen, s: &ForumScreen, h: usize, w: usize, lines: &mut Vec<L
                 (pad(2), Style::default()),
                 (actor(&c.author), Style::default()),
                 (lit(" "), Style::default()),
-                (tt(&clock(c.created_at_ms)), dim()),
+                (tt(&clock(c.t_rank_ms)), dim()),
                 (lit("  "), Style::default()),
                 (fit(&tt(&text), room), dim()),
             ]));

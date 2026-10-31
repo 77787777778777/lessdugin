@@ -8,6 +8,9 @@
 //! - `$EDITOR` runs with the terminal suspended: the input reader is parked first (so it cannot
 //!   take the editor's keys), then the alternate screen is left and raw mode switched off; both
 //!   are restored afterwards and the screen redrawn.
+//! - Images (`crate::image`) are decoded and resized on worker threads, which wake the loop
+//!   with [`Action::ImagesReady`]; the terminal's graphics protocol is queried once, before the
+//!   input reader starts.
 //! - The terminal is restored on exit, on errors and on a panic of the UI thread. A panic in
 //!   an effect task does not touch the terminal from that thread (the UI would go on drawing
 //!   in cooked mode): the task reports it, and the UI loop ends with an error, restoring the
@@ -104,6 +107,11 @@ async fn ui<H: Host>(
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<Action>,
 ) -> anyhow::Result<Report> {
     let mut term = Term::enter()?;
+    // the protocol query reads the terminal's answer: before the input reader takes stdin
+    let wake = tx.clone();
+    let mut images = crate::image::Images::query(Arc::new(move || {
+        let _ = wake.send(Action::ImagesReady);
+    }));
     let input = Input::spawn(tx.clone());
     let (w, h) = crossterm::terminal::size()?;
     let mut state = State::new(w, h, opts.account.clone(), opts.offline);
@@ -118,6 +126,7 @@ async fn ui<H: Host>(
             while let Some(effect) = queue.pop_front() {
                 match effect {
                     Effect::Quit => break 'main,
+                    Effect::DecodeMedia { cid, bytes } => images.decode(cid, bytes),
                     Effect::Editor(req) => {
                         input.pause();
                         term.suspend()?;
@@ -159,7 +168,19 @@ async fn ui<H: Host>(
             if state.quit {
                 break;
             }
-            term.terminal.draw(|f| crate::view::draw(&state, f))?;
+            // what the image workers finished goes to the state before the frame is drawn
+            let polled = images.poll();
+            if !polled.decoded.is_empty() || !polled.evicted.is_empty() {
+                for (cid, result) in polled.decoded {
+                    queue.extend(state.update(Action::MediaDecoded { cid, result }));
+                }
+                for cid in polled.evicted {
+                    queue.extend(state.update(Action::MediaEvicted { cid }));
+                }
+                continue;
+            }
+            term.terminal
+                .draw(|f| crate::view::draw_with(&state, Some(&mut images), f))?;
             let a = tokio::select! {
                 a = rx.recv() => a,
                 Some(why) = panicked.recv() => {

@@ -161,3 +161,322 @@ fn writing_needs_an_account() {
     assert!(screen.contains("Log in to write"), "{screen}");
     assert!(screen.contains("not logged in (read-only)"), "{screen}");
 }
+
+/// `:edit` opens `$EDITOR` on your comment's current text and sends the edit; the old version
+/// is kept as a revision. Someone else's comment is refused.
+#[test]
+fn the_edit_command_edits_your_comment() {
+    use lessdugin_core::dto::CommentDraft;
+    let s = scenario();
+    let carol = &s.w.carol;
+    let t = block_on(
+        carol
+            .engine
+            .comment(&CommentDraft::new(&s.welcome, None, "First version.")),
+    )
+    .unwrap();
+    carol.flush();
+    let mine = carol.done(&t);
+    let dir = tempfile::tempdir().unwrap();
+    let mut t = tui_with_editor(&s, dir.path(), "Second version.");
+    block_on(t.start(None));
+    block_on(t.open_thread(&s.welcome));
+    let run = |t: &mut Headless<lessdugin_testkit::MemHost>, line: &str| {
+        block_on(t.press(":"));
+        for c in line.chars() {
+            block_on(t.press(&c.to_string()));
+        }
+        block_on(t.press("Enter"));
+    };
+    run(&mut t, &format!("edit {mine}"));
+    block_on(t.engine().outbox_flush()).unwrap();
+    block_on(t.settle());
+    let view = block_on(carol.engine.get_thread(&s.welcome, &ThreadOpts::default())).unwrap();
+    let c = view.comments.iter().find(|c| c.uri == mine).unwrap();
+    // the editor's text above the template's: the new line, then the old text it was given
+    assert!(
+        c.body.text.starts_with("Second version."),
+        "{:?}",
+        c.body.text
+    );
+    assert!(c.badges.edited, "{:?}", c.badges);
+    let h = block_on(carol.engine.history(&mine)).unwrap();
+    assert!(!h.versions.is_empty(), "{h:?}");
+
+    // bob's comment is not carol's to edit
+    run(&mut t, &format!("edit {}", s.bob_c1));
+    let st = t.state.status.as_ref().unwrap().text.to_plain_string();
+    assert!(st.contains("only your own"), "{st}");
+}
+
+/// Types `line` into the `:` overlay and runs it.
+fn run(t: &mut Headless<lessdugin_testkit::MemHost>, line: &str) {
+    block_on(t.press(":"));
+    for c in line.chars() {
+        block_on(t.press(&c.to_string()));
+    }
+    block_on(t.press("Enter"));
+}
+
+/// carol's post `uri` as the engine reads it back: `(title, body text)`.
+fn post_of(s: &common::Scenario, uri: &str) -> (Option<String>, String) {
+    let view = block_on(s.w.carol.engine.get_thread(uri, &ThreadOpts::default())).unwrap();
+    let ThreadRoot::Post(p) = view.post else {
+        panic!("missing")
+    };
+    (p.post.title, p.body.text)
+}
+
+/// `:edit` on a quick take edits its body: it has no title line (`data-model.md` PO4), so the
+/// first line of the text stays in the body, and a one-line take is not emptied.
+#[test]
+fn the_edit_command_edits_a_quick_takes_body() {
+    use lessdugin_core::dto::{BodyDraft, PostDraft, PostKind};
+    let s = scenario();
+    let carol = &s.w.carol;
+    let draft = PostDraft {
+        kind: PostKind::QuickTake,
+        title: None,
+        body: BodyDraft::text("A one-line take."),
+        ..PostDraft::article(&s.forum, "", "")
+    };
+    let t = block_on(carol.engine.publish(&draft)).unwrap();
+    carol.flush();
+    let take = carol.done(&t);
+
+    // the editor writes a new first line above the take
+    let dir = tempfile::tempdir().unwrap();
+    let mut t = tui_with_editor(&s, dir.path(), "Sharper:");
+    block_on(t.start(None));
+    run(&mut t, &format!("edit {take}"));
+    block_on(t.engine().outbox_flush()).unwrap();
+    block_on(t.settle());
+    let (title, body) = post_of(&s, &take);
+    assert_eq!(title, None);
+    // (the plain text of the markdown: the two lines are one paragraph)
+    assert_eq!(body.trim(), "Sharper: A one-line take.", "{body:?}");
+
+    // an editor that leaves the text as it is keeps the whole take
+    let dir = tempfile::tempdir().unwrap();
+    let mut t = tui_with_editor(&s, dir.path(), "");
+    block_on(t.start(None));
+    run(&mut t, &format!("edit {take}"));
+    block_on(t.engine().outbox_flush()).unwrap();
+    block_on(t.settle());
+    let (title, body) = post_of(&s, &take);
+    assert_eq!(title, None);
+    assert_eq!(body.trim(), "Sharper: A one-line take.", "{body:?}");
+
+    // and the editor is given the take as it is, with no (empty) title line above it
+    let dir = tempfile::tempdir().unwrap();
+    let mut t = tui_with_sed(&s, dir.path(), "s/Sharper:/Sharper:/", true);
+    block_on(t.start(None));
+    run(&mut t, &format!("edit {take}"));
+    let seen = std::fs::read_to_string(dir.path().join("seen.txt")).unwrap();
+    assert!(seen.starts_with("Sharper:\n"), "{seen:?}");
+    assert!(!seen.contains("the first line is the title"), "{seen}");
+    assert!(!seen.contains("The first line is the title"), "{seen}");
+}
+
+/// carol's TUI with an `$EDITOR` that runs `sed -e <expr>` over the file (and, with `record`,
+/// keeps a copy of what it was given in `seen.txt`).
+fn tui_with_sed(
+    s: &common::Scenario,
+    dir: &std::path::Path,
+    expr: &str,
+    record: bool,
+) -> Headless<lessdugin_testkit::MemHost> {
+    let script = dir.join("sed-editor.sh");
+    let keep = if record {
+        format!("cp \"$1\" '{}'\n", dir.join("seen.txt").display())
+    } else {
+        String::new()
+    };
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nset -e\n{keep}sed -e '{expr}' \"$1\" > \"$1.new\"\nmv \"$1.new\" \"$1\"\n"
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    block_on(Headless::new(
+        s.w.carol.engine.clone(),
+        HeadlessOpts {
+            editor: Some(editor(dir, &script)),
+            ..HeadlessOpts::default()
+        },
+    ))
+    .unwrap()
+}
+
+/// `:edit` on a post whose body spilled into a blob (over 64 KiB, `data-model.md` §5.3) edits
+/// its source as the engine fetched it, and the new version spills again.
+#[test]
+fn the_edit_command_edits_a_spilled_body() {
+    use lessdugin_core::dto::PostDraft;
+    let s = scenario();
+    let carol = &s.w.carol;
+    let mut source = "The old opening.\n\n".to_owned();
+    while source.len() <= 65_536 {
+        source.push_str("More words in the long body. ");
+    }
+    let t = block_on(
+        carol
+            .engine
+            .publish(&PostDraft::article(&s.forum, "Long", source)),
+    )
+    .unwrap();
+    carol.flush();
+    let post = carol.done(&t);
+    let record = |uri: &str| {
+        use lessdugin_core::host::Host as _;
+        let u = lessdugin_atp::syntax::AtUri::parse(uri).unwrap();
+        block_on(
+            lessdugin_core::store::records::RecordStore::new(carol.engine.host().cache()).get(&u),
+        )
+        .unwrap()
+        .unwrap()
+        .value_json()
+        .unwrap()
+    };
+    assert!(
+        record(&post)["body"].get("textBlob").is_some(),
+        "it spilled"
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut t = tui_with_sed(
+        &s,
+        dir.path(),
+        "s/The old opening./The new opening./",
+        false,
+    );
+    block_on(t.start(None));
+    run(&mut t, &format!("edit {post}"));
+    let st = t.state.status.as_ref().unwrap().text.to_plain_string();
+    assert!(!st.contains("blob"), "{st}");
+    block_on(t.engine().outbox_flush()).unwrap();
+    block_on(t.settle());
+    let (title, body) = post_of(&s, &post);
+    assert_eq!(title.as_deref(), Some("Long"));
+    assert!(
+        body.starts_with("The new opening. More words"),
+        "{}",
+        &body[..80]
+    );
+    assert!(
+        record(&post)["body"].get("textBlob").is_some(),
+        "it spilled again"
+    );
+}
+
+/// `:edit` on an article keeps a title the user did not change as it was, a leading `#`
+/// included, and takes the edited body.
+#[test]
+fn the_edit_command_keeps_an_unchanged_title() {
+    use lessdugin_core::dto::PostDraft;
+    let s = scenario();
+    let carol = &s.w.carol;
+    let t = block_on(carol.engine.publish(&PostDraft::article(
+        &s.forum,
+        "#1 rule: be kind",
+        "The old body.",
+    )))
+    .unwrap();
+    carol.flush();
+    let post = carol.done(&t);
+
+    // an editor that changes the body only
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("sed-editor.sh");
+    std::fs::write(
+        &script,
+        "#!/bin/sh\nset -e\nsed 's/The old body./The new body./' \"$1\" > \"$1.new\"\nmv \"$1.new\" \"$1\"\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let mut t = block_on(Headless::new(
+        carol.engine.clone(),
+        HeadlessOpts {
+            editor: Some(editor(dir.path(), &script)),
+            ..HeadlessOpts::default()
+        },
+    ))
+    .unwrap();
+    block_on(t.start(None));
+    run(&mut t, &format!("edit {post}"));
+    block_on(t.engine().outbox_flush()).unwrap();
+    block_on(t.settle());
+    let (title, body) = post_of(&s, &post);
+    assert_eq!(title.as_deref(), Some("#1 rule: be kind"));
+    assert_eq!(body.trim(), "The new body.", "{body:?}");
+}
+
+/// sec-7 (`social.md` §4.5, `threat-model.md` SOC-3): `:edit` on an item a moderator pinned
+/// says the edit suspends the pin and asks first; `n` opens no editor and sends nothing, `y`
+/// edits.
+#[test]
+fn the_edit_command_asks_before_suspending_a_pin() {
+    use lessdugin_core::dto::{ModActionIntent, ModActionValue, ModScope, PinScope, PostDraft};
+    let s = scenario();
+    let (alice, carol) = (&s.w.alice, &s.w.carol);
+    let t = block_on(carol.engine.publish(&PostDraft::article(
+        &s.forum,
+        "Pinned",
+        "The old body.",
+    )))
+    .unwrap();
+    carol.flush();
+    let post = carol.done(&t);
+    alice.sync(&s.forum);
+    block_on(alice.engine.mod_action(&ModActionIntent::Assert {
+        forum: s.forum.clone(),
+        scope: ModScope::Forum,
+        subject: post.clone(),
+        action: ModActionValue::Pin {
+            scope: PinScope::Forum,
+            pinned: true,
+        },
+        reason: None,
+        until_ms: None,
+    }))
+    .unwrap();
+    alice.flush();
+    s.w.tick(common::MINUTE);
+    carol.sync(&s.forum);
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut t = tui_with_sed(&s, dir.path(), "s/The old body./The new body./", true);
+    block_on(t.start(None));
+    run(&mut t, &format!("edit {post}"));
+    let c = t.state.confirm.as_ref().expect("a confirmation");
+    assert!(
+        c.text.starts_with("Editing suspends its pin:"),
+        "{}",
+        c.text
+    );
+    assert!(t.render().contains("Editing suspends its pin"));
+    block_on(t.press("n"));
+    assert!(t.state.confirm.is_none());
+    assert!(!dir.path().join("seen.txt").exists(), "no editor ran");
+    block_on(t.engine().outbox_flush()).unwrap();
+    block_on(t.settle());
+    assert_eq!(post_of(&s, &post).1.trim(), "The old body.");
+
+    run(&mut t, &format!("edit {post}"));
+    assert!(t.state.confirm.is_some());
+    block_on(t.press("y"));
+    assert!(dir.path().join("seen.txt").exists(), "the editor ran");
+    block_on(t.engine().outbox_flush()).unwrap();
+    block_on(t.settle());
+    assert_eq!(post_of(&s, &post).1.trim(), "The new body.");
+}

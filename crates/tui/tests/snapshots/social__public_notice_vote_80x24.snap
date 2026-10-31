@@ -1,0 +1,28 @@
+---
+source: crates/tui/tests/social.rs
+expression: screen
+---
+ lessdugin › Meta                                            @carol.example.com
+  posts  activity  sort:  magic   filter:  frontpage   synced 08:58 UTC
+▌ Hello from bob
+▌ @bob.example.com · 2025-10-09 08:56 UTC · 0 comments · 1 point
+  Welcome
+  @alice.example.com · 2025-10-09 08:54 UTC · 1 comment · 1 point
+
+
+          ┌ This is public ──────────────────────────────────────────┐
+          │Your votes are public records in your repository: everyone│
+          │can see what you voted on and how. Each vote is held for 4│
+          │seconds before it is sent; Backspace undoes it.           │
+          │                                                          │
+          │You are asked once for each kind of public action.        │
+          │y go on · n cancel                                        │
+          └──────────────────────────────────────────────────────────┘
+
+
+
+
+
+
+
+ This is public: y to go on, n to cancel.

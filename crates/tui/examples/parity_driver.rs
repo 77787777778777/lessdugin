@@ -94,6 +94,14 @@ fn forum_list<H: lessdugin_core::host::Host>(h: &Headless<H>) -> Res<PostList> {
     }
 }
 
+/// Answers `y` to the "this is public" interstitial, which the first opinion of each kind on
+/// a fresh account opens (`social.md` §17).
+async fn go_past_public_notice<H: lessdugin_core::host::Host>(h: &mut Headless<H>) {
+    if h.state.public_notice.is_some() {
+        h.press("y").await;
+    }
+}
+
 /// Opens `forum` (Home under it), applies any pending update, selects `post` and opens it.
 async fn open_post<H: lessdugin_core::host::Host>(
     h: &mut Headless<H>,
@@ -215,6 +223,7 @@ async fn votes(forum: &str, post: &str, size: (u16, u16)) -> Res<()> {
     // settled and nothing is left in the undo window when the scenario compares the clients.
     for key in ["u", "a"] {
         h.press(key).await;
+        go_past_public_notice(&mut h).await;
         let screen = h.render();
         if let Some(s) = &h.state.status {
             let text = s.text.to_plain_string();
@@ -231,6 +240,7 @@ async fn votes(forum: &str, post: &str, size: (u16, u16)) -> Res<()> {
     // the react palette (`x`), picking the highlighted entry with Enter
     h.press("x").await;
     h.press("Enter").await;
+    go_past_public_notice(&mut h).await;
     engine
         .outbox_flush()
         .await
@@ -297,15 +307,20 @@ async fn read(forum: &str, post: &str, out: &Path, size: (u16, u16)) -> Res<()> 
     h.start(Some(forum.to_owned())).await;
     h.state.show_pending();
     let screen = forum_list(&h)?;
-    let sort = match h.state.top().map(|s| &s.kind) {
-        Some(ScreenKind::Forum(f)) => f.sort,
+    let (sort, filter) = match h.state.top().map(|s| &s.kind) {
+        Some(ScreenKind::Forum(f)) => (f.sort, f.filter),
         _ => return Err("the forum is not on top".into()),
     };
     // The page the other clients compare: the screen's query with their page size. The
     // screen lists more (LIST_LIMIT); its first posts must be this page, in this order.
     let list = d
         .engine
-        .list_posts(&exec::posts_query(forum, sort, exec::PARITY_LIST_LIMIT))
+        .list_posts(&exec::posts_query(
+            forum,
+            sort,
+            filter,
+            exec::PARITY_LIST_LIMIT,
+        ))
         .await
         .map_err(|e| e.message)?;
     let uris = |l: &PostList| l.items.iter().map(|p| p.uri.clone()).collect::<Vec<_>>();
