@@ -5,9 +5,13 @@
 // comment, a new post and an edit with a revision. Every test fails on any CSP or Trusted Types
 // violation and on any page or console error.
 
+import { fileURLToPath } from "node:url";
 import { expect, test } from "@playwright/test";
 import { DEV_CSP } from "../../csp.mjs";
 import { e2eState, route, type StrictWatch, signIn, watchStrict, withDevnet } from "./state.ts";
+
+/** A real 8x8 PNG (also used by scenario.spec.ts). */
+const PIXEL_PNG = fileURLToPath(new URL("../fixtures/pixel.png", import.meta.url));
 
 const s = e2eState();
 let w: StrictWatch;
@@ -157,12 +161,28 @@ test("bob signs in with OAuth, joins, comments, publishes a post and edits it (a
   await page.getByLabel("Title").fill("Bob's first post");
   await page.getByRole("textbox", { name: "Post body" }).click();
   await page.keyboard.type("Written in the browser, signed by **DPoP**.");
+  await page.getByTestId("attachment-input").setInputFiles(PIXEL_PNG);
+  await expect(page.getByTestId("attachment-list")).toContainText("ready");
   await page.getByRole("button", { name: "Publish", exact: true }).click();
   await expect(page.getByRole("heading", { level: 1, name: "Bob's first post" })).toBeVisible();
   await expect(page.locator("[data-rendered-root] strong").first()).toHaveText("DPoP");
   const m = /#\/p\/(did:plc:[a-z2-7]{24})\/([a-z2-7-]+)$/.exec(page.url());
   expect(m?.[1]).toBe(bob.did);
   const postUri = `at://${m?.[1]}/online.7778777.lessdugin.temp.post/${m?.[2]}`;
+
+  // The attached image, on click (or by the engine's autoload verdict, sync.md §11.3): fetched,
+  // CID-checked and sniffed, then shown from a typed object URL (sync.md §11.2, threat-model
+  // SPA-7; the CSP allows `img-src blob:` only).
+  const load = page.getByRole("button", { name: /click to load/ });
+  const shown = page.locator("[data-rendered-root] img[data-cid]");
+  // the placeholder's own img stays in the DOM, hidden, until the bytes arrive
+  await expect(load.or(shown.and(page.locator(":not(.lfm-media-pending)")))).toBeVisible();
+  if (await load.isVisible()) {
+    await expect(load).toContainText("which will see your IP");
+    await load.click();
+  }
+  await expect(shown).toHaveAttribute("src", /^blob:/);
+  await expect.poll(() => shown.evaluate((img: HTMLImageElement) => img.naturalWidth)).toBe(8);
 
   // The edit: applyWrites [create revision, update post] (data-model.md §8.3).
   await page.getByRole("link", { name: "Edit", exact: true }).click();

@@ -1,6 +1,8 @@
 // The mention token walk (docs/plan.md M4: "mention autocomplete"). The interesting cases are
 // the ones that must NOT open a completion: an email address, a path segment, a token the caret
 // has already left.
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { applyMention, type MentionCandidate, mentionAt, rankMentions } from "./mentions.ts";
@@ -57,10 +59,24 @@ describe("rankMentions", () => {
 });
 
 describe("applyMention", () => {
-  it("inserts the handle with a trailing space and moves the caret past it", () => {
-    const out = applyMention("hi @ali there", 3, 7, "alice.example.com");
-    expect(out.text).toBe("hi @alice.example.com  there");
-    // start + "@" + handle + " " is where the next character goes
-    expect(out.caret).toBe(3 + 1 + "alice.example.com".length + 1);
+  const DID = "did:plc:abcdefghijklmnopqrstuvwx";
+
+  it("inserts a mention link with a trailing space and moves the caret past it", () => {
+    const out = applyMention("hi @ali there", 3, 7, { did: DID, handle: "alice.example.com" });
+    const link = `[@alice.example.com](at://${DID}) `;
+    expect(out.text).toBe(`hi ${link} there`);
+    expect(out.caret).toBe(3 + link.length);
+  });
+
+  // lfm-1.md §4.4: only a link to the DID's profile whose text starts with `@` is a mention. The
+  // shared vectors pin what the renderer, and so derive_metadata, makes of the inserted text.
+  it("inserts what the renderer's mention vectors list as a mention", () => {
+    const file = JSON.parse(
+      readFileSync(resolve(process.cwd(), "../testdata/vectors/lfm1/mention.json"), "utf8"),
+    ) as { vectors: { name: string; input: { text: string }; expected: { mentions: string[] } }[] };
+    const plc = file.vectors.find((v) => v.name === "plc-mention");
+    const out = applyMention("hi @ali", 3, 7, { did: DID, handle: "alice" });
+    expect(`${out.text.trimEnd()}\n`).toBe(plc?.input.text);
+    expect(plc?.expected.mentions).toEqual([DID]);
   });
 });

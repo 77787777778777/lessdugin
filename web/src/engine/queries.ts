@@ -38,6 +38,8 @@ export const qk = {
   sequence: (uri: string) => ["sequence", uri] as const,
   user: (actor: string, forum: string | undefined) => ["user", actor, forum ?? null] as const,
   actor: (input: string) => ["actor", input] as const,
+  /** Under `user`, so a `user` topic refreshes it. */
+  mutes: () => ["user", "mutes"] as const,
   search: (q: string, forum: string | undefined) => ["search", q, forum ?? null] as const,
   notifications: (all: boolean) => ["notifications", all] as const,
   drafts: () => ["drafts"] as const,
@@ -54,7 +56,9 @@ export const qk = {
 /** The query-key prefixes a topic invalidates. A forum change (moderation, membership, policy,
  * authorities) can change the state, score or visibility of any post or thread in it, and post
  * query keys do not carry their forum, so `Forum(uri)` also invalidates every post query; only
- * the active ones refetch. */
+ * the active ones refetch. The engine computes notifications when they are queried and emits no
+ * `notifications` topic for new ones, so `Forum` and `Thread` re-query them too (engine-api.md
+ * §3.4). */
 export function keysForTopic(topic: Topic): readonly (readonly unknown[])[] {
   switch (topic.kind) {
     case "forum":
@@ -69,9 +73,10 @@ export function keysForTopic(topic: Topic): readonly (readonly unknown[])[] {
         ["sequence"],
         ["bookmarks"],
         ["user"],
+        ["notifications"],
       ];
     case "thread":
-      return [["post", topic.uri], ["raw"], ["bookmarks"], ["search"]];
+      return [["post", topic.uri], ["raw"], ["bookmarks"], ["search"], ["notifications"]];
     case "user":
       return [["user"]];
     case "notifications":

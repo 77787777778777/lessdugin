@@ -52,7 +52,7 @@ export function ForumActivityPage() {
                 <RecordLink uri={c.uri}>{shortAge(c.tRankMs)}</RecordLink>
                 <span>{c.score.score} karma</span>
               </div>
-              <RenderedHtml html={c.body.html} className="lfm-compact" />
+              <RenderedHtml html={c.body.html} media={c.body.media} className="lfm-compact" />
             </div>
           ))}
         </article>

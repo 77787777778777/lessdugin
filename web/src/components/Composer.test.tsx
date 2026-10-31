@@ -102,4 +102,26 @@ describe("Composer", () => {
     );
     expect(kept).toHaveLength(1);
   });
+
+  it("turns a file pasted or dropped into the editor into an attachment (m4-20)", async () => {
+    const engine = new MockEngine();
+    const prepare = vi.spyOn(engine, "prepareMedia");
+    const { container } = renderWithApp(
+      <Composer label="Post body" attachments onSubmit={async () => true} />,
+      { engine },
+    );
+    const view = await editor(container);
+    const shot = new File([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], "shot.png", {
+      type: "image/png",
+    });
+    fireEvent.paste(view.contentDOM, { clipboardData: { files: [shot], types: ["Files"] } });
+    await waitFor(() =>
+      expect(screen.getByTestId("attachment-list").textContent).toContain("ready"),
+    );
+    expect(prepare).toHaveBeenCalledTimes(1);
+    expect(view.state.doc.toString()).toBe("");
+    const drop = new File([new Uint8Array([0xff, 0xd8, 0xff])], "drop.jpg", { type: "image/jpeg" });
+    fireEvent.drop(view.contentDOM, { dataTransfer: { files: [drop], types: ["Files"] } });
+    await waitFor(() => expect(prepare).toHaveBeenCalledTimes(2));
+  });
 });

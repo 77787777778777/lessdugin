@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Edit, retract and delete for the viewer's own comments (data-model.md §8.3, §8.7). Edits keep
 // a public revision; retraction keeps the comment, struck through. An edit rebuilds the draft
-// from the record itself, so the parent, the quote and the body's media survive it.
+// from the record itself, so the parent, the quote and the body's media survive it. Before an
+// edit, the author is told when it will suspend a keep or a pin (social.md §4.5).
 
 import type { CommentNode, MediaRef, TextQuote } from "@lessdugin/engine/types";
 import { useState } from "react";
 import { useEngine } from "../engine/context.tsx";
 import { writeStore } from "../engine/writes.ts";
+import { positiveAssertions, suspensionWarning } from "../lib/modActions.ts";
 import { markdownOf, mediaRefsOf, objectField, refUri, textQuoteOf } from "../lib/records.ts";
 import ui from "../styles/ui.module.css";
 import { Dialog } from "./Dialog.tsx";
@@ -37,6 +39,8 @@ export function commentSourceOf(record: unknown): CommentSource | null {
 export function OwnCommentActions({ node, postUri }: { node: CommentNode; postUri: string }) {
   const engine = useEngine();
   const [editing, setEditing] = useState<CommentSource | null>(null);
+  // the edit suspends the comment's positive assertions (a keep, a pin): said before it is sent
+  const [suspends, setSuspends] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
 
   const run = async (
@@ -61,6 +65,7 @@ export function OwnCommentActions({ node, postUri }: { node: CommentNode; postUr
       const raw = await engine.raw(node.uri);
       const source = commentSourceOf(raw.record);
       if (!source) throw new Error("The comment's source is not available.");
+      setSuspends(suspensionWarning(positiveAssertions(raw), "comment"));
       setEditing(source);
     } catch (e) {
       toasts.show({ message: errorMessage(e), tone: "error" });
@@ -86,6 +91,11 @@ export function OwnCommentActions({ node, postUri }: { node: CommentNode; postUr
       </button>
       {editing && (
         <div className={ui.fullWidth}>
+          {suspends && (
+            <p className={ui.notice} role="note" data-testid="edit-suspends">
+              {suspends}
+            </p>
+          )}
           <LazyComposer
             compact
             autoFocus

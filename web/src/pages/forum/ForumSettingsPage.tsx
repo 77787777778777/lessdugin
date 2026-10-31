@@ -4,7 +4,7 @@
 // remove moderators (`mods_set`; a removed moderator's actions are adopted first, social.md
 // §4.10).
 
-import type { ForumDraft, ModRole, WriteTicket } from "@lessdugin/engine/types";
+import type { ActionTicket, ForumDraft, ModRole } from "@lessdugin/engine/types";
 import { useQuery } from "@tanstack/react-query";
 import { Fragment, useId, useState } from "react";
 import { ActorName } from "../../components/ActorName.tsx";
@@ -22,15 +22,18 @@ import ui from "../../styles/ui.module.css";
 import styles from "../pages.module.css";
 import { useForumView } from "./forumContext.tsx";
 
-/** Runs a write and waits for its outcome; true when it was done. */
+/** Runs a write and waits for its outcome; true when it was done. The engine's notices are
+ * shown at once (a moderator's removal adopts their assertions first and says what it will
+ * not adopt, engine-api.md §3.2 `mods_set`). */
 async function runWrite(
-  start: () => Promise<WriteTicket>,
+  start: () => Promise<ActionTicket>,
   subject: string,
   done: string,
 ): Promise<boolean> {
   try {
     const ticket = await start();
     writeStore.track(ticket, subject);
+    for (const n of ticket.notices ?? []) toasts.show({ message: n.message });
     const final = await writeStore.wait(ticket.id);
     if (final.kind === "failed") throw final.error;
     if (final.kind !== "done") return false;
@@ -194,7 +197,7 @@ export function ForumSettingsPage() {
         <>
           <h2 className={ui.sectionTitle}>About</h2>
           <div className={ui.card}>
-            <RenderedHtml html={view.about.html} />
+            <RenderedHtml html={view.about.html} media={view.about.media} />
           </div>
         </>
       )}

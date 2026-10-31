@@ -4,7 +4,7 @@ import { getRouteApi, Link, Outlet, useNavigate } from "@tanstack/react-router";
 import { useEffect } from "react";
 import { ActorName } from "../../components/ActorName.tsx";
 import { Badges } from "../../components/Badges.tsx";
-import { Banners } from "../../components/Banners.tsx";
+import { Banners, withOpenModeLabel } from "../../components/Banners.tsx";
 import { usePublicAck } from "../../components/PublicAck.tsx";
 import { ParticipantsProvider } from "../../components/participants.tsx";
 import { ErrorView, errorMessage, Loading } from "../../components/Status.tsx";
@@ -126,7 +126,7 @@ export function ForumLayout() {
               {f.followed ? "Unfollow" : "Follow"}
             </button>
           </div>
-          <Banners banners={view.banners} />
+          <Banners banners={withOpenModeLabel(view.banners, f.membership)} />
           {view.viewer?.newcomer === true && (
             <p className={styles.banner} data-viewer-state="newcomer">
               You are a new user here: your posts and comments are collapsed for other readers until

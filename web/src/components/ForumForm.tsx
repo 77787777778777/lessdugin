@@ -17,6 +17,7 @@ import { markdownOf, mediaRefsOf, objectField, stringField, stringsField } from 
 import { cleanName } from "../lib/text.ts";
 import { isDid } from "../lib/uri.ts";
 import ui from "../styles/ui.module.css";
+import { OPEN_MODE_LABEL } from "./Banners.tsx";
 import { errorMessage } from "./Status.tsx";
 
 export const SLUG_RE = /^[a-z0-9]+(-[a-z0-9]+)*$/;
@@ -261,6 +262,12 @@ export function ForumForm({
             </label>
           ))}
         </div>
+        {membership === "open" && (
+          <p className={ui.hint} data-testid="open-mode-label">
+            {OPEN_MODE_LABEL} Anyone who joins is a member, and brand-new members are found only
+            through that public infrastructure; approval mode is complete without it.
+          </p>
+        )}
       </fieldset>
       <fieldset className={ui.field}>
         <legend className={ui.label}>Default tier of new posts</legend>

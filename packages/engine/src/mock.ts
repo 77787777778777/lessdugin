@@ -16,6 +16,7 @@ import type {
   CommentRec,
   ForumRec,
   MockState,
+  ModLogEntryRec,
   MyOpinionRec,
   PolicyRec,
   PostRec,
@@ -43,6 +44,7 @@ import {
   type AccountInfo,
   type AccountView,
   type ActionNotice,
+  type ActionTicket,
   type ActorView,
   type Anchor,
   type AtUri,
@@ -75,6 +77,7 @@ import {
   type KarmaCadence,
   type ListPostsQuery,
   type LoadedMedia,
+  type MediaFile,
   type MediaInput,
   type MediaRef,
   type MembersQuery,
@@ -153,7 +156,16 @@ interface WriteRec {
   timer?: Timer;
   /** The subject an opinion write is about (`MyOpinion.pending`). */
   subject?: AtUri;
-  apply: () => { uri: AtUri; cid: string; topics: Topic[] };
+  apply: () => Applied;
+}
+
+/** What a write did. `report`: a `modAdopt`'s lines on what it did not adopt or kept
+ * (`WriteState.done.report`). */
+interface Applied {
+  uri: AtUri;
+  cid: string;
+  topics: Topic[];
+  report?: string[];
 }
 
 const RENDER_NOTICE = "Rendered by the mock engine's minimal markdown renderer.";
@@ -168,6 +180,15 @@ const PUBLIC_ACTION_KINDS: readonly PublicActionKind[] = [
   "modAction",
 ];
 const RANK: Record<string, number> = { owner: 3, admin: 2, moderator: 1 };
+
+/** The engine's retroactivity notices (crates/core/src/engine/moderation.rs). */
+const RETROACTIVE_RESTRICT =
+  "this restriction is retroactive: it also hides the user's earlier items of the restricted kinds";
+const RETROACTIVE_BAN =
+  "a ban is retroactive: it hides all of the user's items in this forum, unless they are kept";
+/** The engine's `missingAlt` notice (crates/core/src/media/mod.rs). */
+const MISSING_ALT =
+  "this file has no alt text: readers who cannot see it will not know what it shows";
 
 function err(code: EngineErrorCode, message: string, retryable = false): EngineError {
   return { code, message, retryable };
@@ -820,10 +841,7 @@ export class MockEngine implements EngineApi {
 
   // ------------------------------------------------------------------------------- writes
 
-  private write(
-    undoable: boolean,
-    apply: () => { uri: AtUri; cid: string; topics: Topic[] },
-  ): WriteTicket {
+  private write(undoable: boolean, apply: () => Applied): WriteTicket {
     const id = this.nextId("w");
     const rec: WriteRec = { id, state: { kind: "pending" }, undoable, apply };
     this.writeRecs.set(id, rec);
@@ -842,6 +860,7 @@ export class MockEngine implements EngineApi {
       try {
         const r = rec.apply();
         rec.state = { kind: "done", uri: r.uri, cid: r.cid };
+        if (r.report !== undefined && r.report.length > 0) rec.state.report = r.report;
         this.emit({ kind: "write", id, state: clone(rec.state) });
         this.changed(...r.topics, { kind: "outbox" });
       } catch (e) {
@@ -1231,11 +1250,29 @@ export class MockEngine implements EngineApi {
     return [...(this.rejected.get(uri) ?? [])].sort();
   }
 
-  async modsSet(uri: AtUri, change: ModsChange): Promise<WriteTicket> {
+  async modsSet(uri: AtUri, change: ModsChange): Promise<ActionTicket> {
     const f = this.forumRec(uri);
     if (f.summary.owner !== this.me())
       throw err("blocked", "Only the owner can change moderators.");
-    return this.write(false, () => {
+    // Removing a moderator adopts their assertions first, and the ticket says so
+    // (engine-api.md §3.2 `mods_set`)
+    const notices: ActionNotice[] = [];
+    if (change.kind === "remove" && change.skipAdopt !== true) {
+      const theirs = (this.s.modLog.get(uri) ?? []).filter((e) => e.actor === change.did);
+      const lapsed = theirs.filter((e) => e.lapsed).length;
+      const adoption = await this.modAdopt(uri, change.did);
+      notices.push({
+        code: "adoptedFirst",
+        message: `mod adopt runs first (write ${adoption.id}, ${theirs.length - lapsed} assertion(s) in effect); the moderator is removed only once it completes`,
+      });
+      if (lapsed > 0) {
+        notices.push({
+          code: "adoptedFirst",
+          message: `not adopted, since they are not in effect: ${lapsed} lapsed`,
+        });
+      }
+    }
+    const ticket = this.write(false, () => {
       if (change.kind === "add") {
         f.moderators = f.moderators.filter((m) => m.did !== change.did);
         const m: ForumRec["moderators"][number] = {
@@ -1252,6 +1289,7 @@ export class MockEngine implements EngineApi {
       }
       return { uri, cid: fakeCid(`${uri}@${this.tick()}`), topics: [{ kind: "forum", uri }] };
     });
+    return notices.length > 0 ? { ...ticket, notices } : ticket;
   }
 
   // =============================================================================== §3.3
@@ -1692,15 +1730,59 @@ export class MockEngine implements EngineApi {
       .sort((a, b) => b.atMs - a.atMs || (a.subject < b.subject ? -1 : 1))
       .map((e) => ({
         ...clone(e),
-        uri: atUri(
-          e.actor,
-          COLL.modAction,
-          `${this.fkOf(forum)}-${b32hash(`${e.action}:${e.subject}`, 16)}`,
-        ),
+        uri: this.logEntryUri(forum, e),
         actor: this.actor(e.actor),
         status: e.lapsed ? ("lapsed" as const) : ("effective" as const),
       }));
     return { dto: DTO_VERSION, entries };
+  }
+
+  private logEntryUri(forum: AtUri, e: ModLogEntryRec): AtUri {
+    return atUri(
+      e.actor,
+      COLL.modAction,
+      `${this.fkOf(forum)}-${b32hash(`${e.action}:${e.subject}`, 16)}`,
+    );
+  }
+
+  /** The modActions naming `uri`, as the engine's raw view lists them: one record per (actor,
+   * action key), the latest, unless it was removed (`{uri, cid, valid, record, status}`). */
+  private rawAssertions(uri: AtUri): Json[] {
+    const naming = (this.s.modLog.get(FORUM_URI) ?? []).filter((e) => e.subject === uri);
+    const latest = new Map(naming.map((e) => [`${e.actor} ${e.action}`, e] as const));
+    const t = (name: string, fields: { [k: string]: Json }): Json => ({
+      $type: `${COLL.modAction}#${name}`,
+      ...fields,
+    });
+    const action = (key: string, value: string): Json => {
+      if (key === "hide")
+        return t("hide", value === "keep" ? { hidden: false } : { spam: value.includes("spam") });
+      if (key === "tier") return t("tier", { tier: value });
+      if (key.startsWith("pin:"))
+        return t("pin", { scope: key.slice(4), pinned: value === "pinned" });
+      if (key === "lock") return t("lock", { locked: value === "locked" });
+      return t(key, {});
+    };
+    return [...latest.values()]
+      .filter((e) => e.value !== "removed")
+      .map((e) => {
+        const auri = atUri(e.actor, COLL.modAction, `${FK}-${b32hash(`${e.action}:${uri}`, 16)}`);
+        const record: { [k: string]: Json } = {
+          $type: COLL.modAction,
+          forum: FORUM_URI,
+          subject: uri,
+          action: action(e.action, e.value),
+          createdAt: new Date(FIXTURE_NOW).toISOString(),
+        };
+        if (e.reason !== undefined) record.reason = e.reason;
+        return {
+          uri: auri,
+          cid: fakeCid(auri),
+          valid: true,
+          record,
+          status: e.lapsed ? "lapsed" : "effective",
+        };
+      });
   }
 
   async raw(uri: AtUri): Promise<RawView> {
@@ -1783,15 +1865,7 @@ export class MockEngine implements EngineApi {
       level: "pds",
       record,
       validity: [],
-      assertions: (this.s.modLog.get(FORUM_URI) ?? [])
-        .filter((e) => e.subject === uri)
-        .map((e) => ({
-          uri: atUri(e.actor, COLL.modAction, `${FK}-${b32hash(`${e.action}:${e.subject}`, 16)}`),
-          actor: e.actor,
-          action: e.action,
-          value: e.value,
-          status: e.lapsed ? "lapsed" : "effective",
-        })),
+      assertions: this.rawAssertions(uri),
     };
     if (cid !== undefined) view.cid = cid;
     if (c) view.root = c.root;
@@ -2094,7 +2168,22 @@ export class MockEngine implements EngineApi {
     });
   }
 
-  async modAction(intent: ModActionIntent): Promise<WriteTicket> {
+  async modAction(intent: ModActionIntent): Promise<ActionTicket> {
+    const ticket = await this.modActionWrite(intent);
+    // bans and restrictions are retroactive, and the engine says so (social.md §4.6, §4.7)
+    if (intent.kind === "assert") {
+      const a = intent.action;
+      if (a.kind === "access" && a.level === "banned") {
+        return { ...ticket, notices: [{ code: "retroactive", message: RETROACTIVE_BAN }] };
+      }
+      if (a.kind === "restrict" && (a.capabilities?.length ?? 0) > 0) {
+        return { ...ticket, notices: [{ code: "retroactive", message: RETROACTIVE_RESTRICT }] };
+      }
+    }
+    return ticket;
+  }
+
+  private async modActionWrite(intent: ModActionIntent): Promise<WriteTicket> {
     const me = this.me();
     const f = this.forumRec(intent.forum);
     const role = this.myRole(f);
@@ -2108,6 +2197,14 @@ export class MockEngine implements EngineApi {
       role === "moderator"
     ) {
       throw err("blocked", "Only admins and the owner can curate.");
+    }
+    if (
+      intent.kind === "assert" &&
+      intent.action.kind === "restrict" &&
+      intent.action.capabilities === undefined &&
+      intent.action.nullifyVotes === undefined
+    ) {
+      throw err("invalid_input", "A restriction names its capabilities or nullifyVotes.");
     }
     const rank = RANK[role] ?? 0;
     const copy = clone(intent);
@@ -2165,13 +2262,21 @@ export class MockEngine implements EngineApi {
             break;
           }
           case "restrict": {
+            // one record holds both dimensions: the one left out keeps its current value, as
+            // the engine merges (engine-api.md §3.5 `mod_action`)
+            const target = this.actorRec(subject);
+            const caps = a.capabilities ?? target.restricted ?? [];
+            const nullify = a.nullifyVotes ?? target.nullified === true;
+            if (caps.length > 0) target.restricted = [...caps];
+            else delete target.restricted;
+            if (nullify) target.nullified = true;
+            else delete target.nullified;
             for (const x of [...this.s.posts.values(), ...this.s.comments.values()]) {
               if (x.author !== subject || !listed(x.state)) continue;
               const cap = this.s.posts.has(x.uri) ? "post" : "comment";
-              if ((a.capabilities ?? []).includes(cap))
-                x.state = { kind: "hidden", reason: { kind: "restricted" } };
+              if (caps.includes(cap)) x.state = { kind: "hidden", reason: { kind: "restricted" } };
             }
-            value = (a.capabilities ?? []).join(",") || "none";
+            value = `restrict:${caps.join("+")},${nullify ? "nullify" : "unnullify"}`;
             break;
           }
           case "tier":
@@ -2210,6 +2315,11 @@ export class MockEngine implements EngineApi {
         if (post && copy.actionKey === "pin:forum") post.pinned = false;
         if (comment && copy.actionKey === "pin:thread") comment.pinned = false;
         if (post && copy.actionKey === "lock") post.locked = false;
+        if (copy.actionKey === "restrict" && isDid(subject)) {
+          const target = this.actorRec(subject);
+          delete target.restricted;
+          delete target.nullified;
+        }
         if (copy.actionKey === "access") {
           for (const x of [...this.s.posts.values(), ...this.s.comments.values()]) {
             if (
@@ -2252,12 +2362,28 @@ export class MockEngine implements EngineApi {
 
   async modAdopt(forum: AtUri, formerMod: Did): Promise<WriteTicket> {
     if (!this.isAuthority(forum)) throw err("blocked", "Only authorities can adopt assertions.");
+    const me = this.me();
     return this.write(false, () => {
       const t = this.tick();
-      for (const e of this.s.modLog.get(forum) ?? []) {
-        if (e.actor === formerMod) e.lapsed = true;
+      const log = this.s.modLog.get(forum) ?? [];
+      // What is not adopted is the write's report (engine-api.md §3.2 `mod_adopt`)
+      const report: string[] = [];
+      for (const e of log) {
+        if (e.actor !== formerMod) continue;
+        const own = log.some(
+          (x) =>
+            x.actor === me &&
+            x.action === e.action &&
+            x.subject === e.subject &&
+            !x.lapsed &&
+            x.value !== "removed",
+        );
+        if (e.lapsed) report.push(`cannot adopt ${this.logEntryUri(forum, e)}: not in effect`);
+        else if (own) report.push(`kept own assertion for ${this.logEntryUri(forum, e)}`);
+        e.lapsed = true;
       }
       return {
+        report,
         uri: atUri(
           this.me(),
           COLL.modAction,
@@ -2389,8 +2515,17 @@ export class MockEngine implements EngineApi {
     });
   }
 
-  async prepareMedia(bytes: Uint8Array, input: MediaInput = {}): Promise<MediaRef> {
-    const b = bytes;
+  async prepareMedia(bytes: Uint8Array | MediaFile, hints: MediaInput = {}): Promise<MediaRef> {
+    // engine API v0 passed one MediaFile (`mime` is the declared type)
+    const file = bytes instanceof Uint8Array ? null : bytes;
+    const b = file ? file.bytes : (bytes as Uint8Array);
+    const input: MediaInput = file
+      ? {
+          ...(file.mime !== undefined ? { declaredMime: file.mime } : {}),
+          ...(file.name !== undefined ? { name: file.name } : {}),
+          ...(file.alt !== undefined ? { alt: file.alt } : {}),
+        }
+      : hints;
     // the declared type is only a hint: the sniffed one wins (data-model.md §8.8)
     let mime = input.declaredMime ?? "application/octet-stream";
     if (b[0] === 0x89 && b[1] === 0x50) mime = "image/png";
@@ -2403,7 +2538,9 @@ export class MockEngine implements EngineApi {
       mime,
       sizeBytes: b.length,
     };
-    if (input.alt !== undefined) ref.alt = input.alt;
+    // a blank alt is no alt, and writers warn when it is missing (data-model.md §4)
+    if (input.alt !== undefined && input.alt.trim() !== "") ref.alt = input.alt;
+    else ref.notices = [{ code: "missingAlt", message: MISSING_ALT }];
     if (input.name !== undefined) ref.name = input.name;
     return ref;
   }

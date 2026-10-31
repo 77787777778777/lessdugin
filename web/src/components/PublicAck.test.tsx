@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+
+import { MockEngine } from "@lessdugin/engine/mock";
 import type { PublicActionKind } from "@lessdugin/engine/types";
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { renderWithApp } from "../test/render.tsx";
 import { usePublicAck } from "./PublicAck.tsx";
 
@@ -62,5 +64,24 @@ describe("PublicAck (social.md §17)", () => {
     // The react request is still waiting for its own answer.
     expect(await screen.findByRole("dialog", { name: "Reacts are public" })).toBeTruthy();
     expect(results.react).toBeUndefined();
+  });
+
+  it("stores the acknowledgement in the engine, per kind, and does not ask again (m3-5)", async () => {
+    const engine = new MockEngine();
+    const ack = vi.spyOn(engine, "acknowledgePublicAction");
+    const set = vi.spyOn(engine, "setSetting");
+    const results: Record<string, boolean[]> = {};
+    const first = renderWithApp(<Requester results={results} />, { engine });
+    fireEvent.click(await screen.findByRole("button", { name: "vote" }));
+    fireEvent.click(await continueIn("Votes are public"));
+    await waitFor(() => expect(results.vote).toEqual([true]));
+    await waitFor(() => expect(ack).toHaveBeenCalledWith("vote"));
+    expect(set).not.toHaveBeenCalled();
+    first.unmount();
+    // a reload: a new provider over the same engine asks nothing
+    renderWithApp(<Requester results={results} />, { engine });
+    fireEvent.click(await screen.findByRole("button", { name: "vote" }));
+    await waitFor(() => expect(results.vote).toEqual([true, true]));
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 });
