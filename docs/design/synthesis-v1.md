@@ -1359,6 +1359,9 @@ tui [forum]    web [--port] [--no-open]    config get|set|edit    completions <s
 - Validation errors appear as single-line YAML comments.
 - Publishing shows a summary (forum, tags, local files, media, word count) and asks `[y/N/e]`.
 
+**Edits**
+- `edit` sends the item again with the fields it does not change as cached (`data-model.md` §8.3): the body's media (sent again as references), a link post's card (`link.title` and `link.description`, while the uri stays the same), tags and labels. A new link uri drops the card that described the old one.
+
 **Output**
 - Human output wraps to the terminal and pages through `less -R`. Everything is `TermText`.
 - `--color never` gives plain, accessible output with no box drawing.
