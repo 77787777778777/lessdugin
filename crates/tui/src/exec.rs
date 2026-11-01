@@ -11,10 +11,10 @@ use std::collections::BTreeMap;
 
 use lessdugin_atp::syntax::AtUri;
 use lessdugin_core::dto::{
-    ActionNotice, ActorView, BodyDraft, Capability, CommentDraft, DefaultTier, Draft, EditOpts,
-    ExternalLinkDraft, ForumDraft, KarmaCadence, ListPostsQuery, MembersQuery, MembershipMode,
-    ModActionIntent, ModActionValue, ModScope, NotificationsQuery, PostDraft, PostFilter, PostKind,
-    PostSort, Ref, RefContext, SyncOpts, TextQuote, ThreadOpts, ThreadRoot,
+    ActionNotice, ActorView, AspectRatio, BodyDraft, Capability, CommentDraft, DefaultTier, Draft,
+    EditOpts, ExternalLinkDraft, ForumDraft, KarmaCadence, ListPostsQuery, MediaRef, MembersQuery,
+    MembershipMode, ModActionIntent, ModActionValue, ModScope, NotificationsQuery, PostDraft,
+    PostFilter, PostKind, PostSort, Ref, RefContext, SyncOpts, TextQuote, ThreadOpts, ThreadRoot,
 };
 use lessdugin_core::engine::{Engine, EngineError};
 use lessdugin_core::host::Host;
@@ -582,9 +582,50 @@ async fn body_markdown<H: Host>(
     })
 }
 
-/// `:edit`: your post or comment's draft as cached (the fields the CLI's `edit` keeps) and the
-/// editor session on its text, with what the edit would suspend (`edit_preflight`, `social.md`
-/// §4.5) for the user to confirm first.
+/// The media items of a cached body as the references an edit sends again (the engine keeps
+/// their blob objects, `data-model.md` §8.8, so a `cid:` image of the text still resolves). An
+/// item that does not read as `defs#media` refuses the edit: leaving it out would delete it.
+fn media_of(uri: &str, body: Option<&serde_json::Value>) -> Result<Vec<MediaRef>, EngineError> {
+    let Some(items) = body.and_then(|b| b.get("media")) else {
+        return Ok(Vec::new());
+    };
+    let items = items.as_array().ok_or_else(|| {
+        EngineError::invalid_input(format!("{uri}: the body's media is not a list"))
+    })?;
+    let mut out = Vec::with_capacity(items.len());
+    for (i, item) in items.iter().enumerate() {
+        let m = serde_json::from_value::<lessdugin_lexicon::records::Media>(item.clone()).map_err(
+            |e| {
+                EngineError::invalid_input(format!(
+                    "{uri}: media item {} cannot be read ({e}); an edit would drop it",
+                    i + 1
+                ))
+            },
+        )?;
+        let cid = m.blob.r#ref.link.clone();
+        out.push(MediaRef {
+            id: cid.clone(),
+            cid,
+            mime: m.blob.mime_type.clone(),
+            size_bytes: u64::try_from(m.blob.size).unwrap_or(0),
+            alt: m.alt.clone(),
+            aspect_ratio: m.aspect_ratio.as_ref().and_then(|a| {
+                Some(AspectRatio {
+                    width: u32::try_from(a.width).ok()?,
+                    height: u32::try_from(a.height).ok()?,
+                })
+            }),
+            duration_ms: m.duration_ms.and_then(|d| u64::try_from(d).ok()),
+            name: m.name.clone(),
+            notices: Vec::new(),
+        });
+    }
+    Ok(out)
+}
+
+/// `:edit`: your post or comment's draft as cached (the fields the CLI's `edit` keeps: the
+/// body's media and a link's card with it) and the editor session on its text, with what the
+/// edit would suspend (`edit_preflight`, `social.md` §4.5) for the user to confirm first.
 async fn start_edit<H: Host>(
     engine: &Engine<H>,
     uri: &str,
@@ -600,6 +641,10 @@ async fn start_edit<H: Host>(
     }
     let v = cached(engine, &uri).await?;
     let markdown = body_markdown(engine, &uri, &v).await?;
+    let body = BodyDraft {
+        markdown: markdown.clone(),
+        media: media_of(&uri, v.get("body"))?,
+    };
     let s = |k: &str| {
         v.get(k)
             .and_then(serde_json::Value::as_str)
@@ -619,15 +664,23 @@ async fn start_edit<H: Host>(
             // a quick take has no title (data-model.md PO4): its text is all body
             let quick = kind == PostKind::QuickTake;
             let title = s("title");
+            // the card's title and description stay with the uri the TUI cannot change (the
+            // engine writes `link` from the draft, `data-model.md` §8.3)
+            let link_field = |k: &str| {
+                v.get("link")
+                    .and_then(|l| l.get(k))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+            };
             let draft = PostDraft {
                 forum: s("forum").unwrap_or_default(),
                 kind,
                 title: title.clone(),
-                body: BodyDraft::text(markdown.clone()),
+                body,
                 link: strong("link").map(|uri| ExternalLinkDraft {
                     uri,
-                    title: None,
-                    description: None,
+                    title: link_field("title"),
+                    description: link_field("description"),
                 }),
                 tags: strs(v.get("tags")),
                 labels: v
@@ -666,7 +719,7 @@ async fn start_edit<H: Host>(
                 comment: CommentDraft {
                     root: strong("root").unwrap_or_default(),
                     parent: strong("parent"),
-                    body: BodyDraft::text(markdown.clone()),
+                    body,
                     quote: v
                         .get("quote")
                         .and_then(|q| serde_json::from_value::<TextQuote>(q.clone()).ok()),
@@ -739,14 +792,19 @@ async fn forum_draft<H: Host>(
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned)
     };
+    // the about's media go with its text (as an edit's, `data-model.md` §8.8)
     let about = match v.get("about") {
         None => None,
-        Some(b) => match b.get("text").and_then(serde_json::Value::as_str) {
-            Some(t) => Some(BodyDraft::text(t)),
-            // a spilled `about` (`data-model.md` §5.3) is sent as its source, which the outbox
-            // spills again: as `forum_open` fetched it from the owner's PDS for the header
-            None => Some(BodyDraft::text(spilled_about(engine, forum, b).await?)),
-        },
+        Some(b) => Some(BodyDraft {
+            markdown: match b.get("text").and_then(serde_json::Value::as_str) {
+                Some(t) => t.to_owned(),
+                // a spilled `about` (`data-model.md` §5.3) is sent as its source, which the
+                // outbox spills again: as `forum_open` fetched it from the owner's PDS for
+                // the header
+                None => spilled_about(engine, forum, b).await?,
+            },
+            media: media_of(forum, Some(b))?,
+        }),
     };
     let empty_is_none = |o: &Option<String>| o.clone().filter(|t| !t.is_empty());
     Ok(ForumDraft {

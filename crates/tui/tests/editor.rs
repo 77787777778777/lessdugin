@@ -480,3 +480,162 @@ fn the_edit_command_asks_before_suspending_a_pin() {
     block_on(t.settle());
     assert_eq!(post_of(&s, &post).1.trim(), "The new body.");
 }
+
+/// A user's cached record `uri` as JSON (what the engine wrote back once the write was done).
+fn record(u: &common::User, uri: &str) -> serde_json::Value {
+    use lessdugin_core::host::Host as _;
+    let u_ = lessdugin_atp::syntax::AtUri::parse(uri).unwrap();
+    block_on(lessdugin_core::store::records::RecordStore::new(u.engine.host().cache()).get(&u_))
+        .unwrap()
+        .unwrap()
+        .value_json()
+        .unwrap()
+}
+
+/// `prepare_media` of a tiny PNG with alt text `alt`.
+fn picture(u: &common::User, seed: u8, alt: &str) -> lessdugin_core::dto::MediaRef {
+    block_on(u.engine.prepare_media(
+        lessdugin_testkit::fake_pds::tiny_png(seed),
+        &lessdugin_core::dto::MediaInput {
+            declared_mime: Some("image/png".into()),
+            alt: Some(alt.into()),
+            name: None,
+            aspect_ratio: None,
+        },
+    ))
+    .unwrap()
+}
+
+/// robustness-1 (`data-model.md` §8.3, §8.8): `:edit` keeps the body's media. The edit sends
+/// the cached items again as references, so the engine keeps their blob objects and every
+/// `cid:` image of the text still resolves; before, the new version had no `media` at all.
+#[test]
+fn the_edit_command_keeps_the_bodys_media() {
+    use lessdugin_core::dto::{CommentDraft, PostDraft};
+    let s = scenario();
+    let carol = &s.w.carol;
+    let pic = picture(carol, 1, "a picture");
+    let cid = pic.cid.clone();
+    let mut d = PostDraft::article(
+        &s.forum,
+        "With a picture",
+        format!("Look:\n\n![a picture](cid:{cid})"),
+    );
+    d.body.media.push(pic);
+    let t = block_on(carol.engine.publish(&d)).unwrap();
+    carol.flush();
+    let post = carol.done(&t);
+    // and a comment with another one
+    let pic2 = picture(carol, 2, "another");
+    let cid2 = pic2.cid.clone();
+    let mut c = CommentDraft::new(
+        &s.welcome,
+        None,
+        format!("Mine too: ![another](cid:{cid2})"),
+    );
+    c.body.media.push(pic2);
+    let t = block_on(carol.engine.comment(&c)).unwrap();
+    carol.flush();
+    let comment = carol.done(&t);
+    let media_of = |v: &serde_json::Value| -> Vec<(String, String)> {
+        v["body"]["media"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .map(|m| {
+                        (
+                            m["blob"]["ref"]["$link"].as_str().unwrap_or("").to_owned(),
+                            m["alt"].as_str().unwrap_or("").to_owned(),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    assert_eq!(
+        media_of(&record(carol, &post)),
+        [(cid.clone(), "a picture".to_owned())]
+    );
+
+    // a typo fix in the post's body
+    let dir = tempfile::tempdir().unwrap();
+    let mut t = tui_with_sed(&s, dir.path(), "s/Look:/Look here:/", false);
+    block_on(t.start(None));
+    run(&mut t, &format!("edit {post}"));
+    block_on(t.engine().outbox_flush()).unwrap();
+    block_on(t.settle());
+    let v = record(carol, &post);
+    assert!(
+        v["body"]["text"].as_str().unwrap().contains("Look here:"),
+        "{v}"
+    );
+    assert_eq!(media_of(&v), [(cid.clone(), "a picture".to_owned())], "{v}");
+    let view = block_on(carol.engine.get_thread(&post, &ThreadOpts::default())).unwrap();
+    let ThreadRoot::Post(p) = &view.post else {
+        panic!("no post")
+    };
+    assert_eq!(p.body.media.len(), 1, "{:?}", p.body.media);
+    assert_eq!(p.body.media[0].cid, cid);
+
+    // and in the comment
+    let dir = tempfile::tempdir().unwrap();
+    let mut t = tui_with_sed(&s, dir.path(), "s/Mine too:/Mine as well:/", false);
+    block_on(t.start(None));
+    block_on(t.open_thread(&s.welcome));
+    run(&mut t, &format!("edit {comment}"));
+    block_on(t.engine().outbox_flush()).unwrap();
+    block_on(t.settle());
+    let v = record(carol, &comment);
+    assert!(
+        v["body"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Mine as well:"),
+        "{v}"
+    );
+    assert_eq!(media_of(&v), [(cid2, "another".to_owned())], "{v}");
+}
+
+/// robustness-7 (`data-model.md` §8.3): `:edit` of a link post keeps the card's title and
+/// description, which the TUI cannot change, with the uri; before, the new version's card was
+/// the bare uri.
+#[test]
+fn the_edit_command_keeps_a_link_posts_card() {
+    use lessdugin_core::dto::{ExternalLinkDraft, PostDraft, PostKind};
+    let s = scenario();
+    let carol = &s.w.carol;
+    let mut d = PostDraft::article(&s.forum, "A link", "Why it matters.");
+    d.kind = PostKind::Link;
+    d.link = Some(ExternalLinkDraft {
+        uri: "https://example.com/article".into(),
+        title: Some("The article".into()),
+        description: Some("What it says.".into()),
+    });
+    let t = block_on(carol.engine.publish(&d)).unwrap();
+    carol.flush();
+    let post = carol.done(&t);
+    let card = |v: &serde_json::Value| {
+        (
+            v["link"]["uri"].as_str().map(str::to_owned),
+            v["link"]["title"].as_str().map(str::to_owned),
+            v["link"]["description"].as_str().map(str::to_owned),
+        )
+    };
+    let before = card(&record(carol, &post));
+    assert_eq!(before.1.as_deref(), Some("The article"));
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut t = tui_with_sed(
+        &s,
+        dir.path(),
+        "s/Why it matters./Why it still matters./",
+        false,
+    );
+    block_on(t.start(None));
+    run(&mut t, &format!("edit {post}"));
+    block_on(t.engine().outbox_flush()).unwrap();
+    block_on(t.settle());
+    let v = record(carol, &post);
+    assert_eq!(post_of(&s, &post).1.trim(), "Why it still matters.");
+    assert_eq!(card(&v), before, "{v}");
+}

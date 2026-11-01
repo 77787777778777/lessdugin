@@ -2047,3 +2047,66 @@ fn forum_edit_keeps_a_spilled_about() {
     assert_eq!(name, "Longer");
     assert_eq!(again, spilled, "the same source, spilled again");
 }
+
+/// robustness-1 (`data-model.md` §8.8): `:forum edit` keeps the about's media, as an edit
+/// keeps a body's; before, a name change dropped every image of the about.
+#[test]
+fn forum_edit_keeps_the_abouts_media() {
+    use lessdugin_core::dto::{BodyDraft, ForumDraft, MediaInput, PostDraft};
+    let s = scenario();
+    let alice = &s.w.alice;
+    let pic = block_on(alice.engine.prepare_media(
+        lessdugin_testkit::fake_pds::tiny_png(3),
+        &MediaInput {
+            declared_mime: Some("image/png".into()),
+            alt: Some("the rules, drawn".into()),
+            name: None,
+            aspect_ratio: None,
+        },
+    ))
+    .unwrap();
+    let cid = pic.cid.clone();
+    // the picture reaches alice's PDS with a post (`forum_create` uploads nothing); the
+    // forum's about then refers to it
+    let mut d = PostDraft::article(&s.forum, "Drawn", format!("![the rules](cid:{cid})"));
+    d.body.media.push(pic.clone());
+    block_on(alice.engine.publish(&d)).unwrap();
+    alice.flush();
+    let mut draft = ForumDraft::new("pics", "Pics");
+    draft.about = Some(BodyDraft {
+        markdown: format!("# Rules\n\n![the rules, drawn](cid:{cid})"),
+        media: vec![pic],
+    });
+    let t = block_on(alice.engine.forum_create(&draft)).unwrap();
+    alice.flush();
+    let forum = alice.done(&t);
+    let about = || {
+        use lessdugin_core::host::Host as _;
+        let u = lessdugin_atp::syntax::AtUri::parse(&forum).unwrap();
+        let v = block_on(
+            lessdugin_core::store::records::RecordStore::new(alice.engine.host().cache()).get(&u),
+        )
+        .unwrap()
+        .unwrap()
+        .value_json()
+        .unwrap();
+        (v["name"].clone(), v["about"]["media"].clone())
+    };
+    let (_, media) = about();
+    assert_eq!(media.as_array().map(Vec::len), Some(1), "{media}");
+
+    let mut ta = alice_tui(&s, 100, 30);
+    block_on(ta.start(Some(forum.clone())));
+    run_command(&mut ta, "forum edit --name Pictures");
+    assert!(
+        status(&ta).contains("Forum edit: queued"),
+        "{}",
+        status(&ta)
+    );
+    block_on(ta.engine().outbox_flush()).unwrap();
+    block_on(alice.engine.forum_open(&forum)).unwrap();
+    let (name, again) = about();
+    assert_eq!(name, "Pictures");
+    assert_eq!(again, media, "the about keeps its picture");
+    assert_eq!(again[0]["blob"]["ref"]["$link"], cid);
+}

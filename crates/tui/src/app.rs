@@ -3066,9 +3066,11 @@ impl State {
             Compose::Edit { uri, base } => {
                 let mut draft = (**base).clone();
                 match &mut draft {
+                    // the text replaces the body's markdown; its media (the cached items, as
+                    // `start_edit` read them) stay, or the edit would delete them
                     // a quick take has no title line (data-model.md PO4): the text is its body
                     Draft::Post { post, .. } if post.kind == PostKind::QuickTake => {
-                        post.body = lessdugin_core::dto::BodyDraft::text(text.clone());
+                        post.body.markdown = text.clone();
                     }
                     Draft::Post { post, .. } => match editor::split_post(&text) {
                         Ok((title, body)) => {
@@ -3078,7 +3080,7 @@ impl State {
                             if post.title.as_deref().map(str::trim) != Some(first) {
                                 post.title = Some(title);
                             }
-                            post.body = lessdugin_core::dto::BodyDraft::text(body);
+                            post.body.markdown = body;
                         }
                         Err(why) => {
                             self.say(
@@ -3093,7 +3095,7 @@ impl State {
                         }
                     },
                     Draft::Comment { comment, .. } => {
-                        comment.body = lessdugin_core::dto::BodyDraft::text(text.clone());
+                        comment.body.markdown = text.clone();
                     }
                 }
                 self.say(Tone::Info, lit("Queuing the edit..."));
