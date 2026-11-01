@@ -25,7 +25,32 @@ use crate::host::NativeHost;
 /// Maps the native configuration to the engine's (without parity mode; see [`open_engine`]).
 pub fn engine_config(cfg: &Config) -> EngineConfig {
     match &cfg.network {
-        NetworkProfile::Devnet(d) => EngineConfig::devnet(d.plc.clone(), d.pds.clone()),
+        NetworkProfile::Devnet(d) => EngineConfig {
+            network: lessdugin_core::engine::Network::Devnet {
+                plc: d.plc.clone(),
+                pds: d.pds.clone(),
+            },
+            sources: match cfg.sources.unwrap_or(Sources::Direct) {
+                Sources::Direct => EngineSources::Direct,
+                Sources::Assisted => EngineSources::Assisted,
+            },
+            sources_flag: cfg.sources.map(|s| match s {
+                Sources::Direct => EngineSources::Direct,
+                Sources::Assisted => EngineSources::Assisted,
+            }),
+            verify: match cfg.verify {
+                VerifyMode::Pds => EngineVerifyMode::Pds,
+                VerifyMode::Proof => EngineVerifyMode::Proof,
+            },
+            doh: Vec::new(),
+            plc: d.plc.clone(),
+            relays: cfg.relays.clone(),
+            jetstream: d.jetstream.iter().cloned().collect(),
+            constellation: cfg.constellation.clone(),
+            slingshot: cfg.slingshot.clone(),
+            platform: lessdugin_core::engine::Platform::Native,
+            ..EngineConfig::default()
+        },
         NetworkProfile::Production => EngineConfig {
             // a `sources` the file states pins it like a flag (O-9): a CLI flag, then
             // config.toml, then the stored setting, then the build default (`sync.md` §2.3)

@@ -527,9 +527,13 @@ impl Config {
     pub fn net_policy(&self) -> NetPolicy {
         match &self.network {
             NetworkProfile::Production => NetPolicy::production(),
-            NetworkProfile::Devnet(d) => {
-                NetPolicy::devnet([&d.plc, &d.pds].into_iter().chain(d.jetstream.as_ref()))
-            }
+            NetworkProfile::Devnet(d) => NetPolicy::devnet(
+                [&d.plc, &d.pds]
+                    .into_iter()
+                    .chain(d.jetstream.as_ref())
+                    .chain(self.relays.iter())
+                    .chain(self.constellation.as_ref()),
+            ),
         }
     }
 
