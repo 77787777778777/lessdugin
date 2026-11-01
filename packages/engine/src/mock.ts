@@ -1873,7 +1873,8 @@ export class MockEngine implements EngineApi {
       if (f.about !== undefined) r.about = md(f.about);
       if (f.reportContact !== undefined) r.reportContact = f.reportContact;
       record = r;
-      cid = fakeCid(uri);
+      // A declaration revision changes its record CID as well as its contents.
+      cid = fakeCid(JSON.stringify(r));
     } else {
       throw err("not_found", `No record ${uri}`);
     }

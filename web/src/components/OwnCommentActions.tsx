@@ -6,8 +6,9 @@
 // says which, `editPreflight`).
 
 import type { CommentNode, MediaRef, TextQuote } from "@lessdugin/engine/types";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useEngine } from "../engine/context.tsx";
+import { SpilledBodySourceError, useCoherentEditSource } from "../engine/editSource.ts";
 import { writeStore } from "../engine/writes.ts";
 import { suspendsNotice } from "../lib/modActions.ts";
 import {
@@ -48,6 +49,8 @@ export function commentSourceOf(record: unknown, source?: string): CommentSource
 export function OwnCommentActions({ node, postUri }: { node: CommentNode; postUri: string }) {
   const engine = useEngine();
   const [editing, setEditing] = useState<CommentSource | null>(null);
+  const [opening, setOpening] = useState(false);
+  const source = useCoherentEditSource(engine, node.uri, opening && editing === null);
   // the edit suspends the comment's positive assertions (a keep, a pin): said before it is sent
   const [suspends, setSuspends] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -69,31 +72,65 @@ export function OwnCommentActions({ node, postUri }: { node: CommentNode; postUr
     }
   };
 
-  const startEdit = async (): Promise<void> => {
-    try {
-      const raw = await engine.raw(node.uri);
-      // a body that spilled into a blob is not in the record: its source comes from the engine
-      // (engine-api.md §3.4 `body_source`), and is never read as empty
-      const spilled = isSpilledBody(objectField(raw.record, "body"))
-        ? await engine.bodySource(node.uri)
-        : undefined;
-      const source = commentSourceOf(raw.record, spilled?.markdown);
-      if (!source) throw new Error("The comment's source is not available.");
-      // the engine names what the edit suspends (social.md §4.5); without an answer, the edit
-      // goes ahead with no warning
-      const notices = await engine.editPreflight(node.uri).catch(() => []);
-      setSuspends(suspendsNotice(notices));
-      setEditing(source);
-    } catch (e) {
-      toasts.show({ message: errorMessage(e), tone: "error" });
+  const sourceData = source.data;
+  useEffect(() => {
+    if (!opening || editing !== null || !sourceData) return;
+    let live = true;
+    const draft = commentSourceOf(sourceData.raw.record, sourceData.source.markdown);
+    if (!draft) {
+      setOpening(false);
+      toasts.show({ message: "The comment's source is not available.", tone: "error" });
+      return;
     }
-  };
+    void engine
+      .editPreflight(node.uri)
+      .then((notices) => {
+        if (!live) return;
+        setSuspends(suspendsNotice(notices));
+        setEditing(draft);
+        setOpening(false);
+      })
+      .catch(() => {
+        if (!live) return;
+        setSuspends(null);
+        setEditing(draft);
+        setOpening(false);
+      });
+    return () => {
+      live = false;
+    };
+  }, [editing, engine, node.uri, opening, sourceData]);
 
   return (
     <>
-      <button type="button" className={ui.link} onClick={() => void startEdit()}>
+      <button
+        type="button"
+        className={ui.link}
+        disabled={opening && source.isFetching}
+        onClick={() => {
+          setEditing(null);
+          setOpening(true);
+        }}
+      >
         Edit
       </button>
+      {opening && source.isError && (
+        <div role="alert" className={ui.fullWidth}>
+          <p>
+            {errorMessage(
+              source.error instanceof SpilledBodySourceError
+                ? source.error.sourceError
+                : source.error,
+            )}
+          </p>
+          <button type="button" className={ui.link} onClick={source.retry}>
+            Try again
+          </button>
+          <button type="button" className={ui.link} onClick={() => setOpening(false)}>
+            Cancel
+          </button>
+        </div>
+      )}
       {!node.retracted && (
         <button
           type="button"

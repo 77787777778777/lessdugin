@@ -37,6 +37,8 @@ export const qk = {
   raw: (uri: string) => ["raw", uri] as const,
   /** Under `raw`, so what refreshes the record refreshes its body's source. */
   bodySource: (uri: string) => ["raw", uri, "source"] as const,
+  /** A raw+bodySource pair accepted only at one CID; no independently cached halves. */
+  editSource: (uri: string, attempt = 0) => ["raw", uri, "edit-source", attempt] as const,
   /** Under `post`, so a forum or thread change (an assertion made or lapsed) refreshes it. */
   editPreflight: (uri: string) => ["post", uri, "editPreflight"] as const,
   sequence: (uri: string) => ["sequence", uri] as const,

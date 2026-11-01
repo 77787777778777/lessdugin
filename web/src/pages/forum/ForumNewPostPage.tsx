@@ -13,9 +13,10 @@ import { useCallback, useId, useRef, useState } from "react";
 import type { Attachment } from "../../components/Attachments.tsx";
 import { LazyComposer } from "../../components/LazyComposer.tsx";
 import { KIND_LABEL } from "../../components/PostMeta.tsx";
-import { ErrorView, errorMessage, Loading } from "../../components/Status.tsx";
+import { ErrorView, Loading } from "../../components/Status.tsx";
 import { toasts } from "../../components/Toast.tsx";
 import { useEngine } from "../../engine/context.tsx";
+import { useCoherentEditSource } from "../../engine/editSource.ts";
 import { qk, useActiveAccount } from "../../engine/queries.ts";
 import { useAnnounceQueued } from "../../engine/queued.ts";
 import { writeStore } from "../../engine/writes.ts";
@@ -306,7 +307,7 @@ export function EditPost({ uri }: { uri: string }) {
   const engine = useEngine();
   const { forum } = useForumView();
   const active = useActiveAccount();
-  const raw = useQuery({ queryKey: qk.raw(uri), queryFn: () => engine.raw(uri) });
+  const source = useCoherentEditSource(engine, uri);
   // what the edit suspends, from the engine (social.md §4.5); an error means no warning
   const preflight = useQuery({
     queryKey: qk.editPreflight(uri),
@@ -315,45 +316,28 @@ export function EditPost({ uri }: { uri: string }) {
   });
   const author = parseAtUri(uri)?.did;
   const own = author !== undefined && author === active.data?.did;
-  // a body that spilled into a blob is not in the record (data-model.md §5.2): its source is
-  // asked for first (engine-api.md §3.4 `body_source`), so the edit starts from the text
-  const spilled = raw.data !== undefined && isSpilledBody(objectField(raw.data.record, "body"));
-  const source = useQuery({
-    queryKey: qk.bodySource(uri),
-    queryFn: () => engine.bodySource(uri),
-    enabled: own && spilled,
-    retry: false,
-  });
-  if (
-    raw.isPending ||
-    active.isPending ||
-    preflight.isPending ||
-    (own && spilled && (source.isPending || source.isFetching))
-  ) {
+  if (source.isPending || active.isPending || preflight.isPending || source.isFetching) {
     return <Loading />;
   }
-  if (raw.isError) return <ErrorView error={raw.error} title="This post cannot be edited" />;
-  const draft = postDraftOf(raw.data.record, forum.uri, source.data?.markdown);
-  if (!draft || !own) {
-    // say which: the source of a spilled body could not be loaded (it can be asked for again;
-    // the form never pretends the body is empty), or the record is not one this form edits
-    const why = !own
-      ? "Only the author can edit a post."
-      : spilled
-        ? `This post's text is stored in a blob that could not be loaded (${errorMessage(source.error)}), so it cannot be edited here yet. Try again, or edit it from the CLI (lessdugin edit).`
-        : "This post's record is not one this app can edit: its body or its kind is unknown.";
+  if (source.isError) {
     return (
       <div className={ui.stack}>
-        <ErrorView error={new Error(why)} title="This post cannot be edited" />
-        {own && spilled && (
-          <div className={ui.row}>
-            <button type="button" className={ui.button} onClick={() => void source.refetch()}>
-              Try again
-            </button>
-          </div>
-        )}
+        <ErrorView error={source.error} title="This post cannot be edited" />
+        <div className={ui.row}>
+          <button type="button" className={ui.button} onClick={source.retry}>
+            Try again
+          </button>
+        </div>
       </div>
     );
+  }
+  if (!source.data) return <Loading />;
+  const draft = postDraftOf(source.data.raw.record, forum.uri, source.data.source.markdown);
+  if (!draft || !own) {
+    const why = !own
+      ? "Only the author can edit a post."
+      : "This post's record is not one this app can edit: its body or its kind is unknown.";
+    return <ErrorView error={new Error(why)} title="This post cannot be edited" />;
   }
   return (
     <section className={ui.page} aria-label="Edit post">

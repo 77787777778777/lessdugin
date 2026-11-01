@@ -379,7 +379,10 @@ describe("MockEngine local state and declarations", () => {
         moderators: [],
       });
       await vi.advanceTimersByTimeAsync(10);
-      const after = (await e.raw(uri)).record as Record<string, unknown>;
+      const afterView = await e.raw(uri);
+      const after = afterView.record as Record<string, unknown>;
+      expect(afterView.cid).not.toBe(raw.cid);
+      expect(afterView.cid).toBe((await e.bodySource(uri)).cid);
       expect(after.name).toBe("Renamed");
       expect(after.about).toBeUndefined();
       expect(after.reportContact).toBeUndefined();

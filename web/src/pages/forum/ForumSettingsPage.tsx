@@ -14,9 +14,9 @@ import { RenderedHtml } from "../../components/RenderedHtml.tsx";
 import { ErrorView, errorMessage, Loading } from "../../components/Status.tsx";
 import { toasts } from "../../components/Toast.tsx";
 import { useEngine } from "../../engine/context.tsx";
+import { SpilledBodySourceError, useCoherentEditSource } from "../../engine/editSource.ts";
 import { qk } from "../../engine/queries.ts";
 import { writeStore } from "../../engine/writes.ts";
-import { isSpilledBody, objectField } from "../../lib/records.ts";
 import { cleanName } from "../../lib/text.ts";
 import { parseAtUri } from "../../lib/uri.ts";
 import ui from "../../styles/ui.module.css";
@@ -48,29 +48,31 @@ async function runWrite(
 
 function EditDeclaration({ uri, onDone }: { uri: string; onDone: () => void }) {
   const engine = useEngine();
-  const raw = useQuery({ queryKey: qk.raw(uri), queryFn: () => engine.raw(uri) });
+  const source = useCoherentEditSource(engine, uri);
   const tags = useQuery({ queryKey: qk.tags(uri), queryFn: () => engine.tags(uri) });
-  // an about that spilled into a blob is not in the record (data-model.md §5.2): its source is
-  // asked for first (engine-api.md §3.4 `body_source`), since a draft without `about` removes it
-  const aboutSpilled =
-    raw.data !== undefined && isSpilledBody(objectField(raw.data.record, "about"));
-  const source = useQuery({
-    queryKey: qk.bodySource(uri),
-    queryFn: () => engine.bodySource(uri),
-    enabled: aboutSpilled,
-    retry: false,
-  });
-  if (raw.isPending || (aboutSpilled && (source.isPending || source.isFetching))) {
-    return <Loading label="Loading the declaration…" />;
+  if (source.isPending || source.isFetching) return <Loading label="Loading the declaration…" />;
+  const unavailable = source.error instanceof SpilledBodySourceError ? source.error : undefined;
+  if (source.isError && !unavailable) {
+    return (
+      <>
+        <ErrorView error={source.error} />
+        <button type="button" className={ui.button} onClick={source.retry}>
+          Try again
+        </button>
+      </>
+    );
   }
-  if (raw.isError) return <ErrorView error={raw.error} />;
-  const initial = forumDraftOf(raw.data.record, parseAtUri(uri)?.rkey ?? "", source.data?.markdown);
+  const raw = source.data?.raw ?? unavailable?.raw;
+  if (!raw) return <Loading label="Loading the declaration…" />;
+  const initial = forumDraftOf(
+    raw.record,
+    parseAtUri(uri)?.rkey ?? "",
+    source.data?.source.markdown,
+  );
   if (!initial) return <ErrorView error={new Error("The forum declaration is not readable.")} />;
-  // without the source the form says so and refuses to save, never reading the about as empty
-  const aboutUnavailable =
-    aboutSpilled && source.data === undefined
-      ? { reason: errorMessage(source.error), retry: () => void source.refetch() }
-      : undefined;
+  const aboutUnavailable = unavailable
+    ? { reason: errorMessage(unavailable.sourceError), retry: source.retry }
+    : undefined;
   const save = async (draft: ForumDraft): Promise<boolean> => {
     const ok = await runWrite(
       () => engine.forumUpdate(uri, draft),

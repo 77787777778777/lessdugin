@@ -68,6 +68,33 @@ describe("OwnCommentActions edit", () => {
     expect(source).toHaveBeenCalledWith(node.uri);
   });
 
+  it("keeps a spilled comment closed when raw and source name different revisions", async () => {
+    const engine = new MockEngine({ spilledBodies: true });
+    const { node, post } = await ownComment(engine);
+    const originalRaw = engine.raw.bind(engine);
+    const rawRead = vi.spyOn(engine, "raw");
+    rawRead.mockImplementation(async (target) => {
+      const result = await originalRaw(target);
+      if (target === node.uri && rawRead.mock.calls.length % 2 === 1) {
+        return { ...result, cid: "old-comment-revision" };
+      }
+      return result;
+    });
+    const source = vi.spyOn(engine, "bodySource");
+    const preflight = vi.spyOn(engine, "editPreflight");
+    renderWithApp(<OwnCommentActions node={node} postUri={post} />, { engine });
+    fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
+    expect(
+      await screen.findByText(/record changed while its edit source was loading/i),
+    ).toBeTruthy();
+    expect(source).toHaveBeenCalledWith(node.uri);
+    expect(preflight).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: "Save edit" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    await screen.findByText(/record changed while its edit source was loading/i);
+    expect(source).toHaveBeenCalledTimes(2);
+  });
+
   it("keeps a spilled comment closed when its source is unavailable (robustness-2)", async () => {
     const engine = new MockEngine({ spilledBodies: true });
     const { node, post } = await ownComment(engine);

@@ -7,7 +7,7 @@
 import { EditorView } from "@codemirror/view";
 import { MockEngine } from "@lessdugin/engine/mock";
 import type { ForumView } from "@lessdugin/engine/types";
-import { fireEvent, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor } from "@testing-library/react";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { renderWithApp } from "../../test/render.tsx";
 import { EditPost, PostForm } from "./ForumNewPostPage.tsx";
@@ -134,6 +134,52 @@ describe("EditPost", () => {
     expect(cm.state.doc.toString()).toBe(expected.markdown);
     expect(source).toHaveBeenCalledWith(uri);
     expect(screen.queryByText("This post cannot be edited")).toBeNull();
+  });
+
+  it("refuses a mixed revision instead of combining newer media with older source", async () => {
+    vi.useRealTimers();
+    const engine = new MockEngine({ spilledBodies: true });
+    const { view, uri } = await ownPost(engine);
+    const current = await engine.raw(uri);
+    const originalRaw = engine.raw.bind(engine);
+    const originalSource = engine.bodySource.bind(engine);
+    const rawRead = vi.spyOn(engine, "raw");
+    rawRead.mockImplementation(async (target) => {
+      const result = await originalRaw(target);
+      if (target !== uri || rawRead.mock.calls.length % 2 === 0) return result;
+      // Odd calls are the page's outer raw reads; even ones belong to mock bodySource.
+      return {
+        ...result,
+        cid: "record-before-source",
+        record: { ...(current.record as object), title: "Wrong revision title" },
+      };
+    });
+    let release: (() => void) | undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let calls = 0;
+    vi.spyOn(engine, "bodySource").mockImplementation(async (target) => {
+      calls++;
+      if (calls === 1) await held;
+      return originalSource(target);
+    });
+    renderWithApp(
+      <ForumContext value={view}>
+        <EditPost uri={uri} />
+      </ForumContext>,
+      { engine },
+    );
+    await waitFor(() => expect(engine.bodySource).toHaveBeenCalledTimes(1));
+    await act(async () => release?.());
+    expect(await screen.findByText("This post cannot be edited")).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Edit post" })).toBeNull();
+    expect(screen.queryByDisplayValue("Wrong revision title")).toBeNull();
+    await vi.waitFor(() => expect(engine.bodySource).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(engine.bodySource).toHaveBeenCalledTimes(2));
+    // Each attempt calls the page's raw plus the mock's own coherent raw inside bodySource.
+    expect(engine.raw).toHaveBeenCalledTimes(4);
   });
 
   it("refuses to edit a spilled post when its source is unavailable (robustness-2)", async () => {
