@@ -28,7 +28,8 @@ use lessdugin_core::dto::{
 };
 use lessdugin_core::dto::{
     Draft, ForumDraft, ForumRole, KarmaCadence, MemberView, MembershipMode, PostKind, PostSummary,
-    RawView, Ref, Settings, Subscription, TextQuote,
+    RawView, Ref, SearchQuery, SearchResults, SequenceDraft, SequencePosition, SequenceSummary,
+    SequenceView, Settings, Subscription, TagSummary, TagView, TextQuote, UserView, WikiDraft,
 };
 use lessdugin_core::engine::EngineError;
 
@@ -117,6 +118,15 @@ pub enum Compose {
         /// Its draft as cached.
         base: Box<Draft>,
     },
+    /// A wiki revision; its structured fields stay out of the markdown editor.
+    Wiki {
+        /// The forum.
+        forum: String,
+        /// The page slug.
+        slug: String,
+        /// Name, description, tag relations and summary; the editor replaces the body.
+        draft: Box<WikiDraft>,
+    },
 }
 
 impl Compose {
@@ -128,6 +138,7 @@ impl Compose {
             Compose::Comment { parent: None, .. } => "comment",
             Compose::Post { .. } => "post",
             Compose::Edit { .. } => "edit",
+            Compose::Wiki { .. } => "wiki edit",
         }
     }
 
@@ -140,6 +151,7 @@ impl Compose {
             Compose::Comment { parent: None, .. } => "c",
             Compose::Post { .. } => "P",
             Compose::Edit { .. } => ":edit",
+            Compose::Wiki { .. } => "the :wiki edit command",
         }
     }
 }
@@ -355,6 +367,35 @@ pub enum Effect {
         /// The kind.
         kind: PublicActionKind,
     },
+    /// `search(query)`, over the engine's local synced cache, shown in a selectable panel.
+    Search {
+        /// Text and optional forum/author restrictions.
+        query: SearchQuery,
+    },
+    /// `user(forum, actor)`, shown in a panel.
+    LoadUser {
+        /// Optional forum role/karma context.
+        forum: Option<String>,
+        /// Handle or DID.
+        actor: String,
+    },
+    /// `tags(forum)` or `tag(forum, slug)`, shown in a panel.
+    LoadTags {
+        /// The forum.
+        forum: String,
+        /// One tag, or all when absent.
+        slug: Option<String>,
+    },
+    /// `sequences(forum)`, shown in a selectable panel.
+    LoadSequences {
+        /// The forum.
+        forum: String,
+    },
+    /// `sequence(uri)`, shown in a panel.
+    LoadSequence {
+        /// The sequence at-uri.
+        uri: String,
+    },
     /// `forum_discover(query)`, shown in a panel.
     Discover {
         /// The forum name query.
@@ -436,6 +477,64 @@ pub enum Effect {
         /// What changes.
         changes: ForumChanges,
         /// The screen to reload afterwards.
+        screen: ScreenId,
+    },
+    /// `wiki_edit(forum, slug, draft)`: the markdown returned by `$EDITOR`.
+    WikiEdit {
+        /// The forum.
+        forum: String,
+        /// The page slug.
+        slug: String,
+        /// The complete new revision.
+        draft: WikiDraft,
+        /// The editor text, kept if queuing fails.
+        text: String,
+    },
+    /// `seq_create(draft)`.
+    SequenceCreate {
+        /// The complete draft.
+        draft: SequenceDraft,
+        /// The screen to reload after queuing.
+        screen: ScreenId,
+    },
+    /// `seq_edit(uri, draft)`.
+    SequenceEdit {
+        /// The sequence.
+        uri: String,
+        /// The complete draft.
+        draft: SequenceDraft,
+        /// The screen to reload after queuing.
+        screen: ScreenId,
+    },
+    /// `seq_add(uri, post, at)`.
+    SequenceAdd {
+        /// The sequence.
+        uri: String,
+        /// The post.
+        post: String,
+        /// The chapter-local insertion point.
+        at: SequencePosition,
+        /// The screen to reload after queuing.
+        screen: ScreenId,
+    },
+    /// `seq_remove(uri, post)`.
+    SequenceRemove {
+        /// The sequence.
+        uri: String,
+        /// The post.
+        post: String,
+        /// The screen to reload after queuing.
+        screen: ScreenId,
+    },
+    /// `seq_move(uri, from, to)`.
+    SequenceMove {
+        /// The sequence.
+        uri: String,
+        /// The old position.
+        from: SequencePosition,
+        /// The new position.
+        to: SequencePosition,
+        /// The screen to reload after queuing.
         screen: ScreenId,
     },
     /// Reads your post or comment `uri` from the cache and opens `$EDITOR` on its text.
@@ -568,6 +667,7 @@ impl Effect {
                 Compose::Comment { .. } => "comment",
                 Compose::Post { .. } => "publish",
                 Compose::Edit { .. } => "edit",
+                Compose::Wiki { .. } => "wiki_edit",
             },
             Effect::LoadHome { .. } => "followed",
             Effect::LoadForum { .. } => "list_posts",
@@ -592,6 +692,12 @@ impl Effect {
             Effect::LoadWrites => "writes",
             Effect::LoadAcknowledged => "acknowledged_public_actions",
             Effect::Acknowledge { .. } => "acknowledge_public_action",
+            Effect::Search { .. } => "search",
+            Effect::LoadUser { .. } => "user",
+            Effect::LoadTags { slug: None, .. } => "tags",
+            Effect::LoadTags { slug: Some(_), .. } => "tag",
+            Effect::LoadSequences { .. } => "sequences",
+            Effect::LoadSequence { .. } => "sequence",
             Effect::Discover { .. } => "forum_discover",
             Effect::LoadBacklinks { .. } => "backlinks",
             Effect::Open { .. } => "forum_open",
@@ -609,6 +715,12 @@ impl Effect {
             Effect::Adopt { .. } => "mod_adopt",
             Effect::ForumCreate { .. } => "forum_create",
             Effect::ForumEdit { .. } => "forum_update",
+            Effect::WikiEdit { .. } => "wiki_edit",
+            Effect::SequenceCreate { .. } => "seq_create",
+            Effect::SequenceEdit { .. } => "seq_edit",
+            Effect::SequenceAdd { .. } => "seq_add",
+            Effect::SequenceRemove { .. } => "seq_remove",
+            Effect::SequenceMove { .. } => "seq_move",
             Effect::StartEdit { .. } | Effect::Edit { .. } => "edit",
             Effect::ItemWrite { op, .. } => match op {
                 ItemOp::Delete => "delete",
@@ -797,6 +909,18 @@ pub enum Action {
         /// Its acknowledgements.
         result: Result<Vec<PublicActionKind>, EngineError>,
     },
+    /// [`Effect::Search`] finished.
+    Searched(Result<SearchResults, EngineError>),
+    /// [`Effect::LoadUser`] finished.
+    UserLoaded(Result<UserView, EngineError>),
+    /// [`Effect::LoadTags`] finished listing tags.
+    TagsLoaded(Result<Vec<TagSummary>, EngineError>),
+    /// [`Effect::LoadTags`] finished reading one tag.
+    TagLoaded(Result<TagView, EngineError>),
+    /// [`Effect::LoadSequences`] finished.
+    SequencesLoaded(Result<Vec<SequenceSummary>, EngineError>),
+    /// [`Effect::LoadSequence`] finished.
+    SequenceLoaded(Result<SequenceView, EngineError>),
     /// [`Effect::Discover`] finished.
     Discovered(Result<Vec<ForumSummary>, EngineError>),
     /// [`Effect::LoadBacklinks`] finished.
@@ -1319,8 +1443,17 @@ pub struct PublicNotice {
     pub held: Vec<Effect>,
 }
 
+/// One openable result in a [`Panel`]. `line` is the result's first unwrapped text line.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PanelItem {
+    /// First line of this result.
+    pub line: usize,
+    /// Its stable reference, resolved by the ordinary `:open` path.
+    pub target: String,
+}
+
 /// A text panel over the screen (`:members`, `:raw`, `:settings`): the navigation keys
-/// scroll it, any other key closes it.
+/// scroll it, any other key closes it. Result panels additionally select and open items.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Panel {
     /// Its title.
@@ -1329,6 +1462,10 @@ pub struct Panel {
     pub lines: Vec<TermText>,
     /// The first line shown.
     pub scroll: usize,
+    /// Openable results, ordered as displayed; empty for a plain scrolling panel.
+    pub items: Vec<PanelItem>,
+    /// The selected result (ignored when `items` is empty).
+    pub selected: usize,
 }
 
 /// A yes/no question before a write that cannot be taken back (`:delete`, `:redact`), or an
@@ -1572,6 +1709,11 @@ fn complete(line: &mut String) {
         "sort",
         "filter",
         "user",
+        "search",
+        "tags",
+        "sequences",
+        "sequence",
+        "wiki",
         "open",
         "follow",
         "unfollow",
@@ -2007,6 +2149,57 @@ impl State {
                 Ok(kinds) => self.acknowledged.get_or_insert_default().extend(kinds),
                 Err(e) => tracing::debug!(error = %e, "acknowledged_public_actions failed"),
             },
+            Action::Searched(result) => match result {
+                Ok(results) => {
+                    let (lines, items) = search_lines(&results);
+                    self.show_result_panel("Local search", lines, items);
+                }
+                Err(e) => self.say(Tone::Error, cat([lit("Search failed: "), tt(&e.message)])),
+            },
+            Action::UserLoaded(result) => match result {
+                Ok(view) => {
+                    let (lines, items) = user_lines(&view);
+                    self.show_result_panel("User", lines, items);
+                }
+                Err(e) => self.say(
+                    Tone::Error,
+                    cat([lit("Cannot load user: "), tt(&e.message)]),
+                ),
+            },
+            Action::TagsLoaded(result) => match result {
+                Ok(tags) => self.show_panel("Tags", tags_lines(&tags)),
+                Err(e) => self.say(
+                    Tone::Error,
+                    cat([lit("Cannot list tags: "), tt(&e.message)]),
+                ),
+            },
+            Action::TagLoaded(result) => match result {
+                Ok(view) => {
+                    let (lines, items) = tag_lines(&view);
+                    self.show_result_panel("Tag", lines, items);
+                }
+                Err(e) => self.say(Tone::Error, cat([lit("Cannot load tag: "), tt(&e.message)])),
+            },
+            Action::SequencesLoaded(result) => match result {
+                Ok(sequences) => {
+                    let (lines, items) = sequences_lines(&sequences);
+                    self.show_result_panel("Sequences", lines, items);
+                }
+                Err(e) => self.say(
+                    Tone::Error,
+                    cat([lit("Cannot list sequences: "), tt(&e.message)]),
+                ),
+            },
+            Action::SequenceLoaded(result) => match result {
+                Ok(view) => {
+                    let (lines, items) = sequence_lines(&view);
+                    self.show_result_panel("Sequence", lines, items);
+                }
+                Err(e) => self.say(
+                    Tone::Error,
+                    cat([lit("Cannot load sequence: "), tt(&e.message)]),
+                ),
+            },
             Action::Discovered(result) => match result {
                 Ok(forums) => self.show_panel("Discover", discover_lines(&forums)),
                 Err(e) => self.say(
@@ -2024,7 +2217,11 @@ impl State {
             Action::Opened(result) => match result {
                 Ok(Ref::Forum { uri }) => self.push_forum(uri, &mut fx),
                 Ok(Ref::Post { uri } | Ref::Comment { uri }) => self.push_thread(uri, &mut fx),
-                Ok(_) => self.say(Tone::Info, lit("That is not a forum, a post or a comment.")),
+                Ok(Ref::Sequence { uri }) => fx.push(Effect::LoadSequence { uri }),
+                Ok(_) => self.say(
+                    Tone::Info,
+                    lit("That is not a forum, a post, a comment or a sequence."),
+                ),
                 Err(e) => self.say(Tone::Error, cat([lit("Cannot open it: "), tt(&e.message)])),
             },
             Action::Written {
@@ -2296,10 +2493,17 @@ impl State {
 
     /// Opens a text panel.
     fn show_panel(&mut self, title: &str, lines: Vec<TermText>) {
+        self.show_result_panel(title, lines, Vec::new());
+    }
+
+    /// Opens a panel whose rows can be selected and opened by stable reference.
+    fn show_result_panel(&mut self, title: &str, lines: Vec<TermText>, items: Vec<PanelItem>) {
         self.panel = Some(Panel {
             title: title.to_owned(),
             lines,
             scroll: 0,
+            items,
+            selected: 0,
         });
     }
 
@@ -2633,16 +2837,46 @@ impl State {
             fx.push(Effect::Quit);
             return;
         }
-        // a panel scrolls like the help overlay, and any other key closes it
+        // Plain panels scroll. Result panels keep a cursor by stable item reference: Enter
+        // resolves that reference and pushes its view, leaving the underlying screen's cursor alone.
         if let Some(p) = &mut self.panel {
-            match cmd {
-                Some(Cmd::Down) => p.scroll = p.scroll.saturating_add(1),
-                Some(Cmd::Up) => p.scroll = p.scroll.saturating_sub(1),
-                Some(Cmd::HalfDown) => p.scroll = p.scroll.saturating_add(5),
-                Some(Cmd::HalfUp) => p.scroll = p.scroll.saturating_sub(5),
-                Some(Cmd::Top) => p.scroll = 0,
-                Some(Cmd::Bottom) => p.scroll = usize::MAX,
-                _ => self.panel = None,
+            if p.items.is_empty() {
+                match cmd {
+                    Some(Cmd::Down) => p.scroll = p.scroll.saturating_add(1),
+                    Some(Cmd::Up) => p.scroll = p.scroll.saturating_sub(1),
+                    Some(Cmd::HalfDown) => p.scroll = p.scroll.saturating_add(5),
+                    Some(Cmd::HalfUp) => p.scroll = p.scroll.saturating_sub(5),
+                    Some(Cmd::Top) => p.scroll = 0,
+                    Some(Cmd::Bottom) => p.scroll = usize::MAX,
+                    _ => self.panel = None,
+                }
+            } else {
+                match cmd {
+                    Some(Cmd::Down | Cmd::HalfDown) => {
+                        let by = if cmd == Some(Cmd::HalfDown) { 5 } else { 1 };
+                        p.selected = (p.selected + by).min(p.items.len() - 1);
+                        p.scroll = p.items[p.selected].line;
+                    }
+                    Some(Cmd::Up | Cmd::HalfUp) => {
+                        let by = if cmd == Some(Cmd::HalfUp) { 5 } else { 1 };
+                        p.selected = p.selected.saturating_sub(by);
+                        p.scroll = p.items[p.selected].line;
+                    }
+                    Some(Cmd::Top) => {
+                        p.selected = 0;
+                        p.scroll = 0;
+                    }
+                    Some(Cmd::Bottom) => {
+                        p.selected = p.items.len() - 1;
+                        p.scroll = p.items[p.selected].line;
+                    }
+                    Some(Cmd::Open) => {
+                        let target = p.items[p.selected].target.clone();
+                        self.panel = None;
+                        fx.push(Effect::Open { target });
+                    }
+                    _ => self.panel = None,
+                }
             }
             return;
         }
@@ -3172,6 +3406,17 @@ impl State {
                 self.say(Tone::Info, lit("Queuing the edit..."));
                 fx.push(Effect::Edit {
                     uri: uri.clone(),
+                    draft,
+                    text,
+                });
+            }
+            Compose::Wiki { forum, slug, draft } => {
+                let mut draft = (**draft).clone();
+                draft.body = Some(lessdugin_core::dto::BodyDraft::text(text.clone()));
+                self.say(Tone::Info, lit("Queuing the wiki edit..."));
+                fx.push(Effect::WikiEdit {
+                    forum: forum.clone(),
+                    slug: slug.clone(),
                     draft,
                     text,
                 });
@@ -4628,10 +4873,15 @@ impl State {
                 _ => self.say(Tone::Info, lit("Open a forum or a thread to sort it.")),
             },
             Verb::Filter(filter) => self.set_filter(filter, fx),
-            Verb::User { actor } => {
-                let actor = actor.or_else(|| self.mod_subject().map(|m| m.author));
+            Verb::User { actor, forum } => {
+                let actor = actor
+                    .or_else(|| self.mod_subject().map(|m| m.author))
+                    .or_else(|| self.account.as_ref().map(|a| a.did.clone()));
                 match actor {
-                    Some(a) => self.show_user(&a, fx),
+                    Some(actor) => fx.push(Effect::LoadUser {
+                        forum: forum.or_else(|| self.top_forum()),
+                        actor,
+                    }),
                     None => self.say(Tone::Info, lit("Nothing selected: name an actor.")),
                 }
             }
@@ -4686,7 +4936,7 @@ impl State {
         subject: Option<String>,
         fx: &mut Vec<Effect>,
     ) {
-        use crate::command::{SubTarget, Verb};
+        use crate::command::{SequenceVerb, SubTarget, Verb};
         let screen = self.top().map_or(0, |s| s.id);
         // the forum a membership or forum verb acts on: the one on screen
         let forum = |st: &mut Self| -> Option<String> {
@@ -4705,6 +4955,98 @@ impl State {
             it
         };
         match verb {
+            Verb::Search { mut query, all } => {
+                if query.forum.is_none() && !all {
+                    query.forum = self.top_forum();
+                }
+                fx.push(Effect::Search { query });
+            }
+            Verb::Tags { slug, forum: named } => {
+                let Some(forum) = (match named {
+                    Some(f) => Some(f),
+                    None => forum(self),
+                }) else {
+                    return;
+                };
+                fx.push(Effect::LoadTags { forum, slug });
+            }
+            Verb::Sequences { forum: named } => {
+                let Some(forum) = (match named {
+                    Some(f) => Some(f),
+                    None => forum(self),
+                }) else {
+                    return;
+                };
+                fx.push(Effect::LoadSequences { forum });
+            }
+            Verb::Sequence(SequenceVerb::Read(uri)) => fx.push(Effect::LoadSequence { uri }),
+            Verb::Sequence(SequenceVerb::Create(mut draft)) => {
+                if !self.can_write() {
+                    return;
+                }
+                if draft.forum == "." {
+                    let Some(current) = forum(self) else { return };
+                    draft.forum = current;
+                }
+                fx.push(Effect::SequenceCreate { draft, screen });
+            }
+            Verb::Sequence(SequenceVerb::Edit { uri, mut draft }) => {
+                if !self.can_write() {
+                    return;
+                }
+                if draft.forum == "." {
+                    let Some(current) = forum(self) else { return };
+                    draft.forum = current;
+                }
+                fx.push(Effect::SequenceEdit { uri, draft, screen });
+            }
+            Verb::Sequence(SequenceVerb::Add { uri, post, at }) => {
+                if self.can_write() {
+                    fx.push(Effect::SequenceAdd {
+                        uri,
+                        post,
+                        at,
+                        screen,
+                    });
+                }
+            }
+            Verb::Sequence(SequenceVerb::Remove { uri, post }) => {
+                if self.can_write() {
+                    fx.push(Effect::SequenceRemove { uri, post, screen });
+                }
+            }
+            Verb::Sequence(SequenceVerb::Move { uri, from, to }) => {
+                if self.can_write() {
+                    fx.push(Effect::SequenceMove {
+                        uri,
+                        from,
+                        to,
+                        screen,
+                    });
+                }
+            }
+            Verb::WikiEdit {
+                forum: named,
+                slug,
+                draft,
+            } => {
+                let Some(forum) = (match named {
+                    Some(f) => Some(f),
+                    None => forum(self),
+                }) else {
+                    return;
+                };
+                if !self.can_write() {
+                    return;
+                }
+                let compose = Compose::Wiki {
+                    forum,
+                    slug: slug.clone(),
+                    draft: Box::new(draft.clone()),
+                };
+                let template = editor::wiki_template(&self.prefill(&compose), &slug, &draft.name);
+                fx.push(Effect::Editor(EditorRequest { compose, template }));
+            }
             Verb::Discover { query } => fx.push(Effect::Discover { query }),
             Verb::Linked { target } => fx.push(Effect::LoadBacklinks {
                 target,
@@ -4712,7 +5054,10 @@ impl State {
             }),
             Verb::Open { target } => fx.push(Effect::Open { target }),
             Verb::Follow { forum: named, on } => {
-                let Some(f) = named.or_else(|| forum(self)) else {
+                let Some(f) = (match named {
+                    Some(f) => Some(f),
+                    None => forum(self),
+                }) else {
                     return;
                 };
                 fx.push(Effect::Follow {
@@ -5037,54 +5382,6 @@ impl State {
             screen,
             label,
         });
-    }
-
-    /// `user [actor]`: who an actor is here, from what the loaded forum view holds (their role
-    /// in the moderator list, and whether they wrote the selected item).
-    fn show_user(&mut self, actor: &str, _fx: &mut Vec<Effect>) {
-        let Some(forum) = self.top_forum() else {
-            self.say(Tone::Info, lit("Open a forum first."));
-            return;
-        };
-        let Some(view) = self.stack.iter().rev().find_map(|s| match &s.kind {
-            ScreenKind::Forum(f) if f.uri == forum => f.data.as_ref().map(|d| &d.view),
-            _ => None,
-        }) else {
-            self.say(Tone::Info, lit("The forum is still loading."));
-            return;
-        };
-        let role = view
-            .moderators
-            .iter()
-            .find(|m| m.actor.did == actor || m.actor.handle.as_deref() == Some(actor));
-        let wrote_selected = self.mod_subject().is_some_and(|m| m.author == actor);
-        match role {
-            Some(m) => {
-                let mut parts = vec![
-                    crate::text::actor(&m.actor),
-                    tt(&format!("{:?}", m.role).to_lowercase()),
-                ];
-                if let Some(t) = &m.title {
-                    parts.push(tt(&format!("\"{t}\"")));
-                }
-                if !m.shown {
-                    parts.push(lit("not a member"));
-                }
-                self.say(Tone::Info, crate::text::joined(parts));
-            }
-            None if wrote_selected => self.say(
-                Tone::Info,
-                tt(&format!(
-                    "{actor} wrote the selected item, and is not a declared moderator here."
-                )),
-            ),
-            None => self.say(
-                Tone::Info,
-                tt(&format!(
-                    "{actor} is not a declared moderator of this forum."
-                )),
-            ),
-        }
     }
 
     /// `mods [role]`: the forum's declared moderators from its view.
@@ -5675,6 +5972,216 @@ fn backlink_lines(posts: &[PostSummary]) -> Vec<TermText> {
             ]
         })
         .collect()
+}
+
+/// Appends a rendered cached body's plain text. `TermText` sanitises remote control characters.
+fn rendered_lines(out: &mut Vec<TermText>, body: &lessdugin_core::dto::RenderedBody) {
+    if body.text.trim().is_empty() {
+        return;
+    }
+    out.extend(body.text.lines().map(tt));
+}
+
+/// Appends one openable post to an organisation panel.
+fn push_post_result(lines: &mut Vec<TermText>, items: &mut Vec<PanelItem>, post: &PostSummary) {
+    let line = lines.len();
+    lines.push(cat([post_title(post), lit("  "), actor(&post.author)]));
+    if !post.excerpt.trim().is_empty() {
+        lines.push(tt(&post.excerpt));
+    }
+    lines.push(tt(&post.uri));
+    items.push(PanelItem {
+        line,
+        target: post.uri.clone(),
+    });
+}
+
+/// `:search`: snippets and stable item references, one selectable result per hit.
+fn search_lines(results: &SearchResults) -> (Vec<TermText>, Vec<PanelItem>) {
+    if results.hits.is_empty() {
+        return (
+            vec![lit("No matches in the local synced cache.")],
+            Vec::new(),
+        );
+    }
+    let mut lines = Vec::new();
+    let mut items = Vec::new();
+    for (i, hit) in results.hits.iter().enumerate() {
+        let line = lines.len();
+        let (kind, title, uri) = match &hit.item {
+            lessdugin_core::dto::SearchItem::Post(post) => {
+                ("post", post_title(post), post.uri.as_str())
+            }
+            lessdugin_core::dto::SearchItem::Comment(comment) => (
+                "comment",
+                cat([lit("comment by "), actor(&comment.author)]),
+                comment.uri.as_str(),
+            ),
+        };
+        lines.push(cat([tt(&format!("{}. {kind}  ", i + 1)), title]));
+        lines.push(tt(&hit.snippet));
+        lines.push(tt(uri));
+        items.push(PanelItem {
+            line,
+            target: uri.to_owned(),
+        });
+    }
+    (lines, items)
+}
+
+/// `:user`: the engine's cached profile, pinned/recent activity and optional forum standing.
+fn user_lines(view: &UserView) -> (Vec<TermText>, Vec<PanelItem>) {
+    let mut lines = vec![actor(&view.actor), cat([lit("DID: "), tt(&view.actor.did)])];
+    let mut items = Vec::new();
+    if let Some(body) = &view.bio {
+        lines.push(lit("About"));
+        rendered_lines(&mut lines, body);
+    }
+    for link in &view.links {
+        lines.push(cat([
+            tt(link.label.as_deref().unwrap_or(&link.host)),
+            lit("  "),
+            tt(&link.uri),
+        ]));
+    }
+    if let Some(forum) = &view.forum {
+        lines.push(cat([lit("Forum: "), tt(forum)]));
+        lines.push(tt(&format!("Role: {:?}", view.status).to_lowercase()));
+        if let Some(karma) = &view.karma {
+            lines.push(tt(&format!(
+                "Karma: {} (K1 {}, KP {})",
+                karma.k, karma.k1, karma.kp
+            )));
+        }
+    }
+    for (heading, posts) in [
+        ("Pinned posts", &view.pinned),
+        ("Recent posts", &view.recent_posts),
+    ] {
+        if !posts.is_empty() {
+            lines.push(lit(heading));
+            for post in posts {
+                push_post_result(&mut lines, &mut items, post);
+            }
+        }
+    }
+    if !view.recent_comments.is_empty() {
+        lines.push(lit("Recent comments"));
+        for comment in &view.recent_comments {
+            let line = lines.len();
+            lines.push(cat([lit("comment by "), actor(&comment.author)]));
+            lines.extend(comment.body.text.lines().take(2).map(tt));
+            lines.push(tt(&comment.uri));
+            items.push(PanelItem {
+                line,
+                target: comment.uri.clone(),
+            });
+        }
+    }
+    (lines, items)
+}
+
+fn push_tag_summary(lines: &mut Vec<TermText>, tag: &TagSummary) {
+    lines.push(cat([
+        tt(&format!("#{}  ", tag.slug)),
+        tt(&tag.name),
+        lit("  "),
+        count(tag.post_count, "post", "posts"),
+    ]));
+    if tag.unmerged_edits > 0 {
+        lines.push(tt(&format!("{} unmerged edits", tag.unmerged_edits)));
+    }
+    if let Some(description) = &tag.description {
+        lines.push(tt(description));
+    }
+}
+
+/// `:tags`: all tags declared in the forum.
+fn tags_lines(tags: &[TagSummary]) -> Vec<TermText> {
+    if tags.is_empty() {
+        return vec![lit("No tags.")];
+    }
+    let mut lines = Vec::new();
+    for tag in tags {
+        push_tag_summary(&mut lines, tag);
+    }
+    lines.push(lit("Read one with `:tags <slug>`."));
+    lines
+}
+
+/// `:tags <slug>`: its current page and openable tagged posts.
+fn tag_lines(view: &TagView) -> (Vec<TermText>, Vec<PanelItem>) {
+    let mut lines = Vec::new();
+    let mut items = Vec::new();
+    push_tag_summary(&mut lines, &view.tag);
+    if let Some(head) = &view.head {
+        lines.push(cat([lit("Revision: "), tt(head)]));
+    }
+    if let Some(page) = &view.page {
+        lines.push(lit("Page"));
+        rendered_lines(&mut lines, page);
+    }
+    if !view.posts.is_empty() {
+        lines.push(lit("Tagged posts"));
+        for post in &view.posts {
+            push_post_result(&mut lines, &mut items, post);
+        }
+    }
+    (lines, items)
+}
+
+/// `:sequences`: stable sequence URIs, selectable for the ordinary open path.
+fn sequences_lines(sequences: &[SequenceSummary]) -> (Vec<TermText>, Vec<PanelItem>) {
+    if sequences.is_empty() {
+        return (vec![lit("No sequences.")], Vec::new());
+    }
+    let mut lines = Vec::new();
+    let mut items = Vec::new();
+    for sequence in sequences {
+        let line = lines.len();
+        let mut meta = vec![
+            actor(&sequence.author),
+            count(sequence.chapters, "chapter", "chapters"),
+            count(sequence.posts, "post", "posts"),
+        ];
+        if sequence.pinned {
+            meta.push(lit("pinned"));
+        }
+        lines.push(tt(&sequence.title));
+        lines.push(crate::text::joined(meta));
+        lines.push(tt(&sequence.uri));
+        items.push(PanelItem {
+            line,
+            target: sequence.uri.clone(),
+        });
+    }
+    (lines, items)
+}
+
+/// `:sequence <uri>`: its body, chapters and openable chapter posts.
+fn sequence_lines(view: &SequenceView) -> (Vec<TermText>, Vec<PanelItem>) {
+    let mut lines = vec![
+        tt(&view.sequence.title),
+        actor(&view.sequence.author),
+        tt(&view.sequence.uri),
+    ];
+    let mut items = Vec::new();
+    if let Some(body) = &view.body {
+        rendered_lines(&mut lines, body);
+    }
+    for (i, chapter) in view.chapters.iter().enumerate() {
+        lines.push(tt(&chapter
+            .title
+            .clone()
+            .unwrap_or_else(|| format!("Chapter {}", i + 1))));
+        if let Some(body) = &chapter.body {
+            rendered_lines(&mut lines, body);
+        }
+        for post in &chapter.posts {
+            push_post_result(&mut lines, &mut items, post);
+        }
+    }
+    (lines, items)
 }
 
 /// The `:members` panel: one member per line, with what `MemberView` says of them.

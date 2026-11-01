@@ -315,6 +315,25 @@ pub fn post_template(prefill: &str, forum: &str) -> String {
     s
 }
 
+/// The template of a wiki revision. Structured fields stay in the command's typed draft; only
+/// markdown is edited here, so a one-line command never has to encode a whole page.
+pub fn wiki_template(prefill: &str, slug: &str, name: &str) -> String {
+    let mut s = head(prefill);
+    s.push_str("#\n# Wiki page: ");
+    s.push_str(&remote(name));
+    s.push_str("\n# Slug: ");
+    s.push_str(&remote(slug));
+    s.push('\n');
+    s.push_str(&tail([
+        "Write the page body above the scissors line, in markdown.",
+        "An empty text cancels: nothing is sent.",
+        "Save and close the editor to queue a new immutable revision.",
+        "The name and other structured fields come from the command.",
+        "lessdugin",
+    ]));
+    s
+}
+
 /// The template of an edit of your post (`post`: the first line is its title) or comment:
 /// `prefill` is its current text, `context` says what is edited (remote).
 pub fn edit_template(prefill: &str, context: &[String], post: bool) -> String {

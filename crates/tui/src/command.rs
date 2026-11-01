@@ -17,7 +17,8 @@
 //! | `notifications [all]`, `read`, `read-all` | `notifications`, `mark_notifications_read`, `mark_all_notifications_read` | `N`, `a`, `M` |
 //! | `activity` | `recent_discussion` | `Tab` on a forum |
 //! | `sort <sort>`, `filter <filter>` | `list_posts`, `get_thread` | `s`, `f` |
-//! | `user [actor]` | the forum view's `moderators` | - |
+//! | `user [actor]`, `search <terms>`, `tags [slug]`, `sequences`, `sequence <uri>` | `user`, `search`, `tags`/`tag`, `sequences`/`sequence` | - |
+//! | `wiki edit`, `sequence create\|edit\|add\|remove\|move` | `wiki_edit`, `seq_*` | - |
 //! | `mods [role]` | the forum view's `moderators` | - |
 //! | `mods add <actor> [admin|moderator]`, `mods remove <actor>` | `mods_set` | - |
 //! | `open <ref>`, `follow [forum]`, `unfollow [forum]` | `forum_open`, `forum_follow`, `forum_unfollow` | `Enter` |
@@ -38,11 +39,11 @@
 use lessdugin_core::dto::{
     AccessLevel, AgreementValue, Capability, CommentSort, DefaultTier, ForumRole, KarmaCadence,
     KarmaValue, MembershipMode, ModActionIntent, ModActionValue, ModRole, ModScope, PinScope,
-    PostFilter, PostSort, Tier,
+    PostFilter, PostSort, SearchQuery, SequenceDraft, SequencePosition, Tier, WikiDraft,
 };
 
 /// What the `:` command line was asked to do, once parsed.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Verb {
     /// `vote up|down|strong-up|strong-down|clear`: the karma axis.
     Vote(Vote),
@@ -80,10 +81,42 @@ pub enum Verb {
     Sort(SortName),
     /// `filter frontpage|all|curated`: a forum's post filter (`f`).
     Filter(PostFilter),
-    /// `user [actor]`: who an actor is and what they posted here.
+    /// `user [actor] [--forum FORUM]`: the actor's cached user page.
     User {
-        /// The actor, when named (else the selected item's author).
+        /// The actor, when named (else the selected item's author, or the active account).
         actor: Option<String>,
+        /// Also show role and karma in this forum (default: the current forum).
+        forum: Option<String>,
+    },
+    /// `search <terms> [--forum FORUM|--all] [--author ACTOR] [--limit N]`: local cache search.
+    Search {
+        /// The engine query.
+        query: SearchQuery,
+        /// Explicit `--all`: do not inherit the current forum.
+        all: bool,
+    },
+    /// `tags [slug] [--forum FORUM]`: a forum's tags or one tag page.
+    Tags {
+        /// The tag to read, or all tags when absent.
+        slug: Option<String>,
+        /// The forum (default: the current forum).
+        forum: Option<String>,
+    },
+    /// `sequences [--forum FORUM]`: a forum's sequence library.
+    Sequences {
+        /// The forum (default: the current forum).
+        forum: Option<String>,
+    },
+    /// `sequence …`: read a sequence or change one through the ordinary outbox.
+    Sequence(SequenceVerb),
+    /// `wiki edit <slug> --name NAME …`: the body is written in `$EDITOR`.
+    WikiEdit {
+        /// The forum (default: the current forum).
+        forum: Option<String>,
+        /// The tag/page slug.
+        slug: String,
+        /// The structured fields; the editor supplies `draft.body`.
+        draft: WikiDraft,
     },
     /// `mods [role]`: lists the forum's declared moderators.
     ModsList {
@@ -207,6 +240,47 @@ pub enum Verb {
     },
 }
 
+/// A sequence read or write (`engine-api.md` §3.9).
+#[derive(Clone, Debug, PartialEq)]
+pub enum SequenceVerb {
+    /// `sequence <uri>`: read it.
+    Read(String),
+    /// `sequence create <SequenceDraft JSON>`: create it. `forum: "."` means the current forum.
+    Create(SequenceDraft),
+    /// `sequence edit <uri> <SequenceDraft JSON>`: replace its editable fields.
+    Edit {
+        /// The sequence.
+        uri: String,
+        /// The complete typed draft.
+        draft: SequenceDraft,
+    },
+    /// `sequence add <uri> <post> --chapter N --index N`.
+    Add {
+        /// The sequence.
+        uri: String,
+        /// The post.
+        post: String,
+        /// Where to insert it.
+        at: SequencePosition,
+    },
+    /// `sequence remove <uri> <post>`.
+    Remove {
+        /// The sequence.
+        uri: String,
+        /// The post.
+        post: String,
+    },
+    /// `sequence move <uri> --chapter N --index N --to-chapter N --to-index N`.
+    Move {
+        /// The sequence.
+        uri: String,
+        /// The old position.
+        from: SequencePosition,
+        /// The new position.
+        to: SequencePosition,
+    },
+}
+
 /// What `grant`, `revoke`, `approve` and `reject` do (`engine-api.md` §3.2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AccessOp {
@@ -326,12 +400,35 @@ pub const REACH: &[(&str, Reach)] = &[
         "mod_adopt",
         Reach::Command("mod adopt did:plc:aaaaaaaaaaaaaaaaaaaaaaaa"),
     ),
-    ("wiki_edit", Reach::NotHere("M5 (engine-api.md §3.9)")),
-    ("seq_create", Reach::NotHere("M5 (engine-api.md §3.9)")),
-    ("seq_edit", Reach::NotHere("M5 (engine-api.md §3.9)")),
-    ("seq_add", Reach::NotHere("M5 (engine-api.md §3.9)")),
-    ("seq_remove", Reach::NotHere("M5 (engine-api.md §3.9)")),
-    ("seq_move", Reach::NotHere("M5 (engine-api.md §3.9)")),
+    ("wiki_edit", Reach::Command("wiki edit rust --name Rust")),
+    (
+        "seq_create",
+        Reach::Command(r#"sequence create {"forum":".","title":"Reading","chapters":[]}"#),
+    ),
+    (
+        "seq_edit",
+        Reach::Command(
+            r#"sequence edit at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/online.7778777.lessdugin.sequence/s1 {"forum":".","title":"Reading","chapters":[]}"#,
+        ),
+    ),
+    (
+        "seq_add",
+        Reach::Command(
+            "sequence add at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/online.7778777.lessdugin.sequence/s1 at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/online.7778777.lessdugin.post/p1 --chapter 0 --index 0",
+        ),
+    ),
+    (
+        "seq_remove",
+        Reach::Command(
+            "sequence remove at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/online.7778777.lessdugin.sequence/s1 at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/online.7778777.lessdugin.post/p1",
+        ),
+    ),
+    (
+        "seq_move",
+        Reach::Command(
+            "sequence move at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/online.7778777.lessdugin.sequence/s1 --chapter 0 --index 0 --to-chapter 0 --to-index 1",
+        ),
+    ),
     ("redact_revision", Reach::Command("redact")),
     (
         "prepare_media",
@@ -559,7 +656,7 @@ pub struct ModOpts {
 }
 
 /// One parsed command line: a verb, its optional explicit subject, and an optional reason.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Command {
     /// What to do.
     pub verb: Verb,
@@ -579,11 +676,22 @@ pub type Parsed = Result<Command, String>;
 /// # Errors
 /// Returns the usage message for an unknown verb or an unusable argument.
 pub fn parse(line: &str) -> Parsed {
-    let mut words = line.split_whitespace();
-    let Some(verb) = words.next() else {
+    // JSON drafts and setting values keep their original whitespace and quotes; shell-like
+    // word splitting would destroy both. Other commands accept quoted values through $EDITOR's
+    // splitter.
+    if let Some(parsed) = sequence_json_command(line) {
+        return parsed;
+    }
+    if let Some(parsed) = setting_command(line) {
+        return parsed;
+    }
+    let words = crate::editor::split_words(line)
+        .ok_or_else(|| "Unterminated quote in command.".to_owned())?;
+    let mut words = words.iter();
+    let Some(verb) = words.next().map(String::as_str) else {
         return Err(usage());
     };
-    let rest: Vec<&str> = words.collect();
+    let rest: Vec<&str> = words.map(String::as_str).collect();
     match verb {
         "vote" => Ok(Command {
             verb: Verb::Vote(vote(rest.first().copied())?),
@@ -721,14 +829,34 @@ pub fn parse(line: &str) -> Parsed {
             reason: None,
             opts: ModOpts::default(),
         }),
-        "user" | "whoami" => Ok(Command {
-            verb: Verb::User {
-                actor: rest.first().map(|s| (*s).to_owned()),
-            },
-            subject: None,
-            reason: None,
-            opts: ModOpts::default(),
-        }),
+        "user" | "whoami" => {
+            let mut actor = None;
+            let mut forum = None;
+            let mut i = 0;
+            while i < rest.len() {
+                match rest[i] {
+                    "--forum" => {
+                        i += 1;
+                        let Some(value) = rest.get(i) else {
+                            return Err("user --forum needs a forum.".into());
+                        };
+                        forum = Some((*value).to_owned());
+                    }
+                    flag if flag.starts_with("--") => {
+                        return Err(format!("Unknown user option `{flag}`."));
+                    }
+                    value if actor.is_none() => actor = Some(value.to_owned()),
+                    value => return Err(format!("Unexpected user argument `{value}`.")),
+                }
+                i += 1;
+            }
+            Ok(Command {
+                verb: Verb::User { actor, forum },
+                subject: None,
+                reason: None,
+                opts: ModOpts::default(),
+            })
+        }
         "mods" | "moderators" => {
             // `mods`: list them; `mods add <did> [role]` / `mods remove <did>`: `mods_set`
             match rest.first().copied() {
@@ -831,6 +959,11 @@ fn more(verb: &str, rest: &[&str]) -> Option<Parsed> {
         })
     };
     Some(match verb {
+        "search" => return Some(search_verb(rest)),
+        "tags" | "tag" => return Some(tags_verb(rest)),
+        "sequences" => return Some(sequences_verb(rest)),
+        "sequence" | "seq" => return Some(sequence_verb(rest)),
+        "wiki" => return Some(wiki_verb(rest)),
         "discover" => bare(
             Verb::Discover {
                 query: text_of(rest).unwrap_or_default(),
@@ -981,6 +1114,360 @@ fn more(verb: &str, rest: &[&str]) -> Option<Parsed> {
         ),
         _ => return None,
     })
+}
+
+/// `set` takes the rest of the original line as text or JSON; in particular, keep quotes
+/// inside a JSON list. `unset` only needs its key.
+fn setting_command(line: &str) -> Option<Parsed> {
+    let mut head = line.trim_start().splitn(3, char::is_whitespace);
+    let action = head.next()?;
+    if !matches!(action, "set" | "unset") {
+        return None;
+    }
+    let key = head.next().unwrap_or_default();
+    if key.is_empty() {
+        return Some(Err(format!("{action} needs a setting (try `settings`).")));
+    }
+    let value = trim_reason(head.next().unwrap_or_default());
+    if action == "set" && value.is_none() {
+        return Some(Err(format!("set {key} needs a value.")));
+    }
+    Some(bare(
+        Verb::Settings {
+            key: Some(key.to_owned()),
+            value: if action == "set" { value } else { None },
+        },
+        None,
+    ))
+}
+
+/// `sequence create|edit` takes the rest of the original line as JSON, not shell-like words.
+fn sequence_json_command(line: &str) -> Option<Parsed> {
+    let mut head = line.trim_start().splitn(3, char::is_whitespace);
+    if !matches!(head.next(), Some("sequence" | "seq")) {
+        return None;
+    }
+    let action = head.next()?;
+    if !matches!(action, "create" | "new" | "edit") {
+        return None;
+    }
+    let rest = head.next().unwrap_or_default().trim_start();
+    let parse_draft = |json: &str| -> Result<SequenceDraft, String> {
+        if json.is_empty() {
+            return Err(format!(
+                "sequence {action} needs a JSON SequenceDraft (use `forum`: `.` for the current forum)."
+            ));
+        }
+        serde_json::from_str(json)
+            .map_err(|e| format!("Invalid SequenceDraft JSON for sequence {action}: {e}"))
+    };
+    let verb = if matches!(action, "create" | "new") {
+        parse_draft(rest).map(SequenceVerb::Create)
+    } else {
+        let mut args = rest.splitn(2, char::is_whitespace);
+        let uri = args.next().unwrap_or_default();
+        if uri.is_empty() {
+            return Some(Err(
+                "sequence edit needs a sequence at-uri and a JSON draft.".into(),
+            ));
+        }
+        let json = args.next().unwrap_or_default().trim_start();
+        parse_draft(json).map(|draft| SequenceVerb::Edit {
+            uri: uri.to_owned(),
+            draft,
+        })
+    };
+    Some(verb.map(|sequence| Command {
+        verb: Verb::Sequence(sequence),
+        subject: None,
+        reason: None,
+        opts: ModOpts::default(),
+    }))
+}
+
+/// `search <terms> [--forum FORUM|--all] [--author ACTOR] [--limit N]`.
+fn search_verb(rest: &[&str]) -> Parsed {
+    let mut query = SearchQuery {
+        q: String::new(),
+        forum: None,
+        author: None,
+        limit: 50,
+    };
+    let mut terms = Vec::new();
+    let mut all = false;
+    let mut i = 0;
+    while i < rest.len() {
+        match rest[i] {
+            "--all" => {
+                query.forum = None;
+                all = true;
+            }
+            "--forum" | "--author" | "--limit" => {
+                let flag = rest[i];
+                i += 1;
+                let Some(value) = rest.get(i) else {
+                    return Err(format!("search {flag} needs a value."));
+                };
+                match flag {
+                    "--forum" => {
+                        query.forum = Some((*value).to_owned());
+                        all = false;
+                    }
+                    "--author" => query.author = Some((*value).to_owned()),
+                    _ => {
+                        query.limit = value.parse().map_err(|_| {
+                            format!("search --limit takes a number from 1 to 100, not `{value}`.")
+                        })?;
+                        if !(1..=100).contains(&query.limit) {
+                            return Err("search --limit takes a number from 1 to 100.".into());
+                        }
+                    }
+                }
+            }
+            flag if flag.starts_with("--") => {
+                return Err(format!("Unknown search option `{flag}`."));
+            }
+            term => terms.push(term),
+        }
+        i += 1;
+    }
+    query.q = terms.join(" ");
+    if query.q.trim().is_empty() {
+        return Err("search needs text to find in the local synced cache.".into());
+    }
+    bare(Verb::Search { query, all }, None)
+}
+
+/// `tags [slug] [--forum FORUM]`.
+fn tags_verb(rest: &[&str]) -> Parsed {
+    let (slug, forum) = one_positional_and_forum("tags", rest)?;
+    bare(Verb::Tags { slug, forum }, None)
+}
+
+/// `sequences [--forum FORUM]`.
+fn sequences_verb(rest: &[&str]) -> Parsed {
+    let (slug, forum) = one_positional_and_forum("sequences", rest)?;
+    if slug.is_some() {
+        return Err(
+            "sequences takes only an optional --forum; use sequence <uri> to read one.".into(),
+        );
+    }
+    bare(Verb::Sequences { forum }, None)
+}
+
+fn one_positional_and_forum(
+    command: &str,
+    rest: &[&str],
+) -> Result<(Option<String>, Option<String>), String> {
+    let mut positional = None;
+    let mut forum = None;
+    let mut i = 0;
+    while i < rest.len() {
+        match rest[i] {
+            "--forum" => {
+                i += 1;
+                let Some(value) = rest.get(i) else {
+                    return Err(format!("{command} --forum needs a forum."));
+                };
+                forum = Some((*value).to_owned());
+            }
+            flag if flag.starts_with("--") => {
+                return Err(format!("Unknown {command} option `{flag}`."));
+            }
+            value if positional.is_none() => positional = Some(value.to_owned()),
+            value => return Err(format!("Unexpected {command} argument `{value}`.")),
+        }
+        i += 1;
+    }
+    Ok((positional, forum))
+}
+
+/// `sequence <uri>`, or one of the membership writes (create/edit JSON is parsed earlier).
+fn sequence_verb(rest: &[&str]) -> Parsed {
+    let Some(action) = rest.first().copied() else {
+        return Err(
+            "sequence needs an at-uri, or create|edit|add|remove|move; sequences lists them."
+                .into(),
+        );
+    };
+    let sequence = match action {
+        "read" => match rest.get(1) {
+            Some(uri) if rest.len() == 2 => SequenceVerb::Read((*uri).to_owned()),
+            _ => return Err("sequence read needs exactly one sequence at-uri.".into()),
+        },
+        "add" | "remove" | "rm" | "move" => {
+            let Some(uri) = rest.get(1).copied() else {
+                return Err(format!("sequence {action} needs a sequence at-uri."));
+            };
+            match action {
+                "add" => {
+                    let Some(post) = rest.get(2).copied() else {
+                        return Err(
+                            "sequence add needs a sequence at-uri and a post at-uri.".into()
+                        );
+                    };
+                    let (from, to) = sequence_positions(&rest[3..], false)?;
+                    if to.is_some() {
+                        return Err("sequence add does not take --to-chapter or --to-index.".into());
+                    }
+                    SequenceVerb::Add {
+                        uri: uri.to_owned(),
+                        post: post.to_owned(),
+                        at: from,
+                    }
+                }
+                "move" => {
+                    let (from, to) = sequence_positions(&rest[2..], true)?;
+                    SequenceVerb::Move {
+                        uri: uri.to_owned(),
+                        from,
+                        to: to.expect("moving requires a destination"),
+                    }
+                }
+                _ => {
+                    let Some(post) = rest.get(2).copied() else {
+                        return Err("sequence remove needs a sequence and a post at-uri.".into());
+                    };
+                    if rest.len() != 3 {
+                        return Err(
+                            "sequence remove takes exactly a sequence and a post at-uri.".into(),
+                        );
+                    }
+                    SequenceVerb::Remove {
+                        uri: uri.to_owned(),
+                        post: post.to_owned(),
+                    }
+                }
+            }
+        }
+        "create" | "new" | "edit" => {
+            return Err("Internal error: the JSON sequence command was not parsed.".into());
+        }
+        uri if rest.len() == 1 => SequenceVerb::Read(uri.to_owned()),
+        other => {
+            return Err(format!(
+                "Unknown sequence action or extra argument `{other}`."
+            ));
+        }
+    };
+    bare(Verb::Sequence(sequence), None)
+}
+
+/// Parse chapter/index pairs, and a destination when `moving`.
+fn sequence_positions(
+    rest: &[&str],
+    moving: bool,
+) -> Result<(SequencePosition, Option<SequencePosition>), String> {
+    let mut chapter = None;
+    let mut index = None;
+    let mut to_chapter = None;
+    let mut to_index = None;
+    let mut i = 0;
+    while i < rest.len() {
+        let flag = rest[i];
+        if !matches!(
+            flag,
+            "--chapter" | "--index" | "--to-chapter" | "--to-index"
+        ) {
+            return Err(format!("Unknown sequence position option `{flag}`."));
+        }
+        i += 1;
+        let Some(value) = rest.get(i) else {
+            return Err(format!("{flag} needs a zero-based number."));
+        };
+        let n = value
+            .parse::<usize>()
+            .map_err(|_| format!("{flag} needs a zero-based number, not `{value}`."))?;
+        match flag {
+            "--chapter" => chapter = Some(n),
+            "--index" => index = Some(n),
+            "--to-chapter" if moving => to_chapter = Some(n),
+            "--to-index" if moving => to_index = Some(n),
+            _ => return Err(format!("{flag} is only valid for sequence move.")),
+        }
+        i += 1;
+    }
+    let (Some(chapter), Some(index)) = (chapter, index) else {
+        return Err("sequence add/move needs --chapter and --index.".into());
+    };
+    let to = if moving {
+        let (Some(chapter), Some(index)) = (to_chapter, to_index) else {
+            return Err("sequence move needs --to-chapter and --to-index.".into());
+        };
+        Some(SequencePosition { chapter, index })
+    } else {
+        None
+    };
+    Ok((SequencePosition { chapter, index }, to))
+}
+
+/// `wiki edit <slug> --name NAME [options]`; only the body goes through the editor.
+fn wiki_verb(rest: &[&str]) -> Parsed {
+    if rest.first().copied() != Some("edit") {
+        return Err("wiki supports `wiki edit <slug> --name NAME [--description D] [--summary S] [--parent-tag TAG] [--tag true|false] [--forum FORUM]`.".into());
+    }
+    let Some(slug) = rest.get(1).copied() else {
+        return Err("wiki edit needs a tag/page slug.".into());
+    };
+    let mut forum = None;
+    let mut draft = WikiDraft {
+        name: String::new(),
+        description: None,
+        body: None,
+        is_tag: true,
+        parent_tags: Vec::new(),
+        summary: None,
+    };
+    let mut named = false;
+    let mut i = 2;
+    while i < rest.len() {
+        let flag = rest[i];
+        if flag == "--no-tag" {
+            draft.is_tag = false;
+            i += 1;
+            continue;
+        }
+        if !matches!(
+            flag,
+            "--name" | "--description" | "--summary" | "--parent-tag" | "--tag" | "--forum"
+        ) {
+            return Err(format!("Unknown wiki edit option `{flag}`."));
+        }
+        i += 1;
+        let Some(value) = rest.get(i).copied() else {
+            return Err(format!("wiki edit {flag} needs a value."));
+        };
+        match flag {
+            "--name" => {
+                draft.name = value.to_owned();
+                named = true;
+            }
+            "--description" => draft.description = Some(value.to_owned()),
+            "--summary" => draft.summary = Some(value.to_owned()),
+            "--parent-tag" => draft.parent_tags.push(value.to_owned()),
+            "--forum" => forum = Some(value.to_owned()),
+            "--tag" => {
+                draft.is_tag = match value {
+                    "true" => true,
+                    "false" => false,
+                    _ => return Err("wiki edit --tag takes true or false.".into()),
+                }
+            }
+            _ => unreachable!(),
+        }
+        i += 1;
+    }
+    if !named || draft.name.trim().is_empty() {
+        return Err("wiki edit needs --name and a non-empty page name.".into());
+    }
+    bare(
+        Verb::WikiEdit {
+            forum,
+            slug: slug.to_owned(),
+            draft,
+        },
+        None,
+    )
 }
 
 /// `forum create <slug> <name...> [--open]`, `forum edit [--flag value...]`.
@@ -1289,7 +1776,18 @@ pub fn usage() -> String {
         "activity",
         "sort magic|top|new|old|recent-comments|latest-reply",
         "filter frontpage|all|curated",
-        "user [actor]",
+        "user [actor] [--forum FORUM]",
+        "search <terms> [--forum FORUM|--all] [--author ACTOR] [--limit 1..100]",
+        "tags [slug] [--forum FORUM]",
+        "sequences [--forum FORUM]",
+        "sequence <uri>",
+        "sequence create <SequenceDraft JSON>  (`forum`: `.` uses the current forum)",
+        "sequence edit <uri> <SequenceDraft JSON>",
+        "sequence add <uri> <post> --chapter N --index N",
+        "sequence remove <uri> <post>",
+        "sequence move <uri> --chapter N --index N --to-chapter N --to-index N",
+        "wiki edit <slug> --name NAME [--description D] [--summary S] [--parent-tag TAG] [--tag true|false] [--forum FORUM]",
+        "  wiki body: written in $EDITOR; sequence create/edit: typed CLI-compatible JSON drafts",
         "mods [role]",
         "mods add <did|handle> [admin|moderator]",
         "mods remove <did|handle>",
@@ -1506,10 +2004,154 @@ mod tests {
         assert_eq!(
             parse("user alice").unwrap().verb,
             Verb::User {
-                actor: Some("alice".into())
+                actor: Some("alice".into()),
+                forum: None,
             }
         );
         assert_eq!(parse("mods").unwrap().verb, Verb::ModsList { role: None });
+    }
+
+    #[test]
+    fn organisation_commands_parse_typed_arguments() {
+        let Verb::Search { query, all } =
+            parse("search \"Café notes\" --forum at://f --author bob.example --limit 7")
+                .unwrap()
+                .verb
+        else {
+            panic!("search did not parse");
+        };
+        assert_eq!(query.q, "Café notes");
+        assert_eq!(query.forum.as_deref(), Some("at://f"));
+        assert_eq!(query.author.as_deref(), Some("bob.example"));
+        assert_eq!(query.limit, 7);
+        assert!(!all);
+        assert!(
+            parse("search needle --all").unwrap().verb
+                == Verb::Search {
+                    query: SearchQuery {
+                        q: "needle".into(),
+                        forum: None,
+                        author: None,
+                        limit: 50,
+                    },
+                    all: true,
+                }
+        );
+        assert!(parse("search").is_err());
+        assert!(parse("search needle --limit 0").is_err());
+        assert!(parse("search needle --limit 101").is_err());
+
+        assert_eq!(
+            parse("user bob.example --forum at://f").unwrap().verb,
+            Verb::User {
+                actor: Some("bob.example".into()),
+                forum: Some("at://f".into()),
+            }
+        );
+        assert_eq!(
+            parse("tags rust --forum at://f").unwrap().verb,
+            Verb::Tags {
+                slug: Some("rust".into()),
+                forum: Some("at://f".into()),
+            }
+        );
+        assert_eq!(
+            parse("sequences").unwrap().verb,
+            Verb::Sequences { forum: None }
+        );
+        assert_eq!(
+            parse("sequence at://did:plc:a/c/s").unwrap().verb,
+            Verb::Sequence(SequenceVerb::Read("at://did:plc:a/c/s".into()))
+        );
+
+        let Verb::WikiEdit {
+            forum,
+            slug,
+            draft,
+        } = parse(
+            "wiki edit rust --name \"Rust Language\" --description \"Systems programming\" --summary \"Initial revision\" --parent-tag programming --tag false --forum at://f",
+        )
+        .unwrap()
+        .verb
+        else {
+            panic!("wiki edit did not parse");
+        };
+        assert_eq!(forum.as_deref(), Some("at://f"));
+        assert_eq!(slug, "rust");
+        assert_eq!(draft.name, "Rust Language");
+        assert_eq!(draft.description.as_deref(), Some("Systems programming"));
+        assert_eq!(draft.summary.as_deref(), Some("Initial revision"));
+        assert_eq!(draft.parent_tags, ["programming"]);
+        assert!(!draft.is_tag);
+        assert!(draft.body.is_none(), "the editor carries the body");
+        assert!(parse("wiki edit rust").is_err());
+    }
+
+    #[test]
+    fn sequence_commands_parse_raw_json_and_positions() {
+        let Verb::Sequence(SequenceVerb::Create(draft)) = parse(
+            r#"sequence create {"forum":".","title":"Reading list","body":{"markdown":"Two words"},"chapters":[{"title":"One","posts":[]}]}"#,
+        )
+        .unwrap()
+        .verb
+        else {
+            panic!("sequence create did not parse");
+        };
+        assert_eq!(draft.title, "Reading list");
+        assert_eq!(draft.body.unwrap().markdown, "Two words");
+        assert_eq!(draft.chapters[0].title.as_deref(), Some("One"));
+
+        let Verb::Sequence(SequenceVerb::Edit { uri, draft }) = parse(
+            r#"sequence edit at://did:plc:a/c/s {"forum":"at://f","title":"Edited","chapters":[]}"#,
+        )
+        .unwrap()
+        .verb
+        else {
+            panic!("sequence edit did not parse");
+        };
+        assert_eq!(uri, "at://did:plc:a/c/s");
+        assert_eq!(draft.title, "Edited");
+
+        assert_eq!(
+            parse("sequence add at://s at://p --chapter 2 --index 3")
+                .unwrap()
+                .verb,
+            Verb::Sequence(SequenceVerb::Add {
+                uri: "at://s".into(),
+                post: "at://p".into(),
+                at: SequencePosition {
+                    chapter: 2,
+                    index: 3
+                },
+            })
+        );
+        assert_eq!(
+            parse("sequence remove at://s at://p").unwrap().verb,
+            Verb::Sequence(SequenceVerb::Remove {
+                uri: "at://s".into(),
+                post: "at://p".into(),
+            })
+        );
+        assert_eq!(
+            parse("sequence move at://s --chapter 0 --index 1 --to-chapter 2 --to-index 3")
+                .unwrap()
+                .verb,
+            Verb::Sequence(SequenceVerb::Move {
+                uri: "at://s".into(),
+                from: SequencePosition {
+                    chapter: 0,
+                    index: 1
+                },
+                to: SequencePosition {
+                    chapter: 2,
+                    index: 3
+                },
+            })
+        );
+        assert!(parse("sequence create {not json}").is_err());
+        assert!(parse("sequence edit at://s").is_err());
+        assert!(parse("sequence add at://s at://p --chapter 0").is_err());
+        assert!(parse("sequence move at://s --chapter 0 --index 0").is_err());
     }
 
     #[test]

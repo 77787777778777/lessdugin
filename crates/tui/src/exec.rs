@@ -256,6 +256,16 @@ pub async fn run<H: Host>(engine: &Engine<H>, effect: Effect, opts: ExecOpts) ->
             }
             return None;
         }
+        Effect::Search { query } => Action::Searched(engine.search(&query).await),
+        Effect::LoadUser { forum, actor } => {
+            Action::UserLoaded(engine.user(forum.as_deref(), &actor).await)
+        }
+        Effect::LoadTags { forum, slug } => match slug {
+            Some(slug) => Action::TagLoaded(engine.tag(&forum, &slug).await),
+            None => Action::TagsLoaded(engine.tags(&forum).await),
+        },
+        Effect::LoadSequences { forum } => Action::SequencesLoaded(engine.sequences(&forum).await),
+        Effect::LoadSequence { uri } => Action::SequenceLoaded(engine.sequence(&uri).await),
         Effect::Discover { query } => Action::Discovered(engine.forum_discover(&query).await),
         Effect::LoadBacklinks { target, forum } => {
             Action::BacklinksLoaded(match item_uri(engine, &target, &forum).await {
@@ -265,7 +275,12 @@ pub async fn run<H: Host>(engine: &Engine<H>, effect: Effect, opts: ExecOpts) ->
         }
         Effect::Open { target } => Action::Opened(
             match engine.parse_ref(&target, &RefContext::default()).await {
-                Ok(r @ (Ref::Forum { .. } | Ref::Post { .. } | Ref::Comment { .. })) => Ok(r),
+                Ok(
+                    r @ (Ref::Forum { .. }
+                    | Ref::Post { .. }
+                    | Ref::Comment { .. }
+                    | Ref::Sequence { .. }),
+                ) => Ok(r),
                 // a forum reference parse_ref does not take (`owner/slug`)
                 other => match engine.forum_open(&target).await {
                     Ok(v) => Ok(Ref::Forum { uri: v.forum.uri }),
@@ -364,6 +379,55 @@ pub async fn run<H: Host>(engine: &Engine<H>, effect: Effect, opts: ExecOpts) ->
                 Ok(d) => engine.forum_update(&forum, &d).await.map(|t| vec![t]),
                 Err(e) => Err(e),
             },
+        },
+        Effect::WikiEdit {
+            forum,
+            slug,
+            draft,
+            text,
+        } => Action::Queued {
+            compose: Compose::Wiki {
+                forum: forum.clone(),
+                slug: slug.clone(),
+                draft: Box::new(draft.clone()),
+            },
+            text,
+            result: engine.wiki_edit(&forum, &slug, draft).await,
+        },
+        Effect::SequenceCreate { draft, screen } => Action::Written {
+            what: "Sequence create",
+            screen: Some(screen),
+            result: engine.seq_create(&draft).await.map(|t| vec![t]),
+        },
+        Effect::SequenceEdit { uri, draft, screen } => Action::Written {
+            what: "Sequence edit",
+            screen: Some(screen),
+            result: engine.seq_edit(&uri, &draft).await.map(|t| vec![t]),
+        },
+        Effect::SequenceAdd {
+            uri,
+            post,
+            at,
+            screen,
+        } => Action::Written {
+            what: "Sequence add",
+            screen: Some(screen),
+            result: engine.seq_add(&uri, &post, &at).await.map(|t| vec![t]),
+        },
+        Effect::SequenceRemove { uri, post, screen } => Action::Written {
+            what: "Sequence remove",
+            screen: Some(screen),
+            result: engine.seq_remove(&uri, &post).await.map(|t| vec![t]),
+        },
+        Effect::SequenceMove {
+            uri,
+            from,
+            to,
+            screen,
+        } => Action::Written {
+            what: "Sequence move",
+            screen: Some(screen),
+            result: engine.seq_move(&uri, &from, &to).await.map(|t| vec![t]),
         },
         Effect::StartEdit { uri, forum } => {
             Action::EditReady(start_edit(engine, &uri, &forum).await)

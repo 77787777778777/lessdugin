@@ -122,11 +122,20 @@ pub fn draw_with(state: &State, images: Option<&mut crate::image::Images>, f: &m
 fn panel(f: &mut Frame<'_>, p: &Panel, area: Rect) {
     let width = 76.min(area.width);
     let inner = usize::from(width.saturating_sub(2)).max(1);
-    let lines: Vec<Line<'static>> = p
-        .lines
-        .iter()
-        .flat_map(|t| wrapped(t, Style::default(), inner))
-        .collect();
+    let selected_line = p.items.get(p.selected).map(|item| item.line);
+    let mut lines = Vec::new();
+    for (i, text) in p.lines.iter().enumerate() {
+        let mut wrapped = wrapped(text, Style::default(), inner);
+        if selected_line == Some(i)
+            && let Some(first) = wrapped.first_mut()
+        {
+            // A textual gutter as well as colour: selection remains visible on monochrome terminals.
+            first
+                .spans
+                .insert(0, Span::styled("\u{258c} ", selected_gutter()));
+        }
+        lines.extend(wrapped);
+    }
     let rows = usize::from(area.height.saturating_sub(4)).max(1);
     let max_scroll = lines.len().saturating_sub(rows);
     let scroll = p.scroll.min(max_scroll);
@@ -138,18 +147,24 @@ fn panel(f: &mut Frame<'_>, p: &Panel, area: Rect) {
     let x = area.x + (area.width - width) / 2;
     let y = area.y + (area.height - height) / 2;
     let r = Rect::new(x, y, width, height);
+    let footer = if p.items.is_empty() {
+        format!(
+            " {}-{} of {} · any key closes ",
+            (scroll + 1).min(total),
+            (scroll + rows).min(total),
+            total
+        )
+    } else {
+        format!(
+            " result {}/{} · j/k select · Enter opens · Esc closes ",
+            p.selected + 1,
+            p.items.len()
+        )
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .title(line([(tt(&format!(" {} ", p.title)), bold())]))
-        .title_bottom(line([(
-            tt(&format!(
-                " {}-{} of {} \u{b7} any key closes ",
-                (scroll + 1).min(total),
-                (scroll + rows).min(total),
-                total
-            )),
-            dim(),
-        )]));
+        .title_bottom(line([(tt(&footer), dim())]));
     f.render_widget(Clear, r);
     f.render_widget(Paragraph::new(Text::from(shown)).block(block), r);
 }

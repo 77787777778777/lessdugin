@@ -212,11 +212,25 @@ impl<H: Host> Headless<H> {
                     });
                 }
                 other => {
-                    let write = matches!(other, Effect::Comment { .. } | Effect::Publish { .. });
+                    let write = matches!(
+                        other,
+                        Effect::Comment { .. }
+                            | Effect::Publish { .. }
+                            | Effect::WikiEdit { .. }
+                            | Effect::SequenceCreate { .. }
+                            | Effect::SequenceEdit { .. }
+                            | Effect::SequenceAdd { .. }
+                            | Effect::SequenceRemove { .. }
+                            | Effect::SequenceMove { .. }
+                    );
                     if let Some(a) = exec::run(&self.engine, other, exec_opts).await {
                         // the events the call emitted come first, as on the runtime's channel
                         self.drain_events();
-                        let queued = matches!(&a, Action::Queued { result: Ok(_), .. });
+                        let queued = matches!(
+                            &a,
+                            Action::Queued { result: Ok(_), .. }
+                                | Action::Written { result: Ok(_), .. }
+                        );
                         self.act(a);
                         if write
                             && queued
