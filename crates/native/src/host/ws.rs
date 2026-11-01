@@ -87,16 +87,29 @@ pub async fn connect(net: &Net, url: Url, max_message_bytes: u32) -> Result<Nati
             http::header::USER_AGENT,
             http::HeaderValue::from_static(USER_AGENT),
         );
+        request.headers_mut().insert(
+            http::header::SEC_WEBSOCKET_PROTOCOL,
+            http::HeaderValue::from_static("xrpc.v1.json"),
+        );
         let max = max_message_bytes as usize;
         let config = WebSocketConfig::default()
             .max_message_size(Some(max))
             .max_frame_size(Some(max));
         // TLS (for wss) uses the URL's host for SNI and certificate checks; the TCP stream is
         // already connected to the pinned address.
-        let (stream, _resp) =
+        let (stream, resp) =
             tokio_tungstenite::client_async_tls_with_config(request, tcp, Some(config), None)
                 .await
                 .map_err(map_ws_error)?;
+        let selected = resp
+            .headers()
+            .get(http::header::SEC_WEBSOCKET_PROTOCOL)
+            .and_then(|v| v.to_str().ok());
+        if selected != Some("xrpc.v1.json") {
+            return Err(HostError::Network(format!(
+                "WebSocket server did not negotiate xrpc.v1.json (selected {selected:?})"
+            )));
+        }
         Ok::<_, HostError>(stream)
     };
     let total = Duration::from_millis(u64::from(limits::REQUEST_TIMEOUT_MS));

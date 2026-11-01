@@ -1,0 +1,835 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+use std::collections::BTreeSet;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use lessdugin_atp::syntax::Did;
+use lessdugin_core::engine::{AccountInfo, Engine, EngineConfig, Sources};
+use lessdugin_core::host::{
+    BlobHandle, Dir, Host, HostError, HttpRequest, HttpResponse, KeyRange, KvOp, KvStore, WsMessage,
+};
+use lessdugin_core::live::source::{Cursor, Subscription};
+use lessdugin_core::live::wire::{self, Wire};
+use lessdugin_core::live::{
+    Action, Context, EventFilter, FilterMode, Gap, LiveConfig, LiveSource, Operation, SourceStatus,
+};
+use lessdugin_core::store::mem::MemKv;
+use lessdugin_core::store::schema;
+use lessdugin_core::sync::queue::Action as QueueAction;
+use lessdugin_core::sync::{DirtyItem, DirtyQueue, Priority, Reason};
+use lessdugin_testkit::{FakeNet, MemHost};
+use serde_json::json;
+
+const DID: &str = "did:plc:known";
+const OTHER: &str = "did:plc:other";
+const NEW: &str = "did:plc:newcomer";
+const FK: &str = "aaaaaaaaaaaa";
+const REV: &str = "3mxyfycmgv32r";
+const CID: &str = "bafyreiarbommdbe24mq6atxsq4ms6dzmkh2nlyagyn35bh7zdaardjmr2q";
+const TIME: &str = "2025-10-09T08:53:20.000Z";
+const TIME_US: i64 = 1_760_000_000_000_000;
+
+#[derive(Clone)]
+struct FailOnceKv {
+    inner: MemKv,
+    fail_next: Arc<AtomicBool>,
+    successful_writes: Arc<futures::lock::Mutex<()>>,
+}
+
+impl KvStore for FailOnceKv {
+    async fn get_many(&self, keys: Vec<Vec<u8>>) -> Result<Vec<Option<Vec<u8>>>, HostError> {
+        self.inner.get_many(keys).await
+    }
+
+    async fn scan(
+        &self,
+        range: KeyRange,
+        dir: Dir,
+        limit: u32,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, HostError> {
+        self.inner.scan(range, dir, limit).await
+    }
+
+    async fn write(&self, batch: Vec<KvOp>) -> Result<(), HostError> {
+        if self.fail_next.swap(false, Ordering::SeqCst) {
+            return Err(HostError::Storage("injected live apply failure".into()));
+        }
+        let _guard = self.successful_writes.lock().await;
+        self.inner.write(batch).await
+    }
+}
+
+#[derive(Clone)]
+struct FailHost {
+    inner: MemHost,
+    cache: FailOnceKv,
+    state: FailOnceKv,
+}
+
+impl FailHost {
+    fn new(inner: MemHost) -> Self {
+        let cache = FailOnceKv {
+            inner: inner.cache_kv().clone(),
+            fail_next: Arc::new(AtomicBool::new(false)),
+            successful_writes: Arc::new(futures::lock::Mutex::new(())),
+        };
+        let state = FailOnceKv {
+            inner: inner.state_kv().clone(),
+            fail_next: Arc::new(AtomicBool::new(false)),
+            successful_writes: Arc::new(futures::lock::Mutex::new(())),
+        };
+        Self {
+            inner,
+            cache,
+            state,
+        }
+    }
+
+    fn fail_next_cache_write(&self) {
+        self.cache.fail_next.store(true, Ordering::SeqCst);
+    }
+
+    fn allow_cache_writes(&self) {
+        self.cache.fail_next.store(false, Ordering::SeqCst);
+    }
+}
+
+impl Host for FailHost {
+    type Kv = FailOnceKv;
+    type Ws = <MemHost as Host>::Ws;
+    type Lock = <MemHost as Host>::Lock;
+
+    fn cache(&self) -> &Self::Kv {
+        &self.cache
+    }
+
+    fn state(&self) -> &Self::Kv {
+        &self.state
+    }
+
+    async fn http(&self, req: HttpRequest) -> Result<HttpResponse, HostError> {
+        self.inner.http(req).await
+    }
+
+    async fn fetch_blob(
+        &self,
+        pds: url::Url,
+        did: Did,
+        cid: String,
+        max_bytes: u64,
+    ) -> Result<BlobHandle, HostError> {
+        self.inner.fetch_blob(pds, did, cid, max_bytes).await
+    }
+
+    async fn websocket(&self, url: url::Url, max: u32) -> Result<Self::Ws, HostError> {
+        self.inner.websocket(url, max).await
+    }
+
+    async fn resolve_txt_system(&self, name: String) -> Result<Option<Vec<String>>, HostError> {
+        self.inner.resolve_txt_system(name).await
+    }
+
+    async fn lock(&self, name: &str, wait: bool) -> Result<Option<Self::Lock>, HostError> {
+        self.inner.lock(name, wait).await
+    }
+
+    async fn sleep(&self, ms: u64) {
+        self.inner.sleep(ms).await;
+    }
+
+    fn now_ms(&self) -> i64 {
+        self.inner.now_ms()
+    }
+
+    fn fill_random(&self, buf: &mut [u8]) {
+        self.inner.fill_random(buf);
+    }
+}
+
+fn context() -> Context {
+    Context {
+        known_dids: BTreeSet::from([DID.to_owned()]),
+        forums: BTreeSet::from([FK.to_owned()]),
+        newcomer_forums: BTreeSet::from([FK.to_owned()]),
+        declarations: BTreeSet::from([(DID.to_owned(), "forum".to_owned())]),
+        ..Context::default()
+    }
+}
+
+fn v2_commit(did: &str, collection: &str, rkey: &str, seq: u64) -> String {
+    json!({
+        "$type": "message",
+        "payload": {
+            "$type": "network.bsky.jetstream.subscribeEvents#commit",
+            "did": did, "seq": seq, "time": TIME, "witnessedAt": TIME,
+            "rev": REV, "operation": "create", "collection": collection,
+            "rkey": rkey, "cid": CID,
+            "record": {"$type": collection, "text": "UNTRUSTED HINT TEXT"}
+        }
+    })
+    .to_string()
+}
+
+fn v1_commit(did: &str, collection: &str, rkey: &str) -> String {
+    json!({
+        "did": did, "time_us": TIME_US, "cursor": 42, "kind": "commit",
+        "commit": {
+            "rev": REV, "operation": "create", "collection": collection,
+            "rkey": rkey, "cid": CID,
+            "record": {"text": "also untrusted"}
+        }
+    })
+    .to_string()
+}
+
+fn post() -> String {
+    lessdugin_lexicon::collection::nsid::POST.to_owned()
+}
+
+fn membership() -> String {
+    lessdugin_lexicon::collection::nsid::MEMBERSHIP.to_owned()
+}
+
+fn point(output: &lessdugin_core::live::FilterOutput) -> (String, Option<String>, i64) {
+    match &output.actions[..] {
+        [
+            Action::PointFetch {
+                uri,
+                cid,
+                first_seen_us,
+                ..
+            },
+        ] => (uri.clone(), cid.clone(), *first_seen_us),
+        other => panic!("expected point fetch, got {other:?}"),
+    }
+}
+
+#[test]
+fn v2_exact_filter_and_record_is_only_a_hint() {
+    let cx = context();
+    let mut filter = EventFilter::default();
+    let event = wire::parse(Wire::V2, &v2_commit(DID, &post(), &format!("{FK}-3l"), 9))
+        .unwrap()
+        .unwrap();
+    let out = filter.apply(Wire::V2, "one", event, &cx);
+    let (uri, cid, first) = point(&out);
+    assert_eq!(uri, format!("at://{DID}/{}/{FK}-3l", post()));
+    assert_eq!(cid.as_deref(), Some(CID));
+    assert_eq!(first, TIME_US);
+    assert!(!format!("{:?}", out).contains("UNTRUSTED"));
+
+    for bad_rkey in [format!("{FK}x-3l"), format!("{FK}x"), "other".into()] {
+        let e = wire::parse(Wire::V2, &v2_commit(DID, &post(), &bad_rkey, 10))
+            .unwrap()
+            .unwrap();
+        assert!(filter.apply(Wire::V2, "one", e, &cx).actions.is_empty());
+    }
+    let spoof = format!("{}.spoof", post());
+    let e = wire::parse(Wire::V2, &v2_commit(DID, &spoof, &format!("{FK}-3l"), 11))
+        .unwrap()
+        .unwrap();
+    assert!(filter.apply(Wire::V2, "one", e, &cx).actions.is_empty());
+}
+
+#[test]
+fn shared_v1_v2_dedup_and_cursor() {
+    let cx = context();
+    let mut filter = EventFilter::default();
+    let v1 = wire::parse(Wire::V1, &v1_commit(DID, &post(), &format!("{FK}-3l")))
+        .unwrap()
+        .unwrap();
+    let first = filter.apply(Wire::V1, "old", v1, &cx);
+    assert_eq!(first.actions.len(), 1);
+    assert_eq!(first.cursor.unwrap().time_us, TIME_US);
+    let v2 = wire::parse(Wire::V2, &v2_commit(DID, &post(), &format!("{FK}-3l"), 42))
+        .unwrap()
+        .unwrap();
+    let replay = filter.apply(Wire::V2, "new", v2, &cx);
+    assert!(replay.duplicate);
+    assert!(replay.actions.is_empty());
+    assert_eq!(replay.cursor.unwrap().seq, Some(42));
+}
+
+#[test]
+fn identity_account_sync_drop_network_noise() {
+    let cx = context();
+    let identity = json!({"$type":"message","payload":{
+        "$type":"network.bsky.jetstream.subscribeEvents#identity", "did":OTHER,
+        "seq":50,"witnessedAt":TIME,"identity":{"did":OTHER,"seq":8,"time":TIME}
+    }})
+    .to_string();
+    let account = json!({"$type":"message","payload":{
+        "$type":"network.bsky.jetstream.subscribeEvents#account", "did":DID,
+        "seq":51,"witnessedAt":TIME,"account":{"did":DID,"seq":9,"time":TIME,"active":false,"status":"suspended"}
+    }}).to_string();
+    let sync = json!({"$type":"message","payload":{
+        "$type":"network.bsky.jetstream.subscribeEvents#sync", "did":DID,
+        "seq":52,"witnessedAt":TIME,"time":TIME
+    }})
+    .to_string();
+    let mut filter = EventFilter::default();
+    let noise = wire::parse(Wire::V2, &identity).unwrap().unwrap();
+    assert!(filter.apply(Wire::V2, "i", noise, &cx).actions.is_empty());
+    let account = wire::parse(Wire::V2, &account).unwrap().unwrap();
+    let out = filter.apply(Wire::V2, "i", account, &cx);
+    assert!(matches!(
+        out.actions[..],
+        [Action::AccountStatus { active: false, .. }]
+    ));
+    let sync = wire::parse(Wire::V2, &sync).unwrap().unwrap();
+    assert!(matches!(
+        filter.apply(Wire::V2, "i", sync, &cx).actions[..],
+        [Action::Resync { .. }]
+    ));
+}
+
+#[test]
+fn malformed_events_are_errors_not_panics_or_actions() {
+    let valid = v2_commit(DID, &post(), &format!("{FK}-3l"), 42);
+    for bad in [
+        "not json".into(),
+        valid.replace(DID, "not-a-did"),
+        valid.replace(REV, "bad-rev"),
+        valid.replace(CID, "bad-cid"),
+        valid.replace(TIME, "not-a-time"),
+        valid.replace(&format!("\"rkey\":\"{FK}-3l\""), "\"rkey\":\"..\""),
+        valid.replace("\"seq\":42", "\"seq\":\"42\""),
+    ] {
+        assert!(wire::parse(Wire::V2, &bad).is_err(), "accepted {bad}");
+    }
+    let unknown = json!({"$type":"message","payload":{"$type":"something.new#future"}});
+    assert_eq!(wire::parse(Wire::V2, &unknown.to_string()).unwrap(), None);
+}
+
+#[test]
+fn unknown_did_only_exact_f_new_membership_candidate() {
+    let cx = context();
+    let mut filter = EventFilter::default();
+    let e = wire::parse(Wire::V2, &v2_commit(NEW, &membership(), FK, 1))
+        .unwrap()
+        .unwrap();
+    let out = filter.apply(Wire::V2, "i", e, &cx);
+    assert!(matches!(
+        out.actions[..],
+        [Action::Candidate { ref did, ref fk, .. }] if did == NEW && fk == FK
+    ));
+    for (collection, rkey) in [(post(), FK.to_owned()), (membership(), format!("{FK}-x"))] {
+        let e = wire::parse(Wire::V2, &v2_commit(NEW, &collection, &rkey, 2))
+            .unwrap()
+            .unwrap();
+        assert!(filter.apply(Wire::V2, "i", e, &cx).actions.is_empty());
+    }
+}
+
+#[test]
+fn info_actions_restart_cursor() {
+    for (name, gap) in [
+        ("OutdatedCursor", Gap::OutdatedCursor),
+        ("FutureCursor", Gap::FutureCursor),
+    ] {
+        let text = json!({"$type":"message","payload":{
+            "$type":"network.bsky.jetstream.subscribeEvents#info", "name":name
+        }})
+        .to_string();
+        let e = wire::parse(Wire::V2, &text).unwrap().unwrap();
+        let out = EventFilter::default().apply(Wire::V2, "i", e, &context());
+        if gap == Gap::OutdatedCursor {
+            assert_eq!(out.actions, vec![Action::Reconcile(gap)]);
+        } else {
+            assert!(out.actions.is_empty());
+        }
+        assert!(out.restart_cursor);
+        assert!(out.cursor.is_none());
+    }
+}
+
+#[test]
+fn subscription_modes_and_private_participant_filters() {
+    let base = url::Url::parse("wss://jetstream.example/subscribe").unwrap();
+    let ns = lessdugin_lexicon::ns::NS;
+    let dids = |n| {
+        (0..n)
+            .map(|i| format!("did:plc:user{i}"))
+            .collect::<Vec<_>>()
+    };
+    let native = Subscription::plan(&base, ns, false, true, &dids(200), None, TIME_US).unwrap();
+    assert_eq!(native.mode, FilterMode::Wildcard);
+    assert_eq!(
+        native
+            .url
+            .query_pairs()
+            .filter(|(k, _)| k == "dids")
+            .count(),
+        0
+    );
+    let early = Subscription::plan(&base, ns, true, false, &dids(2), None, TIME_US).unwrap();
+    assert_eq!(early.mode, FilterMode::Wildcard);
+    let small = Subscription::plan(&base, ns, true, true, &dids(150), None, TIME_US).unwrap();
+    assert_eq!(small.mode, FilterMode::V2Dids);
+    assert_eq!(
+        small.url.query_pairs().filter(|(k, _)| k == "dids").count(),
+        150
+    );
+    assert!(!small.url.as_str().contains("kinds=commit"));
+    let large = Subscription::plan(&base, ns, true, true, &dids(151), None, TIME_US).unwrap();
+    assert_eq!(large.mode, FilterMode::V1Dids);
+    let hello: serde_json::Value = serde_json::from_str(large.hello.as_deref().unwrap()).unwrap();
+    assert_eq!(
+        hello["payload"]["wantedDids"].as_array().unwrap().len(),
+        151
+    );
+    assert_eq!(
+        large.url.query_pairs().filter(|(k, _)| k == "dids").count(),
+        0
+    );
+    let huge = Subscription::plan(&base, ns, true, true, &dids(10_001), None, TIME_US).unwrap();
+    assert_eq!(huge.mode, FilterMode::Wildcard);
+}
+
+#[test]
+fn cursor_resume_inclusive_or_rewound() {
+    let cursor = Cursor {
+        wire: Wire::V2,
+        instance: "wss://one:443".into(),
+        seq: Some(42),
+        time_us: TIME_US,
+    };
+    let base = url::Url::parse("wss://one/subscribe").unwrap();
+    let same = Subscription::plan(
+        &base,
+        lessdugin_lexicon::ns::NS,
+        false,
+        false,
+        &[],
+        Some(&cursor),
+        TIME_US,
+    )
+    .unwrap();
+    assert!(
+        same.url
+            .query_pairs()
+            .any(|(k, v)| k == "cursor" && v == "42")
+    );
+    let other = url::Url::parse("wss://two/subscribe").unwrap();
+    let moved = Subscription::plan(
+        &other,
+        lessdugin_lexicon::ns::NS,
+        false,
+        false,
+        &[],
+        Some(&cursor),
+        TIME_US,
+    )
+    .unwrap();
+    assert!(
+        moved
+            .url
+            .query_pairs()
+            .any(|(k, v)| k == "cursor" && v == (TIME_US - 5_000_000).to_string())
+    );
+}
+
+#[test]
+fn live_actions_coalesce_in_existing_queue() {
+    let mut queue = DirtyQueue::new();
+    queue.enqueue(DirtyItem::point(DID, "at://did/a/1", Priority::P1, 10_000).with_min_rev(REV));
+    queue.enqueue(DirtyItem::new(DID, Priority::P0, Reason::Resync, 5_000));
+    assert_eq!(queue.len(), 1);
+    let item = queue.get(DID).unwrap();
+    assert_eq!(item.priority, Priority::P0);
+    assert_eq!(item.ready_at, 5_000);
+    assert_eq!(item.action(), QueueAction::Sync);
+}
+
+#[test]
+fn memhost_v1_v2_source_and_persisted_cursor() {
+    futures::executor::block_on(async {
+        let host = MemHost::new();
+        let coll = post();
+        host.script_websocket(
+            "wss://jetstream.example/",
+            vec![WsMessage::Text(v2_commit(
+                DID,
+                &coll,
+                &format!("{FK}-3l"),
+                42,
+            ))],
+        );
+        let mut source = LiveSource::new(
+            Arc::new(host.clone()),
+            LiveConfig::new(
+                vec![url::Url::parse("wss://jetstream.example/subscribe").unwrap()],
+                false,
+            ),
+        );
+        let status = source.next(&context()).await.unwrap();
+        assert!(matches!(status, SourceStatus::Actions(ref a) if a.len() == 1));
+        assert!(source.cursor().is_none());
+        source.acknowledge().await.unwrap();
+        assert_eq!(source.cursor().unwrap().seq, Some(42));
+        // A clean close flushes before the periodic 5s/1000-event deadline and schedules backoff.
+        assert_eq!(
+            source.next(&context()).await.unwrap(),
+            SourceStatus::Waiting
+        );
+        assert!(source.retry_in_ms() > 0);
+        let raw = host
+            .cache()
+            .get_many(vec![schema::cur_key("jetstream")])
+            .await
+            .unwrap()
+            .pop()
+            .flatten();
+        assert!(raw.is_some());
+
+        let v1_host = MemHost::new();
+        v1_host.script_websocket(
+            "ws://jetstream.test/",
+            vec![WsMessage::Text(v1_commit(DID, &coll, &format!("{FK}-3l")))],
+        );
+        let mut cx = context();
+        cx.participants_known = true;
+        cx.filter_dids = (0..151).map(|i| format!("did:plc:user{i}")).collect();
+        let mut v1 = LiveSource::new(
+            Arc::new(v1_host.clone()),
+            LiveConfig::new(
+                vec![url::Url::parse("ws://jetstream.test/subscribe").unwrap()],
+                true,
+            ),
+        );
+        assert!(matches!(
+            v1.next(&cx).await.unwrap(),
+            SourceStatus::Actions(_)
+        ));
+        let sent = v1_host.websocket_sent();
+        assert_eq!(sent.len(), 1);
+        assert!(sent[0].contains("options_update"));
+        assert!(!sent[0].contains(DID));
+    });
+}
+
+#[test]
+fn memhost_info_gap_is_bounded_and_malformed_does_not_move_cursor() {
+    futures::executor::block_on(async {
+        let host = MemHost::new();
+        let info = json!({"$type":"message","payload":{
+            "$type":"network.bsky.jetstream.subscribeEvents#info","name":"OutdatedCursor"
+        }})
+        .to_string();
+        host.script_websocket("wss://jetstream.example/", vec![WsMessage::Text(info)]);
+        let mut source = LiveSource::new(
+            Arc::new(host),
+            LiveConfig::new(
+                vec![url::Url::parse("wss://jetstream.example/subscribe").unwrap()],
+                false,
+            ),
+        );
+        assert_eq!(
+            source.next(&context()).await.unwrap(),
+            SourceStatus::Actions(vec![Action::Reconcile(Gap::OutdatedCursor)])
+        );
+        assert!(source.cursor().is_none());
+        source.acknowledge().await.unwrap();
+        assert_eq!(source.cursor().unwrap().seq, None);
+        assert_eq!(source.cursor().unwrap().time_us, TIME_US - 5_000_000);
+        assert!(source.retry_in_ms() > 0);
+        // One call does not spin reconnecting a scripted closed socket.
+        assert_eq!(
+            source.next(&context()).await.unwrap(),
+            SourceStatus::Waiting
+        );
+    });
+}
+
+#[test]
+fn malformed_source_frame_does_not_move_cursor_or_kill_connection() {
+    futures::executor::block_on(async {
+        let host = MemHost::new();
+        host.script_websocket(
+            "wss://jetstream.example/",
+            vec![
+                WsMessage::Text("{malformed".into()),
+                WsMessage::Text(v2_commit(DID, &post(), &format!("{FK}-3l"), 42)),
+            ],
+        );
+        let mut source = LiveSource::new(
+            Arc::new(host),
+            LiveConfig::new(
+                vec![url::Url::parse("wss://jetstream.example/subscribe").unwrap()],
+                false,
+            ),
+        );
+        assert_eq!(
+            source.next(&context()).await.unwrap(),
+            SourceStatus::Waiting
+        );
+        assert!(source.cursor().is_none());
+        assert!(matches!(
+            source.next(&context()).await.unwrap(),
+            SourceStatus::Actions(_)
+        ));
+        assert!(source.cursor().is_none());
+        source.acknowledge().await.unwrap();
+        assert_eq!(source.cursor().unwrap().seq, Some(42));
+    });
+}
+
+#[test]
+fn dedup_is_bounded_lru() {
+    let cx = context();
+    let mut filter = EventFilter::with_dedup_capacity(2);
+    for rkey in ["aaaaaaaaaaaa-1", "aaaaaaaaaaaa-2"] {
+        let e = wire::parse(Wire::V2, &v2_commit(DID, &post(), rkey, 1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(filter.apply(Wire::V2, "i", e, &cx).actions.len(), 1);
+    }
+    // Promote the first key, then insert a third: the second is the least recently used.
+    let first = wire::parse(Wire::V2, &v2_commit(DID, &post(), "aaaaaaaaaaaa-1", 1))
+        .unwrap()
+        .unwrap();
+    assert!(filter.apply(Wire::V2, "i", first, &cx).duplicate);
+    let third = wire::parse(Wire::V2, &v2_commit(DID, &post(), "aaaaaaaaaaaa-3", 1))
+        .unwrap()
+        .unwrap();
+    assert_eq!(filter.apply(Wire::V2, "i", third, &cx).actions.len(), 1);
+    assert_eq!(filter.dedup().len(), 2);
+    let second = wire::parse(Wire::V2, &v2_commit(DID, &post(), "aaaaaaaaaaaa-2", 1))
+        .unwrap()
+        .unwrap();
+    assert_eq!(filter.apply(Wire::V2, "i", second, &cx).actions.len(), 1);
+}
+
+#[test]
+fn two_oversized_frames_recover_once_with_reconcile() {
+    futures::executor::block_on(async {
+        let host = MemHost::new();
+        host.script_websocket(
+            "wss://jetstream.example/",
+            vec![WsMessage::Text("x".repeat(1_200_001))],
+        );
+        let mut source = LiveSource::new(
+            Arc::new(host.clone()),
+            LiveConfig::new(
+                vec![url::Url::parse("wss://jetstream.example/subscribe").unwrap()],
+                false,
+            ),
+        );
+        assert_eq!(
+            source.next(&context()).await.unwrap(),
+            SourceStatus::Waiting
+        );
+        host.advance_ms(source.retry_in_ms());
+        assert_eq!(
+            source.next(&context()).await.unwrap(),
+            SourceStatus::Actions(vec![Action::Reconcile(Gap::OversizedMessage)])
+        );
+        assert!(source.cursor().is_none());
+        source.acknowledge().await.unwrap();
+        assert!(source.cursor().is_some());
+        // A third call observes backoff instead of spinning on the scripted socket.
+        assert_eq!(
+            source.next(&context()).await.unwrap(),
+            SourceStatus::Waiting
+        );
+    });
+}
+
+#[test]
+fn live_tail_store_failure_replays_frame_before_advancing_cursor() {
+    futures::executor::block_on(async {
+        let mem = MemHost::new();
+        let net = FakeNet::on(&mem);
+        let account = net.add_account("alice.example.com");
+        let host = FailHost::new(mem.clone());
+        let endpoint = url::Url::parse("wss://jetstream.example/subscribe").unwrap();
+        let engine = Engine::new(
+            host.clone(),
+            EngineConfig {
+                jetstream: vec![endpoint],
+                ..EngineConfig::default()
+            },
+        );
+        engine
+            .add_account(AccountInfo::app_password(
+                account.did().as_str(),
+                account.pds_base(),
+            ))
+            .await
+            .unwrap();
+        mem.script_websocket(
+            "wss://jetstream.example/",
+            vec![WsMessage::Text(v2_commit(
+                account.did().as_str(),
+                &post(),
+                &format!("{FK}-3l"),
+                42,
+            ))],
+        );
+        mem.park_sleeps(true);
+        host.fail_next_cache_write();
+        let replay_write = host.cache.successful_writes.lock().await;
+
+        let tail = engine.live_tail();
+        futures::pin_mut!(tail);
+        assert!(futures::poll!(tail.as_mut()).is_pending());
+        assert!(
+            !host.cache.fail_next.load(Ordering::SeqCst),
+            "the actionable frame did not reach its cache write"
+        );
+        let key = schema::cur_key("jetstream");
+        assert!(
+            host.cache()
+                .get_many(vec![key.clone()])
+                .await
+                .unwrap()
+                .pop()
+                .flatten()
+                .is_none(),
+            "a failed action batch must not persist the frame cursor"
+        );
+
+        // The next round receives LiveSource's buffered action, not a new socket frame. Move past
+        // the periodic persistence deadline so a successful replay makes the cursor observable.
+        host.allow_cache_writes();
+        mem.advance_ms(5_001);
+        drop(replay_write);
+        assert!(futures::poll!(tail.as_mut()).is_pending());
+        assert!(
+            host.cache()
+                .get_many(vec![key])
+                .await
+                .unwrap()
+                .pop()
+                .flatten()
+                .is_some(),
+            "the replayed action batch must be acknowledged after it applies"
+        );
+        engine.live_stop();
+        tail.await.unwrap();
+    });
+}
+
+#[test]
+fn discovery_completion_controls_private_participant_filters() {
+    futures::executor::block_on(async {
+        let host = MemHost::new();
+        host.park_sleeps(true);
+        let candidate = "did:plc:candidate".to_owned();
+        for complete in [false, true] {
+            host.script_websocket(
+                "wss://jetstream.example/",
+                vec![WsMessage::Text(v2_commit(DID, &post(), "unrelated", 1))],
+            );
+            let mut source = LiveSource::new(
+                Arc::new(host.clone()),
+                LiveConfig::new(
+                    vec![url::Url::parse("wss://jetstream.example/subscribe").unwrap()],
+                    true,
+                ),
+            );
+            let context = Context {
+                participants_known: complete,
+                filter_dids: if complete {
+                    vec![candidate.clone()]
+                } else {
+                    Vec::new()
+                },
+                ..context()
+            };
+            // Drive exactly one connection and one scripted frame; no engine tail or sleep.
+            let status = source.next(&context).await.unwrap();
+            assert!(matches!(
+                status,
+                SourceStatus::Actions(_) | SourceStatus::Waiting
+            ));
+            source.stop().await;
+        }
+
+        let urls = host.websocket_urls();
+        assert_eq!(urls.len(), 2);
+        let filtered = |url: &str| {
+            url::Url::parse(url)
+                .unwrap()
+                .query_pairs()
+                .any(|(k, v)| k == "dids" && v == candidate)
+        };
+        assert!(!filtered(&urls[0]), "discovery was not complete");
+        assert!(filtered(&urls[1]), "completed discovery must filter DIDs");
+    });
+}
+
+#[test]
+fn direct_engine_takes_no_live_leader_or_socket() {
+    futures::executor::block_on(async {
+        let host = MemHost::new();
+        host.park_sleeps(true);
+        let engine = Engine::new(
+            host.clone(),
+            EngineConfig {
+                sources: Sources::Direct,
+                sources_flag: Some(Sources::Direct),
+                ..EngineConfig::default()
+            },
+        );
+        let tail = engine.live_tail();
+        futures::pin_mut!(tail);
+        assert!(futures::poll!(tail.as_mut()).is_pending());
+        // Assisted LiveSource takes this lock before Host::websocket. Direct mode leaves it free.
+        assert!(host.lock("sync-leader", false).await.unwrap().is_some());
+        host.park_sleeps(false);
+        engine.live_stop();
+        tail.await.unwrap();
+        assert!(host.websocket_sent().is_empty());
+    });
+}
+
+#[test]
+fn did_parser_used_by_filter_rejects_bad_own_did() {
+    assert!(Did::parse("did:plc:valid").is_ok());
+    assert!(Did::parse("did:PLC:invalid").is_err());
+    assert_eq!(Operation::Create, Operation::Create);
+}
+
+#[test]
+fn browser_filter_reconnect_is_rate_limited_and_catches_up_new_dids() {
+    futures::executor::block_on(async {
+        let host = MemHost::new();
+        host.script_websocket(
+            "wss://jetstream.example/",
+            vec![
+                WsMessage::Text(v2_commit(OTHER, &post(), "unrelated", 1)),
+                WsMessage::Text(v2_commit(OTHER, &post(), "unrelated", 2)),
+            ],
+        );
+        let mut source = LiveSource::new(
+            Arc::new(host.clone()),
+            LiveConfig::new(
+                vec![url::Url::parse("wss://jetstream.example/subscribe").unwrap()],
+                true,
+            ),
+        );
+        let mut cx = context();
+        cx.participants_known = true;
+        cx.filter_dids = vec![DID.to_owned()];
+        assert_eq!(source.next(&cx).await.unwrap(), SourceStatus::Waiting);
+        assert_eq!(host.websocket_urls().len(), 1);
+
+        cx.filter_dids.push(OTHER.to_owned());
+        assert_eq!(source.next(&cx).await.unwrap(), SourceStatus::Waiting);
+        assert_eq!(host.websocket_urls().len(), 1, "changed D is rate-limited");
+
+        host.advance_ms(600_000);
+        assert_eq!(
+            source.next(&cx).await.unwrap(),
+            SourceStatus::Actions(vec![Action::CatchUp {
+                did: OTHER.to_owned()
+            }])
+        );
+        let urls = host.websocket_urls();
+        assert_eq!(urls.len(), 2);
+        assert!(urls[1].contains("dids=did%3Aplc%3Aother"));
+        assert!(!urls[1].contains("kinds=commit"));
+    });
+}

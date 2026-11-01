@@ -98,6 +98,7 @@ struct Inner {
     txt: Mutex<BTreeMap<String, TxtAnswer>>,
     blobs: Mutex<BTreeMap<String, Vec<u8>>>,
     ws: Mutex<Vec<(String, Vec<WsMessage>)>>,
+    ws_urls: Mutex<Vec<String>>,
     ws_sent: Arc<Mutex<Vec<String>>>,
     /// Named locks ([`Host::lock`]), shared by clones (one "machine").
     locks: ProcessLocks,
@@ -158,6 +159,7 @@ impl MemHost {
                 txt: Mutex::new(BTreeMap::new()),
                 blobs: Mutex::new(BTreeMap::new()),
                 ws: Mutex::new(Vec::new()),
+                ws_urls: Mutex::new(Vec::new()),
                 ws_sent: Arc::new(Mutex::new(Vec::new())),
                 locks: ProcessLocks::new(),
             }),
@@ -372,6 +374,11 @@ impl MemHost {
         lock(&self.inner.ws).push((prefix.to_owned(), messages));
     }
 
+    /// URLs of all scripted WebSocket connections, in connection order.
+    pub fn websocket_urls(&self) -> Vec<String> {
+        lock(&self.inner.ws_urls).clone()
+    }
+
     /// Text frames sent on scripted WebSockets.
     pub fn websocket_sent(&self) -> Vec<String> {
         lock(&self.inner.ws_sent).clone()
@@ -512,6 +519,7 @@ impl Host for MemHost {
 
     async fn websocket(&self, url: url::Url, max_message_bytes: u32) -> Result<MemWs, HostError> {
         let s = url.to_string();
+        lock(&self.inner.ws_urls).push(s.clone());
         let script = lock(&self.inner.ws)
             .iter()
             .rev()
