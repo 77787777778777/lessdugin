@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// A done adoption's report (`WriteState.done.report`) is shown when its write event arrives,
-// once (engine-api.md §3.5 `mod_adopt`; review finding sec-8).
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+// A done adoption's report (`WriteState.done.report`) is shown for its acting account, once
+// (engine-api.md §3.5 `mod_adopt`; review finding sec-8).
+import { MockEngine } from "@lessdugin/engine/mock";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { WriteStore } from "../engine/writes.ts";
+import { renderWithApp } from "../test/render.tsx";
 import { AdoptionReport } from "./AdoptionReport.tsx";
 
 const NS = "online.7778777.lessdugin.temp";
@@ -13,32 +15,97 @@ const LINES = [`cannot adopt ${MOD}/k-1: not in effect`, `kept own assertion for
 describe("AdoptionReport", () => {
   it("lists what a done adoption did not adopt, once per write", async () => {
     const store = new WriteStore();
-    render(<AdoptionReport store={store} />);
+    const me = (await new MockEngine().activeAccount())?.did;
+    if (!me) throw new Error("no active account");
+    const id = `${me}/8`;
+    renderWithApp(<AdoptionReport store={store} />);
     expect(screen.queryByText("Adoption report")).toBeNull();
     // a write that is done without a report (everything adopted, or not an adoption) says nothing
-    store.update("w7", { kind: "done", uri: `${MOD}/k-0` });
-    store.update("w8", { kind: "sending" });
+    store.update(`${me}/7`, { kind: "done", uri: `${MOD}/k-0` });
+    store.update(id, { kind: "sending" });
     expect(screen.queryByText("Adoption report")).toBeNull();
-    store.update("w8", { kind: "done", uri: `${MOD}/a-1`, report: LINES });
+    store.update(id, { kind: "done", uri: `${MOD}/a-1`, report: LINES });
     expect(await screen.findByText("Adoption report")).toBeTruthy();
-    expect(screen.getByText(/\(write w8\); 2 assertions not adopted/)).toBeTruthy();
+    expect(screen.getByText(/; 2 assertions not adopted/)).toBeTruthy();
     const items = within(screen.getByTestId("adoption-report")).getAllByRole("listitem");
     expect(items.map((li) => li.textContent)).toEqual(LINES);
     fireEvent.click(screen.getByRole("button", { name: "Close" }));
     await waitFor(() => expect(screen.queryByText("Adoption report")).toBeNull());
     // the same done state again (an event replayed, an outbox listing) does not reopen it
-    store.update("w8", { kind: "done", uri: `${MOD}/a-1`, report: LINES });
+    store.update(id, { kind: "done", uri: `${MOD}/a-1`, report: LINES });
     expect(screen.queryByText("Adoption report")).toBeNull();
+  });
+
+  it("keeps A's report hidden after switching to B and recovers it on returning to A", async () => {
+    const engine = new MockEngine();
+    const store = new WriteStore();
+    const a = (await engine.activeAccount())?.did;
+    if (!a) throw new Error("no active account");
+    const b = "did:plc:accountbbbbbbbbbbbbbbbbbbbb";
+    await engine.addAccount({ did: b, pds: "https://pds.example.test", auth: "appPassword" });
+    const { queryClient } = renderWithApp(<AdoptionReport store={store} />, { engine });
+    // Startup seeding can contain either account's retained writes, but presentation is scoped.
+    store.seed([
+      { id: `${b}/20`, state: { kind: "done", uri: `${MOD}/b`, report: ["B report"] } },
+      { id: `${a}/20`, state: { kind: "done", uri: `${MOD}/a`, report: ["A report"] } },
+    ]);
+    expect((await screen.findByTestId("adoption-report")).textContent).toContain("A report");
+    await act(async () => {
+      await engine.setActiveAccount(b);
+      await queryClient.invalidateQueries();
+    });
+    await screen.findByText("B report");
+    store.update(`${a}/20`, { kind: "done", uri: `${MOD}/a`, report: ["A report"] });
+    expect(screen.queryByText("A report")).toBeNull();
+    expect(store.pendingReport(a)?.lines).toEqual(["A report"]);
+    expect(store.pendingReport(b)?.lines).toEqual(["B report"]);
+    await act(async () => {
+      await engine.setActiveAccount(a);
+      await queryClient.invalidateQueries();
+    });
+    expect((await screen.findByTestId("adoption-report")).textContent).toContain("A report");
+  });
+
+  it("shows no report while the active account query is unresolved", async () => {
+    const engine = new MockEngine();
+    const a = (await engine.activeAccount())?.did;
+    if (!a) throw new Error("no active account");
+    const store = new WriteStore();
+    store.seed([{ id: `${a}/20`, state: { kind: "done", uri: `${MOD}/a`, report: ["A report"] } }]);
+    let answer: (() => void) | undefined;
+    const pending = new Promise<void>((resolve) => {
+      answer = resolve;
+    });
+    const original = engine.activeAccount.bind(engine);
+    let hold = false;
+    engine.activeAccount = async () => {
+      if (hold) await pending;
+      return original();
+    };
+    hold = true;
+    const { queryClient } = renderWithApp(<AdoptionReport store={store} />, { engine });
+    expect(screen.queryByText("Adoption report")).toBeNull();
+    await act(async () => {
+      answer?.();
+      await queryClient.invalidateQueries();
+    });
+    expect(await screen.findByText("Adoption report")).toBeTruthy();
   });
 
   it("shows reports in turn", async () => {
     const store = new WriteStore();
-    render(<AdoptionReport store={store} />);
-    store.update("w1", { kind: "done", uri: `${MOD}/a-1`, report: [LINES[0] as string] });
-    store.update("w2", { kind: "done", uri: `${MOD}/a-2`, report: [LINES[1] as string] });
-    expect((await screen.findByText(/\(write w1\)/)).textContent).toMatch(/1 assertion not/);
+    const me = (await new MockEngine().activeAccount())?.did;
+    if (!me) throw new Error("no active account");
+    const one = `${me}/1`;
+    const two = `${me}/2`;
+    renderWithApp(<AdoptionReport store={store} />);
+    store.update(one, { kind: "done", uri: `${MOD}/a-1`, report: [LINES[0] as string] });
+    store.update(two, { kind: "done", uri: `${MOD}/a-2`, report: [LINES[1] as string] });
+    expect((await screen.findByText(new RegExp(`\\(write ${one}\\)`))).textContent).toMatch(
+      /1 assertion not/,
+    );
     fireEvent.click(screen.getByRole("button", { name: "Close" }));
-    expect(await screen.findByText(/\(write w2\)/)).toBeTruthy();
+    expect(await screen.findByText(new RegExp(`\\(write ${two}\\)`))).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Close" }));
     await waitFor(() => expect(screen.queryByText("Adoption report")).toBeNull());
   });

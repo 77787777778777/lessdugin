@@ -7,6 +7,7 @@ import { MockEngine } from "@lessdugin/engine/mock";
 import { DTO_VERSION, type ForumView, type ModLogEntry } from "@lessdugin/engine/types";
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
+import { AdoptionReport } from "../../components/AdoptionReport.tsx";
 import { renderWithApp } from "../../test/render.tsx";
 import { ForumModPage, isBlocked } from "./ForumModPage.tsx";
 import { ForumContext } from "./forumContext.tsx";
@@ -226,22 +227,33 @@ describe("ForumModPage", () => {
     await waitFor(() => expect(adopt).toHaveBeenCalledWith(forum, OTHER));
   });
 
-  it("lists what the adoption did not adopt, from the write's report (sec-8)", async () => {
+  it("hands what the adoption did not adopt to the global report, without a page copy", async () => {
     const engine = new MockEngine({ holdMs: 0, sendMs: 0 });
     const forum = (await engine.followed())[0]?.uri ?? "";
+    const view: ForumView = { ...(await engine.forumOpen(forum)), myRole: "owner" };
+    delete view.viewer;
     // the fixture's former moderator, whose forum pin has lapsed
     const lapsed = (await engine.modLog(forum)).entries.find((e) => e.lapsed);
     if (lapsed === undefined) throw new Error("no lapsed entry");
-    await setup(engine);
+    renderWithApp(
+      <>
+        <ForumContext value={view}>
+          <ForumModPage />
+        </ForumContext>
+        <AdoptionReport />
+      </>,
+      { engine },
+    );
     fireEvent.change(await screen.findByRole("textbox", { name: /Former moderator/ }), {
       target: { value: lapsed.actor.did },
     });
     fireEvent.click(screen.getByRole("button", { name: "Adopt" }));
     await acknowledge();
-    const list = await screen.findByRole("region", { name: "Not adopted" });
+    const list = await screen.findByTestId("adoption-report");
     expect(within(list).getByRole("listitem").textContent).toBe(
       `cannot adopt ${lapsed.uri}: not in effect`,
     );
+    expect(screen.queryByRole("region", { name: "Not adopted" })).toBeNull();
   });
 
   it("approves an applicant from the queue only after the interstitial (m3-4, sec-4)", async () => {

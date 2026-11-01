@@ -847,7 +847,8 @@ export class MockEngine implements EngineApi {
   // ------------------------------------------------------------------------------- writes
 
   private write(undoable: boolean, apply: () => Applied): WriteTicket {
-    const id = this.nextId("w");
+    // The same account/sequence shape as crates/core/src/outbox/model.rs `write_id`.
+    const id = `${this.me()}/${this.s.nextId++}`;
     const rec: WriteRec = { id, state: { kind: "pending" }, undoable, apply };
     this.writeRecs.set(id, rec);
     this.emit({ kind: "write", id, state: { kind: "pending" } });

@@ -6,6 +6,7 @@
 // keeps each report until it is closed, so one that arrives while another is open follows it.
 
 import { useSyncExternalStore } from "react";
+import { useActiveAccount } from "../engine/queries.ts";
 import { type WriteStore, writeStore } from "../engine/writes.ts";
 import { plural } from "../lib/text.ts";
 import ui from "../styles/ui.module.css";
@@ -13,7 +14,10 @@ import { Dialog } from "./Dialog.tsx";
 
 export function AdoptionReport({ store = writeStore }: { store?: WriteStore | undefined }) {
   useSyncExternalStore(store.subscribe, store.snapshot, store.snapshot);
-  const report = store.pendingReport();
+  // No report is shown until the actual account query has answered. A report that completed
+  // after a switch stays queued for the account whose DID prefixes its write id.
+  const active = useActiveAccount();
+  const report = active.data === undefined ? undefined : store.pendingReport(active.data?.did);
   const close = (): void => {
     if (report) store.dismissReport(report.id);
   };

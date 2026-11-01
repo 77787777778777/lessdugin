@@ -223,6 +223,7 @@ describe("MockEngine writes", () => {
     if (lapsed === undefined) throw new Error("no lapsed entry");
     const adoption = await e.modAdopt(FORUM_URI, lapsed.actor.did);
     await vi.advanceTimersByTimeAsync(50);
+    expect(adoption.id).toBe(`${(await e.activeAccount())?.did}/${adoption.id.split("/").pop()}`);
     expect((await e.writeStatus(adoption.id))?.state).toMatchObject({
       kind: "done",
       report: [`cannot adopt ${lapsed.uri}: not in effect`],
@@ -244,7 +245,9 @@ describe("MockEngine writes", () => {
     await vi.advanceTimersByTimeAsync(50);
     const removal = await e.modsSet(uri, { kind: "remove", did });
     expect(removal.notices?.map((n) => n.code)).toEqual(["adoptedFirst"]);
-    expect(removal.notices?.[0]?.message).toMatch(/^mod adopt runs first \(write w-\d+, 0 /);
+    expect(removal.notices?.[0]?.message).toMatch(
+      /^mod adopt runs first \(write did:[^/]+\/\d+, 0 /,
+    );
     expect(
       (await e.modsSet(uri, { kind: "remove", did, skipAdopt: true })).notices,
     ).toBeUndefined();
