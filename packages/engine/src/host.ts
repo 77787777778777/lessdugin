@@ -5,7 +5,11 @@
 //
 // - `http(...)`: `Target::Anon` requests through `fetchAnon` (fetch.ts); `Target::UserPds`
 //   requests through `userPds` (the worker: the main thread's AuthBridge);
-// - `fetchBlob(...)`: blobs.ts;
+// - `fetchBlob(...)`: blobs.ts, one download per CID at a time (sync.md §12.2): a second call
+//   for a CID being downloaded awaits the same promise, and a caller that stops waiting (the
+//   core's `BODY_BLOB_WAIT_MS` for a spilled body) neither stops it nor starts another;
+//   `blobOpen`, `blobRead`, `blobDelete`: the same store, by CID (`blobRead` slices the stored
+//   `Blob`, so only the window it returns enters wasm memory);
 // - `lock(name, wait)`: Web Locks (locks.ts); in `lessdugin web` mode an `outbox:<did>` lock is
 //   then also the native one (bridge-lock.ts), Web Lock first;
 // - `sleep(ms)`, `now()`, `random(n)`: `setTimeout`, `Date.now()`, `crypto.getRandomValues`;
@@ -38,6 +42,9 @@ export interface JsHostImports {
     redirects: number,
   ): Promise<HttpResult>;
   fetchBlob(pds: string, did: string, cid: string, maxBytes: number): Promise<BlobHandleValue>;
+  blobOpen(cid: string): Promise<BlobHandleValue | null>;
+  blobRead(cid: string, offset: number, len: number): Promise<Uint8Array>;
+  blobDelete(cid: string): Promise<void>;
   lock(name: string, wait: boolean): Promise<LockHandle | null>;
   sleep(ms: number): Promise<void>;
   now(): number;
@@ -60,6 +67,9 @@ export interface HostDeps {
   now?: () => number;
 }
 
+/** sync.md §12.2: the most bytes one `blobRead` returns (`BLOB_READ_MAX_BYTES`, 1 MiB). */
+export const BLOB_READ_MAX_BYTES = 1_048_576;
+
 function pairs(flat: string[]): [string, string][] {
   const out: [string, string][] = [];
   for (let i = 0; i + 1 < flat.length; i += 2) out.push([flat[i] as string, flat[i + 1] as string]);
@@ -74,6 +84,8 @@ function asHostError(e: unknown): unknown {
 
 export function createJsHost(deps: HostDeps): JsHostImports {
   const now = deps.now ?? (() => Date.now());
+  /** The downloads in flight, by CID (see the module comment). */
+  const downloads = new Map<string, Promise<BlobHandleValue>>();
   return {
     async http(method, url, account, path, headers, body, maxBytes, timeoutMs, redirects) {
       try {
@@ -108,9 +120,46 @@ export function createJsHost(deps: HostDeps): JsHostImports {
         throw asHostError(e);
       }
     },
-    async fetchBlob(pds, did, cid, maxBytes) {
+    fetchBlob(pds, did, cid, maxBytes) {
+      const running = downloads.get(cid);
+      if (running) return running;
+      const p: Promise<BlobHandleValue> = fetchBlob(
+        { ...deps.fetch, store: deps.blobs },
+        pds,
+        did,
+        cid,
+        maxBytes,
+      )
+        .catch((e: unknown) => {
+          throw asHostError(e);
+        })
+        .finally(() => {
+          if (downloads.get(cid) === p) downloads.delete(cid);
+        });
+      downloads.set(cid, p);
+      return p;
+    },
+    async blobOpen(cid) {
       try {
-        return await fetchBlob({ ...deps.fetch, store: deps.blobs }, pds, did, cid, maxBytes);
+        const b = await deps.blobs.get(cid);
+        return b ? { cid, size: b.size, locator: deps.blobs.locator(cid) } : null;
+      } catch (e) {
+        throw asHostError(e);
+      }
+    },
+    async blobRead(cid, offset, len) {
+      try {
+        const b = await deps.blobs.get(cid);
+        if (!b) throw hostError("storage", `blob ${cid} is not stored`);
+        const n = Math.min(len, BLOB_READ_MAX_BYTES);
+        return new Uint8Array(await b.slice(offset, offset + n).arrayBuffer());
+      } catch (e) {
+        throw asHostError(e);
+      }
+    },
+    async blobDelete(cid) {
+      try {
+        await deps.blobs.delete(cid);
       } catch (e) {
         throw asHostError(e);
       }

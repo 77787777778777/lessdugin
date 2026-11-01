@@ -515,12 +515,13 @@ pub fn post_title(p: &PostSummary) -> TermText {
     }
 }
 
-/// A post's meta line: author, time, comments, score (with agreement, notes and the viewer's
+/// A post's meta line: author, time (t_rank), comments, score (with agreement, notes and the viewer's
 /// own vote), kind, badges (tier, pinned, locked, unread), tags, state and trust badges.
 pub fn post_meta(p: &PostSummary) -> Vec<TermText> {
     let mut parts = vec![
         actor(&p.author),
-        tt(&time(p.created_at_ms)),
+        // the displayed time is t_rank, never the self-asserted createdAt (`social.md` §2.3)
+        tt(&time(p.t_rank_ms)),
         count(p.comment_count, "comment", "comments"),
     ];
     parts.extend(score_parts(&p.score));

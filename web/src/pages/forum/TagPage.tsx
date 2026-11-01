@@ -53,7 +53,7 @@ export function TagPage() {
       {q.data.tag.description && <p className={ui.muted}>{q.data.tag.description}</p>}
       {q.data.page && (
         <div className={ui.card}>
-          <RenderedHtml html={q.data.page.html} />
+          <RenderedHtml html={q.data.page.html} media={q.data.page.media} />
         </div>
       )}
       <h3 className={ui.sectionTitle}>

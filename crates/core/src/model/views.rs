@@ -49,7 +49,7 @@ use crate::dto::{
 use crate::identity::short_did;
 use crate::model::build::ForumModel;
 use crate::model::palette;
-use crate::model::render::{RenderCache, empty_body, render_md};
+use crate::model::render::{BodyItem, MediaPrefs, RenderCache, empty_body};
 use crate::social::full::gates::Gate;
 use crate::social::full::moderation::{ModRecord, ModScope};
 use crate::social::full::query::{self, CommentQuery, Query};
@@ -63,6 +63,11 @@ use crate::store::records::Level;
 
 /// The newest newcomer items the mod queue lists (open mode, `social.md` §4.12).
 pub const NEWCOMER_QUEUE_MAX: usize = 100;
+
+/// The open-mode label of the forum header (`threat-model.md` L7, SOC-13; `social.md` §3.2), as
+/// the `relayDependent` banner: open mode finds brand-new members only through third-party
+/// infrastructure.
+pub const OPEN_MODE_LABEL: &str = "Open mode relies on Bluesky relay, Jetstream and Constellation";
 
 /// An actor view with only the DID (no cached identity).
 pub fn bare_actor(did: &str) -> ActorView {
@@ -252,8 +257,12 @@ pub struct Viewer {
     pub muted: BTreeSet<String>,
     /// `lastVisited[post]` (µs, on the `t_obs` scale) of the posts the view shows: a comment is
     /// unread iff `t_obs(c) > lastVisited[root]` (§16). Posts without a mark have no unread
-    /// state.
+    /// state (`unreadComments` omitted, `unread` false). Empty in parity mode (`engine-api.md`
+    /// §2.1, decision O-13): read marks are device state, which parity mode cannot inject, so
+    /// the engine builds every view as for a device with no marks.
     pub read: BTreeMap<String, i64>,
+    /// The device's media autoload inputs (`sync.md` §11.3).
+    pub media: MediaPrefs,
 }
 
 /// Everything a view needs besides the model.
@@ -295,9 +304,10 @@ impl Views<'_> {
             .unwrap_or_else(|| bare_actor(did))
     }
 
-    /// The forum's banners (`newerRules`, `moderationUnavailable`).
+    /// The forum's banners (`newerRules`, `moderationUnavailable`, `authorityInactive`).
     pub fn banners(&self) -> Vec<Banner> {
-        self.model
+        let mut out: Vec<Banner> = self
+            .model
             .view
             .banners
             .iter()
@@ -305,7 +315,15 @@ impl Views<'_> {
                 code: b.code.clone(),
                 message: b.message.clone(),
             })
-            .collect()
+            .collect();
+        if !self.model.inactive.is_empty() {
+            out.push(Banner {
+                code: "authorityInactive".into(),
+                message: "a moderator's account is inactive; their decisions still apply for now"
+                    .into(),
+            });
+        }
+        out
     }
 
     /// The completeness of the forum, `degraded` also when the fold is (§4.11).
@@ -580,8 +598,33 @@ impl Views<'_> {
             _ => None,
         };
         let pds = self.pds.get(&x.did).map_or("", String::as_str);
-        self.renders
-            .body(&x.cid, md, &self.model.input.ns, excerpt, &x.did, pds)
+        let root = self
+            .model
+            .comment_root(&x.uri)
+            .and_then(|r| self.model.skel(r));
+        fn labels_of(x: Option<&Skel>) -> &[String] {
+            match x.map(|x| &x.data) {
+                Some(SkelData::Post { labels, .. }) => labels,
+                _ => &[],
+            }
+        }
+        let p = &self.model.view.participation;
+        let item = BodyItem {
+            established: p.s.contains(&x.did) || self.model.in_e(&x.did),
+            visible: self.item_state(&x.uri) == Some(ItemState::Visible),
+            labels: labels_of(Some(x)),
+            root_labels: labels_of(root),
+            prefs: &self.viewer.media,
+        };
+        self.renders.body(
+            &x.cid,
+            md,
+            &self.model.input.ns,
+            excerpt,
+            &x.did,
+            pds,
+            &item,
+        )
     }
 
     /// P of the current body of a listed item whose value was read (`None` for a spilled body
@@ -592,7 +635,9 @@ impl Views<'_> {
             return None;
         }
         let body = self.values.get(uri)?.get("body")?;
-        if body.get("textBlob").is_some() {
+        let fetched = crate::model::render::text_blob_cid(body)
+            .is_some_and(|b| self.renders.spilled(b).is_some() || self.renders.contains(&x.cid));
+        if body.get("textBlob").is_some() && !fetched {
             return None;
         }
         Some(self.body(x, true).text)
@@ -1112,7 +1157,7 @@ impl Views<'_> {
         let d = &self.model.decl;
         let about = d.about.as_ref().and_then(|md| {
             let v = serde_json::to_value(md).ok()?;
-            Some(render_md(&v, &self.model.input.ns, None))
+            Some(self.renders.uncached(&v, &self.model.input.ns))
         });
         let moderators = lessdugin_lexicon::validity::entry::moderators(d, &self.model.key.owner)
             .into_iter()
@@ -1127,6 +1172,12 @@ impl Views<'_> {
             })
             .collect();
         let mut banners = self.banners();
+        if self.model.view.policy.membership == MembershipMode::Open {
+            banners.push(Banner {
+                code: "relayDependent".into(),
+                message: OPEN_MODE_LABEL.into(),
+            });
+        }
         banners.extend(warnings.iter().map(|w| Banner {
             code: "warning".into(),
             message: w.clone(),

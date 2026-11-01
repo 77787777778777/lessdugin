@@ -3,9 +3,11 @@
 //!
 //! Commands:
 //!   ci                 fmt, clippy (native + wasm32), tests (native + wasm32; the social
-//!                      vectors also with `final-ns`), lexicon lint, web checks
+//!                      vectors also with `final-ns`, the markdown vectors also with `ammonia`),
+//!                      lexicon lint, web checks and, with Chromium available, the web e2e suite
 //!   test-wasm [-- <test args>]   run the interop, vector and property tests of atp, lexicon and
-//!                      markdown on wasm32-unknown-unknown under node (wasm-bindgen-test-runner),
+//!                      markdown, and core's social fold vectors and P9 parity digest (in both
+//!                      namespaces), on wasm32-unknown-unknown under node (wasm-bindgen-test-runner),
 //!                      after checking that the wasm32 test binaries hold the native tests
 //!   wasm [--release|--dev] [--budget] [--report] [--kv-test]
 //!                      build the engine wasm + JS bindings into packages/engine/pkg
@@ -45,6 +47,57 @@ const WASM_SAFE: &[&str] = &[
 /// Crates whose integration tests (interop, vector and property tests) also run on wasm32 under
 /// node (`test-wasm`); every integration test of these crates must build for wasm32.
 const WASM_TESTED: &[&str] = &["lessdugin-atp", "lessdugin-lexicon", "lessdugin-markdown"];
+
+/// Single integration tests of other crates that also run on wasm32 under node (`test-wasm`), as
+/// (package, features, test targets): the social fold vectors (`social_vectors`, which holds the
+/// full fold's runners at the final namespace) and the P9 parity digest (`social_parity`), in the
+/// build namespace and in the final one the vectors are written in (`social.md` §1.3 rule 6 and
+/// §6.3 P9, `engine-api.md` §3.9: native = wasm).
+const WASM_TESTED_TARGETS: &[(&str, &str, &[&str])] = &[
+    ("lessdugin-core", "", &["social_vectors", "social_parity"]),
+    (
+        "lessdugin-core",
+        "final-ns",
+        &["social_vectors", "social_parity"],
+    ),
+];
+
+/// The cargo package and target selections `test-wasm` runs on wasm32: every integration test of
+/// [`WASM_TESTED`], then each entry of [`WASM_TESTED_TARGETS`].
+fn wasm_selections() -> Vec<Vec<&'static str>> {
+    let mut crates = Vec::new();
+    for c in WASM_TESTED {
+        crates.extend(["-p", c]);
+    }
+    crates.extend(["--test", "*"]);
+    let mut all = vec![crates];
+    for (package, features, tests) in WASM_TESTED_TARGETS {
+        let mut sel = vec!["-p", *package];
+        if !features.is_empty() {
+            sel.extend(["--features", *features]);
+        }
+        for t in *tests {
+            sel.extend(["--test", *t]);
+        }
+        all.push(sel);
+    }
+    all
+}
+
+/// M4 acceptance, `ammonia(html) == html` for every render vector (`lfm-1.md` §8.5): the
+/// markdown vector and property tests with the native-only `ammonia` feature, which no default
+/// build enables (`ci` and ci.yml's rust job).
+const AMMONIA_TESTS: &[&str] = &[
+    "test",
+    "-p",
+    "lessdugin-markdown",
+    "--features",
+    "ammonia",
+    "--test",
+    "vectors",
+    "--test",
+    "props",
+];
 
 /// The engine wasm's `gzip -9` size (after wasm-opt) above which `wasm --budget` fails. It is a
 /// tripwire for something linked in by mistake (tokio, reqwest, ammonia, debug info), not a
@@ -191,6 +244,7 @@ fn ci() -> Result<(), String> {
             "dto_decl",
         ],
     )?;
+    run("cargo", AMMONIA_TESTS)?;
     // M2 acceptance: the 50-member cold sync in under 5 s, on an optimised build (the debug
     // run above asserts it only off CI; a release build has devnet mode only with `devnet`).
     // As in ci.yml, the release CLI embeds the placeholder page: the test asserts sync timing,
@@ -238,19 +292,39 @@ fn ci() -> Result<(), String> {
         );
     }
     if root().join("node_modules").exists() {
-        // the root check is ci.yml's: biome with the root config, over every package
+        // the root check is ci.yml's: biome with the root config over every package, then each
+        // package's own `check` (tsc, its biome run, the web package's raw-href guard)
         run("pnpm", &["run", "check"])?;
-        run("pnpm", &["-r", "--if-present", "run", "check"])?;
         run("pnpm", &["-r", "--if-present", "run", "test"])?;
         // the release bundle, as ci.yml's web job: `vite build` + check-release-bundle
         run("pnpm", &["run", "build"])?;
     } else {
         eprintln!("(skipping web checks: run `pnpm install` first)");
     }
+    ci_web_e2e()?;
     match over_budget {
         Some(over) => Err(over),
         None => Ok(()),
     }
+}
+
+/// ci.yml's `web-e2e` job, using an already installed Chromium (the workflow installs its own).
+fn ci_web_e2e() -> Result<(), String> {
+    let mut vars = vec![("LESSDUGIN_KV_TEST".into(), "1".into())];
+    match env::var_os("PLAYWRIGHT_BROWSERS_PATH") {
+        Some(path) if !path.is_empty() => {}
+        _ if Path::new("/opt/pw-browsers").is_dir() => {
+            vars.push(("PLAYWRIGHT_BROWSERS_PATH".into(), "/opt/pw-browsers".into()));
+        }
+        _ => {
+            eprintln!(
+                "(skipping web e2e: no Chromium in PLAYWRIGHT_BROWSERS_PATH or /opt/pw-browsers)"
+            );
+            return Ok(());
+        }
+    }
+    wasm(&["--kv-test".to_owned()])?;
+    run_env("pnpm", &["--filter", "@lessdugin/web", "run", "e2e"], &vars)
 }
 
 /// The Rust end-to-end tests against the devnet: (package, test targets). They run only with
@@ -276,6 +350,14 @@ const RUST_E2E: &[(&str, &[&str])] = &[
 /// wasm, the e2e SPA (`web/dist-e2e`), the CLI embedding it (so the `lessdugin web` spec runs)
 /// and the TUI parity driver (`crates/tui/examples/parity_driver.rs`).
 fn e2e(args: &[String]) -> Result<(), String> {
+    if matches!(args, [a] if a == "--help" || a == "-h") {
+        println!(
+            "usage: cargo xtask e2e [--rust] [--web] [--parity] [--no-build]\n\
+             --rust runs the Rust devnet tests; --web runs the SPA devnet suite;\n\
+             --parity runs only the M2 parity scenario; no selection runs Rust and web"
+        );
+        return Ok(());
+    }
     let (mut rust, mut web, mut parity, mut build) = (false, false, false, true);
     for a in args {
         match a.as_str() {
@@ -394,11 +476,11 @@ fn install_runner_hint() -> String {
     }
 }
 
-/// `cargo test` of the `WASM_TESTED` crates' integration tests for wasm32-unknown-unknown, run in
-/// node by wasm-bindgen-test-runner. The tests are the native ones: on wasm32 they are
-/// `#[wasm_bindgen_test]`s and read their fixtures from copies embedded at compile time
-/// ([`check_wasm_parity`] runs first). `args` are passed on to the test binaries (e.g.
-/// `-- --nocapture`).
+/// `cargo test` of the `WASM_TESTED` crates' integration tests and of [`WASM_TESTED_TARGETS`] for
+/// wasm32-unknown-unknown, run in node by wasm-bindgen-test-runner. The tests are the native
+/// ones: on wasm32 they are `#[wasm_bindgen_test]`s and read their fixtures from copies embedded
+/// at compile time ([`check_wasm_parity`] runs first). `args` are passed on to the test binaries
+/// (e.g. `-- --nocapture`).
 fn test_wasm(args: &[String]) -> Result<(), String> {
     let want = wasm_bindgen_version()?;
     let out = Command::new(TEST_RUNNER).arg("--version").output();
@@ -421,41 +503,39 @@ fn test_wasm(args: &[String]) -> Result<(), String> {
         return Err("node not found (the wasm32 tests run in node)".into());
     }
     check_wasm_parity()?;
-    let mut cargo_args = vec!["test", "--target", "wasm32-unknown-unknown"];
-    for c in WASM_TESTED {
-        cargo_args.extend(["-p", c]);
-    }
-    // integration tests only: the crates' unit tests are plain `#[test]`s (native only)
-    cargo_args.extend(["--test", "*"]);
     let rest: Vec<&str> = args
         .iter()
         .map(String::as_str)
         .skip_while(|a| *a == "--")
         .collect();
-    if !rest.is_empty() {
-        cargo_args.push("--");
-        cargo_args.extend(rest);
+    // integration tests only: the crates' unit tests are plain `#[test]`s (native only)
+    for sel in wasm_selections() {
+        let mut cargo_args = vec!["test", "--target", "wasm32-unknown-unknown"];
+        cargo_args.extend(sel);
+        if !rest.is_empty() {
+            cargo_args.push("--");
+            cargo_args.extend(&rest);
+        }
+        eprintln!(
+            "$ cargo {} ({TEST_RUNNER} {want}, node)",
+            cargo_args.join(" ")
+        );
+        let status = Command::new("cargo")
+            .args(&cargo_args)
+            .env("CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER", TEST_RUNNER)
+            .current_dir(root())
+            .status()
+            .map_err(|e| format!("failed to run cargo: {e}"))?;
+        if !status.success() {
+            return Err(format!("wasm32 tests failed: {status}"));
+        }
     }
-    eprintln!(
-        "$ cargo {} ({TEST_RUNNER} {want}, node)",
-        cargo_args.join(" ")
-    );
-    let status = Command::new("cargo")
-        .args(&cargo_args)
-        .env("CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER", TEST_RUNNER)
-        .current_dir(root())
-        .status()
-        .map_err(|e| format!("failed to run cargo: {e}"))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("wasm32 tests failed: {status}"))
-    }
+    Ok(())
 }
 
-/// Integration tests of `WASM_TESTED` that run natively only, as `(test file, test name)`: each
-/// compares a list embedded for wasm32 with a directory on disk. Every other one must also be a
-/// wasm32 test ([`check_wasm_parity`]).
+/// Integration tests of `WASM_TESTED` and [`WASM_TESTED_TARGETS`] that run natively only, as
+/// `(test file, test name)`: each compares a list embedded for wasm32 with a directory on disk.
+/// Every other one must also be a wasm32 test ([`check_wasm_parity`]).
 const NATIVE_ONLY_TESTS: &[(&str, &str)] = &[
     (
         "crates/lexicon/tests/schemas.rs",
@@ -465,45 +545,55 @@ const NATIVE_ONLY_TESTS: &[(&str, &str)] = &[
         "crates/markdown/tests/vectors.rs",
         "wasm_embeds_every_vector_file",
     ),
+    (
+        "crates/core/tests/social_vectors.rs",
+        "wasm_embeds_every_social_vector_file",
+    ),
 ];
 
-/// Checks that the wasm32 test binaries of `WASM_TESTED` hold exactly their native integration
-/// tests, except [`NATIVE_ONLY_TESTS`]. Without it a test file whose tests are not
-/// `#[wasm_bindgen_test]`s on wasm32 would pass silently: the runner says "no tests to run!" and
-/// exits 0 for a binary without any.
+/// Checks that the wasm32 test binaries of every [`wasm_selections`] entry hold exactly their
+/// native integration tests, except [`NATIVE_ONLY_TESTS`]. Without it a test file whose tests are
+/// not `#[wasm_bindgen_test]`s on wasm32 would pass silently: the runner says "no tests to run!"
+/// and exits 0 for a binary without any.
 fn check_wasm_parity() -> Result<(), String> {
-    let mut native_args = vec!["test"];
-    for c in WASM_TESTED {
-        native_args.extend(["-p", c]);
-    }
-    native_args.extend(["--test", "*"]);
-    let mut wasm_args = native_args.clone();
-    wasm_args.extend(["--target", "wasm32-unknown-unknown"]);
-    let native = test_binaries(&native_args)?;
-    let wasm: BTreeMap<String, PathBuf> = test_binaries(&wasm_args)?.into_iter().collect();
     let mut problems = Vec::new();
-    let (mut total, mut native_only) = (0, 0);
-    for (file, exe) in &native {
-        let mut want = listed_tests(Command::new(exe).args(["--list", "--format", "terse"]))?;
-        let before = want.len();
-        want.retain(|t| !NATIVE_ONLY_TESTS.contains(&(file.as_str(), t.as_str())));
-        native_only += before - want.len();
-        let Some(wasm_exe) = wasm.get(file) else {
-            problems.push(format!("{file}: no wasm32 test binary"));
-            continue;
-        };
-        let got = listed_tests(Command::new(TEST_RUNNER).arg(wasm_exe).arg("--list"))?;
-        for t in want.iter().filter(|t| !got.contains(t)) {
-            problems.push(format!("{file}: `{t}` is not a wasm32 test"));
+    let (mut total, mut files) = (0, 0);
+    let mut native_only = std::collections::BTreeSet::new();
+    for sel in wasm_selections() {
+        let mut native_args = vec!["test"];
+        native_args.extend(&sel);
+        let mut wasm_args = native_args.clone();
+        wasm_args.extend(["--target", "wasm32-unknown-unknown"]);
+        let native = test_binaries(&native_args)?;
+        let wasm: BTreeMap<String, PathBuf> = test_binaries(&wasm_args)?.into_iter().collect();
+        for (file, exe) in &native {
+            let mut want = listed_tests(Command::new(exe).args(["--list", "--format", "terse"]))?;
+            want.retain(|t| {
+                let only = NATIVE_ONLY_TESTS.contains(&(file.as_str(), t.as_str()));
+                if only {
+                    native_only.insert((file.clone(), t.clone()));
+                }
+                !only
+            });
+            let Some(wasm_exe) = wasm.get(file) else {
+                problems.push(format!("{file}: no wasm32 test binary"));
+                continue;
+            };
+            let got = listed_tests(Command::new(TEST_RUNNER).arg(wasm_exe).arg("--list"))?;
+            for t in want.iter().filter(|t| !got.contains(t)) {
+                problems.push(format!("{file}: `{t}` is not a wasm32 test"));
+            }
+            for t in got.iter().filter(|t| !want.contains(t)) {
+                problems.push(format!("{file}: `{t}` is a wasm32 test only"));
+            }
+            total += got.len();
         }
-        for t in got.iter().filter(|t| !want.contains(t)) {
-            problems.push(format!("{file}: `{t}` is a wasm32 test only"));
+        for file in wasm.keys().filter(|f| !native.iter().any(|(n, _)| n == *f)) {
+            problems.push(format!("{file}: a wasm32 test binary only"));
         }
-        total += got.len();
+        files += native.len();
     }
-    for file in wasm.keys().filter(|f| !native.iter().any(|(n, _)| n == *f)) {
-        problems.push(format!("{file}: a wasm32 test binary only"));
-    }
+    let native_only = native_only.len();
     if native_only != NATIVE_ONLY_TESTS.len() {
         problems.push(format!(
             "NATIVE_ONLY_TESTS lists {} tests, {native_only} of them exist",
@@ -519,8 +609,7 @@ fn check_wasm_parity() -> Result<(), String> {
         ));
     }
     eprintln!(
-        "wasm32 has the native tests: {total} in {} test files ({native_only} native-only)",
-        native.len()
+        "wasm32 has the native tests: {total} in {files} test binaries ({native_only} native-only)"
     );
     Ok(())
 }
@@ -695,8 +784,9 @@ fn wasm_build(args: &[String]) -> Result<Option<String>, String> {
     }
     if o.report && !o.dev {
         let tmp = root().join("target/wasm-report/no-verify");
+        // every default feature but `verify`, so the marginal is verify's alone
         let nv = build_wasm(
-            &["--no-default-features", "--features", "math"],
+            &["--no-default-features", "--features", "math,orientation"],
             profile,
             &tmp,
             true,
@@ -1065,6 +1155,16 @@ fn fuzz(args: &[String]) -> Result<(), String> {
     ];
     seed_args.extend(targets.iter().copied());
     run("cargo", &seed_args)?;
+    // the targets link libFuzzer's C++ runtime dynamically; where the loader has no global
+    // library path (NixOS, the flake's `ci` shell) it is found next to the compiler's
+    let mut vars = Vec::new();
+    if let Some(dir) = cxx_runtime_dir() {
+        let mut path = dir.display().to_string();
+        if let Some(old) = env::var_os("LD_LIBRARY_PATH").filter(|v| !v.is_empty()) {
+            path = format!("{path}:{}", old.to_string_lossy());
+        }
+        vars.push(("LD_LIBRARY_PATH".to_owned(), path));
+    }
     let mut failed = Vec::new();
     for t in &targets {
         let (_, max_len, timeout) = FUZZ_TARGETS
@@ -1102,7 +1202,7 @@ fn fuzz(args: &[String]) -> Result<(), String> {
         }
         a.extend(extra.iter().cloned());
         let a: Vec<&str> = a.iter().map(String::as_str).collect();
-        if run("cargo", &a).is_err() {
+        if run_env("cargo", &a, &vars).is_err() {
             failed.push(*t);
         }
     }
@@ -1114,5 +1214,200 @@ fn fuzz(args: &[String]) -> Result<(), String> {
              `cargo +nightly fuzz run <target> <input>`, minimise with `cargo +nightly fuzz tmin`)",
             failed.join(", ")
         ))
+    }
+}
+
+/// The directory of the C++ runtime (`libstdc++.so.6`) the C++ compiler links, as
+/// `g++ -print-file-name` (or `c++`) names it; `None` when neither gives a path that exists.
+fn cxx_runtime_dir() -> Option<PathBuf> {
+    ["g++", "c++"].into_iter().find_map(|cxx| {
+        let out = Command::new(cxx)
+            .arg("-print-file-name=libstdc++.so.6")
+            .output()
+            .ok()?;
+        let p = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+        (p.is_absolute() && p.exists())
+            .then(|| p.parent().map(Path::to_path_buf))
+            .flatten()
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    //! The CI wiring: the workflows and the root `package.json` run what this file says they run
+    //! (each of these checks was once missing from CI).
+
+    use super::*;
+
+    fn file(rel: &str) -> String {
+        std::fs::read_to_string(root().join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"))
+    }
+
+    /// The single-line `run:` commands of job `job` in workflow `rel`, in order.
+    fn job_runs(rel: &str, job: &str) -> Vec<String> {
+        let text = file(rel);
+        let header = format!("  {job}:");
+        let mut lines = text.lines().skip_while(|l| *l != header);
+        assert!(lines.next().is_some(), "{rel} has no job `{job}`");
+        lines
+            .take_while(|l| !(l.starts_with("  ") && !l.starts_with("   ") && l.ends_with(':')))
+            .filter_map(|l| l.trim_start().strip_prefix("- run: "))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    fn cargo(args: &[&str]) -> String {
+        format!("cargo {}", args.join(" "))
+    }
+
+    /// Native = wasm for the social fold (`social.md` §1.3 rule 6, §6.3 P9): core's social
+    /// vectors and the P9 digest run on wasm32 in both namespaces, in ci.yml's wasm-tests job.
+    #[test]
+    fn the_social_vectors_and_p9_run_on_wasm32_in_ci() {
+        assert!(
+            job_runs(".github/workflows/ci.yml", "wasm-tests")
+                .contains(&"cargo xtask test-wasm".into())
+        );
+        let sels = wasm_selections();
+        for features in [None, Some("final-ns")] {
+            let found = sels.iter().any(|s| {
+                s.windows(2).any(|w| w == ["-p", "lessdugin-core"])
+                    && s.windows(2).any(|w| w == ["--test", "social_vectors"])
+                    && s.windows(2).any(|w| w == ["--test", "social_parity"])
+                    && match features {
+                        None => !s.contains(&"--features"),
+                        Some(f) => s.windows(2).any(|w| w == ["--features", f]),
+                    }
+            });
+            assert!(
+                found,
+                "no wasm32 run of social_vectors and social_parity with {features:?}"
+            );
+        }
+    }
+
+    /// `ammonia(html) == html` (M4 acceptance) runs in ci.yml's rust job (and in `ci`, which runs
+    /// [`AMMONIA_TESTS`]).
+    #[test]
+    fn the_ammonia_equality_runs_in_ci() {
+        let runs = job_runs(".github/workflows/ci.yml", "rust");
+        assert!(
+            runs.contains(&cargo(AMMONIA_TESTS)),
+            "ci.yml rust: {runs:#?}"
+        );
+    }
+
+    /// Every ci.yml job has a counterpart in `cargo xtask ci`, including the browser-only
+    /// sanitiser, CSP and accessibility checks (lfm-1.md §8.5).
+    #[test]
+    fn every_ci_yml_job_has_an_xtask_ci_counterpart() {
+        let workflow = file(".github/workflows/ci.yml");
+        let jobs: Vec<&str> = workflow
+            .lines()
+            .skip_while(|l| *l != "jobs:")
+            .skip(1)
+            .filter(|l| l.starts_with("  ") && !l.starts_with("   ") && l.ends_with(':'))
+            .map(|l| l.trim().trim_end_matches(':'))
+            .collect();
+        assert_eq!(jobs, ["rust", "wasm-tests", "lexicons", "web", "web-e2e"]);
+
+        let source = file("xtask/src/main.rs");
+        let ci = source
+            .split("fn ci() -> Result<(), String> {")
+            .nth(1)
+            .and_then(|s| s.split("/// The Rust end-to-end tests").next())
+            .expect("the ci function");
+        for (job, counterpart) in [
+            ("rust", "run(\"cargo\", AMMONIA_TESTS)?"),
+            ("wasm-tests", "test_wasm(&[])?"),
+            ("lexicons", "lex(&[\"lint\".to_owned()])?"),
+            ("web", "run(\"pnpm\", &[\"run\", \"build\"])?"),
+            ("web-e2e", "ci_web_e2e()?"),
+        ] {
+            assert!(
+                ci.contains(counterpart),
+                "ci.yml's {job} job has no xtask ci counterpart ({counterpart})"
+            );
+        }
+
+        let web_e2e = source
+            .split("fn ci_web_e2e() -> Result<(), String> {")
+            .nth(1)
+            .and_then(|s| s.split("\n}\n").next())
+            .expect("the web-e2e counterpart");
+        for command in [
+            "wasm(&[\"--kv-test\".to_owned()])?",
+            "\"--filter\", \"@lessdugin/web\", \"run\", \"e2e\"",
+            "(\"LESSDUGIN_KV_TEST\".into(), \"1\".into())",
+        ] {
+            assert!(
+                web_e2e.contains(command),
+                "the web-e2e counterpart does not run {command}"
+            );
+        }
+        let runs = job_runs(".github/workflows/ci.yml", "web-e2e");
+        assert!(runs.contains(&"cargo xtask wasm --kv-test".into()));
+        assert!(runs.contains(&"pnpm --filter @lessdugin/web run e2e".into()));
+    }
+
+    /// The web job's `pnpm run check` runs the intended commands in every package, not merely
+    /// scripts that happen to have the right names.
+    #[test]
+    fn the_root_check_runs_every_package_check() {
+        assert!(job_runs(".github/workflows/ci.yml", "web").contains(&"pnpm run check".into()));
+        for (manifest, command) in [
+            (
+                "package.json",
+                "biome check . && pnpm -r --if-present run check",
+            ),
+            (
+                "web/package.json",
+                "tsc -p tsconfig.json && biome check . && node scripts/check-no-raw-href.mjs",
+            ),
+            (
+                "packages/engine/package.json",
+                "tsc -p tsconfig.json && biome check .",
+            ),
+        ] {
+            let pkg = file(manifest);
+            let check = pkg
+                .lines()
+                .find_map(|l| {
+                    l.trim()
+                        .strip_prefix("\"check\": \"")
+                        .and_then(|l| l.strip_suffix("\","))
+                })
+                .unwrap_or_else(|| panic!("{manifest} has no check script"));
+            assert_eq!(check, command, "{manifest}'s check script");
+        }
+    }
+
+    #[test]
+    fn e2e_help_is_a_cheap_probe() {
+        e2e(&["--help".into()]).expect("e2e --help must not build or start a devnet");
+    }
+
+    /// fuzz.yml runs every target `cargo xtask fuzz` knows, and the seed generator seeds each of
+    /// them (without seeds `cargo xtask fuzz` stops at the target).
+    #[test]
+    fn fuzz_yml_runs_every_fuzz_target() {
+        let wf = file(".github/workflows/fuzz.yml");
+        let matrix = wf
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("target: ["))
+            .and_then(|l| l.strip_suffix(']'))
+            .expect("a target matrix");
+        let mut listed: Vec<&str> = matrix.split(',').map(str::trim).collect();
+        let mut known: Vec<&str> = FUZZ_TARGETS.iter().map(|t| t.0).collect();
+        listed.sort();
+        known.sort();
+        assert_eq!(listed, known, "fuzz.yml matrix vs FUZZ_TARGETS");
+        let seeds = file("fuzz/seeds/src/main.rs");
+        for t in &known {
+            assert!(
+                seeds.contains(&format!("\"{t}\" => ")),
+                "fuzz/seeds/src/main.rs has no seeds for {t}"
+            );
+        }
     }
 }

@@ -923,6 +923,37 @@ fn eligibility_and_fold_rows() {
     assert!(eligible(&row, Some(&repo)));
     repo.status = AccountStatus::Inactive;
     assert!(!eligible(&row, Some(&repo)));
+
+    // I8's authority exception (sync.md §3.4): an authority's modActions, for the retention time
+    let week = crate::store::repo::INACTIVE_RETENTION_MS;
+    let mut repo = RepoRow::new("https://pds.example");
+    repo.set_status(AccountStatus::Inactive, Some("takendown".into()), 1_000);
+    repo.set_status(AccountStatus::Inactive, Some("takendown".into()), 5_000);
+    assert_eq!(
+        repo.inactive_since,
+        Some(1_000),
+        "kept from the first check"
+    );
+    let m = version(&uri_in(DID, "modAction", &format!("{FK}-x")), 1, "3l2a", 1);
+    let (ms, _) = admit(Slot::Empty, m);
+    let mrow = rec(&ms).clone();
+    let mkey = RecKey::new(&coll("modAction"), DID, &format!("{FK}-x"));
+    let pkey = RecKey::new(&coll("post"), DID, &format!("{FK}-x"));
+    let at = |t| eligible_in_forum(&mrow, &mkey, Some(&repo), true, t);
+    assert!(at(1_000 + week - 1));
+    assert!(!at(1_000 + week), "retention over");
+    assert!(
+        !eligible_in_forum(&mrow, &mkey, Some(&repo), false, 2_000),
+        "not an authority"
+    );
+    assert!(
+        !eligible_in_forum(&row, &pkey, Some(&repo), true, 2_000),
+        "not a modAction"
+    );
+    repo.set_status(AccountStatus::Active, None, 6_000);
+    assert_eq!(repo.inactive_since, None);
+    assert!(!repo.inactive_retained(6_000));
+
     row.id_hint = true;
     assert!(!eligible(&row, None));
 

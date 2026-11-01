@@ -16,6 +16,7 @@ import type {
   CommentRec,
   ForumRec,
   MockState,
+  ModLogEntryRec,
   MyOpinionRec,
   PolicyRec,
   PostRec,
@@ -42,9 +43,12 @@ import { paletteReact } from "./palette.ts";
 import {
   type AccountInfo,
   type AccountView,
+  type ActionNotice,
+  type ActionTicket,
   type ActorView,
   type Anchor,
   type AtUri,
+  type BodySource,
   type BookmarkEntry,
   type Cid,
   type CommentDraft,
@@ -68,11 +72,13 @@ import {
   type HistoryView,
   type Href,
   type HrefContext,
+  type ImportReport,
   type ItemState,
   type Json,
   type KarmaCadence,
   type ListPostsQuery,
   type LoadedMedia,
+  type MediaFile,
   type MediaInput,
   type MediaRef,
   type MembersQuery,
@@ -140,6 +146,8 @@ export interface MockEngineOptions {
   sendMs?: number;
   /** Start without a signed-in account. */
   signedOut?: boolean;
+  /** Serve every present body/about as a textBlob in `raw`; `bodySource` still reads its text. */
+  spilledBodies?: boolean;
 }
 
 type Timer = ReturnType<typeof setTimeout>;
@@ -151,7 +159,16 @@ interface WriteRec {
   timer?: Timer;
   /** The subject an opinion write is about (`MyOpinion.pending`). */
   subject?: AtUri;
-  apply: () => { uri: AtUri; cid: string; topics: Topic[] };
+  apply: () => Applied;
+}
+
+/** What a write did. `report`: a `modAdopt`'s lines on what it did not adopt or kept
+ * (`WriteState.done.report`). */
+interface Applied {
+  uri: AtUri;
+  cid: string;
+  topics: Topic[];
+  report?: string[];
 }
 
 const RENDER_NOTICE = "Rendered by the mock engine's minimal markdown renderer.";
@@ -166,6 +183,15 @@ const PUBLIC_ACTION_KINDS: readonly PublicActionKind[] = [
   "modAction",
 ];
 const RANK: Record<string, number> = { owner: 3, admin: 2, moderator: 1 };
+
+/** The engine's retroactivity notices (crates/core/src/engine/moderation.rs). */
+const RETROACTIVE_RESTRICT =
+  "this restriction is retroactive: it also hides the user's earlier items of the restricted kinds";
+const RETROACTIVE_BAN =
+  "a ban is retroactive: it hides all of the user's items in this forum, unless they are kept";
+/** The engine's `missingAlt` notice (crates/core/src/media/mod.rs). */
+const MISSING_ALT =
+  "this file has no alt text: readers who cannot see it will not know what it shows";
 
 function err(code: EngineErrorCode, message: string, retryable = false): EngineError {
   return { code, message, retryable };
@@ -263,6 +289,7 @@ export class MockEngine implements EngineApi {
   private readonly s: MockState;
   private readonly holdMs: number;
   private readonly sendMs: number;
+  private readonly spilledBodies: boolean;
   private ticks = 0;
   private readonly listeners = new Set<EventListener>();
   private readonly queue: EngineEvent[] = [];
@@ -275,6 +302,7 @@ export class MockEngine implements EngineApi {
     this.s = buildFixture().state;
     this.holdMs = opts.holdMs ?? OPINION_UNDO_WINDOW_MS;
     this.sendMs = opts.sendMs ?? 250;
+    this.spilledBodies = opts.spilledBodies ?? false;
     if (opts.signedOut) this.s.active = null;
   }
 
@@ -818,11 +846,9 @@ export class MockEngine implements EngineApi {
 
   // ------------------------------------------------------------------------------- writes
 
-  private write(
-    undoable: boolean,
-    apply: () => { uri: AtUri; cid: string; topics: Topic[] },
-  ): WriteTicket {
-    const id = this.nextId("w");
+  private write(undoable: boolean, apply: () => Applied): WriteTicket {
+    // The same account/sequence shape as crates/core/src/outbox/model.rs `write_id`.
+    const id = `${this.me()}/${this.s.nextId++}`;
     const rec: WriteRec = { id, state: { kind: "pending" }, undoable, apply };
     this.writeRecs.set(id, rec);
     this.emit({ kind: "write", id, state: { kind: "pending" } });
@@ -840,6 +866,7 @@ export class MockEngine implements EngineApi {
       try {
         const r = rec.apply();
         rec.state = { kind: "done", uri: r.uri, cid: r.cid };
+        if (r.report !== undefined && r.report.length > 0) rec.state.report = r.report;
         this.emit({ kind: "write", id, state: clone(rec.state) });
         this.changed(...r.topics, { kind: "outbox" });
       } catch (e) {
@@ -1229,11 +1256,29 @@ export class MockEngine implements EngineApi {
     return [...(this.rejected.get(uri) ?? [])].sort();
   }
 
-  async modsSet(uri: AtUri, change: ModsChange): Promise<WriteTicket> {
+  async modsSet(uri: AtUri, change: ModsChange): Promise<ActionTicket> {
     const f = this.forumRec(uri);
     if (f.summary.owner !== this.me())
       throw err("blocked", "Only the owner can change moderators.");
-    return this.write(false, () => {
+    // Removing a moderator adopts their assertions first, and the ticket says so
+    // (engine-api.md §3.2 `mods_set`)
+    const notices: ActionNotice[] = [];
+    if (change.kind === "remove" && change.skipAdopt !== true) {
+      const theirs = (this.s.modLog.get(uri) ?? []).filter((e) => e.actor === change.did);
+      const lapsed = theirs.filter((e) => e.lapsed).length;
+      const adoption = await this.modAdopt(uri, change.did);
+      notices.push({
+        code: "adoptedFirst",
+        message: `mod adopt runs first (write ${adoption.id}, ${theirs.length - lapsed} assertion(s) in effect); the moderator is removed only once it completes`,
+      });
+      if (lapsed > 0) {
+        notices.push({
+          code: "adoptedFirst",
+          message: `not adopted, since they are not in effect: ${lapsed} lapsed`,
+        });
+      }
+    }
+    const ticket = this.write(false, () => {
       if (change.kind === "add") {
         f.moderators = f.moderators.filter((m) => m.did !== change.did);
         const m: ForumRec["moderators"][number] = {
@@ -1250,6 +1295,7 @@ export class MockEngine implements EngineApi {
       }
       return { uri, cid: fakeCid(`${uri}@${this.tick()}`), topics: [{ kind: "forum", uri }] };
     });
+    return notices.length > 0 ? { ...ticket, notices } : ticket;
   }
 
   // =============================================================================== §3.3
@@ -1690,15 +1736,59 @@ export class MockEngine implements EngineApi {
       .sort((a, b) => b.atMs - a.atMs || (a.subject < b.subject ? -1 : 1))
       .map((e) => ({
         ...clone(e),
-        uri: atUri(
-          e.actor,
-          COLL.modAction,
-          `${this.fkOf(forum)}-${b32hash(`${e.action}:${e.subject}`, 16)}`,
-        ),
+        uri: this.logEntryUri(forum, e),
         actor: this.actor(e.actor),
         status: e.lapsed ? ("lapsed" as const) : ("effective" as const),
       }));
     return { dto: DTO_VERSION, entries };
+  }
+
+  private logEntryUri(forum: AtUri, e: ModLogEntryRec): AtUri {
+    return atUri(
+      e.actor,
+      COLL.modAction,
+      `${this.fkOf(forum)}-${b32hash(`${e.action}:${e.subject}`, 16)}`,
+    );
+  }
+
+  /** The modActions naming `uri`, as the engine's raw view lists them: one record per (actor,
+   * action key), the latest, unless it was removed (`{uri, cid, valid, record, status}`). */
+  private rawAssertions(uri: AtUri): Json[] {
+    const naming = (this.s.modLog.get(FORUM_URI) ?? []).filter((e) => e.subject === uri);
+    const latest = new Map(naming.map((e) => [`${e.actor} ${e.action}`, e] as const));
+    const t = (name: string, fields: { [k: string]: Json }): Json => ({
+      $type: `${COLL.modAction}#${name}`,
+      ...fields,
+    });
+    const action = (key: string, value: string): Json => {
+      if (key === "hide")
+        return t("hide", value === "keep" ? { hidden: false } : { spam: value.includes("spam") });
+      if (key === "tier") return t("tier", { tier: value });
+      if (key.startsWith("pin:"))
+        return t("pin", { scope: key.slice(4), pinned: value === "pinned" });
+      if (key === "lock") return t("lock", { locked: value === "locked" });
+      return t(key, {});
+    };
+    return [...latest.values()]
+      .filter((e) => e.value !== "removed")
+      .map((e) => {
+        const auri = atUri(e.actor, COLL.modAction, `${FK}-${b32hash(`${e.action}:${uri}`, 16)}`);
+        const record: { [k: string]: Json } = {
+          $type: COLL.modAction,
+          forum: FORUM_URI,
+          subject: uri,
+          action: action(e.action, e.value),
+          createdAt: new Date(FIXTURE_NOW).toISOString(),
+        };
+        if (e.reason !== undefined) record.reason = e.reason;
+        return {
+          uri: auri,
+          cid: fakeCid(auri),
+          valid: true,
+          record,
+          status: e.lapsed ? "lapsed" : "effective",
+        };
+      });
   }
 
   async raw(uri: AtUri): Promise<RawView> {
@@ -1706,7 +1796,36 @@ export class MockEngine implements EngineApi {
     const c = this.s.comments.get(uri);
     const seq = this.s.sequences.get(uri);
     const f = this.s.forums.get(uri);
-    const md = (text: string): Json => ({ $type: COLL.markdown, text, profile: "lfm/1" });
+    const md = (text: string, media: readonly MediaRef[]): Json => {
+      const mediaRecords = media.map((m) => ({
+        blob: {
+          $type: "blob",
+          ref: { $link: m.cid },
+          mimeType: m.mime,
+          size: m.sizeBytes,
+        },
+        ...(m.alt !== undefined ? { alt: m.alt } : {}),
+        ...(m.aspectRatio !== undefined
+          ? { aspectRatio: { width: m.aspectRatio.width, height: m.aspectRatio.height } }
+          : {}),
+        ...(m.durationMs !== undefined ? { durationMs: m.durationMs } : {}),
+        ...(m.name !== undefined ? { name: m.name } : {}),
+      }));
+      if (!this.spilledBodies) {
+        return { $type: COLL.markdown, text, profile: "lfm/1", media: mediaRecords };
+      }
+      return {
+        $type: COLL.markdown,
+        textBlob: {
+          $type: "blob",
+          ref: { $link: fakeCid(`markdown:${text}`) },
+          mimeType: "text/markdown",
+          size: new TextEncoder().encode(text).length,
+        },
+        profile: "lfm/1",
+        media: mediaRecords,
+      };
+    };
     let record: Json | undefined;
     let cid: string | undefined;
     let state: ItemState | undefined;
@@ -1715,12 +1834,19 @@ export class MockEngine implements EngineApi {
         $type: COLL.post,
         forum: p.forum,
         kind: p.kind,
-        body: md(p.markdown),
+        body: md(p.markdown, p.media),
         tags: p.tags,
+        labels: p.labels,
         createdAt: new Date(p.createdAtMs).toISOString(),
       };
       if (p.title !== undefined) r.title = p.title;
-      if (p.link) r.link = { uri: p.link.uri, ...(p.link.title ? { title: p.link.title } : {}) };
+      if (p.link) {
+        r.link = {
+          uri: p.link.uri,
+          ...(p.link.title ? { title: p.link.title } : {}),
+          ...(p.link.description !== undefined ? { description: p.link.description } : {}),
+        };
+      }
       record = r;
       cid = p.cid;
       state = clone(p.state);
@@ -1730,7 +1856,7 @@ export class MockEngine implements EngineApi {
         $type: COLL.comment,
         forum: c.forum,
         root: { uri: c.root, cid: root?.cid ?? fakeCid(c.root) },
-        body: md(c.markdown),
+        body: md(c.markdown, c.media),
         createdAt: new Date(c.createdAtMs).toISOString(),
       };
       if (c.parent !== undefined) {
@@ -1768,10 +1894,11 @@ export class MockEngine implements EngineApi {
         })),
       };
       if (f.summary.description !== undefined) r.description = f.summary.description;
-      if (f.about !== undefined) r.about = md(f.about);
+      if (f.about !== undefined) r.about = md(f.about, []);
       if (f.reportContact !== undefined) r.reportContact = f.reportContact;
       record = r;
-      cid = fakeCid(uri);
+      // A declaration revision changes its record CID as well as its contents.
+      cid = fakeCid(JSON.stringify(r));
     } else {
       throw err("not_found", `No record ${uri}`);
     }
@@ -1781,20 +1908,44 @@ export class MockEngine implements EngineApi {
       level: "pds",
       record,
       validity: [],
-      assertions: (this.s.modLog.get(FORUM_URI) ?? [])
-        .filter((e) => e.subject === uri)
-        .map((e) => ({
-          uri: atUri(e.actor, COLL.modAction, `${FK}-${b32hash(`${e.action}:${e.subject}`, 16)}`),
-          actor: e.actor,
-          action: e.action,
-          value: e.value,
-          status: e.lapsed ? "lapsed" : "effective",
-        })),
+      assertions: this.rawAssertions(uri),
     };
     if (cid !== undefined) view.cid = cid;
     if (c) view.root = c.root;
     if (state !== undefined) view.state = state;
     return view;
+  }
+
+  async bodySource(uri: AtUri): Promise<BodySource> {
+    const p = this.s.posts.get(uri);
+    const c = this.s.comments.get(uri);
+    const f = this.s.forums.get(uri);
+    if (!p && !c && !f) {
+      // any other collection is `invalid_ref` (engine-api.md §3.4)
+      if (this.s.sequences.has(uri))
+        throw err("invalid_ref", `Not a post, comment or forum: ${uri}`);
+      throw err("not_found", `No post, comment or forum ${uri}`);
+    }
+    // raw and the source/profile are read from the same synchronous state snapshot.
+    const raw = await this.raw(uri);
+    const record =
+      raw.record !== null && typeof raw.record === "object" && !Array.isArray(raw.record)
+        ? raw.record
+        : undefined;
+    const bodyValue = record?.body ?? record?.about;
+    const body: { [key: string]: Json } | undefined =
+      bodyValue !== null && typeof bodyValue === "object" && !Array.isArray(bodyValue)
+        ? bodyValue
+        : undefined;
+    const present = p !== undefined || c !== undefined || f?.about !== undefined;
+    const markdown =
+      typeof body?.text === "string" ? body.text : (p?.markdown ?? c?.markdown ?? f?.about ?? "");
+    return {
+      markdown,
+      cid: raw.cid ?? "",
+      profile: typeof body?.profile === "string" ? body.profile : "lfm/1",
+      spilled: present && this.spilledBodies,
+    };
   }
 
   async loadMedia(cid: Cid): Promise<LoadedMedia> {
@@ -1853,6 +2004,7 @@ export class MockEngine implements EngineApi {
         kind: draft.kind,
         markdown: draft.body.markdown,
         body: renderMarkdown(draft.body.markdown).body,
+        media: clone(draft.body.media ?? []),
         tags: [...(draft.tags ?? [])],
         tier: f.defaultTier,
         pinned: false,
@@ -1919,6 +2071,7 @@ export class MockEngine implements EngineApi {
         author: me,
         markdown: draft.body.markdown,
         body: renderMarkdown(draft.body.markdown).body,
+        media: clone(draft.body.media ?? []),
         createdAtMs: t,
         tRankMs: t,
         base: { score: 1, agreement: 0, unweighted: 0, earlier: 0, weighted: 0 },
@@ -1943,6 +2096,13 @@ export class MockEngine implements EngineApi {
     });
   }
 
+  /** The mock tracks no CID-bound assertions: nothing to suspend. */
+  async editPreflight(uri: AtUri): Promise<ActionNotice[]> {
+    if (!this.s.posts.has(uri) && !this.s.comments.has(uri))
+      throw err("not_found", `No record ${uri}`);
+    return [];
+  }
+
   async edit(uri: AtUri, draft: Draft, opts: EditOpts): Promise<WriteTicket> {
     const me = this.me();
     const p = this.s.posts.get(uri);
@@ -1965,8 +2125,16 @@ export class MockEngine implements EngineApi {
         }
         p.markdown = draft.post.body.markdown;
         p.body = renderMarkdown(p.markdown).body;
+        p.media = clone(draft.post.body.media ?? []);
         if (draft.post.title !== undefined && p.kind !== "quickTake") p.title = draft.post.title;
         p.tags = [...(draft.post.tags ?? [])];
+        p.labels = [...(draft.post.labels ?? [])];
+        if (draft.post.link) {
+          const href = safeHref(draft.post.link.uri, "field");
+          p.link = { ...clone(draft.post.link), host: href?.kind === "external" ? href.host : "" };
+        } else {
+          delete p.link;
+        }
         p.cid = fakeCid(`${uri}#t${t}`);
         p.badges = { ...p.badges, edited: true };
         return { uri, cid: p.cid, topics: this.threadTopics(uri) };
@@ -1974,6 +2142,7 @@ export class MockEngine implements EngineApi {
       if (c && draft.kind === "comment") {
         c.markdown = draft.comment.body.markdown;
         c.body = renderMarkdown(c.markdown).body;
+        c.media = clone(draft.comment.body.media ?? []);
         // The edit replaces the whole record: the quote is whatever the draft carries.
         if (draft.comment.quote) {
           c.quote = clone(draft.comment.quote);
@@ -2085,7 +2254,22 @@ export class MockEngine implements EngineApi {
     });
   }
 
-  async modAction(intent: ModActionIntent): Promise<WriteTicket> {
+  async modAction(intent: ModActionIntent): Promise<ActionTicket> {
+    const ticket = await this.modActionWrite(intent);
+    // bans and restrictions are retroactive, and the engine says so (social.md §4.6, §4.7)
+    if (intent.kind === "assert") {
+      const a = intent.action;
+      if (a.kind === "access" && a.level === "banned") {
+        return { ...ticket, notices: [{ code: "retroactive", message: RETROACTIVE_BAN }] };
+      }
+      if (a.kind === "restrict" && (a.capabilities?.length ?? 0) > 0) {
+        return { ...ticket, notices: [{ code: "retroactive", message: RETROACTIVE_RESTRICT }] };
+      }
+    }
+    return ticket;
+  }
+
+  private async modActionWrite(intent: ModActionIntent): Promise<WriteTicket> {
     const me = this.me();
     const f = this.forumRec(intent.forum);
     const role = this.myRole(f);
@@ -2099,6 +2283,14 @@ export class MockEngine implements EngineApi {
       role === "moderator"
     ) {
       throw err("blocked", "Only admins and the owner can curate.");
+    }
+    if (
+      intent.kind === "assert" &&
+      intent.action.kind === "restrict" &&
+      intent.action.capabilities === undefined &&
+      intent.action.nullifyVotes === undefined
+    ) {
+      throw err("invalid_input", "A restriction names its capabilities or nullifyVotes.");
     }
     const rank = RANK[role] ?? 0;
     const copy = clone(intent);
@@ -2156,13 +2348,21 @@ export class MockEngine implements EngineApi {
             break;
           }
           case "restrict": {
+            // one record holds both dimensions: the one left out keeps its current value, as
+            // the engine merges (engine-api.md §3.5 `mod_action`)
+            const target = this.actorRec(subject);
+            const caps = a.capabilities ?? target.restricted ?? [];
+            const nullify = a.nullifyVotes ?? target.nullified === true;
+            if (caps.length > 0) target.restricted = [...caps];
+            else delete target.restricted;
+            if (nullify) target.nullified = true;
+            else delete target.nullified;
             for (const x of [...this.s.posts.values(), ...this.s.comments.values()]) {
               if (x.author !== subject || !listed(x.state)) continue;
               const cap = this.s.posts.has(x.uri) ? "post" : "comment";
-              if (a.capabilities.includes(cap))
-                x.state = { kind: "hidden", reason: { kind: "restricted" } };
+              if (caps.includes(cap)) x.state = { kind: "hidden", reason: { kind: "restricted" } };
             }
-            value = a.capabilities.join(",") || "none";
+            value = `restrict:${caps.join("+")},${nullify ? "nullify" : "unnullify"}`;
             break;
           }
           case "tier":
@@ -2201,6 +2401,11 @@ export class MockEngine implements EngineApi {
         if (post && copy.actionKey === "pin:forum") post.pinned = false;
         if (comment && copy.actionKey === "pin:thread") comment.pinned = false;
         if (post && copy.actionKey === "lock") post.locked = false;
+        if (copy.actionKey === "restrict" && isDid(subject)) {
+          const target = this.actorRec(subject);
+          delete target.restricted;
+          delete target.nullified;
+        }
         if (copy.actionKey === "access") {
           for (const x of [...this.s.posts.values(), ...this.s.comments.values()]) {
             if (
@@ -2243,12 +2448,28 @@ export class MockEngine implements EngineApi {
 
   async modAdopt(forum: AtUri, formerMod: Did): Promise<WriteTicket> {
     if (!this.isAuthority(forum)) throw err("blocked", "Only authorities can adopt assertions.");
+    const me = this.me();
     return this.write(false, () => {
       const t = this.tick();
-      for (const e of this.s.modLog.get(forum) ?? []) {
-        if (e.actor === formerMod) e.lapsed = true;
+      const log = this.s.modLog.get(forum) ?? [];
+      // What is not adopted is the write's report (engine-api.md §3.2 `mod_adopt`)
+      const report: string[] = [];
+      for (const e of log) {
+        if (e.actor !== formerMod) continue;
+        const own = log.some(
+          (x) =>
+            x.actor === me &&
+            x.action === e.action &&
+            x.subject === e.subject &&
+            !x.lapsed &&
+            x.value !== "removed",
+        );
+        if (e.lapsed) report.push(`cannot adopt ${this.logEntryUri(forum, e)}: not in effect`);
+        else if (own) report.push(`kept own assertion for ${this.logEntryUri(forum, e)}`);
+        e.lapsed = true;
       }
       return {
+        report,
         uri: atUri(
           this.me(),
           COLL.modAction,
@@ -2380,8 +2601,17 @@ export class MockEngine implements EngineApi {
     });
   }
 
-  async prepareMedia(bytes: Uint8Array, input: MediaInput = {}): Promise<MediaRef> {
-    const b = bytes;
+  async prepareMedia(bytes: Uint8Array | MediaFile, hints: MediaInput = {}): Promise<MediaRef> {
+    // engine API v0 passed one MediaFile (`mime` is the declared type)
+    const file = bytes instanceof Uint8Array ? null : bytes;
+    const b = file ? file.bytes : (bytes as Uint8Array);
+    const input: MediaInput = file
+      ? {
+          ...(file.mime !== undefined ? { declaredMime: file.mime } : {}),
+          ...(file.name !== undefined ? { name: file.name } : {}),
+          ...(file.alt !== undefined ? { alt: file.alt } : {}),
+        }
+      : hints;
     // the declared type is only a hint: the sniffed one wins (data-model.md §8.8)
     let mime = input.declaredMime ?? "application/octet-stream";
     if (b[0] === 0x89 && b[1] === 0x50) mime = "image/png";
@@ -2394,7 +2624,9 @@ export class MockEngine implements EngineApi {
       mime,
       sizeBytes: b.length,
     };
-    if (input.alt !== undefined) ref.alt = input.alt;
+    // a blank alt is no alt, and writers warn when it is missing (data-model.md §4)
+    if (input.alt !== undefined && input.alt.trim() !== "") ref.alt = input.alt;
+    else ref.notices = [{ code: "missingAlt", message: MISSING_ALT }];
     if (input.name !== undefined) ref.name = input.name;
     return ref;
   }
@@ -2578,7 +2810,9 @@ export class MockEngine implements EngineApi {
     };
   }
 
-  async importLocal(json: Json): Promise<void> {
+  /** `scope` (`"mine"`, the default, or `"everything"`, engine-api.md §3.6): the mock has one
+   * account's state, so both import the same. */
+  async importLocal(json: Json, _scope?: "mine" | "everything"): Promise<ImportReport> {
     if (
       typeof json !== "object" ||
       json === null ||
@@ -2604,6 +2838,7 @@ export class MockEngine implements EngineApi {
     if (j.mutes) this.s.mutes = new Set(j.mutes);
     if (j.settings) this.s.settings = { ...this.s.settings, ...j.settings };
     this.changed({ kind: "drafts" }, { kind: "notifications" }, { kind: "forum", uri: FORUM_URI });
+    return { imported: Object.keys(j).length, outOfScope: 0, undecodable: 0 };
   }
 
   // =============================================================================== §3.7

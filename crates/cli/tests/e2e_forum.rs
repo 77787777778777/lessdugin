@@ -177,7 +177,7 @@ fn e2e_cli_forum_scenario() {
     assert_eq!(show["forum"]["membership"], "approval");
     assert_eq!(show["myRole"], "owner");
     // she approves bob and carol, and posts
-    let a = alice.json(&["approve", "bob.test", "carol.test"]);
+    let a = alice.json(&["approve", "bob.test", "carol.test", "--yes"]);
     for w in a["writes"].as_array().unwrap() {
         done(w);
     }
@@ -189,7 +189,7 @@ fn e2e_cli_forum_scenario() {
 
     // bob joins and posts; carol replies
     let fref = format!("alice.test/{slug}");
-    done(&bob.json(&["join", &fref, "--note", "hi"]));
+    done(&bob.json(&["join", &fref, "--note", "hi", "--yes"]));
     let f = bob.file("q.md", "A question from bob.\n");
     let question = done(&bob.json(&["post", &f, "--title", "Bob's question", "--yes"]));
     let reply = done(&carol.json(&["comment", &question, "-m", "Carol's answer."]));

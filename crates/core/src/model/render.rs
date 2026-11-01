@@ -3,11 +3,13 @@
 //! LRU keyed by `(cid, RENDERER_VERSION)` (`sync.md` §13, `lfm-1.md` §1.2).
 //!
 //! A body is an `NS.markdown` union value (`data-model.md` §5): inline `text`, or a `textBlob`.
-//! Spilled bodies are fetched with the media work of M4; until then they render as a notice
-//! with the record's `excerpt` as text. An unknown union member renders as a notice.
+//! A spilled body is rendered from its fetched source ([`RenderCache::put_spilled`], fetched by
+//! the engine from the author's PDS, `lfm-1.md` §1.3); until it is there it is **pending**: a
+//! notice with the record's `excerpt` as text, never cached. An unknown union member renders as
+//! a notice.
 //!
-//! The cached value does not depend on who renders it: the author and PDS of media views are
-//! filled in per call ([`RenderCache::body`]).
+//! The cached value does not depend on who renders it: the author and PDS of media views, and
+//! their autoload verdict (`sync.md` §11.3), are filled in per call ([`RenderCache::body`]).
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -16,14 +18,21 @@ use lessdugin_markdown::{MediaItem, RENDERER_VERSION, RenderOpts, Rendered};
 use serde_json::Value;
 
 use crate::dto::{AspectRatio, MediaView, RenderedBody, TocEntry};
+use crate::media::policy::{self, Autoload, MediaCandidate};
 
 /// The presentation version as written in DTOs.
 pub fn renderer_version() -> String {
     RENDERER_VERSION.to_string()
 }
 
-/// Notice for a spilled body that is not fetched yet (M4 fetches `textBlob`s).
+/// Notice for a spilled body that is not fetched yet (pending, `lfm-1.md` §1.3).
 pub const NOTICE_SPILLED: &str = "[the body is stored as a blob and is not loaded yet]";
+/// Notice for a spilled body whose fetched bytes do not match its CID (`data-model.md` §5.2
+/// rule 3: an "unreadable body" placeholder; the record stays valid).
+pub const NOTICE_UNVERIFIED_BODY: &str = "[unreadable body: it does not match its CID]";
+/// Notice for a spilled body whose blob the author's PDS reports missing (`sync.md` §11.1,
+/// HTTP 400 "Blob not found": not asked for again).
+pub const NOTICE_MISSING_BODY: &str = "[the body is missing: the author's PDS does not have it]";
 /// Notice for a body of an unknown union member.
 pub const NOTICE_UNKNOWN_BODY: &str = "[unsupported body format]";
 /// Notice for flattened structure (`lfm-1.md` §8.4).
@@ -131,6 +140,10 @@ pub fn render_markdown(src: &str, media: &Value, profile: Option<&str>) -> Rende
         text: true,
     };
     let r = lessdugin_markdown::render_profile(src, &items, profile, &opts);
+    from_rendered(r, media)
+}
+
+fn from_rendered(r: Rendered, media: &Value) -> RenderedBody {
     RenderedBody {
         notices: notices(&r),
         html: r.html,
@@ -152,8 +165,48 @@ pub fn render_markdown(src: &str, media: &Value, profile: Option<&str>) -> Rende
     }
 }
 
-/// Renders an `md` union value; `excerpt` is the record's own excerpt (shown for spilled
-/// bodies until M4 fetches them).
+/// The CID of an `md` value's `textBlob` (`None`: an inline body).
+pub fn text_blob_cid(md: &Value) -> Option<&str> {
+    md.get("textBlob")?.get("ref")?.get("$link")?.as_str()
+}
+
+/// A spilled body as the engine fetched it (`lfm-1.md` §1.3), by its blob's CID.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Spilled {
+    /// The decoded source (UTF-8, one leading U+FEFF stripped).
+    Text(Arc<str>),
+    /// It cannot be rendered: not UTF-8, or larger than the lexicon allows.
+    Error(lessdugin_markdown::BodyError),
+    /// The bytes did not match the CID (`data-model.md` §5.2 rule 3).
+    Unverified,
+    /// The author's PDS does not have the blob (`sync.md` §11.1: missing, not retried).
+    Missing,
+}
+
+/// Renders a spilled body from what was fetched for it.
+fn render_spilled(md: &Value, spilled: &Spilled) -> RenderedBody {
+    let media = md.get("media").cloned().unwrap_or(Value::Null);
+    let profile = md.get("profile").and_then(Value::as_str);
+    match spilled {
+        Spilled::Text(src) => render_markdown(src, &media, profile),
+        Spilled::Error(e) => from_rendered(lessdugin_markdown::render_error(*e, profile), &media),
+        Spilled::Unverified => placeholder(NOTICE_UNVERIFIED_BODY, &media),
+        Spilled::Missing => placeholder(NOTICE_MISSING_BODY, &media),
+    }
+}
+
+/// A body that is only `notice` (the record stays valid), with its media.
+fn placeholder(notice: &str, media: &Value) -> RenderedBody {
+    RenderedBody {
+        notices: vec![notice.to_owned()],
+        media: media_views(media),
+        ..empty_body()
+    }
+}
+
+/// Renders an `md` union value; `excerpt` is the record's own excerpt, the text of a spilled
+/// body while it is pending (this function never fetches; [`RenderCache::body`] renders a
+/// fetched one).
 pub fn render_md(md: &Value, ns: &str, excerpt: Option<&str>) -> RenderedBody {
     let markdown_type = format!("{ns}.markdown");
     let known = md
@@ -171,7 +224,7 @@ pub fn render_md(md: &Value, ns: &str, excerpt: Option<&str>) -> RenderedBody {
     match md.get("text").and_then(Value::as_str) {
         Some(text) => render_markdown(text, &media, profile),
         None => {
-            // TODO(M4): fetch the `textBlob` (`lfm-1.md` §1.3) and render it.
+            // pending: the engine fetches the `textBlob` (`lfm-1.md` §1.3) before the views
             let text = excerpt.unwrap_or_default().to_owned();
             RenderedBody {
                 excerpt: text.clone(),
@@ -217,10 +270,43 @@ impl Lru {
     }
 }
 
+/// The spilled bodies fetched (by blob CID), at most [`SPILLED_ENTRIES`], oldest dropped first,
+/// and the ones that could not be fetched, with the time to ask again and whose they are, at
+/// most [`SPILLED_PENDING_ENTRIES`], the soonest due dropped first.
+#[derive(Default)]
+struct SpilledMap {
+    tick: u64,
+    texts: BTreeMap<String, (u64, Arc<Spilled>)>,
+    pending: BTreeMap<String, PendingSpilled>,
+}
+
+/// Spilled sources kept in memory: each is at most `BLOB_TEXT_MAX_BYTES`, and once rendered the
+/// body is in the LRU anyway (the host still has the verified bytes).
+pub const SPILLED_ENTRIES: usize = 16;
+
+/// Pending spilled bodies remembered for `live_tail` to fetch again (a view asks for one it
+/// does not remember at once).
+pub const SPILLED_PENDING_ENTRIES: usize = 64;
+
+/// A spilled body a view left pending (`lfm-1.md` §1.3): when it may be asked for again, and
+/// the item it is the body of, so `live_tail` can fetch it and announce it (`Changed`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingSpilled {
+    /// When it may be asked for again (ms).
+    pub at_ms: i64,
+    /// The forum's uri.
+    pub forum: String,
+    /// The item's uri (a post, or the forum for its `about`).
+    pub uri: String,
+    /// Its author, whose PDS has the blob.
+    pub did: String,
+}
+
 /// The render cache: `(cid, RENDERER_VERSION) → RenderedBody`, least recently used dropped
-/// first.
+/// first, and the fetched sources of spilled bodies.
 pub struct RenderCache {
     lru: Mutex<Lru>,
+    spilled: Mutex<SpilledMap>,
 }
 
 impl std::fmt::Debug for RenderCache {
@@ -247,6 +333,7 @@ impl RenderCache {
                 map: BTreeMap::new(),
                 order: BTreeMap::new(),
             }),
+            spilled: Mutex::new(SpilledMap::default()),
         }
     }
 
@@ -254,6 +341,78 @@ impl RenderCache {
         self.lru
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn spilled_map(&self) -> std::sync::MutexGuard<'_, SpilledMap> {
+        self.spilled
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// `true` when the body of record `cid` is rendered and cached.
+    pub fn contains(&self, cid: &str) -> bool {
+        self.lock()
+            .map
+            .contains_key(&(cid.to_owned(), RENDERER_VERSION))
+    }
+
+    /// What was fetched for the spilled body whose blob is `blob` (`None`: pending).
+    pub fn spilled(&self, blob: &str) -> Option<Arc<Spilled>> {
+        self.spilled_map()
+            .texts
+            .get(blob)
+            .map(|(_, v)| Arc::clone(v))
+    }
+
+    /// Records what was fetched for the blob `blob`.
+    pub fn put_spilled(&self, blob: &str, v: Spilled) {
+        let mut m = self.spilled_map();
+        m.tick += 1;
+        let tick = m.tick;
+        m.pending.remove(blob);
+        m.texts.insert(blob.to_owned(), (tick, Arc::new(v)));
+        while m.texts.len() > SPILLED_ENTRIES {
+            let Some(oldest) = m
+                .texts
+                .iter()
+                .min_by_key(|(_, (t, _))| *t)
+                .map(|(k, _)| k.clone())
+            else {
+                break;
+            };
+            m.texts.remove(&oldest);
+        }
+    }
+
+    /// When the blob `blob`, which could not be fetched, may be asked for again (ms).
+    pub fn spilled_retry_at(&self, blob: &str) -> Option<i64> {
+        self.spilled_map().pending.get(blob).map(|p| p.at_ms)
+    }
+
+    /// The blob `blob` could not be fetched: it stays pending until `p.at_ms`.
+    pub fn spilled_unavailable(&self, blob: &str, p: PendingSpilled) {
+        let mut m = self.spilled_map();
+        m.pending.insert(blob.to_owned(), p);
+        while m.pending.len() > SPILLED_PENDING_ENTRIES {
+            let Some(soonest) = m
+                .pending
+                .iter()
+                .min_by_key(|(_, p)| p.at_ms)
+                .map(|(k, _)| k.clone())
+            else {
+                break;
+            };
+            m.pending.remove(&soonest);
+        }
+    }
+
+    /// The spilled bodies left pending, by blob CID.
+    pub fn spilled_pending(&self) -> Vec<(String, PendingSpilled)> {
+        self.spilled_map()
+            .pending
+            .iter()
+            .map(|(b, p)| (b.clone(), p.clone()))
+            .collect()
     }
 
     /// Entries held.
@@ -282,8 +441,20 @@ impl RenderCache {
         v
     }
 
+    /// A body with no record CID of its own to cache it under (a forum's `about`), rendered
+    /// each time: a spilled one from its fetched source, while that is pending the pending body.
+    pub fn uncached(&self, md: &Value, ns: &str) -> RenderedBody {
+        let spilled = text_blob_cid(md).filter(|_| md.get("text").is_none());
+        match spilled.and_then(|b| self.spilled(b)) {
+            Some(v) => render_spilled(md, &v),
+            None => render_md(md, ns, None),
+        }
+    }
+
     /// The body of the record `cid` (whose body is `md`), with media views attributed to
-    /// `author` at `pds`.
+    /// `author` at `pds` and their autoload verdict for `item` (`sync.md` §11.3). A spilled
+    /// body renders from its fetched source; while that is pending, the uncached pending body.
+    #[allow(clippy::too_many_arguments)]
     pub fn body(
         &self,
         cid: &str,
@@ -292,15 +463,70 @@ impl RenderCache {
         excerpt: Option<&str>,
         author: &str,
         pds: &str,
+        item: &BodyItem<'_>,
     ) -> RenderedBody {
-        let cached = self.get_or_render(cid, || render_md(md, ns, excerpt));
+        let spilled = text_blob_cid(md).filter(|_| md.get("text").is_none());
+        let cached = match spilled.map(|b| self.spilled(b)) {
+            None => self.get_or_render(cid, || render_md(md, ns, excerpt)),
+            Some(Some(v)) => self.get_or_render(cid, || render_spilled(md, &v)),
+            // pending: what an earlier fetch rendered, or the notice (never cached)
+            Some(None) => {
+                let earlier = self.lock().get(&(cid.to_owned(), RENDERER_VERSION));
+                earlier.unwrap_or_else(|| Arc::new(render_md(md, ns, excerpt)))
+            }
+        };
         let mut b = (*cached).clone();
+        let host = policy::host_of(pds);
+        let shared = item.prefs.hosts.get(&host).copied().unwrap_or(0);
         for m in &mut b.media {
             author.clone_into(&mut m.author);
             pds.clone_into(&mut m.pds);
+            let candidate = MediaCandidate {
+                author,
+                visible: item.visible,
+                labels: item.labels,
+                root_labels: item.root_labels,
+                host: &host,
+                mime: &m.mime,
+                size_bytes: (m.size_bytes > 0).then_some(m.size_bytes),
+            };
+            let established = item.established && item.prefs.doc.contains(author);
+            m.autoload = item.prefs.enabled
+                && policy::autoload(&candidate, established, shared, &item.prefs.allowlist)
+                    == Autoload::Yes;
         }
         b
     }
+}
+
+/// The device's media autoload inputs (`sync.md` §11.3): the master switch, the reader's
+/// allowlist and how many of the forum's participants each PDS host serves. Per device, so it
+/// is part of the viewer.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MediaPrefs {
+    /// The `mediaAutoload` setting is not `off`; off, nothing loads without a click.
+    pub enabled: bool,
+    /// `mediaHosts`: hosts the reader allowlisted.
+    pub allowlist: Vec<String>,
+    /// Participants of the forum by the host of the PDS in their identity rows.
+    pub hosts: BTreeMap<String, usize>,
+    /// The participants whose identity is at level `doc` (§11.1: a hint never autoloads).
+    pub doc: std::collections::BTreeSet<String>,
+}
+
+/// What the autoload policy needs to know of the item a body belongs to (`sync.md` §11.3).
+#[derive(Clone, Copy, Debug)]
+pub struct BodyItem<'a> {
+    /// The author is in S ∪ E of the forum.
+    pub established: bool,
+    /// The item is `Visible` after the lens (a `Collapsed` item's media stay click-to-load).
+    pub visible: bool,
+    /// The item's self-labels.
+    pub labels: &'a [String],
+    /// For a comment, its root post's self-labels.
+    pub root_labels: &'a [String],
+    /// The device's inputs.
+    pub prefs: &'a MediaPrefs,
 }
 
 #[cfg(test)]

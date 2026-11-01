@@ -3,12 +3,11 @@
 // The engine's public operations (docs/spec/engine-api.md §3: engine API v0, frozen at M3; only
 // compatible changes from here on), one async method per operation, camelCased:
 // `lessdugin-wasm` dispatches each name (`WasmEngine.call(op, argsJson)`, crates/wasm/src/ops.rs,
-// whose native test checks this list). Every method resolves with a DTO from `./types.ts` or
-// rejects with an `EngineError`. The operations of later milestones reject with code
-// `unsupported` and `detail.milestone` (engine-api.md §3.9): `forumDiscover`, `tags`, `tag`,
-// `sequences`, `sequence`, `user`, `search`, `wikiEdit`, the `seq*` writes (M5);
-// `redactRevision`, `prepareMedia`, the engine's drafts, `settings`/`setSetting`,
-// `exportLocal`/`importLocal`, `validateRecord`, `deriveRkey` (M4); `runVector` (tests).
+// whose native test checks this list and the arity of each). Every method resolves with a DTO
+// from `./types.ts` or rejects with an `EngineError`. The operations of later milestones reject
+// with code `unsupported` and `detail.milestone` (engine-api.md §3.9): `forumDiscover`, `tags`,
+// `tag`, `sequences`, `sequence`, `user`, `search`, `wikiEdit`, the `seq*` writes (M5);
+// `runVector` (tests).
 //
 // Two names differ from a literal camelCasing of §3, because JavaScript has no overloading:
 // - `subscribe(cb)` is the event subscription of §3.8;
@@ -17,10 +16,12 @@
 import type {
   AccountInfo,
   AccountView,
+  ActionNotice,
   ActionTicket,
   ActorView,
   AtUri,
   BodyDraft,
+  BodySource,
   BookmarkEntry,
   Cid,
   CommentDraft,
@@ -37,12 +38,15 @@ import type {
   HistoryView,
   Href,
   HrefContext,
+  ImportReport,
   Json,
   KarmaCadence,
   ListPostsQuery,
   LoadedMedia,
+  MediaFile,
   MediaInput,
   MediaRef,
+  MediaView,
   MembersQuery,
   MemberView,
   ModActionIntent,
@@ -186,8 +190,21 @@ export interface EngineApi {
   /** Public; paged like `listPosts` (`limit` 0 or absent: the default page). */
   modLog(forum: AtUri, cursor?: string, limit?: number): Promise<ModLog>;
   raw(uri: AtUri): Promise<RawView>;
-  /** Fetches a media blob for display; the URL is an object URL in the browser. */
-  loadMedia(cid: Cid): Promise<LoadedMedia>;
+  /** The markdown source of a post's or comment's body, or of a forum's `about`, as a composer
+   * edits it (`""` for an item without one): the inline text, or the spilled `textBlob` as the
+   * host holds it, fetched from the author's PDS when it does not (waiting at most
+   * `BODY_BLOB_WAIT_MS`, like a view). `cid` is the current record CID, not the blob CID;
+   * markdown/profile and CID come from one coherent model view. Open to every viewer, like
+   * `raw`. Rejects while it cannot be had: `network` with `detail.kind: "bodyPending"`
+   * (retryable), `not_found` with
+   * `"bodyMissing"`, `network` with `"bodyFailedVerification"`, `too_large` or `invalid_input`
+   * with `"bodyUnreadable"`. */
+  bodySource(uri: AtUri): Promise<BodySource>;
+  /** Fetches a media blob for display from its author's PDS (sync.md §11.1). `media`: the
+   * item's view from `RenderedBody.media` (its author, declared type and size), or only the
+   * author's DID; without it, the active account's own repo is asked. No login is needed. The
+   * URL is a `blob:` object URL in the browser; see `LoadedMedia`. */
+  loadMedia(cid: Cid, media?: MediaView | Did): Promise<LoadedMedia>;
   drafts(): Promise<DraftEntry[]>;
   /** Newest first. */
   bookmarks(): Promise<BookmarkEntry[]>;
@@ -201,6 +218,10 @@ export interface EngineApi {
   publish(draft: PostDraft): Promise<WriteTicket>;
   comment(draft: CommentDraft): Promise<WriteTicket>;
   edit(uri: AtUri, draft: Draft, opts: EditOpts): Promise<WriteTicket>;
+  /** What to confirm before `edit` of `uri`: a `suspendsAssertions` notice when the item
+   * carries positive assertions in effect (a keep, a frontpage or curated tier, a pin), which
+   * the edit suspends until an authority asserts them again (social.md §4.5). Empty: none. */
+  editPreflight(uri: AtUri): Promise<ActionNotice[]>;
   delete(uri: AtUri): Promise<WriteTicket>;
   retract(uri: AtUri): Promise<WriteTicket>;
   /** A public action (`acknowledgePublicAction(vote | react | tagVote)` first). Held for
@@ -212,7 +233,8 @@ export interface EngineApi {
    * active account's modAction for (scope, subject, action key). A lock refused above 5,000
    * comments rejects with `detail.hint: "useHide"`. */
   modAction(intent: ModActionIntent): Promise<ActionTicket>;
-  /** Re-issues the former moderator's (a DID or handle) non-lapsed assertions. */
+  /** Re-issues the departing moderator's (a DID or handle) assertions that are in effect;
+   * the others are reported in the write's result. */
   modAdopt(forum: AtUri, formerMod: string): Promise<WriteTicket>;
   wikiEdit(forum: AtUri, slug: Slug, draft: WikiDraft): Promise<WriteTicket>;
   seqCreate(draft: SequenceDraft): Promise<WriteTicket>;
@@ -220,14 +242,17 @@ export interface EngineApi {
   seqAdd(uri: AtUri, post: AtUri, at: SequencePosition): Promise<WriteTicket>;
   seqRemove(uri: AtUri, post: AtUri): Promise<WriteTicket>;
   seqMove(uri: AtUri, from: SequencePosition, to: SequencePosition): Promise<WriteTicket>;
-  /** `null` when the item had no history left to redact (the call is idempotent). */
-  redactRevision(uri: AtUri): Promise<WriteTicket | null>;
+  /** Deletes every revision record of the active account's item, as its PDS lists them when
+   * the write is sent: always one write, so an item without history is a write that deletes
+   * nothing. Rejects with `invalid_input` (`detail.kind: "modLog"`) for a forum or a modAction,
+   * whose history is the moderation log (engine-api.md §3.5). */
+  redactRevision(uri: AtUri): Promise<WriteTicket>;
   /**
-   * `prepare_media` (engine-api.md §3.6): sniff, strip metadata, apply EXIF orientation and
-   * compute the CID. The bytes are a separate argument because a Blob or a file is not a DTO
-   * field; the upload itself happens at publish time (data-model.md §8.8).
+   * `prepare_media` (engine-api.md §3.5): sniff, strip metadata, apply EXIF orientation and
+   * compute the CID; the upload itself happens at publish time (data-model.md §8.8). The bytes
+   * and the hints, or (engine API v0) one `MediaFile` carrying both.
    */
-  prepareMedia(bytes: Uint8Array, input?: MediaInput): Promise<MediaRef>;
+  prepareMedia(bytes: Uint8Array | MediaFile, input?: MediaInput): Promise<MediaRef>;
   undo(writeId: string): Promise<WriteTicket>;
   /** Queues a `failed` (or conflicting) write again. */
   retryWrite(writeId: string): Promise<WriteTicket>;
@@ -261,12 +286,21 @@ export interface EngineApi {
   karmaNotifications(): Promise<KarmaCadence>;
   setKarmaNotifications(cadence: KarmaCadence): Promise<void>;
   settings(): Promise<Settings>;
+  /** One field of `Settings`, with a value of its type (`null` in JSON: back to the default).
+   * `acknowledgedPublicActions` needs an active account. */
   setSetting<K extends SettingKey>(key: K, value: Settings[K]): Promise<void>;
+  /** This device's local state (the active account's, plus the device-wide rows). */
   exportLocal(): Promise<Json>;
-  importLocal(json: Json): Promise<void>;
+  /** Merges an `exportLocal` result back: `scope` is `"mine"` (the default: the active
+   * account's rows and the device-wide ones, PRIV-8) or `"everything"`. Login state, the
+   * acknowledgements and the settings that name third parties are never imported; the report
+   * counts what was written and what was left out. */
+  importLocal(json: Json, scope?: "mine" | "everything"): Promise<ImportReport>;
 
   // §3.7 Pure functions -----------------------------------------------------------------------
-  render(markdown: string, media: MediaRef[], opts: RenderOpts): Promise<RenderedBody>;
+  /** `media`: the draft's `MediaRef`s (rendered as `publish` writes them), or `defs#media`
+   * values as a record stores them (objects with a `blob`); `opts.profile` is the body's. */
+  render(markdown: string, media: MediaRef[] | Json[], opts: RenderOpts): Promise<RenderedBody>;
   safeHref(raw: string, ctx: HrefContext): Promise<Href | null>;
   validateRecord(collection: string, json: Json): Promise<ValidationReport>;
   deriveRkey(input: RkeyInput): Promise<string>;

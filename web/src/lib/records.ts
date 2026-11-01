@@ -65,6 +65,13 @@ export function markdownOf(body: unknown): string | undefined {
   return isObj(body) ? str(body.text) : undefined;
 }
 
+/** Whether `body` is a spilled body: its source is the `textBlob` it names, not an inline `text`
+ * (data-model.md §5.2). The source is not in the record, so a form must never read such a body
+ * as empty: a draft sent without it would remove it (engine-api.md §3.2 `forum_update`). */
+export function isSpilledBody(body: unknown): boolean {
+  return isObj(body) && body.text === undefined && isObj(body.textBlob);
+}
+
 /** A string-valued field of a record. */
 export function stringField(record: unknown, key: string): string | undefined {
   return isObj(record) ? str(record[key]) : undefined;

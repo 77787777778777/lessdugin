@@ -11,14 +11,19 @@
 //!          decl      = (F, cid, value) of the admitted, valid declaration row
 //!          records   = eligible rows (§1.5): memberships with rkey fk ∪ the forum-scoped
 //!                      collections of the "{fk}-" range; values without bodies or revision
-//!                      snapshots (no layer reads them; `inputDigest` reads only (uri, cid))
+//!                      snapshots (no layer reads them; `inputDigest` reads only (uri, cid));
+//!                      an authority's modActions while its repo is inactive but retained (§3.4)
 //!          absent    = §5.6.4 for the subjects of the opinions in records, minus records
 //!          obs       = the stored first-seen times (obs_entries), or the injected parity time
-//!          repoStatus= repoStatus(d, fk) for every record owner and authority
+//!          repoStatus= repoStatus(d, fk) for every record owner and authority; an inactive
+//!                      authority is at least Stale while retained, then Unavailable (§3.4)
 //!          now       = injected (tests, parity mode), or the host clock
 //! fold   : Cx::new with the *stored* validity (each row's `valid`/`rule`, decided at admission;
 //!          not recomputed), then fold_cx(cx, Query::default()); the model keeps cx's skeletons
 //!          and typed declaration, and re-ranks other queries with full::reorder (no refold)
+//! blobs  : the CIDs each record of records (and the declaration) references, read from the
+//!          whole value before the bodies are dropped; blob_refs counts those the fold shows
+//!          (sync.md §11.4)
 //! ```
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -39,9 +44,10 @@ use crate::social::full::view::{Pending, State};
 use crate::social::full::{self, Cx, ForumView, Query};
 use crate::social::input::{DeclInput, FoldInput, ForumInput, RecordInput, Skel, SkelData};
 use crate::store::records::{
-    Level, RecordStore, StoreError, below_cap_boundary, eligible, fold_rows_capped, obs_entries,
+    Level, RecordStore, StoreError, below_cap_boundary, eligible_in_forum, fold_rows_capped,
+    obs_entries,
 };
-use crate::store::repo::{RepoRow, RepoStatus};
+use crate::store::repo::{AccountStatus, RepoRow, RepoStatus};
 
 /// Why a model could not be built.
 #[derive(Clone, Debug, PartialEq, thiserror::Error)]
@@ -94,6 +100,39 @@ pub struct ForumModel {
     pub rows: BTreeMap<String, RowMeta>,
     /// Repos whose last sync attempt failed (the `[stale]` badge with a non-`Fresh` status).
     pub failing: BTreeSet<String>,
+    /// Authorities whose account is inactive while their modActions are retained (`sync.md`
+    /// §3.4): the `authorityInactive` banner.
+    pub inactive: BTreeSet<String>,
+    /// The blobs each record of the fold input (and the declaration) references, by uri: the
+    /// CIDs of every blob object in its value, revision snapshots included. Records without
+    /// one are left out.
+    pub blobs: BTreeMap<String, BTreeSet<String>>,
+}
+
+/// The CIDs of the blobs `v` references: every `{"$type": "blob", "ref": {"$link": cid}}` in
+/// it, at any depth (media, `textBlob`, an icon, a revision's snapshot).
+pub(crate) fn blob_cids(v: &Value) -> BTreeSet<String> {
+    fn walk(v: &Value, out: &mut BTreeSet<String>) {
+        match v {
+            Value::Object(m) => {
+                if m.get("$type").and_then(Value::as_str) == Some("blob")
+                    && let Some(cid) = m
+                        .get("ref")
+                        .and_then(|r| r.get("$link"))
+                        .and_then(Value::as_str)
+                {
+                    out.insert(cid.to_owned());
+                    return;
+                }
+                m.values().for_each(|x| walk(x, out));
+            }
+            Value::Array(a) => a.iter().for_each(|x| walk(x, out)),
+            _ => {}
+        }
+    }
+    let mut out = BTreeSet::new();
+    walk(v, &mut out);
+    out
 }
 
 /// A value as the fold input carries it: what the skeletons and the layers read, without the
@@ -192,10 +231,15 @@ impl ForumModel {
         let mut validity: BTreeMap<String, (bool, Option<String>)> = BTreeMap::new();
         let mut obs: BTreeMap<(String, String), i64> = BTreeMap::new();
         let mut meta: BTreeMap<String, RowMeta> = BTreeMap::new();
+        let mut blobs: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         let mut subjects: BTreeSet<String> = BTreeSet::new();
+        let now_ms = now_us.div_euclid(1000);
         for r in &rows {
             let repo = repos.get(&r.key.did);
-            if !eligible(&r.row, repo) || below_cap_boundary(&key.fk, &r.key, repo) {
+            let authority = authorities.contains_key(&r.key.did);
+            if !eligible_in_forum(&r.row, &r.key, repo, authority, now_ms)
+                || below_cap_boundary(&key.fk, &r.key, repo)
+            {
                 continue;
             }
             let uri = r.uri();
@@ -220,6 +264,10 @@ impl ForumModel {
             }
             validity.insert(uri.clone(), (r.row.valid, r.row.rule.clone()));
             meta.insert(uri.clone(), RowMeta { level: r.row.level });
+            let cids = blob_cids(&value);
+            if !cids.is_empty() {
+                blobs.insert(uri.clone(), cids);
+            }
             records.insert(
                 uri,
                 RecordInput {
@@ -241,12 +289,26 @@ impl ForumModel {
             .filter_map(|u| crate::social::input::split_uri(u).map(|(d, _, _)| d))
             .chain(authorities.keys().map(String::as_str))
             .collect();
+        // an inactive authority (§3.4): its cached assertions apply while retained (at least
+        // Stale), then it is Unavailable and the view degrades (§4.11) instead of opening
+        let mut inactive = BTreeSet::new();
         let repo_status: BTreeMap<String, RepoStatus> = owners
             .iter()
             .map(|d| {
-                let st = repos
-                    .get(*d)
-                    .map_or(RepoStatus::Unavailable, |r| r.repo_status(&key.fk));
+                let st = match repos.get(*d) {
+                    None => RepoStatus::Unavailable,
+                    Some(r)
+                        if r.status == AccountStatus::Inactive && authorities.contains_key(*d) =>
+                    {
+                        if r.inactive_retained(now_ms) {
+                            inactive.insert((*d).to_owned());
+                            r.repo_status(&key.fk).max(RepoStatus::Stale)
+                        } else {
+                            RepoStatus::Unavailable
+                        }
+                    }
+                    Some(r) => r.repo_status(&key.fk),
+                };
                 ((*d).to_owned(), st)
             })
             .collect();
@@ -262,6 +324,10 @@ impl ForumModel {
             obs.entry(k).and_modify(|e| *e = (*e).min(t)).or_insert(t);
         }
         validity.insert(key.uri.to_string(), (true, None));
+        let decl_blobs = blob_cids(&decl_value);
+        if !decl_blobs.is_empty() {
+            blobs.insert(key.uri.to_string(), decl_blobs);
+        }
         let input = FoldInput {
             decl: DeclInput {
                 uri: key.uri.to_string(),
@@ -281,7 +347,11 @@ impl ForumModel {
                 .cloned()
                 .unwrap_or_else(|| (false, Some("missing".into())))
         };
-        Self::from_contract(key.clone(), &input, &stored, decl_row.level, meta, failing)
+        let mut m =
+            Self::from_contract(key.clone(), &input, &stored, decl_row.level, meta, failing)?;
+        m.inactive = inactive;
+        m.blobs = blobs;
+        Ok(m)
     }
 
     /// A model over an explicit fold input in contract form with record validity `validity`
@@ -306,7 +376,48 @@ impl ForumModel {
             decl_level,
             rows,
             failing,
+            inactive: BTreeSet::new(),
+            blobs: BTreeMap::new(),
         })
+    }
+
+    /// The blob references this fold counts (`sync.md` §11.4): CID → how many of the forum's
+    /// stored, eligible records that reference it are counted. Counted: the declaration; a
+    /// post, comment, sequence or wiki revision while it is listed (`Visible` or `Collapsed`,
+    /// `social.md` §10.1, before the thread pass); a revision while its subject is counted;
+    /// every other record of the input (memberships, opinions, modActions). A hidden, excluded
+    /// or deleted item's blobs are not counted, nor its revisions'. `None` while the visibility
+    /// layer is pending: nothing is decided then.
+    pub fn blob_refs(&self) -> Option<BTreeMap<String, u32>> {
+        let states = &self.view.visibility.as_ref().ok()?.states;
+        let decl = self.key.uri.as_str();
+        let counted = |uri: &str| {
+            uri == decl
+                || self.skel(uri).is_some_and(|x| match x.coll {
+                    Some(
+                        Collection::Post
+                        | Collection::Comment
+                        | Collection::Sequence
+                        | Collection::WikiRevision,
+                    ) => states.get(uri).is_some_and(State::listed),
+                    _ => true,
+                })
+        };
+        let mut out: BTreeMap<String, u32> = BTreeMap::new();
+        for (uri, cids) in &self.blobs {
+            let yes = match self.skel(uri).map(|x| &x.data) {
+                Some(SkelData::Revision { subject, .. }) => {
+                    subject.as_ref().is_some_and(|s| counted(&s.uri))
+                }
+                _ => counted(uri),
+            };
+            if yes {
+                for c in cids {
+                    *out.entry(c.clone()).or_insert(0) += 1;
+                }
+            }
+        }
+        Some(out)
     }
 
     /// The orderings of `query` (`social.md` §12) from the cached layers, without folding
@@ -423,6 +534,22 @@ mod tests {
         );
         let op = serde_json::json!({"karma": "up", "body": "kept"});
         assert_eq!(fold_value(Some(Collection::Opinion), op.clone()), op);
+    }
+
+    #[test]
+    fn blob_cids_are_found_at_any_depth() {
+        let blob = |c: &str| serde_json::json!({"$type": "blob", "ref": {"$link": c}, "size": 1});
+        let rev = serde_json::json!({
+            "op": "update",
+            "record": {"body": {"textBlob": blob("a"), "media": [{"blob": blob("b")}]}},
+            "icon": blob("c"),
+            "notBlob": {"$type": "other", "ref": {"$link": "d"}},
+        });
+        assert_eq!(
+            blob_cids(&rev).into_iter().collect::<Vec<_>>(),
+            ["a", "b", "c"]
+        );
+        assert!(blob_cids(&serde_json::json!({"text": "x"})).is_empty());
     }
 
     #[test]

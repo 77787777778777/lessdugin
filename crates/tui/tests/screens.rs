@@ -35,7 +35,15 @@ fn home_without_forums_says_how_to_join_one() {
     block_on(t.start(None));
     let screen = t.render();
     assert!(screen.contains("You follow no forum yet."), "{screen}");
+    // the TUI's own commands, not the CLI's
+    assert!(screen.contains("`:open <owner>/<slug>`"), "{screen}");
+    assert!(screen.contains("`:join`"), "{screen}");
+    assert!(!screen.contains("lessdugin join"), "{screen}");
     insta::assert_snapshot!("home_empty_80x24", screen);
+    // and so does `R`, which has nothing to sync
+    block_on(t.press("R"));
+    let st = t.state.status.as_ref().unwrap().text.to_plain_string();
+    assert!(st.contains("`:open <owner>/<slug>`"), "{st}");
 }
 
 #[test]
@@ -262,4 +270,394 @@ fn a_new_comment_shows_a_banner_on_the_thread() {
     assert!(t.thread_document().unwrap().contains("One more thing."));
     assert_eq!(selected(&t).0, s.bob_c1);
     assert!(!t.render().contains("new \u{2014} R"));
+}
+
+/// The displayed time of a post or comment is its t_rank, never the createdAt its author claims
+/// (`social.md` §2.3): a backdated item shows when it was first seen.
+#[test]
+fn the_displayed_time_is_t_rank_not_the_claimed_created_at() {
+    use lessdugin_core::dto::{ListPostsQuery, ThreadOpts};
+    use lessdugin_tui::app::ThreadData;
+    use lessdugin_tui::text::{post_meta, time};
+    let s = scenario();
+    let list = block_on(
+        s.w.carol
+            .engine
+            .list_posts(&ListPostsQuery::new(s.forum.clone())),
+    )
+    .unwrap();
+    // three years before it was seen
+    let backdated = 3 * 365 * 24 * 60 * MINUTE;
+    let mut p = list.items[0].clone();
+    p.created_at_ms = p.t_rank_ms - backdated;
+    let meta: Vec<String> = post_meta(&p).iter().map(|t| t.to_plain_string()).collect();
+    assert!(meta.contains(&time(p.t_rank_ms)), "{meta:?}");
+    assert!(!meta.contains(&time(p.created_at_ms)), "{meta:?}");
+
+    let mut view = block_on(
+        s.w.carol
+            .engine
+            .get_thread(&s.welcome, &ThreadOpts::default()),
+    )
+    .unwrap();
+    let c = &mut view.comments[0];
+    c.created_at_ms = c.t_rank_ms - backdated;
+    let (shown, claimed) = (time(c.t_rank_ms), time(c.created_at_ms));
+    let data = ThreadData {
+        view,
+        bodies: Default::default(),
+    };
+    let doc: String = lessdugin_tui::thread::layout(&data, &Default::default(), 80)
+        .lines
+        .iter()
+        .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+        .collect();
+    assert!(doc.contains(&shown), "{doc}");
+    assert!(!doc.contains(&claimed), "{doc}");
+}
+
+/// A forum whose posts start in `personal` (the CLI's and the SPA's default) lists nothing on
+/// the frontpage; `f` cycles the filter to all posts (and curated), `s` reaches the
+/// recent-comments sort, and on a thread `s` sorts the comments (`social.md` §12.2-§12.4).
+#[test]
+fn filters_and_every_sort_are_reachable() {
+    use lessdugin_core::dto::{CommentSort, ForumDraft, PostFilter, PostSort};
+    let s = scenario();
+    let (alice, carol) = (&s.w.alice, &s.w.carol);
+    let t = block_on(
+        alice
+            .engine
+            .forum_create(&ForumDraft::new("personal", "Personal")),
+    )
+    .unwrap();
+    alice.flush();
+    let forum = alice.done(&t);
+    s.w.tick(MINUTE);
+    let t = block_on(
+        alice
+            .engine
+            .publish(&PostDraft::article(&forum, "A personal post", "Hi.")),
+    )
+    .unwrap();
+    alice.flush();
+    let post = alice.done(&t);
+    s.w.tick(MINUTE);
+    block_on(carol.engine.forum_follow(&forum, None)).unwrap();
+    carol.sync(&forum);
+
+    let mut t = tui(&s, 80, 24);
+    block_on(t.start(Some(forum.clone())));
+    let screen = t.render();
+    assert!(screen.contains("No frontpage posts."), "{screen}");
+    assert!(!screen.contains("A personal post"), "{screen}");
+    block_on(t.press("f"));
+    let screen = t.render();
+    assert!(screen.contains("A personal post"), "{screen}");
+    assert!(screen.contains("filter:  all"), "{screen}");
+    let f = t.state.top_forum_screen().unwrap();
+    assert_eq!(f.filter, PostFilter::All);
+    assert_eq!(f.data.as_ref().unwrap().list.filter, PostFilter::All);
+    block_on(t.press("f"));
+    assert_eq!(
+        t.state.top_forum_screen().unwrap().filter,
+        PostFilter::Curated
+    );
+    // `:filter all` sets it directly
+    block_on(t.press(":"));
+    for c in "filter all".chars() {
+        block_on(t.press(&c.to_string()));
+    }
+    block_on(t.press("Enter"));
+    assert_eq!(t.state.top_forum_screen().unwrap().filter, PostFilter::All);
+    // four `s` from magic: recent comments, and the list is in it
+    block_on(t.keys(&["s", "s", "s", "s"]));
+    let f = t.state.top_forum_screen().unwrap();
+    assert_eq!(f.sort, PostSort::RecentComments);
+    assert_eq!(f.data.as_ref().unwrap().list.sort, PostSort::RecentComments);
+    assert!(t.render().contains("recent comments"), "{}", t.render());
+
+    // a thread's comment sort
+    block_on(t.open_thread(&post));
+    block_on(t.press("s"));
+    let th = t.state.top_thread().unwrap();
+    assert_eq!(th.opts.sort, CommentSort::Top);
+    assert_eq!(th.data.as_ref().unwrap().view.sort, CommentSort::Top);
+    assert!(t.render().contains("comments: top"), "{}", t.render());
+    block_on(t.press(":"));
+    for c in "sort latest-reply".chars() {
+        block_on(t.press(&c.to_string()));
+    }
+    block_on(t.press("Enter"));
+    let th = t.state.top_thread().unwrap();
+    assert_eq!(
+        th.data.as_ref().unwrap().view.sort,
+        CommentSort::LatestReply
+    );
+}
+
+/// An open forum carries the L7 label in its header (`threat-model.md` L7, SOC-13); an
+/// approval forum, complete without third-party servers, does not.
+#[test]
+fn an_open_forum_says_it_relies_on_public_relays() {
+    use lessdugin_core::dto::{DefaultTier, ForumDraft, MembershipMode};
+    use lessdugin_tui::view::OPEN_MODE_LABEL;
+    let s = scenario();
+    let (alice, carol) = (&s.w.alice, &s.w.carol);
+    let mut draft = ForumDraft::new("open", "Open");
+    draft.membership = MembershipMode::Open;
+    draft.default_tier = DefaultTier::Frontpage;
+    let t = block_on(alice.engine.forum_create(&draft)).unwrap();
+    alice.flush();
+    let forum = alice.done(&t);
+    s.w.tick(MINUTE);
+    block_on(carol.engine.forum_follow(&forum, None)).unwrap();
+    carol.sync(&forum);
+
+    let mut t = tui(&s, 80, 24);
+    block_on(t.start(Some(forum.clone())));
+    let screen = t.render();
+    // the engine's `relayDependent` banner, shown once
+    assert_eq!(screen.matches(OPEN_MODE_LABEL).count(), 1, "{screen}");
+    // ... and it IS the engine's banner that shows, not the TUI's own label (sec-6: the two
+    // read the same, so the engine's is given other words): the TUI falls back to its label
+    // only when the view carries no such banner
+    fn banners(
+        t: &mut lessdugin_tui::Headless<lessdugin_testkit::MemHost>,
+    ) -> &mut Vec<lessdugin_core::dto::Banner> {
+        let ScreenKind::Forum(f) = &mut t.state.stack.last_mut().unwrap().kind else {
+            panic!("not the forum screen")
+        };
+        &mut f.data.as_mut().unwrap().view.banners
+    }
+    let relay = "relayDependent";
+    assert!(banners(&mut t).iter().any(|b| b.code == relay));
+    for b in banners(&mut t).iter_mut().filter(|b| b.code == relay) {
+        b.message = "The engine's own words about open mode.".into();
+    }
+    let screen = t.render();
+    assert!(
+        screen.contains("The engine's own words about open mode."),
+        "{screen}"
+    );
+    assert!(!screen.contains(OPEN_MODE_LABEL), "{screen}");
+    banners(&mut t).retain(|b| b.code != relay);
+    let screen = t.render();
+    assert_eq!(screen.matches(OPEN_MODE_LABEL).count(), 1, "{screen}");
+    let mut t = tui(&s, 80, 24);
+    block_on(t.start(Some(s.forum.clone())));
+    let screen = t.render();
+    assert!(!screen.contains(OPEN_MODE_LABEL), "{screen}");
+}
+
+/// Collapsed comments render collapsed, with their reason (`social.md` §10.1), and `Space`
+/// expands them; the viewer's own `Collapsed(NewUser)` comments show expanded with the label
+/// kept, since the newcomer collapse is for other readers (§10.3, decision O-4).
+#[test]
+fn collapsed_comments_fold_except_the_viewers_own_newcomer_ones() {
+    use lessdugin_core::dto::{CollapseReason, ItemState, ThreadOpts};
+    use lessdugin_tui::app::ThreadData;
+    use lessdugin_tui::body::Body;
+    use std::collections::BTreeSet;
+    let s = scenario();
+    let mut view = block_on(
+        s.w.carol
+            .engine
+            .get_thread(&s.welcome, &ThreadOpts::default()),
+    )
+    .unwrap();
+    let bob = s.w.bob.did();
+    assert_eq!(view.comments[0].author.did, bob);
+    let doc =
+        |view: &lessdugin_core::dto::ThreadView, toggled: &BTreeSet<String>, me: Option<&str>| {
+            let c = &view.comments[0];
+            let data = ThreadData {
+                bodies: [(c.uri.clone(), Body::from_record(None, &c.body))].into(),
+                view: view.clone(),
+            };
+            lessdugin_tui::thread::layout_for(&data, toggled, 80, me, &Default::default())
+                .lines
+                .iter()
+                .map(|l| {
+                    l.spans
+                        .iter()
+                        .map(|s| s.content.to_string())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+    let none = BTreeSet::new();
+    let body = "Thanks for the forum!";
+    for reason in [CollapseReason::NewUser, CollapseReason::LowScore] {
+        view.comments[0].state = ItemState::Collapsed { reason };
+        // another reader (carol), and a reader without an account
+        for me in [Some(s.w.carol.did()), None] {
+            let shown = doc(&view, &none, me.as_deref());
+            assert!(shown.contains("collapsed: "), "{shown}");
+            assert!(shown.contains("[+]"), "{shown}");
+            assert!(
+                !shown.contains(body),
+                "{reason:?} folds for others:\n{shown}"
+            );
+            // Space expands it
+            let toggled = BTreeSet::from([s.bob_c1.clone()]);
+            let shown = doc(&view, &toggled, me.as_deref());
+            assert!(shown.contains(body), "{shown}");
+            assert!(!shown.contains("[+]"), "{shown}");
+        }
+    }
+    // bob sees his own newcomer comment expanded, label kept
+    view.comments[0].state = ItemState::Collapsed {
+        reason: CollapseReason::NewUser,
+    };
+    let shown = doc(&view, &none, Some(&bob));
+    assert!(shown.contains(body), "{shown}");
+    assert!(shown.contains("collapsed: "), "{shown}");
+    assert!(!shown.contains("[+]"), "{shown}");
+    // a low-score collapse is not the newcomer one: it folds for its author too
+    view.comments[0].state = ItemState::Collapsed {
+        reason: CollapseReason::LowScore,
+    };
+    let shown = doc(&view, &none, Some(&bob));
+    assert!(!shown.contains(body), "{shown}");
+}
+
+/// The same through the State: the Thread screen lays the thread out for the session's account,
+/// so bob's own newcomer comment shows expanded in bob's TUI and folded in carol's (decision
+/// O-4).
+#[test]
+fn the_thread_screen_shows_the_viewers_own_newcomer_comment_expanded() {
+    use lessdugin_core::dto::{CollapseReason, ItemState, ThreadOpts};
+    use lessdugin_tui::app::{Origin, ThreadData};
+    use lessdugin_tui::{Action, Headless, HeadlessOpts};
+    let s = scenario();
+    let body = "Thanks for the forum!";
+    let bob_tui = block_on(Headless::new(
+        s.w.bob.engine.clone(),
+        HeadlessOpts {
+            width: 80,
+            height: 30,
+            ..HeadlessOpts::default()
+        },
+    ))
+    .unwrap();
+    for (mut t, own) in [(bob_tui, true), (tui(&s, 80, 30), false)] {
+        block_on(t.start(None));
+        block_on(t.open_thread(&s.welcome));
+        let screen = t.state.top().unwrap().id;
+        let mut view = block_on(t.engine().get_thread(&s.welcome, &ThreadOpts::default())).unwrap();
+        let c = view
+            .comments
+            .iter_mut()
+            .find(|c| c.uri == s.bob_c1)
+            .expect("bob's comment");
+        c.state = ItemState::Collapsed {
+            reason: CollapseReason::NewUser,
+        };
+        let bodies = t
+            .state
+            .top_thread()
+            .unwrap()
+            .data
+            .as_ref()
+            .unwrap()
+            .bodies
+            .clone();
+        let _ = t.state.update(Action::ThreadLoaded {
+            screen,
+            origin: Origin::Live,
+            result: Ok(Box::new(ThreadData { view, bodies })),
+        });
+        let shown = t.thread_document().unwrap();
+        assert!(shown.contains("collapsed: new user"), "{shown}");
+        assert_eq!(shown.contains(body), own, "own: {own}\n{shown}");
+    }
+}
+
+/// A post over 64 KiB spills its body into a `textBlob` (`data-model.md` §5.3). The engine
+/// fetches it for the view (m4-5); the Thread screen styles that source as it styles an inline
+/// body (headings, emphasis), rather than showing the view's plain text.
+#[test]
+fn a_spilled_body_is_styled_from_its_fetched_source() {
+    use lessdugin_core::dto::{BodyDraft, ThreadOpts, ThreadRoot};
+    use lessdugin_tui::body::BodyDoc;
+    let s = scenario();
+    let bob = &s.w.bob;
+    let mut source = "# Chapter one\n\nIt was a **dark** night.\n\n".to_owned();
+    while source.len() <= 65_536 {
+        source.push_str("More words in the long body. ");
+    }
+    let mut d = PostDraft::article(&s.forum, "Long", "");
+    d.body = BodyDraft::text(source);
+    let w = block_on(bob.engine.publish(&d)).unwrap();
+    bob.flush();
+    let post = bob.done(&w);
+    s.w.carol.sync(&s.forum);
+    // the record carries the blob, not the text
+    let pv = block_on(s.w.carol.engine.get_thread(&post, &ThreadOpts::default())).unwrap();
+    let ThreadRoot::Post(p) = pv.post else {
+        panic!("no post")
+    };
+    assert!(p.body.notices.is_empty(), "{:?}", p.body.notices);
+    assert!(
+        p.body.text.starts_with("Chapter one"),
+        "{}",
+        &p.body.text[..80]
+    );
+
+    let mut t = tui(&s, 80, 40);
+    block_on(t.start(None));
+    block_on(t.open_thread(&post));
+    let body = &t.state.top_thread().unwrap().data.as_ref().unwrap().bodies[&post];
+    assert!(matches!(body.doc, BodyDoc::Styled(_)), "{:?}", body.doc);
+    assert!(body.notices.is_empty(), "{:?}", body.notices);
+    // the terminal projection: a heading line of its own (the view's plain text runs it into
+    // the paragraph), and the emphasis markers are styling, not text
+    let screen = t.render();
+    assert!(screen.contains("# Chapter one\n"), "{screen}");
+    assert!(screen.contains("It was a dark night."), "{screen}");
+    assert!(!screen.contains("**dark**"), "{screen}");
+}
+
+/// m4-5 (`engine-api.md` §3.8 "Spilled bodies"): a spilled body the thread showed pending (the
+/// author's PDS stalled) is fetched again by `live_tail`, which announces it; the open thread
+/// re-queries and shows it.
+#[test]
+fn a_pending_spilled_body_shows_when_it_arrives() {
+    use lessdugin_core::dto::PostDraft;
+    use lessdugin_core::limits::BODY_BLOB_RETRY_MS;
+    use lessdugin_core::model::render::NOTICE_SPILLED;
+    let s = scenario();
+    let (bob, carol) = (&s.w.bob, &s.w.carol);
+    let mut source = "The opening.\n\n".to_owned();
+    while source.len() <= 65_536 {
+        source.push_str("More words in the long body. ");
+    }
+    source.push_str("\n\nThe last words.");
+    let t = block_on(
+        bob.engine
+            .publish(&PostDraft::article(&s.forum, "Long", source)),
+    )
+    .unwrap();
+    bob.flush();
+    let post = bob.done(&t);
+    s.w.tick(MINUTE);
+    carol.host.hold_blob_fetches(true);
+    carol.sync(&s.forum);
+
+    let mut t = tui(&s, 100, 30);
+    block_on(t.start(Some(s.forum.clone())));
+    block_on(t.open_thread(&post));
+    let doc = t.thread_document().unwrap();
+    assert!(doc.contains(NOTICE_SPILLED), "{doc}");
+    assert!(!doc.contains("The last words."), "{doc}");
+
+    // the PDS answers again; the round after the retry time fetches the body
+    carol.host.hold_blob_fetches(false);
+    s.w.tick(BODY_BLOB_RETRY_MS);
+    block_on(t.engine().live_step()).unwrap();
+    block_on(t.settle());
+    let doc = t.thread_document().unwrap();
+    assert!(!doc.contains(NOTICE_SPILLED), "{doc}");
+    assert!(doc.contains("The last words."), "{doc}");
 }

@@ -85,9 +85,9 @@ fn a_failed_forum_sync_is_a_warning_and_is_tried_again() {
     let bob = net.user("bob.test", true);
     let anon = net.reader(&alice);
     alice.json(&["forum", "create", "meta"]);
-    let t = bob.json(&["join", "alice.test/meta"]);
+    let t = bob.json(&["join", "alice.test/meta", "--yes"]);
     assert_eq!(t["state"]["kind"], "done", "{t}");
-    alice.json(&["approve", "bob.test"]);
+    alice.json(&["approve", "bob.test", "--yes"]);
     let f = alice.file("p.md", "---\ntitle: Sync me\n---\nBody.\n");
     let t = alice.json(&["post", s(&f), "--yes"]);
     let post = t["state"]["uri"].as_str().unwrap().to_owned();

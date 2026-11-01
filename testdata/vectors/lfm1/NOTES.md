@@ -56,8 +56,12 @@ M1.
     nothing. → §8.4 (`limits.json#link-dropped-at-boundary`, `#leaf-exemption`,
     `#flattened-empty-emits-nothing`).
 14. **Real host.** The test runs on the displayed text (Default_Ignorable removed, NFKC,
-    U+3002/U+FF61, names of any script); the `ext-image` text is its alt. → §5.5, §14 30
-    (`links.json#host-display-*`).
+    U+3002/U+FF61 and the other lookalike dots, gaps next to a dot removed, names of any
+    script) and tests every dotted name the text names, except mailboxes (never in a URL's
+    authority) and path names; the link text is read as the HTML writer renders it, generated
+    image labels included, and a link with images is also tested without their alts; a link
+    that holds math always shows the host; a standalone `ext-image`'s text is its alt. → §5.5,
+    §14 30 (`links.json#host-display-*`).
 15. **Gallery items with odd CIDs** render as `span.media-missing`. → §6.3.
 16. **MathML normaliser.** *Changed at M4 (ADR 0002):* math-core 0.9's closed set of `style`
     values becomes `mc-*` classes (styled by `crates/markdown/assets/mathml.css` after
@@ -67,10 +71,14 @@ M1.
 17. **Engine guard** (nesting and unmatched-delimiter limits) and, *added at M4*, the engine
     budget (`len << unmatched`, 2^22 per document). → §7.2, K3
     (`math.json#engine-nesting-guard`, `#guard-*`, `#engine-document-budget`).
-18. **`RENDERER_VERSION`** is 3 at M4 (2 before the normaliser landed); Temml builds set bit 31.
-    → §1.2. The M4 reconciliation changed presentation again (decisions 2, 27 and bugs 1, 3, 4)
-    and the normaliser of decision 16 changed it once more, so the version was bumped with them
-    in the same commit, as §1.2 requires.
+18. **`RENDERER_VERSION`** is 5 after the M3/M4 fix rounds (3 at M4, 2 before the normaliser
+    landed); Temml builds set bit 31. → §1.2. The M4 reconciliation changed presentation again
+    (decisions 2, 27 and bugs 1, 3, 4) and the normaliser of decision 16 changed it once more,
+    so the version was bumped with them in the same commit, as §1.2 requires. 4 reworked the
+    §5.5 real-host test to every dotted name of the displayed text (red-team F2, §14 30); 5 reads
+    the link text as rendered, generated labels included, always shows the host of a link with
+    math and exempts no name in a URL's authority as a mailbox (§14 30, `links.json#host-display-
+    generated-labels`, `#host-display-math-in-link`, `#host-display-userinfo-variants`).
 19. **`Rendered.error`.** → §1.3, §1.4.
 20. **Escaping record strings** (CR, CRLF → LF, NUL → U+FFFD in attribute values). → §8.3.
 21. **`StyledDoc`.** Shared summary ids, empty item `Para`, single-line contexts, code `lang`,

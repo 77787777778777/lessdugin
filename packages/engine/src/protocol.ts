@@ -3,7 +3,7 @@
 // Shapes shared by the main thread (`client.ts`, `auth-bridge.ts`), the engine worker
 // (`worker.ts`) and the wasm host (`host.ts`). Nothing here touches the DOM or the network.
 
-import type { Did, EngineEvent } from "./types.ts";
+import type { Did, EngineError, EngineEvent } from "./types.ts";
 
 // ---------------------------------------------------------------------------------------------
 // Engine configuration (crates/wasm/src/config.rs `ConfigInput`)
@@ -30,6 +30,26 @@ export interface EngineConfigInput {
   /** Parity mode (`engine-api.md` §2.1). Test-only: the worker accepts it only in e2e builds
    * (`VITE_E2E=1`); release builds drop the code path. */
   parityNowMs?: number;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Media (limits.md §6)
+// ---------------------------------------------------------------------------------------------
+
+/** `MEDIA_WASM_WINDOW_BYTES`: the most bytes of a file `prepareMedia` copies into wasm memory;
+ * a larger file is refused before it leaves the main thread (threat-model INFRA-6). */
+export const MEDIA_WASM_WINDOW_BYTES = 64 * 1024 * 1024;
+
+/** The `EngineError` of a file over `MEDIA_WASM_WINDOW_BYTES` (as the core words it). */
+export function tooLargeForTheBrowser(bytes: number): EngineError {
+  return {
+    code: "too_large",
+    message:
+      "the file is larger than 64 MiB, which the browser does not prepare for upload " +
+      "(limits.md §6): attach a smaller file or use the CLI",
+    retryable: false,
+    detail: { kind: "mediaRejected", bytes, limit: MEDIA_WASM_WINDOW_BYTES },
+  };
 }
 
 // ---------------------------------------------------------------------------------------------

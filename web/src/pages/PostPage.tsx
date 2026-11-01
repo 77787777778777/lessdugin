@@ -17,7 +17,7 @@ import { Dialog } from "../components/Dialog.tsx";
 import { LazyComposer } from "../components/LazyComposer.tsx";
 import { ModMenu } from "../components/ModMenu.tsx";
 import {
-  COLLAPSE_LABEL,
+  collapseNote,
   KindBadge,
   postTitle,
   TagChips,
@@ -305,9 +305,7 @@ function PostBodyView({
             <TierBadge tier={post.tier} />
             {post.pinned && <span>📌 Pinned</span>}
             {post.locked && <span>🔒 Comments locked</span>}
-            {post.state.kind === "collapsed" && (
-              <span>Collapsed: {COLLAPSE_LABEL[post.state.reason]}</span>
-            )}
+            {post.state.kind === "collapsed" && <span>{collapseNote(post.state.reason, own)}</span>}
             <Badges badges={post.badges} pending={own && pending} />
             <HistoryButton
               uri={post.uri}
@@ -336,7 +334,7 @@ function PostBodyView({
             ]
           </p>
         ) : (
-          <RenderedHtml html={body.html} sidenotes ref={bodyRef} />
+          <RenderedHtml html={body.html} media={body.media} sidenotes ref={bodyRef} />
         )}
         {view.sequences.map((s) => (
           <nav
@@ -382,10 +380,11 @@ function PostBodyView({
             />
           )}
           {own && <OwnPostActions uri={post.uri} forum={post.forum} />}
-          {ctx.isAuthority && (
+          {(ctx.isAuthority || (own && ctx.authorGate === true)) && (
             <ModMenu
               forum={post.forum}
               canCurate={ctx.canCurate}
+              scope={ctx.isAuthority ? "forum" : "author"}
               subject={{
                 kind: "post",
                 uri: post.uri,
@@ -463,6 +462,10 @@ export function PostThread({ uri }: { uri: string }) {
     isAuthority: viewer !== undefined ? viewer.moderate : isAuthorityRole(role),
     canCurate: viewer !== undefined ? viewer.curate : role === "owner" || role === "admin",
     caps: viewer,
+    postAuthor: postView?.post.author.did,
+    authorGate:
+      viewer !== undefined &&
+      (postView?.post.tier === "personal" ? viewer.authorModPersonal : viewer.authorModFrontpage),
   };
   const canComment =
     myDid !== null && (!ctx.locked || ctx.isAuthority) && allows(ctx.caps, "comment");

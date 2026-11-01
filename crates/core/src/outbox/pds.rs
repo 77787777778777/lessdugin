@@ -717,32 +717,42 @@ impl<'h, H: Host> PdsClient<'h, H> {
         Ok(w)
     }
 
-    /// `uploadBlob`: the returned blob object, verbatim.
+    /// `uploadBlob`: the returned blob object, verbatim, and the bytes the PDS stored.
+    ///
+    /// On a 413 an image is re-encoded at half the size of the last encoding and sent again, at
+    /// most [`limits::IMAGE_UPLOAD_413_RETRIES`] times (`limits.md` §12); anything else, or an
+    /// image still refused after that, fails the upload (§8.8: "On 413, the client downscales
+    /// (images) or refuses").
     pub async fn upload_blob(
         &mut self,
         bytes: Vec<u8>,
         mime: &str,
     ) -> Result<(Value, Vec<u8>), CallError> {
-        // The bytes that end up stored. On a 413 this becomes the downscaled body (§8.8: "On
-        // 413, the client downscales (images) or refuses"), and the caller compares the CID of
-        // exactly these bytes with the `ref.` the PDS returns.
+        // The bytes that end up stored. After a 413 this is the downscaled body, and the caller
+        // compares the CID of exactly these bytes with the `ref.` the PDS returns.
         let mut sent = bytes;
-        let (resp, _) = match self
-            .send_write("com.atproto.repo.uploadBlob", sent.clone(), mime, 0)
-            .await
-        {
-            Ok(v) => v,
-            Err(CallError::Rejected { status: 413, .. }) => {
-                sent = crate::media::fit_for_upload(sent, crate::media::UPLOAD_TARGET_BYTES)
-                    .map_err(|error| CallError::Rejected {
-                        status: 413,
-                        name: None,
-                        error,
+        let mut retries = 0;
+        let (resp, _) = loop {
+            match self
+                .send_write("com.atproto.repo.uploadBlob", sent.clone(), mime, 0)
+                .await
+            {
+                Ok(v) => break v,
+                Err(CallError::Rejected { status: 413, .. })
+                    if retries < limits::IMAGE_UPLOAD_413_RETRIES =>
+                {
+                    retries += 1;
+                    let target = sent.len() / 2;
+                    sent = crate::media::fit_for_upload(sent, target).map_err(|error| {
+                        CallError::Rejected {
+                            status: 413,
+                            name: None,
+                            error,
+                        }
                     })?;
-                self.send_write("com.atproto.repo.uploadBlob", sent.clone(), mime, 0)
-                    .await?
+                }
+                Err(e) => return Err(e),
             }
-            Err(e) => return Err(e),
         };
         let v: Value = crate::xrpc::decode_json(&resp.body).map_err(|e| {
             CallError::Ambiguous(EngineError::new(

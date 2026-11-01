@@ -30,11 +30,21 @@ export function acceptableIndexerUrl(raw: string): boolean {
   }
 }
 
-function useSetSetting() {
+/** Changes one setting; a refusal is shown, never left as an unhandled rejection. */
+export function useSetSetting() {
   const engine = useEngine();
   const qc = useQueryClient();
   return async <K extends keyof Settings>(key: K, value: Settings[K]): Promise<void> => {
-    await engine.setSetting(key, value);
+    try {
+      // the cadence has its own operation (engine-api.md §3.6)
+      if (key === "karmaNotifications") {
+        await engine.setKarmaNotifications(value as Settings["karmaNotifications"]);
+      } else {
+        await engine.setSetting(key, value);
+      }
+    } catch (e) {
+      toasts.show({ message: errorMessage(e), tone: "error" });
+    }
     await qc.invalidateQueries({ queryKey: qk.settings() });
   };
 }

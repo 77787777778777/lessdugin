@@ -14,7 +14,7 @@
 //! | P5 | per stage: removing voter u's opinions on recipient r's items (none on an absent subject) moves `K1[r]` by at most `pairCap` and no other K1; with E and the K1 basis unchanged, `KP[r]` by at most `pairCap × strong(max(K1[u], 0))` and no other KP; with E and the KP basis unchanged, `K[r]` by at most `pairCap × strong(max(KP[u], 0))` and no other K. The corollary: removing all opinions of u ∉ S (none on an absent subject) changes no K1, `seedUp` or E and moves each `KP[r]` by at most `pairCap × strong(max(K1[u], 0))` |
 //! | P6 | s ∈ S ⇒ s ∈ E, whatever K1[s] is |
 //! | P7 | I' = I ∪ R, R by DIDs ∉ E(I) ∪ A with hypotheses (a) and (b): K1, `seedUp`, E, KP, K, the score and agreement of every item of I, and the V1–V10 state (before the thread pass) of every item of I whose author wrote nothing in R are unchanged. No hypothesis (c): CO5 compares only a valid root (§20.1 item 51), so R may hold a record whose `forum` is not F at the root uri of a comment of I; `p7_holds_for_an_invalid_record_at_a_root_uri` pins the former counterexample (§20.1 item 49) |
-//! | P8 | incremental equals batch: a stream of puts, edits, deletes and re-puts, applied by an incremental driver (today: the engine's rebuild-and-refold), ends in the view of the batch fold of the final record set; replaying a suffix (resume) and folding intermediate states change nothing |
+//! | P8 | incremental equals batch: a stream of puts, edits, deletes and re-puts ends in the view of the batch fold of the final record set (§1.1: the live records, `absent` confirmed by tombstones or complete listings, every version's first-seen time); replaying a suffix (resume) and folding intermediate states change nothing. The fold itself has no incremental path (§1.3 rule 7: the engine refolds its model after each `Changed` event), so the incremental implementation under test is the engine's: each change admitted into a record store as the sync layer admits it, and the model built from that store (`ForumModel::build`) |
 //! | §19 | the thread cycle cut does not depend on walk order (and §11 steps 2–4 hold); the lens never changes fold outputs |
 //! | §1.3 | folding twice, and folding a shuffled input, gives identical serialised views and `inputDigest`; the fold's sources use no hash maps, clocks, randomness or floats outside `hot` |
 //! | §1.1 | the fold is total: records with mangled values (any JSON shape, fields removed or added, deep nesting) still fold, are Excluded and never counted when invalid, and keep P1; a mangled declaration is rejected exactly when it is invalid |
@@ -29,11 +29,17 @@ mod social_gen;
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use lessdugin_atp::syntax::{AtUri, Did, Tid};
+use lessdugin_core::discovery::ForumKey;
+use lessdugin_core::model::ForumModel;
 use lessdugin_core::social::full::karma::{Karma, strong};
 use lessdugin_core::social::full::visibility::{Lensed, lens};
 use lessdugin_core::social::full::{ForumView, Query};
 use lessdugin_core::social::input::FoldInput;
 use lessdugin_core::social::threads::{Node, Parent, ThreadComment, place};
+use lessdugin_core::store::admit::{Expect, LexiconValidator, admit_value};
+use lessdugin_core::store::mem::MemKv;
+use lessdugin_core::store::{Delete, DeleteEvidence, Observation, OrderKey, RecordStore, RepoRow};
 use lessdugin_lexicon::ns::NS;
 use proptest::prelude::*;
 use proptest::test_runner::{Config, TestRng, TestRunner};
@@ -378,43 +384,52 @@ proptest! {
         check_p7(&f, &i, &vi, &v2, &r)?;
     }
 
-    /// P8: an incremental driver ends in the batch fold of its final record set.
+    /// P8: the engine's incremental path (a record store fed change by change, then
+    /// `ForumModel::build`) ends in the batch fold of the final record set.
     #[test]
     fn p8_incremental_equals_batch(s in spec(SMALL), seed in any::<u64>()) {
         let f = build(&s);
         let mut rng = Rng(seed);
         let stream = change_stream(&f, &mut rng);
-        let mut driver = Refold::new(&f);
+        let mut reference = Refold::new(&f);
+        let mut engine = StoreDriver::new(&f);
         let mut probes = 0;
         for (n, c) in stream.iter().enumerate() {
-            driver.apply(c);
-            // fold some intermediate states: no fold may leave state behind
+            reference.apply(n, c);
+            engine.apply(n, c);
+            // build some intermediate models: no build may leave state behind
             if rng.chance(1, 8) && probes < 3 {
                 probes += 1;
-                let _ = driver.view(&Query::default());
+                let _ = engine.model();
             }
             if n + 1 == stream.len() {
-                // resume from an earlier cursor: the last events are applied again
+                // resume from an earlier cursor: the last events are delivered again
                 let k = rng.below(stream.len().min(12) + 1);
-                for c in &stream[stream.len() - k..] {
-                    driver.apply(c);
+                for (m, c) in stream.iter().enumerate().skip(stream.len() - k) {
+                    reference.apply(m, c);
+                    engine.apply(m, c);
                 }
             }
         }
-        let batch = driver.batch_input();
+        let batch = reference.batch_input();
         prop_assert_eq!(batch.records.len(), f.recs.len());
-        for q in queries(first_post(&f).as_deref()).into_iter().take(3) {
-            let inc = driver.view(&q);
-            let bat = fold(&batch, &q);
-            prop_assert!(serialize(&inc) == serialize(&bat), "query {:?}", q);
+        let model = engine.model();
+        let bat = fold(&batch, &Query::default());
+        prop_assert!(
+            serialize(&model.view) == serialize(&bat),
+            "the store-built model differs from the batch fold"
+        );
+        // other queries re-rank the model's cached layers (no refold)
+        for q in queries(first_post(&f).as_deref()).into_iter().skip(1).take(3) {
+            prop_assert!(model.orderings(&q) == fold(&batch, &q).orderings, "query {:?}", q);
         }
         // the same record set folded from the generator's own input: only the first-seen
-        // times differ (earlier versions were seen first), so only `t_rank` and the orderings
-        let mut inc = driver.view(&Query::default());
-        let own = fold(&f.input(), &Query::default());
-        inc.times = own.times.clone();
-        inc.orderings = own.orderings.clone();
-        prop_assert!(serialize(&inc) == serialize(&own));
+        // times differ (earlier versions were seen first) and the never-synced uris the
+        // complete listings confirm absent, so only `t_rank`, the orderings, `absent` and the
+        // digest it covers
+        let own = f.input();
+        prop_assert_eq!(&batch.records, &own.records);
+        prop_assert!(own.absent.is_subset(&batch.absent));
     }
 
     /// §19: the lens never changes fold outputs; it only collapses listed items of muted
@@ -794,16 +809,21 @@ enum Change {
     Delete(String),
 }
 
-/// The incremental driver under test. Today the engine rebuilds its model and re-runs the
-/// whole fold after each `Changed` event (`model::build`, `sync.md` §13), which [`Refold`]
-/// reproduces; an incremental implementation that re-runs only the affected layers plugs in
-/// here, and the property then checks it against the batch fold.
+/// A consumer of the change stream. Change `n` of the stream is observed at the repo rev
+/// [`rev`]`(n)`; a change delivered again (a resume from an earlier cursor) keeps its rev and is
+/// observed later.
 trait Incremental {
-    fn apply(&mut self, change: &Change);
-    fn view(&mut self, q: &Query) -> ForumView;
+    fn apply(&mut self, n: usize, change: &Change);
 }
 
-/// The record set a stream of changes leaves, with first-seen times per version.
+/// The rev at which change `n` of a stream was observed (TIDs increase with `n`).
+fn rev(n: usize) -> String {
+    let us = u64::try_from(social_gen::T0).unwrap() + u64::try_from(n).unwrap() + 1;
+    Tid::from_parts(us, 0).unwrap().as_str().to_owned()
+}
+
+/// The batch side of P8: the record set a stream of changes leaves, with the first-seen time of
+/// every version seen, as `social.md` §1.1 defines the fold input over it.
 struct Refold {
     forum: Forum,
     live: BTreeMap<String, Rec>,
@@ -825,12 +845,42 @@ impl Refold {
         }
     }
 
-    /// The contract input of the current record set (§1.1): `absent` = tombstoned uris named
-    /// by a live opinion; `obs` = the first-seen time of every version seen, the minimum per
-    /// uri being `t_obs`.
+    /// The contract input of the current record set (§1.1): `absent` = the uris named by a live
+    /// opinion that are not live and whose absence is confirmed, by a tombstone or by a complete
+    /// listing of their `{fk}-` range (every repo but an `unavailable` one was listed:
+    /// [`StoreDriver`]); `obs` = the first-seen time of every version seen, the minimum per uri
+    /// being `t_obs`.
     fn batch_input(&self) -> FoldInput {
         let mut f = self.forum.clone();
         f.deleted = self.tombstones.clone();
+        let listed = |u: &str| {
+            let Ok((did, coll, rkey)) = lessdugin_lexicon::keys::split_uri(u) else {
+                return false;
+            };
+            let ranged = [
+                "post",
+                "comment",
+                "revision",
+                "opinion",
+                "modAction",
+                "wikiRevision",
+                "sequence",
+            ]
+            .iter()
+            .any(|c| coll == format!("{NS}.{c}"));
+            ranged
+                && rkey.len() > f.fk.len() + 1
+                && rkey.starts_with(&format!("{}-", f.fk))
+                && f.status.get(did).copied() != Some("unavailable")
+        };
+        let unlisted: Vec<String> = self
+            .forum
+            .ghost_cids
+            .keys()
+            .filter(|u| !self.live.contains_key(*u) && listed(u))
+            .cloned()
+            .collect();
+        f.deleted.extend(unlisted);
         for r in self.live.values() {
             f.put(&r.uri, r.kind, r.value.clone(), r.valid, r.obs);
         }
@@ -848,7 +898,7 @@ impl Refold {
 }
 
 impl Incremental for Refold {
-    fn apply(&mut self, change: &Change) {
+    fn apply(&mut self, _: usize, change: &Change) {
         self.clock += social_gen::MINUTE;
         match change {
             Change::Put(r) => {
@@ -867,10 +917,126 @@ impl Incremental for Refold {
             }
         }
     }
+}
 
-    fn view(&mut self, q: &Query) -> ForumView {
-        fold(&self.batch_input(), q)
+/// The incremental side of P8: the engine's own path from changes to a fold. Each put is
+/// admitted as the sync layer admits a listed record (`admit_value` with the lexicon validator,
+/// a stable listing observation at the change's rev, first seen when it arrives), each delete is
+/// a confirmed tombstone (a complete listing without the uri), each repo is listed at its
+/// status (an `unavailable` repo never was), and the view is the model the engine builds from
+/// the store (`ForumModel::build`, `sync.md` §13), which refolds every time.
+struct StoreDriver {
+    kv: MemKv,
+    key: ForumKey,
+    now: i64,
+    clock: i64,
+}
+
+impl StoreDriver {
+    fn new(f: &Forum) -> Self {
+        let kv = MemKv::new();
+        let store = RecordStore::new(&kv);
+        let mut b = store.batch();
+        // the declaration, first seen at T0 (as in every generated input)
+        let decl = admitted(&f.uri, &f.decl_cid, &f.decl);
+        let t0_ms = social_gen::T0 / 1000;
+        block_on(b.put_version(decl.into_version(Observation::listing(
+            &rev(0),
+            t0_ms,
+            true,
+            t0_ms,
+        ))))
+        .unwrap();
+        // every repo listed at its status: fresh (at the latest head), stale (a later head was
+        // seen) or unavailable (never listed: no row)
+        let last = rev(usize::MAX >> 16);
+        for i in 0..USERS {
+            let did = user(i);
+            let mut row = RepoRow::new("https://pds.test");
+            match f.status.get(&did).copied() {
+                Some("unavailable") => continue,
+                Some("stale") => {
+                    row.listed.insert(f.fk.clone(), last.clone());
+                    row.add_mark(
+                        &format!("at://{did}/{NS}.post/{}-later", f.fk),
+                        &rev(usize::MAX >> 15),
+                    );
+                }
+                _ => {
+                    row.listed.insert(f.fk.clone(), last.clone());
+                }
+            }
+            b.put_repo(&did, &row).unwrap();
+        }
+        block_on(b.commit()).unwrap();
+        let key = ForumKey::of_uri(&AtUri::parse(&f.uri).unwrap()).unwrap();
+        Self {
+            kv,
+            key,
+            now: f.now,
+            clock: social_gen::T0,
+        }
     }
+
+    /// The model the engine builds from the store: the fold for the base query, and the
+    /// orderings of others from its cached layers.
+    fn model(&self) -> ForumModel {
+        block_on(ForumModel::build(&self.kv, &self.key, self.now)).expect("the model builds")
+    }
+}
+
+impl Incremental for StoreDriver {
+    fn apply(&mut self, n: usize, change: &Change) {
+        self.clock += social_gen::MINUTE;
+        let now_ms = self.clock / 1000;
+        let store = RecordStore::new(&self.kv);
+        let mut b = store.batch();
+        match change {
+            Change::Put(r) => {
+                let v = admitted(&r.uri, &r.cid, &r.value).into_version(Observation::listing(
+                    &rev(n),
+                    now_ms,
+                    true,
+                    now_ms,
+                ));
+                block_on(b.put_version(v)).unwrap();
+            }
+            Change::Delete(u) => {
+                let d = Delete {
+                    key: OrderKey::new(rev(n), now_ms),
+                    evidence: DeleteEvidence::CompleteListing,
+                    at_ms: now_ms,
+                };
+                block_on(b.tombstone(&AtUri::parse(u).unwrap(), d)).unwrap();
+            }
+        }
+        block_on(b.commit()).unwrap();
+    }
+}
+
+fn block_on<F: std::future::Future>(f: F) -> F::Output {
+    futures::executor::block_on(f)
+}
+
+/// `value` at `uri` with CID `cid`, through the sync layer's admission (`sync.md` §5.5).
+fn admitted(uri: &str, cid: &str, value: &Value) -> lessdugin_core::store::AdmittedRecord {
+    let at = AtUri::parse(uri).unwrap();
+    let did = Did::parse(at.did().as_str()).unwrap();
+    let expect = Expect {
+        did: &did,
+        collection: at.collection().as_str(),
+        rkey: Some(at.rkey().as_str()),
+    };
+    let len = serde_json::to_vec(value).unwrap().len();
+    admit_value(
+        Some(uri),
+        Some(cid),
+        Some(value),
+        len,
+        &expect,
+        &LexiconValidator,
+    )
+    .unwrap_or_else(|e| panic!("{uri} is not admitted: {e}"))
 }
 
 /// A random stream that ends in `f`'s record set: earlier versions put first (edits), records
@@ -895,12 +1061,18 @@ fn change_stream(f: &Forum, rng: &mut Rng) -> Vec<Change> {
         ch.push(Change::Put(r.clone()));
         per_uri.push(ch);
     }
-    // deleted items that were once seen (their absence is confirmed by the tombstone)
+    // deleted items that were once seen (their absence is confirmed by the tombstone), as some
+    // version of the uri's collection
     for u in &f.deleted {
+        let coll = u.split('/').nth(3).unwrap();
+        let value =
+            json!({"$type": coll, "forum": f.uri, "title": "gone", "createdAt": social_gen::at(0)});
         let rec = Rec {
             uri: u.clone(),
-            cid: f.ghost_cids[u].clone(),
-            value: json!({"$type": format!("{NS}.post"), "forum": f.uri, "title": "gone", "createdAt": social_gen::at(0)}),
+            cid: lessdugin_atp::datamodel::record_cid(&value)
+                .unwrap()
+                .to_string(),
+            value,
             author: u.split('/').nth(2).unwrap().to_owned(),
             kind: Kind::Post,
             valid: true,

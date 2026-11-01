@@ -210,6 +210,10 @@ F("lfm1/autolink.json", "render", [
     R("in-heading-and-table", "# www.a.com\n\n| www.b.com |\n|---|\n| http://c.com |\n", "html", "toc"),
     R("adjacent-links", "www.a.com www.b.com\n"),
     R("multibyte-before", "é www.a.com ü\n"),
+    # Candidates that pass the first valid_domain check and fail the second (red-team F1: the
+    # scan must stay linear over one whitespace-free run).
+    R("failed-candidates-share-a-run", "(www.a.b.(www.a.b.(www.a.b. (www.a.b.)(www.c.d.)) (www.e.f.&amp;(www.g.h)\n"),
+    G("failed-candidates-long-run", {"prefix": "", "repeat": "(www.a.b.", "times": 2000, "suffix": "\n"}, "html_bytes", "html_tail"),
 ])
 
 # ------------------------------------------------------------------ spoiler-details.json
@@ -330,6 +334,15 @@ F("lfm1/links.json", "render", [
     R("host-display-invisible-characters", "[google.com&#8203;](https://evil.com) [goo&#173;gle.com](https://evil.com) [goo\u2060gle.com](https://evil.com) [\ufeffgoogle.com](https://evil.com) [evil\u200b.com](https://evil.com)\n", *LK),
     R("host-display-trailing-punctuation", "[google.com!](https://evil.com) [google.com.](https://evil.com) [google.com/x](https://evil.com) [evil.com.](https://evil.com) [evil.com!](https://evil.com)\n", *LK),
     R("host-display-lookalikes", "[\u0261oogle.com](https://evil.com) [g\u043e\u043egle.com](https://evil.com) [\uff47\uff4f\uff4f\uff47\uff4c\uff45\uff0e\uff43\uff4f\uff4d](https://evil.com) [google\u3002com](https://evil.com) [\uff45\uff56\uff49\uff4c\uff0e\uff43\uff4f\uff4d](https://evil.com)\n", *LK),
+    # Leading code points that are not name characters (punctuation, symbols, emoji, U+2800) do
+    # not hide the host (red-team F2).
+    R("host-display-leading-non-name", "[(google.com)](https://evil.com) [\"google.com\"](https://evil.com) [\u00a1google.com!](https://evil.com) [\u2192 google.com](https://evil.com) [\u2800google.com](https://evil.com) [\U0001f512 https://www.google.com](https://evil.com) [(evil.com)](https://evil.com) [(https://www.evil.com/x)](https://evil.com) [(click here)](https://evil.com)\n", *LK),
+    # Every dotted name the text names is tested, wherever it stands; mailboxes and path names
+    # are not hosts; gaps and lookalikes next to or in place of a dot do not hide a name; an
+    # image covers its alt (red-team F2).
+    R("host-display-anywhere-in-text", "[See. google.com](https://evil.com) [google.com (ask bob@corp)](https://evil.com) [google.com@corp](https://evil.com) [evil.com, not google.com](https://evil.com) [https://google.com@evil.com/](https://evil.com) [see evil.com](https://evil.com) [https://evil.com/a.html?v=1.2#s.3](https://evil.com) [first.last@evil.com](mailto:first.last@evil.com) [Hello. World](https://evil.com)\n", *LK),
+    R("host-display-gaps-and-lookalike-dots", "[google.\u2800com](https://evil.com) [google.\U0001d159com](https://evil.com) [google\u2800.com](https://evil.com) [google.\u200acom](https://evil.com) [google\ua4f8com](https://evil.com) [google\u0701com](https://evil.com) [evil.\u2800com](https://evil.com) [evil\ua4f8com](https://evil.com) [google. com](https://evil.com)\n", *LK),
+    R("host-display-image-in-link", f"[![evil.com](cid:{CID1})/google.com](https://evil.com) [google.com@![evil.com](cid:{CID1})](https://evil.com) [![a](cid:{CID1}) evil.com](https://evil.com)\n", *LK, media=[media(CID1)]),
     R("mailto-empty-address-dropped", "[support@google.com](mailto:?to=attacker@evil.com)\n", *LK),
     R("mailto-recipient-fields-dropped", "[a](mailto:a@evil.com?cc=b@google.com) [b](mailto:a@evil.com?BCC=b@google.com) [c](mailto:a@evil.com?subject=x&%74o=b@google.com)\n", *LK),
     R("mailto-multiple-recipients-dropped", "[google.com](mailto:a@evil.com,b@google.com) [x](mailto:a@evil.com;b@google.com) [y](mailto:a%40evil.com@google.com)\n", *LK),

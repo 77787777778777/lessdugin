@@ -1353,11 +1353,21 @@ tui [forum]    web [--port] [--no-open]    config get|set|edit    completions <s
 
 **Refs:** `3` (from the last listing in this terminal), `c12` (comment label from the last `read`), an at-uri, any SPA URL, or `<handle>/<rkey>`. `#` is never used in refs, because shells treat it as a comment.
 
+**Local state**
+- `bookmark` defaults to `ls`; `add` and `rm` take a post ref. `subscribe post <ref>`, `forum [ref]`, `user <actor>` or `tag <slug> [--forum <ref>]` selects a subscription, `unsubscribe` takes the same target, and `subs` lists them. These call the engine's local-state operations; nothing is written to a repository.
+- `config get [key]` shows the settings in effect. `config set <key> [value]` calls `set_setting`, with no value resetting the setting; list settings take comma-separated values or JSON, and an indexer URL becomes a consent granted at the command's time. A `sources` in `config.toml` stays the O-9 pin (as does devnet's `direct`): a stored setting is kept but does not override the pin, and the output says so.
+- `members revoke <actor>... [--yes]` calls `revoke`, removing the account's grant while leaving the actor's own membership record (an applicant again in approval mode).
+
 **Drafts**
 - Stored as `$DATA/drafts/<id>.md` with YAML frontmatter (forum, title, kind, url, tags, sequence).
 - The editor chain is `$VISUAL` → `$EDITOR` → `editor` → `nano` → `vi` (notepad on Windows).
 - Validation errors appear as single-line YAML comments.
 - Publishing shows a summary (forum, tags, local files, media, word count) and asks `[y/N/e]`.
+
+**Edits**
+- `edit` sends the item again with the fields it does not change as cached (`data-model.md` §8.3): the body's media (sent again as references), a link post's card (`link.title` and `link.description`, while the uri stays the same), tags and labels. A new link uri drops the card that described the old one.
+- Before an edit of an item that carries a keep, a frontpage or curated tier or a pin, `edit` (and `draft publish` of an edit draft) says what the edit suspends, in the engine's words (`edit_preflight`, `social.md` §4.5), and asks; headless use needs `--yes`. When that check cannot run, it says what could not be checked and why, and asks the same question, rather than refusing the edit.
+- `forum edit` by an account that does not own the forum is refused (`blocked`, as the engine refuses the write) before anything is read or fetched: the declaration lives in the owner's repository, and a spilled about is fetched only by its owner.
 
 **Output**
 - Human output wraps to the terminal and pages through `less -R`. Everything is `TermText`.
@@ -1372,7 +1382,9 @@ tui [forum]    web [--port] [--no-open]    config get|set|edit    completions <s
 - `State` plus a stack of screens. `update(State, Action) → Vec<Effect>`; `view` is pure.
 - Engine events become Actions. A live update never moves the cursor: it shows a "3 new — R" banner.
 - `$EDITOR` runs with the terminal suspended. An inline composer (tui-textarea) handles short replies; `Ctrl-e` escalates to `$EDITOR`.
-- Images use the ratatui-image protocol picked by `Picker::from_query_stdio()`. tmux passthrough is detected; otherwise halfblocks are used.
+- `:edit` asks first when the edit would suspend a moderator's keep, tier or pin on the item (`edit_preflight`, `social.md` §4.5); when that check cannot run, it says what it could not check and why, and asks the same question, rather than refusing the edit.
+- The mod menu's restrict presets ("posting", "voting, reacting") add to the capabilities the moderator's own `#restrict` record restricts while it is in effect, and send that record's `until` and `reason` with them unless the entry states its own: the one record's expiry belongs to everything it states (`social.md` §4.2), so adding to a timed restriction never makes it permanent, and a lapsed one is not re-imposed. The `:mod` command line states the complete set, as the CLI does.
+- Images use a ratatui-image protocol (Kitty, iTerm2, Sixel, else halfblocks), learnt by asking the terminal once, before the input reader starts. The terminal is asked only when it is worth asking: under `LESSDUGIN_TUI_IMAGES=auto` (the default) when the environment names an emulator or a multiplexer (`TERM_PROGRAM`, `KITTY_WINDOW_ID`, `WEZTERM_*`, `ITERM_SESSION_ID`, `VTE_VERSION`, `TMUX`, a `TERM` such as `xterm-kitty` or `foot`) or the terminal reports its cell size in pixels; a bare pty with an inherited `TERM` gets halfblocks unasked, and `query`, `halfblocks` and `off` force the answer. The TUI reads the answer itself with one bounded poll on stdin (2 s) ending at the terminal's Device Status Report, so a terminal that never answers leaves no reader behind, and keys typed around the answer are forwarded as the keys they are: the input thread is the only reader stdin ever has, and no keystroke is lost (`crates/tui/src/image.rs`). tmux passthrough is detected as before.
 
 **Screens:** Home (forums with unread counts, notification badge, sync status), Forum (sort and filter tabs; Posts and Activity), Post, Thread, Tags/Tag, Sequences/Sequence, User, Notifications, Search, Mod queue (one key per action, plus reason), Mod log, Drafts. Overlays: `?` help, `:` command line (accepts any CLI subcommand), react palette, confirmations, login.
 

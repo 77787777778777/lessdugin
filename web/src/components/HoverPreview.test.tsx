@@ -6,7 +6,9 @@ import { MockEngine } from "@lessdugin/engine/mock";
 import type { PostSummary, PostView } from "@lessdugin/engine/types";
 import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
+import { qk } from "../engine/queries.ts";
 import { renderWithApp } from "../test/render.tsx";
+import { actorIdent } from "./ActorName.tsx";
 import { HoverPreview } from "./HoverPreview.tsx";
 
 async function postTitled(engine: MockEngine, prefix: string): Promise<PostSummary> {
@@ -71,6 +73,52 @@ describe("HoverPreview (lfm-1.md §5.3)", () => {
     expect(dialog.textContent).not.toContain("Welcome to LessDugin");
     expect(dialog.querySelector("[data-rendered-root]")).toBeNull();
     expect(within(dialog).getByRole("link", { name: "Open →" })).toBeTruthy();
+  });
+
+  it("builds a DID card from identity resolution, not the M5 user op (m4-22)", async () => {
+    const engine = new MockEngine();
+    const post = await postTitled(engine, "Welcome");
+    const did = post.author.did;
+    // the wasm engine answers `user` with `unsupported` until M5
+    const user = vi
+      .spyOn(engine, "user")
+      .mockRejectedValue({ code: "unsupported", message: "M5", retryable: false });
+    const resolveActor = vi.spyOn(engine, "resolveActor");
+    const { queryClient } = preview(engine, did);
+    const dialog = await screen.findByRole("dialog", { name: "Link preview" });
+    await waitFor(() => expect(dialog.textContent).toContain(actorIdent(post.author)));
+    expect(dialog.textContent).not.toContain("Unknown user.");
+    expect(resolveActor).toHaveBeenCalledWith(did);
+    expect(user).not.toHaveBeenCalled();
+    // the identity lands where lazy mention substitution reads it (lfm-1.md §5.4)
+    expect(queryClient.getQueryData(qk.actor(did))).toMatchObject({ did });
+  });
+
+  it("opens no forum and syncs no authority on hover (m4-29)", async () => {
+    const engine = new MockEngine();
+    const forum = (await engine.followed())[0]?.uri ?? "";
+    const forumOpen = vi.spyOn(engine, "forumOpen");
+    preview(engine, forum);
+    const dialog = await screen.findByRole("dialog", { name: "Link preview" });
+    // a forum not in the cache gets the metadata card, whose "open" does the opening
+    await waitFor(() => expect(dialog.textContent).toContain(forum));
+    expect(within(dialog).getByRole("link", { name: "Open →" })).toBeTruthy();
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 50));
+    });
+    expect(forumOpen).not.toHaveBeenCalled();
+  });
+
+  it("names a forum already in the cache", async () => {
+    const engine = new MockEngine();
+    const forum = (await engine.followed())[0]?.uri ?? "";
+    const view = await engine.forumOpen(forum);
+    const forumOpen = vi.spyOn(engine, "forumOpen");
+    const { queryClient } = preview(engine, forum);
+    queryClient.setQueryData(qk.forumRef(forum), view);
+    const dialog = await screen.findByRole("dialog", { name: "Link preview" });
+    await waitFor(() => expect(dialog.textContent).toContain(view.forum.name));
+    expect(forumOpen).not.toHaveBeenCalled();
   });
 
   it("opens no preview from inside a preview (depth 1)", async () => {

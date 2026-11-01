@@ -18,13 +18,18 @@
 //! | GIF | the header, logical screen descriptor, global colour table, graphic control extensions, image descriptors with local colour tables and image data, the `NETSCAPE2.0` application extension, trailer | comment and plain-text extensions, other application extensions (XMP), anything after the trailer |
 //! | MP4 / MOV | **every byte** — offsets must never shift | every `udta` and `meta` box at any depth, overwritten with a `free` box whose payload is zeroed |
 //!
-//! **Orientation.** An EXIF orientation other than 1 is applied physically (the pixels are
-//! rotated and re-encoded) before the EXIF is dropped, so a rotated photo keeps looking right
-//! (`sync.md`, PRIV-4).
+//! **Orientation.** An EXIF orientation other than 1 (from a JPEG's APP1, a PNG's `eXIf` or a
+//! WebP's `EXIF` chunk) is applied physically (the pixels are rotated and re-encoded) before the
+//! EXIF is dropped, so a rotated photo keeps looking right (`sync.md`, PRIV-4).
+//!
+//! **Fail closed.** A container of the table that the walk cannot parse (a truncated stream, a
+//! length past the end, a byte that is no marker, a missing end marker) is reported `malformed`
+//! and refused for upload by [`prepare`]: nothing proves that what the table drops is gone, and
+//! browsers display such files anyway, so uploading them as they are would publish their EXIF.
 //!
 //! **Bounded walks.** Every walk is iterative and capped (`limits.md` §6), so a truncated or
 //! cyclic container cannot hang or overflow the stack: a walk that runs off the end stops and
-//! treats the file as unstrippable rather than looping.
+//! treats the file as malformed rather than looping.
 
 use crate::engine::EngineError;
 
@@ -79,37 +84,37 @@ pub struct Stripped {
     /// The container nests deeper than [`MEDIA_CONTAINER_MAX_DEPTH`], so §6 refuses it for
     /// upload. The bytes are the input's, unmodified; this is not a "nothing to drop" answer.
     pub too_deep: bool,
+    /// The container is one of the table's but the walk could not parse it, so nothing proves
+    /// that its metadata is gone: [`prepare`] refuses it for upload (fail closed). The bytes are
+    /// the input's, unmodified; this is not a "nothing to drop" answer either.
+    pub malformed: bool,
 }
 
 /// Nesting of MP4 boxes (and RIFF chunks) walked by the sniffer and the strippers
 /// (`limits.md` §6, `MEDIA_CONTAINER_MAX_DEPTH`). Deeper: the file is refused for upload.
 pub const MEDIA_CONTAINER_MAX_DEPTH: u32 = 32;
 
-/// Strips metadata from `b` by allowlist rebuild (§5.9.1). A format outside the table, or one the
-/// walk cannot parse, is returned unchanged with `changed: false`: the pipeline never destroys a
-/// file it does not understand, and PRIV-7 says the others upload as they are. A container nested
-/// past [`MEDIA_CONTAINER_MAX_DEPTH`] sets `too_deep` instead (§6: refused for upload).
+/// Strips metadata from `b` by allowlist rebuild (§5.9.1). A format outside the table is returned
+/// unchanged with `changed: false` (PRIV-7: the others upload as they are). A container of the
+/// table that the walk cannot parse comes back unchanged too, but `malformed` (the pipeline never
+/// destroys a file it does not understand, and never uploads it either); one nested past
+/// [`MEDIA_CONTAINER_MAX_DEPTH`] sets `too_deep` instead (§6: refused for upload).
 pub fn strip_metadata(b: &[u8]) -> Stripped {
+    let format = sniff(b);
     if b.len() > MAX_SCAN_BYTES {
+        // never walked, so never vouched for
         return Stripped {
-            bytes: b.to_vec(),
-            changed: false,
-            orientation: None,
-            too_deep: false,
+            malformed: format.is_some(),
+            ..unchanged(b)
         };
     }
-    match sniff(b) {
+    match format {
         Some(Format::Jpeg) => strip_jpeg(b),
         Some(Format::Png) => strip_png(b),
         Some(Format::Webp) => strip_webp(b),
         Some(Format::Gif) => strip_gif(b),
         Some(Format::Iso) => strip_iso(b),
-        None => Stripped {
-            bytes: b.to_vec(),
-            changed: false,
-            orientation: None,
-            too_deep: false,
-        },
+        None => unchanged(b),
     }
 }
 
@@ -119,6 +124,18 @@ fn unchanged(b: &[u8]) -> Stripped {
         changed: false,
         orientation: None,
         too_deep: false,
+        malformed: false,
+    }
+}
+
+/// The result of a rebuild that dropped something (or not) and parsed to the end.
+fn rebuilt(bytes: Vec<u8>, changed: bool, orientation: Option<u16>) -> Stripped {
+    Stripped {
+        bytes,
+        changed,
+        orientation,
+        too_deep: false,
+        malformed: false,
     }
 }
 
@@ -126,10 +143,16 @@ fn unchanged(b: &[u8]) -> Stripped {
 /// upload with its bytes unmodified rather than half-processed.
 fn refused_too_deep(b: &[u8]) -> Stripped {
     Stripped {
-        bytes: b.to_vec(),
-        changed: false,
-        orientation: None,
         too_deep: true,
+        ..unchanged(b)
+    }
+}
+
+/// The walk could not parse `b`: its bytes unmodified, refused for upload by [`prepare`].
+fn malformed(b: &[u8]) -> Stripped {
+    Stripped {
+        malformed: true,
+        ..unchanged(b)
     }
 }
 
@@ -156,7 +179,7 @@ fn jpeg_kept(marker: u8) -> bool {
 /// MPF APP2, and anything after EOI.
 fn strip_jpeg(b: &[u8]) -> Stripped {
     if b.len() < 4 {
-        return unchanged(b);
+        return malformed(b);
     }
     let mut out = Vec::with_capacity(b.len());
     out.extend_from_slice(&b[0..2]); // SOI
@@ -167,7 +190,7 @@ fn strip_jpeg(b: &[u8]) -> Stripped {
     // input unchanged rather than emitting a half-stripped file.
     while i < b.len() {
         if b[i] != 0xFF {
-            return unchanged(b);
+            return malformed(b);
         }
         // Skip fill bytes (a run of 0xFF before a marker is legal padding). Collapsing them
         // is a change to the file, so it must be reported as one: `changed == false` promises
@@ -180,19 +203,14 @@ fn strip_jpeg(b: &[u8]) -> Stripped {
             changed = true;
         }
         let Some(&marker) = b.get(i) else {
-            return unchanged(b);
+            return malformed(b);
         };
         i += 1;
         match marker {
             0xD9 => {
                 // EOI: nothing after it survives
                 out.extend_from_slice(&[0xFF, 0xD9]);
-                return Stripped {
-                    bytes: out,
-                    changed: changed || i != b.len(),
-                    orientation,
-                    too_deep: false,
-                };
+                return rebuilt(out, changed || i != b.len(), orientation);
             }
             0xD8 => {
                 out.extend_from_slice(&[0xFF, 0xD8]);
@@ -201,11 +219,11 @@ fn strip_jpeg(b: &[u8]) -> Stripped {
             0xDA => {
                 // SOS: its header segment, then the entropy-coded data up to the next marker.
                 let Some(len_at) = b.get(i..i + 2) else {
-                    return unchanged(b);
+                    return malformed(b);
                 };
                 let len = u16::from_be_bytes([len_at[0], len_at[1]]) as usize;
                 if len < 2 || i + len > b.len() {
-                    return unchanged(b);
+                    return malformed(b);
                 }
                 out.extend_from_slice(&[0xFF, 0xDA]);
                 out.extend_from_slice(&b[i..i + len]);
@@ -213,7 +231,7 @@ fn strip_jpeg(b: &[u8]) -> Stripped {
                 // entropy-coded data: copy until a marker that is not a stuffed 0x00 and not RSTn
                 loop {
                     let Some(&c) = b.get(i) else {
-                        return unchanged(b);
+                        return malformed(b);
                     };
                     if c != 0xFF {
                         out.push(c);
@@ -221,7 +239,7 @@ fn strip_jpeg(b: &[u8]) -> Stripped {
                         continue;
                     }
                     let Some(&n) = b.get(i + 1) else {
-                        return unchanged(b);
+                        return malformed(b);
                     };
                     if n == 0x00 {
                         out.extend_from_slice(&[0xFF, 0x00]);
@@ -241,11 +259,11 @@ fn strip_jpeg(b: &[u8]) -> Stripped {
             _ => {}
         }
         let Some(len_at) = b.get(i..i + 2) else {
-            return unchanged(b);
+            return malformed(b);
         };
         let len = u16::from_be_bytes([len_at[0], len_at[1]]) as usize;
         if len < 2 || i + len > b.len() {
-            return unchanged(b);
+            return malformed(b);
         }
         let payload = &b[i + 2..i + len];
         let keep = if jpeg_kept(marker) {
@@ -272,13 +290,23 @@ fn strip_jpeg(b: &[u8]) -> Stripped {
         i += len;
     }
     // no EOI: a truncated stream
-    unchanged(b)
+    malformed(b)
 }
 
 /// The EXIF orientation tag (0x0112) from an APP1 payload, if present and sane.
 fn exif_orientation(app1: &[u8]) -> Option<u16> {
     // "Exif\0\0" then a TIFF header ("II"/"MM", 42, offset to IFD0)
-    let tiff = app1.strip_prefix(b"Exif\0\0")?;
+    tiff_orientation(app1.strip_prefix(b"Exif\0\0")?)
+}
+
+/// The orientation tag of a PNG `eXIf` or WebP `EXIF` chunk: the TIFF structure itself, which
+/// some writers still prefix with JPEG's `Exif\0\0`.
+fn chunk_orientation(payload: &[u8]) -> Option<u16> {
+    tiff_orientation(payload.strip_prefix(b"Exif\0\0").unwrap_or(payload))
+}
+
+/// The orientation tag (0x0112) of IFD0 of a TIFF structure, if present and sane.
+fn tiff_orientation(tiff: &[u8]) -> Option<u16> {
     let little = match tiff.get(0..2)? {
         b"II" => true,
         b"MM" => false,
@@ -332,38 +360,41 @@ fn strip_png(b: &[u8]) -> Stripped {
 
     // signature is 8 bytes
     if b.len() < 8 {
-        return unchanged(b);
+        return malformed(b);
     }
     let mut out = Vec::with_capacity(b.len());
     out.extend_from_slice(&b[0..8]);
     let mut i = 8;
     let mut changed = false;
+    let mut orientation = None;
     while i + 8 <= b.len() {
         let len = u32::from_be_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]) as usize;
         let kind = &b[i + 4..i + 8];
         // len + type + data + CRC, with a bound so a corrupt length cannot overflow
         let Some(end) = i.checked_add(12).and_then(|v| v.checked_add(len)) else {
-            return unchanged(b);
+            return malformed(b);
         };
         if end > b.len() {
-            return unchanged(b);
+            return malformed(b);
         }
         match kind {
             b"IEND" => {
                 out.extend_from_slice(&b[i..end]);
-                return Stripped {
-                    bytes: out,
-                    changed: changed || end != b.len(),
-                    orientation: None,
-                    too_deep: false,
-                };
+                return rebuilt(out, changed || end != b.len(), orientation);
             }
             k if KEEP.iter().any(|x| **x == *k) => out.extend_from_slice(&b[i..end]),
-            _ => changed = true,
+            k => {
+                // eXIf is dropped like the rest, but its orientation is applied first
+                if k == b"eXIf" && orientation.is_none() {
+                    orientation = chunk_orientation(&b[i + 8..i + 8 + len]);
+                }
+                changed = true;
+            }
         }
         i = end;
     }
-    unchanged(b)
+    // no IEND: a truncated stream
+    malformed(b)
 }
 
 // --- WebP -----------------------------------------------------------------------------------
@@ -380,31 +411,33 @@ fn webp_kept(id: &[u8]) -> bool {
 /// XMP flag bits (`threat-model.md` §5.9.1).
 fn strip_webp(b: &[u8]) -> Stripped {
     if b.len() < 12 {
-        return unchanged(b);
+        return malformed(b);
     }
     let mut out = Vec::with_capacity(b.len());
     out.extend_from_slice(&b[0..12]);
     let mut i = 12;
     let mut changed = false;
+    let mut orientation = None;
     while i + 8 <= b.len() {
         let id = &b[i..i + 4];
         let len = u32::from_le_bytes([b[i + 4], b[i + 5], b[i + 6], b[i + 7]]) as usize;
         // chunks are padded to an even size
         let padded = len + (len & 1);
         let Some(end) = i.checked_add(8).and_then(|v| v.checked_add(padded)) else {
-            return unchanged(b);
+            return malformed(b);
         };
         if end > b.len() {
-            return unchanged(b);
+            return malformed(b);
         }
         if webp_kept(id) {
             if id == b"VP8X" && len >= 1 {
-                // byte 0 holds the flag bits: bit 3 = EXIF, bit 4 = XMP (RFC 9649)
+                // byte 0 holds the flag bits, MSB first `Rsv Rsv I L E X A R` (RFC 9649):
+                // ICC 0x20, alpha 0x10, EXIF 0x08, XMP 0x04, animation 0x02
                 let mut chunk = b[i..end].to_vec();
                 let mut flags = chunk[8];
                 let before = flags;
-                flags &= !(1 << 3); // EXIF
-                flags &= !(1 << 4); // XMP
+                flags &= !0x08; // EXIF
+                flags &= !0x04; // XMP
                 if flags != before {
                     chunk[8] = flags;
                     changed = true;
@@ -414,7 +447,10 @@ fn strip_webp(b: &[u8]) -> Stripped {
                 out.extend_from_slice(&b[i..end]);
             }
         } else {
-            // EXIF, XMP and every other chunk
+            // EXIF, XMP and every other chunk; EXIF's orientation is applied first
+            if id == b"EXIF" && orientation.is_none() {
+                orientation = chunk_orientation(&b[i + 8..i + 8 + len]);
+            }
             changed = true;
         }
         i = end;
@@ -425,16 +461,13 @@ fn strip_webp(b: &[u8]) -> Stripped {
     }
     // recompute the RIFF size: everything after the first 8 bytes
     if out.len() < 8 {
-        return unchanged(b);
+        return malformed(b);
     }
-    let size = (out.len() - 8) as u32;
-    out[4..8].copy_from_slice(&size.to_le_bytes());
-    Stripped {
-        bytes: out,
-        changed,
-        orientation: None,
-        too_deep: false,
-    }
+    let size = ((out.len() - 8) as u32).to_le_bytes();
+    // a header that misstated the size is a change too (`changed: false` promises the input)
+    changed |= out[4..8] != size;
+    out[4..8].copy_from_slice(&size);
+    rebuilt(out, changed, orientation)
 }
 
 // --- GIF ------------------------------------------------------------------------------------
@@ -451,7 +484,7 @@ fn is_netscape_loop(blocks: &[u8]) -> bool {
 /// extension (XMP) are dropped, as is anything after the trailer.
 fn strip_gif(b: &[u8]) -> Stripped {
     if b.len() < 13 {
-        return unchanged(b);
+        return malformed(b);
     }
     let mut out = Vec::with_capacity(b.len());
     // header (6) + logical screen descriptor (7)
@@ -463,10 +496,10 @@ fn strip_gif(b: &[u8]) -> Stripped {
     if packed & 0x80 != 0 {
         let entries = 1usize << ((packed & 0x07) + 1);
         let Some(end) = i.checked_add(entries * 3) else {
-            return unchanged(b);
+            return malformed(b);
         };
         if end > b.len() {
-            return unchanged(b);
+            return malformed(b);
         }
         out.extend_from_slice(&b[i..end]);
         i = end;
@@ -476,23 +509,23 @@ fn strip_gif(b: &[u8]) -> Stripped {
     while i < b.len() {
         guard += 1;
         if guard > 1_000_000 {
-            return unchanged(b);
+            return malformed(b);
         }
         match b[i] {
             0x21 => {
                 // extension: label, then sub-blocks
                 let Some(&label) = b.get(i + 1) else {
-                    return unchanged(b);
+                    return malformed(b);
                 };
                 let Some(start) = i.checked_add(2) else {
-                    return unchanged(b);
+                    return malformed(b);
                 };
                 // walk the sub-block chain to find the end
                 let mut j = start;
                 let mut blocks = Vec::new();
                 loop {
                     let Some(&sz) = b.get(j) else {
-                        return unchanged(b);
+                        return malformed(b);
                     };
                     let sz = sz as usize;
                     if sz == 0 {
@@ -501,10 +534,10 @@ fn strip_gif(b: &[u8]) -> Stripped {
                         break;
                     }
                     let Some(end) = j.checked_add(1).and_then(|v| v.checked_add(sz)) else {
-                        return unchanged(b);
+                        return malformed(b);
                     };
                     if end > b.len() {
-                        return unchanged(b);
+                        return malformed(b);
                     }
                     blocks.extend_from_slice(&b[j..end]);
                     j = end;
@@ -531,31 +564,31 @@ fn strip_gif(b: &[u8]) -> Stripped {
             0x2C => {
                 // image descriptor (9 bytes) + optional local colour table + LZW sub-blocks
                 let Some(start) = i.checked_add(10) else {
-                    return unchanged(b);
+                    return malformed(b);
                 };
                 if start > b.len() {
-                    return unchanged(b);
+                    return malformed(b);
                 }
                 let mut j = start;
                 let lp = b[i + 9];
                 if lp & 0x80 != 0 {
                     let entries = 1usize << ((lp & 0x07) + 1);
                     let Some(e) = j.checked_add(entries * 3) else {
-                        return unchanged(b);
+                        return malformed(b);
                     };
                     if e > b.len() {
-                        return unchanged(b);
+                        return malformed(b);
                     }
                     j = e;
                 }
                 // LZW minimum code size, then sub-blocks
                 let Some(_mcs) = b.get(j) else {
-                    return unchanged(b);
+                    return malformed(b);
                 };
                 j += 1;
                 loop {
                     let Some(&sz) = b.get(j) else {
-                        return unchanged(b);
+                        return malformed(b);
                     };
                     let sz = sz as usize;
                     if sz == 0 {
@@ -563,10 +596,10 @@ fn strip_gif(b: &[u8]) -> Stripped {
                         break;
                     }
                     let Some(e) = j.checked_add(1).and_then(|v| v.checked_add(sz)) else {
-                        return unchanged(b);
+                        return malformed(b);
                     };
                     if e > b.len() {
-                        return unchanged(b);
+                        return malformed(b);
                     }
                     j = e;
                 }
@@ -576,17 +609,13 @@ fn strip_gif(b: &[u8]) -> Stripped {
             0x3B => {
                 // trailer
                 out.push(0x3B);
-                return Stripped {
-                    bytes: out,
-                    changed: changed || i + 1 != b.len(),
-                    orientation: None,
-                    too_deep: false,
-                };
+                return rebuilt(out, changed || i + 1 != b.len(), None);
             }
-            _ => return unchanged(b),
+            _ => return malformed(b),
         }
     }
-    unchanged(b)
+    // no trailer: a truncated stream
+    malformed(b)
 }
 
 // --- MP4 / ISO-BMFF -------------------------------------------------------------------------
@@ -613,7 +642,7 @@ fn strip_iso(b: &[u8]) -> Stripped {
         while i + 8 <= end {
             guard += 1;
             if guard > 1_000_000 {
-                return unchanged(b);
+                return malformed(b);
             }
             let size32 = u32::from_be_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]) as u64;
             let kind = &b[i + 4..i + 8];
@@ -622,20 +651,30 @@ fn strip_iso(b: &[u8]) -> Stripped {
                 1 => {
                     // 64-bit size follows the type
                     let Some(l) = b.get(i + 8..i + 16) else {
-                        break;
+                        return malformed(b);
                     };
                     (u64::from_be_bytes(l.try_into().unwrap()), 16usize)
                 }
                 n => (n, 8usize),
             };
+            // A size smaller than its own header leaves the rest of this level unframed: a
+            // `udta` or `meta` in it could not be found, so the walk cannot vouch for the file.
             if size < header as u64 {
-                break;
+                return malformed(b);
             }
             let box_end = match (i as u64).checked_add(size) {
                 Some(v) if v <= end as u64 => v as usize,
                 // a size that runs past its container: stop this level
                 _ => end,
             };
+            // Clamping an oversized box must not make its extended header unreachable. Check
+            // before slicing the payload, including a child header or a dropped box.
+            let Some(payload) = i.checked_add(header) else {
+                return malformed(b);
+            };
+            if payload > box_end {
+                return malformed(b);
+            }
             if iso_dropped(kind) {
                 // overwrite the type with `free` and zero the payload
                 out[i + 4..i + 8].copy_from_slice(b"free");
@@ -670,12 +709,7 @@ fn strip_iso(b: &[u8]) -> Stripped {
         }
     }
     if changed {
-        Stripped {
-            bytes: out,
-            changed,
-            orientation: None,
-            too_deep: false,
-        }
+        rebuilt(out, true, None)
     } else {
         unchanged(b)
     }
@@ -694,45 +728,103 @@ const DECODE_MAX_SIDE: usize = 8_192;
 const DECODE_MAX_ALLOC_BYTES: usize = 256 * 1024 * 1024;
 
 /// True when SUP-9 lets us decode `bytes` at all. A hostile header can declare an enormous frame,
-/// and `image::load_from_memory` would allocate it, so the caps are checked BEFORE any pixels are
-/// read. `imagesize` parses only the container header, which costs no decode.
+/// and a decoder would allocate it, so the caps are checked BEFORE any pixels are read: the frame
+/// size comes from `imagesize` (the container header only), and when it cannot parse the header,
+/// from the decoder's own header parse ([`image::ImageReader::into_dimensions`], no pixels).
+/// Their walkers differ (a JPEG fill byte before a marker throws `imagesize` off, while the
+/// decoder accepts it), so a header neither can measure is refused: fail closed (F35/F36).
 ///
-/// A header `imagesize` cannot parse is not a cap violation: the decode below then decides, which
-/// is what already happens for an undecodable file (the metadata is still stripped, and
-/// orientation and downscaling no-op).
+/// The three caps are 64 MiB of input, 8192 pixels per side, and a 256 MiB allocation at 4 bytes
+/// a pixel. Public so every surface that decodes media - the pipeline here, and the TUI's image
+/// widget - uses ONE policy; [`decode_image`] applies the same caps inside the decoder too.
 #[cfg(feature = "orientation")]
-/// True when the bytes may be handed to a decoder: the three SUP-9 caps hold (64 MiB of input,
-/// 8192 pixels per side, a 256 MiB allocation at 4 bytes a pixel). Public so every surface that
-/// decodes media - the pipeline here, and the TUI's image widget - uses ONE policy.
 pub fn decoding_allowed(bytes: &[u8]) -> bool {
     if bytes.len() > DECODE_MAX_INPUT_BYTES {
         return false;
     }
-    let Ok(size) = imagesize::blob_size(bytes) else {
-        return true;
+    let (width, height) = match imagesize::blob_size(bytes) {
+        Ok(size) => (size.width, size.height),
+        Err(_) => match reader(bytes).and_then(|r| r.into_dimensions().ok()) {
+            Some((w, h)) => (w as usize, h as usize),
+            None => return false,
+        },
     };
-    if size.width.max(size.height) > DECODE_MAX_SIDE {
+    if width.max(height) > DECODE_MAX_SIDE {
         return false;
     }
     // RGBA is the largest allocation the decoders here make per pixel.
-    size.width.saturating_mul(size.height).saturating_mul(4) <= DECODE_MAX_ALLOC_BYTES
+    width.saturating_mul(height).saturating_mul(4) <= DECODE_MAX_ALLOC_BYTES
+}
+
+/// An image reader over `bytes` with SUP-9's caps as the decoder's own limits, so a frame past
+/// them fails inside the decoder even if a header check was fooled (the `image` crate's default
+/// is 512 MiB of allocation and no side cap).
+#[cfg(feature = "orientation")]
+fn reader(bytes: &[u8]) -> Option<image::ImageReader<std::io::Cursor<&[u8]>>> {
+    let mut r = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(DECODE_MAX_SIDE as u32);
+    limits.max_image_height = Some(DECODE_MAX_SIDE as u32);
+    limits.max_alloc = Some(DECODE_MAX_ALLOC_BYTES as u64);
+    r.limits(limits);
+    Some(r)
+}
+
+/// Decodes `bytes` under SUP-9: `None` unless [`decoding_allowed`] holds and the decoder, run
+/// with the same caps as its limits, succeeds. Every decode of the pipeline goes through here.
+#[cfg(feature = "orientation")]
+pub fn decode_image(bytes: &[u8]) -> Option<image::DynamicImage> {
+    if !decoding_allowed(bytes) {
+        return None;
+    }
+    reader(bytes)?.decode().ok()
+}
+
+/// True for an APNG (an `acTL` chunk before the first `IDAT`) or an animated WebP (VP8X's
+/// animation flag `0x02`, RFC 9649). The decoders here return the first frame only, so a
+/// re-encode would turn the animation into a still: it keeps its bytes instead.
+#[cfg(feature = "orientation")]
+fn is_animated(b: &[u8]) -> bool {
+    match sniff(b) {
+        Some(Format::Png) => {
+            let mut i = 8;
+            while let Some(head) = b.get(i..i + 8) {
+                let len = u32::from_be_bytes([head[0], head[1], head[2], head[3]]) as usize;
+                match &head[4..8] {
+                    b"acTL" => return true,
+                    b"IDAT" | b"IEND" => return false,
+                    _ => {}
+                }
+                let Some(next) = i.checked_add(12).and_then(|v| v.checked_add(len)) else {
+                    return false;
+                };
+                i = next;
+            }
+            false
+        }
+        // VP8X, when present, is the first chunk; byte 0 of its payload holds the flags
+        Some(Format::Webp) => {
+            b.get(12..16) == Some(b"VP8X") && b.get(20).is_some_and(|f| f & 0x02 != 0)
+        }
+        _ => false,
+    }
 }
 
 /// Applies EXIF orientation physically, by re-encoding the pixels (so no EXIF survives). Returns
 /// the input unchanged when the orientation is 1/absent or the image cannot be decoded.
 ///
 /// Only the formats the `image` crate can decode in this build are handled (PNG, JPEG, GIF, WebP);
-/// anything else keeps its bytes, and the caller still strips its metadata.
+/// anything else keeps its bytes, and the caller still strips its metadata. An animation keeps
+/// its bytes too ([`is_animated`]): its frames stay, unrotated, rather than become one still.
 #[cfg(feature = "orientation")]
 pub fn apply_orientation(bytes: &[u8], orientation: u16) -> Vec<u8> {
     use image::{DynamicImage, ImageFormat};
-    if !(2..=8).contains(&orientation) {
+    if !(2..=8).contains(&orientation) || is_animated(bytes) {
         return bytes.to_vec();
     }
-    if !decoding_allowed(bytes) {
-        return bytes.to_vec();
-    }
-    let Ok(img) = image::load_from_memory(bytes) else {
+    let Some(img) = decode_image(bytes) else {
         return bytes.to_vec();
     };
     // Orientations 5-8 swap the axes, so they are 90/270 rotations plus flips.
@@ -774,6 +866,16 @@ pub fn prepare(bytes: Vec<u8>) -> Result<Vec<u8>, EngineError> {
         ))
         .with_detail("kind", "mediaRejected"));
     }
+    // Fail closed (PRIV-4, §5.9.1 "the output keeps only what the table allows"): a damaged
+    // image or MP4 is not uploaded with its metadata, it is refused.
+    if stripped.malformed {
+        return Err(EngineError::invalid_input(
+            "the file is damaged (truncated or not well formed), so its metadata cannot be \
+             removed safely: re-save it with an image or video editor and attach it again",
+        )
+        .with_detail("kind", "mediaRejected")
+        .with_detail("reason", "malformed"));
+    }
     #[cfg(feature = "orientation")]
     if let Some(o) = stripped.orientation.filter(|o| *o != 1) {
         return Ok(apply_orientation(&stripped.bytes, o));
@@ -790,9 +892,8 @@ use crate::dto::{MediaInput, MediaRef};
 ///
 /// The declared type is checked against the sniffed one through §8.8's table, which is also what
 /// decides whether the type is acceptable at all; a type outside the table is refused rather than
-/// uploaded as something the reader will not accept. A file whose metadata cannot be parsed is
-/// still returned (the pipeline never destroys a file it does not understand, PRIV-7), but it is
-/// returned with the bytes it came in with.
+/// uploaded as something the reader will not accept. An image or MP4 whose container cannot be
+/// parsed is refused too (fail closed, [`prepare`]): its metadata could not be removed.
 impl<H: crate::host::Host> crate::engine::Engine<H> {
     /// See [`prepare_media`](Self::prepare_media).
     pub async fn prepare_media(
@@ -800,6 +901,13 @@ impl<H: crate::host::Host> crate::engine::Engine<H> {
         bytes: Vec<u8>,
         input: &MediaInput,
     ) -> Result<MediaRef, crate::engine::EngineError> {
+        // limits.md §6: the SPA's client refuses a larger file before it crosses into wasm; this
+        // is the same line for a caller that sent it anyway (natively there is no window)
+        if cfg!(target_arch = "wasm32")
+            && bytes.len() as u64 > crate::limits::MEDIA_WASM_WINDOW_BYTES
+        {
+            return Err(too_large_for_the_browser(bytes.len() as u64));
+        }
         let sniffed = crate::outbox::blob::normalise_mime(&bytes).ok_or_else(|| {
             crate::engine::EngineError::invalid_input("unsupported media type (data-model.md §8.8)")
                 .with_detail("kind", "mediaRejected")
@@ -813,7 +921,7 @@ impl<H: crate::host::Host> crate::engine::Engine<H> {
                 "prepare_media: the sniffed type wins (data-model.md §8.8)"
             );
         }
-        let prepared = prepare(bytes)?;
+        let prepared = fit_to_target(prepare(bytes)?);
         let mime = crate::outbox::blob::normalise_mime(&prepared).unwrap_or(sniffed);
         let mime = if mime == sniffed {
             sniffed
@@ -827,43 +935,74 @@ impl<H: crate::host::Host> crate::engine::Engine<H> {
         // (data-model.md §8.8). They are stored, not held in memory, so a composer that is
         // closed and reopened still publishes the file it prepared.
         self.store_prepared_media(&cid, &prepared, mime).await?;
+        // data-model.md §4: a blank alt is no alt, and writers warn when it is missing
+        let alt = input.alt.clone().filter(|a| !a.trim().is_empty());
+        let notices = if alt.is_none() {
+            vec![crate::dto::ActionNotice {
+                code: crate::dto::NoticeCode::MissingAlt,
+                message: MISSING_ALT.to_owned(),
+            }]
+        } else {
+            Vec::new()
+        };
         Ok(MediaRef {
             id: cid.clone(),
             cid,
             mime: mime.to_owned(),
             size_bytes: prepared.len() as u64,
-            alt: input.alt.clone(),
+            alt,
             aspect_ratio: input.aspect_ratio.clone(),
             duration_ms: None,
             name: input.name.clone(),
+            notices,
         })
     }
 }
 
+/// The `missingAlt` notice of [`prepare_media`](crate::engine::Engine::prepare_media).
+pub const MISSING_ALT: &str =
+    "this file has no alt text: readers who cannot see it will not know what it shows";
+
 /// The upload size the pipeline aims for before trying (§8.8, "downscale (try 5 MiB first, fit on
-/// 413)").
-pub const UPLOAD_TARGET_BYTES: usize = 5 * 1024 * 1024;
+/// 413)"): `limits.md` §12 `IMAGE_UPLOAD_TARGET_BYTES`.
+pub const UPLOAD_TARGET_BYTES: usize = crate::limits::IMAGE_UPLOAD_TARGET_BYTES as usize;
+
+/// §8.8's first step: an image larger than [`UPLOAD_TARGET_BYTES`] is downscaled to it while it is
+/// prepared, so the CID the draft's `cid:` URLs name is the CID that is uploaded. One that cannot
+/// be downscaled (an animation, an image the decoders here do not take) keeps its bytes: the
+/// PDS's answer then decides (a 413 is refused, [`fit_for_upload`]).
+fn fit_to_target(prepared: Vec<u8>) -> Vec<u8> {
+    if prepared.len() <= UPLOAD_TARGET_BYTES {
+        return prepared;
+    }
+    #[cfg(feature = "orientation")]
+    if let Some(smaller) = downscale_to_fit(&prepared, UPLOAD_TARGET_BYTES) {
+        return smaller;
+    }
+    prepared
+}
 
 /// Re-encodes an image smaller so it fits `max_bytes`, halving the longest side until it does.
 ///
 /// Returns `None` when the bytes are not a decodable image or cannot be made to fit - the caller
 /// then refuses the upload rather than sending something the PDS will reject again (§8.8: "On 413,
-/// the client downscales (images) or refuses"). Audio, video, PDF and text never downscale.
+/// the client downscales (images) or refuses"). Audio, video, PDF and text never downscale, and
+/// neither does an animation (a GIF, an APNG or an animated WebP, [`is_animated`]): it is not
+/// resized frame by frame here, and its first frame alone is not the file.
 #[cfg(feature = "orientation")]
 pub fn downscale_to_fit(bytes: &[u8], max_bytes: usize) -> Option<Vec<u8>> {
     use image::ImageFormat;
-    let format = sniff(bytes)?;
-    let image_format = match format {
+    if is_animated(bytes) {
+        return None;
+    }
+    let image_format = match sniff(bytes)? {
         Format::Png => ImageFormat::Png,
         Format::Gif => return None, // an animation is not resized frame by frame here
         Format::Webp => ImageFormat::WebP,
         Format::Jpeg => ImageFormat::Jpeg,
         Format::Iso => return None,
     };
-    if !decoding_allowed(bytes) {
-        return None;
-    }
-    let mut img = image::load_from_memory(bytes).ok()?;
+    let mut img = decode_image(bytes)?;
     // bounded: at most 20 halvings (a 2^20-fold reduction), so this cannot spin
     for _ in 0..20 {
         let mut out = Vec::new();
@@ -890,7 +1029,8 @@ pub fn downscale_to_fit(bytes: &[u8], max_bytes: usize) -> Option<Vec<u8>> {
 }
 
 /// §8.8's upload policy: try the prepared bytes, and on a size refusal downscale an image or give
-/// up. `max_bytes` is the PDS's limit from the 413 (or [`UPLOAD_TARGET_BYTES`] beforehand).
+/// up. `max_bytes` is the target after a 413: half the size of the last encoding (`limits.md`
+/// §12), so a retry never sends the same body again.
 ///
 /// The returned bytes are what should be uploaded, and the caller MUST recompute the CID from
 /// them - the record's `ref.$link` has to be the CID of the bytes the PDS actually stored.
@@ -939,74 +1079,293 @@ mod tests {
         assert!(!decoding_allowed(&png_claiming(1, 8_193)));
         // within the side cap but past the allocation cap
         assert!(!decoding_allowed(&png_claiming(8_192, 8_193)));
-        // a header imagesize cannot parse is not a cap violation: the decode decides
-        assert!(decoding_allowed(b"not an image at all"));
+        // a header nothing can measure is refused (fail closed, F3)
+        assert!(!decoding_allowed(b"not an image at all"));
+        assert!(!decoding_allowed(&[0xFF, 0xD8, 0xFF, 0xFF, 0xFF]));
+    }
+
+    /// F3: a real JPEG whose SOF0 declares 12000×12000 behind one fill byte (legal, T.81 B.1.1.2).
+    /// `imagesize` loses its way at the fill byte, the decoder does not: without a fallback the
+    /// guard said "allowed" and the decoder allocated the frame.
+    #[test]
+    fn a_fill_byte_cannot_smuggle_a_frame_past_the_side_cap() {
+        let mut jpeg = Vec::new();
+        image::DynamicImage::new_rgb8(8, 8)
+            .write_to(
+                &mut std::io::Cursor::new(&mut jpeg),
+                image::ImageFormat::Jpeg,
+            )
+            .unwrap();
+        let sof = jpeg.windows(2).position(|w| w == [0xFF, 0xC0]).unwrap();
+        // SOF0: length (2), precision (1), height (2), width (2)
+        jpeg[sof + 5..sof + 9].copy_from_slice(&[0x2E, 0xE0, 0x2E, 0xE0]);
+        jpeg.insert(sof, 0xFF);
+        assert!(
+            imagesize::blob_size(&jpeg).is_err(),
+            "the fallback is untested"
+        );
+        assert!(!decoding_allowed(&jpeg));
+        assert!(decode_image(&jpeg).is_none());
+        assert_eq!(apply_orientation(&jpeg, 6), jpeg);
+        assert_eq!(downscale_to_fit(&jpeg, 1), None);
+        // the same fill byte in front of a frame within the caps decodes as before
+        let mut small = Vec::new();
+        image::DynamicImage::new_rgb8(8, 4)
+            .write_to(
+                &mut std::io::Cursor::new(&mut small),
+                image::ImageFormat::Jpeg,
+            )
+            .unwrap();
+        let sof = small.windows(2).position(|w| w == [0xFF, 0xC0]).unwrap();
+        small.insert(sof, 0xFF);
+        assert!(decoding_allowed(&small));
+        assert_eq!(
+            decode_image(&small).map(|i| (i.width(), i.height())),
+            Some((8, 4))
+        );
     }
 }
 
 pub mod policy;
 pub use policy::{Autoload, LoadReason, MediaCandidate, autoload, host_of, is_bluesky_host};
 
-/// The prepared bytes of a media reference, kept until the write that uses them is sent.
+/// The refusal of a file larger than `MEDIA_WASM_WINDOW_BYTES` in the browser (`limits.md` §6).
+pub fn too_large_for_the_browser(size: u64) -> EngineError {
+    EngineError::new(
+        crate::engine::ErrorCode::TooLarge,
+        "the file is larger than 64 MiB, which the browser does not prepare for upload \
+         (limits.md §6): attach a smaller file or use the CLI",
+    )
+    .with_detail("kind", "mediaRejected")
+    .with_detail("bytes", size)
+    .with_detail("limit", crate::limits::MEDIA_WASM_WINDOW_BYTES)
+}
+
+/// `("prep", cid)`: what was prepared under `cid`.
+const PREP: &str = "prep";
+/// `("prep.blob", cid, n)`: its bytes, in chunks of at most 1 MiB (as the outbox keeps them).
+const PREP_BLOB: &str = "prep.blob";
+/// The family the first M4 builds kept prepared bytes in, as one JSON number array per file.
+/// Swept when a file is prepared, and never exported (`engine::local`): it is a copy of a file,
+/// not local state.
+pub(crate) const LEGACY_MEDIA: (&str, &str) = ("loc", "media");
+
+/// The row of a prepared file (`sync.md` §10.4).
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct PreparedRow {
+    v: u32,
+    mime: String,
+    size: u64,
+    chunks: u32,
+    /// When it was prepared (ms), for [`crate::limits::PREPARED_MEDIA_TTL_MS`].
+    at: i64,
+}
+
+/// The prepared bytes of a media reference, kept until the write that uses them is enqueued.
 ///
 /// A `MediaRef` is only a reference: `prepare_media` computes the CID and returns it, but the
 /// outbox has to upload the bytes when the record write goes out (`data-model.md` §8.8), so they
-/// are stored here under their CID. `publish` reads them back with
-/// [`Engine::prepared_media`] and hands them to the outbox.
+/// are stored here under their CID: raw, in chunks of at most 1 MiB, never as JSON. `publish`,
+/// `comment` and `edit` read them back with [`Engine::prepared_media`] and hand them to the
+/// outbox, which keeps its own copy; then [`Engine::forget_prepared_media`] removes them. Files
+/// prepared for a draft that is never sent are removed after
+/// [`crate::limits::PREPARED_MEDIA_TTL_MS`].
 impl<H: crate::host::Host> crate::engine::Engine<H> {
-    /// Stores the prepared bytes under their CID.
+    /// Stores the prepared bytes under their CID, and removes what expired.
     async fn store_prepared_media(
         &self,
         cid: &str,
         bytes: &[u8],
         mime: &str,
     ) -> Result<(), crate::engine::EngineError> {
-        let key = crate::key!("loc", "media", cid);
-        let value = serde_json::json!({ "mime": mime, "bytes": bytes }).to_string();
-        crate::host::KvStore::write(
-            self.host().state(),
-            vec![crate::host::KvOp::Put(key, value.into_bytes())],
-        )
-        .await?;
+        use crate::host::{KvOp, KvStore};
+        let now = self.host().now_ms();
+        let mut ops = self.expired_prepared_media(now).await?;
+        let chunks: Vec<&[u8]> = bytes
+            .chunks(crate::outbox::model::BLOB_CHUNK_BYTES)
+            .collect();
+        let row = PreparedRow {
+            v: 1,
+            mime: mime.to_owned(),
+            size: bytes.len() as u64,
+            chunks: u32::try_from(chunks.len()).unwrap_or(u32::MAX),
+            at: now,
+        };
+        let encode = |e: crate::store::row::RowError| {
+            crate::engine::EngineError::internal(format!("a prepared file: {e}"))
+        };
+        ops.push(KvOp::DeleteRange(crate::host::KeyRange::prefix(
+            &crate::key!(PREP_BLOB, cid),
+        )));
+        for (n, c) in chunks.into_iter().enumerate() {
+            let chunk = crate::outbox::model::ChunkRow {
+                v: 1,
+                b: c.to_vec(),
+            };
+            ops.push(KvOp::Put(
+                crate::key!(PREP_BLOB, cid, n as i64),
+                crate::store::row::encode(&chunk).map_err(encode)?,
+            ));
+        }
+        ops.push(KvOp::Put(
+            crate::key!(PREP, cid),
+            crate::store::row::encode(&row).map_err(encode)?,
+        ));
+        KvStore::write(self.host().state(), ops).await?;
         Ok(())
+    }
+
+    /// The deletions of every prepared file older than [`crate::limits::PREPARED_MEDIA_TTL_MS`],
+    /// and of the legacy rows.
+    async fn expired_prepared_media(
+        &self,
+        now: i64,
+    ) -> Result<Vec<crate::host::KvOp>, crate::engine::EngineError> {
+        use crate::host::{Dir, KeyRange, KvOp, KvStore};
+        let mut ops = vec![KvOp::DeleteRange(KeyRange::prefix(&crate::key!(
+            LEGACY_MEDIA.0,
+            LEGACY_MEDIA.1
+        )))];
+        let mut range = KeyRange::prefix(&crate::key!(PREP));
+        loop {
+            let page = KvStore::scan(self.host().state(), range.clone(), Dir::Forward, 256).await?;
+            let full = page.len() >= 256;
+            let last = page.last().map(|(k, _)| k.clone());
+            for (k, v) in page {
+                let stale = crate::store::row::decode::<PreparedRow>(&v).map_or(true, |r| {
+                    now.saturating_sub(r.at) > crate::limits::PREPARED_MEDIA_TTL_MS
+                });
+                let cid = match crate::store::key::decode(&k).ok().as_deref() {
+                    Some([_, crate::store::key::Part::Bytes(c)]) => {
+                        String::from_utf8(c.clone()).ok()
+                    }
+                    _ => None,
+                };
+                if let (true, Some(cid)) = (stale, cid) {
+                    ops.push(KvOp::Delete(k));
+                    ops.push(KvOp::DeleteRange(KeyRange::prefix(&crate::key!(
+                        PREP_BLOB,
+                        cid.as_str()
+                    ))));
+                }
+            }
+            match last {
+                Some(k) if full => range.start = std::ops::Bound::Excluded(k),
+                _ => break,
+            }
+        }
+        Ok(ops)
     }
 
     /// The prepared bytes of `cid`, as [`crate::outbox::BlobData`] hands them to the outbox.
     ///
-    /// `None` when the bytes are gone (a different device, a cleared store): the caller then
-    /// refuses the publish rather than sending a reference the PDS cannot resolve, which is the
-    /// failure the devnet surfaced as `BlobNotFound (HTTP 400)`.
+    /// `None` when the bytes are gone (a different device, a cleared store, expired, already
+    /// sent): the caller then refuses the publish rather than sending a reference the PDS cannot
+    /// resolve, which is the failure the devnet surfaced as `BlobNotFound (HTTP 400)`.
     pub async fn prepared_media(
         &self,
         cid: &str,
     ) -> Result<Option<crate::outbox::BlobData>, crate::engine::EngineError> {
-        let key = crate::key!("loc", "media", cid);
-        let rows = crate::host::KvStore::get_many(self.host().state(), vec![key]).await?;
+        use crate::host::KvStore;
+        let rows = KvStore::get_many(self.host().state(), vec![crate::key!(PREP, cid)]).await?;
         let Some(Some(raw)) = rows.into_iter().next() else {
             return Ok(None);
         };
-        let Ok(v) = serde_json::from_slice::<serde_json::Value>(&raw) else {
+        let Ok(row) = crate::store::row::decode::<PreparedRow>(&raw) else {
             return Ok(None);
         };
-        let Some(bytes) = v.get("bytes").and_then(|b| b.as_array()) else {
-            return Ok(None);
-        };
-        let bytes: Vec<u8> = bytes
-            .iter()
-            .filter_map(|n| n.as_u64().and_then(|n| u8::try_from(n).ok()))
+        let keys = (0..row.chunks)
+            .map(|n| crate::key!(PREP_BLOB, cid, i64::from(n)))
             .collect();
-        let Some(mime) = v.get("mime").and_then(|m| m.as_str()) else {
+        let mut bytes = Vec::with_capacity(usize::try_from(row.size).unwrap_or(0));
+        for chunk in KvStore::get_many(self.host().state(), keys).await? {
+            let Some(c) = chunk
+                .and_then(|c| crate::store::row::decode::<crate::outbox::model::ChunkRow>(&c).ok())
+            else {
+                return Ok(None);
+            };
+            bytes.extend_from_slice(&c.b);
+        }
+        // a torn or tampered row is not uploaded under a CID it does not have
+        if bytes.len() as u64 != row.size || lessdugin_atp::cid::for_raw(&bytes).to_string() != cid
+        {
             return Ok(None);
-        };
+        }
         Ok(Some(crate::outbox::BlobData {
             cid: cid.to_owned(),
-            mime: mime.to_owned(),
+            mime: row.mime,
             bytes,
         }))
+    }
+
+    /// [`Engine::forget_prepared_media`] after a write is enqueued: the write stands either way,
+    /// so a failure only leaves the rows for the expiry sweep.
+    pub(crate) async fn sent_prepared_media(&self, media: &[crate::dto::MediaRef]) {
+        if let Err(e) = self.forget_prepared_media(media).await {
+            tracing::warn!(error = %e, "prepared media are left for the expiry sweep");
+        }
+    }
+
+    /// Removes the prepared bytes of `media` once a write that uploads them is enqueued: the
+    /// outbox keeps its own copy from then on (`("out.blob", …)`, `sync.md` §10.4).
+    pub(crate) async fn forget_prepared_media(
+        &self,
+        media: &[crate::dto::MediaRef],
+    ) -> Result<(), crate::engine::EngineError> {
+        use crate::host::{KeyRange, KvOp, KvStore};
+        if media.is_empty() {
+            return Ok(());
+        }
+        let ops = media
+            .iter()
+            .flat_map(|m| {
+                [
+                    KvOp::Delete(crate::key!(PREP, m.cid.as_str())),
+                    KvOp::DeleteRange(KeyRange::prefix(&crate::key!(PREP_BLOB, m.cid.as_str()))),
+                ]
+            })
+            .collect();
+        KvStore::write(self.host().state(), ops).await?;
+        Ok(())
     }
 }
 
 impl<H: crate::host::Host> crate::engine::Engine<H> {
+    /// The blobs an edit uploads (`data-model.md` §8.8): the media references of `media` that the
+    /// cached version `cached` does not already hold. Those it holds were uploaded with that
+    /// version and are referenced by it, so the PDS keeps them; their blob objects in `new` are
+    /// replaced by the cached ones, verbatim, rather than re-synthesised from the reference.
+    pub(crate) async fn edit_media_blobs(
+        &self,
+        cached: &serde_json::Value,
+        new: &mut serde_json::Value,
+        media: &[crate::dto::MediaRef],
+    ) -> Result<Vec<crate::outbox::BlobData>, crate::engine::EngineError> {
+        use crate::outbox::blob;
+        fn objects(v: &serde_json::Value, out: &mut Vec<(String, serde_json::Value)>) {
+            if let Some(l) = blob::blob_link(v) {
+                out.push((l.to_owned(), v.clone()));
+                return;
+            }
+            match v {
+                serde_json::Value::Object(m) => m.values().for_each(|x| objects(x, out)),
+                serde_json::Value::Array(a) => a.iter().for_each(|x| objects(x, out)),
+                _ => {}
+            }
+        }
+        let mut held = Vec::new();
+        objects(cached, &mut held);
+        for (link, object) in &held {
+            blob::substitute_blob(new, link, object);
+        }
+        let fresh: Vec<crate::dto::MediaRef> = media
+            .iter()
+            .filter(|m| !held.iter().any(|(l, _)| *l == m.cid))
+            .cloned()
+            .collect();
+        self.media_blobs(&fresh).await
+    }
+
     /// The blob data for a body's media references, ready for `ContentOpts.blobs`.
     ///
     /// Fails when a reference has no prepared bytes on this device: publishing a reference whose
@@ -1033,40 +1392,523 @@ impl<H: crate::host::Host> crate::engine::Engine<H> {
     }
 }
 
-/// The largest media blob this client will load for display: the 64 MiB input cap of F35.
-pub const MEDIA_DISPLAY_MAX_BYTES: u64 = 64 * 1024 * 1024;
+/// The type a fetched blob's prefix sniffs as: the §8.8 table, plus AVIF (which is never
+/// uploaded), or `None`. A download card names its file from it (`sync.md` §11.2).
+pub fn sniffed_type(prefix: &[u8]) -> Option<&'static str> {
+    crate::outbox::blob::normalise_mime(prefix).or_else(|| {
+        (prefix.len() >= 12
+            && &prefix[4..8] == b"ftyp"
+            && matches!(&prefix[8..12], b"avif" | b"avis"))
+        .then_some("image/avif")
+    })
+}
+
+/// The type a fetched blob is displayed as (`sync.md` §11.2): the [`sniffed_type`] of its
+/// prefix when it is on the display allowlist (AVIF: inline in the SPA only), or `None` (a
+/// download card).
+pub fn display_type(prefix: &[u8]) -> Option<&'static str> {
+    sniffed_type(prefix).filter(|t| {
+        matches!(
+            *t,
+            "image/png"
+                | "image/jpeg"
+                | "image/gif"
+                | "image/webp"
+                | "image/avif"
+                | "video/mp4"
+                | "video/webm"
+                | "audio/mp4"
+                | "audio/mpeg"
+                | "audio/ogg"
+        )
+    })
+}
+
+/// A declared `mimeType` through §8.8's names: parameters and case dropped, and the aliases the
+/// table names (`audio/x-m4a`, `application/ogg`) mapped to their type.
+fn normalise_declared(declared: &str) -> String {
+    let base = declared
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    match base.as_str() {
+        "audio/x-m4a" | "audio/m4a" => "audio/mp4".to_owned(),
+        "application/ogg" => "audio/ogg".to_owned(),
+        _ => base,
+    }
+}
+
+/// Whose blob [`load_media`](crate::engine::Engine::load_media) fetches, and what the record
+/// declares of it: the item's [`crate::dto::MediaView`], or only the author's DID.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MediaOwner<'a> {
+    /// The author's DID: their PDS has the blob.
+    pub author: &'a str,
+    /// The view's CID, which must be the one asked for.
+    pub cid: Option<&'a str>,
+    /// The record's `mimeType` (the sniffed type must agree with it to display inline).
+    pub mime: Option<&'a str>,
+    /// The record's `size` (0 or absent: not stated; the hard cap applies).
+    pub size_bytes: u64,
+}
+
+impl<'a> MediaOwner<'a> {
+    /// The owner and declaration of a media item, from its view.
+    pub fn of_view(m: &'a crate::dto::MediaView) -> Self {
+        Self {
+            author: &m.author,
+            cid: Some(&m.cid),
+            mime: Some(&m.mime),
+            size_bytes: m.size_bytes,
+        }
+    }
+
+    /// Only the author (the sniffed type decides the display alone).
+    pub fn author(did: &'a str) -> Self {
+        Self {
+            author: did,
+            cid: None,
+            mime: None,
+            size_bytes: 0,
+        }
+    }
+}
 
 impl<H: crate::host::Host> crate::engine::Engine<H> {
-    /// `loadMedia(cid)`: fetches a media blob for display and returns a URL for it.
+    /// The PDS of `did` from its DID document (`sync.md` §11.1 "require identity(did) is doc"),
+    /// never from a view or a record, which anyone can write.
+    async fn author_pds(
+        &self,
+        did: &lessdugin_atp::syntax::Did,
+    ) -> Result<String, crate::engine::EngineError> {
+        let ident = self
+            .resolver()
+            .resolve_did_doc(did, crate::identity::DID_DOC_TTL_MS)
+            .await?;
+        ident.pds.ok_or_else(|| {
+            crate::engine::EngineError::not_found(format!(
+                "{did} has no usable PDS: {}",
+                ident.pds_problem.as_deref().unwrap_or("unknown")
+            ))
+        })
+    }
+
+    /// `loadMedia(cid, media?)`: fetches a media blob for display (`sync.md` §11.1).
     ///
-    /// The bytes are streamed and CID-checked by the host while they arrive, so they never pass
-    /// through wasm linear memory (`threat-model.md`); the client gets a locator. The caller is
-    /// the one that decided to load - the autoload policy in [`super::policy`] is what decides
-    /// whether it may do that without asking.
+    /// With the item's owner (its [`crate::dto::MediaView`], as a rendered body lists it, or only
+    /// its author's DID), the blob comes from the AUTHOR's PDS, resolved from their DID document
+    /// here (the view's `pds` is not trusted for this), as the author's DID, for any reader,
+    /// signed in or not; the cap is the declared `size`, so a longer body is aborted, within
+    /// `BLOB_HARD_MAX_BYTES`. Without it the active account's own repo is asked, as before the
+    /// owner was passed (a client of the first M4 builds).
+    ///
+    /// The host streams and CID-checks the bytes, so they never pass through wasm memory
+    /// (INFRA-6); the core reads only the first `BLOB_SNIFF_PREFIX_BYTES` to sniff the type.
+    /// `mime` is set only when the sniffed type is on the display allowlist and agrees with the
+    /// declared one (when the owner states one), and it is the allowlist's constant string;
+    /// otherwise the client shows a download card. The caller is the one that decided to load -
+    /// [`super::policy`] says whether it may do that without asking.
     pub async fn load_media(
         &self,
         cid: &str,
+        owner: Option<MediaOwner<'_>>,
     ) -> Result<crate::dto::LoadedMedia, crate::engine::EngineError> {
-        let session = self.active_session().await?;
-        // the session already holds the account's DID and PDS, which is where the blob lives
-        let handle = self
-            .host()
-            .fetch_blob(
-                session.pds.clone(),
-                session.did.clone(),
-                cid.to_owned(),
-                MEDIA_DISPLAY_MAX_BYTES,
+        use crate::engine::{EngineError, ErrorCode};
+        use crate::host::HostError;
+        let hard = crate::limits::BLOB_HARD_MAX_BYTES;
+        let (pds, did, declared, max) = match owner {
+            Some(m) => {
+                if let Some(other) = m.cid.filter(|c| *c != cid) {
+                    return Err(EngineError::invalid_input(format!(
+                        "loadMedia: the media view is of {other}, not {cid}"
+                    )));
+                }
+                let did = lessdugin_atp::syntax::Did::parse(m.author).map_err(|e| {
+                    EngineError::invalid_input(format!("loadMedia: author {:?}: {e}", m.author))
+                })?;
+                if m.size_bytes > hard {
+                    return Err(EngineError::new(
+                        ErrorCode::TooLarge,
+                        "the file is larger than 300 MiB, which is never loaded (limits.md §5)",
+                    )
+                    .with_detail("bytes", m.size_bytes));
+                }
+                let pds = self.author_pds(&did).await?;
+                // a declared size of 0 is no size: the hard cap applies
+                let max = if m.size_bytes == 0 {
+                    hard
+                } else {
+                    m.size_bytes
+                };
+                (pds, did, m.mime, max)
+            }
+            None => {
+                let session = self.active_session().await?;
+                (session.pds.to_string(), session.did.clone(), None, hard)
+            }
+        };
+        let pds = url::Url::parse(&pds)
+            .map_err(|e| EngineError::internal(format!("the PDS URL {pds:?}: {e}")))?;
+        let handle = match self.host().fetch_blob(pds, did, cid.to_owned(), max).await {
+            Ok(h) => h,
+            Err(HostError::HttpStatus(400, _)) => {
+                // "Blob not found": missing, not retried (sync.md §11.1). Nothing was stored: a
+                // stored copy is returned without a request (§12.2), so there is none to purge
+                return Err(EngineError::not_found(
+                    "the author's PDS does not have this file (any more)",
+                )
+                .with_detail("kind", "mediaMissing"));
+            }
+            Err(HostError::CidMismatch) => {
+                return Err(EngineError::new(
+                    ErrorCode::Network,
+                    "the file failed verification: its bytes do not match its CID",
+                )
+                .with_detail("kind", "mediaFailedVerification"));
+            }
+            Err(HostError::TooLarge) => {
+                return Err(EngineError::new(
+                    ErrorCode::TooLarge,
+                    "the PDS sent more bytes than the file declares",
+                )
+                .with_detail("limit", max));
+            }
+            Err(e) => return Err(EngineError::from(e)),
+        };
+        self.note_stored(&handle.cid).await;
+        // a copy stored by another fetch is held to this declaration too
+        if handle.size > max {
+            return Err(EngineError::new(
+                ErrorCode::TooLarge,
+                "the file is larger than it declares",
             )
-            .await
-            .map_err(|e| {
-                crate::engine::EngineError::internal(format!(
-                    "a media blob could not be fetched: {e}"
-                ))
-            })?;
+            .with_detail("limit", max));
+        }
+        let prefix = self
+            .host()
+            .blob_read(&handle.cid, 0, crate::limits::BLOB_SNIFF_PREFIX_BYTES)
+            .await?;
+        let sniffed = display_type(&prefix);
+        let mime = match (sniffed, declared) {
+            (Some(t), Some(d)) => (normalise_declared(d) == t).then_some(t),
+            (t, None) => t,
+            (None, Some(_)) => None,
+        };
         Ok(crate::dto::LoadedMedia {
             cid: handle.cid,
             size: handle.size,
             url: handle.locator,
+            mime: mime.map(str::to_owned),
+            sniffed: sniffed_type(&prefix).map(str::to_owned),
         })
+    }
+}
+
+// --- spilled bodies and the autoload inputs of views (`sync.md` §11, `lfm-1.md` §1.3) ---------
+
+impl<H: crate::host::Host> crate::engine::Engine<H> {
+    /// Fetches the spilled bodies (`textBlob`) of the items `uris` of `model` that `renders`
+    /// does not hold yet, so the views render them (`lfm-1.md` §1.3): from the AUTHOR's PDS,
+    /// through the streaming, CID-checked `Host::fetch_blob` with `BLOB_TEXT_MAX_BYTES`, then
+    /// read back through `blob_read` and decoded (UTF-8, one leading U+FEFF stripped). A body
+    /// that cannot be fetched now (the network) stays pending and is asked for again after
+    /// `BODY_BLOB_RETRY_MS`; one the PDS reports missing renders as missing and is not asked for
+    /// again (`sync.md` §11.1); one that does not match its CID, is not UTF-8 or is too large
+    /// renders as unreadable. Only the bodies the views render are fetched: those of items
+    /// the fold lists (`sync.md` §11.4, "hidden, provisional and pending content is never
+    /// prefetched").
+    ///
+    /// The view waits at most `BODY_BLOB_WAIT_MS` for them: a slow author's PDS leaves its body
+    /// pending (the excerpt shows) rather than hold back the post and everyone's comments. The
+    /// host's download runs on (one per CID, `sync.md` §12.2: a view that stops waiting cancels
+    /// nothing), so a copy the host stored meanwhile is taken by the next view, without a
+    /// request; a fetch that failed is asked for again after `BODY_BLOB_RETRY_MS`.
+    pub(crate) async fn load_spilled_bodies(
+        &self,
+        model: &crate::model::ForumModel,
+        uris: &[String],
+        renders: &crate::model::RenderCache,
+    ) {
+        use crate::model::render::text_blob_cid;
+        use crate::social::full::view::State;
+        let Ok(values) = self.values(model, uris).await else {
+            return;
+        };
+        let now = self.host().now_ms();
+        // (uri, author, blob)
+        let mut wanted: Vec<(&str, &str, &str)> = Vec::new();
+        for (uri, v) in &values {
+            // the predicate of `Views::body`: an item it renders empty is not asked for
+            if !model.displayed(uri).is_some_and(State::listed) {
+                continue;
+            }
+            let Some(md) = v.get("body").filter(|b| b.get("text").is_none()) else {
+                continue;
+            };
+            let (Some(blob), Some(x)) = (text_blob_cid(md), model.skel(uri)) else {
+                continue;
+            };
+            if renders.contains(&x.cid) || renders.spilled(blob).is_some() {
+                continue;
+            }
+            if renders.spilled_retry_at(blob).is_some_and(|t| now < t)
+                && !matches!(self.host().blob_open(blob).await, Ok(Some(_)))
+            {
+                continue;
+            }
+            wanted.push((uri, &x.did, blob));
+        }
+        self.fetch_spilled(model.key.uri.as_str(), &wanted, renders)
+            .await;
+    }
+
+    /// [`Self::load_spilled_bodies`] for the forum's `about`, a body of its owner's.
+    pub(crate) async fn load_spilled_about(
+        &self,
+        model: &crate::model::ForumModel,
+        renders: &crate::model::RenderCache,
+    ) {
+        use crate::model::render::text_blob_cid;
+        let Some(md) = model
+            .decl
+            .about
+            .as_ref()
+            .and_then(|a| serde_json::to_value(a).ok())
+            .filter(|md| md.get("text").is_none())
+        else {
+            return;
+        };
+        let Some(blob) = text_blob_cid(&md) else {
+            return;
+        };
+        let now = self.host().now_ms();
+        if renders.spilled(blob).is_some()
+            || renders.spilled_retry_at(blob).is_some_and(|t| now < t)
+                && !matches!(self.host().blob_open(blob).await, Ok(Some(_)))
+        {
+            return;
+        }
+        let forum = model.key.uri.as_str();
+        let owner = model.key.owner.as_str();
+        self.fetch_spilled(forum, &[(forum, owner, blob)], renders)
+            .await;
+    }
+
+    /// Fetches the spilled bodies `wanted` (item uri, author, blob) of `forum`, waiting at most
+    /// `BODY_BLOB_WAIT_MS`: one that does not come in time, or cannot be fetched now, is left
+    /// pending until `BODY_BLOB_RETRY_MS` from now, with its item, for `live_tail`
+    /// ([`Self::retry_spilled_bodies`]).
+    pub(crate) async fn fetch_spilled(
+        &self,
+        forum: &str,
+        wanted: &[(&str, &str, &str)],
+        renders: &crate::model::RenderCache,
+    ) {
+        use crate::model::render::PendingSpilled;
+        if wanted.is_empty() {
+            return;
+        }
+        let retry = self
+            .host()
+            .now_ms()
+            .saturating_add(crate::limits::BODY_BLOB_RETRY_MS);
+        let pending = |uri: &str, did: &str| PendingSpilled {
+            at_ms: retry,
+            forum: forum.to_owned(),
+            uri: uri.to_owned(),
+            did: did.to_owned(),
+        };
+        let fetches =
+            futures::future::join_all(wanted.iter().map(|&(uri, did, blob)| async move {
+                match self.fetch_text_blob(did, blob).await {
+                    Ok(s) => renders.put_spilled(blob, s),
+                    Err(e) => {
+                        tracing::debug!(uri = %uri, error = %e, "a spilled body stays pending");
+                        renders.spilled_unavailable(blob, pending(uri, did));
+                    }
+                }
+            }));
+        let wait = std::pin::pin!(self.host().sleep(crate::limits::BODY_BLOB_WAIT_MS));
+        let fetches = std::pin::pin!(fetches);
+        // the fetches first: one that is ready (a stored copy) never waits for the clock
+        let waited = futures::future::select(fetches, wait).await;
+        if let futures::future::Either::Right(_) = waited {
+            for &(uri, did, blob) in wanted {
+                if renders.spilled(blob).is_none() {
+                    tracing::debug!(uri = %uri, "a spilled body is slow to come: it stays pending");
+                    renders.spilled_unavailable(blob, pending(uri, did));
+                }
+            }
+        }
+    }
+
+    /// The spilled bodies views left pending, fetched again by `live_tail` (`lfm-1.md` §1.3):
+    /// each one the host has stored meanwhile (its download ran on), or whose retry time has
+    /// come. Returns the topics of the items whose body arrived (fetched, or found
+    /// missing or unreadable), for `Changed`: their thread and their forum, so a client shows
+    /// the body without being asked again. The forums' fetches run together, so stalled PDSes
+    /// hold the round back by one `BODY_BLOB_WAIT_MS` at most, however many forums wait.
+    pub(crate) async fn retry_spilled_bodies(
+        &self,
+        renders: &crate::model::RenderCache,
+    ) -> Vec<crate::dto::Topic> {
+        use crate::dto::Topic;
+        let now = self.host().now_ms();
+        let mut due: Vec<(String, crate::model::render::PendingSpilled)> = Vec::new();
+        for (blob, p) in renders.spilled_pending() {
+            if now >= p.at_ms || matches!(self.host().blob_open(&blob).await, Ok(Some(_))) {
+                due.push((blob, p));
+            }
+        }
+        let by_forum = due.iter().fold(
+            std::collections::BTreeMap::<&str, Vec<(&str, &str, &str)>>::new(),
+            |mut by, (blob, p)| {
+                by.entry(p.forum.as_str()).or_default().push((
+                    p.uri.as_str(),
+                    p.did.as_str(),
+                    blob.as_str(),
+                ));
+                by
+            },
+        );
+        futures::future::join_all(by_forum.iter().map(|(&forum, items)| async move {
+            self.fetch_spilled(forum, items, renders).await;
+            let mut topics: Vec<Topic> = Vec::new();
+            for &(uri, _, blob) in items {
+                if renders.spilled(blob).is_some() && uri != forum {
+                    topics.push(Topic::Thread {
+                        uri: uri.to_owned(),
+                    });
+                }
+            }
+            if items
+                .iter()
+                .any(|&(_, _, blob)| renders.spilled(blob).is_some())
+            {
+                topics.push(Topic::Forum {
+                    uri: forum.to_owned(),
+                });
+            }
+            topics
+        }))
+        .await
+        .into_iter()
+        .flatten()
+        .collect()
+    }
+
+    /// Marks `cid`, which the host has just stored, loose when no forum counts a reference to
+    /// it (`sync.md` §11.4): the next build of a forum that references it deletes it. A failure
+    /// is logged; the blob then stays until the cache is cleared.
+    async fn note_stored(&self, cid: &str) {
+        let now = self.host().now_ms();
+        if let Err(e) = crate::store::blob::note_stored(self.host().cache(), cid, now).await {
+            tracing::warn!(cid = %cid, error = %e, "marking a stored blob");
+        }
+    }
+
+    /// One `textBlob` of `did`, fetched and decoded (`data-model.md` §5.2 rule 3).
+    async fn fetch_text_blob(
+        &self,
+        did: &str,
+        cid: &str,
+    ) -> Result<crate::model::render::Spilled, crate::engine::EngineError> {
+        use crate::host::HostError;
+        use crate::model::render::Spilled;
+        use lessdugin_markdown::BodyError;
+        let did = lessdugin_atp::syntax::Did::parse(did)
+            .map_err(|e| crate::engine::EngineError::invalid_input(format!("{did:?}: {e}")))?;
+        let pds = self.author_pds(&did).await?;
+        let pds = url::Url::parse(&pds).map_err(|e| {
+            crate::engine::EngineError::internal(format!("the PDS URL {pds:?}: {e}"))
+        })?;
+        let max = crate::limits::BLOB_TEXT_MAX_BYTES;
+        let h = match self.host().fetch_blob(pds, did, cid.to_owned(), max).await {
+            Ok(h) => h,
+            Err(HostError::CidMismatch) => return Ok(Spilled::Unverified),
+            Err(HostError::TooLarge) => return Ok(Spilled::Error(BodyError::TooLarge)),
+            // "Blob not found": missing, not retried (sync.md §11.1); nothing was stored
+            Err(HostError::HttpStatus(400, _)) => return Ok(Spilled::Missing),
+            Err(e) => return Err(e.into()),
+        };
+        self.note_stored(&h.cid).await;
+        // a copy stored by another fetch is held to the same cap
+        if h.size > max {
+            return Ok(Spilled::Error(BodyError::TooLarge));
+        }
+        let mut bytes = Vec::with_capacity(h.size as usize);
+        while (bytes.len() as u64) < h.size {
+            let w = self
+                .host()
+                .blob_read(&h.cid, bytes.len() as u64, crate::host::BLOB_READ_MAX_BYTES)
+                .await?;
+            if w.is_empty() {
+                break;
+            }
+            bytes.extend_from_slice(&w);
+        }
+        Ok(match lessdugin_markdown::decode_text_blob(&bytes) {
+            Ok(text) => Spilled::Text(text.into()),
+            Err(e) => Spilled::Error(e),
+        })
+    }
+
+    /// The device's media autoload inputs for views over `model` whose bodies are `values`
+    /// (`sync.md` §11.3): the `mediaAutoload` switch (on unless `off`), the `mediaHosts`
+    /// allowlist and, when some body has media, how many participants each PDS host serves by
+    /// their cached identity rows, and which of them are at level `doc` (nothing is resolved
+    /// here).
+    pub(crate) async fn media_prefs(
+        &self,
+        model: &crate::model::ForumModel,
+        values: &std::collections::BTreeMap<String, serde_json::Value>,
+    ) -> crate::model::render::MediaPrefs {
+        use crate::host::KvStore;
+        let mut prefs = crate::model::render::MediaPrefs::default();
+        let has_media = values.values().any(|v| {
+            v.get("body")
+                .and_then(|b| b.get("media"))
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|m| !m.is_empty())
+        });
+        if !has_media {
+            return prefs;
+        }
+        let switch = self
+            .host()
+            .state()
+            .get_many(vec![crate::key!("loc", "setting", "mediaAutoload")])
+            .await
+            .ok()
+            .and_then(|mut v| v.pop().flatten());
+        prefs.enabled = switch.as_deref() != Some(b"off".as_slice());
+        if !prefs.enabled {
+            return prefs;
+        }
+        prefs.allowlist = self.media_hosts().await.unwrap_or_default();
+        let dids: Vec<lessdugin_atp::syntax::Did> = model
+            .participants()
+            .iter()
+            .filter_map(|d| lessdugin_atp::syntax::Did::parse(d).ok())
+            .collect();
+        let found = futures::future::join_all(dids.iter().map(|d| self.resolver().cached(d))).await;
+        for id in found.into_iter().flatten() {
+            // the forum's sync talks to every participant's PDS, whatever level its row has; an
+            // author's own media autoload only at level doc (§11.1)
+            if id.level == crate::identity::IdentityLevel::Doc {
+                prefs.doc.insert(id.did.to_string());
+            }
+            if let Some(host) = id
+                .pds
+                .as_deref()
+                .map(policy::host_of)
+                .filter(|h| !h.is_empty())
+            {
+                *prefs.hosts.entry(host).or_default() += 1;
+            }
+        }
+        prefs
     }
 }

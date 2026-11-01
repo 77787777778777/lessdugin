@@ -15,8 +15,8 @@ use lessdugin_core::engine::ErrorCode;
 use lessdugin_core::host::{KvOp, KvStore};
 use lessdugin_core::outbox::model::{self, OUTBOX_ROW_VERSION};
 use lessdugin_core::outbox::{
-    BudgetRow, ContentOpts, EditOpts, Intent, NewWrite, Op, OpinionStep, Outbox, PendingWrite,
-    Session, Step, WriteStage, records,
+    BudgetRow, ContentOpts, Counted, EditOpts, Intent, NewWrite, Op, OpinionStep, Outbox,
+    PendingWrite, Session, Step, WriteStage, records,
 };
 use lessdugin_core::store::records::RecordStore;
 use lessdugin_core::store::row;
@@ -125,7 +125,7 @@ impl World {
 
 fn done(t: &WriteTicket) -> (String, String) {
     match &t.state {
-        WriteState::Done { uri, cid } => (uri.clone(), cid.clone().unwrap_or_default()),
+        WriteState::Done { uri, cid, .. } => (uri.clone(), cid.clone().unwrap_or_default()),
         other => panic!("write {} is {other:?}", t.id),
     }
 }
@@ -738,13 +738,22 @@ fn delete_sends_the_target_first_in_chunks_of_200() {
         .collect();
     let spoof = format!("{p}-{}", tid(3_600_000, 999));
     let nested = format!("{p}-{}-{}", tid(3_600_000, 1_000), tid(3_600_000, 1_001));
+    let comment = format!(
+        "at://{}/{}/{p}-{}",
+        w.alice.did(),
+        nsid::COMMENT,
+        tid(3_600_000, 1_002)
+    );
+    let of_comment = format!("{p}-{}-{}", tid(3_600_000, 1_002), tid(3_600_000, 1_003));
     w.alice.batch(|wr| {
         for (i, k) in revs.iter().enumerate() {
             wr.put(nsid::REVISION, k, &rev(&uri, i as u64));
         }
         // same prefix, another subject: kept (§3.2)
         wr.put(nsid::REVISION, &spoof, &rev(&other, 0));
-        // not exactly P + "-" + TID: kept
+        // a comment's revision under the post's prefix: kept
+        wr.put(nsid::REVISION, &of_comment, &rev(&comment, 0));
+        // not exactly P + "-" + TID, but it names the target: invalid history, deleted (§8.7)
         wr.put(nsid::REVISION, &nested, &rev(&uri, 1));
     });
     w.host.clear_requests();
@@ -756,7 +765,7 @@ fn delete_sends_the_target_first_in_chunks_of_200() {
         .iter()
         .map(|b| b["writes"].as_array().unwrap().len())
         .collect();
-    assert_eq!(sizes, vec![200, 200, 51]);
+    assert_eq!(sizes, vec![200, 200, 52]);
     let first = &bodies[0]["writes"][0];
     assert_eq!(first["$type"], "com.atproto.repo.applyWrites#delete");
     assert_eq!(first["collection"], nsid::POST);
@@ -769,7 +778,7 @@ fn delete_sends_the_target_first_in_chunks_of_200() {
         .into_iter()
         .map(|(k, _)| k)
         .collect();
-    let mut want = vec![spoof, nested];
+    let mut want = vec![spoof, of_comment];
     want.sort();
     let mut left_sorted = left.clone();
     left_sorted.sort();
@@ -1079,12 +1088,14 @@ fn mod_adopt_reissues_the_former_moderators_assertions() {
     carol.put(nsid::MOD_ACTION, &hide.rkey, &hide.value);
     carol.put(nsid::MOD_ACTION, &curated.rkey, &curated.value);
     let adopt = || {
+        // carol, an admin, may curate; the adopting moderator may not
         let t = block_on(w.ob.mod_adopt(
             &w.session,
             &w.forum(),
             carol.did(),
             &carol.pds_base(),
             "moderator",
+            counted(&carol, &[&hide.rkey, &curated.rkey], &[(&carol, "admin")]),
         ))
         .unwrap();
         w.run();
@@ -1135,6 +1146,110 @@ fn mod_adopt_reissues_the_former_moderators_assertions() {
     let applies = w.net.count(APPLY);
     adopt();
     assert_eq!(w.net.count(APPLY), applies);
+}
+
+/// What the engine passes `mod_adopt`: the former's `rkeys` as counted (with their current
+/// CIDs), under `roles`.
+fn counted(former: &AccountHandle, rkeys: &[&str], roles: &[(&AccountHandle, &str)]) -> Counted {
+    Counted {
+        originals: rkeys
+            .iter()
+            .map(|k| {
+                let cid = former.cid(nsid::MOD_ACTION, k).unwrap();
+                ((*k).to_owned(), cid.to_string())
+            })
+            .collect(),
+        roles: roles
+            .iter()
+            .map(|(a, r)| (a.did().to_string(), (*r).to_owned()))
+            .collect(),
+    }
+}
+
+/// `social.md` §4.10: only originals that counted for the former are re-issued. One that was
+/// not in effect, one that changed since, and one the former's rank never allowed (a
+/// moderator's ban of the owner) are reported; the report keeps 100 lines.
+#[test]
+fn mod_adopt_reissues_only_what_counted() {
+    use lessdugin_lexicon::records::AccessAction;
+    use lessdugin_lexicon::values::AccessLevel;
+
+    let w = world();
+    let carol = w.net.add_account("carol.example.com");
+    let hide_of = |i: u64| {
+        let s = w
+            .alice
+            .uri(nsid::POST, &format!("{}-{}", w.fk(), tid(60_000, i)));
+        let b = records::mod_action(&ModAction::new(
+            w.forum(),
+            s,
+            Action::Hide(HideAction::hide()),
+            w.now(),
+        ))
+        .unwrap();
+        carol.put(nsid::MOD_ACTION, &b.rkey, &b.value);
+        b.rkey
+    };
+    let (kept, never, changed) = (hide_of(0), hide_of(1), hide_of(2));
+    let ban = records::mod_action(&ModAction::new(
+        w.forum(),
+        w.bob.did().as_str(),
+        Action::Access(AccessAction::new(AccessLevel::Banned)),
+        w.now(),
+    ))
+    .unwrap();
+    carol.put(nsid::MOD_ACTION, &ban.rkey, &ban.value);
+    // bob owns the forum; carol is a moderator
+    let mut c = counted(
+        &carol,
+        &[&kept, &changed, &ban.rkey],
+        &[(&w.bob, "owner"), (&carol, "moderator")],
+    );
+    c.originals.insert(changed.clone(), "bafyreiother".into());
+    w.host.advance_ms(60_000);
+    let adopt = |c: Counted| {
+        let t = block_on(w.ob.mod_adopt(
+            &w.session,
+            &w.forum(),
+            carol.did(),
+            &carol.pds_base(),
+            "owner",
+            c,
+        ))
+        .unwrap();
+        w.run();
+        done(&w.ticket(&t));
+        let Intent::Adopt { report, .. } = block_on(w.ob.get(&t.id)).unwrap().unwrap().intent
+        else {
+            panic!()
+        };
+        report
+    };
+    let report = adopt(c.clone());
+    assert!(w.alice.get(nsid::MOD_ACTION, &kept).is_some());
+    for k in [&never, &changed, &ban.rkey] {
+        assert!(w.alice.get(nsid::MOD_ACTION, k).is_none(), "{k}");
+    }
+    let line = |k: &str| {
+        report
+            .iter()
+            .find(|l| l.contains(k))
+            .unwrap_or_else(|| panic!("{k}: {report:?}"))
+            .clone()
+    };
+    assert!(line(&never).contains("never counted"), "{report:?}");
+    assert!(line(&changed).contains("changed since"), "{report:?}");
+    assert!(line(&ban.rkey).contains("not allowed"), "{report:?}");
+    assert_eq!(report.len(), 3, "{report:?}");
+
+    // the report keeps 100 lines and counts the rest
+    for i in 0..105 {
+        hide_of(100 + i);
+    }
+    w.host.advance_ms(60_000);
+    let report = adopt(c);
+    assert_eq!(report.len(), 101, "{report:?}");
+    assert_eq!(report[100], "… and 8 more");
 }
 
 #[test]
@@ -1538,6 +1653,7 @@ fn adopt_batches_respect_the_body_size_limit() {
     let carol = w.net.add_account("carol.example.com");
     let reason: String = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466}".repeat(790);
     assert!(reason.len() <= 20_000);
+    let mut rkeys = Vec::new();
     for i in 0..50 {
         let subject = format!(
             "at://{}/{}/{}-{}",
@@ -1555,14 +1671,17 @@ fn adopt_batches_respect_the_body_size_limit() {
         m.reason = Some(reason.clone());
         let b = records::mod_action(&m).unwrap();
         carol.put(nsid::MOD_ACTION, &b.rkey, &b.value);
+        rkeys.push(b.rkey);
     }
     w.host.advance_ms(60_000);
+    let rkeys: Vec<&str> = rkeys.iter().map(String::as_str).collect();
     let t = block_on(w.ob.mod_adopt(
         &w.session,
         &w.forum(),
         carol.did(),
         &carol.pds_base(),
         "owner",
+        counted(&carol, &rkeys, &[(&carol, "moderator")]),
     ))
     .unwrap();
     w.run();

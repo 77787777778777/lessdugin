@@ -17,12 +17,13 @@
 //! progress arrives as `Write` events, and a confirmed write as `Changed` for its forum and
 //! thread. Bodies are LFM/1 markdown with the derived `mentions`/`links` (W8); media are
 //! refused until M4 (`unsupported`). A comment's or react's quote gets its derived
-//! `prefix`/`suffix`/`start` from P of the target's cached version (W8). TODO(M4):
-//! `at://handle` mention rewriting (W7).
+//! `prefix`/`suffix`/`start` from P of the target's cached version (W8). Handle-authority
+//! `at://` destinations are rewritten to verified DIDs first (W7, `Engine::with_dids`).
 
 use futures::StreamExt;
 use futures::future::join_all;
 use lessdugin_atp::syntax::AtUri;
+use lessdugin_lexicon::Collection;
 use lessdugin_lexicon::collection::nsid;
 use lessdugin_lexicon::records::{
     Comment, ExternalLink, Labels, Post, SelfLabels, StrongRef, TextQuote as LexQuote,
@@ -30,8 +31,8 @@ use lessdugin_lexicon::records::{
 use serde_json::{Map, Value};
 
 use crate::dto::{
-    ActionTicket, AgreementValue, CommentDraft, Draft, EditOpts, KarmaValue, NoticeCode,
-    OpinionIntent, PostDraft, PostKind, Stance, TextQuote, WriteTicket,
+    ActionNotice, ActionTicket, AgreementValue, CommentDraft, Draft, EditOpts, KarmaValue,
+    NoticeCode, OpinionIntent, PostDraft, PostKind, Stance, TextQuote, WriteTicket,
 };
 use crate::host::Host;
 use crate::outbox::{
@@ -40,6 +41,7 @@ use crate::outbox::{
 use crate::social::full::ForumView;
 use crate::social::full::gates::{Gate, passes};
 use crate::social::full::reacts::palette;
+use crate::social::full::view::ModStatus;
 use crate::social::input::split_uri;
 use crate::store::records::RecordStore;
 
@@ -311,12 +313,18 @@ impl<H: Host> Engine<H> {
     pub async fn publish(&self, draft: &PostDraft) -> Result<WriteTicket, EngineError> {
         let session = self.active_session().await?;
         let key = self.forum_key(&draft.forum).await?;
+        let draft = &PostDraft {
+            body: self.with_dids(&draft.body).await?,
+            ..draft.clone()
+        };
         let post = self.post_record(draft, key.uri.clone())?;
         let opts = ContentOpts {
             blobs: self.media_blobs(&draft.body.media).await?,
             excerpt: Some(excerpt_of(&draft.body.markdown)),
         };
-        self.outbox.create_post(&session, &post, opts).await
+        let t = self.outbox.create_post(&session, &post, opts).await?;
+        self.sent_prepared_media(&draft.body.media).await;
+        Ok(t)
     }
 
     /// The current `(cid, value)` of a cached record.
@@ -350,6 +358,8 @@ impl<H: Host> Engine<H> {
             .and_then(Value::as_str)
             .ok_or_else(|| EngineError::invalid_input(format!("{root} names no forum")))
             .and_then(records::at_uri)?;
+        self.refuse_locked(&forum, &root, session.did.as_str())
+            .await?;
         let mut quoted = root_value.clone();
         let parent = match &draft.parent {
             Some(p) => {
@@ -380,16 +390,134 @@ impl<H: Host> Engine<H> {
             "",
             records::datetime_ms(self.host.now_ms())?,
         );
-        c.body = markdown_body(&draft.body)?;
+        c.body = markdown_body(&self.with_dids(&draft.body).await?)?;
         // the quote's target is the parent if present, else the root (`social.md` §16)
         c.quote = draft
             .quote
             .as_ref()
             .map(|q| derived_quote(q, &quoted))
             .transpose()?;
-        self.outbox
-            .create_comment(&session, &c, ContentOpts::default())
+        // the comment's media are uploaded with it (data-model.md §8.8)
+        let opts = ContentOpts {
+            blobs: self.media_blobs(&draft.body.media).await?,
+            excerpt: None,
+        };
+        let t = self.outbox.create_comment(&session, &c, opts).await?;
+        self.sent_prepared_media(&draft.body.media).await;
+        Ok(t)
+    }
+
+    /// `social.md` §4.8 "Composer": a comment on a locked post is refused (`blocked`,
+    /// `detail.kind = "locked"`) unless the writer is in A, or, for an author lock, is the post's
+    /// author. It would be published and at once be `Hidden(Locked)` for everyone (V7): a new
+    /// comment is never on the allow-list and has no keep. Without a cached model of the forum
+    /// there is nothing to go by, and the comment is written.
+    async fn refuse_locked(
+        &self,
+        forum: &AtUri,
+        root: &AtUri,
+        writer: &str,
+    ) -> Result<(), EngineError> {
+        let Ok(key) = self.forum_key(forum.as_str()).await else {
+            return Ok(());
+        };
+        let Ok(l) = self.loaded(&key).await else {
+            return Ok(());
+        };
+        let v = &l.model.view;
+        if v.authorities.contains_key(writer) {
+            return Ok(());
+        }
+        let forum_lock = v.moderation.lock(root.as_str()).is_some();
+        let author_lock = root.did().as_str() != writer
+            && v.author
+                .as_ref()
+                .is_ok_and(|a| a.locks.contains_key(root.as_str()));
+        if forum_lock || author_lock {
+            return Err(EngineError::blocked(format!(
+                "{root} is locked: a new comment would be hidden from everyone"
+            ))
+            .with_detail("kind", "locked"));
+        }
+        Ok(())
+    }
+
+    /// `edit_preflight(uri)` (`social.md` §4.5, `threat-model.md` SOC-3): the notices to show,
+    /// and confirm, before `edit` of `uri` is sent. An edit gives the item a new CID, so the
+    /// positive assertions in effect on it (a keep, a tier of `frontpage` or `curated`, a pin;
+    /// mod-log status `effective`) stop counting until an authority asserts them again on the
+    /// new version: one `suspendsAssertions` notice names them. Empty when there are none, or
+    /// while the forum's moderation layer is pending. `not_found` when `uri` is not cached.
+    pub async fn edit_preflight(&self, uri: &str) -> Result<Vec<ActionNotice>, EngineError> {
+        use lessdugin_lexicon::records::{Action, ModAction};
+        use lessdugin_lexicon::values::Tier as LexTier;
+        let u = records::at_uri(uri)?;
+        if RecordStore::new(self.host.cache())
+            .get(&u)
             .await
+            .map_err(store_error)?
+            .is_none()
+        {
+            return Err(EngineError::not_found(format!("{u} is not in the cache")));
+        }
+        let key = self.forum_of(&u).await?;
+        let l = self.loaded(&key).await?;
+        let m = &l.model;
+        let Ok(log) = m.view.mod_log.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let uri = u.as_str();
+        // (keep, tier, pin): the positive dimensions of social.md §4.2 in effect on the item
+        let (mut keep, mut tier, mut pin) = (false, None::<LexTier>, false);
+        for x in m.input.records.values() {
+            if x.coll != Some(Collection::ModAction) {
+                continue;
+            }
+            let Some(v) = x.value() else { continue };
+            if v.get("subject").and_then(Value::as_str) != Some(uri) {
+                continue;
+            }
+            let effective = log
+                .iter()
+                .any(|e| e.uri == x.uri && e.status == ModStatus::Effective);
+            let Some(a) = effective
+                .then(|| serde_json::from_value::<ModAction>(v.clone()).ok())
+                .flatten()
+            else {
+                continue;
+            };
+            match &a.action {
+                Action::Hide(h) if !h.hidden() => keep = true,
+                Action::Tier(t) => {
+                    if let Some(t @ (LexTier::Frontpage | LexTier::Curated)) = t.tier() {
+                        tier = tier.max(Some(t));
+                    }
+                }
+                Action::Pin(p) if p.pinned() => pin = true,
+                _ => {}
+            }
+        }
+        let tier = tier.map(|t| format!("its {} tier", t.as_str()));
+        let named: Vec<&str> = [keep.then_some("a moderator's keep"), tier.as_deref()]
+            .into_iter()
+            .flatten()
+            .chain(pin.then_some("its pin"))
+            .collect();
+        let Some((last, rest)) = named.split_last() else {
+            return Ok(Vec::new());
+        };
+        let list = if rest.is_empty() {
+            (*last).to_owned()
+        } else {
+            format!("{} and {last}", rest.join(", "))
+        };
+        Ok(vec![ActionNotice {
+            code: NoticeCode::SuspendsAssertions,
+            message: format!(
+                "editing suspends {list}: they apply to the version a moderator saw, and stop \
+                 until one asserts them again on the new version"
+            ),
+        }])
     }
 
     /// `edit(uri, Draft, EditOpts)`: the edit protocol (`data-model.md` §8.3) with a revision
@@ -404,11 +532,32 @@ impl<H: Host> Engine<H> {
         let u = records::at_uri(uri)?;
         let session = self.session_for(u.did().as_str()).await?;
         let (base, mut value) = self.current(&u).await?;
+        let draft = &match draft {
+            Draft::Post { id, post } => Draft::Post {
+                id: id.clone(),
+                post: PostDraft {
+                    body: self.with_dids(&post.body).await?,
+                    ..post.clone()
+                },
+            },
+            Draft::Comment { id, comment } => Draft::Comment {
+                id: id.clone(),
+                comment: CommentDraft {
+                    body: self.with_dids(&comment.body).await?,
+                    ..comment.clone()
+                },
+            },
+        };
+        let cached = value.clone();
         let coll = u.collection().as_str();
         let obj = value
             .as_object_mut()
             .ok_or_else(|| EngineError::internal(format!("{u} is not an object")))?;
         let mut excerpt = None;
+        let media = match draft {
+            Draft::Post { post, .. } => &post.body.media,
+            Draft::Comment { comment, .. } => &comment.body.media,
+        };
         match draft {
             Draft::Post { post, .. } => {
                 if coll != nsid::POST {
@@ -422,7 +571,29 @@ impl<H: Host> Engine<H> {
                     ));
                 }
                 let p = self.post_record(post, key.uri.clone())?;
-                let pv = to_value(&p)?;
+                let mut pv = to_value(&p)?;
+                // a link to the uri the cached version links keeps its cached card (W3): a
+                // draft that names neither title nor description keeps the object whole, one
+                // that names some keeps the thumb, which no draft carries (robustness-7)
+                let kept = match (&post.link, obj.get("link")) {
+                    (Some(l), Some(old))
+                        if old.get("uri").and_then(Value::as_str) == Some(l.uri.as_str()) =>
+                    {
+                        if l.title.is_none() && l.description.is_none() {
+                            Some(old.clone())
+                        } else {
+                            let mut new = pv.get("link").cloned().unwrap_or(Value::Null);
+                            if let (Some(t), Some(n)) = (old.get("thumb"), new.as_object_mut()) {
+                                n.insert("thumb".into(), t.clone());
+                            }
+                            Some(new)
+                        }
+                    }
+                    _ => None,
+                };
+                if let (Some(kept), Some(m)) = (kept, pv.as_object_mut()) {
+                    m.insert("link".into(), kept);
+                }
                 for k in ["kind", "title", "body", "link", "tags", "labels"] {
                     set(obj, k, pv.get(k).cloned());
                 }
@@ -447,13 +618,18 @@ impl<H: Host> Engine<H> {
                 );
             }
         }
+        // media new in this version are uploaded with the edit; the others keep the blob
+        // objects of the cached version (data-model.md §8.8)
+        let blobs = self.edit_media_blobs(&cached, &mut value, media).await?;
         let o = outbox::EditOpts {
             history: opts.history,
             summary: opts.summary.clone(),
-            blobs: Vec::new(),
+            blobs,
             excerpt,
         };
-        self.outbox.edit(&session, uri, &value, &base, o).await
+        let t = self.outbox.edit(&session, uri, &value, &base, o).await?;
+        self.sent_prepared_media(media).await;
+        Ok(t)
     }
 
     /// `retract(uri)`: an edit of an own comment with `retracted: true` (`data-model.md` §8.3).
@@ -723,28 +899,18 @@ impl<H: crate::host::Host> Engine<H> {
     /// deletion in a repo the caller does not own (W9). A redaction is itself a delete of each
     /// revision record, so it goes through the outbox like any other write.
     ///
+    /// Which revisions go is decided when the write is sent, from a fresh listing of the
+    /// author's PDS filtered by `subject.uri` (`Outbox::redact_item`), not from this device's
+    /// fold: an invalid revision, one past the fetch caps, or one another device wrote since the
+    /// last sync is deleted too. A forum declaration's or a modAction's revisions are the mod log
+    /// and are refused (`invalid_input`, `detail.kind = "modLog"`, `threat-model.md` SOC-7).
+    ///
     /// The item then reads as "history redacted": it was edited (its own record says so) but no
-    /// revision is left, which is what [`Engine::history`] reports.
+    /// revision is left, which is what [`Engine::history`] reports. Redacting an item without
+    /// history is a write that deletes nothing.
     pub async fn redact_revision(&self, uri: &str) -> Result<Vec<WriteTicket>, EngineError> {
         let u = records::at_uri(uri)?;
         let session = self.session_for(u.did().as_str()).await?;
-        let key = self.forum_of(&u).await?;
-        let l = self.loaded(&key).await?;
-        // every revision record this device knows of for the item, from the fold's own graph
-        let revs: Vec<String> = l
-            .model
-            .view
-            .revisions
-            .get(&u.to_string())
-            .cloned()
-            .unwrap_or_default();
-        if revs.is_empty() {
-            // nothing to do is not an error: "the history is already empty" and "there was never
-            // a revision" are the same state, and a redaction is idempotent
-            return Ok(Vec::new());
-        }
-        // the outbox has a purpose-built path for this: one `applyWrites` of `#delete revision`
-        // ops, chunked at 200, which is what `Intent::Redact` is for
-        Ok(vec![self.outbox.redact(&session, &revs).await?])
+        Ok(vec![self.outbox.redact_item(&session, u.as_str()).await?])
     }
 }

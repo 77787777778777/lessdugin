@@ -1,13 +1,24 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Edit, retract and delete for the viewer's own comments (data-model.md §8.3, §8.7). Edits keep
 // a public revision; retraction keeps the comment, struck through. An edit rebuilds the draft
-// from the record itself, so the parent, the quote and the body's media survive it.
+// from the record itself, so the parent, the quote and the body's media survive it. Before an
+// edit, the author is told when it will suspend a keep or a pin (social.md §4.5; the engine
+// says which, `editPreflight`).
 
 import type { CommentNode, MediaRef, TextQuote } from "@lessdugin/engine/types";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useEngine } from "../engine/context.tsx";
+import { SpilledBodySourceError, useCoherentEditSource } from "../engine/editSource.ts";
 import { writeStore } from "../engine/writes.ts";
-import { markdownOf, mediaRefsOf, objectField, refUri, textQuoteOf } from "../lib/records.ts";
+import { suspendsNotice } from "../lib/modActions.ts";
+import {
+  isSpilledBody,
+  markdownOf,
+  mediaRefsOf,
+  objectField,
+  refUri,
+  textQuoteOf,
+} from "../lib/records.ts";
 import ui from "../styles/ui.module.css";
 import { Dialog } from "./Dialog.tsx";
 import { LazyComposer } from "./LazyComposer.tsx";
@@ -21,10 +32,11 @@ export interface CommentSource {
   media: MediaRef[];
 }
 
-/** The editable parts of a comment record, or null if it has no inline markdown body. */
-export function commentSourceOf(record: unknown): CommentSource | null {
+/** The editable parts of a comment record, or null if it has no markdown body: inline, or
+ * `source`, the markdown of a body that spilled into a blob (`bodySource`). */
+export function commentSourceOf(record: unknown, source?: string): CommentSource | null {
   const body = objectField(record, "body");
-  const markdown = markdownOf(body);
+  const markdown = markdownOf(body) ?? (isSpilledBody(body) ? source : undefined);
   if (markdown === undefined) return null;
   const out: CommentSource = { markdown, media: mediaRefsOf(body) };
   const parent = refUri(record, "parent");
@@ -37,6 +49,10 @@ export function commentSourceOf(record: unknown): CommentSource | null {
 export function OwnCommentActions({ node, postUri }: { node: CommentNode; postUri: string }) {
   const engine = useEngine();
   const [editing, setEditing] = useState<CommentSource | null>(null);
+  const [opening, setOpening] = useState(false);
+  const source = useCoherentEditSource(engine, node.uri, opening && editing === null);
+  // the edit suspends the comment's positive assertions (a keep, a pin): said before it is sent
+  const [suspends, setSuspends] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
 
   const run = async (
@@ -56,22 +72,65 @@ export function OwnCommentActions({ node, postUri }: { node: CommentNode; postUr
     }
   };
 
-  const startEdit = async (): Promise<void> => {
-    try {
-      const raw = await engine.raw(node.uri);
-      const source = commentSourceOf(raw.record);
-      if (!source) throw new Error("The comment's source is not available.");
-      setEditing(source);
-    } catch (e) {
-      toasts.show({ message: errorMessage(e), tone: "error" });
+  const sourceData = source.data;
+  useEffect(() => {
+    if (!opening || editing !== null || !sourceData) return;
+    let live = true;
+    const draft = commentSourceOf(sourceData.raw.record, sourceData.source.markdown);
+    if (!draft) {
+      setOpening(false);
+      toasts.show({ message: "The comment's source is not available.", tone: "error" });
+      return;
     }
-  };
+    void engine
+      .editPreflight(node.uri)
+      .then((notices) => {
+        if (!live) return;
+        setSuspends(suspendsNotice(notices));
+        setEditing(draft);
+        setOpening(false);
+      })
+      .catch(() => {
+        if (!live) return;
+        setSuspends(null);
+        setEditing(draft);
+        setOpening(false);
+      });
+    return () => {
+      live = false;
+    };
+  }, [editing, engine, node.uri, opening, sourceData]);
 
   return (
     <>
-      <button type="button" className={ui.link} onClick={() => void startEdit()}>
+      <button
+        type="button"
+        className={ui.link}
+        disabled={opening && source.isFetching}
+        onClick={() => {
+          setEditing(null);
+          setOpening(true);
+        }}
+      >
         Edit
       </button>
+      {opening && source.isError && (
+        <div role="alert" className={ui.fullWidth}>
+          <p>
+            {errorMessage(
+              source.error instanceof SpilledBodySourceError
+                ? source.error.sourceError
+                : source.error,
+            )}
+          </p>
+          <button type="button" className={ui.link} onClick={source.retry}>
+            Try again
+          </button>
+          <button type="button" className={ui.link} onClick={() => setOpening(false)}>
+            Cancel
+          </button>
+        </div>
+      )}
       {!node.retracted && (
         <button
           type="button"
@@ -86,6 +145,11 @@ export function OwnCommentActions({ node, postUri }: { node: CommentNode; postUr
       </button>
       {editing && (
         <div className={ui.fullWidth}>
+          {suspends && (
+            <p className={ui.notice} role="note" data-testid="edit-suspends">
+              {suspends}
+            </p>
+          )}
           <LazyComposer
             compact
             autoFocus

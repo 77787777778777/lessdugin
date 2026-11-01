@@ -268,6 +268,31 @@
         "html": "<div class=\"lfm\" dir=\"auto\">\n<p dir=\"auto\">\u00e9 <a href=\"https://www.a.com\" rel=\"nofollow ugc noopener noreferrer\">www.a.com</a> \u00fc</p>\n</div>\n",
         "text": "\u00e9 www.a.com \u00fc"
       }
+    },
+    {
+      "name": "failed-candidates-share-a-run",
+      "input": {
+        "text": "(www.a.b.(www.a.b.(www.a.b. (www.a.b.)(www.c.d.)) (www.e.f.&amp;(www.g.h)\n"
+      },
+      "expected": {
+        "html": "<div class=\"lfm\" dir=\"auto\">\n<p dir=\"auto\">(www.a.b.(www.a.b.(<a href=\"https://www.a.b\" rel=\"nofollow ugc noopener noreferrer\">www.a.b</a>. (www.a.b.)(<a href=\"https://www.c.d\" rel=\"nofollow ugc noopener noreferrer\">www.c.d</a>.)) (www.e.f.&amp;(<a href=\"https://www.g.h\" rel=\"nofollow ugc noopener noreferrer\">www.g.h</a>)</p>\n</div>\n",
+        "text": "(www.a.b.(www.a.b.(www.a.b. (www.a.b.)(www.c.d.)) (www.e.f.&(www.g.h)"
+      }
+    },
+    {
+      "name": "failed-candidates-long-run",
+      "input": {
+        "gen": {
+          "prefix": "",
+          "repeat": "(www.a.b.",
+          "times": 2000,
+          "suffix": "\n"
+        }
+      },
+      "expected": {
+        "html_bytes": 18124,
+        "html_tail": "a.b.(www.a.b.(www.a.b.(www.a.b.(www.a.b.(www.a.b.(www.a.b.(www.a.b.(www.a.b.(www.a.b.(www.a.b.(www.a.b.(www.a.b.(www.a.b.(www.a.b.(www.a.b.(www.a.b.(www.a.b.(www.a.b.(www.a.b.(www.a.b.(www.a.b.(www.a.b.(www.a.b.(www.a.b.(www.a.b.(www.a.b.(www.a.b.(www.a.b.(www.a.b.(www.a.b.(www.a.b.(www.a.b.(www.a.b.(www.a.b.(<a href=\"https://www.a.b\" rel=\"nofollow ugc noopener noreferrer\">www.a.b</a>.</p>\n</div>\n"
+      }
     }
   ]
 }

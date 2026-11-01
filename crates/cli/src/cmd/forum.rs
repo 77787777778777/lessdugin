@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Forums and membership: `forum ls|show|follow|unfollow|use|create`, `join`, `leave`,
-//! `members`, `approve` and `sync` (synthesis §6.10).
+//! Forums and membership: `forum ls|show|follow|unfollow|use|create|edit`, `join`, `leave`,
+//! `members` (and `members revoke`), `approve`, `reject` and `sync` (synthesis §6.10).
 //!
 //! `forum create` always writes the membership mode (default `approval`, `docs/plan.md` M2)
 //! and makes the new forum the current one, as `join` does. `--json` prints the engine's DTOs
@@ -13,19 +13,28 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use lessdugin_core::dto::{
     BodyDraft, DTO_VERSION, DefaultTier, Event, ForumDraft, ForumRole, ForumSummary, MemberView,
-    MembersQuery, MembershipMode, SyncOpts, SyncReport, WriteTicket,
+    MembersQuery, MembershipMode, PublicActionKind, SyncOpts, SyncReport, WriteTicket,
 };
 use lessdugin_core::engine::{Engine, EngineError};
 use lessdugin_native::host::NativeHost;
 use serde::Serialize;
 
 use crate::args::{
-    ApproveArgs, ForumAction, ForumArgs, JoinArgs, LeaveArgs, MembersArgs, SyncArgs,
+    ApproveArgs, ForumAction, ForumArgs, ForumEditArgs, JoinArgs, LeaveArgs, MembersAction,
+    MembersArgs, RejectArgs, SyncArgs,
 };
-use crate::cmd::{read, refs, write};
+use crate::cmd::{read, refs, social, write};
 use crate::ctx::{CliError, Ctx};
 use crate::out::{Style, TermText, cat, lit, name, tt};
 use crate::render;
+
+/// The L7 label of an open forum (`threat-model.md` L7, SOC-13): only approval mode is complete
+/// without third-party servers.
+const OPEN_MODE_LABEL: &str = "Open mode relies on Bluesky relay, Jetstream and Constellation \
+                               (or an indexer) to find new members.";
+
+/// The banner code of the same label, should the engine carry it (shown once).
+const RELAY_DEPENDENT: &str = "relayDependent";
 
 fn mode(m: MembershipMode) -> &'static str {
     match m {
@@ -173,6 +182,9 @@ pub async fn forum(ctx: &Ctx, args: ForumArgs) -> Result<(), CliError> {
             let w = ctx.writer().await?;
             let mut d = ForumDraft::new(slug.clone(), name.unwrap_or_else(|| slug.clone()));
             d.membership = mode.into();
+            if d.membership == MembershipMode::Open {
+                ctx.out.warn(lit(OPEN_MODE_LABEL));
+            }
             d.description = description;
             d.about = about.map(BodyDraft::text);
             d.default_tier = if frontpage {
@@ -191,7 +203,85 @@ pub async fn forum(ctx: &Ctx, args: ForumArgs) -> Result<(), CliError> {
             let t = write::drive(ctx, &w, ticket).await?;
             write::report(ctx, &t, "Created")
         }
+        ForumAction::Edit(a) => edit(ctx, a).await,
     }
+}
+
+/// An optional text option: empty removes the field.
+fn text_option(given: Option<String>, current: Option<String>) -> Option<String> {
+    match given {
+        Some(t) if t.trim().is_empty() => None,
+        Some(t) => Some(t),
+        None => current,
+    }
+}
+
+/// `lessdugin forum edit [forum] …` (`engine-api.md` §3.2 `forum_update`): the owner changes
+/// the declaration through the edit protocol; every field not given keeps its current value
+/// (read from the cached declaration). Another account is refused before anything is read:
+/// the declaration lives in the owner's repository, and a spilled about is fetched only by its
+/// owner (m4-5), so the engine's refusal of the write never comes after a fetch.
+async fn edit(ctx: &Ctx, a: ForumEditArgs) -> Result<(), CliError> {
+    let w = ctx.writer().await?;
+    let uri = refs::forum_or_current(ctx, &w.engine, a.forum.as_deref()).await?;
+    if write::owner_of(&uri)? != w.account.did {
+        return Err(EngineError::blocked(
+            "only the forum's owner can change it (the declaration is in the owner's repo)",
+        )
+        .into());
+    }
+    // loads (and caches) the declaration
+    w.engine.forum_open(&uri).await?;
+    let (_, decl) = write::cached(&w.engine, &uri).await?;
+    let current: lessdugin_lexicon::records::Forum = serde_json::from_value(decl.clone())
+        .map_err(|e| EngineError::internal(format!("{uri}: {e}")))?;
+    let about = match a.about {
+        Some(t) if t.trim().is_empty() => None,
+        Some(t) => Some(BodyDraft::text(t)),
+        // the current about is kept: its text (a spilled one fetched from the owner's PDS) and
+        // its media
+        None => match decl.get("about") {
+            None => None,
+            Some(md) if md.get("text").is_none() && md.get("textBlob").is_none() => {
+                return Err(CliError::usage(
+                    "this forum's about text is in a format this client cannot keep; pass \
+                     --about to replace it",
+                ));
+            }
+            Some(md) => Some(write::kept_body(&w, &uri, md).await?),
+        },
+    };
+    let mut d = ForumDraft::new(String::new(), a.name.unwrap_or(current.name.clone()));
+    d.description = text_option(a.description, current.description.clone());
+    d.about = about;
+    d.membership = match a.mode {
+        Some(m) => m.into(),
+        None => match current.membership_mode().value {
+            lessdugin_lexicon::values::MembershipMode::Open => MembershipMode::Open,
+            lessdugin_lexicon::values::MembershipMode::Approval => MembershipMode::Approval,
+        },
+    };
+    d.default_tier = match a.default_tier {
+        Some(t) => t.into(),
+        None => match current.default_tier().value {
+            lessdugin_lexicon::values::DefaultTier::Frontpage => DefaultTier::Frontpage,
+            lessdugin_lexicon::values::DefaultTier::Personal => DefaultTier::Personal,
+        },
+    };
+    d.featured_tags = if a.no_featured_tags {
+        Vec::new()
+    } else if !a.featured_tags.is_empty() {
+        a.featured_tags
+    } else {
+        current.featured_tags.clone().unwrap_or_default()
+    };
+    d.report_contact = text_option(a.report_contact, current.report_contact.clone());
+    if a.mode.is_some() && d.membership == MembershipMode::Open {
+        ctx.out.warn(lit(OPEN_MODE_LABEL));
+    }
+    let ticket = w.engine.forum_update(&uri, &d).await?;
+    let t = write::drive(ctx, &w, ticket).await?;
+    write::report(ctx, &t, "Updated")
 }
 
 async fn ls(ctx: &Ctx) -> Result<(), CliError> {
@@ -280,6 +370,9 @@ async fn show(ctx: &Ctx, forum: Option<&str>) -> Result<(), CliError> {
     out.field("uri", 11, tt(&f.uri));
     out.field("owner", 11, render::actor(&f.owner));
     out.field("membership", 11, lit(mode(f.membership)));
+    if f.membership == MembershipMode::Open {
+        out.field("", 11, lit(OPEN_MODE_LABEL));
+    }
     out.field("your role", 11, lit(role(v.my_role)));
     out.field(
         "followed",
@@ -321,19 +414,25 @@ async fn show(ctx: &Ctx, forum: Option<&str>) -> Result<(), CliError> {
             }),
         ]),
     );
-    for b in &v.banners {
+    for b in v.banners.iter().filter(|b| b.code != RELAY_DEPENDENT) {
         out.warn(tt(&b.message));
     }
-    if v.about.is_some() {
+    if let Some(view) = &v.about {
         let style = render::BodyStyle {
             color: out.color(),
             hyperlinks: out.color() && out.stdout_is_tty(),
             width: render::width(out.stdout_is_tty()),
         };
-        if let Ok((_, decl)) = write::cached(&engine, &f.uri).await
-            && let Some(about) = decl.get("about")
-            && let Some(text) = render::markdown(about, &style, 2, &|_| None)
-        {
+        // the cached markdown, else (a spilled about) what the view shows: its excerpt and
+        // notice
+        let local = match write::cached(&engine, &f.uri).await {
+            Ok((_, decl)) => decl
+                .get("about")
+                .and_then(|about| render::markdown(about, &style, 2, &|_| None)),
+            Err(_) => None,
+        };
+        let text = local.unwrap_or_else(|| render::view_body(view, &style, 2));
+        if !text.trim().is_empty() {
             out.page(&format!("\n{text}"), false);
         }
     }
@@ -344,6 +443,8 @@ async fn show(ctx: &Ctx, forum: Option<&str>) -> Result<(), CliError> {
 pub async fn join(ctx: &Ctx, args: JoinArgs) -> Result<(), CliError> {
     let w = ctx.writer().await?;
     let uri = refs::forum(ctx, &w.engine, &args.forum).await?;
+    // joining (applying, with its note) is public (`social.md` §17)
+    social::acknowledge(ctx, &w, PublicActionKind::Join, args.yes).await?;
     let ticket = w.engine.join(&uri, args.note.as_deref()).await?;
     if let Some(a) = &args.alias {
         w.engine.forum_follow(&uri, Some(a)).await?;
@@ -374,8 +475,11 @@ pub async fn leave(ctx: &Ctx, args: LeaveArgs) -> Result<(), CliError> {
     write::report(ctx, &t, "Left")
 }
 
-/// `lessdugin members [forum] [--pending]`.
+/// `lessdugin members [forum] [--pending]`, and `members revoke <actor>...`.
 pub async fn members(ctx: &Ctx, args: MembersArgs) -> Result<(), CliError> {
+    if let Some(MembersAction::Revoke { actors, yes }) = args.action {
+        return revoke(ctx, args.forum.as_deref(), &actors, yes).await;
+    }
     let engine = ctx.reader().await?;
     let uri = refs::forum_or_current(ctx, &engine, args.forum.as_deref()).await?;
     read::sync_forum_quietly(ctx, &engine, &uri).await;
@@ -430,19 +534,54 @@ pub async fn members(ctx: &Ctx, args: MembersArgs) -> Result<(), CliError> {
 pub async fn approve(ctx: &Ctx, args: ApproveArgs) -> Result<(), CliError> {
     let w = ctx.writer().await?;
     let uri = refs::forum_or_current(ctx, &w.engine, None).await?;
-    let tickets = w.engine.grant(&uri, &args.actors).await?;
+    // a grant is an `#access` mod action (`social.md` §17)
+    social::acknowledge(ctx, &w, PublicActionKind::ModAction, args.yes).await?;
+    // the grant, and the actors leave this device's rejected list (`reject`)
+    let tickets = w.engine.approve(&uri, &args.actors).await?;
     let mut done = Vec::with_capacity(tickets.len());
     for t in tickets {
         done.push(write::drive(ctx, &w, t).await?);
     }
+    report_each(ctx, &args.actors, &done, "Approved ", "Queued approval of ")
+}
+
+/// `lessdugin members revoke <actor>...` (`engine-api.md` §3.2 `revoke`): removes the
+/// account's grant of membership (its `#access{member}`) of each actor; the removal is a mod
+/// action (`social.md` §17).
+async fn revoke(
+    ctx: &Ctx,
+    forum: Option<&str>,
+    actors: &[String],
+    yes: bool,
+) -> Result<(), CliError> {
+    let w = ctx.writer().await?;
+    let uri = refs::forum_or_current(ctx, &w.engine, forum).await?;
+    social::acknowledge(ctx, &w, PublicActionKind::ModAction, yes).await?;
+    let tickets = w.engine.revoke(&uri, actors).await?;
+    let mut done = Vec::with_capacity(tickets.len());
+    for t in tickets {
+        done.push(write::drive(ctx, &w, t).await?);
+    }
+    report_each(ctx, actors, &done, "Revoked ", "Queued revocation of ")
+}
+
+/// Reports one write per actor (`approve`, `members revoke`): `--json` prints the tickets as
+/// one list; the first failure is the exit code.
+fn report_each(
+    ctx: &Ctx,
+    actors: &[String],
+    done: &[WriteTicket],
+    did: &'static str,
+    queued: &'static str,
+) -> Result<(), CliError> {
     if ctx.out.is_json() {
         ctx.out.json(&WriteList {
             dto: DTO_VERSION,
-            writes: &done,
+            writes: done,
         });
     }
     let mut first_error = None;
-    for (actor, t) in args.actors.iter().zip(&done) {
+    for (actor, t) in actors.iter().zip(done) {
         match &t.state {
             lessdugin_core::dto::WriteState::Failed { error } => {
                 if !ctx.out.is_json() {
@@ -458,9 +597,9 @@ pub async fn approve(ctx: &Ctx, args: ApproveArgs) -> Result<(), CliError> {
             _ if ctx.out.is_json() => {}
             lessdugin_core::dto::WriteState::Done { .. } => ctx
                 .out
-                .line(&[(lit("Approved "), Style::Good), (name(actor), Style::Bold)]),
+                .line(&[(lit(did), Style::Good), (name(actor), Style::Bold)]),
             _ => ctx.out.line(&[
-                (lit("Queued approval of "), Style::Warn),
+                (lit(queued), Style::Warn),
                 (name(actor), Style::Bold),
                 (lit(": write "), Style::Plain),
                 (tt(&t.id), Style::Plain),
@@ -477,6 +616,40 @@ pub async fn approve(ctx: &Ctx, args: ApproveArgs) -> Result<(), CliError> {
         }
         None => Ok(()),
     }
+}
+
+/// `lessdugin reject <actor>...` (`engine-api.md` §3.2): dismisses the applicants on this
+/// device (nothing public is written for them; they leave `members --pending`), and removes the
+/// account's own grant of an actor, if it made one.
+pub async fn reject(ctx: &Ctx, args: RejectArgs) -> Result<(), CliError> {
+    let w = ctx.writer().await?;
+    let uri = refs::forum_or_current(ctx, &w.engine, None).await?;
+    let tickets = w.engine.reject(&uri, &args.actors).await?;
+    let mut done = Vec::with_capacity(tickets.len());
+    for t in tickets {
+        done.push(write::drive(ctx, &w, t).await?);
+    }
+    if ctx.out.is_json() {
+        ctx.out.json(&WriteList {
+            dto: DTO_VERSION,
+            writes: &done,
+        });
+        if let Some(e) = done.iter().find_map(|t| match &t.state {
+            lessdugin_core::dto::WriteState::Failed { error } => Some(error.clone()),
+            _ => None,
+        }) {
+            return Err(CliError::Engine(e));
+        }
+        return Ok(());
+    }
+    for actor in &args.actors {
+        ctx.out
+            .line(&[(lit("Rejected "), Style::Good), (name(actor), Style::Bold)]);
+    }
+    for t in &done {
+        write::report(ctx, t, "Removed your grant")?;
+    }
+    Ok(())
 }
 
 /// Shows `SyncProgress` on a terminal's stderr while `sync` runs.

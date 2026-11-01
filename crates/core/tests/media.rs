@@ -7,7 +7,9 @@
 
 mod common;
 
-use lessdugin_core::media::{Format, apply_orientation, prepare, sniff, strip_metadata};
+use lessdugin_core::media::{
+    Format, apply_orientation, downscale_to_fit, prepare, sniff, strip_metadata,
+};
 
 // --- builders -------------------------------------------------------------------------------
 
@@ -106,8 +108,8 @@ fn png_with_metadata() -> Vec<u8> {
     v
 }
 
-/// A WebP: RIFF/WEBP, VP8X with EXIF+XMP flags set, an ICCP chunk, an EXIF chunk, an XMP chunk and
-/// a VP8 lossy chunk.
+/// A WebP: RIFF/WEBP, VP8X with the ICC, alpha, EXIF and XMP flags set, an ICCP chunk, an EXIF
+/// chunk, an XMP chunk, an ALPH chunk and a VP8 lossy chunk.
 fn webp_with_metadata() -> Vec<u8> {
     let chunk = |id: &[u8; 4], data: &[u8]| {
         let mut v = id.to_vec();
@@ -119,11 +121,13 @@ fn webp_with_metadata() -> Vec<u8> {
         v
     };
     let mut body = Vec::new();
-    // VP8X: 1 byte flags, 3 bytes reserved, 3 bytes width-1, 3 bytes height-1
-    body.extend(chunk(b"VP8X", &[0b0001_1000, 0, 0, 0, 0, 0, 0, 0, 0, 0]));
+    // VP8X: 1 byte flags (`Rsv Rsv I L E X A R`, RFC 9649: ICC 0x20 | alpha 0x10 | EXIF 0x08 |
+    // XMP 0x04), 3 bytes reserved, 3 bytes width-1, 3 bytes height-1
+    body.extend(chunk(b"VP8X", &[0x3C, 0, 0, 0, 0, 0, 0, 0, 0, 0]));
     body.extend(chunk(b"ICCP", b"icc-profile"));
     body.extend(chunk(b"EXIF", b"Exif\0\0GPS"));
     body.extend(chunk(b"XMP ", b"<xmp>secret</xmp>"));
+    body.extend(chunk(b"ALPH", b"\x00alpha"));
     body.extend(chunk(b"VP8 ", b"\x00\x01\x02\x03"));
     let mut v = b"RIFF".to_vec();
     v.extend_from_slice(&((body.len() + 4) as u32).to_le_bytes());
@@ -256,6 +260,9 @@ fn truncated_and_hostile_jpegs_do_not_panic() {
         let out = strip_metadata(part);
         // an unparseable stream comes back untouched rather than half-stripped
         assert_eq!(out.bytes.len(), part.len());
+        // ...and flagged, so it is never uploaded as it is (fail closed); two bytes are not a
+        // JPEG at all
+        assert_eq!(out.malformed, cut > 2, "cut at {cut}");
     }
     // a length that runs past the end
     let mut evil = vec![0xFF, 0xD8];
@@ -263,6 +270,7 @@ fn truncated_and_hostile_jpegs_do_not_panic() {
     evil.extend_from_slice(b"truncated");
     let out = strip_metadata(&evil);
     assert_eq!(out.bytes, evil);
+    assert!(out.malformed);
     // a marker loop: fill bytes with no terminator
     let filler = vec![0xFFu8; 64];
     let _ = strip_metadata(&filler);
@@ -309,6 +317,10 @@ fn truncated_pngs_do_not_panic() {
         let part = &full[..cut.min(full.len())];
         let out = strip_metadata(part);
         assert_eq!(out.bytes.len(), part.len());
+        assert!(
+            out.malformed,
+            "a PNG without IEND must be flagged (cut at {cut})"
+        );
     }
     // a chunk length of u32::MAX must not overflow into a panic
     let mut evil = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
@@ -316,6 +328,67 @@ fn truncated_pngs_do_not_panic() {
     evil.extend_from_slice(b"tEXt");
     let out = strip_metadata(&evil);
     assert_eq!(out.bytes, evil);
+    assert!(out.malformed);
+}
+
+/// acc-m4-13/14: a damaged file must never reach the PDS with its EXIF or GPS. Every truncation of
+/// every metadata-bearing fixture is either refused by the pipeline or comes out clean.
+#[test]
+fn no_truncation_uploads_metadata() {
+    let personal: [&[u8]; 12] = [
+        b"GPS-GPS-GPS",
+        b"Exif",
+        b"secret comment",
+        b"Photoshop",
+        b"second-image",
+        b"GPS: 51.5",
+        b"eXIf",
+        b"<xmp>secret</xmp>",
+        b"a secret!",
+        b"XMP DataXMP",
+        b"GPS 51.5,-0.12",
+        b"GPS:51.5",
+    ];
+    for (name, full) in [
+        ("jpeg", jpeg_with_metadata(6, true)),
+        ("png", png_with_metadata()),
+        ("webp", webp_with_metadata()),
+        ("gif", gif_with_comment()),
+        ("mp4", mp4_with_udta()),
+    ] {
+        let mut refused = 0;
+        for cut in 1..=full.len() {
+            let part = full[..cut].to_vec();
+            match prepare(part) {
+                Ok(out) => {
+                    for needle in personal {
+                        assert!(
+                            !contains(&out, needle),
+                            "{name} cut at {cut}/{}: {needle:?} would be uploaded",
+                            full.len()
+                        );
+                    }
+                }
+                Err(e) => {
+                    refused += 1;
+                    assert_eq!(
+                        e.detail.as_ref().and_then(|d| d.get("kind")),
+                        Some(&serde_json::json!("mediaRejected")),
+                        "{name} cut at {cut}"
+                    );
+                }
+            }
+        }
+        // JPEG, PNG and GIF need their end marker, so nearly every cut is a refusal; a WebP cut
+        // inside a chunk is one
+        match name {
+            "jpeg" | "png" | "gif" => {
+                assert!(refused > full.len() / 2, "{name}: only {refused} refusals");
+            }
+            "webp" => assert!(refused > 0, "{name}: no refusal"),
+            _ => {}
+        }
+    }
 }
 
 // --- WebP -----------------------------------------------------------------------------------
@@ -340,15 +413,19 @@ fn webp_drops_exif_and_xmp_and_clears_the_flag_bits() {
         out.bytes.len() - 8,
         "RIFF size not recomputed"
     );
-    // VP8X flag bits 3 (EXIF) and 4 (XMP) are cleared
+    // the VP8X EXIF (0x08) and XMP (0x04) flags are cleared, and nothing else: the ICC (0x20)
+    // and alpha (0x10) flags still describe chunks that are there
+    assert!(contains(&out.bytes, b"ALPH"));
     let vp8x = out
         .bytes
         .windows(4)
         .position(|w| w == b"VP8X")
         .expect("VP8X kept");
     let flags = out.bytes[vp8x + 8];
-    assert_eq!(flags & (1 << 3), 0, "EXIF flag still set");
-    assert_eq!(flags & (1 << 4), 0, "XMP flag still set");
+    assert_eq!(
+        flags, 0x30,
+        "flags {flags:#04x}: only EXIF and XMP may be cleared"
+    );
 }
 
 #[test]
@@ -487,6 +564,26 @@ fn a_truncated_or_cyclic_mp4_does_not_hang() {
     let _ = strip_metadata(&zero);
 }
 
+#[test]
+fn an_oversized_extended_mp4_box_is_rejected_before_its_header_is_sliced() {
+    // Found by `cargo fuzz`: this extended-size `meta` names more bytes than its parent `moov`
+    // holds. The clamped box ends only eight bytes after it starts, before its 16-byte header.
+    // That is malformed input, not a metadata box whose payload can be stripped.
+    let input: &[u8] = &[
+        0, 0, 0, 24, b'f', b't', b'y', b'p', b'i', 0xD3, b'o', b'm', 0, 0xBB, 2, 0, b'i', b's',
+        b'o', b'M', 0, 0, 0, 0, 0, 0, 0, 20, b'm', b'o', b'o', b'v', 0, 0, 0, 1, b'm', b'e', b't',
+        b'a', 0, 0, 0, 0, 0x88, 0x88, 0x88, 0x0C,
+    ];
+    let out = strip_metadata(input);
+    assert!(out.malformed);
+    assert!(!out.changed);
+    assert_eq!(out.bytes, input, "a refusal must not partly strip the file");
+    assert!(
+        prepare(input.to_vec()).is_err(),
+        "a malformed container is not uploaded"
+    );
+}
+
 // --- dispatch and the pipeline --------------------------------------------------------------
 
 #[test]
@@ -540,7 +637,345 @@ fn apply_orientation_rotates_a_real_image() {
     assert_eq!(apply_orientation(b"not an image", 6), b"not an image");
 }
 
+/// A real `w`×`h` image (the left column red, the rest green), encoded by the image crate so the
+/// orientation pass can decode it.
+fn real_image(w: u32, h: u32, format: image::ImageFormat) -> Vec<u8> {
+    let mut buf = image::RgbImage::from_pixel(w, h, image::Rgb([0, 255, 0]));
+    for y in 0..h {
+        buf.put_pixel(0, y, image::Rgb([255, 0, 0]));
+    }
+    let mut out = Vec::new();
+    image::DynamicImage::ImageRgb8(buf)
+        .write_to(&mut std::io::Cursor::new(&mut out), format)
+        .unwrap();
+    out
+}
+
+/// A little-endian TIFF structure whose IFD0 holds the orientation and a GPS IFD pointer, with a
+/// recognisable GPS payload.
+fn tiff_with(orientation: u16) -> Vec<u8> {
+    let mut tiff = b"II\x2a\x00".to_vec();
+    tiff.extend_from_slice(&8u32.to_le_bytes());
+    tiff.extend_from_slice(&2u16.to_le_bytes());
+    tiff.extend_from_slice(&0x0112u16.to_le_bytes());
+    tiff.extend_from_slice(&3u16.to_le_bytes());
+    tiff.extend_from_slice(&1u32.to_le_bytes());
+    tiff.extend_from_slice(&orientation.to_le_bytes());
+    tiff.extend_from_slice(&[0, 0]);
+    tiff.extend_from_slice(&0x8825u16.to_le_bytes());
+    tiff.extend_from_slice(&4u16.to_le_bytes());
+    tiff.extend_from_slice(&1u32.to_le_bytes());
+    tiff.extend_from_slice(&40u32.to_le_bytes());
+    tiff.extend_from_slice(&0u32.to_le_bytes());
+    tiff.resize(40, 0);
+    tiff.extend_from_slice(b"GPS-GPS-GPS");
+    tiff
+}
+
+fn dimensions(bytes: &[u8]) -> (u32, u32) {
+    let img = image::load_from_memory(bytes).expect("the prepared image decodes");
+    (img.width(), img.height())
+}
+
+#[test]
+fn a_real_jpeg_with_orientation_6_comes_out_rotated_and_without_exif() {
+    // acc-m4-16: the photo a phone takes, through the engine entry point
+    let plain = real_image(8, 4, image::ImageFormat::Jpeg);
+    let mut app1 = b"Exif\0\0".to_vec();
+    app1.extend_from_slice(&tiff_with(6));
+    let mut jpeg = plain[..2].to_vec();
+    jpeg.extend(seg(0xE1, &app1));
+    jpeg.extend_from_slice(&plain[2..]);
+    assert_eq!(dimensions(&jpeg), (8, 4), "the decoder ignores the tag");
+
+    let e =
+        lessdugin_core::engine::Engine::new(lessdugin_testkit::MemHost::new(), Default::default());
+    let input = lessdugin_core::dto::MediaInput {
+        declared_mime: Some("image/jpeg".into()),
+        alt: Some("a photo".into()),
+        name: None,
+        aspect_ratio: None,
+    };
+    let m = block_on(e.prepare_media(jpeg, &input)).unwrap();
+    let blob = block_on(e.prepared_media(&m.cid)).unwrap().unwrap();
+    assert_eq!(m.mime, "image/jpeg");
+    assert!(!contains(&blob.bytes, b"Exif"), "the EXIF survived");
+    assert!(
+        !contains(&blob.bytes, b"GPS-GPS-GPS"),
+        "the GPS IFD survived"
+    );
+    assert_eq!(
+        dimensions(&blob.bytes),
+        (4, 8),
+        "orientation 6 is a quarter turn"
+    );
+}
+
+#[test]
+fn png_exif_and_webp_exif_orientation_is_applied_too() {
+    // m4-12: the same TIFF orientation tag in a PNG `eXIf` chunk and in a WebP `EXIF` chunk
+    let plain = real_image(6, 2, image::ImageFormat::Png);
+    let mut png = plain[..33].to_vec(); // signature + IHDR
+    png.extend(png_chunk(b"eXIf", &tiff_with(6)));
+    png.extend_from_slice(&plain[33..]);
+    assert_eq!(strip_metadata(&png).orientation, Some(6));
+    let out = prepare(png).unwrap();
+    assert_eq!(sniff(&out), Some(Format::Png));
+    assert!(!contains(&out, b"GPS-GPS-GPS"));
+    assert_eq!(dimensions(&out), (2, 6));
+
+    let plain = real_image(6, 2, image::ImageFormat::WebP);
+    let mut webp = plain.clone();
+    let mut exif = b"Exif\0\0".to_vec();
+    exif.extend_from_slice(&tiff_with(8));
+    webp.extend_from_slice(b"EXIF");
+    webp.extend_from_slice(&(exif.len() as u32).to_le_bytes());
+    webp.extend_from_slice(&exif);
+    if exif.len() % 2 == 1 {
+        webp.push(0);
+    }
+    let riff = (webp.len() - 8) as u32;
+    webp[4..8].copy_from_slice(&riff.to_le_bytes());
+    assert_eq!(strip_metadata(&webp).orientation, Some(8));
+    let out = prepare(webp).unwrap();
+    assert_eq!(sniff(&out), Some(Format::Webp));
+    assert!(!contains(&out, b"GPS-GPS-GPS"));
+    assert_eq!(dimensions(&out), (2, 6));
+}
+
 // --- the engine entry point -----------------------------------------------------------------
+
+// --- animations ------------------------------------------------------------------------------
+
+/// The CRC-32 of ISO 3309 that PNG chunks carry (a decoder checks it).
+fn crc32(bytes: &[u8]) -> u32 {
+    let mut c = !0u32;
+    for &b in bytes {
+        c ^= u32::from(b);
+        for _ in 0..8 {
+            c = if c & 1 != 0 {
+                0xEDB8_8320 ^ (c >> 1)
+            } else {
+                c >> 1
+            };
+        }
+    }
+    !c
+}
+
+/// A PNG chunk with its CRC.
+fn png_chunk_crc(kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
+    let mut v = (data.len() as u32).to_be_bytes().to_vec();
+    v.extend_from_slice(kind);
+    v.extend_from_slice(data);
+    v.extend_from_slice(&crc32(&v[4..]).to_be_bytes());
+    v
+}
+
+/// The `IHDR` payload and the concatenated `IDAT` data of a PNG.
+fn ihdr_and_idat(png: &[u8]) -> (Vec<u8>, Vec<u8>) {
+    let (mut ihdr, mut idat) = (Vec::new(), Vec::new());
+    let mut i = 8;
+    while i + 8 <= png.len() {
+        let len = u32::from_be_bytes(png[i..i + 4].try_into().unwrap()) as usize;
+        let data = &png[i + 8..i + 8 + len];
+        match &png[i + 4..i + 8] {
+            b"IHDR" => ihdr = data.to_vec(),
+            b"IDAT" => idat.extend_from_slice(data),
+            _ => {}
+        }
+        i += 12 + len;
+    }
+    (ihdr, idat)
+}
+
+/// An APNG whose frames are `frames` (PNGs of one size and type): the first is the default image
+/// (`IDAT`), the others `fdAT`; `extra` chunks follow `IHDR`.
+fn apng(frames: &[Vec<u8>], extra: &[Vec<u8>]) -> Vec<u8> {
+    let (ihdr, _) = ihdr_and_idat(&frames[0]);
+    let fctl = |seq: u32| {
+        // sequence, width, height, x and y offsets, delay 1/10 s, dispose and blend 0
+        let mut d = seq.to_be_bytes().to_vec();
+        d.extend_from_slice(&ihdr[..8]);
+        d.extend_from_slice(&[0; 8]);
+        d.extend_from_slice(&[0, 1, 0, 10, 0, 0]);
+        png_chunk_crc(b"fcTL", &d)
+    };
+    let mut v = frames[0][..8].to_vec();
+    v.extend(png_chunk_crc(b"IHDR", &ihdr));
+    for e in extra {
+        v.extend_from_slice(e);
+    }
+    let mut actl = (frames.len() as u32).to_be_bytes().to_vec();
+    actl.extend_from_slice(&0u32.to_be_bytes()); // loop forever
+    v.extend(png_chunk_crc(b"acTL", &actl));
+    let mut seq = 0;
+    for (n, f) in frames.iter().enumerate() {
+        v.extend(fctl(seq));
+        seq += 1;
+        let (_, idat) = ihdr_and_idat(f);
+        if n == 0 {
+            v.extend(png_chunk_crc(b"IDAT", &idat));
+        } else {
+            let mut d = seq.to_be_bytes().to_vec();
+            seq += 1;
+            d.extend_from_slice(&idat);
+            v.extend(png_chunk_crc(b"fdAT", &d));
+        }
+    }
+    v.extend(png_chunk_crc(b"IEND", b""));
+    v
+}
+
+/// An animated WebP (VP8X with the animation flag, ANIM, `n` ANMF frames) of the frame of
+/// `still`, a `w`×`h` WebP of one `VP8L` chunk as the `image` crate writes it; `extra` chunks
+/// go last, where EXIF and XMP belong.
+fn animated_webp(still: &[u8], w: u32, h: u32, n: usize, flags: u8, extra: &[u8]) -> Vec<u8> {
+    let le24 = |x: u32| x.to_le_bytes()[..3].to_vec();
+    let chunk = |id: &[u8; 4], data: &[u8]| {
+        let mut v = id.to_vec();
+        v.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        v.extend_from_slice(data);
+        if data.len() % 2 == 1 {
+            v.push(0);
+        }
+        v
+    };
+    assert_eq!(&still[12..16], b"VP8L");
+    let mut vp8x = vec![0x02 | flags, 0, 0, 0];
+    vp8x.extend(le24(w - 1));
+    vp8x.extend(le24(h - 1));
+    let mut body = chunk(b"VP8X", &vp8x);
+    body.extend(chunk(b"ANIM", &[0, 0, 0, 0, 0, 0]));
+    for _ in 0..n {
+        // x/2, y/2, width-1, height-1, duration (ms), flags; then the frame's VP8L chunk
+        let mut d = le24(0);
+        d.extend(le24(0));
+        d.extend(le24(w - 1));
+        d.extend(le24(h - 1));
+        d.extend(le24(100));
+        d.push(0);
+        d.extend_from_slice(&still[12..]);
+        body.extend(chunk(b"ANMF", &d));
+    }
+    body.extend_from_slice(extra);
+    let mut v = b"RIFF".to_vec();
+    v.extend_from_slice(&((body.len() + 4) as u32).to_le_bytes());
+    v.extend_from_slice(b"WEBP");
+    v.extend(body);
+    v
+}
+
+#[test]
+fn an_animation_is_never_flattened_to_its_first_frame() {
+    // the decoders here return an APNG's or animated WebP's first frame, so downscaling or
+    // orienting one re-encoded a still; it keeps its bytes (data-model.md §8.8)
+    let frame = || real_image(6, 2, image::ImageFormat::Png);
+    let png = apng(&[frame(), frame()], &[]);
+    assert_eq!(dimensions(&png), (6, 2), "the fixture decodes");
+    assert_eq!(apply_orientation(&png, 6), png);
+    assert_eq!(downscale_to_fit(&png, png.len() / 2), None);
+    // its EXIF goes, its frames stay, unrotated
+    let tagged = apng(
+        &[frame(), frame()],
+        &[png_chunk_crc(b"eXIf", &tiff_with(6))],
+    );
+    assert_eq!(strip_metadata(&tagged).orientation, Some(6));
+    let out = prepare(tagged).unwrap();
+    assert!(contains(&out, b"acTL") && contains(&out, b"fdAT"));
+    assert!(!contains(&out, b"GPS-GPS-GPS"));
+    assert_eq!(dimensions(&out), (6, 2));
+
+    let still = real_image(6, 2, image::ImageFormat::WebP);
+    let webp = animated_webp(&still, 6, 2, 2, 0, &[]);
+    assert_eq!(dimensions(&webp), (6, 2), "the fixture decodes");
+    assert_eq!(apply_orientation(&webp, 8), webp);
+    assert_eq!(downscale_to_fit(&webp, webp.len() / 2), None);
+    let mut exif = b"EXIF".to_vec();
+    let mut payload = b"Exif\0\0".to_vec();
+    payload.extend_from_slice(&tiff_with(8));
+    exif.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    exif.extend_from_slice(&payload);
+    if payload.len() % 2 == 1 {
+        exif.push(0);
+    }
+    let tagged = animated_webp(&still, 6, 2, 2, 0x08, &exif);
+    assert_eq!(strip_metadata(&tagged).orientation, Some(8));
+    let out = prepare(tagged).unwrap();
+    assert_eq!(out.windows(4).filter(|w| *w == b"ANMF").count(), 2);
+    assert!(!contains(&out, b"GPS-GPS-GPS"));
+    assert_eq!(dimensions(&out), (6, 2));
+
+    // a still is still oriented
+    let still = real_image(6, 2, image::ImageFormat::Png);
+    assert_eq!(dimensions(&apply_orientation(&still, 6)), (2, 6));
+}
+
+#[test]
+fn an_animation_over_5_mib_keeps_its_frames_when_it_is_prepared() {
+    // m4-7 put every image above IMAGE_UPLOAD_TARGET_BYTES through the downscale when it is
+    // prepared, so a large APNG became a still before the PDS had a say
+    use lessdugin_core::dto::MediaInput;
+    let noise = |seed: u32| {
+        let mut x = seed.wrapping_mul(2_654_435_761).max(1);
+        let img = image::RgbImage::from_fn(1_000, 1_000, |_, _| {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            image::Rgb([x as u8, (x >> 8) as u8, (x >> 16) as u8])
+        });
+        let mut out = Vec::new();
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+            .unwrap();
+        out
+    };
+    let anim = apng(&[noise(1), noise(2)], &[]);
+    assert!(anim.len() > 5 * 1024 * 1024, "{} bytes", anim.len());
+    let e =
+        lessdugin_core::engine::Engine::new(lessdugin_testkit::MemHost::new(), Default::default());
+    let input = MediaInput {
+        declared_mime: Some("image/png".into()),
+        alt: Some("two frames of noise".into()),
+        name: None,
+        aspect_ratio: None,
+    };
+    let m = block_on(e.prepare_media(anim.clone(), &input)).unwrap();
+    assert_eq!(m.size_bytes, anim.len() as u64);
+    let blob = block_on(e.prepared_media(&m.cid)).unwrap().unwrap();
+    assert!(blob.bytes == anim, "the APNG is uploaded as it is");
+}
+
+#[test]
+fn a_heic_is_refused_not_uploaded_as_video_with_its_gps() {
+    // m4-10: an iPhone photo. The `meta` box indexes the items; the Exif item itself (GPS
+    // included) sits in `mdat`, where zeroing `meta` cannot reach it.
+    let boxed = |kind: &[u8; 4], payload: &[u8]| {
+        let mut v = ((payload.len() + 8) as u32).to_be_bytes().to_vec();
+        v.extend_from_slice(kind);
+        v.extend_from_slice(payload);
+        v
+    };
+    let mut heic = boxed(b"ftyp", b"heic\0\0\0\0mif1heic");
+    heic.extend(boxed(b"meta", b"\0\0\0\0iinf-iloc-the-item-index"));
+    let mut exif = b"\0\0\0\x06Exif\0\0".to_vec();
+    exif.extend_from_slice(&tiff_with(1));
+    heic.extend(boxed(b"mdat", &exif));
+    let e =
+        lessdugin_core::engine::Engine::new(lessdugin_testkit::MemHost::new(), Default::default());
+    let input = lessdugin_core::dto::MediaInput {
+        declared_mime: Some("image/heic".into()),
+        alt: None,
+        name: None,
+        aspect_ratio: None,
+    };
+    let err = block_on(e.prepare_media(heic, &input)).unwrap_err();
+    assert_eq!(err.code, lessdugin_core::engine::ErrorCode::InvalidInput);
+    assert_eq!(
+        err.detail.as_ref().and_then(|d| d.get("kind")),
+        Some(&serde_json::json!("mediaRejected"))
+    );
+}
 
 #[test]
 fn prepare_media_strips_and_refuses_what_it_must() {

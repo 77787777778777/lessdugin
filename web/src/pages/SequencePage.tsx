@@ -26,7 +26,7 @@ function Sequence({ uri }: { uri: string }) {
       <p className={ui.small}>
         A sequence by <ActorName actor={sequence.author} showIdent /> · {sequence.score.score} karma
       </p>
-      {body && <RenderedHtml html={body.html} />}
+      {body && <RenderedHtml html={body.html} media={body.media} />}
       {chapters.map((c, i) => {
         const title = (c.title && cleanName(c.title, 300)) || `Chapter ${i + 1}`;
         return (
@@ -35,7 +35,9 @@ function Sequence({ uri }: { uri: string }) {
             <h2 className={ui.sectionTitle}>
               <bdi>{title}</bdi>
             </h2>
-            {c.body && <RenderedHtml html={c.body.html} className="lfm-compact" />}
+            {c.body && (
+              <RenderedHtml html={c.body.html} media={c.body.media} className="lfm-compact" />
+            )}
             {c.posts.map((p) => (
               <PostListItem key={p.uri} post={p} />
             ))}

@@ -30,6 +30,20 @@ describe("changed topics → query invalidation (engine-api.md §3.8)", () => {
     expect(keysForTopic({ kind: "outbox" })).toEqual([]);
   });
 
+  it("re-queries notifications on forum and thread topics (they are computed lazily)", () => {
+    const qc = new QueryClient();
+    for (const topic of [
+      { kind: "forum", uri: FORUM },
+      { kind: "thread", uri: POST },
+    ] as const) {
+      qc.setQueryData([...qk.notifications(false)], 1);
+      qc.setQueryData([...qk.notifications(true)], 1);
+      invalidateTopics(qc, [topic]);
+      expect(qc.getQueryState([...qk.notifications(false)])?.isInvalidated).toBe(true);
+      expect(qc.getQueryState([...qk.notifications(true)])?.isInvalidated).toBe(true);
+    }
+  });
+
   it("keys ref parsing by the forum context (`handle/rkey` refs resolve against it)", () => {
     expect(qk.ref("alice.test/3kabc", FORUM)).not.toEqual(qk.ref("alice.test/3kabc"));
     expect(qk.ref("alice.test/3kabc", FORUM)).toEqual(["ref", "alice.test/3kabc", FORUM]);

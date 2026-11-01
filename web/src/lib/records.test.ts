@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import { forumDraftOf, forumDraftProblems } from "../components/ForumForm.tsx";
 import { commentSourceOf } from "../components/OwnCommentActions.tsx";
 import { postDraftOf } from "../pages/forum/ForumNewPostPage.tsx";
+import { isSpilledBody } from "./records.ts";
 
 const DID = "did:plc:abcdefghijklmnopqrstuvwx";
 const CID = "bafkreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy";
@@ -111,6 +112,18 @@ describe("forum declaration edits (data-model.md §6.1)", () => {
       moderators: [{ did: DID, role: "admin", title: "Lead" }],
       reportContact: "mailto:mods@example.com",
     });
+  });
+
+  it("tell a spilled about apart from an absent one (robustness-2)", () => {
+    const blob = { $type: "blob", ref: { $link: CID }, mimeType: "text/markdown", size: 70_000 };
+    const spilled = { $type: "online.7778777.lessdugin.markdown", textBlob: blob };
+    // the source is not in the record: the draft has no about, and the form must know why
+    expect(forumDraftOf({ name: "F", about: spilled }, "f")?.about).toBeUndefined();
+    expect(isSpilledBody(spilled)).toBe(true);
+    expect(isSpilledBody(md(""))).toBe(false);
+    expect(isSpilledBody(md("x", { textBlob: blob }))).toBe(false);
+    expect(isSpilledBody(undefined)).toBe(false);
+    expect(isSpilledBody({ textBlob: "not a blob" })).toBe(false);
   });
 
   it("read an absent membership as approval, the spec default", () => {

@@ -148,7 +148,7 @@ The fold contract (`social.md` §1: purity, integer arithmetic, `libm` for `hot(
 
 A Level-0 client displays a forum's posts and comments, with moderators' hides applied. It MUST:
 
-1. **Admission** (`sync.md` §1, §5.5): display and fold only records admitted at level `pds` (fetched from the PDS in the author's DID document over TLS, with the CID recomputed from JSON → DAG-CBOR) or `proven` (verified by `proofs/1`, and current under `sync.md` §1.2). It MUST NOT display text from hints (relay, Jetstream, Constellation, Slingshot, indexer JSON). It MUST exclude records of inactive repos (`sync.md` §3.4).
+1. **Admission** (`sync.md` §1, §5.5): display and fold only records admitted at level `pds` (fetched from the PDS in the author's DID document over TLS, with the CID recomputed from JSON → DAG-CBOR) or `proven` (verified by `proofs/1`, and current under `sync.md` §1.2). It MUST NOT display text from hints (relay, Jetstream, Constellation, Slingshot, indexer JSON). It MUST exclude records of inactive repos (`sync.md` §3.4; an authority's modActions are retained for a time).
 2. **Identity** (`sync.md` §3): resolve DIDs through PLC or did:web, and display a handle only if it verifies in both directions; otherwise display `short_did` (`lfm-1.md` §5.4).
 3. **Forum and authorities** (`sync.md` §4.2; `social.md` §4.1): read the declaration from the owner's PDS; take the authorities from it (rule FO2); use the effective policy (`social.md` §1.6).
 4. **Discovery and sync** (`sync.md` §4–§5): find participants by any method of `sync.md` §4 (in approval mode the grants in the authorities' repos give the complete set); in every authority's repo and every participant repo it reads, list the `{fk}-` ranges of `post`, `comment` and `modAction` and fetch the membership record with rkey `fk`; apply the normative fetch caps (`data-model.md` §7.4); remove a record only after a complete listing without it or `RecordNotFound`. Authority repos come first; while one has never been listed, the view is `degraded` (item 6).
@@ -229,7 +229,7 @@ A claim is valid only while the implementation passes every normative vector of 
 
 ### 5.3 Runners and blessing
 
-- The Rust runner (`lessdugin-testkit`) and the TypeScript runner (vitest, calling `runVector` in a `vectors`-feature wasm build) run every vector. Their results MUST be equal, which proves native = wasm.
+- The Rust runners (the vector tests of each crate) run every vector natively. The same tests, built for wasm32-unknown-unknown, run under node (`cargo xtask test-wasm`, in CI): the vectors of `lessdugin-atp`, `lessdugin-lexicon` and `lessdugin-markdown`, and the social fold vectors and the P9 digest of `lessdugin-core` in both namespaces. Both runs check the same expected outputs, which proves native = wasm. (A TypeScript runner calling `runVector` in a `vectors`-feature wasm build is not needed for that, and none is built.)
 - `cargo xtask vectors --bless` regenerates expected outputs. Every blessed diff is reviewed, and lands in the same commit as the spec change that explains it.
 - Before M7, any expected output MAY change under that rule. After M7, the rules of §3.3 apply.
 - Property tests (proptest; `social.md` §19) complement the vectors: permutation invariance, idempotence, layering, the pair and sybil bounds, incremental = batch, native = wasm.

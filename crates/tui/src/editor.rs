@@ -315,6 +315,30 @@ pub fn post_template(prefill: &str, forum: &str) -> String {
     s
 }
 
+/// The template of an edit of your post (`post`: the first line is its title) or comment:
+/// `prefill` is its current text, `context` says what is edited (remote).
+pub fn edit_template(prefill: &str, context: &[String], post: bool) -> String {
+    let mut s = head(prefill);
+    s.push_str("#\n");
+    for c in context {
+        s.push_str("# ");
+        s.push_str(&remote(c));
+        s.push('\n');
+    }
+    s.push_str(&tail([
+        if post {
+            "The first line is the title; the rest is the body, in markdown."
+        } else {
+            "Edit the text above the scissors line, in markdown."
+        },
+        "An empty text cancels: nothing is changed.",
+        "Save and close the editor to send the edit.",
+        "The old version is kept as a revision.",
+        "lessdugin",
+    ]));
+    s
+}
+
 /// The text above the scissors line (all of it if the line was removed), without trailing
 /// blanks; `None` when nothing is left.
 pub fn strip_template(text: &str) -> Option<String> {

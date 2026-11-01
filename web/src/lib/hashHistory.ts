@@ -18,9 +18,11 @@ export function routeHrefFromHash(hash: string): string {
   return rest.length > 0 ? `${route}#${rest.join("#")}` : route;
 }
 
-/** The part of the page's real query string that links keep: only the `mock` flag. */
+/** The part of the page's real query string that links keep: only the demo flags. */
 export function pageQuery(search: string): string {
-  return new URLSearchParams(search).has("mock") ? "?mock" : "";
+  const q = new URLSearchParams(search);
+  const flags = ["mock", "spilled"].filter((flag) => q.has(flag));
+  return flags.length > 0 ? `?${flags.join("&")}` : "";
 }
 
 export function createAppHashHistory(win: Window = window): RouterHistory {

@@ -9,9 +9,14 @@
 // One set of delegated listeners handles the rendered root:
 // - `a[data-at-uri]` / `a[data-did]`: re-parsed by the engine (F5), then routed in-app;
 // - `a[data-anchor]`: scrolls inside this root only (lfm-1.md §4.6; never `location.hash`);
-// - `[data-cid]` media: "click to load" placeholders; a click is the consent (synthesis-v1.md
-//   3.9) and the bytes then come from the author's PDS through `engine.loadMedia`, which
-//   streams and CID-checks them before the element gets a URL;
+// - `[data-cid]` media: "click to load" placeholders naming the host that will see the reader's
+//   address (sync.md §11.3); a click is the consent (synthesis-v1.md 3.9), or the engine's
+//   `MediaView.autoload` verdict for the item (a hover preview's target is the item, lfm-1.md
+//   §5.3; the composer's preview never autoloads), and the bytes then come from the author's
+//   PDS through `engine.loadMedia`, which streams, CID-checks and sniffs them and hands back a
+//   `blob:` URL with the display type. An image or a player gets that URL (lib/media.ts,
+//   lib/mediaUrl.ts), anything else becomes a download card; the URL is revoked with the
+//   content (threat-model SPA-7);
 // - hover/focus previews for eligible record links and DIDs, depth 1 (lfm-1.md §5.3).
 // After insertion it also substitutes verified handles into mentions (§5.4: eagerly only for
 // the first 16 distinct mentioned DIDs that are forum participants; any other mention only once
@@ -19,12 +24,16 @@
 // links keyboard-reachable, names task-list checkboxes, and, when asked, copies footnotes next to
 // their references as sidenotes for wide screens.
 
-import type { ActorView } from "@lessdugin/engine/types";
+import type { EngineApi } from "@lessdugin/engine/api";
+import type { ActorView, LoadedMedia, MediaView } from "@lessdugin/engine/types";
 import { useQueryClient } from "@tanstack/react-query";
 import { type Ref, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState } from "react";
 import { useEngine } from "../engine/context.tsx";
 import { qk } from "../engine/queries.ts";
 import { cx } from "../lib/cx.ts";
+import { downloadObjectUrl } from "../lib/download.ts";
+import { loadMediaFor, mediaDisplay, mediaHostNotice } from "../lib/media.ts";
+import { setMediaSource } from "../lib/mediaUrl.ts";
 import { sanitizerMismatch, setSanitizedHtml } from "../lib/sanitize.ts";
 import { isDid, parseAtUri, previewEligible } from "../lib/uri.ts";
 import { HoverPreview, type HoverTarget } from "./HoverPreview.tsx";
@@ -76,21 +85,107 @@ export function scrollToAnchor(
   setTimeout(() => target?.classList.remove("lfm-target"), 1500);
 }
 
-/** Replaces media with "click to load" placeholders (runtime DOM changes, lfm-1.md §8.2). */
-function addMediaPlaceholders(root: Element): void {
+/** What a media placeholder is called: its alt or label (lfm-1.md §6.2), else its kind. */
+function mediaLabel(el: Element): string {
+  const isImage = el.localName === "img";
+  return (
+    (isImage ? el.getAttribute("alt") : el.textContent)?.trim() || (isImage ? "image" : "media")
+  );
+}
+
+/** Replaces media with "click to load" placeholders (runtime DOM changes, lfm-1.md §8.2), each
+ * with the notice of sync.md §11.3. Returns the placeholders of media the engine lets load
+ * without a click (`MediaView.autoload`). */
+function addMediaPlaceholders(
+  root: Element,
+  media: readonly MediaView[] | undefined,
+): HTMLButtonElement[] {
+  const auto: HTMLButtonElement[] = [];
   for (const el of root.querySelectorAll("img[data-cid], span.media[data-cid]")) {
     const cid = el.getAttribute("data-cid") ?? "";
     const isImage = el.localName === "img";
-    const label =
-      (isImage ? el.getAttribute("alt") : el.textContent)?.trim() || (isImage ? "image" : "media");
+    const label = mediaLabel(el);
+    const view = media?.find((m) => m.cid === cid);
     const button = document.createElement("button");
     button.type = "button";
     button.className = "lfm-media-load";
     button.setAttribute("data-media-cid", cid);
-    button.textContent = `${isImage ? "🖼" : "▶"} ${label} (click to load)`;
+    button.textContent = `${isImage ? "🖼" : "▶"} ${label} (click to load; ${mediaHostNotice(view)})`;
     el.classList.add("lfm-media-pending");
     el.before(button);
+    if (view?.autoload === true) auto.push(button);
   }
+  return auto;
+}
+
+/** Loads the media of the placeholder `button` into `root` (a click, or the engine's autoload
+ * verdict, is the consent: the bytes come from the author's PDS, which learns this device's
+ * address). The host streamed the bytes, checked them against the CID and sniffed them; the
+ * `blob:` URL is pushed to `revokers`, to go with the content it is shown in. */
+function loadPlaceholder(
+  engine: EngineApi,
+  root: Element,
+  button: Element,
+  view: MediaView | undefined,
+  revokers: (() => void)[],
+): void {
+  if (button.getAttribute("aria-busy") === "true") return;
+  const cid = button.getAttribute("data-media-cid") ?? "";
+  if (cid === "") return;
+  button.setAttribute("aria-busy", "true");
+  button.textContent = "loading…";
+  const next = button.nextElementSibling;
+  const pending =
+    next?.getAttribute("data-cid") === cid
+      ? next
+      : root.querySelector(`[data-cid="${CSS.escape(cid)}"]`);
+  const show = async (): Promise<void> => {
+    const loaded = await loadMediaFor(engine, cid, view);
+    const revoke = (): void => URL.revokeObjectURL(loaded.url);
+    if (pending === null || !pending.isConnected || !root.contains(pending)) {
+      revoke();
+      return;
+    }
+    revokers.push(revoke);
+    showMedia(pending, loaded);
+    button.remove();
+  };
+  void show().catch((err: unknown) => {
+    button.removeAttribute("aria-busy");
+    button.textContent = `could not load: ${errorMessage(err)}`;
+  });
+}
+
+/** Shows the loaded media of the placeholder `pending` (lfm-1.md §6.2, sync.md §11.2): as the
+ * image itself or a player when its display type allows it, else as a download card. */
+function showMedia(pending: Element, loaded: LoadedMedia): void {
+  const display = mediaDisplay(loaded, pending.localName === "img" ? "img" : "span");
+  if (display.kind === "img" && pending instanceof HTMLImageElement) {
+    setMediaSource(pending, loaded.url);
+    pending.classList.remove("lfm-media-pending");
+    return;
+  }
+  if (display.kind === "video" || display.kind === "audio") {
+    // a player with controls, because a media element without them cannot be started by
+    // keyboard
+    const el = document.createElement(display.kind);
+    setMediaSource(el, loaded.url);
+    el.setAttribute("controls", "");
+    el.setAttribute("preload", "metadata");
+    el.className = "lfm-media";
+    pending.replaceWith(el);
+    return;
+  }
+  // A download card: saved as `<cid>.<ext>`, never opened in the page (threat-model SPA-7).
+  const card = document.createElement("span");
+  card.className = "lfm-media-card";
+  const save = document.createElement("button");
+  save.type = "button";
+  save.className = "lfm-media-download";
+  save.textContent = `⤓ Download ${mediaLabel(pending)} (${display.filename})`;
+  save.addEventListener("click", () => downloadObjectUrl(loaded.url, display.filename));
+  card.append(save);
+  pending.replaceWith(card);
 }
 
 /** In-content anchor links (`a[data-anchor]`: footnote references, back-links, `#frag` links)
@@ -127,7 +222,10 @@ function labelTaskCheckboxes(root: Element): void {
   }
 }
 
-/** Copies each footnote next to its first reference, for wide screens. */
+/** Copies each footnote next to its first reference, for wide screens. Only the copied
+ * definitions are hidden there: one whose first reference is not in the root (inside a
+ * flattened spoiler, or cut by the output budget) stays in the footnotes section, which is
+ * hidden only when every definition was copied (lfm-1.md §8.1). */
 function addSidenotes(root: Element): void {
   for (const sup of root.querySelectorAll("sup[id]")) {
     const m = /^md-fnref-([1-9][0-9]*)-1$/.exec(sup.id);
@@ -153,20 +251,41 @@ function addSidenotes(root: Element): void {
     }
     for (const withId of note.querySelectorAll("[id]")) withId.removeAttribute("id");
     sup.after(note);
+    li.classList.add("lfm-sidenoted");
+  }
+  for (const section of root.querySelectorAll("section.footnotes")) {
+    const items = [...section.querySelectorAll("li[id]")].filter((li) => /^md-fn-/.test(li.id));
+    if (items.every((li) => li.classList.contains("lfm-sidenoted"))) {
+      section.classList.add("lfm-all-sidenoted");
+      continue;
+    }
+    // the definitions left in the list keep their numbers when the others are hidden
+    for (const li of items) {
+      const n = /^md-fn-([1-9][0-9]*)$/.exec(li.id)?.[1];
+      if (n) li.setAttribute("value", n);
+    }
   }
 }
 
 export function RenderedHtml({
   html,
+  media,
   className,
   preview = false,
+  autoload = true,
   sidenotes = false,
   ref,
 }: {
   html: string;
+  /** The body's media (`RenderedBody.media`): each names its author's PDS, declared type and
+   * size for `loadMedia`. */
+  media?: readonly MediaView[] | undefined;
   className?: string | undefined;
   /** Inside a hover preview: no nested previews (depth 1). */
   preview?: boolean | undefined;
+  /** false: the media load only on a click, whatever their `MediaView.autoload` (the
+   * composer's preview of an unpublished draft). */
+  autoload?: boolean | undefined;
   sidenotes?: boolean | undefined;
   ref?: Ref<RenderedHtmlHandle> | undefined;
 }) {
@@ -175,6 +294,10 @@ export function RenderedHtml({
   const openRef = useOpenRef();
   const participants = useParticipants();
   const rootRef = useRef<HTMLDivElement>(null);
+  const mediaRef = useRef(media);
+  mediaRef.current = media;
+  /** Revokes the object URLs of the media shown in the current content. */
+  const revokers = useRef<(() => void)[]>([]);
   const [mismatch, setMismatch] = useState(false);
   const [hover, setHover] = useState<HoverTarget | null>(null);
   const timers = useRef<{
@@ -196,7 +319,7 @@ export function RenderedHtml({
       }
     }
     setSanitizedHtml(el, html);
-    addMediaPlaceholders(el);
+    const auto = addMediaPlaceholders(el, mediaRef.current);
     makeAnchorsFocusable(el);
     labelTaskCheckboxes(el);
     makeMathScrollable(el);
@@ -204,7 +327,26 @@ export function RenderedHtml({
       addSidenotes(el);
       makeAnchorsFocusable(el);
     }
-  }, [html, sidenotes]);
+    // the engine's autoload verdict (sync.md §11.3), inside a hover preview too (lfm-1.md §5.3:
+    // the views are the target item's)
+    const shown = revokers.current;
+    if (autoload) {
+      for (const button of auto) {
+        const cid = button.getAttribute("data-media-cid");
+        loadPlaceholder(
+          engine,
+          el,
+          button,
+          mediaRef.current?.find((m) => m.cid === cid),
+          shown,
+        );
+      }
+    }
+    // the content is replaced or unmounted: its media URLs go with it (SPA-7)
+    return () => {
+      for (const revoke of shown.splice(0)) revoke();
+    };
+  }, [html, sidenotes, autoload, engine]);
 
   // Mentions: substitute handles verified both ways (§5.4). Eager resolution covers only the
   // participants among the first 16 distinct mentioned DIDs; the others are substituted only
@@ -283,40 +425,11 @@ export function RenderedHtml({
       const media = target?.closest("button.lfm-media-load");
       if (media && root.contains(media)) {
         e.preventDefault();
-        if (media.getAttribute("aria-busy") === "true") return;
-        const cid = media.getAttribute("data-media-cid") ?? "";
-        if (cid === "") return;
-        // Clicking IS the consent (synthesis-v1.md 3.9): the bytes come from the author's PDS,
-        // which learns this device's address, so nothing is fetched until the reader asks.
-        media.setAttribute("aria-busy", "true");
-        media.textContent = "loading…";
-        void engine
-          .loadMedia(cid as Parameters<typeof engine.loadMedia>[0])
-          .then((loaded) => {
-            // the host streamed and CID-checked the bytes, so `url` is safe to point at
-            const pending = root.querySelector(`[data-cid="${CSS.escape(cid)}"]`);
-            if (pending === null) return;
-            if (pending.localName === "img") {
-              pending.setAttribute("src", loaded.url);
-              pending.classList.remove("lfm-media-pending");
-            } else {
-              // video/audio/other: replace the placeholder span with a player that has
-              // controls, because a media element without them cannot be started by keyboard
-              const el = document.createElement(
-                pending.getAttribute("data-media-kind") === "audio" ? "audio" : "video",
-              );
-              el.setAttribute("src", loaded.url);
-              el.setAttribute("controls", "");
-              el.setAttribute("preload", "metadata");
-              el.className = "lfm-media";
-              pending.replaceWith(el);
-            }
-            media.remove();
-          })
-          .catch((err: unknown) => {
-            media.removeAttribute("aria-busy");
-            media.textContent = `could not load: ${errorMessage(err)}`;
-          });
+        // Clicking IS the consent (synthesis-v1.md 3.9): nothing is fetched until the reader
+        // asks, unless the engine's autoload verdict allowed it.
+        const cid = media.getAttribute("data-media-cid");
+        const view = mediaRef.current?.find((m) => m.cid === cid);
+        loadPlaceholder(engine, root, media, view, revokers.current);
         return;
       }
       const a = linkFrom(e.target);

@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { useQueryClient } from "@tanstack/react-query";
 import { getRouteApi, Link, Outlet, useNavigate } from "@tanstack/react-router";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { ActorName } from "../../components/ActorName.tsx";
 import { Badges } from "../../components/Badges.tsx";
-import { Banners } from "../../components/Banners.tsx";
+import { Banners, withOpenModeLabel } from "../../components/Banners.tsx";
+import { Dialog } from "../../components/Dialog.tsx";
 import { usePublicAck } from "../../components/PublicAck.tsx";
 import { ParticipantsProvider } from "../../components/participants.tsx";
 import { ErrorView, errorMessage, Loading } from "../../components/Status.tsx";
@@ -38,7 +39,9 @@ export function ForumLayout() {
   }, [uri]);
   useForumSync(uri);
   const progress = useSyncProgress(uri);
+  // a membership write (join or leave) about this forum is pending
   const joining = usePendingWrite(uri ?? "");
+  const [confirmLeave, setConfirmLeave] = useState(false);
 
   if (forum.isPending) return <Loading label="Opening the forum…" />;
   if (forum.isError)
@@ -66,6 +69,27 @@ export function ForumLayout() {
         toasts.show({ message: "Joined (your membership is public)", tone: "success" });
       } else {
         toasts.show({ message: "Join undone" });
+      }
+    } catch (e) {
+      toasts.show({ message: errorMessage(e), tone: "error" });
+    }
+  };
+  // Leaving deletes the membership record (engine-api.md §3.2 `leave`, social.md §3
+  // "Leaving"): not a public action, but one that hides the member's content from the default
+  // view, so it is confirmed first.
+  const leave = async (): Promise<void> => {
+    setConfirmLeave(false);
+    try {
+      const ticket = await engine.leave(f.uri);
+      writeStore.track(ticket, f.uri);
+      const final = await writeStore.settle(ticket.id);
+      if (final.kind === "failed") throw final.error;
+      if (final.kind === "queued") {
+        announceQueued("Leaving the forum", final.state);
+      } else if (final.kind === "done") {
+        toasts.show({ message: "Left the forum", tone: "success" });
+      } else {
+        toasts.show({ message: "Leaving undone" });
       }
     } catch (e) {
       toasts.show({ message: errorMessage(e), tone: "error" });
@@ -114,6 +138,16 @@ export function ForumLayout() {
                   Sign in to join
                 </Link>
               ))}
+            {f.member && signedIn && (
+              <button
+                type="button"
+                className={ui.ghost}
+                disabled={joining}
+                onClick={() => setConfirmLeave(true)}
+              >
+                Leave
+              </button>
+            )}
             <button
               type="button"
               className={ui.ghost}
@@ -126,7 +160,26 @@ export function ForumLayout() {
               {f.followed ? "Unfollow" : "Follow"}
             </button>
           </div>
-          <Banners banners={view.banners} />
+          <Dialog
+            open={confirmLeave}
+            onClose={() => setConfirmLeave(false)}
+            title="Leave this forum?"
+          >
+            <p>
+              Your membership record is deleted from your repository. Your posts and comments stay
+              there, but the forum's default view hides them until you join again. Copies others
+              have archived may remain.
+            </p>
+            <div className={ui.row}>
+              <button type="button" className={ui.danger} onClick={() => void leave()}>
+                Leave
+              </button>
+              <button type="button" className={ui.ghost} onClick={() => setConfirmLeave(false)}>
+                Cancel
+              </button>
+            </div>
+          </Dialog>
+          <Banners banners={withOpenModeLabel(view.banners, f.membership)} />
           {view.viewer?.newcomer === true && (
             <p className={styles.banner} data-viewer-state="newcomer">
               You are a new user here: your posts and comments are collapsed for other readers until

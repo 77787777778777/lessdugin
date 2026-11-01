@@ -80,6 +80,13 @@ export interface BodyDraft {
     media?: MediaRef[];
 }
 
+export interface BodySource {
+    markdown: string;
+    cid: string;
+    profile?: string;
+    spilled: boolean;
+}
+
 export interface BookmarkEntry {
     uri: string;
     savedAtMs: number;
@@ -254,6 +261,14 @@ export interface HistoryView {
     versions: VersionEntry[];
 }
 
+export interface ImportReport {
+    imported: number;
+    outOfScope: number;
+    undecodable: number;
+    refused?: number;
+    kinds?: [string, number][];
+}
+
 export interface IndexerConsent {
     url: string;
     did?: string;
@@ -294,6 +309,8 @@ export interface LoadedMedia {
     cid: string;
     size: number;
     url: string;
+    mime?: string;
+    sniffed?: string;
 }
 
 export interface MediaInput {
@@ -312,6 +329,7 @@ export interface MediaRef {
     aspectRatio?: AspectRatio;
     durationMs?: number;
     name?: string;
+    notices?: ActionNotice[];
 }
 
 export interface MediaView {
@@ -350,7 +368,7 @@ export type MembershipMode = "open" | "approval";
 
 export type ModActionIntent = { kind: "assert"; forum: string; scope: ModScope; subject: string; action: ModActionValue; reason?: string; untilMs?: number } | { kind: "remove"; forum: string; scope: ModScope; subject: string; actionKey: string };
 
-export type ModActionValue = { kind: "hide"; hidden: boolean; spam?: boolean; showReason?: boolean } | { kind: "access"; level: AccessLevel } | { kind: "restrict"; capabilities: Capability[]; nullifyVotes?: boolean } | { kind: "tier"; tier: Tier; notice?: BodyDraft } | { kind: "pin"; scope: PinScope; pinned: boolean } | { kind: "lock"; locked: boolean } | { kind: "tag"; removed: boolean; head?: string };
+export type ModActionValue = { kind: "hide"; hidden: boolean; spam?: boolean; showReason?: boolean } | { kind: "access"; level: AccessLevel } | { kind: "restrict"; capabilities?: Capability[]; nullifyVotes?: boolean } | { kind: "tier"; tier: Tier; notice?: BodyDraft } | { kind: "pin"; scope: PinScope; pinned: boolean } | { kind: "lock"; locked: boolean } | { kind: "tag"; removed: boolean; head?: string };
 
 export interface ModLog {
     dto: DtoVersion;
@@ -416,7 +434,7 @@ export interface MyOpinion {
     notYetCounted?: boolean;
 }
 
-export type NoticeCode = "notEstablished" | "retroactive" | "adoptedFirst";
+export type NoticeCode = "notEstablished" | "retroactive" | "adoptedFirst" | "missingAlt" | "suspendsAssertions" | "sharedExpiry";
 
 export interface NotificationList {
     dto: DtoVersion;
@@ -551,6 +569,8 @@ export interface RenderedBody {
     notices: string[];
     rendererVersion: string;
 }
+
+export type RkeyInput = { kind: "membership"; forum: string } | { kind: "post"; forum: string; tid: string } | { kind: "comment"; root: string; tid: string } | { kind: "opinion"; forum: string; subject: string } | { kind: "modAction"; forum: string; scope: ModScope; subject: string; actionKey: string } | { kind: "revision"; subject: string; tid: string };
 
 export interface ScoreView {
     score: number;
@@ -717,6 +737,11 @@ export interface UserView {
     recentComments: CommentNode[];
 }
 
+export interface ValidationReport {
+    valid: boolean;
+    errors: string[];
+}
+
 export interface VerifyCheck {
     name: string;
     ok: boolean;
@@ -769,7 +794,7 @@ export interface ViewerCaps {
 
 export type WarningKind = "equivocation" | "indexerContradiction" | "degraded" | "renderFailure" | "other";
 
-export type WriteState = { kind: "pending"; notBeforeMs?: number; held?: boolean; throttled?: boolean; needsLogin?: boolean; error?: EngineError } | { kind: "sending" } | { kind: "done"; uri: string; cid?: string } | { kind: "failed"; error: EngineError } | { kind: "undone" };
+export type WriteState = { kind: "pending"; notBeforeMs?: number; held?: boolean; throttled?: boolean; needsLogin?: boolean; error?: EngineError } | { kind: "sending" } | { kind: "done"; uri: string; cid?: string; report?: string[] } | { kind: "failed"; error: EngineError } | { kind: "undone" };
 
 export interface WriteTicket {
     id: string;

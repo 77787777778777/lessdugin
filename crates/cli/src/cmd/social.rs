@@ -20,8 +20,9 @@ use lessdugin_native::host::NativeHost;
 use serde_json::Value;
 
 use crate::args::{
-    ActivityArgs, AgreeArgs, ExportArgs, ExportScopeArg, ModAction, ModArgs, ModSubject,
-    ModsAction, ModsArgs, NotificationsArgs, PinArgs, ReactArgs, VoteArgs, scope_of, stance_of,
+    ActivityArgs, AgreeArgs, ExportArgs, ExportScopeArg, KarmaCadenceArg, ModAction, ModArgs,
+    ModSubject, ModsAction, ModsArgs, MuteArgs, NotificationsArgs, PinArgs, ReactArgs, VoteArgs,
+    scope_of, stance_of,
 };
 use crate::cmd::{read, refs, write};
 use crate::ctx::{CliError, Ctx, Writer};
@@ -53,33 +54,44 @@ fn public_notice(kind: PublicActionKind) -> &'static str {
 }
 
 /// Shows the first-use interstitial of `kind` unless it was acknowledged, and records the
-/// acknowledgement. On a terminal the user is asked; headless use proceeds after the note (a
-/// script cannot answer, and refusing every headless vote would make automation impossible).
-async fn acknowledge(ctx: &Ctx, w: &Writer, kind: PublicActionKind) -> Result<(), CliError> {
+/// acknowledgement (`engine-api.md` §3.6): the first action of a kind is a decision, taken on a
+/// terminal by answering the question, or by `--yes` (`yes`), which headless use needs, since a
+/// script cannot answer. Once acknowledged, the kind asks nothing again, on any client of this
+/// device.
+pub(crate) async fn acknowledge(
+    ctx: &Ctx,
+    w: &Writer,
+    kind: PublicActionKind,
+    yes: bool,
+) -> Result<(), CliError> {
     if w.engine.public_action_acknowledged(kind).await? {
         return Ok(());
     }
     let text = public_notice(kind);
-    if prompt::stdin_is_tty() {
-        ctx.out.line(&[(tt(text), Style::Warn)]);
+    if yes {
+        ctx.out.note(&[(lit(text), Style::Dim)]);
+    } else if prompt::stdin_is_tty() {
+        ctx.out.err_line(&[(lit(text), Style::Warn)]);
         if !prompt::confirm("continue?") {
             return Err(CliError::Reported(1));
         }
     } else {
-        ctx.out.note(&[(lit(text), Style::Dim)]);
+        return Err(CliError::usage(format!(
+            "{text} This is asked once: add --yes to confirm when not running interactively."
+        )));
     }
     w.engine.acknowledge_public_action(kind).await?;
     Ok(())
 }
 
 /// Drives an action's write, prints its outcome and notices, and (in JSON mode) the
-/// `ActionTicket` with its final state.
+/// `ActionTicket` with its final state; returns true when the write is done.
 async fn drive_action(
     ctx: &Ctx,
     w: &Writer,
     at: ActionTicket,
     done: &'static str,
-) -> Result<(), CliError> {
+) -> Result<bool, CliError> {
     let notices = at.notices.clone();
     let t = write::drive(ctx, w, at.ticket()).await?;
     if ctx.out.is_json() {
@@ -96,13 +108,13 @@ async fn drive_action(
         if let WriteState::Failed { error } = &t.state {
             return Err(CliError::Engine(error.clone()));
         }
-        return Ok(());
+        return Ok(matches!(t.state, WriteState::Done { .. }));
     }
     write::report(ctx, &t, done)?;
     for n in &notices {
         ctx.out.note(&[(tt(&n.message), Style::Dim)]);
     }
-    Ok(())
+    Ok(matches!(t.state, WriteState::Done { .. }))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -117,6 +129,7 @@ pub async fn vote(ctx: &Ctx, args: VoteArgs) -> Result<(), CliError> {
             value: args.value.into(),
         },
         "Voted",
+        args.yes,
     )
     .await
 }
@@ -129,6 +142,7 @@ pub async fn agree(ctx: &Ctx, args: AgreeArgs) -> Result<(), CliError> {
         &args.reference,
         OpinionIntent::Agreement { value },
         "Recorded",
+        args.yes,
     )
     .await
 }
@@ -154,6 +168,7 @@ pub async fn react(ctx: &Ctx, args: ReactArgs) -> Result<(), CliError> {
             remove: args.remove,
         },
         "Reacted",
+        args.yes,
     )
     .await
 }
@@ -165,13 +180,15 @@ async fn opinion(
     reference: &str,
     intent: OpinionIntent,
     done: &'static str,
+    yes: bool,
 ) -> Result<(), CliError> {
     let w = ctx.writer().await?;
     let (uri, _) = refs::post_or_comment(ctx, &w.engine, reference).await?;
     read::sync_thread_quietly(ctx, &w.engine, &uri).await;
-    acknowledge(ctx, &w, intent.public_kind()).await?;
+    acknowledge(ctx, &w, intent.public_kind(), yes).await?;
     let at = w.engine.opinion(&uri, &intent).await?;
-    drive_action(ctx, &w, at, done).await
+    drive_action(ctx, &w, at, done).await?;
+    Ok(())
 }
 
 /// `lessdugin reacts`: the `default/1` palette (`social.md` §9.1).
@@ -209,13 +226,32 @@ pub async fn reacts(ctx: &Ctx) -> Result<(), CliError> {
 /// `lessdugin notifications [--all] [--mark-read]`.
 pub async fn notifications(ctx: &Ctx, args: NotificationsArgs) -> Result<(), CliError> {
     let engine = ctx.reader().await?;
+    if let Some(c) = args.karma_cadence {
+        engine.set_karma_notifications(c.into()).await?;
+        ctx.out.note(&[(
+            cat([
+                lit("Karma changes are notified "),
+                lit(match c {
+                    KarmaCadenceArg::Realtime => "as they happen",
+                    KarmaCadenceArg::Daily => "daily",
+                    KarmaCadenceArg::Weekly => "weekly",
+                }),
+                lit(" (saved)."),
+            ]),
+            Style::Dim,
+        )]);
+    }
     let list = engine
         .notifications(&NotificationsQuery {
             all: args.all,
             limit: args.limit,
         })
         .await?;
-    if args.mark_read && !list.items.is_empty() {
+    // the shown ones; with --all every notification, listed or not (`engine-api.md` §3.6
+    // `mark_all_notifications_read`)
+    if args.mark_read && args.all {
+        engine.mark_all_notifications_read().await?;
+    } else if args.mark_read && !list.items.is_empty() {
         let ids: Vec<String> = list.items.iter().map(|n| n.id.clone()).collect();
         engine.mark_notifications_read(&ids).await?;
     }
@@ -266,6 +302,52 @@ pub async fn notifications(ctx: &Ctx, args: NotificationsArgs) -> Result<(), Cli
     Ok(())
 }
 
+/// `lessdugin mute|unmute <actor>...` (local: the lens shows a muted author's listed items
+/// collapsed, `social.md` §10.3; nothing is written to any repository).
+pub async fn mute(ctx: &Ctx, args: MuteArgs, on: bool) -> Result<(), CliError> {
+    let engine = ctx.reader().await?;
+    for a in &args.actors {
+        engine.mute(a, on).await?;
+        if !ctx.out.is_json() {
+            ctx.out.line(&[
+                (lit(if on { "Muted " } else { "Unmuted " }), Style::Good),
+                (name(a), Style::Bold),
+            ]);
+        }
+    }
+    if ctx.out.is_json() {
+        print_mutes(ctx, &engine.mutes().await?);
+    }
+    Ok(())
+}
+
+/// `lessdugin mutes`.
+pub async fn mutes(ctx: &Ctx) -> Result<(), CliError> {
+    let engine = ctx.reader().await?;
+    let list = engine.mutes().await?;
+    if ctx.out.is_json() {
+        print_mutes(ctx, &list);
+        return Ok(());
+    }
+    if list.is_empty() {
+        ctx.out.line(&[(lit("You muted nobody."), Style::Dim)]);
+    }
+    for a in &list {
+        ctx.out.line(&[
+            (render::actor(a), Style::Plain),
+            (cat([lit("  "), tt(&a.did)]), Style::Dim),
+        ]);
+    }
+    Ok(())
+}
+
+fn print_mutes(ctx: &Ctx, list: &[lessdugin_core::dto::ActorView]) {
+    ctx.out.json(&serde_json::json!({
+        "dto": lessdugin_core::dto::DTO_VERSION,
+        "mutes": list,
+    }));
+}
+
 /// `lessdugin activity [forum]`: Recent Discussion (`social.md` §12.4).
 pub async fn activity(ctx: &Ctx, args: ActivityArgs) -> Result<(), CliError> {
     let engine = ctx.reader().await?;
@@ -310,20 +392,32 @@ pub async fn activity(ctx: &Ctx, args: ActivityArgs) -> Result<(), CliError> {
 pub async fn mods(ctx: &Ctx, args: ModsArgs) -> Result<(), CliError> {
     let w = ctx.writer().await?;
     let forum = refs::forum_or_current(ctx, &w.engine, None).await?;
-    acknowledge(ctx, &w, PublicActionKind::ModAction).await?;
+    acknowledge(ctx, &w, PublicActionKind::ModAction, args.yes).await?;
+    // a removal that adopts: whom, and what they asserted (reported once it is sent)
+    let mut adopting = None;
     let change = match args.action {
         ModsAction::Add { actor, role } => ModsChange::Add {
             did: actor,
             role: role.into(),
             title: None,
         },
-        ModsAction::Rm { actor, skip_adopt } => ModsChange::Remove {
-            did: actor,
-            skip_adopt,
-        },
+        ModsAction::Rm { actor, skip_adopt } => {
+            let who = w.engine.resolve_actor(&actor).await?;
+            let originals = originals_of(ctx, &w, &forum, &who.did).await?;
+            if skip_adopt {
+                confirm_lapse(ctx, &who, &actor, &originals, args.yes)?;
+            } else {
+                adopting = Some((who, originals));
+            }
+            ModsChange::Remove {
+                did: actor,
+                skip_adopt,
+            }
+        }
     };
     let at = w.engine.mods_set(&forum, &change).await?;
-    drive_action(
+    let edit_id = at.id.clone();
+    let done = drive_action(
         ctx,
         &w,
         at,
@@ -332,7 +426,218 @@ pub async fn mods(ctx: &Ctx, args: ModsArgs) -> Result<(), CliError> {
             ModsChange::Remove { .. } => "Removed",
         },
     )
-    .await
+    .await?;
+    if let (Some((who, originals)), true) = (adopting, done) {
+        let report = adoption_report(&w, &edit_id).await?;
+        report_adoption(ctx, &w, &forum, &who, &originals, &report).await?;
+    }
+    Ok(())
+}
+
+/// The adopt report (`WriteState.done.report`, `engine-api.md` §3.2) of the `mod adopt` that
+/// `mods rm` ran first: the declaration edit `edit_id` is sent only after that write (its
+/// `after`), whose ticket is still in the outbox once the edit is done.
+async fn adoption_report(w: &Writer, edit_id: &str) -> Result<Vec<String>, CliError> {
+    use lessdugin_core::outbox::model::write_id;
+    let Some(adopt) = w
+        .engine
+        .outbox()
+        .get(edit_id)
+        .await?
+        .and_then(|p| Some(write_id(&p.account, p.after?)))
+    else {
+        return Ok(Vec::new());
+    };
+    Ok(match w.engine.write_status(&adopt).await? {
+        Some(lessdugin_core::dto::WriteTicket {
+            state: WriteState::Done { report, .. },
+            ..
+        }) => report,
+        _ => Vec::new(),
+    })
+}
+
+/// Why the adopt report names the original `uri` (`cannot adopt <uri>: <why>`, `kept own
+/// assertion for <uri>`, `engine-api.md` §3.5 `mod_adopt`), if it does.
+fn reported_reason(report: &[String], uri: &str) -> Option<String> {
+    report.iter().find_map(|l| {
+        if let Some(why) = l
+            .strip_prefix("cannot adopt ")
+            .and_then(|r| r.strip_prefix(uri))
+            .and_then(|r| r.strip_prefix(": "))
+        {
+            return Some(format!("cannot adopt: {why}"));
+        }
+        (l.strip_prefix("kept own assertion for ") == Some(uri))
+            .then(|| "kept own assertion".to_owned())
+    })
+}
+
+/// The name of a mod-log status, as `dto/1` spells it.
+fn status_name(s: lessdugin_core::dto::ModLogStatus) -> String {
+    serde_json::to_value(s)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .unwrap_or_default()
+}
+
+/// The moderator `did`'s forum-scope assertions that a removal from `moderators` ends
+/// (`data-model.md` §8.6 `originals`: valid, scope forum, not lapsed or expired), from the mod
+/// log after a sync of the forum: those that count now (`effective`) and those that never did
+/// (`overridden`, `stale`, `unauthorised`, `reservedUnknown`), which lapse just the same.
+async fn originals_of(
+    ctx: &Ctx,
+    w: &Writer,
+    forum: &str,
+    did: &str,
+) -> Result<Vec<lessdugin_core::dto::ModLogEntry>, CliError> {
+    use lessdugin_core::dto::ModLogStatus;
+    read::sync_forum_quietly(ctx, &w.engine, forum).await;
+    let mut out = Vec::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        let page = w.engine.mod_log(forum, cursor.as_deref(), 200).await?;
+        out.extend(page.entries.into_iter().filter(|e| {
+            e.actor.did == did
+                && !e.author_scope
+                // a revision entry is not an assertion; a lapsed or expired one ended already
+                && !matches!(
+                    e.status,
+                    ModLogStatus::Lapsed
+                        | ModLogStatus::Expired
+                        | ModLogStatus::Edited
+                        | ModLogStatus::Removed
+                )
+        }));
+        match page.cursor {
+            Some(c) => cursor = Some(c),
+            None => break,
+        }
+    }
+    Ok(out)
+}
+
+/// After `mod adopt` or `mods rm` sent its write: the former moderator's `originals` that no
+/// own record adopts now (one whose `adopts` names it), read from the mod log after a sync.
+/// They lapse with the former's role. Each says why: an original that never counted names its
+/// status, one in effect the reason of the engine's adopt `report` ("cannot adopt …", "kept
+/// own assertion", `data-model.md` §8.6); a report line naming no listed original is shown
+/// as it is.
+async fn report_adoption(
+    ctx: &Ctx,
+    w: &Writer,
+    forum: &str,
+    who: &lessdugin_core::dto::ActorView,
+    originals: &[lessdugin_core::dto::ModLogEntry],
+    report: &[String],
+) -> Result<(), CliError> {
+    use lessdugin_core::dto::ModLogStatus;
+    if originals.is_empty() && report.is_empty() {
+        return Ok(());
+    }
+    let mine = originals_of(ctx, w, forum, &w.account.did).await?;
+    let adopted: std::collections::BTreeSet<&str> = mine
+        .iter()
+        .filter_map(|e| e.adopted_from.as_deref())
+        .collect();
+    let skipped: Vec<_> = originals
+        .iter()
+        .filter(|o| !adopted.contains(o.uri.as_str()))
+        .collect();
+    let unlisted: Vec<&String> = report
+        .iter()
+        .filter(|l| {
+            !originals
+                .iter()
+                .any(|o| reported_reason(std::slice::from_ref(l), &o.uri).is_some())
+        })
+        .collect();
+    let n = u32::try_from(originals.len()).unwrap_or(u32::MAX);
+    let k = u32::try_from(originals.len() - skipped.len()).unwrap_or(u32::MAX);
+    if skipped.is_empty() && unlisted.is_empty() {
+        ctx.out.note(&[(
+            cat([
+                lit("Adopted all "),
+                render::count(n, "assertion", "assertions"),
+                lit(" by "),
+                render::actor(who),
+                lit("."),
+            ]),
+            Style::Dim,
+        )]);
+        return Ok(());
+    }
+    ctx.out.warn(cat([
+        lit("adopted "),
+        tt(&k.to_string()),
+        lit(" of "),
+        render::count(n, "assertion", "assertions"),
+        lit(" by "),
+        render::actor(who),
+        lit("; not adopted (they lapse with the role):"),
+    ]));
+    for e in skipped {
+        let why = match e.status {
+            ModLogStatus::Effective => reported_reason(report, &e.uri)
+                .unwrap_or_else(|| "cannot adopt (rank or role), or kept own assertion".to_owned()),
+            s => format!("never counted ({})", status_name(s)),
+        };
+        let mut parts = vec![tt(&e.action), tt(&e.value), tt(&e.subject)];
+        if let Some(r) = &e.reason {
+            parts.push(tt(r));
+        }
+        parts.push(tt(&why));
+        ctx.out.warn(cat([lit("  "), cat(intersperse(parts))]));
+    }
+    for l in unlisted {
+        ctx.out.warn(cat([lit("  "), tt(l)]));
+    }
+    Ok(())
+}
+
+/// The confirmation of `mods rm --skip-adopt` (`social.md` §4.10, `data-model.md` §8.6): lists
+/// every forum-scope assertion of the moderator that lapses with the removal (`lapsing`, from
+/// [`originals_of`]), then asks on a terminal; headless use needs `--yes` (`yes`). Nothing to
+/// list asks nothing.
+fn confirm_lapse(
+    ctx: &Ctx,
+    who: &lessdugin_core::dto::ActorView,
+    actor: &str,
+    lapsing: &[lessdugin_core::dto::ModLogEntry],
+    yes: bool,
+) -> Result<(), CliError> {
+    if lapsing.is_empty() {
+        return Ok(());
+    }
+    let n = u32::try_from(lapsing.len()).unwrap_or(u32::MAX);
+    ctx.out.warn(cat([
+        lit("removing without adopting: "),
+        render::count(n, "assertion", "assertions"),
+        lit(" by "),
+        render::actor(who),
+        lit(" lapse at once:"),
+    ]));
+    for e in lapsing {
+        let mut parts = vec![tt(&e.action), tt(&e.value), tt(&e.subject)];
+        if let Some(r) = &e.reason {
+            parts.push(tt(r));
+        }
+        parts.push(tt(&status_name(e.status)));
+        ctx.out.warn(cat([lit("  "), cat(intersperse(parts))]));
+    }
+    if yes {
+        return Ok(());
+    }
+    if prompt::stdin_is_tty() && !ctx.out.is_json() {
+        if prompt::confirm("remove without adopting them?") {
+            return Ok(());
+        }
+        return Err(CliError::Reported(1));
+    }
+    Err(CliError::usage(format!(
+        "{n} assertion(s) by {actor} would lapse (listed above): add --yes to remove without \
+         adopting when not running interactively, or drop --skip-adopt to adopt them"
+    )))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -410,10 +715,12 @@ async fn mod_action(
     w: &Writer,
     intent: ModActionIntent,
     done: &'static str,
+    yes: bool,
 ) -> Result<(), CliError> {
-    acknowledge(ctx, w, PublicActionKind::ModAction).await?;
+    acknowledge(ctx, w, PublicActionKind::ModAction, yes).await?;
     let at = w.engine.mod_action(&intent).await?;
-    drive_action(ctx, w, at, done).await
+    drive_action(ctx, w, at, done).await?;
+    Ok(())
 }
 
 fn assert(
@@ -448,8 +755,8 @@ pub async fn run(ctx: &Ctx, args: ModArgs) -> Result<(), CliError> {
     match args.action {
         ModAction::Queue { forum } => queue(ctx, forum.as_deref()).await,
         ModAction::Log { forum, limit } => log(ctx, forum.as_deref(), limit).await,
-        ModAction::Adopt { actor, forum } => adopt(ctx, &actor, forum.as_deref()).await,
-        action => assert_or_remove(ctx, action).await,
+        ModAction::Adopt { actor, forum } => adopt(ctx, &actor, forum.as_deref(), args.yes).await,
+        action => assert_or_remove(ctx, action, args.yes).await,
     }
 }
 
@@ -521,7 +828,7 @@ fn intersperse(parts: Vec<crate::out::TermText>) -> Vec<crate::out::TermText> {
     let mut out = Vec::with_capacity(parts.len() * 2);
     for (i, p) in parts.into_iter().enumerate() {
         if i > 0 {
-            out.push(lit(" · "));
+            out.push(tt(" · "));
         }
         out.push(p);
     }
@@ -529,18 +836,25 @@ fn intersperse(parts: Vec<crate::out::TermText>) -> Vec<crate::out::TermText> {
 }
 
 /// `mod adopt <former-mod>`.
-async fn adopt(ctx: &Ctx, actor: &str, forum: Option<&str>) -> Result<(), CliError> {
+async fn adopt(ctx: &Ctx, actor: &str, forum: Option<&str>, yes: bool) -> Result<(), CliError> {
     let w = ctx.writer().await?;
     let forum = refs::forum_or_current(ctx, &w.engine, forum).await?;
-    acknowledge(ctx, &w, PublicActionKind::ModAction).await?;
+    acknowledge(ctx, &w, PublicActionKind::ModAction, yes).await?;
+    let who = w.engine.resolve_actor(actor).await?;
+    let originals = originals_of(ctx, &w, &forum, &who.did).await?;
     let ticket = w.engine.mod_adopt(&forum, actor).await?;
     let t = write::drive(ctx, &w, ticket).await?;
-    write::report(ctx, &t, "Adopted")
+    write::report(ctx, &t, "Adopted")?;
+    if let WriteState::Done { report, .. } = &t.state {
+        report_adoption(ctx, &w, &forum, &who, &originals, report).await?;
+    }
+    Ok(())
 }
 
 /// Every `mod <verb> <subject>` that asserts or removes one action.
-async fn assert_or_remove(ctx: &Ctx, action: ModAction) -> Result<(), CliError> {
+async fn assert_or_remove(ctx: &Ctx, action: ModAction, yes: bool) -> Result<(), CliError> {
     let w = ctx.writer().await?;
+    let is_restrict = matches!(&action, ModAction::Restrict(_) | ModAction::Nullify(_));
     let (subject, forum_opt, scope, value, reason, until, done) = match action {
         ModAction::Hide(a) => (
             a.subject.clone(),
@@ -584,7 +898,7 @@ async fn assert_or_remove(ctx: &Ctx, action: ModAction) -> Result<(), CliError> 
             a.forum.clone(),
             scope_of(a.author_scope),
             ModActionValue::Restrict {
-                capabilities: if a.capabilities.is_empty() {
+                capabilities: Some(if a.capabilities.is_empty() {
                     vec![
                         Capability::Post,
                         Capability::Comment,
@@ -596,8 +910,9 @@ async fn assert_or_remove(ctx: &Ctx, action: ModAction) -> Result<(), CliError> 
                     ]
                 } else {
                     a.capabilities.iter().map(|c| (*c).into()).collect()
-                },
-                nullify_votes: false,
+                }),
+                // the engine keeps the current nullification (m3r-2)
+                nullify_votes: None,
             },
             a.reason.clone(),
             until_ms(a.until.as_deref())?,
@@ -608,32 +923,33 @@ async fn assert_or_remove(ctx: &Ctx, action: ModAction) -> Result<(), CliError> 
             a.forum.clone(),
             scope_of(a.author_scope),
             ModActionValue::Restrict {
-                capabilities: Vec::new(),
-                nullify_votes: true,
+                // the engine keeps the current restriction (m3r-2)
+                capabilities: None,
+                nullify_votes: Some(true),
             },
             a.reason.clone(),
             until_ms(a.until.as_deref())?,
             "Votes nullified",
         ),
         ModAction::Personal(s) => {
-            return tier(ctx, &w, s, Tier::Personal, "Moved to personal").await;
+            return tier(ctx, &w, s, Tier::Personal, "Moved to personal", yes).await;
         }
         ModAction::Frontpage(s) => {
-            return tier(ctx, &w, s, Tier::Frontpage, "Moved to frontpage").await;
+            return tier(ctx, &w, s, Tier::Frontpage, "Moved to frontpage", yes).await;
         }
         ModAction::Curate(s) => {
-            return tier(ctx, &w, s, Tier::Curated, "Curated").await;
+            return tier(ctx, &w, s, Tier::Curated, "Curated", yes).await;
         }
         ModAction::Pin(a) => {
-            return pin(ctx, &w, a, true).await;
+            return pin(ctx, &w, a, true, yes).await;
         }
         ModAction::Unpin(a) => {
-            return pin(ctx, &w, a, false).await;
+            return pin(ctx, &w, a, false, yes).await;
         }
         ModAction::Lock(s) => (
             s.subject.clone(),
             s.forum.clone(),
-            ModScope::Forum,
+            scope_of(s.author_scope),
             ModActionValue::Lock { locked: true },
             None,
             None,
@@ -642,23 +958,30 @@ async fn assert_or_remove(ctx: &Ctx, action: ModAction) -> Result<(), CliError> 
         ModAction::Unlock(s) => (
             s.subject.clone(),
             s.forum.clone(),
-            ModScope::Forum,
+            scope_of(s.author_scope),
             ModActionValue::Lock { locked: false },
             None,
             None,
             "Unlocked",
         ),
         ModAction::Unhide(s) => {
-            return removal(ctx, &w, s, "hide", "Unhidden").await;
+            return removal(ctx, &w, s, "hide", "Unhidden", yes).await;
         }
         ModAction::Unban(s) => {
-            return removal(ctx, &w, s, "access", "Unbanned").await;
+            return removal(ctx, &w, s, "access", "Unbanned", yes).await;
         }
         ModAction::Unrestrict(s) => {
-            return removal(ctx, &w, s, "restrict", "Unrestricted").await;
+            return removal(ctx, &w, s, "restrict", "Unrestricted", yes).await;
         }
         ModAction::Approve(s) => {
+            if s.author_scope {
+                return Err(CliError::usage(
+                    "a grant is a forum action; --author-scope does not apply",
+                ));
+            }
             let forum = refs::forum_or_current(ctx, &w.engine, s.forum.as_deref()).await?;
+            // a grant is an `#access` mod action (`social.md` §17)
+            acknowledge(ctx, &w, PublicActionKind::ModAction, yes).await?;
             let tickets = w
                 .engine
                 .grant(&forum, std::slice::from_ref(&s.subject))
@@ -694,11 +1017,19 @@ async fn assert_or_remove(ctx: &Ctx, action: ModAction) -> Result<(), CliError> 
     let forum = mod_forum(ctx, &w.engine, forum_opt.as_deref(), &subject).await?;
     let subject = subject_of(ctx, &w.engine, &subject).await?;
     read::sync_thread_quietly(ctx, &w.engine, &subject).await;
+    if is_restrict {
+        // `#restrict` is one record per (actor, scope, subject) carrying both the capability
+        // set and `nullifyVotes`; the engine keeps the dimension the verb leaves out from the
+        // account's last unsent write of it, else the cached record (`engine-api.md` §3.5,
+        // m3r-2). A record written from another device reaches the cache by this sync.
+        read::sync_forum_quietly(ctx, &w.engine, &forum).await;
+    }
     mod_action(
         ctx,
         &w,
         assert(forum, scope, subject, value, reason, until),
         done,
+        yes,
     )
     .await
 }
@@ -710,6 +1041,7 @@ async fn tier(
     s: ModSubject,
     tier: Tier,
     done: &'static str,
+    yes: bool,
 ) -> Result<(), CliError> {
     let forum = mod_forum(ctx, &w.engine, s.forum.as_deref(), &s.subject).await?;
     let subject = subject_of(ctx, &w.engine, &s.subject).await?;
@@ -719,19 +1051,20 @@ async fn tier(
         w,
         assert(
             forum,
-            ModScope::Forum,
+            scope_of(s.author_scope),
             subject,
             ModActionValue::Tier { tier, notice: None },
             None,
             None,
         ),
         done,
+        yes,
     )
     .await
 }
 
 /// `mod pin|unpin`.
-async fn pin(ctx: &Ctx, w: &Writer, a: PinArgs, pinned: bool) -> Result<(), CliError> {
+async fn pin(ctx: &Ctx, w: &Writer, a: PinArgs, pinned: bool, yes: bool) -> Result<(), CliError> {
     let forum = mod_forum(ctx, &w.engine, a.forum.as_deref(), &a.subject).await?;
     let subject = subject_of(ctx, &w.engine, &a.subject).await?;
     read::sync_thread_quietly(ctx, &w.engine, &subject).await;
@@ -740,7 +1073,7 @@ async fn pin(ctx: &Ctx, w: &Writer, a: PinArgs, pinned: bool) -> Result<(), CliE
         w,
         assert(
             forum,
-            ModScope::Forum,
+            scope_of(a.author_scope),
             subject,
             ModActionValue::Pin {
                 scope: a.scope.into(),
@@ -750,35 +1083,43 @@ async fn pin(ctx: &Ctx, w: &Writer, a: PinArgs, pinned: bool) -> Result<(), CliE
             None,
         ),
         if pinned { "Pinned" } else { "Unpinned" },
+        yes,
     )
     .await
 }
 
-/// A removal of one of the account's assertions (`mod unhide|unban|unrestrict`).
+/// A removal of one of the account's assertions (`mod unhide|unban|unrestrict`), of the forum
+/// or (`--author-scope`) the author scope: the scope is part of the record's key.
 async fn removal(
     ctx: &Ctx,
     w: &Writer,
     s: ModSubject,
     action_key: &str,
     done: &'static str,
+    yes: bool,
 ) -> Result<(), CliError> {
     let forum = mod_forum(ctx, &w.engine, s.forum.as_deref(), &s.subject).await?;
     let subject = subject_of(ctx, &w.engine, &s.subject).await?;
     mod_action(
         ctx,
         w,
-        remove(forum, ModScope::Forum, subject, action_key),
+        remove(forum, scope_of(s.author_scope), subject, action_key),
         done,
+        yes,
     )
     .await
 }
 
-/// `export`: this device's local state as JSON, or `--import` to merge one back
-/// (`engine-api.md` §3.6, `synthesis-v1.md` §6.10, `threat-model.md` PRIV-8/PRIV-10).
+/// `export`: content (`cmd/export.rs`), or with `--local` this device's local state as JSON,
+/// or `--import` to merge one back (`engine-api.md` §3.6, `threat-model.md` PRIV-8/PRIV-10).
 ///
-/// `--mine` is the default: the active account's state plus the rows that belong to no account.
-/// An import merges, so a partial or older export never destroys state it does not mention.
+/// `--local --scope mine` is the default: the active account's state plus the rows that belong
+/// to no account. An import merges, so a partial or older export never destroys state it does
+/// not mention.
 pub async fn export(ctx: &Ctx, args: ExportArgs) -> Result<(), CliError> {
+    if !args.local && args.import.is_none() {
+        return crate::cmd::export::content(ctx, args).await;
+    }
     let engine = ctx.reader().await?;
     if let Some(path) = args.import {
         let text = std::fs::read_to_string(&path)
@@ -792,8 +1133,8 @@ pub async fn export(ctx: &Ctx, args: ExportArgs) -> Result<(), CliError> {
         } else {
             ctx.out.line(&[(
                 crate::out::tt(&format!(
-                    "Imported {} rows ({} out of scope, {} unreadable).",
-                    report.imported, report.out_of_scope, report.undecodable
+                    "Imported {} rows ({} out of scope, {} unreadable, {} refused).",
+                    report.imported, report.out_of_scope, report.undecodable, report.refused
                 )),
                 crate::out::Style::Plain,
             )]);

@@ -19,19 +19,26 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crossterm::event::KeyEvent;
 use lessdugin_core::dto::{
-    AccessLevel, AccountView, ActionTicket, AgreementValue, Capability, CommentDraft,
-    DiscussionList, Event, ForumSummary, ForumView, HistoryView, KarmaValue, ModActionIntent,
-    ModActionValue, ModLog, ModQueue, ModScope, ModsChange, NotificationList, OpinionIntent,
-    PinScope, PostDraft, PostList, PostSort, ReactTally, Stance, SyncReport, ThreadRoot,
-    ThreadView, Tier, Topic, UnreadCounts, ViewerCaps, WriteState, WriteTicket,
+    AccessLevel, AccountView, ActionNotice, ActionTicket, AgreementValue, Capability, CommentDraft,
+    CommentSort, DiscussionList, Event, ForumSummary, ForumView, HistoryView, KarmaValue,
+    ModActionIntent, ModActionValue, ModLog, ModQueue, ModScope, ModsChange, NotificationList,
+    OpinionIntent, PinScope, PostDraft, PostFilter, PostList, PostSort, PublicActionKind,
+    ReactTally, Stance, SyncReport, ThreadOpts, ThreadRoot, ThreadView, Tier, Topic, UnreadCounts,
+    ViewerCaps, WriteState, WriteTicket,
+};
+use lessdugin_core::dto::{
+    Draft, ForumDraft, ForumRole, KarmaCadence, MemberView, MembershipMode, PostKind, RawView, Ref,
+    Settings, Subscription, TextQuote,
 };
 use lessdugin_core::engine::EngineError;
 
 use crate::body::Body;
+use crate::command::{AccessOp, ForumChanges, RestrictDim};
 use crate::editor;
+use crate::image::{MediaBytes, Placeholder};
 use crate::keys::{self, Cmd, Op};
 use crate::text::{TermText, actor, cat, count, lit, post_title, tt};
-use crate::thread::{self, Layout, Pos};
+use crate::thread::{self, Layout, MediaState, Pos};
 
 /// Identifies a screen instance (results for a screen that was closed are dropped).
 pub type ScreenId = u64;
@@ -88,7 +95,7 @@ pub enum SyncTarget {
 }
 
 /// What is being written.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Compose {
     /// A comment on `root`, replying to `parent`.
     Comment {
@@ -102,6 +109,14 @@ pub enum Compose {
         /// The forum.
         forum: String,
     },
+    /// An edit of your post or comment `uri` (`:edit`): `base` is its current draft, whose
+    /// text (and a post's title) the editor's text replaces.
+    Edit {
+        /// The item.
+        uri: String,
+        /// Its draft as cached.
+        base: Box<Draft>,
+    },
 }
 
 impl Compose {
@@ -112,6 +127,7 @@ impl Compose {
             } => "reply",
             Compose::Comment { parent: None, .. } => "comment",
             Compose::Post { .. } => "post",
+            Compose::Edit { .. } => "edit",
         }
     }
 
@@ -123,6 +139,7 @@ impl Compose {
             } => "r",
             Compose::Comment { parent: None, .. } => "c",
             Compose::Post { .. } => "P",
+            Compose::Edit { .. } => ":edit",
         }
     }
 }
@@ -138,12 +155,25 @@ struct OwnWrite {
 }
 
 /// An `$EDITOR` session to run.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct EditorRequest {
     /// What is written.
     pub compose: Compose,
     /// The template (`editor::comment_template`, `editor::post_template`).
     pub template: String,
+}
+
+/// What `:edit` found before the editor opens ([`Effect::StartEdit`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct EditStart {
+    /// The editor session.
+    pub request: EditorRequest,
+    /// What the edit would suspend (`edit_preflight`, `social.md` §4.5): the user confirms
+    /// first.
+    pub notices: Vec<ActionNotice>,
+    /// Why `edit_preflight` could not run, when it could not: the edit goes on unchecked, once
+    /// the user, told why, confirms (sec-7).
+    pub unchecked: Option<String>,
 }
 
 /// Something for the runtime to do.
@@ -156,7 +186,7 @@ pub enum Effect {
         /// Who asked.
         origin: Origin,
     },
-    /// `forum_open` and `list_posts` (filter frontpage, the M3 default).
+    /// `forum_open` and `list_posts` (`magic` over `frontpage` when it opens, the M3 default).
     LoadForum {
         /// The screen.
         screen: ScreenId,
@@ -164,6 +194,8 @@ pub enum Effect {
         forum: String,
         /// The sort.
         sort: PostSort,
+        /// The filter (`f`).
+        filter: PostFilter,
         /// Who asked.
         origin: Origin,
     },
@@ -173,6 +205,8 @@ pub enum Effect {
         screen: ScreenId,
         /// The post or comment uri.
         uri: String,
+        /// The comment sort (`s` on the thread).
+        opts: ThreadOpts,
         /// Who asked.
         origin: Origin,
     },
@@ -241,6 +275,8 @@ pub enum Effect {
         forum: String,
         /// The screen the menu was opened from.
         screen: ScreenId,
+        /// How a `#restrict` assertion is completed (read when the effect runs).
+        merge: Option<RestrictDim>,
     },
     /// `recent_discussion(forum, None, limit)`: the Forum screen's Activity tab
     /// (`synthesis-v1.md` §6.11, `social.md` §12.5).
@@ -277,8 +313,19 @@ pub enum Effect {
         /// The screen to reload afterwards.
         screen: ScreenId,
     },
+    /// `mark_all_notifications_read()`: every notification, listed or not (`M`, `:read-all`).
+    MarkAllRead {
+        /// The screen to reload afterwards.
+        screen: ScreenId,
+    },
     /// `unread_counts()`: the notification badge and the forums' unread state.
     LoadUnread,
+    /// `mark_read(post)`: the thread was viewed (`social.md` §16: "viewing a thread sets
+    /// lastVisited"); its unread marks and notifications clear.
+    MarkThreadRead {
+        /// The thread's post.
+        post: String,
+    },
     /// `mod_queue(forum)`.
     LoadQueue {
         /// The screen.
@@ -300,8 +347,273 @@ pub enum Effect {
     /// `writes()`: the outbox as it is at start (writes queued or failed before this
     /// session).
     LoadWrites,
+    /// `acknowledged_public_actions()`: the "this is public" interstitials the account has
+    /// seen (`engine-api.md` §3.6).
+    LoadAcknowledged,
+    /// `acknowledge_public_action(kind)`: the user went past the interstitial of `kind`.
+    Acknowledge {
+        /// The kind.
+        kind: PublicActionKind,
+    },
+    /// `parse_ref(target)`, then the screen of the forum, post or comment it names (`:open`).
+    Open {
+        /// The reference.
+        target: String,
+    },
+    /// `forum_follow(forum)` or `forum_unfollow(forum)`.
+    Follow {
+        /// The forum.
+        forum: String,
+        /// Follow, or stop.
+        on: bool,
+    },
+    /// `join(forum, note)`: a public action (`PublicActionKind::Join`).
+    Join {
+        /// The forum.
+        forum: String,
+        /// The membership note.
+        note: Option<String>,
+        /// The screen to reload afterwards.
+        screen: ScreenId,
+    },
+    /// `leave(forum)`.
+    Leave {
+        /// The forum.
+        forum: String,
+        /// The screen to reload afterwards.
+        screen: ScreenId,
+    },
+    /// `members(forum, query)`, shown in a panel.
+    LoadMembers {
+        /// The forum.
+        forum: String,
+        /// The role kept.
+        status: Option<ForumRole>,
+        /// The applicants only.
+        pending: bool,
+    },
+    /// `grant`, `revoke`, `approve` or `reject` of `actors`.
+    Access {
+        /// Which.
+        op: AccessOp,
+        /// The forum.
+        forum: String,
+        /// The DIDs or handles.
+        actors: Vec<String>,
+        /// The screen to reload afterwards.
+        screen: ScreenId,
+    },
+    /// `mod_adopt(forum, former)`.
+    Adopt {
+        /// The forum.
+        forum: String,
+        /// The former moderator.
+        former: String,
+        /// The screen to reload afterwards.
+        screen: ScreenId,
+    },
+    /// `forum_create(draft)`.
+    ForumCreate {
+        /// The new forum.
+        draft: ForumDraft,
+    },
+    /// `forum_update(forum, draft)`, the draft being the cached declaration with `changes`.
+    ForumEdit {
+        /// The forum.
+        forum: String,
+        /// What changes.
+        changes: ForumChanges,
+        /// The screen to reload afterwards.
+        screen: ScreenId,
+    },
+    /// Reads your post or comment `uri` from the cache and opens `$EDITOR` on its text.
+    StartEdit {
+        /// The item (or a reference to it).
+        uri: String,
+        /// Its forum, for a reference.
+        forum: String,
+    },
+    /// `edit(uri, draft, EditOpts::default())`: the old version is kept as a revision.
+    Edit {
+        /// The item.
+        uri: String,
+        /// The new draft.
+        draft: Draft,
+        /// The editor's text (offered again if the edit fails).
+        text: String,
+    },
+    /// `delete(uri)`, `retract(uri)` or `redact_revision(uri)` of your post or comment.
+    ItemWrite {
+        /// Which.
+        op: ItemOp,
+        /// The item (or a reference to it).
+        uri: String,
+        /// Its forum, for a reference.
+        forum: String,
+        /// The screen to reload afterwards.
+        screen: ScreenId,
+    },
+    /// `raw(uri)`, shown in a panel.
+    LoadRaw {
+        /// The item (or a reference to it).
+        uri: String,
+        /// Its forum, for a reference.
+        forum: String,
+    },
+    /// `bookmark(uri, on)`.
+    Bookmark {
+        /// The post (or a reference to it).
+        uri: String,
+        /// Its forum, for a reference.
+        forum: String,
+        /// Bookmark, or remove it.
+        on: bool,
+    },
+    /// `subscribe(subscription, on)` (`setSubscription` in TypeScript).
+    Subscribe {
+        /// What.
+        subscription: Subscription,
+        /// Subscribe, or stop.
+        on: bool,
+    },
+    /// `mute(actor, on)`.
+    Mute {
+        /// The DID or handle.
+        actor: String,
+        /// Mute, or unmute.
+        on: bool,
+    },
+    /// `karma_notifications()`, or `set_karma_notifications(cadence)`.
+    KarmaNotifications {
+        /// The cadence to set; `None` shows it.
+        cadence: Option<KarmaCadence>,
+    },
+    /// `settings()`, after `set_setting(key, value)` when a key is given.
+    Settings {
+        /// The key and its value (`None`: the default).
+        set: Option<(String, Option<String>)>,
+    },
+    /// `retry_write(id)`.
+    Retry {
+        /// The write id.
+        id: String,
+    },
+    /// `load_media(cid, media)` of an image from its author's PDS (streamed and CID-checked by
+    /// the host), then its bytes for the decoder.
+    FetchMedia {
+        /// The image as the item's body lists it (its CID, author, declared type and size).
+        media: Box<lessdugin_core::dto::MediaView>,
+    },
+    /// Decodes a fetched image off the UI thread: the runtime's [`crate::image::Images`].
+    DecodeMedia {
+        /// The blob's CID.
+        cid: String,
+        /// Its bytes.
+        bytes: MediaBytes,
+    },
     /// Leave the TUI.
     Quit,
+}
+
+/// The writes of `:delete`, `:retract` and `:redact` on your own item.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ItemOp {
+    /// `delete(uri)`.
+    Delete,
+    /// `retract(uri)`.
+    Retract,
+    /// `redact_revision(uri)`.
+    Redact,
+}
+
+impl Effect {
+    /// The public action this effect writes (`social.md` §17), whose first-use interstitial
+    /// must have been seen before it runs: an opinion by its intent; a mod action, an
+    /// `#access` grant or a moderator change is a mod action.
+    pub fn public_kind(&self) -> Option<PublicActionKind> {
+        match self {
+            Effect::Opinion { intent, .. } => Some(intent.public_kind()),
+            Effect::ModAction { .. }
+            | Effect::Grant { .. }
+            | Effect::ModsSet { .. }
+            | Effect::Adopt { .. }
+            | Effect::Access {
+                op: AccessOp::Grant | AccessOp::Revoke | AccessOp::Approve,
+                ..
+            } => Some(PublicActionKind::ModAction),
+            Effect::Join { .. } => Some(PublicActionKind::Join),
+            _ => None,
+        }
+    }
+
+    /// The engine operation (`engine-api.md` §3) the effect calls, by its name there (for an
+    /// editor session, the write it leads to; for `Open`, the screen's `forum_open` or
+    /// `get_thread`); `None` for what the runtime does itself
+    /// (decoding an image, quitting).
+    pub fn operation(&self) -> Option<&'static str> {
+        Some(match self {
+            Effect::Editor(req) => match req.compose {
+                Compose::Comment { .. } => "comment",
+                Compose::Post { .. } => "publish",
+                Compose::Edit { .. } => "edit",
+            },
+            Effect::LoadHome { .. } => "followed",
+            Effect::LoadForum { .. } => "list_posts",
+            Effect::LoadThread { .. } => "get_thread",
+            Effect::Sync { .. } => "sync_forum",
+            Effect::Comment { .. } => "comment",
+            Effect::Publish { .. } => "publish",
+            Effect::Opinion { .. } => "opinion",
+            Effect::Undo { .. } => "undo",
+            Effect::Grant { .. } => "grant",
+            Effect::ModsSet { .. } => "mods_set",
+            Effect::ModAction { .. } => "mod_action",
+            Effect::LoadActivity { .. } => "recent_discussion",
+            Effect::LoadHistory { .. } => "history",
+            Effect::LoadNotifications { .. } => "notifications",
+            Effect::MarkRead { .. } => "mark_notifications_read",
+            Effect::MarkAllRead { .. } => "mark_all_notifications_read",
+            Effect::LoadUnread => "unread_counts",
+            Effect::MarkThreadRead { .. } => "mark_read",
+            Effect::LoadQueue { .. } => "mod_queue",
+            Effect::LoadLog { .. } => "mod_log",
+            Effect::LoadWrites => "writes",
+            Effect::LoadAcknowledged => "acknowledged_public_actions",
+            Effect::Acknowledge { .. } => "acknowledge_public_action",
+            Effect::Open { .. } => "forum_open",
+            Effect::Follow { on: true, .. } => "forum_follow",
+            Effect::Follow { on: false, .. } => "forum_unfollow",
+            Effect::Join { .. } => "join",
+            Effect::Leave { .. } => "leave",
+            Effect::LoadMembers { .. } => "members",
+            Effect::Access { op, .. } => match op {
+                AccessOp::Grant => "grant",
+                AccessOp::Revoke => "revoke",
+                AccessOp::Approve => "approve",
+                AccessOp::Reject => "reject",
+            },
+            Effect::Adopt { .. } => "mod_adopt",
+            Effect::ForumCreate { .. } => "forum_create",
+            Effect::ForumEdit { .. } => "forum_update",
+            Effect::StartEdit { .. } | Effect::Edit { .. } => "edit",
+            Effect::ItemWrite { op, .. } => match op {
+                ItemOp::Delete => "delete",
+                ItemOp::Retract => "retract",
+                ItemOp::Redact => "redact_revision",
+            },
+            Effect::LoadRaw { .. } => "raw",
+            Effect::Bookmark { .. } => "bookmark",
+            Effect::Subscribe { .. } => "subscribe",
+            Effect::Mute { .. } => "mute",
+            Effect::KarmaNotifications { cadence: None } => "karma_notifications",
+            Effect::KarmaNotifications { cadence: Some(_) } => "set_karma_notifications",
+            Effect::Settings { set: None } => "settings",
+            Effect::Settings { set: Some(_) } => "set_setting",
+            Effect::Retry { .. } => "retry_write",
+            Effect::FetchMedia { .. } => "load_media",
+            Effect::DecodeMedia { .. } | Effect::Quit => return None,
+        })
+    }
 }
 
 /// Something that happened.
@@ -464,6 +776,56 @@ pub enum Action {
         /// The log.
         result: Result<ModLog, EngineError>,
     },
+    /// [`Effect::LoadAcknowledged`] finished.
+    AcknowledgedLoaded {
+        /// The account they were read for (the active one; `None`: no account).
+        account: Option<String>,
+        /// Its acknowledgements.
+        result: Result<Vec<PublicActionKind>, EngineError>,
+    },
+    /// [`Effect::Open`] resolved its reference.
+    Opened(Result<Ref, EngineError>),
+    /// A write a `:` command queued (or why it was refused); `what` names it.
+    Written {
+        /// What the status line calls it (`"Join"`, `"Delete"`).
+        what: &'static str,
+        /// The screen to reload.
+        screen: Option<ScreenId>,
+        /// The tickets.
+        result: Result<Vec<WriteTicket>, EngineError>,
+    },
+    /// A local-state command finished: what the status line says, or why it failed.
+    LocalDone(Result<String, EngineError>),
+    /// [`Effect::StartEdit`]: the editor session and what the edit would suspend
+    /// (`edit_preflight`), or why there is none.
+    EditReady(Result<EditStart, EngineError>),
+    /// [`Effect::LoadMembers`] finished.
+    MembersLoaded(Result<Vec<MemberView>, EngineError>),
+    /// [`Effect::LoadRaw`] finished.
+    RawLoaded(Result<RawView, EngineError>),
+    /// [`Effect::Settings`] finished.
+    SettingsLoaded(Result<Settings, EngineError>),
+    /// [`Effect::FetchMedia`] finished.
+    MediaFetched {
+        /// The blob's CID.
+        cid: String,
+        /// Its bytes, or why there are none.
+        result: Result<MediaBytes, EngineError>,
+    },
+    /// An image's decode finished: it is drawn, or why not.
+    MediaDecoded {
+        /// The blob's CID.
+        cid: String,
+        /// The outcome.
+        result: Result<(), Placeholder>,
+    },
+    /// A decoded image was dropped to bound memory: it loads again on request.
+    MediaEvicted {
+        /// The blob's CID.
+        cid: String,
+    },
+    /// An image worker has a result: the runtime polls its images (the state has nothing to do).
+    ImagesReady,
 }
 
 /// The tone of a status message.
@@ -570,6 +932,13 @@ pub const LIST_ROWS: usize = 2;
 /// ([`Screen::live_burst`]): the loop guard against a load that always re-announces a change.
 pub const LIVE_RELOAD_CAP: u32 = 3;
 
+/// What the status line calls a write that creates an open forum; its message carries the
+/// L7 label (`threat-model.md` L7).
+pub const NEW_OPEN_FORUM: &str = "New open forum";
+
+/// What the status line calls a forum edit that sets open membership (with the L7 label).
+pub const OPEN_FORUM_EDIT: &str = "Forum edit (open membership)";
+
 /// The Home screen: followed forums with their sync status.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct HomeScreen {
@@ -617,8 +986,10 @@ pub struct ActivityData {
 pub struct ForumScreen {
     /// The forum uri.
     pub uri: String,
-    /// The sort (`s`: new, old, top).
+    /// The sort (`s`: magic, top, new, old, recent comments; `social.md` §12.2).
     pub sort: PostSort,
+    /// The filter (`f`: frontpage, all, curated; `social.md` §12.3).
+    pub filter: PostFilter,
     /// The data, once loaded.
     pub data: Option<ForumData>,
     /// A live update waiting for `R`.
@@ -688,14 +1059,21 @@ impl ForumScreen {
 pub struct ThreadScreen {
     /// The uri opened (a post, or a comment of the thread).
     pub uri: String,
+    /// The comment sort (`s`: magic, top, new, old, latest reply; `social.md` §12.4).
+    pub opts: ThreadOpts,
     /// The data, once loaded.
     pub data: Option<ThreadData>,
     /// A live update waiting for `R`.
     pub pending: Option<ThreadData>,
     /// The version history of the opened item, once loaded (`h` toggles the panel; M4).
     pub history: Option<Result<HistoryView, String>>,
-    /// Comments whose replies are folded.
+    /// Comments whose fold the reader switched (`Space`): a collapsed comment expands, any
+    /// other one folds its replies.
     pub collapsed: BTreeSet<String>,
+    /// The viewer's DID: their own `Collapsed(NewUser)` comments show expanded.
+    pub viewer: Option<String>,
+    /// The images asked for, by blob CID.
+    pub media: BTreeMap<String, MediaState>,
     /// The selection and scroll.
     pub pos: Pos,
     /// The layout for the current width.
@@ -719,7 +1097,13 @@ impl ThreadScreen {
             .items
             .get(self.pos.selected)
             .map(|i| (i.uri.clone(), i.start as isize - self.pos.scroll as isize));
-        self.layout = thread::layout(data, &self.collapsed, width);
+        self.layout = thread::layout_for(
+            data,
+            &self.collapsed,
+            width,
+            self.viewer.as_deref(),
+            &self.media,
+        );
         if let Some((uri, row)) = before {
             if let Some(i) = self.layout.index_of(&uri) {
                 self.pos.selected = i;
@@ -867,6 +1251,9 @@ pub struct ModEntry {
     pub queue: bool,
     /// The entry opens the log screen.
     pub log: bool,
+    /// How the entry's `#restrict` assertion is completed (the engine keeps the dimension it
+    /// leaves out).
+    pub merge: Option<RestrictDim>,
 }
 
 /// The mod menu overlay (`synthesis-v1.md` §6.11 "Other": `m` mod menu). The entries are the
@@ -899,6 +1286,59 @@ pub struct Prompt {
     pub forum: String,
     /// The screen to reload after the write.
     pub screen: ScreenId,
+    /// As [`ModEntry::merge`].
+    pub merge: Option<RestrictDim>,
+}
+
+/// The "this is public" interstitial (`social.md` §17, `threat-model.md` PRIV-9): the first
+/// public action of a kind the account has not acknowledged waits behind it until the user
+/// goes on (`y`) or cancels (`n`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct PublicNotice {
+    /// The kinds it covers, in [`PublicActionKind`] order (one, unless one key queued two).
+    pub kinds: Vec<PublicActionKind>,
+    /// The writes it holds.
+    pub held: Vec<Effect>,
+}
+
+/// A text panel over the screen (`:members`, `:raw`, `:settings`): the navigation keys
+/// scroll it, any other key closes it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Panel {
+    /// Its title.
+    pub title: String,
+    /// Its lines.
+    pub lines: Vec<TermText>,
+    /// The first line shown.
+    pub scroll: usize,
+}
+
+/// A yes/no question before a write that cannot be taken back (`:delete`, `:redact`), or an
+/// edit that suspends a moderator's assertions (`:edit`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Confirm {
+    /// The question.
+    pub text: String,
+    /// What `y` runs.
+    pub effects: Vec<Effect>,
+}
+
+/// What the mod menu and `:mod` act on: the selected item, its thread's post, and their
+/// authors.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModSubject {
+    /// The selected post or comment.
+    pub item: String,
+    /// Its forum.
+    pub forum: String,
+    /// The item's author.
+    pub author: String,
+    /// The thread's post (the item itself when a post is selected).
+    pub post: String,
+    /// The post's author: the one author moderation belongs to (`social.md` §4.9).
+    pub post_author: String,
+    /// The item is a comment.
+    pub comment: bool,
 }
 
 /// A screen on the stack.
@@ -935,11 +1375,13 @@ impl Screen {
                 screen,
                 forum: f.uri.clone(),
                 sort: f.sort,
+                filter: f.filter,
                 origin,
             },
             ScreenKind::Thread(t) => Effect::LoadThread {
                 screen,
                 uri: t.uri.clone(),
+                opts: t.opts.clone(),
                 origin,
             },
             ScreenKind::Mod(m) => Effect::LoadQueue {
@@ -991,8 +1433,15 @@ impl Screen {
     fn concerns(&self, topic: &Topic) -> bool {
         match (&self.kind, topic) {
             (ScreenKind::Home(_), Topic::Forum { .. } | Topic::Accounts) => true,
-            (ScreenKind::Notifications(_), Topic::Notifications) => true,
+            // notifications are computed lazily: a forum or thread change is what brings new
+            // ones (`engine-api.md` §3.4), and nothing emits `Notifications` for them
+            (
+                ScreenKind::Notifications(_),
+                Topic::Notifications | Topic::Forum { .. } | Topic::Thread { .. },
+            ) => true,
             (ScreenKind::Forum(f), Topic::Forum { uri }) => *uri == f.uri,
+            // new applicants and assertions arrive with the forum's changes
+            (ScreenKind::Mod(m), Topic::Forum { uri }) => *uri == m.forum,
             (ScreenKind::Thread(t), topic) => {
                 let Some(d) = &t.data else {
                     return matches!(topic, Topic::Thread { uri } if *uri == t.uri);
@@ -1100,7 +1549,37 @@ fn complete(line: &mut String) {
         "read",
         "read-all",
         "activity",
+        "sort",
+        "filter",
         "user",
+        "open",
+        "follow",
+        "unfollow",
+        "join",
+        "leave",
+        "members",
+        "grant",
+        "revoke",
+        "approve",
+        "reject",
+        "forum",
+        "edit",
+        "delete",
+        "retract",
+        "redact",
+        "raw",
+        "bookmark",
+        "unbookmark",
+        "subscribe",
+        "unsubscribe",
+        "mute",
+        "unmute",
+        "karma-notifications",
+        "settings",
+        "set",
+        "unset",
+        "undo",
+        "retry",
         "help",
     ];
     const ARGS: &[&str] = &[
@@ -1116,6 +1595,7 @@ fn complete(line: &mut String) {
         "hide",
         "spam",
         "unhide",
+        "keep",
         "ban",
         "unban",
         "pin",
@@ -1126,14 +1606,27 @@ fn complete(line: &mut String) {
         "restrict",
         "unrestrict",
         "nullify",
+        "unnullify",
         "approve",
         "personal",
         "frontpage",
         "curated",
         "all",
         "unread",
+        "magic",
+        "top",
+        "new",
+        "old",
+        "recent-comments",
+        "latest-reply",
     ];
-    let start = line.rfind(char::is_whitespace).map_or(0, |i| i + 1);
+    // the byte after the last whitespace character, which may be wider than one byte (an NBSP,
+    // an IME's full-width space): `i + 1` would slice inside it
+    let start = line
+        .char_indices()
+        .rev()
+        .find(|(_, c)| c.is_whitespace())
+        .map_or(0, |(i, c)| i + c.len_utf8());
     let word = &line[start..];
     if word.is_empty() && start > 0 {
         return;
@@ -1218,6 +1711,18 @@ pub struct State {
     pub prompt: Option<Prompt>,
     /// The `:` command line overlay (`synthesis-v1.md` §6.11 Overlays): the text so far.
     pub command: Option<String>,
+    /// The public-action interstitial, while one is open.
+    pub public_notice: Option<PublicNotice>,
+    /// A confirmation, while one is open.
+    pub confirm: Option<Confirm>,
+    /// A text panel, while one is open.
+    pub panel: Option<Panel>,
+    /// The public actions the account has acknowledged (`None` until loaded: every kind asks).
+    pub acknowledged: Option<BTreeSet<PublicActionKind>>,
+    /// The account [`State::acknowledged`] was read for.
+    acknowledged_for: Option<String>,
+    /// [`Effect::LoadAcknowledged`] was sent.
+    acknowledged_asked: bool,
     /// The unread counts (`unread_counts()`): the header's notification badge and the Home
     /// screen's per-forum new counts.
     pub unread: Option<UnreadCounts>,
@@ -1267,6 +1772,16 @@ pub fn status_text(s: &Status) -> TermText {
     cat([lit(" "), s.text.clone()])
 }
 
+/// Every notice of an action's result, `; `-separated (the engine returns them in a fixed
+/// order, each telling the user something the others do not: a restriction's retroactivity
+/// and the expiry it now shares, an adoption and what it does not adopt).
+fn notices_text(notices: &[ActionNotice]) -> TermText {
+    cat(notices
+        .iter()
+        .enumerate()
+        .flat_map(|(i, n)| [lit(if i == 0 { "" } else { "; " }), tt(&n.message)]))
+}
+
 impl State {
     /// A new state for a terminal of `width` × `height`.
     pub fn new(width: u16, height: u16, account: Option<AccountView>, offline: bool) -> Self {
@@ -1280,6 +1795,12 @@ impl State {
             mod_menu: None,
             prompt: None,
             command: None,
+            public_notice: None,
+            confirm: None,
+            panel: None,
+            acknowledged: None,
+            acknowledged_for: account.as_ref().map(|a| a.did.clone()),
+            acknowledged_asked: false,
             unread: None,
             help_scroll: 0,
             status: None,
@@ -1421,9 +1942,11 @@ impl State {
                 result,
             } => self.mod_action_done(screen, result, &mut fx),
             Action::QueueLoaded { screen, result, .. } => {
-                self.mod_loaded(screen, Some(result), None)
+                self.mod_loaded(screen, Some(result), None, &mut fx)
             }
-            Action::LogLoaded { screen, result, .. } => self.mod_loaded(screen, None, Some(result)),
+            Action::LogLoaded { screen, result, .. } => {
+                self.mod_loaded(screen, None, Some(result), &mut fx)
+            }
             Action::ActivityLoaded {
                 screen,
                 origin,
@@ -1433,7 +1956,7 @@ impl State {
                 screen,
                 origin,
                 result,
-            } => self.notifications_loaded(screen, origin, result),
+            } => self.notifications_loaded(screen, origin, result, &mut fx),
             Action::HistoryLoaded {
                 screen,
                 origin,
@@ -1452,9 +1975,369 @@ impl State {
                     self.unread = Some(u);
                 }
             }
+            Action::AcknowledgedLoaded { account, result } => match result {
+                // another account is active now (another client switched): its own
+                // acknowledgements replace the previous account's
+                Ok(kinds) if account != self.acknowledged_for => {
+                    self.acknowledged = Some(kinds.into_iter().collect());
+                    self.acknowledged_for = account;
+                }
+                // acknowledgements are never withdrawn, and one made here may not be stored
+                // yet when this list was read: keep both
+                Ok(kinds) => self.acknowledged.get_or_insert_default().extend(kinds),
+                Err(e) => tracing::debug!(error = %e, "acknowledged_public_actions failed"),
+            },
+            Action::Opened(result) => match result {
+                Ok(Ref::Forum { uri }) => self.push_forum(uri, &mut fx),
+                Ok(Ref::Post { uri } | Ref::Comment { uri }) => self.push_thread(uri, &mut fx),
+                Ok(_) => self.say(Tone::Info, lit("That is not a forum, a post or a comment.")),
+                Err(e) => self.say(Tone::Error, cat([lit("Cannot open it: "), tt(&e.message)])),
+            },
+            Action::Written {
+                what,
+                screen,
+                result,
+            } => self.written(what, screen, result, &mut fx),
+            Action::LocalDone(result) => match result {
+                Ok(msg) => self.say(Tone::Good, tt(&msg)),
+                Err(e) => self.say(Tone::Error, tt(&e.message)),
+            },
+            Action::EditReady(result) => match result {
+                Ok(EditStart {
+                    request,
+                    notices,
+                    unchecked: None,
+                }) if notices.is_empty() => fx.push(Effect::Editor(request)),
+                // an edit suspends the keep, tier or pin in effect on the item: ask first
+                // (`social.md` §4.5, `threat-model.md` SOC-3); when that could not be checked,
+                // say why and ask the same, rather than refuse the edit (sec-7)
+                Ok(EditStart {
+                    request,
+                    notices,
+                    unchecked,
+                }) => {
+                    let mut text = String::new();
+                    for n in &notices {
+                        let mut c = n.message.chars();
+                        text.extend(c.next().map(|f| f.to_ascii_uppercase()));
+                        text.push_str(c.as_str());
+                        text.push_str(". ");
+                    }
+                    if let Some(why) = unchecked {
+                        text.push_str(&format!(
+                            "What this edit would suspend could not be checked ({why}). "
+                        ));
+                    }
+                    text.push_str("Edit it anyway?");
+                    self.confirm = Some(Confirm {
+                        text,
+                        effects: vec![Effect::Editor(request)],
+                    });
+                }
+                Err(e) => self.say(Tone::Error, cat([lit("Cannot edit it: "), tt(&e.message)])),
+            },
+            Action::MembersLoaded(result) => match result {
+                Ok(m) => self.show_panel("Members", members_lines(&m)),
+                Err(e) => self.say(Tone::Error, tt(&e.message)),
+            },
+            Action::RawLoaded(result) => match result {
+                Ok(r) => self.show_panel("Raw", raw_lines(&r)),
+                Err(e) => self.say(Tone::Error, tt(&e.message)),
+            },
+            Action::SettingsLoaded(result) => match result {
+                Ok(set) => self.show_panel("Settings", settings_lines(&set)),
+                Err(e) => self.say(Tone::Error, tt(&e.message)),
+            },
+            Action::MediaFetched { cid, result } => {
+                let next = match result {
+                    // decoded only for a thread screen that still shows it
+                    Ok(bytes) if self.wants_media(&cid) => {
+                        fx.push(Effect::DecodeMedia {
+                            cid: cid.clone(),
+                            bytes,
+                        });
+                        Some(MediaState::Decoding)
+                    }
+                    Ok(_) => None,
+                    Err(e) => Some(MediaState::Failed(format!("could not load: {}", e.message))),
+                };
+                self.set_media(&cid, next);
+            }
+            Action::MediaDecoded { cid, result } => {
+                let next = match result {
+                    Ok(()) => MediaState::Shown,
+                    Err(p) => MediaState::Failed(p.text().to_owned()),
+                };
+                self.set_media(&cid, Some(next));
+            }
+            Action::MediaEvicted { cid } => self.set_media(&cid, None),
+            Action::ImagesReady => {}
         }
+        self.hold_public(&mut fx);
         self.fit();
         fx
+    }
+
+    /// Takes the public writes of a kind the account has not acknowledged out of `fx` and
+    /// holds them behind the interstitial (`engine-api.md` §3.6: every client shows it before
+    /// the first action of a kind; the engine does not enforce it). Every write the TUI makes
+    /// passes here, whatever key or command queued it.
+    fn hold_public(&mut self, fx: &mut Vec<Effect>) {
+        let acked = self.acknowledged.clone().unwrap_or_default();
+        let (held, rest): (Vec<Effect>, Vec<Effect>) = std::mem::take(fx)
+            .into_iter()
+            .partition(|e| e.public_kind().is_some_and(|k| !acked.contains(&k)));
+        *fx = rest;
+        if held.is_empty() {
+            return;
+        }
+        let notice = self.public_notice.get_or_insert(PublicNotice {
+            kinds: Vec::new(),
+            held: Vec::new(),
+        });
+        for e in held {
+            if let Some(k) = e.public_kind()
+                && !notice.kinds.contains(&k)
+            {
+                notice.kinds.push(k);
+            }
+            notice.held.push(e);
+        }
+        notice.kinds.sort();
+        self.say(Tone::Warn, lit("This is public: y to go on, n to cancel."));
+    }
+
+    /// A key while a confirmation is open: `y` runs its writes, `n` or Esc drops them.
+    fn confirm_key(&mut self, k: &KeyEvent, fx: &mut Vec<Effect>) {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        if k.modifiers.contains(KeyModifiers::CONTROL) && matches!(k.code, KeyCode::Char('c')) {
+            self.confirm = None;
+            self.quit = true;
+            fx.push(Effect::Quit);
+            return;
+        }
+        match k.code {
+            KeyCode::Char('y' | 'Y') => {
+                if let Some(c) = self.confirm.take() {
+                    self.status = None;
+                    fx.extend(c.effects);
+                }
+            }
+            KeyCode::Char('n' | 'N' | 'q') | KeyCode::Esc => {
+                self.confirm = None;
+                self.say(Tone::Info, lit("Cancelled."));
+            }
+            _ => {}
+        }
+    }
+
+    /// True if a thread screen on the stack asked for the image `cid`.
+    fn wants_media(&self, cid: &str) -> bool {
+        self.stack
+            .iter()
+            .any(|s| matches!(&s.kind, ScreenKind::Thread(t) if t.media.contains_key(cid)))
+    }
+
+    /// Sets where the image `cid` is on every thread screen that asked for it (`None`: not
+    /// asked for any more), and lays the screens out again.
+    fn set_media(&mut self, cid: &str, state: Option<MediaState>) {
+        let (w, h) = (self.width, self.content_height());
+        for s in &mut self.stack {
+            if let ScreenKind::Thread(t) = &mut s.kind
+                && t.media.contains_key(cid)
+            {
+                match &state {
+                    Some(st) => {
+                        t.media.insert(cid.to_owned(), st.clone());
+                    }
+                    None => {
+                        t.media.remove(cid);
+                    }
+                }
+                t.relayout(w, h);
+            }
+        }
+    }
+
+    /// `i`: loads the selected item's images. The key is the reader's consent (`sync.md`
+    /// §11.3: what the autoload policy does not load is "click to load"): their author's PDS
+    /// sees this device's address. A comment folded by the fold shows neither its images nor
+    /// the host they load from, so it is expanded first.
+    fn load_media(&mut self, fx: &mut Vec<Effect>) {
+        let Some(t) = self.top_thread() else {
+            self.say(Tone::Info, lit("Open a post to load its images."));
+            return;
+        };
+        let Some(span) = t.layout.items.get(t.pos.selected) else {
+            return;
+        };
+        let uri = span.uri.clone();
+        if span.collapsed && !t.collapsed.contains(&uri) {
+            self.say(
+                Tone::Info,
+                lit(
+                    "This comment is collapsed: press Space to show it, and where its images \
+                     load from, first.",
+                ),
+            );
+            return;
+        }
+        let media: Vec<lessdugin_core::dto::MediaView> = t
+            .data
+            .as_ref()
+            .map(|d| item_media(d, &uri, false))
+            .unwrap_or_default();
+        if media.is_empty() {
+            self.say(Tone::Info, lit("The selected item has no image to load."));
+            return;
+        }
+        let n = self.request_media(media, fx);
+        if n == 0 {
+            self.say(Tone::Info, lit("Its images are already loaded or loading."));
+        } else {
+            self.say(
+                Tone::Info,
+                cat([lit("Loading "), count(n, "image", "images"), lit("...")]),
+            );
+        }
+    }
+
+    /// Asks for each image of `media` the top thread does not have yet (one over the input cap
+    /// is marked so, never fetched); returns how many were asked for.
+    fn request_media(
+        &mut self,
+        media: Vec<lessdugin_core::dto::MediaView>,
+        fx: &mut Vec<Effect>,
+    ) -> u32 {
+        let (w, h) = (self.width, self.content_height());
+        let Some(ScreenKind::Thread(t)) = self.stack.last_mut().map(|s| &mut s.kind) else {
+            return 0;
+        };
+        let mut n = 0;
+        for m in media {
+            if matches!(
+                t.media.get(&m.cid),
+                Some(MediaState::Fetching | MediaState::Decoding | MediaState::Shown)
+            ) {
+                continue;
+            }
+            if m.size_bytes > crate::image::limits::MAX_INPUT_BYTES as u64 {
+                t.media.insert(
+                    m.cid.clone(),
+                    MediaState::Failed(Placeholder::TooLarge.text().to_owned()),
+                );
+                continue;
+            }
+            t.media.insert(m.cid.clone(), MediaState::Fetching);
+            fx.push(Effect::FetchMedia { media: Box::new(m) });
+            n += 1;
+        }
+        t.relayout(w, h);
+        n
+    }
+
+    /// The images of the thread on top that load without a key (`sync.md` §11.3,
+    /// `threat-model.md` PRIV-1): the engine's verdict (`MediaView.autoload`), only for a
+    /// `Visible` item, an inline image type and at most `BLOB_AUTOLOAD_MAX_BYTES`.
+    fn autoload_media(&mut self, fx: &mut Vec<Effect>) {
+        let Some(t) = self.top_thread() else {
+            return;
+        };
+        let Some(d) = &t.data else {
+            return;
+        };
+        let wanted: Vec<lessdugin_core::dto::MediaView> = thread::item_uris(d)
+            .iter()
+            .flat_map(|uri| item_media(d, uri, true))
+            .filter(|m| {
+                m.autoload
+                    && m.size_bytes <= lessdugin_core::media::policy::AUTOLOAD_MAX_BYTES
+                    && !t.media.contains_key(&m.cid)
+            })
+            .collect();
+        if !wanted.is_empty() {
+            self.request_media(wanted, fx);
+        }
+    }
+
+    /// Opens a text panel.
+    fn show_panel(&mut self, title: &str, lines: Vec<TermText>) {
+        self.panel = Some(Panel {
+            title: title.to_owned(),
+            lines,
+            scroll: 0,
+        });
+    }
+
+    /// [`Action::Written`]: the tickets are followed, the screen reloads.
+    fn written(
+        &mut self,
+        what: &'static str,
+        screen: Option<ScreenId>,
+        result: Result<Vec<WriteTicket>, EngineError>,
+        fx: &mut Vec<Effect>,
+    ) {
+        match result {
+            Ok(tickets) => {
+                for t in tickets {
+                    if !matches!(
+                        t.state,
+                        WriteState::Done { .. } | WriteState::Failed { .. } | WriteState::Undone
+                    ) {
+                        self.writes.insert(t.id.clone(), t.state);
+                    }
+                }
+                let mut msg = if self.offline {
+                    format!("{what}: queued; it is sent when you are online.")
+                } else {
+                    format!("{what}: queued; sending...")
+                };
+                // creating an open forum, or opening one, says what open mode relies on
+                // (`threat-model.md` L7, as the CLI's `forum create --mode open`)
+                if matches!(what, NEW_OPEN_FORUM | OPEN_FORUM_EDIT) {
+                    msg = format!("{msg} {}.", crate::view::OPEN_MODE_LABEL);
+                }
+                self.say(Tone::Good, tt(&msg));
+                if let Some(i) = screen.and_then(|id| self.index_of(id)) {
+                    self.follow_own = screen;
+                    self.reload(i, Origin::User, fx);
+                }
+            }
+            Err(e) => self.say(Tone::Error, tt(&format!("{what} refused: {}", e.message))),
+        }
+    }
+
+    /// A key while the interstitial is open: `y` sends the held writes and records the
+    /// acknowledgement, `n` or Esc drops them. Enter does nothing here: it is the key that
+    /// queued most of the held writes, and a second press (or a key repeat) must not publish
+    /// past a notice the user has not read (`threat-model.md` PRIV-9).
+    fn public_notice_key(&mut self, k: &KeyEvent, fx: &mut Vec<Effect>) {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        if k.modifiers.contains(KeyModifiers::CONTROL) && matches!(k.code, KeyCode::Char('c')) {
+            self.public_notice = None;
+            self.quit = true;
+            fx.push(Effect::Quit);
+            return;
+        }
+        match k.code {
+            KeyCode::Char('y' | 'Y') => {
+                let Some(n) = self.public_notice.take() else {
+                    return;
+                };
+                let acked = self.acknowledged.get_or_insert_default();
+                for kind in n.kinds {
+                    acked.insert(kind);
+                    fx.push(Effect::Acknowledge { kind });
+                }
+                self.status = None;
+                fx.extend(n.held);
+            }
+            KeyCode::Char('n' | 'N' | 'q') | KeyCode::Esc => {
+                self.public_notice = None;
+                self.say(Tone::Info, lit("Cancelled: nothing was published."));
+            }
+            _ => {}
+        }
     }
 
     /// Keeps the top screen consistent with the terminal size: the thread laid out for the
@@ -1511,6 +2394,11 @@ impl State {
         });
         let i = self.stack.len() - 1;
         self.reload(i, Origin::User, fx);
+        // the acknowledgements the interstitial needs, once there is an account to ask about
+        if self.account.is_some() && !self.acknowledged_asked {
+            self.acknowledged_asked = true;
+            fx.push(Effect::LoadAcknowledged);
+        }
         i
     }
 
@@ -1519,6 +2407,7 @@ impl State {
             ScreenKind::Forum(Box::new(ForumScreen {
                 uri: uri.clone(),
                 sort: PostSort::Magic,
+                filter: PostFilter::Frontpage,
                 data: None,
                 pending: None,
                 tab: ForumTab::Posts,
@@ -1558,6 +2447,7 @@ impl State {
         let i = self.push(
             ScreenKind::Thread(Box::new(ThreadScreen {
                 uri: uri.clone(),
+                viewer: self.account.as_ref().map(|a| a.did.clone()),
                 ..ThreadScreen::default()
             })),
             fx,
@@ -1595,7 +2485,9 @@ impl State {
                 if s.live_burst >= LIVE_RELOAD_CAP {
                     // the loads change nothing the user can see (an authority repo that stays
                     // unavailable keeps re-announcing itself): stop until the user acts or
-                    // presses R; the screen keeps what it shows
+                    // presses R; the screen keeps what it shows, marked stale so the user's
+                    // next move reloads it (a genuine update is late, never lost)
+                    s.stale = true;
                     return;
                 }
                 s.live_burst += 1;
@@ -1682,6 +2574,15 @@ impl State {
         if k.kind == crossterm::event::KeyEventKind::Release {
             return;
         }
+        // the public-action interstitial is answered before anything else, then a confirmation
+        if self.public_notice.is_some() {
+            self.public_notice_key(k, fx);
+            return;
+        }
+        if self.confirm.is_some() {
+            self.confirm_key(k, fx);
+            return;
+        }
         // a prompt captures the raw keys (it edits a text line)
         if self.prompt.is_some() {
             self.prompt_key(k, fx);
@@ -1696,6 +2597,19 @@ impl State {
         if cmd == Some(Cmd::Quit) {
             self.quit = true;
             fx.push(Effect::Quit);
+            return;
+        }
+        // a panel scrolls like the help overlay, and any other key closes it
+        if let Some(p) = &mut self.panel {
+            match cmd {
+                Some(Cmd::Down) => p.scroll = p.scroll.saturating_add(1),
+                Some(Cmd::Up) => p.scroll = p.scroll.saturating_sub(1),
+                Some(Cmd::HalfDown) => p.scroll = p.scroll.saturating_add(5),
+                Some(Cmd::HalfUp) => p.scroll = p.scroll.saturating_sub(5),
+                Some(Cmd::Top) => p.scroll = 0,
+                Some(Cmd::Bottom) => p.scroll = usize::MAX,
+                _ => self.panel = None,
+            }
             return;
         }
         // while the help overlay is open, the navigation keys scroll it and any other key
@@ -1746,6 +2660,7 @@ impl State {
             Cmd::Open => self.open(fx),
             Cmd::Sync => self.sync_top(fx),
             Cmd::Sort => self.sort(fx),
+            Cmd::Filter => self.filter(fx),
             Cmd::Reply => self.compose_comment(true, fx),
             Cmd::CommentOnPost => self.compose_comment(false, fx),
             Cmd::NewPost => self.compose_post(fx),
@@ -1753,6 +2668,7 @@ impl State {
             Cmd::Undo => self.undo_last(fx),
             Cmd::ReactPalette => self.open_react(),
             Cmd::History => self.open_history(fx),
+            Cmd::LoadMedia => self.load_media(fx),
             Cmd::ModMenu => self.open_mod_menu(),
             Cmd::Notifications => self.open_notifications(fx),
             Cmd::Command => self.command = Some(String::new()),
@@ -1776,17 +2692,24 @@ impl State {
                     ),
                 }
             }
-            nav => self.navigate(nav),
+            nav => self.navigate(nav, fx),
         }
     }
 
-    fn navigate(&mut self, cmd: Cmd) {
+    fn navigate(&mut self, cmd: Cmd, fx: &mut Vec<Effect>) {
         let (w, h) = (self.width, self.content_height());
-        let Some(top) = self.stack.last_mut() else {
+        let Some(i) = self.stack.len().checked_sub(1) else {
             return;
         };
+        let top = &mut self.stack[i];
         top.settling = false;
         top.live_burst = 0;
+        if top.stale {
+            // live updates were capped while the user did nothing: the move picks them up
+            top.stale = false;
+            self.reload(i, Origin::Live, fx);
+        }
+        let top = &mut self.stack[i];
         match &mut top.kind {
             ScreenKind::Home(s) => {
                 let len = s.data.as_ref().map_or(0, |d| d.forums.len());
@@ -1811,7 +2734,7 @@ impl State {
                         let Some(it) = l.items.get(t.pos.selected) else {
                             return;
                         };
-                        if !it.comment || it.replies == 0 {
+                        if !it.comment || (it.replies == 0 && !it.collapsed) {
                             return;
                         }
                         let uri = it.uri.clone();
@@ -1852,7 +2775,7 @@ impl State {
                     self.push_thread(uri, fx);
                 }
             }
-            ScreenKind::Thread(_) => self.navigate(Cmd::Collapse),
+            ScreenKind::Thread(_) => self.navigate(Cmd::Collapse, fx),
             // on the Mod screen, Enter approves the selected queue row (an applicant)
             ScreenKind::Mod(_) => self.approve_selected(fx),
             // on the Notifications screen, Enter opens the notification's thread
@@ -1865,19 +2788,92 @@ impl State {
         }
     }
 
+    /// `s`: the next post sort on a forum (`social.md` §12.2), the next comment sort on a
+    /// thread (§12.4).
     fn sort(&mut self, fx: &mut Vec<Effect>) {
         let Some(i) = self.stack.len().checked_sub(1) else {
             return;
         };
-        let ScreenKind::Forum(s) = &mut self.stack[i].kind else {
+        match &mut self.stack[i].kind {
+            ScreenKind::Forum(s) => {
+                let next = match s.sort {
+                    PostSort::Magic => PostSort::Top,
+                    PostSort::Top => PostSort::New,
+                    PostSort::New => PostSort::Old,
+                    PostSort::Old => PostSort::RecentComments,
+                    PostSort::RecentComments => PostSort::Magic,
+                };
+                self.set_post_sort(next, fx);
+            }
+            ScreenKind::Thread(t) => {
+                let next = match t.opts.sort {
+                    CommentSort::Magic => CommentSort::Top,
+                    CommentSort::Top => CommentSort::New,
+                    CommentSort::New => CommentSort::Old,
+                    CommentSort::Old => CommentSort::LatestReply,
+                    CommentSort::LatestReply => CommentSort::Magic,
+                };
+                self.set_comment_sort(next, fx);
+            }
+            _ => self.say(Tone::Info, lit("Sorting is for forums and threads.")),
+        }
+    }
+
+    /// Lists the forum on top in `sort`.
+    fn set_post_sort(&mut self, sort: PostSort, fx: &mut Vec<Effect>) {
+        let Some(i) = self.stack.len().checked_sub(1) else {
             return;
         };
-        s.sort = match s.sort {
-            PostSort::Magic => PostSort::Top,
-            PostSort::Top => PostSort::New,
-            PostSort::New => PostSort::Old,
-            _ => PostSort::Magic,
+        let ScreenKind::Forum(s) = &mut self.stack[i].kind else {
+            self.say(Tone::Info, lit("Open a forum to sort its posts."));
+            return;
         };
+        s.sort = sort;
+        s.tab = ForumTab::Posts;
+        s.pos = ListPos::default();
+        s.pending = None;
+        self.reload(i, Origin::User, fx);
+    }
+
+    /// Shows the thread on top in `sort` (the selection stays on its item).
+    fn set_comment_sort(&mut self, sort: CommentSort, fx: &mut Vec<Effect>) {
+        let Some(i) = self.stack.len().checked_sub(1) else {
+            return;
+        };
+        let ScreenKind::Thread(t) = &mut self.stack[i].kind else {
+            self.say(Tone::Info, lit("Open a thread to sort its comments."));
+            return;
+        };
+        t.opts.sort = sort;
+        t.pending = None;
+        self.reload(i, Origin::User, fx);
+    }
+
+    /// `f`: the next filter of the forum on top (frontpage, all, curated; `social.md` §12.3).
+    fn filter(&mut self, fx: &mut Vec<Effect>) {
+        let next = match self.top_forum_screen().map(|f| f.filter) {
+            Some(PostFilter::Frontpage) => PostFilter::All,
+            Some(PostFilter::All) => PostFilter::Curated,
+            Some(PostFilter::Curated) => PostFilter::Frontpage,
+            None => {
+                self.say(Tone::Info, lit("Open a forum to filter its posts."));
+                return;
+            }
+        };
+        self.set_filter(next, fx);
+    }
+
+    /// Lists the forum on top with `filter`.
+    fn set_filter(&mut self, filter: PostFilter, fx: &mut Vec<Effect>) {
+        let Some(i) = self.stack.len().checked_sub(1) else {
+            return;
+        };
+        let ScreenKind::Forum(s) = &mut self.stack[i].kind else {
+            self.say(Tone::Info, lit("Open a forum to filter its posts."));
+            return;
+        };
+        s.filter = filter;
+        s.tab = ForumTab::Posts;
         s.pos = ListPos::default();
         s.pending = None;
         self.reload(i, Origin::User, fx);
@@ -1902,7 +2898,7 @@ impl State {
                 if forums.is_empty() {
                     self.say(
                         Tone::Info,
-                        lit("You follow no forum yet: run `lessdugin join <forum>`."),
+                        lit("You follow no forum yet: open one with `:open <owner>/<slug>`."),
                     );
                     return;
                 }
@@ -2104,6 +3100,48 @@ impl State {
                     ]),
                 ),
             },
+            Compose::Edit { uri, base } => {
+                let mut draft = (**base).clone();
+                match &mut draft {
+                    // the text replaces the body's markdown; its media (the cached items, as
+                    // `start_edit` read them) stay, or the edit would delete them
+                    // a quick take has no title line (data-model.md PO4): the text is its body
+                    Draft::Post { post, .. } if post.kind == PostKind::QuickTake => {
+                        post.body.markdown = text.clone();
+                    }
+                    Draft::Post { post, .. } => match editor::split_post(&text) {
+                        Ok((title, body)) => {
+                            // an unchanged first line keeps the title as it was (`split_post`
+                            // drops a leading `#`, which an article's title may start with)
+                            let first = text.trim_start().lines().next().unwrap_or("").trim();
+                            if post.title.as_deref().map(str::trim) != Some(first) {
+                                post.title = Some(title);
+                            }
+                            post.body.markdown = body;
+                        }
+                        Err(why) => {
+                            self.say(
+                                Tone::Error,
+                                cat([
+                                    lit("Not edited: "),
+                                    tt(why),
+                                    lit(". Run :edit to edit it again."),
+                                ]),
+                            );
+                            return;
+                        }
+                    },
+                    Draft::Comment { comment, .. } => {
+                        comment.body.markdown = text.clone();
+                    }
+                }
+                self.say(Tone::Info, lit("Queuing the edit..."));
+                fx.push(Effect::Edit {
+                    uri: uri.clone(),
+                    draft,
+                    text,
+                });
+            }
         }
     }
 
@@ -2191,6 +3229,53 @@ impl State {
             }
             ScreenKind::Home(_) | ScreenKind::Mod(_) | ScreenKind::Notifications(_) => None,
         }
+    }
+
+    /// The item an opinion command acts on, with its forum: the subject the command line named
+    /// (a uri or any reference `parse_ref` takes; its forum when a screen on the stack shows
+    /// it, else none, and the engine checks it), or the selection.
+    fn command_subject(&self, named: Option<&str>) -> Option<(String, String)> {
+        match named {
+            Some(n) => Some((n.to_owned(), self.shown_forum(n).unwrap_or_default())),
+            None => self.opinion_subject(),
+        }
+    }
+
+    /// The forum of `uri` when a screen on the stack shows it (a post in a list or the Activity
+    /// tab, an item of a thread).
+    fn shown_forum(&self, uri: &str) -> Option<String> {
+        self.stack.iter().rev().find_map(|s| match &s.kind {
+            ScreenKind::Forum(f) => {
+                let listed =
+                    f.data
+                        .as_ref()
+                        .is_some_and(|d| d.list.items.iter().any(|p| p.uri == uri))
+                        || f.activity.as_ref().is_some_and(|a| {
+                            a.list.items.iter().any(|i| {
+                                i.post.uri == uri || i.comments.iter().any(|c| c.uri == uri)
+                            })
+                        });
+                listed.then(|| f.uri.clone())
+            }
+            ScreenKind::Thread(t) => {
+                let d = t.data.as_ref()?;
+                let ThreadRoot::Post(p) = &d.view.post else {
+                    return None;
+                };
+                (p.post.uri == uri || d.view.comments.iter().any(|c| c.uri == uri))
+                    .then(|| p.post.forum.clone())
+            }
+            _ => None,
+        })
+    }
+
+    /// True if the thread on top holds `uri` (its react tallies are known).
+    fn thread_holds(&self, uri: &str) -> bool {
+        self.top_thread()
+            .and_then(|t| t.data.as_ref())
+            .is_some_and(|d| {
+                thread::root_uri(d) == uri || d.view.comments.iter().any(|c| c.uri == uri)
+            })
     }
 
     /// The viewer caps of `forum` from the screens below (a Forum screen has its own).
@@ -2460,8 +3545,7 @@ impl State {
     }
 
     /// `Enter`: reacts with the selected palette entry (the viewer's own react of the same
-    /// stance toggles off; a stance switch removes and re-adds, as the engine coalesces the
-    /// two into one opinion record).
+    /// stance toggles off; a stance switch is one add, which replaces the stance in place).
     fn react_choose(&mut self, fx: &mut Vec<Effect>) {
         let Some(o) = self.react.clone() else {
             return;
@@ -2499,12 +3583,10 @@ impl State {
         match existing {
             // the viewer already holds this stance: take it back
             Some(s) if s == o.stance => fx.push(react(o.stance, true)),
-            // the opposite stance: remove it, then add the new one (one opinion record)
-            Some(s) => {
-                fx.push(react(s, true));
-                fx.push(react(o.stance, false));
-            }
-            None => fx.push(react(o.stance, false)),
+            // the opposite stance, or none: one add (AddReact replaces a held stance in place;
+            // a separate remove would be a second task the runtime may run first, and a remove
+            // that lands after the add deletes the react)
+            Some(_) | None => fx.push(react(o.stance, false)),
         }
         self.react = None;
         self.say(Tone::Info, lit("Recording the react..."));
@@ -2513,45 +3595,51 @@ impl State {
     // -----------------------------------------------------------------------------------------
     // moderation (M3, synthesis-v1.md §6.11, social.md §4.4)
 
-    /// The item and author the mod menu acts on: `(item uri, forum, author did)`. The author
-    /// is the selected comment's author, or the thread's post author, or (on a list) the
-    /// selected post's author.
-    fn mod_subject(&self) -> Option<(String, String, String)> {
+    /// The item and authors the mod menu acts on: the selected comment or post, its thread's
+    /// post and their authors (on a list: the selected post, its own thread).
+    fn mod_subject(&self) -> Option<ModSubject> {
         match &self.stack.last()?.kind {
-            ScreenKind::Forum(s) => s
-                .selected()
-                .map(|p| (p.uri.clone(), p.forum.clone(), p.author.did.clone())),
+            ScreenKind::Forum(s) => s.selected().map(|p| ModSubject {
+                item: p.uri.clone(),
+                forum: p.forum.clone(),
+                author: p.author.did.clone(),
+                post: p.uri.clone(),
+                post_author: p.author.did.clone(),
+                comment: false,
+            }),
             ScreenKind::Thread(t) => {
                 let d = t.data.as_ref()?;
-                let forum = match &d.view.post {
-                    ThreadRoot::Post(p) => p.post.forum.clone(),
-                    ThreadRoot::Missing { .. } => return None,
+                let ThreadRoot::Post(p) = &d.view.post else {
+                    return None;
                 };
                 let uri = t.layout.items.get(t.pos.selected)?.uri.clone();
-                let author = match d.view.comments.iter().find(|c| c.uri == uri) {
-                    Some(c) => c.author.did.clone(),
-                    None => match &d.view.post {
-                        ThreadRoot::Post(p) => p.post.author.did.clone(),
-                        ThreadRoot::Missing { .. } => return None,
-                    },
-                };
-                Some((uri, forum, author))
+                let comment = d.view.comments.iter().find(|c| c.uri == uri);
+                Some(ModSubject {
+                    author: comment
+                        .map_or_else(|| p.post.author.did.clone(), |c| c.author.did.clone()),
+                    comment: comment.is_some(),
+                    item: uri,
+                    forum: p.post.forum.clone(),
+                    post: p.post.uri.clone(),
+                    post_author: p.post.author.did.clone(),
+                })
             }
             _ => None,
         }
     }
 
     /// `m`: opens the mod menu for the selected item (and its author) when the viewer may
-    /// moderate the forum (`ViewerCaps.moderate`, §4.4), else says why not.
+    /// moderate the forum (`ViewerCaps.moderate`, §4.4) or the thread (author moderation, §4.9),
+    /// else says why not.
     fn open_mod_menu(&mut self) {
-        let Some((item, forum, author)) = self.mod_subject() else {
+        let Some(subject) = self.mod_subject() else {
             self.say(Tone::Info, lit("Nothing selected to moderate."));
             return;
         };
-        let caps = self.caps_of(&forum).cloned();
+        let caps = self.caps_of(&subject.forum).cloned();
         let Some(c) = caps.as_ref() else {
             // no forum header on the stack: the engine's own checks decide
-            self.mod_menu = Some(self.mod_menu_for(&forum, &item, &author, None));
+            self.mod_menu = Some(self.mod_menu_for(&subject, None));
             return;
         };
         if !c.moderate && !c.author_mod_personal && !c.author_mod_frontpage {
@@ -2561,48 +3649,37 @@ impl State {
             );
             return;
         }
-        self.mod_menu = Some(self.mod_menu_for(&forum, &item, &author, Some(c)));
+        self.mod_menu = Some(self.mod_menu_for(&subject, Some(c)));
     }
 
-    /// The menu's entries for the selected item and author, from the viewer's caps
-    /// (`ViewerCaps.moderate`/`rank`/`curate`; `social.md` §4.4).
-    fn mod_menu_for(
-        &self,
-        forum: &str,
-        item: &str,
-        author: &str,
-        caps: Option<&ViewerCaps>,
-    ) -> ModMenu {
+    /// The menu's entries for the selected item and authors, from the viewer's caps
+    /// (`ViewerCaps.moderate`/`rank`/`curate`, `social.md` §4.4; the author tier of §4.9 in
+    /// the viewer's own threads). The CLI's meaning of each verb: an override asserts the
+    /// opposite value, a "retract" removes the viewer's own assertion. Nothing is offered whose
+    /// subject would be the viewer.
+    fn mod_menu_for(&self, m: &ModSubject, caps: Option<&ViewerCaps>) -> ModMenu {
         let moderate = caps.is_none_or(|c| c.moderate);
         let curate = caps.is_none_or(|c| c.curate);
+        let author_mod = caps.is_none_or(|c| c.author_mod_personal || c.author_mod_frontpage);
         let me = self.account.as_ref().map(|a| a.did.as_str()).unwrap_or("");
-        let own_thread = me == author;
-        let assert = |action: ModActionValue| ModActionIntent::Assert {
+        // author moderation belongs to the author of the thread's POST (§4.9), and acts on
+        // other people's comments in it
+        let own_thread = !me.is_empty() && me == m.post_author;
+        let own_item = !me.is_empty() && me == m.author;
+        let forum = m.forum.as_str();
+        let assert_on =
+            |scope: ModScope, subject: &str, action: ModActionValue| ModActionIntent::Assert {
+                forum: forum.to_owned(),
+                scope,
+                subject: subject.to_owned(),
+                action,
+                reason: None,
+                until_ms: None,
+            };
+        let remove_on = |scope: ModScope, subject: &str, key: &str| ModActionIntent::Remove {
             forum: forum.to_owned(),
-            scope: ModScope::Forum,
-            subject: item.to_owned(),
-            action,
-            reason: None,
-            until_ms: None,
-        };
-        let remove = |key: &'static str| ModActionIntent::Remove {
-            forum: forum.to_owned(),
-            scope: ModScope::Forum,
-            subject: item.to_owned(),
-            action_key: key.to_owned(),
-        };
-        let user_assert = |action: ModActionValue| ModActionIntent::Assert {
-            forum: forum.to_owned(),
-            scope: ModScope::Forum,
-            subject: author.to_owned(),
-            action,
-            reason: None,
-            until_ms: None,
-        };
-        let user_remove = |key: &'static str| ModActionIntent::Remove {
-            forum: forum.to_owned(),
-            scope: ModScope::Forum,
-            subject: author.to_owned(),
+            scope,
+            subject: subject.to_owned(),
             action_key: key.to_owned(),
         };
         let mut e = Vec::new();
@@ -2611,119 +3688,222 @@ impl State {
             intent: Some(intent),
             queue: false,
             log: false,
+            merge: None,
         };
+        let pin_scope = if m.comment {
+            PinScope::Thread
+        } else {
+            PinScope::Forum
+        };
+        let pin_key = if m.comment { "pin:thread" } else { "pin:forum" };
         if moderate {
+            let f = ModScope::Forum;
+            let hide = |spam| ModActionValue::Hide {
+                hidden: true,
+                spam,
+                show_reason: true,
+            };
+            e.push(entry("hide this item", assert_on(f, &m.item, hide(false))));
+            e.push(entry("hide as spam", assert_on(f, &m.item, hide(true))));
             e.push(entry(
-                "hide this item",
-                assert(ModActionValue::Hide {
-                    hidden: true,
-                    spam: false,
-                    show_reason: true,
-                }),
+                "keep visible (override a hide)",
+                assert_on(
+                    f,
+                    &m.item,
+                    ModActionValue::Hide {
+                        hidden: false,
+                        spam: false,
+                        show_reason: true,
+                    },
+                ),
+            ));
+            e.push(entry("retract your hide", remove_on(f, &m.item, "hide")));
+            if !own_item {
+                e.push(entry(
+                    "ban the author",
+                    assert_on(
+                        f,
+                        &m.author,
+                        ModActionValue::Access {
+                            level: AccessLevel::Banned,
+                        },
+                    ),
+                ));
+                e.push(entry("unban the author", remove_on(f, &m.author, "access")));
+            }
+            e.push(entry(
+                if m.comment {
+                    "pin in the thread"
+                } else {
+                    "pin in the forum"
+                },
+                assert_on(
+                    f,
+                    &m.item,
+                    ModActionValue::Pin {
+                        scope: pin_scope,
+                        pinned: true,
+                    },
+                ),
             ));
             e.push(entry(
-                "hide as spam",
-                assert(ModActionValue::Hide {
-                    hidden: true,
-                    spam: true,
-                    show_reason: true,
-                }),
+                "unpin (override a pin)",
+                assert_on(
+                    f,
+                    &m.item,
+                    ModActionValue::Pin {
+                        scope: pin_scope,
+                        pinned: false,
+                    },
+                ),
             ));
-            e.push(entry("unhide (keep)", remove("hide")));
+            e.push(entry("retract your pin", remove_on(f, &m.item, pin_key)));
+            // locks and tiers belong to the thread's post
             e.push(entry(
-                "ban the author",
-                user_assert(ModActionValue::Access {
-                    level: AccessLevel::Banned,
-                }),
+                "lock the thread",
+                assert_on(f, &m.post, ModActionValue::Lock { locked: true }),
             ));
-            e.push(entry("unban the author", user_remove("access")));
             e.push(entry(
-                "pin in the forum",
-                assert(ModActionValue::Pin {
-                    scope: PinScope::Forum,
-                    pinned: true,
-                }),
+                "unlock (override a lock)",
+                assert_on(f, &m.post, ModActionValue::Lock { locked: false }),
             ));
-            e.push(entry("unpin", remove("pin:forum")));
-            e.push(entry("lock", assert(ModActionValue::Lock { locked: true })));
-            e.push(entry("unlock", remove("lock")));
+            e.push(entry("retract your lock", remove_on(f, &m.post, "lock")));
+            let tier = |t| ModActionValue::Tier {
+                tier: t,
+                notice: None,
+            };
             e.push(entry(
                 "tier: personal",
-                assert(ModActionValue::Tier {
-                    tier: Tier::Personal,
-                    notice: None,
-                }),
+                assert_on(f, &m.post, tier(Tier::Personal)),
             ));
             e.push(entry(
                 "tier: frontpage",
-                assert(ModActionValue::Tier {
-                    tier: Tier::Frontpage,
-                    notice: None,
-                }),
+                assert_on(f, &m.post, tier(Tier::Frontpage)),
             ));
             if curate {
                 e.push(entry(
                     "tier: curated",
-                    assert(ModActionValue::Tier {
-                        tier: Tier::Curated,
-                        notice: None,
-                    }),
+                    assert_on(f, &m.post, tier(Tier::Curated)),
+                ));
+            }
+            if !own_item {
+                // each sets one dimension of the viewer's `#restrict` and the engine keeps the
+                // other (m3r-2); the capability presets add to the capabilities it restricts
+                // already
+                let restrict = |label, capabilities, nullify_votes, merge| ModEntry {
+                    merge,
+                    ..entry(
+                        label,
+                        assert_on(
+                            f,
+                            &m.author,
+                            ModActionValue::Restrict {
+                                capabilities,
+                                nullify_votes,
+                            },
+                        ),
+                    )
+                };
+                e.push(restrict(
+                    "restrict the author (posting)",
+                    Some(vec![Capability::Post, Capability::Comment]),
+                    None,
+                    Some(RestrictDim::AddCapabilities),
+                ));
+                e.push(restrict(
+                    "restrict the author (voting, reacting)",
+                    Some(vec![Capability::Vote, Capability::React]),
+                    None,
+                    Some(RestrictDim::AddCapabilities),
+                ));
+                e.push(restrict(
+                    "nullify the author's votes",
+                    None,
+                    Some(true),
+                    None,
+                ));
+                e.push(restrict(
+                    "restore the author's votes",
+                    None,
+                    Some(false),
+                    None,
+                ));
+                e.push(entry(
+                    "retract your restriction",
+                    remove_on(f, &m.author, "restrict"),
+                ));
+            }
+        }
+        if own_thread && author_mod {
+            // the author tier in the viewer's own thread (§4.9): other people's comments, and
+            // the viewer's own post
+            let a = ModScope::Author;
+            if m.comment && !own_item {
+                e.push(entry(
+                    "hide this comment (your thread)",
+                    assert_on(
+                        a,
+                        &m.item,
+                        ModActionValue::Hide {
+                            hidden: true,
+                            spam: false,
+                            show_reason: true,
+                        },
+                    ),
+                ));
+                e.push(entry(
+                    "unhide this comment (your thread)",
+                    remove_on(a, &m.item, "hide"),
+                ));
+                e.push(entry(
+                    "pin this comment (your thread)",
+                    assert_on(
+                        a,
+                        &m.item,
+                        ModActionValue::Pin {
+                            scope: PinScope::Thread,
+                            pinned: true,
+                        },
+                    ),
+                ));
+                e.push(entry(
+                    "unpin this comment (your thread)",
+                    remove_on(a, &m.item, "pin:thread"),
+                ));
+                e.push(entry(
+                    "ban the author from your threads",
+                    assert_on(
+                        a,
+                        &m.author,
+                        ModActionValue::Access {
+                            level: AccessLevel::Banned,
+                        },
+                    ),
+                ));
+                e.push(entry(
+                    "lift your ban of the author",
+                    remove_on(a, &m.author, "access"),
                 ));
             }
             e.push(entry(
-                "restrict the author (posting)",
-                user_assert(ModActionValue::Restrict {
-                    capabilities: vec![Capability::Post, Capability::Comment],
-                    nullify_votes: false,
-                }),
+                "lock your thread",
+                assert_on(a, &m.post, ModActionValue::Lock { locked: true }),
             ));
-            e.push(entry(
-                "nullify the author's votes",
-                user_assert(ModActionValue::Restrict {
-                    capabilities: vec![],
-                    nullify_votes: true,
-                }),
-            ));
-            e.push(entry("unrestrict", user_remove("restrict")));
-        }
-        if !moderate && own_thread {
-            // author scope on one's own thread (social.md §4.9): hide a comment, ban a user
-            let hide = ModActionIntent::Assert {
-                forum: forum.to_owned(),
-                scope: ModScope::Author,
-                subject: item.to_owned(),
-                action: ModActionValue::Hide {
-                    hidden: true,
-                    spam: false,
-                    show_reason: true,
-                },
-                reason: None,
-                until_ms: None,
-            };
-            e.push(entry("hide this comment (your thread)", hide));
-            let ban = ModActionIntent::Assert {
-                forum: forum.to_owned(),
-                scope: ModScope::Author,
-                subject: author.to_owned(),
-                action: ModActionValue::Access {
-                    level: AccessLevel::Banned,
-                },
-                reason: None,
-                until_ms: None,
-            };
-            e.push(entry("ban the author (your threads)", ban));
+            e.push(entry("unlock your thread", remove_on(a, &m.post, "lock")));
         }
         e.push(ModEntry {
             label: "mod queue",
             intent: None,
             queue: true,
             log: false,
+            merge: None,
         });
         e.push(ModEntry {
             label: "mod log",
             intent: None,
             queue: false,
             log: true,
+            merge: None,
         });
         ModMenu {
             forum: forum.to_owned(),
@@ -2796,6 +3976,7 @@ impl State {
         let Some(intent) = e.intent.clone() else {
             return;
         };
+        let merge = e.merge;
         self.mod_menu = None;
         // ask for the optional reason before the write
         self.prompt = Some(Prompt {
@@ -2804,6 +3985,7 @@ impl State {
             intent,
             forum: m.forum.clone(),
             screen: m.screen,
+            merge,
         });
     }
 
@@ -2853,10 +4035,22 @@ impl State {
         match result {
             Ok(t) => {
                 let mut msg = lit("Moderator list updated.");
-                if let Some(n) = t.notices.first() {
-                    msg = cat([lit("Moderator list updated: "), tt(&n.message), lit(".")]);
+                if !t.notices.is_empty() {
+                    msg = cat([
+                        lit("Moderator list updated: "),
+                        notices_text(&t.notices),
+                        lit("."),
+                    ]);
                 }
                 self.say(Tone::Good, msg);
+                // a removal's notices name the adoption write and list what it does not
+                // adopt (`data-model.md` §8.6): more than the status line holds
+                if t.notices.len() > 1 {
+                    self.show_panel(
+                        "Moderator change",
+                        t.notices.iter().map(|n| tt(&n.message)).collect(),
+                    );
+                }
                 self.follow_own = Some(screen);
                 if let Some(i) = self.index_of(screen) {
                     self.reload(i, Origin::User, fx);
@@ -2985,8 +4179,8 @@ impl State {
         self.push(ScreenKind::Notifications(Box::default()), fx);
     }
 
-    /// `M` (or the notifications' opening): marks every listed notification read
-    /// (`engine.mark_notifications_read`).
+    /// `M` and `:read-all`: marks every notification read, the listed ones and any past the
+    /// list (`engine.mark_all_notifications_read`).
     fn mark_all_read(&mut self, fx: &mut Vec<Effect>) {
         let Some(s) = self.stack.last().and_then(|s| match &s.kind {
             ScreenKind::Notifications(s) => Some(s.clone()),
@@ -2998,22 +4192,36 @@ impl State {
             );
             return;
         };
-        let ids: Vec<String> = s
-            .data
-            .as_ref()
-            .map(|d| {
-                d.items
-                    .iter()
-                    .filter(|n| !n.read)
-                    .map(|n| n.id.clone())
-                    .collect()
-            })
-            .unwrap_or_default();
-        if ids.is_empty() {
+        // `unread` counts every unread notification, listed or not
+        if s.data.as_ref().is_none_or(|d| d.unread == 0) {
             self.say(Tone::Info, lit("Nothing to mark read."));
             return;
         }
         let screen = self.stack.last().map_or(0, |x| x.id);
+        fx.push(Effect::MarkAllRead { screen });
+    }
+
+    /// `:read`: marks the selected notification read.
+    fn mark_selected_read(&mut self, fx: &mut Vec<Effect>) {
+        let Some((id, screen)) = self.stack.last().and_then(|s| match &s.kind {
+            ScreenKind::Notifications(n) => n
+                .data
+                .as_ref()
+                .and_then(|d| d.items.get(n.pos.cursor))
+                .map(|item| (item, s.id)),
+            _ => None,
+        }) else {
+            self.say(
+                Tone::Info,
+                lit("Select a notification on the notifications screen (N)."),
+            );
+            return;
+        };
+        if id.read {
+            self.say(Tone::Info, lit("That notification is already read."));
+            return;
+        }
+        let ids = vec![id.id.clone()];
         fx.push(Effect::MarkRead { ids, screen });
     }
 
@@ -3023,6 +4231,7 @@ impl State {
         screen: ScreenId,
         origin: Origin,
         result: Result<NotificationList, EngineError>,
+        fx: &mut Vec<Effect>,
     ) {
         let Some(i) = self.index_of(screen) else {
             return;
@@ -3044,6 +4253,11 @@ impl State {
                 );
             }
             Err(e) => s.error = Some(e),
+        }
+        // a live reload asked for while this one ran (as `loaded`)
+        if s.dirty && s.loading == 0 {
+            s.dirty = false;
+            self.reload(i, Origin::Live, fx);
         }
     }
 
@@ -3198,7 +4412,7 @@ impl State {
     /// Runs a `:` command line against the engine through the same effects the keys use
     /// (`synthesis-v1.md` §6.11: the backstop that makes every MVP action reachable).
     fn run_command(&mut self, line: &str, fx: &mut Vec<Effect>) {
-        use crate::command::{ModVerb, Verb, agree_intent, mod_intent, vote_intent};
+        use crate::command::{ModTarget, Verb, agree_intent, mod_intent, vote_intent};
         let line = line.trim();
         if line.is_empty() || line == "help" || line == "?" {
             self.say(Tone::Info, tt(&crate::command::usage()));
@@ -3212,26 +4426,32 @@ impl State {
             }
         };
         match cmd.verb {
+            // a subject named on the command line wins over the selection (as `mod`)
             Verb::Vote(v) => {
-                let Some((subject, forum)) = self.opinion_subject() else {
+                let Some((subject, forum)) = self.command_subject(cmd.subject.as_deref()) else {
                     self.say(Tone::Info, lit("Nothing selected to vote on."));
                     return;
                 };
                 self.opinion_intent(vote_intent(v), subject, forum, "Vote", fx);
             }
             Verb::Agree(a) => {
-                let Some((subject, forum)) = self.opinion_subject() else {
+                let Some((subject, forum)) = self.command_subject(cmd.subject.as_deref()) else {
                     self.say(Tone::Info, lit("Nothing selected to vote on."));
                     return;
                 };
                 self.opinion_intent(agree_intent(a), subject, forum, "Vote", fx);
             }
-            Verb::React { id, against } => {
-                let Some((subject, forum)) = self.opinion_subject() else {
+            Verb::React { id, against, quote } => {
+                let Some((subject, forum)) = self.command_subject(cmd.subject.as_deref()) else {
                     self.say(Tone::Info, lit("Nothing selected to react to."));
                     return;
                 };
-                if against && !self.react_tallies(&subject).contains_key(&id) {
+                // the tallies are known only for the thread on top; elsewhere the engine says
+                // whether there is anything to react against
+                if against
+                    && self.thread_holds(&subject)
+                    && !self.react_tallies(&subject).contains_key(&id)
+                {
                     self.say(
                         Tone::Warn,
                         tt(&format!(
@@ -3250,7 +4470,13 @@ impl State {
                     OpinionIntent::React {
                         id,
                         stance,
-                        quote: None,
+                        // `exact` only: the engine derives the rest from the item's text
+                        quote: quote.map(|exact| TextQuote {
+                            exact,
+                            prefix: None,
+                            suffix: None,
+                            start: None,
+                        }),
                         remove: false,
                     },
                     subject,
@@ -3260,12 +4486,18 @@ impl State {
                 );
             }
             Verb::Unreact { id } => {
-                let Some((subject, forum)) = self.opinion_subject() else {
+                let Some((subject, forum)) = self.command_subject(cmd.subject.as_deref()) else {
                     self.say(Tone::Info, lit("Nothing selected to react to."));
                     return;
                 };
-                let Some(stance) = self.react_tallies(&subject).get(&id).and_then(|t| t.mine)
-                else {
+                let held = self.react_tallies(&subject).get(&id).and_then(|t| t.mine);
+                // a removal takes the react back whatever its stance, so an item the screen does
+                // not show is asked for with either; the engine says when there is none
+                let held = match held {
+                    None if !self.thread_holds(&subject) => Some(Stance::For),
+                    h => h,
+                };
+                let Some(stance) = held else {
                     self.say(
                         Tone::Info,
                         tt(&format!(
@@ -3288,18 +4520,14 @@ impl State {
                 );
             }
             Verb::Mod(m) => {
-                // a subject named on the command line wins; else the selection
+                // a subject named on the command line wins; else the selection (the item, its
+                // thread's post or its author, as the verb acts on)
                 let named = cmd.subject.clone();
                 let subject = match named.or_else(|| {
-                    self.mod_subject().map(|(item, _, author)| match m {
-                        // access-scoped actions act on the author, the rest on the item
-                        ModVerb::Ban
-                        | ModVerb::Unban
-                        | ModVerb::Restrict
-                        | ModVerb::Nullify
-                        | ModVerb::Unrestrict
-                        | ModVerb::Approve => author,
-                        _ => item,
+                    self.mod_subject().map(|sel| match m.target() {
+                        ModTarget::Author => sel.author,
+                        ModTarget::Post => sel.post,
+                        ModTarget::Item => sel.item,
                     })
                 }) {
                     Some(s) => s,
@@ -3318,7 +4546,9 @@ impl State {
                 let Some(screen) = self.stack.last().map(|s| s.id) else {
                     return;
                 };
-                if m == ModVerb::Approve {
+                let Some(intent) = mod_intent(&m, &forum, &subject, cmd.reason.clone(), &cmd.opts)
+                else {
+                    // `approve` is a grant
                     fx.push(Effect::Grant {
                         forum,
                         actors: vec![subject],
@@ -3326,17 +4556,18 @@ impl State {
                     });
                     self.say(Tone::Info, lit("Approving..."));
                     return;
-                }
-                let intent = mod_intent(&m, &forum, &subject, cmd.reason.clone());
+                };
                 self.say(Tone::Info, lit("Mod action..."));
                 fx.push(Effect::ModAction {
                     intent,
                     forum,
                     screen,
+                    merge: None,
                 });
             }
             Verb::Notifications { all } => self.command_notifications(all, fx),
-            Verb::Read | Verb::ReadAll => self.mark_all_read(fx),
+            Verb::Read => self.mark_selected_read(fx),
+            Verb::ReadAll => self.mark_all_read(fx),
             Verb::Activity => {
                 let Some(top) = self.stack.last_mut() else {
                     return;
@@ -3351,8 +4582,20 @@ impl State {
                 }
                 self.switch_forum_tab(fx);
             }
+            Verb::Sort(name) => match self.stack.last().map(|s| &s.kind) {
+                Some(ScreenKind::Forum(_)) => match name.post() {
+                    Some(sort) => self.set_post_sort(sort, fx),
+                    None => self.say(Tone::Info, lit("latest-reply sorts a thread's comments.")),
+                },
+                Some(ScreenKind::Thread(_)) => match name.comment() {
+                    Some(sort) => self.set_comment_sort(sort, fx),
+                    None => self.say(Tone::Info, lit("recent-comments sorts a forum's posts.")),
+                },
+                _ => self.say(Tone::Info, lit("Open a forum or a thread to sort it.")),
+            },
+            Verb::Filter(filter) => self.set_filter(filter, fx),
             Verb::User { actor } => {
-                let actor = actor.or_else(|| self.mod_subject().map(|(_, _, a)| a));
+                let actor = actor.or_else(|| self.mod_subject().map(|m| m.author));
                 match actor {
                     Some(a) => self.show_user(&a, fx),
                     None => self.say(Tone::Info, lit("Nothing selected: name an actor.")),
@@ -3397,6 +4640,252 @@ impl State {
                     screen,
                 });
             }
+            other => self.run_more(other, cmd.subject, fx),
+        }
+    }
+
+    /// The `:` verbs past the M3 opinion and moderation set (`engine-api.md` §3.2, §3.5,
+    /// §3.6): forums and membership, your own items, and the local state.
+    fn run_more(
+        &mut self,
+        verb: crate::command::Verb,
+        subject: Option<String>,
+        fx: &mut Vec<Effect>,
+    ) {
+        use crate::command::{SubTarget, Verb};
+        let screen = self.top().map_or(0, |s| s.id);
+        // the forum a membership or forum verb acts on: the one on screen
+        let forum = |st: &mut Self| -> Option<String> {
+            let f = st.top_forum();
+            if f.is_none() {
+                st.say(Tone::Info, lit("Open a forum first."));
+            }
+            f
+        };
+        // the item a verb on one item acts on: the one named, else the selection
+        let item = |st: &mut Self, what: &str| -> Option<(String, String)> {
+            let it = st.command_subject(subject.as_deref());
+            if it.is_none() {
+                st.say(Tone::Info, tt(&format!("Nothing selected to {what}.")));
+            }
+            it
+        };
+        match verb {
+            Verb::Open { target } => fx.push(Effect::Open { target }),
+            Verb::Follow { forum: named, on } => {
+                let Some(f) = named.or_else(|| forum(self)) else {
+                    return;
+                };
+                fx.push(Effect::Follow {
+                    forum: f.clone(),
+                    on,
+                });
+                // a forum followed by name opens
+                if on
+                    && !self
+                        .stack
+                        .iter()
+                        .any(|s| matches!(&s.kind, ScreenKind::Forum(x) if x.uri == f))
+                {
+                    fx.push(Effect::Open { target: f });
+                }
+            }
+            Verb::Join { note } => {
+                let Some(forum) = forum(self) else { return };
+                if self.can_write() {
+                    fx.push(Effect::Join {
+                        forum,
+                        note,
+                        screen,
+                    });
+                }
+            }
+            Verb::Leave => {
+                let Some(forum) = forum(self) else { return };
+                if self.can_write() {
+                    fx.push(Effect::Leave { forum, screen });
+                }
+            }
+            Verb::Members { status, pending } => {
+                let Some(forum) = forum(self) else { return };
+                fx.push(Effect::LoadMembers {
+                    forum,
+                    status,
+                    pending,
+                });
+            }
+            Verb::Access { op, actors } => {
+                let Some(forum) = forum(self) else { return };
+                if self.can_write() {
+                    fx.push(Effect::Access {
+                        op,
+                        forum,
+                        actors,
+                        screen,
+                    });
+                }
+            }
+            Verb::Adopt { former } => {
+                let Some(forum) = forum(self) else { return };
+                if self.can_write() {
+                    fx.push(Effect::Adopt {
+                        forum,
+                        former,
+                        screen,
+                    });
+                }
+            }
+            Verb::ForumCreate { slug, name, open } => {
+                if !self.can_write() {
+                    return;
+                }
+                let mut draft = ForumDraft::new(slug, name);
+                if open {
+                    draft.membership = MembershipMode::Open;
+                }
+                fx.push(Effect::ForumCreate { draft });
+            }
+            Verb::ForumEdit(changes) => {
+                let Some(forum) = forum(self) else { return };
+                if self.can_write() {
+                    fx.push(Effect::ForumEdit {
+                        forum,
+                        changes,
+                        screen,
+                    });
+                }
+            }
+            Verb::Edit => {
+                let Some((uri, forum)) = item(self, "edit") else {
+                    return;
+                };
+                if self.can_write() {
+                    fx.push(Effect::StartEdit { uri, forum });
+                }
+            }
+            Verb::Delete | Verb::Retract | Verb::Redact => {
+                let (op, what) = match verb {
+                    Verb::Delete => (ItemOp::Delete, "delete"),
+                    Verb::Retract => (ItemOp::Retract, "retract"),
+                    _ => (ItemOp::Redact, "redact"),
+                };
+                let Some((uri, forum)) = item(self, what) else {
+                    return;
+                };
+                if !self.can_write() {
+                    return;
+                }
+                let e = Effect::ItemWrite {
+                    op,
+                    uri,
+                    forum,
+                    screen,
+                };
+                // neither a deletion nor a redaction can be undone: ask first
+                let question = match op {
+                    ItemOp::Delete => Some("Delete this item, with its revisions?"),
+                    ItemOp::Redact => {
+                        Some("Delete this item's version history? It cannot be undone.")
+                    }
+                    ItemOp::Retract => None,
+                };
+                match question {
+                    Some(q) => {
+                        self.confirm = Some(Confirm {
+                            text: q.to_owned(),
+                            effects: vec![e],
+                        });
+                    }
+                    None => fx.push(e),
+                }
+            }
+            Verb::Raw => {
+                let Some((uri, forum)) = item(self, "show") else {
+                    return;
+                };
+                fx.push(Effect::LoadRaw { uri, forum });
+            }
+            Verb::Bookmark { on } => {
+                let Some((uri, forum)) = item(self, "bookmark") else {
+                    return;
+                };
+                if self.can_write() {
+                    fx.push(Effect::Bookmark { uri, forum, on });
+                }
+            }
+            Verb::Subscribe { target, on } => {
+                let subscription = match target {
+                    SubTarget::Post(named) => {
+                        // a comment's subscription is its thread's post
+                        let post = named.or_else(|| {
+                            self.top_thread()
+                                .and_then(|t| t.post())
+                                .map(|p| p.post.uri.clone())
+                                .or_else(|| {
+                                    self.top_forum_screen()?.selected().map(|p| p.uri.clone())
+                                })
+                        });
+                        let Some(uri) = post else {
+                            self.say(Tone::Info, lit("Nothing selected to subscribe to."));
+                            return;
+                        };
+                        Subscription::Post { uri }
+                    }
+                    SubTarget::Forum => {
+                        let Some(uri) = forum(self) else { return };
+                        Subscription::Forum { uri }
+                    }
+                    SubTarget::User(did) => Subscription::User { did },
+                    SubTarget::Tag(slug) => {
+                        let Some(forum) = forum(self) else { return };
+                        Subscription::Tag { forum, slug }
+                    }
+                };
+                if self.can_write() {
+                    fx.push(Effect::Subscribe { subscription, on });
+                }
+            }
+            Verb::Mute { actor, on } => {
+                let Some(actor) = actor.or_else(|| self.mod_subject().map(|m| m.author)) else {
+                    self.say(Tone::Info, lit("Nothing selected: name an actor."));
+                    return;
+                };
+                if self.can_write() {
+                    fx.push(Effect::Mute { actor, on });
+                }
+            }
+            Verb::KarmaNotifications(cadence) => {
+                if cadence.is_none() || self.can_write() {
+                    fx.push(Effect::KarmaNotifications { cadence });
+                }
+            }
+            Verb::Settings { key, value } => fx.push(Effect::Settings {
+                set: key.map(|k| (k, value)),
+            }),
+            Verb::Undo => self.undo_last(fx),
+            Verb::Retry { id } => {
+                let id = match (id, self.failed.len()) {
+                    (Some(id), _) => id,
+                    (None, 0) => {
+                        self.say(Tone::Info, lit("No failed write to send again."));
+                        return;
+                    }
+                    (None, 1) => self.failed.iter().next().cloned().unwrap_or_default(),
+                    (None, _) => {
+                        let ids: Vec<&str> = self.failed.iter().map(String::as_str).collect();
+                        self.say(
+                            Tone::Info,
+                            tt(&format!("Which write? retry one of: {}", ids.join(", "))),
+                        );
+                        return;
+                    }
+                };
+                if self.can_write() {
+                    fx.push(Effect::Retry { id });
+                }
+            }
+            // the M3 verbs are run_command's
+            _ => {}
         }
     }
 
@@ -3529,7 +5018,7 @@ impl State {
             .moderators
             .iter()
             .find(|m| m.actor.did == actor || m.actor.handle.as_deref() == Some(actor));
-        let wrote_selected = self.mod_subject().is_some_and(|(_, _, a)| a == actor);
+        let wrote_selected = self.mod_subject().is_some_and(|m| m.author == actor);
         match role {
             Some(m) => {
                 let mut parts = vec![
@@ -3643,6 +5132,7 @@ impl State {
                     intent,
                     forum: p.forum,
                     screen: p.screen,
+                    merge: p.merge,
                 });
             }
             KeyCode::Backspace => {
@@ -3678,8 +5168,12 @@ impl State {
                     self.writes.insert(t.id.clone(), t.state);
                 }
                 let mut msg = lit("Mod action recorded.");
-                if let Some(n) = t.notices.first() {
-                    msg = cat([lit("Mod action recorded: "), tt(&n.message), lit(".")]);
+                if !t.notices.is_empty() {
+                    msg = cat([
+                        lit("Mod action recorded: "),
+                        notices_text(&t.notices),
+                        lit("."),
+                    ]);
                 }
                 self.say(Tone::Good, msg);
                 self.follow_own = Some(screen);
@@ -3700,6 +5194,7 @@ impl State {
         screen: ScreenId,
         queue: Option<Result<ModQueue, EngineError>>,
         log: Option<Result<ModLog, EngineError>>,
+        fx: &mut Vec<Effect>,
     ) {
         let Some(i) = self.index_of(screen) else {
             return;
@@ -3718,6 +5213,10 @@ impl State {
         }
         let len = m.row_count();
         m.pos.reveal(len, usize::from(self.height));
+        if s.dirty && s.loading == 0 {
+            s.dirty = false;
+            self.reload(i, Origin::Live, fx);
+        }
     }
 
     /// [`Action::OpinionDone`]: notices and the undo hint, or the refusal.
@@ -3740,11 +5239,11 @@ impl State {
                     self.writes.insert(t.id.clone(), t.state);
                 }
                 let mut msg = cat([lit(label), lit(" recorded (Backspace undoes).")]);
-                if let Some(n) = t.notices.first() {
+                if !t.notices.is_empty() {
                     msg = cat([
                         lit(label),
                         lit(" recorded: "),
-                        tt(&n.message),
+                        notices_text(&t.notices),
                         lit(" (Backspace undoes)."),
                     ]);
                 }
@@ -3805,6 +5304,10 @@ impl State {
         let is_top = i + 1 == self.stack.len();
         let s = &mut self.stack[i];
         s.loading = s.loading.saturating_sub(1);
+        // a load the user asked for (opening the thread, R, an own write) shows the thread to
+        // them: it is read. A live load is not, nor one that only counts as the user's while
+        // the screen settles (marking emits `Changed [Thread]`, which would reload it again)
+        let viewed = origin == Origin::User && is_top;
         let origin = if s.settling { Origin::User } else { origin };
         let mut failed = None;
         match result {
@@ -3824,8 +5327,8 @@ impl State {
                         HomeScreen::uris,
                     ),
                     (ScreenKind::Forum(s), Loaded::Forum(d)) => {
-                        // a load for another sort is superseded by the one in flight
-                        if d.list.sort == s.sort {
+                        // a load for another sort or filter is superseded by the one in flight
+                        if d.list.sort == s.sort && d.list.filter == s.filter {
                             receive_list(
                                 &mut s.data,
                                 &mut s.pending,
@@ -3836,7 +5339,16 @@ impl State {
                             );
                         }
                     }
-                    (ScreenKind::Thread(t), Loaded::Thread(d)) => t.receive(*d, origin, w, h),
+                    // as for a forum: a load in another comment sort is superseded
+                    (ScreenKind::Thread(t), Loaded::Thread(d)) if d.view.sort != t.opts.sort => {}
+                    (ScreenKind::Thread(t), Loaded::Thread(d)) => {
+                        if viewed && let ThreadRoot::Post(p) = &d.view.post {
+                            fx.push(Effect::MarkThreadRead {
+                                post: p.post.uri.clone(),
+                            });
+                        }
+                        t.receive(*d, origin, w, h);
+                    }
                     _ => {}
                 }
             }
@@ -3847,6 +5359,10 @@ impl State {
         }
         if let (Some(msg), true, Origin::User) = (failed, is_top, origin) {
             self.say(Tone::Error, msg);
+        }
+        // the thread on top shows what it now holds: what the autoload policy loads, loads
+        if is_top && matches!(self.stack[i].kind, ScreenKind::Thread(_)) {
+            self.autoload_media(fx);
         }
     }
 
@@ -3968,12 +5484,19 @@ impl State {
                         self.stack[i].stale = true;
                     }
                 }
-                // the header's badge follows the notifications
-                if topics
-                    .iter()
-                    .any(|t| matches!(t, Topic::Notifications | Topic::Forum { .. }))
-                {
+                // the header's badge follows the notifications (re-queried on a Notifications,
+                // Forum or Thread topic, `engine-api.md` §3.4)
+                if topics.iter().any(|t| {
+                    matches!(
+                        t,
+                        Topic::Notifications | Topic::Forum { .. } | Topic::Thread { .. }
+                    )
+                }) {
                     fx.push(Effect::LoadUnread);
+                }
+                // another client on this device may have acknowledged an interstitial
+                if self.account.is_some() && topics.contains(&Topic::Accounts) {
+                    fx.push(Effect::LoadAcknowledged);
                 }
             }
             Event::SyncProgress { forum, done, total } => {
@@ -3984,7 +5507,7 @@ impl State {
                     self.failed.remove(&id);
                     self.writes.insert(id, state);
                 }
-                WriteState::Done { .. } => {
+                WriteState::Done { report, .. } => {
                     self.writes.remove(&id);
                     self.failed.remove(&id);
                     self.op_writes.retain(|x| *x != id);
@@ -3998,6 +5521,21 @@ impl State {
                         None => {
                             self.finished.insert(id);
                         }
+                    }
+                    // an adoption's report (`mod adopt`, `mods remove`, `data-model.md` §8.6):
+                    // what it did not adopt lapses with the former moderator unless the
+                    // adopter's own assertion stands, so it is listed
+                    if !report.is_empty() {
+                        let n = u32::try_from(report.len()).unwrap_or(u32::MAX);
+                        self.say(
+                            Tone::Warn,
+                            cat([
+                                lit("Adoption sent; "),
+                                count(n, "assertion", "assertions"),
+                                lit(" not adopted (listed)."),
+                            ]),
+                        );
+                        self.show_panel("Adoption report", report.iter().map(|l| tt(l)).collect());
                     }
                 }
                 WriteState::Failed { error } => {
@@ -4042,6 +5580,132 @@ impl State {
     }
 }
 
+/// The inline images of the item `uri` of a thread, when its body shows (`visible_only`: only
+/// for a `Visible` item, as autoload requires).
+fn item_media(
+    d: &ThreadData,
+    uri: &str,
+    visible_only: bool,
+) -> Vec<lessdugin_core::dto::MediaView> {
+    use lessdugin_core::dto::ItemState;
+    let shown = |st: &ItemState| match st {
+        ItemState::Visible => true,
+        ItemState::Collapsed { .. } => !visible_only,
+        _ => false,
+    };
+    let media = match &d.view.post {
+        ThreadRoot::Post(p) if p.post.uri == uri => shown(&p.post.state).then_some(&p.body.media),
+        _ => d
+            .view
+            .comments
+            .iter()
+            .find(|c| c.uri == uri && !c.missing)
+            .and_then(|c| shown(&c.state).then_some(&c.body.media)),
+    };
+    media
+        .into_iter()
+        .flatten()
+        .filter(|m| thread::inline_image(&m.mime))
+        .cloned()
+        .collect()
+}
+
+/// The `:members` panel: one member per line, with what `MemberView` says of them.
+fn members_lines(members: &[MemberView]) -> Vec<TermText> {
+    if members.is_empty() {
+        return vec![lit("No members match.")];
+    }
+    members
+        .iter()
+        .map(|m| {
+            let role = match m.status {
+                ForumRole::Owner => "owner",
+                ForumRole::Admin => "admin",
+                ForumRole::Moderator => "moderator",
+                ForumRole::Member => "member",
+                ForumRole::Established => "established",
+                ForumRole::Newcomer => "newcomer",
+                ForumRole::None => "not a participant",
+            };
+            let mut parts = vec![actor(&m.actor), lit(role)];
+            if m.applicant {
+                parts.push(lit("applicant"));
+            }
+            if m.granted {
+                parts.push(lit("granted"));
+            }
+            if let Some(k) = m.karma {
+                parts.push(tt(&format!("karma {k}")));
+            }
+            if m.banned {
+                parts.push(lit("banned"));
+            }
+            if m.nullified {
+                parts.push(lit("votes nullified"));
+            }
+            if !m.restricted.is_empty() {
+                parts.push(tt(&format!("restricted: {}", m.restricted.join(", "))));
+            }
+            if let Some(n) = &m.membership_note {
+                parts.push(cat([lit("note: "), tt(n)]));
+            }
+            crate::text::joined(parts)
+        })
+        .collect()
+}
+
+/// The `:raw` panel (`social.md` §10.3, "shows everything, with annotations"): the record's
+/// state, validity and score, the mod actions naming it, and its JSON.
+fn raw_lines(r: &RawView) -> Vec<TermText> {
+    let json = |v: &serde_json::Value| serde_json::to_string_pretty(v).unwrap_or_default();
+    let mut out = vec![tt(&r.uri)];
+    if let Some(c) = &r.cid {
+        out.push(cat([lit("cid "), tt(c)]));
+    }
+    if let Some(st) = &r.state {
+        out.push(cat([
+            lit("state "),
+            tt(&serde_json::to_string(st).unwrap_or_default()),
+        ]));
+    }
+    if let Some(sc) = &r.score {
+        out.push(tt(&format!("score {}", sc.score)));
+    }
+    if r.validity.is_empty() {
+        out.push(lit("valid"));
+    }
+    for v in &r.validity {
+        out.push(cat([lit("violation: "), tt(v)]));
+    }
+    out.push(tt(&format!("{} mod actions name it", r.assertions.len())));
+    for a in &r.assertions {
+        out.extend(json(a).lines().map(|l| cat([lit("  "), tt(l)])));
+    }
+    match &r.record {
+        Some(v) => {
+            out.push(lit("record:"));
+            out.extend(json(v).lines().map(tt));
+        }
+        None => out.push(lit("The record is not cached.")),
+    }
+    out
+}
+
+/// The `:settings` panel.
+fn settings_lines(s: &Settings) -> Vec<TermText> {
+    let v = serde_json::to_value(s).unwrap_or_default();
+    let mut out = Vec::new();
+    if let Some(o) = v.as_object() {
+        for (k, val) in o {
+            out.push(tt(&format!("{k}: {val}")));
+        }
+    }
+    out.push(lit(
+        "Change one with `set <key> <value>`; `unset <key>` restores it.",
+    ));
+    out
+}
+
 fn st_is_ok(s: &SyncStatus) -> bool {
     matches!(s, SyncStatus::Done { .. })
 }
@@ -4083,6 +5747,7 @@ mod tests {
             state: WriteState::Done {
                 uri: "at://did:plc:x/c/1".into(),
                 cid: None,
+                report: Vec::new(),
             },
         }))
     }
@@ -4260,6 +5925,7 @@ mod tests {
                 state: WriteState::Done {
                     uri: "at://x".into(),
                     cid: None,
+                    report: Vec::new(),
                 },
             },
         ])));
@@ -4340,5 +6006,398 @@ mod tests {
         let mut line = String::from("vote ");
         complete(&mut line);
         assert_eq!(line, "vote ");
+    }
+
+    /// A writing account.
+    fn me() -> AccountView {
+        AccountView {
+            did: "did:plc:me".into(),
+            handle: None,
+            pds: "https://pds.example".into(),
+            auth_kind: lessdugin_core::dto::AuthKind::AppPassword,
+            active: true,
+        }
+    }
+
+    fn notification_loads(fx: &[Effect]) -> usize {
+        fx.iter()
+            .filter(|e| matches!(e, Effect::LoadNotifications { .. }))
+            .count()
+    }
+
+    /// Notifications are computed lazily: the Notifications screen re-queries on a Forum or
+    /// Thread topic (nothing emits `Notifications` for a new reply), and a reload asked for
+    /// while its load runs is not dropped.
+    #[test]
+    fn the_notifications_screen_follows_forum_and_thread_changes() {
+        let mut st = State::new(80, 24, Some(me()), true);
+        st.start(None);
+        let fx = st.update(Action::Key(keys::parse_key("N").unwrap()));
+        assert_eq!(notification_loads(&fx), 1, "{fx:?}");
+        let screen = st.top().unwrap().id;
+        // a change while the first load runs is kept for when it finishes
+        let fx = changed(
+            &mut st,
+            Topic::Thread {
+                uri: "at://t".into(),
+            },
+        );
+        assert_eq!(notification_loads(&fx), 0, "{fx:?}");
+        let fx = st.update(Action::NotificationsLoaded {
+            screen,
+            origin: Origin::User,
+            result: Ok(NotificationList {
+                dto: Default::default(),
+                items: Vec::new(),
+                unread: 0,
+            }),
+        });
+        assert_eq!(notification_loads(&fx), 1, "the dirty reload runs: {fx:?}");
+        st.update(Action::NotificationsLoaded {
+            screen,
+            origin: Origin::Live,
+            result: Ok(NotificationList {
+                dto: Default::default(),
+                items: Vec::new(),
+                unread: 0,
+            }),
+        });
+        // a forum change re-queries them too
+        let fx = changed(
+            &mut st,
+            Topic::Forum {
+                uri: "at://f".into(),
+            },
+        );
+        assert_eq!(notification_loads(&fx), 1, "{fx:?}");
+    }
+
+    fn forum_loads(fx: &[Effect]) -> usize {
+        fx.iter()
+            .filter(|e| matches!(e, Effect::LoadForum { .. }))
+            .count()
+    }
+
+    /// Past `LIVE_RELOAD_CAP` live reloads with no key in between, a change is not loaded at
+    /// once, but it is not lost either: the user's next move reloads the screen.
+    #[test]
+    fn a_capped_live_update_reloads_on_the_next_move() {
+        let mut st = State::new(80, 24, None, true);
+        st.start(None);
+        st.open_forum("at://f".into());
+        let screen = st.top().unwrap().id;
+        let finish = |st: &mut State| {
+            st.update(Action::ForumLoaded {
+                screen,
+                origin: Origin::Live,
+                result: Err(EngineError::internal("offline")),
+            });
+        };
+        finish(&mut st);
+        for _ in 0..LIVE_RELOAD_CAP {
+            let fx = changed(
+                &mut st,
+                Topic::Forum {
+                    uri: "at://f".into(),
+                },
+            );
+            assert_eq!(forum_loads(&fx), 1, "{fx:?}");
+            finish(&mut st);
+        }
+        let fx = changed(
+            &mut st,
+            Topic::Forum {
+                uri: "at://f".into(),
+            },
+        );
+        assert_eq!(forum_loads(&fx), 0, "capped: {fx:?}");
+        assert!(st.top().unwrap().stale);
+        let fx = st.update(Action::Key(keys::parse_key("j").unwrap()));
+        assert_eq!(forum_loads(&fx), 1, "the move reloads: {fx:?}");
+        assert!(!st.top().unwrap().stale);
+    }
+
+    /// The Mod screen follows its forum's changes (a new applicant), and a reload asked for
+    /// while its loads run is not dropped.
+    #[test]
+    fn the_mod_screen_follows_its_forum() {
+        let mut st = State::new(80, 24, None, true);
+        st.start(None);
+        st.open_forum("at://f".into());
+        let mut fx = Vec::new();
+        st.push(
+            ScreenKind::Mod(Box::new(ModScreen {
+                forum: "at://f".into(),
+                ..ModScreen::default()
+            })),
+            &mut fx,
+        );
+        let screen = st.top().unwrap().id;
+        let queue_loads = |fx: &[Effect]| {
+            fx.iter()
+                .filter(|e| matches!(e, Effect::LoadQueue { .. }))
+                .count()
+        };
+        let fx = changed(
+            &mut st,
+            Topic::Forum {
+                uri: "at://f".into(),
+            },
+        );
+        assert_eq!(queue_loads(&fx), 0, "loading: kept for later: {fx:?}");
+        let empty = || ModLog {
+            dto: Default::default(),
+            entries: Vec::new(),
+            cursor: None,
+        };
+        st.update(Action::LogLoaded {
+            screen,
+            origin: Origin::User,
+            result: Ok(empty()),
+        });
+        let fx = st.update(Action::LogLoaded {
+            screen,
+            origin: Origin::User,
+            result: Ok(empty()),
+        });
+        assert_eq!(queue_loads(&fx), 1, "the dirty reload runs: {fx:?}");
+        st.update(Action::LogLoaded {
+            screen,
+            origin: Origin::Live,
+            result: Ok(empty()),
+        });
+        st.update(Action::LogLoaded {
+            screen,
+            origin: Origin::Live,
+            result: Ok(empty()),
+        });
+        let fx = changed(
+            &mut st,
+            Topic::Forum {
+                uri: "at://f".into(),
+            },
+        );
+        assert_eq!(queue_loads(&fx), 1, "{fx:?}");
+        let fx = changed(
+            &mut st,
+            Topic::Forum {
+                uri: "at://g".into(),
+            },
+        );
+        assert_eq!(queue_loads(&fx), 0, "another forum: {fx:?}");
+    }
+
+    /// The subject of every mod-menu entry that acts on an actor (a ban, a restriction).
+    fn actor_subjects(m: &ModMenu) -> Vec<(String, ModScope)> {
+        m.entries
+            .iter()
+            .filter_map(|e| match e.intent.as_ref()? {
+                ModActionIntent::Assert {
+                    subject,
+                    scope,
+                    action: ModActionValue::Access { .. } | ModActionValue::Restrict { .. },
+                    ..
+                } => Some((subject.clone(), *scope)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn author_entries(m: &ModMenu) -> Vec<&'static str> {
+        m.entries
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e.intent,
+                    Some(ModActionIntent::Assert {
+                        scope: ModScope::Author,
+                        ..
+                    })
+                )
+            })
+            .map(|e| e.label)
+            .collect()
+    }
+
+    /// Author moderation (`social.md` §4.9) belongs to the author of the thread's POST and acts
+    /// on other people's comments there; nothing in the menu ever names the viewer as the
+    /// subject of a ban or restriction.
+    #[test]
+    fn the_mod_menu_offers_author_moderation_in_the_viewers_own_thread() {
+        let st = State::new(80, 24, Some(me()), true);
+        let author_caps = ViewerCaps {
+            author_mod_personal: true,
+            author_mod_frontpage: true,
+            ..ViewerCaps::default()
+        };
+        let sel = |author: &str, post_author: &str| ModSubject {
+            item: "at://did:plc:x/c/1".into(),
+            forum: "at://f".into(),
+            author: author.into(),
+            post: "at://did:plc:y/p/1".into(),
+            post_author: post_author.into(),
+            comment: true,
+        };
+        // someone else's comment in the viewer's own thread: hide, pin and ban, author scope
+        let m = st.mod_menu_for(&sel("did:plc:other", "did:plc:me"), Some(&author_caps));
+        let labels = author_entries(&m);
+        assert!(
+            labels.contains(&"hide this comment (your thread)"),
+            "{labels:?}"
+        );
+        assert!(
+            labels.contains(&"ban the author from your threads"),
+            "{labels:?}"
+        );
+        assert_eq!(
+            actor_subjects(&m),
+            [("did:plc:other".to_owned(), ModScope::Author)],
+            "{m:?}"
+        );
+        // the viewer's own comment in their own thread: nothing aimed at themselves
+        let m = st.mod_menu_for(&sel("did:plc:me", "did:plc:me"), Some(&author_caps));
+        assert!(actor_subjects(&m).is_empty(), "{m:?}");
+        assert!(
+            !author_entries(&m).contains(&"hide this comment (your thread)"),
+            "{m:?}"
+        );
+        // the viewer's own comment in someone else's thread: no author tier at all
+        let m = st.mod_menu_for(&sel("did:plc:me", "did:plc:other"), Some(&author_caps));
+        assert!(author_entries(&m).is_empty(), "{m:?}");
+        assert!(actor_subjects(&m).is_empty(), "{m:?}");
+        // a moderator on their own item: no forum-tier ban or restriction of themselves
+        let modcaps = ViewerCaps {
+            moderate: true,
+            rank: Some(1),
+            ..ViewerCaps::default()
+        };
+        let m = st.mod_menu_for(&sel("did:plc:me", "did:plc:other"), Some(&modcaps));
+        assert!(actor_subjects(&m).is_empty(), "{m:?}");
+    }
+
+    /// The forum tier's overrides assert the opposite value (`social.md` §4.2); a pin of a
+    /// comment is a thread pin; a lock or a tier acts on the thread's post.
+    #[test]
+    fn the_mod_menu_overrides_assert_and_pins_by_kind() {
+        let st = State::new(80, 24, Some(me()), true);
+        let modcaps = ViewerCaps {
+            moderate: true,
+            rank: Some(2),
+            curate: true,
+            ..ViewerCaps::default()
+        };
+        let m = st.mod_menu_for(
+            &ModSubject {
+                item: "at://did:plc:x/c/1".into(),
+                forum: "at://f".into(),
+                author: "did:plc:x".into(),
+                post: "at://did:plc:y/p/1".into(),
+                post_author: "did:plc:y".into(),
+                comment: true,
+            },
+            Some(&modcaps),
+        );
+        let of = |label: &str| {
+            m.entries
+                .iter()
+                .find(|e| e.label == label)
+                .and_then(|e| e.intent.clone())
+                .unwrap_or_else(|| panic!("no {label:?} in {m:?}"))
+        };
+        assert!(matches!(
+            of("keep visible (override a hide)"),
+            ModActionIntent::Assert {
+                action: ModActionValue::Hide { hidden: false, .. },
+                ..
+            }
+        ));
+        assert!(matches!(
+            of("unlock (override a lock)"),
+            ModActionIntent::Assert {
+                action: ModActionValue::Lock { locked: false },
+                ref subject,
+                ..
+            } if subject == "at://did:plc:y/p/1"
+        ));
+        assert!(matches!(
+            of("pin in the thread"),
+            ModActionIntent::Assert {
+                action: ModActionValue::Pin {
+                    scope: PinScope::Thread,
+                    pinned: true
+                },
+                ..
+            }
+        ));
+        assert!(matches!(
+            of("unpin (override a pin)"),
+            ModActionIntent::Assert {
+                action: ModActionValue::Pin {
+                    scope: PinScope::Thread,
+                    pinned: false
+                },
+                ..
+            }
+        ));
+        assert!(matches!(
+            of("retract your hide"),
+            ModActionIntent::Remove { ref action_key, .. } if action_key == "hide"
+        ));
+        // a nullification names only nullifyVotes: the engine keeps the restriction (m3r-2)
+        assert!(matches!(
+            of("nullify the author's votes"),
+            ModActionIntent::Assert {
+                action: ModActionValue::Restrict {
+                    capabilities: None,
+                    nullify_votes: Some(true)
+                },
+                ..
+            }
+        ));
+        assert!(matches!(
+            of("restore the author's votes"),
+            ModActionIntent::Assert {
+                action: ModActionValue::Restrict {
+                    capabilities: None,
+                    nullify_votes: Some(false)
+                },
+                ..
+            }
+        ));
+        // the capability presets add to what the record restricts already
+        for label in [
+            "restrict the author (posting)",
+            "restrict the author (voting, reacting)",
+        ] {
+            let e = m.entries.iter().find(|e| e.label == label).unwrap();
+            assert_eq!(e.merge, Some(RestrictDim::AddCapabilities), "{label}");
+        }
+    }
+
+    /// A multi-byte space (NBSP from macOS Option-Space, U+3000 from a CJK IME) before `Tab`
+    /// completes the word after it instead of slicing inside the space and panicking.
+    #[test]
+    fn completion_after_a_wide_space_does_not_panic() {
+        for space in ['\u{a0}', '\u{3000}'] {
+            let mut line = format!("vote{space}str");
+            complete(&mut line);
+            assert_eq!(line, format!("vote{space}strong-up"));
+            let mut line = format!("vote{space}");
+            complete(&mut line);
+            assert_eq!(line, format!("vote{space}"));
+
+            // the same through the key loop: the overlay keeps the text, the TUI keeps running
+            let mut st = State::new(80, 24, None, true);
+            st.start(None);
+            st.update(Action::Key(keys::parse_key(":").unwrap()));
+            for c in format!("vote{space}").chars() {
+                st.update(Action::Key(crossterm::event::KeyEvent::new(
+                    crossterm::event::KeyCode::Char(c),
+                    crossterm::event::KeyModifiers::NONE,
+                )));
+            }
+            st.update(Action::Key(keys::parse_key("Tab").unwrap()));
+            assert_eq!(st.command.as_deref(), Some(format!("vote{space}").as_str()));
+        }
     }
 }

@@ -4,7 +4,7 @@
 // remove moderators (`mods_set`; a removed moderator's actions are adopted first, social.md
 // §4.10).
 
-import type { ForumDraft, ModRole, WriteTicket } from "@lessdugin/engine/types";
+import type { ActionTicket, ForumDraft, ModRole } from "@lessdugin/engine/types";
 import { useQuery } from "@tanstack/react-query";
 import { Fragment, useId, useState } from "react";
 import { ActorName } from "../../components/ActorName.tsx";
@@ -14,6 +14,7 @@ import { RenderedHtml } from "../../components/RenderedHtml.tsx";
 import { ErrorView, errorMessage, Loading } from "../../components/Status.tsx";
 import { toasts } from "../../components/Toast.tsx";
 import { useEngine } from "../../engine/context.tsx";
+import { SpilledBodySourceError, useCoherentEditSource } from "../../engine/editSource.ts";
 import { qk } from "../../engine/queries.ts";
 import { writeStore } from "../../engine/writes.ts";
 import { cleanName } from "../../lib/text.ts";
@@ -22,15 +23,18 @@ import ui from "../../styles/ui.module.css";
 import styles from "../pages.module.css";
 import { useForumView } from "./forumContext.tsx";
 
-/** Runs a write and waits for its outcome; true when it was done. */
+/** Runs a write and waits for its outcome; true when it was done. The engine's notices are
+ * shown at once (a moderator's removal adopts their assertions first and says what it will
+ * not adopt, engine-api.md §3.2 `mods_set`). */
 async function runWrite(
-  start: () => Promise<WriteTicket>,
+  start: () => Promise<ActionTicket>,
   subject: string,
   done: string,
 ): Promise<boolean> {
   try {
     const ticket = await start();
     writeStore.track(ticket, subject);
+    for (const n of ticket.notices ?? []) toasts.show({ message: n.message });
     const final = await writeStore.wait(ticket.id);
     if (final.kind === "failed") throw final.error;
     if (final.kind !== "done") return false;
@@ -44,12 +48,31 @@ async function runWrite(
 
 function EditDeclaration({ uri, onDone }: { uri: string; onDone: () => void }) {
   const engine = useEngine();
-  const raw = useQuery({ queryKey: qk.raw(uri), queryFn: () => engine.raw(uri) });
+  const source = useCoherentEditSource(engine, uri);
   const tags = useQuery({ queryKey: qk.tags(uri), queryFn: () => engine.tags(uri) });
-  if (raw.isPending) return <Loading label="Loading the declaration…" />;
-  if (raw.isError) return <ErrorView error={raw.error} />;
-  const initial = forumDraftOf(raw.data.record, parseAtUri(uri)?.rkey ?? "");
+  if (source.isPending || source.isFetching) return <Loading label="Loading the declaration…" />;
+  const unavailable = source.error instanceof SpilledBodySourceError ? source.error : undefined;
+  if (source.isError && !unavailable) {
+    return (
+      <>
+        <ErrorView error={source.error} />
+        <button type="button" className={ui.button} onClick={source.retry}>
+          Try again
+        </button>
+      </>
+    );
+  }
+  const raw = source.data?.raw ?? unavailable?.raw;
+  if (!raw) return <Loading label="Loading the declaration…" />;
+  const initial = forumDraftOf(
+    raw.record,
+    parseAtUri(uri)?.rkey ?? "",
+    source.data?.source.markdown,
+  );
   if (!initial) return <ErrorView error={new Error("The forum declaration is not readable.")} />;
+  const aboutUnavailable = unavailable
+    ? { reason: errorMessage(unavailable.sourceError), retry: source.retry }
+    : undefined;
   const save = async (draft: ForumDraft): Promise<boolean> => {
     const ok = await runWrite(
       () => engine.forumUpdate(uri, draft),
@@ -61,10 +84,13 @@ function EditDeclaration({ uri, onDone }: { uri: string; onDone: () => void }) {
   };
   return (
     <ForumForm
+      // the form's fields start from `initial` once: remount it when the source arrives
+      key={aboutUnavailable ? "about-unavailable" : "about"}
       initial={initial}
       creating={false}
       tags={tags.data}
       submitLabel="Save the declaration"
+      aboutUnavailable={aboutUnavailable}
       onSubmit={save}
       onCancel={onDone}
     />
@@ -194,7 +220,7 @@ export function ForumSettingsPage() {
         <>
           <h2 className={ui.sectionTitle}>About</h2>
           <div className={ui.card}>
-            <RenderedHtml html={view.about.html} />
+            <RenderedHtml html={view.about.html} media={view.about.media} />
           </div>
         </>
       )}

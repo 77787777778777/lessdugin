@@ -8,6 +8,12 @@
 //! - `$EDITOR` runs with the terminal suspended: the input reader is parked first (so it cannot
 //!   take the editor's keys), then the alternate screen is left and raw mode switched off; both
 //!   are restored afterwards and the screen redrawn.
+//! - Images (`crate::image`) are decoded and resized on worker threads, which wake the loop
+//!   with [`Action::ImagesReady`]. The terminal's graphics protocol is queried once, before the
+//!   input reader starts, and only when the environment (or `LESSDUGIN_TUI_IMAGES`) says the
+//!   terminal answers such queries; the answer is read with a bounded poll, so nothing but the
+//!   input reader ever reads stdin, and keys typed around the answer are kept
+//!   (`crate::image`'s module docs).
 //! - The terminal is restored on exit, on errors and on a panic of the UI thread. A panic in
 //!   an effect task does not touch the terminal from that thread (the UI would go on drawing
 //!   in cooked mode): the task reports it, and the UI loop ends with an error, restoring the
@@ -31,6 +37,7 @@ use lessdugin_core::host::Host;
 use lessdugin_core::outbox::Session;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use ratatui_image::picker::Picker;
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 
 use crate::app::{Action, Effect, State};
@@ -104,6 +111,8 @@ async fn ui<H: Host>(
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<Action>,
 ) -> anyhow::Result<Report> {
     let mut term = Term::enter()?;
+    // the protocol query reads the terminal's answer: before the input reader takes stdin
+    let mut images = images(&tx).await;
     let input = Input::spawn(tx.clone());
     let (w, h) = crossterm::terminal::size()?;
     let mut state = State::new(w, h, opts.account.clone(), opts.offline);
@@ -118,6 +127,7 @@ async fn ui<H: Host>(
             while let Some(effect) = queue.pop_front() {
                 match effect {
                     Effect::Quit => break 'main,
+                    Effect::DecodeMedia { cid, bytes } => images.decode(cid, bytes),
                     Effect::Editor(req) => {
                         input.pause();
                         term.suspend()?;
@@ -159,7 +169,19 @@ async fn ui<H: Host>(
             if state.quit {
                 break;
             }
-            term.terminal.draw(|f| crate::view::draw(&state, f))?;
+            // what the image workers finished goes to the state before the frame is drawn
+            let polled = images.poll();
+            if !polled.decoded.is_empty() || !polled.evicted.is_empty() {
+                for (cid, result) in polled.decoded {
+                    queue.extend(state.update(Action::MediaDecoded { cid, result }));
+                }
+                for cid in polled.evicted {
+                    queue.extend(state.update(Action::MediaEvicted { cid }));
+                }
+                continue;
+            }
+            term.terminal
+                .draw(|f| crate::view::draw_with(&state, Some(&mut images), f))?;
             let a = tokio::select! {
                 a = rx.recv() => a,
                 Some(why) = panicked.recv() => {
@@ -185,6 +207,35 @@ async fn ui<H: Host>(
         queued_writes: state.writes.len(),
         failed_writes: state.failed.len(),
     })
+}
+
+/// The images of this terminal: halfblocks, none, or what the terminal answers when it is worth
+/// asking (`crate::image::detection`). The query runs on a blocking thread that ends at its
+/// bounded wait; the keys it read instead of an answer go on the channel first, before the
+/// input reader starts, so they reach the state in the order they were typed.
+async fn images(tx: &UnboundedSender<Action>) -> crate::image::Images {
+    use crate::image::{Detection, Images, Setting, cell_pixels, detection, keys_of};
+    let wake = tx.clone();
+    let notify: crate::image::Notify = Arc::new(move || {
+        let _ = wake.send(Action::ImagesReady);
+    });
+    let setting = Setting::from_env();
+    let pixels = cell_pixels();
+    match detection(setting, |k| std::env::var(k).ok(), pixels.is_some()) {
+        Detection::Off => Images::off(),
+        Detection::Halfblocks => Images::new(Picker::halfblocks(), notify),
+        Detection::Query => {
+            let queried = tokio::task::spawn_blocking(|| {
+                crate::image::query_terminal(crate::image::QUERY_TIMEOUT)
+            })
+            .await;
+            let (picker, typed) = queried.unwrap_or_else(|_| (Picker::halfblocks(), Vec::new()));
+            for k in keys_of(&typed) {
+                let _ = tx.send(Action::Key(k));
+            }
+            Images::new(picker, notify)
+        }
+    }
 }
 
 /// The message of a panic payload.

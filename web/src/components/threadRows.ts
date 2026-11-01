@@ -6,6 +6,7 @@
 // collapse behind "show N more by @x". The limit is presentation only.
 
 import type { CommentNode } from "@lessdugin/engine/types";
+import { ownNewcomerItem } from "../lib/lens.ts";
 
 export const MAX_INDENT = 6;
 export const THREAD_AUTHOR_EXPANDED_MAX = 50;
@@ -33,13 +34,15 @@ export interface ContinueRow {
 
 export type ThreadRow = CommentRow | ContinueRow;
 
-/** Collapsed by default: items the fold collapsed (newUser, lowScore, muted), and items over the
- * per-author display limit. */
+/** Collapsed by default: items the fold collapsed (newUser, lowScore, muted), except the
+ * `viewer`'s own newcomer items (social.md §10.3), and items over the per-author display limit. */
 export function collapsedByDefault(
   node: CommentNode,
   overflow: ReadonlySet<string> = new Set(),
+  viewer: string | null = null,
 ): boolean {
-  return node.state.kind === "collapsed" || overflow.has(node.uri);
+  if (overflow.has(node.uri)) return true;
+  return node.state.kind === "collapsed" && !ownNewcomerItem(node.state, node.author.did, viewer);
 }
 
 /** A comment is collapsed when its default differs from the user's toggle. */
@@ -47,8 +50,9 @@ export function isCollapsed(
   node: CommentNode,
   toggled: ReadonlySet<string>,
   overflow: ReadonlySet<string> = new Set(),
+  viewer: string | null = null,
 ): boolean {
-  return collapsedByDefault(node, overflow) !== toggled.has(node.uri);
+  return collapsedByDefault(node, overflow, viewer) !== toggled.has(node.uri);
 }
 
 /** The comments beyond each author's first `max` in `(t_rank, uri)` order (listed comments
@@ -94,6 +98,8 @@ export function buildRows(
     /** Authors whose comments over the per-author limit the reader chose to show. */
     expandedAuthors?: ReadonlySet<string>;
     authorMax?: number;
+    /** The viewer's DID: their own newcomer comments start expanded. */
+    viewer?: string | null;
   } = {},
 ): ThreadRow[] {
   const maxIndent = opts.maxIndent ?? MAX_INDENT;
@@ -124,7 +130,7 @@ export function buildRows(
     }
     atLevel[indent] = node.uri;
     atLevel.length = indent + 1;
-    const collapsed = isCollapsed(node, toggled, overflow.uris);
+    const collapsed = isCollapsed(node, toggled, overflow.uris, opts.viewer ?? null);
     const row: CommentRow = {
       kind: "comment",
       node,

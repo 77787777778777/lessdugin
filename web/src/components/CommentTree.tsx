@@ -86,8 +86,8 @@ export function CommentTree({
   const [focused, setFocused] = useState<string | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const rows: ThreadRow[] = useMemo(
-    () => buildRows(comments, toggled, { baseDepth, expandedAuthors }),
-    [comments, toggled, baseDepth, expandedAuthors],
+    () => buildRows(comments, toggled, { baseDepth, expandedAuthors, viewer: ctx.myDid }),
+    [comments, toggled, baseDepth, expandedAuthors, ctx.myDid],
   );
   const showAuthor = useCallback((did: string) => {
     setExpandedAuthors((prev) => new Set(prev).add(did));

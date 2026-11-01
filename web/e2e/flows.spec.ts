@@ -157,6 +157,92 @@ test("signed out, actions lead to sign-in instead of failing on submit", async (
   await expect(page.getByRole("link", { name: "Sign in to join" })).toBeVisible();
 });
 
+test("leave a forum after confirming (engine-api.md §3.2 leave)", async ({ page }) => {
+  await go(page, FORUM_PATH, FORUM);
+  await page.getByRole("button", { name: "Leave", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Leave this forum?" });
+  await expect(dialog).toContainText("Your membership record is deleted");
+  await dialog.getByRole("button", { name: "Cancel" }).click();
+  await expect(dialog).toBeHidden();
+  await page.getByRole("button", { name: "Leave", exact: true }).click();
+  await dialog.getByRole("button", { name: "Leave" }).click();
+  await expect(page.getByText("Left the forum")).toBeVisible();
+});
+
+test("a spilled about is loaded before the forum form is shown (robustness-2)", async ({
+  page,
+}) => {
+  await page.goto(`${server.url}/?mock&spilled#/`);
+  await page.getByRole("button", { name: "Create a forum" }).click();
+  const form = page.getByRole("region", { name: "Create a forum" });
+  await form.getByLabel("Address").fill("spilled-about");
+  await form.getByLabel("Name").fill("Spilled about");
+  await form.getByRole("textbox", { name: /^About/ }).fill("Source behind the blob");
+  await form.getByRole("button", { name: "Create the forum" }).click();
+  await page.getByRole("link", { name: "About" }).click();
+  await page.getByRole("button", { name: "Edit the forum" }).click();
+  const about = page.getByRole("textbox", { name: /^About/ });
+  await expect(about).toHaveValue("Source behind the blob");
+  await expect(about).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Save the declaration" })).toBeEnabled();
+  await expect(page.getByTestId("about-unavailable")).toHaveCount(0);
+  await about.fill("Source behind the blob, edited");
+  await page.getByRole("button", { name: "Save the declaration" }).click();
+  await expect(page.getByRole("region", { name: "About this forum" })).toContainText(
+    "Source behind the blob, edited",
+  );
+});
+
+test("a spilled post opens its normal editor with the stored source (robustness-2)", async ({
+  page,
+}) => {
+  const source = "Testing quick takes from the mock account. Everything here lives in memory.";
+  await page.goto(`${server.url}/?mock&spilled#${FORUM_PATH}/new`);
+  await page.getByText("Quick take", { exact: true }).click();
+  const body = page.getByRole("textbox", { name: "Post body" });
+  await body.fill(source);
+  await page.getByRole("button", { name: "Publish" }).click();
+  await page.getByRole("link", { name: "Edit", exact: true }).click();
+  await expect(body).toHaveText(source);
+  await body.fill(`${source}\n\nA browser edit.`);
+  await page.getByRole("button", { name: "Save edit" }).click();
+  await expect(page.getByText("A browser edit.")).toBeVisible();
+});
+
+test("a spilled post edit preserves its media and link-card draft fields", async ({ page }) => {
+  await page.goto(`${server.url}/?mock&spilled#${FORUM_PATH}/new`);
+  await page.getByLabel("Title", { exact: true }).fill("Preserved media and card");
+  await page.getByText("Link post", { exact: true }).click();
+  await page.getByRole("textbox", { name: "Link", exact: true }).fill("https://example.test/paper");
+  const body = page.getByRole("textbox", { name: "Post body" });
+  await body.fill("Source behind the blob");
+  await page.getByTestId("attachment-input").setInputFiles({
+    name: "figure.png",
+    mimeType: "image/png",
+    buffer: Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+      "base64",
+    ),
+  });
+  await expect(page.getByTestId("attachments")).toContainText("figure.png");
+  await page.getByLabel("Alt text").fill("Preserved diagram");
+  await page.getByRole("button", { name: "Publish" }).click();
+  await page.getByRole("link", { name: "Edit", exact: true }).click();
+  await expect(body).toHaveText("Source behind the blob");
+  await expect(page.getByRole("textbox", { name: "Link", exact: true })).toHaveValue(
+    "https://example.test/paper",
+  );
+  await expect(page.getByLabel("Alt text")).toHaveValue("Preserved diagram");
+  await body.fill("Edited source");
+  await page.getByRole("button", { name: "Save edit" }).click();
+  await page.getByRole("link", { name: "Edit", exact: true }).click();
+  await expect(body).toHaveText("Edited source");
+  await expect(page.getByLabel("Alt text")).toHaveValue("Preserved diagram");
+  await expect(page.getByRole("textbox", { name: "Link", exact: true })).toHaveValue(
+    "https://example.test/paper",
+  );
+});
+
 test("create a forum, edit its declaration and manage a moderator", async ({ page }) => {
   await go(page, "/", "Your forums");
   await page.getByRole("button", { name: "Create a forum" }).click();

@@ -4,18 +4,23 @@
 
 import type { PostSummary } from "@lessdugin/engine/types";
 import { useId } from "react";
+import { useActiveAccount } from "../engine/queries.ts";
 import { cx } from "../lib/cx.ts";
+import { ownNewcomerItem } from "../lib/lens.ts";
 import { fullDate, shortAge } from "../lib/time.ts";
 import { ActorName } from "./ActorName.tsx";
 import { Badges } from "./Badges.tsx";
 import { hiddenReasonText } from "./CommentItem.tsx";
 import styles from "./PostListItem.module.css";
-import { COLLAPSE_LABEL, KindBadge, postTitle, TagChips, TierBadge } from "./PostMeta.tsx";
+import { collapseNote, KindBadge, postTitle, TagChips, TierBadge } from "./PostMeta.tsx";
 import { RecordLink } from "./RecordLink.tsx";
 
 export function PostListItem({ post }: { post: PostSummary }) {
   const titleId = useId();
+  const viewer = useActiveAccount().data?.did ?? null;
   const collapsed = post.state.kind === "collapsed" ? post.state.reason : null;
+  // the viewer's own newcomer post is shown like a listed one, label kept (social.md §10.3)
+  const own = ownNewcomerItem(post.state, post.author.did, viewer);
   // A hidden or tombstoned post is listed as a reason only, with no body (social.md §10.1).
   if (post.state.kind === "hidden" || post.state.kind === "tombstone") {
     return (
@@ -27,7 +32,10 @@ export function PostListItem({ post }: { post: PostSummary }) {
     );
   }
   return (
-    <article className={cx(styles.item, collapsed && styles.collapsed)} aria-labelledby={titleId}>
+    <article
+      className={cx(styles.item, collapsed && !own && styles.collapsed)}
+      aria-labelledby={titleId}
+    >
       <span className={styles.score} title={`Karma ${post.score.score}`}>
         <span className="visually-hidden">Karma </span>
         {post.score.score}
@@ -60,7 +68,7 @@ export function PostListItem({ post }: { post: PostSummary }) {
           {post.link && <span className={styles.host}>{post.link.host}</span>}
           <TagChips forum={post.forum} tags={post.tags} />
           {collapsed && (
-            <span className={styles.collapsedNote}>Collapsed: {COLLAPSE_LABEL[collapsed]}</span>
+            <span className={styles.collapsedNote}>{collapseNote(collapsed, own)}</span>
           )}
         </div>
       </div>

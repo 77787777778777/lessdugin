@@ -3,9 +3,12 @@
 
 pub mod doctor;
 pub mod draft;
+pub mod export;
 pub mod forum;
 pub mod identity;
+pub mod local;
 pub mod login;
+pub mod media;
 pub mod outbox;
 pub mod read;
 pub mod refs;

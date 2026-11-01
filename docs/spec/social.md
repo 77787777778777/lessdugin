@@ -126,7 +126,7 @@ Query = the requested list, sort, filter or thread (§12); it never changes any 
 - records of `post`, `comment`, `revision`, `opinion`, `modAction`, `wikiRevision` or `sequence` in the `{fk}-` key range, after the normative fetch caps (`data-model.md` §7.4).
 
 The following are never members:
-- records of inactive repos;
+- records of inactive repos, except a member of A's `modAction` records while its account has been inactive for less than 7 days (`sync.md` §3.4; its `repoStatus` is then at least `Stale`, and `Unavailable` afterwards);
 - hints (Jetstream, Constellation, relay, Slingshot, indexer JSON);
 - third-party proofs whose rev is below the author PDS's `getLatestCommit` head (`[stale]`).
 
@@ -331,7 +331,7 @@ newcomer(d) ⇔ d ∈ P ∖ (S ∪ E)                                    // both
 | Eligible voters E | E = S, because P ∖ S ⊆ B ∪ N. `establish` and `establishSeeds` have no effect. | S plus established users (§6.2) |
 | Newcomer content | none | collapsed by default, labelled "new user", per `display.newUsers` (V8) |
 | Completeness | provable at CORE | S ∪ E is complete at CORE thanks to the closure (`sync.md`); newcomers are best effort (CORE+) |
-| UI label | – | "relies on public relay infrastructure (Bluesky relay, Jetstream, Constellation)" |
+| UI label | – | "relies on public relay infrastructure (Bluesky relay, Jetstream, Constellation)": the forum header's `relayDependent` banner, "Open mode relies on Bluesky relay, Jetstream and Constellation" (`threat-model.md` L7) |
 
 `forum create` always writes the mode explicitly. With no flag it writes `approval`.
 
@@ -386,7 +386,7 @@ An **assertion** is a modAction m that meets all of these:
 
 Its **actor** is `did(m.uri)` and its subject is `m.subject`.
 
-A record states the **complete desired state** of its action key. Each dimension of its action is asserted with the field's value, or with the field's default when the field is absent. The one exception is `tag.head`, which is asserted only when `head` is present. To override another actor's assertion, write your own record with the opposite value (`data-model.md` §6.7).
+A record states the **complete desired state** of its action key. Each dimension of its action is asserted with the field's value, or with the field's default when the field is absent. The one exception is `tag.head`, which is asserted only when `head` is present. To override another actor's assertion, write your own record with the opposite value (`data-model.md` §6.7). Since one `#restrict` record carries both `restrict` and `nullify`, a writer that changes one of them writes the other as its own current record states it (the engine merges, `engine-api.md` §3.5 `mod_action`): restricting never lifts the writer's nullification, and nullifying never lifts its restriction. The record's one `until` and `reason` belong to both: a change that states no `until` keeps the record's while the other dimension is in effect, so a temporary restriction stays temporary after a nullification (and the reverse), and a change that states one moves the other dimension's expiry with it, which the engine announces (`sharedExpiry`).
 
 | Action | Dimension asserted | Value asserted | Order (safe value first) | Positive, so CID-bound |
 |---|---|---|---|---|
@@ -482,7 +482,7 @@ keepRank(x) = r  if resolve(x.uri, hidden) = Resolved{false, r, _}
 - produces a mod-queue item "edited since <action>" (§4.12);
 - makes the tier fall back, the pin drop and the keep stop, until an authority re-asserts it on the new version.
 
-Before an author edits an item that carries positive assertions, their client warns that the edit will suspend them.
+Before an author edits an item that carries positive assertions, their client warns that the edit will suspend them (the engine names them: `engine-api.md` §3.5 `edit_preflight`).
 
 **Negative assertions** take effect whatever their `subjectCid`. On DID and `tag:` subjects, `subjectCid` is ignored.
 
@@ -539,7 +539,7 @@ A DID in B (forum tier, `access = banned`, resolved at rank `banRank(d)`):
 - **Allow-lists.** Equal-rank locks intersect their allow-lists. Entries outside p's thread are ignored (MA9).
 - **Unlocking.** The actor deletes their own record, or a higher rank writes `#lock{locked: false}`.
 - **Forum-wide locks** (a forum uri as subject) are **Reserved (P2)** and have no effect. An owner can archive a forum by switching it to approval mode (§3.3).
-- **Composer.** Clients refuse to compose a comment on a locked post, unless the writer is in A or the comment would be exempt. This is UX, not security.
+- **Composer.** Clients refuse to compose a comment on a locked post, unless the writer is in A or the comment would be exempt. A new comment is never on the allow-list and has no keep, so the engine's `comment` refuses it unless the writer is in A, or is the post's author under an author lock (`engine-api.md` §3.5). This is UX, not security.
 
 ### 4.9 Author moderation (L5)
 
@@ -604,7 +604,8 @@ Each (actor, scope, subject, action key) has exactly one record (`data-model.md`
 - The fold cannot tell a former moderator from a DID that never was one, so every forum-scope assertion by an actor ∉ A is `lapsed` (§4.12).
 
 **Adoption**
-- `lessdugin mod adopt <did>` re-issues a former moderator's non-lapsed forum-scope assertions under the adopting authority, with `adopts` pointing at each original (`data-model.md` §8.6).
+- `lessdugin mod adopt <did>` re-issues a departing moderator's forum-scope assertions that are in effect under the adopting authority, with `adopts` pointing at each original (`data-model.md` §8.6).
+- **Only what counted is adopted.** An original is re-issued only if its mod-log status (§4.12) in the adopter's fold is `effective`, with the same CID when the copy is sent, and §4.3 conditions 3 and 4 hold for its own actor. Every other original is reported, not copied: an `unauthorised` record (for example a moderator's ban of the owner) or an `overridden` one (a hide that an admin's keep beats) would otherwise take effect at the adopter's higher rank. A DID already removed from `moderators` has only `lapsed` records (§4.12), so nothing of theirs is adopted.
 - `adopts` is informational. A copy counts only on its own merits: the adopter's rank and role, its own `until`, and its own `subjectCid`.
 
 **Removing a moderator (`mods rm <did>`)**
@@ -626,7 +627,7 @@ degraded ⇔ ∃ a ∈ A : repoStatus[a] = Unavailable
 - Rule V2 also hides every item whose author is not in S, as `Hidden(ModerationUnavailable)`.
 - A banner says "moderation data unavailable".
 
-**What does not cause degradation.** A `Stale` authority repo does not degrade the view: its cached assertions apply. Moderation never vanishes because a PDS is down, so hidden spam is never resurrected.
+**What does not cause degradation.** A `Stale` authority repo does not degrade the view: its cached assertions apply. Moderation never vanishes because a PDS is down, so hidden spam is never resurrected. The same holds for an authority whose account is inactive (taken down, suspended, deactivated or deleted), for 7 days: its cached assertions apply, with an `authorityInactive` banner. After that its repo is `Unavailable` and the view degrades (`sync.md` §3.4).
 
 ### 4.12 Mod log, mod queue, raw view
 
@@ -988,6 +989,7 @@ The lens is applied after the fold, from local state only. It never changes any 
 - **Raw view.** Shows everything, with annotations (§4.12).
 - **"My view".** A local alternative algorithm (§6.4).
 - **Display limit.** Clients show at most 50 comments per author per thread expanded, in `(t_rank, uri)` order. The rest collapse behind "show N more by @x" (`limits.md`). This is presentation only.
+- **Own newcomer items.** Clients show the viewer's own `Collapsed(NewUser)` items expanded, with the label kept ("collapsed for other readers"). The state itself stays viewer-independent (V8); this is presentation only (§20.2 item 6).
 
 ---
 
@@ -1236,6 +1238,9 @@ Sequence scores come from opinions on the sequence. They earn no karma.
 Everything in this section is computed locally from the fold and local state. That happens at sync time (CORE), live through Jetstream (CORE+), and offline or across forums through the indexer's `getActivity` (EXT, later), whose results are hints followed by point fetches. Push and email are **Reserved (P8+)**.
 
 **Newness.** An item x is new for the viewer if and only if `t_obs(x) > watermark(viewer)`. `createdAt` is never used, so backdating cannot hide an item.
+- Each computation moves the watermark to the greatest `t_obs` of the forum's records, eligible or not.
+- A new item that is not eligible when the watermark passes it (hidden while an authority's repo is unavailable, hidden by a moderator and then kept by a higher rank, by an author not yet in S ∪ E) is kept **pending** and evaluated again at each later computation, so it is notified once it is eligible. A pending item is dropped once it is Excluded (V1), 7 days (*tunable*) after it was first seen, or beyond the 1,000 (*tunable*) most recently seen per viewer and forum. The cap counts every candidate that is not eligible, including ones that may never be (a newcomer's items, every non-seed item while the view is degraded), so more than 1,000 newer ones in one forum push an older pending item out and it is never notified: an accepted limit of the bound.
+- A stored notification about an item is shown, and counted as unread, only while the item is listed. One about an item hidden, removed or deleted since is left out, with its preview. This fails closed: while the item's forum is not followed or its view cannot be computed, nothing shows the item is listed, so the notification is left out until the forum's view is back.
 
 **Eligible items.** Only items that are:
 - listed (§10.1);
@@ -1266,6 +1271,7 @@ Everything in this section is computed locally from the fold and local state. Th
 - `lastVisited[post]` is local.
 - A comment c is unread if `t_obs(c) > lastVisited[root]`.
 - Viewing a thread sets `lastVisited` to the greatest `t_obs` among the comments displayed.
+- In parity mode (`engine-api.md` §2.1, decision O-13) the engine ignores `lastVisited`: every view is computed as for a device with no marks (`unreadComments` omitted, `unread` false), since which threads a device visited is not a function of the synced records.
 
 **Subscriptions, follows, bookmarks**
 - Subscriptions to a forum, post, user, tag or sequence are local.
@@ -1509,3 +1515,5 @@ These choices fill gaps in the sources or resolve ambiguities. Each takes the si
 3. **Author moderation requires E (§4.9).** This tightens the gate beyond the synthesis. The alternative is to drop it and weaken P7 to exclude visibility inside outsiders' own threads.
 4. *(Resolved: forum-pinned posts are exempt from the magic cutoff, matching ForumMagnum's sticky posts; see 20.1 item 18.)*
 5. *(Resolved: CO5 compares only a valid root; see 20.1 item 51.)*
+6. **Own newcomer items are shown expanded (§10.3; orchestrator decision O-4, M3–M6 review).** V8 collapses a newcomer's items for every viewer, the newcomer included, so a newcomer could not see what they had just written. Clients now show the viewer's own `Collapsed(NewUser)` items expanded with the label kept, matching the M3 banner "collapsed for other readers". For the U7 review.
+7. **The `restrict` dimension merge is a semantic exception to the dto/1 freeze (§4.2; orchestrator decision O-12, M3–M6 review).** A `restrict` input that names `capabilities` and leaves `nullifyVotes` out no longer clears an in-effect nullification (and keeps its `until` and `reason`), although under engine API v0 that input asserted `nullifyVotes: false` (the record states the complete desired state, §4.2). The v0 reading made every client's `restrict` silently un-nullify the user (defect m3r-2), and `engine-api.md` §1 lists "changing what an operation means" as a breaking change, so this is a deliberate exception: the freeze freezes shapes, not defects. A client that wants both dimensions reset names both. For the U7 review.

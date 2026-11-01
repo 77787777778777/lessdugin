@@ -147,7 +147,9 @@ on RecordNotFound: tombstone (§5.6); drop p
 ```
 eligible(v) ⇔ (v.level = pds ∨ (v.level = proven ∧ current(v)))
               ∧ ¬v.idHint                                   // identity level doc (§1.3)
-              ∧ status(did(v.uri)) ≠ inactive                // I8, §3.4
+              ∧ (status(did(v.uri)) ≠ inactive ∨ retained(v)) // I8, §3.4
+retained(v) ⇔ coll(v) = NS.modAction ∧ did(v.uri) ∈ A(F)     // the authority exception, §3.4
+              ∧ now < inactiveSince(did(v.uri)) + INACTIVE_RETENTION_MS
 ```
 
 The `records` input of the fold (`social.md` §1.1) is built from eligible stored versions only, after the fetch caps (§5.4). Invalid records are eligible and are fold inputs (the fold excludes them in V1).
@@ -222,7 +224,7 @@ The `records` input of the fold (`social.md` §1.1) is built from eligible store
 | `indexer` | `forum`, `none`, or a list of URLs | `forum` | which indexers to use (§2.4); CLI `--indexer <url\|none\|forum>` |
 | `media.hosts` | list of hostnames | empty | the user's media autoload allowlist (§11.3) |
 
-Settings live in the `state` store (`loc`, §10.4). CLI flags override them per invocation.
+Settings live in the `state` store (`loc`, §10.4). CLI flags override them per invocation. `sources` in effect is a flag of the invocation, else a `sources` the native `config.toml` states (an explicit local pin, passed as `EngineConfig.sources_flag`), else the stored setting, else the build default; the running engine reads it at each use, so `set_setting` applies at once, and in `direct` no CORE+ or EXT endpoint (Slingshot, Jetstream, Constellation, a relay, an indexer) is contacted (`engine-api.md` §3.6). A store that cannot be read counts as `direct`, and an imported file (`import_local`) can set `sources` only to `direct`, never back to `assisted`. `verify = proof` is refused by `set_setting` (`unsupported`) while it is Reserved, so a stored choice never claims a mode that does nothing.
 
 ### 2.4 Endpoints and consent
 
@@ -325,7 +327,8 @@ DIDs that merely appear in records are never resolved eagerly.
   - after the errors listed in §3.3;
   - by the daily reconcile (§6.8).
 - The DID is **inactive** if `active = false` and `status` ∈ {`takendown`, `suspended`, `deleted`, `deactivated`} or `status` is absent. `desynchronized` and `throttled` are temporary: the repo is treated as failing (its cached records stay, `[stale]` badge), not as inactive.
-- Records of an inactive DID are excluded from every fold input (I8) and hidden. They stay in the cache for 7 days (*tunable*), then are purged. If the account is active again within that time, a P1 sync restores them.
+- Records of an inactive DID are excluded from every fold input (I8) and hidden. They stay in the cache for 7 days (`INACTIVE_RETENTION_MS`, *tunable*, counted from `inactiveSince`, when the DID was first found inactive), then are purged. If the account is active again within that time, a P1 sync restores them.
+- **Authority exception.** A DID in A(F) (`social.md` §4.1) is the forum's moderation, which must not vanish with its account (`threat-model.md` G2, SOC-6): a moderator can be taken down, suspended or deactivated by a host, or deactivate themselves. For the folds of F, its cached `NS.modAction` records stay fold inputs for those 7 days, and `repoStatus(d, fk)` is at least `Stale`, so its assertions keep applying and the view carries an `authorityInactive` banner. Its other records are excluded as usual. After the 7 days, none of its records is a fold input and `repoStatus(d, fk) = Unavailable`, so the view is degraded (`social.md` §4.11) until the owner removes it from the declaration or the account is active again.
 - Status changes are never taken from a hint: a Jetstream `account` event only triggers the check.
 
 ### 3.5 PLC pacing
@@ -1203,7 +1206,7 @@ Native paths: `~/.cache/lessdugin/{cache.sqlite, blobs/}`, `~/.local/share/lessd
 | I5 | The record store holds only `pds` and `proven` versions (and `idHint` rows, marked). Hints, `[stale]` proofs and pending writes live only in memory or in the outbox, and are never persisted as records. For the same `(uri, cid)`, the level only increases. |
 | I6 | A completeness claim requires every repo in the completeness set to be `Fresh` for that forum (§4.5, §5.9); otherwise the view shows `[partial k/n]`. |
 | I7 | Moderation inputs are read only from the record store, through the eligibility filter (§1.5). |
-| I8 | Records of DIDs that are not active (§3.4) are excluded from every fold input. |
+| I8 | Records of DIDs that are not active (§3.4) are excluded from every fold input, except an authority's modActions during the retention time (§3.4). |
 | I9 | One background-sync leader per cache (§10.6). Other processes and tabs do only P0 fetches, under per-repo locks. All writes are idempotent and order-key-monotonic (§5.6.2). Changes are broadcast (§10.6). |
 
 ### 10.3 Key encoding
@@ -1229,6 +1232,9 @@ The key of a tuple is the concatenation of its elements. A prefix scan over `(e1
 | cache | `("id", "handle", handle)` | `HandleRow` | |
 | cache | `("disc", fk, did)` | `DiscRow` | discovery candidates; not records |
 | cache | `("blob", cid)` | `BlobRow` | the bytes live in the host's blob storage (§12.2) |
+| cache | `("blob.ref", cid, fk)` | `BlobRefRow` | how many of forum fk's counted records reference the CID (§11.4); absent at 0 |
+| cache | `("blob.forum", fk, cid)` | `BlobRefRow` | the same row, by forum: what the next build of fk and its eviction start from |
+| cache | `("blob.loose", cid)` | `LooseBlobRow` | a blob the host stored while no forum counted a reference to it (§11.4) |
 | cache | `("cur", source)` | `CursorRow` | `source` = `"jetstream"` or `"indexer:" + did + ":" + fk` |
 | cache | `("host", origin)` | `HostRow` | |
 | cache | `("forum", fk)` | `ForumRow` | `{uri, lastViewed}` for eviction |
@@ -1237,8 +1243,11 @@ The key of a tuple is the concatenation of its elements. A prefix scan over `(e1
 | state | `("out.budget", account)` | `BudgetRow` | spent write points with timestamps, for the two sliding windows |
 | state | `("out.meta", account)` | `MetaRow` | the last TID handed out to this account's writes (W6) |
 | state | `("out.blob", account, seq, index, chunk)` | bytes | ≤ 1 MiB chunks of a blob uploaded when write `seq` is sent (`data-model.md` §8.8) |
+| state | `("prep", cid)` | `{v, mime, size, chunks, at}` | a file `prepare_media` prepared, until a write that uploads it is enqueued or `PREPARED_MEDIA_TTL_MS` passes (`data-model.md` §8.8) |
+| state | `("prep.blob", cid, n)` | bytes | its ≤ 1 MiB chunks, raw |
+| state | `("loc", "media", cid)` | legacy | prepared bytes of the first M4 builds: deleted when a file is prepared, and never exported or imported (`export_local`), as they are a copy of a file, not local state |
 | state | `("loc", kind, key…)` | per kind | kinds: `draft`, `read`, `sub`, `follow`, `unfollow`, `bookmark`, `mute`, `setting`, `alias`, `last_listing`, `consent`, `media_host`, `as_pin`, `quarantine`, `account`, `active_account`, `seeded` |
-| state | `("notif", account, ts, id)` | notification | |
+| state | `("loc", kind, account, key…)` | per kind | the rows of one account: `draft` (`id`), `notif` (`id`), `nbase` (forum), `ack` (kind); `logout --purge` deletes them with the account's `out*` rows (`threat-model.md` AUTH-11). A `("loc", "draft", id)` row (no account, before M4's drafts were per account) is adopted by the first account that uses drafts, or deleted by a purge |
 | state | `("meta", "schema")` | integer | `state` is migrated, never dropped |
 
 ### 10.5 Row schemas
@@ -1255,7 +1264,7 @@ RepoRow    { pds: url, rev: TID | "", commit?: CID, headSeen?: {rev, cid, sentAt
              listed: {scope → TID}, capped: {scope → {nsid → boundary rkey}}, byteCapped: {scope → bool},
              marks: {uri → TID} (≤ 1000), marksOverflow: bool,
              checkedAt, lastOk, nextCheck: ms, fails: int, unstable: int, class: string,
-             status: "active" | "inactive" | "temporary", statusDetail?: string, statusAt: ms,
+             status: "active" | "inactive" | "temporary", statusDetail?: string, statusAt: ms, inactiveSince?: ms,
              rollbackSince?: ms, lastChangeAt: ms, lastReconcile: ms }
 IdentityRow{ doc: bytes (JSON), level: "doc" | "hint", src: "plc" | "web" | "slingshot" | "devnet",
              pds?: url, key?: string (multikey), aka?: handle, hstate: "verified" | "unverified" | "invalid",
@@ -1263,6 +1272,9 @@ IdentityRow{ doc: bytes (JSON), level: "doc" | "hint", src: "plc" | "web" | "sli
 HandleRow  { result: "did" | "none" | "invalid", did?: did, method: "doh" | "system" | "wellknown" | "hint" | "devnet", at: ms }
 DiscRow    { src: [string], first: ms, state: "candidate" | "confirmed" | "rejected", at: ms }
 BlobRow    { did, mime: string (declared), sniff?: string, size: int, stored: bool, refs: int, at: ms, used: ms }
+             (v1 writes none: the references are the BlobRefRows, §11.4)
+BlobRefRow { n: int (≥ 1) }
+LooseBlobRow { at: ms (when stored) }
 CursorRow  { wire?: "v1" | "v2", instance?: host, seq?: int, timeUs?: µs, at: ms }
 HostRow    { rangeCursor: "unknown" | "yes" | "no", rcAt: ms, shortPageEnds: bool, nullSwap?: bool,
              breaker: {state, failures, until, openMs}, budget?: {limit, est, resetAt}, strikes: int }
@@ -1285,9 +1297,9 @@ HostRow    { rangeCursor: "unknown" | "yes" | "no", rcAt: ms, shortPageEnds: boo
 ### 10.7 Eviction
 
 - **Budget** (*tunable*): 2 GB native, 500 MB browser, measured as SQLite page count × page size plus the blob directory (native) or `navigator.storage.estimate().usage` (browser).
-- Above the budget, whole forums are evicted, least recently viewed (`ForumRow.lastViewed`) first, until usage is below 80% of the budget. Evicting forum `fk` deletes `("rec", fk, …)`, `("tomb", fk, …)` and `("disc", fk, …)`, resets `listed[fk]` in every repo row, and drops blob references held by the deleted rows.
+- Above the budget, whole forums are evicted, least recently viewed (`ForumRow.lastViewed`) first, until usage is below 80% of the budget. Evicting forum `fk` deletes `("rec", fk, …)`, `("tomb", fk, …)` and `("disc", fk, …)`, resets `listed[fk]` in every repo row, and drops the forum's blob references (its `("blob.forum", fk, ·)` and `("blob.ref", ·, fk)` rows).
 - **Never evicted:** identity rows; the user's own repo rows; the repos of authorities of followed forums. Evicting a forum skips their `(fk, coll, did)` sub-ranges.
-- Blobs whose `refs` falls to 0 are deleted with `Host::blob_delete` (§11.4).
+- Blobs that no forum references any more are deleted with `Host::blob_delete` (§11.4).
 - The SPA calls `navigator.storage.persist()` at startup.
 
 ---
@@ -1307,7 +1319,8 @@ fetch_media(did, blobRef, policy):
                                                                           // streamed and hashed by the host; a body
                                                                           // longer than the declared size is aborted
      CidMismatch → discard; strike against the host; show "media failed verification"
-     HTTP 400 "Blob not found" → missing: not retried; purge any cached copy (ADR 0005)
+     HTTP 400 "Blob not found" → missing: not retried (ADR 0005); nothing is stored, and a
+                                  stored CID is never asked for (§12.2), so there is no copy to purge
   sniff = sniff_type(Host::blob_read(h.cid, 0, 4096))
   require normalise(declared blobRef.mimeType) = normalise(sniff) ∧ that type is on the display allowlist (§11.2)
           else: download card only
@@ -1342,11 +1355,16 @@ Media loads automatically only if all of these hold:
 
 Otherwise the user clicks through a notice: "loads from <host>, which will see your IP". Avatars and forum icons follow the same rules, with the profile or declaration as the item.
 
+The engine decides while it builds a view: `MediaView.autoload` is this verdict for this device (`engine-api.md` §4.1), so every client shows the same thing. Condition 1 also needs the author's identity at level `doc` (§11.1); condition 4 counts the participants' identity rows the cache holds (any level, nothing is resolved for it); condition 5 reads the record's declared `mimeType` and `size`, and a blob whose size the record does not state never autoloads. The `mediaAutoload` setting `off` turns autoload off on the device. `pds` in the view names the host for the notice.
+
 ### 11.4 Caching and purging
 
 - Hidden, provisional and pending content is never prefetched.
-- `BlobRow.refs` counts the stored, eligible records that reference the CID and are not `Hidden(*)` in the current fold (the ForumModel updates it). When an item becomes hidden or is deleted, its blobs lose a reference; at 0 the bytes are deleted.
-- Blobs are also deleted with their forum on eviction (§10.7), and when `getBlob` reports them missing.
+- **References.** A blob is referenced by every blob object (`{"$type": "blob", "ref": {"$link": cid}}`, at any depth: media, `textBlob`, an icon, a revision's snapshot) in the value of a stored, eligible record of a forum's fold input, or of its declaration. A reference **counts** while its record is shown: the declaration; a post, comment, sequence or wiki revision while it is listed (`Visible` or `Collapsed(*)`, `social.md` §10.1, before the thread pass, so a `Tombstone` counts for nothing); a revision while its subject counts; every other record (membership, opinion, modAction). `("blob.ref", cid, fk)` holds how many of forum fk's records count for the CID, and `("blob.forum", fk, cid)` the same by forum.
+- **Updates.** Every build of a forum's model rewrites the forum's rows that changed, whole (two processes building the same forum write the same rows), unless the visibility layer is pending. When an item becomes hidden or excluded, or is deleted, its blobs lose its references; a CID that no forum references any more has its stored bytes deleted (`Host::blob_delete`, `threat-model.md` PRIV-2), right after the build that saw it lose them. A blob stays stored while any forum's shown record references it, and is fetched again (from the author's PDS) if it is wanted after a deletion.
+- Blobs are also deleted with their forum on eviction (§10.7), when no other forum references them.
+- **Loose blobs.** A blob the host stores (`load_media`, a spilled body) while no forum counts a reference to it (media loaded for an item that is already hidden: from the mod queue, or through a view older than the fold that hid it) is marked `("blob.loose", cid)`. The next build of a forum that references it without counting it deletes its stored bytes, when no forum counts it by then, and drops the mark; the mark also goes once some forum counts it, which then deletes it as above. A loose blob no forum references (the account's own, loaded with no owner) stays marked.
+- **Limits.** The count follows the fold of the last build of each forum: a forum not opened again keeps its rows, and a loose blob it references stays stored, until it is.
 
 ---
 
@@ -1402,6 +1420,7 @@ pub enum BlobError     { Host(HostError), Status(u16, Option<String>), TooLarge,
 ```
 
 - `fetch_blob` sends `GET <pds>/xrpc/com.atproto.sync.getBlob?did=<did>&cid=<cid>` (Anon, no redirects), streams the body, counts bytes against `max_bytes`, hashes it with sha256, compares the digest with the raw-codec CID, and only on a match stores the bytes under the CID in the host's blob storage and returns a handle. On any failure nothing is stored. An already stored CID returns its handle without a request.
+- **One download per CID at a time.** A `fetch_blob` of a CID being downloaded awaits that download instead of starting another, and a caller that stops awaiting (dropping the future, as the engine does after `BODY_BLOB_WAIT_MS` for a spilled body, `limits.md` §5) does not cancel it: natively the download is a detached task, capped by `BLOB_TOTAL_TIMEOUT_MS`; in the browser it is the running `fetch`. So the stored copy is there for the next caller, and a slow body is never restarted and aborted on every view. The first caller's `max_bytes` caps the download; the core holds a stored copy to its own declaration (§11.1).
 - `blob_open` returns the handle of a stored CID; `blob_read` returns at most 1,048,576 bytes from an offset; `blob_delete` removes the stored bytes.
 - The browser UI obtains object URLs from the host's blob storage by CID, outside the core.
 
@@ -1639,3 +1658,5 @@ These choices fill gaps or resolve ambiguities in the sources. Each takes the si
 3. Does Jetstream's DID filter also filter `identity` and `account` events? This document drops unknown DIDs client-side either way. M5 should measure it, because it changes browser bandwidth.
 4. ADR 0004's per-host verdict is statistical (rotating egress IPs). The M1 fixed-IP check may still show a shared budget, which would change §9.2 and §14.
 5. ADR 0003 asks whether the public v1 Jetstream hosts will be retired. If they are, filters of more than 150 DIDs need several v2 connections of at most 150 DIDs each.
+6. *(Orchestrator decisions O-3 and O-9, for the U7 review.)* The `sources` setting is honoured at runtime by the running engine (§2.3). In `direct`, no CORE+ or EXT endpoint is contacted. A `sources` the native configuration file states is an explicit local pin at the flag level: `crates/native` passes it as `EngineConfig.sources_flag`. Precedence: CLI flag > `config.toml` > stored setting > build default. A file that does not state `sources` leaves it to the stored setting.
+7. **Blob deletion on forum eviction depends on eviction (review finding m4-27, M3–M6 review).** §10.7 says evicting a forum drops its blob references and deletes the blobs no forum references any more (§11.4). No client implements the §10.7 budget yet, so no forum is evicted and that deletion never runs: a blob referenced only by a forum the user stopped visiting stays stored until the cache is cleared. The reference counting, the deletion of a blob that loses its last counted reference and the purge of loose blobs (§11.4, m4-27) are in place and will serve eviction when it lands; until then this is a recorded, accepted limit.

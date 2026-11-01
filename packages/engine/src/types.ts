@@ -274,8 +274,8 @@ export interface PostList {
   items: PostSummary[];
   cursor?: string;
   completeness: Completeness;
-  /** `moderationUnavailable` (a degraded view, social.md §4.11), `newerRules`; omitted when
-   * empty. */
+  /** `moderationUnavailable` (a degraded view, social.md §4.11), `newerRules`,
+   * `authorityInactive` (sync.md §3.4); omitted when empty. */
   banners?: Banner[];
 }
 
@@ -883,6 +883,20 @@ export interface NotificationsQuery {
   limit: number;
 }
 
+/** `bodySource`'s result (engine-api.md §3.4): a body's markdown source, as a composer edits
+ * it. */
+export interface BodySource {
+  /** The inline `text`, or the spilled `textBlob` decoded (UTF-8, one leading U+FEFF stripped);
+   * `""` for an item without a body. */
+  markdown: string;
+  /** The current CID of the record whose body this is (never a body's blob CID). */
+  cid: Cid;
+  /** The body's `profile` as the record states it (absent: `lfm/1`). */
+  profile?: string;
+  /** Stored as a `textBlob` (lfm-1.md §1.3): a kept source is spilled again when it must. */
+  spilled: boolean;
+}
+
 // ---------------------------------------------------------------------------------------------
 // §3.5 Writes
 // ---------------------------------------------------------------------------------------------
@@ -897,17 +911,29 @@ export interface MediaRef {
   aspectRatio?: AspectRatio;
   durationMs?: number;
   name?: string;
+  /** From `prepareMedia`: `missingAlt` when the file has no alt text (writers warn,
+   * data-model.md §4); a client clears it once the user writes one. */
+  notices?: ActionNotice[];
 }
 
 // What `prepare_media` takes: the display hints and the DECLARED type. The bytes are a
 // separate argument (a `Uint8Array` or a file), because neither belongs in a DTO that is also
-// exported to Rust (engine-api.md §3.6; the Rust type is `MediaInput`).
+// exported to Rust (engine-api.md §3.5; the Rust type is `MediaInput`).
 export interface MediaInput {
   /** The declared mimeType; the sniffed one wins when they disagree (data-model.md §8.8). */
   declaredMime?: string;
   alt?: string;
   name?: string;
   aspectRatio?: AspectRatio;
+}
+
+/** `prepareMedia`'s argument in engine API v0: the bytes with the hints (`mime` is the declared
+ * type, `declaredMime` in `MediaInput`). Still accepted. */
+export interface MediaFile {
+  bytes: Uint8Array;
+  mime?: string;
+  name?: string;
+  alt?: string;
 }
 
 export interface BodyDraft {
@@ -992,11 +1018,13 @@ export type AccessLevel = "banned" | "member";
 export type PinScope = "forum" | "thread";
 
 /** A modAction `action` as a client asks for it (data-model.md §6.7): the complete desired state
- * of its action key. Defaults: `spam` false, `showReason` true, `nullifyVotes` false. */
+ * of its action key. Defaults: `spam` false, `showReason` true. One `#restrict` record holds both
+ * `capabilities` and `nullifyVotes`: the one a `restrict` leaves out keeps the account's current
+ * value (none yet: no capability, `false`); naming neither is refused. */
 export type ModActionValue =
   | { kind: "hide"; hidden: boolean; spam?: boolean; showReason?: boolean }
   | { kind: "access"; level: AccessLevel }
-  | { kind: "restrict"; capabilities: Capability[]; nullifyVotes?: boolean }
+  | { kind: "restrict"; capabilities?: Capability[]; nullifyVotes?: boolean }
   | { kind: "tier"; tier: Tier; notice?: BodyDraft }
   | { kind: "pin"; scope: PinScope; pinned: boolean }
   | { kind: "lock"; locked: boolean }
@@ -1034,8 +1062,9 @@ export type WriteState =
       error?: EngineError;
     }
   | { kind: "sending" }
-  /** `cid` is absent for deletes. */
-  | { kind: "done"; uri: AtUri; cid?: Cid }
+  /** `cid` is absent for deletes. `report`: a done `modAdopt` (also the one `modsSet` runs
+   * first) lists, one line each, the assertions it did not adopt or kept. */
+  | { kind: "done"; uri: AtUri; cid?: Cid; report?: string[] }
   | { kind: "failed"; error: EngineError }
   | { kind: "undone" };
 
@@ -1044,7 +1073,16 @@ export interface WriteTicket {
   state: WriteState;
 }
 
-export type NoticeCode = "notEstablished" | "retroactive" | "adoptedFirst";
+export type NoticeCode =
+  | "notEstablished"
+  | "retroactive"
+  | "adoptedFirst"
+  | "missingAlt"
+  /** `editPreflight`: the edit suspends the item's positive assertions (social.md §4.5). */
+  | "suspendsAssertions"
+  /** `modAction` restrict: the `#restrict` record's one `until` now also applies to the
+   * dimension the intent left out, or to the one it named (social.md §4.2). */
+  | "sharedExpiry";
 
 /** A notice to show with an action's result, e.g. "recorded; will count once you're
  * established". */
@@ -1090,13 +1128,22 @@ export interface SubscriptionEntry {
   sinceMs: Ms;
 }
 
-/** A media blob fetched for display (`engine-api.md` §3.6 `loadMedia`). `url` is an object URL
- * in the browser; `cid` is already verified by the host while the bytes streamed
- * (threat-model: blob bytes never enter wasm linear memory). */
+/** A media blob fetched for display (`engine-api.md` §3.4 `loadMedia`, sync.md §11.2). `cid` was
+ * verified while the bytes streamed (they never enter wasm memory). In the browser `url` is a
+ * `blob:` object URL the client made on the main thread from the verified stored `Blob`, typed
+ * `mime` (or `application/octet-stream`); the caller owns it and revokes it
+ * (`URL.revokeObjectURL`) when the element unmounts. `mime` is the display type: present only
+ * when the sniffed type matches the declared one and is on the display allowlist (inline image,
+ * or a click-to-play video/audio); absent, show a download card, never inline. `sniffed` is the
+ * type the bytes sniff as (data-model.md §8.8's table, or `image/avif`), whatever was declared:
+ * a download card saves the file as `<cid>.<ext>` from it (sync.md §11.2); never display it by
+ * it. */
 export interface LoadedMedia {
   cid: string;
   size: number;
   url: string;
+  mime?: string;
+  sniffed?: string;
 }
 
 export interface DraftEntry {
@@ -1142,6 +1189,18 @@ export interface Settings {
 
 export type SettingKey = keyof Settings;
 
+/** `importLocal`'s result (engine-api.md §3.6). */
+export interface ImportReport {
+  imported: number;
+  outOfScope: number;
+  undecodable: number;
+  /** Members an import never writes (login state, acknowledgements, third-party settings, keys
+   * outside the local state). */
+  refused?: number;
+  /** Members written per family (`follow`, `setting`, …). */
+  kinds?: [string, number][];
+}
+
 export type KarmaCadence = "realtime" | "daily" | "weekly";
 
 export type PublicActionKind = "vote" | "react" | "tagVote" | "join" | "modAction";
@@ -1154,6 +1213,8 @@ export interface RenderOpts {
   html: boolean;
   text: boolean;
   styled: boolean;
+  /** The body's `profile` (lfm-1.md §1.4); absent: `lfm/1`. */
+  profile?: string;
 }
 
 export interface ValidationReport {

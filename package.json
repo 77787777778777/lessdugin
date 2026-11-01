@@ -7,7 +7,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "check": "biome check . && pnpm -r --if-present run typecheck",
+    "check": "biome check . && pnpm -r --if-present run check",
     "test": "pnpm -r --if-present run test",
     "build": "pnpm --filter @lessdugin/web run build"
   },

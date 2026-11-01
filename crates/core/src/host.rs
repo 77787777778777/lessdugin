@@ -284,6 +284,10 @@ pub struct BlobHandle {
     pub locator: String,
 }
 
+/// The most bytes one [`Host::blob_read`] returns (1 MiB, `sync.md` §12.2): enough to sniff a
+/// type and to read a `textBlob` body in one or a few calls, never a whole video.
+pub const BLOB_READ_MAX_BYTES: u32 = 1_048_576;
+
 /// Directions for range scans.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Dir {
@@ -409,6 +413,36 @@ pub trait Host: MaybeSendSync + 'static {
         cid: String,
         max_bytes: u64,
     ) -> impl Future<Output = Result<BlobHandle, HostError>> + MaybeSend;
+
+    /// The handle of a stored (verified) blob, or `None` when this host does not hold `cid`
+    /// (`sync.md` §12.2). Hosts that store no blobs keep the default: `Unsupported`.
+    fn blob_open(
+        &self,
+        cid: &str,
+    ) -> impl Future<Output = Result<Option<BlobHandle>, HostError>> + MaybeSend {
+        let _ = cid;
+        async { Err(HostError::Unsupported("this host stores no blobs".into())) }
+    }
+
+    /// At most `len` bytes (capped at [`BLOB_READ_MAX_BYTES`]) of the stored blob `cid` from
+    /// `offset`; fewer at its end, none past it. [`HostError::Storage`] when it is not stored.
+    /// This is how the core sniffs a fetched blob and reads a `textBlob`, a window at a time.
+    fn blob_read(
+        &self,
+        cid: &str,
+        offset: u64,
+        len: u32,
+    ) -> impl Future<Output = Result<Vec<u8>, HostError>> + MaybeSend {
+        let _ = (cid, offset, len);
+        async { Err(HostError::Unsupported("this host stores no blobs".into())) }
+    }
+
+    /// Removes the stored blob `cid` (no error when it is absent): one that no forum's shown
+    /// record references any more (`sync.md` §11.4, PRIV-2).
+    fn blob_delete(&self, cid: &str) -> impl Future<Output = Result<(), HostError>> + MaybeSend {
+        let _ = cid;
+        async { Err(HostError::Unsupported("this host stores no blobs".into())) }
+    }
 
     /// Open a WebSocket (Jetstream). Messages larger than `max_message_bytes` fail the stream.
     fn websocket(

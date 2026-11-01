@@ -435,6 +435,45 @@ fn a_react_shows_in_the_palette_and_under_the_item() {
     let _ = OpinionIntent::Karma { value: None };
 }
 
+/// Switching a held react's stance is ONE opinion effect: the runtime runs effects as separate
+/// tasks, so a remove-then-add pair could land add-first and the remove would delete the react.
+#[test]
+fn a_stance_switch_is_one_add() {
+    use lessdugin_core::dto::{OpinionIntent, Stance};
+    use lessdugin_tui::{Action, Effect};
+    let s = scenario();
+    let (forum, _, _) = react_forum(&s);
+    let mut t = tui(&s, 80, 24);
+    block_on(t.start(Some(forum.clone())));
+    block_on(t.press("Enter"));
+    // carol reacts "Agreed" for, and the write lands
+    block_on(t.keys(&["x", "Enter"]));
+    block_on(t.engine().outbox_flush()).unwrap();
+    block_on(t.settle());
+    // the palette again, against, Enter: the effects of that one key
+    block_on(t.keys(&["x", "Tab"]));
+    let fx = t.state.update(Action::Key(
+        lessdugin_tui::keys::parse_key("Enter").unwrap(),
+    ));
+    let opinions: Vec<&OpinionIntent> = fx
+        .iter()
+        .filter_map(|e| match e {
+            Effect::Opinion { intent, .. } => Some(intent),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        opinions,
+        [&OpinionIntent::React {
+            id: "agree".into(),
+            stance: Stance::Against,
+            quote: None,
+            remove: false,
+        }],
+        "{fx:?}"
+    );
+}
+
 #[test]
 fn the_mod_menu_hides_an_item_with_a_reason() {
     use lessdugin_core::dto::{ItemState, ThreadOpts};
@@ -574,10 +613,9 @@ fn the_mod_queue_is_blocked_for_a_plain_member() {
     assert!(status(&t).contains("cannot moderate"), "{}", status(&t));
 }
 
-#[test]
-fn an_applicant_shows_in_the_queue_and_enter_approves() {
-    let s = scenario();
-    // dave applies to the approval-mode forum (a membership without a grant)
+/// dave applies to the approval-mode forum of `s` (a membership without a grant) and alice
+/// learns of it; returns his DID.
+fn dave_applies(s: &common::Scenario) -> String {
     let dave_acct = s.w.net.add_account("dave.example.com");
     let h = MemHost::new();
     h.set_seed(11);
@@ -613,8 +651,11 @@ fn an_applicant_shows_in_the_queue_and_enter_approves() {
     block_on(s.w.alice.engine.sync_thread(&dave_c, &SyncOpts::default())).unwrap();
     s.w.tick(MINUTE);
     s.w.alice.sync(&s.forum);
+    dave_acct.did().to_string()
+}
 
-    // alice (the owner) opens the Mod screen: the queue lists dave as an applicant
+/// alice's TUI on the Mod screen's queue of `s`'s forum.
+fn alice_queue(s: &common::Scenario) -> Tui {
     let mut t = block_on(lessdugin_tui::Headless::new(
         s.w.alice.engine.clone(),
         lessdugin_tui::HeadlessOpts {
@@ -639,6 +680,15 @@ fn an_applicant_shows_in_the_queue_and_enter_approves() {
         block_on(t.press("j"));
     }
     block_on(t.press("Enter"));
+    t
+}
+
+#[test]
+fn an_applicant_shows_in_the_queue_and_enter_approves() {
+    let s = scenario();
+    let dave = dave_applies(&s);
+    // alice (the owner) opens the Mod screen: the queue lists dave as an applicant
+    let mut t = alice_queue(&s);
     let screen = t.render();
     assert!(screen.contains("applicant"), "{screen}");
     assert!(screen.contains("dave"), "{screen}");
@@ -660,9 +710,7 @@ fn an_applicant_shows_in_the_queue_and_enter_approves() {
     )
     .unwrap();
     assert!(
-        members
-            .iter()
-            .any(|m| m.actor.did == dave_acct.did().to_string() && m.granted),
+        members.iter().any(|m| m.actor.did == dave && m.granted),
         "{members:?}"
     );
 }
@@ -1060,5 +1108,1247 @@ fn versions_panel_shows_the_history_and_says_when_it_was_redacted() {
     assert!(
         !screen.contains("History"),
         "the panel must close:\n{screen}"
+    );
+}
+
+/// alice's TUI (headless, syncing as the TUI does).
+fn alice_tui(s: &common::Scenario, width: u16, height: u16) -> Tui {
+    block_on(lessdugin_tui::Headless::new(
+        s.w.alice.engine.clone(),
+        lessdugin_tui::HeadlessOpts {
+            width,
+            height,
+            ..lessdugin_tui::HeadlessOpts::default()
+        },
+    ))
+    .unwrap()
+}
+
+/// Viewing a thread sets its read mark (`social.md` §16): the notifications about it are read
+/// once it has been opened, and the badge drops.
+#[test]
+fn opening_a_thread_marks_it_read() {
+    let s = scenario();
+    let _comment = alice_with_a_notification(&s);
+    let mut t = alice_tui(&s, 80, 24);
+    block_on(t.start(None));
+    assert!(t.render().contains("[N 2]"), "{}", t.render());
+    block_on(t.open_thread(&s.welcome));
+    let n = block_on(t.engine().notifications(&Default::default())).unwrap();
+    assert_eq!(n.unread, 0, "{n:?}");
+    let screen = t.render();
+    assert!(!screen.contains("[N "), "{screen}");
+}
+
+/// `:read` marks the selected notification read, not every listed one.
+#[test]
+fn the_read_command_marks_only_the_selected_notification() {
+    let s = scenario();
+    let _comment = alice_with_a_notification(&s);
+    let mut t = alice_tui(&s, 80, 24);
+    block_on(t.start(None));
+    block_on(t.press("N"));
+    run_command(&mut t, "read");
+    let n = block_on(t.engine().notifications(&Default::default())).unwrap();
+    assert_eq!(n.unread, 1, "one of the two is read: {n:?}");
+    // the screen follows
+    assert!(t.render().contains("1 unread"), "{}", t.render());
+    // `read-all` takes the rest
+    run_command(&mut t, "read-all");
+    let n = block_on(t.engine().notifications(&Default::default())).unwrap();
+    assert_eq!(n.unread, 0, "{n:?}");
+}
+
+/// Types `line` into the `:` overlay and returns the effects of its Enter (not run).
+fn command_effects(t: &mut Tui, line: &str) -> Vec<lessdugin_tui::Effect> {
+    block_on(t.press(":"));
+    for c in line.chars() {
+        block_on(t.press(&c.to_string()));
+    }
+    t.state.update(lessdugin_tui::Action::Key(
+        lessdugin_tui::keys::parse_key("Enter").unwrap(),
+    ))
+}
+
+/// The opinion subjects of `fx`.
+fn opinion_subjects(fx: &[lessdugin_tui::Effect]) -> Vec<String> {
+    fx.iter()
+        .filter_map(|e| match e {
+            lessdugin_tui::Effect::Opinion { subject, .. } => Some(subject.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// `:vote`, `:agree`, `:react` and `:unreact` act on the subject the command names, not on
+/// the selection; and they work where nothing is selected (the Notifications screen).
+#[test]
+fn opinion_commands_act_on_the_named_subject() {
+    use lessdugin_core::dto::{KarmaValue, ThreadOpts, ThreadRoot};
+    let s = scenario();
+    let mut t = tui(&s, 100, 30);
+    block_on(t.start(Some(s.forum.clone())));
+    // bob's post is selected (the first); the command names the welcome post
+    assert_eq!(
+        t.state.top_forum_screen().unwrap().selected().unwrap().uri,
+        s.bob_post
+    );
+    let fx = command_effects(&mut t, &format!("vote down {}", s.welcome));
+    assert_eq!(
+        opinion_subjects(&fx),
+        std::slice::from_ref(&s.welcome),
+        "{fx:?}"
+    );
+    for line in [
+        format!("agree for {}", s.welcome),
+        format!("react agree for {}", s.welcome),
+        format!("unreact agree {}", s.welcome),
+    ] {
+        let fx = command_effects(&mut t, &line);
+        assert_eq!(
+            opinion_subjects(&fx),
+            std::slice::from_ref(&s.welcome),
+            "{line}: {fx:?}"
+        );
+    }
+
+    // end to end, from a screen with no selection
+    block_on(t.press("N"));
+    run_command(&mut t, &format!("vote up {}", s.bob_c1));
+    assert!(status(&t).contains("Vote recorded"), "{}", status(&t));
+    block_on(t.engine().outbox_flush()).unwrap();
+    block_on(t.settle());
+    let tv = block_on(t.engine().get_thread(&s.welcome, &ThreadOpts::default())).unwrap();
+    let c = tv.comments.iter().find(|c| c.uri == s.bob_c1).unwrap();
+    assert_eq!(
+        c.score.mine.as_ref().and_then(|m| m.karma),
+        Some(KarmaValue::Up),
+        "{:?}",
+        c.score
+    );
+    let ThreadRoot::Post(p) = &tv.post else {
+        panic!("no post")
+    };
+    assert_eq!(p.post.score.mine.as_ref().and_then(|m| m.karma), None);
+}
+
+/// `:mod keep` asserts `#hide{hidden: false}`: the owner overrides a moderator's hide from the
+/// TUI (it was a removal of the owner's own, non-existent hide, refused with `not_found`).
+#[test]
+fn the_owner_keeps_an_item_a_moderator_hid() {
+    use lessdugin_core::dto::{ItemState, ThreadOpts, ThreadRoot};
+    let s = scenario();
+    let (forum, bob_post, _) = react_forum(&s); // carol moderates, alice owns
+    block_on(s.w.carol.engine.mod_action(&ModActionIntent::Assert {
+        forum: forum.clone(),
+        scope: ModScope::Forum,
+        subject: bob_post.clone(),
+        action: ModActionValue::Hide {
+            hidden: true,
+            spam: false,
+            show_reason: true,
+        },
+        reason: None,
+        until_ms: None,
+    }))
+    .unwrap();
+    s.w.carol.flush();
+    s.w.tick(MINUTE);
+    s.w.alice.sync(&forum);
+    let state = |t: &Tui| {
+        let tv = block_on(t.engine().get_thread(&bob_post, &ThreadOpts::default())).unwrap();
+        let ThreadRoot::Post(p) = tv.post else {
+            panic!("no post")
+        };
+        p.post.state
+    };
+    let mut t = alice_tui(&s, 100, 30);
+    block_on(t.start(Some(forum.clone())));
+    assert!(
+        matches!(state(&t), ItemState::Hidden { .. }),
+        "{:?}",
+        state(&t)
+    );
+    run_command(&mut t, &format!("mod keep {bob_post} \"on topic\""));
+    assert!(status(&t).contains("Mod action recorded"), "{}", status(&t));
+    block_on(t.engine().outbox_flush()).unwrap();
+    s.w.tick(MINUTE);
+    block_on(t.settle());
+    assert_eq!(state(&t), ItemState::Visible);
+}
+
+/// A nullification keeps the restriction the same moderator asserted before it, and the other
+/// way round: each sets one dimension of the one `#restrict` record (`social.md` §4.2).
+#[test]
+fn restrict_then_nullify_keeps_both() {
+    use lessdugin_core::dto::MembersQuery;
+    let s = scenario();
+    let bob = s.w.bob.did();
+    let mut t = alice_tui(&s, 100, 30);
+    block_on(t.start(Some(s.forum.clone())));
+    let member = |t: &Tui| {
+        let mut m = block_on(t.engine().members(&s.forum, &MembersQuery::default()))
+            .unwrap()
+            .into_iter()
+            .find(|m| m.actor.did == bob)
+            .unwrap();
+        m.restricted.sort();
+        m
+    };
+    run_command(&mut t, &format!("mod restrict post,comment {bob}"));
+    block_on(t.engine().outbox_flush()).unwrap();
+    s.w.tick(MINUTE);
+    block_on(t.settle());
+    let m = member(&t);
+    assert_eq!(m.restricted, ["comment", "post"], "{m:?}");
+    run_command(&mut t, &format!("mod nullify {bob}"));
+    assert!(status(&t).contains("Mod action recorded"), "{}", status(&t));
+    block_on(t.engine().outbox_flush()).unwrap();
+    s.w.tick(MINUTE);
+    block_on(t.settle());
+    let m = member(&t);
+    assert!(m.nullified, "{m:?}");
+    assert_eq!(
+        m.restricted,
+        ["comment", "post"],
+        "the restriction stays: {m:?}"
+    );
+    // and a restriction keeps the nullification
+    run_command(&mut t, &format!("mod restrict vote {bob}"));
+    block_on(t.engine().outbox_flush()).unwrap();
+    s.w.tick(MINUTE);
+    block_on(t.settle());
+    let m = member(&t);
+    assert!(m.nullified, "the nullification stays: {m:?}");
+    assert_eq!(m.restricted, ["vote"], "{m:?}");
+}
+
+/// bob's membership as alice's engine reads it, its restrictions sorted.
+fn bob_member(t: &Tui, s: &common::Scenario) -> lessdugin_core::dto::MemberView {
+    let mut m = block_on(t.engine().members(&s.forum, &Default::default()))
+        .unwrap()
+        .into_iter()
+        .find(|m| m.actor.did == s.w.bob.did())
+        .unwrap();
+    m.restricted.sort();
+    m
+}
+
+/// The same, when the first write is still in the outbox (not sent, or offline): the second
+/// is completed from the pending write, not from the cache that holds confirmed writes only.
+#[test]
+fn restrict_then_nullify_before_the_first_is_sent_keeps_both() {
+    let s = scenario();
+    let bob = s.w.bob.did();
+    let mut t = alice_tui(&s, 100, 30);
+    block_on(t.start(Some(s.forum.clone())));
+    run_command(&mut t, &format!("mod restrict post,comment {bob}"));
+    run_command(&mut t, &format!("mod nullify {bob}"));
+    assert!(status(&t).contains("Mod action recorded"), "{}", status(&t));
+    block_on(t.engine().outbox_flush()).unwrap();
+    s.w.tick(MINUTE);
+    block_on(t.settle());
+    let m = bob_member(&t, &s);
+    assert!(m.nullified, "{m:?}");
+    assert_eq!(m.restricted, ["comment", "post"], "{m:?}");
+    // and a retraction still in the outbox leaves nothing to keep
+    run_command(&mut t, &format!("mod unrestrict {bob}"));
+    run_command(&mut t, &format!("mod restrict vote {bob}"));
+    block_on(t.engine().outbox_flush()).unwrap();
+    s.w.tick(MINUTE);
+    block_on(t.settle());
+    let m = bob_member(&t, &s);
+    assert!(!m.nullified, "{m:?}");
+    assert_eq!(m.restricted, ["vote"], "{m:?}");
+}
+
+/// The mod menu's capability presets add up: "voting, reacting" after "posting" restricts
+/// both (each states the record's whole set, `social.md` §4.7), even before the first is sent.
+#[test]
+fn the_menu_restrictions_add_up() {
+    let s = scenario();
+    let mut t = alice_tui(&s, 100, 30);
+    block_on(t.start(Some(s.forum.clone())));
+    block_on(t.open_thread(&s.bob_post));
+    let pick = |t: &mut Tui, label: &str| {
+        block_on(t.press("m"));
+        let menu = t.state.mod_menu.as_ref().expect("the menu opened");
+        let n = menu
+            .entries
+            .iter()
+            .position(|e| e.label == label)
+            .unwrap_or_else(|| panic!("no {label:?} in {menu:?}"));
+        for _ in 0..n {
+            block_on(t.press("j"));
+        }
+        block_on(t.press("Enter"));
+        assert!(t.state.prompt.is_some(), "the reason prompt opened");
+        block_on(t.press("Enter"));
+        assert!(status(t).contains("Mod action recorded"), "{}", status(t));
+    };
+    pick(&mut t, "restrict the author (posting)");
+    pick(&mut t, "restrict the author (voting, reacting)");
+    block_on(t.engine().outbox_flush()).unwrap();
+    s.w.tick(MINUTE);
+    block_on(t.settle());
+    let m = bob_member(&t, &s);
+    assert_eq!(m.restricted, ["comment", "post", "react", "vote"], "{m:?}");
+}
+
+/// `--until` a few minutes from alice's clock, as `mod` takes it.
+fn until_soon(s: &common::Scenario) -> String {
+    use lessdugin_core::host::Host as _;
+    let at = s.w.alice.host.now_ms() + 2 * MINUTE;
+    lessdugin_atp::syntax::Datetime::from_millis(at)
+        .unwrap()
+        .as_str()
+        .to_owned()
+}
+
+/// m3r-2: a nullification names only `nullifyVotes` and the engine fills the capabilities from
+/// the account's record as it reads it, so a restriction whose `until` passed stays lapsed
+/// (the TUI used to send the capabilities it read back, and so re-imposed it for good).
+#[test]
+fn a_nullification_does_not_reimpose_a_lapsed_restriction() {
+    let s = scenario();
+    let bob = s.w.bob.did();
+    let mut t = alice_tui(&s, 100, 30);
+    block_on(t.start(Some(s.forum.clone())));
+    let until = until_soon(&s);
+    run_command(
+        &mut t,
+        &format!("mod restrict post,comment --until {until} {bob}"),
+    );
+    block_on(t.engine().outbox_flush()).unwrap();
+    s.w.tick(MINUTE);
+    block_on(t.settle());
+    assert_eq!(bob_member(&t, &s).restricted, ["comment", "post"]);
+    s.w.tick(5 * MINUTE);
+    run_command(&mut t, &format!("mod nullify {bob}"));
+    block_on(t.engine().outbox_flush()).unwrap();
+    s.w.tick(MINUTE);
+    block_on(t.settle());
+    let m = bob_member(&t, &s);
+    assert!(m.nullified, "{m:?}");
+    assert!(m.restricted.is_empty(), "it stays lapsed: {m:?}");
+}
+
+/// The mod menu's capability presets add to the capabilities restricted now: one whose `until`
+/// passed restricts nothing, so it is not re-imposed with the preset's.
+#[test]
+fn the_menu_presets_add_only_to_a_restriction_in_effect() {
+    let s = scenario();
+    let bob = s.w.bob.did();
+    let mut t = alice_tui(&s, 100, 30);
+    block_on(t.start(Some(s.forum.clone())));
+    let until = until_soon(&s);
+    run_command(
+        &mut t,
+        &format!("mod restrict post,comment --until {until} {bob}"),
+    );
+    block_on(t.engine().outbox_flush()).unwrap();
+    s.w.tick(MINUTE);
+    block_on(t.settle());
+    assert_eq!(bob_member(&t, &s).restricted, ["comment", "post"]);
+    s.w.tick(5 * MINUTE);
+    block_on(t.open_thread(&s.bob_post));
+    block_on(t.press("m"));
+    let menu = t.state.mod_menu.as_ref().expect("the menu opened");
+    let label = "restrict the author (voting, reacting)";
+    let n = menu.entries.iter().position(|e| e.label == label).unwrap();
+    for _ in 0..n {
+        block_on(t.press("j"));
+    }
+    block_on(t.press("Enter"));
+    block_on(t.press("Enter"));
+    assert!(status(&t).contains("Mod action recorded"), "{}", status(&t));
+    block_on(t.engine().outbox_flush()).unwrap();
+    s.w.tick(MINUTE);
+    block_on(t.settle());
+    let m = bob_member(&t, &s);
+    assert_eq!(m.restricted, ["react", "vote"], "{m:?}");
+}
+
+/// m3r-2, the neighbour of the lapsed case: a timed restriction still in effect keeps its
+/// `until` (and its reason) when the menu's preset adds capabilities to it, since the one
+/// record's expiry belongs to everything it states (`social.md` §4.2); the TUI used to send the
+/// merged capabilities with no `until`, which made the whole restriction permanent.
+#[test]
+fn the_menu_presets_keep_a_timed_restrictions_expiry() {
+    use lessdugin_core::host::Host as _;
+    let s = scenario();
+    let bob = s.w.bob.did();
+    let mut t = alice_tui(&s, 100, 30);
+    block_on(t.start(Some(s.forum.clone())));
+    // ten minutes from alice's clock
+    let until = lessdugin_atp::syntax::Datetime::from_millis(s.w.alice.host.now_ms() + 10 * MINUTE)
+        .unwrap()
+        .as_str()
+        .to_owned();
+    run_command(
+        &mut t,
+        &format!("mod restrict post,comment --until {until} {bob}"),
+    );
+    block_on(t.engine().outbox_flush()).unwrap();
+    s.w.tick(MINUTE);
+    block_on(t.settle());
+    assert_eq!(bob_member(&t, &s).restricted, ["comment", "post"]);
+    // the preset adds voting and reacting while the restriction has minutes left
+    block_on(t.open_thread(&s.bob_post));
+    block_on(t.press("m"));
+    let menu = t.state.mod_menu.as_ref().expect("the menu opened");
+    let label = "restrict the author (voting, reacting)";
+    let n = menu.entries.iter().position(|e| e.label == label).unwrap();
+    for _ in 0..n {
+        block_on(t.press("j"));
+    }
+    block_on(t.press("Enter"));
+    block_on(t.press("Enter"));
+    assert!(status(&t).contains("Mod action recorded"), "{}", status(&t));
+    block_on(t.engine().outbox_flush()).unwrap();
+    s.w.tick(MINUTE);
+    block_on(t.settle());
+    let m = bob_member(&t, &s);
+    assert_eq!(m.restricted, ["comment", "post", "react", "vote"], "{m:?}");
+    // the record kept its until: past it, nothing is restricted any more
+    s.w.tick(10 * MINUTE);
+    block_on(t.settle());
+    let m = bob_member(&t, &s);
+    assert!(m.restricted.is_empty(), "it lapsed with the rest: {m:?}");
+}
+
+/// The "this is public" interstitial (`social.md` §17, `threat-model.md` PRIV-9,
+/// `engine-api.md` §3.6): the first public action of each kind waits behind it; `n` drops it,
+/// `y` sends it and records the acknowledgement, which every client on the device shares.
+#[test]
+fn the_first_public_action_of_each_kind_asks_first() {
+    use lessdugin_core::dto::PublicActionKind;
+    let s = common::scenario_unacknowledged();
+    let engine = s.w.carol.engine.clone();
+    let acked = |k| block_on(engine.public_action_acknowledged(k)).unwrap();
+    let mut t = tui(&s, 80, 24);
+    block_on(t.start(Some(s.forum.clone())));
+    let writes = |t: &Tui| block_on(t.engine().writes()).unwrap().len();
+
+    // `u`: nothing is written yet
+    block_on(t.press("u"));
+    let n = t
+        .state
+        .public_notice
+        .as_ref()
+        .expect("the interstitial opens");
+    assert_eq!(n.kinds, [PublicActionKind::Vote]);
+    let screen = t.render();
+    assert!(screen.contains("This is public"), "{screen}");
+    assert!(screen.contains("y go on"), "{screen}");
+    insta::assert_snapshot!("public_notice_vote_80x24", screen);
+    assert_eq!(writes(&t), 0, "the vote waits");
+    // keys go to the interstitial, not to the screen below
+    block_on(t.press("j"));
+    assert!(t.state.public_notice.is_some());
+    assert_eq!(writes(&t), 0);
+    // nor does Enter go past it (it queued most of the held writes: a second press, or a key
+    // repeat, must not publish unread)
+    block_on(t.press("Enter"));
+    assert!(t.state.public_notice.is_some(), "Enter is not a yes");
+    assert_eq!(writes(&t), 0);
+    assert!(!acked(PublicActionKind::Vote));
+
+    // `n` cancels: nothing written, nothing acknowledged
+    block_on(t.press("n"));
+    assert!(t.state.public_notice.is_none());
+    assert!(
+        status(&t).contains("nothing was published"),
+        "{}",
+        status(&t)
+    );
+    assert_eq!(writes(&t), 0);
+    assert!(!acked(PublicActionKind::Vote));
+
+    // `u` asks again; `y` sends the vote and records the acknowledgement
+    block_on(t.press("u"));
+    assert!(t.state.public_notice.is_some());
+    block_on(t.press("y"));
+    assert!(t.state.public_notice.is_none());
+    assert!(status(&t).contains("Vote recorded"), "{}", status(&t));
+    assert_eq!(writes(&t), 1);
+    assert!(acked(PublicActionKind::Vote));
+    // the next vote does not ask, nor does `0` (two intents, one kind)
+    block_on(t.press("d"));
+    assert!(t.state.public_notice.is_none());
+    block_on(t.press("0"));
+    assert!(t.state.public_notice.is_none());
+
+    // a react is another kind, and so is a mod action, whichever key or command queues it
+    block_on(t.press("x"));
+    block_on(t.press("Enter"));
+    let n = t.state.public_notice.as_ref().expect("the react asks");
+    assert_eq!(n.kinds, [PublicActionKind::React]);
+    block_on(t.press("Esc"));
+    assert!(!acked(PublicActionKind::React));
+    let fx = command_effects(&mut t, &format!("mod hide {}", s.bob_post));
+    assert!(
+        !fx.iter()
+            .any(|e| matches!(e, lessdugin_tui::Effect::ModAction { .. })),
+        "{fx:?}"
+    );
+    let n = t.state.public_notice.as_ref().expect("the mod action asks");
+    assert_eq!(n.kinds, [PublicActionKind::ModAction]);
+    assert_eq!(n.held.len(), 1);
+    block_on(t.press("n"));
+
+    // another client on the device acknowledges: this session follows
+    block_on(engine.acknowledge_public_action(PublicActionKind::React)).unwrap();
+    block_on(t.settle());
+    block_on(t.press("x"));
+    block_on(t.press("Enter"));
+    assert!(t.state.public_notice.is_none(), "{}", t.render());
+    assert!(status(&t).contains("React recorded"), "{}", status(&t));
+
+    // a new session reads the acknowledgements back
+    let mut t2 = tui(&s, 80, 24);
+    block_on(t2.start(Some(s.forum.clone())));
+    block_on(t2.press("u"));
+    assert!(t2.state.public_notice.is_none());
+    assert!(status(&t2).contains("Vote recorded"), "{}", status(&t2));
+}
+
+/// A join (`:join`) and an approval from the mod queue (Enter) are public actions too: each
+/// waits behind the interstitial of its kind.
+#[test]
+fn a_join_and_a_queue_approval_ask_first() {
+    use lessdugin_core::dto::PublicActionKind;
+    use lessdugin_tui::Effect;
+    let s = common::scenario_unacknowledged();
+    // carol is granted but has not joined
+    let mut t = tui(&s, 80, 24);
+    block_on(t.start(Some(s.forum.clone())));
+    let fx = command_effects(&mut t, "join");
+    assert!(
+        !fx.iter().any(|e| matches!(e, Effect::Join { .. })),
+        "{fx:?}"
+    );
+    let n = t.state.public_notice.as_ref().expect("the join asks");
+    assert_eq!(n.kinds, [PublicActionKind::Join]);
+    assert!(matches!(n.held[..], [Effect::Join { .. }]), "{n:?}");
+    block_on(t.press("n"));
+    assert!(block_on(t.engine().writes()).unwrap().is_empty());
+
+    // Enter on an applicant in alice's queue: the grant waits
+    let dave = dave_applies(&s);
+    let mut t = alice_queue(&s);
+    assert!(t.render().contains("applicant"), "{}", t.render());
+    let before = block_on(t.engine().writes()).unwrap().len();
+    let fx = t.state.update(lessdugin_tui::Action::Key(
+        lessdugin_tui::keys::parse_key("Enter").unwrap(),
+    ));
+    assert!(!fx.iter().any(|e| e.operation() == Some("grant")), "{fx:?}");
+    let n = t.state.public_notice.as_ref().expect("the approval asks");
+    assert_eq!(n.kinds, [PublicActionKind::ModAction]);
+    assert!(
+        n.held.iter().all(|e| e.operation() == Some("grant")),
+        "{n:?}"
+    );
+    // `y` sends it
+    block_on(t.press("y"));
+    assert!(t.state.public_notice.is_none());
+    assert!(block_on(t.engine().writes()).unwrap().len() > before);
+    block_on(t.engine().outbox_flush()).unwrap();
+    let members = block_on(
+        s.w.alice
+            .engine
+            .members(&s.forum, &lessdugin_core::dto::MembersQuery::default()),
+    )
+    .unwrap();
+    assert!(
+        members.iter().any(|m| m.actor.did == dave && m.granted),
+        "{members:?}"
+    );
+}
+
+/// The acknowledgements are the active account's: when another client on the device switches
+/// to an account that has not seen the interstitial, the next public action asks again.
+#[test]
+fn another_active_account_asks_again() {
+    use lessdugin_core::dto::PublicActionKind;
+    let s = scenario();
+    let mut t = tui(&s, 80, 24);
+    block_on(t.start(Some(s.forum.clone())));
+    block_on(t.press("u"));
+    assert!(t.state.public_notice.is_none(), "carol acknowledged votes");
+    // erin logs in on carol's device (and is the active account now)
+    let erin = s.w.net.add_account("erin.example.com");
+    block_on(t.engine().add_account(AccountInfo::app_password(
+        erin.did().as_str(),
+        erin.pds_base(),
+    )))
+    .unwrap();
+    block_on(t.settle());
+    block_on(t.press("d"));
+    let n = t
+        .state
+        .public_notice
+        .as_ref()
+        .expect("erin's first vote asks");
+    assert_eq!(n.kinds, [PublicActionKind::Vote]);
+}
+
+/// The operations of `engine-api.md` §3.2 (forums and membership), §3.5 (writes) and §3.6
+/// (local state), by name, from the spec's tables.
+fn spec_operations() -> std::collections::BTreeSet<String> {
+    let spec = include_str!("../../../docs/spec/engine-api.md");
+    let mut ops = std::collections::BTreeSet::new();
+    let mut on = false;
+    for line in spec.lines() {
+        if line.starts_with("### ") {
+            on = ["### 3.2 ", "### 3.5 ", "### 3.6 "]
+                .iter()
+                .any(|h| line.starts_with(h));
+            continue;
+        }
+        if !on || !line.starts_with("| `") {
+            continue;
+        }
+        let first = line.split('|').nth(1).unwrap_or_default();
+        for code in first.split('`').skip(1).step_by(2) {
+            let name: String = code
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            if !name.is_empty() {
+                ops.insert(name);
+            }
+        }
+    }
+    ops
+}
+
+/// `docs/plan.md` §M3: "every MVP action is reachable in all three clients (in the TUI at least
+/// through the `:` command line)". The TUI's `REACH` table names every operation of the spec's
+/// tables, and nothing else; so an operation the spec adds fails here until the TUI reaches it
+/// (or says why it does not).
+#[test]
+fn every_engine_operation_has_a_way_in() {
+    use lessdugin_tui::command::{REACH, Reach};
+    let spec = spec_operations();
+    assert!(spec.len() > 40, "the spec's tables were not read: {spec:?}");
+    let reach: std::collections::BTreeSet<String> =
+        REACH.iter().map(|(op, _)| (*op).to_owned()).collect();
+    assert_eq!(REACH.len(), reach.len(), "an operation is listed twice");
+    let missing: Vec<&String> = spec.difference(&reach).collect();
+    assert!(
+        missing.is_empty(),
+        "not reachable from the TUI: {missing:?}"
+    );
+    let stale: Vec<&String> = reach.difference(&spec).collect();
+    assert!(stale.is_empty(), "not operations of the spec: {stale:?}");
+    // every operation an M3 client must offer is a key or a command
+    for (op, r) in REACH {
+        if let Reach::NotHere(why) = r {
+            assert!(
+                why.starts_with("M5")
+                    || op.contains("draft")
+                    || op.contains("_local")
+                    || *op == "prepare_media",
+                "{op} must be reachable: {why}"
+            );
+        }
+    }
+}
+
+/// Each key and command of `REACH` leads to its operation: run on alice's welcome thread with
+/// bob's comment selected (and `read`/`read-all` on her Notifications screen), the effects
+/// it queues (or holds behind a confirmation or the public-action interstitial) include one
+/// that calls it.
+#[test]
+fn every_key_and_command_reaches_its_operation() {
+    use lessdugin_tui::command::{REACH, Reach};
+    let s = scenario();
+    let _comment = alice_with_a_notification(&s);
+    let mut t = alice_tui(&s, 100, 30);
+    block_on(t.start(Some(s.forum.clone())));
+    block_on(t.open_thread(&s.welcome));
+    let on_comment = |t: &Tui| {
+        t.state
+            .top_thread()
+            .and_then(|th| th.layout.items.get(th.pos.selected))
+            .is_some_and(|i| i.uri == s.bob_c1)
+    };
+    for _ in 0..4 {
+        if !on_comment(&t) {
+            block_on(t.press("j"));
+        }
+    }
+    assert!(on_comment(&t), "{}", t.render());
+    // an opinion in its undo window, for `undo`
+    block_on(t.press("u"));
+    assert!(status(&t).contains("Vote recorded"), "{}", status(&t));
+    // opening the thread (and the vote's reload) read its notifications: a new one, for
+    // `read` and `read-all`
+    let _again = alice_with_a_notification(&s);
+    block_on(t.settle());
+
+    let notifications = ["mark_notifications_read", "mark_all_notifications_read"];
+    for (op, r) in REACH {
+        let fx = match r {
+            Reach::Command(line) => {
+                if notifications.contains(op) {
+                    block_on(t.press("N"));
+                }
+                command_effects(&mut t, line)
+            }
+            Reach::Keys(keys) => {
+                let (last, first) = keys.split_last().unwrap();
+                for k in first {
+                    block_on(t.press(k));
+                }
+                t.state.update(lessdugin_tui::Action::Key(
+                    lessdugin_tui::keys::parse_key(last).unwrap(),
+                ))
+            }
+            Reach::Automatic(_) | Reach::NotHere(_) => continue,
+        };
+        let mut all = fx;
+        if let Some(c) = t.state.confirm.take() {
+            all.extend(c.effects);
+        }
+        if let Some(n) = t.state.public_notice.take() {
+            all.extend(n.held);
+        }
+        t.state.panel = None;
+        let ops: Vec<Option<&str>> = all.iter().map(|e| e.operation()).collect();
+        assert!(
+            ops.contains(&Some(*op)),
+            "{op} via {r:?}: {ops:?}, status {}",
+            status(&t)
+        );
+        // back where it started
+        if notifications.contains(op) {
+            block_on(t.press("h"));
+        }
+        assert!(on_comment(&t), "{op} moved away:\n{}", t.render());
+    }
+}
+
+/// Membership, own items and local state from the `:` line, end to end: carol joins with a
+/// note, alice sees her in `:members`, carol deletes her comment after confirming, reads an
+/// item's raw view, bookmarks, mutes, and alice renames the forum.
+#[test]
+fn the_command_line_reaches_membership_items_and_local_state() {
+    use lessdugin_core::dto::{MembersQuery, OpinionIntent, ThreadOpts};
+    let s = scenario();
+    let (alice, carol) = (&s.w.alice, &s.w.carol);
+    let mut t = tui(&s, 100, 30);
+    block_on(t.start(Some(s.forum.clone())));
+
+    // `:join` writes the membership, with its note
+    run_command(&mut t, "join Carol, from the TUI");
+    assert!(status(&t).contains("Join: queued"), "{}", status(&t));
+    block_on(t.engine().outbox_flush()).unwrap();
+    alice.sync(&s.forum);
+    let members = block_on(alice.engine.members(&s.forum, &MembersQuery::default())).unwrap();
+    let c = members.iter().find(|m| m.actor.did == carol.did()).unwrap();
+    assert_eq!(c.membership_note.as_deref(), Some("Carol, from the TUI"));
+    // `:members` shows them in a panel; any key closes it
+    run_command(&mut t, "members");
+    block_on(t.settle());
+    let panel = t.render();
+    assert!(panel.contains("Members"), "{panel}");
+    assert!(panel.contains("bob.example.com"), "{panel}");
+    block_on(t.press("x"));
+    assert!(t.state.panel.is_none());
+
+    // `:react ... --quote` anchors the react to the passage
+    block_on(t.open_thread(&s.welcome));
+    let fx = command_effects(
+        &mut t,
+        &format!("react agree for {} --quote Thanks for the forum", s.bob_c1),
+    );
+    let quoted = fx.iter().any(|e| {
+        matches!(e, lessdugin_tui::Effect::Opinion {
+            intent: OpinionIntent::React { quote: Some(q), .. }, ..
+        } if q.exact == "Thanks for the forum")
+    });
+    assert!(quoted, "{fx:?}");
+
+    // `:raw` shows the record and the mod actions naming it
+    run_command(&mut t, &format!("raw {}", s.bob_c1));
+    block_on(t.settle());
+    let panel = t.render();
+    assert!(panel.contains("Raw"), "{panel}");
+    assert!(panel.contains("mod actions name it"), "{panel}");
+    assert!(panel.contains("Thanks for the forum!"), "{panel}");
+    block_on(t.press("q"));
+
+    // `:bookmark` and `:mute` are local state
+    run_command(&mut t, "bookmark");
+    assert!(block_on(carol.engine.bookmarked(&s.welcome)).unwrap());
+    run_command(&mut t, &format!("mute {}", s.w.bob.did()));
+    let mutes = block_on(carol.engine.mutes()).unwrap();
+    assert!(mutes.iter().any(|m| m.did == s.w.bob.did()), "{mutes:?}");
+
+    // `:set` takes a word as the text it is and a list as JSON; `:unset` resets. Each shows
+    // the settings in a panel, which a key closes
+    let set = |t: &mut Tui, line: &str| {
+        run_command(t, line);
+        block_on(t.settle());
+        assert!(t.state.panel.is_some(), "{line}: {}", status(t));
+        block_on(t.press("q"));
+    };
+    set(&mut t, "set sources direct");
+    set(&mut t, r#"set mediaAutoloadHosts ["cdn.example.com"]"#);
+    let st = block_on(carol.engine.settings()).unwrap();
+    assert_eq!(
+        serde_json::to_value(st.sources).unwrap(),
+        "direct",
+        "{}",
+        status(&t)
+    );
+    assert_eq!(
+        st.media_autoload_hosts,
+        ["cdn.example.com"],
+        "{}",
+        status(&t)
+    );
+    set(&mut t, "unset mediaAutoloadHosts");
+    let st = block_on(carol.engine.settings()).unwrap();
+    assert!(st.media_autoload_hosts.is_empty(), "{}", status(&t));
+    set(&mut t, "unset sources");
+
+    // `:delete` asks first: `n` keeps the comment, `y` deletes it
+    let t2 = block_on(
+        carol
+            .engine
+            .comment(&lessdugin_core::dto::CommentDraft::new(
+                &s.welcome,
+                None,
+                "To be deleted.",
+            )),
+    )
+    .unwrap();
+    carol.flush();
+    let mine = carol.done(&t2);
+    run_command(&mut t, &format!("delete {mine}"));
+    assert!(t.state.confirm.is_some());
+    assert!(t.render().contains("Confirm"), "{}", t.render());
+    block_on(t.press("n"));
+    assert!(t.state.confirm.is_none());
+    assert_eq!(
+        block_on(t.engine().writes())
+            .unwrap()
+            .iter()
+            .filter(|w| !matches!(w.state, lessdugin_core::dto::WriteState::Done { .. }))
+            .count(),
+        0
+    );
+    run_command(&mut t, &format!("delete {mine}"));
+    block_on(t.press("y"));
+    assert!(status(&t).contains("Delete: queued"), "{}", status(&t));
+    block_on(t.engine().outbox_flush()).unwrap();
+    block_on(t.settle());
+    let view = block_on(carol.engine.get_thread(&s.welcome, &ThreadOpts::default())).unwrap();
+    assert!(view.comments.iter().all(|c| c.uri != mine), "{view:?}");
+
+    // `:open` takes a forum as owner/slug, and a post by its link
+    run_command(&mut t, "open alice.example.com/meta");
+    assert!(
+        t.state.top_forum_screen().is_some_and(|f| f.uri == s.forum),
+        "{}\n{}",
+        status(&t),
+        t.render()
+    );
+    run_command(&mut t, &format!("open {}", s.bob_post));
+    assert_eq!(
+        t.state.top_thread().map(|th| th.uri.clone()),
+        Some(s.bob_post.clone())
+    );
+
+    // alice renames her forum with `:forum edit`
+    let mut ta = alice_tui(&s, 100, 30);
+    block_on(ta.start(Some(s.forum.clone())));
+    run_command(&mut ta, "forum edit --name Meta, renamed --description");
+    assert!(
+        status(&ta).contains("Forum edit: queued"),
+        "{}",
+        status(&ta)
+    );
+    block_on(ta.engine().outbox_flush()).unwrap();
+    let f = block_on(alice.engine.forum_open(&s.forum)).unwrap();
+    assert_eq!(f.forum.name, "Meta, renamed");
+    assert_eq!(f.forum.description, None);
+    assert!(!status(&ta).contains("relies on"), "{}", status(&ta));
+
+    // an open forum, created or switched to, carries the L7 label (threat-model.md L7)
+    let label = lessdugin_tui::view::OPEN_MODE_LABEL;
+    run_command(&mut ta, "forum edit --mode open");
+    assert!(status(&ta).contains(label), "{}", status(&ta));
+    run_command(&mut ta, "forum create cafe The cafe --open");
+    assert!(status(&ta).contains("New open forum"), "{}", status(&ta));
+    assert!(status(&ta).contains(label), "{}", status(&ta));
+    run_command(&mut ta, "forum create desk The desk");
+    assert!(status(&ta).contains("New forum"), "{}", status(&ta));
+    assert!(!status(&ta).contains(label), "{}", status(&ta));
+}
+
+/// robustness-3 (`social.md` §4.2, `engine-api.md` §3.5): every notice of an action's result
+/// shows, not only the first. A restriction on top of a timed nullification comes back with
+/// two: it is retroactive, and it shares the nullification's expiry; the TUI used to drop the
+/// second, so the moderator never learnt the permanent-looking restriction ends.
+#[test]
+fn a_restrict_over_a_timed_nullification_shows_the_shared_expiry() {
+    let s = scenario();
+    let bob = s.w.bob.did();
+    let mut t = alice_tui(&s, 100, 30);
+    block_on(t.start(Some(s.forum.clone())));
+    let until = until_soon(&s);
+    run_command(&mut t, &format!("mod nullify --until {until} {bob}"));
+    assert!(status(&t).contains("Mod action recorded"), "{}", status(&t));
+    block_on(t.engine().outbox_flush()).unwrap();
+    s.w.tick(MINUTE);
+    block_on(t.settle());
+    run_command(&mut t, &format!("mod restrict post {bob}"));
+    let st = status(&t);
+    assert!(st.contains("Mod action recorded: "), "{st}");
+    assert!(st.contains("retroactive"), "the first notice: {st}");
+    assert!(
+        st.contains("ends with your nullification"),
+        "the second notice (sharedExpiry): {st}"
+    );
+    assert!(st.contains(&until), "{st}");
+    // both are on the screen (the status line wraps)
+    let screen = t.render();
+    assert!(screen.contains("retroactive"), "{screen}");
+    assert!(screen.contains("ends with your nullification"), "{screen}");
+}
+
+/// bob made a moderator, who hid bob_c1; alice un-hid it, so bob's hide is not in effect.
+fn bob_moderator_with_an_overridden_hide(s: &common::Scenario) {
+    use lessdugin_core::dto::{ModRole, ModsChange};
+    let (alice, bob) = (&s.w.alice, &s.w.bob);
+    block_on(alice.engine.mods_set(
+        &s.forum,
+        &ModsChange::Add {
+            did: bob.did(),
+            role: ModRole::Moderator,
+            title: None,
+        },
+    ))
+    .unwrap();
+    alice.flush();
+    s.w.tick(MINUTE);
+    bob.sync(&s.forum);
+    let hide = |hidden| ModActionIntent::Assert {
+        forum: s.forum.clone(),
+        scope: ModScope::Forum,
+        subject: s.bob_c1.clone(),
+        action: ModActionValue::Hide {
+            hidden,
+            spam: false,
+            show_reason: true,
+        },
+        reason: None,
+        until_ms: None,
+    };
+    block_on(bob.engine.mod_action(&hide(true))).unwrap();
+    bob.flush();
+    s.w.tick(MINUTE);
+    alice.sync(&s.forum);
+    block_on(alice.engine.mod_action(&hide(false))).unwrap();
+    alice.flush();
+    s.w.tick(MINUTE);
+    alice.sync(&s.forum);
+}
+
+/// sec-8 and robustness-3 (`engine-api.md` §3.5 `mods_set`, `data-model.md` §8.6): `:mods
+/// remove` runs `mod adopt` first, and its result says so AND lists what the adoption does not
+/// adopt (the second notice, which the TUI used to drop); the adoption's own report follows
+/// once it is sent.
+#[test]
+fn mods_remove_shows_the_adoption_and_what_it_does_not_adopt() {
+    let s = scenario();
+    bob_moderator_with_an_overridden_hide(&s);
+    let bob = s.w.bob.did();
+    let mut t = alice_tui(&s, 100, 30);
+    block_on(t.start(Some(s.forum.clone())));
+    run_command(&mut t, &format!("mods remove {bob}"));
+    let st = status(&t);
+    assert!(st.starts_with("Moderator list updated: "), "{st}");
+    assert!(st.contains("mod adopt runs first"), "{st}");
+    assert!(
+        st.contains("not adopted, since they are not in effect: 1 overridden"),
+        "the second notice: {st}"
+    );
+    // more than the status line holds: the panel lists each notice
+    let p = t.state.panel.as_ref().expect("the notices panel");
+    assert_eq!(p.title, "Moderator change");
+    let lines: Vec<String> = p.lines.iter().map(|l| l.to_plain_string()).collect();
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert!(lines[0].starts_with("mod adopt runs first"), "{lines:?}");
+    assert!(
+        lines[1].starts_with("not adopted, since they are not in effect: 1 overridden"),
+        "{lines:?}"
+    );
+    assert!(t.render().contains("not adopted"), "{}", t.render());
+
+    // sent: the adoption's report lists the same assertion, and bob is no longer a moderator
+    block_on(t.engine().outbox_flush()).unwrap();
+    block_on(t.settle());
+    let st = status(&t);
+    assert!(st.contains("1 assertion not adopted"), "{st}");
+    let p = t.state.panel.as_ref().expect("the report");
+    assert_eq!(p.title, "Adoption report");
+    let f = block_on(s.w.alice.engine.forum_open(&s.forum)).unwrap();
+    assert!(
+        f.moderators.iter().all(|m| m.actor.did != bob),
+        "{:?}",
+        f.moderators
+    );
+}
+
+/// sec-8 (`engine-api.md` §3.5 `mod_adopt`, `data-model.md` §8.6): what an adoption did not
+/// adopt comes back in its `done` state, and the TUI lists it: here bob's hide, which alice's
+/// keep overrode, so it never counted.
+#[test]
+fn mod_adopt_lists_what_it_did_not_adopt() {
+    use lessdugin_core::dto::{ModRole, ModsChange};
+    let s = scenario();
+    let (alice, bob) = (&s.w.alice, &s.w.bob);
+    block_on(alice.engine.mods_set(
+        &s.forum,
+        &ModsChange::Add {
+            did: bob.did(),
+            role: ModRole::Moderator,
+            title: None,
+        },
+    ))
+    .unwrap();
+    alice.flush();
+    s.w.tick(MINUTE);
+    bob.sync(&s.forum);
+    let hide = |hidden| ModActionIntent::Assert {
+        forum: s.forum.clone(),
+        scope: ModScope::Forum,
+        subject: s.bob_c1.clone(),
+        action: ModActionValue::Hide {
+            hidden,
+            spam: false,
+            show_reason: true,
+        },
+        reason: None,
+        until_ms: None,
+    };
+    block_on(bob.engine.mod_action(&hide(true))).unwrap();
+    bob.flush();
+    s.w.tick(MINUTE);
+    alice.sync(&s.forum);
+    block_on(alice.engine.mod_action(&hide(false))).unwrap();
+    alice.flush();
+    s.w.tick(MINUTE);
+    alice.sync(&s.forum);
+
+    let mut t = alice_tui(&s, 100, 30);
+    block_on(t.start(Some(s.forum.clone())));
+    run_command(&mut t, &format!("mod adopt {}", bob.did()));
+    block_on(t.engine().outbox_flush()).unwrap();
+    block_on(t.settle());
+    let st = status(&t);
+    assert!(st.contains("1 assertion not adopted"), "{st}");
+    let p = t.state.panel.as_ref().expect("the report");
+    assert_eq!(p.title, "Adoption report");
+    let lines: Vec<String> = p.lines.iter().map(|l| l.to_plain_string()).collect();
+    let prefix = format!("cannot adopt at://{}/", bob.did());
+    assert!(
+        lines.len() == 1 && lines[0].starts_with(&prefix),
+        "{lines:?}"
+    );
+    assert!(t.render().contains("cannot adopt"), "{}", t.render());
+}
+
+/// m4-5: `:forum edit` on a forum whose `about` spilled into a blob (over 64 KiB,
+/// `data-model.md` §5.3) keeps it: its source goes back to the engine, and spills again into
+/// the same blob.
+#[test]
+fn forum_edit_keeps_a_spilled_about() {
+    use lessdugin_core::dto::{BodyDraft, ForumDraft};
+    let s = scenario();
+    let alice = &s.w.alice;
+    let mut about = "# Rules\n\n".to_owned();
+    while about.len() <= 65_536 {
+        about.push_str("Be kind to each other. ");
+    }
+    let mut draft = ForumDraft::new("long", "Long");
+    draft.about = Some(BodyDraft::text(about));
+    let t = block_on(alice.engine.forum_create(&draft)).unwrap();
+    alice.flush();
+    let forum = alice.done(&t);
+    let blob_of = || {
+        use lessdugin_core::host::Host as _;
+        let u = lessdugin_atp::syntax::AtUri::parse(&forum).unwrap();
+        let v = block_on(
+            lessdugin_core::store::records::RecordStore::new(alice.engine.host().cache()).get(&u),
+        )
+        .unwrap()
+        .unwrap()
+        .value_json()
+        .unwrap();
+        (v["name"].clone(), v["about"]["textBlob"].clone())
+    };
+    let (_, spilled) = blob_of();
+    assert!(spilled.is_object(), "it spilled: {spilled}");
+
+    let mut ta = alice_tui(&s, 100, 30);
+    block_on(ta.start(Some(forum.clone())));
+    run_command(&mut ta, "forum edit --name Longer");
+    assert!(
+        status(&ta).contains("Forum edit: queued"),
+        "{}",
+        status(&ta)
+    );
+    block_on(ta.engine().outbox_flush()).unwrap();
+    block_on(alice.engine.forum_open(&forum)).unwrap();
+    let (name, again) = blob_of();
+    assert_eq!(name, "Longer");
+    assert_eq!(again, spilled, "the same source, spilled again");
+}
+
+/// robustness-1 (`data-model.md` §8.8): `:forum edit` keeps the about's media, as an edit
+/// keeps a body's; before, a name change dropped every image of the about.
+#[test]
+fn forum_edit_keeps_the_abouts_media() {
+    use lessdugin_core::dto::{BodyDraft, ForumDraft, MediaInput, PostDraft};
+    let s = scenario();
+    let alice = &s.w.alice;
+    let pic = block_on(alice.engine.prepare_media(
+        lessdugin_testkit::fake_pds::tiny_png(3),
+        &MediaInput {
+            declared_mime: Some("image/png".into()),
+            alt: Some("the rules, drawn".into()),
+            name: None,
+            aspect_ratio: None,
+        },
+    ))
+    .unwrap();
+    let cid = pic.cid.clone();
+    // the picture reaches alice's PDS with a post (`forum_create` uploads nothing); the
+    // forum's about then refers to it
+    let mut d = PostDraft::article(&s.forum, "Drawn", format!("![the rules](cid:{cid})"));
+    d.body.media.push(pic.clone());
+    block_on(alice.engine.publish(&d)).unwrap();
+    alice.flush();
+    let mut draft = ForumDraft::new("pics", "Pics");
+    draft.about = Some(BodyDraft {
+        markdown: format!("# Rules\n\n![the rules, drawn](cid:{cid})"),
+        media: vec![pic],
+    });
+    let t = block_on(alice.engine.forum_create(&draft)).unwrap();
+    alice.flush();
+    let forum = alice.done(&t);
+    let about = || {
+        use lessdugin_core::host::Host as _;
+        let u = lessdugin_atp::syntax::AtUri::parse(&forum).unwrap();
+        let v = block_on(
+            lessdugin_core::store::records::RecordStore::new(alice.engine.host().cache()).get(&u),
+        )
+        .unwrap()
+        .unwrap()
+        .value_json()
+        .unwrap();
+        (v["name"].clone(), v["about"]["media"].clone())
+    };
+    let (_, media) = about();
+    assert_eq!(media.as_array().map(Vec::len), Some(1), "{media}");
+
+    let mut ta = alice_tui(&s, 100, 30);
+    block_on(ta.start(Some(forum.clone())));
+    run_command(&mut ta, "forum edit --name Pictures");
+    assert!(
+        status(&ta).contains("Forum edit: queued"),
+        "{}",
+        status(&ta)
+    );
+    block_on(ta.engine().outbox_flush()).unwrap();
+    block_on(alice.engine.forum_open(&forum)).unwrap();
+    let (name, again) = about();
+    assert_eq!(name, "Pictures");
+    assert_eq!(again, media, "the about keeps its picture");
+    assert_eq!(again[0]["blob"]["ref"]["$link"], cid);
+}
+
+/// m4-5, from the owner's other device, which never held the spilled about's blob: `:forum
+/// edit` fetches its source from the owner's PDS (as `forum_open` does for the header) and
+/// sends it again, so the about survives. Here the PDS fails the fetch while the Forum screen
+/// opens, so the header's attempt leaves the body pending and the edit itself runs the fallback
+/// once the retry is due.
+#[test]
+fn forum_edit_fetches_a_spilled_about_from_the_owners_pds() {
+    use lessdugin_core::dto::{BodyDraft, ForumDraft};
+    use lessdugin_core::host::Host as _;
+    use lessdugin_tui::{Headless, HeadlessOpts};
+    let s = scenario();
+    let alice = &s.w.alice;
+    let mut about = "# Rules\n\n".to_owned();
+    while about.len() <= 65_536 {
+        about.push_str("Be kind to each other. ");
+    }
+    let mut draft = ForumDraft::new("long", "Long");
+    draft.about = Some(BodyDraft::text(about));
+    let t = block_on(alice.engine.forum_create(&draft)).unwrap();
+    alice.flush();
+    let forum = alice.done(&t);
+    let on_pds = || {
+        let v = alice
+            .acct
+            .get(lessdugin_lexicon::collection::nsid::FORUM, "long")
+            .unwrap();
+        (v["name"].clone(), v["about"]["textBlob"].clone())
+    };
+    let (_, spilled) = on_pds();
+    assert!(spilled.is_object(), "it spilled: {spilled}");
+
+    // alice's laptop: its own stores and clock, the same account and network
+    let laptop = MemHost::new();
+    laptop.set_now_ms(alice.host.now_ms());
+    laptop.set_seed(7);
+    s.w.net.install_as(&laptop, "laptop");
+    let e2 = Engine::new(laptop.clone(), EngineConfig::default());
+    block_on(e2.add_account(AccountInfo::app_password(
+        alice.acct.did().as_str(),
+        alice.acct.pds_base(),
+    )))
+    .unwrap();
+    // the blob cannot be fetched while the screen opens
+    let outage = s.w.net.inject(
+        Fault::status(500)
+            .on_nsid("com.atproto.sync.getBlob")
+            .for_caller("laptop"),
+    );
+    let mut t = block_on(Headless::new(
+        e2,
+        HeadlessOpts {
+            width: 100,
+            height: 30,
+            ..HeadlessOpts::default()
+        },
+    ))
+    .unwrap();
+    block_on(t.start(Some(forum.clone())));
+    assert!(
+        !t.render().contains("Be kind to each other"),
+        "{}",
+        t.render()
+    );
+    s.w.net.remove_fault(outage);
+    // the retry is due (`BODY_BLOB_RETRY_MS`)
+    laptop.advance_ms(2 * MINUTE);
+    s.w.tick(2 * MINUTE);
+
+    run_command(&mut t, "forum edit --name Longer");
+    assert!(status(&t).contains("Forum edit: queued"), "{}", status(&t));
+    block_on(t.engine().outbox_flush()).unwrap();
+    let (name, again) = on_pds();
+    assert_eq!(name, "Longer");
+    assert_eq!(
+        again, spilled,
+        "the same source, fetched from the PDS and spilled again"
     );
 }

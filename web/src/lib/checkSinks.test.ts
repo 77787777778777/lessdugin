@@ -68,6 +68,18 @@ describe("check-no-raw-href", () => {
     expect(rules("lib/x.test.ts", "a.href = u; el.innerHTML = h;")).toEqual([]);
   });
 
+  it("allows only `.src` assignments in the media-source helper", () => {
+    expect(rules("lib/mediaUrl.ts", "el.src = URL.createObjectURL(b);")).toEqual([]);
+    for (const line of ["a.href = u;", 'el.setAttribute("src", u);', "location.assign(u);"]) {
+      expect(rules("lib/mediaUrl.ts", line), line).toEqual(["dom-url"]);
+    }
+    // anywhere else a `src` write is still flagged, however it is spelled
+    expect(rules("components/RenderedHtml.tsx", "img.src = url;")).toEqual(["dom-url"]);
+    expect(rules("components/RenderedHtml.tsx", 'img.setAttribute("src", url);')).toEqual([
+      "dom-url",
+    ]);
+  });
+
   it("flags other URL-bearing JSX attributes and spread props on intrinsic elements", () => {
     expect(rules("components/X.tsx", "export const X = () => <img src={u} alt='' />;")).toEqual([
       "raw-href",

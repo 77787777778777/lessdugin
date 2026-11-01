@@ -17,13 +17,13 @@ import type { VotingMode } from "../lib/policy.ts";
 import { quoteFromSelection } from "../lib/quote.ts";
 import { fullDate, shortAge } from "../lib/time.ts";
 import ui from "../styles/ui.module.css";
-import { ActorName, actorLabel } from "./ActorName.tsx";
+import { ActorName, actorText } from "./ActorName.tsx";
 import { Badges } from "./Badges.tsx";
 import styles from "./CommentTree.module.css";
 import { LazyComposer } from "./LazyComposer.tsx";
 import { ModMenu } from "./ModMenu.tsx";
 import { OwnCommentActions } from "./OwnCommentActions.tsx";
-import { COLLAPSE_LABEL } from "./PostMeta.tsx";
+import { collapseNote } from "./PostMeta.tsx";
 import { ReactBar } from "./Reacts.tsx";
 import { RecordLink } from "./RecordLink.tsx";
 import { RenderedHtml, type RenderedHtmlHandle } from "./RenderedHtml.tsx";
@@ -40,6 +40,10 @@ export interface ThreadContext {
   myDid: string | null;
   isAuthority: boolean;
   canCurate: boolean;
+  /** The thread's post author, and whether the viewer passes the author gate for that post
+   * (social.md §4.9): a post's author moderates their own thread in author scope. */
+  postAuthor?: string | undefined;
+  authorGate?: boolean | undefined;
   /** `ForumView.viewer` (social.md §8): gates voting, reacts and commenting. Absent signed
    * out, which never disables an action (the sign-in affordance carries that case). */
   caps?: ViewerCaps | undefined;
@@ -99,7 +103,7 @@ function ReplyBox({
     <LazyComposer
       compact
       autoFocus
-      label={`Reply to ${actorLabel(node.author)}`}
+      label={`Reply to ${actorText(node.author)}`}
       submitLabel="Publish reply"
       placeholder="Write a reply…"
       initial={draft?.markdown ?? ""}
@@ -242,7 +246,7 @@ export function CommentItem({
         focused && styles.focused,
         mine && styles.mine,
       )}
-      aria-label={`Comment by ${actorLabel(node.author)}${node.unread ? " (new)" : ""}`}
+      aria-label={`Comment by ${actorText(node.author)}${node.unread ? " (new)" : ""}`}
     >
       <header className={styles.header}>
         <button
@@ -276,12 +280,15 @@ export function CommentItem({
         {version && <span className={styles.note}>{version}</span>}
         {node.orphaned && <span className={styles.note}>re-attached reply</span>}
         {node.retracted && <span className={styles.note}>retracted</span>}
+        {!row.collapsed && collapsedReason && (
+          <span className={styles.note}>{collapseNote(collapsedReason, mine)}</span>
+        )}
         <Badges badges={node.badges} pending={mine && pending} />
       </header>
       {row.collapsed ? (
         <p className={styles.reason}>
           {collapsedReason
-            ? `Collapsed: ${COLLAPSE_LABEL[collapsedReason]}. `
+            ? `${collapseNote(collapsedReason, mine)}. `
             : row.authorOverflow !== undefined
               ? `Collapsed: more than ${THREAD_AUTHOR_EXPANDED_MAX} comments by this author. `
               : "Collapsed. "}
@@ -294,7 +301,7 @@ export function CommentItem({
                 className={ui.link}
                 onClick={() => onShowAuthor(node.author.did)}
               >
-                Show {row.authorOverflow} more by <bdi>{actorLabel(node.author)}</bdi>
+                Show {row.authorOverflow} more by <bdi>{actorText(node.author)}</bdi>
               </button>
             </>
           )}
@@ -307,7 +314,12 @@ export function CommentItem({
             </blockquote>
           )}
           <div className={cx(node.retracted && styles.retracted)}>
-            <RenderedHtml html={node.body.html} className="lfm-compact" ref={bodyRef} />
+            <RenderedHtml
+              html={node.body.html}
+              media={node.body.media}
+              className="lfm-compact"
+              ref={bodyRef}
+            />
           </div>
           {ctx.votingMode === "reacts" && (
             <ReactBar
@@ -345,10 +357,15 @@ export function CommentItem({
               </button>
             )}
             {mine && <OwnCommentActions node={node} postUri={ctx.postUri} />}
-            {ctx.isAuthority && (
+            {(ctx.isAuthority ||
+              (ctx.authorGate === true &&
+                ctx.myDid !== null &&
+                ctx.postAuthor === ctx.myDid &&
+                !mine)) && (
               <ModMenu
                 forum={ctx.forum}
                 canCurate={ctx.canCurate}
+                scope={ctx.isAuthority ? "forum" : "author"}
                 subject={{
                   kind: "comment",
                   uri: node.uri,

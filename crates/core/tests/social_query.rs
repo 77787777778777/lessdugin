@@ -8,7 +8,8 @@
 //! `thread/depth.json`.
 //!
 //! The vectors are in the final namespace, so this test exists only in a `final-ns` build:
-//! `cargo test -p lessdugin-core --features final-ns --test social_query`.
+//! `cargo test -p lessdugin-core --features final-ns --test social_query`. On wasm32 (no
+//! filesystem) it is a module of `social_vectors.rs`, which embeds the vector files.
 
 #![cfg(feature = "final-ns")]
 
@@ -20,9 +21,35 @@ use lessdugin_core::social::full::query::{
 use lessdugin_core::social::full::{Query, fold_view, project};
 use lessdugin_core::social::input::FoldInput;
 use serde_json::Value;
+// Natively this is a libtest test; on wasm32 the same body runs under wasm-bindgen-test in node.
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen_test::wasm_bindgen_test as test;
 
 fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata/vectors")
+}
+
+/// The vector files of `dir` as (path, text), read from disk.
+#[cfg(not(target_arch = "wasm32"))]
+fn vector_files(dir: &str) -> Vec<(PathBuf, String)> {
+    let paths = std::fs::read_dir(root().join(dir)).unwrap();
+    paths
+        .map(|e| {
+            let path = e.unwrap().path();
+            let text = std::fs::read_to_string(&path).unwrap();
+            (path, text)
+        })
+        .collect()
+}
+
+/// The vector files of `dir` as (path, text), embedded by `social_vectors.rs`.
+#[cfg(target_arch = "wasm32")]
+fn vector_files(dir: &str) -> Vec<(PathBuf, String)> {
+    crate::FILES
+        .iter()
+        .filter(|f| f.starts_with(&format!("{dir}/")))
+        .map(|f| (root().join(f), crate::vector_text(f)))
+        .collect()
 }
 
 /// Every fold vector, re-folded with each sort, a post list and the comments of the queried (or
@@ -59,9 +86,8 @@ fn queries_change_no_per_item_value() {
         "thread",
         "fold",
     ] {
-        for e in std::fs::read_dir(root().join(d)).unwrap() {
-            let path = e.unwrap().path();
-            let f: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        for (path, text) in vector_files(d) {
+            let f: Value = serde_json::from_str(&text).unwrap();
             if matches!(f["kind"].as_str(), Some("conversion" | "power")) {
                 continue;
             }

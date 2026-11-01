@@ -15,6 +15,8 @@
 //! Record values are kept as their JSON bytes (`serde_bytes`), so a record of any depth, with
 //! `$link` and `$bytes` objects, round-trips verbatim whatever the row caps.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -304,8 +306,13 @@ pub enum Intent {
         /// Revision rkey `P(target) + "-" + tid` (W6).
         revision_rkey: String,
     },
-    /// Redact history: `ops = [delete revision…]`, chunked at ≤ 200.
-    Redact,
+    /// Redact history: `ops = [delete revision…]`, chunked at ≤ 200; with `subject`, every own
+    /// revision of that item listed on the PDS when the write is sent is deleted too.
+    Redact {
+        /// The item whose history is redacted (a row written without it deletes its ops).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subject: Option<String>,
+    },
     /// An opinion write (§8.5): `ops = [update opinion]` without a value (it is computed when
     /// sent from the current value and `steps`).
     Opinion {
@@ -337,10 +344,28 @@ pub enum Intent {
         role: String,
         /// The TID of every revision this write creates (their `P` differ, W6).
         revision_tid: String,
+        /// What may be re-issued (a row written without it adopts nothing).
+        #[serde(default)]
+        counted: Counted,
         /// What was skipped, once sent (`cannot adopt …`, `kept own assertion …`).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         report: Vec<String>,
     },
+}
+
+/// What `mod adopt` may re-issue (§8.6, `social.md` §4.10): only the originals that counted for
+/// the former moderator, so that a copy never does what its original could not.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Counted {
+    /// rkey → CID of the former's originals whose mod-log status was `effective` in the actor's
+    /// fold when the write was made; an original not here, or with another CID, is reported.
+    #[serde(default)]
+    pub originals: BTreeMap<String, String>,
+    /// A at that time, DID → role (`owner`, `admin` or `moderator`; §4.1): §4.3 conditions 3
+    /// and 4 are checked again against the former's rank and role when the write is sent.
+    #[serde(default)]
+    pub roles: BTreeMap<String, String>,
 }
 
 impl Intent {
@@ -356,7 +381,7 @@ impl Intent {
             Self::DeleteContent => "deleteContent",
             Self::DeleteRecord => "deleteRecord",
             Self::RemoveModAction { .. } => "removeModAction",
-            Self::Redact => "redact",
+            Self::Redact { .. } => "redact",
             Self::Opinion { .. } => "opinion",
             Self::Adopt { .. } => "adopt",
         }
@@ -541,6 +566,10 @@ impl PendingWrite {
                         .or_else(|| self.primary_uri())
                         .unwrap_or_default(),
                     cid: first.and_then(|r| r.cid.clone()),
+                    report: match &self.intent {
+                        Intent::Adopt { report, .. } => report.clone(),
+                        _ => Vec::new(),
+                    },
                 }
             }
             WriteStage::Conflict | WriteStage::Failed => WriteState::Failed {
@@ -707,6 +736,10 @@ mod tests {
                 former_pds: "p".into(),
                 role: "owner".into(),
                 revision_tid: "t".into(),
+                counted: Counted {
+                    originals: [("k".to_owned(), "c".to_owned())].into(),
+                    roles: [("d".to_owned(), "moderator".to_owned())].into(),
+                },
                 report: vec!["x".into()],
             },
         ] {

@@ -25,9 +25,15 @@ futures.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 unicode-width.workspace = true
+# the author's PDS of an image (`Host::fetch_blob`)
+url.workspace = true
+
+# the terminal's answer to the graphics query is read with a bounded `poll` on stdin (no thread
+# is left reading it; `image.rs`); crossterm's own rustix lacks the `event` feature
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", default-features = false, features = ["std", "event", "stdio"] }
 
 [dev-dependencies]
 lessdugin-testkit.workspace = true
 insta.workspace = true
 tempfile.workspace = true
-url.workspace = true

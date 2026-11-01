@@ -2,7 +2,9 @@
 # Scheduled fuzzing (docs/plan.md M4; fuzz/README.md): each cargo-fuzz target runs for 10 minutes
 # on its own runner. A crash, timeout or OOM fails the job and uploads the input; reproduce it with
 # `cargo +nightly fuzz run <target> <file>`, fix it in the crate with a regression test, and keep
-# the minimised input in fuzz/regressions/<target>/.
+# the minimised input in fuzz/regressions/<target>/. The schedule and workflow_dispatch work only
+# once this file is on the default branch; until then `cargo xtask fuzz` (in the flake's `ci`
+# shell, which pins the same nightly and has cargo-fuzz) is the run of record.
 name: fuzz
 on:
   schedule:
@@ -30,7 +32,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [car, commit, dagcbor, lexicon, mst, render]
+        # every target of `cargo xtask fuzz --list` (xtask FUZZ_TARGETS)
+        target: [car, commit, dagcbor, lexicon, mst, render, media]
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master

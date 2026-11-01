@@ -26,7 +26,9 @@ import {
   type HttpResult,
   isHostError,
   LEADER_LOCK,
+  MEDIA_WASM_WINDOW_BYTES,
   type PdsRequest,
+  tooLargeForTheBrowser,
   type WorkerInfo,
   type WorkerInit,
 } from "./protocol.ts";
@@ -41,6 +43,8 @@ export interface WasmModule {
 
 export interface WasmEngineLike {
   call(op: string, argsJson: string): Promise<string>;
+  /** `prepare_media` with the bytes as bytes (crates/wasm/src/bindings.rs). */
+  prepareMedia?(bytes: Uint8Array, inputJson: string): Promise<string>;
   subscribe(cb: (eventJson: string) => void): number;
   unsubscribe(id: number): boolean;
   free?(): void;
@@ -100,6 +104,7 @@ export class WorkerEngine {
   private leader: LeaderElection | null = null;
   private relay: ChangeRelay | null = null;
   private stores: { close?: () => void }[] = [];
+  private blobs: BlobStore | null = null;
   private offOnline: (() => void) | null = null;
   readonly id = randomId();
 
@@ -195,6 +200,7 @@ export class WorkerEngine {
       throw toEngineError(e);
     }
     const { cache, state, blobs } = stores;
+    this.blobs = blobs;
     let locks = this.env.locks;
     if (!locks) {
       this.warn("Web Locks are unavailable: locks hold within this worker only", null);
@@ -305,6 +311,30 @@ export class WorkerEngine {
     return JSON.parse(await this.callJson(op, JSON.stringify(args))) as unknown;
   }
 
+  /** The stored blob `cid`, which `fetchBlob` kept only after checking it against its CID
+   * (`loadMedia`); `null` when it is not stored. The main thread types it and makes the object
+   * URL (sync.md §11.2), so no blob byte passes through wasm or JSON. */
+  async blob(cid: string): Promise<Blob | null> {
+    return (await this.blobs?.get(cid)) ?? null;
+  }
+
+  /** `prepareMedia(bytes, input)`: the bytes go into wasm memory once, as bytes (never as a
+   * JSON number array), and only up to `MEDIA_WASM_WINDOW_BYTES` (limits.md §6). */
+  async prepareMedia(bytes: Uint8Array, input: unknown): Promise<unknown> {
+    const engine = this.engine;
+    if (!engine) throw engineError("internal", "the engine worker is not initialised");
+    if (bytes.byteLength > MEDIA_WASM_WINDOW_BYTES) throw tooLargeForTheBrowser(bytes.byteLength);
+    const inputJson = JSON.stringify(input ?? null);
+    if (!engine.prepareMedia) {
+      return this.call("prepareMedia", [Array.from(bytes), input ?? null]);
+    }
+    try {
+      return JSON.parse(await engine.prepareMedia(bytes, inputJson)) as unknown;
+    } catch (e) {
+      throw toEngineError(e);
+    }
+  }
+
   /** Stops the long-lived tasks, hands the leadership over and closes the stores. */
   async close(): Promise<void> {
     const engine = this.engine;
@@ -316,6 +346,7 @@ export class WorkerEngine {
     this.relay?.close();
     if (this.subscription !== null) engine.unsubscribe(this.subscription);
     this.closeStores();
+    this.blobs = null;
     this.engine = null;
   }
 

@@ -60,6 +60,23 @@ describe("CommentTree", () => {
     expect(screen.getAllByText("New").length).toBeGreaterThan(0);
   });
 
+  it("shows the viewer's own newcomer comment expanded, label kept (social.md §10.3)", async () => {
+    const engine = new MockEngine();
+    const { post, thread } = await welcomeThread(engine);
+    const dan = thread.comments.find((c) => c.author.displayName === "Dan Newcomer");
+    if (!dan) throw new Error("no newcomer comment");
+    expect(dan.state).toEqual({ kind: "collapsed", reason: "newUser" });
+    renderWithApp(<CommentTree comments={thread.comments} ctx={ctxFor(post, dan.author.did)} />, {
+      engine,
+    });
+    const row = await screen.findByRole("article", { name: /^Comment by Dan Newcomer/ });
+    expect(within(row).getByText("Collapsed for other readers: from a new user")).toBeTruthy();
+    expect(within(row).getByText(/Is there a guide for newcomers\?/)).toBeTruthy();
+    expect(within(row).getByRole("button", { name: "Collapse comment" })).toBeTruthy();
+    // its replies are shown too
+    expect(screen.getByText(/Welcome! Start with the moderation policy/)).toBeTruthy();
+  });
+
   it("does not hide a placeholder's replies on Enter (social.md §10.2)", async () => {
     const engine = new MockEngine();
     const { post, thread } = await welcomeThread(engine);

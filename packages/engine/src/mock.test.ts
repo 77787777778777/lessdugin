@@ -186,9 +186,225 @@ describe("MockEngine writes", () => {
     expect((await e.getPost(post.uri)).post.commentCount).toBe(post.commentCount + 1);
     expect(ticket.state.kind).toBe("pending");
   });
+
+  it("keeps the #restrict dimension an intent leaves out, as the engine merges (m3r-2)", async () => {
+    const e = new MockEngine({ sendMs: 10 });
+    const target = (await e.members(FORUM_URI, {})).find(
+      (m) => m.banned !== true && m.nullified !== true && m.restricted === undefined,
+    )?.actor.did;
+    if (target === undefined) throw new Error("no unmoderated member");
+    const restrict = (action: { capabilities?: ("post" | "comment")[]; nullifyVotes?: boolean }) =>
+      e.modAction({
+        kind: "assert",
+        forum: FORUM_URI,
+        scope: "forum",
+        subject: target,
+        action: { kind: "restrict", ...action },
+      });
+    const state = async () => {
+      const m = (await e.members(FORUM_URI, {})).find((x) => x.actor.did === target);
+      return { restricted: m?.restricted, nullified: m?.nullified === true };
+    };
+    await restrict({ capabilities: ["post", "comment"] });
+    await vi.advanceTimersByTimeAsync(50);
+    await restrict({ nullifyVotes: true });
+    await vi.advanceTimersByTimeAsync(50);
+    expect(await state()).toEqual({ restricted: ["post", "comment"], nullified: true });
+    await restrict({ capabilities: ["comment"] });
+    await vi.advanceTimersByTimeAsync(50);
+    expect(await state()).toEqual({ restricted: ["comment"], nullified: true });
+    await expect(restrict({})).rejects.toMatchObject({ code: "invalid_input" });
+  });
+
+  it("adopts before removing a moderator, says so, and reports what it did not adopt (sec-8)", async () => {
+    const e = new MockEngine({ sendMs: 10 });
+    // the fixture's former moderator, whose forum pin has lapsed
+    const lapsed = (await e.modLog(FORUM_URI)).entries.find((x) => x.lapsed);
+    if (lapsed === undefined) throw new Error("no lapsed entry");
+    const adoption = await e.modAdopt(FORUM_URI, lapsed.actor.did);
+    await vi.advanceTimersByTimeAsync(50);
+    expect(adoption.id).toBe(`${(await e.activeAccount())?.did}/${adoption.id.split("/").pop()}`);
+    expect((await e.writeStatus(adoption.id))?.state).toMatchObject({
+      kind: "done",
+      report: [`cannot adopt ${lapsed.uri}: not in effect`],
+    });
+    // a removal adopts first: the ticket's notice names the adoption's write
+    const ticket = await e.forumCreate({
+      slug: "mods",
+      name: "Mods",
+      membership: "open",
+      defaultTier: "frontpage",
+      featuredTags: [],
+      moderators: [],
+    });
+    await vi.advanceTimersByTimeAsync(50);
+    const uri = (await e.followed()).find((f) => f.name === "Mods")?.uri ?? "";
+    expect(ticket.state.kind).toBe("pending");
+    const did = lapsed.actor.did;
+    await e.modsSet(uri, { kind: "add", did, role: "moderator" });
+    await vi.advanceTimersByTimeAsync(50);
+    const removal = await e.modsSet(uri, { kind: "remove", did });
+    expect(removal.notices?.map((n) => n.code)).toEqual(["adoptedFirst"]);
+    expect(removal.notices?.[0]?.message).toMatch(
+      /^mod adopt runs first \(write did:[^/]+\/\d+, 0 /,
+    );
+    expect(
+      (await e.modsSet(uri, { kind: "remove", did, skipAdopt: true })).notices,
+    ).toBeUndefined();
+  });
+});
+
+describe("MockEngine body sources", () => {
+  it("reads inline markdown, or the source behind a spilled record (engine-api.md §3.4)", async () => {
+    const inline = new MockEngine();
+    const post = (
+      await inline.listPosts({ forum: FORUM_URI, sort: "new", filter: "all", limit: 1 })
+    ).items[0];
+    if (post === undefined) throw new Error("no post in the fixture");
+    const record = (await inline.raw(post.uri)).record as { body: { text: string } };
+    await expect(inline.bodySource(post.uri)).resolves.toMatchObject({
+      markdown: record.body.text,
+      cid: (await inline.raw(post.uri)).cid,
+      profile: "lfm/1",
+      spilled: false,
+    });
+
+    const spilled = new MockEngine({ spilledBodies: true });
+    const raw = (await spilled.raw(post.uri)).record as {
+      body: { text?: string; textBlob?: unknown };
+    };
+    expect(raw.body.text).toBeUndefined();
+    expect(raw.body.textBlob).toBeDefined();
+    await expect(spilled.bodySource(post.uri)).resolves.toEqual({
+      markdown: (await inline.bodySource(post.uri)).markdown,
+      cid: (await spilled.raw(post.uri)).cid,
+      profile: "lfm/1",
+      spilled: true,
+    });
+  });
+
+  it("does not call an absent forum about spilled", async () => {
+    const e = new MockEngine({ sendMs: 1, spilledBodies: true });
+    await e.forumCreate({
+      slug: "without-about",
+      name: "Without about",
+      membership: "open",
+      defaultTier: "frontpage",
+      featuredTags: [],
+      moderators: [],
+    });
+    await vi.waitFor(async () => {
+      const uri = (await e.followed()).find((f) => f.name === "Without about")?.uri;
+      expect(uri).toBeDefined();
+    });
+    const uri = (await e.followed()).find((f) => f.name === "Without about")?.uri ?? "";
+    await expect(e.bodySource(uri)).resolves.toMatchObject({ markdown: "", spilled: false });
+  });
 });
 
 describe("MockEngine local state and declarations", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it("binds each body source to the same record CID as raw", async () => {
+    const e = new MockEngine();
+    const list = await e.listPosts({ forum: FORUM_URI, sort: "new", filter: "all", limit: 100 });
+    const post = list.items.find((p) => p.commentCount > 0);
+    if (!post) throw new Error("no post with comments");
+    const thread = await e.getThread(post.uri, { sort: "new", unreadOnly: false });
+    const comment = thread.comments.find((c) => c.body.text.length > 0);
+    if (!comment) throw new Error("no comment with an inline body");
+    for (const uri of [FORUM_URI, post.uri, comment.uri]) {
+      const [raw, source] = await Promise.all([e.raw(uri), e.bodySource(uri)]);
+      expect(source.cid).toBe(raw.cid);
+      expect(source.profile).toBe("lfm/1");
+    }
+  });
+
+  it("preserves media, card, label and quote fields through spilled edits", async () => {
+    for (const spilledBodies of [false, true]) {
+      const e = new MockEngine({ holdMs: 0, sendMs: 0, spilledBodies });
+      const forum = FORUM_URI;
+      const me = (await e.activeAccount())?.did;
+      if (!me) throw new Error("no active account");
+      const media = {
+        id: "bafyreiea7pi4w34g3sju7r6yhhl4tv4zwgtq2g4w2h2g2g2g2g2g2g2g2g",
+        cid: "bafyreiea7pi4w34g3sju7r6yhhl4tv4zwgtq2g4w2h2g2g2g2g2g2g2g",
+        mime: "image/png",
+        sizeBytes: 184211,
+        alt: "Preserved diagram",
+        aspectRatio: { width: 1600, height: 900 },
+      };
+      const link = {
+        uri: "https://example.test/paper",
+        title: "Card title",
+        description: "Card description",
+      };
+      const published = await e.publish({
+        forum,
+        kind: "link",
+        title: "Preserved card",
+        body: { markdown: "Original source", media: [media] },
+        link,
+        labels: ["preserved-label"],
+      });
+      await vi.advanceTimersByTimeAsync(10);
+      const post = (await e.writeStatus(published.id))?.state;
+      if (post?.kind !== "done") throw new Error("post did not finish");
+      await e.edit(
+        post.uri,
+        {
+          kind: "post",
+          post: {
+            forum,
+            kind: "link",
+            title: "Preserved card",
+            body: { markdown: "Edited source", media: [media] },
+            link,
+            labels: ["preserved-label"],
+          },
+        },
+        { history: true },
+      );
+      await vi.advanceTimersByTimeAsync(10);
+      expect(await e.raw(post.uri)).toMatchObject({
+        record: {
+          link,
+          labels: ["preserved-label"],
+          body: { media: [{ alt: "Preserved diagram", aspectRatio: media.aspectRatio }] },
+        },
+      });
+      expect((await e.bodySource(post.uri)).markdown).toBe("Edited source");
+      const reply = await e.comment({
+        root: post.uri,
+        body: { markdown: "Comment source", media: [media] },
+        quote: { exact: "Original", prefix: "", suffix: " source", start: 0 },
+      });
+      await vi.advanceTimersByTimeAsync(10);
+      const comment = (await e.writeStatus(reply.id))?.state;
+      if (comment?.kind !== "done") throw new Error("comment did not finish");
+      await e.edit(
+        comment.uri,
+        {
+          kind: "comment",
+          comment: {
+            root: post.uri,
+            body: { markdown: "Edited comment", media: [media] },
+            quote: { exact: "Original", prefix: "", suffix: " source", start: 0 },
+          },
+        },
+        { history: true },
+      );
+      await vi.advanceTimersByTimeAsync(10);
+      expect(await e.raw(comment.uri)).toMatchObject({
+        record: {
+          quote: { exact: "Original", start: 0 },
+          body: { media: [{ alt: "Preserved diagram", aspectRatio: media.aspectRatio }] },
+        },
+      });
+    }
+  });
+
   it("never gives a new draft the id of an existing one", async () => {
     const e = new MockEngine();
     const before = await e.drafts();
@@ -199,6 +415,17 @@ describe("MockEngine local state and declarations", () => {
     });
     expect(before.map((d) => d.id)).not.toContain(id);
     expect(await e.drafts()).toHaveLength(before.length + 1);
+  });
+
+  it("imports an export back, with or without the scope (engine-api.md §3.6)", async () => {
+    const e = new MockEngine();
+    const exported = await e.exportLocal();
+    const report = await e.importLocal(exported, "everything");
+    expect(report.imported).toBeGreaterThan(0);
+    expect(await e.importLocal(exported)).toEqual(report);
+    await expect(e.importLocal({ format: "other" }, "mine")).rejects.toMatchObject({
+      code: "invalid_input",
+    });
   });
 
   it("round-trips a forum declaration through forumCreate, raw and forumUpdate", async () => {
@@ -239,7 +466,10 @@ describe("MockEngine local state and declarations", () => {
         moderators: [],
       });
       await vi.advanceTimersByTimeAsync(10);
-      const after = (await e.raw(uri)).record as Record<string, unknown>;
+      const afterView = await e.raw(uri);
+      const after = afterView.record as Record<string, unknown>;
+      expect(afterView.cid).not.toBe(raw.cid);
+      expect(afterView.cid).toBe((await e.bodySource(uri)).cid);
       expect(after.name).toBe("Renamed");
       expect(after.about).toBeUndefined();
       expect(after.reportContact).toBeUndefined();

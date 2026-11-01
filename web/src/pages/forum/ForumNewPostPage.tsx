@@ -16,11 +16,14 @@ import { KIND_LABEL } from "../../components/PostMeta.tsx";
 import { ErrorView, Loading } from "../../components/Status.tsx";
 import { toasts } from "../../components/Toast.tsx";
 import { useEngine } from "../../engine/context.tsx";
+import { useCoherentEditSource } from "../../engine/editSource.ts";
 import { qk, useActiveAccount } from "../../engine/queries.ts";
 import { useAnnounceQueued } from "../../engine/queued.ts";
 import { writeStore } from "../../engine/writes.ts";
 import { capReason } from "../../lib/caps.ts";
+import { suspendsNotice } from "../../lib/modActions.ts";
 import {
+  isSpilledBody,
   markdownOf,
   mediaRefsOf,
   objectField,
@@ -35,10 +38,12 @@ import { useForumView } from "./forumContext.tsx";
 const route = getRouteApi("/f/$owner/$slug/new");
 const KINDS: PostKind[] = ["article", "question", "link", "quickTake"];
 
-/** The post record being edited, as a draft (record JSON is untrusted: every field checked). */
-export function postDraftOf(record: unknown, forum: string): PostDraft | null {
+/** The post record being edited, as a draft (record JSON is untrusted: every field checked).
+ * `source`: the markdown of a body that spilled into a blob (engine-api.md §3.4 `body_source`),
+ * which the record does not carry. */
+export function postDraftOf(record: unknown, forum: string, source?: string): PostDraft | null {
   const body = objectField(record, "body");
-  const markdown = markdownOf(body);
+  const markdown = markdownOf(body) ?? (isSpilledBody(body) ? source : undefined);
   // An absent `kind` is `article` (data-model.md §6.3; writers omit the default). An unknown
   // kind is not edited here: rewriting it as another kind would change the post.
   const kind = stringField(record, "kind") ?? "article";
@@ -66,15 +71,18 @@ export function postDraftOf(record: unknown, forum: string): PostDraft | null {
   return d;
 }
 
-function PostForm({
+export function PostForm({
   initial,
   draftId,
   editing,
+  suspends,
 }: {
   initial: PostDraft | null;
   draftId: string | undefined;
   /** The uri of the own post being edited (edit mode), if any. */
   editing?: string | undefined;
+  /** Edit mode: the warning that the edit suspends the post's positive assertions. */
+  suspends?: string | null | undefined;
 }) {
   const engine = useEngine();
   const { forum } = useForumView();
@@ -92,16 +100,17 @@ function PostForm({
   latest.current = { kind, title, link, tags };
   // Kept as they are: the composer edits only the markdown.
   const media = useRef<MediaRef[]>(initial?.body.media ?? []);
+  const [editMedia, setEditMedia] = useState<readonly MediaRef[]>(initial?.body.media ?? []);
   const labels = useRef<string[]>(initial?.labels ?? []);
   const linkMeta = useRef(initial?.link);
 
   const draftFor = useCallback(
-    (markdown: string): PostDraft => {
+    (markdown: string, withMedia: MediaRef[] = media.current): PostDraft => {
       const { kind: k, title: t, link: l, tags: tg } = latest.current;
       const d: PostDraft = {
         forum: forum.uri,
         kind: k,
-        body: { markdown, media: media.current },
+        body: { markdown, media: withMedia },
         tags: tg,
         labels: labels.current,
       };
@@ -128,26 +137,32 @@ function PostForm({
     // the prepared refs the composer collected (docs/plan.md M4); a refused file is never
     // already in the draft, and one whose row was removed is not either
     const prepared = attached.flatMap((a) => (a.kind === "ready" ? [a.ref] : []));
-    media.current = [...media.current, ...prepared];
+    // This submission's media: the kept ones and the prepared ones. `media.current` takes them
+    // only once the write is accepted: the composer keeps its attachments after a refusal or a
+    // failure, and the engine does not deduplicate `body.media`, so a submission sent again
+    // would otherwise list them twice.
+    const withMedia = editing ? prepared : [...media.current, ...prepared];
     const ticket = editing
       ? await engine.edit(
           editing,
-          { kind: "post", post: draftFor(markdown) },
+          { kind: "post", post: draftFor(markdown, withMedia) },
           {
             history: keepHistory,
             ...(keepHistory && summary.trim() !== "" ? { summary: summary.trim() } : {}),
           },
         )
-      : await engine.publish(draftFor(markdown));
+      : await engine.publish(draftFor(markdown, withMedia));
     writeStore.track(ticket, editing);
     const final = await writeStore.settle(ticket.id);
     if (final.kind === "failed") throw final.error;
     if (final.kind === "queued") {
+      media.current = withMedia;
       announceQueued(editing ? "Your edit" : "Your post", final.state);
       void navigate({ to: "/outbox" });
       return true;
     }
     if (final.kind !== "done") return false;
+    media.current = withMedia;
     toasts.show({ message: editing ? "Post updated" : "Published", tone: "success" });
     const p = parseAtUri(final.uri);
     if (p) void navigate({ to: "/p/$author/$rkey", params: { author: p.did, rkey: p.rkey } });
@@ -231,6 +246,11 @@ function PostForm({
       </fieldset>
       <div className={ui.field}>
         <span className={ui.label}>Body</span>
+        {suspends && (
+          <p className={ui.notice} role="note" data-testid="edit-suspends">
+            {suspends}
+          </p>
+        )}
         <LazyComposer
           label="Post body"
           initial={initial?.body.markdown ?? ""}
@@ -240,6 +260,19 @@ function PostForm({
           placeholder="Write your post in markdown…"
           onSubmit={publish}
           attachments
+          media={editMedia}
+          initialAttachments={(initial?.body.media ?? []).map((ref) => ({
+            kind: "ready",
+            ref,
+            name: ref.name ?? `Existing media ${ref.cid}`,
+          }))}
+          onAttachmentsChange={(next) => {
+            if (editing) {
+              const refs = next.flatMap((a) => (a.kind === "ready" ? [a.ref] : []));
+              media.current = refs;
+              setEditMedia(refs);
+            }
+          }}
         />
         <span className={ui.hint}>
           Published posts are public records in your repository. Edits keep a public history unless
@@ -282,28 +315,53 @@ function PostForm({
   );
 }
 
-/** Edit mode: loads the viewer's own post record. */
-function EditPost({ uri }: { uri: string }) {
+/** Edit mode: loads the viewer's own post record (exported for its tests). */
+export function EditPost({ uri }: { uri: string }) {
   const engine = useEngine();
   const { forum } = useForumView();
   const active = useActiveAccount();
-  const raw = useQuery({ queryKey: qk.raw(uri), queryFn: () => engine.raw(uri) });
-  if (raw.isPending || active.isPending) return <Loading />;
-  if (raw.isError) return <ErrorView error={raw.error} title="This post cannot be edited" />;
+  const source = useCoherentEditSource(engine, uri);
+  // what the edit suspends, from the engine (social.md §4.5); an error means no warning
+  const preflight = useQuery({
+    queryKey: qk.editPreflight(uri),
+    queryFn: () => engine.editPreflight(uri),
+    retry: false,
+  });
   const author = parseAtUri(uri)?.did;
-  const draft = postDraftOf(raw.data.record, forum.uri);
-  if (!draft || author === undefined || author !== active.data?.did) {
+  const own = author !== undefined && author === active.data?.did;
+  if (source.isPending || active.isPending || preflight.isPending || source.isFetching) {
+    return <Loading />;
+  }
+  if (source.isError) {
     return (
-      <ErrorView
-        error={new Error("Only the author can edit a post, and only one with an inline body.")}
-        title="This post cannot be edited"
-      />
+      <div className={ui.stack}>
+        <ErrorView error={source.error} title="This post cannot be edited" />
+        <div className={ui.row}>
+          <button type="button" className={ui.button} onClick={source.retry}>
+            Try again
+          </button>
+        </div>
+      </div>
     );
+  }
+  if (!source.data) return <Loading />;
+  const draft = postDraftOf(source.data.raw.record, forum.uri, source.data.source.markdown);
+  if (!draft || !own) {
+    const why = !own
+      ? "Only the author can edit a post."
+      : "This post's record is not one this app can edit: its body or its kind is unknown.";
+    return <ErrorView error={new Error(why)} title="This post cannot be edited" />;
   }
   return (
     <section className={ui.page} aria-label="Edit post">
       <h2 className={ui.sectionTitle}>Edit post</h2>
-      <PostForm key={uri} initial={draft} draftId={undefined} editing={uri} />
+      <PostForm
+        key={uri}
+        initial={draft}
+        draftId={undefined}
+        editing={uri}
+        suspends={preflight.data ? suspendsNotice(preflight.data) : null}
+      />
     </section>
   );
 }

@@ -107,8 +107,6 @@ pub(crate) struct LinkData {
     pub kind: LinkKind,
     pub dest: String,
     pub title: String,
-    /// `plain(inner events)` (§10.1, no normalisation); filled by pass 5.
-    pub inner: String,
     pub res: LinkRes,
 }
 
