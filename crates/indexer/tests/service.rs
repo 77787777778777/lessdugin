@@ -275,6 +275,56 @@ async fn durable_poll_converges_within_five_seconds() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn daily_reconcile_checks_moved_heads_and_indexes_new_records() {
+    let fixture = Fixture::new().await;
+    fixture.post("Before reconcile");
+    ingest::sync_forum(&fixture.indexer, fixture.forum.uri.as_str())
+        .await
+        .unwrap();
+
+    fixture.net.clear_requests();
+    let post = fixture.post("Found by daily reconcile");
+    ingest::reconcile(&fixture.indexer).await;
+
+    let checks = fixture.net.requests_for("com.atproto.sync.getLatestCommit");
+    assert!(
+        checks
+            .iter()
+            .any(|r| r.did.as_deref() == Some(fixture.owner.did().as_str())),
+        "reconcile did not check the changed PDS head: {checks:?}"
+    );
+    assert!(
+        fixture
+            .indexer
+            .store
+            .record_cid(fixture.forum.uri.as_str(), &post)
+            .is_some(),
+        "the new signed record did not enter index state"
+    );
+    assert!(
+        fixture
+            .indexer
+            .store
+            .changes(Some(fixture.forum.uri.as_str()), 0, 500)
+            .iter()
+            .any(|c| c.uri == post),
+        "the reconciled record is missing from the durable change log"
+    );
+
+    // The owner is also a participant. An unchanged pass must still issue exactly one head check,
+    // not one per forum role, and must not need another snapshot refresh to converge.
+    fixture.net.clear_requests();
+    ingest::reconcile(&fixture.indexer).await;
+    let checks = fixture.net.requests_for("com.atproto.sync.getLatestCommit");
+    assert_eq!(
+        checks.len(),
+        1,
+        "owner/participant DID was not deduplicated"
+    );
+    assert_eq!(checks[0].did.as_deref(), Some(fixture.owner.did().as_str()));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn proof_omission_and_forgery_are_detectable() {
     let fixture = Fixture::new().await;
     let post = fixture.post("Proof");

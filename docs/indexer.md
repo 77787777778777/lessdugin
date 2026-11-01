@@ -24,10 +24,14 @@ lessdugin-indexer \
 Use the ordinary native `config.toml` in the data directory for PLC/devnet settings. Repeat
 `--forum <at-uri>` to seed declarations directly. `--poll <pds-url>` enables the durable polling
 loop (`--poll-interval-ms`, default 5000; 250 ms is useful for a loopback devnet). Poll mode is
-particularly useful without a relay or Jetstream. Relay declaration backfill runs every six hours;
-a full reconcile runs daily. Two configured Jetstream endpoints are consumed concurrently with a
-shared deduplicator and independent durable cursors. Reconnects rewind ten seconds, and cursors
-advance only after admission, proof acquisition and snapshot persistence.
+particularly useful without a relay or Jetstream. Relay declaration backfill runs every six hours.
+Daily reconcile makes one `getLatestCommit` head check per unique indexed owner/participant DID and
+refreshes only forums containing a repo whose head moved; an individual head failure is logged and
+does not stop checks of other repos. Two configured Jetstream endpoints are consumed concurrently
+with a shared deduplicator and independent durable cursors. Reconnects rewind ten seconds, and
+cursors advance only after admission, proof acquisition and snapshot persistence. A failed event
+therefore remains unacknowledged and is replayed after reconnect; a permanently failing record can
+currently stall later frames on that stream rather than being silently skipped.
 
 The blocklist contains one DID, at-uri, CID or host per line; blank lines and `#` comments are
 ignored. Host entries also match `host:port` and exact origins. It is applied when answering

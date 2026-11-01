@@ -3,6 +3,7 @@
 //! sync engine; relay listings and Jetstream are discovery hints only.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
@@ -13,6 +14,7 @@ use lessdugin_core::host::Host;
 use lessdugin_core::model::ForumModel;
 use lessdugin_core::store::records::RecordStore;
 use lessdugin_core::store::repo::AccountStatus;
+use lessdugin_core::sync::{Priority, Stats};
 use lessdugin_core::xrpc::{CallOpts, Service};
 use tracing::{info, warn};
 
@@ -38,10 +40,7 @@ pub fn spawn(indexer: Indexer) -> tokio::task::JoinHandle<()> {
                     .schedule_next("backfill", now.saturating_add(6 * 60 * 60 * 1000))
                     .ok();
             }
-            if backfill
-                || indexer.config.poll.is_some()
-                || indexer.store.schedule_due("reconcile", now)
-            {
+            if backfill || indexer.config.poll.is_some() {
                 let forums = indexer.store.forum_seeds();
                 for forum in forums {
                     if indexer.blocked(&forum) {
@@ -52,6 +51,9 @@ pub fn spawn(indexer: Indexer) -> tokio::task::JoinHandle<()> {
                         warn!(forum=%forum,error=%e,"forum sync failed");
                     }
                 }
+            }
+            if indexer.store.schedule_due("reconcile", now) {
+                reconcile(&indexer).await;
                 indexer
                     .store
                     .schedule_next("reconcile", now.saturating_add(24 * 60 * 60 * 1000))
@@ -63,6 +65,56 @@ pub fn spawn(indexer: Indexer) -> tokio::task::JoinHandle<()> {
                 .ok();
         }
     })
+}
+
+/// Checks every indexed owner/participant repo once, deduplicated across forums. Only forums
+/// containing a repo whose synced head moved are refreshed. A failed head or forum refresh is
+/// isolated so it cannot prevent the remaining repos from being reconciled.
+pub async fn reconcile(indexer: &Indexer) {
+    let mut repos: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for forum in indexer.store.forums(None) {
+        if indexer.blocked(&forum.uri) {
+            continue;
+        }
+        let participants = indexer.store.participants(&forum.uri, None);
+        for did in std::iter::once(forum.did).chain(participants.into_iter().map(|p| p.did)) {
+            if !indexer.blocked(&did) {
+                repos.entry(did).or_default().insert(forum.uri.clone());
+            }
+        }
+    }
+
+    let session = indexer
+        .engine
+        .syncer()
+        .session(Priority::P3, Arc::new(Stats::new()));
+    let mut affected = BTreeSet::new();
+    for (did, forums) in repos {
+        let Ok(parsed) = Did::parse(&did) else {
+            indexer.metrics.sync_errors.fetch_add(1, Ordering::Relaxed);
+            warn!(did=%did,"reconcile skipped an invalid indexed DID");
+            continue;
+        };
+        match indexer
+            .engine
+            .syncer()
+            .head_check(&session, &parsed, false)
+            .await
+        {
+            Ok(Some(_)) => affected.extend(forums),
+            Ok(None) => {}
+            Err(e) => {
+                indexer.metrics.sync_errors.fetch_add(1, Ordering::Relaxed);
+                warn!(did=%did,error=%e,"reconcile head check failed");
+            }
+        }
+    }
+    for forum in affected {
+        if let Err(e) = sync_forum(indexer, &forum).await {
+            indexer.metrics.sync_errors.fetch_add(1, Ordering::Relaxed);
+            warn!(forum=%forum,error=%e,"reconcile forum sync failed");
+        }
+    }
 }
 
 pub async fn sync_forum(indexer: &Indexer, forum: &str) -> anyhow::Result<()> {
