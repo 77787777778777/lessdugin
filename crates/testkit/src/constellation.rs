@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use lessdugin_atp::syntax::{AtUri, Did, Nsid};
+#[cfg(feature = "http")]
 use lessdugin_core::host::Target;
 use lessdugin_core::host::{HttpRequest, HttpResponse};
 use serde_json::{Value, json};
@@ -23,6 +24,7 @@ const LINKS: &str = "blue.microcosm.links.getBacklinks";
 const COUNT: &str = "blue.microcosm.links.getBacklinksCount";
 const DEFAULT_BASE: &str = "https://constellation.example.com";
 /// Test-only page size. The discovery client must keep paging even when a page is short.
+#[cfg(feature = "http")]
 const DEVNET_PAGE: usize = 1;
 const MAX_PAGE: usize = 100;
 
@@ -297,7 +299,7 @@ fn bad_request(message: &str) -> HttpResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lessdugin_core::host::Host;
+    use lessdugin_core::host::{Host, Target};
 
     async fn get(host: &MemHost, path: &str) -> Value {
         let req = HttpRequest::get(Target::Anon(url::Url::parse(path).unwrap()));

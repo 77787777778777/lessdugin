@@ -50,15 +50,24 @@ fn matches(haystack: &str, needle: &str) -> Vec<(usize, usize)> {
     out
 }
 
-/// A snippet around the first case-insensitive match and code-point highlight ranges into that
-/// snippet (including its ellipses). At most 160 source code points are copied, with up to 60
-/// before the first match.
+/// A snippet around the first case-insensitive term match and code-point highlight ranges into
+/// that snippet (including its ellipses). Whitespace-separated terms are ANDed, in any order;
+/// every one is highlighted. At most 160 source code points are copied, with up to 60 before
+/// the first match.
 pub fn snippet(haystack: &str, needle: &str) -> Option<(String, Vec<(u32, u32)>)> {
-    let needle = needle.trim();
-    if needle.is_empty() {
+    let terms: Vec<_> = needle.split_whitespace().collect();
+    if terms.is_empty() {
         return None;
     }
-    let first = matches(haystack, needle).first().copied()?;
+    let term_matches: Vec<_> = terms.iter().map(|term| matches(haystack, term)).collect();
+    if term_matches.iter().any(Vec::is_empty) {
+        return None;
+    }
+    let first = term_matches
+        .iter()
+        .flatten()
+        .copied()
+        .min_by_key(|range| range.0)?;
     let chars: Vec<char> = haystack.chars().collect();
     let start = first.0.saturating_sub(CONTEXT);
     let end = (start + SNIPPET).min(chars.len());
@@ -70,10 +79,13 @@ pub fn snippet(haystack: &str, needle: &str) -> Option<(String, Vec<(u32, u32)>)
     if end < chars.len() {
         snippet.push('…');
     }
-    let highlights = matches(&snippet, needle)
-        .into_iter()
+    let mut highlights: Vec<_> = terms
+        .iter()
+        .flat_map(|term| matches(&snippet, term))
         .filter_map(|(start, end)| Some((u32::try_from(start).ok()?, u32::try_from(end).ok()?)))
         .collect();
+    highlights.sort_unstable();
+    highlights.dedup();
     Some((snippet, highlights))
 }
 
@@ -87,6 +99,15 @@ mod tests {
         assert_eq!(s, "αβ Café café");
         assert_eq!(h, vec![(3, 7), (8, 12)]);
         assert_eq!(snippet("nothing here", "café"), None);
+    }
+
+    #[test]
+    fn terms_are_anded_in_any_order_and_all_are_highlighted() {
+        let (text, highlights) = snippet("αβ shared Café notes", "café shared").unwrap();
+        assert_eq!(text, "αβ shared Café notes");
+        assert_eq!(highlights, vec![(3, 9), (10, 14)]);
+        assert_eq!(snippet("Café only", "café missing"), None);
+        assert_eq!(snippet("Café only", "   "), None);
     }
 
     #[test]
