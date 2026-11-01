@@ -155,7 +155,7 @@ impl<H: Host> Engine<H> {
             // source degrades discovery, not an already readable forum; PDS errors still fail.
             let assisted = self.sources().await.unwrap_or(super::Sources::Direct);
             if assisted == super::Sources::Assisted {
-                match self.discover_forum_hints(&key).await {
+                match self.discover_forum_hints(key).await {
                     Ok(hints) => hints.apply_to(&mut opts),
                     Err(e) => {
                         tracing::warn!(forum = %key.uri, error = %e, "CORE+ discovery unavailable");
