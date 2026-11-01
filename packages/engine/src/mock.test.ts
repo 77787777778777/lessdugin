@@ -258,8 +258,9 @@ describe("MockEngine body sources", () => {
       await inline.listPosts({ forum: FORUM_URI, sort: "new", filter: "all", limit: 1 })
     ).items[0];
     if (post === undefined) throw new Error("no post in the fixture");
+    const record = (await inline.raw(post.uri)).record as { body: { text: string } };
     await expect(inline.bodySource(post.uri)).resolves.toMatchObject({
-      markdown: (await inline.raw(post.uri)).record.body.text,
+      markdown: record.body.text,
       profile: "lfm/1",
       spilled: false,
     });
