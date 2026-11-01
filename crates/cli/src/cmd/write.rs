@@ -556,6 +556,10 @@ struct Current {
     title: Option<String>,
     kind: String,
     link: Option<String>,
+    /// The link card's title and description: an edit that keeps the uri keeps them too (the
+    /// engine writes `link` from the draft, `data-model.md` §8.3).
+    link_title: Option<String>,
+    link_description: Option<String>,
     tags: Vec<String>,
     labels: Vec<String>,
     root: Option<String>,
@@ -687,6 +691,12 @@ async fn current(w: &Writer, uri: &str) -> Result<Current, CliError> {
         None => String::new(),
     };
     let s = |k: &str| v.get(k).and_then(Value::as_str).map(str::to_owned);
+    let link = |k: &str| {
+        v.get("link")
+            .and_then(|l| l.get(k))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    };
     Ok(Current {
         is_post,
         forum: s("forum").unwrap_or_default(),
@@ -694,11 +704,9 @@ async fn current(w: &Writer, uri: &str) -> Result<Current, CliError> {
         markdown,
         title: s("title"),
         kind: s("kind").unwrap_or_else(|| "article".into()),
-        link: v
-            .get("link")
-            .and_then(|l| l.get("uri"))
-            .and_then(Value::as_str)
-            .map(str::to_owned),
+        link: link("uri"),
+        link_title: link("title"),
+        link_description: link("description"),
         tags: strs(v.get("tags")),
         labels: v
             .get("labels")
@@ -777,10 +785,14 @@ fn edit_draft(c: &Current, doc: &Doc, body: Option<String>) -> Result<Draft, Cli
                     c.title.clone()
                 },
                 body,
-                link: link.map(|uri| ExternalLinkDraft {
-                    uri,
-                    title: None,
-                    description: None,
+                link: link.map(|uri| {
+                    // the card's title and description describe the uri they came with
+                    let same = c.link.as_deref() == Some(uri.as_str());
+                    ExternalLinkDraft {
+                        uri,
+                        title: c.link_title.clone().filter(|_| same),
+                        description: c.link_description.clone().filter(|_| same),
+                    }
                 }),
                 tags: if has("tags") {
                     doc.list("tags")
