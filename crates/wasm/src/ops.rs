@@ -11,7 +11,7 @@
 use lessdugin_core::dto::{
     CommentDraft, Draft, EditOpts, ForumDraft, KarmaCadence, ListPostsQuery, MediaInput,
     MembersQuery, ModActionIntent, ModsChange, NotificationsQuery, OpinionIntent, PostDraft,
-    PublicActionKind, RefContext, Subscription, SyncOpts, ThreadOpts, Topic,
+    PublicActionKind, RefContext, Subscription, SyncOpts, ThreadOpts, Topic, WikiDraft,
 };
 use lessdugin_core::engine::{AccountInfo, Engine, EngineError, ErrorCode};
 use lessdugin_core::host::Host;
@@ -40,6 +40,7 @@ pub const OPS: &[&str] = &[
     "followed",
     "forumCreate",
     "forumUpdate",
+    "wikiEdit",
     "join",
     "leave",
     "members",
@@ -67,6 +68,10 @@ pub const OPS: &[&str] = &[
     "recentDiscussion",
     "getPost",
     "backlinks",
+    "tags",
+    "tag",
+    "sequences",
+    "sequence",
     "getThread",
     "history",
     "notifications",
@@ -130,14 +135,9 @@ pub const OPS: &[&str] = &[
 /// one later is a compatible change of engine API v0.
 pub const UNSUPPORTED: &[(&str, &str)] = &[
     // §3.4: tags, sequences, user pages, search
-    ("tags", "M5"),
-    ("tag", "M5"),
-    ("sequences", "M5"),
-    ("sequence", "M5"),
     ("user", "M5"),
     ("search", "M5"),
     // §3.5: the wiki and sequences (M5), media and redaction (M4)
-    ("wikiEdit", "M5"),
     ("seqCreate", "M5"),
     ("seqEdit", "M5"),
     ("seqAdd", "M5"),
@@ -466,6 +466,26 @@ pub async fn call<H: Host>(engine: &Engine<H>, op: &str, a: &str) -> Result<Stri
         "backlinks" => {
             let (uri,): (String,) = args(op, a)?;
             out(&engine.backlinks(&uri).await?)
+        }
+        "tags" => {
+            let (forum,): (String,) = args(op, a)?;
+            out(&engine.tags(&forum).await?)
+        }
+        "tag" => {
+            let (forum, slug): (String, String) = args(op, a)?;
+            out(&engine.tag(&forum, &slug).await?)
+        }
+        "sequences" => {
+            let (forum,): (String,) = args(op, a)?;
+            out(&engine.sequences(&forum).await?)
+        }
+        "sequence" => {
+            let (uri,): (String,) = args(op, a)?;
+            out(&engine.sequence(&uri).await?)
+        }
+        "wikiEdit" => {
+            let (forum, slug, draft): (String, String, WikiDraft) = args(op, a)?;
+            out(&engine.wiki_edit(&forum, &slug, draft).await?)
         }
         "getThread" => {
             let (uri, opts): (String, Option<ThreadOpts>) = args(op, a)?;
