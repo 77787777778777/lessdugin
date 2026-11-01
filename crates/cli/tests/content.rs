@@ -285,6 +285,23 @@ fn approval_mode_with_three_users_and_anonymous_reading() {
         insta::assert_snapshot!("members", redact(&users, &alice.ok(&["members"])));
     });
 
+    // `members revoke` is the direct engine.revoke alias: it removes the owner's #access
+    // grant, while bob's own membership record makes him an applicant again.
+    let r = alice.json(&["members", "revoke", "bob.test", "--yes"]);
+    assert_eq!(r["dto"], 1, "{r}");
+    assert_eq!(r["writes"].as_array().unwrap().len(), 1, "{r}");
+    assert_eq!(r["writes"][0]["state"]["kind"], "done", "{r}");
+    let members = alice.json(&["members", "--pending"]);
+    let b = members["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["actor"]["did"] == bob.did().as_str())
+        .unwrap_or_else(|| panic!("{members}"));
+    assert_eq!(b["granted"], false, "{b}");
+    let r = alice.json(&["approve", "bob.test", "--yes"]);
+    assert_eq!(r["writes"][0]["state"]["kind"], "done", "{r}");
+
     // bob posts (the forum by alias), carol replies after reading it
     let f = bob.file("p.md", "Bob's question body.\n");
     let t = bob.json(&[

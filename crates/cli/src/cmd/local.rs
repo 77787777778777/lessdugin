@@ -9,6 +9,7 @@
 
 use lessdugin_core::dto::{BookmarkEntry, DTO_VERSION, Settings, Subscription, SubscriptionEntry};
 use lessdugin_core::engine::{Engine, EngineError};
+use lessdugin_core::host::Host;
 use lessdugin_native::host::NativeHost;
 use serde::Serialize;
 use serde_json::Value;
@@ -250,7 +251,7 @@ const LIST_SETTINGS: [&str; 4] = [
 /// list, an object or a quoted string; for a list setting a bare value is a comma-separated
 /// list (`indexers`: of URLs); otherwise the string. `set_setting` checks it against the
 /// setting's type.
-fn setting_value(key: &str, text: &str) -> Value {
+fn setting_value(key: &str, text: &str, now_ms: i64) -> Value {
     if text.starts_with(['[', '{', '"'])
         && let Ok(v) = serde_json::from_str(text)
     {
@@ -263,7 +264,7 @@ fn setting_value(key: &str, text: &str) -> Value {
             .filter(|s| !s.is_empty())
             .map(|s| {
                 if key == "indexers" {
-                    serde_json::json!({ "url": s })
+                    serde_json::json!({ "url": s, "grantedAtMs": now_ms })
                 } else {
                     Value::String(s.to_owned())
                 }
@@ -274,9 +275,13 @@ fn setting_value(key: &str, text: &str) -> Value {
     Value::String(text.to_owned())
 }
 
-/// The settings `config.toml` pins (decision O-9): `sources`, when the file states it.
+/// The settings pinned outside the stored setting (decision O-9): `sources`, when the file
+/// states it or devnet mode fixes it to `direct`.
 fn pinned(ctx: &Ctx) -> Vec<&'static str> {
-    if ctx.config.sources.is_some() {
+    if crate::ctx::engine_config(&ctx.config)
+        .sources_flag
+        .is_some()
+    {
         vec!["sources"]
     } else {
         Vec::new()
@@ -326,7 +331,11 @@ async fn show(ctx: &Ctx, engine: &Engine<NativeHost>, key: Option<&str>) -> Resu
         }
         let mut text = tt(&value_text(v));
         if pinned.contains(&k.as_str()) {
-            text.append(lit(" (pinned by config.toml)"));
+            text.append(lit(if ctx.config.sources.is_some() {
+                " (pinned by config.toml)"
+            } else {
+                " (pinned by devnet mode)"
+            }));
         }
         ctx.out.line(&[
             (tt(&format!("{k:<width$}")), Style::Bold),
@@ -343,20 +352,21 @@ pub async fn config(ctx: &Ctx, args: ConfigArgs) -> Result<(), CliError> {
     match args.action {
         ConfigAction::Get { key } => show(ctx, &engine, key.as_deref()).await,
         ConfigAction::Set { key, value } => {
-            let v = value.as_deref().map(|t| setting_value(&key, t));
+            let v = value
+                .as_deref()
+                .map(|t| setting_value(&key, t, engine.host().now_ms()));
             engine.set_setting(&key, v.as_ref()).await?;
-            if key == "sources"
-                && let Some(s) = ctx.config.sources
-            {
+            if key == "sources" && pinned(ctx).contains(&"sources") {
+                let devnet = ctx.config.sources.is_none();
                 ctx.out.warn(cat([
-                    lit("config.toml pins sources = "),
-                    lit(match s {
-                        lessdugin_native::config::Sources::Direct => "direct",
-                        lessdugin_native::config::Sources::Assisted => "assisted",
+                    lit(if devnet {
+                        "devnet mode pins sources = direct"
+                    } else {
+                        "config.toml has pinned sources"
                     }),
                     lit(
-                        ": the stored setting is kept but takes effect only once that line \
-                         is removed",
+                        ": the stored setting is kept but takes effect only once that pin is \
+                         removed",
                     ),
                 ]));
             }
@@ -397,28 +407,28 @@ mod tests {
     #[test]
     fn values_as_set_setting_takes_them() {
         assert_eq!(
-            setting_value("sources", "direct"),
+            setting_value("sources", "direct", 123),
             Value::String("direct".into())
         );
         assert_eq!(
-            setting_value("mediaAutoloadHosts", "a.example, b.example"),
+            setting_value("mediaAutoloadHosts", "a.example, b.example", 123),
             serde_json::json!(["a.example", "b.example"])
         );
         assert_eq!(
-            setting_value("mediaAutoloadHosts", "[\"a.example\"]"),
+            setting_value("mediaAutoloadHosts", "[\"a.example\"]", 123),
             serde_json::json!(["a.example"])
         );
         assert_eq!(
-            setting_value("indexers", "https://idx.example"),
-            serde_json::json!([{ "url": "https://idx.example" }])
+            setting_value("indexers", "https://idx.example", 123),
+            serde_json::json!([{ "url": "https://idx.example", "grantedAtMs": 123 }])
         );
         assert_eq!(
-            setting_value("externalImagesForums", ""),
+            setting_value("externalImagesForums", "", 123),
             serde_json::json!([])
         );
         // a stored switch is its text
         assert_eq!(
-            setting_value("mediaAutoload", "off"),
+            setting_value("mediaAutoload", "off", 123),
             Value::String("off".into())
         );
     }
