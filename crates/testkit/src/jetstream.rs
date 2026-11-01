@@ -38,6 +38,8 @@ pub struct RequestLog {
     pub url: String,
     /// `options_update` payload, if received.
     pub options: Option<Value>,
+    /// Frames sent on this connection (test diagnostics; no record bodies are ever present).
+    pub sent: Vec<String>,
 }
 
 /// A running, loopback-only mini-Jetstream.
@@ -144,6 +146,7 @@ async fn serve(
         lock(&log).push(RequestLog {
             url: url.clone(),
             options: None,
+            sent: Vec::new(),
         });
         let _ = url_tx.send(url);
         Ok(resp)
@@ -171,8 +174,9 @@ async fn serve(
                 }
                 let options = value.get("payload").cloned().unwrap_or(Value::Null);
                 lock(&requests).push(RequestLog {
-                    url: first_url,
+                    url: first_url.clone(),
                     options: Some(options.clone()),
+                    sent: Vec::new(),
                 });
                 options
             }
@@ -187,7 +191,6 @@ async fn serve(
         .and_then(|c| c.parse::<u64>().ok())
         .unwrap_or(0);
     let mut sent = 0;
-    let mut last_seq = 0;
     // v2 sequence cursors are inclusive. Timestamp cursors (v1, or a v2 instance change)
     // include the rewind boundary; core deduplication handles that deliberate overlap.
     let timestamp_cursor = cursor > net.events().last().map_or(0, |e| e.seq);
@@ -199,14 +202,24 @@ async fn serve(
     } else {
         net.events_since(cursor.saturating_sub(1))
     };
+    // A timestamp replay snapshot may be empty, or its events may be filtered below. Start at
+    // its latest sequence either way so the first poll never falls back to all history.
+    let mut last_seq = initial.iter().map(|e| e.seq).max().unwrap_or(0);
     let mut pending = initial;
     loop {
         for event in std::mem::take(&mut pending) {
             last_seq = last_seq.max(event.seq);
             for frame in frames(&event, wire, &wanted) {
-                if frame.len() > MAX_FRAME_BYTES
-                    || ws.send(Message::Text(frame.into())).await.is_err()
+                if frame.len() > MAX_FRAME_BYTES {
+                    return;
+                }
+                if let Some(r) = lock(&requests)
+                    .iter_mut()
+                    .find(|r| r.url == first_url && r.options.is_none())
                 {
+                    r.sent.push(frame.clone());
+                }
+                if ws.send(Message::Text(frame.into())).await.is_err() {
                     return;
                 }
                 sent += 1;
@@ -217,7 +230,19 @@ async fn serve(
         }
         tokio::select! {
             () = tokio::time::sleep(std::time::Duration::from_millis(20)) => {
-                pending = net.events_since(last_seq);
+                // Advance over replayed events even if their DID/collection is filtered out.
+                // Otherwise the first poll falls back to sequence 0 and replays stale events.
+                pending = if timestamp_cursor {
+                    let fresh = net
+                        .events_since(last_seq)
+                        .into_iter()
+                        .filter(|e| e.time_us >= i64::try_from(cursor).unwrap_or(i64::MAX))
+                        .collect::<Vec<_>>();
+                    last_seq = fresh.iter().map(|e| e.seq).max().unwrap_or(last_seq);
+                    fresh
+                } else {
+                    net.events_since(last_seq)
+                };
             }
             message = ws.next() => {
                 match message {
@@ -293,7 +318,13 @@ fn frames(event: &RepoEvent, wire: Wire, wanted: &Filters) -> Vec<String> {
                 if let Some(cid) = op.cid {
                     p.insert("cid".into(), json!(cid.to_string()));
                 }
-                payloads.push(("commit", Value::Object(p)));
+                let body = match wire {
+                    // The captured production v1 wire nests these fields under `commit`.
+                    Wire::V1 => json!({"commit": p}),
+                    // subscribeEvents v2 puts them directly in its payload.
+                    Wire::V2 => Value::Object(p),
+                };
+                payloads.push(("commit", body));
             }
         }
         RepoEventKind::Identity { handle } => {
@@ -361,6 +392,17 @@ mod tests {
         for wire in [Wire::V1, Wire::V2] {
             let frames = frames(&event, wire, &wanted);
             assert_eq!(frames.len(), 1);
+            if wire == Wire::V1 {
+                let value: Value = serde_json::from_str(&frames[0]).unwrap();
+                assert!(value["commit"]["collection"].is_string());
+                assert!(value["commit"]["rkey"].is_string());
+                assert!(value.get("collection").is_none());
+            } else {
+                let value: Value = serde_json::from_str(&frames[0]).unwrap();
+                assert!(value["payload"]["collection"].is_string());
+                assert!(value["payload"]["rkey"].is_string());
+                assert!(value["payload"].get("commit").is_none());
+            }
             assert!(frames[0].contains("online.7778777.lessdugin.post"));
             assert!(!frames[0].contains("private record text"));
         }
@@ -436,6 +478,39 @@ mod tests {
                 assert!(logs.iter().any(|r| r.options.is_some()));
             }
         }
+    }
+
+    #[tokio::test]
+    async fn timestamp_cursor_never_replays_pre_cursor_events() {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let net = FakeNet::serve_http(crate::fake_pds::SystemClock);
+        let alice = net.add_account("alice.test");
+        alice.put(
+            "online.7778777.lessdugin.post",
+            "f-3l2s5xxv2zaa2",
+            &json!({"createdAt": "2025-10-09T08:53:20Z"}),
+        );
+        alice.head();
+        let server = Jetstream::start(&net, Wire::V2);
+        let cursor = net.now_ms() + 60_000;
+        let path = format!(
+            "/xrpc/network.bsky.jetstream.subscribeEvents?collections=online.7778777.lessdugin.*&cursor={}000",
+            cursor
+        );
+        let mut request = format!("{}{}", server.base_url(), path)
+            .into_client_request()
+            .unwrap();
+        request
+            .headers_mut()
+            .insert("sec-websocket-protocol", "xrpc.v1.json".parse().unwrap());
+        let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(
+            server.requests().iter().all(|r| r.sent.is_empty()),
+            "pre-cursor events were sent: {:?}",
+            server.requests()
+        );
+        socket.close(None).await.unwrap();
     }
 
     #[test]

@@ -11,7 +11,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use lessdugin_atp::syntax::{AtUri, Did, Nsid};
-#[cfg(test)]
 use lessdugin_core::host::Target;
 use lessdugin_core::host::{HttpRequest, HttpResponse};
 use serde_json::{Value, json};
@@ -23,6 +22,8 @@ use super::resp;
 const LINKS: &str = "blue.microcosm.links.getBacklinks";
 const COUNT: &str = "blue.microcosm.links.getBacklinksCount";
 const DEFAULT_BASE: &str = "https://constellation.example.com";
+/// Test-only page size. The discovery client must keep paging even when a page is short.
+const DEVNET_PAGE: usize = 1;
 const MAX_PAGE: usize = 100;
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -51,6 +52,30 @@ pub struct Constellation {
     observed: Arc<Mutex<BTreeMap<RecordKey, Observation>>>,
 }
 
+/// An owned loopback Constellation listener for native devnet tests.
+#[cfg(feature = "http")]
+pub struct HttpConstellation {
+    base: String,
+    runtime: Option<tokio::runtime::Runtime>,
+}
+
+#[cfg(feature = "http")]
+impl HttpConstellation {
+    /// The base URL to configure in the native devnet profile.
+    pub fn base_url(&self) -> &str {
+        &self.base
+    }
+}
+
+#[cfg(feature = "http")]
+impl Drop for HttpConstellation {
+    fn drop(&mut self) {
+        if let Some(runtime) = self.runtime.take() {
+            runtime.shutdown_background();
+        }
+    }
+}
+
 impl Constellation {
     /// Install the service at the default test URL on `host`.
     pub fn install(net: &FakeNet, host: &MemHost) -> Self {
@@ -76,6 +101,63 @@ impl Constellation {
             count.answer(req, true)
         });
         this
+    }
+
+    /// Serve the same index over loopback HTTP for native devnet tests. The service is bounded
+    /// to one record per page so a successful sync proves short-page cursor handling.
+    #[cfg(feature = "http")]
+    pub fn serve_http(net: &FakeNet) -> HttpConstellation {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind Constellation");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking listener");
+        let base = format!("http://{}", listener.local_addr().expect("local address"));
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .thread_name("fake-constellation")
+            .enable_all()
+            .build()
+            .expect("Constellation runtime");
+        let service = Self {
+            net: net.clone(),
+            base: Arc::from(base.clone()),
+            seq: Arc::new(AtomicU64::new(0)),
+            observed: Arc::new(Mutex::new(BTreeMap::new())),
+        };
+        runtime.spawn(async move {
+            let listener = tokio::net::TcpListener::from_std(listener).expect("tokio listener");
+            let app = axum::Router::new().fallback(move |req: axum::extract::Request| {
+                let service = service.clone();
+                async move {
+                    let method = req.method().clone();
+                    let uri = req.uri().to_string();
+                    let request = HttpRequest::get(Target::Anon(
+                        url::Url::parse(&format!("http://localhost{uri}")).expect("request URL"),
+                    ));
+                    if method != http::Method::GET {
+                        return axum::response::Response::new(axum::body::Body::from("method"));
+                    }
+                    let response = service.answer(&request, uri.contains(&format!("/{COUNT}")));
+                    match response {
+                        Ok(response) => axum::response::Response::builder()
+                            .status(response.status)
+                            .header("content-type", "application/json")
+                            .header("access-control-allow-origin", "*")
+                            .body(axum::body::Body::from(response.body))
+                            .expect("response"),
+                        Err(error) => axum::response::Response::builder()
+                            .status(500)
+                            .body(axum::body::Body::from(error.to_string()))
+                            .expect("error"),
+                    }
+                }
+            });
+            let _ = axum::serve(listener, app).await;
+        });
+        HttpConstellation {
+            base,
+            runtime: Some(runtime),
+        }
     }
 
     /// The configured base URL.
@@ -130,6 +212,8 @@ impl Constellation {
             },
             None => MAX_PAGE,
         };
+        #[cfg(feature = "http")]
+        let limit = limit.min(DEVNET_PAGE);
         let offset = match params.get("cursor") {
             None => 0,
             Some(c) if c.is_empty() => 0,

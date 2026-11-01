@@ -25,7 +25,35 @@ use crate::host::NativeHost;
 /// Maps the native configuration to the engine's (without parity mode; see [`open_engine`]).
 pub fn engine_config(cfg: &Config) -> EngineConfig {
     match &cfg.network {
-        NetworkProfile::Devnet(d) => EngineConfig::devnet(d.plc.clone(), d.pds.clone()),
+        NetworkProfile::Devnet(d) => EngineConfig {
+            network: lessdugin_core::engine::Network::Devnet {
+                plc: d.plc.clone(),
+                pds: d.pds.clone(),
+            },
+            sources: match cfg.sources.unwrap_or(Sources::Direct) {
+                Sources::Direct => EngineSources::Direct,
+                Sources::Assisted => EngineSources::Assisted,
+            },
+            sources_flag: cfg.sources.map(|s| match s {
+                Sources::Direct => EngineSources::Direct,
+                Sources::Assisted => EngineSources::Assisted,
+            }),
+            verify: match cfg.verify {
+                VerifyMode::Pds => EngineVerifyMode::Pds,
+                VerifyMode::Proof => EngineVerifyMode::Proof,
+            },
+            doh: Vec::new(),
+            plc: d.plc.clone(),
+            // Production defaults are never a devnet's CORE+ configuration. Config::devnet
+            // starts empty; only explicit configured endpoints are copied here.
+            relays: cfg.relays.clone(),
+            jetstream: d.jetstream.iter().cloned().collect(),
+            constellation: cfg.constellation.clone(),
+            slingshot: cfg.slingshot.clone(),
+            indexers: Vec::new(),
+            platform: lessdugin_core::engine::Platform::Native,
+            ..EngineConfig::default()
+        },
         NetworkProfile::Production => EngineConfig {
             // a `sources` the file states pins it like a flag (O-9): a CLI flag, then
             // config.toml, then the stored setting, then the build default (`sync.md` §2.3)
@@ -68,6 +96,22 @@ pub fn open_engine(paths: &Paths, config: &Config) -> Result<Engine<NativeHost>,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_devnet_never_inherits_production_core_plus_endpoints() {
+        let mut cfg = Config::devnet(
+            url::Url::parse("http://127.0.0.1:2582").unwrap(),
+            url::Url::parse("http://127.0.0.1:2583").unwrap(),
+        );
+        cfg.sources = Some(Sources::Assisted);
+        let c = engine_config(&cfg);
+        assert!(c.relays.is_empty());
+        assert!(c.jetstream.is_empty());
+        assert!(c.constellation.is_none());
+        assert!(c.slingshot.is_none());
+        assert!(c.doh.is_empty());
+        assert_eq!(c.sources, EngineSources::Assisted);
+    }
 
     /// O-9: a `sources` in config.toml wins over the stored setting; without one the stored
     /// setting decides.
