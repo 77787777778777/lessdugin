@@ -14,6 +14,7 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
+use lessdugin_atp::syntax::AtUri;
 use lessdugin_markdown::{MediaItem, RENDERER_VERSION, RenderOpts, Rendered};
 use serde_json::Value;
 
@@ -124,8 +125,21 @@ fn media_views(media: &Value) -> Vec<MediaView> {
         .collect()
 }
 
-/// Renders a markdown source with its `media[]` value (`defs#media` JSON) and `profile`.
-pub fn render_markdown(src: &str, media: &Value, profile: Option<&str>) -> RenderedBody {
+#[derive(Clone, Debug)]
+struct CachedBody {
+    body: RenderedBody,
+    /// Links produced by the renderer; record `markdown.links` hints never enter this cache.
+    links: Vec<AtUri>,
+}
+
+fn cached_rendered(r: Rendered, media: &Value) -> CachedBody {
+    CachedBody {
+        body: from_rendered(r.clone(), media),
+        links: r.links,
+    }
+}
+
+fn cached_markdown(src: &str, media: &Value, profile: Option<&str>) -> CachedBody {
     let items: Vec<MediaItem> = media
         .as_array()
         .map(|a| {
@@ -139,8 +153,15 @@ pub fn render_markdown(src: &str, media: &Value, profile: Option<&str>) -> Rende
         styled: false,
         text: true,
     };
-    let r = lessdugin_markdown::render_profile(src, &items, profile, &opts);
-    from_rendered(r, media)
+    cached_rendered(
+        lessdugin_markdown::render_profile(src, &items, profile, &opts),
+        media,
+    )
+}
+
+/// Renders a markdown source with its `media[]` value (`defs#media` JSON) and `profile`.
+pub fn render_markdown(src: &str, media: &Value, profile: Option<&str>) -> RenderedBody {
+    cached_markdown(src, media, profile).body
 }
 
 fn from_rendered(r: Rendered, media: &Value) -> RenderedBody {
@@ -183,16 +204,26 @@ pub enum Spilled {
     Missing,
 }
 
-/// Renders a spilled body from what was fetched for it.
-fn render_spilled(md: &Value, spilled: &Spilled) -> RenderedBody {
+fn render_spilled_cached(md: &Value, spilled: &Spilled) -> CachedBody {
     let media = md.get("media").cloned().unwrap_or(Value::Null);
     let profile = md.get("profile").and_then(Value::as_str);
     match spilled {
-        Spilled::Text(src) => render_markdown(src, &media, profile),
-        Spilled::Error(e) => from_rendered(lessdugin_markdown::render_error(*e, profile), &media),
-        Spilled::Unverified => placeholder(NOTICE_UNVERIFIED_BODY, &media),
-        Spilled::Missing => placeholder(NOTICE_MISSING_BODY, &media),
+        Spilled::Text(src) => cached_markdown(src, &media, profile),
+        Spilled::Error(e) => cached_rendered(lessdugin_markdown::render_error(*e, profile), &media),
+        Spilled::Unverified => CachedBody {
+            body: placeholder(NOTICE_UNVERIFIED_BODY, &media),
+            links: Vec::new(),
+        },
+        Spilled::Missing => CachedBody {
+            body: placeholder(NOTICE_MISSING_BODY, &media),
+            links: Vec::new(),
+        },
     }
+}
+
+/// Renders a spilled body from what was fetched for it.
+fn render_spilled(md: &Value, spilled: &Spilled) -> RenderedBody {
+    render_spilled_cached(md, spilled).body
 }
 
 /// A body that is only `notice` (the record stays valid), with its media.
@@ -237,15 +268,32 @@ pub fn render_md(md: &Value, ns: &str, excerpt: Option<&str>) -> RenderedBody {
     }
 }
 
+fn render_md_cached(md: &Value, ns: &str, excerpt: Option<&str>) -> CachedBody {
+    let markdown_type = format!("{ns}.markdown");
+    let known = md
+        .get("$type")
+        .and_then(Value::as_str)
+        .is_some_and(|t| t == markdown_type || t == format!("{markdown_type}#main"));
+    let media = md.get("media").cloned().unwrap_or(Value::Null);
+    let profile = md.get("profile").and_then(Value::as_str);
+    if known && let Some(text) = md.get("text").and_then(Value::as_str) {
+        return cached_markdown(text, &media, profile);
+    }
+    CachedBody {
+        body: render_md(md, ns, excerpt),
+        links: Vec::new(),
+    }
+}
+
 struct Lru {
     cap: usize,
     tick: u64,
-    map: BTreeMap<(String, u32), (u64, Arc<RenderedBody>)>,
+    map: BTreeMap<(String, u32), (u64, Arc<CachedBody>)>,
     order: BTreeMap<u64, (String, u32)>,
 }
 
 impl Lru {
-    fn get(&mut self, k: &(String, u32)) -> Option<Arc<RenderedBody>> {
+    fn get(&mut self, k: &(String, u32)) -> Option<Arc<CachedBody>> {
         self.tick += 1;
         let tick = self.tick;
         let (t, v) = self.map.get_mut(k)?;
@@ -255,7 +303,7 @@ impl Lru {
         Some(Arc::clone(v))
     }
 
-    fn put(&mut self, k: (String, u32), v: Arc<RenderedBody>) {
+    fn put(&mut self, k: (String, u32), v: Arc<CachedBody>) {
         self.tick += 1;
         if let Some((t, _)) = self.map.insert(k.clone(), (self.tick, v)) {
             self.order.remove(&t);
@@ -432,6 +480,21 @@ impl RenderCache {
         cid: &str,
         render: impl FnOnce() -> RenderedBody,
     ) -> Arc<RenderedBody> {
+        Arc::new(
+            self.get_or_render_cached(cid, || CachedBody {
+                body: render(),
+                links: Vec::new(),
+            })
+            .body
+            .clone(),
+        )
+    }
+
+    fn get_or_render_cached(
+        &self,
+        cid: &str,
+        render: impl FnOnce() -> CachedBody,
+    ) -> Arc<CachedBody> {
         let key = (cid.to_owned(), RENDERER_VERSION);
         if let Some(v) = self.lock().get(&key) {
             return v;
@@ -467,15 +530,20 @@ impl RenderCache {
     ) -> RenderedBody {
         let spilled = text_blob_cid(md).filter(|_| md.get("text").is_none());
         let cached = match spilled.map(|b| self.spilled(b)) {
-            None => self.get_or_render(cid, || render_md(md, ns, excerpt)),
-            Some(Some(v)) => self.get_or_render(cid, || render_spilled(md, &v)),
+            None => self.get_or_render_cached(cid, || render_md_cached(md, ns, excerpt)),
+            Some(Some(v)) => self.get_or_render_cached(cid, || render_spilled_cached(md, &v)),
             // pending: what an earlier fetch rendered, or the notice (never cached)
             Some(None) => {
                 let earlier = self.lock().get(&(cid.to_owned(), RENDERER_VERSION));
-                earlier.unwrap_or_else(|| Arc::new(render_md(md, ns, excerpt)))
+                earlier.unwrap_or_else(|| {
+                    Arc::new(CachedBody {
+                        body: render_md(md, ns, excerpt),
+                        links: Vec::new(),
+                    })
+                })
             }
         };
-        let mut b = (*cached).clone();
+        let mut b = cached.body.clone();
         let host = policy::host_of(pds);
         let shared = item.prefs.hosts.get(&host).copied().unwrap_or(0);
         for m in &mut b.media {
@@ -496,6 +564,23 @@ impl RenderCache {
                     == Autoload::Yes;
         }
         b
+    }
+    /// Canonical record links from the cached rendered body, rendering first on a miss.
+    pub fn links(&self, cid: &str, md: &Value, ns: &str, excerpt: Option<&str>) -> Vec<AtUri> {
+        let spilled = text_blob_cid(md).filter(|_| md.get("text").is_none());
+        match spilled.map(|b| self.spilled(b)) {
+            None => self.get_or_render_cached(cid, || render_md_cached(md, ns, excerpt)),
+            Some(Some(v)) => self.get_or_render_cached(cid, || render_spilled_cached(md, &v)),
+            Some(None) => {
+                return self
+                    .lock()
+                    .get(&(cid.to_owned(), RENDERER_VERSION))
+                    .map(|v| v.links.clone())
+                    .unwrap_or_default();
+            }
+        }
+        .links
+        .clone()
     }
 }
 
@@ -532,6 +617,7 @@ pub struct BodyItem<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lessdugin_lexicon::ns::NS;
     use serde_json::json;
 
     #[test]
@@ -549,6 +635,27 @@ mod tests {
         assert_eq!(s.notices, [NOTICE_SPILLED]);
         let u = render_md(&json!({"$type": "x.y"}), ns, None);
         assert_eq!(u.notices, [NOTICE_UNKNOWN_BODY]);
+    }
+
+    #[test]
+    fn links_come_from_rendering_not_record_hints() {
+        let cache = RenderCache::default();
+        let target =
+            "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/zone.lessdugin.post/uetjixxr3a33-3jzfcijpj2z2a";
+        let hint =
+            "at://did:plc:bbbbbbbbbbbbbbbbbbbbbbbb/zone.lessdugin.post/uetjixxr3a33-3jzfcijpj2z2b";
+        let md = json!({
+            "$type": format!("{NS}.markdown"),
+            "text": format!("[target]({target})"),
+            "links": [hint],
+        });
+        let links = cache.links("cid", &md, NS, None);
+        assert_eq!(
+            links.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            [target]
+        );
+        assert!(!links.iter().any(|link| link.as_str() == hint));
+        assert_eq!(cache.links("cid", &md, NS, None), links);
     }
 
     #[test]

@@ -62,8 +62,26 @@ fn page<T: Clone>(items: &[T], offset: usize, limit: usize) -> (Vec<T>, Option<S
     (page, cursor)
 }
 
-fn fold_pending(p: impl std::fmt::Display) -> EngineError {
+pub(crate) fn fold_pending(p: impl std::fmt::Display) -> EngineError {
     EngineError::internal(format!("the fold layer is pending: {p}"))
+}
+
+/// Eligible sequences whose entries contain `post`; their values supply SequenceNav titles.
+fn sequence_contexts(m: &ForumModel, post: &str) -> Vec<String> {
+    let Ok(library) = m.view.library.as_ref() else {
+        return Vec::new();
+    };
+    library
+        .eligible
+        .iter()
+        .filter(|uri| {
+            library
+                .entries
+                .get(*uri)
+                .is_some_and(|entries| entries.iter().any(|entry| entry == post))
+        })
+        .cloned()
+        .collect()
 }
 
 impl<H: Host> Engine<H> {
@@ -165,7 +183,9 @@ impl<H: Host> Engine<H> {
         // a spilled body is fetched before the view renders it (lfm-1.md §1.3)
         self.load_spilled_bodies(&l.model, one, &self.rt.renders)
             .await;
-        self.with_views(&l, one, one, |v| v.post_view(&uri))
+        let mut values = vec![uri.clone()];
+        values.extend(sequence_contexts(&l.model, &uri));
+        self.with_views(&l, &values, one, |v| v.post_view(&uri))
             .await?
             .ok_or_else(|| EngineError::not_found(format!("no post {uri} in the forum")))
     }
@@ -227,6 +247,7 @@ impl<H: Host> Engine<H> {
         // only a post's body can spill (data-model.md §5.2 rule 2)
         self.load_spilled_bodies(m, std::slice::from_ref(&uri), &self.rt.renders)
             .await;
+        bodies.extend(sequence_contexts(m, &uri));
         let mut view = self
             .with_views(&l, &bodies, &people, |v| v.thread_view(&uri, sort))
             .await?;

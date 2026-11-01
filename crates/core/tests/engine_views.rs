@@ -894,6 +894,91 @@ fn moderators_see_reasons_the_queue_and_the_log() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Sequences (M5)
+
+#[test]
+fn sequence_engine_views_keep_unavailable_entries_and_skip_them_in_navigation() {
+    let mut n = Net::new();
+    let c = Cast::new(&n);
+    let reader = n.device("reader", Some(&c.carol));
+    let s = scene(&n, &c);
+    let at = n.now();
+    let missing = format!(
+        "at://{}/{}/{}",
+        c.alice.did(),
+        nsid::POST,
+        keys::post_rkey(&s.f.uri, tid_at_ms(at + MINUTE).as_str()).unwrap()
+    );
+    let wrong_forum = format!(
+        "at://{}/{}/uetjixxr3a33-{}",
+        c.alice.did(),
+        nsid::POST,
+        tid_at_ms(at + 2 * MINUTE)
+    );
+    let value = json!({
+        "$type": nsid::SEQUENCE,
+        "forum": s.f.uri,
+        "title": "A reading guide",
+        "body": md("Introduction"),
+        "chapters": [{
+            "title": "Start",
+            "body": md("Chapter body"),
+            "posts": [s.welcome.uri, s.spam.uri, missing, wrong_forum, s.bob_post.uri],
+        }],
+        "createdAt": dt(at),
+    });
+    let sequence = s.f.put(
+        &c.alice,
+        nsid::SEQUENCE,
+        &keys::sequence_rkey(&s.f.uri, tid_at_ms(at).as_str()).unwrap(),
+        &value,
+    );
+    sync(&reader, &s.f.uri);
+
+    let library = block_on(reader.sequences(&s.f.uri)).unwrap();
+    assert_eq!(library.len(), 1);
+    assert_eq!(library[0].uri, sequence.uri);
+    assert_eq!(library[0].posts, 5, "the summary counts raw entries");
+    let view = block_on(reader.sequence(&sequence.uri)).unwrap();
+    assert_eq!(view.body.unwrap().text, "Introduction");
+    assert_eq!(view.chapters[0].body.as_ref().unwrap().text, "Chapter body");
+    assert_eq!(
+        view.chapters[0]
+            .posts
+            .iter()
+            .map(|p| p.uri.as_str())
+            .collect::<Vec<_>>(),
+        [
+            s.welcome.uri.as_str(),
+            s.spam.uri.as_str(),
+            s.bob_post.uri.as_str()
+        ],
+        "a known hidden post remains as a redacted unavailable entry"
+    );
+    let unavailable = &view.chapters[0].posts[1];
+    assert!(matches!(unavailable.state, ItemState::Hidden { .. }));
+    assert_eq!(unavailable.title, None);
+    assert!(unavailable.excerpt.is_empty());
+
+    let first = post(&reader, &s.welcome);
+    assert_eq!(first.sequences.len(), 1);
+    assert_eq!(first.sequences[0].sequence, sequence.uri);
+    assert_eq!(first.sequences[0].title, "A reading guide");
+    assert_eq!(first.sequences[0].prev, None);
+    assert_eq!(
+        first.sequences[0].next.as_deref(),
+        Some(s.bob_post.uri.as_str()),
+        "hidden, missing and foreign entries are not displayable neighbours"
+    );
+    let last = post(&reader, &s.bob_post);
+    assert_eq!(
+        last.sequences[0].prev.as_deref(),
+        Some(s.welcome.uri.as_str())
+    );
+    assert_eq!(last.sequences[0].next, None);
+}
+
+// ---------------------------------------------------------------------------------------------
 // Fail closed
 
 /// A moderator hides spam; then the moderator's PDS goes down. A reader who had listed the
