@@ -1796,8 +1796,24 @@ export class MockEngine implements EngineApi {
     const c = this.s.comments.get(uri);
     const seq = this.s.sequences.get(uri);
     const f = this.s.forums.get(uri);
-    const md = (text: string): Json => {
-      if (!this.spilledBodies) return { $type: COLL.markdown, text, profile: "lfm/1" };
+    const md = (text: string, media: readonly MediaRef[]): Json => {
+      const mediaRecords = media.map((m) => ({
+        blob: {
+          $type: "blob",
+          ref: { $link: m.cid },
+          mimeType: m.mime,
+          size: m.sizeBytes,
+        },
+        ...(m.alt !== undefined ? { alt: m.alt } : {}),
+        ...(m.aspectRatio !== undefined
+          ? { aspectRatio: { width: m.aspectRatio.width, height: m.aspectRatio.height } }
+          : {}),
+        ...(m.durationMs !== undefined ? { durationMs: m.durationMs } : {}),
+        ...(m.name !== undefined ? { name: m.name } : {}),
+      }));
+      if (!this.spilledBodies) {
+        return { $type: COLL.markdown, text, profile: "lfm/1", media: mediaRecords };
+      }
       return {
         $type: COLL.markdown,
         textBlob: {
@@ -1807,6 +1823,7 @@ export class MockEngine implements EngineApi {
           size: new TextEncoder().encode(text).length,
         },
         profile: "lfm/1",
+        media: mediaRecords,
       };
     };
     let record: Json | undefined;
@@ -1817,12 +1834,19 @@ export class MockEngine implements EngineApi {
         $type: COLL.post,
         forum: p.forum,
         kind: p.kind,
-        body: md(p.markdown),
+        body: md(p.markdown, p.media),
         tags: p.tags,
+        labels: p.labels,
         createdAt: new Date(p.createdAtMs).toISOString(),
       };
       if (p.title !== undefined) r.title = p.title;
-      if (p.link) r.link = { uri: p.link.uri, ...(p.link.title ? { title: p.link.title } : {}) };
+      if (p.link) {
+        r.link = {
+          uri: p.link.uri,
+          ...(p.link.title ? { title: p.link.title } : {}),
+          ...(p.link.description !== undefined ? { description: p.link.description } : {}),
+        };
+      }
       record = r;
       cid = p.cid;
       state = clone(p.state);
@@ -1832,7 +1856,7 @@ export class MockEngine implements EngineApi {
         $type: COLL.comment,
         forum: c.forum,
         root: { uri: c.root, cid: root?.cid ?? fakeCid(c.root) },
-        body: md(c.markdown),
+        body: md(c.markdown, c.media),
         createdAt: new Date(c.createdAtMs).toISOString(),
       };
       if (c.parent !== undefined) {
@@ -1870,7 +1894,7 @@ export class MockEngine implements EngineApi {
         })),
       };
       if (f.summary.description !== undefined) r.description = f.summary.description;
-      if (f.about !== undefined) r.about = md(f.about);
+      if (f.about !== undefined) r.about = md(f.about, []);
       if (f.reportContact !== undefined) r.reportContact = f.reportContact;
       record = r;
       // A declaration revision changes its record CID as well as its contents.
@@ -1980,6 +2004,7 @@ export class MockEngine implements EngineApi {
         kind: draft.kind,
         markdown: draft.body.markdown,
         body: renderMarkdown(draft.body.markdown).body,
+        media: clone(draft.body.media ?? []),
         tags: [...(draft.tags ?? [])],
         tier: f.defaultTier,
         pinned: false,
@@ -2046,6 +2071,7 @@ export class MockEngine implements EngineApi {
         author: me,
         markdown: draft.body.markdown,
         body: renderMarkdown(draft.body.markdown).body,
+        media: clone(draft.body.media ?? []),
         createdAtMs: t,
         tRankMs: t,
         base: { score: 1, agreement: 0, unweighted: 0, earlier: 0, weighted: 0 },
@@ -2099,8 +2125,16 @@ export class MockEngine implements EngineApi {
         }
         p.markdown = draft.post.body.markdown;
         p.body = renderMarkdown(p.markdown).body;
+        p.media = clone(draft.post.body.media ?? []);
         if (draft.post.title !== undefined && p.kind !== "quickTake") p.title = draft.post.title;
         p.tags = [...(draft.post.tags ?? [])];
+        p.labels = [...(draft.post.labels ?? [])];
+        if (draft.post.link) {
+          const href = safeHref(draft.post.link.uri, "field");
+          p.link = { ...clone(draft.post.link), host: href?.kind === "external" ? href.host : "" };
+        } else {
+          delete p.link;
+        }
         p.cid = fakeCid(`${uri}#t${t}`);
         p.badges = { ...p.badges, edited: true };
         return { uri, cid: p.cid, topics: this.threadTopics(uri) };
@@ -2108,6 +2142,7 @@ export class MockEngine implements EngineApi {
       if (c && draft.kind === "comment") {
         c.markdown = draft.comment.body.markdown;
         c.body = renderMarkdown(c.markdown).body;
+        c.media = clone(draft.comment.body.media ?? []);
         // The edit replaces the whole record: the quote is whatever the draft carries.
         if (draft.comment.quote) {
           c.quote = clone(draft.comment.quote);

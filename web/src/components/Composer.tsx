@@ -114,6 +114,8 @@ export function Composer({
   attachments = false,
   forumUri = undefined,
   media = NO_MEDIA,
+  initialAttachments = [],
+  onAttachmentsChange,
   onSubmit,
   onCancel,
 }: {
@@ -135,6 +137,9 @@ export function Composer({
   /** The media the body already has (an edit keeps them): the preview renders their
    * placeholders, with the attachments', as `publish` will (lfm-1.md §6.2). */
   media?: readonly MediaRef[] | undefined;
+  /** Existing record media shown as removable attachment rows when an edit opens. */
+  initialAttachments?: readonly Attachment[] | undefined;
+  onAttachmentsChange?: ((attachments: Attachment[]) => void) | undefined;
   onCancel?: (() => void) | undefined;
 }) {
   const engine = useEngine();
@@ -167,7 +172,7 @@ export function Composer({
   const [showPreview, setShowPreview] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [files, setFiles] = useState<Attachment[]>([]);
+  const [files, setFiles] = useState<Attachment[]>([...initialAttachments]);
   // mention completion (M4): the token under the caret and the candidates for it
   const [mentions, setMentions] = useState<{ start: number; items: MentionCandidate[] } | null>(
     null,
@@ -450,7 +455,15 @@ export function Composer({
         </ul>
       )}
       {attachments ? (
-        <Attachments ref={attachmentsRef} value={files} onChange={setFiles} disabled={busy} />
+        <Attachments
+          ref={attachmentsRef}
+          value={files}
+          onChange={(next) => {
+            setFiles(next);
+            onAttachmentsChange?.(next);
+          }}
+          disabled={busy}
+        />
       ) : null}
       {showPreview && preview && (
         <section className={styles.preview} aria-label="Preview">

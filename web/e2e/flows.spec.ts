@@ -209,6 +209,40 @@ test("a spilled post opens its normal editor with the stored source (robustness-
   await expect(page.getByText("A browser edit.")).toBeVisible();
 });
 
+test("a spilled post edit preserves its media and link-card draft fields", async ({ page }) => {
+  await page.goto(`${server.url}/?mock&spilled#${FORUM_PATH}/new`);
+  await page.getByLabel("Title", { exact: true }).fill("Preserved media and card");
+  await page.getByText("Link post", { exact: true }).click();
+  await page.getByRole("textbox", { name: "Link", exact: true }).fill("https://example.test/paper");
+  const body = page.getByRole("textbox", { name: "Post body" });
+  await body.fill("Source behind the blob");
+  await page.getByTestId("attachment-input").setInputFiles({
+    name: "figure.png",
+    mimeType: "image/png",
+    buffer: Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+      "base64",
+    ),
+  });
+  await expect(page.getByTestId("attachments")).toContainText("figure.png");
+  await page.getByLabel("Alt text").fill("Preserved diagram");
+  await page.getByRole("button", { name: "Publish" }).click();
+  await page.getByRole("link", { name: "Edit", exact: true }).click();
+  await expect(body).toHaveText("Source behind the blob");
+  await expect(page.getByRole("textbox", { name: "Link", exact: true })).toHaveValue(
+    "https://example.test/paper",
+  );
+  await expect(page.getByLabel("Alt text")).toHaveValue("Preserved diagram");
+  await body.fill("Edited source");
+  await page.getByRole("button", { name: "Save edit" }).click();
+  await page.getByRole("link", { name: "Edit", exact: true }).click();
+  await expect(body).toHaveText("Edited source");
+  await expect(page.getByLabel("Alt text")).toHaveValue("Preserved diagram");
+  await expect(page.getByRole("textbox", { name: "Link", exact: true })).toHaveValue(
+    "https://example.test/paper",
+  );
+});
+
 test("create a forum, edit its declaration and manage a moderator", async ({ page }) => {
   await go(page, "/", "Your forums");
   await page.getByRole("button", { name: "Create a forum" }).click();

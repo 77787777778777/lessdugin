@@ -100,6 +100,7 @@ export function PostForm({
   latest.current = { kind, title, link, tags };
   // Kept as they are: the composer edits only the markdown.
   const media = useRef<MediaRef[]>(initial?.body.media ?? []);
+  const [editMedia, setEditMedia] = useState<readonly MediaRef[]>(initial?.body.media ?? []);
   const labels = useRef<string[]>(initial?.labels ?? []);
   const linkMeta = useRef(initial?.link);
 
@@ -140,7 +141,7 @@ export function PostForm({
     // only once the write is accepted: the composer keeps its attachments after a refusal or a
     // failure, and the engine does not deduplicate `body.media`, so a submission sent again
     // would otherwise list them twice.
-    const withMedia = [...media.current, ...prepared];
+    const withMedia = editing ? prepared : [...media.current, ...prepared];
     const ticket = editing
       ? await engine.edit(
           editing,
@@ -259,7 +260,19 @@ export function PostForm({
           placeholder="Write your post in markdown…"
           onSubmit={publish}
           attachments
-          media={initial?.body.media}
+          media={editMedia}
+          initialAttachments={(initial?.body.media ?? []).map((ref) => ({
+            kind: "ready",
+            ref,
+            name: ref.name ?? `Existing media ${ref.cid}`,
+          }))}
+          onAttachmentsChange={(next) => {
+            if (editing) {
+              const refs = next.flatMap((a) => (a.kind === "ready" ? [a.ref] : []));
+              media.current = refs;
+              setEditMedia(refs);
+            }
+          }}
         />
         <span className={ui.hint}>
           Published posts are public records in your repository. Edits keep a public history unless

@@ -136,6 +136,54 @@ describe("EditPost", () => {
     expect(screen.queryByText("This post cannot be edited")).toBeNull();
   });
 
+  it("shows retained media in the edit form without submitting it twice", async () => {
+    const engine = new MockEngine({ holdMs: 0, sendMs: 0, spilledBodies: true });
+    const { view, uri } = await ownPost(engine);
+    const current = await engine.raw(uri);
+    const media = {
+      id: "bafyreiea7pi4w34g3sju7r6yhhl4tv4zwgtq2g4w2h2g2g2g2g2g2g2g2g",
+      cid: "bafyreiea7pi4w34g3sju7r6yhhl4tv4zwgtq2g4w2h2g2g2g2g2g2g2g2g",
+      mime: "image/png",
+      sizeBytes: 1234,
+      alt: "Retained image",
+      aspectRatio: { width: 4, height: 3 },
+    };
+    const originalRaw = engine.raw.bind(engine);
+    vi.spyOn(engine, "raw").mockImplementation(async (target) => {
+      const result = await originalRaw(target);
+      if (target !== uri) return result;
+      return {
+        ...result,
+        record: {
+          ...(current.record as object),
+          body: {
+            ...(current.record as { body: object }).body,
+            media: [
+              {
+                blob: { ref: { $link: media.cid }, mimeType: media.mime, size: media.sizeBytes },
+                alt: media.alt,
+                aspectRatio: media.aspectRatio,
+              },
+            ],
+          },
+        },
+      };
+    });
+    renderWithApp(
+      <ForumContext value={view}>
+        <EditPost uri={uri} />
+      </ForumContext>,
+      { engine },
+    );
+    const alt = (await screen.findByLabelText("Alt text")) as HTMLInputElement;
+    expect(alt.value).toBe("Retained image");
+    fireEvent.click(screen.getByRole("button", { name: "Save edit" }));
+    await screen.findByText("Post updated");
+    const saved = (await engine.raw(uri)).record as { body: { media: unknown[] } };
+    expect(saved.body.media).toHaveLength(1);
+    expect(saved).toMatchObject({ body: { media: [{ alt: "Retained image" }] } });
+  });
+
   it("refuses a mixed revision instead of combining newer media with older source", async () => {
     vi.useRealTimers();
     const engine = new MockEngine({ spilledBodies: true });

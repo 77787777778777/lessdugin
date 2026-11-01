@@ -303,6 +303,9 @@ describe("MockEngine body sources", () => {
 });
 
 describe("MockEngine local state and declarations", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
   it("binds each body source to the same record CID as raw", async () => {
     const e = new MockEngine();
     const list = await e.listPosts({ forum: FORUM_URI, sort: "new", filter: "all", limit: 100 });
@@ -315,6 +318,90 @@ describe("MockEngine local state and declarations", () => {
       const [raw, source] = await Promise.all([e.raw(uri), e.bodySource(uri)]);
       expect(source.cid).toBe(raw.cid);
       expect(source.profile).toBe("lfm/1");
+    }
+  });
+
+  it("preserves media, card, label and quote fields through spilled edits", async () => {
+    for (const spilledBodies of [false, true]) {
+      const e = new MockEngine({ holdMs: 0, sendMs: 0, spilledBodies });
+      const forum = FORUM_URI;
+      const me = (await e.activeAccount())?.did;
+      if (!me) throw new Error("no active account");
+      const media = {
+        id: "bafyreiea7pi4w34g3sju7r6yhhl4tv4zwgtq2g4w2h2g2g2g2g2g2g2g2g",
+        cid: "bafyreiea7pi4w34g3sju7r6yhhl4tv4zwgtq2g4w2h2g2g2g2g2g2g2g",
+        mime: "image/png",
+        sizeBytes: 184211,
+        alt: "Preserved diagram",
+        aspectRatio: { width: 1600, height: 900 },
+      };
+      const link = {
+        uri: "https://example.test/paper",
+        title: "Card title",
+        description: "Card description",
+      };
+      const published = await e.publish({
+        forum,
+        kind: "link",
+        title: "Preserved card",
+        body: { markdown: "Original source", media: [media] },
+        link,
+        labels: ["preserved-label"],
+      });
+      await vi.advanceTimersByTimeAsync(10);
+      const post = (await e.writeStatus(published.id))?.state;
+      if (post?.kind !== "done") throw new Error("post did not finish");
+      await e.edit(
+        post.uri,
+        {
+          kind: "post",
+          post: {
+            forum,
+            kind: "link",
+            title: "Preserved card",
+            body: { markdown: "Edited source", media: [media] },
+            link,
+            labels: ["preserved-label"],
+          },
+        },
+        { history: true },
+      );
+      await vi.advanceTimersByTimeAsync(10);
+      expect(await e.raw(post.uri)).toMatchObject({
+        record: {
+          link,
+          labels: ["preserved-label"],
+          body: { media: [{ alt: "Preserved diagram", aspectRatio: media.aspectRatio }] },
+        },
+      });
+      expect((await e.bodySource(post.uri)).markdown).toBe("Edited source");
+      const reply = await e.comment({
+        root: post.uri,
+        body: { markdown: "Comment source", media: [media] },
+        quote: { exact: "Original", prefix: "", suffix: " source", start: 0 },
+      });
+      await vi.advanceTimersByTimeAsync(10);
+      const comment = (await e.writeStatus(reply.id))?.state;
+      if (comment?.kind !== "done") throw new Error("comment did not finish");
+      await e.edit(
+        comment.uri,
+        {
+          kind: "comment",
+          comment: {
+            root: post.uri,
+            body: { markdown: "Edited comment", media: [media] },
+            quote: { exact: "Original", prefix: "", suffix: " source", start: 0 },
+          },
+        },
+        { history: true },
+      );
+      await vi.advanceTimersByTimeAsync(10);
+      expect(await e.raw(comment.uri)).toMatchObject({
+        record: {
+          quote: { exact: "Original", start: 0 },
+          body: { media: [{ alt: "Preserved diagram", aspectRatio: media.aspectRatio }] },
+        },
+      });
     }
   });
 
