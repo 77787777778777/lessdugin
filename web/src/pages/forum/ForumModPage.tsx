@@ -59,18 +59,15 @@ export function isBlocked(e: unknown): boolean {
   return isEngineError(e) && e.code === "blocked";
 }
 
-/** Waits for each write and says how it ended; resolves with the lines of their `report`s
- * (what a `modAdopt` did not adopt or kept, engine-api.md §3.5). */
-async function settle(tickets: WriteTicket[], done: string): Promise<string[]> {
-  const report: string[] = [];
+/** Waits for each write and says how it ended. The store records any adoption report for
+ * AppShell's single global presentation, whether it originated here, in modsSet, or elsewhere. */
+async function settle(tickets: WriteTicket[], done: string): Promise<void> {
   for (const t of tickets) {
     writeStore.track(t);
     const final = await writeStore.wait(t.id);
     if (final.kind === "failed") throw final.error;
-    if (final.kind === "done") report.push(...(final.report ?? []));
   }
   toasts.show({ message: done, tone: "success" });
-  return report;
 }
 
 /** The one action of a queue item (social.md §4.12). */
@@ -278,14 +275,12 @@ function Adopt({ uri }: { uri: string }) {
   const requestAck = usePublicAck();
   const [former, setFormer] = useState("");
   const [busy, setBusy] = useState(false);
-  const [report, setReport] = useState<string[]>([]);
   const adopt = async (): Promise<void> => {
     // the copies are the adopter's own public modActions
     if (!(await requestAck("modAction"))) return;
     setBusy(true);
-    setReport([]);
     try {
-      setReport(await settle([await engine.modAdopt(uri, former.trim())], "Assertions adopted"));
+      await settle([await engine.modAdopt(uri, former.trim())], "Assertions adopted");
       setFormer("");
     } catch (e) {
       toasts.show({ message: errorMessage(e), tone: "error" });
@@ -317,20 +312,6 @@ function Adopt({ uri }: { uri: string }) {
           Adopt
         </button>
       </div>
-      {report.length > 0 && (
-        <section aria-label="Not adopted">
-          <p className={ui.small}>
-            Not adopted ({report.length}): these lapse, or stay as your own records.
-          </p>
-          <ul className={ui.small}>
-            {report.map((line) => (
-              <li key={line} className={ui.mono}>
-                {line}
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
     </>
   );
 }

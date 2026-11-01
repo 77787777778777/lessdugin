@@ -13,13 +13,14 @@ import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
 import { markdown } from "@codemirror/lang-markdown";
 import { EditorSelection, EditorState } from "@codemirror/state";
 import { EditorView, keymap, placeholder as placeholderExt } from "@codemirror/view";
-import type { Draft, RenderedBody } from "@lessdugin/engine/types";
+import type { Draft, MediaRef, RenderedBody } from "@lessdugin/engine/types";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { useEngine } from "../engine/context.tsx";
 import { qk } from "../engine/queries.ts";
 import { cx } from "../lib/cx.ts";
 import { applyMention, type MentionCandidate, mentionAt, rankMentions } from "../lib/mentions.ts";
+import { cleanName } from "../lib/text.ts";
 import ui from "../styles/ui.module.css";
 import { type Attachment, Attachments, type AttachmentsHandle } from "./Attachments.tsx";
 import styles from "./Composer.module.css";
@@ -28,6 +29,8 @@ import { errorMessage } from "./Status.tsx";
 
 const PREVIEW_DEBOUNCE_MS = 150;
 const DRAFT_DEBOUNCE_MS = 1000;
+// one instance: a fresh `[]` default would re-run the preview effect on every render
+const NO_MEDIA: readonly MediaRef[] = [];
 
 const editorTheme = EditorView.theme({
   "&": {
@@ -110,6 +113,9 @@ export function Composer({
   compact = false,
   attachments = false,
   forumUri = undefined,
+  media = NO_MEDIA,
+  initialAttachments = [],
+  onAttachmentsChange,
   onSubmit,
   onCancel,
 }: {
@@ -128,6 +134,12 @@ export function Composer({
   attachments?: boolean | undefined;
   /** The forum whose members can be mentioned; omit to offer no completion (M4). */
   forumUri?: string | undefined;
+  /** The media the body already has (an edit keeps them): the preview renders their
+   * placeholders, with the attachments', as `publish` will (lfm-1.md §6.2). */
+  media?: readonly MediaRef[] | undefined;
+  /** Existing record media shown as removable attachment rows when an edit opens. */
+  initialAttachments?: readonly Attachment[] | undefined;
+  onAttachmentsChange?: ((attachments: Attachment[]) => void) | undefined;
   onCancel?: (() => void) | undefined;
 }) {
   const engine = useEngine();
@@ -144,17 +156,13 @@ export function Composer({
   // the first candidate, for the keyboard; set below once `mentions` is known
   const pendingMention = useRef<MentionCandidate | null>(null);
   const acceptMentionRef = useRef<(c: MentionCandidate) => void>(() => {});
-  candidatesRef.current = (members.data ?? []).flatMap((m) =>
-    m.actor.handle !== undefined && m.actor.handleState === "verified"
-      ? [
-          {
-            did: m.actor.did,
-            handle: m.actor.handle,
-            ...(m.actor.displayName ? { label: m.actor.displayName } : {}),
-          },
-        ]
-      : [],
-  );
+  candidatesRef.current = (members.data ?? []).flatMap((m) => {
+    if (m.actor.handle === undefined || m.actor.handleState !== "verified") return [];
+    // the display name as every other name is shown (threat-model SPA-5, ID-5): bidi controls,
+    // zero-width characters and badge glyphs removed, and dropped when nothing is left
+    const label = m.actor.displayName ? cleanName(m.actor.displayName) : "";
+    return [{ did: m.actor.did, handle: m.actor.handle, ...(label !== "" ? { label } : {}) }];
+  });
   const hostRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
   // where files pasted or dropped into the editor go (null without the attachment picker)
@@ -164,7 +172,7 @@ export function Composer({
   const [showPreview, setShowPreview] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [files, setFiles] = useState<Attachment[]>([]);
+  const [files, setFiles] = useState<Attachment[]>([...initialAttachments]);
   // mention completion (M4): the token under the caret and the candidates for it
   const [mentions, setMentions] = useState<{ start: number; items: MentionCandidate[] } | null>(
     null,
@@ -292,15 +300,24 @@ export function Composer({
     };
   }, []);
 
-  // Live preview through the engine's renderer.
+  // Live preview through the engine's renderer, with the body's media (the kept ones and the
+  // prepared attachments), so `cid:` images and media placeholders show as they will.
   useEffect(() => {
     if (text.trim() === "") {
       setPreview(null);
       return;
     }
     let cancelled = false;
+    // An edit supplies retained media both as kept refs and as ready attachment rows. The
+    // renderer indexes every matching ref, so keep one ref per CID. Prefer the kept ref: the
+    // parent updates it when an attachment's alt is edited.
+    const byCid = new Map<string, MediaRef>();
+    for (const ref of [...media, ...files.flatMap((a) => (a.kind === "ready" ? [a.ref] : []))]) {
+      if (!byCid.has(ref.cid)) byCid.set(ref.cid, ref);
+    }
+    const refs = [...byCid.values()];
     const t = setTimeout(() => {
-      engine.render(text, [], { html: true, text: true, styled: false }).then(
+      engine.render(text, refs, { html: true, text: true, styled: false }).then(
         (body) => {
           if (!cancelled) setPreview(body);
         },
@@ -311,7 +328,7 @@ export function Composer({
       cancelled = true;
       clearTimeout(t);
     };
-  }, [text, engine]);
+  }, [text, engine, media, files]);
 
   // Draft autosave.
   useEffect(() => {
@@ -434,14 +451,26 @@ export function Composer({
                 }}
               >
                 <span className={styles.mentionHandle}>@{c.handle}</span>
-                {c.label && <span className={styles.mentionLabel}>{c.label}</span>}
+                {c.label && (
+                  <span className={styles.mentionLabel}>
+                    <bdi>{c.label}</bdi>
+                  </span>
+                )}
               </button>
             </li>
           ))}
         </ul>
       )}
       {attachments ? (
-        <Attachments ref={attachmentsRef} value={files} onChange={setFiles} disabled={busy} />
+        <Attachments
+          ref={attachmentsRef}
+          value={files}
+          onChange={(next) => {
+            setFiles(next);
+            onAttachmentsChange?.(next);
+          }}
+          disabled={busy}
+        />
       ) : null}
       {showPreview && preview && (
         <section className={styles.preview} aria-label="Preview">

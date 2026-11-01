@@ -146,6 +146,8 @@ export interface MockEngineOptions {
   sendMs?: number;
   /** Start without a signed-in account. */
   signedOut?: boolean;
+  /** Serve every present body/about as a textBlob in `raw`; `bodySource` still reads its text. */
+  spilledBodies?: boolean;
 }
 
 type Timer = ReturnType<typeof setTimeout>;
@@ -287,6 +289,7 @@ export class MockEngine implements EngineApi {
   private readonly s: MockState;
   private readonly holdMs: number;
   private readonly sendMs: number;
+  private readonly spilledBodies: boolean;
   private ticks = 0;
   private readonly listeners = new Set<EventListener>();
   private readonly queue: EngineEvent[] = [];
@@ -299,6 +302,7 @@ export class MockEngine implements EngineApi {
     this.s = buildFixture().state;
     this.holdMs = opts.holdMs ?? OPINION_UNDO_WINDOW_MS;
     this.sendMs = opts.sendMs ?? 250;
+    this.spilledBodies = opts.spilledBodies ?? false;
     if (opts.signedOut) this.s.active = null;
   }
 
@@ -843,7 +847,8 @@ export class MockEngine implements EngineApi {
   // ------------------------------------------------------------------------------- writes
 
   private write(undoable: boolean, apply: () => Applied): WriteTicket {
-    const id = this.nextId("w");
+    // The same account/sequence shape as crates/core/src/outbox/model.rs `write_id`.
+    const id = `${this.me()}/${this.s.nextId++}`;
     const rec: WriteRec = { id, state: { kind: "pending" }, undoable, apply };
     this.writeRecs.set(id, rec);
     this.emit({ kind: "write", id, state: { kind: "pending" } });
@@ -1791,7 +1796,36 @@ export class MockEngine implements EngineApi {
     const c = this.s.comments.get(uri);
     const seq = this.s.sequences.get(uri);
     const f = this.s.forums.get(uri);
-    const md = (text: string): Json => ({ $type: COLL.markdown, text, profile: "lfm/1" });
+    const md = (text: string, media: readonly MediaRef[]): Json => {
+      const mediaRecords = media.map((m) => ({
+        blob: {
+          $type: "blob",
+          ref: { $link: m.cid },
+          mimeType: m.mime,
+          size: m.sizeBytes,
+        },
+        ...(m.alt !== undefined ? { alt: m.alt } : {}),
+        ...(m.aspectRatio !== undefined
+          ? { aspectRatio: { width: m.aspectRatio.width, height: m.aspectRatio.height } }
+          : {}),
+        ...(m.durationMs !== undefined ? { durationMs: m.durationMs } : {}),
+        ...(m.name !== undefined ? { name: m.name } : {}),
+      }));
+      if (!this.spilledBodies) {
+        return { $type: COLL.markdown, text, profile: "lfm/1", media: mediaRecords };
+      }
+      return {
+        $type: COLL.markdown,
+        textBlob: {
+          $type: "blob",
+          ref: { $link: fakeCid(`markdown:${text}`) },
+          mimeType: "text/markdown",
+          size: new TextEncoder().encode(text).length,
+        },
+        profile: "lfm/1",
+        media: mediaRecords,
+      };
+    };
     let record: Json | undefined;
     let cid: string | undefined;
     let state: ItemState | undefined;
@@ -1800,12 +1834,19 @@ export class MockEngine implements EngineApi {
         $type: COLL.post,
         forum: p.forum,
         kind: p.kind,
-        body: md(p.markdown),
+        body: md(p.markdown, p.media),
         tags: p.tags,
+        labels: p.labels,
         createdAt: new Date(p.createdAtMs).toISOString(),
       };
       if (p.title !== undefined) r.title = p.title;
-      if (p.link) r.link = { uri: p.link.uri, ...(p.link.title ? { title: p.link.title } : {}) };
+      if (p.link) {
+        r.link = {
+          uri: p.link.uri,
+          ...(p.link.title ? { title: p.link.title } : {}),
+          ...(p.link.description !== undefined ? { description: p.link.description } : {}),
+        };
+      }
       record = r;
       cid = p.cid;
       state = clone(p.state);
@@ -1815,7 +1856,7 @@ export class MockEngine implements EngineApi {
         $type: COLL.comment,
         forum: c.forum,
         root: { uri: c.root, cid: root?.cid ?? fakeCid(c.root) },
-        body: md(c.markdown),
+        body: md(c.markdown, c.media),
         createdAt: new Date(c.createdAtMs).toISOString(),
       };
       if (c.parent !== undefined) {
@@ -1853,10 +1894,11 @@ export class MockEngine implements EngineApi {
         })),
       };
       if (f.summary.description !== undefined) r.description = f.summary.description;
-      if (f.about !== undefined) r.about = md(f.about);
+      if (f.about !== undefined) r.about = md(f.about, []);
       if (f.reportContact !== undefined) r.reportContact = f.reportContact;
       record = r;
-      cid = fakeCid(uri);
+      // A declaration revision changes its record CID as well as its contents.
+      cid = fakeCid(JSON.stringify(r));
     } else {
       throw err("not_found", `No record ${uri}`);
     }
@@ -1878,8 +1920,13 @@ export class MockEngine implements EngineApi {
     const p = this.s.posts.get(uri);
     const c = this.s.comments.get(uri);
     const f = this.s.forums.get(uri);
-    if (!p && !c && !f) throw err("not_found", `No post, comment or forum ${uri}`);
-    // The same snapshot supplies raw's CID and this body's source/profile.
+    if (!p && !c && !f) {
+      // any other collection is `invalid_ref` (engine-api.md §3.4)
+      if (this.s.sequences.has(uri))
+        throw err("invalid_ref", `Not a post, comment or forum: ${uri}`);
+      throw err("not_found", `No post, comment or forum ${uri}`);
+    }
+    // raw and the source/profile are read from the same synchronous state snapshot.
     const raw = await this.raw(uri);
     const record =
       raw.record !== null && typeof raw.record === "object" && !Array.isArray(raw.record)
@@ -1890,13 +1937,14 @@ export class MockEngine implements EngineApi {
       bodyValue !== null && typeof bodyValue === "object" && !Array.isArray(bodyValue)
         ? bodyValue
         : undefined;
+    const present = p !== undefined || c !== undefined || f?.about !== undefined;
     const markdown =
       typeof body?.text === "string" ? body.text : (p?.markdown ?? c?.markdown ?? f?.about ?? "");
     return {
       markdown,
       cid: raw.cid ?? "",
       profile: typeof body?.profile === "string" ? body.profile : "lfm/1",
-      spilled: false,
+      spilled: present && this.spilledBodies,
     };
   }
 
@@ -1956,6 +2004,7 @@ export class MockEngine implements EngineApi {
         kind: draft.kind,
         markdown: draft.body.markdown,
         body: renderMarkdown(draft.body.markdown).body,
+        media: clone(draft.body.media ?? []),
         tags: [...(draft.tags ?? [])],
         tier: f.defaultTier,
         pinned: false,
@@ -2022,6 +2071,7 @@ export class MockEngine implements EngineApi {
         author: me,
         markdown: draft.body.markdown,
         body: renderMarkdown(draft.body.markdown).body,
+        media: clone(draft.body.media ?? []),
         createdAtMs: t,
         tRankMs: t,
         base: { score: 1, agreement: 0, unweighted: 0, earlier: 0, weighted: 0 },
@@ -2075,8 +2125,16 @@ export class MockEngine implements EngineApi {
         }
         p.markdown = draft.post.body.markdown;
         p.body = renderMarkdown(p.markdown).body;
+        p.media = clone(draft.post.body.media ?? []);
         if (draft.post.title !== undefined && p.kind !== "quickTake") p.title = draft.post.title;
         p.tags = [...(draft.post.tags ?? [])];
+        p.labels = [...(draft.post.labels ?? [])];
+        if (draft.post.link) {
+          const href = safeHref(draft.post.link.uri, "field");
+          p.link = { ...clone(draft.post.link), host: href?.kind === "external" ? href.host : "" };
+        } else {
+          delete p.link;
+        }
         p.cid = fakeCid(`${uri}#t${t}`);
         p.badges = { ...p.badges, edited: true };
         return { uri, cid: p.cid, topics: this.threadTopics(uri) };
@@ -2084,6 +2142,7 @@ export class MockEngine implements EngineApi {
       if (c && draft.kind === "comment") {
         c.markdown = draft.comment.body.markdown;
         c.body = renderMarkdown(c.markdown).body;
+        c.media = clone(draft.comment.body.media ?? []);
         // The edit replaces the whole record: the quote is whatever the draft carries.
         if (draft.comment.quote) {
           c.quote = clone(draft.comment.quote);
@@ -2751,7 +2810,9 @@ export class MockEngine implements EngineApi {
     };
   }
 
-  async importLocal(json: Json): Promise<ImportReport> {
+  /** `scope` (`"mine"`, the default, or `"everything"`, engine-api.md §3.6): the mock has one
+   * account's state, so both import the same. */
+  async importLocal(json: Json, _scope?: "mine" | "everything"): Promise<ImportReport> {
     if (
       typeof json !== "object" ||
       json === null ||

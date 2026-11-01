@@ -6,7 +6,7 @@ describe("chooseEngine", () => {
   it("uses the mock for ?mock before or inside the hash, in development and demo builds", () => {
     expect(chooseEngine({ search: "?mock", hash: "#/" }, { DEV: true })).toBe("mock");
     expect(chooseEngine({ search: "", hash: "#/f/x/y?mock" }, { VITE_DEMO: "1" })).toBe("mock");
-    expect(chooseEngine({ search: "?mock", hash: "#/" }, { VITE_DEMO: "1" })).toBe("mock");
+    expect(chooseEngine({ search: "?mock&spilled", hash: "#/" }, { VITE_DEMO: "1" })).toBe("mock");
   });
   it("ignores ?mock in a release build", () => {
     expect(mockAllowed({ DEV: false })).toBe(false);

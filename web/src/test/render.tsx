@@ -7,7 +7,9 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   createMemoryHistory,
   createRootRoute,
+  createRoute,
   createRouter,
+  Outlet,
   RouterProvider,
 } from "@tanstack/react-router";
 import { render } from "@testing-library/react";
@@ -21,7 +23,13 @@ import { writeStore } from "../engine/writes.ts";
 
 export function renderWithApp(
   ui: ReactNode,
-  opts: { engine?: MockEngine; engineOptions?: MockEngineOptions } = {},
+  opts: {
+    engine?: MockEngine;
+    engineOptions?: MockEngineOptions;
+    /** Render `ui` as the component of this route (a path with params, as router.tsx declares
+     * it), with the history at `at`: for a page that reads its params through `getRouteApi`. */
+    route?: { path: string; at: string };
+  } = {},
 ) {
   const engine = opts.engine ?? new MockEngine(opts.engineOptions);
   const handle = createMockHandle(engine);
@@ -33,14 +41,23 @@ export function renderWithApp(
   const rootRoute = createRootRoute({
     component: () => (
       <>
-        {ui}
+        {opts.route ? <Outlet /> : ui}
         <ToastRegion />
       </>
     ),
   });
+  const routeTree = opts.route
+    ? rootRoute.addChildren([
+        createRoute({
+          getParentRoute: () => rootRoute,
+          path: opts.route.path,
+          component: () => ui,
+        }),
+      ])
+    : rootRoute;
   const router = createRouter({
-    routeTree: rootRoute,
-    history: createMemoryHistory({ initialEntries: ["/"] }),
+    routeTree,
+    history: createMemoryHistory({ initialEntries: [opts.route?.at ?? "/"] }),
   });
   const result = render(
     <EngineProvider engine={handle}>

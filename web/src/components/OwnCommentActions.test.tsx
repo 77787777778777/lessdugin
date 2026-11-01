@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // @vitest-environment jsdom
 // Before an author edits an item that carries positive assertions, the client warns that the
-// edit suspends them (social.md §4.5; review finding sec-7).
+// edit suspends them, with what the engine's editPreflight names (social.md §4.5; review
+// findings sec-7, robustness-6).
+import { EditorView } from "@codemirror/view";
 import { MockEngine } from "@lessdugin/engine/mock";
-import type { CommentNode, Json } from "@lessdugin/engine/types";
+import type { CommentNode } from "@lessdugin/engine/types";
 import { fireEvent, screen, waitFor } from "@testing-library/react";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { renderWithApp } from "../test/render.tsx";
@@ -27,39 +29,102 @@ describe("OwnCommentActions edit", () => {
     Object.defineProperty(document, "execCommand", { value: () => false, configurable: true });
   });
 
-  it("warns that the edit suspends a moderator's keep", async () => {
+  it("warns with the engine's editPreflight notice (robustness-6)", async () => {
     const engine = new MockEngine();
     const { node, post } = await ownComment(engine);
-    const real = await engine.raw(node.uri);
-    const keep: Json = {
-      uri: "at://did:plc:moderatormoderatormoderat/online.7778777.lessdugin.temp.modAction/k",
-      cid: "bafyrei",
-      valid: true,
-      status: "effective",
-      record: {
-        $type: "online.7778777.lessdugin.temp.modAction",
-        subject: node.uri,
-        action: { $type: "online.7778777.lessdugin.temp.modAction#hide", hidden: false },
+    const preflight = vi.spyOn(engine, "editPreflight").mockResolvedValue([
+      {
+        code: "suspendsAssertions",
+        message: "editing suspends a moderator's keep: they apply to the version a moderator saw",
       },
-    };
-    vi.spyOn(engine, "raw").mockResolvedValue({ ...real, assertions: [keep] });
+    ]);
     renderWithApp(<OwnCommentActions node={node} postUri={post} />, { engine });
     fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
     await waitFor(() =>
       expect(screen.getByTestId("edit-suspends").textContent).toMatch(
-        /suspends a moderator's keep/,
+        /^editing suspends a moderator's keep/,
       ),
     );
+    expect(preflight).toHaveBeenCalledWith(node.uri);
   });
 
-  it("says nothing when the comment carries no positive assertion", async () => {
+  it("loads a spilled comment's source before opening its normal editor (robustness-2)", async () => {
+    const engine = new MockEngine({ spilledBodies: true });
+    const { node, post } = await ownComment(engine);
+    const expected = await engine.bodySource(node.uri);
+    expect(expected.spilled).toBe(true);
+    const source = vi.spyOn(engine, "bodySource");
+    const { container } = renderWithApp(<OwnCommentActions node={node} postUri={post} />, {
+      engine,
+    });
+    fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
+    await screen.findByRole("button", { name: "Save edit" }, { timeout: 10_000 });
+    await waitFor(() => {
+      const host = container.querySelector('[data-testid="composer-editor"]');
+      const content = host?.shadowRoot?.querySelector(".cm-content");
+      const editor = content instanceof HTMLElement ? EditorView.findFromDOM(content) : null;
+      expect(editor?.state.doc.toString()).toBe(expected.markdown);
+    });
+    expect(source).toHaveBeenCalledWith(node.uri);
+  });
+
+  it("keeps a spilled comment closed when raw and source name different revisions", async () => {
+    const engine = new MockEngine({ spilledBodies: true });
+    const { node, post } = await ownComment(engine);
+    const originalRaw = engine.raw.bind(engine);
+    const rawRead = vi.spyOn(engine, "raw");
+    rawRead.mockImplementation(async (target) => {
+      const result = await originalRaw(target);
+      if (target === node.uri && rawRead.mock.calls.length % 2 === 1) {
+        return { ...result, cid: "old-comment-revision" };
+      }
+      return result;
+    });
+    const source = vi.spyOn(engine, "bodySource");
+    const preflight = vi.spyOn(engine, "editPreflight");
+    renderWithApp(<OwnCommentActions node={node} postUri={post} />, { engine });
+    fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
+    expect(
+      await screen.findByText(/record changed while its edit source was loading/i),
+    ).toBeTruthy();
+    expect(source).toHaveBeenCalledWith(node.uri);
+    expect(preflight).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: "Save edit" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    await screen.findByText(/record changed while its edit source was loading/i);
+    expect(source).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps a spilled comment closed when its source is unavailable (robustness-2)", async () => {
+    const engine = new MockEngine({ spilledBodies: true });
+    const { node, post } = await ownComment(engine);
+    const source = vi.spyOn(engine, "bodySource").mockRejectedValue({
+      code: "network",
+      message: "The source is not available.",
+      retryable: true,
+    });
+    const preflight = vi.spyOn(engine, "editPreflight");
+    renderWithApp(<OwnCommentActions node={node} postUri={post} />, { engine });
+    fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
+    await screen.findByText("The source is not available.");
+    expect(source).toHaveBeenCalledWith(node.uri);
+    expect(preflight).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: "Save edit" })).toBeNull();
+  });
+
+  it("says nothing when the engine names nothing, or cannot answer", async () => {
     const engine = new MockEngine();
     const { node, post } = await ownComment(engine);
-    const real = await engine.raw(node.uri);
-    vi.spyOn(engine, "raw").mockResolvedValue({ ...real, assertions: [] });
+    // the mock's editPreflight answers [] for a cached item
     renderWithApp(<OwnCommentActions node={node} postUri={post} />, { engine });
     fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
     // the composer loads lazily
+    await screen.findByRole("button", { name: "Save edit" }, { timeout: 10_000 });
+    expect(screen.queryByTestId("edit-suspends")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    // a preflight that fails degrades to editing without the warning
+    vi.spyOn(engine, "editPreflight").mockRejectedValue(new Error("offline"));
+    fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
     await screen.findByRole("button", { name: "Save edit" }, { timeout: 10_000 });
     expect(screen.queryByTestId("edit-suspends")).toBeNull();
   });

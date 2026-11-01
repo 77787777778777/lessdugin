@@ -16,6 +16,7 @@ import { cleanName } from "../lib/text.ts";
 import { parseAtUri } from "../lib/uri.ts";
 import { useAccountActor } from "./AccountName.tsx";
 import { actorLabel } from "./ActorName.tsx";
+import { AdoptionReport } from "./AdoptionReport.tsx";
 import styles from "./AppShell.module.css";
 import { SafeLink } from "./SafeLink.tsx";
 import { errorMessage } from "./Status.tsx";
@@ -384,6 +385,7 @@ export function AppShell() {
         </p>
       </footer>
       <ToastRegion />
+      <AdoptionReport />
     </div>
   );
 }

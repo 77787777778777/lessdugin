@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Reading modAction records as the SPA needs them (data-model.md §6.7; social.md §4.2, §4.5):
 // the action key a removal names, the action value of a stored record (to re-assert it on a
-// new version), and the positive assertions in effect on an item, which an edit suspends.
+// new version), and the notice the engine gives before an edit that suspends assertions.
 
-import type { Json, ModActionValue, ModLogEntry, RawView } from "@lessdugin/engine/types";
+import type { ActionNotice, Json, ModActionValue, ModLogEntry } from "@lessdugin/engine/types";
 import { parseAtUri } from "./uri.ts";
 
 type Obj = { [k: string]: Json };
@@ -82,38 +82,11 @@ export function tagSlug(subject: string): string | null {
   return /^[a-z0-9]+(-[a-z0-9]+)*$/.test(slug) ? slug : null;
 }
 
-/** A positive assertion of social.md §4.2: a keep, a tier of frontpage or curated, a pin. */
-export type PositiveKind = "keep" | "tier" | "pin";
-
-/** The positive assertions in effect on the item of `raw` (status `effective`): an edit of the
- * item suspends them until an authority asserts them again (social.md §4.5). */
-export function positiveAssertions(raw: RawView): PositiveKind[] {
-  const out = new Set<PositiveKind>();
-  for (const entry of raw.assertions) {
-    if (!isObj(entry) || entry.status !== "effective") continue;
-    const v = recordActionValue(entry.record);
-    if (v?.kind === "hide" && !v.hidden) out.add("keep");
-    else if (v?.kind === "tier" && v.tier !== "personal") out.add("tier");
-    else if (v?.kind === "pin" && v.pinned) out.add("pin");
-  }
-  return [...out];
-}
-
-const POSITIVE_TEXT: Record<PositiveKind, string> = {
-  keep: "a moderator's keep",
-  tier: "its frontpage or curated tier",
-  pin: "its pin",
-};
-
-/** What an author is told before editing an item that carries positive assertions (social.md
- * §4.5), or null when it carries none. */
-export function suspensionWarning(
-  kinds: readonly PositiveKind[],
-  what: "post" | "comment",
-): string | null {
-  if (kinds.length === 0) return null;
-  const list = kinds.map((k) => POSITIVE_TEXT[k]);
-  const named =
-    list.length === 1 ? list[0] : `${list.slice(0, -1).join(", ")} and ${list[list.length - 1]}`;
-  return `Editing this ${what} suspends ${named}: they apply to the version a moderator saw, and stop until one asserts them again on the new version.`;
+/** What the engine says an edit of the item suspends (`editPreflight`, engine-api.md §3.5): the
+ * `suspendsAssertions` notice naming the positive assertions in effect on it, which the edit's
+ * new version stops until an authority asserts them again (social.md §4.5); null when there is
+ * none. The engine owns the rule, so every client warns about the same set. */
+export function suspendsNotice(notices: readonly ActionNotice[]): string | null {
+  const lines = notices.filter((n) => n.code === "suspendsAssertions").map((n) => n.message);
+  return lines.length > 0 ? lines.join(" ") : null;
 }

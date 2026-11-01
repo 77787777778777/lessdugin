@@ -17,6 +17,7 @@ import type {
   ForumSummary,
   ItemState,
   KarmaView,
+  MediaRef,
   MembershipMode,
   ModeratorView,
   ModLogEntry,
@@ -80,6 +81,7 @@ export interface PostRec {
   title?: string;
   markdown: string;
   body: RenderedBody;
+  media: MediaRef[];
   tags: Slug[];
   tier: Tier;
   pinned: boolean;
@@ -108,6 +110,7 @@ export interface CommentRec {
   author: Did;
   markdown: string;
   body: RenderedBody;
+  media: MediaRef[];
   quote?: TextQuote;
   quoteAnchor?: Anchor;
   createdAtMs: number;

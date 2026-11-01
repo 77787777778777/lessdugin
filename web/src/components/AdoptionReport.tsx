@@ -1,0 +1,50 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// The report of a done adoption (`mod adopt`, and the one a moderator's removal runs first):
+// what it did not adopt lapses with the former moderator unless the adopter's own assertion
+// stands, so it is listed as soon as the write is done (engine-api.md §3.5 `mod_adopt`,
+// data-model.md §8.6; review finding sec-8), as the TUI's adoption panel does. The write store
+// keeps each report until it is closed, so one that arrives while another is open follows it.
+
+import { useSyncExternalStore } from "react";
+import { useActiveAccount } from "../engine/queries.ts";
+import { type WriteStore, writeStore } from "../engine/writes.ts";
+import { plural } from "../lib/text.ts";
+import ui from "../styles/ui.module.css";
+import { Dialog } from "./Dialog.tsx";
+
+export function AdoptionReport({ store = writeStore }: { store?: WriteStore | undefined }) {
+  useSyncExternalStore(store.subscribe, store.snapshot, store.snapshot);
+  // No report is shown until the actual account query has answered successfully. TanStack Query
+  // can retain previous data through placeholderData/keepPreviousData and after a failed refetch;
+  // that data does not establish the current account during a switch.
+  const active = useActiveAccount();
+  const did = active.isError || active.error !== null ? undefined : active.data?.did;
+  const report = did === undefined ? undefined : store.pendingReport(did);
+  const close = (): void => {
+    if (report) store.dismissReport(report.id);
+  };
+  return (
+    <Dialog open={report !== undefined} onClose={close} title="Adoption report">
+      {report && (
+        <>
+          <p>
+            Adoption sent (write {report.id}); {plural(report.lines.length, "assertion")} not
+            adopted, listed below. What was not adopted lapses with the former moderator, unless
+            your own assertion for it stands.
+          </p>
+          <ul className={ui.list} data-testid="adoption-report">
+            {/* one line per assertion uri (data-model.md §8.6), so the line is the key */}
+            {report.lines.map((line) => (
+              <li key={line}>{line}</li>
+            ))}
+          </ul>
+          <div className={ui.row}>
+            <button type="button" className={ui.button} onClick={close}>
+              Close
+            </button>
+          </div>
+        </>
+      )}
+    </Dialog>
+  );
+}
