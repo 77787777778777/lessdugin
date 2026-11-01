@@ -1353,6 +1353,11 @@ tui [forum]    web [--port] [--no-open]    config get|set|edit    completions <s
 
 **Refs:** `3` (from the last listing in this terminal), `c12` (comment label from the last `read`), an at-uri, any SPA URL, or `<handle>/<rkey>`. `#` is never used in refs, because shells treat it as a comment.
 
+**Local state**
+- `bookmark` defaults to `ls`; `add` and `rm` take a post ref. `subscribe post <ref>`, `forum [ref]`, `user <actor>` or `tag <slug> [--forum <ref>]` selects a subscription, `unsubscribe` takes the same target, and `subs` lists them. These call the engine's local-state operations; nothing is written to a repository.
+- `config get [key]` shows the settings in effect. `config set <key> [value]` calls `set_setting`, with no value resetting the setting; list settings take comma-separated values or JSON, and an indexer URL becomes a consent granted at the command's time. A `sources` in `config.toml` stays the O-9 pin (as does devnet's `direct`): a stored setting is kept but does not override the pin, and the output says so.
+- `members revoke <actor>... [--yes]` calls `revoke`, removing the account's grant while leaving the actor's own membership record (an applicant again in approval mode).
+
 **Drafts**
 - Stored as `$DATA/drafts/<id>.md` with YAML frontmatter (forum, title, kind, url, tags, sequence).
 - The editor chain is `$VISUAL` → `$EDITOR` → `editor` → `nano` → `vi` (notepad on Windows).
