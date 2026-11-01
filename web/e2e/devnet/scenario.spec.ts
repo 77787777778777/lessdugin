@@ -74,6 +74,11 @@ const EDITED_TITLE = "Bob's question (edited)";
 const EDIT_TAIL = "Edited in the browser.";
 const REPLY = "Carol answers from the TUI: it should.";
 const CANARY_TITLE = "Dated an hour ahead";
+const TAG_SLUG = "parity";
+const TAG_NAME = "Parity evidence";
+const WIKI_BODY = "A real wiki page created for the M5 cross-client parity scenario.";
+
+type SourceMode = "direct" | "assisted";
 
 interface Run {
   code: number | null;
@@ -107,8 +112,33 @@ class User {
     readonly name: string,
     readonly dir: string,
     parityNowMs: number,
+    readonly sources: SourceMode,
     private readonly log: (name: string, r: Run) => void,
   ) {
+    mkdirSync(dir, { recursive: true });
+    // TOML has no null: false maps these optional services to None. Keep every endpoint local
+    // and every unused CORE+ service disabled, in BOTH variants; assisted must not silently
+    // inherit the production relay/Jetstream/Constellation/Slingshot defaults.
+    writeFileSync(
+      join(dir, "config.toml"),
+      [
+        `sources = "${sources}"`,
+        "doh = []",
+        'plc = "http://127.0.0.1:9"',
+        "relays = []",
+        "jetstream = []",
+        "constellation = false",
+        "slingshot = false",
+        'indexer = "none"',
+        "",
+        "[network]",
+        'mode = "devnet"',
+        `plc = ${JSON.stringify(s.devnet.plc)}`,
+        `pds = ${JSON.stringify(s.devnet.pds)}`,
+        "",
+      ].join("\n"),
+      { mode: 0o600 },
+    );
     const env: NodeJS.ProcessEnv = {};
     for (const [k, v] of Object.entries(process.env)) {
       if (k.startsWith("LESSDUGIN_")) continue;
@@ -143,6 +173,15 @@ class User {
     return r.stdout;
   }
 
+  /** Effective engine settings, not merely the file the harness wrote. */
+  async verifySources(): Promise<void> {
+    const settings = JSON.parse(
+      await this.cli("config-sources", ["--json", "config", "get", "sources"]),
+    ) as { settings: { sources: string }; pinned: string[] };
+    expect(settings.settings.sources).toBe(this.sources);
+    expect(settings.pinned).toContain("sources");
+  }
+
   async login(): Promise<void> {
     const acct = s.devnet.accounts[this.name as "alice" | "bob" | "carol"];
     await this.cli(
@@ -150,6 +189,7 @@ class User {
       ["--json", "login", acct.handle, "--password-stdin"],
       `${acct.appPassword}\n`,
     );
+    await this.verifySources();
   }
 }
 
@@ -252,7 +292,7 @@ async function compare(
   return problems;
 }
 
-test("M2 parity scenario: alice (CLI), bob (SPA) and carol (TUI); the three clients read the same bytes", async ({
+test("M5 full parity scenario: approval/open × direct/assisted; CLI, SPA and TUI read the same bytes", async ({
   browser,
 }, info) => {
   test.skip(
@@ -262,14 +302,16 @@ test("M2 parity scenario: alice (CLI), bob (SPA) and carol (TUI); the three clie
   expect(MISSING, "the binaries the scenario runs (cargo xtask e2e --parity builds them)").toEqual(
     [],
   );
-  test.setTimeout(360_000);
+  test.setTimeout(900_000);
 
   // docs/plan.md §4.2 "Variants: approval and open mode (M3)": the scenario runs once per
-  // membership mode, and the three clients must agree byte for byte in both. Approval mode needs
-  // the owner's grant before bob and carol can post; open mode lets them join and post at once,
-  // and there is no "Approval required" banner to see.
+  // membership mode and source mode. Approval mode needs the owner's grant before bob and carol
+  // can post; open mode lets them join and post at once. Both source variants use the same local
+  // PDS/PLC; assisted has no CORE+ service enabled, rather than contacting production defaults.
   for (const mode of ["approval", "open"] as const) {
-    await runScenario(browser, info, mode);
+    for (const sources of ["direct", "assisted"] as const) {
+      await runScenario(browser, info, mode, sources);
+    }
   }
 });
 
@@ -278,16 +320,18 @@ async function runScenario(
   browser: Browser,
   info: TestInfo,
   mode: "approval" | "open",
+  sources: SourceMode,
 ): Promise<void> {
   const approval = mode === "approval";
 
   // the scenario's start plus a day, the same in every client (engine-api.md §2.1)
   const t = Date.now() + 86_400_000;
-  const out = info.outputPath(`parity-${mode}`);
+  const out = info.outputPath(`parity-${mode}-${sources}`);
   mkdirSync(out, { recursive: true });
   const work = mkdtempSync(join(tmpdir(), "lessdugin-parity-"));
   const timings: { step: string; ms: number }[] = [];
   const logRun = (name: string, r: Run) => {
+    writeFileSync(join(out, `${name}.stdout.txt`), r.stdout);
     writeFileSync(join(out, `${name}.stderr.txt`), r.stderr);
     timings.push({ step: `  ${name}`, ms: r.ms });
   };
@@ -299,19 +343,41 @@ async function runScenario(
       timings.push({ step: name, ms: Date.now() - t0 });
     }
   };
-  const user = (name: string) => new User(name, join(work, name), t, logRun);
+  const user = (name: string) => new User(name, join(work, name), t, sources, logRun);
   const alice = user("alice");
   const carol = user("carol");
-  // the slug is per variant: the two runs share a devnet, so a reused slug would collide
-  const slug = `parity-${mode}-${Date.now().toString(36)}`;
+  // the slug is per variant: all four runs share a devnet, so a reused slug would collide
+  const slug = `parity-${mode}-${sources}-${Date.now().toString(36)}`;
   let forum = "";
+  let wiki = "";
   let post = "";
   let reply = "";
   let canary = "";
   // step 4's settled opinion, kept so the report can show what the keys recorded
   let socialVote: unknown = null;
+  let cachedRender: { ms: number; blockedRequests: string[] } | null = null;
   // (read below, in the parity report)
   const total0 = Date.now();
+  const spaSourceOptions = {
+    sources,
+    relays: [],
+    jetstream: [],
+    constellation: null,
+    slingshot: null,
+  };
+  const spaRequests: Record<string, string[]> = {};
+  const recordRequests = (name: string, page: Page) => {
+    const seen: string[] = [];
+    spaRequests[name] = seen;
+    page.on("request", (r) => seen.push(`${r.method()} ${r.url()}`));
+  };
+  const expectLoopbackOnly = (name: string) => {
+    const external = (spaRequests[name] ?? []).filter((line) => {
+      const url = new URL(line.slice(line.indexOf(" ") + 1));
+      return !["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
+    });
+    expect(external, `${name}: every request stays on loopback`).toEqual([]);
+  };
 
   try {
     // 1. alice, CLI: the forum in this variant's membership mode; in approval mode bob and carol
@@ -335,6 +401,34 @@ async function runScenario(
         );
         const show = JSON.parse(await alice.cli("forum-show", ["--json", "forum", "show", forum]));
         expect(show.forum.membership).toBe(mode);
+        wiki = doneUri(
+          await alice.cli(
+            "wiki-create",
+            [
+              "--json",
+              "wiki",
+              "edit",
+              TAG_SLUG,
+              "--name",
+              TAG_NAME,
+              "--description",
+              "Cross-client organisation evidence",
+              "--forum",
+              forum,
+              "--file",
+              "-",
+            ],
+            `${WIKI_BODY}\n`,
+          ),
+        );
+        expect(wiki).toContain(`at://${s.devnet.accounts.alice.did}/`);
+        const page = JSON.parse(
+          await alice.cli("wiki-read", ["--json", "tag", TAG_SLUG, "--forum", forum]),
+        ) as { head: string | null; page: { text: string } | null; tag: { slug: string } };
+        expect(page.tag.slug).toBe(TAG_SLUG);
+        expect(page.head).toBe(wiki);
+        expect(page.page?.text).toContain(WIKI_BODY);
+        await alice.cli("sync-after-wiki", ["--json", "sync", forum]);
         if (approval) {
           const approved = JSON.parse(
             await alice.cli("approve", [
@@ -373,9 +467,12 @@ async function runScenario(
     const ctx = await browser.newContext();
     const page = await ctx.newPage();
     const w = await watchStrict(page);
-    await withDevnet(page, s, { parityNowMs: t });
+    recordRequests("bob", page);
+    await withDevnet(page, s, { parityNowMs: t, ...spaSourceOptions });
     await step(`2. bob (SPA): sign in, join, post (${mode})`, async () => {
       await signIn(page, s, "bob");
+      const effective = JSON.parse(await hook(page, "settings", [])) as { sources: string };
+      expect(effective.sources, "the SPA worker's effective source mode").toBe(sources);
       await page.goto(`${s.app}/${route(forum)}`);
       await expect(page.getByRole("heading", { level: 1, name: FORUM_NAME })).toBeVisible();
       if (approval) {
@@ -520,6 +617,70 @@ async function runScenario(
       expect([flushed.failed, flushed.conflicts]).toEqual([0, 0]);
       expect(await w.problems()).toEqual([]);
     });
+    // 6c. Alice, the owner and therefore a seed in both membership modes, applies the wiki-backed
+    // tag to Bob's post through the real SPA action. Her vote resolves independently of Bob's
+    // open-mode newcomer status; in approval mode his grant already includes him in S.
+    await step("6c. alice (SPA): applies the wiki-backed tag to bob's post", async () => {
+      const tagCtx = await browser.newContext();
+      const tagPage = await tagCtx.newPage();
+      const tw = await watchStrict(tagPage);
+      recordRequests("alice", tagPage);
+      await withDevnet(tagPage, s, { parityNowMs: t, ...spaSourceOptions });
+      await signIn(tagPage, s, "alice");
+      await tagPage.goto(`${s.app}/${route(post)}`);
+      await expect(tagPage.getByRole("heading", { level: 1, name: EDITED_TITLE })).toBeVisible();
+      await tagPage.getByRole("button", { name: "Vote on tags" }).click();
+      const votes = tagPage.getByRole("region", { name: "Tag votes" });
+      await votes.getByLabel("Apply another tag").selectOption(TAG_SLUG);
+      await votes.getByRole("button", { name: "Vote to apply" }).click();
+      await tagPage
+        .getByRole("dialog", { name: "Tag votes are public" })
+        .getByRole("button", { name: "I understand, continue" })
+        .click();
+      await expect(votes.getByRole("button", { name: "Applies", exact: true })).toHaveAttribute(
+        "aria-pressed",
+        "true",
+      );
+      const flushed = JSON.parse(await hook(tagPage, "outboxFlush", [])) as {
+        failed: number;
+        conflicts: number;
+      };
+      expect([flushed.failed, flushed.conflicts]).toEqual([0, 0]);
+      const opinions = (await xrpc(s.devnet.pds, "com.atproto.repo.listRecords", {
+        query: { repo: s.devnet.accounts.alice.did, collection: `${NS}.opinion`, limit: "100" },
+      })) as {
+        records: {
+          uri: string;
+          value: { subject?: { uri?: string }; tags?: { tag: string; value: string }[] };
+        }[];
+      };
+      writeFileSync(join(out, "alice-opinions.json"), `${JSON.stringify(opinions, null, 2)}\n`);
+      const tagOpinion = opinions.records.find(
+        (r) =>
+          r.value.subject?.uri === post &&
+          r.value.tags?.some((v) => v.tag === TAG_SLUG && v.value === "up"),
+      );
+      expect(
+        tagOpinion,
+        "alice's settled public opinion contains the applicable tag vote",
+      ).toBeTruthy();
+      writeFileSync(
+        join(out, "alice-tag-opinion-raw.json"),
+        await hook(tagPage, "raw", [tagOpinion?.uri ?? ""]),
+      );
+      await hook(tagPage, "syncForum", [forum, { full: false }]);
+      const ownSpaList = await hook(tagPage, "listPosts", [
+        { forum, sort: "magic", filter: "frontpage", limit: 30 },
+      ]);
+      writeFileSync(join(out, "alice-spa-list.json"), ownSpaList);
+      const ownItems = (JSON.parse(ownSpaList) as { items: { uri: string; tags: string[] }[] })
+        .items;
+      expect(ownItems.find((item) => item.uri === post)?.tags).toContain(TAG_SLUG);
+      expect(await tw.problems()).toEqual([]);
+      expectLoopbackOnly("alice");
+      await tagCtx.close();
+    });
+    expectLoopbackOnly("bob");
     await ctx.close();
 
     // 6b. step 5's pin is bound to the CID it was made on (social.md §4.5): the edit suspended
@@ -543,6 +704,10 @@ async function runScenario(
         "still a good question",
       ]);
       await alice.cli("sync-after-repin", ["--json", "sync", forum]);
+      const ownList = JSON.parse(await alice.cli("ls-after-tag", ["--json", "ls", forum])) as {
+        items: { uri: string; tags: string[] }[];
+      };
+      expect(ownList.items.find((p) => p.uri === post)?.tags).toEqual([TAG_SLUG]);
     });
 
     // the blob the SPA prepared and uploaded in step 2, as bob's post record names it (the edit
@@ -562,6 +727,7 @@ async function runScenario(
     const spaOut: Outputs = { thread: "", list: "" };
 
     await step("read: CLI (ls --json, read --json)", async () => {
+      await cli.verifySources();
       // the DEFAULT view (magic sort, frontpage filter since M3, engine-api.md §3.4), which is
       // what the TUI's Forum screen shows: the three clients must agree on the default, so none
       // of them pins a sort or filter the others do not.
@@ -575,13 +741,16 @@ async function runScenario(
       const f = (n: string) => readFileSync(join(dir, n), "utf8");
       tuiOut.thread = { compact: f("thread.json"), pretty: f("thread.pretty.json") };
       tuiOut.list = { compact: f("list.json"), pretty: f("list.pretty.json") };
+      const effective = JSON.parse(f("settings.json")) as { sources: string };
+      expect(effective.sources, "the TUI engine's effective source mode").toBe(sources);
     });
 
     await step("read: SPA (forum page, post page; debug hook)", async () => {
       const actx = await browser.newContext();
       const apage = await actx.newPage();
       const aw = await watchStrict(apage);
-      await withDevnet(apage, s, { parityNowMs: t });
+      recordRequests("anonymous", apage);
+      await withDevnet(apage, s, { parityNowMs: t, ...spaSourceOptions });
       await apage.goto(`${s.app}/${route(forum)}`);
       await expect(apage.getByRole("heading", { level: 1, name: FORUM_NAME })).toBeVisible();
       await apage.getByRole("link", { name: EDITED_TITLE }).click();
@@ -601,6 +770,53 @@ async function runScenario(
         { forum, sort: "magic", filter: "frontpage", limit: 30 },
       ]);
       expect(await aw.problems()).toEqual([]);
+
+      // M5 cached forum rendering: return to the forum while the devnet is live, then reload the
+      // real SPA/worker against the IndexedDB this page just warmed. During the reload, only the
+      // forum's own declaration refresh stays live; every other PLC/PDS request gets 503. Thus the
+      // non-empty post list can only come from the real cache, without charging the render budget
+      // for the declaration fetcher's offline retry schedule. This is a warm page/worker restart,
+      // not a cold browser process start or a claim that the whole network was offline.
+      await apage.goto(`${s.app}/${route(forum)}`);
+      await expect(apage.getByRole("heading", { level: 1, name: FORUM_NAME })).toBeVisible();
+      const blockedRequests: string[] = [];
+      const forumParts = forum.split("/");
+      await apage.route("**/*", async (r) => {
+        const url = r.request().url();
+        const parsed = new URL(url);
+        const origin = parsed.origin;
+        const declaration =
+          origin === s.devnet.pds &&
+          parsed.pathname === "/xrpc/com.atproto.repo.getRecord" &&
+          parsed.searchParams.get("repo") === forumParts[2] &&
+          parsed.searchParams.get("collection") === forumParts[3] &&
+          parsed.searchParams.get("rkey") === forumParts[4];
+        if ((origin === s.devnet.pds || origin === s.devnet.plc) && !declaration) {
+          blockedRequests.push(url);
+          await r.fulfill({ status: 503, contentType: "text/plain", body: "cache-only reload" });
+        } else {
+          await r.continue();
+        }
+      });
+      const cache0 = Date.now();
+      await apage.reload();
+      await expect(apage.getByRole("heading", { level: 1, name: FORUM_NAME })).toBeVisible();
+      await expect(apage.getByRole("link", { name: EDITED_TITLE })).toBeVisible();
+      await expect(apage.getByRole("link", { name: CANARY_TITLE })).toBeVisible();
+      const ms = Date.now() - cache0;
+      cachedRender = { ms, blockedRequests };
+      writeFileSync(
+        join(out, "cached-render.json"),
+        `${JSON.stringify({ ...cachedRender, budgetMs: 1500, coldBrowserRestart: false, declarationRefresh: "loopback only; all other PLC/PDS requests returned 503" }, null, 2)}\n`,
+      );
+      expect(
+        blockedRequests.length,
+        "the cached reload really refused repository/sync traffic",
+      ).toBeGreaterThan(0);
+      expect(ms, `warm IndexedDB forum render (${ms} ms); see cached-render.json`).toBeLessThan(
+        1500,
+      );
+      expectLoopbackOnly("anonymous");
       await actx.close();
     });
 
@@ -618,9 +834,11 @@ async function runScenario(
       ...(await compare("thread", cliOut.thread, tuiOut.thread, spaOut.thread, out, info)),
       ...(await compare("list", cliOut.list, tuiOut.list, spaOut.list, out, info)),
     ];
+    writeFileSync(join(out, "native-config.toml"), readFileSync(join(alice.dir, "config.toml")));
+    writeFileSync(join(out, "spa-requests.json"), `${JSON.stringify(spaRequests, null, 2)}\n`);
     writeFileSync(
       join(out, "result.json"),
-      `${JSON.stringify({ parityNowMs: t, forum, post, reply, mediaCid, socialVote, identical: problems.length === 0, problems }, null, 2)}\n`,
+      `${JSON.stringify({ parityNowMs: t, mode, sources, forum, wiki, tag: TAG_SLUG, post, reply, mediaCid, socialVote, cachedRender, identical: problems.length === 0, problems }, null, 2)}\n`,
     );
     expect(problems, `the clients disagree; diffs in ${out}`).toEqual([]);
 
@@ -646,11 +864,11 @@ async function runScenario(
       ).toEqual([[mediaCid, "image/png", s.devnet.accounts.bob.did]]);
       expect(body.html, `${client}: the image in the body`).toContain(`data-cid="${mediaCid}"`);
     }
-    // steps 4 and 5 (the social subset, M3): the counted opinions and the pin. One weighted
-    // vote, cast before bob's edit, in both modes: in approval mode carol's (a granted member is
-    // established), with her agreement; in open mode alice's seed upvote (the owner is a seed),
-    // and carol's vote is in no reader's input at all, since the readers do not fetch a
-    // newcomer's repo whose only content is hidden (reposTotal 2 below)
+    // steps 4 and 5 (the social subset, M3): the counted opinions and the pin. In approval mode
+    // carol's pre-edit vote is the one weighted, earlier-version vote, with her agreement. In open
+    // mode alice's seed upvote is weighted, while carol's newcomer vote is absent from the readers'
+    // input (reposTotal 2 below). Alice's later tag action updates that same opinion to the edited
+    // post's current CID, so her open-mode vote no longer counts as cast on an earlier version.
     const score = thread.post.post.score as {
       score: number;
       agreement?: number;
@@ -661,7 +879,9 @@ async function runScenario(
     const shown = JSON.stringify(score);
     expect(score.score, `the counted upvote: ${shown}`).toBeGreaterThan(0);
     expect([score.weightedVotes, score.earlierVersionVotes, score.unweighted], shown).toEqual([
-      1, 1, 0,
+      1,
+      approval ? 1 : 0,
+      0,
     ]);
     expect(score.agreement, `carol's agreement counts only when she is established: ${shown}`).toBe(
       approval ? 1 : 0,
@@ -697,6 +917,7 @@ async function runScenario(
         createdAtMs: number;
         tRankMs: number;
         badges: Record<string, unknown>;
+        tags: string[];
       }[];
     };
     // the pinned post comes first (social.md §12), whatever the canary's rank
@@ -704,6 +925,22 @@ async function runScenario(
       [post, true],
       [canary, false],
     ]);
+    // M5 organisation parity: the wiki-backed tag resolved from Alice's real, seed-weighted
+    // opinion is present, in the same PostSummary order, in every client's DTO. Equal empty lists
+    // cannot pass.
+    for (const [client, text] of [
+      ["CLI", cliOut.list],
+      ["TUI", tuiOut.list.compact],
+      ["SPA", spaOut.list],
+    ] as const) {
+      const view = JSON.parse(text) as { items: { uri: string; tags: string[] }[] };
+      expect(view.items.length, `${client}: a non-empty PostSummary list`).toBe(2);
+      expect(
+        view.items.find((p) => p.uri === post)?.tags,
+        `${client}: resolved tags on the tagged post`,
+      ).toEqual([TAG_SLUG]);
+      expect(view.items.find((p) => p.uri === canary)?.tags).toEqual([]);
+    }
     // parity mode reached every client: under the injected `now` and `obs` the canary is not
     // future-dated and ranks by its own date (byte equality above holds it for all three)
     const c = list.items.find((p) => p.uri === canary);

@@ -39,58 +39,47 @@ fn indexers(cfg: &Config) -> Vec<lessdugin_core::engine::IndexerConsent> {
 
 /// Maps the native configuration to the engine's (without parity mode; see [`open_engine`]).
 pub fn engine_config(cfg: &Config) -> EngineConfig {
+    // A file setting pins sources like a flag (O-9). Devnet defaults to direct, but an
+    // explicit setting may enable only its explicitly configured local CORE+ services.
+    let sources = cfg.sources.map(|s| match s {
+        Sources::Direct => EngineSources::Direct,
+        Sources::Assisted => EngineSources::Assisted,
+    });
+    let devnet = matches!(&cfg.network, NetworkProfile::Devnet(_));
+    let common = EngineConfig {
+        sources: sources.unwrap_or(if devnet {
+            EngineSources::Direct
+        } else {
+            EngineSources::Assisted
+        }),
+        sources_flag: sources,
+        verify: match cfg.verify {
+            VerifyMode::Pds => EngineVerifyMode::Pds,
+            VerifyMode::Proof => EngineVerifyMode::Proof,
+        },
+        doh: if devnet { Vec::new() } else { cfg.doh.clone() },
+        // The native host has no system TXT resolver yet; DoH is used instead.
+        dns: EngineDns::Doh,
+        plc: cfg.plc.clone(),
+        relays: cfg.relays.clone(),
+        jetstream: cfg.jetstream.clone(),
+        constellation: cfg.constellation.clone(),
+        slingshot: cfg.slingshot.clone(),
+        indexers: indexers(cfg),
+        ..EngineConfig::default()
+    };
     match &cfg.network {
         NetworkProfile::Devnet(d) => EngineConfig {
             network: lessdugin_core::engine::Network::Devnet {
                 plc: d.plc.clone(),
                 pds: d.pds.clone(),
             },
-            sources: match cfg.sources.unwrap_or(Sources::Direct) {
-                Sources::Direct => EngineSources::Direct,
-                Sources::Assisted => EngineSources::Assisted,
-            },
-            sources_flag: cfg.sources.map(|s| match s {
-                Sources::Direct => EngineSources::Direct,
-                Sources::Assisted => EngineSources::Assisted,
-            }),
-            verify: match cfg.verify {
-                VerifyMode::Pds => EngineVerifyMode::Pds,
-                VerifyMode::Proof => EngineVerifyMode::Proof,
-            },
-            doh: Vec::new(),
             plc: d.plc.clone(),
-            // Production defaults are never a devnet's CORE+ configuration. Config::devnet
-            // starts empty; only explicit configured endpoints are copied here.
-            relays: cfg.relays.clone(),
+            // Only the devnet profile's explicitly configured socket is used.
             jetstream: d.jetstream.iter().cloned().collect(),
-            constellation: cfg.constellation.clone(),
-            slingshot: cfg.slingshot.clone(),
-            indexers: indexers(cfg),
-            platform: lessdugin_core::engine::Platform::Native,
-            ..EngineConfig::default()
+            ..common
         },
-        NetworkProfile::Production => EngineConfig {
-            // a `sources` the file states pins it like a flag (O-9): a CLI flag, then
-            // config.toml, then the stored setting, then the build default (`sync.md` §2.3)
-            sources_flag: cfg.sources.map(|s| match s {
-                Sources::Direct => EngineSources::Direct,
-                Sources::Assisted => EngineSources::Assisted,
-            }),
-            verify: match cfg.verify {
-                VerifyMode::Pds => EngineVerifyMode::Pds,
-                VerifyMode::Proof => EngineVerifyMode::Proof,
-            },
-            doh: cfg.doh.clone(),
-            // The native host has no system TXT resolver yet; DoH is used instead.
-            dns: EngineDns::Doh,
-            plc: cfg.plc.clone(),
-            relays: cfg.relays.clone(),
-            jetstream: cfg.jetstream.clone(),
-            constellation: cfg.constellation.clone(),
-            slingshot: cfg.slingshot.clone(),
-            indexers: indexers(cfg),
-            ..EngineConfig::default()
-        },
+        NetworkProfile::Production => common,
     }
 }
 
@@ -149,6 +138,31 @@ mod tests {
         );
         devnet.indexer = crate::config::IndexerSetting::Urls(vec![url]);
         assert_eq!(engine_config(&devnet).indexers.len(), 1);
+    }
+
+    #[test]
+    fn explicit_assisted_devnet_uses_only_its_configured_services() {
+        let cfg = Config::from_toml_str(
+            r#"sources = "assisted"
+            relays = []
+            jetstream = []
+            constellation = false
+            slingshot = false
+            [network]
+            mode = "devnet"
+            plc = "http://localhost:2582"
+            pds = "http://localhost:2583""#,
+        )
+        .unwrap();
+        let c = engine_config(&cfg);
+        assert_eq!(c.sources_flag, Some(EngineSources::Assisted));
+        assert!(c.relays.is_empty() && c.jetstream.is_empty());
+        assert_eq!(c.constellation, None);
+        assert_eq!(c.slingshot, None);
+        assert_eq!(
+            engine_config(&Config::default()).sources,
+            EngineSources::Assisted
+        );
     }
 
     /// O-9: a `sources` in config.toml wins over the stored setting; without one the stored

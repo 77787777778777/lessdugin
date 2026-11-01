@@ -5,6 +5,7 @@
 
 import { readFileSync } from "node:fs";
 import { expect, type Page } from "@playwright/test";
+import type { E2EOptions } from "../../src/host/e2e.ts";
 
 export interface DevnetAccount {
   handle: string;
@@ -86,7 +87,7 @@ export async function watchStrict(page: Page): Promise<StrictWatch> {
 export async function withDevnet(
   page: Page,
   s: E2EState,
-  extra: { parityNowMs?: number; cspProbe?: boolean } = {},
+  extra: Omit<E2EOptions, "devnet"> = {},
 ): Promise<void> {
   await page.addInitScript(
     (o) => {

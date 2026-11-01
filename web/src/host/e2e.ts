@@ -16,6 +16,14 @@ import type { ListPostsQuery, ThreadOpts } from "@lessdugin/engine/types";
 export interface E2EOptions {
   /** The devnet's PLC directory and PDS (http, loopback). */
   devnet?: { plc: string; pds: string };
+  /** Direct PDS/PLC only, or explicitly configured local CORE+ services. */
+  sources?: "direct" | "assisted";
+  /** Local relay and Jetstream endpoints; empty arrays disable them. */
+  relays?: string[];
+  jetstream?: string[];
+  /** Local optional indexers; null disables them. */
+  constellation?: string | null;
+  slingshot?: string | null;
   /** Parity mode: the fixed `now` of every view (ms since the epoch). */
   parityNowMs?: number;
   /** The engine worker runs one blocked `eval` after starting (WorkerInit `cspProbe`), so a
@@ -47,15 +55,25 @@ declare global {
   }
 }
 
-function loopbackHttp(u: unknown): string | null {
+function loopback(u: unknown, protocols: readonly string[]): string | null {
   if (typeof u !== "string") return null;
   try {
     const url = new URL(u);
     const loop = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
-    return url.protocol === "http:" && loop ? url.origin : null;
+    return protocols.includes(url.protocol) && loop ? url.origin : null;
   } catch {
     return null;
   }
+}
+
+function loopbackHttp(u: unknown): string | null {
+  return loopback(u, ["http:"]);
+}
+
+function loopbackList(raw: unknown, protocols: readonly string[]): string[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const urls = raw.map((u) => loopback(u, protocols));
+  return urls.every((u): u is string => u !== null) ? urls : undefined;
 }
 
 /** The harness's options (validated: devnet endpoints must be loopback http). */
@@ -63,6 +81,11 @@ export function e2eOptions(raw: unknown = globalThis.window?.__LESSDUGIN_E2E__):
   if (typeof raw !== "object" || raw === null) return {};
   const v = raw as {
     devnet?: { plc?: unknown; pds?: unknown };
+    sources?: unknown;
+    relays?: unknown;
+    jetstream?: unknown;
+    constellation?: unknown;
+    slingshot?: unknown;
     parityNowMs?: unknown;
     cspProbe?: unknown;
   };
@@ -70,6 +93,18 @@ export function e2eOptions(raw: unknown = globalThis.window?.__LESSDUGIN_E2E__):
   const plc = loopbackHttp(v.devnet?.plc);
   const pds = loopbackHttp(v.devnet?.pds);
   if (plc && pds) out.devnet = { plc, pds };
+  if (v.sources === "direct" || v.sources === "assisted") out.sources = v.sources;
+  const relays = loopbackList(v.relays, ["http:"]);
+  if (relays) out.relays = relays;
+  const jetstream = loopbackList(v.jetstream, ["ws:"]);
+  if (jetstream) out.jetstream = jetstream;
+  for (const key of ["constellation", "slingshot"] as const) {
+    if (v[key] === null) out[key] = null;
+    else {
+      const url = loopbackHttp(v[key]);
+      if (url) out[key] = url;
+    }
+  }
   if (typeof v.parityNowMs === "number" && Number.isSafeInteger(v.parityNowMs)) {
     out.parityNowMs = v.parityNowMs;
   }
@@ -81,6 +116,11 @@ export function e2eOptions(raw: unknown = globalThis.window?.__LESSDUGIN_E2E__):
 export function e2eEngineConfig(o: E2EOptions): EngineConfigInput {
   const config: EngineConfigInput = {};
   if (o.devnet) config.network = { kind: "devnet", plc: o.devnet.plc, pds: o.devnet.pds };
+  if (o.sources) config.sources = o.sources;
+  if (o.relays) config.relays = o.relays;
+  if (o.jetstream) config.jetstream = o.jetstream;
+  if (o.constellation !== undefined) config.constellation = o.constellation;
+  if (o.slingshot !== undefined) config.slingshot = o.slingshot;
   if (o.parityNowMs !== undefined) config.parityNowMs = o.parityNowMs;
   return config;
 }

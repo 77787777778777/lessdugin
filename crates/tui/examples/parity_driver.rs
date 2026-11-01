@@ -345,6 +345,13 @@ async fn read(forum: &str, post: &str, out: &Path, size: (u16, u16)) -> Res<()> 
     )
     .await
     .map_err(|e| e.message)?;
+    // Evidence that the TUI really opened the requested direct/assisted configuration.
+    let settings = d.engine.settings().await.map_err(|e| e.message)?;
+    write(
+        out,
+        "settings.json",
+        &serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?,
+    )?;
     // as `capture_thread` serialises the ThreadView
     let list_compact = serde_json::to_string(&list).map_err(|e| e.to_string())?;
     let mut list_pretty = serde_json::to_string_pretty(&list).map_err(|e| e.to_string())?;
