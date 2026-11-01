@@ -1420,6 +1420,7 @@ pub enum BlobError     { Host(HostError), Status(u16, Option<String>), TooLarge,
 ```
 
 - `fetch_blob` sends `GET <pds>/xrpc/com.atproto.sync.getBlob?did=<did>&cid=<cid>` (Anon, no redirects), streams the body, counts bytes against `max_bytes`, hashes it with sha256, compares the digest with the raw-codec CID, and only on a match stores the bytes under the CID in the host's blob storage and returns a handle. On any failure nothing is stored. An already stored CID returns its handle without a request.
+- **One download per CID at a time.** A `fetch_blob` of a CID being downloaded awaits that download instead of starting another, and a caller that stops awaiting (dropping the future, as the engine does after `BODY_BLOB_WAIT_MS` for a spilled body, `limits.md` §5) does not cancel it: natively the download is a detached task, capped by `BLOB_TOTAL_TIMEOUT_MS`; in the browser it is the running `fetch`. So the stored copy is there for the next caller, and a slow body is never restarted and aborted on every view. The first caller's `max_bytes` caps the download; the core holds a stored copy to its own declaration (§11.1).
 - `blob_open` returns the handle of a stored CID; `blob_read` returns at most 1,048,576 bytes from an offset; `blob_delete` removes the stored bytes.
 - The browser UI obtains object URLs from the host's blob storage by CID, outside the core.
 

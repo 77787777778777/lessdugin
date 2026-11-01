@@ -5,8 +5,11 @@
 //
 // - `http(...)`: `Target::Anon` requests through `fetchAnon` (fetch.ts); `Target::UserPds`
 //   requests through `userPds` (the worker: the main thread's AuthBridge);
-// - `fetchBlob(...)`: blobs.ts; `blobOpen`, `blobRead`, `blobDelete`: the same store, by CID
-//   (`blobRead` slices the stored `Blob`, so only the window it returns enters wasm memory);
+// - `fetchBlob(...)`: blobs.ts, one download per CID at a time (sync.md §12.2): a second call
+//   for a CID being downloaded awaits the same promise, and a caller that stops waiting (the
+//   core's `BODY_BLOB_WAIT_MS` for a spilled body) neither stops it nor starts another;
+//   `blobOpen`, `blobRead`, `blobDelete`: the same store, by CID (`blobRead` slices the stored
+//   `Blob`, so only the window it returns enters wasm memory);
 // - `lock(name, wait)`: Web Locks (locks.ts); in `lessdugin web` mode an `outbox:<did>` lock is
 //   then also the native one (bridge-lock.ts), Web Lock first;
 // - `sleep(ms)`, `now()`, `random(n)`: `setTimeout`, `Date.now()`, `crypto.getRandomValues`;
@@ -81,6 +84,8 @@ function asHostError(e: unknown): unknown {
 
 export function createJsHost(deps: HostDeps): JsHostImports {
   const now = deps.now ?? (() => Date.now());
+  /** The downloads in flight, by CID (see the module comment). */
+  const downloads = new Map<string, Promise<BlobHandleValue>>();
   return {
     async http(method, url, account, path, headers, body, maxBytes, timeoutMs, redirects) {
       try {
@@ -115,12 +120,24 @@ export function createJsHost(deps: HostDeps): JsHostImports {
         throw asHostError(e);
       }
     },
-    async fetchBlob(pds, did, cid, maxBytes) {
-      try {
-        return await fetchBlob({ ...deps.fetch, store: deps.blobs }, pds, did, cid, maxBytes);
-      } catch (e) {
-        throw asHostError(e);
-      }
+    fetchBlob(pds, did, cid, maxBytes) {
+      const running = downloads.get(cid);
+      if (running) return running;
+      const p: Promise<BlobHandleValue> = fetchBlob(
+        { ...deps.fetch, store: deps.blobs },
+        pds,
+        did,
+        cid,
+        maxBytes,
+      )
+        .catch((e: unknown) => {
+          throw asHostError(e);
+        })
+        .finally(() => {
+          if (downloads.get(cid) === p) downloads.delete(cid);
+        });
+      downloads.set(cid, p);
+      return p;
     },
     async blobOpen(cid) {
       try {

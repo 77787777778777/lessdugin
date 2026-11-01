@@ -1613,9 +1613,10 @@ impl<H: crate::host::Host> crate::engine::Engine<H> {
     /// prefetched").
     ///
     /// The view waits at most `BODY_BLOB_WAIT_MS` for them: a slow author's PDS leaves its body
-    /// pending (the excerpt shows) rather than hold back the post and everyone's comments. A
-    /// fetch given up on is asked for again after `BODY_BLOB_RETRY_MS`; a copy the host stored
-    /// meanwhile (the browser's download runs on) is taken before then, without a request.
+    /// pending (the excerpt shows) rather than hold back the post and everyone's comments. The
+    /// host's download runs on (one per CID, `sync.md` §12.2: a view that stops waiting cancels
+    /// nothing), so a copy the host stored meanwhile is taken by the next view, without a
+    /// request; a fetch that failed is asked for again after `BODY_BLOB_RETRY_MS`.
     pub(crate) async fn load_spilled_bodies(
         &self,
         model: &crate::model::ForumModel,
@@ -1736,8 +1737,8 @@ impl<H: crate::host::Host> crate::engine::Engine<H> {
     }
 
     /// The spilled bodies views left pending, fetched again by `live_tail` (`lfm-1.md` §1.3):
-    /// each one the host has stored meanwhile (the browser's download ran on), or whose retry
-    /// time has come. Returns the topics of the items whose body arrived (fetched, or found
+    /// each one the host has stored meanwhile (its download ran on), or whose retry time has
+    /// come. Returns the topics of the items whose body arrived (fetched, or found
     /// missing or unreadable), for `Changed`: their thread and their forum, so a client shows
     /// the body without being asked again. The forums' fetches run together, so stalled PDSes
     /// hold the round back by one `BODY_BLOB_WAIT_MS` at most, however many forums wait.

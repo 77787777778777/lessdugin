@@ -392,7 +392,9 @@ UIs re-query on `Changed` and never move the user's cursor on live updates (TUI 
   re-query no longer shows the item as pending.
 - **Spilled bodies.** A spilled body (`textBlob`) a view returned pending (`limits.md`
   `BODY_BLOB_WAIT_MS`) is fetched again by `live_tail`: from the host's stored copy as soon as
-  there is one, else once `BODY_BLOB_RETRY_MS` has passed. When it arrives (rendered, or found
+  there is one, else once `BODY_BLOB_RETRY_MS` has passed. A view that stops waiting does not
+  stop the host's download: the host runs one download per CID at a time (`sync.md` §12.2), so
+  a slow body arrives for the next view or round rather than being restarted and aborted again. When it arrives (rendered, or found
   missing or unreadable), `live_tail` emits `Changed [Thread(post), Forum]` (a spilled `about`:
   `Changed [Forum]`), so a client re-queries and shows it. A round fetches all its due bodies
   together, so stalled PDSes hold it back by one `BODY_BLOB_WAIT_MS` at most, however many

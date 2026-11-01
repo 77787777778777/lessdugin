@@ -693,7 +693,8 @@ fn a_slow_authors_pds_does_not_hold_back_the_thread() {
     assert_eq!(pv.body.text, "The whole body");
     assert!(blob_requests(&n).is_empty());
 
-    // natively the download stops with the wait: it is asked for again later
+    // a fetch that ended without storing anything (MemHost drops its held fetch with the wait;
+    // natively the download runs on, sync.md §12.2): asked for again once the retry time comes
     let uri = spilled_post(&n, &bob, &f, b"# Another body");
     let r = block_on(e.sync_forum(&f, &SyncOpts::default())).unwrap();
     assert!(r.errors.is_empty(), "{r:?}");
@@ -747,7 +748,7 @@ fn a_pending_spilled_body_that_arrives_is_announced() {
     // a round with nothing new announces nothing
     e.live_step().now_or_never().unwrap().unwrap();
     assert!(!announced(&uri));
-    // the browser's download ran on and stored it: the next round announces it
+    // the host's download ran on and stored it: the next round announces it
     let blob = lessdugin_atp::cid::for_raw(source).to_string();
     e.host().put_blob(&blob, source.to_vec());
     block_on(e.live_step()).unwrap();
@@ -757,7 +758,7 @@ fn a_pending_spilled_body_that_arrives_is_announced() {
         "The whole body"
     );
 
-    // natively the download stopped with the wait: the round after the retry time fetches it
+    // a fetch that ended without storing anything: the round after the retry time fetches it
     let uri = spilled_post(&n, &bob, &f, b"# Another body");
     let r = block_on(e.sync_forum(&f, &SyncOpts::default())).unwrap();
     assert!(r.errors.is_empty(), "{r:?}");
