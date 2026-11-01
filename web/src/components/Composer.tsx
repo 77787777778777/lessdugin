@@ -13,7 +13,7 @@ import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
 import { markdown } from "@codemirror/lang-markdown";
 import { EditorSelection, EditorState } from "@codemirror/state";
 import { EditorView, keymap, placeholder as placeholderExt } from "@codemirror/view";
-import type { Draft, RenderedBody } from "@lessdugin/engine/types";
+import type { Draft, MediaRef, RenderedBody } from "@lessdugin/engine/types";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { useEngine } from "../engine/context.tsx";
@@ -29,6 +29,8 @@ import { errorMessage } from "./Status.tsx";
 
 const PREVIEW_DEBOUNCE_MS = 150;
 const DRAFT_DEBOUNCE_MS = 1000;
+// one instance: a fresh `[]` default would re-run the preview effect on every render
+const NO_MEDIA: readonly MediaRef[] = [];
 
 const editorTheme = EditorView.theme({
   "&": {
@@ -111,6 +113,7 @@ export function Composer({
   compact = false,
   attachments = false,
   forumUri = undefined,
+  media = NO_MEDIA,
   onSubmit,
   onCancel,
 }: {
@@ -129,6 +132,9 @@ export function Composer({
   attachments?: boolean | undefined;
   /** The forum whose members can be mentioned; omit to offer no completion (M4). */
   forumUri?: string | undefined;
+  /** The media the body already has (an edit keeps them): the preview renders their
+   * placeholders, with the attachments', as `publish` will (lfm-1.md §6.2). */
+  media?: readonly MediaRef[] | undefined;
   onCancel?: (() => void) | undefined;
 }) {
   const engine = useEngine();
@@ -289,15 +295,17 @@ export function Composer({
     };
   }, []);
 
-  // Live preview through the engine's renderer.
+  // Live preview through the engine's renderer, with the body's media (the kept ones and the
+  // prepared attachments), so `cid:` images and media placeholders show as they will.
   useEffect(() => {
     if (text.trim() === "") {
       setPreview(null);
       return;
     }
     let cancelled = false;
+    const refs = [...media, ...files.flatMap((a) => (a.kind === "ready" ? [a.ref] : []))];
     const t = setTimeout(() => {
-      engine.render(text, [], { html: true, text: true, styled: false }).then(
+      engine.render(text, refs, { html: true, text: true, styled: false }).then(
         (body) => {
           if (!cancelled) setPreview(body);
         },
@@ -308,7 +316,7 @@ export function Composer({
       cancelled = true;
       clearTimeout(t);
     };
-  }, [text, engine]);
+  }, [text, engine, media, files]);
 
   // Draft autosave.
   useEffect(() => {

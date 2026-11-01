@@ -4,7 +4,7 @@
 
 import { EditorView } from "@codemirror/view";
 import { MockEngine } from "@lessdugin/engine/mock";
-import type { Draft, MemberView } from "@lessdugin/engine/types";
+import type { Draft, MediaRef, MemberView } from "@lessdugin/engine/types";
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { renderWithApp } from "../test/render.tsx";
@@ -123,6 +123,31 @@ describe("Composer", () => {
     const drop = new File([new Uint8Array([0xff, 0xd8, 0xff])], "drop.jpg", { type: "image/jpeg" });
     fireEvent.drop(view.contentDOM, { dataTransfer: { files: [drop], types: ["Files"] } });
     await waitFor(() => expect(prepare).toHaveBeenCalledTimes(2));
+  });
+
+  it("previews the body with its media: the kept ones and the prepared attachments (m4-20)", async () => {
+    const engine = new MockEngine();
+    const render = vi.spyOn(engine, "render");
+    const cid = "bafkreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy";
+    const kept: MediaRef = { id: cid, cid, mime: "image/png", sizeBytes: 10, alt: "kept" };
+    const { container } = renderWithApp(
+      <Composer label="Post body" attachments media={[kept]} onSubmit={async () => true} />,
+      { engine },
+    );
+    const view = await editor(container);
+    const shot = new File([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], "shot.png", {
+      type: "image/png",
+    });
+    fireEvent.paste(view.contentDOM, { clipboardData: { files: [shot], types: ["Files"] } });
+    await waitFor(() =>
+      expect(screen.getByTestId("attachment-list").textContent).toContain("ready"),
+    );
+    view.dispatch({ changes: { from: 0, insert: `![kept](cid:${cid})` } });
+    await waitFor(() => {
+      const last = render.mock.calls.at(-1);
+      expect(last?.[1].map((m) => (m as MediaRef).cid)).toEqual([cid, expect.any(String)]);
+    });
+    expect(render.mock.calls.at(-1)?.[1][1]).toMatchObject({ mime: "image/png" });
   });
 
   it("shows a mention candidate's display name cleaned and isolated, like every name (security-4)", async () => {

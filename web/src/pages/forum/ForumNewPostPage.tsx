@@ -256,6 +256,7 @@ export function PostForm({
           placeholder="Write your post in markdown…"
           onSubmit={publish}
           attachments
+          media={initial?.body.media}
         />
         <span className={ui.hint}>
           Published posts are public records in your repository. Edits keep a public history unless
