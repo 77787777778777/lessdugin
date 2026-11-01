@@ -16,6 +16,7 @@ import { toasts } from "../../components/Toast.tsx";
 import { useEngine } from "../../engine/context.tsx";
 import { qk } from "../../engine/queries.ts";
 import { writeStore } from "../../engine/writes.ts";
+import { isSpilledBody, objectField } from "../../lib/records.ts";
 import { cleanName } from "../../lib/text.ts";
 import { parseAtUri } from "../../lib/uri.ts";
 import ui from "../../styles/ui.module.css";
@@ -53,6 +54,8 @@ function EditDeclaration({ uri, onDone }: { uri: string; onDone: () => void }) {
   if (raw.isError) return <ErrorView error={raw.error} />;
   const initial = forumDraftOf(raw.data.record, parseAtUri(uri)?.rkey ?? "");
   if (!initial) return <ErrorView error={new Error("The forum declaration is not readable.")} />;
+  // an about that spilled into a blob is not in the record: the form must not read it as empty
+  const aboutUnavailable = isSpilledBody(objectField(raw.data.record, "about"));
   const save = async (draft: ForumDraft): Promise<boolean> => {
     const ok = await runWrite(
       () => engine.forumUpdate(uri, draft),
@@ -68,6 +71,7 @@ function EditDeclaration({ uri, onDone }: { uri: string; onDone: () => void }) {
       creating={false}
       tags={tags.data}
       submitLabel="Save the declaration"
+      aboutUnavailable={aboutUnavailable}
       onSubmit={save}
       onCancel={onDone}
     />

@@ -111,11 +111,16 @@ function splitTags(s: string): string[] {
   ];
 }
 
+/** Why a declaration whose about spilled into a blob is not saved from here. */
+export const ABOUT_UNAVAILABLE =
+  "The about text is stored in a blob this app cannot read yet, and saving the declaration without it would remove it. Edit it from the CLI (lessdugin forum edit) or the TUI (:forum edit), which read it.";
+
 export function ForumForm({
   initial,
   creating,
   tags = [],
   submitLabel,
+  aboutUnavailable = false,
   onSubmit,
   onCancel,
 }: {
@@ -124,6 +129,10 @@ export function ForumForm({
   /** The forum's existing tags, offered as featured tags. */
   tags?: readonly TagSummary[] | undefined;
   submitLabel: string;
+  /** The declaration's about is a spilled body whose source this form does not have
+   * (records.ts `isSpilledBody`): the form says so and refuses to save, since a draft without
+   * `about` removes it (engine-api.md §3.2 `forum_update`). */
+  aboutUnavailable?: boolean | undefined;
   /** Resolves to true when the write was done. */
   onSubmit: (draft: ForumDraft) => Promise<boolean>;
   onCancel?: (() => void) | undefined;
@@ -168,6 +177,8 @@ export function ForumForm({
     if (busy) return;
     const d = draft();
     const found = forumDraftProblems(d, creating);
+    // never send a declaration without an about this form could not read
+    if (aboutUnavailable) found.unshift(ABOUT_UNAVAILABLE);
     setProblems(found);
     if (found.length > 0) return;
     setBusy(true);
@@ -238,8 +249,14 @@ export function ForumForm({
           className={ui.input}
           rows={6}
           value={about}
+          disabled={aboutUnavailable}
           onChange={(e) => setAbout(e.target.value)}
         />
+        {aboutUnavailable && (
+          <p className={ui.notice} role="note" data-testid="about-unavailable">
+            {ABOUT_UNAVAILABLE}
+          </p>
+        )}
       </div>
       <fieldset className={ui.field}>
         <legend className={ui.label}>Membership</legend>
@@ -343,7 +360,7 @@ export function ForumForm({
         current version, so policy and membership changes apply retroactively.
       </p>
       <div className={ui.row}>
-        <button type="submit" className={ui.primary} disabled={busy}>
+        <button type="submit" className={ui.primary} disabled={busy || aboutUnavailable}>
           {busy ? "Saving…" : submitLabel}
         </button>
         {onCancel && (

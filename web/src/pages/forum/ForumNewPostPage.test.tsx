@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // @vitest-environment jsdom
 // Writing and editing a post: the edit warning comes from the engine's editPreflight
-// (social.md §4.5; review finding robustness-6), and a submission sent again after a refusal
-// lists its attachments once (robustness-5).
+// (social.md §4.5; review finding robustness-6), a submission sent again after a refusal
+// lists its attachments once (robustness-5), and a post whose body spilled into a blob is
+// refused with the reason, never read as empty (robustness-2).
 import { EditorView } from "@codemirror/view";
 import { MockEngine } from "@lessdugin/engine/mock";
-import type { ForumView } from "@lessdugin/engine/types";
+import type { ForumView, Json } from "@lessdugin/engine/types";
 import { fireEvent, screen, waitFor } from "@testing-library/react";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { renderWithApp } from "../../test/render.tsx";
@@ -114,5 +115,31 @@ describe("EditPost", () => {
     );
     await screen.findByRole("heading", { name: "Edit post" });
     expect(screen.queryByTestId("edit-suspends")).toBeNull();
+  });
+
+  it("says why a post whose body spilled into a blob is not edited here (robustness-2)", async () => {
+    const engine = new MockEngine();
+    const { view, uri } = await ownPost(engine);
+    const real = await engine.raw(uri);
+    const record = real.record as { [k: string]: Json };
+    const body: Json = {
+      $type: "online.7778777.lessdugin.temp.markdown",
+      textBlob: {
+        $type: "blob",
+        ref: { $link: "bafkreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy" },
+        mimeType: "text/markdown",
+        size: 70_000,
+      },
+    };
+    vi.spyOn(engine, "raw").mockResolvedValue({ ...real, record: { ...record, body } });
+    renderWithApp(
+      <ForumContext value={view}>
+        <EditPost uri={uri} />
+      </ForumContext>,
+      { engine },
+    );
+    await screen.findByText("This post cannot be edited");
+    expect(screen.getByText(/stored in a blob this app cannot read yet/)).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Edit post" })).toBeNull();
   });
 });

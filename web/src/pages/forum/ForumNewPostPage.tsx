@@ -22,6 +22,7 @@ import { writeStore } from "../../engine/writes.ts";
 import { capReason } from "../../lib/caps.ts";
 import { suspendsNotice } from "../../lib/modActions.ts";
 import {
+  isSpilledBody,
   markdownOf,
   mediaRefsOf,
   objectField,
@@ -314,12 +315,15 @@ export function EditPost({ uri }: { uri: string }) {
   const author = parseAtUri(uri)?.did;
   const draft = postDraftOf(raw.data.record, forum.uri);
   if (!draft || author === undefined || author !== active.data?.did) {
-    return (
-      <ErrorView
-        error={new Error("Only the author can edit a post, and only one with an inline body.")}
-        title="This post cannot be edited"
-      />
-    );
+    // say which: a body that spilled into a blob is not in the record (data-model.md §5.2), so
+    // this form cannot start from it, and must not pretend it is empty
+    const why =
+      author === undefined || author !== active.data?.did
+        ? "Only the author can edit a post."
+        : isSpilledBody(objectField(raw.data.record, "body"))
+          ? "This post's text is stored in a blob this app cannot read yet, so it cannot be edited here. Edit it from the CLI (lessdugin edit), which reads it."
+          : "This post's record is not one this app can edit: its body or its kind is unknown.";
+    return <ErrorView error={new Error(why)} title="This post cannot be edited" />;
   }
   return (
     <section className={ui.page} aria-label="Edit post">
