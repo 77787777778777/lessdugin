@@ -218,10 +218,18 @@ fn text_option(given: Option<String>, current: Option<String>) -> Option<String>
 
 /// `lessdugin forum edit [forum] …` (`engine-api.md` §3.2 `forum_update`): the owner changes
 /// the declaration through the edit protocol; every field not given keeps its current value
-/// (read from the cached declaration).
+/// (read from the cached declaration). Another account is refused before anything is read:
+/// the declaration lives in the owner's repository, and a spilled about is fetched only by its
+/// owner (m4-5), so the engine's refusal of the write never comes after a fetch.
 async fn edit(ctx: &Ctx, a: ForumEditArgs) -> Result<(), CliError> {
     let w = ctx.writer().await?;
     let uri = refs::forum_or_current(ctx, &w.engine, a.forum.as_deref()).await?;
+    if write::owner_of(&uri)? != w.account.did {
+        return Err(EngineError::blocked(
+            "only the forum's owner can change it (the declaration is in the owner's repo)",
+        )
+        .into());
+    }
     // loads (and caches) the declaration
     w.engine.forum_open(&uri).await?;
     let (_, decl) = write::cached(&w.engine, &uri).await?;

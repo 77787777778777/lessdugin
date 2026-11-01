@@ -647,7 +647,8 @@ fn the_human_thread_shows_agreement_reacts_and_banners() {
 /// `forum edit` keeps the about it is not asked to change, also a spilled one (`textBlob`,
 /// over 64 KiB, `data-model.md` §5.3) and its media: the text is fetched from the owner's PDS
 /// and spilled again, the media sent again as references (m4-5). `forum show` shows a spilled
-/// about's text, which the engine fetches from the owner's PDS (m4-5, engine part).
+/// about's text, which the engine fetches from the owner's PDS (m4-5, engine part). An
+/// account that does not own the forum is refused before any fetch.
 #[test]
 fn forum_edit_keeps_a_spilled_about_and_its_media() {
     use lessdugin_lexicon::collection::nsid;
@@ -687,4 +688,16 @@ fn forum_edit_keeps_a_spilled_about_and_its_media() {
     assert_eq!(media.len(), 1, "{decl}");
     assert_eq!(media[0]["blob"]["ref"], png["ref"], "{decl}");
     assert_eq!(media[0]["alt"], "a dot", "{decl}");
+
+    // another account is refused before anything is fetched (m4-5): the about's blob is the
+    // owner's to read, and the refusal is the engine's, not a failed fetch
+    let bob = net.user("bob.test", true);
+    let blob_gets = net.net.count("com.atproto.sync.getBlob");
+    let e = bob.fails(1, &["forum", "edit", "alice.test/big", "--name", "Mine"]);
+    assert_eq!(e["code"], "blocked", "{e}");
+    assert_eq!(
+        net.net.count("com.atproto.sync.getBlob"),
+        blob_gets,
+        "a non-owner's forum edit fetched a blob"
+    );
 }

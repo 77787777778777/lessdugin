@@ -234,7 +234,8 @@ pub async fn cached(engine: &Engine<NativeHost>, uri: &str) -> Result<(String, V
     Ok((row.cid.to_string(), v))
 }
 
-fn owner_of(uri: &str) -> Result<String, CliError> {
+/// The DID whose repository holds `uri`.
+pub fn owner_of(uri: &str) -> Result<String, CliError> {
     let u = AtUri::parse(uri).map_err(|e| EngineError::invalid_ref(format!("{uri:?}: {e}")))?;
     Ok(u.did().to_string())
 }

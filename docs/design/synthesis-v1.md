@@ -1361,6 +1361,7 @@ tui [forum]    web [--port] [--no-open]    config get|set|edit    completions <s
 
 **Edits**
 - `edit` sends the item again with the fields it does not change as cached (`data-model.md` §8.3): the body's media (sent again as references), a link post's card (`link.title` and `link.description`, while the uri stays the same), tags and labels. A new link uri drops the card that described the old one.
+- `forum edit` by an account that does not own the forum is refused (`blocked`, as the engine refuses the write) before anything is read or fetched: the declaration lives in the owner's repository, and a spilled about is fetched only by its owner.
 
 **Output**
 - Human output wraps to the terminal and pages through `less -R`. Everything is `TermText`.
