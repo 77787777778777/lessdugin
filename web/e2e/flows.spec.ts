@@ -157,6 +157,18 @@ test("signed out, actions lead to sign-in instead of failing on submit", async (
   await expect(page.getByRole("link", { name: "Sign in to join" })).toBeVisible();
 });
 
+test("leave a forum after confirming (engine-api.md §3.2 leave)", async ({ page }) => {
+  await go(page, FORUM_PATH, FORUM);
+  await page.getByRole("button", { name: "Leave", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Leave this forum?" });
+  await expect(dialog).toContainText("Your membership record is deleted");
+  await dialog.getByRole("button", { name: "Cancel" }).click();
+  await expect(dialog).toBeHidden();
+  await page.getByRole("button", { name: "Leave", exact: true }).click();
+  await dialog.getByRole("button", { name: "Leave" }).click();
+  await expect(page.getByText("Left the forum")).toBeVisible();
+});
+
 test("create a forum, edit its declaration and manage a moderator", async ({ page }) => {
   await go(page, "/", "Your forums");
   await page.getByRole("button", { name: "Create a forum" }).click();
