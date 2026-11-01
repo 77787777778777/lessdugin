@@ -1361,6 +1361,7 @@ tui [forum]    web [--port] [--no-open]    config get|set|edit    completions <s
 
 **Edits**
 - `edit` sends the item again with the fields it does not change as cached (`data-model.md` §8.3): the body's media (sent again as references), a link post's card (`link.title` and `link.description`, while the uri stays the same), tags and labels. A new link uri drops the card that described the old one.
+- Before an edit of an item that carries a keep, a frontpage or curated tier or a pin, `edit` (and `draft publish` of an edit draft) says what the edit suspends, in the engine's words (`edit_preflight`, `social.md` §4.5), and asks; headless use needs `--yes`. When that check cannot run, it says what could not be checked and why, and asks the same question, rather than refusing the edit.
 - `forum edit` by an account that does not own the forum is refused (`blocked`, as the engine refuses the write) before anything is read or fetched: the declaration lives in the owner's repository, and a spilled about is fetched only by its owner.
 
 **Output**
