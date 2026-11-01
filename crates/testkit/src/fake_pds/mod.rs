@@ -84,6 +84,7 @@ use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
 use lessdugin_atp::syntax::Did;
 use lessdugin_core::host::{HostError, HttpRequest, HttpResponse};
+use serde_json::Value;
 
 pub use blob::{Generated, sniff_mime, tiny_png};
 pub use faults::{CursorMode, Fault, FaultId, FaultRule, ForkSelector, RateLimit};
@@ -97,6 +98,9 @@ use crate::memhost::{MemHost, target_url};
 use faults::ActiveFault;
 use server::{Abort, Incoming, Outgoing};
 use state::{NetState, PdsState};
+
+/// A committed-record snapshot for auxiliary test services.
+pub(crate) type BacklinkSnapshot = Vec<(Did, Vec<(String, String, Value)>)>;
 
 /// The PDS [`FakeNet::add_account`] uses when none was added.
 pub const DEFAULT_PDS: &str = "https://pds.example.com";
@@ -463,6 +467,35 @@ impl FakeNet {
                 }
             })
         }
+    }
+
+    /// Flush helper writes before an auxiliary index takes its next snapshot.
+    pub(crate) fn commit_all(&self) {
+        let now = self.now();
+        let mut st = self.state();
+        let dids = st.accounts.keys().cloned().collect::<Vec<_>>();
+        for did in dids {
+            st.ensure_commit(&did, now);
+        }
+    }
+
+    /// Committed records visible to the Constellation test service. Kept `pub(crate)` so test
+    /// code cannot use this snapshot to bypass PDS verification in the core.
+    pub(crate) fn backlink_records(&self) -> BacklinkSnapshot {
+        let st = self.state();
+        st.accounts
+            .values()
+            .filter(|a| a.status == state::AccountStatus::Active)
+            .map(|a| {
+                let mut records = Vec::new();
+                for collection in a.repo.collections() {
+                    for (rkey, record) in a.repo.list(&collection, None, true, usize::MAX) {
+                        records.push((collection.clone(), rkey.to_owned(), record.json()));
+                    }
+                }
+                (a.did.clone(), records)
+            })
+            .collect()
     }
 
     /// Answers one request directly (no `MemHost`): latency advances the network's clock.

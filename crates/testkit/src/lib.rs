@@ -16,6 +16,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod constellation;
 pub mod fake_pds;
 pub mod identity;
 pub mod kv;
