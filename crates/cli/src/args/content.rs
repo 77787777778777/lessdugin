@@ -412,6 +412,25 @@ pub struct MembersArgs {
     /// Applicants only (a membership and no grant).
     #[arg(long)]
     pub pending: bool,
+    /// Instead of listing: change a membership.
+    #[command(subcommand)]
+    pub action: Option<MembersAction>,
+}
+
+/// `members …`.
+#[derive(Debug, Subcommand)]
+pub enum MembersAction {
+    /// Remove your grant of membership (in --forum, else the current forum); in approval
+    /// mode the actor becomes an applicant again.
+    Revoke {
+        /// Handles or DIDs.
+        #[arg(value_name = "ACTOR", required = true, num_args = 1..)]
+        actors: Vec<String>,
+        /// Confirm the public mod action without asking (the first mod action needs it when
+        /// not running interactively).
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
 }
 
 /// `approve`.

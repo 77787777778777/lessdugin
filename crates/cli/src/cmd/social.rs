@@ -247,7 +247,11 @@ pub async fn notifications(ctx: &Ctx, args: NotificationsArgs) -> Result<(), Cli
             limit: args.limit,
         })
         .await?;
-    if args.mark_read && !list.items.is_empty() {
+    // the shown ones; with --all every notification, listed or not (`engine-api.md` §3.6
+    // `mark_all_notifications_read`)
+    if args.mark_read && args.all {
+        engine.mark_all_notifications_read().await?;
+    } else if args.mark_read && !list.items.is_empty() {
         let ids: Vec<String> = list.items.iter().map(|n| n.id.clone()).collect();
         engine.mark_notifications_read(&ids).await?;
     }

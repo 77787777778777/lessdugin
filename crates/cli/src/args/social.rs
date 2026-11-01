@@ -146,7 +146,7 @@ pub struct NotificationsArgs {
     /// How often karma changes are notified, saved on this device (`social.md` §16).
     #[arg(long, value_enum, value_name = "CADENCE")]
     pub karma_cadence: Option<KarmaCadenceArg>,
-    /// Mark every shown notification read.
+    /// Mark every shown notification read (with --all, every notification).
     #[arg(long)]
     pub mark_read: bool,
     /// At most this many notifications (1–200).
