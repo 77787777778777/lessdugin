@@ -820,6 +820,27 @@ fn an_owner_with_a_hint_identity_cannot_be_opened() {
 }
 
 #[test]
+fn directory_fetches_declarations_from_their_owners_pds() {
+    let w = World::new();
+    let owner = w.net.add_account("owner.example.com");
+    let f = w.forum(&owner, "meta", MembershipMode::Open, &[]);
+    let found = block_on(w.engine.forum_discover("meta")).unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].uri, f.uri.as_str());
+    assert_eq!(found[0].name, "meta");
+    assert_eq!(found[0].owner.did, owner.did().as_str());
+    assert!(w.net.requests().iter().any(|r| {
+        r.nsid.as_deref() == Some("com.atproto.repo.listRecords")
+            && r.did.as_deref() == Some(owner.did().as_str())
+    }));
+    assert!(
+        block_on(w.engine.forum_discover("no such forum"))
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
 fn open_mode_follows_the_closure_and_newcomers() {
     let w = World::new();
     let owner = w.net.add_account("owner.example.com");

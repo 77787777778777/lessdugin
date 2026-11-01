@@ -1548,6 +1548,35 @@ impl<H: Host> Syncer<H> {
         Ok(RepoOutcome::Applied)
     }
 
+    /// Every declaration of `did`'s `NS.forum` collection, admitted from its own PDS. This is
+    /// the directory's trust boundary: relay hints name owners, never the text shown for them.
+    pub async fn list_forum_declarations(
+        &self,
+        s: &Session<H>,
+        did: &Did,
+    ) -> Result<Vec<AdmittedRecord>, SyncError> {
+        let (svc, origin, _) = self.pds_of(s, did).await?;
+        let coll = nsid_of(nsid::FORUM)?;
+        let xrpc = s.xrpc();
+        let tuning = self.config().tuning.clone();
+        let mut listing = Lister {
+            xrpc: &xrpc,
+            service: &svc,
+            origin: &origin,
+            did,
+            validator: &LexiconValidator,
+            tuning: &tuning,
+            keep_values: true,
+        }
+        .list_all(&coll)
+        .await?;
+        Ok(listing
+            .take_admitted()
+            .into_iter()
+            .map(|(r, _)| r)
+            .collect())
+    }
+
     /// A point fetch (§5.7): `getRecord(uri)` at the author's PDS, admitted at level `pds` with
     /// key `(repo.headSeen.rev, sentAt)`; `RecordNotFound` tombstones it. A matching `hint`
     /// satisfies the uri's dirty mark (§6.5).

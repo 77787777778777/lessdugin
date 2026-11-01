@@ -366,6 +366,129 @@ impl<H: Host> Engine<H> {
         Ok(self.active_account().await?.map(|a| a.did))
     }
 
+    /// `forum_discover(q)` (`engine-api.md` §3.9): the relay forum directory. Relay results
+    /// are only owner hints; every returned declaration came from its owner's PDS and passed
+    /// the ordinary record admission and validity checks. An owner that cannot be read is
+    /// skipped; no hinted text is substituted.
+    pub async fn forum_discover(&self, q: &str) -> Result<Vec<ForumSummary>, EngineError> {
+        let hints = self.discover_forum_owners().await?;
+        let stats = std::sync::Arc::new(crate::sync::Stats::new());
+        let session = self.syncer().session(crate::sync::Priority::P1, stats);
+        let query = q.trim().to_lowercase();
+        let mut out = Vec::new();
+        for did in hints.dids {
+            let Ok(did) = Did::parse(&did) else { continue };
+            let declarations = match self.syncer().list_forum_declarations(&session, &did).await {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::debug!(did = %did, error = %e, "directory owner unavailable");
+                    continue;
+                }
+            };
+            for r in declarations {
+                if !r.validity.is_valid() {
+                    continue;
+                }
+                let decl: Forum = match serde_json::from_value(r.value.clone()) {
+                    Ok(d) => d,
+                    Err(_) => continue,
+                };
+                let key = match ForumKey::of_uri(&r.uri) {
+                    Ok(k) => k,
+                    Err(_) => continue,
+                };
+                let matches = query.is_empty()
+                    || decl.name.to_lowercase().contains(&query)
+                    || decl
+                        .description
+                        .as_deref()
+                        .is_some_and(|d| d.to_lowercase().contains(&query));
+                if !matches {
+                    continue;
+                }
+                let (followed, alias) = self.follow_state(key.uri.as_str()).await?;
+                let (owners, _) = self.actors([key.owner.as_str()]).await;
+                let owner = owners
+                    .get(key.owner.as_str())
+                    .cloned()
+                    .unwrap_or_else(|| bare_actor(key.owner.as_str()));
+                out.push(summary_from_decl(
+                    &key,
+                    Some(&decl),
+                    followed,
+                    false,
+                    alias,
+                    owner,
+                ));
+            }
+        }
+        out.sort_by(|a, b| {
+            a.name
+                .to_lowercase()
+                .cmp(&b.name.to_lowercase())
+                .then_with(|| a.uri.cmp(&b.uri))
+        });
+        Ok(out)
+    }
+
+    /// `backlinks(uri)`: listed synced posts whose rendered bodies link to `uri`. The record's
+    /// optional `markdown.links` field is not used: only the shared renderer's output counts.
+    pub async fn backlinks(&self, uri: &str) -> Result<Vec<crate::dto::PostSummary>, EngineError> {
+        let target = AtUri::parse(uri).map_err(|e| EngineError::invalid_ref(e.to_string()))?;
+        let forum = self.forum_of(&target).await?;
+        let l = self.loaded(&forum).await?;
+        let posts: Vec<String> = l
+            .model
+            .view
+            .visibility
+            .as_ref()
+            .map(|v| {
+                v.states
+                    .iter()
+                    .filter(|(_, s)| s.listed())
+                    .filter(|(u, _)| {
+                        l.model
+                            .skel(u)
+                            .is_some_and(|x| x.coll == Some(lessdugin_lexicon::Collection::Post))
+                    })
+                    .map(|(u, _)| u.clone())
+                    .collect()
+            })
+            .map_err(|p| EngineError::internal(format!("the forum view is pending: {p}")))?;
+        let values = self.values(&l.model, &posts).await?;
+        let mut links = Vec::new();
+        for u in &posts {
+            if l.model.skel(u).is_none() {
+                continue;
+            }
+            let Some(body) = values.get(u).and_then(|v| v.get("body")) else {
+                continue;
+            };
+            let Some(src) = body.get("text").and_then(Value::as_str) else {
+                // Spilled text is never guessed from the record's hint fields; it becomes
+                // available once the normal renderer has fetched and admitted the blob.
+                continue;
+            };
+            let profile = body.get("profile").and_then(Value::as_str);
+            let rendered = lessdugin_markdown::render_profile(
+                src,
+                &[],
+                profile,
+                &lessdugin_markdown::RenderOpts::default(),
+            );
+            if rendered.links.contains(&target) {
+                links.push(u.clone());
+            }
+        }
+        self.with_views(&l, &[], &links, |v| {
+            links
+                .iter()
+                .filter_map(|u| v.post_summary(u))
+                .collect::<Vec<_>>()
+        })
+        .await
+    }
+
     /// `forum_open(ref)` (`engine-api.md` §3.2): resolves the reference, fetches the
     /// declaration (with a proof on first open; an open within [`limits::FORUM_REOPEN_MS`] of
     /// the last one reuses it) and returns the header. It schedules the authority sync:

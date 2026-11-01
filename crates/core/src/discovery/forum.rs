@@ -576,6 +576,8 @@ impl<H: Host> Syncer<H> {
             if a.contains_key(d) || done.contains(d) || active.iter().any(|c| c.did == did) {
                 continue;
             }
+            let hinted = DiscRow::new("hint:active", self.host().now_ms());
+            disc.entry(did.as_str().to_owned()).or_insert(hinted);
             let granted = r.granted.contains(d);
             if !granted && !r.is_open() {
                 continue;

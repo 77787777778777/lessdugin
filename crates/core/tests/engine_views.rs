@@ -272,6 +272,57 @@ fn tomb(reason: HiddenReason) -> ItemState {
 // ---------------------------------------------------------------------------------------------
 // States, sorts, filters
 
+#[test]
+fn backlinks_come_from_listed_posts_rendered_bodies_not_hint_fields() {
+    let n = Net::new();
+    let c = Cast::new(&n);
+    let f = Forum::create(&n, &c.alice, "approval", json!({}));
+    f.join(&c.bob);
+    f.act(
+        &c.alice,
+        None,
+        c.bob.did().as_str(),
+        None,
+        json!({"$type": "access", "level": "member"}),
+        None,
+    );
+    let target = f.post(&c.alice, "Target", "The post being linked.", json!({}));
+    let linked = f.post(
+        &c.bob,
+        "A real link",
+        &format!("Read [the target]({}) .", target.uri),
+        json!({}),
+    );
+    f.post(
+        &c.bob,
+        "Only a hint",
+        "No record link in the body.",
+        json!({"markdown": {"links": [target.uri]}}),
+    );
+    let hidden = f.post(
+        &c.bob,
+        "A removed link",
+        &format!("Removed [link]({}).", target.uri),
+        json!({}),
+    );
+    f.act(
+        &c.alice,
+        None,
+        &hidden.uri,
+        Some(&hidden.cid),
+        json!({"$type": "hide", "hidden": true}),
+        None,
+    );
+    let e = Engine::new(n.hosts[0].clone(), EngineConfig::default());
+    sync(&e, &f.uri);
+    let links = block_on(e.backlinks(&target.uri)).unwrap();
+    assert_eq!(links.len(), 1);
+    assert_eq!(links[0].uri, linked.uri);
+    assert_eq!(links[0].title.as_deref(), Some("A real link"));
+}
+
+// ---------------------------------------------------------------------------------------------
+
 /// The cast of an open forum: alice owns it, mo moderates, bob and carol are granted (seeds),
 /// nina and sam joined without a grant (newcomers), bea is banned, rita is restricted from
 /// commenting. Seeds reply to or vote on the newcomers' items, so the closure (`sync.md` §4.3)
