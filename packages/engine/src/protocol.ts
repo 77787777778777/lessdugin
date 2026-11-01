@@ -26,6 +26,7 @@ export interface EngineConfigInput {
   constellation?: string | null;
   /** `null` disables it. */
   slingshot?: string | null;
+  indexer?: "forum" | "none";
   indexers?: string[];
   /** Parity mode (`engine-api.md` §2.1). Test-only: the worker accepts it only in e2e builds
    * (`VITE_E2E=1`); release builds drop the code path. */

@@ -50,6 +50,17 @@ pub enum Platform {
     Browser,
 }
 
+/// Which locally enabled indexers may be used (`sync.md` §2.3). This is independent of
+/// `sources`: direct/assisted controls CORE+, while `None` disables every EXT endpoint.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum IndexerMode {
+    /// Use explicitly configured URLs and stored consent, including forum-scoped consent.
+    #[default]
+    Forum,
+    /// No indexer, including explicitly configured and previously consented URLs.
+    None,
+}
+
 /// A consented indexer endpoint (`sync.md` §2.4).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IndexerConsent {
@@ -83,8 +94,12 @@ pub struct EngineConfig {
     pub constellation: Option<url::Url>,
     /// `network.slingshot` (hint-only identity fallback; assisted only).
     pub slingshot: Option<url::Url>,
-    /// User-configured or consented indexers.
+    /// Local indexer mode. `None` overrides both configured and stored consent.
+    pub indexer_mode: IndexerMode,
+    /// Explicitly configured indexer URLs (configuration is their consent).
     pub indexers: Vec<IndexerConsent>,
+    /// Use stored global and forum-scoped consent in addition to configured URLs.
+    pub stored_indexer_consent: bool,
     /// `User-Agent` for native hosts.
     pub user_agent: String,
     /// Native or browser.
@@ -130,7 +145,9 @@ impl Default for EngineConfig {
             ],
             constellation: Some(url("https://constellation.microcosm.blue")),
             slingshot: Some(url(DEFAULT_SLINGSHOT)),
+            indexer_mode: IndexerMode::Forum,
             indexers: Vec::new(),
+            stored_indexer_consent: true,
             user_agent: default_user_agent(),
             platform: Platform::Native,
             parity_now_ms: None,

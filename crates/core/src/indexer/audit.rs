@@ -2,11 +2,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use lessdugin_atp::syntax::{AtUri, Did};
-use lessdugin_atp::tid::Tid;
-use lessdugin_lexicon::collection::Collection;
-use serde::{Deserialize, Serialize};
-
 use crate::discovery::forum_ref::ForumKey;
 use crate::discovery::state::ForumState;
 use crate::engine::{Engine, EngineError};
@@ -17,35 +12,14 @@ use crate::indexer::proofs::{ProofStatus, hydrate_visible};
 use crate::store::RepoStatus;
 use crate::store::records::RecordStore;
 use crate::sync::{PointOutcome, Session};
+use lessdugin_atp::syntax::{AtUri, Did};
+use lessdugin_atp::tid::Tid;
+use lessdugin_lexicon::collection::Collection;
+
+pub use crate::dto::{AuditCheck, AuditCounts, AuditFinding, AuditKind, AuditReport};
 
 const TWO_MINUTES_MS: i64 = 120_000;
 const MAX_AUDIT_ITEMS: usize = 10_000;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum AuditKind {
-    Contradiction,
-    Omission,
-    Lag,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AuditFinding {
-    pub check: String,
-    pub kind: AuditKind,
-    pub subject: String,
-    pub detail: String,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AuditCounts {
-    pub checked: usize,
-    pub contradictions: usize,
-    pub omissions: usize,
-    pub lag: usize,
-}
 
 impl AuditCounts {
     fn count(&mut self, kind: AuditKind) {
@@ -55,14 +29,6 @@ impl AuditCounts {
             AuditKind::Lag => self.lag += 1,
         }
     }
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AuditCheck {
-    pub name: String,
-    pub counts: AuditCounts,
-    pub findings: Vec<AuditFinding>,
 }
 
 impl AuditCheck {
@@ -86,16 +52,6 @@ impl AuditCheck {
             detail: detail.into(),
         });
     }
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AuditReport {
-    pub forum: String,
-    pub indexer: String,
-    pub endpoint: String,
-    pub checks: Vec<AuditCheck>,
-    pub counts: AuditCounts,
 }
 
 impl AuditReport {

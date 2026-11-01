@@ -2,6 +2,7 @@
 // The settings page writes each setting through the operation the engine keeps it with, and
 // shows a refusal instead of dropping it (review finding m3-5).
 import { MockEngine } from "@lessdugin/engine/mock";
+import { FORUM_URI } from "@lessdugin/engine/mock/fixture";
 import { fireEvent, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { renderWithApp } from "../test/render.tsx";

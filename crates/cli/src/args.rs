@@ -102,6 +102,10 @@ pub struct GlobalArgs {
     #[arg(long, global = true, value_name = "FORUM", env = "LESSDUGIN_FORUM")]
     pub forum: Option<String>,
 
+    /// Indexers for this invocation: a consenting HTTPS URL, `forum`, or `none`.
+    #[arg(long, global = true, value_name = "URL|none|forum")]
+    pub indexer: Option<String>,
+
     /// Do not use the network: read the local cache only; writes stay queued.
     #[arg(long, global = true)]
     pub offline: bool,

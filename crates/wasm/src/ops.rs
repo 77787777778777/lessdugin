@@ -35,6 +35,7 @@ pub const OPS: &[&str] = &[
     "parseRef",
     // §3.2
     "forumOpen",
+    "forumIndexers",
     "forumDiscover",
     "forumFollow",
     "forumUnfollow",
@@ -58,6 +59,7 @@ pub const OPS: &[&str] = &[
     "modsSet",
     // §3.3
     "syncForum",
+    "auditIndexer",
     "syncThread",
     "liveTail",
     "liveStop",
@@ -307,6 +309,10 @@ pub async fn call<H: Host>(engine: &Engine<H>, op: &str, a: &str) -> Result<Stri
             let (r,): (String,) = args(op, a)?;
             out(&engine.forum_open(&r).await?)
         }
+        "forumIndexers" => {
+            let (r,): (String,) = args(op, a)?;
+            out(&engine.forum_indexers(&r).await?)
+        }
         "forumDiscover" => {
             let (q,): (String,) = args(op, a)?;
             out(&engine.forum_discover(&q).await?)
@@ -375,6 +381,15 @@ pub async fn call<H: Host>(engine: &Engine<H>, op: &str, a: &str) -> Result<Stri
         "syncForum" => {
             let (uri, opts): (String, Option<SyncOpts>) = args(op, a)?;
             out(&engine.sync_forum(&uri, &opts.unwrap_or_default()).await?)
+        }
+        "auditIndexer" => {
+            let (forum,): (String,) = args(op, a)?;
+            let report = engine.audit_indexer(&forum).await?.ok_or_else(|| {
+                EngineError::invalid_input(
+                    "audit requires assisted sources and a consented indexer",
+                )
+            })?;
+            out(&report)
         }
         "syncThread" => {
             let (uri, opts): (String, Option<SyncOpts>) = args(op, a)?;

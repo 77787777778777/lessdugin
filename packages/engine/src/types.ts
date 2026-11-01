@@ -1167,6 +1167,43 @@ export interface IndexerConsent {
   grantedAtMs: Ms;
 }
 
+export interface ForumIndexer {
+  url: string;
+  did?: Did;
+  note?: string;
+  consented: boolean;
+}
+
+export type AuditKind = "contradiction" | "omission" | "lag";
+
+export interface AuditFinding {
+  check: string;
+  kind: AuditKind;
+  subject: string;
+  detail: string;
+}
+
+export interface AuditCounts {
+  checked: number;
+  contradictions: number;
+  omissions: number;
+  lag: number;
+}
+
+export interface AuditCheck {
+  name: string;
+  counts: AuditCounts;
+  findings: AuditFinding[];
+}
+
+export interface AuditReport {
+  forum: AtUri;
+  indexer: Did;
+  endpoint: string;
+  checks: AuditCheck[];
+  counts: AuditCounts;
+}
+
 /** Local settings (synthesis §1.4, §3.9, §6.12). */
 /** Where content comes from (synthesis-v1.md 1.4). */
 export type Sources = "direct" | "assisted";

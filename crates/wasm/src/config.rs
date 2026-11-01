@@ -7,7 +7,7 @@
 //! (threat-model INFRA-9, `engine-api.md` §2.1); this module accepts what it is given.
 
 use lessdugin_core::engine::{
-    EngineConfig, EngineError, IndexerConsent, Platform, Sources, VerifyMode,
+    EngineConfig, EngineError, IndexerConsent, IndexerMode, Platform, Sources, VerifyMode,
 };
 use serde::Deserialize;
 
@@ -42,7 +42,10 @@ pub struct ConfigInput {
     /// Slingshot (`null` disables it).
     #[serde(default, deserialize_with = "some_nullable")]
     pub slingshot: Option<Option<String>>,
-    /// Consented indexers.
+    /// Local indexer mode (`forum` by default; `none` disables every indexer).
+    #[serde(default)]
+    pub indexer: Option<String>,
+    /// Explicitly consented indexer URLs.
     #[serde(default)]
     pub indexers: Option<Vec<String>>,
     /// Parity mode (test-only, `engine-api.md` §2.1).
@@ -143,6 +146,17 @@ pub fn build(input: ConfigInput) -> Result<EngineConfig, EngineError> {
     }
     if let Some(v) = &input.slingshot {
         c.slingshot = v.as_deref().map(|s| url("slingshot", s)).transpose()?;
+    }
+    if let Some(mode) = &input.indexer {
+        c.indexer_mode = match mode.as_str() {
+            "forum" => IndexerMode::Forum,
+            "none" => IndexerMode::None,
+            _ => {
+                return Err(EngineError::invalid_input(format!(
+                    "config.indexer: {mode:?}"
+                )));
+            }
+        };
     }
     if let Some(l) = &input.indexers {
         c.indexers = urls("indexers", l)?

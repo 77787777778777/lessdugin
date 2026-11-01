@@ -15,7 +15,9 @@ use lessdugin_core::dto::AccountView;
 use lessdugin_core::engine::{Engine, EngineConfig, EngineError, ErrorCode};
 use lessdugin_core::outbox::Session;
 use lessdugin_native::auth::{SecretStore, restore_session};
-use lessdugin_native::config::{Config, DevnetProfile, DnsMode, NetworkProfile, Paths};
+use lessdugin_native::config::{
+    Config, DevnetProfile, DnsMode, IndexerMode, IndexerSetting, NetworkProfile, Paths,
+};
 use lessdugin_native::host::NativeHost;
 
 use crate::args::GlobalArgs;
@@ -103,6 +105,18 @@ impl Ctx {
             Ok(c) => (c, None),
             Err(e) => (Config::default(), Some(e.to_string())),
         };
+        let cli_indexer = g
+            .indexer
+            .as_deref()
+            .filter(|indexer| *indexer != "forum" && *indexer != "none")
+            .map(|indexer| {
+                url::Url::parse(indexer).map_err(|e| {
+                    CliError::usage(format!(
+                        "--indexer expects an HTTPS URL, forum or none: {e}"
+                    ))
+                })
+            })
+            .transpose()?;
         if !DEVNET_AVAILABLE && (g.dev || config.is_devnet()) {
             return Err(devnet_unavailable());
         }
@@ -148,6 +162,25 @@ impl Ctx {
             config
                 .validate()
                 .map_err(|e| CliError::usage(e.to_string()))?;
+        }
+        if let Some(url) = &cli_indexer
+            && !lessdugin_core::indexer::endpoint_allowed(
+                url,
+                lessdugin_core::indexer::EndpointPolicy::Production,
+            )
+        {
+            return Err(CliError::usage(format!(
+                "--indexer must be an HTTPS URL on the default port without credentials: {url}"
+            )));
+        }
+        if let Some(indexer) = &g.indexer {
+            config.indexer = match indexer.as_str() {
+                "forum" => IndexerSetting::Mode(IndexerMode::Forum),
+                "none" => IndexerSetting::Mode(IndexerMode::None),
+                _ => {
+                    IndexerSetting::Urls(vec![cli_indexer.expect("URL-valued indexer was parsed")])
+                }
+            };
         }
         if config.dns == DnsMode::System && !config.is_devnet() {
             out.warn(tt(

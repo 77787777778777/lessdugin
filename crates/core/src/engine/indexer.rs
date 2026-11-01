@@ -16,7 +16,7 @@ use crate::sync::net::Priority;
 use crate::sync::queue::DirtyItem;
 use crate::sync::{Reason, Session};
 
-use super::{Engine, EngineError, Network, Sources};
+use super::{Engine, EngineError, IndexerMode, Network, Sources};
 
 fn policy(network: &Network) -> EndpointPolicy {
     match network {
@@ -27,6 +27,9 @@ fn policy(network: &Network) -> EndpointPolicy {
 
 impl<H: Host> Engine<H> {
     async fn consents(&self, forum: Option<&ForumKey>) -> Result<Vec<Consent>, EngineError> {
+        if self.config.indexer_mode == IndexerMode::None {
+            return Ok(Vec::new());
+        }
         let mut out = Vec::new();
         for c in &self.config.indexers {
             out.push(Consent {
@@ -35,24 +38,28 @@ impl<H: Host> Engine<H> {
                 forum: None,
             });
         }
-        let raw = self.stored_settings().await?;
-        if let Some(text) = raw.get("indexers") {
-            let stored: Vec<crate::dto::IndexerConsent> = serde_json::from_str(text)
-                .map_err(|e| EngineError::invalid_input(format!("stored indexer consent: {e}")))?;
-            for c in stored {
-                let url = url::Url::parse(&c.url)
-                    .map_err(|e| EngineError::invalid_input(format!("indexer URL: {e}")))?;
-                let did = c
-                    .did
-                    .as_deref()
-                    .map(Did::parse)
-                    .transpose()
-                    .map_err(|e| EngineError::invalid_input(format!("indexer DID: {e}")))?;
-                out.push(Consent {
-                    url,
-                    did,
-                    forum: c.forum,
-                });
+        if self.config.stored_indexer_consent {
+            let raw = self.stored_settings().await?;
+            if let Some(text) = raw.get("indexers") {
+                let stored: Vec<crate::dto::IndexerConsent> =
+                    serde_json::from_str(text).map_err(|e| {
+                        EngineError::invalid_input(format!("stored indexer consent: {e}"))
+                    })?;
+                for c in stored {
+                    let url = url::Url::parse(&c.url)
+                        .map_err(|e| EngineError::invalid_input(format!("indexer URL: {e}")))?;
+                    let did = c
+                        .did
+                        .as_deref()
+                        .map(Did::parse)
+                        .transpose()
+                        .map_err(|e| EngineError::invalid_input(format!("indexer DID: {e}")))?;
+                    out.push(Consent {
+                        url,
+                        did,
+                        forum: c.forum,
+                    });
+                }
             }
         }
         out.retain(|c| match (forum, &c.forum) {
@@ -60,6 +67,36 @@ impl<H: Host> Engine<H> {
             (Some(key), Some(consented)) => key.uri.as_str() == consented,
             (None, Some(_)) => false,
         });
+        // Forum-scoped consent is admitted only for a usable endpoint in that forum's
+        // declaration. A stored global consent remains global and never depends on it.
+        if let Some(key) = forum
+            && out.iter().any(|c| c.forum.is_some())
+        {
+            let loaded = self.loaded(key).await?;
+            let declared = lessdugin_lexicon::validity::entry::usable_indexers(&loaded.model.decl)
+                .into_iter()
+                .map(|e| (e.url.clone(), e.did.clone()))
+                .collect::<Vec<_>>();
+            out.retain(|c| {
+                c.forum.is_none()
+                    || declared.iter().any(|(url, _)| {
+                        url::Url::parse(url).is_ok_and(|u| {
+                            u.as_str().trim_end_matches('/') == c.url.as_str().trim_end_matches('/')
+                        })
+                    })
+            });
+            for c in &mut out {
+                if c.forum.is_some()
+                    && let Some((_, did)) = declared.iter().find(|(url, _)| {
+                        url::Url::parse(url).is_ok_and(|u| {
+                            u.as_str().trim_end_matches('/') == c.url.as_str().trim_end_matches('/')
+                        })
+                    })
+                {
+                    c.did = did.clone();
+                }
+            }
+        }
         let mut seen = BTreeSet::new();
         out.retain(|c| {
             seen.insert((
@@ -68,6 +105,59 @@ impl<H: Host> Engine<H> {
             ))
         });
         Ok(out)
+    }
+
+    /// Validated `discovery.indexers` from the cached declaration and this device's consent.
+    /// This reads local state only after resolving the declaration; it never contacts an indexer.
+    pub async fn forum_indexers(
+        &self,
+        forum: &str,
+    ) -> Result<Vec<crate::dto::ForumIndexer>, EngineError> {
+        let key = self.forum_key(forum).await?;
+        let loaded = self.loaded(&key).await?;
+        let mut consented = BTreeSet::new();
+        if self.config.indexer_mode != IndexerMode::None {
+            consented.extend(
+                self.config
+                    .indexers
+                    .iter()
+                    .map(|c| c.url.as_str().trim_end_matches('/').to_owned()),
+            );
+            if self.config.stored_indexer_consent {
+                let raw = self.stored_settings().await?;
+                let stored = raw
+                    .get("indexers")
+                    .map(|text| {
+                        serde_json::from_str::<Vec<crate::dto::IndexerConsent>>(text).map_err(|e| {
+                            EngineError::invalid_input(format!("stored indexer consent: {e}"))
+                        })
+                    })
+                    .transpose()?
+                    .unwrap_or_default();
+                consented.extend(
+                    stored
+                        .into_iter()
+                        .filter(|c| c.forum.as_deref().is_none_or(|f| f == key.uri.as_str()))
+                        .filter_map(|c| {
+                            url::Url::parse(&c.url)
+                                .ok()
+                                .map(|u| u.as_str().trim_end_matches('/').to_owned())
+                        }),
+                );
+            }
+        }
+        Ok(
+            lessdugin_lexicon::validity::entry::usable_indexers(&loaded.model.decl)
+                .into_iter()
+                .map(|e| crate::dto::ForumIndexer {
+                    consented: url::Url::parse(&e.url)
+                        .is_ok_and(|u| consented.contains(u.as_str().trim_end_matches('/'))),
+                    url: e.url.clone(),
+                    did: e.did.as_ref().map(ToString::to_string),
+                    note: e.note.clone(),
+                })
+                .collect(),
+        )
     }
 
     async fn selected(

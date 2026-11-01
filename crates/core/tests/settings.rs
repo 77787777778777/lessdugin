@@ -375,6 +375,18 @@ fn every_settings_field_persists_through_set_setting() {
             "indexers",
             json!([{ "url": "http://plain.example", "grantedAtMs": 1 }]),
         ),
+        (
+            "indexers",
+            json!([{ "url": "https://index.example.com:444", "grantedAtMs": 1 }]),
+        ),
+        (
+            "indexers",
+            json!([{ "url": "https://user@index.example.com", "grantedAtMs": 1 }]),
+        ),
+        (
+            "indexers",
+            json!([{ "url": "https://index.example.com/?query=unexpected", "grantedAtMs": 1 }]),
+        ),
         ("mediaAutoloadHosts", json!(["https://cdn.example/x"])),
         ("externalImagesForums", json!(["not a uri"])),
         ("karmaNotifications", json!("hourly")),

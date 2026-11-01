@@ -10,6 +10,7 @@ import { useEngine } from "./context.tsx";
 
 export const qk = {
   forumRef: (ref: string) => ["forumRef", ref] as const,
+  forumIndexers: (ref: string) => ["forumIndexers", ref] as const,
   posts: (q: ListPostsQuery) =>
     [
       "forum",

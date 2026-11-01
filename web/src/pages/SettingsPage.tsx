@@ -3,7 +3,13 @@
 // images, media autoload hosts, karma notifications, export/import of local state, storage
 // persistence, and the running build's hash (threat-model SUP-4).
 
-import type { AccountView, Json, Settings } from "@lessdugin/engine/types";
+import type {
+  AccountView,
+  AuditReport,
+  IndexerConsent,
+  Json,
+  Settings,
+} from "@lessdugin/engine/types";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { useId, useState } from "react";
@@ -12,6 +18,7 @@ import { ActorName } from "../components/ActorName.tsx";
 import { ErrorView, errorMessage, Loading } from "../components/Status.tsx";
 import { toasts } from "../components/Toast.tsx";
 import { useEngine, useEngineHandle } from "../engine/context.tsx";
+import { useCurrentForum } from "../engine/currentForum.ts";
 import { qk, useFollowed, useSettings } from "../engine/queries.ts";
 import { downloadBlob } from "../lib/download.ts";
 import { cleanName } from "../lib/text.ts";
@@ -34,7 +41,7 @@ export function acceptableIndexerUrl(raw: string): boolean {
 export function useSetSetting() {
   const engine = useEngine();
   const qc = useQueryClient();
-  return async <K extends keyof Settings>(key: K, value: Settings[K]): Promise<void> => {
+  return async <K extends keyof Settings>(key: K, value: Settings[K]): Promise<boolean> => {
     try {
       // the cadence has its own operation (engine-api.md §3.6)
       if (key === "karmaNotifications") {
@@ -44,8 +51,11 @@ export function useSetSetting() {
       }
     } catch (e) {
       toasts.show({ message: errorMessage(e), tone: "error" });
+      return false;
     }
     await qc.invalidateQueries({ queryKey: qk.settings() });
+    if (key === "indexers") await qc.invalidateQueries({ queryKey: ["forumIndexers"] });
+    return true;
   };
 }
 
@@ -258,9 +268,136 @@ function LocalData() {
   );
 }
 
+function sameIndexer(a: string, b: string): boolean {
+  try {
+    return new URL(a).href.replace(/\/$/, "") === new URL(b).href.replace(/\/$/, "");
+  } catch {
+    return a === b;
+  }
+}
+
+function ForumDeclaredIndexers({ forum }: { forum: { uri: string; name: string } }) {
+  const engine = useEngine();
+  const settings = useSettings();
+  const set = useSetSetting();
+  const declared = useQuery({
+    queryKey: qk.forumIndexers(forum.uri),
+    queryFn: () => engine.forumIndexers(forum.uri),
+  });
+  if (declared.isError) return <ErrorView error={declared.error} />;
+  if (!declared.data?.length || !settings.data) return null;
+  const consents = settings.data.indexers;
+  return (
+    <div>
+      <h3 className={ui.sectionTitle}>{cleanName(forum.name)}</h3>
+      <ul className={ui.list}>
+        {declared.data.map((i) => (
+          <li key={i.url} className={ui.row}>
+            <span>
+              <span className={ui.mono}>{i.url}</span>
+              {i.note && <span className={ui.hint}> {i.note}</span>}
+            </span>
+            <button
+              type="button"
+              className={ui.ghost}
+              onClick={() => {
+                const without = consents.filter(
+                  (x) => !(x.forum === forum.uri && sameIndexer(x.url, i.url)),
+                );
+                const next: IndexerConsent = {
+                  url: i.url,
+                  forum: forum.uri,
+                  grantedAtMs: Date.now(),
+                };
+                if (i.did !== undefined) next.did = i.did;
+                void set("indexers", i.consented ? without : [...without, next]);
+              }}
+            >
+              {i.consented ? "Revoke consent" : "Consent for this forum"}
+            </button>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function IndexerAudit({ forums }: { forums: { uri: string; name: string }[] }) {
+  const engine = useEngine();
+  const [forum, setForum] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [report, setReport] = useState<AuditReport | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const selected = forum || forums[0]?.uri || "";
+  const run = async (): Promise<void> => {
+    if (!selected) return;
+    setBusy(true);
+    setError(null);
+    setReport(null);
+    try {
+      setReport(await engine.auditIndexer(selected));
+    } catch (e) {
+      setError(errorMessage(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div>
+      <h3 className={ui.sectionTitle}>Manual indexer audit (A1–A5)</h3>
+      <p className={ui.small}>
+        Cross-check exactly one consented indexer against PDS heads and local recomputation.
+        Findings are reported only; this never demotes an indexer automatically.
+      </p>
+      <div className={ui.row}>
+        <select
+          className={ui.input}
+          aria-label="Forum to audit"
+          value={selected}
+          onChange={(e) => setForum(e.target.value)}
+        >
+          {forums.map((f) => (
+            <option key={f.uri} value={f.uri}>
+              {cleanName(f.name)}
+            </option>
+          ))}
+        </select>
+        <button
+          type="button"
+          className={ui.button}
+          disabled={!selected || busy}
+          onClick={() => void run()}
+        >
+          {busy ? "Auditing…" : "Run audit"}
+        </button>
+      </div>
+      {error && <p role="alert">{error}</p>}
+      {report && (
+        <div aria-live="polite">
+          <p>
+            Checked {report.counts.checked}; {report.counts.contradictions} contradictions;{" "}
+            {report.counts.omissions} omissions; {report.counts.lag} lag findings.
+          </p>
+          <ul className={ui.list}>
+            {report.checks.flatMap((c) =>
+              c.findings.map((f, n) => (
+                <li key={`${f.check}:${f.subject}:${n}`}>
+                  <strong>{f.check} {f.kind}</strong>: {f.detail}{" "}
+                  <span className={ui.mono}>{f.subject}</span>
+                </li>
+              )),
+            )}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function SettingsPage() {
   const settings = useSettings();
   const followed = useFollowed();
+  const currentForum = useCurrentForum();
   const set = useSetSetting();
   const [indexerUrl, setIndexerUrl] = useState("");
   if (settings.isPending) return <Loading />;
@@ -283,6 +420,10 @@ export function SettingsPage() {
         </span>
       </label>
     ));
+  const forumChoices = [...(followed.data ?? [])];
+  if (currentForum && !forumChoices.some((f) => f.uri === currentForum)) {
+    forumChoices.push({ uri: currentForum, name: currentForum } as (typeof forumChoices)[number]);
+  }
   return (
     <div className={ui.page}>
       <h1 className={ui.pageTitle}>Settings</h1>
@@ -332,7 +473,7 @@ export function SettingsPage() {
         </p>
         <ul className={ui.list}>
           {s.indexers.map((i) => (
-            <li key={i.url} className={ui.row}>
+            <li key={`${i.forum ?? "global"}:${i.url}`} className={ui.row}>
               <span className={ui.mono}>{i.url}</span>
               <button
                 type="button"
@@ -340,7 +481,9 @@ export function SettingsPage() {
                 onClick={() =>
                   void set(
                     "indexers",
-                    s.indexers.filter((x) => x.url !== i.url),
+                    s.indexers.filter(
+                      (x) => !(x.forum === i.forum && sameIndexer(x.url, i.url)),
+                    ),
                   )
                 }
               >
@@ -361,17 +504,21 @@ export function SettingsPage() {
             type="button"
             className={ui.button}
             disabled={!acceptableIndexerUrl(indexerUrl.trim())}
-            onClick={() => {
-              void set("indexers", [
-                ...s.indexers,
+            onClick={async () => {
+              const saved = await set("indexers", [
+                ...s.indexers.filter((x) => x.forum !== undefined),
                 { url: indexerUrl.trim(), grantedAtMs: Date.now() },
               ]);
-              setIndexerUrl("");
+              if (saved) setIndexerUrl("");
             }}
           >
             Consent and add
           </button>
         </div>
+        {forumChoices.map((f) => (
+          <ForumDeclaredIndexers key={f.uri} forum={f} />
+        ))}
+        <IndexerAudit forums={forumChoices} />
       </section>
       <section aria-labelledby="settings-images">
         <h2 id="settings-images" className={ui.sectionTitle}>

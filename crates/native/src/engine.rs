@@ -15,7 +15,8 @@
 //! ```
 
 use lessdugin_core::engine::{
-    Engine, EngineConfig, EngineError, Sources as EngineSources, VerifyMode as EngineVerifyMode,
+    Engine, EngineConfig, EngineError, IndexerMode as EngineIndexerMode, Sources as EngineSources,
+    VerifyMode as EngineVerifyMode,
 };
 use lessdugin_core::identity::DnsMode as EngineDns;
 
@@ -65,7 +66,16 @@ pub fn engine_config(cfg: &Config) -> EngineConfig {
         jetstream: cfg.jetstream.clone(),
         constellation: cfg.constellation.clone(),
         slingshot: cfg.slingshot.clone(),
+        indexer_mode: match &cfg.indexer {
+            IndexerSetting::Mode(crate::config::IndexerMode::None) => EngineIndexerMode::None,
+            IndexerSetting::Mode(crate::config::IndexerMode::Forum) | IndexerSetting::Urls(_) => {
+                EngineIndexerMode::Forum
+            }
+        },
         indexers: indexers(cfg),
+        // An explicit URL list is the complete consent for this invocation. `forum`
+        // includes the user's stored global and forum-scoped consent; `none` disables both.
+        stored_indexer_consent: !matches!(cfg.indexer, IndexerSetting::Urls(_)),
         ..EngineConfig::default()
     };
     match &cfg.network {

@@ -20,6 +20,7 @@ import type {
   ActionTicket,
   ActorView,
   AtUri,
+  AuditReport,
   BodyDraft,
   BodySource,
   BookmarkEntry,
@@ -33,6 +34,7 @@ import type {
   EditOpts,
   EventListener,
   ForumDraft,
+  ForumIndexer,
   ForumSummary,
   ForumView,
   HistoryView,
@@ -109,6 +111,8 @@ export interface EngineApi {
   // §3.2 Forums and membership ----------------------------------------------------------------
   /** `ref` is anything `parseRef` accepts that names a forum. */
   forumOpen(ref: string): Promise<ForumView>;
+  /** Validated declaration endpoints and their current local consent state. */
+  forumIndexers(ref: string): Promise<ForumIndexer[]>;
   forumDiscover(q: string): Promise<ForumSummary[]>;
   forumFollow(uri: AtUri, alias?: string): Promise<void>;
   forumUnfollow(uri: AtUri): Promise<void>;
@@ -143,6 +147,8 @@ export interface EngineApi {
 
   // §3.3 Sync ---------------------------------------------------------------------------------
   syncForum(uri: AtUri, opts: SyncOpts): Promise<SyncReport>;
+  /** Manual A1–A5 audit of exactly one consented indexer for this forum. */
+  auditIndexer(uri: AtUri): Promise<AuditReport>;
   syncThread(postUri: AtUri, opts: SyncOpts): Promise<SyncReport>;
   /** Long-lived; resolves after `liveStop()`. In the browser the worker runs it in the leader
    * tab only. */

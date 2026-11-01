@@ -55,6 +55,36 @@ export interface AspectRatio {
     height: number;
 }
 
+export interface AuditCheck {
+    name: string;
+    counts: AuditCounts;
+    findings: AuditFinding[];
+}
+
+export interface AuditCounts {
+    checked: number;
+    contradictions: number;
+    omissions: number;
+    lag: number;
+}
+
+export interface AuditFinding {
+    check: string;
+    kind: AuditKind;
+    subject: string;
+    detail: string;
+}
+
+export type AuditKind = "contradiction" | "omission" | "lag";
+
+export interface AuditReport {
+    forum: string;
+    indexer: string;
+    endpoint: string;
+    checks: AuditCheck[];
+    counts: AuditCounts;
+}
+
 export type AuthKind = "oauth" | "appPassword";
 
 export type AuthState = { kind: "ok" } | { kind: "expiring"; inMs: number } | { kind: "expired" };
@@ -210,6 +240,13 @@ export interface ForumDraft {
     featuredTags?: string[];
     moderators?: ModeratorDraft[];
     reportContact?: string;
+}
+
+export interface ForumIndexer {
+    url: string;
+    did?: string;
+    note?: string;
+    consented: boolean;
 }
 
 export type ForumRole = "owner" | "admin" | "moderator" | "member" | "established" | "newcomer" | "none";

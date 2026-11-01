@@ -37,7 +37,8 @@ use lessdugin_atp::syntax::{AtIdentifier, Did, LooseAtUri};
 
 pub use accounts::{AccountInfo, LoginBinding, PinStatus, is_app_password_shape};
 pub use config::{
-    EngineConfig, IndexerConsent, Network, Platform, Sources, VerifyMode, default_user_agent,
+    EngineConfig, IndexerConsent, IndexerMode, Network, Platform, Sources, VerifyMode,
+    default_user_agent,
 };
 pub use error::{EngineError, ErrorCode};
 pub use events::{EventCallback, SubscriptionId};

@@ -708,13 +708,10 @@ fn check_setting_value(key: &str, v: &str) -> Result<(), EngineError> {
 }
 
 /// An indexer URL a consent may name (`threat-model.md` §5): `https`, a host name, the default
-/// port, no user info.
+/// port, no user info, query or fragment.
 fn is_https_endpoint(raw: &str) -> bool {
     url::Url::parse(raw).is_ok_and(|u| {
-        u.scheme() == "https"
-            && u.port().is_none()
-            && u.username().is_empty()
-            && u.password().is_none()
+        crate::indexer::endpoint_allowed(&u, crate::indexer::EndpointPolicy::Production)
             && u.host_str().is_some_and(is_host)
     })
 }

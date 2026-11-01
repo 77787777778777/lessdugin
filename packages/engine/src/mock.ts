@@ -48,6 +48,7 @@ import {
   type ActorView,
   type Anchor,
   type AtUri,
+  type AuditReport,
   type BodySource,
   type BookmarkEntry,
   type Cid,
@@ -66,6 +67,7 @@ import {
   type EngineEvent,
   type EventListener,
   type ForumDraft,
+  type ForumIndexer,
   type ForumRole,
   type ForumSummary,
   type ForumView,
@@ -1027,6 +1029,17 @@ export class MockEngine implements EngineApi {
     return summary;
   }
 
+  async forumIndexers(ref: string): Promise<ForumIndexer[]> {
+    const uri = this.forumRec(ref).summary.uri;
+    return this.s.settings.indexers
+      .filter((i) => i.forum === undefined || i.forum === uri)
+      .map((i) => {
+        const indexer: ForumIndexer = { url: i.url, consented: true };
+        if (i.did !== undefined) indexer.did = i.did;
+        return indexer;
+      });
+  }
+
   async forumOpen(ref: string): Promise<ForumView> {
     const parsed =
       ref.startsWith("at://") && ref.includes(`/${COLL.forum}/`)
@@ -1329,6 +1342,27 @@ export class MockEngine implements EngineApi {
     for (let done = 0; done <= 9; done += 3)
       this.emit({ kind: "syncProgress", forum: uri, done, total: 9 });
     return this.syncReport(uri);
+  }
+
+  async auditIndexer(uri: AtUri): Promise<AuditReport> {
+    this.forumRec(uri);
+    const eligible = this.s.settings.indexers.filter(
+      (i) => i.forum === undefined || i.forum === uri,
+    );
+    if (eligible.length !== 1) {
+      throw {
+        code: "invalid_input",
+        message: `audit requires exactly one consented indexer for this forum (found ${eligible.length})`,
+        retryable: false,
+      } satisfies EngineError;
+    }
+    return {
+      forum: uri,
+      indexer: eligible[0]!.did ?? "did:web:indexer.example.com",
+      endpoint: eligible[0]!.url,
+      checks: [],
+      counts: { checked: 0, contradictions: 0, omissions: 0, lag: 0 },
+    };
   }
 
   async syncThread(postUri: AtUri, _opts: SyncOpts): Promise<SyncReport> {

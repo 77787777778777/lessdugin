@@ -12,7 +12,7 @@ use lessdugin_atp::car::write_car;
 use lessdugin_atp::dagcbor;
 use lessdugin_atp::syntax::AtUri;
 use lessdugin_core::discovery::{ForumKey, SyncOpts};
-use lessdugin_core::engine::{Engine, EngineConfig, IndexerConsent, Sources};
+use lessdugin_core::engine::{Engine, EngineConfig, IndexerConsent, IndexerMode, Sources};
 use lessdugin_core::host::Host;
 use lessdugin_core::indexer::{EndpointPolicy, LiveProofBatch, ProofStatus};
 use lessdugin_core::store::records::RecordStore;
@@ -149,6 +149,163 @@ fn direct_mode_generates_no_indexer_traffic() {
         !block_on(RecordStore::new(w.host.cache()).repo(w.alice.did.as_str()))
             .unwrap()
             .is_some_and(|r| r.head_seen.is_some())
+    );
+}
+
+#[test]
+fn none_mode_ignores_configured_and_stored_consent_without_indexer_traffic() {
+    let (w, _, uri) = current_proof_world(Sources::Assisted, false);
+    let e = Engine::new(
+        w.host.clone(),
+        EngineConfig {
+            sources: Sources::Assisted,
+            indexer_mode: IndexerMode::None,
+            indexers: vec![IndexerConsent {
+                url: url::Url::parse(INDEX).unwrap(),
+            }],
+            ..EngineConfig::default()
+        },
+    );
+    block_on(e.set_setting("indexers", Some(&json!([{"url": INDEX, "grantedAtMs": 1}])))).unwrap();
+    w.host.clear_requests();
+    let forum = format!("at://{}/{}/f", w.alice.did, nsid::FORUM);
+    assert!(
+        block_on(e.hydrate_indexer_records(&forum, &[uri]))
+            .unwrap()
+            .is_none()
+    );
+    assert!(w.host.requests_to(INDEX).is_empty());
+}
+
+fn declaration_with_indexers(w: &World, indexers: Value) -> String {
+    w.pds.update(&w.alice.did, None, |repo| {
+        repo.put(
+            nsid::FORUM,
+            "f",
+            &json!({
+                "$type": nsid::FORUM,
+                "name": "Forum",
+                "membership": "open",
+                "defaultTier": "personal",
+                "createdAt": "2025-01-01T00:00:00Z",
+                "discovery": {"indexers": indexers}
+            }),
+        );
+    });
+    format!("at://{}/{}/f", w.alice.did, nsid::FORUM)
+}
+
+#[test]
+fn forum_consent_requires_the_exact_cached_validated_declaration_endpoint() {
+    let w = World::new();
+    let forum = declaration_with_indexers(
+        &w,
+        json!([{
+            "url": INDEX,
+            "did": "did:web:index.example.com",
+            "note": "community indexer"
+        }]),
+    );
+    let e = Engine::new(
+        w.host.clone(),
+        EngineConfig {
+            sources: Sources::Assisted,
+            ..EngineConfig::default()
+        },
+    );
+    block_on(e.set_setting(
+        "indexers",
+        Some(&json!([
+            {"url": "https://attacker.example.com", "did": "did:web:attacker.example.com",
+             "forum": forum, "grantedAtMs": 1},
+            {"url": INDEX, "did": "did:web:attacker.example.com",
+             "forum": forum, "grantedAtMs": 2}
+        ])),
+    ))
+    .unwrap();
+
+    let declared = block_on(e.forum_indexers(&forum)).unwrap();
+    assert_eq!(declared.len(), 1);
+    assert_eq!(declared[0].url, INDEX);
+    assert_eq!(
+        declared[0].did.as_deref(),
+        Some("did:web:index.example.com")
+    );
+    assert_eq!(declared[0].note.as_deref(), Some("community indexer"));
+    assert!(declared[0].consented);
+
+    // Selection replaces the untrusted stored DID with the validated declaration DID.
+    let rev = tid_at_ms(w.host.now() - 60_000);
+    let car = w
+        .pds
+        .update(&w.alice.did, None, |repo| bundle(repo, rev, false));
+    describe(&w.host, &["getRecordProofs"], 0);
+    w.host
+        .respond_get(&endpoint("getRecordProofs"), resp::car(car));
+    let uri = AtUri::parse(&w.uri(RKEY)).unwrap();
+    assert_eq!(
+        block_on(e.hydrate_indexer_records(&forum, &[uri]))
+            .unwrap()
+            .unwrap()
+            .admitted,
+        1
+    );
+    assert!(
+        w.host
+            .requests_to("https://attacker.example.com")
+            .is_empty()
+    );
+}
+
+#[test]
+fn stored_consent_survives_restart_and_other_forum_consent_does_not_leak() {
+    let w = World::new();
+    let forum = declaration_with_indexers(&w, json!([{ "url": INDEX }]));
+    let e = Engine::new(
+        w.host.clone(),
+        EngineConfig {
+            sources: Sources::Assisted,
+            ..EngineConfig::default()
+        },
+    );
+    block_on(e.set_setting(
+        "indexers",
+        Some(&json!([
+            {"url": INDEX, "forum": "at://did:plc:other/online.7778777.lessdugin.temp.forum/f",
+             "grantedAtMs": 1}
+        ])),
+    ))
+    .unwrap();
+    assert!(!block_on(e.forum_indexers(&forum)).unwrap()[0].consented);
+
+    block_on(e.set_setting(
+        "indexers",
+        Some(&json!([{"url": INDEX, "forum": forum, "grantedAtMs": 2}])),
+    ))
+    .unwrap();
+    let restarted = Engine::new(
+        w.host.clone(),
+        EngineConfig {
+            sources: Sources::Assisted,
+            ..EngineConfig::default()
+        },
+    );
+    assert!(block_on(restarted.forum_indexers(&forum)).unwrap()[0].consented);
+
+    let rev = tid_at_ms(w.host.now() - 60_000);
+    let car = w
+        .pds
+        .update(&w.alice.did, None, |repo| bundle(repo, rev, false));
+    describe(&w.host, &["getRecordProofs"], 0);
+    w.host
+        .respond_get(&endpoint("getRecordProofs"), resp::car(car));
+    let uri = AtUri::parse(&w.uri(RKEY)).unwrap();
+    assert_eq!(
+        block_on(restarted.hydrate_indexer_records(&forum, &[uri]))
+            .unwrap()
+            .unwrap()
+            .admitted,
+        1
     );
 }
 

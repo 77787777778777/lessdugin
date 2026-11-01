@@ -89,6 +89,63 @@ dto! {
     }
 }
 
+dto! {
+    /// A validated indexer declared by one forum, with this device's existing consent state.
+    pub struct ForumIndexer {
+        pub url: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub did: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub note: Option<String>,
+        pub consented: bool,
+    }
+}
+
+string_enum! {
+    /// Severity of a manual indexer audit finding.
+    pub enum AuditKind { Contradiction, Omission, Lag }
+}
+
+dto! {
+    pub struct AuditFinding {
+        pub check: String,
+        pub kind: AuditKind,
+        pub subject: String,
+        pub detail: String,
+    }
+}
+
+dto! {
+    #[derive(Default)]
+    pub struct AuditCounts {
+        pub checked: usize,
+        pub contradictions: usize,
+        pub omissions: usize,
+        pub lag: usize,
+    }
+}
+
+dto! {
+    #[derive(Default)]
+    pub struct AuditCheck {
+        pub name: String,
+        pub counts: AuditCounts,
+        pub findings: Vec<AuditFinding>,
+    }
+}
+
+dto! {
+    /// Result of the manual A1–A5 audit; it never changes indexer selection automatically.
+    #[derive(Default)]
+    pub struct AuditReport {
+        pub forum: String,
+        pub indexer: String,
+        pub endpoint: String,
+        pub checks: Vec<AuditCheck>,
+        pub counts: AuditCounts,
+    }
+}
+
 string_enum! {
     /// Where content comes from (`synthesis-v1.md` §1.4): CORE only, or CORE+ with the
     /// optional helper services.
