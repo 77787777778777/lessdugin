@@ -14,10 +14,12 @@ import { Dialog } from "./Dialog.tsx";
 
 export function AdoptionReport({ store = writeStore }: { store?: WriteStore | undefined }) {
   useSyncExternalStore(store.subscribe, store.snapshot, store.snapshot);
-  // No report is shown until the actual account query has answered. A report that completed
-  // after a switch stays queued for the account whose DID prefixes its write id.
+  // No report is shown until the actual account query has answered successfully. TanStack Query
+  // can retain previous data through placeholderData/keepPreviousData and after a failed refetch;
+  // that data does not establish the current account during a switch.
   const active = useActiveAccount();
-  const report = active.data === undefined ? undefined : store.pendingReport(active.data?.did);
+  const did = active.isError || active.error !== null ? undefined : active.data?.did;
+  const report = did === undefined ? undefined : store.pendingReport(did);
   const close = (): void => {
     if (report) store.dismissReport(report.id);
   };

@@ -44,15 +44,33 @@ export function canSendNow(s: WriteState): boolean {
   );
 }
 
-/** Only acknowledgements are durable. Report lines and record content are recovered from the
- * engine, never copied into site storage. The injectable shape is localStorage's relevant part. */
+/** Only acknowledgement identities and times are durable. Report lines and record content are
+ * recovered from the engine, never copied into site storage. The injectable shape is
+ * localStorage's relevant part. */
 export interface ReportAcknowledgements {
   getItem(key: string): string | null;
   setItem(key: string, value: string): void;
 }
 
 const REPORT_ACK_KEY = "lessdugin.adoptionReports.acknowledged.v1";
-const REPORT_ACK_CAP = 256;
+/** Core retains done/undone writes for seven days (`DONE_KEEP_MS`). Keep dismissals for 30 days:
+ * a 23-day margin, with no count-based eviction of a still-retained report (engine-api.md §3.5). */
+const REPORT_ACK_KEEP_MS = 30 * 24 * 60 * 60 * 1000;
+
+interface ReportAcknowledgement {
+  id: string;
+  acknowledgedAtMs: number;
+}
+
+function isReportAcknowledgement(value: unknown): value is ReportAcknowledgement {
+  if (typeof value !== "object" || value === null) return false;
+  const entry = value as Partial<ReportAcknowledgement>;
+  return (
+    typeof entry.id === "string" &&
+    typeof entry.acknowledgedAtMs === "number" &&
+    Number.isFinite(entry.acknowledgedAtMs)
+  );
+}
 
 function browserReportAcknowledgements(): ReportAcknowledgements | undefined {
   try {
@@ -78,27 +96,40 @@ export class WriteStore {
    * `Write` event path too; review finding sec-8). */
   private readonly reports: AdoptionReportEntry[] = [];
   private readonly reported = new Set<string>();
-  private readonly acknowledged: Set<string>;
+  private acknowledged = new Map<string, number>();
   private version = 0;
 
-  constructor(private readonly acknowledgements?: ReportAcknowledgements) {
-    let ids: string[] = [];
+  constructor(
+    private readonly acknowledgements?: ReportAcknowledgements,
+    private readonly now: () => number = Date.now,
+  ) {
+    let stored: ReportAcknowledgement[] = [];
     try {
       const parsed: unknown = JSON.parse(acknowledgements?.getItem(REPORT_ACK_KEY) ?? "[]");
-      if (Array.isArray(parsed)) {
-        ids = parsed.filter((id): id is string => typeof id === "string").slice(-REPORT_ACK_CAP);
-      }
+      if (Array.isArray(parsed)) stored = parsed.filter(isReportAcknowledgement);
     } catch {
       // Malformed or unavailable storage degrades to at-least-once display, not lost reports.
     }
-    this.acknowledged = new Set(ids);
+    this.acknowledged = new Map(stored.map((entry) => [entry.id, entry.acknowledgedAtMs]));
+    this.expireAcknowledgements();
+  }
+
+  /** Expiry is by acknowledgement age, never by how many later reports were dismissed. */
+  private expireAcknowledgements(): void {
+    const cutoff = this.now() - REPORT_ACK_KEEP_MS;
+    const fresh = [...this.acknowledged].filter(([, at]) => at > cutoff);
+    if (fresh.length === this.acknowledged.size) return;
+    this.acknowledged = new Map(fresh);
+    this.persistAcknowledgements();
   }
 
   private persistAcknowledgements(): void {
     try {
       this.acknowledgements?.setItem(
         REPORT_ACK_KEY,
-        JSON.stringify([...this.acknowledged].slice(-REPORT_ACK_CAP)),
+        JSON.stringify(
+          [...this.acknowledged].map(([id, acknowledgedAtMs]) => ({ id, acknowledgedAtMs })),
+        ),
       );
     } catch {
       // The in-memory acknowledgement still prevents a replay in this page lifetime.
@@ -174,7 +205,7 @@ export class WriteStore {
   dismissReport(id: string): void {
     const i = this.reports.findIndex((r) => r.id === id);
     if (i >= 0) this.reports.splice(i, 1);
-    this.acknowledged.add(id);
+    this.acknowledged.set(id, this.now());
     this.persistAcknowledgements();
     this.version++;
     for (const l of [...this.listeners]) l();

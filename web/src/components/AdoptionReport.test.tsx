@@ -4,6 +4,7 @@
 import { MockEngine } from "@lessdugin/engine/mock";
 import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
+import { qk } from "../engine/queries.ts";
 import { WriteStore } from "../engine/writes.ts";
 import { renderWithApp } from "../test/render.tsx";
 import { AdoptionReport } from "./AdoptionReport.tsx";
@@ -64,6 +65,59 @@ describe("AdoptionReport", () => {
       await queryClient.invalidateQueries();
     });
     expect((await screen.findByTestId("adoption-report")).textContent).toContain("A report");
+  });
+
+  it("hides stale A data after a failed switch to B, then recovers B and A queues", async () => {
+    const engine = new MockEngine();
+    const store = new WriteStore();
+    const a = (await engine.activeAccount())?.did;
+    if (!a) throw new Error("no active account");
+    const b = "did:plc:accountbbbbbbbbbbbbbbbbbbbb";
+    await engine.addAccount({ did: b, pds: "https://pds.example.test", auth: "appPassword" });
+    const { queryClient } = renderWithApp(<AdoptionReport store={store} />, { engine });
+    store.seed([
+      { id: `${a}/30`, state: { kind: "done", uri: `${MOD}/a`, report: ["A report"] } },
+      { id: `${b}/30`, state: { kind: "done", uri: `${MOD}/b`, report: ["B report"] } },
+    ]);
+    expect((await screen.findByTestId("adoption-report")).textContent).toContain("A report");
+
+    const original = engine.activeAccount.bind(engine);
+    let fail = false;
+    engine.activeAccount = async () => {
+      if (fail) throw new Error("active account refresh failed");
+      return original();
+    };
+    fail = true;
+    await act(async () => {
+      await engine.setActiveAccount(b);
+      await queryClient.invalidateQueries();
+    });
+    await waitFor(() =>
+      expect(queryClient.getQueryState(qk.activeAccount())?.status).toBe("error"),
+    );
+    // TanStack Query retains the previous data on a failed refetch, as it does with
+    // placeholderData/keepPreviousData. It must not be treated as B's resolved identity.
+    expect(queryClient.getQueryData<{ did: string }>(qk.activeAccount())?.did).toBe(a);
+    expect(screen.queryByText("A report")).toBeNull();
+    expect(screen.queryByText("B report")).toBeNull();
+    expect(store.pendingReport(a)?.lines).toEqual(["A report"]);
+    expect(store.pendingReport(b)?.lines).toEqual(["B report"]);
+
+    fail = false;
+    await act(async () => {
+      await queryClient.invalidateQueries();
+    });
+    expect((await screen.findByTestId("adoption-report")).textContent).toContain("B report");
+    expect(screen.queryByText("A report")).toBeNull();
+
+    await act(async () => {
+      await engine.setActiveAccount(a);
+      await queryClient.invalidateQueries();
+    });
+    expect((await screen.findByTestId("adoption-report")).textContent).toContain("A report");
+    expect(screen.queryByText("B report")).toBeNull();
+    expect(store.pendingReport(a)?.lines).toEqual(["A report"]);
+    expect(store.pendingReport(b)?.lines).toEqual(["B report"]);
   });
 
   it("shows no report while the active account query is unresolved", async () => {

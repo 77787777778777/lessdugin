@@ -313,6 +313,15 @@ emits `Auth { did, state: Expired }`, and the next login of the account (`add_ac
 | `write_status(write_id) -> Option<WriteTicket>` | `None`: unknown or pruned |
 | `writes() -> Vec<WriteTicket>` | every write in the outbox, by account then `seq` (the CLI's `outbox` listing, the SPA's pending badges) |
 
+**SPA adoption-report acknowledgements.** Core currently retains done and undone writes for seven
+days (`DONE_KEEP_MS`). After dismissing a `mod_adopt` report, the SPA stores only
+`{ id, acknowledgedAtMs }`, never its report lines or record content. The entry expires when
+`nowMs - acknowledgedAtMs >= 30 days`; earlier entries are retained regardless of how many later
+reports are dismissed. This gives a 23-day margin beyond core retention. Acknowledgement expiry
+is coordinated with `DONE_KEEP_MS`: if that retention changes, the client rule must retain at
+least the same 23-day margin. Undismissed reports remain in their per-account queues, and storage
+read/write failures degrade to at-least-once display rather than losing a report.
+
 `BodyDraft { markdown, media?: Vec<MediaRef> }` — the engine performs spill-to-blob, mention
 rewriting (`at://handle` → DID), derived `mentions`/`links`, and validation before persisting.
 The rewriting covers every handle-authority `at://` link destination (inline links, autolinks,

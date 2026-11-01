@@ -308,7 +308,14 @@ export function Composer({
       return;
     }
     let cancelled = false;
-    const refs = [...media, ...files.flatMap((a) => (a.kind === "ready" ? [a.ref] : []))];
+    // An edit supplies retained media both as kept refs and as ready attachment rows. The
+    // renderer indexes every matching ref, so keep one ref per CID. Prefer the kept ref: the
+    // parent updates it when an attachment's alt is edited.
+    const byCid = new Map<string, MediaRef>();
+    for (const ref of [...media, ...files.flatMap((a) => (a.kind === "ready" ? [a.ref] : []))]) {
+      if (!byCid.has(ref.cid)) byCid.set(ref.cid, ref);
+    }
+    const refs = [...byCid.values()];
     const t = setTimeout(() => {
       engine.render(text, refs, { html: true, text: true, styled: false }).then(
         (body) => {

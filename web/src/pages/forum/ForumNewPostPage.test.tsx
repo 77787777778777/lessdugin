@@ -4,11 +4,17 @@
 // (social.md §4.5; review finding robustness-6), a submission sent again after a refusal
 // lists its attachments once (robustness-5), and a post whose body spilled into a blob is
 // edited from its bodySource, or refused with the reason (robustness-2).
+
+import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { EditorView } from "@codemirror/view";
 import { MockEngine } from "@lessdugin/engine/mock";
-import type { ForumView } from "@lessdugin/engine/types";
+import type { ForumView, Json, MediaRef, RenderedBody } from "@lessdugin/engine/types";
 import { act, fireEvent, screen, waitFor } from "@testing-library/react";
 import { beforeAll, describe, expect, it, vi } from "vitest";
+import * as wasm from "../../../../packages/engine/pkg/lessdugin_engine.js";
+import { NS } from "../../../../packages/engine/src/auth-bridge.ts";
+import { WorkerEngine, type WorkerEnv } from "../../../../packages/engine/src/worker-core.ts";
 import { renderWithApp } from "../../test/render.tsx";
 import { EditPost, PostForm } from "./ForumNewPostPage.tsx";
 import { ForumContext } from "./forumContext.tsx";
@@ -35,6 +41,44 @@ async function ownPost(engine: MockEngine): Promise<{ view: ForumView; uri: stri
   const own = list.items.find((p) => p.author.did === me);
   if (!own) throw new Error("no own post in the fixture");
   return { view, uri: own.uri };
+}
+
+/** One render through the actual Rust engine compiled to WASM, not the mock renderer. */
+async function renderWithRealEngine(
+  markdown: string,
+  media: MediaRef[] | Json[],
+): Promise<RenderedBody> {
+  const require = createRequire(import.meta.url);
+  const wasmPath = require.resolve("../../../../packages/engine/pkg/lessdugin_engine_bg.wasm");
+  wasm.initSync({ module: readFileSync(wasmPath) });
+  const env: WorkerEnv = {
+    fetch: (async () => {
+      throw new TypeError("offline");
+    }) as typeof fetch,
+    locks: null,
+    idb: null,
+    channel: null,
+    warn: () => {},
+  };
+  const worker = new WorkerEngine(wasm, env);
+  await worker.init(
+    { config: {}, namespace: NS, elect: false },
+    {
+      request: async () => {
+        throw { kind: "authRequired", message: "pure render needs no session" };
+      },
+    },
+    () => {},
+  );
+  try {
+    return (await worker.call("render", [
+      markdown,
+      media,
+      { html: true, text: true },
+    ])) as RenderedBody;
+  } finally {
+    await worker.close();
+  }
 }
 
 // the composer focuses CodeMirror, which calls execCommand; jsdom has none
@@ -136,8 +180,14 @@ describe("EditPost", () => {
     expect(screen.queryByText("This post cannot be edited")).toBeNull();
   });
 
-  it("shows retained media in the edit form without submitting it twice", async () => {
+  it("renders a referenced retained medium once and submits one edited item", async () => {
     const engine = new MockEngine({ holdMs: 0, sendMs: 0, spilledBodies: true });
+    const rendered: RenderedBody[] = [];
+    vi.spyOn(engine, "render").mockImplementation(async (markdown, media) => {
+      const result = await renderWithRealEngine(markdown, media);
+      rendered.push(result);
+      return result;
+    });
     const { view, uri } = await ownPost(engine);
     const current = await engine.raw(uri);
     const media = {
@@ -149,9 +199,19 @@ describe("EditPost", () => {
       aspectRatio: { width: 4, height: 3 },
     };
     const originalRaw = engine.raw.bind(engine);
+    const edit = vi.spyOn(engine, "edit");
+    const originalSource = engine.bodySource.bind(engine);
+    vi.spyOn(engine, "bodySource").mockImplementation(async (target) => {
+      const source = await originalSource(target);
+      return target === uri
+        ? { ...source, markdown: `![Retained image](cid:${media.cid})` }
+        : source;
+    });
+    let initialRaw = true;
     vi.spyOn(engine, "raw").mockImplementation(async (target) => {
       const result = await originalRaw(target);
-      if (target !== uri) return result;
+      if (target !== uri || !initialRaw) return result;
+      initialRaw = false;
       return {
         ...result,
         record: {
@@ -169,7 +229,7 @@ describe("EditPost", () => {
         },
       };
     });
-    renderWithApp(
+    const firstForm = renderWithApp(
       <ForumContext value={view}>
         <EditPost uri={uri} />
       </ForumContext>,
@@ -177,12 +237,44 @@ describe("EditPost", () => {
     );
     const alt = (await screen.findByLabelText("Alt text")) as HTMLInputElement;
     expect(alt.value).toBe("Retained image");
+    const preview = await screen.findByRole("region", { name: "Preview" }, { timeout: 10_000 });
+    await waitFor(() => expect(rendered.length).toBeGreaterThan(0));
+    // The real renderer returns one media entry per matching ref (crates/markdown media_used),
+    // so the kept ref plus the initial attachment must not both reach it.
+    expect(rendered.at(-1)?.media.filter((item) => item.cid === media.cid)).toHaveLength(1);
+    expect(preview.querySelectorAll("img[data-cid]")).toHaveLength(1);
+    fireEvent.change(alt, { target: { value: "Edited retained image" } });
+    await waitFor(() => expect(rendered.at(-1)?.media[0]?.alt).toBe("Edited retained image"));
+    expect(rendered.at(-1)?.media.filter((item) => item.cid === media.cid)).toHaveLength(1);
     fireEvent.click(screen.getByRole("button", { name: "Save edit" }));
     await screen.findByText("Post updated");
     const saved = (await engine.raw(uri)).record as { body: { media: unknown[] } };
     expect(saved.body.media).toHaveLength(1);
-    expect(saved).toMatchObject({ body: { media: [{ alt: "Retained image" }] } });
-  });
+    expect(saved).toMatchObject({ body: { media: [{ alt: "Edited retained image" }] } });
+    const submitted = edit.mock.calls[0]?.[1];
+    expect(submitted?.kind).toBe("post");
+    if (submitted?.kind !== "post") throw new Error("post edit not submitted");
+    const submittedMedia = submitted.post.body.media;
+    expect(submittedMedia).toHaveLength(1);
+    expect(submittedMedia?.[0]?.alt).toBe("Edited retained image");
+
+    firstForm.unmount();
+    renderWithApp(
+      <ForumContext value={view}>
+        <EditPost uri={uri} />
+      </ForumContext>,
+      { engine },
+    );
+    const remove = await screen.findByRole("button", {
+      name: `Remove Existing media ${media.cid}`,
+    });
+    fireEvent.click(remove);
+    fireEvent.click(screen.getByRole("button", { name: "Save edit" }));
+    await waitFor(() => expect(edit).toHaveBeenCalledTimes(2));
+    const removed = edit.mock.calls[1]?.[1];
+    if (removed?.kind !== "post") throw new Error("post removal edit not submitted");
+    expect(removed.post.body.media).toEqual([]);
+  }, 30_000);
 
   it("refuses a mixed revision instead of combining newer media with older source", async () => {
     vi.useRealTimers();

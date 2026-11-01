@@ -138,6 +138,79 @@ describe("WriteStore", () => {
     expect(again.pendingReport(A)).toBeUndefined();
   });
 
+  it("keeps more than 256 fresh acknowledgements without evicting the first", () => {
+    const firstId = `${A}/1`;
+    const values = new Map<string, string>();
+    const storage = {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => values.set(key, value),
+    };
+    const first = new WriteStore(storage, () => NOW);
+    const ids = [firstId, ...Array.from({ length: 256 }, (_, i) => `${A}/${i + 2}`)];
+    first.seed(ids.map((id) => reported(id, `private report ${id}`)));
+    for (const id of ids) first.dismissReport(id);
+
+    const stored = JSON.parse([...values.values()][0] ?? "[]") as unknown[];
+    expect(stored).toHaveLength(257);
+    expect(stored[0]).toEqual({ id: firstId, acknowledgedAtMs: NOW });
+    expect(JSON.stringify(stored)).not.toContain("private report");
+    expect(JSON.stringify(stored)).not.toContain("at://x");
+
+    const recovered = new WriteStore(storage, () => NOW + 1);
+    recovered.seed(ids.map((id) => reported(id)));
+    expect(recovered.pendingReport(A)).toBeUndefined();
+  });
+
+  it("expires only acknowledgements at least 30 days old and persists the cleanup", () => {
+    const DAY = 24 * 60 * 60 * 1000;
+    const now = 1_800_000_000_000;
+    const values = new Map<string, string>([
+      [
+        "lessdugin.adoptionReports.acknowledged.v1",
+        JSON.stringify([
+          { id: `${A}/expired`, acknowledgedAtMs: now - 30 * DAY },
+          { id: `${A}/fresh`, acknowledgedAtMs: now - 30 * DAY + 1 },
+        ]),
+      ],
+    ]);
+    const storage = {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => values.set(key, value),
+    };
+    const store = new WriteStore(storage, () => now);
+    store.seed([reported(`${A}/expired`), reported(`${A}/fresh`)]);
+    expect(store.pendingReport(A)?.id).toBe(`${A}/expired`);
+    store.dismissReport(`${A}/expired`);
+    expect(store.pendingReport(A)).toBeUndefined();
+
+    const stored = JSON.parse([...values.values()][0] ?? "[]") as {
+      id: string;
+      acknowledgedAtMs: number;
+    }[];
+    expect(stored.map((entry) => entry.id)).toEqual([`${A}/fresh`, `${A}/expired`]);
+    expect(stored.every((entry) => typeof entry.acknowledgedAtMs === "number")).toBe(true);
+  });
+
+  it("degrades to at-least-once display when acknowledgement storage throws", () => {
+    const id = `${A}/71`;
+    const storage = {
+      getItem: (): string | null => {
+        throw new Error("storage read refused");
+      },
+      setItem: (): void => {
+        throw new Error("storage write refused");
+      },
+    };
+    const first = new WriteStore(storage);
+    first.seed([reported(id)]);
+    first.dismissReport(id);
+    expect(first.pendingReport(A)).toBeUndefined();
+
+    const recovered = new WriteStore(storage);
+    recovered.seed([reported(id)]);
+    expect(recovered.pendingReport(A)?.id).toBe(id);
+  });
+
   it("keeps undismissed reports queued across recovery and another report opening", () => {
     const id = `${A}/61`;
     const values = new Map<string, string>();
