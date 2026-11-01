@@ -565,9 +565,7 @@ impl<H: Host> Engine<H> {
                     let Ok(did) = Did::parse(&did) else { continue };
                     let stats = Arc::new(Stats::capped(None));
                     let session = sy.session(Priority::P1, stats);
-                    if let Err(e) = sy.check_account_status(&session, &did).await {
-                        tracing::debug!(did = %did, error = %e, "live account status check failed");
-                    }
+                    sy.check_account_status(&session, &did).await?;
                 }
                 LiveAction::Resync { did } => {
                     sy.enqueue(self.live_item(&did, Priority::P1, Reason::Resync));

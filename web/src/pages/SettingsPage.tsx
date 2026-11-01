@@ -380,10 +380,12 @@ function IndexerAudit({ forums }: { forums: { uri: string; name: string }[] }) {
           </p>
           <ul className={ui.list}>
             {report.checks.flatMap((c) =>
-              c.findings.map((f, n) => (
-                <li key={`${f.check}:${f.subject}:${n}`}>
-                  <strong>{f.check} {f.kind}</strong>: {f.detail}{" "}
-                  <span className={ui.mono}>{f.subject}</span>
+              c.findings.map((f) => (
+                <li key={`${c.name}:${f.check}:${f.subject}:${f.kind}:${f.detail}`}>
+                  <strong>
+                    {f.check} {f.kind}
+                  </strong>
+                  : {f.detail} <span className={ui.mono}>{f.subject}</span>
                 </li>
               )),
             )}
@@ -481,9 +483,7 @@ export function SettingsPage() {
                 onClick={() =>
                   void set(
                     "indexers",
-                    s.indexers.filter(
-                      (x) => !(x.forum === i.forum && sameIndexer(x.url, i.url)),
-                    ),
+                    s.indexers.filter((x) => !(x.forum === i.forum && sameIndexer(x.url, i.url))),
                   )
                 }
               >

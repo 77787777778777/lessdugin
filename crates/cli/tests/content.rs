@@ -106,6 +106,18 @@ fn a_forum_from_creation_to_deletion() {
         );
     });
 
+    // A post's declared tags become applied tags only after their tag page exists (§13.3).
+    let tag_page = alice.file("intro.md", "Introductions and first posts.\n");
+    let t = alice.json(&[
+        "wiki",
+        "edit",
+        "intro",
+        "--name",
+        "Introductions",
+        "--file",
+        s(&tag_page),
+    ]);
+    assert_eq!(t["state"]["kind"], "done", "{t}");
     // post from a file with frontmatter; `ls` numbers it
     let file = alice.file(
         "hello.md",
@@ -737,6 +749,11 @@ fn tags_links_stdin_follows_and_accounts() {
     alice.ok(&["forum", "use", "lounge"]);
 
     // tags from flags, a link post and bodies from standard input
+    for slug in ["rust", "cli"] {
+        let page = alice.file(&format!("{slug}.md"), &format!("About {slug}.\n"));
+        let t = alice.json(&["wiki", "edit", slug, "--name", slug, "--file", s(&page)]);
+        assert_eq!(t["state"]["kind"], "done", "{t}");
+    }
     let f = alice.file("t.md", "---\ntitle: Tagged\n---\nWith tags.\n");
     let t = alice.json(&["post", s(&f), "--tag", "rust", "--tag", "cli", "--yes"]);
     assert_eq!(t["state"]["kind"], "done", "{t}");
@@ -759,7 +776,7 @@ fn tags_links_stdin_follows_and_accounts() {
     let link_post = t["state"]["uri"].as_str().unwrap().to_owned();
     let pl: PostList = exact(&json_out(&alice, &["ls", "--all", "--sort", "old"]));
     assert_eq!(pl.items.len(), 2);
-    assert_eq!(pl.items[0].tags, ["rust", "cli"]);
+    assert_eq!(pl.items[0].tags, ["cli", "rust"]);
     assert_eq!(pl.items[1].uri, link_post);
     let link = pl.items[1].link.as_ref().unwrap();
     assert_eq!(
@@ -799,12 +816,10 @@ fn tags_links_stdin_follows_and_accounts() {
     let pl: PostList = exact(&json_out(&carol, &["ls", &n.to_string(), "--all"]));
     assert_eq!(pl.forum, forum_of(&alice, "lounge"));
     assert_eq!(pl.items.len(), 2);
-    // The tag filter matches only tags whose wiki page exists (social.md §13.3:
-    // an unknown tag never applies). The CLI cannot create a wiki page until M5,
-    // so `--tag rust` returns nothing here even though the post carries the tag
-    // (asserted above); M5 (organisation/discovery) adds the wiki and revisits this.
+    // The tag pages were written before the posts, so these declared tags apply (§13.3).
     let pl: PostList = exact(&json_out(&carol, &["ls", "l", "--all", "--tag", "rust"]));
-    assert_eq!(pl.items.len(), 0, "{pl:?}");
+    assert_eq!(pl.items.len(), 1, "{pl:?}");
+    assert_eq!(pl.items[0].tags, ["cli", "rust"]);
     // two followed forums and no current one: `ls` asks which
     let e = carol.fails(2, &["ls"]);
     assert!(

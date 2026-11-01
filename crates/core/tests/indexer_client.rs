@@ -361,6 +361,31 @@ fn oversized_bundles_halve_then_use_pds_for_one_oversized_item() {
 }
 
 #[test]
+fn unavailable_proof_service_falls_back_to_the_authors_pds() {
+    let w = World::new();
+    describe(&w.host, &["getRecordProofs"], 0);
+    w.host.fail(
+        &endpoint("getRecordProofs"),
+        lessdugin_core::host::HostError::Network("offline".into()),
+    );
+    let e = engine(&w.host, Sources::Assisted);
+    let forum = format!("at://{}/{}/f", w.alice.did, nsid::FORUM);
+    let uri = AtUri::parse(&w.uri(RKEY)).unwrap();
+    let report = block_on(e.hydrate_indexer_records(&forum, std::slice::from_ref(&uri)))
+        .unwrap()
+        .unwrap();
+    assert_eq!(report.point_fetched, 1, "{report:?}");
+    assert_eq!(report.failed, 1);
+    assert_eq!(
+        block_on(RecordStore::new(w.host.cache()).get(&uri))
+            .unwrap()
+            .unwrap()
+            .level,
+        Level::Pds
+    );
+}
+
+#[test]
 fn visible_page_uses_only_uri_hints_then_hydrates_proofs() {
     let (w, e, uri) = current_proof_world(Sources::Assisted, false);
     let forum = format!("at://{}/{}/f", w.alice.did, nsid::FORUM);
@@ -435,10 +460,11 @@ fn a_current_proof_has_direct_sync_content_parity() {
 
 #[test]
 fn stale_and_forged_proofs_never_remain_proven() {
-    for forged in [false, true] {
+    for (forged, advance_head) in [(false, true), (true, true), (true, false)] {
         let (w, e, uri) = current_proof_world(Sources::Assisted, forged);
-        if !forged {
-            // The CAR was built at the old head. Advance only the PDS head to make it stale.
+        if advance_head {
+            // The old-rev CAR has a bad signature against the current key. Advance only the PDS
+            // head to exercise key-rotation stale-proof handling (not a current-head forgery).
             w.pds
                 .update(&w.alice.did, Some(tid_at_ms(w.host.now())), |_| {});
         }
@@ -451,18 +477,25 @@ fn stale_and_forged_proofs_never_remain_proven() {
         assert_eq!(report.admitted, 0, "{report:?}");
         assert_eq!(
             report.items[0].status,
-            if forged {
-                ProofStatus::Failed
-            } else {
+            if advance_head {
                 ProofStatus::StaleProof
+            } else {
+                ProofStatus::Failed
             }
         );
         assert_eq!(report.point_fetched, 1);
         let row = block_on(RecordStore::new(w.host.cache()).get(&uri))
             .unwrap()
             .unwrap();
-        assert_eq!(row.level, Level::Pds);
-        assert_eq!(row.src, Source::Get);
+        if forged && advance_head {
+            // A bad signature below the new head is stale-proof: recover with a fresh PDS CAR
+            // without blaming the indexer, rather than treating it as a current-head forgery.
+            assert_eq!(row.level, Level::Proven, "{report:?} {row:?}");
+            assert_eq!(row.src, Source::Proof);
+        } else {
+            assert_eq!(row.level, Level::Pds);
+            assert_eq!(row.src, Source::Get);
+        }
         let origin = url::Url::parse(INDEX)
             .unwrap()
             .origin()
@@ -471,8 +504,43 @@ fn stale_and_forged_proofs_never_remain_proven() {
             .unwrap()
             .unwrap_or_default()
             .strikes;
-        assert_eq!(strikes, u32::from(forged));
+        assert_eq!(strikes, u32::from(forged && !advance_head));
     }
+}
+
+#[test]
+fn cold_page_falls_back_to_pds_sync_when_the_indexer_is_unavailable() {
+    let w = forum_world();
+    w.host.fail(
+        &endpoint("listPosts"),
+        lessdugin_core::host::HostError::Network("offline".into()),
+    );
+    let mut query = lessdugin_core::dto::ListPostsQuery::new(w.key.uri.to_string());
+    query.filter = lessdugin_core::dto::PostFilter::All;
+    let page = block_on(
+        w.engine
+            .list_posts_page(&query, &lessdugin_core::dto::SyncOpts::default()),
+    )
+    .unwrap();
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].title.as_deref(), Some("Title"));
+    assert_eq!(
+        block_on(RecordStore::new(w.host.cache()).get(&AtUri::parse(&w.post).unwrap()))
+            .unwrap()
+            .unwrap()
+            .level,
+        Level::Pds
+    );
+
+    // No consented/usable indexer is also a cold PDS fallback, not a reason to stay empty.
+    let w = forum_world();
+    block_on(w.engine.set_setting("indexers", Some(&json!([])))).unwrap();
+    let page = block_on(
+        w.engine
+            .list_posts_page(&query, &lessdugin_core::dto::SyncOpts::default()),
+    )
+    .unwrap();
+    assert_eq!(page.items[0].title.as_deref(), Some("Title"));
 }
 
 #[test]

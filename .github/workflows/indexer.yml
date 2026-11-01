@@ -1,0 +1,46 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# M6's optional indexer image. This does not enable the M7 release workflow or switch the
+# staging namespace. Branch builds validate only; publication is explicit or after the M6 merge.
+name: indexer
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: [".github/workflows/indexer.yml", "crates/indexer/Dockerfile", "crates/**", "Cargo.*"]
+permissions:
+  contents: read
+  packages: write
+concurrency:
+  group: indexer-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  image:
+    runs-on: ubuntu-24.04
+    env:
+      IMAGE: ghcr.io/${{ github.repository_owner }}/lessdugin-indexer
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: build the distroless image and verify its source URL
+        run: |
+          source_url="${{ github.server_url }}/${{ github.repository }}/tree/${{ github.sha }}"
+          podman build --file crates/indexer/Dockerfile \
+            --build-arg "SOURCE_URL=${source_url}" \
+            --tag "${IMAGE}:sha-${GITHUB_SHA}" .
+      - name: smoke-test the image
+        run: |
+          podman run --rm --entrypoint /usr/local/bin/lessdugin-indexer \
+            "${IMAGE}:sha-${GITHUB_SHA}" --help | grep -- --source-url
+      - name: publish the immutable SHA tag
+        if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
+        run: podman push "${IMAGE}:sha-${GITHUB_SHA}"
+      - name: publish latest from the default branch
+        if: github.ref == 'refs/heads/main'
+        run: |
+          podman tag "${IMAGE}:sha-${GITHUB_SHA}" "${IMAGE}:latest"
+          podman push "${IMAGE}:latest"

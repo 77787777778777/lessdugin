@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# Build from the repository root. M6 does not publish this image.
+# Build from the repository root. `.github/workflows/indexer.yml` publishes M6 builds to GHCR.
 FROM docker.io/library/rust:1.97-bookworm AS build
+ARG SOURCE_URL=https://github.com/lessdugin/lessdugin
+ENV LESSDUGIN_INDEXER_SOURCE_URL=${SOURCE_URL}
 WORKDIR /src
 COPY . .
 RUN cargo build --locked --release -p lessdugin-indexer

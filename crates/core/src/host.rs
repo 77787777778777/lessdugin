@@ -41,6 +41,13 @@ pub trait MaybeSendSync {}
 #[cfg(target_arch = "wasm32")]
 impl<T: ?Sized> MaybeSendSync for T {}
 
+/// A boxed future with the host's native `Send` / browser-local threading contract. Core-internal
+/// deep async chains use this to keep their state on the heap without changing that contract.
+#[cfg(not(target_arch = "wasm32"))]
+pub type HostFuture<'a, T> = futures::future::BoxFuture<'a, T>;
+#[cfg(target_arch = "wasm32")]
+pub type HostFuture<'a, T> = futures::future::LocalBoxFuture<'a, T>;
+
 /// Where an HTTP request goes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Target {

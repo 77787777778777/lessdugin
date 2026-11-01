@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+.git
+.claude
+.rustup
+target
+node_modules
+**/node_modules
+**/target
+web/dist
+web/dist-e2e
+test-results
+packages/e2e/devnet.json
+*.sqlite
+*.sqlite-*
+*.log

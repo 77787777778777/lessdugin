@@ -242,6 +242,7 @@ fn shared_v1_v2_dedup_and_cursor() {
     let first = filter.apply(Wire::V1, "old", v1, &cx);
     assert_eq!(first.actions.len(), 1);
     assert_eq!(first.cursor.unwrap().time_us, TIME_US);
+    filter.acknowledge();
     let v2 = wire::parse(Wire::V2, &v2_commit(DID, &post(), &format!("{FK}-3l"), 42))
         .unwrap()
         .unwrap();
@@ -249,6 +250,40 @@ fn shared_v1_v2_dedup_and_cursor() {
     assert!(replay.duplicate);
     assert!(replay.actions.is_empty());
     assert_eq!(replay.cursor.unwrap().seq, Some(42));
+}
+
+#[test]
+fn failed_actionable_frame_replays_instead_of_becoming_a_duplicate() {
+    let cx = context();
+    let mut filter = EventFilter::default();
+    let event = || {
+        wire::parse(
+            Wire::V2,
+            &v2_commit(DID, &post(), &format!("{FK}-replay"), 42),
+        )
+        .unwrap()
+        .unwrap()
+    };
+    let first = filter.apply(Wire::V2, "one", event(), &cx);
+    assert_eq!(first.actions.len(), 1);
+    assert!(filter.has_pending());
+    // The integrator fails before committing effects: the wire replay cannot skip this work.
+    assert!(
+        filter
+            .apply(Wire::V2, "one", event(), &cx)
+            .actions
+            .is_empty()
+    );
+    let (_, _, _, _, retry) = filter.retry().unwrap();
+    assert_eq!(retry.actions, first.actions);
+    assert_eq!(retry.cursor.unwrap().time_us, TIME_US);
+    assert!(!filter.acknowledge_for(Wire::V2, "two"));
+    assert!(filter.has_pending());
+    assert!(filter.acknowledge_for(Wire::V2, "one"));
+    assert!(!filter.has_pending());
+    let duplicate = filter.apply(Wire::V2, "one", event(), &cx);
+    assert!(duplicate.duplicate);
+    assert!(duplicate.actions.is_empty());
 }
 
 #[test]
@@ -277,6 +312,7 @@ fn identity_account_sync_drop_network_noise() {
         out.actions[..],
         [Action::AccountStatus { active: false, .. }]
     ));
+    filter.acknowledge();
     let sync = wire::parse(Wire::V2, &sync).unwrap().unwrap();
     assert!(matches!(
         filter.apply(Wire::V2, "i", sync, &cx).actions[..],
@@ -333,9 +369,14 @@ fn info_actions_restart_cursor() {
         }})
         .to_string();
         let e = wire::parse(Wire::V2, &text).unwrap().unwrap();
-        let out = EventFilter::default().apply(Wire::V2, "i", e, &context());
+        let mut filter = EventFilter::default();
+        let out = filter.apply(Wire::V2, "i", e, &context());
         if gap == Gap::OutdatedCursor {
             assert_eq!(out.actions, vec![Action::Reconcile(gap)]);
+            let retry = filter.retry().unwrap().4;
+            assert_eq!(retry, out);
+            assert!(retry.restart_cursor);
+            assert!(retry.cursor.is_none());
         } else {
             assert!(out.actions.is_empty());
         }
@@ -584,6 +625,7 @@ fn dedup_is_bounded_lru() {
             .unwrap()
             .unwrap();
         assert_eq!(filter.apply(Wire::V2, "i", e, &cx).actions.len(), 1);
+        filter.acknowledge();
     }
     // Promote the first key, then insert a third: the second is the least recently used.
     let first = wire::parse(Wire::V2, &v2_commit(DID, &post(), "aaaaaaaaaaaa-1", 1))
@@ -594,6 +636,7 @@ fn dedup_is_bounded_lru() {
         .unwrap()
         .unwrap();
     assert_eq!(filter.apply(Wire::V2, "i", third, &cx).actions.len(), 1);
+    filter.acknowledge();
     assert_eq!(filter.dedup().len(), 2);
     let second = wire::parse(Wire::V2, &v2_commit(DID, &post(), "aaaaaaaaaaaa-2", 1))
         .unwrap()
@@ -705,6 +748,71 @@ fn live_tail_store_failure_replays_frame_before_advancing_cursor() {
                 .flatten()
                 .is_some(),
             "the replayed action batch must be acknowledged after it applies"
+        );
+        engine.live_stop();
+        tail.await.unwrap();
+    });
+}
+
+#[test]
+fn account_status_failure_replays_before_advancing_cursor() {
+    futures::executor::block_on(async {
+        let mem = MemHost::new();
+        let net = FakeNet::on(&mem);
+        let account = net.add_account("alice.example.com");
+        let engine = Engine::new(
+            mem.clone(),
+            EngineConfig {
+                jetstream: vec![url::Url::parse("wss://jetstream.example/subscribe").unwrap()],
+                ..EngineConfig::default()
+            },
+        );
+        engine
+            .add_account(AccountInfo::app_password(
+                account.did().as_str(),
+                account.pds_base(),
+            ))
+            .await
+            .unwrap();
+        let event = json!({"$type":"message","payload":{
+            "$type":"network.bsky.jetstream.subscribeEvents#account", "did":account.did(),
+            "seq":42,"witnessedAt":TIME,"account":{"did":account.did(),"seq":9,"time":TIME,
+            "active":false,"status":"deactivated"}
+        }})
+        .to_string();
+        mem.script_websocket("wss://jetstream.example/", vec![WsMessage::Text(event)]);
+        mem.park_sleeps(true);
+        net.inject(
+            lessdugin_testkit::fake_pds::Fault::disconnect()
+                .on_repo(account.did().as_str())
+                .on_nsid("com.atproto.sync.getRepoStatus")
+                .once(),
+        );
+        let tail = engine.live_tail();
+        futures::pin_mut!(tail);
+        assert!(futures::poll!(tail.as_mut()).is_pending());
+        let key = schema::cur_key("jetstream");
+        assert!(
+            mem.cache()
+                .get_many(vec![key.clone()])
+                .await
+                .unwrap()
+                .pop()
+                .flatten()
+                .is_none(),
+            "a failed getRepoStatus must leave the live frame unacknowledged"
+        );
+        mem.advance_ms(5_001);
+        assert!(futures::poll!(tail.as_mut()).is_pending());
+        assert!(
+            mem.cache()
+                .get_many(vec![key])
+                .await
+                .unwrap()
+                .pop()
+                .flatten()
+                .is_some(),
+            "a successful status refresh acknowledges the replayed frame"
         );
         engine.live_stop();
         tail.await.unwrap();

@@ -11,6 +11,14 @@ repository.workspace = true
 name = "lessdugin_indexer"
 path = "src/lib.rs"
 
+[features]
+# The signed loopback cold-start fixture is test tooling, never a production service endpoint.
+devnet = []
+
+[[example]]
+name = "cold_start_devnet"
+required-features = ["devnet"]
+
 [[bin]]
 name = "lessdugin-indexer"
 path = "src/main.rs"
@@ -40,3 +48,4 @@ url.workspace = true
 lessdugin-testkit = { workspace = true, features = ["http"] }
 tempfile.workspace = true
 tower = { version = "0.5", features = ["util"] }
+reqwest.workspace = true

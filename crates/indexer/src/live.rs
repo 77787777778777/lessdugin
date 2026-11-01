@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use lessdugin_atp::syntax::AtUri;
+use lessdugin_atp::syntax::{AtUri, Did};
 use lessdugin_core::discovery::ForumKey;
 use lessdugin_core::host::{Host, WebSocket, WsMessage};
 use lessdugin_core::live::events::{Action, Context, EventFilter};
@@ -100,7 +100,30 @@ async fn connection(
         .live_connections
         .fetch_add(1, Ordering::Relaxed);
     let result = async {
-        while let Some(msg) = socket.next().await {
+        loop {
+            let pending = filter.lock().await.retry();
+            let Some((_, origin, _, _, out)) = pending else {
+                break;
+            };
+            for action in out.actions {
+                apply(indexer, action).await?;
+            }
+            if !filter.lock().await.acknowledge_for(Wire::V2, &origin) {
+                continue;
+            }
+            if let Some(Cursor { time_us, .. }) = out.cursor {
+                indexer
+                    .store
+                    .set_cursor(&format!("jetstream:{origin}"), &time_us.to_string())?;
+            }
+        }
+        loop {
+            if filter.lock().await.has_pending() {
+                break;
+            }
+            let Some(msg) = socket.next().await else {
+                break;
+            };
             let text = match msg? {
                 WsMessage::Text(t) => t,
                 WsMessage::Binary(b) => String::from_utf8(b)?,
@@ -132,6 +155,10 @@ async fn connection(
             for action in out.actions {
                 apply(indexer, action).await?;
             }
+            filter
+                .lock()
+                .await
+                .acknowledge_for(Wire::V2, &endpoint.origin().ascii_serialization());
             if let Some(Cursor { time_us, .. }) = out.cursor {
                 indexer.store.set_cursor(&name, &time_us.to_string())?;
             }
@@ -188,15 +215,93 @@ async fn apply(indexer: &Indexer, action: Action) -> anyhow::Result<()> {
         Action::Candidate { uri, rev, cid, .. } => {
             point(indexer, &uri, &rev, cid, Priority::P1).await?
         }
-        Action::Resync { .. }
-        | Action::InvalidateIdentity { .. }
-        | Action::AccountStatus { .. }
-        | Action::CatchUp { .. }
-        | Action::Reconcile(_) => {
+        Action::InvalidateIdentity { did, authority } => {
+            indexer.engine.invalidate_identity(&did).await?;
+            if authority {
+                refresh_forums(indexer, &did).await?;
+            }
+        }
+        Action::AccountStatus { did, .. } => {
+            let parsed = Did::parse(&did)?;
+            let session = indexer
+                .engine
+                .syncer()
+                .session(Priority::P1, Arc::new(Stats::new()));
+            indexer
+                .engine
+                .syncer()
+                .check_account_status(&session, &parsed)
+                .await?;
+            refresh_forums(indexer, &did).await?;
+        }
+        Action::Resync { did } | Action::CatchUp { did } => {
+            resync(indexer, &did).await?;
+        }
+        Action::Reconcile(_) => {
             for forum in indexer.store.forum_seeds() {
                 ingest::sync_forum(indexer, &forum).await?;
             }
         }
+    }
+    Ok(())
+}
+
+fn did_forums(indexer: &Indexer, did: &str) -> Vec<String> {
+    indexer
+        .store
+        .forum_seeds()
+        .into_iter()
+        .filter(|forum| {
+            indexer.store.forum(forum).is_some_and(|row| {
+                row.did == did
+                    || indexer
+                        .store
+                        .participants(forum, None)
+                        .iter()
+                        .any(|p| p.did == did)
+            })
+        })
+        .collect()
+}
+
+async fn refresh_forums(indexer: &Indexer, did: &str) -> anyhow::Result<()> {
+    for forum in did_forums(indexer, did) {
+        ingest::sync_forum(indexer, &forum).await?;
+    }
+    Ok(())
+}
+
+async fn resync(indexer: &Indexer, did: &str) -> anyhow::Result<()> {
+    let parsed = Did::parse(did)?;
+    let session = indexer
+        .engine
+        .syncer()
+        .session(Priority::P1, Arc::new(Stats::new()));
+    let _one = indexer.sync_lock.lock().await;
+    let forums = did_forums(indexer, did);
+    for forum in &forums {
+        let key = ForumKey::of_uri(&AtUri::parse(forum)?)?;
+        let report = indexer
+            .engine
+            .syncer()
+            .sync_repo(
+                &session,
+                &lessdugin_core::sync::SyncRequest::forum(
+                    parsed.clone(),
+                    &key.fk,
+                    lessdugin_core::sync::Reason::Resync,
+                ),
+            )
+            .await;
+        if let Some(error) = report.error {
+            return Err(anyhow::anyhow!(
+                "targeted repository resync failed: {error}"
+            ));
+        }
+    }
+    drop(_one);
+    for forum in forums {
+        ingest::sync_forum(indexer, &forum).await?;
     }
     Ok(())
 }

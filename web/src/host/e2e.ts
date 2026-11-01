@@ -21,7 +21,8 @@ export interface E2EOptions {
   /** Local relay and Jetstream endpoints; empty arrays disable them. */
   relays?: string[];
   jetstream?: string[];
-  /** Local optional indexers; null disables them. */
+  /** Local optional indexers, explicitly consented for this e2e context. */
+  indexers?: string[];
   constellation?: string | null;
   slingshot?: string | null;
   /** Parity mode: the fixed `now` of every view (ms since the epoch). */
@@ -84,6 +85,7 @@ export function e2eOptions(raw: unknown = globalThis.window?.__LESSDUGIN_E2E__):
     sources?: unknown;
     relays?: unknown;
     jetstream?: unknown;
+    indexers?: unknown;
     constellation?: unknown;
     slingshot?: unknown;
     parityNowMs?: unknown;
@@ -98,6 +100,8 @@ export function e2eOptions(raw: unknown = globalThis.window?.__LESSDUGIN_E2E__):
   if (relays) out.relays = relays;
   const jetstream = loopbackList(v.jetstream, ["ws:"]);
   if (jetstream) out.jetstream = jetstream;
+  const indexers = loopbackList(v.indexers, ["http:"]);
+  if (indexers) out.indexers = indexers;
   for (const key of ["constellation", "slingshot"] as const) {
     if (v[key] === null) out[key] = null;
     else {
@@ -119,6 +123,7 @@ export function e2eEngineConfig(o: E2EOptions): EngineConfigInput {
   if (o.sources) config.sources = o.sources;
   if (o.relays) config.relays = o.relays;
   if (o.jetstream) config.jetstream = o.jetstream;
+  if (o.indexers) config.indexers = o.indexers;
   if (o.constellation !== undefined) config.constellation = o.constellation;
   if (o.slingshot !== undefined) config.slingshot = o.slingshot;
   if (o.parityNowMs !== undefined) config.parityNowMs = o.parityNowMs;

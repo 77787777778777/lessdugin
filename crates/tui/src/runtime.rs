@@ -151,8 +151,11 @@ async fn ui<H: Host>(
                         let tx = tx.clone();
                         let panicked = panicked_tx.clone();
                         tokio::spawn(async move {
-                            let run =
-                                std::panic::AssertUnwindSafe(exec::run(&engine, other, exec_opts));
+                            // Construct the deep engine sync future on the heap, as headless
+                            // does, not on the Tokio worker's stack.
+                            let run = std::panic::AssertUnwindSafe(Box::pin(exec::run(
+                                &engine, other, exec_opts,
+                            )));
                             match run.catch_unwind().await {
                                 Ok(Some(a)) => {
                                     let _ = tx.send(a);

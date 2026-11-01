@@ -2,8 +2,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use lessdugin_atp::proof::{BundleCaps, ProofBundle};
+use lessdugin_atp::proof::{BundleCaps, ProofBundle, ProofCaps, ProofErrorKind, verify_proof};
 use lessdugin_atp::syntax::{AtUri, Did};
+use lessdugin_atp::xrpc::SyncGetRecord;
 use serde::{Deserialize, Serialize};
 
 use crate::host::Host;
@@ -175,7 +176,24 @@ async fn hydrate_chunk<H: Host>(
                 ..ProofReport::default()
             });
         }
-        Err(e) => return Err(e),
+        Err(e) => {
+            // A failed bundle request says nothing about the author's PDS. Keep the source error
+            // visible, but converge each requested record through ordinary PDS admission.
+            let mut report = ProofReport::default();
+            for uri in uris {
+                let mut item = ProofItemStatus {
+                    uri: uri.to_string(),
+                    status: ProofStatus::Failed,
+                    rev: None,
+                    error: Some(format!("indexer proof request failed: {e}")),
+                    point_fetched: false,
+                };
+                point_fallback(syncer, session, uri, &mut item).await;
+                report.items.push(item);
+            }
+            report.finish_counts();
+            return Ok(report);
+        }
     };
     let received_at = session.host().now_ms();
     let origin = client.origin();
@@ -287,12 +305,36 @@ async fn hydrate_chunk<H: Host>(
             ));
             continue;
         };
+        let current_head = store
+            .repo(uri.did().as_str())
+            .await
+            .map_err(store_error)?
+            .and_then(|r| r.head_seen)
+            .filter(|h| h.sent_at >= received_at - HEAD_CURRENCY_MS);
         let outcome =
             match bundle.verify_item(index, &key, session.host().now_ms().saturating_mul(1000)) {
                 Ok(o) => o,
                 Err(e) => {
-                    strikes += 1;
-                    results.push(failed(uri, e.to_string()));
+                    if e.kind() == ProofErrorKind::BadSignature
+                        && let (Some(rev), Some(head)) = (e.rev, &current_head)
+                        && rev.as_str() < head.rev.as_str()
+                    {
+                        let mut item = ProofItemStatus {
+                            uri: uri.to_string(),
+                            status: ProofStatus::StaleProof,
+                            rev: Some(rev.to_string()),
+                            error: Some("stale-proof: fetching a fresh author-PDS proof".into()),
+                            point_fetched: false,
+                        };
+                        pds_proof_fallback(syncer, session, uri, &ident, &key, &mut item).await;
+                        results.push(ItemResult {
+                            status: item,
+                            fallback: false,
+                        });
+                    } else {
+                        strikes += 1;
+                        results.push(failed(uri, e.to_string()));
+                    }
                     continue;
                 }
             };
@@ -400,6 +442,91 @@ fn failed(uri: &AtUri, error: impl ToString) -> ItemResult {
             point_fetched: false,
         },
         fallback: true,
+    }
+}
+
+/// A proof signed before a key rotation is not indexer misconduct. Recover from the author's
+/// own PDS with a fresh `sync.getRecord`, retaining proof-level admission rather than lowering
+/// the result to an unproven JSON fetch (`sync.md` §8.7).
+async fn pds_proof_fallback<H: Host>(
+    syncer: &Syncer<H>,
+    session: &Session<H>,
+    uri: &AtUri,
+    ident: &crate::identity::ResolvedIdentity,
+    key: &lessdugin_atp::crypto::PublicKey,
+    item: &mut ProofItemStatus,
+) {
+    let result = async {
+        let pds = ident
+            .pds_url()
+            .ok_or_else(|| invalid("the DID document has no usable PDS"))?;
+        let before = session.host().now_ms();
+        let response = session
+            .xrpc()
+            .query_raw(
+                &crate::xrpc::Service::Anon(pds),
+                &SyncGetRecord {
+                    did: uri.did().clone(),
+                    collection: uri.collection().clone(),
+                    rkey: uri.rkey().clone(),
+                },
+                &crate::xrpc::CallOpts::capped(crate::limits::PROOF_CAR_MAX_BYTES)
+                    .with_timeout_ms(crate::limits::CAR_TIMEOUT_MS),
+            )
+            .await?;
+        let sent_at = crate::sync::net::sent_at(&response).unwrap_or(before);
+        let outcome = verify_proof(
+            &response.body,
+            uri.did(),
+            uri.collection(),
+            uri.rkey(),
+            key,
+            session.host().now_ms().saturating_mul(1000),
+            &ProofCaps::default(),
+        )
+        .map_err(|e| invalid(format!("fresh PDS proof failed: {e}")))?;
+        let rev = outcome.rev.to_string();
+        let store = RecordStore::new(session.host().cache());
+        let _guard = syncer.net().repo_lock(uri.did()).await;
+        let mut batch = store.batch();
+        if let Some(record) = outcome.record {
+            let admitted = admit::admit_block(uri, &record.cid, &record.bytes, &LexiconValidator)
+                .map_err(|e| invalid(format!("fresh PDS proof admission: {e}")))?;
+            let mut observation =
+                Observation::proof(&rev, sent_at, Source::Proof, session.host().now_ms());
+            if let Some(first) = syncer.hint_first_seen(uri.as_str(), &record.cid.to_string()) {
+                observation = observation.with_first_seen(first);
+            }
+            batch
+                .put_version(admitted.into_version(observation))
+                .await
+                .map_err(store_error)?;
+        } else {
+            batch
+                .tombstone(
+                    uri,
+                    Delete {
+                        key: OrderKey::new(&rev, sent_at),
+                        evidence: DeleteEvidence::RecordNotFound,
+                        at_ms: session.host().now_ms(),
+                    },
+                )
+                .await
+                .map_err(store_error)?;
+        }
+        batch.commit().await.map_err(store_error)?;
+        Ok::<_, XrpcCallError>(rev)
+    }
+    .await;
+    match result {
+        Ok(rev) => {
+            item.rev = Some(rev);
+            item.error = None;
+            item.point_fetched = true;
+        }
+        Err(e) => {
+            item.error = Some(format!("stale-proof PDS recovery failed: {e}"));
+        }
     }
 }
 

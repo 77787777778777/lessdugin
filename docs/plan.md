@@ -235,6 +235,38 @@ A milestone is done when all of the following hold:
 
 ### M6 — Optional indexer
 
+**Status:** implementation and automatic acceptance verification, 2026-11-01; M7 not started.
+The signed loopback cold-start fixture (`scripts/m6-cold-start.sh`, invoked by
+`pnpm --filter @lessdugin/web run e2e:cold-start`) contains 2,000 distinct signed participant DIDs,
+1,999 approval grants, and a signed post. Three fresh Chromium contexts painted its verified title
+in **1.606 s, 1.449 s and 1.432 s** on the final integrated tree, with real proof CARs, PDS head
+checks, no post point fetch and no browser/CSP errors. Pre-indexing all 2,000 repos took
+**453.834 s** and is deliberately outside the browser measurement. Evidence:
+`/home/wrath/.cache/lessdugin-orchestrator/state/m6-cold-start-results-final.json`. On NixOS, run
+it through `nix develop .#ci -c pnpm --filter @lessdugin/web run e2e:cold-start` so the pinned
+browser environment is available. The native service tests cover convergence, restart,
+proof omission/forgery, membership-hint backfill paging, and live proof failure replay. A failed
+proof-service request now falls back to each author's PDS. An old bad signature is stale-proof
+only below a fresh PDS head: it fetches a new author-PDS proof and does not strike the indexer.
+A cold assisted page with failed or unavailable hydration falls back to a bounded ordinary PDS
+sync; cursor pages and already-discovered forums remain local reads. The
+distroless image builds locally with a non-root user and the configured source URL. GHCR workflow
+dispatch has not been run. The [target] 1M-record 200 r/s benchmark remains **unmeasured**; it is
+not claimed as passed. Full workspace CI exposed two pre-M5 CLI tag-fixture failures
+(`a_forum_from_creation_to_deletion`, `tags_links_stdin_follows_and_accounts`). Their fixtures
+now create real tag pages before publishing, then assert applied tags and filtering, retaining
+the normative rule that unknown tags never apply (social.md §13.3). All 13 CLI content tests pass.
+The independent review's live-replay and relay-candidate findings were corrected: actionable frames
+are retried until their effects are acknowledged before cursor advancement, candidate confirmation
+uses the core's discovery state, unchanged rejected hints become eligible after the 24-hour
+back-off, and persisted signed-membership recency drives the newcomer budget. Native and wasm
+social parity agrees in both namespaces; their M3 golden digests were re-recorded after the
+reviewed M4/M5 fold changes. Two deep forum-open/per-repository async chains are boxed to avoid
+small native test-stack overflows, with the original TUI e2e and dispatcher repros passing.
+GitHub Actions runs for the final integration commit are not yet verified; local acceptance logs
+live in `/home/wrath/.cache/lessdugin-orchestrator`. M5's production login and Safari/iOS checks
+remain **pending user run** (§8). M7 has not started.
+
 **Scope**
 - **Ingest:** the Jetstream wildcard from two endpoints, with a 10 s cursor rewind; a backfill every 6 h (relay `listReposByCollection` per NSID, then range listing); a daily reconcile; `--poll <pds>` mode for the devnet and air-gapped setups; per-host politeness; a `sync.getRecord` proof per live event, and lazily for backfilled records.
 - **XRPC, first pass:** `describeIndexer`, `listForums`, `listParticipants`, `getRepoHeads`, `getChanges`, `listPosts`, `listRecentDiscussion`, `getThread`, `getRecordProofs`. Reserved (P2): `searchPosts` (fts5), `listBacklinks`, `getActivity`, `getKarma`, `getTallies`, `getRecords`.

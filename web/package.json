@@ -15,7 +15,8 @@
     "test": "vitest run",
     "e2e": "pnpm run build:demo && PLAYWRIGHT_BROWSERS_PATH=${PLAYWRIGHT_BROWSERS_PATH:-/opt/pw-browsers} playwright test -c e2e/playwright.config.ts",
     "build:e2e": "VITE_E2E=1 vite build --outDir dist-e2e --emptyOutDir",
-    "e2e:devnet": "pnpm run build:e2e && PLAYWRIGHT_BROWSERS_PATH=${PLAYWRIGHT_BROWSERS_PATH:-/opt/pw-browsers} playwright test -c e2e/devnet/playwright.config.ts"
+    "e2e:devnet": "pnpm run build:e2e && PLAYWRIGHT_BROWSERS_PATH=${PLAYWRIGHT_BROWSERS_PATH:-/opt/pw-browsers} playwright test -c e2e/devnet/playwright.config.ts",
+    "e2e:cold-start": "bash ../scripts/m6-cold-start.sh"
   },
   "dependencies": {
     "@atproto/oauth-client-browser": "0.5.9",

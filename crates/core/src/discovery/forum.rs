@@ -880,7 +880,10 @@ impl<H: Host> Syncer<H> {
         // `sync_forum` is user-initiated: its passes refresh stale collection lists (§5.2)
         let jobs: Vec<SyncRequest> = jobs.iter().cloned().map(SyncRequest::explicit).collect();
         join_all(jobs.iter().map(|r| async move {
-            let report = self.sync_repo(s, r).await;
+            // A repository sync nests listing, request, admission and join futures. Do not inline
+            // that whole chain into every forum caller's future (small native test stacks).
+            let run: crate::host::HostFuture<'_, _> = Box::pin(self.sync_repo(s, r));
+            let report = run.await;
             let done = tally.done.fetch_add(1, Ordering::SeqCst) + 1;
             progress.report(done, tally.total.load(Ordering::SeqCst));
             report

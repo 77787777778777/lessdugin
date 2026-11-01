@@ -70,12 +70,14 @@ impl Store {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.execute_batch(SCHEMA)?;
+        migrate_candidates(&conn)?;
         Ok(Self(Arc::new(Mutex::new(conn))))
     }
 
     pub fn in_memory() -> rusqlite::Result<Self> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch(SCHEMA)?;
+        migrate_candidates(&conn)?;
         Ok(Self(Arc::new(Mutex::new(conn))))
     }
 
@@ -89,6 +91,67 @@ impl Store {
         self.db().execute(
             "INSERT INTO forums(uri,did,rkey,name,created_at,cid,synced_ms,input_digest) VALUES(?1,?2,?3,'','','',0,'') ON CONFLICT(uri) DO NOTHING",
             params![uri.to_string(), uri.did().as_str(), uri.rkey().as_str()],
+        )?;
+        Ok(())
+    }
+
+    /// Persist a relay membership hint, never a confirmed participant. Ordinary forum sync
+    /// checks the author's own signed membership before admitting the repository. A changed
+    /// membership CID is a new hint; a repeated listing does not reset rejection back-off.
+    pub fn add_candidate(
+        &self,
+        forum: &str,
+        did: &str,
+        cid: &str,
+        created_ms: i64,
+    ) -> rusqlite::Result<()> {
+        lessdugin_core::discovery::ForumKey::of_uri(
+            &AtUri::parse(forum)
+                .map_err(|e| rusqlite::Error::InvalidParameterName(e.to_string()))?,
+        )
+        .map_err(|e| rusqlite::Error::InvalidParameterName(e.to_string()))?;
+        lessdugin_atp::syntax::Did::parse(did)
+            .map_err(|e| rusqlite::Error::InvalidParameterName(e.to_string()))?;
+        self.db().execute(
+            "INSERT INTO forum_candidates(forum,did,cid,created_ms,state,observed_ms) VALUES(?1,?2,?3,?4,'pending',0) ON CONFLICT(forum,did) DO UPDATE SET cid=excluded.cid,created_ms=excluded.created_ms,state=CASE WHEN forum_candidates.state='rejected' AND forum_candidates.cid=excluded.cid THEN 'rejected' WHEN forum_candidates.cid<>excluded.cid OR forum_candidates.state='confirmed' THEN 'pending' ELSE forum_candidates.state END WHERE forum_candidates.cid<>excluded.cid OR forum_candidates.created_ms<excluded.created_ms OR forum_candidates.state='confirmed'",
+            params![forum, did, cid, created_ms],
+        )?;
+        Ok(())
+    }
+
+    /// At most 500 unconfirmed candidates, most recently declared first within this relay
+    /// enumeration source. Rejected hints join only after their 24-hour back-off.
+    pub fn candidates(&self, forum: &str, now_ms: i64) -> Vec<(String, String, i64)> {
+        let db = self.db();
+        let mut q = db
+            .prepare("SELECT did,cid,created_ms FROM forum_candidates WHERE forum=?1 AND (state='pending' OR (state='rejected' AND observed_ms<=?2)) ORDER BY created_ms DESC,did DESC LIMIT 500",
+            )
+            .unwrap();
+        q.query_map(
+            params![
+                forum,
+                now_ms - lessdugin_core::discovery::state::REJECTED_RECHECK_MS
+            ],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap()
+        .filter_map(Result::ok)
+        .collect()
+    }
+
+    pub fn set_candidate_state(
+        &self,
+        forum: &str,
+        did: &str,
+        state: &str,
+        now_ms: i64,
+    ) -> rusqlite::Result<()> {
+        if !matches!(state, "confirmed" | "rejected") {
+            return Err(rusqlite::Error::InvalidParameterName(state.into()));
+        }
+        self.db().execute(
+            "UPDATE forum_candidates SET state=?3,observed_ms=?4 WHERE forum=?1 AND did=?2",
+            params![forum, did, state, now_ms],
         )?;
         Ok(())
     }
@@ -141,6 +204,16 @@ impl Store {
     pub fn set_cursor(&self, source: &str, value: &str) -> rusqlite::Result<()> {
         self.db().execute("INSERT INTO cursors(name,value) VALUES(?1,?2) ON CONFLICT(name) DO UPDATE SET value=excluded.value", params![source,value])?;
         Ok(())
+    }
+
+    pub fn scheduled_at(&self, name: &str) -> Option<i64> {
+        self.db()
+            .query_row("SELECT value FROM schedule WHERE name=?1", [name], |r| {
+                r.get(0)
+            })
+            .optional()
+            .ok()
+            .flatten()
     }
 
     pub fn schedule_due(&self, name: &str, now_ms: i64) -> bool {
@@ -428,6 +501,31 @@ impl Store {
             .flatten()
     }
 
+    pub(crate) fn indexed_record_cids(&self, uri: &str) -> Vec<String> {
+        let db = self.db();
+        let mut q = db
+            .prepare("SELECT DISTINCT cid FROM record_state WHERE uri=?1")
+            .unwrap();
+        q.query_map([uri], |r| r.get(0))
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect()
+    }
+
+    /// The URI is an indexed projection and this CID belongs to one of its current snapshots.
+    /// Different forums may still hold different revisions. PDS-head currency is checked by the
+    /// client, not by choosing whichever forum happened to sync most recently (sync.md §8.6).
+    pub fn indexed_record_has_cid(&self, uri: &str, cid: &str) -> bool {
+        self.db()
+            .query_row(
+                "SELECT 1 FROM record_state WHERE uri=?1 AND cid=?2 LIMIT 1",
+                params![uri, cid],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()
+            .is_ok_and(|present| present.is_some())
+    }
+
     pub fn record_pds(&self, did: &str) -> Option<String> {
         self.db()
             .query_row("SELECT pds FROM repo_heads WHERE did=?1", [did], |r| {
@@ -439,7 +537,36 @@ impl Store {
     }
 }
 
+fn migrate_candidates(conn: &Connection) -> rusqlite::Result<()> {
+    let columns = conn
+        .prepare("PRAGMA table_info(forum_candidates)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    for (name, declaration) in [
+        ("cid", "TEXT NOT NULL DEFAULT ''"),
+        ("created_ms", "INTEGER NOT NULL DEFAULT 0"),
+        ("state", "TEXT NOT NULL DEFAULT 'pending'"),
+        ("observed_ms", "INTEGER NOT NULL DEFAULT 0"),
+    ] {
+        if !columns.iter().any(|column| column == name) {
+            conn.execute(
+                &format!("ALTER TABLE forum_candidates ADD COLUMN {name} {declaration}"),
+                [],
+            )?;
+        }
+    }
+    // Pre-migration hints must go through ordinary PDS confirmation once, not bypass it forever.
+    conn.execute(
+        "UPDATE forum_candidates SET state='confirmed' WHERE state='pending' AND EXISTS(SELECT 1 FROM participants WHERE participants.forum=forum_candidates.forum AND participants.did=forum_candidates.did)",
+        [],
+    )?;
+    Ok(())
+}
+
 const SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS forum_candidates(
+ forum TEXT NOT NULL,did TEXT NOT NULL,
+ PRIMARY KEY(forum,did));
 CREATE TABLE IF NOT EXISTS forums(
  uri TEXT PRIMARY KEY,did TEXT NOT NULL,rkey TEXT NOT NULL,name TEXT NOT NULL DEFAULT '',
  description TEXT,created_at TEXT NOT NULL DEFAULT '',cid TEXT NOT NULL DEFAULT '',
@@ -460,3 +587,134 @@ CREATE TABLE IF NOT EXISTS proof_cache(
 CREATE TABLE IF NOT EXISTS cursors(name TEXT PRIMARY KEY,value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS schedule(name TEXT PRIMARY KEY,value INTEGER NOT NULL);
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn candidate_hints_keep_recency_and_rejection_backoff() {
+        let store = Store::in_memory().unwrap();
+        let owner = lessdugin_atp::syntax::Did::parse("did:plc:abcdefghijklmnopqrstuvwx").unwrap();
+        let forum = lessdugin_core::discovery::ForumKey::new(&owner, "forum")
+            .unwrap()
+            .uri
+            .to_string();
+        let older = "did:plc:abcdefghijklmnopqrstuvwy";
+        let newer = "did:plc:abcdefghijklmnopqrstuvwz";
+        store.add_candidate(&forum, older, "old", 10).unwrap();
+        store.add_candidate(&forum, newer, "new", 20).unwrap();
+        assert_eq!(
+            store.candidates(&forum, 30),
+            vec![
+                (newer.into(), "new".into(), 20),
+                (older.into(), "old".into(), 10)
+            ]
+        );
+
+        store
+            .set_candidate_state(&forum, older, "rejected", 30)
+            .unwrap();
+        store.add_candidate(&forum, older, "old", 10).unwrap();
+        assert_eq!(
+            store.candidates(&forum, 31),
+            vec![(newer.into(), "new".into(), 20)]
+        );
+
+        // A changed signed membership is a new hint; repeated relay enumeration is not.
+        store
+            .add_candidate(&forum, older, "replacement", 11)
+            .unwrap();
+        assert!(
+            store
+                .candidates(&forum, 32)
+                .iter()
+                .any(|(d, _, _)| d == older)
+        );
+        store
+            .set_candidate_state(&forum, older, "rejected", 40)
+            .unwrap();
+        store
+            .add_candidate(&forum, older, "replacement", 999)
+            .unwrap();
+        assert_eq!(
+            store.candidates(&forum, 41),
+            vec![(newer.into(), "new".into(), 20)]
+        );
+
+        // An unchanged hint becomes eligible again after the normal rejected-candidate back-off.
+        let retry = 40 + lessdugin_core::discovery::state::REJECTED_RECHECK_MS;
+        assert!(
+            store.candidates(&forum, retry - 1).is_empty()
+                || store
+                    .candidates(&forum, retry - 1)
+                    .iter()
+                    .all(|(d, _, _)| d != older)
+        );
+        assert!(
+            store
+                .candidates(&forum, retry)
+                .iter()
+                .any(|(d, _, _)| d == older)
+        );
+        store
+            .set_candidate_state(&forum, newer, "confirmed", retry)
+            .unwrap();
+        assert!(
+            store
+                .candidates(&forum, retry)
+                .iter()
+                .all(|(d, _, _)| d != newer)
+        );
+
+        // Open-mode membership deletion can retain its CID when recreated. A relay sighting
+        // after confirmation is the signal to confirm the new membership again.
+        store.add_candidate(&forum, newer, "new", 20).unwrap();
+        assert!(
+            store
+                .candidates(&forum, retry + 1)
+                .contains(&(newer.into(), "new".into(), 20))
+        );
+    }
+
+    #[test]
+    fn proof_scope_accepts_any_current_projection_not_just_the_newest() {
+        let store = Store::in_memory().unwrap();
+        let record = "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/online.7778777.lessdugin.post/r";
+        for (forum, synced, cid) in [
+            (
+                "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/online.7778777.lessdugin.forum/old",
+                10,
+                "old",
+            ),
+            (
+                "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/online.7778777.lessdugin.forum/new",
+                20,
+                "new",
+            ),
+        ] {
+            store.add_forum_seed(forum).unwrap();
+            store
+                .db()
+                .execute(
+                    "UPDATE forums SET synced_ms=?2 WHERE uri=?1",
+                    params![forum, synced],
+                )
+                .unwrap();
+            store
+                .db()
+                .execute(
+                    "INSERT INTO record_state(forum,uri,cid) VALUES(?1,?2,?3)",
+                    params![forum, record, cid],
+                )
+                .unwrap();
+        }
+        let cids = store.indexed_record_cids(record);
+        assert!(cids.contains(&"old".to_owned()));
+        assert!(cids.contains(&"new".to_owned()));
+        assert!(!cids.contains(&"forged".to_owned()));
+        assert!(store.indexed_record_has_cid(record, "old"));
+        assert!(store.indexed_record_has_cid(record, "new"));
+        assert!(!store.indexed_record_has_cid(record, "forged"));
+    }
+}

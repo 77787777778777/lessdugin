@@ -18,9 +18,9 @@ use lessdugin_core::sync::{Priority, Stats};
 use lessdugin_core::xrpc::{CallOpts, Service};
 use tracing::{info, warn};
 
+use crate::Indexer;
 use crate::proofs;
 use crate::store::HeadRow;
-use crate::{Indexer, NS};
 
 pub fn spawn(indexer: Indexer) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -31,15 +31,14 @@ pub fn spawn(indexer: Indexer) -> tokio::task::JoinHandle<()> {
             interval.tick().await;
             let now = indexer.now_ms();
             let backfill = indexer.store.schedule_due("backfill", now);
+            let mut discovery = Ok(());
             if backfill {
-                if let Err(e) = discover(&indexer).await {
+                discovery = discover(&indexer).await;
+                if let Err(e) = &discovery {
                     warn!(error=%e,"declaration backfill discovery failed");
                 }
-                indexer
-                    .store
-                    .schedule_next("backfill", now.saturating_add(6 * 60 * 60 * 1000))
-                    .ok();
             }
+            let mut synced = true;
             if backfill || indexer.config.poll.is_some() {
                 let forums = indexer.store.forum_seeds();
                 for forum in forums {
@@ -47,10 +46,24 @@ pub fn spawn(indexer: Indexer) -> tokio::task::JoinHandle<()> {
                         continue;
                     }
                     if let Err(e) = sync_forum(&indexer, &forum).await {
+                        synced = false;
                         indexer.metrics.sync_errors.fetch_add(1, Ordering::Relaxed);
                         warn!(forum=%forum,error=%e,"forum sync failed");
                     }
                 }
+            }
+            if backfill {
+                indexer
+                    .store
+                    .schedule_next(
+                        "backfill",
+                        now.saturating_add(if discovery.is_ok() && synced {
+                            6 * 60 * 60 * 1000
+                        } else {
+                            60 * 1000
+                        }),
+                    )
+                    .ok();
             }
             if indexer.store.schedule_due("reconcile", now) {
                 reconcile(&indexer).await;
@@ -121,10 +134,85 @@ pub async fn sync_forum(indexer: &Indexer, forum: &str) -> anyhow::Result<()> {
     let _one = indexer.sync_lock.lock().await;
     let uri = AtUri::parse(forum)?;
     let key = ForumKey::of_uri(&uri)?;
+    let pending = indexer.store.candidates(forum, indexer.now_ms());
+    let mut confirmations = BTreeMap::new();
+    for (did, cid, _) in &pending {
+        let membership = lessdugin_lexicon::keys::membership_rkey(key.fk.as_str())?;
+        let at = AtUri::parse(&format!(
+            "at://{did}/{}/{membership}",
+            lessdugin_lexicon::nsid::MEMBERSHIP
+        ))?;
+        confirmations.insert(did.clone(), (at, cid.clone()));
+    }
+    // Preserve the durable relay enumeration order, including for authors whose membership has
+    // never been cached locally. Do not reconstruct recency from the cache.
+    let newcomers = pending
+        .into_iter()
+        .map(|(did, _, _)| (did, "relay".to_owned()))
+        .collect();
     indexer
         .engine
-        .sync_forum(forum, &SyncOpts::default())
+        .sync_forum(
+            forum,
+            &SyncOpts {
+                newcomers,
+                background: true,
+                ..SyncOpts::default()
+            },
+        )
         .await?;
+    let decl = RecordStore::new(indexer.engine.host().cache())
+        .get(&uri)
+        .await?
+        .and_then(|row| row.value_json().ok())
+        .and_then(|value| {
+            lessdugin_lexicon::records::Record::from_nsid_value(
+                lessdugin_lexicon::nsid::FORUM,
+                value,
+            )
+        })
+        .and_then(|record| match record {
+            Ok(lessdugin_lexicon::records::Record::Forum(decl)) => Some(decl),
+            _ => None,
+        })
+        .ok_or_else(|| anyhow::anyhow!("synced forum declaration is missing"))?;
+    let state = lessdugin_core::discovery::ForumState::load(
+        indexer.engine.host().cache(),
+        &key,
+        &decl,
+        indexer.now_ms().saturating_mul(1000),
+    )
+    .await?;
+    for (did, (at, expected_cid)) in confirmations {
+        let state_name = if matches!(
+            state.disc.get(&did).map(|d| &d.state),
+            Some(lessdugin_core::discovery::DiscState::Confirmed)
+        ) {
+            Some("confirmed")
+        } else if matches!(
+            state.disc.get(&did).map(|d| &d.state),
+            Some(lessdugin_core::discovery::DiscState::Rejected)
+        ) {
+            Some("rejected")
+        } else {
+            None
+        };
+        if let Some(name) = state_name {
+            let current = RecordStore::new(indexer.engine.host().cache())
+                .get(&at)
+                .await?;
+            // A confirmed membership absence cannot be matched to a relay CID. The PDS check
+            // above is authoritative; never cache a superseded membership CID as the rejection.
+            if name == "confirmed"
+                || current.is_none()
+                || current.is_some_and(|row| row.cid.to_string() == expected_cid)
+            {
+                indexer
+                    .store
+                    .set_candidate_state(forum, &did, name, indexer.now_ms())?;
+            }
+        }
+    }
     let now_us = indexer.now_ms().saturating_mul(1000);
     let model = ForumModel::build(indexer.engine.host().cache(), &key, now_us).await?;
     let store = RecordStore::new(indexer.engine.host().cache());
@@ -188,14 +276,20 @@ pub async fn sync_forum(indexer: &Indexer, forum: &str) -> anyhow::Result<()> {
         .metrics
         .changes_written
         .fetch_add(changes as u64, Ordering::Relaxed);
-    // Backfill proofs are lazy with respect to HTTP queries but fetched asynchronously after a
-    // changed snapshot. Live ingest fetches the event's proof before acknowledging its cursor.
+    // Backfill proofs are lazy: a query may fetch them on demand. Refresh at most two bundles
+    // after a changed snapshot so a large forum does not synchronously hydrate its whole history.
     if changes > 0 {
         let mut proof_uris = vec![model.key.uri.to_string()];
-        proof_uris.extend(model.input.records.keys().take(99).cloned());
+        proof_uris.extend(model.input.records.keys().take(49).cloned());
         for uri in proof_uris {
-            if indexer.store.proof(&uri).is_none() {
-                let _ = proofs::fetch(indexer, &uri).await;
+            let stale = indexer.store.proof(&uri).is_none_or(|proof| {
+                proof
+                    .cid
+                    .as_deref()
+                    .is_none_or(|cid| !indexer.store.indexed_record_has_cid(&uri, cid))
+            });
+            if stale && let Err(e) = proofs::fetch(indexer, &uri).await {
+                warn!(uri=%uri,error=%e,"background proof fetch failed");
             }
         }
     }
@@ -203,45 +297,60 @@ pub async fn sync_forum(indexer: &Indexer, forum: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn discover(indexer: &Indexer) -> anyhow::Result<()> {
+pub async fn discover(indexer: &Indexer) -> anyhow::Result<()> {
+    let mut failures = Vec::new();
     let relays = indexer.config.relays.clone();
     for relay in relays {
-        let mut cursor = None;
-        for _ in 0..1000 {
-            let params = ListReposByCollection {
-                collection: Nsid::parse(&format!("{NS}.forum"))?,
-                limit: Some(500),
-                cursor: cursor.clone(),
-            };
-            let page = indexer
-                .engine
-                .xrpc()
-                .query_endpoint(&Service::Anon(relay.clone()), &params, &CallOpts::default())
-                .await?;
-            for repo in page.repos {
-                let Some(did) = repo.did else {
-                    continue;
+        for collection in [
+            lessdugin_lexicon::nsid::FORUM,
+            lessdugin_lexicon::nsid::MEMBERSHIP,
+        ] {
+            let mut cursor = None;
+            for _ in 0..1000 {
+                let params = ListReposByCollection {
+                    collection: Nsid::parse(collection)?,
+                    limit: Some(500),
+                    cursor: cursor.clone(),
                 };
-                let Ok(did) = Did::parse(&did) else {
-                    continue;
-                };
-                if indexer.blocked(did.as_str()) {
-                    continue;
+                let page = indexer
+                    .engine
+                    .xrpc()
+                    .query_endpoint(&Service::Anon(relay.clone()), &params, &CallOpts::default())
+                    .await?;
+                for repo in page.repos {
+                    let Some(did) = repo.did else {
+                        continue;
+                    };
+                    let Ok(did) = Did::parse(&did) else {
+                        continue;
+                    };
+                    if indexer.blocked(did.as_str()) {
+                        continue;
+                    }
+                    if let Err(e) = records_of(indexer, &did, collection).await {
+                        warn!(did=%did,collection,error=%e,"backfill record listing failed");
+                        failures.push(format!("{did}/{collection}: {e}"));
+                    }
                 }
-                if let Err(e) = declarations_of(indexer, &did).await {
-                    warn!(did=%did,error=%e,"declaration listing failed");
+                match page.cursor {
+                    Some(next) if Some(&next) != cursor.as_ref() => cursor = Some(next),
+                    _ => break,
                 }
-            }
-            match page.cursor {
-                Some(next) if Some(&next) != cursor.as_ref() => cursor = Some(next),
-                _ => break,
             }
         }
     }
-    Ok(())
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!(
+            "{} repository discovery passes failed: {}",
+            failures.len(),
+            failures.join("; ")
+        ))
+    }
 }
 
-async fn declarations_of(indexer: &Indexer, did: &Did) -> anyhow::Result<()> {
+async fn records_of(indexer: &Indexer, did: &Did, collection: &str) -> anyhow::Result<()> {
     let ident = indexer.engine.resolver().resolve_did_fresh(did, 0).await?;
     let Some(pds) = ident.pds_url() else {
         return Ok(());
@@ -250,7 +359,7 @@ async fn declarations_of(indexer: &Indexer, did: &Did) -> anyhow::Result<()> {
     for _ in 0..100 {
         let params = ListRecords {
             repo: AtIdentifier::Did(did.clone()),
-            collection: Nsid::parse(&format!("{NS}.forum"))?,
+            collection: Nsid::parse(collection)?,
             limit: Some(100),
             cursor: cursor.clone(),
             reverse: None,
@@ -261,10 +370,51 @@ async fn declarations_of(indexer: &Indexer, did: &Did) -> anyhow::Result<()> {
             .query_endpoint(&Service::Anon(pds.clone()), &params, &CallOpts::default())
             .await?;
         for record in page.records {
-            if let Some(uri) = record.uri
-                && AtUri::parse(&uri).is_ok()
+            let (Some(uri), Some(cid), Some(value)) = (record.uri, record.cid, record.value) else {
+                continue;
+            };
+            if cid.is_empty() {
+                continue;
+            }
+            let Ok(uri) = AtUri::parse(&uri) else {
+                continue;
+            };
+            if uri.did() != did
+                || uri.collection().as_str() != collection
+                || indexer.blocked(uri.as_str())
+                || lessdugin_lexicon::validity::check_uri(&uri, &value)
+                    .first_rule()
+                    .is_some()
             {
-                indexer.store.add_forum_seed(&uri)?;
+                continue;
+            }
+            let forum = if collection == lessdugin_lexicon::nsid::FORUM {
+                Some(uri)
+            } else {
+                match lessdugin_lexicon::records::Record::from_nsid_value(collection, value.clone())
+                {
+                    Some(Ok(lessdugin_lexicon::records::Record::Membership(m))) => Some(m.forum),
+                    _ => None,
+                }
+            };
+            if let Some(forum) = forum
+                && !indexer.blocked(forum.as_str())
+            {
+                indexer.store.add_forum_seed(forum.as_str())?;
+                if collection == lessdugin_lexicon::nsid::MEMBERSHIP {
+                    let created_ms =
+                        lessdugin_lexicon::records::Record::from_nsid_value(collection, value)
+                            .and_then(|r| match r {
+                                Ok(lessdugin_lexicon::records::Record::Membership(m)) => {
+                                    Some(m.created_at.timestamp_micros().div_euclid(1000))
+                                }
+                                _ => None,
+                            })
+                            .unwrap_or(0);
+                    indexer
+                        .store
+                        .add_candidate(forum.as_str(), did.as_str(), &cid, created_ms)?;
+                }
             }
         }
         match page.cursor {

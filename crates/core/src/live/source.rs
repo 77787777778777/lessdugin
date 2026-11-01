@@ -407,6 +407,7 @@ impl<H: Host> LiveSource<H> {
             return Ok(());
         };
         self.commit_frame(&frame).await?;
+        self.filter.acknowledge();
         self.unacked = None;
         Ok(())
     }

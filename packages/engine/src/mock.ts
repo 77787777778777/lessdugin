@@ -1356,10 +1356,12 @@ export class MockEngine implements EngineApi {
         retryable: false,
       } satisfies EngineError;
     }
+    const selected = eligible[0];
+    if (!selected) throw new Error("eligible indexer invariant");
     return {
       forum: uri,
-      indexer: eligible[0]!.did ?? "did:web:indexer.example.com",
-      endpoint: eligible[0]!.url,
+      indexer: selected.did ?? "did:web:indexer.example.com",
+      endpoint: selected.url,
       checks: [],
       counts: { checked: 0, contradictions: 0, omissions: 0, lag: 0 },
     };

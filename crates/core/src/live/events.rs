@@ -242,6 +242,7 @@ pub struct FilterOutput {
 #[derive(Clone, Debug, Default)]
 pub struct EventFilter {
     dedup: Dedup,
+    pending: Option<(Wire, String, Event, FilterOutput, Context)>,
 }
 
 impl EventFilter {
@@ -249,6 +250,7 @@ impl EventFilter {
     pub fn with_dedup_capacity(capacity: usize) -> Self {
         Self {
             dedup: Dedup::new(capacity),
+            pending: None,
         }
     }
 
@@ -268,11 +270,16 @@ impl EventFilter {
             }),
             ..FilterOutput::default()
         };
+        if self.pending.is_some() {
+            return FilterOutput::default();
+        }
+        let original = e.clone();
         if let EventKind::Info(info) = e.kind {
             out.cursor = None;
             out.restart_cursor = true;
             if info == InfoKind::OutdatedCursor {
                 out.actions.push(Action::Reconcile(Gap::OutdatedCursor));
+                self.pending = Some((wire, instance.to_owned(), original, out.clone(), cx.clone()));
             }
             return out;
         }
@@ -379,6 +386,41 @@ impl EventFilter {
             }
             EventKind::Info(_) => unreachable!("info returned above"),
         }
+        if !out.actions.is_empty() {
+            self.pending = Some((wire, instance.to_owned(), original, out.clone(), cx.clone()));
+        }
         out
+    }
+
+    /// Retries the one actionable frame whose effects have not all completed. A duplicate wire
+    /// delivery of it is held back until this explicit acknowledgement, never discarded by LRU.
+    pub fn retry(&mut self) -> Option<(Wire, String, Event, Context, FilterOutput)> {
+        let (wire, instance, event, out, cx) = self.pending.clone()?;
+        Some((wire, instance, event, cx, out))
+    }
+
+    /// Marks every action of the pending frame applied, only for the consumer that produced it.
+    /// Returns false for another endpoint's acknowledgement attempt.
+    pub fn acknowledge_for(&mut self, wire: Wire, instance: &str) -> bool {
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|(w, i, ..)| *w == wire && i == instance)
+        {
+            self.pending = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Marks every action of the pending frame applied, permitting its cursor to advance.
+    pub fn acknowledge(&mut self) {
+        self.pending = None;
+    }
+
+    /// A failed frame must not allow a later frame to leapfrog its durable cursor.
+    pub fn has_pending(&self) -> bool {
+        self.pending.is_some()
     }
 }

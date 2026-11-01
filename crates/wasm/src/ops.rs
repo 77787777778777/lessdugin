@@ -467,8 +467,16 @@ pub async fn call<H: Host>(engine: &Engine<H>, op: &str, a: &str) -> Result<Stri
             let (q,): (ListPostsQuery,) = args(op, a)?;
             // A visible cold page may use proof-backed indexer hydration. This is a no-op in
             // direct mode and on hosts without consent; local DTOs remain the only view source.
-            let _ = engine.hydrate_indexer_page(&q).await;
-            out(&engine.list_posts(&q).await?)
+            out(&engine
+                .list_posts_page(
+                    &q,
+                    &SyncOpts {
+                        budget_ms: Some(8_000),
+                        max_requests: Some(400),
+                        full: false,
+                    },
+                )
+                .await?)
         }
         "recentDiscussion" => {
             let (forum, cursor, limit): (String, Option<String>, Option<u32>) = args(op, a)?;

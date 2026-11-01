@@ -92,6 +92,10 @@ pub async fn bundle(indexer: &Indexer, uris: &[String]) -> anyhow::Result<Vec<u8
     let mut items = Vec::new();
     let mut blocks: BTreeMap<Cid, Vec<u8>> = BTreeMap::new();
     for uri in uris.iter().take(25) {
+        let indexed_cids = indexer.store.indexed_record_cids(uri);
+        if indexed_cids.is_empty() {
+            continue;
+        }
         if indexer.blocked(uri)
             || AtUri::parse(uri).ok().is_some_and(|u| {
                 indexer
@@ -102,7 +106,11 @@ pub async fn bundle(indexer: &Indexer, uris: &[String]) -> anyhow::Result<Vec<u8
         {
             continue;
         }
-        let row = match indexer.store.proof(uri) {
+        let row = match indexer.store.proof(uri).filter(|row| {
+            row.cid
+                .as_ref()
+                .is_some_and(|cid| indexed_cids.contains(cid))
+        }) {
             Some(row) => row,
             None => match fetch(indexer, uri).await {
                 Ok(row) => row,
@@ -110,6 +118,15 @@ pub async fn bundle(indexer: &Indexer, uris: &[String]) -> anyhow::Result<Vec<u8
             },
         };
         if row.cid.as_deref().is_some_and(|cid| indexer.blocked(cid)) {
+            continue;
+        }
+        // The repository may have moved while the proof was fetched. Keep a proof that still
+        // belongs to any current forum projection; the client applies PDS-head currency itself.
+        if !row
+            .cid
+            .as_ref()
+            .is_some_and(|cid| indexed_cids.contains(cid))
+        {
             continue;
         }
         let car = match read_car(&row.car, &CarLimits::PROOF) {

@@ -104,13 +104,58 @@ fn root_of(value: &Value) -> Option<AtUri> {
 }
 
 impl<H: Host> Engine<H> {
+    /// Reads a post page locally after optional proof hydration. If hydration fails before any
+    /// forum discovery has completed, a cold page converges through one bounded ordinary PDS
+    /// sync. Cursor pages and already-discovered forums never trigger this fallback.
+    pub async fn list_posts_page(
+        &self,
+        query: &dto::ListPostsQuery,
+        fallback_sync: &dto::SyncOpts,
+    ) -> Result<dto::PostList, EngineError> {
+        if query.cursor.is_none() {
+            match self.hydrate_indexer_page(query).await {
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    self.cold_page_sync(query, fallback_sync, "no usable indexer")
+                        .await?;
+                }
+                Err(error) => {
+                    self.cold_page_sync(query, fallback_sync, &error.to_string())
+                        .await?;
+                }
+            }
+        }
+        self.list_posts(query).await
+    }
+
+    async fn cold_page_sync(
+        &self,
+        query: &dto::ListPostsQuery,
+        fallback_sync: &dto::SyncOpts,
+        reason: &str,
+    ) -> Result<(), EngineError> {
+        let key = self.forum_key(&query.forum).await?;
+        if discovery::state::discovery_complete(self.host.cache(), &key.fk)
+            .await
+            .map_err(store_error)?
+        {
+            return Ok(());
+        }
+        let _flight = self.rt.cold_sync.lock().await;
+        if !discovery::state::discovery_complete(self.host.cache(), &key.fk)
+            .await
+            .map_err(store_error)?
+            && let Err(sync_error) = self.sync_forum(&query.forum, fallback_sync).await
+        {
+            tracing::debug!(%reason, %sync_error, "cold indexer and PDS sync failed");
+        }
+        Ok(())
+    }
+
     /// `sync_forum(uri, SyncOpts)` (`engine-api.md` §3.3): opens the forum and syncs its
     /// authorities and confirmed participants in the order of `sync.md` §4.5. Emits
     /// `SyncProgress` as repos finish (see the module docs) and `Changed [Forum]`; the forum's
     /// authorities are queued for handle verification.
-    // In wasm the runtime is not `Send` (callbacks are `MaybeSendSync`); the core is
-    // single-threaded there.
-    #[allow(clippy::arc_with_non_send_sync)]
     pub async fn sync_forum(
         &self,
         forum: &str,
@@ -144,7 +189,9 @@ impl<H: Host> Engine<H> {
         mut opts: discovery::SyncOpts,
     ) -> Result<SyncReport, EngineError> {
         let f = key.uri.to_string();
-        // progress, chained after the caller's own callback
+        // progress, chained after the caller's own callback. Runtime contains non-Send browser
+        // caches; the Progress callback is intentionally confined to this engine's local executor.
+        #[allow(clippy::arc_with_non_send_sync)]
         let progress = Arc::new(ForumProgress {
             rt: Arc::clone(&self.rt),
             forum: f.clone(),

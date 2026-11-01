@@ -24,7 +24,12 @@ lessdugin-indexer \
 Use the ordinary native `config.toml` in the data directory for PLC/devnet settings. Repeat
 `--forum <at-uri>` to seed declarations directly. `--poll <pds-url>` enables the durable polling
 loop (`--poll-interval-ms`, default 5000; 250 ms is useful for a loopback devnet). Poll mode is
-particularly useful without a relay or Jetstream. Relay declaration backfill runs every six hours.
+particularly useful without a relay or Jetstream. Relay backfill runs every six hours, scanning
+forum declarations and membership records. A membership is only a forum-discovery hint; normal
+sync must still admit it before that author becomes a participant. Durable candidate rows retain
+those hints across restarts; they never become participant rows without PDS confirmation. A
+failed discovery or forum sync retries after one minute instead of waiting for the next six-hour
+pass.
 Daily reconcile makes one `getLatestCommit` head check per unique indexed owner/participant DID and
 refreshes only forums containing a repo whose head moved; an individual head failure is logged and
 does not stop checks of other repos. Two configured Jetstream endpoints are consumed concurrently
@@ -73,7 +78,12 @@ M6.
 
 `crates/indexer/Dockerfile` is a multi-stage build whose runtime is distroless `cc-debian12` and
 whose user is non-root. Build it with the repository root as context and mount persistent storage
-at `/data`. No image is published by this milestone.
+at `/data`. Pass `SOURCE_URL` as a build argument so `/` links to the exact corresponding source.
+
+`.github/workflows/indexer.yml` builds and smoke-tests the image without publishing on ordinary
+branch pushes. An explicit workflow dispatch publishes `ghcr.io/<owner>/lessdugin-indexer:sha-<full
+commit>`; a push to the default branch also publishes `latest`. This is the M6 image pipeline,
+not the M7 release workflow. The workflow has only `contents: read` and `packages: write`.
 
 ## Checks
 

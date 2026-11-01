@@ -3130,6 +3130,7 @@ dependencies = [
  "lessdugin-lexicon",
  "lessdugin-native",
  "lessdugin-testkit",
+ "reqwest",
  "rusqlite",
  "serde",
  "serde_json",

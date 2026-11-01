@@ -41,7 +41,7 @@ struct Args {
     jetstream: Vec<Url>,
     #[arg(long)]
     blocklist: Option<PathBuf>,
-    #[arg(long, default_value = "https://github.com/lessdugin/lessdugin")]
+    #[arg(long, default_value = option_env!("LESSDUGIN_INDEXER_SOURCE_URL").unwrap_or("https://github.com/lessdugin/lessdugin"))]
     source_url: String,
 }
 

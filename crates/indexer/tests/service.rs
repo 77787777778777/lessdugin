@@ -12,7 +12,8 @@ use axum::http::{Request, StatusCode, header};
 use axum::response::IntoResponse;
 use lessdugin_atp::proof::ProofBundle;
 use lessdugin_atp::syntax::Datetime;
-use lessdugin_core::discovery::ForumKey;
+use lessdugin_core::discovery::{ForumKey, SyncOpts};
+use lessdugin_core::host::Host;
 use lessdugin_indexer::host::PoliteHost;
 use lessdugin_indexer::store::Store;
 use lessdugin_indexer::{Indexer, IndexerConfig, NS, ingest, proofs};
@@ -47,6 +48,13 @@ impl Fixture {
                 pds: owner.pds().url(),
                 jetstream: None,
             }),
+            // Loopback relay endpoints used only by discovery tests. Production endpoint policy
+            // is unchanged and still rejects plain HTTP.
+            relays: net
+                .relays()
+                .into_iter()
+                .map(|r| Url::parse(&r).unwrap())
+                .collect(),
             ..Config::default()
         };
         let host = NativeHost::open(&paths, &config).unwrap();
@@ -127,6 +135,135 @@ impl Fixture {
             headers,
         )
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn open_mode_newcomer_confirmation_clears_the_durable_hint() {
+    let fixture = Fixture::new().await;
+    let accepted = fixture.owner.pds().add_account("accepted.test");
+    let rkey = keys::membership_rkey(fixture.forum.uri.as_str()).unwrap();
+    let at = Datetime::from_millis(fixture.net.now_ms() - 3_600_000).unwrap();
+    let cid = accepted.put(
+        nsid::MEMBERSHIP,
+        &rkey,
+        &serde_json::to_value(Membership::new(fixture.forum.uri.clone(), at)).unwrap(),
+    );
+    fixture
+        .indexer
+        .store
+        .add_candidate(
+            fixture.forum.uri.as_str(),
+            accepted.did().as_str(),
+            &cid.to_string(),
+            10,
+        )
+        .unwrap();
+    ingest::sync_forum(&fixture.indexer, fixture.forum.uri.as_str())
+        .await
+        .unwrap();
+    assert!(
+        fixture
+            .indexer
+            .store
+            .candidates(fixture.forum.uri.as_str(), fixture.indexer.now_ms(),)
+            .is_empty()
+    );
+    assert!(
+        fixture
+            .indexer
+            .store
+            .participants(fixture.forum.uri.as_str(), None,)
+            .iter()
+            .any(|p| p.did == accepted.did().as_str())
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rejected_relay_hint_does_not_block_a_new_member() {
+    let fixture = Fixture::new().await;
+    let rejected = fixture.owner.pds().add_account("rejected.test");
+    let accepted = fixture.owner.pds().add_account("accepted.test");
+    let at = Datetime::from_millis(fixture.net.now_ms() - 3_600_000).unwrap();
+    let rkey = keys::membership_rkey(fixture.forum.uri.as_str()).unwrap();
+    // The relay may advertise a CID before the PDS can supply its membership. A missing
+    // membership is a definitive rejection; the PDS's own record CID is not invented here.
+    let cid = accepted.put(
+        nsid::MEMBERSHIP,
+        &rkey,
+        &serde_json::to_value(Membership::new(fixture.forum.uri.clone(), at.clone())).unwrap(),
+    );
+    fixture
+        .indexer
+        .store
+        .add_candidate(
+            fixture.forum.uri.as_str(),
+            rejected.did().as_str(),
+            &cid.to_string(),
+            10,
+        )
+        .unwrap();
+    ingest::sync_forum(&fixture.indexer, fixture.forum.uri.as_str())
+        .await
+        .unwrap();
+    assert!(
+        fixture
+            .indexer
+            .store
+            .candidates(fixture.forum.uri.as_str(), fixture.indexer.now_ms())
+            .is_empty()
+    );
+
+    accepted.put(
+        nsid::MEMBERSHIP,
+        &rkey,
+        &serde_json::to_value(Membership::new(fixture.forum.uri.clone(), at)).unwrap(),
+    );
+    fixture
+        .indexer
+        .engine
+        .sync_forum(
+            fixture.forum.uri.as_str(),
+            &SyncOpts {
+                newcomers: vec![(accepted.did().to_string(), "relay".into())],
+                background: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    ingest::sync_forum(&fixture.indexer, fixture.forum.uri.as_str())
+        .await
+        .unwrap();
+    let membership =
+        lessdugin_core::store::records::RecordStore::new(fixture.indexer.engine.host().cache())
+            .get(
+                &lessdugin_atp::syntax::AtUri::parse(&format!(
+                    "at://{}/{}/{rkey}",
+                    accepted.did(),
+                    nsid::MEMBERSHIP
+                ))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+    assert!(membership.is_some_and(|row| row.valid));
+    fixture
+        .indexer
+        .store
+        .add_candidate(
+            fixture.forum.uri.as_str(),
+            rejected.did().as_str(),
+            &cid.to_string(),
+            10,
+        )
+        .unwrap();
+    assert!(
+        fixture
+            .indexer
+            .store
+            .candidates(fixture.forum.uri.as_str(), fixture.indexer.now_ms())
+            .is_empty()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -247,6 +384,83 @@ async fn native_devnet_all_first_pass_methods_and_restart() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_backfill_sync_retries_within_one_minute() {
+    let fixture = Fixture::new().await;
+    let missing = fixture.forum.uri.as_str().replace("/m6", "/missing");
+    fixture.indexer.store.add_forum_seed(&missing).unwrap();
+    let task = ingest::spawn(fixture.indexer.clone());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let failed = fixture.indexer.metrics.sync_errors.load(Ordering::Relaxed) > 0;
+        if failed
+            && !fixture
+                .indexer
+                .store
+                .schedule_due("backfill", fixture.indexer.now_ms())
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline, "backfill did not run");
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let retry = fixture.indexer.store.scheduled_at("backfill").unwrap();
+    assert!(
+        retry <= fixture.indexer.now_ms() + 60_001,
+        "failed discovery/sync scheduled {retry} at {}, errors={}",
+        fixture.indexer.now_ms(),
+        fixture.indexer.metrics.sync_errors.load(Ordering::Relaxed),
+    );
+    task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn failed_repository_discovery_is_not_a_successful_backfill() {
+    let net = FakeNet::serve_http(SystemClock);
+    let pds = net.default_pds();
+    let owner = pds.add_account("owner.test");
+    let forum = ForumKey::new(owner.did(), "m6").unwrap();
+    let declaration = Forum::create(
+        "M6",
+        Datetime::from_millis(net.now_ms() - 3_600_000).unwrap(),
+        MembershipMode::Open,
+    );
+    owner.put(
+        nsid::FORUM,
+        "m6",
+        &serde_json::to_value(declaration).unwrap(),
+    );
+    let mut fixture = Fixture::at(&TempDir::new().unwrap().keep(), net, owner, forum).await;
+    let member = fixture.owner.pds().add_account("failed-member.test");
+    let membership = Membership::new(
+        fixture.forum.uri.clone(),
+        Datetime::from_millis(fixture.net.now_ms() - 3_600_000).unwrap(),
+    );
+    member.put(
+        nsid::MEMBERSHIP,
+        &fixture.forum.fk,
+        &serde_json::to_value(membership).unwrap(),
+    );
+    Arc::get_mut(&mut fixture.indexer.config).unwrap().relays = fixture
+        .net
+        .relays()
+        .into_iter()
+        .map(|r| Url::parse(&r).unwrap())
+        .collect();
+    fixture.net.inject(
+        lessdugin_testkit::fake_pds::Fault::status(500)
+            .on_repo(member.did().as_str())
+            .on_nsid("com.atproto.repo.listRecords"),
+    );
+    let error = ingest::discover(&fixture.indexer).await.unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("repository discovery passes failed"),
+        "{error}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn durable_poll_converges_within_five_seconds() {
     let fixture = Fixture::new().await;
     let post = fixture.post("Polled");
@@ -272,6 +486,83 @@ async fn durable_poll_converges_within_five_seconds() {
     let seq = fixture.indexer.store.latest_seq();
     let again = Store::open(&fixture.dir.join("state.sqlite")).unwrap();
     assert_eq!(again.latest_seq(), seq);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn backfill_follows_membership_hints_and_pages_every_record() {
+    let net = FakeNet::serve_http(SystemClock);
+    let pds = net.default_pds();
+    let owner = pds.add_account("owner.test");
+    let forum = ForumKey::new(owner.did(), "m6").unwrap();
+    let f = Forum::create(
+        "M6",
+        Datetime::from_millis(net.now_ms() - 3_600_000).unwrap(),
+        MembershipMode::Open,
+    );
+    let declaration = serde_json::to_value(f).unwrap();
+    owner.put(nsid::FORUM, "m6", &declaration);
+    let membership = Membership::new(
+        forum.uri.clone(),
+        Datetime::from_millis(net.now_ms() - 3_600_000).unwrap(),
+    );
+    owner.put(
+        nsid::MEMBERSHIP,
+        &forum.fk,
+        &serde_json::to_value(membership).unwrap(),
+    );
+
+    // 101 distinct memberships force a second PDS page. No declaration scan can find the forum
+    // from these repositories, so this also tests discovery through membership records.
+    for n in 0..101 {
+        let member = pds.add_account(&format!("member-{n}.test"));
+        let m = Membership::new(
+            forum.uri.clone(),
+            Datetime::from_millis(net.now_ms() - 3_600_000).unwrap(),
+        );
+        member.put(
+            nsid::MEMBERSHIP,
+            &forum.fk,
+            &serde_json::to_value(m).unwrap(),
+        );
+    }
+    let mut candidate =
+        Fixture::at(&TempDir::new().unwrap().keep(), net, owner, forum.clone()).await;
+    let relays = candidate
+        .net
+        .relays()
+        .into_iter()
+        .map(|r| Url::parse(&r).unwrap())
+        .collect::<Vec<_>>();
+    Arc::get_mut(&mut candidate.indexer.config).unwrap().relays = relays;
+    ingest::discover(&candidate.indexer).await.unwrap();
+    assert!(
+        candidate
+            .indexer
+            .store
+            .forum_seeds()
+            .contains(&forum.uri.to_string())
+    );
+    let membership_pages = candidate
+        .net
+        .requests_for("com.atproto.repo.listRecords")
+        .into_iter()
+        .filter(|r| r.url.contains("membership"))
+        .count();
+    assert!(
+        membership_pages >= 102,
+        "only one PDS page was read: {membership_pages}"
+    );
+    ingest::sync_forum(&candidate.indexer, forum.uri.as_str())
+        .await
+        .unwrap();
+    assert_eq!(
+        candidate
+            .indexer
+            .store
+            .participants(forum.uri.as_str(), None)
+            .len(),
+        102
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -325,6 +616,35 @@ async fn daily_reconcile_checks_moved_heads_and_indexes_new_records() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn public_rate_limit_uses_the_tcp_peer_not_forwarding_headers() {
+    let fixture = Fixture::new().await;
+    let endpoint = serve(&fixture.indexer).await.0;
+    let client = reqwest::Client::new();
+    let url = format!("{endpoint}xrpc/{NS}.index.describeIndexer");
+    let mut limited = false;
+    for _ in 0..21 {
+        let response = client
+            .get(&url)
+            // A hostile client cannot choose another quota bucket with forwarding headers.
+            .header("x-forwarded-for", "203.0.113.99")
+            .header("forwarded", "for=203.0.113.99")
+            .send()
+            .await
+            .unwrap();
+        if response.status() == StatusCode::TOO_MANY_REQUESTS {
+            limited = true;
+            assert_eq!(response.headers()[header::RETRY_AFTER], "1");
+            assert_eq!(response.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN], "*");
+            let body: Value = response.json().await.unwrap();
+            assert_eq!(body["error"], "RateLimitExceeded");
+            break;
+        }
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+    assert!(limited, "TCP-peer rate limit did not fire");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn proof_omission_and_forgery_are_detectable() {
     let fixture = Fixture::new().await;
     let post = fixture.post("Proof");
@@ -343,6 +663,74 @@ async fn proof_omission_and_forgery_are_detectable() {
     assert!(
         ProofBundle::parse(&forged, &Default::default()).is_err(),
         "existing verifier detects a forged bundle"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn proof_bundles_stay_with_indexed_records_and_current_cids() {
+    let fixture = Fixture::new().await;
+    let post = fixture.post("Current");
+    ingest::sync_forum(&fixture.indexer, fixture.forum.uri.as_str())
+        .await
+        .unwrap();
+    let old = proofs::bundle(&fixture.indexer, std::slice::from_ref(&post))
+        .await
+        .unwrap();
+    assert_eq!(
+        ProofBundle::parse(&old, &Default::default())
+            .unwrap()
+            .items
+            .len(),
+        1
+    );
+
+    // A signed record outside the forum's scope is not a proof-source invitation.
+    fixture.owner.put(
+        nsid::POST,
+        "outside",
+        &serde_json::to_value(Post::article(
+            fixture.forum.uri.clone(),
+            "Not indexed",
+            "Not an indexed record.",
+            Datetime::from_millis(fixture.net.now_ms() - 3_600_000).unwrap(),
+        ))
+        .unwrap(),
+    );
+    let unrelated = fixture.owner.uri(nsid::POST, "outside");
+    let bundle = proofs::bundle(&fixture.indexer, &[unrelated])
+        .await
+        .unwrap();
+    assert!(
+        ProofBundle::parse(&bundle, &Default::default())
+            .unwrap()
+            .items
+            .is_empty()
+    );
+
+    let rkey = lessdugin_atp::syntax::AtUri::parse(&post)
+        .unwrap()
+        .rkey()
+        .to_string();
+    let edited = Post::article(
+        fixture.forum.uri.clone(),
+        "Edited",
+        "A new signed CID.",
+        Datetime::from_millis(fixture.net.now_ms() - 3_600_000).unwrap(),
+    );
+    fixture
+        .owner
+        .put(nsid::POST, &rkey, &serde_json::to_value(edited).unwrap());
+    ingest::sync_forum(&fixture.indexer, fixture.forum.uri.as_str())
+        .await
+        .unwrap();
+    let bundle = proofs::bundle(&fixture.indexer, &[post]).await.unwrap();
+    let parsed = ProofBundle::parse(&bundle, &Default::default()).unwrap();
+    assert_eq!(parsed.items.len(), 1);
+    assert_ne!(
+        parsed.car.blocks,
+        lessdugin_atp::car::read_car(&old, &Default::default())
+            .unwrap()
+            .blocks
     );
 }
 
@@ -464,6 +852,7 @@ async fn spawn_server(
 
 async fn serve_flaky_proofs(
     indexer: &Indexer,
+    failures: usize,
 ) -> (
     Url,
     tokio::task::JoinHandle<()>,
@@ -479,7 +868,7 @@ async fn serve_flaky_proofs(
         let calls = Arc::clone(&calls);
         async move {
             if req.uri().path().ends_with(".getRecordProofs")
-                && calls.fetch_add(1, Ordering::Relaxed) < 4
+                && calls.fetch_add(1, Ordering::Relaxed) < failures
             {
                 // Exhaust the core transport's initial attempt plus three retries. The live
                 // frame itself must then remain unacknowledged and be replayed by live_tail.
@@ -804,7 +1193,8 @@ async fn live_proof_batches_replay_failures_without_losing_frames() {
     ingest::sync_forum(&fixture.indexer, fixture.forum.uri.as_str())
         .await
         .unwrap();
-    let (endpoint, server, proof_calls) = serve_flaky_proofs(&fixture.indexer).await;
+    let indexing = ingest::spawn(fixture.indexer.clone());
+    let (endpoint, server, proof_calls) = serve_flaky_proofs(&fixture.indexer, 4).await;
     let jetstream = Jetstream::start(&fixture.net, Wire::V2);
     let mut config = Config::devnet(
         Url::parse(&fixture.net.plc()).unwrap(),
@@ -862,25 +1252,38 @@ async fn live_proof_batches_replay_failures_without_losing_frames() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     assert!(proof_calls.load(Ordering::Relaxed) >= 5);
-    for uri in [&first, &second] {
+    let proof_deadline = Instant::now() + Duration::from_secs(10);
+    loop {
         let row = RecordStore::new(engine.host().cache())
-            .get(&AtUri::parse(uri).unwrap())
+            .get(&AtUri::parse(&second).unwrap())
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(row.level, Level::Proven);
+        if row.level == Level::Proven {
+            break;
+        }
+        assert!(
+            Instant::now() < proof_deadline,
+            "newest proof never became current; requests={:?}",
+            fixture.net.requests()
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    let older = RecordStore::new(engine.host().cache())
+        .get(&AtUri::parse(&first).unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    // The first may already have become proven before the second commit arrived. A later head
+    // does not revoke that record's earlier verified admission.
+    assert!(matches!(older.level, Level::Pds | Level::Proven));
+    let point_fetches = fixture.net.requests_for("com.atproto.repo.getRecord");
     assert!(
-        !fixture
-            .net
-            .requests_for("com.atproto.repo.getRecord")
-            .iter()
-            .any(|r| {
-                r.did.as_deref() == Some(fixture.owner.did().as_str())
-                    && r.url.contains("lessdugin.temp.post")
-            }),
-        "successful live proofs must not fall back to record point fetches: {:?}",
-        fixture.net.requests_for("com.atproto.repo.getRecord")
+        !point_fetches.iter().any(|r| {
+            r.did.as_deref() == Some(fixture.owner.did().as_str())
+                && r.url.contains("lessdugin.temp.post")
+        }),
+        "successful live proofs must not fall back to post point fetches: {point_fetches:?}"
     );
     engine.live_stop();
     tokio::time::timeout(Duration::from_secs(5), tail)
@@ -888,6 +1291,7 @@ async fn live_proof_batches_replay_failures_without_losing_frames() {
         .unwrap()
         .unwrap()
         .unwrap();
+    indexing.abort();
     server.abort();
 }
 

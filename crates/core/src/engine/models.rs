@@ -140,6 +140,8 @@ pub(crate) struct Runtime {
     models: Mutex<Models>,
     /// One build at a time per forum (single flight).
     flights: Mutex<BTreeMap<String, Arc<AsyncMutex<()>>>>,
+    /// A cold assisted page may need one bounded ordinary PDS sync, shared with other queries.
+    pub(crate) cold_sync: AsyncMutex<()>,
     pub(crate) renders: RenderCache,
     /// The last `open_forum` result per forum, with its time (ms).
     opened: Mutex<BTreeMap<String, (i64, OpenedForum)>>,
@@ -169,6 +171,7 @@ impl Runtime {
             bus: EventBus::default(),
             models: Mutex::new(Models::default()),
             flights: Mutex::new(BTreeMap::new()),
+            cold_sync: AsyncMutex::new(()),
             renders: RenderCache::default(),
             opened: Mutex::new(BTreeMap::new()),
             verify: Mutex::new(BTreeSet::new()),
@@ -460,10 +463,12 @@ impl<H: Host> Engine<H> {
         } else {
             limits::FORUM_DECL_FIRST_BUDGET_MS
         };
-        let opened = self
-            .syncer()
-            .open_forum(&self.p0_session(None, Some(budget)), key)
-            .await?;
+        let syncer = self.syncer();
+        let session = self.p0_session(None, Some(budget));
+        // Identity resolution and declaration proof verification form a deep async chain. Keep
+        // it out of every view caller's future; this path is used before forum sync as well.
+        let open: crate::host::HostFuture<'_, _> = Box::pin(syncer.open_forum(&session, key));
+        let opened = open.await?;
         self.rt.register(key);
         if self.rt.note_opened(&opened, self.host.now_ms()) {
             self.rt.invalidate(f);
