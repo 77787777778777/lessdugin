@@ -870,6 +870,14 @@ fn body_source_gives_the_markdown_of_inline_and_spilled_bodies() {
     );
     let source = "\u{FEFF}# The whole body\n\nEvery word of it.";
     let spilled = spilled_post(&n, &bob, &f, source.as_bytes());
+    let inline_cid = bob
+        .cid(nsid::POST, inline.rsplit('/').next().unwrap())
+        .unwrap()
+        .to_string();
+    let spilled_cid = bob
+        .cid(nsid::POST, spilled.rsplit('/').next().unwrap())
+        .unwrap()
+        .to_string();
     let e = n.device("anon", None);
     let r = block_on(e.sync_forum(&f, &SyncOpts::default())).unwrap();
     assert!(r.errors.is_empty(), "{r:?}");
@@ -879,6 +887,7 @@ fn body_source_gives_the_markdown_of_inline_and_spilled_bodies() {
         block_on(e.body_source(&inline)).unwrap(),
         BodySource {
             markdown: "Short *and* sweet.".into(),
+            cid: inline_cid.clone(),
             profile: Some("lfm/1".into()),
             spilled: false,
         }
@@ -887,8 +896,19 @@ fn body_source_gives_the_markdown_of_inline_and_spilled_bodies() {
     // spilled and never viewed: fetched from bob's PDS now, decoded as a view decodes it
     let s = block_on(e.body_source(&spilled)).unwrap();
     assert_eq!(s.markdown, "# The whole body\n\nEvery word of it.");
+    assert_eq!(s.cid, spilled_cid);
+    assert_ne!(
+        s.cid,
+        lessdugin_atp::cid::for_raw(source.as_bytes()).to_string()
+    );
     assert!(s.spilled);
     assert_eq!(blob_requests(&n), [(bob.pds_base(), bob.did().to_string())]);
+    let raw = block_on(e.raw(&spilled)).unwrap();
+    assert_eq!(s.cid, raw.cid.unwrap());
+    assert_eq!(
+        raw.record.unwrap()["body"]["textBlob"]["ref"]["$link"],
+        json!(lessdugin_atp::cid::for_raw(source.as_bytes()).to_string())
+    );
     // and the view renders what was fetched, without a second request
     n.net.clear_requests();
     let pv = block_on(e.get_post(&spilled)).unwrap();
@@ -910,9 +930,13 @@ fn body_source_gives_the_markdown_of_inline_and_spilled_bodies() {
     // a forum's about: none, inline, spilled
     let s = block_on(e.body_source(&f)).unwrap();
     assert_eq!((s.markdown.as_str(), s.spilled), ("", false));
+    let no_about_cid = bob.cid(nsid::FORUM, "meta").unwrap().to_string();
+    assert_eq!(s.cid, no_about_cid);
+    assert_eq!(block_on(e.raw(&f)).unwrap().cid, Some(s.cid));
     let mut decl = bob.get(nsid::FORUM, "meta").unwrap();
     decl["about"] = json!({"$type": nsid::MARKDOWN, "text": "Be kind."});
-    bob.put(nsid::FORUM, "meta", &decl);
+    let inline_about_cid = bob.put(nsid::FORUM, "meta", &decl).to_string();
+    assert_ne!(inline_about_cid, no_about_cid);
     n.tick(MINUTE);
     let e3 = n.device("anon3", None);
     let s = block_on(e3.body_source(&f)).unwrap();
@@ -920,13 +944,17 @@ fn body_source_gives_the_markdown_of_inline_and_spilled_bodies() {
         (s.markdown.as_str(), s.profile, s.spilled),
         ("Be kind.", None, false)
     );
+    assert_eq!(s.cid, inline_about_cid);
+    assert_eq!(block_on(e3.raw(&f)).unwrap().cid, Some(s.cid));
     decl["about"] = spilled_body(&bob, b"# About this forum\n\nBe kind.");
-    bob.put(nsid::FORUM, "meta", &decl);
+    let spilled_about_cid = bob.put(nsid::FORUM, "meta", &decl).to_string();
     n.tick(MINUTE);
     let e4 = n.device("anon4", None);
     n.net.clear_requests();
     let s = block_on(e4.body_source(&f)).unwrap();
     assert_eq!(s.markdown, "# About this forum\n\nBe kind.");
+    assert_eq!(s.cid, spilled_about_cid);
+    assert_eq!(block_on(e4.raw(&f)).unwrap().cid, Some(s.cid));
     assert!(s.spilled);
     assert_eq!(
         blob_requests(&n)
@@ -940,6 +968,65 @@ fn body_source_gives_the_markdown_of_inline_and_spilled_bodies() {
     let membership = bob.uri(nsid::MEMBERSHIP, &keys::membership_rkey(&f).unwrap());
     let err = block_on(e.body_source(&membership)).unwrap_err();
     assert_eq!(err.code, ErrorCode::InvalidRef, "{err:?}");
+}
+
+#[test]
+fn body_source_names_the_current_comments_record_cid() {
+    let mut n = Net::new();
+    let bob = n
+        .net
+        .add_pds("bob.example.com")
+        .add_account("bob.example.com");
+    let f = forum(&n, &bob);
+    let root = post(
+        &n,
+        &bob,
+        &f,
+        json!({"$type": nsid::MARKDOWN, "text": "A thread"}),
+    );
+    let root_cid = bob
+        .cid(nsid::POST, root.rsplit('/').next().unwrap())
+        .unwrap()
+        .to_string();
+    let v = json!({
+        "$type": nsid::COMMENT, "forum": f,
+        "root": {"uri": root, "cid": root_cid},
+        "body": {"$type": nsid::MARKDOWN, "profile": "lfm/1", "text": "Original reply"},
+        "createdAt": dt(n.now()),
+    });
+    let rkey = keys::comment_rkey(
+        lessdugin_lexicon::ns::NS,
+        &f,
+        &root,
+        tid_at_ms(n.now()).as_str(),
+    )
+    .unwrap();
+    let original_cid = bob.put(nsid::COMMENT, &rkey, &v).to_string();
+    n.tick(MINUTE);
+    let e = n.device("anon", None);
+    let r = block_on(e.sync_forum(&f, &SyncOpts::default())).unwrap();
+    assert!(r.errors.is_empty(), "{r:?}");
+    let source = block_on(e.body_source(&bob.uri(nsid::COMMENT, &rkey))).unwrap();
+    assert_eq!(source.cid, original_cid);
+    assert_eq!(source.markdown, "Original reply");
+    assert_eq!(source.profile.as_deref(), Some("lfm/1"));
+
+    // A new revision changes both fields together; it is not the CID of any referenced record.
+    let mut edited = v.clone();
+    edited["body"]["profile"] = json!("lfm/2");
+    edited["body"]["text"] = json!("Edited reply");
+    let edited_cid = bob.put(nsid::COMMENT, &rkey, &edited).to_string();
+    assert_ne!(edited_cid, original_cid);
+    n.tick(MINUTE);
+    let e2 = n.device("anon2", None);
+    let r = block_on(e2.sync_forum(&f, &SyncOpts::default())).unwrap();
+    assert!(r.errors.is_empty(), "{r:?}");
+    let uri = bob.uri(nsid::COMMENT, &rkey);
+    let source = block_on(e2.body_source(&uri)).unwrap();
+    assert_eq!(source.cid, edited_cid);
+    assert_eq!(source.markdown, "Edited reply");
+    assert_eq!(source.profile.as_deref(), Some("lfm/2"));
+    assert_eq!(block_on(e2.raw(&uri)).unwrap().cid, Some(source.cid));
 }
 
 #[test]

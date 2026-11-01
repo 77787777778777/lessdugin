@@ -377,8 +377,8 @@ impl<H: Host> Engine<H> {
         use lessdugin_markdown::BodyError;
         let u = parse_uri(uri)?;
         let coll = u.collection().as_str();
-        // (forum, author, the body's `md` value)
-        let (forum, did, md) = if coll == nsid::FORUM {
+        // (forum, author, the body's record CID, the body's `md` value): all from one model.
+        let (forum, did, cid, md) = if coll == nsid::FORUM {
             let key = self.forum_key(u.as_str()).await?;
             let l = self.loaded(&key).await?;
             let md = l
@@ -389,7 +389,12 @@ impl<H: Host> Engine<H> {
                 .map(serde_json::to_value)
                 .transpose()
                 .map_err(|e| EngineError::internal(format!("{u}: {e}")))?;
-            (key.uri.to_string(), key.owner.to_string(), md)
+            (
+                key.uri.to_string(),
+                key.owner.to_string(),
+                l.model.input.decl_cid.clone(),
+                md,
+            )
         } else if coll == nsid::POST || coll == nsid::COMMENT {
             let key = self.forum_of(&u).await?;
             let l = self.loaded(&key).await?;
@@ -398,9 +403,16 @@ impl<H: Host> Engine<H> {
             let v = values
                 .remove(&uri)
                 .ok_or_else(|| EngineError::not_found(format!("{uri} is not available")))?;
+            let cid = l
+                .model
+                .skel(&uri)
+                .expect("values returns only model skeletons")
+                .cid
+                .clone();
             (
                 key.uri.to_string(),
                 u.did().to_string(),
+                cid,
                 v.get("body").cloned(),
             )
         } else {
@@ -411,6 +423,7 @@ impl<H: Host> Engine<H> {
         let Some(md) = md else {
             return Ok(BodySource {
                 markdown: String::new(),
+                cid,
                 profile: None,
                 spilled: false,
             });
@@ -419,6 +432,7 @@ impl<H: Host> Engine<H> {
         if let Some(text) = md.get("text").and_then(Value::as_str) {
             return Ok(BodySource {
                 markdown: text.to_owned(),
+                cid,
                 profile,
                 spilled: false,
             });
@@ -448,6 +462,7 @@ impl<H: Host> Engine<H> {
         match &*spilled {
             Spilled::Text(src) => Ok(BodySource {
                 markdown: src.to_string(),
+                cid,
                 profile,
                 spilled: true,
             }),

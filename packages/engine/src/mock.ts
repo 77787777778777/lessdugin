@@ -1900,9 +1900,26 @@ export class MockEngine implements EngineApi {
         throw err("invalid_ref", `Not a post, comment or forum: ${uri}`);
       throw err("not_found", `No post, comment or forum ${uri}`);
     }
+    // raw and the source/profile are read from the same synchronous state snapshot.
+    const raw = await this.raw(uri);
+    const record =
+      raw.record !== null && typeof raw.record === "object" && !Array.isArray(raw.record)
+        ? raw.record
+        : undefined;
+    const bodyValue = record?.body ?? record?.about;
+    const body: { [key: string]: Json } | undefined =
+      bodyValue !== null && typeof bodyValue === "object" && !Array.isArray(bodyValue)
+        ? bodyValue
+        : undefined;
     const present = p !== undefined || c !== undefined || f?.about !== undefined;
-    const markdown = p?.markdown ?? c?.markdown ?? f?.about ?? "";
-    return { markdown, profile: "lfm/1", spilled: present && this.spilledBodies };
+    const markdown =
+      typeof body?.text === "string" ? body.text : (p?.markdown ?? c?.markdown ?? f?.about ?? "");
+    return {
+      markdown,
+      cid: raw.cid ?? "",
+      profile: typeof body?.profile === "string" ? body.profile : "lfm/1",
+      spilled: present && this.spilledBodies,
+    };
   }
 
   async loadMedia(cid: Cid): Promise<LoadedMedia> {
