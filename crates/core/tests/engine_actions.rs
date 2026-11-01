@@ -15,11 +15,11 @@ use std::sync::{Arc, Mutex};
 
 use common::block_on;
 use lessdugin_core::dto::{
-    AccessLevel, ActionTicket, AgreementValue, Capability, CommentDraft, Draft, EditOpts, Event,
-    ForumDraft, KarmaCadence, KarmaValue, MembershipMode, ModActionIntent, ModActionValue, ModRole,
-    ModScope, ModsChange, NoticeCode, NotificationReason, NotificationsQuery, OpinionIntent,
-    PinScope, PostDraft, PublicActionKind, Stance, Subscription, SyncOpts, TextQuote, Tier, Topic,
-    WriteState, WriteTicket,
+    AccessLevel, ActionTicket, AgreementValue, BodyDraft, Capability, CommentDraft, Draft,
+    EditOpts, Event, ForumDraft, KarmaCadence, KarmaValue, MembershipMode, ModActionIntent,
+    ModActionValue, ModRole, ModScope, ModsChange, NoticeCode, NotificationReason,
+    NotificationsQuery, OpinionIntent, PinScope, PostDraft, PublicActionKind, Stance, Subscription,
+    SyncOpts, TextQuote, Tier, Topic, WikiDraft, WriteState, WriteTicket,
 };
 use lessdugin_core::engine::{AccountInfo, Engine, EngineConfig, ErrorCode};
 use lessdugin_core::outbox::records;
@@ -288,6 +288,99 @@ impl World {
     fn opinion_rkey(&self, subject: &str) -> String {
         records::opinion_rkey(&self.forum, subject).unwrap()
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Wiki and tags (M5)
+
+#[test]
+fn wiki_revisions_parent_the_canonical_head_and_drive_tag_views() {
+    let w = World::new();
+    let draft = |name: &str, body: Option<BodyDraft>, is_tag: bool| WikiDraft {
+        name: name.to_owned(),
+        description: Some("A tag for testing".to_owned()),
+        body,
+        is_tag,
+        parent_tags: vec!["programming".to_owned()],
+        summary: Some("test revision".to_owned()),
+    };
+    let first = block_on(w.alice.engine.wiki_edit(
+        &w.forum,
+        "rust",
+        draft("Rust", Some(BodyDraft::text("About **Rust**")), true),
+    ))
+    .unwrap();
+    w.alice.flush();
+    let (first_uri, first_cid) = match w.alice.state(&first.id) {
+        WriteState::Done { uri, cid, .. } => (uri, cid.unwrap()),
+        other => panic!("wiki write is {other:?}"),
+    };
+    let first_record = w
+        .alice
+        .record(nsid::WIKI_REVISION, first_uri.rsplit('/').next().unwrap())
+        .unwrap();
+    assert_eq!(first_record["slug"], "rust");
+    assert_eq!(first_record["body"]["text"], "About **Rust**");
+    assert_eq!(first_record["isTag"], true);
+    assert_eq!(first_record["parentTags"], json!(["programming"]));
+    assert!(first_record.get("parents").is_none());
+
+    let notes = block_on(w.alice.engine.wiki_edit(
+        &w.forum,
+        "notes",
+        draft("Notes", Some(BodyDraft::text("Wiki only")), false),
+    ))
+    .unwrap();
+    w.alice.flush();
+    w.alice.done(&notes);
+
+    for (user, title) in [(&w.alice, "Rust one"), (&w.bob, "Rust two")] {
+        let mut post = PostDraft::article(&w.forum, title, "A tagged post with an excerpt.");
+        post.tags = vec!["rust".to_owned()];
+        let ticket = block_on(user.engine.publish(&post)).unwrap();
+        user.flush();
+        user.done(&ticket);
+    }
+    w.sync_all();
+
+    let tags = block_on(w.carol.engine.tags(&w.forum)).unwrap();
+    assert_eq!(tags.len(), 1, "isTag=false pages are not tags: {tags:?}");
+    assert_eq!(tags[0].slug, "rust");
+    assert_eq!(tags[0].name, "Rust");
+    assert_eq!(tags[0].post_count, 2);
+    let page = block_on(w.carol.engine.tag(&w.forum, "rust")).unwrap();
+    assert_eq!(page.head.as_deref(), Some(first_uri.as_str()));
+    assert_eq!(page.page.as_ref().unwrap().text, "About Rust");
+    assert_eq!(page.posts.len(), 2);
+    assert!(
+        page.posts
+            .iter()
+            .all(|p| p.excerpt == "A tagged post with an excerpt.")
+    );
+    assert!(matches!(
+        block_on(w.carol.engine.tag(&w.forum, "notes"))
+            .unwrap_err()
+            .code,
+        ErrorCode::NotFound
+    ));
+
+    w.alice.sync(&w.forum);
+    let second = block_on(w.alice.engine.wiki_edit(
+        &format!("{}/meta", w.alice.did()),
+        "rust",
+        draft("Rust language", None, true),
+    ))
+    .unwrap();
+    w.alice.flush();
+    let second_uri = w.alice.done(&second);
+    let second_record = w
+        .alice
+        .record(nsid::WIKI_REVISION, second_uri.rsplit('/').next().unwrap())
+        .unwrap();
+    assert_eq!(
+        second_record["parents"],
+        json!([{"uri": first_uri, "cid": first_cid}])
+    );
 }
 
 // ---------------------------------------------------------------------------------------------

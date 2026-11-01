@@ -831,14 +831,9 @@ impl Views<'_> {
             description: rev.description,
             post_count: wiki
                 .applies
-                .get(slug)
-                .map(|posts| {
-                    posts
-                        .iter()
-                        .filter(|uri| self.post_summary(uri).is_some())
-                        .count() as u32
-                })
-                .unwrap_or(0),
+                .iter()
+                .filter(|(uri, slugs)| slugs.contains(slug) && self.listed(uri))
+                .count() as u32,
             unmerged_edits: page.unmerged,
         })
     }
@@ -857,10 +852,9 @@ impl Views<'_> {
         });
         let mut posts: Vec<_> = wiki
             .applies
-            .get(slug)
-            .into_iter()
-            .flatten()
-            .filter_map(|uri| self.post_summary(uri))
+            .iter()
+            .filter(|(uri, slugs)| slugs.contains(slug) && self.listed(uri))
+            .filter_map(|(uri, _)| self.post_summary(uri))
             .collect();
         posts.sort_by(|a, b| {
             b.score
@@ -907,12 +901,27 @@ impl Views<'_> {
         })
     }
 
+    fn same_forum_post(&self, uri: &str) -> bool {
+        let Some((_, collection, rkey)) = split_uri(uri) else {
+            return false;
+        };
+        collection == nsid::POST
+            && lessdugin_lexicon::keys::fk_of(rkey) == Some(self.model.key.fk.as_str())
+    }
+
     fn displayable_post(&self, uri: &str) -> Option<PostSummary> {
-        let fk = &self.model.key.fk;
-        let (_, _, rkey) = split_uri(uri)?;
-        if lessdugin_lexicon::keys::fk_of(rkey) != Some(fk.as_str()) {
+        if !self.same_forum_post(uri) || !self.listed(uri) {
             return None;
         }
+        self.post_summary(uri)
+    }
+
+    fn sequence_chapter_post(&self, uri: &str) -> Option<PostSummary> {
+        if !self.same_forum_post(uri) {
+            return None;
+        }
+        // A known but unlisted post is the DTO's unavailable entry: its summary is redacted by
+        // post_summary. A missing record has no trustworthy summary to construct.
         self.post_summary(uri)
     }
 
@@ -929,8 +938,8 @@ impl Views<'_> {
             .collect()
     }
 
-    /// A sequence page with rendered sequence/chapter bodies and only displayable, same-forum
-    /// post entries.
+    /// A sequence page with rendered sequence/chapter bodies. Same-forum entries that are not
+    /// displayable retain their redacted summary as an unavailable entry; foreign entries go.
     pub fn sequence_view(&self, uri: &str) -> Option<SequenceView> {
         self.sequence_summary(uri)?;
         let seq = self.sequence_record(uri)?;
@@ -955,7 +964,7 @@ impl Views<'_> {
                 posts: chapter
                     .posts
                     .iter()
-                    .filter_map(|post| self.displayable_post(post.as_str()))
+                    .filter_map(|post| self.sequence_chapter_post(post.as_str()))
                     .collect(),
             })
             .collect();
@@ -968,7 +977,7 @@ impl Views<'_> {
     }
 
     /// Sequence navigation around the first displayable occurrence of a post. The post author's
-    /// eligible sequence wins (score desc, uri asc), then the Library's listed order.
+    /// eligible sequence wins (score desc, uri asc), then a listed sequence in the same order.
     pub fn sequence_nav(&self, post: &str) -> Vec<SequenceNav> {
         let Ok(library) = self.model.view.library.as_ref() else {
             return Vec::new();
@@ -999,10 +1008,17 @@ impl Views<'_> {
                 .cmp(&self.raw_score(a).map(|s| s.score).unwrap_or(0))
                 .then_with(|| a.cmp(b))
         });
-        let selected = own
-            .first()
-            .copied()
-            .or_else(|| library.listed.iter().find(|uri| contains(uri)));
+        let selected = own.first().copied().or_else(|| {
+            let mut listed: Vec<_> = library.listed.iter().filter(|uri| contains(uri)).collect();
+            listed.sort_by(|a, b| {
+                self.raw_score(b)
+                    .map(|s| s.score)
+                    .unwrap_or(0)
+                    .cmp(&self.raw_score(a).map(|s| s.score).unwrap_or(0))
+                    .then_with(|| a.cmp(b))
+            });
+            listed.first().copied()
+        });
         let Some(sequence) = selected else {
             return Vec::new();
         };
@@ -1010,12 +1026,12 @@ impl Views<'_> {
         let Some(index) = posts.iter().position(|entry| entry.uri == post) else {
             return Vec::new();
         };
-        let Some(summary) = self.sequence_summary(sequence) else {
+        let Some(title) = self.sequence_record(sequence).map(|s| s.title) else {
             return Vec::new();
         };
         vec![SequenceNav {
-            sequence: summary.uri,
-            title: summary.title,
+            sequence: sequence.clone(),
+            title,
             prev: index
                 .checked_sub(1)
                 .and_then(|i| posts.get(i).map(|post| post.uri.clone())),

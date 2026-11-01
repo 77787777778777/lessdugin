@@ -392,3 +392,72 @@ fn karma_only_scores_have_no_agreement() {
         );
     }
 }
+
+/// M5 organisation views consume Library without manufacturing unavailable post summaries.
+#[test]
+fn sequence_views_filter_entries_and_navigate_displayable_neighbors() {
+    let (forum, decl, mut i) = base(lessdugin_lexicon::values::MembershipMode::Open);
+    let p1 = i.post(OWNER, "One", "first", T0 + HOUR);
+    let p2 = i.post(OWNER, "Two", "second", T0 + 2 * HOUR);
+    let missing = format!(
+        "at://{OWNER}/{}/{}",
+        nsid::POST,
+        keys::post_rkey(&forum, tid_at_ms(T0 + 3 * HOUR).as_str()).unwrap()
+    );
+    let wrong_forum = format!(
+        "at://{OWNER}/{}/uetjixxr3a33-{}",
+        nsid::POST,
+        tid_at_ms(T0 + 4 * HOUR)
+    );
+    let seq_value = json!({
+        "$type": nsid::SEQUENCE, "forum": forum, "title": "Guide",
+        "body": md("Introduction"), "chapters": [{
+            "title": "Start", "body": md("Chapter body"),
+            "posts": [p1, wrong_forum, missing, p2],
+        }],
+        "createdAt": dt(T0),
+    });
+    let seq = i.add(
+        OWNER,
+        nsid::SEQUENCE,
+        &keys::sequence_rkey(&forum, tid_at_ms(T0).as_str()).unwrap(),
+        seq_value,
+        T0,
+    );
+    let mut model = build(&decl, &i, T0 + 5 * HOUR);
+    model.view.library = Ok(lessdugin_core::social::full::sequences::Library {
+        eligible: BTreeSet::from([seq.clone()]),
+        listed: vec![seq.clone()],
+        entries: BTreeMap::from([(
+            seq.clone(),
+            vec![p1.clone(), wrong_forum, missing, p2.clone()],
+        )]),
+    });
+    let values: BTreeMap<String, Value> = i.records.iter().cloned().collect();
+    let (renders, pending, actors, c) = (
+        RenderCache::default(),
+        BTreeSet::new(),
+        BTreeMap::new(),
+        Completeness::default(),
+    );
+    let v = views(&model, &values, &renders, &pending, &actors, &c);
+    let view = v.sequence_view(&seq).unwrap();
+    assert_eq!(view.sequence.posts, 4, "the summary counts raw entries");
+    assert_eq!(view.sequence.chapters, 1);
+    assert_eq!(view.body.unwrap().text, "Introduction");
+    assert_eq!(view.chapters[0].body.as_ref().unwrap().text, "Chapter body");
+    assert_eq!(
+        view.chapters[0]
+            .posts
+            .iter()
+            .map(|post| post.uri.as_str())
+            .collect::<Vec<_>>(),
+        [p1.as_str(), p2.as_str()]
+    );
+    let nav = &v.post_view(&p2).unwrap().sequences;
+    assert_eq!(nav.len(), 1);
+    assert_eq!(nav[0].sequence, seq);
+    assert_eq!(nav[0].title, "Guide");
+    assert_eq!(nav[0].prev.as_deref(), Some(p1.as_str()));
+    assert_eq!(nav[0].next, None);
+}

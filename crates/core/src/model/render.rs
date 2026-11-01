@@ -276,10 +276,8 @@ fn render_md_cached(md: &Value, ns: &str, excerpt: Option<&str>) -> CachedBody {
         .is_some_and(|t| t == markdown_type || t == format!("{markdown_type}#main"));
     let media = md.get("media").cloned().unwrap_or(Value::Null);
     let profile = md.get("profile").and_then(Value::as_str);
-    if known {
-        if let Some(text) = md.get("text").and_then(Value::as_str) {
-            return cached_markdown(text, &media, profile);
-        }
+    if known && let Some(text) = md.get("text").and_then(Value::as_str) {
+        return cached_markdown(text, &media, profile);
     }
     CachedBody {
         body: render_md(md, ns, excerpt),
@@ -619,6 +617,7 @@ pub struct BodyItem<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lessdugin_lexicon::ns::NS;
     use serde_json::json;
 
     #[test]
@@ -636,6 +635,27 @@ mod tests {
         assert_eq!(s.notices, [NOTICE_SPILLED]);
         let u = render_md(&json!({"$type": "x.y"}), ns, None);
         assert_eq!(u.notices, [NOTICE_UNKNOWN_BODY]);
+    }
+
+    #[test]
+    fn links_come_from_rendering_not_record_hints() {
+        let cache = RenderCache::default();
+        let target =
+            "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/zone.lessdugin.post/uetjixxr3a33-3jzfcijpj2z2a";
+        let hint =
+            "at://did:plc:bbbbbbbbbbbbbbbbbbbbbbbb/zone.lessdugin.post/uetjixxr3a33-3jzfcijpj2z2b";
+        let md = json!({
+            "$type": format!("{NS}.markdown"),
+            "text": format!("[target]({target})"),
+            "links": [hint],
+        });
+        let links = cache.links("cid", &md, NS, None);
+        assert_eq!(
+            links.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            [target]
+        );
+        assert!(!links.iter().any(|link| link.as_str() == hint));
+        assert_eq!(cache.links("cid", &md, NS, None), links);
     }
 
     #[test]
