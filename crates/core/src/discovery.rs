@@ -17,6 +17,7 @@
 pub mod forum;
 pub mod forum_ref;
 pub mod roster;
+pub mod sources;
 pub mod state;
 
 pub use forum::{
