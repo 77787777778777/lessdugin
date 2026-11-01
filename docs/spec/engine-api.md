@@ -72,7 +72,12 @@ Normative details of the underlying behaviour live in `data-model.md` (records, 
   account's own restriction or nullification of the user (it still means none when there is no
   current record); likewise, while that dimension is in effect, a left-out `untilMs` or `reason`
   keeps the record's, with the notice code `sharedExpiry` when a dimension's expiry changes
-  (§3.5 `mod_action`). New operation: `edit_preflight` (§3.5), with the notice code
+  (§3.5 `mod_action`). This changes what a valid v0 input that names only `capabilities`
+  means (under v0 it also asserted `nullifyVotes: false`): a deliberate semantic exception to
+  the freeze rule above, **orchestrator decision O-12, flagged for the U7 review**. The freeze
+  freezes shapes, not defects: the v0 reading made every client's `restrict` silently
+  un-nullify the user, the defect m3r-2 fixed. A client that wants both dimensions reset names
+  both (`social.md` §20.2). New operation: `edit_preflight` (§3.5), with the notice code
   `suspendsAssertions`; new banner code: `relayDependent` (§4.2). `render` takes media (each a
   `MediaRef` or a stored `defs#media` value) where v0 refused any, and `RenderOpts` gains an
   optional `profile`. `LoadedMedia` gains an optional `sniffed` (the type a download card names
