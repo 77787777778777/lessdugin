@@ -106,11 +106,15 @@ pub fn build(input: ConfigInput) -> Result<EngineConfig, EngineError> {
     };
     c.platform = Platform::Browser;
     if let Some(s) = &input.sources {
-        c.sources = match s.as_str() {
+        let sources = match s.as_str() {
             "direct" => Sources::Direct,
             "assisted" => Sources::Assisted,
             _ => return Err(EngineError::invalid_input(format!("config.sources: {s:?}"))),
         };
+        c.sources = sources;
+        // Devnet defaults to a direct-only pin. An explicit source selection is also a pin,
+        // allowing an entirely local assisted devnet with explicitly configured CORE+ URLs.
+        c.sources_flag = Some(sources);
     }
     if let Some(v) = &input.verify {
         c.verify = match v.as_str() {
@@ -182,7 +186,18 @@ mod tests {
         assert_eq!(c.parity_now_ms, Some(1_700_000_000_000));
         assert_eq!(c.slingshot, None);
         assert_eq!(c.sources, Sources::Direct);
+        assert_eq!(c.sources_flag, Some(Sources::Direct));
         assert_eq!(c.platform, Platform::Browser);
+
+        let assisted = parse(
+            r#"{"network":{"kind":"devnet","plc":"http://localhost:2582","pds":"http://localhost:2583"},
+                "sources":"assisted","relays":[],"jetstream":[],"constellation":null,"slingshot":null}"#,
+        )
+        .unwrap();
+        assert_eq!(assisted.sources_flag, Some(Sources::Assisted));
+        assert!(assisted.relays.is_empty() && assisted.jetstream.is_empty());
+        assert_eq!(assisted.constellation, None);
+        assert_eq!(assisted.slingshot, None);
 
         let c = parse(r#"{"doh":["https://dns.example/dns-query"],"constellation":null}"#).unwrap();
         assert_eq!(c.doh.len(), 1);

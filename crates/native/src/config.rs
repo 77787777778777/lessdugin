@@ -430,6 +430,34 @@ pub enum IndexerMode {
 /// plc = "http://localhost:2582"
 /// pds = "http://localhost:2583"
 /// ```
+/// TOML has no null: `false` explicitly disables an optional HTTP service. This is especially
+/// useful for an assisted local devnet, where the production default must never be inherited.
+fn optional_url<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Url>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Value {
+        Url(Url),
+        Disabled(bool),
+    }
+    match Value::deserialize(d)? {
+        Value::Url(url) => Ok(Some(url)),
+        Value::Disabled(false) => Ok(None),
+        Value::Disabled(true) => Err(serde::de::Error::custom(
+            "an optional service takes a URL or false (disabled)",
+        )),
+    }
+}
+
+fn serialize_optional_url<S: serde::Serializer>(
+    url: &Option<Url>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    match url {
+        Some(url) => serializer.serialize_str(url.as_str()),
+        None => serializer.serialize_bool(false),
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -450,9 +478,17 @@ pub struct Config {
     pub relays: Vec<Url>,
     /// Jetstream endpoints.
     pub jetstream: Vec<Url>,
-    /// Constellation (assisted mode only).
+    /// Constellation (assisted mode only). TOML `false` disables it.
+    #[serde(
+        deserialize_with = "optional_url",
+        serialize_with = "serialize_optional_url"
+    )]
     pub constellation: Option<Url>,
-    /// Slingshot (hint-only identity fallback; assisted mode only).
+    /// Slingshot (hint-only identity fallback; assisted mode only). TOML `false` disables it.
+    #[serde(
+        deserialize_with = "optional_url",
+        serialize_with = "serialize_optional_url"
+    )]
     pub slingshot: Option<Url>,
     /// Indexers.
     pub indexer: IndexerSetting,

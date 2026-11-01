@@ -385,6 +385,55 @@ fn wiki_revisions_parent_the_canonical_head_and_drive_tag_views() {
 }
 
 #[test]
+fn a_seed_tag_vote_resolves_on_another_users_post() {
+    let w = World::new();
+    let wiki = block_on(w.alice.engine.wiki_edit(
+        &w.forum,
+        "rust",
+        WikiDraft {
+            name: "Rust".to_owned(),
+            description: None,
+            body: Some(BodyDraft::text("About Rust")),
+            is_tag: true,
+            parent_tags: vec![],
+            summary: None,
+        },
+    ))
+    .unwrap();
+    w.alice.flush();
+    w.alice.done(&wiki);
+    w.sync_all();
+    let edit = block_on(w.bob.engine.edit(
+        &w.bob_post,
+        &Draft::Post {
+            id: None,
+            post: PostDraft::article(&w.forum, "Bob's edited post", "Edited"),
+        },
+        &EditOpts::default(),
+    ))
+    .unwrap();
+    w.bob.flush();
+    w.bob.done(&edit);
+    w.sync_all();
+    let _vote = w.alice.opinion(
+        &w.bob_post,
+        OpinionIntent::Tag {
+            slug: "rust".to_owned(),
+            value: Some(KarmaValue::Up),
+        },
+    );
+    w.alice.flush();
+    w.sync_all();
+    let page = block_on(w.carol.engine.tag(&w.forum, "rust")).unwrap();
+    assert!(
+        page.posts.iter().any(|p| p.uri == w.bob_post),
+        "the seed's tag vote must resolve: {page:?}"
+    );
+    let view = block_on(w.carol.engine.get_post(&w.bob_post)).unwrap();
+    assert_eq!(view.post.tags, vec!["rust".to_owned()]);
+}
+
+#[test]
 fn sequence_writes_create_edit_add_move_and_remove_through_the_outbox() {
     let w = World::new();
     let draft = SequenceDraft {
