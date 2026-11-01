@@ -607,8 +607,7 @@ pub(crate) fn html_host_suffix(inner: &str, host: &str) -> bool {
             continue;
         };
         // `first.last@corp.com` names only `corp.com`; in a URL's authority no name is a mailbox.
-        let mailbox =
-            u.get(end) == Some(&'@') && dotted_end(&u, end + 1).is_some() && !authority;
+        let mailbox = u.get(end) == Some(&'@') && dotted_end(&u, end + 1).is_some() && !authority;
         if !mailbox && !path {
             let d: String = u[i..end].iter().collect();
             if d.strip_prefix("www.").unwrap_or(&d) != h {
