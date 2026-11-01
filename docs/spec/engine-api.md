@@ -63,10 +63,12 @@ Normative details of the underlying behaviour live in `data-model.md` (records, 
   (§4.4). Kept compatible with the v0 declarations: `prepare_media` takes `(bytes, MediaInput?)`
   and still accepts v0's single `MediaFile` (the TypeScript name `MediaInput` now names the hints,
   as in Rust; v0's shape is `MediaFile`); `redact_revision` resolves with a `WriteTicket`;
-  `import_local` resolves with an `ImportReport` where v0 declared nothing (the binding also
-  takes an optional second argument, the scope); `set_setting` takes every field of `Settings`
-  with a value of its type. New optional output field: `WriteState.done.report` (the adopt
-  report). `ModActionValue.restrict.capabilities` became optional: every v0 input still parses,
+  `import_local` resolves with an `ImportReport` where v0 declared nothing, and takes an
+  optional second argument, the scope (`importLocal(json, scope?)`, `"mine"` or
+  `"everything"`); `set_setting` takes every field of `Settings` with a value of its type. New
+  optional output fields: `WriteState.done.report` (the adopt report) and `MediaRef.notices`
+  (`prepare_media`'s notices, §4.4, with the new `NoticeCode` variant `missingAlt` when the file
+  has no alt text). `ModActionValue.restrict.capabilities` became optional: every v0 input still parses,
   and one that names both dimensions means what it did; a dimension left out now keeps the
   account's current value instead of resetting it, since the reset silently lifted the
   account's own restriction or nullification of the user (it still means none when there is no
@@ -78,7 +80,9 @@ Normative details of the underlying behaviour live in `data-model.md` (records, 
   freezes shapes, not defects: the v0 reading made every client's `restrict` silently
   un-nullify the user, the defect m3r-2 fixed. A client that wants both dimensions reset names
   both (`social.md` §20.2). New operation: `edit_preflight` (§3.5), with the notice code
-  `suspendsAssertions`; new banner code: `relayDependent` (§4.2). `render` takes media (each a
+  `suspendsAssertions`; new banner codes: `authorityInactive` (an authority's account is
+  inactive while its cached assertions still apply, `sync.md` §3.4) and `relayDependent`
+  (§4.2). `render` takes media (each a
   `MediaRef` or a stored `defs#media` value) where v0 refused any, and `RenderOpts` gains an
   optional `profile`. `LoadedMedia` gains an optional `sniffed` (the type a download card names
   its file from, §3.4). New operation: `body_source(uri) -> BodySource` (§3.4), the markdown

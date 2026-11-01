@@ -289,10 +289,11 @@ export interface EngineApi {
   setSetting<K extends SettingKey>(key: K, value: Settings[K]): Promise<void>;
   /** This device's local state (the active account's, plus the device-wide rows). */
   exportLocal(): Promise<Json>;
-  /** Merges an `exportLocal` result back (the active account's scope). Login state, the
+  /** Merges an `exportLocal` result back: `scope` is `"mine"` (the default: the active
+   * account's rows and the device-wide ones, PRIV-8) or `"everything"`. Login state, the
    * acknowledgements and the settings that name third parties are never imported; the report
    * counts what was written and what was left out. */
-  importLocal(json: Json): Promise<ImportReport>;
+  importLocal(json: Json, scope?: "mine" | "everything"): Promise<ImportReport>;
 
   // §3.7 Pure functions -----------------------------------------------------------------------
   /** `media`: the draft's `MediaRef`s (rendered as `publish` writes them), or `defs#media`
