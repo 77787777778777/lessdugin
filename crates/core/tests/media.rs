@@ -564,6 +564,26 @@ fn a_truncated_or_cyclic_mp4_does_not_hang() {
     let _ = strip_metadata(&zero);
 }
 
+#[test]
+fn an_oversized_extended_mp4_box_is_rejected_before_its_header_is_sliced() {
+    // Found by `cargo fuzz`: this extended-size `meta` names more bytes than its parent `moov`
+    // holds. The clamped box ends only eight bytes after it starts, before its 16-byte header.
+    // That is malformed input, not a metadata box whose payload can be stripped.
+    let input: &[u8] = &[
+        0, 0, 0, 24, b'f', b't', b'y', b'p', b'i', 0xD3, b'o', b'm', 0, 0xBB, 2, 0, b'i', b's',
+        b'o', b'M', 0, 0, 0, 0, 0, 0, 0, 20, b'm', b'o', b'o', b'v', 0, 0, 0, 1, b'm', b'e', b't',
+        b'a', 0, 0, 0, 0, 0x88, 0x88, 0x88, 0x0C,
+    ];
+    let out = strip_metadata(input);
+    assert!(out.malformed);
+    assert!(!out.changed);
+    assert_eq!(out.bytes, input, "a refusal must not partly strip the file");
+    assert!(
+        prepare(input.to_vec()).is_err(),
+        "a malformed container is not uploaded"
+    );
+}
+
 // --- dispatch and the pipeline --------------------------------------------------------------
 
 #[test]

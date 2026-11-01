@@ -667,6 +667,14 @@ fn strip_iso(b: &[u8]) -> Stripped {
                 // a size that runs past its container: stop this level
                 _ => end,
             };
+            // Clamping an oversized box must not make its extended header unreachable. Check
+            // before slicing the payload, including a child header or a dropped box.
+            let Some(payload) = i.checked_add(header) else {
+                return malformed(b);
+            };
+            if payload > box_end {
+                return malformed(b);
+            }
             if iso_dropped(kind) {
                 // overwrite the type with `free` and zero the payload
                 out[i + 4..i + 8].copy_from_slice(b"free");
