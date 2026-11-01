@@ -277,6 +277,24 @@ describe("MockEngine body sources", () => {
       spilled: true,
     });
   });
+
+  it("does not call an absent forum about spilled", async () => {
+    const e = new MockEngine({ sendMs: 1, spilledBodies: true });
+    await e.forumCreate({
+      slug: "without-about",
+      name: "Without about",
+      membership: "open",
+      defaultTier: "frontpage",
+      featuredTags: [],
+      moderators: [],
+    });
+    await vi.waitFor(async () => {
+      const uri = (await e.followed()).find((f) => f.name === "Without about")?.uri;
+      expect(uri).toBeDefined();
+    });
+    const uri = (await e.followed()).find((f) => f.name === "Without about")?.uri ?? "";
+    await expect(e.bodySource(uri)).resolves.toMatchObject({ markdown: "", spilled: false });
+  });
 });
 
 describe("MockEngine local state and declarations", () => {

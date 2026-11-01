@@ -1900,8 +1900,9 @@ export class MockEngine implements EngineApi {
         throw err("invalid_ref", `Not a post, comment or forum: ${uri}`);
       throw err("not_found", `No post, comment or forum ${uri}`);
     }
+    const present = p !== undefined || c !== undefined || f?.about !== undefined;
     const markdown = p?.markdown ?? c?.markdown ?? f?.about ?? "";
-    return { markdown, profile: "lfm/1", spilled: this.spilledBodies };
+    return { markdown, profile: "lfm/1", spilled: present && this.spilledBodies };
   }
 
   async loadMedia(cid: Cid): Promise<LoadedMedia> {
