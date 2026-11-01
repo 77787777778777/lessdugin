@@ -13,7 +13,7 @@ import { useCallback, useId, useRef, useState } from "react";
 import type { Attachment } from "../../components/Attachments.tsx";
 import { LazyComposer } from "../../components/LazyComposer.tsx";
 import { KIND_LABEL } from "../../components/PostMeta.tsx";
-import { ErrorView, Loading } from "../../components/Status.tsx";
+import { ErrorView, errorMessage, Loading } from "../../components/Status.tsx";
 import { toasts } from "../../components/Toast.tsx";
 import { useEngine } from "../../engine/context.tsx";
 import { qk, useActiveAccount } from "../../engine/queries.ts";
@@ -37,10 +37,12 @@ import { useForumView } from "./forumContext.tsx";
 const route = getRouteApi("/f/$owner/$slug/new");
 const KINDS: PostKind[] = ["article", "question", "link", "quickTake"];
 
-/** The post record being edited, as a draft (record JSON is untrusted: every field checked). */
-export function postDraftOf(record: unknown, forum: string): PostDraft | null {
+/** The post record being edited, as a draft (record JSON is untrusted: every field checked).
+ * `source`: the markdown of a body that spilled into a blob (engine-api.md §3.4 `body_source`),
+ * which the record does not carry. */
+export function postDraftOf(record: unknown, forum: string, source?: string): PostDraft | null {
   const body = objectField(record, "body");
-  const markdown = markdownOf(body);
+  const markdown = markdownOf(body) ?? (isSpilledBody(body) ? source : undefined);
   // An absent `kind` is `article` (data-model.md §6.3; writers omit the default). An unknown
   // kind is not edited here: rewriting it as another kind would change the post.
   const kind = stringField(record, "kind") ?? "article";
@@ -311,20 +313,47 @@ export function EditPost({ uri }: { uri: string }) {
     queryFn: () => engine.editPreflight(uri),
     retry: false,
   });
-  if (raw.isPending || active.isPending || preflight.isPending) return <Loading />;
-  if (raw.isError) return <ErrorView error={raw.error} title="This post cannot be edited" />;
   const author = parseAtUri(uri)?.did;
-  const draft = postDraftOf(raw.data.record, forum.uri);
-  if (!draft || author === undefined || author !== active.data?.did) {
-    // say which: a body that spilled into a blob is not in the record (data-model.md §5.2), so
-    // this form cannot start from it, and must not pretend it is empty
-    const why =
-      author === undefined || author !== active.data?.did
-        ? "Only the author can edit a post."
-        : isSpilledBody(objectField(raw.data.record, "body"))
-          ? "This post's text is stored in a blob this app cannot read yet, so it cannot be edited here. Edit it from the CLI (lessdugin edit), which reads it."
-          : "This post's record is not one this app can edit: its body or its kind is unknown.";
-    return <ErrorView error={new Error(why)} title="This post cannot be edited" />;
+  const own = author !== undefined && author === active.data?.did;
+  // a body that spilled into a blob is not in the record (data-model.md §5.2): its source is
+  // asked for first (engine-api.md §3.4 `body_source`), so the edit starts from the text
+  const spilled = raw.data !== undefined && isSpilledBody(objectField(raw.data.record, "body"));
+  const source = useQuery({
+    queryKey: qk.bodySource(uri),
+    queryFn: () => engine.bodySource(uri),
+    enabled: own && spilled,
+    retry: false,
+  });
+  if (
+    raw.isPending ||
+    active.isPending ||
+    preflight.isPending ||
+    (own && spilled && (source.isPending || source.isFetching))
+  ) {
+    return <Loading />;
+  }
+  if (raw.isError) return <ErrorView error={raw.error} title="This post cannot be edited" />;
+  const draft = postDraftOf(raw.data.record, forum.uri, source.data?.markdown);
+  if (!draft || !own) {
+    // say which: the source of a spilled body could not be loaded (it can be asked for again;
+    // the form never pretends the body is empty), or the record is not one this form edits
+    const why = !own
+      ? "Only the author can edit a post."
+      : spilled
+        ? `This post's text is stored in a blob that could not be loaded (${errorMessage(source.error)}), so it cannot be edited here yet. Try again, or edit it from the CLI (lessdugin edit).`
+        : "This post's record is not one this app can edit: its body or its kind is unknown.";
+    return (
+      <div className={ui.stack}>
+        <ErrorView error={new Error(why)} title="This post cannot be edited" />
+        {own && spilled && (
+          <div className={ui.row}>
+            <button type="button" className={ui.button} onClick={() => void source.refetch()}>
+              Try again
+            </button>
+          </div>
+        )}
+      </div>
+    );
   }
   return (
     <section className={ui.page} aria-label="Edit post">

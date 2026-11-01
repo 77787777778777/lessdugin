@@ -10,7 +10,14 @@ import { useState } from "react";
 import { useEngine } from "../engine/context.tsx";
 import { writeStore } from "../engine/writes.ts";
 import { suspendsNotice } from "../lib/modActions.ts";
-import { markdownOf, mediaRefsOf, objectField, refUri, textQuoteOf } from "../lib/records.ts";
+import {
+  isSpilledBody,
+  markdownOf,
+  mediaRefsOf,
+  objectField,
+  refUri,
+  textQuoteOf,
+} from "../lib/records.ts";
 import ui from "../styles/ui.module.css";
 import { Dialog } from "./Dialog.tsx";
 import { LazyComposer } from "./LazyComposer.tsx";
@@ -24,10 +31,11 @@ export interface CommentSource {
   media: MediaRef[];
 }
 
-/** The editable parts of a comment record, or null if it has no inline markdown body. */
-export function commentSourceOf(record: unknown): CommentSource | null {
+/** The editable parts of a comment record, or null if it has no markdown body: inline, or
+ * `source`, the markdown of a body that spilled into a blob (`bodySource`). */
+export function commentSourceOf(record: unknown, source?: string): CommentSource | null {
   const body = objectField(record, "body");
-  const markdown = markdownOf(body);
+  const markdown = markdownOf(body) ?? (isSpilledBody(body) ? source : undefined);
   if (markdown === undefined) return null;
   const out: CommentSource = { markdown, media: mediaRefsOf(body) };
   const parent = refUri(record, "parent");
@@ -64,7 +72,12 @@ export function OwnCommentActions({ node, postUri }: { node: CommentNode; postUr
   const startEdit = async (): Promise<void> => {
     try {
       const raw = await engine.raw(node.uri);
-      const source = commentSourceOf(raw.record);
+      // a body that spilled into a blob is not in the record: its source comes from the engine
+      // (engine-api.md §3.4 `body_source`), and is never read as empty
+      const spilled = isSpilledBody(objectField(raw.record, "body"))
+        ? await engine.bodySource(node.uri)
+        : undefined;
+      const source = commentSourceOf(raw.record, spilled?.markdown);
       if (!source) throw new Error("The comment's source is not available.");
       // the engine names what the edit suspends (social.md §4.5); without an answer, the edit
       // goes ahead with no warning

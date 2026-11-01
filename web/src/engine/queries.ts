@@ -35,6 +35,8 @@ export const qk = {
     ["post", uri, "thread", sort, unreadOnly] as const,
   history: (uri: string) => ["post", uri, "history"] as const,
   raw: (uri: string) => ["raw", uri] as const,
+  /** Under `raw`, so what refreshes the record refreshes its body's source. */
+  bodySource: (uri: string) => ["raw", uri, "source"] as const,
   /** Under `post`, so a forum or thread change (an assertion made or lapsed) refreshes it. */
   editPreflight: (uri: string) => ["post", uri, "editPreflight"] as const,
   sequence: (uri: string) => ["sequence", uri] as const,

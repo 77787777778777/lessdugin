@@ -13,7 +13,14 @@ import type {
   TagSummary,
 } from "@lessdugin/engine/types";
 import { type FormEvent, useId, useState } from "react";
-import { markdownOf, mediaRefsOf, objectField, stringField, stringsField } from "../lib/records.ts";
+import {
+  isSpilledBody,
+  markdownOf,
+  mediaRefsOf,
+  objectField,
+  stringField,
+  stringsField,
+} from "../lib/records.ts";
 import { cleanName } from "../lib/text.ts";
 import { isDid } from "../lib/uri.ts";
 import ui from "../styles/ui.module.css";
@@ -52,8 +59,13 @@ function moderatorsOf(record: unknown): ModeratorDraft[] {
 }
 
 /** The forum declaration being edited, as a draft (record JSON is untrusted: every field is
- * checked; `slug` is the record key). */
-export function forumDraftOf(record: unknown, slug: string): ForumDraft | null {
+ * checked; `slug` is the record key). `aboutSource`: the markdown of an about that spilled into
+ * a blob (engine-api.md §3.4 `body_source`), which the record does not carry. */
+export function forumDraftOf(
+  record: unknown,
+  slug: string,
+  aboutSource?: string,
+): ForumDraft | null {
   const name = stringField(record, "name");
   if (name === undefined) return null;
   const membership = stringField(record, "membership");
@@ -70,7 +82,7 @@ export function forumDraftOf(record: unknown, slug: string): ForumDraft | null {
   const description = stringField(record, "description");
   if (description !== undefined) d.description = description;
   const about = objectField(record, "about");
-  const aboutMd = markdownOf(about);
+  const aboutMd = markdownOf(about) ?? (isSpilledBody(about) ? aboutSource : undefined);
   if (aboutMd !== undefined) d.about = { markdown: aboutMd, media: mediaRefsOf(about) };
   const contact = stringField(record, "reportContact");
   if (contact !== undefined) d.reportContact = contact;
@@ -111,16 +123,18 @@ function splitTags(s: string): string[] {
   ];
 }
 
-/** Why a declaration whose about spilled into a blob is not saved from here. */
-export const ABOUT_UNAVAILABLE =
-  "The about text is stored in a blob this app cannot read yet, and saving the declaration without it would remove it. Edit it from the CLI (lessdugin forum edit) or the TUI (:forum edit), which read it.";
+/** Why a declaration whose about spilled into a blob is not saved while its source is not
+ * loaded (`reason`: the engine's). */
+export function aboutUnavailableNotice(reason: string): string {
+  return `The about text is stored in a blob that could not be loaded (${reason}), and saving the declaration without it would remove it. Try again, or edit it from the CLI (lessdugin forum edit) or the TUI (:forum edit).`;
+}
 
 export function ForumForm({
   initial,
   creating,
   tags = [],
   submitLabel,
-  aboutUnavailable = false,
+  aboutUnavailable,
   onSubmit,
   onCancel,
 }: {
@@ -129,10 +143,10 @@ export function ForumForm({
   /** The forum's existing tags, offered as featured tags. */
   tags?: readonly TagSummary[] | undefined;
   submitLabel: string;
-  /** The declaration's about is a spilled body whose source this form does not have
-   * (records.ts `isSpilledBody`): the form says so and refuses to save, since a draft without
-   * `about` removes it (engine-api.md §3.2 `forum_update`). */
-  aboutUnavailable?: boolean | undefined;
+  /** The declaration's about is a spilled body whose source could not be loaded (`bodySource`
+   * failed with `reason`): the form says so and refuses to save, since a draft without `about`
+   * removes it (engine-api.md §3.2 `forum_update`); `retry` asks for the source again. */
+  aboutUnavailable?: { reason: string; retry: () => void } | undefined;
   /** Resolves to true when the write was done. */
   onSubmit: (draft: ForumDraft) => Promise<boolean>;
   onCancel?: (() => void) | undefined;
@@ -178,7 +192,7 @@ export function ForumForm({
     const d = draft();
     const found = forumDraftProblems(d, creating);
     // never send a declaration without an about this form could not read
-    if (aboutUnavailable) found.unshift(ABOUT_UNAVAILABLE);
+    if (aboutUnavailable) found.unshift(aboutUnavailableNotice(aboutUnavailable.reason));
     setProblems(found);
     if (found.length > 0) return;
     setBusy(true);
@@ -249,12 +263,15 @@ export function ForumForm({
           className={ui.input}
           rows={6}
           value={about}
-          disabled={aboutUnavailable}
+          disabled={aboutUnavailable !== undefined}
           onChange={(e) => setAbout(e.target.value)}
         />
         {aboutUnavailable && (
           <p className={ui.notice} role="note" data-testid="about-unavailable">
-            {ABOUT_UNAVAILABLE}
+            {aboutUnavailableNotice(aboutUnavailable.reason)}{" "}
+            <button type="button" className={ui.link} onClick={aboutUnavailable.retry}>
+              Try again
+            </button>
           </p>
         )}
       </div>
@@ -360,7 +377,11 @@ export function ForumForm({
         current version, so policy and membership changes apply retroactively.
       </p>
       <div className={ui.row}>
-        <button type="submit" className={ui.primary} disabled={busy || aboutUnavailable}>
+        <button
+          type="submit"
+          className={ui.primary}
+          disabled={busy || aboutUnavailable !== undefined}
+        >
           {busy ? "Saving…" : submitLabel}
         </button>
         {onCancel && (

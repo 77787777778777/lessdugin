@@ -1878,8 +1878,12 @@ export class MockEngine implements EngineApi {
     const p = this.s.posts.get(uri);
     const c = this.s.comments.get(uri);
     const f = this.s.forums.get(uri);
-    if (!p && !c && !f) throw err("not_found", `No post, comment or forum ${uri}`);
-    // the mock stores every body inline
+    if (!p && !c && !f) {
+      // any other collection is `invalid_ref` (engine-api.md §3.4)
+      if (this.s.sequences.has(uri)) throw err("invalid_ref", `Not a post, comment or forum: ${uri}`);
+      throw err("not_found", `No post, comment or forum ${uri}`);
+    }
+    // the mock stores every body inline (`raw` gives it as `text`), so none is spilled
     const markdown = p?.markdown ?? c?.markdown ?? f?.about ?? "";
     return { markdown, profile: "lfm/1", spilled: false };
   }

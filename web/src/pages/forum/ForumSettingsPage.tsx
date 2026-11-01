@@ -50,12 +50,31 @@ function EditDeclaration({ uri, onDone }: { uri: string; onDone: () => void }) {
   const engine = useEngine();
   const raw = useQuery({ queryKey: qk.raw(uri), queryFn: () => engine.raw(uri) });
   const tags = useQuery({ queryKey: qk.tags(uri), queryFn: () => engine.tags(uri) });
-  if (raw.isPending) return <Loading label="Loading the declaration…" />;
+  // an about that spilled into a blob is not in the record (data-model.md §5.2): its source is
+  // asked for first (engine-api.md §3.4 `body_source`), since a draft without `about` removes it
+  const aboutSpilled =
+    raw.data !== undefined && isSpilledBody(objectField(raw.data.record, "about"));
+  const source = useQuery({
+    queryKey: qk.bodySource(uri),
+    queryFn: () => engine.bodySource(uri),
+    enabled: aboutSpilled,
+    retry: false,
+  });
+  if (raw.isPending || (aboutSpilled && (source.isPending || source.isFetching))) {
+    return <Loading label="Loading the declaration…" />;
+  }
   if (raw.isError) return <ErrorView error={raw.error} />;
-  const initial = forumDraftOf(raw.data.record, parseAtUri(uri)?.rkey ?? "");
+  const initial = forumDraftOf(
+    raw.data.record,
+    parseAtUri(uri)?.rkey ?? "",
+    source.data?.markdown,
+  );
   if (!initial) return <ErrorView error={new Error("The forum declaration is not readable.")} />;
-  // an about that spilled into a blob is not in the record: the form must not read it as empty
-  const aboutUnavailable = isSpilledBody(objectField(raw.data.record, "about"));
+  // without the source the form says so and refuses to save, never reading the about as empty
+  const aboutUnavailable =
+    aboutSpilled && source.data === undefined
+      ? { reason: errorMessage(source.error), retry: () => void source.refetch() }
+      : undefined;
   const save = async (draft: ForumDraft): Promise<boolean> => {
     const ok = await runWrite(
       () => engine.forumUpdate(uri, draft),
@@ -67,6 +86,8 @@ function EditDeclaration({ uri, onDone }: { uri: string; onDone: () => void }) {
   };
   return (
     <ForumForm
+      // the form's fields start from `initial` once: remount it when the source arrives
+      key={aboutUnavailable ? "about-unavailable" : "about"}
       initial={initial}
       creating={false}
       tags={tags.data}
