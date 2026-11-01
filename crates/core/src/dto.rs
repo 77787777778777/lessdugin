@@ -308,8 +308,53 @@ dto! {
     }
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+/// A chapter of a sequence create/edit draft.
+pub struct SequenceChapterDraft {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<BodyDraft>,
+    pub posts: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+/// A sequence create/edit draft.
+pub struct SequenceDraft {
+    pub forum: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<BodyDraft>,
+    pub chapters: Vec<SequenceChapterDraft>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+/// A chapter-local sequence position.
+pub struct SequencePosition {
+    pub chapter: usize,
+    pub index: usize,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+/// A new immutable wiki revision.
+pub struct WikiDraft {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<BodyDraft>,
+    pub is_tag: bool,
+    #[serde(default)]
+    pub parent_tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+}
+
 dto! {
-    /// Width and height.
     pub struct AspectRatio {
         pub width: u32,
         pub height: u32,

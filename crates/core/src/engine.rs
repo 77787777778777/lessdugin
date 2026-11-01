@@ -22,6 +22,7 @@ mod models;
 mod moderation;
 mod notify;
 mod notify_local;
+mod organisation;
 mod queries;
 mod refs;
 mod syncing;

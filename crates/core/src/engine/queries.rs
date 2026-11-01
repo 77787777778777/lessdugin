@@ -62,7 +62,7 @@ fn page<T: Clone>(items: &[T], offset: usize, limit: usize) -> (Vec<T>, Option<S
     (page, cursor)
 }
 
-fn fold_pending(p: impl std::fmt::Display) -> EngineError {
+pub(crate) fn fold_pending(p: impl std::fmt::Display) -> EngineError {
     EngineError::internal(format!("the fold layer is pending: {p}"))
 }
 

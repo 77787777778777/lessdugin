@@ -38,13 +38,13 @@ use lessdugin_markdown::quote::{QuoteResolution, QuoteTarget, resolve_quote};
 use serde_json::Value;
 
 use crate::dto::{
-    ActorView, AgreementValue, Anchor, Badges, Banner, CollapseReason, CommentNode, CommentSort,
-    Completeness, DtoVersion, ExternalLinkView, ForumRole, ForumSummary, ForumView, HandleState,
-    HiddenReason, HistorySummary, HistoryView, ItemState, KarmaValue, MemberView, MembersQuery,
-    MembershipMode as DtoMode, ModLogEntry, ModLogStatus, ModQueue, ModQueueItem, ModRole,
-    ModeratorView, MyOpinion, PostKind, PostSummary, PostView, ReactTally, RenderedBody, ScoreView,
-    Stance as DtoStance, TextQuote, ThreadRoot, ThreadView, Tier, VersionEntry, VersionRef,
-    ViewerCaps,
+    ActorView, AgreementValue, Anchor, Badges, Banner, ChapterView, CollapseReason, CommentNode,
+    CommentSort, Completeness, DtoVersion, ExternalLinkView, ForumRole, ForumSummary, ForumView,
+    HandleState, HiddenReason, HistorySummary, HistoryView, ItemState, KarmaValue, MemberView,
+    MembersQuery, MembershipMode as DtoMode, ModLogEntry, ModLogStatus, ModQueue, ModQueueItem,
+    ModRole, ModeratorView, MyOpinion, PostKind, PostSummary, PostView, ReactTally, RenderedBody,
+    ScoreView, SequenceNav, SequenceSummary, SequenceView, Stance as DtoStance, TagSummary,
+    TagView, TextQuote, ThreadRoot, ThreadView, Tier, VersionEntry, VersionRef, ViewerCaps,
 };
 use crate::identity::short_did;
 use crate::model::build::ForumModel;
@@ -597,6 +597,20 @@ impl Views<'_> {
             SkelData::Post { excerpt, .. } => excerpt.as_deref(),
             _ => None,
         };
+        self.body_md(x, listed, &x.cid, md, excerpt)
+    }
+
+    fn body_md(
+        &self,
+        x: &Skel,
+        listed: bool,
+        cache_key: &str,
+        md: &Value,
+        excerpt: Option<&str>,
+    ) -> RenderedBody {
+        if !listed {
+            return empty_body();
+        }
         let pds = self.pds.get(&x.did).map_or("", String::as_str);
         let root = self
             .model
@@ -617,7 +631,7 @@ impl Views<'_> {
             prefs: &self.viewer.media,
         };
         self.renders.body(
-            &x.cid,
+            cache_key,
             md,
             &self.model.input.ns,
             excerpt,
@@ -792,8 +806,249 @@ impl Views<'_> {
             body,
             reacts,
             history: self.history_summary(uri),
-            sequences: Vec::new(),
+            sequences: self.sequence_nav(uri),
         })
+    }
+
+    fn wiki_revision(&self, uri: &str) -> Option<lessdugin_lexicon::records::WikiRevision> {
+        self.values
+            .get(uri)
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+    }
+
+    /// A tag summary from the canonical revision selected by Wiki L5.
+    pub fn tag_summary(&self, slug: &str) -> Option<TagSummary> {
+        let wiki = self.model.view.wiki.as_ref().ok()?;
+        let page = wiki.pages.get(slug)?;
+        if !page.exists || !page.applicable {
+            return None;
+        }
+        let canonical = page.canonical.as_ref()?;
+        let rev = self.wiki_revision(canonical)?;
+        Some(TagSummary {
+            slug: slug.to_owned(),
+            name: rev.name,
+            description: rev.description,
+            post_count: wiki
+                .applies
+                .get(slug)
+                .map(|posts| {
+                    posts
+                        .iter()
+                        .filter(|uri| self.post_summary(uri).is_some())
+                        .count() as u32
+                })
+                .unwrap_or(0),
+            unmerged_edits: page.unmerged,
+        })
+    }
+
+    /// A tag page, its canonical body and its listed posts by descending score then uri.
+    pub fn tag_view(&self, slug: &str) -> Option<TagView> {
+        let summary = self.tag_summary(slug)?;
+        let wiki = self.model.view.wiki.as_ref().ok()?;
+        let page = wiki.pages.get(slug)?;
+        let canonical = page.canonical.clone()?;
+        let rev = self.wiki_revision(&canonical)?;
+        let body = rev.body.as_ref().and_then(|_| {
+            self.model
+                .skel(&canonical)
+                .map(|skel| self.body(skel, self.listed(&canonical)))
+        });
+        let mut posts: Vec<_> = wiki
+            .applies
+            .get(slug)
+            .into_iter()
+            .flatten()
+            .filter_map(|uri| self.post_summary(uri))
+            .collect();
+        posts.sort_by(|a, b| {
+            b.score
+                .score
+                .cmp(&a.score.score)
+                .then_with(|| a.uri.cmp(&b.uri))
+        });
+        Some(TagView {
+            dto: DtoVersion::default(),
+            tag: summary,
+            page: body,
+            head: Some(canonical),
+            posts,
+        })
+    }
+
+    fn sequence_record(&self, uri: &str) -> Option<lessdugin_lexicon::records::Sequence> {
+        self.values
+            .get(uri)
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+    }
+
+    /// A sequence summary. Raw counts describe the record; displayed entry lists are filtered
+    /// separately and never invent summaries for unavailable posts.
+    pub fn sequence_summary(&self, uri: &str) -> Option<SequenceSummary> {
+        let library = self.model.view.library.as_ref().ok()?;
+        if !library.eligible.contains(uri) {
+            return None;
+        }
+        let seq = self.sequence_record(uri)?;
+        let skel = self.model.skel(uri)?;
+        Some(SequenceSummary {
+            uri: uri.to_owned(),
+            author: self.actor(&skel.did),
+            title: seq.title,
+            chapters: seq.chapters.len() as u32,
+            posts: library
+                .entries
+                .get(uri)
+                .map(|entries| entries.len() as u32)
+                .unwrap_or(0),
+            score: self.score(uri, self.listed(uri)),
+            pinned: self.model.view.moderation.pinned_forum(uri),
+        })
+    }
+
+    fn displayable_post(&self, uri: &str) -> Option<PostSummary> {
+        let fk = &self.model.key.fk;
+        let (_, _, rkey) = split_uri(uri)?;
+        if lessdugin_lexicon::keys::fk_of(rkey) != Some(fk.as_str()) {
+            return None;
+        }
+        self.post_summary(uri)
+    }
+
+    fn sequence_posts(&self, uri: &str) -> Vec<PostSummary> {
+        let Some(library) = self.model.view.library.as_ref().ok() else {
+            return Vec::new();
+        };
+        library
+            .entries
+            .get(uri)
+            .into_iter()
+            .flatten()
+            .filter_map(|post| self.displayable_post(post))
+            .collect()
+    }
+
+    /// A sequence page with rendered sequence/chapter bodies and only displayable, same-forum
+    /// post entries.
+    pub fn sequence_view(&self, uri: &str) -> Option<SequenceView> {
+        self.sequence_summary(uri)?;
+        let seq = self.sequence_record(uri)?;
+        let skel = self.model.skel(uri)?;
+        let listed = self.listed(uri);
+        let body = seq.body.as_ref().map(|_| self.body(skel, listed));
+        let chapters = seq
+            .chapters
+            .iter()
+            .enumerate()
+            .map(|(i, chapter)| ChapterView {
+                title: chapter.title.clone(),
+                body: chapter.body.as_ref().map(|body| {
+                    self.body_md(
+                        skel,
+                        listed,
+                        &format!("{}#chapter-{i}", skel.cid),
+                        &serde_json::to_value(body).unwrap_or(Value::Null),
+                        None,
+                    )
+                }),
+                posts: chapter
+                    .posts
+                    .iter()
+                    .filter_map(|post| self.displayable_post(post.as_str()))
+                    .collect(),
+            })
+            .collect();
+        Some(SequenceView {
+            dto: DtoVersion::default(),
+            sequence: self.sequence_summary(uri)?,
+            body,
+            chapters,
+        })
+    }
+
+    /// Sequence navigation around the first displayable occurrence of a post. The post author's
+    /// eligible sequence wins (score desc, uri asc), then the Library's listed order.
+    pub fn sequence_nav(&self, post: &str) -> Vec<SequenceNav> {
+        let Ok(library) = self.model.view.library.as_ref() else {
+            return Vec::new();
+        };
+        let Some(post_skel) = self.model.skel(post) else {
+            return Vec::new();
+        };
+        let contains = |uri: &String| {
+            library
+                .entries
+                .get(uri)
+                .is_some_and(|entries| entries.iter().any(|entry| entry == post))
+        };
+        let mut own: Vec<_> = library
+            .eligible
+            .iter()
+            .filter(|uri| {
+                self.model
+                    .skel(uri)
+                    .is_some_and(|skel| skel.did == post_skel.did)
+                    && contains(uri)
+            })
+            .collect();
+        own.sort_by(|a, b| {
+            self.raw_score(b)
+                .map(|s| s.score)
+                .unwrap_or(0)
+                .cmp(&self.raw_score(a).map(|s| s.score).unwrap_or(0))
+                .then_with(|| a.cmp(b))
+        });
+        let selected = own
+            .first()
+            .copied()
+            .or_else(|| library.listed.iter().find(|uri| contains(uri)));
+        let Some(sequence) = selected else {
+            return Vec::new();
+        };
+        let posts = self.sequence_posts(sequence);
+        let Some(index) = posts.iter().position(|entry| entry.uri == post) else {
+            return Vec::new();
+        };
+        let Some(summary) = self.sequence_summary(sequence) else {
+            return Vec::new();
+        };
+        vec![SequenceNav {
+            sequence: summary.uri,
+            title: summary.title,
+            prev: index
+                .checked_sub(1)
+                .and_then(|i| posts.get(i).map(|post| post.uri.clone())),
+            next: posts.get(index + 1).map(|post| post.uri.clone()),
+        }]
+    }
+
+    /// Canonical rendered links of a listed, current post value. Hidden and stale values have
+    /// no outbound links.
+    pub fn rendered_links(&self, uri: &str) -> Vec<lessdugin_atp::syntax::AtUri> {
+        if !self.listed(uri)
+            || !self
+                .model
+                .skel(uri)
+                .is_some_and(|s| s.coll == Some(Collection::Post))
+        {
+            return Vec::new();
+        }
+        let Some(post) = self.values.get(uri).and_then(|v| {
+            serde_json::from_value::<lessdugin_lexicon::records::Post>(v.clone()).ok()
+        }) else {
+            return Vec::new();
+        };
+        self.renders.links(
+            &self
+                .model
+                .skel(uri)
+                .map(|s| s.cid.clone())
+                .unwrap_or_default(),
+            &serde_json::to_value(post.body).unwrap_or(Value::Null),
+            NS,
+            post.excerpt.as_deref(),
+        )
     }
 
     /// The node of comment `uri` in the thread of `root` (`None` unless it is placed there and
