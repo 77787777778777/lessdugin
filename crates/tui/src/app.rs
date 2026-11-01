@@ -27,8 +27,8 @@ use lessdugin_core::dto::{
     ViewerCaps, WriteState, WriteTicket,
 };
 use lessdugin_core::dto::{
-    Draft, ForumDraft, ForumRole, KarmaCadence, MemberView, MembershipMode, PostKind, RawView, Ref,
-    Settings, Subscription, TextQuote,
+    Draft, ForumDraft, ForumRole, KarmaCadence, MemberView, MembershipMode, PostKind, PostSummary,
+    RawView, Ref, Settings, Subscription, TextQuote,
 };
 use lessdugin_core::engine::EngineError;
 
@@ -355,6 +355,18 @@ pub enum Effect {
         /// The kind.
         kind: PublicActionKind,
     },
+    /// `forum_discover(query)`, shown in a panel.
+    Discover {
+        /// The forum name query.
+        query: String,
+    },
+    /// `backlinks(uri)`, shown in a panel.
+    LoadBacklinks {
+        /// The item or a reference to it.
+        target: String,
+        /// The current forum, for resolving a relative reference.
+        forum: String,
+    },
     /// `parse_ref(target)`, then the screen of the forum, post or comment it names (`:open`).
     Open {
         /// The reference.
@@ -580,6 +592,8 @@ impl Effect {
             Effect::LoadWrites => "writes",
             Effect::LoadAcknowledged => "acknowledged_public_actions",
             Effect::Acknowledge { .. } => "acknowledge_public_action",
+            Effect::Discover { .. } => "forum_discover",
+            Effect::LoadBacklinks { .. } => "backlinks",
             Effect::Open { .. } => "forum_open",
             Effect::Follow { on: true, .. } => "forum_follow",
             Effect::Follow { on: false, .. } => "forum_unfollow",
@@ -783,6 +797,10 @@ pub enum Action {
         /// Its acknowledgements.
         result: Result<Vec<PublicActionKind>, EngineError>,
     },
+    /// [`Effect::Discover`] finished.
+    Discovered(Result<Vec<ForumSummary>, EngineError>),
+    /// [`Effect::LoadBacklinks`] finished.
+    BacklinksLoaded(Result<Vec<PostSummary>, EngineError>),
     /// [`Effect::Open`] resolved its reference.
     Opened(Result<Ref, EngineError>),
     /// A write a `:` command queued (or why it was refused); `what` names it.
@@ -1549,6 +1567,8 @@ fn complete(line: &mut String) {
         "read",
         "read-all",
         "activity",
+        "discover",
+        "linked",
         "sort",
         "filter",
         "user",
@@ -1986,6 +2006,20 @@ impl State {
                 // yet when this list was read: keep both
                 Ok(kinds) => self.acknowledged.get_or_insert_default().extend(kinds),
                 Err(e) => tracing::debug!(error = %e, "acknowledged_public_actions failed"),
+            },
+            Action::Discovered(result) => match result {
+                Ok(forums) => self.show_panel("Discover", discover_lines(&forums)),
+                Err(e) => self.say(
+                    Tone::Error,
+                    cat([lit("Discovery failed: "), tt(&e.message)]),
+                ),
+            },
+            Action::BacklinksLoaded(result) => match result {
+                Ok(posts) => self.show_panel("Linked from", backlink_lines(&posts)),
+                Err(e) => self.say(
+                    Tone::Error,
+                    cat([lit("Cannot list links: "), tt(&e.message)]),
+                ),
             },
             Action::Opened(result) => match result {
                 Ok(Ref::Forum { uri }) => self.push_forum(uri, &mut fx),
@@ -4671,6 +4705,11 @@ impl State {
             it
         };
         match verb {
+            Verb::Discover { query } => fx.push(Effect::Discover { query }),
+            Verb::Linked { target } => fx.push(Effect::LoadBacklinks {
+                target,
+                forum: self.top_forum().unwrap_or_default(),
+            }),
             Verb::Open { target } => fx.push(Effect::Open { target }),
             Verb::Follow { forum: named, on } => {
                 let Some(f) = named.or_else(|| forum(self)) else {
@@ -5607,6 +5646,34 @@ fn item_media(
         .flatten()
         .filter(|m| thread::inline_image(&m.mime))
         .cloned()
+        .collect()
+}
+
+/// The `:discover` panel. Discovery results stay visible with their canonical URIs; opening one
+/// remains an explicit `:open` action rather than replacing the screen under the user.
+fn discover_lines(forums: &[ForumSummary]) -> Vec<TermText> {
+    if forums.is_empty() {
+        return vec![lit("No forums found.")];
+    }
+    forums
+        .iter()
+        .flat_map(|f| [cat([tt(&f.name), lit("  "), actor(&f.owner)]), tt(&f.uri)])
+        .collect()
+}
+
+/// The `:linked` panel: listed posts linking to the requested item.
+fn backlink_lines(posts: &[PostSummary]) -> Vec<TermText> {
+    if posts.is_empty() {
+        return vec![lit("No listed posts link to this item.")];
+    }
+    posts
+        .iter()
+        .flat_map(|p| {
+            [
+                cat([post_title(p), lit("  "), actor(&p.author)]),
+                tt(&p.uri),
+            ]
+        })
         .collect()
 }
 

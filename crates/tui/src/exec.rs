@@ -256,6 +256,13 @@ pub async fn run<H: Host>(engine: &Engine<H>, effect: Effect, opts: ExecOpts) ->
             }
             return None;
         }
+        Effect::Discover { query } => Action::Discovered(engine.forum_discover(&query).await),
+        Effect::LoadBacklinks { target, forum } => {
+            Action::BacklinksLoaded(match item_uri(engine, &target, &forum).await {
+                Ok(uri) => engine.backlinks(&uri).await,
+                Err(e) => Err(e),
+            })
+        }
         Effect::Open { target } => Action::Opened(
             match engine.parse_ref(&target, &RefContext::default()).await {
                 Ok(r @ (Ref::Forum { .. } | Ref::Post { .. } | Ref::Comment { .. })) => Ok(r),

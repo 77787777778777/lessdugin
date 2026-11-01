@@ -19,6 +19,24 @@ describe("MockEngine fixture", () => {
     expect(JSON.stringify(t1)).toBe(JSON.stringify(t2));
   });
 
+  it("discovers forums and finds listed posts linking to an item", async () => {
+    const e = new MockEngine();
+    const all = await e.forumDiscover("");
+    expect(all.length).toBeGreaterThan(0);
+    expect(await e.forumDiscover(all[0]?.name.toUpperCase() ?? "missing")).toEqual([all[0]]);
+    expect(await e.forumDiscover("no forum has this name")).toEqual([]);
+
+    const posts = await e.listPosts({ forum: FORUM_URI, sort: "new", filter: "all", limit: 100 });
+    const target = posts.items.find((p) => p.title === "Moderation policy");
+    expect(target).toBeDefined();
+    const linked = await e.backlinks(target?.uri ?? "");
+    expect(linked.map((p) => p.uri)).toContain(
+      posts.items.find((p) => p.title?.startsWith("Welcome"))?.uri,
+    );
+    expect(linked.every((p) => p.state.kind !== "hidden")).toBe(true);
+    await expect(e.backlinks("not an at-uri")).rejects.toMatchObject({ code: "invalid_ref" });
+  });
+
   it("lists posts of every kind with the frontpage filter excluding quick takes", async () => {
     const e = new MockEngine();
     const all = await e.listPosts({ forum: FORUM_URI, sort: "new", filter: "all", limit: 100 });

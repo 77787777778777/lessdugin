@@ -99,6 +99,16 @@ pub enum Verb {
         /// Remove instead of add.
         remove: bool,
     },
+    /// `discover [query]`: public forums matching the optional name query.
+    Discover {
+        /// The name query (empty discovers all).
+        query: String,
+    },
+    /// `linked <uri>`: listed posts whose rendered bodies link to the item.
+    Linked {
+        /// The item reference.
+        target: String,
+    },
     /// `open <ref>`: a forum, post or comment by any reference `parse_ref` takes, or a forum
     /// as `owner/slug`.
     Open {
@@ -258,7 +268,7 @@ pub enum Reach {
 pub const REACH: &[(&str, Reach)] = &[
     // §3.2
     ("forum_open", Reach::Command("open alice.example.com/meta")),
-    ("forum_discover", Reach::NotHere("M5 (engine-api.md §3.9)")),
+    ("forum_discover", Reach::Command("discover rust")),
     ("forum_follow", Reach::Command("follow")),
     ("forum_unfollow", Reach::Command("unfollow")),
     (
@@ -821,6 +831,21 @@ fn more(verb: &str, rest: &[&str]) -> Option<Parsed> {
         })
     };
     Some(match verb {
+        "discover" => bare(
+            Verb::Discover {
+                query: text_of(rest).unwrap_or_default(),
+            },
+            None,
+        ),
+        "linked" => match rest {
+            [target] => bare(
+                Verb::Linked {
+                    target: (*target).to_owned(),
+                },
+                None,
+            ),
+            _ => Err("linked needs one item at-uri.".into()),
+        },
         "open" | "goto" => match rest.first() {
             Some(t) => bare(
                 Verb::Open {
@@ -1270,6 +1295,8 @@ pub fn usage() -> String {
         "mods remove <did|handle>",
         "mod adopt <did|handle>",
         "open <owner/slug|post|comment>",
+        "discover [query]",
+        "linked <item at-uri>",
         "follow [forum], unfollow [forum]",
         "join [note], leave",
         "members [pending|owner|admin|moderator|member|established|newcomer|none]",
@@ -1453,6 +1480,19 @@ mod tests {
             Verb::Unreact { id: "heart".into() }
         );
         assert_eq!(parse("activity").unwrap().verb, Verb::Activity);
+        assert_eq!(
+            parse("discover rust forums").unwrap().verb,
+            Verb::Discover {
+                query: "rust forums".into()
+            }
+        );
+        assert_eq!(
+            parse("linked at://did:plc:a/x.y/z").unwrap().verb,
+            Verb::Linked {
+                target: "at://did:plc:a/x.y/z".into()
+            }
+        );
+        assert!(parse("linked").unwrap_err().contains("needs one"));
         assert_eq!(
             parse("notifications").unwrap().verb,
             Verb::Notifications { all: false }

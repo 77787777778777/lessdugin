@@ -129,6 +129,12 @@ export function HomePage() {
         ))}
       </div>
       <CreateForum />
+      {discover.isError && (
+        <>
+          <h2 className={ui.sectionTitle}>Discover</h2>
+          <ErrorView error={discover.error} />
+        </>
+      )}
       {others.length > 0 && (
         <>
           <h2 className={ui.sectionTitle}>Discover</h2>

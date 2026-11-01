@@ -32,6 +32,8 @@ async fn run(ctx: &Ctx, command: Command) -> Result<(), CliError> {
     match command {
         Command::Read(a) => cmd::read::read(ctx, a).await,
         Command::Ls(a) => cmd::read::ls(ctx, a).await,
+        Command::Discover(a) => cmd::forum::discover(ctx, a).await,
+        Command::Linked(a) => cmd::read::linked(ctx, a).await,
         Command::Post(a) => cmd::write::post(ctx, a).await,
         Command::Comment(a) => cmd::write::comment(ctx, a).await,
         Command::Edit(a) => cmd::write::edit(ctx, a).await,

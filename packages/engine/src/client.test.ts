@@ -114,12 +114,21 @@ describe("startEngine", () => {
     const c = start({ worker });
     expect(await c.getPost("at://x")).toEqual({ op: "getPost" });
     expect(state.calls.at(-1)).toEqual(["getPost", ["at://x"]]);
+    await c.forumDiscover("rust");
+    expect(state.calls.at(-1)).toEqual(["forumDiscover", ["rust"]]);
+    await c.backlinks("at://x");
+    expect(state.calls.at(-1)).toEqual(["backlinks", ["at://x"]]);
     expect(await c.grant("at://f", ["did:plc:a", "did:plc:b"])).toEqual({
       writeId: "w1",
     });
     await c.outboxPump();
     await c.liveTail();
-    expect(state.calls.map(([op]) => op)).toEqual(["getPost", "grant"]);
+    expect(state.calls.map(([op]) => op)).toEqual([
+      "getPost",
+      "forumDiscover",
+      "backlinks",
+      "grant",
+    ]);
     expect(await c.callJson("x", [1, null])).toBe('{"op":"x","args":[1,null]}');
     expect(await c.isLeader()).toBe(true);
     await expect((c as unknown as { fail(): Promise<void> }).fail()).rejects.toMatchObject({

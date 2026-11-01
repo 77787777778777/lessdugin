@@ -28,7 +28,9 @@ function fakeWasm(opts: { failConstruct?: boolean } = {}): Fake {
     }
     async call(op: string): Promise<string> {
       calls.push(op);
-      if (op === "accounts" || op === "writes") return "[]";
+      if (op === "accounts" || op === "writes" || op === "forumDiscover" || op === "backlinks") {
+        return "[]";
+      }
       return "null";
     }
     subscribe(): number {
@@ -76,6 +78,16 @@ function env(over: Partial<WorkerEnv> = {}): WorkerEnv {
 }
 
 describe("WorkerEngine (stand-in wasm)", () => {
+  it("dispatches discovery and backlinks through the real worker path", async () => {
+    const w = fakeWasm();
+    const e = new WorkerEngine(w.module, env());
+    open.push(e);
+    await e.init({ config: {}, namespace: NS, elect: false }, NO_BRIDGE, () => {});
+    await expect(e.call("forumDiscover", ["rust"])).resolves.toEqual([]);
+    await expect(e.call("backlinks", ["at://did:plc:a/x.y/z"])).resolves.toEqual([]);
+    expect(w.calls).toEqual(["forumDiscover", "backlinks"]);
+  });
+
   it("wakes the leader's outbox pump when the device comes back online", async () => {
     const online: (() => void)[] = [];
     const onOnline = (cb: () => void) => {

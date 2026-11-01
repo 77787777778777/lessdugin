@@ -20,8 +20,8 @@ use lessdugin_native::host::NativeHost;
 use serde::Serialize;
 
 use crate::args::{
-    ApproveArgs, ForumAction, ForumArgs, ForumEditArgs, JoinArgs, LeaveArgs, MembersAction,
-    MembersArgs, RejectArgs, SyncArgs,
+    ApproveArgs, DiscoverArgs, ForumAction, ForumArgs, ForumEditArgs, JoinArgs, LeaveArgs,
+    MembersAction, MembersArgs, RejectArgs, SyncArgs,
 };
 use crate::cmd::{read, refs, social, write};
 use crate::ctx::{CliError, Ctx};
@@ -287,7 +287,26 @@ async fn edit(ctx: &Ctx, a: ForumEditArgs) -> Result<(), CliError> {
 async fn ls(ctx: &Ctx) -> Result<(), CliError> {
     let engine = ctx.reader().await?;
     let list = engine.followed().await?;
-    let current = ctx.state.current_forum();
+    print_forums(ctx, list, ctx.state.current_forum(), true)
+}
+
+/// `lessdugin discover [query]`: forums found through the configured discovery sources.
+/// The engine reports direct-mode and unsupported-source errors rather than substituting an
+/// empty local list.
+pub async fn discover(ctx: &Ctx, args: DiscoverArgs) -> Result<(), CliError> {
+    let engine = ctx.reader().await?;
+    let list = engine
+        .forum_discover(args.query.as_deref().unwrap_or(""))
+        .await?;
+    print_forums(ctx, list, None, false)
+}
+
+fn print_forums(
+    ctx: &Ctx,
+    list: Vec<ForumSummary>,
+    current: Option<String>,
+    followed: bool,
+) -> Result<(), CliError> {
     let saved = ctx
         .state
         .update_listings(|l| l.forums = list.iter().map(|f| f.uri.clone()).collect());
@@ -307,7 +326,11 @@ async fn ls(ctx: &Ctx) -> Result<(), CliError> {
     }
     if list.is_empty() {
         ctx.out.line(&[(
-            lit("No followed forums. Join one with `lessdugin join <handle>/<slug>`."),
+            lit(if followed {
+                "No followed forums. Join one with `lessdugin join <handle>/<slug>`."
+            } else {
+                "No forums found."
+            }),
             Style::Dim,
         )]);
     }

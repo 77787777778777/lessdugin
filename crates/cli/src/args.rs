@@ -111,6 +111,10 @@ pub enum Command {
     Read(ReadArgs),
     /// List a forum's posts, numbered (`read 3` reads the third).
     Ls(LsArgs),
+    /// Discover public forums, optionally matching a name.
+    Discover(DiscoverArgs),
+    /// List the listed posts that link to an item.
+    Linked(RefArgs),
     /// Publish a post from a markdown file, or write it in $EDITOR.
     Post(PostArgs),
     /// Comment on a post, or reply to a comment.
@@ -204,6 +208,14 @@ pub enum Command {
     /// Open the terminal UI (bare `lessdugin` does too, on a terminal with an account).
     #[cfg(feature = "tui")]
     Tui(TuiArgs),
+}
+
+/// `discover`.
+#[derive(Debug, Args)]
+pub struct DiscoverArgs {
+    /// Match forum names (all discoverable forums when omitted).
+    #[arg(value_name = "QUERY")]
+    pub query: Option<String>,
 }
 
 /// `tui`.
@@ -349,7 +361,7 @@ mod reach {
     const REACH: &[(&str, Reach)] = &[
         // §3.2
         ("forum_open", Reach::Command("forum show")),
-        ("forum_discover", Reach::NotHere("M5 (engine-api.md §3.9)")),
+        ("forum_discover", Reach::Command("discover rust")),
         (
             "forum_follow",
             Reach::Command("forum follow alice.example.com/meta"),
@@ -560,6 +572,17 @@ mod reach {
             }
         }
         assert!(depth > 0, "{line}: no command");
+    }
+
+    #[test]
+    fn discovery_and_backlink_commands_validate_arguments() {
+        use clap::Parser;
+
+        assert!(Cli::try_parse_from(["lessdugin", "discover"]).is_ok());
+        assert!(Cli::try_parse_from(["lessdugin", "discover", "rust"]).is_ok());
+        assert!(Cli::try_parse_from(["lessdugin", "discover", "rust", "extra"]).is_err());
+        assert!(Cli::try_parse_from(["lessdugin", "linked"]).is_err());
+        assert!(Cli::try_parse_from(["lessdugin", "linked", "at://did:plc:a/x.y/z"]).is_ok());
     }
 
     #[test]

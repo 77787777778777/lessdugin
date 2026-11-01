@@ -34,6 +34,7 @@ pub const OPS: &[&str] = &[
     "parseRef",
     // §3.2
     "forumOpen",
+    "forumDiscover",
     "forumFollow",
     "forumUnfollow",
     "followed",
@@ -65,6 +66,7 @@ pub const OPS: &[&str] = &[
     "listPosts",
     "recentDiscussion",
     "getPost",
+    "backlinks",
     "getThread",
     "history",
     "notifications",
@@ -127,8 +129,6 @@ pub const OPS: &[&str] = &[
 /// (`engine-api.md` §3.9): they reject with `unsupported` (`detail.milestone`). Implementing
 /// one later is a compatible change of engine API v0.
 pub const UNSUPPORTED: &[(&str, &str)] = &[
-    // §3.2: the forum directory
-    ("forumDiscover", "M5"),
     // §3.4: tags, sequences, user pages, search
     ("tags", "M5"),
     ("tag", "M5"),
@@ -308,6 +308,10 @@ pub async fn call<H: Host>(engine: &Engine<H>, op: &str, a: &str) -> Result<Stri
             let (r,): (String,) = args(op, a)?;
             out(&engine.forum_open(&r).await?)
         }
+        "forumDiscover" => {
+            let (q,): (String,) = args(op, a)?;
+            out(&engine.forum_discover(&q).await?)
+        }
         "forumFollow" => {
             let (uri, alias): (String, Option<String>) = args(op, a)?;
             engine.forum_follow(&uri, alias.as_deref()).await?;
@@ -458,6 +462,10 @@ pub async fn call<H: Host>(engine: &Engine<H>, op: &str, a: &str) -> Result<Stri
         "getPost" => {
             let (uri,): (String,) = args(op, a)?;
             out(&engine.get_post(&uri).await?)
+        }
+        "backlinks" => {
+            let (uri,): (String,) = args(op, a)?;
+            out(&engine.backlinks(&uri).await?)
         }
         "getThread" => {
             let (uri, opts): (String, Option<ThreadOpts>) = args(op, a)?;
@@ -949,6 +957,18 @@ mod tests {
                         err.message
                     );
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn discovery_and_backlinks_validate_their_arguments() {
+        let e = engine();
+        for op in ["forumDiscover", "backlinks"] {
+            for bad in ["[]", "[null]", "[1]", r#"["x", "extra"]"#] {
+                let err = call_err(&e, op, bad);
+                assert_eq!(err.code, ErrorCode::InvalidInput, "{op} {bad}: {err}");
+                assert!(err.message.contains("bad arguments"), "{op}: {err}");
             }
         }
     }

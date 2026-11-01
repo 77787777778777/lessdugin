@@ -35,6 +35,13 @@ class MemStorage {
   }
 }
 
+describe("discovery", () => {
+  it("does not turn an unsupported source into an empty result", async () => {
+    const api = withFallbacks({ ...engine, forumDiscover: unsupported });
+    await expect(api.forumDiscover("rust")).rejects.toMatchObject({ code: "unsupported" });
+  });
+});
+
 describe("draft fallbacks", () => {
   it("save, update, list and delete when the engine cannot", async () => {
     const api = withFallbacks(engine, { drafts: memoryDrafts() });

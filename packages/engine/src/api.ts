@@ -5,8 +5,8 @@
 // `lessdugin-wasm` dispatches each name (`WasmEngine.call(op, argsJson)`, crates/wasm/src/ops.rs,
 // whose native test checks this list and the arity of each). Every method resolves with a DTO
 // from `./types.ts` or rejects with an `EngineError`. The operations of later milestones reject
-// with code `unsupported` and `detail.milestone` (engine-api.md §3.9): `forumDiscover`, `tags`,
-// `tag`, `sequences`, `sequence`, `user`, `search`, `wikiEdit`, the `seq*` writes (M5);
+// with code `unsupported` and `detail.milestone` (engine-api.md §3.9): `tags`, `tag`,
+// `sequences`, `sequence`, `user`, `search`, `wikiEdit`, the `seq*` writes (M5);
 // `runVector` (tests).
 //
 // Two names differ from a literal camelCasing of §3, because JavaScript has no overloading:
@@ -58,6 +58,7 @@ import type {
   OpinionIntent,
   PostDraft,
   PostList,
+  PostSummary,
   PostView,
   PublicActionKind,
   RawView,
@@ -170,6 +171,8 @@ export interface EngineApi {
     limit: number,
   ): Promise<DiscussionList>;
   getPost(uri: AtUri): Promise<PostView>;
+  /** Listed posts whose rendered bodies link to this item ("linked from"). */
+  backlinks(uri: AtUri): Promise<PostSummary[]>;
   getThread(uri: AtUri, opts: ThreadOpts): Promise<ThreadView>;
   history(uri: AtUri): Promise<HistoryView>;
   tags(forum: AtUri): Promise<TagSummary[]>;

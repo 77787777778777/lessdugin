@@ -6,8 +6,8 @@
 // engine that implements the operation is used as soon as it does.
 //
 // The answers are the truthful ones for this engine: it cannot save bookmarks or
-// subscriptions, compute notifications, tags or sequences, or discover forums, so those lists
-// are empty; read marks are not kept. Settings live in this tab's memory until the engine
+// subscriptions, compute notifications, tags or sequences, so those lists are empty; read marks
+// are not kept. Settings live in this tab's memory until the engine
 // stores them (the public-action acknowledgements are then asked again after a reload).
 //
 // Drafts are kept by a `DraftBackend` the host chooses, so that composer text survives a
@@ -148,7 +148,6 @@ function stateFallbacks(): Fallbacks {
     notifications: async () => ({ dto: 1, items: [], unread: 0 }),
     tags: async () => [],
     sequences: async () => [],
-    forumDiscover: async () => [],
     markRead: async () => {},
     settings: async () => clone(settings),
     setSetting: async <K extends SettingKey>(key: K, value: Settings[K]) => {

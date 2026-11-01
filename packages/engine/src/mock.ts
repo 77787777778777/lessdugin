@@ -1472,6 +1472,15 @@ export class MockEngine implements EngineApi {
     return this.postView(this.postRec(uri));
   }
 
+  async backlinks(uri: AtUri): Promise<PostSummary[]> {
+    if (!splitAtUri(uri)) throw err("invalid_ref", `Not an at-uri: ${uri}`);
+    return [...this.s.posts.values()]
+      .filter((p) => listed(this.lens(p.author, p.state)))
+      .filter((p) => p.body.html.includes(`data-at-uri="${uri}"`))
+      .sort((a, b) => b.tRankMs - a.tRankMs || (a.uri < b.uri ? -1 : a.uri > b.uri ? 1 : 0))
+      .map((p) => this.postSummary(p));
+  }
+
   async getThread(uri: AtUri, opts: ThreadOpts): Promise<ThreadView> {
     const p = this.s.posts.get(uri);
     let comments = this.thread(uri, opts.sort);

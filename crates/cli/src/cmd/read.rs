@@ -254,22 +254,7 @@ fn print_list(ctx: &Ctx, list: &PostList) {
         ctx.out
             .line(&[(cat([lit("! "), tt(&b.message)]), Style::Warn)]);
     }
-    if list.items.is_empty() {
-        ctx.out.line(&[(lit("No posts."), Style::Dim)]);
-    }
-    let w = list.items.len().to_string().len();
-    for (i, p) in list.items.iter().enumerate() {
-        let n = format!("{:>w$}", i + 1);
-        ctx.out.line(&[
-            (tt(&n), Style::Bold),
-            (lit("  "), Style::Plain),
-            (post_title(p), Style::Bold),
-        ]);
-        ctx.out.line(&[
-            (tt(&" ".repeat(w + 2)), Style::Plain),
-            (joined(post_meta(p)), Style::Dim),
-        ]);
-    }
+    print_posts(ctx, &list.items);
     if list.completeness.partial || list.completeness.degraded {
         ctx.out.note(&[(
             cat([
@@ -287,6 +272,62 @@ fn print_list(ctx: &Ctx, list: &PostList) {
             Style::Dim,
         )]);
     }
+}
+
+fn print_posts(ctx: &Ctx, posts: &[PostSummary]) {
+    if posts.is_empty() {
+        ctx.out.line(&[(lit("No posts."), Style::Dim)]);
+    }
+    let w = posts.len().to_string().len();
+    for (i, p) in posts.iter().enumerate() {
+        let n = format!("{:>w$}", i + 1);
+        ctx.out.line(&[
+            (tt(&n), Style::Bold),
+            (lit("  "), Style::Plain),
+            (post_title(p), Style::Bold),
+        ]);
+        ctx.out.line(&[
+            (tt(&" ".repeat(w + 2)), Style::Plain),
+            (joined(post_meta(p)), Style::Dim),
+        ]);
+    }
+}
+
+/// `lessdugin linked <uri>`: the listed posts whose rendered bodies link to the item.
+pub async fn linked(ctx: &Ctx, args: RefArgs) -> Result<(), CliError> {
+    let engine = ctx.reader().await?;
+    let uri = match refs::item(ctx, &engine, &args.reference).await? {
+        lessdugin_core::dto::Ref::Post { uri }
+        | lessdugin_core::dto::Ref::Comment { uri }
+        | lessdugin_core::dto::Ref::Sequence { uri }
+        | lessdugin_core::dto::Ref::Record { uri } => uri,
+        _ => {
+            return Err(CliError::Engine(EngineError::invalid_ref(format!(
+                "{:?} is not an item",
+                args.reference
+            ))));
+        }
+    };
+    let mut posts = engine.backlinks(&uri).await?;
+    if unverified(ctx, posts.iter().map(|p| &p.author)) && verify_handles(&engine).await {
+        posts = engine.backlinks(&uri).await?;
+    }
+    let saved = ctx.state.update_listings(|l| {
+        l.posts_forum = None;
+        l.posts = posts.iter().map(|p| p.uri.clone()).collect();
+    });
+    if let Err(e) = saved {
+        ctx.out.warn(cat([
+            lit("could not save the listing: "),
+            tt(&e.to_string()),
+        ]));
+    }
+    if ctx.out.is_json() {
+        ctx.out.json(&posts);
+    } else {
+        print_posts(ctx, &posts);
+    }
+    Ok(())
 }
 
 /// `lessdugin read <ref>`.
