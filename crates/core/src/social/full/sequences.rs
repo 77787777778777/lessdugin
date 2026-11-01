@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! L5: the sequence library (`karma/1`, `social.md` §14). **STUB**: [`library`] is replaced
-//! when sequences are built (M5; no vector kind yet, §19).
+//! L5: the sequence library (`karma/1`, `social.md` §14).
 //!
 //! ```text
 //! eligible(s) ⇔ s is a valid sequence in F ∧ s not Hidden by V1–V5
@@ -14,18 +13,14 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use lessdugin_lexicon::Collection;
+use serde_json::Value;
+
 use crate::social::full::cx::Cx;
-use crate::social::full::gates::Gates;
+use crate::social::full::gates::{Gate, Gates};
 use crate::social::full::moderation::Moderation;
 use crate::social::full::scores::Score;
-use crate::social::full::view::{ItemTime, Pending, Stage, State};
-
-/// The pending marker of [`library`].
-pub const PENDING: Pending = Pending {
-    stub: "sequences::library",
-    layer: "L5",
-    section: "§14",
-};
+use crate::social::full::view::{ItemTime, Stage, State};
 
 /// L5 sequence results.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -38,16 +33,56 @@ pub struct Library {
     pub entries: BTreeMap<String, Vec<String>>,
 }
 
-/// **STUB (L5, `social.md` §14).** The sequence library.
+/// L5 (`social.md` §14): eligibility and the sequence library order. Sequence scores and
+/// times are already computed by the common item layers; no sequence contributes karma.
 pub fn library(
-    _cx: &Cx<'_>,
-    _l1: &Moderation,
-    _v1_v5: &BTreeMap<String, Option<State>>,
+    cx: &Cx<'_>,
+    l1: &Moderation,
+    v1_v5: &BTreeMap<String, Option<State>>,
     scores: &Stage<BTreeMap<String, Score>>,
     gates: &Stage<Gates>,
-    _times: &BTreeMap<String, ItemTime>,
+    times: &BTreeMap<String, ItemTime>,
 ) -> Stage<Library> {
-    let _scores = scores.as_ref().map_err(|p| *p)?;
-    let _gates = gates.as_ref().map_err(|p| *p)?;
-    Err(PENDING)
+    let scores = scores.as_ref().map_err(|p| *p)?;
+    let gates = gates.as_ref().map_err(|p| *p)?;
+    let mut out = Library::default();
+    for x in cx.records().filter(|x| {
+        x.coll == Some(Collection::Sequence)
+            && cx.live(&x.uri)
+            && matches!(v1_v5.get(&x.uri), Some(None))
+    }) {
+        let Some(v) = cx.value(&x.uri) else { continue };
+        let entries = v
+            .get("chapters")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|c| c.get("posts")?.as_array())
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect();
+        out.entries.insert(x.uri.clone(), entries);
+        out.eligible.insert(x.uri.clone());
+    }
+    out.listed = out
+        .eligible
+        .iter()
+        .filter(|uri| {
+            cx.skel(uri)
+                .is_some_and(|x| l1.pinned_forum(uri) || gates.pass(&x.did, Gate::Sequence))
+        })
+        .cloned()
+        .collect();
+    out.listed.sort_by(|a, b| {
+        let pin = |u: &String| l1.pinned_forum(u);
+        let score = |u: &String| scores.get(u).map_or(0, |s| s.score);
+        let time = |u: &String| times.get(u).map_or(0, |t| t.t_rank);
+        pin(b)
+            .cmp(&pin(a))
+            .then_with(|| score(b).cmp(&score(a)))
+            .then_with(|| time(b).cmp(&time(a)))
+            .then_with(|| a.cmp(b))
+    });
+    Ok(out)
 }
