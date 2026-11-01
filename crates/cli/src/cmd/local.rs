@@ -13,7 +13,9 @@ use lessdugin_native::host::NativeHost;
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::args::{BookmarkAction, BookmarkArgs, ConfigAction, ConfigArgs, SubscribeArgs, SubscribeTarget};
+use crate::args::{
+    BookmarkAction, BookmarkArgs, ConfigAction, ConfigArgs, SubscribeArgs, SubscribeTarget,
+};
 use crate::cmd::refs;
 use crate::ctx::{CliError, Ctx};
 use crate::out::{Style, TermText, cat, lit, name, tt};
@@ -394,7 +396,10 @@ mod tests {
 
     #[test]
     fn values_as_set_setting_takes_them() {
-        assert_eq!(setting_value("sources", "direct"), Value::String("direct".into()));
+        assert_eq!(
+            setting_value("sources", "direct"),
+            Value::String("direct".into())
+        );
         assert_eq!(
             setting_value("mediaAutoloadHosts", "a.example, b.example"),
             serde_json::json!(["a.example", "b.example"])
@@ -407,8 +412,14 @@ mod tests {
             setting_value("indexers", "https://idx.example"),
             serde_json::json!([{ "url": "https://idx.example" }])
         );
-        assert_eq!(setting_value("externalImagesForums", ""), serde_json::json!([]));
+        assert_eq!(
+            setting_value("externalImagesForums", ""),
+            serde_json::json!([])
+        );
         // a stored switch is its text
-        assert_eq!(setting_value("mediaAutoload", "off"), Value::String("off".into()));
+        assert_eq!(
+            setting_value("mediaAutoload", "off"),
+            Value::String("off".into())
+        );
     }
 }

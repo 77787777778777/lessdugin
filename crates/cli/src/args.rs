@@ -350,7 +350,10 @@ mod reach {
         // §3.2
         ("forum_open", Reach::Command("forum show")),
         ("forum_discover", Reach::NotHere("M5 (engine-api.md §3.9)")),
-        ("forum_follow", Reach::Command("forum follow alice.example.com/meta")),
+        (
+            "forum_follow",
+            Reach::Command("forum follow alice.example.com/meta"),
+        ),
         ("forum_unfollow", Reach::Command("forum unfollow")),
         ("followed", Reach::Command("forum ls")),
         ("forum_create", Reach::Command("forum create meta")),
@@ -362,14 +365,26 @@ mod reach {
             "grant",
             Reach::Automatic("`approve` grants (and forgets a rejection); `mod approve` too"),
         ),
-        ("revoke", Reach::Command("members revoke did:plc:aaaaaaaaaaaaaaaaaaaaaaaa")),
-        ("approve", Reach::Command("approve did:plc:aaaaaaaaaaaaaaaaaaaaaaaa")),
-        ("reject", Reach::Command("reject did:plc:aaaaaaaaaaaaaaaaaaaaaaaa")),
+        (
+            "revoke",
+            Reach::Command("members revoke did:plc:aaaaaaaaaaaaaaaaaaaaaaaa"),
+        ),
+        (
+            "approve",
+            Reach::Command("approve did:plc:aaaaaaaaaaaaaaaaaaaaaaaa"),
+        ),
+        (
+            "reject",
+            Reach::Command("reject did:plc:aaaaaaaaaaaaaaaaaaaaaaaa"),
+        ),
         (
             "rejected_applicants",
             Reach::Automatic("`members --pending` leaves out the applicants rejected here"),
         ),
-        ("mods_set", Reach::Command("mods add did:plc:aaaaaaaaaaaaaaaaaaaaaaaa")),
+        (
+            "mods_set",
+            Reach::Command("mods add did:plc:aaaaaaaaaaaaaaaaaaaaaaaa"),
+        ),
         // §3.5
         ("publish", Reach::Command("post --title Hello")),
         ("comment", Reach::Command("comment 3 -m Hi")),
@@ -382,7 +397,10 @@ mod reach {
         ("retract", Reach::Command("retract c1")),
         ("opinion", Reach::Command("vote 3 up")),
         ("mod_action", Reach::Command("mod hide 3")),
-        ("mod_adopt", Reach::Command("mod adopt did:plc:aaaaaaaaaaaaaaaaaaaaaaaa")),
+        (
+            "mod_adopt",
+            Reach::Command("mod adopt did:plc:aaaaaaaaaaaaaaaaaaaaaaaa"),
+        ),
         ("wiki_edit", Reach::NotHere("M5 (engine-api.md §3.9)")),
         ("seq_create", Reach::NotHere("M5 (engine-api.md §3.9)")),
         ("seq_edit", Reach::NotHere("M5 (engine-api.md §3.9)")),
@@ -399,15 +417,24 @@ mod reach {
         ),
         ("writes", Reach::Command("outbox ls")),
         // §3.6
-        ("mark_read", Reach::Automatic("`read` marks the thread read")),
-        ("mark_notifications_read", Reach::Command("notifications --mark-read")),
+        (
+            "mark_read",
+            Reach::Automatic("`read` marks the thread read"),
+        ),
+        (
+            "mark_notifications_read",
+            Reach::Command("notifications --mark-read"),
+        ),
         (
             "mark_all_notifications_read",
             Reach::Command("notifications --all --mark-read"),
         ),
         ("bookmark", Reach::Command("bookmark add 3")),
         ("subscribe", Reach::Command("subscribe forum")),
-        ("mute", Reach::Command("mute did:plc:aaaaaaaaaaaaaaaaaaaaaaaa")),
+        (
+            "mute",
+            Reach::Command("mute did:plc:aaaaaaaaaaaaaaaaaaaaaaaa"),
+        ),
         (
             "acknowledged_public_actions",
             Reach::Command("config get acknowledgedPublicActions"),
@@ -420,7 +447,10 @@ mod reach {
             "acknowledge_public_action",
             Reach::Automatic("answering the interstitial (or --yes) records it"),
         ),
-        ("karma_notifications", Reach::Command("config get karmaNotifications")),
+        (
+            "karma_notifications",
+            Reach::Command("config get karmaNotifications"),
+        ),
         (
             "set_karma_notifications",
             Reach::Command("notifications --karma-cadence weekly"),
@@ -434,7 +464,10 @@ mod reach {
             Reach::NotHere("the CLI's drafts are files of the data directory (`draft`)"),
         ),
         ("settings", Reach::Command("config get")),
-        ("set_setting", Reach::Command("config set mediaAutoload off")),
+        (
+            "set_setting",
+            Reach::Command("config set mediaAutoload off"),
+        ),
         ("export_local", Reach::Command("export --local")),
         ("import_local", Reach::Command("export --import state.json")),
     ];
@@ -482,7 +515,25 @@ mod reach {
                     .get_arguments()
                     .chain(root.get_arguments())
                     .any(|a| a.get_long() == Some(flag));
-                assert!(known, "{line}: `{word}` is no option of `{}`", cur.get_name());
+                assert!(
+                    known,
+                    "{line}: `{word}` is no option of `{}`",
+                    cur.get_name()
+                );
+                continue;
+            }
+            if let Some(flag) = word.strip_prefix('-')
+                && let Some(flag) = flag.chars().next()
+            {
+                let known = cur
+                    .get_arguments()
+                    .chain(root.get_arguments())
+                    .any(|a| a.get_short() == Some(flag));
+                assert!(
+                    known,
+                    "{line}: `{word}` is no option of `{}`",
+                    cur.get_name()
+                );
                 continue;
             }
             if depth > 0 && !word.starts_with('-') && cur.find_subcommand(word).is_none() {
