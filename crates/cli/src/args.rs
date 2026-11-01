@@ -508,6 +508,7 @@ mod reach {
         let root = Cli::command();
         let mut cur = &root;
         let mut depth = 0;
+        let mut positional = false;
         for word in line.split_whitespace() {
             if let Some(flag) = word.strip_prefix("--") {
                 let flag = flag.split('=').next().unwrap_or_default();
@@ -536,7 +537,11 @@ mod reach {
                 );
                 continue;
             }
-            if depth > 0 && !word.starts_with('-') && cur.find_subcommand(word).is_none() {
+            if depth > 0
+                && positional
+                && !word.starts_with('-')
+                && cur.find_subcommand(word).is_none()
+            {
                 // a value
                 continue;
             }
@@ -544,8 +549,14 @@ mod reach {
                 Some(sub) => {
                     cur = sub;
                     depth += 1;
+                    positional = false;
                 }
-                None => panic!("{line}: `{word}` is no subcommand of `{}`", cur.get_name()),
+                None if depth > 0 && cur.has_subcommands() => {
+                    panic!("{line}: `{word}` is no subcommand of `{}`", cur.get_name())
+                }
+                None => {
+                    positional = true;
+                }
             }
         }
         assert!(depth > 0, "{line}: no command");

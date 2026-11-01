@@ -309,6 +309,17 @@ fn votes_agreement_and_reacts_move_the_score_and_notify() {
     w.alice.json(&["notifications", "--mark-read"]);
     let n2: NotificationList = exact(&w.alice.ok(&["--json", "notifications", "--all"]));
     assert_eq!(n2.unread, 0, "{n2:?}");
+
+    // --all --mark-read reaches mark_all_notifications_read, not just the one shown item.
+    let r = w.carol.json(&["react", &w.post, "insightful", "--yes"]);
+    assert_eq!(r["state"]["kind"], "done", "{r}");
+    w.alice.ok(&["sync", &w.forum]);
+    let before: NotificationList = exact(&w.alice.ok(&["--json", "notifications", "--all"]));
+    assert!(before.unread > 0, "{before:?}");
+    w.alice
+        .json(&["notifications", "--all", "--mark-read", "--limit", "1"]);
+    let after: NotificationList = exact(&w.alice.ok(&["--json", "notifications", "--all"]));
+    assert_eq!(after.unread, 0, "{after:?}");
 }
 
 #[test]
