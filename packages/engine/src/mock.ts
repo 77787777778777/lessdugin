@@ -2724,7 +2724,9 @@ export class MockEngine implements EngineApi {
     };
   }
 
-  async importLocal(json: Json): Promise<ImportReport> {
+  /** `scope` (`"mine"`, the default, or `"everything"`, engine-api.md §3.6): the mock has one
+   * account's state, so both import the same. */
+  async importLocal(json: Json, _scope?: "mine" | "everything"): Promise<ImportReport> {
     if (
       typeof json !== "object" ||
       json === null ||

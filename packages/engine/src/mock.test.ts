@@ -264,6 +264,17 @@ describe("MockEngine local state and declarations", () => {
     expect(await e.drafts()).toHaveLength(before.length + 1);
   });
 
+  it("imports an export back, with or without the scope (engine-api.md §3.6)", async () => {
+    const e = new MockEngine();
+    const exported = await e.exportLocal();
+    const report = await e.importLocal(exported, "everything");
+    expect(report.imported).toBeGreaterThan(0);
+    expect(await e.importLocal(exported)).toEqual(report);
+    await expect(e.importLocal({ format: "other" }, "mine")).rejects.toMatchObject({
+      code: "invalid_input",
+    });
+  });
+
   it("round-trips a forum declaration through forumCreate, raw and forumUpdate", async () => {
     vi.useFakeTimers();
     try {
