@@ -9,6 +9,7 @@ pub mod identity;
 pub mod local;
 pub mod login;
 pub mod media;
+pub mod organisation;
 pub mod outbox;
 pub mod read;
 pub mod refs;

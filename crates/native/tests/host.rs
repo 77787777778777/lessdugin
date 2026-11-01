@@ -697,13 +697,31 @@ async fn fetch_blob_does_not_follow_redirects() {
     );
 }
 
+#[allow(clippy::result_large_err)] // tungstenite's server callback has a large concrete error type
 async fn ws_server(messages: Vec<tokio_tungstenite::tungstenite::Message>) -> u16 {
     use futures::{SinkExt, StreamExt};
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     tokio::spawn(async move {
         let (tcp, _) = listener.accept().await.unwrap();
-        let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
+        let callback =
+            |req: &tokio_tungstenite::tungstenite::handshake::server::Request,
+             mut resp: tokio_tungstenite::tungstenite::handshake::server::Response| {
+                assert_eq!(
+                    req.headers()
+                        .get(tokio_tungstenite::tungstenite::http::header::SEC_WEBSOCKET_PROTOCOL)
+                        .and_then(|v| v.to_str().ok()),
+                    Some("xrpc.v1.json")
+                );
+                resp.headers_mut().insert(
+                    tokio_tungstenite::tungstenite::http::header::SEC_WEBSOCKET_PROTOCOL,
+                    tokio_tungstenite::tungstenite::http::HeaderValue::from_static("xrpc.v1.json"),
+                );
+                Ok(resp)
+            };
+        let mut ws = tokio_tungstenite::accept_hdr_async(tcp, callback)
+            .await
+            .unwrap();
         // Echo the first text message, then send the scripted ones.
         if let Some(Ok(m)) = ws.next().await {
             let _ = ws.send(m).await;
@@ -764,6 +782,26 @@ async fn websocket_caps_messages() {
         )
         .await;
     assert!(matches!(r, Err(HostError::Blocked(_))));
+}
+
+#[tokio::test]
+async fn websocket_requires_xrpc_json_subprotocol() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let (tcp, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
+        let _ = ws.close(None).await;
+    });
+    let origin = Url::parse(&format!("ws://127.0.0.1:{port}")).unwrap();
+    let net = Net::new(NetPolicy::devnet([&origin])).unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let host = NativeHost::with_parts(MemKv::new(), MemKv::new(), tmp.path(), net);
+    let err = host
+        .websocket(origin.join("/subscribe").unwrap(), 1_000)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, HostError::Network(_)));
 }
 
 #[tokio::test]

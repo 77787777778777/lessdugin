@@ -16,8 +16,11 @@
 
 #![forbid(unsafe_code)]
 
+pub mod constellation;
 pub mod fake_pds;
 pub mod identity;
+#[cfg(feature = "http")]
+pub mod jetstream;
 pub mod kv;
 pub mod memhost;
 #[cfg(not(target_arch = "wasm32"))]
