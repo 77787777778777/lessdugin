@@ -117,8 +117,27 @@ impl<H: Host> Engine<H> {
         opts: &impl ForumSyncOpts,
     ) -> Result<SyncReport, EngineError> {
         let key = self.forum_key(forum).await?;
-        let f = key.uri.to_string();
         let mut opts = opts.discovery_opts();
+        if self.sources().await? == super::Sources::Assisted {
+            // CORE+ sources are hints: an unavailable hint service must not prevent the ordinary
+            // PDS sync. Explicit discover_* calls still report their source errors to callers.
+            match self.discover_forum_hints(&key).await {
+                Ok(hints) => hints.apply_to(&mut opts),
+                Err(e) => {
+                    tracing::warn!(forum = %key.uri, error = %e, "CORE+ forum discovery failed")
+                }
+            }
+        }
+        self.sync_forum_resolved(&key, opts).await
+    }
+
+    /// Runs ordinary forum sync with already resolved discovery options.
+    pub(crate) async fn sync_forum_resolved(
+        &self,
+        key: &ForumKey,
+        mut opts: discovery::SyncOpts,
+    ) -> Result<SyncReport, EngineError> {
+        let f = key.uri.to_string();
         // progress, chained after the caller's own callback
         let progress = Arc::new(ForumProgress {
             rt: Arc::clone(&self.rt),

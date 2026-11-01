@@ -255,7 +255,7 @@ impl<H: Host> Sources<H> {
     /// Paging continues until `cursor: null`, including after short and empty pages.
     pub async fn constellation_newcomers(&self, forum: &ForumKey) -> Result<DidHints, SourceError> {
         let dids = self
-            .backlinks(forum, nsid::MEMBERSHIP, Some(forum.fk.as_str()))
+            .backlinks(forum, nsid::MEMBERSHIP, Some(forum.fk.as_str()), None)
             .await?;
         Ok(dids)
     }
@@ -265,7 +265,7 @@ impl<H: Host> Sources<H> {
         let Some(_) = &self.endpoints.constellation else {
             return Ok(DidHints::default());
         };
-        self.backlinks(forum, nsid::POST, None).await
+        self.backlinks(forum, nsid::POST, None, None).await
     }
 
     /// Constellation's unverified membership count for a future UI badge.
@@ -299,6 +299,7 @@ impl<H: Host> Sources<H> {
         forum: &ForumKey,
         collection: &str,
         exact_rkey: Option<&str>,
+        exact_did: Option<&str>,
     ) -> Result<DidHints, SourceError> {
         let base = self
             .endpoints
@@ -321,6 +322,9 @@ impl<H: Host> Sources<H> {
                 ("source", source.as_str()),
                 ("limit", "100"),
             ];
+            if let Some(did) = exact_did {
+                params.push(("did", did));
+            }
             if let Some(c) = &cursor {
                 params.push(("cursor", c));
             }
@@ -338,7 +342,10 @@ impl<H: Host> Sources<H> {
                 .ok_or_else(|| malformed("Constellation", "records must be an array"))?;
             for record in records {
                 let entry = parse_backlink(record)?;
-                if entry.collection != collection || exact_rkey.is_some_and(|fk| entry.rkey != fk) {
+                if entry.collection != collection
+                    || exact_rkey.is_some_and(|fk| entry.rkey != fk)
+                    || exact_did.is_some_and(|did| entry.did != did)
+                {
                     stats.dropped += 1;
                     continue;
                 }
@@ -363,11 +370,29 @@ impl<H: Host> Sources<H> {
         self.relay_repositories_inner(collection, None).await
     }
 
-    /// Relay membership hints, refusing enumeration as soon as the cross-relay union exceeds
-    /// 5,000 DIDs. No partial result is silently returned.
-    pub async fn relay_newcomers(&self) -> Result<DidHints, SourceError> {
-        self.relay_repositories_inner(nsid::MEMBERSHIP, Some(NEWCOMER_RELAY_UNION_LIMIT))
-            .await
+    /// Relay membership hints for one forum, refusing enumeration as soon as the cross-relay
+    /// union exceeds 5,000 DIDs. A relay repository is only a candidate after Constellation's
+    /// exact `NS.membership:forum` backlink query, filtered by that repository's DID, confirms
+    /// the forum-scoped hint. No partial result is silently returned.
+    pub async fn relay_newcomers(&self, forum: &ForumKey) -> Result<DidHints, SourceError> {
+        let relay = self
+            .relay_repositories_inner(nsid::MEMBERSHIP, Some(NEWCOMER_RELAY_UNION_LIMIT))
+            .await?;
+        let mut dids = Vec::new();
+        let mut stats = relay.stats;
+        for did in relay.dids {
+            let scoped = self
+                .backlinks(
+                    forum,
+                    nsid::MEMBERSHIP,
+                    Some(forum.fk.as_str()),
+                    Some(did.as_str()),
+                )
+                .await?;
+            stats.add(scoped.stats);
+            dids.extend(scoped.dids);
+        }
+        Ok(DidHints { dids, stats })
     }
 
     async fn relay_repositories_inner(
@@ -451,7 +476,7 @@ impl<H: Host> Sources<H> {
                 }
             }
         }
-        let r = self.relay_newcomers().await?;
+        let r = self.relay_newcomers(forum).await?;
         stats.add(r.stats);
         for did in r.dids {
             if seen.insert(did.clone()) {
@@ -628,7 +653,8 @@ impl<H: Host> Engine<H> {
     }
 
     /// Discover Constellation and relay newcomers, feeding the exact shape of
-    /// [`SyncOpts::newcomers`]. Relay enumeration has the 5,000-DID union cap.
+    /// [`SyncOpts::newcomers`]. Relay enumeration has the 5,000-DID union cap, and every relay
+    /// candidate is scoped to this forum by an exact DID-filtered Constellation backlink query.
     pub async fn discover_newcomers(&self, forum: &ForumKey) -> Result<NewcomerHints, SourceError> {
         self.core_plus_service(Priority::P2)
             .newcomer_hints(forum)
@@ -680,6 +706,6 @@ impl<H: Host> Engine<H> {
         let hints = self.discover_forum_hints(&key).await?;
         let mut opts = opts.clone();
         hints.apply_to(&mut opts);
-        self.sync_forum(key.uri.as_str(), &opts).await
+        self.sync_forum_resolved(&key, opts).await
     }
 }

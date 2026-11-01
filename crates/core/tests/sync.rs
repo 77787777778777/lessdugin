@@ -1052,6 +1052,11 @@ fn recently_active_authors_come_first_within_the_mode() {
     let fs = w.sync_forum(&f, &opts);
     assert_eq!(w.requests_about(ivy.did()), 0, "ivy is an applicant");
     assert_eq!(
+        fs.state.disc.get(ivy.did().as_str()).map(|d| d.state),
+        Some(DiscState::Candidate),
+        "even a mode-filtered activity hint is retained"
+    );
+    assert_eq!(
         fs.state.disc.get(jon.did().as_str()).map(|d| d.state),
         Some(DiscState::Confirmed)
     );
@@ -1063,12 +1068,17 @@ fn recently_active_authors_come_first_within_the_mode() {
     let pi = w.post(&ivy, &g);
     let opts = SyncOpts {
         recently_active: vec![ivy.did().to_string()],
+        // The active phase handles ivy first; the newcomer hint must still leave its disc source.
+        newcomers: vec![(ivy.did().to_string(), "constellation".into())],
         ..SyncOpts::default()
     };
     let fs = w.sync_forum(&g, &opts);
     let row = &fs.state.disc[ivy.did().as_str()];
     assert_eq!(row.state, DiscState::Confirmed);
-    assert_eq!(row.src, vec!["hint:active".to_owned()]);
+    assert_eq!(
+        row.src,
+        vec!["hint:active".to_owned(), "hint:constellation".to_owned()]
+    );
     assert!(w.stored(&g, &ivy).contains(&pi.0));
 }
 

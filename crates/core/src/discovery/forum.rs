@@ -548,6 +548,35 @@ impl<H: Host> Syncer<H> {
         let now_us = self.host().now_ms().saturating_mul(1000);
         let st = ForumState::load(kv, &key, &forum.decl, now_us).await?;
         let r = &st.roster;
+        // Keep every valid hint in discovery state before phase, mode, budget or `done` filtering.
+        // In particular, an already handled DID still needs its new source recorded; skipping its
+        // candidate job must not erase the hint from the ordinary sync pipeline.
+        let now = self.host().now_ms();
+        for did in parse_dids(&opts.recently_active) {
+            let d = did.to_string();
+            let src = if r.granted.contains(&d) {
+                "grant"
+            } else {
+                "hint:active"
+            };
+            let row = disc
+                .entry(d.clone())
+                .or_insert_with(|| DiscRow::new(src, now));
+            row.add_src(src);
+            touched.insert(d);
+        }
+        for (raw, src) in &opts.newcomers {
+            let Ok(did) = Did::parse(raw) else {
+                continue;
+            };
+            let d = did.to_string();
+            let src = format!("hint:{src}");
+            let row = disc
+                .entry(d.clone())
+                .or_insert_with(|| DiscRow::new(&src, now));
+            row.add_src(&src);
+            touched.insert(d);
+        }
         let hinted: BTreeSet<&str> = opts
             .newcomers
             .iter()

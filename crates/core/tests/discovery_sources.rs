@@ -3,16 +3,21 @@
 use std::sync::Arc;
 
 use futures::executor::block_on;
-use lessdugin_atp::syntax::Did;
+use lessdugin_atp::syntax::{AtUri, Datetime, Did};
 use lessdugin_core::discovery::sources::{
     CorePlusHints, DidHints, GET_BACKLINKS, GET_BACKLINKS_COUNT, LIST_REPOS_BY_COLLECTION,
     NEWCOMER_RELAY_UNION_LIMIT, NewcomerHints, SourceEndpoints, SourceError, Sources,
 };
+use lessdugin_core::discovery::state::{DiscState, disc_rows};
 use lessdugin_core::discovery::{ForumKey, SyncOpts};
 use lessdugin_core::engine::{Engine, EngineConfig, Sources as SourceMode};
 use lessdugin_core::host::{Host, HttpRequest, KvOp, KvStore, Target};
+use lessdugin_core::store::RecordStore;
 use lessdugin_lexicon::collection::nsid;
-use lessdugin_testkit::{MemHost, resp};
+use lessdugin_lexicon::records::{Forum, Membership};
+use lessdugin_lexicon::values::MembershipMode;
+use lessdugin_testkit::fake_pds::ServiceKind;
+use lessdugin_testkit::{FakeNet, MemHost, resp};
 use serde_json::{Value, json};
 use url::Url;
 
@@ -259,7 +264,18 @@ fn relay_pages_and_deduplicates_across_relays() {
             "cursor": null
         })),
     );
-    let hints = block_on(service(&host).relay_newcomers()).unwrap();
+    host.on_get(&format!("{CONSTELLATION}/xrpc/{GET_BACKLINKS}"), |req| {
+        let did = query(req, "did").expect("relay candidate DID filter");
+        assert_eq!(
+            query(req, "source").as_deref(),
+            Some(format!("{}:forum", nsid::MEMBERSHIP).as_str())
+        );
+        Ok(resp::ok_json(&json!({
+            "records": [backlink(&did, nsid::MEMBERSHIP, &forum().fk)],
+            "cursor": null
+        })))
+    });
+    let hints = block_on(service(&host).relay_newcomers(&forum())).unwrap();
     assert_eq!(
         hints.dids,
         [
@@ -269,8 +285,8 @@ fn relay_pages_and_deduplicates_across_relays() {
             "did:web:d.example.com"
         ]
     );
-    assert_eq!(hints.stats.pages, 3);
-    assert_eq!(hints.stats.returned, 6);
+    assert_eq!(hints.stats.pages, 7);
+    assert_eq!(hints.stats.returned, 10);
 }
 
 #[test]
@@ -282,7 +298,7 @@ fn relay_repeated_cursor_is_an_error() {
     );
     let mut eps = endpoints();
     eps.relays.truncate(1);
-    let err = block_on(Sources::new(host.clone(), eps).relay_newcomers()).unwrap_err();
+    let err = block_on(Sources::new(host.clone(), eps).relay_newcomers(&forum())).unwrap_err();
     assert!(matches!(
         err,
         SourceError::RepeatedCursor {
@@ -306,7 +322,7 @@ fn newcomer_cap_applies_to_the_union_across_relays() {
         &format!("{RELAY2}/xrpc/{LIST_REPOS_BY_COLLECTION}"),
         resp::ok_json(&json!({"repos": [repo("did:web:overflow.example.com")]})),
     );
-    let err = block_on(service(&host).relay_newcomers()).unwrap_err();
+    let err = block_on(service(&host).relay_newcomers(&forum())).unwrap_err();
     assert_eq!(
         err,
         SourceError::NewcomerUnionTooLarge {
@@ -346,7 +362,7 @@ fn malformed_relay_entries_and_wildcards_are_rejected() {
         );
         let mut eps = endpoints();
         eps.relays.truncate(1);
-        let err = block_on(Sources::new(host.clone(), eps).relay_newcomers()).unwrap_err();
+        let err = block_on(Sources::new(host.clone(), eps).relay_newcomers(&forum())).unwrap_err();
         assert!(matches!(err, SourceError::Malformed { .. }), "{err}");
     }
     let host = MemHost::new();
@@ -422,6 +438,114 @@ fn transport_http_and_json_errors_are_structured() {
         block_on(service(&host).membership_count(&forum())),
         Err(SourceError::Malformed { .. })
     ));
+}
+
+#[test]
+fn engine_sync_forum_assisted_scopes_newcomers_and_direct_uses_no_core_plus() {
+    let host = MemHost::new();
+    let net = FakeNet::on(&host);
+    let _ = net.default_pds();
+    let owner = net.add_account("owner.example.com");
+    let selected = net.add_account("selected.example.com");
+    let unrelated = net.add_account("unrelated.example.com");
+    let key = ForumKey::new(owner.did(), "open").unwrap();
+    let at = Datetime::from_millis(host.now() - 60_000).unwrap();
+    let declaration = Forum::create("open", at.clone(), MembershipMode::Open);
+    owner.put(
+        nsid::FORUM,
+        "open",
+        &serde_json::to_value(declaration).unwrap(),
+    );
+    for account in [&owner, &selected, &unrelated] {
+        let membership = Membership::new(key.uri.clone(), at.clone());
+        account.put(
+            nsid::MEMBERSHIP,
+            &key.fk,
+            &serde_json::to_value(membership).unwrap(),
+        );
+    }
+
+    // Both newcomers are present in every relay's global membership directory. Constellation's
+    // exact, DID-filtered backlink response selects only one for this forum.
+    let backlink_route = format!("{CONSTELLATION}/xrpc/{GET_BACKLINKS}");
+    host.on_get(&backlink_route, {
+        let key = key.clone();
+        let selected = selected.did().to_string();
+        move |req| {
+            assert_eq!(query(req, "subject").as_deref(), Some(key.uri.as_str()));
+            let source = query(req, "source").unwrap();
+            if source == format!("{}:forum", nsid::POST) {
+                assert_eq!(query(req, "did"), None);
+                return Ok(resp::ok_json(&json!({"records": [], "cursor": null})));
+            }
+            assert_eq!(source, format!("{}:forum", nsid::MEMBERSHIP));
+            let records = match query(req, "did") {
+                Some(did) if did == selected => {
+                    vec![backlink(&did, nsid::MEMBERSHIP, &key.fk)]
+                }
+                _ => vec![],
+            };
+            Ok(resp::ok_json(&json!({"records": records, "cursor": null})))
+        }
+    });
+    let engine = Engine::new(
+        host.clone(),
+        EngineConfig {
+            sources: SourceMode::Assisted,
+            constellation: Some(Url::parse(CONSTELLATION).unwrap()),
+            relays: net
+                .relays()
+                .into_iter()
+                .map(|relay| Url::parse(&relay).unwrap())
+                .collect(),
+            ..EngineConfig::default()
+        },
+    );
+    let report = block_on(engine.sync_forum(key.uri.as_str(), &SyncOpts::default())).unwrap();
+    assert!(report.errors.is_empty(), "{report:?}");
+    let disc = block_on(disc_rows(host.cache(), &key.fk)).unwrap();
+    assert_eq!(
+        disc.get(selected.did().as_str()).map(|row| row.state),
+        Some(DiscState::Confirmed)
+    );
+    assert!(!disc.contains_key(unrelated.did().as_str()));
+    let membership_uri = AtUri::parse(&selected.uri(nsid::MEMBERSHIP, &key.fk)).unwrap();
+    assert!(
+        block_on(RecordStore::new(host.cache()).get(&membership_uri))
+            .unwrap()
+            .is_some(),
+        "the selected newcomer's valid PDS membership was confirmed and stored"
+    );
+    assert!(
+        net.requests()
+            .iter()
+            .all(|request| request.did.as_deref() != Some(unrelated.did().as_str())),
+        "an unselected relay repository must not cause unrelated PDS reads"
+    );
+
+    let direct_host = MemHost::new();
+    net.install(&direct_host);
+    let direct = Engine::new(
+        direct_host.clone(),
+        EngineConfig {
+            sources: SourceMode::Direct,
+            constellation: Some(Url::parse(CONSTELLATION).unwrap()),
+            ..EngineConfig::default()
+        },
+    );
+    net.clear_requests();
+    block_on(direct.sync_forum(key.uri.as_str(), &SyncOpts::default())).unwrap();
+    assert!(
+        direct_host
+            .requests()
+            .iter()
+            .all(|request| !request.url.starts_with(CONSTELLATION))
+    );
+    assert!(
+        net.requests()
+            .iter()
+            .all(|request| request.service != ServiceKind::Relay)
+    );
 }
 
 #[test]
