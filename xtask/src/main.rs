@@ -4,7 +4,7 @@
 //! Commands:
 //!   ci                 fmt, clippy (native + wasm32), tests (native + wasm32; the social
 //!                      vectors also with `final-ns`, the markdown vectors also with `ammonia`),
-//!                      lexicon lint, web checks
+//!                      lexicon lint, web checks and, with Chromium available, the web e2e suite
 //!   test-wasm [-- <test args>]   run the interop, vector and property tests of atp, lexicon and
 //!                      markdown, and core's social fold vectors and P9 parity digest (in both
 //!                      namespaces), on wasm32-unknown-unknown under node (wasm-bindgen-test-runner),
@@ -301,10 +301,30 @@ fn ci() -> Result<(), String> {
     } else {
         eprintln!("(skipping web checks: run `pnpm install` first)");
     }
+    ci_web_e2e()?;
     match over_budget {
         Some(over) => Err(over),
         None => Ok(()),
     }
+}
+
+/// ci.yml's `web-e2e` job, using an already installed Chromium (the workflow installs its own).
+fn ci_web_e2e() -> Result<(), String> {
+    let mut vars = vec![("LESSDUGIN_KV_TEST".into(), "1".into())];
+    match env::var_os("PLAYWRIGHT_BROWSERS_PATH") {
+        Some(path) if !path.is_empty() => {}
+        _ if Path::new("/opt/pw-browsers").is_dir() => {
+            vars.push(("PLAYWRIGHT_BROWSERS_PATH".into(), "/opt/pw-browsers".into()));
+        }
+        _ => {
+            eprintln!(
+                "(skipping web e2e: no Chromium in PLAYWRIGHT_BROWSERS_PATH or /opt/pw-browsers)"
+            );
+            return Ok(());
+        }
+    }
+    wasm(&["--kv-test".to_owned()])?;
+    run_env("pnpm", &["--filter", "@lessdugin/web", "run", "e2e"], &vars)
 }
 
 /// The Rust end-to-end tests against the devnet: (package, test targets). They run only with
@@ -330,6 +350,14 @@ const RUST_E2E: &[(&str, &[&str])] = &[
 /// wasm, the e2e SPA (`web/dist-e2e`), the CLI embedding it (so the `lessdugin web` spec runs)
 /// and the TUI parity driver (`crates/tui/examples/parity_driver.rs`).
 fn e2e(args: &[String]) -> Result<(), String> {
+    if matches!(args, [a] if a == "--help" || a == "-h") {
+        println!(
+            "usage: cargo xtask e2e [--rust] [--web] [--parity] [--no-build]\n\
+             --rust runs the Rust devnet tests; --web runs the SPA devnet suite;\n\
+             --parity runs only the M2 parity scenario; no selection runs Rust and web"
+        );
+        return Ok(());
+    }
     let (mut rust, mut web, mut parity, mut build) = (false, false, false, true);
     for a in args {
         match a.as_str() {
@@ -1269,24 +1297,94 @@ mod tests {
         );
     }
 
-    /// The web job's `pnpm run check` runs every package's own `check` (tsc, biome and the web
-    /// package's raw-href guard), not only `typecheck`.
+    /// Every ci.yml job has a counterpart in `cargo xtask ci`, including the browser-only
+    /// sanitiser, CSP and accessibility checks (lfm-1.md §8.5).
+    #[test]
+    fn every_ci_yml_job_has_an_xtask_ci_counterpart() {
+        let workflow = file(".github/workflows/ci.yml");
+        let jobs: Vec<&str> = workflow
+            .lines()
+            .skip_while(|l| *l != "jobs:")
+            .skip(1)
+            .filter(|l| l.starts_with("  ") && !l.starts_with("   ") && l.ends_with(':'))
+            .map(|l| l.trim().trim_end_matches(':'))
+            .collect();
+        assert_eq!(jobs, ["rust", "wasm-tests", "lexicons", "web", "web-e2e"]);
+
+        let source = file("xtask/src/main.rs");
+        let ci = source
+            .split("fn ci() -> Result<(), String> {")
+            .nth(1)
+            .and_then(|s| s.split("/// The Rust end-to-end tests").next())
+            .expect("the ci function");
+        for (job, counterpart) in [
+            ("rust", "run(\"cargo\", AMMONIA_TESTS)?"),
+            ("wasm-tests", "test_wasm(&[])?"),
+            ("lexicons", "lex(&[\"lint\".to_owned()])?"),
+            ("web", "run(\"pnpm\", &[\"run\", \"build\"])?"),
+            ("web-e2e", "ci_web_e2e()?"),
+        ] {
+            assert!(
+                ci.contains(counterpart),
+                "ci.yml's {job} job has no xtask ci counterpart ({counterpart})"
+            );
+        }
+
+        let web_e2e = source
+            .split("fn ci_web_e2e() -> Result<(), String> {")
+            .nth(1)
+            .and_then(|s| s.split("\n}\n").next())
+            .expect("the web-e2e counterpart");
+        for command in [
+            "wasm(&[\"--kv-test\".to_owned()])?",
+            "\"--filter\", \"@lessdugin/web\", \"run\", \"e2e\"",
+            "(\"LESSDUGIN_KV_TEST\".into(), \"1\".into())",
+        ] {
+            assert!(
+                web_e2e.contains(command),
+                "the web-e2e counterpart does not run {command}"
+            );
+        }
+        let runs = job_runs(".github/workflows/ci.yml", "web-e2e");
+        assert!(runs.contains(&"cargo xtask wasm --kv-test".into()));
+        assert!(runs.contains(&"pnpm --filter @lessdugin/web run e2e".into()));
+    }
+
+    /// The web job's `pnpm run check` runs the intended commands in every package, not merely
+    /// scripts that happen to have the right names.
     #[test]
     fn the_root_check_runs_every_package_check() {
         assert!(job_runs(".github/workflows/ci.yml", "web").contains(&"pnpm run check".into()));
-        let pkg = file("package.json");
-        let check = pkg
-            .lines()
-            .find_map(|l| l.trim().strip_prefix("\"check\": \""))
-            .expect("a root check script");
-        assert!(
-            check.contains("pnpm -r --if-present run check"),
-            "the root check script is {check}"
-        );
-        for p in ["web/package.json", "packages/engine/package.json"] {
-            assert!(file(p).contains("\"check\": "), "{p} has no check script");
+        for (manifest, command) in [
+            (
+                "package.json",
+                "biome check . && pnpm -r --if-present run check",
+            ),
+            (
+                "web/package.json",
+                "tsc -p tsconfig.json && biome check . && node scripts/check-no-raw-href.mjs",
+            ),
+            (
+                "packages/engine/package.json",
+                "tsc -p tsconfig.json && biome check .",
+            ),
+        ] {
+            let pkg = file(manifest);
+            let check = pkg
+                .lines()
+                .find_map(|l| {
+                    l.trim()
+                        .strip_prefix("\"check\": \"")
+                        .and_then(|l| l.strip_suffix("\","))
+                })
+                .unwrap_or_else(|| panic!("{manifest} has no check script"));
+            assert_eq!(check, command, "{manifest}'s check script");
         }
-        assert!(file("web/package.json").contains("check-no-raw-href.mjs"));
+    }
+
+    #[test]
+    fn e2e_help_is_a_cheap_probe() {
+        e2e(&["--help".into()]).expect("e2e --help must not build or start a devnet");
     }
 
     /// fuzz.yml runs every target `cargo xtask fuzz` knows, and the seed generator seeds each of

@@ -506,7 +506,7 @@ Fixed now so that later phases do not reopen them; no v1 code path uses them.
 3. **Lexicon limits** are enforced by the validator from the embedded lexicon JSON. The few in §4 are repeated in `limits.rs` only because other code uses them; a unit test asserts that they equal the embedded lexicon values.
 4. **N-class constants are scoped to their behaviour ID.** A new behaviour ID adds new constants; the old ones stay, so older IDs remain implementable from their vectors.
 5. **Vectors** (`testdata/vectors/limits/`, CC0-1.0, format `{name, input, expected}` as in synthesis §7):
-   - `constants.json` lists every mirrored constant as `{name, value}`. The Rust runner (testkit) and the TS runner (wasm `runVector`) assert that the compiled constants equal it.
+   - The present limits vectors are `graphemes.json`, checked by the Rust lexicon runner natively and on wasm32 under node (`README.md` §5.3). The JavaScript DOM runner, `web/src/lib/sanitize.vectors.test.ts`, covers renderer/sanitiser vectors (`lfm-1.md` §8.5); no TypeScript `runVector` limits runner is built.
    - Boundary vectors cover every N-class row and every S-class row that a pure function can exercise, at the limit and one past it: fetch caps (20,000 and 20,001 in-range keys; 100,000 and 100,001 opinions), `RECORD_CBOR_MAX_BYTES`, proof CAR bytes and blocks, `MST_DEPTH_MAX`, both nesting limits (32/33 and 36/37), `FUTURE_SKEW_MS`, `THREAD_DEPTH_MAX`, `WIKI_WALK_MAX`, `LIST_PAGE_RETRY_LIMITS`, the frontmatter limits, and the §13 rendering and quote limits (which the `lfm1` vectors also cover).
    - Network caps are tested in the testkit against FakePds fault modes (oversized, compressed-bomb and slow responses; cursor regressions), not as pure vectors.
 
