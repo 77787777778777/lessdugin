@@ -169,6 +169,46 @@ test("leave a forum after confirming (engine-api.md §3.2 leave)", async ({ page
   await expect(page.getByText("Left the forum")).toBeVisible();
 });
 
+test("a spilled about is loaded before the forum form is shown (robustness-2)", async ({
+  page,
+}) => {
+  await page.goto(`${server.url}/?mock&spilled#/`);
+  await page.getByRole("button", { name: "Create a forum" }).click();
+  const form = page.getByRole("region", { name: "Create a forum" });
+  await form.getByLabel("Address").fill("spilled-about");
+  await form.getByLabel("Name").fill("Spilled about");
+  await form.getByRole("textbox", { name: /^About/ }).fill("Source behind the blob");
+  await form.getByRole("button", { name: "Create the forum" }).click();
+  await page.getByRole("link", { name: "About" }).click();
+  await page.getByRole("button", { name: "Edit the forum" }).click();
+  const about = page.getByRole("textbox", { name: /^About/ });
+  await expect(about).toHaveValue("Source behind the blob");
+  await expect(about).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Save the declaration" })).toBeEnabled();
+  await expect(page.getByTestId("about-unavailable")).toHaveCount(0);
+  await about.fill("Source behind the blob, edited");
+  await page.getByRole("button", { name: "Save the declaration" }).click();
+  await expect(page.getByRole("region", { name: "About this forum" })).toContainText(
+    "Source behind the blob, edited",
+  );
+});
+
+test("a spilled post opens its normal editor with the stored source (robustness-2)", async ({
+  page,
+}) => {
+  const source = "Testing quick takes from the mock account. Everything here lives in memory.";
+  await page.goto(`${server.url}/?mock&spilled#${FORUM_PATH}/new`);
+  await page.getByText("Quick take", { exact: true }).click();
+  const body = page.getByRole("textbox", { name: "Post body" });
+  await body.fill(source);
+  await page.getByRole("button", { name: "Publish" }).click();
+  await page.getByRole("link", { name: "Edit", exact: true }).click();
+  await expect(body).toHaveText(source);
+  await body.fill(`${source}\n\nA browser edit.`);
+  await page.getByRole("button", { name: "Save edit" }).click();
+  await expect(page.getByText("A browser edit.")).toBeVisible();
+});
+
 test("create a forum, edit its declaration and manage a moderator", async ({ page }) => {
   await go(page, "/", "Your forums");
   await page.getByRole("button", { name: "Create a forum" }).click();

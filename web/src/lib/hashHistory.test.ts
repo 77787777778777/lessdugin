@@ -15,8 +15,9 @@ describe("routeHrefFromHash", () => {
 });
 
 describe("pageQuery", () => {
-  it("keeps only the mock flag of the page's query string", () => {
+  it("keeps only the mock and demo spilled-source flags of the page's query string", () => {
     expect(pageQuery("?mock")).toBe("?mock");
+    expect(pageQuery("?mock&spilled&code=abc&state=xyz")).toBe("?mock&spilled");
     expect(pageQuery("?mock=&code=abc&state=xyz")).toBe("?mock");
     expect(pageQuery("?code=abc&state=xyz")).toBe("");
     expect(pageQuery("")).toBe("");
