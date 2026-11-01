@@ -13,8 +13,8 @@
 // allowlist constant: never the declared string, and a type the browser could show inline
 // anyway. The card's anchor carries `download`, so the bytes are saved and never opened. The SPA
 // cannot re-type the blob: CSP `connect-src` has no `blob:`. A download without a display type is
-// saved as `<cid>.bin`, because `LoadedMedia` carries no sniffed type for it (sync.md §11.2 wants
-// that type's extension; the field is the engine's to add).
+// named from `LoadedMedia.sniffed`, the type the bytes sniff as whatever was declared (sync.md
+// §11.2, engine-api.md §3.4 `load_media`), and `<cid>.bin` when that is unknown too.
 
 import type { EngineApi } from "@lessdugin/engine/api";
 import type { Cid, LoadedMedia, MediaView } from "@lessdugin/engine/types";
@@ -75,6 +75,16 @@ export type MediaDisplay =
   | { kind: "img" | "video" | "audio"; filename: string }
   | { kind: "download"; filename: string };
 
+/** The extension a download card names its file with, by the type the bytes sniff as
+ * (data-model.md §8.8's table, or `image/avif`; a type the SPA never shows inline is a download
+ * too). Nothing but these constants reaches the file name. */
+const SNIFFED_EXT: Record<string, string> = {
+  ...EXT,
+  "image/svg+xml": "svg",
+  "application/pdf": "pdf",
+  "text/markdown": "md",
+};
+
 /** What `loaded` may become in a placeholder of kind `placeholder` (sync.md §11.1: else
  * "download card only"). */
 export function mediaDisplay(loaded: LoadedMedia, placeholder: "img" | "span"): MediaDisplay {
@@ -82,7 +92,12 @@ export function mediaDisplay(loaded: LoadedMedia, placeholder: "img" | "span"): 
   const name = /^b[a-z2-7]{8,100}$/.test(loaded.cid) ? loaded.cid : "media";
   const mime = loaded.mime ?? "";
   const kind = Object.hasOwn(DISPLAY, mime) ? DISPLAY[mime as keyof typeof DISPLAY] : null;
-  const filename = `${name}.${(kind !== null && EXT[mime]) || "bin"}`;
+  const sniffed = loaded.sniffed ?? "";
+  const ext =
+    (kind !== null && EXT[mime]) ||
+    (Object.hasOwn(SNIFFED_EXT, sniffed) && SNIFFED_EXT[sniffed]) ||
+    "bin";
+  const filename = `${name}.${ext}`;
   if (kind !== null && (kind === "img") === (placeholder === "img")) return { kind, filename };
   return { kind: "download", filename };
 }

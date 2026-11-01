@@ -4,11 +4,12 @@ import { describe, expect, it } from "vitest";
 import { mediaDisplay } from "./media.ts";
 
 const CID = "bafkreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy";
-const loaded = (mime?: string, cid = CID) => ({
+const loaded = (mime?: string, cid = CID, sniffed?: string) => ({
   cid,
   size: 1,
   url: "blob:t/1",
   ...(mime === undefined ? {} : { mime }),
+  ...(sniffed === undefined ? {} : { sniffed }),
 });
 
 describe("mediaDisplay (sync.md §11.2)", () => {
@@ -43,5 +44,27 @@ describe("mediaDisplay (sync.md §11.2)", () => {
     expect(mediaDisplay(loaded("image/png"), "span").kind).toBe("download");
     // only a CID reaches the file name
     expect(mediaDisplay(loaded("image/png", "../x"), "span").filename).toBe("media.png");
+  });
+
+  it("names a download from the sniffed type when there is no display type (m4-3)", () => {
+    // a PDF and a spilled text have no display type: the extension comes from the sniff
+    expect(mediaDisplay(loaded(undefined, CID, "application/pdf"), "span")).toEqual({
+      kind: "download",
+      filename: `${CID}.pdf`,
+    });
+    expect(mediaDisplay(loaded(undefined, CID, "text/markdown"), "img").filename).toBe(`${CID}.md`);
+    // declared as an image, sniffed as audio: no display type, but the bytes are an mp3
+    expect(mediaDisplay(loaded(undefined, CID, "audio/mpeg"), "img").filename).toBe(`${CID}.mp3`);
+    expect(mediaDisplay(loaded(undefined, CID, "image/svg+xml"), "img").filename).toBe(
+      `${CID}.svg`,
+    );
+    // an unknown or hostile sniffed string never reaches the file name
+    expect(mediaDisplay(loaded(undefined, CID, "application/x-thing"), "img").filename).toBe(
+      `${CID}.bin`,
+    );
+    expect(mediaDisplay(loaded(undefined, CID, "../../etc"), "img").filename).toBe(`${CID}.bin`);
+    expect(mediaDisplay(loaded(undefined, CID, "toString"), "img").filename).toBe(`${CID}.bin`);
+    // the display type wins when it is there (a video in an image placeholder)
+    expect(mediaDisplay(loaded("video/mp4", CID, "video/mp4"), "img").filename).toBe(`${CID}.mp4`);
   });
 });
