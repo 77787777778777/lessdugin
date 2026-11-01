@@ -191,7 +191,6 @@ async fn serve(
         .and_then(|c| c.parse::<u64>().ok())
         .unwrap_or(0);
     let mut sent = 0;
-    let mut last_seq = 0;
     // v2 sequence cursors are inclusive. Timestamp cursors (v1, or a v2 instance change)
     // include the rewind boundary; core deduplication handles that deliberate overlap.
     let timestamp_cursor = cursor > net.events().last().map_or(0, |e| e.seq);
@@ -203,6 +202,9 @@ async fn serve(
     } else {
         net.events_since(cursor.saturating_sub(1))
     };
+    // A timestamp replay snapshot may be empty, or its events may be filtered below. Start at
+    // its latest sequence either way so the first poll never falls back to all history.
+    let mut last_seq = initial.iter().map(|e| e.seq).max().unwrap_or(0);
     let mut pending = initial;
     loop {
         for event in std::mem::take(&mut pending) {
@@ -228,7 +230,19 @@ async fn serve(
         }
         tokio::select! {
             () = tokio::time::sleep(std::time::Duration::from_millis(20)) => {
-                pending = net.events_since(last_seq);
+                // Advance over replayed events even if their DID/collection is filtered out.
+                // Otherwise the first poll falls back to sequence 0 and replays stale events.
+                pending = if timestamp_cursor {
+                    let fresh = net
+                        .events_since(last_seq)
+                        .into_iter()
+                        .filter(|e| e.time_us >= i64::try_from(cursor).unwrap_or(i64::MAX))
+                        .collect::<Vec<_>>();
+                    last_seq = fresh.iter().map(|e| e.seq).max().unwrap_or(last_seq);
+                    fresh
+                } else {
+                    net.events_since(last_seq)
+                };
             }
             message = ws.next() => {
                 match message {
@@ -464,6 +478,39 @@ mod tests {
                 assert!(logs.iter().any(|r| r.options.is_some()));
             }
         }
+    }
+
+    #[tokio::test]
+    async fn timestamp_cursor_never_replays_pre_cursor_events() {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let net = FakeNet::serve_http(crate::fake_pds::SystemClock);
+        let alice = net.add_account("alice.test");
+        alice.put(
+            "online.7778777.lessdugin.post",
+            "f-3l2s5xxv2zaa2",
+            &json!({"createdAt": "2025-10-09T08:53:20Z"}),
+        );
+        alice.head();
+        let server = Jetstream::start(&net, Wire::V2);
+        let cursor = net.now_ms() + 60_000;
+        let path = format!(
+            "/xrpc/network.bsky.jetstream.subscribeEvents?collections=online.7778777.lessdugin.*&cursor={}000",
+            cursor
+        );
+        let mut request = format!("{}{}", server.base_url(), path)
+            .into_client_request()
+            .unwrap();
+        request
+            .headers_mut()
+            .insert("sec-websocket-protocol", "xrpc.v1.json".parse().unwrap());
+        let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(
+            server.requests().iter().all(|r| r.sent.is_empty()),
+            "pre-cursor events were sent: {:?}",
+            server.requests()
+        );
+        socket.close(None).await.unwrap();
     }
 
     #[test]

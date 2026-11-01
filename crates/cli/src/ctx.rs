@@ -130,6 +130,15 @@ impl Ctx {
                      config.toml)",
                 ));
             };
+            if current.is_none() {
+                // --dev selects a local network, not the production CORE+ defaults. An
+                // explicit devnet profile above can still name its own test services.
+                config.relays.clear();
+                config.jetstream.clear();
+                config.constellation = None;
+                config.slingshot = None;
+                config.doh.clear();
+            }
             config.plc = plc.clone();
             config.network = NetworkProfile::Devnet(DevnetProfile {
                 plc,

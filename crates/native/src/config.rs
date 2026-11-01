@@ -499,6 +499,13 @@ impl Config {
     /// A devnet configuration (`--dev`, e2e tests).
     pub fn devnet(plc: Url, pds: Url) -> Self {
         Self {
+            // A local devnet never inherits production CORE+ endpoints. Explicit config can
+            // add loopback test services, but assisted mode alone cannot contact the public
+            // relays, Constellation or Slingshot.
+            relays: Vec::new(),
+            jetstream: Vec::new(),
+            constellation: None,
+            slingshot: None,
             plc: plc.clone(),
             network: NetworkProfile::Devnet(DevnetProfile {
                 plc,

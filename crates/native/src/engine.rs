@@ -44,10 +44,13 @@ pub fn engine_config(cfg: &Config) -> EngineConfig {
             },
             doh: Vec::new(),
             plc: d.plc.clone(),
+            // Production defaults are never a devnet's CORE+ configuration. Config::devnet
+            // starts empty; only explicit configured endpoints are copied here.
             relays: cfg.relays.clone(),
             jetstream: d.jetstream.iter().cloned().collect(),
             constellation: cfg.constellation.clone(),
             slingshot: cfg.slingshot.clone(),
+            indexers: Vec::new(),
             platform: lessdugin_core::engine::Platform::Native,
             ..EngineConfig::default()
         },
@@ -93,6 +96,22 @@ pub fn open_engine(paths: &Paths, config: &Config) -> Result<Engine<NativeHost>,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_devnet_never_inherits_production_core_plus_endpoints() {
+        let mut cfg = Config::devnet(
+            url::Url::parse("http://127.0.0.1:2582").unwrap(),
+            url::Url::parse("http://127.0.0.1:2583").unwrap(),
+        );
+        cfg.sources = Some(Sources::Assisted);
+        let c = engine_config(&cfg);
+        assert!(c.relays.is_empty());
+        assert!(c.jetstream.is_empty());
+        assert!(c.constellation.is_none());
+        assert!(c.slingshot.is_none());
+        assert!(c.doh.is_empty());
+        assert_eq!(c.sources, EngineSources::Assisted);
+    }
 
     /// O-9: a `sources` in config.toml wins over the stored setting; without one the stored
     /// setting decides.
