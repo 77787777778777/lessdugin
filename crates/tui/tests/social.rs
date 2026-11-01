@@ -1942,6 +1942,121 @@ fn the_command_line_reaches_membership_items_and_local_state() {
     assert!(!status(&ta).contains(label), "{}", status(&ta));
 }
 
+/// robustness-3 (`social.md` §4.2, `engine-api.md` §3.5): every notice of an action's result
+/// shows, not only the first. A restriction on top of a timed nullification comes back with
+/// two: it is retroactive, and it shares the nullification's expiry; the TUI used to drop the
+/// second, so the moderator never learnt the permanent-looking restriction ends.
+#[test]
+fn a_restrict_over_a_timed_nullification_shows_the_shared_expiry() {
+    let s = scenario();
+    let bob = s.w.bob.did();
+    let mut t = alice_tui(&s, 100, 30);
+    block_on(t.start(Some(s.forum.clone())));
+    let until = until_soon(&s);
+    run_command(&mut t, &format!("mod nullify --until {until} {bob}"));
+    assert!(status(&t).contains("Mod action recorded"), "{}", status(&t));
+    block_on(t.engine().outbox_flush()).unwrap();
+    s.w.tick(MINUTE);
+    block_on(t.settle());
+    run_command(&mut t, &format!("mod restrict post {bob}"));
+    let st = status(&t);
+    assert!(st.contains("Mod action recorded: "), "{st}");
+    assert!(st.contains("retroactive"), "the first notice: {st}");
+    assert!(
+        st.contains("ends with your nullification"),
+        "the second notice (sharedExpiry): {st}"
+    );
+    assert!(st.contains(&until), "{st}");
+    // both are on the screen (the status line wraps)
+    let screen = t.render();
+    assert!(screen.contains("retroactive"), "{screen}");
+    assert!(screen.contains("ends with your nullification"), "{screen}");
+}
+
+/// bob made a moderator, who hid bob_c1; alice un-hid it, so bob's hide is not in effect.
+fn bob_moderator_with_an_overridden_hide(s: &common::Scenario) {
+    use lessdugin_core::dto::{ModRole, ModsChange};
+    let (alice, bob) = (&s.w.alice, &s.w.bob);
+    block_on(alice.engine.mods_set(
+        &s.forum,
+        &ModsChange::Add {
+            did: bob.did(),
+            role: ModRole::Moderator,
+            title: None,
+        },
+    ))
+    .unwrap();
+    alice.flush();
+    s.w.tick(MINUTE);
+    bob.sync(&s.forum);
+    let hide = |hidden| ModActionIntent::Assert {
+        forum: s.forum.clone(),
+        scope: ModScope::Forum,
+        subject: s.bob_c1.clone(),
+        action: ModActionValue::Hide {
+            hidden,
+            spam: false,
+            show_reason: true,
+        },
+        reason: None,
+        until_ms: None,
+    };
+    block_on(bob.engine.mod_action(&hide(true))).unwrap();
+    bob.flush();
+    s.w.tick(MINUTE);
+    alice.sync(&s.forum);
+    block_on(alice.engine.mod_action(&hide(false))).unwrap();
+    alice.flush();
+    s.w.tick(MINUTE);
+    alice.sync(&s.forum);
+}
+
+/// sec-8 and robustness-3 (`engine-api.md` §3.5 `mods_set`, `data-model.md` §8.6): `:mods
+/// remove` runs `mod adopt` first, and its result says so AND lists what the adoption does not
+/// adopt (the second notice, which the TUI used to drop); the adoption's own report follows
+/// once it is sent.
+#[test]
+fn mods_remove_shows_the_adoption_and_what_it_does_not_adopt() {
+    let s = scenario();
+    bob_moderator_with_an_overridden_hide(&s);
+    let bob = s.w.bob.did();
+    let mut t = alice_tui(&s, 100, 30);
+    block_on(t.start(Some(s.forum.clone())));
+    run_command(&mut t, &format!("mods remove {bob}"));
+    let st = status(&t);
+    assert!(st.starts_with("Moderator list updated: "), "{st}");
+    assert!(st.contains("mod adopt runs first"), "{st}");
+    assert!(
+        st.contains("not adopted, since they are not in effect: 1 overridden"),
+        "the second notice: {st}"
+    );
+    // more than the status line holds: the panel lists each notice
+    let p = t.state.panel.as_ref().expect("the notices panel");
+    assert_eq!(p.title, "Moderator change");
+    let lines: Vec<String> = p.lines.iter().map(|l| l.to_plain_string()).collect();
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert!(lines[0].starts_with("mod adopt runs first"), "{lines:?}");
+    assert!(
+        lines[1].starts_with("not adopted, since they are not in effect: 1 overridden"),
+        "{lines:?}"
+    );
+    assert!(t.render().contains("not adopted"), "{}", t.render());
+
+    // sent: the adoption's report lists the same assertion, and bob is no longer a moderator
+    block_on(t.engine().outbox_flush()).unwrap();
+    block_on(t.settle());
+    let st = status(&t);
+    assert!(st.contains("1 assertion not adopted"), "{st}");
+    let p = t.state.panel.as_ref().expect("the report");
+    assert_eq!(p.title, "Adoption report");
+    let f = block_on(s.w.alice.engine.forum_open(&s.forum)).unwrap();
+    assert!(
+        f.moderators.iter().all(|m| m.actor.did != bob),
+        "{:?}",
+        f.moderators
+    );
+}
+
 /// sec-8 (`engine-api.md` §3.5 `mod_adopt`, `data-model.md` §8.6): what an adoption did not
 /// adopt comes back in its `done` state, and the TUI lists it: here bob's hide, which alice's
 /// keep overrode, so it never counted.

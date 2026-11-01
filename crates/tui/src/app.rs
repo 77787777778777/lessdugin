@@ -1759,6 +1759,16 @@ pub fn status_text(s: &Status) -> TermText {
     cat([lit(" "), s.text.clone()])
 }
 
+/// Every notice of an action's result, `; `-separated (the engine returns them in a fixed
+/// order, each telling the user something the others do not: a restriction's retroactivity
+/// and the expiry it now shares, an adoption and what it does not adopt).
+fn notices_text(notices: &[ActionNotice]) -> TermText {
+    cat(notices
+        .iter()
+        .enumerate()
+        .flat_map(|(i, n)| [lit(if i == 0 { "" } else { "; " }), tt(&n.message)]))
+}
+
 impl State {
     /// A new state for a terminal of `width` × `height`.
     pub fn new(width: u16, height: u16, account: Option<AccountView>, offline: bool) -> Self {
@@ -3998,10 +4008,22 @@ impl State {
         match result {
             Ok(t) => {
                 let mut msg = lit("Moderator list updated.");
-                if let Some(n) = t.notices.first() {
-                    msg = cat([lit("Moderator list updated: "), tt(&n.message), lit(".")]);
+                if !t.notices.is_empty() {
+                    msg = cat([
+                        lit("Moderator list updated: "),
+                        notices_text(&t.notices),
+                        lit("."),
+                    ]);
                 }
                 self.say(Tone::Good, msg);
+                // a removal's notices name the adoption write and list what it does not
+                // adopt (`data-model.md` §8.6): more than the status line holds
+                if t.notices.len() > 1 {
+                    self.show_panel(
+                        "Moderator change",
+                        t.notices.iter().map(|n| tt(&n.message)).collect(),
+                    );
+                }
                 self.follow_own = Some(screen);
                 if let Some(i) = self.index_of(screen) {
                     self.reload(i, Origin::User, fx);
@@ -5119,8 +5141,12 @@ impl State {
                     self.writes.insert(t.id.clone(), t.state);
                 }
                 let mut msg = lit("Mod action recorded.");
-                if let Some(n) = t.notices.first() {
-                    msg = cat([lit("Mod action recorded: "), tt(&n.message), lit(".")]);
+                if !t.notices.is_empty() {
+                    msg = cat([
+                        lit("Mod action recorded: "),
+                        notices_text(&t.notices),
+                        lit("."),
+                    ]);
                 }
                 self.say(Tone::Good, msg);
                 self.follow_own = Some(screen);
@@ -5186,11 +5212,11 @@ impl State {
                     self.writes.insert(t.id.clone(), t.state);
                 }
                 let mut msg = cat([lit(label), lit(" recorded (Backspace undoes).")]);
-                if let Some(n) = t.notices.first() {
+                if !t.notices.is_empty() {
                     msg = cat([
                         lit(label),
                         lit(" recorded: "),
-                        tt(&n.message),
+                        notices_text(&t.notices),
                         lit(" (Backspace undoes)."),
                     ]);
                 }
