@@ -1879,9 +1879,25 @@ export class MockEngine implements EngineApi {
     const c = this.s.comments.get(uri);
     const f = this.s.forums.get(uri);
     if (!p && !c && !f) throw err("not_found", `No post, comment or forum ${uri}`);
-    // the mock stores every body inline
-    const markdown = p?.markdown ?? c?.markdown ?? f?.about ?? "";
-    return { markdown, profile: "lfm/1", spilled: false };
+    // The same snapshot supplies raw's CID and this body's source/profile.
+    const raw = await this.raw(uri);
+    const record =
+      raw.record !== null && typeof raw.record === "object" && !Array.isArray(raw.record)
+        ? raw.record
+        : undefined;
+    const bodyValue = record?.body ?? record?.about;
+    const body: { [key: string]: Json } | undefined =
+      bodyValue !== null && typeof bodyValue === "object" && !Array.isArray(bodyValue)
+        ? bodyValue
+        : undefined;
+    const markdown =
+      typeof body?.text === "string" ? body.text : (p?.markdown ?? c?.markdown ?? f?.about ?? "");
+    return {
+      markdown,
+      cid: raw.cid ?? "",
+      profile: typeof body?.profile === "string" ? body.profile : "lfm/1",
+      spilled: false,
+    };
   }
 
   async loadMedia(cid: Cid): Promise<LoadedMedia> {

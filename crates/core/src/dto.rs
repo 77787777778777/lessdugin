@@ -1422,6 +1422,8 @@ dto! {
         /// The source as written: the inline `text`, or the spilled `textBlob` decoded (UTF-8,
         /// one leading U+FEFF stripped, `lfm-1.md` §1.3); `""` for an item without a body.
         pub markdown: String,
+        /// The current CID of the record whose body this is (never a body's blob CID).
+        pub cid: String,
         /// The body's `profile` as the record states it (absent: `lfm/1`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub profile: Option<String>,

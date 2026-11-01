@@ -82,6 +82,7 @@ export interface BodyDraft {
 
 export interface BodySource {
     markdown: string;
+    cid: string;
     profile?: string;
     spilled: boolean;
 }

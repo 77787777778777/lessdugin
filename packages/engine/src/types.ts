@@ -889,6 +889,8 @@ export interface BodySource {
   /** The inline `text`, or the spilled `textBlob` decoded (UTF-8, one leading U+FEFF stripped);
    * `""` for an item without a body. */
   markdown: string;
+  /** The current CID of the record whose body this is (never a body's blob CID). */
+  cid: Cid;
   /** The body's `profile` as the record states it (absent: `lfm/1`). */
   profile?: string;
   /** Stored as a `textBlob` (lfm-1.md §1.3): a kept source is spilled again when it must. */

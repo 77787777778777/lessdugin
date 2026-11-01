@@ -193,8 +193,10 @@ export interface EngineApi {
   /** The markdown source of a post's or comment's body, or of a forum's `about`, as a composer
    * edits it (`""` for an item without one): the inline text, or the spilled `textBlob` as the
    * host holds it, fetched from the author's PDS when it does not (waiting at most
-   * `BODY_BLOB_WAIT_MS`, like a view). Open to every viewer, like `raw`. Rejects while it cannot
-   * be had: `network` with `detail.kind: "bodyPending"` (retryable), `not_found` with
+   * `BODY_BLOB_WAIT_MS`, like a view). `cid` is the current record CID, not the blob CID;
+   * markdown/profile and CID come from one coherent model view. Open to every viewer, like
+   * `raw`. Rejects while it cannot be had: `network` with `detail.kind: "bodyPending"`
+   * (retryable), `not_found` with
    * `"bodyMissing"`, `network` with `"bodyFailedVerification"`, `too_large` or `invalid_input`
    * with `"bodyUnreadable"`. */
   bodySource(uri: AtUri): Promise<BodySource>;

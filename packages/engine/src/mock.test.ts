@@ -252,6 +252,21 @@ describe("MockEngine writes", () => {
 });
 
 describe("MockEngine local state and declarations", () => {
+  it("binds each body source to the same record CID as raw", async () => {
+    const e = new MockEngine();
+    const list = await e.listPosts({ forum: FORUM_URI, sort: "new", filter: "all", limit: 100 });
+    const post = list.items.find((p) => p.commentCount > 0);
+    if (!post) throw new Error("no post with comments");
+    const thread = await e.getThread(post.uri, { sort: "new", unreadOnly: false });
+    const comment = thread.comments.find((c) => c.body.text.length > 0);
+    if (!comment) throw new Error("no comment with an inline body");
+    for (const uri of [FORUM_URI, post.uri, comment.uri]) {
+      const [raw, source] = await Promise.all([e.raw(uri), e.bodySource(uri)]);
+      expect(source.cid).toBe(raw.cid);
+      expect(source.profile).toBe("lfm/1");
+    }
+  });
+
   it("never gives a new draft the id of an existing one", async () => {
     const e = new MockEngine();
     const before = await e.drafts();
