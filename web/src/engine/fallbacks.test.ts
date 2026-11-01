@@ -35,10 +35,15 @@ class MemStorage {
   }
 }
 
-describe("discovery", () => {
+describe("unsupported operations", () => {
   it("does not turn an unsupported source into an empty result", async () => {
-    const api = withFallbacks({ ...engine, forumDiscover: unsupported });
-    await expect(api.forumDiscover("rust")).rejects.toMatchObject({ code: "unsupported" });
+    const api = withFallbacks({
+      ...engine,
+      runVector: async (_kind: string, _json: unknown) => unsupported(),
+    });
+    await expect(api.runVector("not-a-release-operation", {})).rejects.toMatchObject({
+      code: "unsupported",
+    });
   });
 });
 
