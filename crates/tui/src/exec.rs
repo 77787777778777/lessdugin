@@ -11,8 +11,8 @@ use std::collections::BTreeMap;
 
 use lessdugin_atp::syntax::AtUri;
 use lessdugin_core::dto::{
-    ActionNotice, ActorView, AspectRatio, BodyDraft, Capability, CommentDraft, DefaultTier, Draft,
-    EditOpts, ExternalLinkDraft, ForumDraft, KarmaCadence, ListPostsQuery, MediaRef, MembersQuery,
+    ActorView, AspectRatio, BodyDraft, Capability, CommentDraft, DefaultTier, Draft, EditOpts,
+    ExternalLinkDraft, ForumDraft, KarmaCadence, ListPostsQuery, MediaRef, MembersQuery,
     MembershipMode, ModActionIntent, ModActionValue, ModScope, NotificationsQuery, PostDraft,
     PostFilter, PostKind, PostSort, Ref, RefContext, SyncOpts, TextQuote, ThreadOpts, ThreadRoot,
 };
@@ -25,8 +25,8 @@ use lessdugin_lexicon::collection::nsid;
 use lessdugin_lexicon::ns::NS;
 
 use crate::app::{
-    Action, ActivityData, Compose, EditorRequest, Effect, ForumData, HomeData, ItemOp, SyncTarget,
-    ThreadData,
+    Action, ActivityData, Compose, EditStart, EditorRequest, Effect, ForumData, HomeData, ItemOp,
+    SyncTarget, ThreadData,
 };
 use crate::body::Body;
 use crate::command::{ALL_CAPABILITIES, AccessOp, ForumChanges, RestrictDim};
@@ -625,12 +625,13 @@ fn media_of(uri: &str, body: Option<&serde_json::Value>) -> Result<Vec<MediaRef>
 
 /// `:edit`: your post or comment's draft as cached (the fields the CLI's `edit` keeps: the
 /// body's media and a link's card with it) and the editor session on its text, with what the
-/// edit would suspend (`edit_preflight`, `social.md` §4.5) for the user to confirm first.
+/// edit would suspend (`edit_preflight`, `social.md` §4.5) for the user to confirm first. A
+/// preflight that cannot run does not stop the edit: the user is told it is unchecked (sec-7).
 async fn start_edit<H: Host>(
     engine: &Engine<H>,
     uri: &str,
     forum: &str,
-) -> Result<(EditorRequest, Vec<ActionNotice>), EngineError> {
+) -> Result<EditStart, EngineError> {
     let uri = item_uri(engine, uri, forum).await?;
     let me = engine.active_account().await?.map(|a| a.did);
     let u = AtUri::parse(&uri).map_err(|e| EngineError::invalid_ref(format!("{uri:?}: {e}")))?;
@@ -735,9 +736,12 @@ async fn start_edit<H: Host>(
             )));
         }
     };
-    let notices = engine.edit_preflight(&uri).await?;
-    Ok((
-        EditorRequest {
+    let (notices, unchecked) = match engine.edit_preflight(&uri).await {
+        Ok(n) => (n, None),
+        Err(e) => (Vec::new(), Some(e.message)),
+    };
+    Ok(EditStart {
+        request: EditorRequest {
             compose: Compose::Edit {
                 uri,
                 base: Box::new(base),
@@ -745,7 +749,8 @@ async fn start_edit<H: Host>(
             template: crate::editor::edit_template(&prefill, &context, post),
         },
         notices,
-    ))
+        unchecked,
+    })
 }
 
 /// The source of the forum's spilled `about` `md`: the `textBlob` the host holds, else as

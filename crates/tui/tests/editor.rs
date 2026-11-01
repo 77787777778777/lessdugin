@@ -639,3 +639,58 @@ fn the_edit_command_keeps_a_link_posts_card() {
     assert_eq!(post_of(&s, &post).1.trim(), "Why it still matters.");
     assert_eq!(card(&v), before, "{v}");
 }
+
+/// sec-7, the other half: when `edit_preflight` cannot run, `:edit` is not refused. The TUI
+/// says what it could not check, and why, and asks the same question; `n` opens no editor, `y`
+/// edits unchecked.
+#[test]
+fn an_edit_whose_preflight_failed_asks_before_editing_unchecked() {
+    use lessdugin_core::dto::{CommentDraft, Draft};
+    use lessdugin_tui::app::{Action, Compose, EditStart, EditorRequest, Effect};
+    let s = scenario();
+    let dir = tempfile::tempdir().unwrap();
+    let mut t = tui_with_sed(&s, dir.path(), "s/x/y/", true);
+    block_on(t.start(None));
+    let request = EditorRequest {
+        compose: Compose::Edit {
+            uri: s.bob_c1.clone(),
+            base: Box::new(Draft::Comment {
+                id: None,
+                comment: CommentDraft::new(&s.welcome, None, "x"),
+            }),
+        },
+        template: "x\n".into(),
+    };
+    let unchecked = || {
+        Action::EditReady(Ok(EditStart {
+            request: request.clone(),
+            notices: Vec::new(),
+            unchecked: Some("the forum's view is not loaded".into()),
+        }))
+    };
+    let fx = t.state.update(unchecked());
+    assert!(fx.is_empty(), "no editor before the user answers: {fx:?}");
+    let c = t.state.confirm.as_ref().expect("asked first");
+    assert!(
+        c.text
+            .contains("could not be checked (the forum's view is not loaded)"),
+        "{}",
+        c.text
+    );
+    assert!(c.text.ends_with("Edit it anyway?"), "{}", c.text);
+    assert!(
+        t.render().contains("could not be checked"),
+        "{}",
+        t.render()
+    );
+    block_on(t.press("n"));
+    assert!(t.state.confirm.is_none());
+    assert!(!dir.path().join("seen.txt").exists(), "no editor ran");
+
+    let fx = t.state.update(unchecked());
+    assert!(fx.is_empty());
+    let y = lessdugin_tui::keys::parse_key("y").unwrap();
+    let fx = t.state.update(Action::Key(y));
+    assert_eq!(fx, [Effect::Editor(request)]);
+    assert!(t.state.confirm.is_none());
+}

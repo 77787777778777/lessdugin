@@ -163,6 +163,19 @@ pub struct EditorRequest {
     pub template: String,
 }
 
+/// What `:edit` found before the editor opens ([`Effect::StartEdit`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct EditStart {
+    /// The editor session.
+    pub request: EditorRequest,
+    /// What the edit would suspend (`edit_preflight`, `social.md` §4.5): the user confirms
+    /// first.
+    pub notices: Vec<ActionNotice>,
+    /// Why `edit_preflight` could not run, when it could not: the edit goes on unchecked, once
+    /// the user, told why, confirms (sec-7).
+    pub unchecked: Option<String>,
+}
+
 /// Something for the runtime to do.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Effect {
@@ -785,7 +798,7 @@ pub enum Action {
     LocalDone(Result<String, EngineError>),
     /// [`Effect::StartEdit`]: the editor session and what the edit would suspend
     /// (`edit_preflight`), or why there is none.
-    EditReady(Result<(EditorRequest, Vec<ActionNotice>), EngineError>),
+    EditReady(Result<EditStart, EngineError>),
     /// [`Effect::LoadMembers`] finished.
     MembersLoaded(Result<Vec<MemberView>, EngineError>),
     /// [`Effect::LoadRaw`] finished.
@@ -1990,10 +2003,19 @@ impl State {
                 Err(e) => self.say(Tone::Error, tt(&e.message)),
             },
             Action::EditReady(result) => match result {
-                Ok((req, notices)) if notices.is_empty() => fx.push(Effect::Editor(req)),
+                Ok(EditStart {
+                    request,
+                    notices,
+                    unchecked: None,
+                }) if notices.is_empty() => fx.push(Effect::Editor(request)),
                 // an edit suspends the keep, tier or pin in effect on the item: ask first
-                // (`social.md` §4.5, `threat-model.md` SOC-3)
-                Ok((req, notices)) => {
+                // (`social.md` §4.5, `threat-model.md` SOC-3); when that could not be checked,
+                // say why and ask the same, rather than refuse the edit (sec-7)
+                Ok(EditStart {
+                    request,
+                    notices,
+                    unchecked,
+                }) => {
                     let mut text = String::new();
                     for n in &notices {
                         let mut c = n.message.chars();
@@ -2001,10 +2023,15 @@ impl State {
                         text.push_str(c.as_str());
                         text.push_str(". ");
                     }
+                    if let Some(why) = unchecked {
+                        text.push_str(&format!(
+                            "What this edit would suspend could not be checked ({why}). "
+                        ));
+                    }
                     text.push_str("Edit it anyway?");
                     self.confirm = Some(Confirm {
                         text,
-                        effects: vec![Effect::Editor(req)],
+                        effects: vec![Effect::Editor(request)],
                     });
                 }
                 Err(e) => self.say(Tone::Error, cat([lit("Cannot edit it: "), tt(&e.message)])),
