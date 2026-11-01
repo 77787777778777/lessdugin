@@ -44,15 +44,35 @@ export function canSendNow(s: WriteState): boolean {
   );
 }
 
+/** The report of a done adoption (`WriteState.done.report`, engine-api.md §3.5 `mod_adopt`). */
+export interface AdoptionReportEntry {
+  id: string;
+  lines: string[];
+}
+
 export class WriteStore {
   private readonly states = new Map<string, WriteState>();
   private readonly subjects = new Map<string, string>();
   private readonly listeners = new Set<() => void>();
   private readonly waiters = new Map<string, ((s: TerminalWriteState) => void)[]>();
+  /** The adoption reports of done writes (a `modAdopt`, also the one `modsSet` runs first), as
+   * their `done` events arrive and until shown, each write's once (the TUI shows them on its
+   * `Write` event path too; review finding sec-8). */
+  private readonly reports: AdoptionReportEntry[] = [];
+  private readonly reported = new Set<string>();
   private version = 0;
 
   update(id: string, state: WriteState): void {
     this.states.set(id, state);
+    if (
+      state.kind === "done" &&
+      state.report !== undefined &&
+      state.report.length > 0 &&
+      !this.reported.has(id)
+    ) {
+      this.reported.add(id);
+      this.reports.push({ id, lines: [...state.report] });
+    }
     this.version++;
     for (const l of [...this.listeners]) l();
     if (isTerminal(state)) {
@@ -90,6 +110,19 @@ export class WriteStore {
 
   get(id: string): WriteState | undefined {
     return this.states.get(id);
+  }
+
+  /** The oldest adoption report not shown yet. */
+  pendingReport(): AdoptionReportEntry | undefined {
+    return this.reports[0];
+  }
+
+  dismissReport(id: string): void {
+    const i = this.reports.findIndex((r) => r.id === id);
+    if (i < 0) return;
+    this.reports.splice(i, 1);
+    this.version++;
+    for (const l of [...this.listeners]) l();
   }
 
   /** Every known write that is not done or undone, in the order first seen. */
