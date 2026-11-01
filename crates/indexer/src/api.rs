@@ -351,15 +351,13 @@ async fn get_changes(
         if since < i.store.change_floor() || (oldest > 0 && since < oldest - 1) {
             return Err(ApiError::too_old());
         }
-        let changes = i
-            .store
-            .changes(forum, since, limit(&p, 500, 1000)?)
+        let rows = i.store.changes(forum, since, limit(&p, 500, 1000)?);
+        // The cursor describes the consumed source page, not the last visible entry. A blocked
+        // final entry must not leave clients polling the same page forever.
+        let cursor = rows.last().map_or(since, |c| c.seq);
+        let changes = rows
             .into_iter()
-            .filter(|c| !i.blocked(&c.uri))
-            .collect::<Vec<_>>();
-        let cursor = changes.last().map_or(since, |c| c.seq);
-        let changes = changes
-            .into_iter()
+            .filter(|c| !i.blocked_change(c))
             .map(|c| json!({"seq":c.seq,"uri":c.uri,"cid":c.cid,"did":c.did,"rev":c.rev,"op":c.op}))
             .collect::<Vec<_>>();
         Ok(json!({"changes":changes,"cursor":cursor}))
@@ -468,7 +466,7 @@ async fn list_posts(
         let kind=one(&p,"kind").map(|k|serde_json::from_value(Value::String(k.into())).map_err(|_|ApiError::invalid("bad kind"))).transpose()?;
         let hydrate=bool_param(&p,"hydrate")?;
         let out=i.engine.list_posts(&dto::ListPostsQuery{forum:forum.into(),sort,filter,tag:one(&p,"tag").map(str::to_owned),author:one(&p,"author").map(str::to_owned),kind,cursor:one(&p,"cursor").map(str::to_owned),limit:limit(&p,25,100)? as u32}).await.map_err(ApiError::internal)?;
-        let mut posts=Vec::new();for post in out.items{if i.blocked(&post.uri)||i.blocked(&post.author.did){continue;}let value=if hydrate{stored_value(&i,&post.uri).await}else{None};posts.push(post_hint(&post,value,hydrate));}
+                let mut posts=Vec::new();for post in out.items{if i.blocked_record(key.uri.as_str(),&post.uri)||i.blocked(&post.author.did){continue;}let value=if hydrate{stored_value(&i,&post.uri).await}else{None};posts.push(post_hint(&post,value,hydrate));}
         let m=model(&i,&key).await?;Ok(json!({"posts":posts,"cursor":out.cursor,"policy":{"karma":"karma/1","ranking":"magic/1"},"inputDigest":m.view.input_digest}))}.await;
     json_result(&i, result, true, headers)
 }
@@ -482,6 +480,9 @@ async fn recent_discussion(
         let p = params(raw);
         let forum = required(&p, "forum")?;
         known_forum(&i, forum)?;
+        let key =
+            ForumKey::of_uri(&AtUri::parse(forum).map_err(|e| ApiError::invalid(e.to_string()))?)
+                .map_err(|e| ApiError::invalid(e.to_string()))?;
         let out = i
             .engine
             .recent_discussion(forum, one(&p, "cursor"), limit(&p, 20, 50)? as u32)
@@ -489,13 +490,17 @@ async fn recent_discussion(
             .map_err(ApiError::internal)?;
         let mut items = Vec::new();
         for item in out.items {
-            if i.blocked(&item.post.uri) || i.blocked(&item.post.author.did) {
+            if i.blocked_record(key.uri.as_str(), &item.post.uri)
+                || i.blocked(&item.post.author.did)
+            {
                 continue;
             }
             let comments = item
                 .comments
                 .into_iter()
-                .filter(|c| !i.blocked(&c.uri) && !i.blocked(&c.author.did))
+                .filter(|c| {
+                    !i.blocked_record(key.uri.as_str(), &c.uri) && !i.blocked(&c.author.did)
+                })
                 .map(|c| comment_hint(&c, false, None))
                 .collect::<Vec<_>>();
             items.push(json!({"post":post_hint(&item.post,None,false),"comments":comments}));
@@ -518,9 +523,9 @@ async fn get_thread(
         let views=Views{model:&m,actors:&actors,pds:&pds,values:&values,renders:&renders,pending:&pending,completeness:&completeness,viewer:&viewer};
         let thread=views.thread_view(&root,sort);
         let dto::ThreadRoot::Post(post_view)=thread.post else{return Err(ApiError::not_indexed("thread root is not indexed"));};
-        if i.blocked(&post_view.post.author.did){return Err(ApiError::not_indexed("post is not indexed"));}
+        if i.blocked_record(key.uri.as_str(), &post_view.post.uri) || i.blocked(&post_view.post.author.did) {return Err(ApiError::not_indexed("post is not indexed"));}
         let value=if hydrate{stored_value(&i,&post_view.post.uri).await}else{None};let post_out=post_hint(&post_view.post,value,hydrate);
-        let truncated=thread.comments.len()>10000;let mut comments=Vec::new();for c in thread.comments.into_iter().take(10000){if i.blocked(&c.uri)||i.blocked(&c.author.did){continue;}let value=if hydrate{stored_value(&i,&c.uri).await}else{None};comments.push(comment_hint(&c,hydrate,value));}
+        let truncated=thread.comments.len()>10000;let mut comments=Vec::new();for c in thread.comments.into_iter().take(10000){if i.blocked_record(key.uri.as_str(), &c.uri)||i.blocked(&c.author.did){continue;}let value=if hydrate{stored_value(&i,&c.uri).await}else{None};comments.push(comment_hint(&c,hydrate,value));}
         Ok(json!({"post":post_out,"comments":comments,"truncated":truncated,"inputDigest":m.view.input_digest}))}.await;
     json_result(&i, result, false, headers)
 }

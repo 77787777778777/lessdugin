@@ -415,6 +415,28 @@ impl Store {
         )?;
         Ok(())
     }
+
+    pub fn record_cid(&self, forum: &str, uri: &str) -> Option<String> {
+        self.db()
+            .query_row(
+                "SELECT cid FROM record_state WHERE forum=?1 AND uri=?2",
+                params![forum, uri],
+                |r| r.get(0),
+            )
+            .optional()
+            .ok()
+            .flatten()
+    }
+
+    pub fn record_pds(&self, did: &str) -> Option<String> {
+        self.db()
+            .query_row("SELECT pds FROM repo_heads WHERE did=?1", [did], |r| {
+                r.get(0)
+            })
+            .optional()
+            .ok()
+            .flatten()
+    }
 }
 
 const SCHEMA: &str = r#"

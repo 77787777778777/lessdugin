@@ -3,6 +3,7 @@
 
 use std::collections::BTreeSet;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::Body;
@@ -95,11 +96,13 @@ impl Fixture {
         Self::at(&keep, net, owner, forum).await
     }
     fn post(&self, title: &str) -> String {
+        static NEXT: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+        let sequence = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let now = Datetime::from_millis(self.net.now_ms() - 3_600_000).unwrap();
         let p = Post::article(self.forum.uri.clone(), title, "A real signed body.", now);
         let rkey = keys::post_rkey(
             self.forum.uri.as_str(),
-            lessdugin_testkit::repo::tid_at_ms(self.net.now_ms()).as_ref(),
+            lessdugin_testkit::repo::tid_at_ms(self.net.now_ms() + sequence).as_ref(),
         )
         .unwrap();
         self.owner
@@ -289,6 +292,82 @@ async fn proof_omission_and_forgery_are_detectable() {
         ProofBundle::parse(&forged, &Default::default()).is_err(),
         "existing verifier detects a forged bundle"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn blocklist_filters_content_and_changes_without_stalling_the_cursor() {
+    let mut fixture = Fixture::new().await;
+    let first = fixture.post("First");
+    let second = fixture.post("Blocked");
+    ingest::sync_forum(&fixture.indexer, fixture.forum.uri.as_str())
+        .await
+        .unwrap();
+    let cid = fixture
+        .indexer
+        .store
+        .record_cid(fixture.forum.uri.as_str(), &second)
+        .unwrap();
+    let (debug_status, debug_posts, _) = fixture
+        .request(&format!(
+            "/xrpc/{NS}.index.listPosts?forum={}&limit=100",
+            urlencoding(fixture.forum.uri.as_ref())
+        ))
+        .await;
+    assert_eq!(debug_status, StatusCode::OK);
+    assert_eq!(debug_posts["posts"].as_array().unwrap().len(), 2);
+    Arc::get_mut(&mut fixture.indexer.config).unwrap().blocklist =
+        Arc::new(BTreeSet::from([second.clone(), cid.clone()]));
+
+    let base = format!("/xrpc/{NS}.index");
+    let encoded = urlencoding(fixture.forum.uri.as_ref());
+    let (status, posts, _) = fixture
+        .request(&format!("{base}.listPosts?forum={encoded}&limit=100"))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let uris = posts["posts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["ref"]["uri"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert!(uris.contains(&first.as_str()));
+    assert!(!uris.contains(&second.as_str()));
+
+    let seq = fixture.indexer.store.latest_seq();
+    let (status, changes, _) = fixture
+        .request(&format!(
+            "{base}.getChanges?forum={encoded}&since=0&limit=1"
+        ))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let before = changes["cursor"].as_i64().unwrap();
+    let (status, changes, _) = fixture
+        .request(&format!(
+            "{base}.getChanges?forum={encoded}&since={before}&limit=100"
+        ))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!changes.to_string().contains(&second));
+    assert!(!changes.to_string().contains(&cid));
+    assert_eq!(changes["cursor"].as_i64().unwrap(), seq);
+
+    // Both records come from one PDS. Blocking its host hides both, and does not regress the
+    // cursor that has already consumed their change entries.
+    let host = fixture.owner.pds().url().host_str().unwrap().to_owned();
+    Arc::get_mut(&mut fixture.indexer.config).unwrap().blocklist = Arc::new(BTreeSet::from([host]));
+    let (status, posts, _) = fixture
+        .request(&format!("{base}.listPosts?forum={encoded}&limit=100"))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(posts["posts"].as_array().unwrap().is_empty());
+    let (status, changes, _) = fixture
+        .request(&format!(
+            "{base}.getChanges?forum={encoded}&since=0&limit=100"
+        ))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(changes["changes"].as_array().unwrap().is_empty());
+    assert_eq!(changes["cursor"].as_i64().unwrap(), seq);
 }
 
 fn urlencoding(s: &str) -> String {

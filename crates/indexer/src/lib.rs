@@ -12,6 +12,7 @@ pub mod store;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use lessdugin_atp::syntax::AtUri;
 use lessdugin_core::engine::Engine;
 use url::Url;
 
@@ -138,6 +139,43 @@ impl Indexer {
             || lessdugin_atp::syntax::AtUri::parse(value)
                 .ok()
                 .is_some_and(|u| self.config.blocklist.contains(u.did().as_str()))
+    }
+
+    pub(crate) fn blocked_host(&self, url: &str) -> bool {
+        Url::parse(url).ok().is_some_and(|u| {
+            u.host_str().is_some_and(|host| {
+                self.config.blocklist.contains(host)
+                    || u.port_or_known_default().is_some_and(|port| {
+                        self.config.blocklist.contains(&format!("{host}:{port}"))
+                    })
+            }) || self
+                .config
+                .blocklist
+                .contains(u.origin().ascii_serialization().as_str())
+        })
+    }
+
+    pub(crate) fn blocked_record(&self, forum: &str, uri: &str) -> bool {
+        self.blocked(uri)
+            || self
+                .store
+                .record_cid(forum, uri)
+                .is_some_and(|cid| self.blocked(&cid))
+            || self.store.forum(uri).is_some_and(|f| self.blocked(&f.cid))
+            || AtUri::parse(uri).ok().is_some_and(|u| {
+                self.store
+                    .record_pds(u.did().as_str())
+                    .is_some_and(|pds| self.blocked_host(&pds))
+            })
+    }
+
+    fn blocked_change(&self, c: &crate::store::ChangeRow) -> bool {
+        self.blocked(&c.uri)
+            || c.cid.as_deref().is_some_and(|cid| self.blocked(cid))
+            || self
+                .store
+                .record_pds(&c.did)
+                .is_some_and(|pds| self.blocked_host(&pds))
     }
 
     pub fn now_ms(&self) -> i64 {

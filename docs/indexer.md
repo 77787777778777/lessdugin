@@ -29,9 +29,10 @@ a full reconcile runs daily. Two configured Jetstream endpoints are consumed con
 shared deduplicator and independent durable cursors. Reconnects rewind ten seconds, and cursors
 advance only after admission, proof acquisition and snapshot persistence.
 
-The blocklist contains one DID or at-uri per line; blank lines and `#` comments are ignored. It is
-applied when answering queries, not as a content-admission or moderation mechanism. Restart after
-editing it. Outbound HTTP is limited to five requests/second and four requests in flight per host,
+The blocklist contains one DID, at-uri, CID or host per line; blank lines and `#` comments are
+ignored. Host entries also match `host:port` and exact origins. It is applied when answering
+queries, not as a content-admission or moderation mechanism. Restart after editing it. Outbound
+HTTP is limited to five requests/second and four requests in flight per host,
 with 200 in flight globally. Inbound requests are limited to 20/second/IP and use XRPC
 `RateLimitExceeded` errors.
 

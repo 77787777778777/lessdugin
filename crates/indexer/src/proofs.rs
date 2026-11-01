@@ -92,7 +92,14 @@ pub async fn bundle(indexer: &Indexer, uris: &[String]) -> anyhow::Result<Vec<u8
     let mut items = Vec::new();
     let mut blocks: BTreeMap<Cid, Vec<u8>> = BTreeMap::new();
     for uri in uris.iter().take(25) {
-        if indexer.blocked(uri) {
+        if indexer.blocked(uri)
+            || AtUri::parse(uri).ok().is_some_and(|u| {
+                indexer
+                    .store
+                    .record_pds(u.did().as_str())
+                    .is_some_and(|pds| indexer.blocked_host(&pds))
+            })
+        {
             continue;
         }
         let row = match indexer.store.proof(uri) {
@@ -102,6 +109,9 @@ pub async fn bundle(indexer: &Indexer, uris: &[String]) -> anyhow::Result<Vec<u8
                 Err(_) => continue,
             },
         };
+        if row.cid.as_deref().is_some_and(|cid| indexer.blocked(cid)) {
+            continue;
+        }
         let car = match read_car(&row.car, &CarLimits::PROOF) {
             Ok(car) => car,
             Err(_) => {
