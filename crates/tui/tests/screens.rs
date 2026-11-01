@@ -418,6 +418,31 @@ fn an_open_forum_says_it_relies_on_public_relays() {
     let screen = t.render();
     // the engine's `relayDependent` banner, shown once
     assert_eq!(screen.matches(OPEN_MODE_LABEL).count(), 1, "{screen}");
+    // ... and it IS the engine's banner that shows, not the TUI's own label (sec-6: the two
+    // read the same, so the engine's is given other words): the TUI falls back to its label
+    // only when the view carries no such banner
+    fn banners(
+        t: &mut lessdugin_tui::Headless<lessdugin_testkit::MemHost>,
+    ) -> &mut Vec<lessdugin_core::dto::Banner> {
+        let ScreenKind::Forum(f) = &mut t.state.stack.last_mut().unwrap().kind else {
+            panic!("not the forum screen")
+        };
+        &mut f.data.as_mut().unwrap().view.banners
+    }
+    let relay = "relayDependent";
+    assert!(banners(&mut t).iter().any(|b| b.code == relay));
+    for b in banners(&mut t).iter_mut().filter(|b| b.code == relay) {
+        b.message = "The engine's own words about open mode.".into();
+    }
+    let screen = t.render();
+    assert!(
+        screen.contains("The engine's own words about open mode."),
+        "{screen}"
+    );
+    assert!(!screen.contains(OPEN_MODE_LABEL), "{screen}");
+    banners(&mut t).retain(|b| b.code != relay);
+    let screen = t.render();
+    assert_eq!(screen.matches(OPEN_MODE_LABEL).count(), 1, "{screen}");
     let mut t = tui(&s, 80, 24);
     block_on(t.start(Some(s.forum.clone())));
     let screen = t.render();

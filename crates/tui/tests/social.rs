@@ -2273,3 +2273,82 @@ fn forum_edit_keeps_the_abouts_media() {
     assert_eq!(again, media, "the about keeps its picture");
     assert_eq!(again[0]["blob"]["ref"]["$link"], cid);
 }
+
+/// m4-5, from the owner's other device, which never held the spilled about's blob: `:forum
+/// edit` fetches its source from the owner's PDS (as `forum_open` does for the header) and
+/// sends it again, so the about survives. Here the PDS fails the fetch while the Forum screen
+/// opens, so the header's attempt leaves the body pending and the edit itself runs the fallback
+/// once the retry is due.
+#[test]
+fn forum_edit_fetches_a_spilled_about_from_the_owners_pds() {
+    use lessdugin_core::dto::{BodyDraft, ForumDraft};
+    use lessdugin_core::host::Host as _;
+    use lessdugin_tui::{Headless, HeadlessOpts};
+    let s = scenario();
+    let alice = &s.w.alice;
+    let mut about = "# Rules\n\n".to_owned();
+    while about.len() <= 65_536 {
+        about.push_str("Be kind to each other. ");
+    }
+    let mut draft = ForumDraft::new("long", "Long");
+    draft.about = Some(BodyDraft::text(about));
+    let t = block_on(alice.engine.forum_create(&draft)).unwrap();
+    alice.flush();
+    let forum = alice.done(&t);
+    let on_pds = || {
+        let v = alice
+            .acct
+            .get(lessdugin_lexicon::collection::nsid::FORUM, "long")
+            .unwrap();
+        (v["name"].clone(), v["about"]["textBlob"].clone())
+    };
+    let (_, spilled) = on_pds();
+    assert!(spilled.is_object(), "it spilled: {spilled}");
+
+    // alice's laptop: its own stores and clock, the same account and network
+    let laptop = MemHost::new();
+    laptop.set_now_ms(alice.host.now_ms());
+    laptop.set_seed(7);
+    s.w.net.install_as(&laptop, "laptop");
+    let e2 = Engine::new(laptop.clone(), EngineConfig::default());
+    block_on(e2.add_account(AccountInfo::app_password(
+        alice.acct.did().as_str(),
+        alice.acct.pds_base(),
+    )))
+    .unwrap();
+    // the blob cannot be fetched while the screen opens
+    let outage = s.w.net.inject(
+        Fault::status(500)
+            .on_nsid("com.atproto.sync.getBlob")
+            .for_caller("laptop"),
+    );
+    let mut t = block_on(Headless::new(
+        e2,
+        HeadlessOpts {
+            width: 100,
+            height: 30,
+            ..HeadlessOpts::default()
+        },
+    ))
+    .unwrap();
+    block_on(t.start(Some(forum.clone())));
+    assert!(
+        !t.render().contains("Be kind to each other"),
+        "{}",
+        t.render()
+    );
+    s.w.net.remove_fault(outage);
+    // the retry is due (`BODY_BLOB_RETRY_MS`)
+    laptop.advance_ms(2 * MINUTE);
+    s.w.tick(2 * MINUTE);
+
+    run_command(&mut t, "forum edit --name Longer");
+    assert!(status(&t).contains("Forum edit: queued"), "{}", status(&t));
+    block_on(t.engine().outbox_flush()).unwrap();
+    let (name, again) = on_pds();
+    assert_eq!(name, "Longer");
+    assert_eq!(
+        again, spilled,
+        "the same source, fetched from the PDS and spilled again"
+    );
+}
