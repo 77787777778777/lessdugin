@@ -18,8 +18,9 @@ use lessdugin_core::dto::{
     AccessLevel, ActionTicket, AgreementValue, BodyDraft, Capability, CommentDraft, Draft,
     EditOpts, Event, ForumDraft, KarmaCadence, KarmaValue, MembershipMode, ModActionIntent,
     ModActionValue, ModRole, ModScope, ModsChange, NoticeCode, NotificationReason,
-    NotificationsQuery, OpinionIntent, PinScope, PostDraft, PublicActionKind, Stance, Subscription,
-    SyncOpts, TextQuote, Tier, Topic, WikiDraft, WriteState, WriteTicket,
+    NotificationsQuery, OpinionIntent, PinScope, PostDraft, PublicActionKind, SequenceChapterDraft,
+    SequenceDraft, SequencePosition, Stance, Subscription, SyncOpts, TextQuote, Tier, Topic,
+    WikiDraft, WriteState, WriteTicket,
 };
 use lessdugin_core::engine::{AccountInfo, Engine, EngineConfig, ErrorCode};
 use lessdugin_core::outbox::records;
@@ -381,6 +382,109 @@ fn wiki_revisions_parent_the_canonical_head_and_drive_tag_views() {
         second_record["parents"],
         json!([{"uri": first_uri, "cid": first_cid}])
     );
+}
+
+#[test]
+fn sequence_writes_create_edit_add_move_and_remove_through_the_outbox() {
+    let w = World::new();
+    let draft = SequenceDraft {
+        forum: w.forum.clone(),
+        title: "A reading list".to_owned(),
+        body: Some(BodyDraft::text("Sequence **introduction**")),
+        chapters: vec![
+            SequenceChapterDraft {
+                title: Some("First".to_owned()),
+                body: Some(BodyDraft::text("Chapter one")),
+                posts: vec![w.welcome.clone()],
+            },
+            SequenceChapterDraft {
+                title: Some("Second".to_owned()),
+                body: None,
+                posts: vec![w.bob_post.clone()],
+            },
+        ],
+    };
+    let created = block_on(w.alice.engine.seq_create(&draft)).unwrap();
+    w.alice.flush();
+    let uri = w.alice.done(&created);
+    let rkey = uri.rsplit('/').next().unwrap();
+    let record = w.alice.record(nsid::SEQUENCE, rkey).unwrap();
+    assert_eq!(record["title"], "A reading list");
+    assert_eq!(record["body"]["text"], "Sequence **introduction**");
+    assert_eq!(record["chapters"][0]["body"]["text"], "Chapter one");
+    assert_eq!(record["chapters"][0]["posts"], json!([w.welcome]));
+
+    let _added = block_on(w.alice.engine.seq_add(
+        &uri,
+        &w.bob_post,
+        &SequencePosition {
+            chapter: 0,
+            index: 1,
+        },
+    ))
+    .unwrap();
+    w.alice.flush();
+    let record = w.alice.record(nsid::SEQUENCE, rkey).unwrap();
+    assert_eq!(
+        record["chapters"][0]["posts"],
+        json!([w.welcome, w.bob_post])
+    );
+
+    let _moved = block_on(w.alice.engine.seq_move(
+        &uri,
+        &SequencePosition {
+            chapter: 0,
+            index: 0,
+        },
+        &SequencePosition {
+            chapter: 1,
+            index: 1,
+        },
+    ))
+    .unwrap();
+    w.alice.flush();
+    let record = w.alice.record(nsid::SEQUENCE, rkey).unwrap();
+    assert_eq!(record["chapters"][0]["posts"], json!([w.bob_post]));
+    assert_eq!(
+        record["chapters"][1]["posts"],
+        json!([w.bob_post, w.welcome])
+    );
+
+    let _edited = block_on(w.alice.engine.seq_edit(
+        &uri,
+        &SequenceDraft {
+            title: "An edited reading list".to_owned(),
+            body: Some(BodyDraft::text("Edited introduction")),
+            chapters: vec![
+                SequenceChapterDraft {
+                    title: Some("First edited".to_owned()),
+                    body: None,
+                    posts: vec![w.bob_post.clone()],
+                },
+                SequenceChapterDraft {
+                    title: Some("Second".to_owned()),
+                    body: Some(BodyDraft::text("Chapter two")),
+                    posts: vec![w.bob_post.clone(), w.welcome.clone()],
+                },
+            ],
+            ..draft
+        },
+    ))
+    .unwrap();
+    w.alice.flush();
+    let record = w.alice.record(nsid::SEQUENCE, rkey).unwrap();
+    assert_eq!(record["title"], "An edited reading list");
+    assert_eq!(record["body"]["text"], "Edited introduction");
+    assert_eq!(record["chapters"][0]["title"], "First edited");
+    assert_eq!(record["chapters"][1]["body"]["text"], "Chapter two");
+    assert!(record["createdAt"].is_string());
+    assert!(record["updatedAt"].is_string());
+
+    let _removed = block_on(w.alice.engine.seq_remove(&uri, &w.bob_post)).unwrap();
+    w.alice.flush();
+    let record = w.alice.record(nsid::SEQUENCE, rkey).unwrap();
+    assert_eq!(record["chapters"][0]["posts"], json!([]));
+    assert_eq!(record["chapters"][1]["posts"], json!([w.welcome]));
 }
 
 // ---------------------------------------------------------------------------------------------

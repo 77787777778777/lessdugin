@@ -4,10 +4,13 @@
 
 use lessdugin_atp::syntax::{AtUri, Datetime};
 use lessdugin_lexicon::collection::nsid;
-use lessdugin_lexicon::records::{StrongRef, WikiRevision};
-use serde_json::Map;
+use lessdugin_lexicon::records::{Chapter, Md, Sequence, StrongRef, WikiRevision};
+use serde_json::{Map, Value};
 
-use crate::dto::{SequenceSummary, SequenceView, TagSummary, TagView, WikiDraft, WriteTicket};
+use crate::dto::{
+    SequenceDraft, SequencePosition, SequenceSummary, SequenceView, TagSummary, TagView, WikiDraft,
+    WriteTicket,
+};
 use crate::engine::forums::{excerpt_of, markdown_body};
 use crate::engine::queries::fold_pending;
 use crate::engine::{Engine, EngineError};
@@ -173,6 +176,316 @@ impl<H: Host> Engine<H> {
             .await?;
         self.sent_prepared_media(&media).await;
         Ok(ticket)
+    }
+
+    /// Rewrite handle mentions and prepare every body in a sequence draft. Media from the
+    /// introduction and all chapters share the write's upload set.
+    async fn prepare_sequence(
+        &self,
+        draft: &SequenceDraft,
+    ) -> Result<(Option<Md>, Vec<Option<Md>>, Vec<crate::dto::MediaRef>), EngineError> {
+        let mut media = Vec::new();
+        let body = match &draft.body {
+            Some(body) => {
+                let body = self.with_dids(body).await?;
+                media.extend(body.media.clone());
+                Some(markdown_body(&body)?)
+            }
+            None => None,
+        };
+        let mut chapters = Vec::with_capacity(draft.chapters.len());
+        for chapter in &draft.chapters {
+            let body = match &chapter.body {
+                Some(body) => {
+                    let body = self.with_dids(body).await?;
+                    media.extend(body.media.clone());
+                    Some(markdown_body(&body)?)
+                }
+                None => None,
+            };
+            chapters.push(body);
+        }
+        Ok((body, chapters, media))
+    }
+
+    /// Create a sequence and its chapters through the ordinary content outbox.
+    pub async fn seq_create(&self, draft: &SequenceDraft) -> Result<WriteTicket, EngineError> {
+        let session = self.active_session().await?;
+        let key = self.forum_key(&draft.forum).await?;
+        let (body, chapter_bodies, media) = self.prepare_sequence(draft).await?;
+        let chapters = draft
+            .chapters
+            .iter()
+            .zip(chapter_bodies)
+            .map(|(chapter, body)| {
+                Ok(Chapter {
+                    title: chapter.title.clone(),
+                    body,
+                    posts: chapter
+                        .posts
+                        .iter()
+                        .map(|post| {
+                            let uri = records_uri(post)?;
+                            if uri.collection().as_str() != nsid::POST {
+                                return Err(EngineError::invalid_input(format!(
+                                    "{uri} is not a post"
+                                )));
+                            }
+                            Ok(uri)
+                        })
+                        .collect::<Result<Vec<_>, EngineError>>()?,
+                    extra: Map::new(),
+                })
+            })
+            .collect::<Result<Vec<_>, EngineError>>()?;
+        let sequence = Sequence {
+            r#type: nsid::SEQUENCE.to_owned(),
+            forum: key.uri,
+            title: draft.title.clone(),
+            body,
+            cover: None,
+            chapters,
+            created_at: Datetime::from_millis(self.host.now_ms())
+                .map_err(|e| EngineError::internal(e.to_string()))?,
+            updated_at: None,
+            extra: Map::new(),
+        };
+        let opts = ContentOpts {
+            blobs: self.media_blobs(&media).await?,
+            excerpt: None,
+        };
+        let ticket = self
+            .outbox
+            .create_sequence(&session, &sequence, opts)
+            .await?;
+        self.sent_prepared_media(&media).await;
+        Ok(ticket)
+    }
+
+    /// The cached current value of an own sequence and the outbox session of its author.
+    async fn sequence_for_edit(
+        &self,
+        uri: &str,
+    ) -> Result<(crate::outbox::Session, String, String, Value), EngineError> {
+        let uri = records_uri(uri)?;
+        if uri.collection().as_str() != nsid::SEQUENCE {
+            return Err(EngineError::invalid_ref(format!("{uri} is not a sequence")));
+        }
+        let session = self.session_for(uri.did().as_str()).await?;
+        let (base, value) = self.current(&uri).await?;
+        Ok((session, uri.to_string(), base, value))
+    }
+
+    /// Replace the drafted fields of a sequence. Forum, creation time, cover and unknown fields
+    /// are retained; chapter-local unknown fields are retained at their existing positions.
+    pub async fn seq_edit(
+        &self,
+        uri: &str,
+        draft: &SequenceDraft,
+    ) -> Result<WriteTicket, EngineError> {
+        let (session, uri, base, mut value) = self.sequence_for_edit(uri).await?;
+        let old_forum = value
+            .get("forum")
+            .and_then(Value::as_str)
+            .ok_or_else(|| EngineError::invalid_input(format!("{uri} names no forum")))?;
+        let key = self.forum_key(&draft.forum).await?;
+        if key.uri.as_str() != old_forum {
+            return Err(EngineError::invalid_input(
+                "a sequence's forum is fixed after creation",
+            ));
+        }
+        let (body, chapter_bodies, media) = self.prepare_sequence(draft).await?;
+        let cached = value.clone();
+        let object = value
+            .as_object_mut()
+            .ok_or_else(|| EngineError::internal(format!("{uri} is not an object")))?;
+        object.insert("title".into(), Value::String(draft.title.clone()));
+        match body {
+            Some(body) => {
+                object.insert(
+                    "body".into(),
+                    serde_json::to_value(body)
+                        .map_err(|e| EngineError::internal(format!("encode: {e}")))?,
+                );
+            }
+            None => {
+                object.remove("body");
+            }
+        }
+        let old_chapters = object
+            .get("chapters")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let mut chapters = Vec::with_capacity(draft.chapters.len());
+        for (i, (chapter, body)) in draft.chapters.iter().zip(chapter_bodies).enumerate() {
+            let mut out = old_chapters
+                .get(i)
+                .and_then(Value::as_object)
+                .cloned()
+                .unwrap_or_default();
+            match &chapter.title {
+                Some(title) => {
+                    out.insert("title".into(), Value::String(title.clone()));
+                }
+                None => {
+                    out.remove("title");
+                }
+            }
+            match body {
+                Some(body) => {
+                    out.insert(
+                        "body".into(),
+                        serde_json::to_value(body)
+                            .map_err(|e| EngineError::internal(format!("encode: {e}")))?,
+                    );
+                }
+                None => {
+                    out.remove("body");
+                }
+            }
+            out.insert(
+                "posts".into(),
+                Value::Array(chapter.posts.iter().cloned().map(Value::String).collect()),
+            );
+            chapters.push(Value::Object(out));
+        }
+        object.insert("chapters".into(), Value::Array(chapters));
+        let blobs = self.edit_media_blobs(&cached, &mut value, &media).await?;
+        let ticket = self
+            .outbox
+            .edit(
+                &session,
+                &uri,
+                &value,
+                &base,
+                crate::outbox::EditOpts {
+                    blobs,
+                    ..Default::default()
+                },
+            )
+            .await?;
+        self.sent_prepared_media(&media).await;
+        Ok(ticket)
+    }
+
+    /// Add a post at a chapter-local position (`index == len` appends).
+    pub async fn seq_add(
+        &self,
+        uri: &str,
+        post: &str,
+        at: &SequencePosition,
+    ) -> Result<WriteTicket, EngineError> {
+        let post = records_uri(post)?;
+        if post.collection().as_str() != nsid::POST {
+            return Err(EngineError::invalid_input(format!("{post} is not a post")));
+        }
+        let (session, uri, base, mut value) = self.sequence_for_edit(uri).await?;
+        let chapters = value
+            .get_mut("chapters")
+            .and_then(Value::as_array_mut)
+            .ok_or_else(|| EngineError::invalid_input(format!("{uri} has no chapters")))?;
+        let chapter = chapters
+            .get_mut(at.chapter)
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| EngineError::invalid_input("no such sequence chapter"))?;
+        let posts = chapter
+            .get_mut("posts")
+            .and_then(Value::as_array_mut)
+            .ok_or_else(|| EngineError::invalid_input("the sequence chapter has no posts"))?;
+        if at.index > posts.len() {
+            return Err(EngineError::invalid_input("no such sequence position"));
+        }
+        posts.insert(at.index, Value::String(post.to_string()));
+        self.outbox
+            .edit(
+                &session,
+                &uri,
+                &value,
+                &base,
+                crate::outbox::EditOpts::default(),
+            )
+            .await
+    }
+
+    /// Remove every occurrence of a post from a sequence's chapters.
+    pub async fn seq_remove(&self, uri: &str, post: &str) -> Result<WriteTicket, EngineError> {
+        let post = records_uri(post)?;
+        if post.collection().as_str() != nsid::POST {
+            return Err(EngineError::invalid_input(format!("{post} is not a post")));
+        }
+        let (session, uri, base, mut value) = self.sequence_for_edit(uri).await?;
+        let chapters = value
+            .get_mut("chapters")
+            .and_then(Value::as_array_mut)
+            .ok_or_else(|| EngineError::invalid_input(format!("{uri} has no chapters")))?;
+        for chapter in chapters {
+            if let Some(posts) = chapter.get_mut("posts").and_then(Value::as_array_mut) {
+                posts.retain(|entry| entry.as_str() != Some(post.as_str()));
+            }
+        }
+        self.outbox
+            .edit(
+                &session,
+                &uri,
+                &value,
+                &base,
+                crate::outbox::EditOpts::default(),
+            )
+            .await
+    }
+
+    /// Move the entry at `from` to `to`, removing it before interpreting the destination index.
+    pub async fn seq_move(
+        &self,
+        uri: &str,
+        from: &SequencePosition,
+        to: &SequencePosition,
+    ) -> Result<WriteTicket, EngineError> {
+        let (session, uri, base, mut value) = self.sequence_for_edit(uri).await?;
+        let chapters = value
+            .get_mut("chapters")
+            .and_then(Value::as_array_mut)
+            .ok_or_else(|| EngineError::invalid_input(format!("{uri} has no chapters")))?;
+        if from.chapter >= chapters.len() || to.chapter >= chapters.len() {
+            return Err(EngineError::invalid_input("no such sequence chapter"));
+        }
+        let source_len = chapters[from.chapter]
+            .get("posts")
+            .and_then(Value::as_array)
+            .map(Vec::len)
+            .ok_or_else(|| EngineError::invalid_input("the sequence chapter has no posts"))?;
+        if from.index >= source_len {
+            return Err(EngineError::invalid_input("no such sequence position"));
+        }
+        let destination_len = chapters[to.chapter]
+            .get("posts")
+            .and_then(Value::as_array)
+            .map(Vec::len)
+            .ok_or_else(|| EngineError::invalid_input("the sequence chapter has no posts"))?
+            - usize::from(from.chapter == to.chapter);
+        if to.index > destination_len {
+            return Err(EngineError::invalid_input("no such sequence position"));
+        }
+        let moved = chapters[from.chapter]
+            .get_mut("posts")
+            .and_then(Value::as_array_mut)
+            .expect("source posts checked above")
+            .remove(from.index);
+        chapters[to.chapter]
+            .get_mut("posts")
+            .and_then(Value::as_array_mut)
+            .expect("destination posts checked above")
+            .insert(to.index, moved);
+        self.outbox
+            .edit(
+                &session,
+                &uri,
+                &value,
+                &base,
+                crate::outbox::EditOpts::default(),
+            )
+            .await
     }
 }
 
