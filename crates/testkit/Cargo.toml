@@ -10,7 +10,7 @@ publish = false
 
 [features]
 # Serve a FakeNet over real HTTP on 127.0.0.1 (CLI tests): axum on an owned Tokio runtime.
-http = ["dep:axum", "dep:tokio"]
+http = ["dep:axum", "dep:tokio", "dep:tokio-tungstenite"]
 
 [dependencies]
 lessdugin-atp.workspace = true
@@ -26,6 +26,7 @@ futures.workspace = true
 data-encoding.workspace = true
 axum = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
+tokio-tungstenite = { workspace = true, optional = true }
 
 [dev-dependencies]
 # End-to-end tests against the local devnet (LESSDUGIN_E2E=1) need a real HTTP client.
