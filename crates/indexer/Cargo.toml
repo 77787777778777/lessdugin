@@ -7,12 +7,36 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[lib]
+name = "lessdugin_indexer"
+path = "src/lib.rs"
+
 [[bin]]
 name = "lessdugin-indexer"
 path = "src/main.rs"
 
 [dependencies]
+lessdugin-atp.workspace = true
 lessdugin-core.workspace = true
+lessdugin-lexicon.workspace = true
 lessdugin-native.workspace = true
 anyhow.workspace = true
-tokio.workspace = true
+axum.workspace = true
+clap = { workspace = true, features = ["derive"] }
+futures.workspace = true
+http.workspace = true
+rusqlite = { workspace = true, features = ["bundled"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal", "sync", "time", "net"] }
+tower-http = { workspace = true, features = ["cors", "trace"] }
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+url.workspace = true
+
+[dev-dependencies]
+lessdugin-testkit = { workspace = true, features = ["http"] }
+tempfile.workspace = true
+tower = { version = "0.5", features = ["util"] }
