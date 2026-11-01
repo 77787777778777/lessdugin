@@ -67,11 +67,7 @@ fn fold_all(f: &Forum, q: &Query) -> (FoldInput, ForumView) {
     let input = f.input();
     let view = fold(&input, q);
     check_validity(f, &input, &view);
-    assert!(
-        view.pending()
-            .iter()
-            .all(|p| p.stub.starts_with("sequences::"))
-    );
+    assert!(view.pending().is_empty());
     (input, view)
 }
 

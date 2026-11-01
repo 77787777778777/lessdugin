@@ -21,7 +21,7 @@
 //! | [`author`] | L5 | §4.9 author tier and author-scope statuses | implemented |
 //! | [`reacts`] | L5 | §9 the `default/1` palette, react aggregation | implemented |
 //! | [`wiki`] | L5 | §13 wiki heads, tag relevance | implemented |
-//! | [`sequences`] | L5 | §14 sequence library | **stub** |
+//! | [`sequences`] | L5 | §14 sequence library | implemented |
 //! | [`visibility`] | L6 | §10.1 V8–V10, §10.2 thread pass | implemented |
 //! | [`ranking`] | L6 | §12 sorts, filters, Recent Discussion | implemented |
 //! | [`project`](mod@project) | – | the vector projection (`testdata/vectors/README.md`) | implemented |

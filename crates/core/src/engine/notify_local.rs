@@ -145,8 +145,19 @@ impl<H: Host> Engine<H> {
         Ok(())
     }
 
-    /// `subscriptions()`: every local subscription, oldest first.
+    /// `subscriptions()`: every local subscription, oldest first. Parity mode ignores this
+    /// device-local state (engine-api.md §2.1, O-13); [`Engine::parity_subscriptions`] is
+    /// the opt-in local-state query for a parity client.
     pub async fn subscriptions(&self) -> Result<Vec<SubscriptionEntry>, EngineError> {
+        if self.config.parity_now_ms.is_some() {
+            return Ok(Vec::new());
+        }
+        self.parity_subscriptions().await
+    }
+
+    /// The device's subscriptions even in parity mode. Their timestamps remain device-local
+    /// and must never feed a record-derived parity comparison.
+    pub async fn parity_subscriptions(&self) -> Result<Vec<SubscriptionEntry>, EngineError> {
         let mut out: Vec<SubscriptionEntry> = self
             .loc_rows(crate::key!("loc", "sub"))
             .await?
@@ -191,8 +202,18 @@ impl<H: Host> Engine<H> {
     }
 
     /// `bookmarks()`: newest first, with the post's summary when it can be built from the
-    /// cache.
+    /// cache. Parity mode ignores this device-local state (O-13);
+    /// [`Engine::parity_bookmarks`] is the opt-in local-state query.
     pub async fn bookmarks(&self) -> Result<Vec<BookmarkEntry>, EngineError> {
+        if self.config.parity_now_ms.is_some() {
+            return Ok(Vec::new());
+        }
+        self.parity_bookmarks().await
+    }
+
+    /// The device's bookmarks even in parity mode. Their timestamps and summaries remain
+    /// device-local and must never feed a record-derived parity comparison.
+    pub async fn parity_bookmarks(&self) -> Result<Vec<BookmarkEntry>, EngineError> {
         let mut rows: Vec<(String, i64)> = self
             .loc_rows(crate::key!("loc", "bookmark"))
             .await?
@@ -216,8 +237,17 @@ impl<H: Host> Engine<H> {
         Ok(out)
     }
 
-    /// `true` if `uri` is bookmarked.
+    /// `true` if `uri` is bookmarked, except in parity mode, which ignores device-local
+    /// bookmarks. [`Engine::parity_bookmarked`] queries the device-local value explicitly.
     pub async fn bookmarked(&self, uri: &str) -> Result<bool, EngineError> {
+        if self.config.parity_now_ms.is_some() {
+            return Ok(false);
+        }
+        self.parity_bookmarked(uri).await
+    }
+
+    /// Whether this device bookmarked `uri`, including in parity mode.
+    pub async fn parity_bookmarked(&self, uri: &str) -> Result<bool, EngineError> {
         Ok(self.loc_row::<AtRow>(bookmark_key(uri)).await?.is_some())
     }
 

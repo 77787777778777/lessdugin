@@ -136,13 +136,13 @@ time windows) and each version's first-seen time `obs` (`social.md` §1, §2: fu
   `members`, `forum_open`, …) is computed at `now = t`, whatever the host clock says;
 - every admitted version's `obs`, and the declaration's, is taken to be `t` (the stored
   first-seen times are not changed);
-- the viewer's device-local read marks (`lastVisited`, `social.md` §16) are ignored: every view
-  is computed as for a device with no marks, so `PostSummary.unreadComments` is omitted and
-  `CommentNode.unread` is `false`, whatever the stored marks say. Which threads a device has
-  visited is not a function of the synced records, so parity mode cannot inject it the way it
-  injects `now` and `obs`, and two clients that read different threads could otherwise never
-  agree. `mark_read` still stores the marks, and nothing changes outside parity mode.
-  (Orchestrator decision O-13, for the U7 review.)
+- the viewer's device-local read marks (`lastVisited`, `social.md` §16), bookmarks and
+  subscriptions are ignored: every view is computed as for a device without them. Read marks
+  are omitted from `PostSummary.unreadComments` and `CommentNode.unread` is `false`; bookmark
+  and subscription lists are empty and they cannot add notification reasons. Explicit local-state
+  queries retain access for a bookmarks/settings pane. `mark_read`, `bookmark` and `subscribe`
+  still store the state, and nothing changes outside parity mode. (Orchestrator decision O-13,
+  for the U7 review.)
 - the handles of the actors a view shows are verified by the query itself (`sync.md` §3.3),
   instead of being queued for `live_tail`, so the handle state does not depend on whether a
   client ran `live_tail`.

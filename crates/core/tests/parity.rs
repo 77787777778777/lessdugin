@@ -12,8 +12,9 @@ mod common;
 
 use common::block_on;
 use lessdugin_core::dto::{
-    CommentDraft, DefaultTier, ForumDraft, ListPostsQuery, PostDraft, PostFilter, PostList,
-    PostSort, SyncOpts, ThreadOpts, ThreadView, WriteState, WriteTicket,
+    CommentDraft, DefaultTier, ForumDraft, ListPostsQuery, NotificationList, NotificationsQuery,
+    PostDraft, PostFilter, PostList, PostSort, Subscription, SyncOpts, ThreadOpts, ThreadView,
+    WriteState, WriteTicket,
 };
 use lessdugin_core::engine::{AccountInfo, Engine, EngineConfig};
 use lessdugin_testkit::fake_pds::AccountHandle;
@@ -291,4 +292,102 @@ fn parity_mode_ignores_read_marks() {
     let list: PostList = block_on(alice.engine.list_posts(&q)).unwrap();
     let item = list.items.iter().find(|p| p.uri == welcome).unwrap();
     assert_eq!(item.unread_comments, Some(1), "{item:?}");
+}
+
+/// Bookmarks and subscriptions live only in the device's `state` store (O-13). Parity clients
+/// neither expose them in record-derived views nor let a subscription add a notification.
+#[test]
+fn parity_mode_ignores_bookmarks_subscriptions_and_their_notifications() {
+    let ha = MemHost::new();
+    let net = FakeNet::on(&ha);
+    let _ = net.default_pds();
+    let hb = MemHost::new();
+    hb.set_seed(2);
+    net.install_as(&hb, "bob");
+    let alice = User::new(&net, ha, "alice.example.com");
+    let bob = User::new(&net, hb, "bob.example.com");
+    let start = alice.host.now();
+    let mut draft = ForumDraft::new("meta", "Meta");
+    draft.default_tier = DefaultTier::Frontpage;
+    let t = block_on(alice.engine.forum_create(&draft)).unwrap();
+    alice.flush();
+    let forum = alice.done(&t);
+    block_on(alice.engine.grant(&forum, &[bob.acct.did().to_string()])).unwrap();
+    for u in [&alice, &bob] {
+        u.host.advance_ms(MINUTE);
+    }
+    let t = block_on(
+        alice
+            .engine
+            .publish(&PostDraft::article(&forum, "Welcome", "Hello.")),
+    )
+    .unwrap();
+    alice.flush();
+    let welcome = alice.done(&t);
+    block_on(bob.engine.forum_open(&forum)).unwrap();
+    let t = block_on(
+        bob.engine
+            .comment(&CommentDraft::new(&welcome, None, "First!")),
+    )
+    .unwrap();
+    bob.flush();
+    bob.done(&t);
+    for u in [&alice, &bob] {
+        u.host.advance_ms(MINUTE);
+        u.sync(&forum);
+    }
+
+    // Establish a baseline on both devices, then subscribe only alice.
+    let notes = |e: &Engine<MemHost>| {
+        let n: NotificationList = block_on(e.notifications(&NotificationsQuery {
+            all: true,
+            limit: 100,
+        }))
+        .unwrap();
+        serde_json::to_string(&n).unwrap()
+    };
+    assert_eq!(notes(&alice.engine), notes(&bob.engine));
+    let subs = [
+        Subscription::Forum { uri: forum.clone() },
+        Subscription::Post {
+            uri: welcome.clone(),
+        },
+        Subscription::User {
+            did: bob.acct.did().to_string(),
+        },
+    ];
+    for s in &subs {
+        block_on(alice.engine.set_subscription(s, true)).unwrap();
+    }
+    block_on(alice.engine.bookmark(&welcome, true)).unwrap();
+    let t = block_on(bob.engine.publish(&PostDraft::article(
+        &forum,
+        "Subscription news",
+        "A later post makes the local subscription observable.",
+    )))
+    .unwrap();
+    bob.flush();
+    bob.done(&t);
+    for u in [&alice, &bob] {
+        u.host.advance_ms(MINUTE);
+        u.sync(&forum);
+    }
+    assert!(block_on(alice.engine.bookmarked(&welcome)).unwrap());
+    assert_eq!(block_on(alice.engine.subscriptions()).unwrap().len(), 3);
+    assert_eq!(block_on(alice.engine.bookmarks()).unwrap().len(), 1);
+    assert_ne!(notes(&alice.engine), notes(&bob.engine));
+
+    let fixed = start + 24 * 60 * MINUTE;
+    let a = alice.parity(fixed);
+    let b = bob.parity(fixed);
+    assert!(block_on(a.subscriptions()).unwrap().is_empty());
+    assert!(block_on(a.bookmarks()).unwrap().is_empty());
+    assert!(!block_on(a.bookmarked(&welcome)).unwrap());
+    // Full parity is over record-derived forum/thread/TUI views, not stored local notification
+    // history (whose timestamps and read flags are intentionally device-local).
+    assert_eq!(views(&a, &forum, &welcome), views(&b, &forum, &welcome));
+    // Explicit local-state accessors are available for a local bookmarks/settings pane only.
+    assert_eq!(block_on(a.parity_subscriptions()).unwrap().len(), 3);
+    assert_eq!(block_on(a.parity_bookmarks()).unwrap().len(), 1);
+    assert!(block_on(a.parity_bookmarked(&welcome)).unwrap());
 }

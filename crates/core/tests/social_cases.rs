@@ -909,7 +909,69 @@ fn tag_votes_op3_before_op4() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// §0.4 CIDs
+// §14 sequence library
+
+/// §14: eligibility uses V1–V5 only, the library gate and forum pin, and its order is
+/// `(pinned, score, t_rank, uri)`. Chapter entries retain their written order.
+#[test]
+fn sequence_library_orders_eligible_sequences_and_preserves_chapter_entries() {
+    let mut f = forum("approval", json!({"gates": {"sequence": 1000}}));
+    let (owner, a, b) = (user(0), user(3), user(4));
+    grant(&mut f, &a);
+    grant(&mut f, &b);
+    let (p1, p2) = (post(&mut f, &a, 10), post(&mut f, &b, 11));
+    let sequence = |f: &mut Forum, author: &str, minute: i64, chapters: &[&str]| {
+        let uri = f.ranged_uri(author, "sequence", minute);
+        let v = json!({
+            "$type": format!("{NS}.sequence"),
+            "forum": f.uri,
+            "title": format!("Sequence {minute}"),
+            "createdAt": at(minute),
+            "chapters": chapters.iter().map(|u| json!({"posts": [u]})).collect::<Vec<_>>(),
+        });
+        f.put(&uri, Kind::Sequence, v, true, Forum::seen(minute))
+            .unwrap();
+        uri
+    };
+    let s1 = sequence(&mut f, &a, 20, &[&p1, &p2]);
+    let s2 = sequence(&mut f, &b, 21, &[&p2]);
+    let s3 = sequence(&mut f, &owner, 22, &[&p1]);
+    let v = run(&f, &Query::default());
+    let lib = v.library.as_ref().unwrap();
+    assert_eq!(
+        lib.eligible,
+        BTreeSet::from([s1.clone(), s2.clone(), s3.clone()])
+    );
+    assert_eq!(lib.entries[&s1], vec![p1.clone(), p2.clone()]);
+    assert_eq!(lib.listed, vec![s3.clone()]);
+
+    // Below-gate b has an eligible sequence but no library entry. An authority passes the gate;
+    // a moderator's pin also includes a below-gate sequence. More karma beats time.
+    let s4 = sequence(&mut f, &user(1), 23, &[&p1]);
+    let s5 = sequence(&mut f, &user(1), 24, &[&p2]);
+    let v = run(&f, &Query::default());
+    assert_eq!(
+        v.library.as_ref().unwrap().listed,
+        vec![s5.clone(), s4.clone(), s3.clone()]
+    );
+    vote(&mut f, &owner, &s4, "strongUp");
+    vote(&mut f, &owner, &s5, "up");
+    let v = run(&f, &Query::default());
+    // Both vote labels have power 1 at zero KP, so equal scores retain the newer-first order.
+    assert_eq!(
+        v.library.as_ref().unwrap().listed,
+        vec![s5.clone(), s4.clone(), s3.clone()]
+    );
+    act(
+        &mut f,
+        &owner,
+        &s2,
+        json!({"$type": ty("pin"), "scope": "forum", "pinned": true}),
+        30,
+    );
+    let v = run(&f, &Query::default());
+    assert_eq!(v.library.as_ref().unwrap().listed, vec![s2, s5, s4, s3]);
+}
 
 /// §0.4: CIDs compare by their canonical string form, so `B` + upper-case base32 (which G2
 /// accepts) names the same version: a positive assertion counts, a vote is not "earlier", a
