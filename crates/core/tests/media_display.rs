@@ -693,7 +693,8 @@ fn a_slow_authors_pds_does_not_hold_back_the_thread() {
     assert_eq!(pv.body.text, "The whole body");
     assert!(blob_requests(&n).is_empty());
 
-    // natively the download stops with the wait: it is asked for again later
+    // a fetch that ended without storing anything (MemHost drops its held fetch with the wait;
+    // natively the download runs on, sync.md §12.2): asked for again once the retry time comes
     let uri = spilled_post(&n, &bob, &f, b"# Another body");
     let r = block_on(e.sync_forum(&f, &SyncOpts::default())).unwrap();
     assert!(r.errors.is_empty(), "{r:?}");
@@ -747,7 +748,7 @@ fn a_pending_spilled_body_that_arrives_is_announced() {
     // a round with nothing new announces nothing
     e.live_step().now_or_never().unwrap().unwrap();
     assert!(!announced(&uri));
-    // the browser's download ran on and stored it: the next round announces it
+    // the host's download ran on and stored it: the next round announces it
     let blob = lessdugin_atp::cid::for_raw(source).to_string();
     e.host().put_blob(&blob, source.to_vec());
     block_on(e.live_step()).unwrap();
@@ -757,7 +758,7 @@ fn a_pending_spilled_body_that_arrives_is_announced() {
         "The whole body"
     );
 
-    // natively the download stopped with the wait: the round after the retry time fetches it
+    // a fetch that ended without storing anything: the round after the retry time fetches it
     let uri = spilled_post(&n, &bob, &f, b"# Another body");
     let r = block_on(e.sync_forum(&f, &SyncOpts::default())).unwrap();
     assert!(r.errors.is_empty(), "{r:?}");
@@ -845,6 +846,245 @@ fn a_spilled_forum_about_is_fetched_from_the_owners_pds() {
             .count(),
         1
     );
+}
+
+// --- body_source (engine-api.md §3.4) ----------------------------------------------------------
+
+#[test]
+fn body_source_gives_the_markdown_of_inline_and_spilled_bodies() {
+    // composers edit a body from its source; a spilled one (textBlob) could be read only by the
+    // CLI and TUI, through the host: body_source reads the stored copy or fetches it as a view
+    // does
+    use lessdugin_core::dto::BodySource;
+    let mut n = Net::new();
+    let bob = n
+        .net
+        .add_pds("bob.example.com")
+        .add_account("bob.example.com");
+    let f = forum(&n, &bob);
+    let inline = post(
+        &n,
+        &bob,
+        &f,
+        json!({"$type": nsid::MARKDOWN, "profile": "lfm/1", "text": "Short *and* sweet."}),
+    );
+    let source = "\u{FEFF}# The whole body\n\nEvery word of it.";
+    let spilled = spilled_post(&n, &bob, &f, source.as_bytes());
+    let inline_cid = bob
+        .cid(nsid::POST, inline.rsplit('/').next().unwrap())
+        .unwrap()
+        .to_string();
+    let spilled_cid = bob
+        .cid(nsid::POST, spilled.rsplit('/').next().unwrap())
+        .unwrap()
+        .to_string();
+    let e = n.device("anon", None);
+    let r = block_on(e.sync_forum(&f, &SyncOpts::default())).unwrap();
+    assert!(r.errors.is_empty(), "{r:?}");
+    n.net.clear_requests();
+    // inline: the text as written, nothing asked
+    assert_eq!(
+        block_on(e.body_source(&inline)).unwrap(),
+        BodySource {
+            markdown: "Short *and* sweet.".into(),
+            cid: inline_cid.clone(),
+            profile: Some("lfm/1".into()),
+            spilled: false,
+        }
+    );
+    assert!(blob_requests(&n).is_empty());
+    // spilled and never viewed: fetched from bob's PDS now, decoded as a view decodes it
+    let s = block_on(e.body_source(&spilled)).unwrap();
+    assert_eq!(s.markdown, "# The whole body\n\nEvery word of it.");
+    assert_eq!(s.cid, spilled_cid);
+    assert_ne!(
+        s.cid,
+        lessdugin_atp::cid::for_raw(source.as_bytes()).to_string()
+    );
+    assert!(s.spilled);
+    assert_eq!(blob_requests(&n), [(bob.pds_base(), bob.did().to_string())]);
+    let raw = block_on(e.raw(&spilled)).unwrap();
+    assert_eq!(s.cid, raw.cid.unwrap());
+    assert_eq!(
+        raw.record.unwrap()["body"]["textBlob"]["ref"]["$link"],
+        json!(lessdugin_atp::cid::for_raw(source.as_bytes()).to_string())
+    );
+    // and the view renders what was fetched, without a second request
+    n.net.clear_requests();
+    let pv = block_on(e.get_post(&spilled)).unwrap();
+    assert!(pv.body.html.contains("The whole body"), "{}", pv.body.html);
+    assert!(blob_requests(&n).is_empty());
+
+    // stored: a copy the host holds (fetched for a view earlier, or by the browser's download
+    // running on) is read without a request
+    let e2 = n.device("anon2", None);
+    let r = block_on(e2.sync_forum(&f, &SyncOpts::default())).unwrap();
+    assert!(r.errors.is_empty(), "{r:?}");
+    let blob = lessdugin_atp::cid::for_raw(source.as_bytes()).to_string();
+    e2.host().put_blob(&blob, source.as_bytes().to_vec());
+    n.net.clear_requests();
+    let s = block_on(e2.body_source(&spilled)).unwrap();
+    assert_eq!(s.markdown, "# The whole body\n\nEvery word of it.");
+    assert!(blob_requests(&n).is_empty());
+
+    // a forum's about: none, inline, spilled
+    let s = block_on(e.body_source(&f)).unwrap();
+    assert_eq!((s.markdown.as_str(), s.spilled), ("", false));
+    let no_about_cid = bob.cid(nsid::FORUM, "meta").unwrap().to_string();
+    assert_eq!(s.cid, no_about_cid);
+    assert_eq!(block_on(e.raw(&f)).unwrap().cid, Some(s.cid));
+    let mut decl = bob.get(nsid::FORUM, "meta").unwrap();
+    decl["about"] = json!({"$type": nsid::MARKDOWN, "text": "Be kind."});
+    let inline_about_cid = bob.put(nsid::FORUM, "meta", &decl).to_string();
+    assert_ne!(inline_about_cid, no_about_cid);
+    n.tick(MINUTE);
+    let e3 = n.device("anon3", None);
+    let s = block_on(e3.body_source(&f)).unwrap();
+    assert_eq!(
+        (s.markdown.as_str(), s.profile, s.spilled),
+        ("Be kind.", None, false)
+    );
+    assert_eq!(s.cid, inline_about_cid);
+    assert_eq!(block_on(e3.raw(&f)).unwrap().cid, Some(s.cid));
+    decl["about"] = spilled_body(&bob, b"# About this forum\n\nBe kind.");
+    let spilled_about_cid = bob.put(nsid::FORUM, "meta", &decl).to_string();
+    n.tick(MINUTE);
+    let e4 = n.device("anon4", None);
+    n.net.clear_requests();
+    let s = block_on(e4.body_source(&f)).unwrap();
+    assert_eq!(s.markdown, "# About this forum\n\nBe kind.");
+    assert_eq!(s.cid, spilled_about_cid);
+    assert_eq!(block_on(e4.raw(&f)).unwrap().cid, Some(s.cid));
+    assert!(s.spilled);
+    assert_eq!(
+        blob_requests(&n)
+            .into_iter()
+            .filter(|(_, d)| d == bob.did().as_str())
+            .count(),
+        1
+    );
+
+    // not a post, a comment or a forum
+    let membership = bob.uri(nsid::MEMBERSHIP, &keys::membership_rkey(&f).unwrap());
+    let err = block_on(e.body_source(&membership)).unwrap_err();
+    assert_eq!(err.code, ErrorCode::InvalidRef, "{err:?}");
+}
+
+#[test]
+fn body_source_names_the_current_comments_record_cid() {
+    let mut n = Net::new();
+    let bob = n
+        .net
+        .add_pds("bob.example.com")
+        .add_account("bob.example.com");
+    let f = forum(&n, &bob);
+    let root = post(
+        &n,
+        &bob,
+        &f,
+        json!({"$type": nsid::MARKDOWN, "text": "A thread"}),
+    );
+    let root_cid = bob
+        .cid(nsid::POST, root.rsplit('/').next().unwrap())
+        .unwrap()
+        .to_string();
+    let v = json!({
+        "$type": nsid::COMMENT, "forum": f,
+        "root": {"uri": root, "cid": root_cid},
+        "body": {"$type": nsid::MARKDOWN, "profile": "lfm/1", "text": "Original reply"},
+        "createdAt": dt(n.now()),
+    });
+    let rkey = keys::comment_rkey(
+        lessdugin_lexicon::ns::NS,
+        &f,
+        &root,
+        tid_at_ms(n.now()).as_str(),
+    )
+    .unwrap();
+    let original_cid = bob.put(nsid::COMMENT, &rkey, &v).to_string();
+    n.tick(MINUTE);
+    let e = n.device("anon", None);
+    let r = block_on(e.sync_forum(&f, &SyncOpts::default())).unwrap();
+    assert!(r.errors.is_empty(), "{r:?}");
+    let source = block_on(e.body_source(&bob.uri(nsid::COMMENT, &rkey))).unwrap();
+    assert_eq!(source.cid, original_cid);
+    assert_eq!(source.markdown, "Original reply");
+    assert_eq!(source.profile.as_deref(), Some("lfm/1"));
+
+    // A new revision changes both fields together; it is not the CID of any referenced record.
+    let mut edited = v.clone();
+    edited["body"]["profile"] = json!("lfm/2");
+    edited["body"]["text"] = json!("Edited reply");
+    let edited_cid = bob.put(nsid::COMMENT, &rkey, &edited).to_string();
+    assert_ne!(edited_cid, original_cid);
+    n.tick(MINUTE);
+    let e2 = n.device("anon2", None);
+    let r = block_on(e2.sync_forum(&f, &SyncOpts::default())).unwrap();
+    assert!(r.errors.is_empty(), "{r:?}");
+    let uri = bob.uri(nsid::COMMENT, &rkey);
+    let source = block_on(e2.body_source(&uri)).unwrap();
+    assert_eq!(source.cid, edited_cid);
+    assert_eq!(source.markdown, "Edited reply");
+    assert_eq!(source.profile.as_deref(), Some("lfm/2"));
+    assert_eq!(block_on(e2.raw(&uri)).unwrap().cid, Some(source.cid));
+}
+
+#[test]
+fn body_source_fails_while_the_body_cannot_be_had() {
+    use lessdugin_core::limits::BODY_BLOB_WAIT_MS;
+    let mut n = Net::new();
+    let bob = n
+        .net
+        .add_pds("bob.example.com")
+        .add_account("bob.example.com");
+    let f = forum(&n, &bob);
+    // a record naming a blob bob's PDS never stored
+    let at = n.now();
+    let gone = json!({
+        "$type": "blob", "ref": {"$link": lessdugin_atp::cid::for_raw(b"gone").to_string()},
+        "mimeType": "text/markdown", "size": 4,
+    });
+    let v = json!({
+        "$type": nsid::POST, "forum": f, "title": "Long",
+        "body": {"$type": nsid::MARKDOWN, "textBlob": gone},
+        "excerpt": "An excerpt", "createdAt": dt(at),
+    });
+    let rkey = keys::post_rkey(&f, tid_at_ms(at).as_str()).unwrap();
+    bob.put(nsid::POST, &rkey, &v);
+    let missing = bob.uri(nsid::POST, &rkey);
+    n.tick(MINUTE);
+    let source = b"# Slow body";
+    let slow = spilled_post(&n, &bob, &f, source);
+    let bad = spilled_post(&n, &bob, &f, b"caf\xe9 au lait");
+    let e = n.device("anon", None);
+    let r = block_on(e.sync_forum(&f, &SyncOpts::default())).unwrap();
+    assert!(r.errors.is_empty(), "{r:?}");
+    // missing: the PDS has no such blob
+    let err = block_on(e.body_source(&missing)).unwrap_err();
+    assert_eq!(err.code, ErrorCode::NotFound, "{err:?}");
+    assert_eq!(err.detail, Some(json!({"kind": "bodyMissing"})));
+    // not UTF-8: unreadable
+    let err = block_on(e.body_source(&bad)).unwrap_err();
+    assert_eq!(err.code, ErrorCode::InvalidInput, "{err:?}");
+    assert_eq!(err.detail, Some(json!({"kind": "bodyUnreadable"})));
+    // a stalled PDS: it waits as a view does, then fails retryably, and the body is pending
+    e.host().hold_blob_fetches(true);
+    e.host().clear_requests();
+    let err = block_on(e.body_source(&slow)).unwrap_err();
+    assert_eq!(err.code, ErrorCode::Network, "{err:?}");
+    assert!(err.retryable);
+    assert_eq!(err.detail, Some(json!({"kind": "bodyPending"})));
+    assert_eq!(e.host().sleeps(), [BODY_BLOB_WAIT_MS]);
+    assert_eq!(block_on(e.get_post(&slow)).unwrap().body.text, "An excerpt");
+    // a copy the host stored meanwhile is taken, unasked
+    let blob = lessdugin_atp::cid::for_raw(source).to_string();
+    e.host().put_blob(&blob, source.to_vec());
+    n.net.clear_requests();
+    assert_eq!(
+        block_on(e.body_source(&slow)).unwrap().markdown,
+        "# Slow body"
+    );
+    assert!(blob_requests(&n).is_empty());
 }
 
 // --- the autoload verdict (m4-4) ---------------------------------------------------------------

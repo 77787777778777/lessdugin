@@ -21,6 +21,7 @@ import type {
   ActorView,
   AtUri,
   BodyDraft,
+  BodySource,
   BookmarkEntry,
   Cid,
   CommentDraft,
@@ -189,6 +190,16 @@ export interface EngineApi {
   /** Public; paged like `listPosts` (`limit` 0 or absent: the default page). */
   modLog(forum: AtUri, cursor?: string, limit?: number): Promise<ModLog>;
   raw(uri: AtUri): Promise<RawView>;
+  /** The markdown source of a post's or comment's body, or of a forum's `about`, as a composer
+   * edits it (`""` for an item without one): the inline text, or the spilled `textBlob` as the
+   * host holds it, fetched from the author's PDS when it does not (waiting at most
+   * `BODY_BLOB_WAIT_MS`, like a view). `cid` is the current record CID, not the blob CID;
+   * markdown/profile and CID come from one coherent model view. Open to every viewer, like
+   * `raw`. Rejects while it cannot be had: `network` with `detail.kind: "bodyPending"`
+   * (retryable), `not_found` with
+   * `"bodyMissing"`, `network` with `"bodyFailedVerification"`, `too_large` or `invalid_input`
+   * with `"bodyUnreadable"`. */
+  bodySource(uri: AtUri): Promise<BodySource>;
   /** Fetches a media blob for display from its author's PDS (sync.md §11.1). `media`: the
    * item's view from `RenderedBody.media` (its author, declared type and size), or only the
    * author's DID; without it, the active account's own repo is asked. No login is needed. The
@@ -280,10 +291,11 @@ export interface EngineApi {
   setSetting<K extends SettingKey>(key: K, value: Settings[K]): Promise<void>;
   /** This device's local state (the active account's, plus the device-wide rows). */
   exportLocal(): Promise<Json>;
-  /** Merges an `exportLocal` result back (the active account's scope). Login state, the
+  /** Merges an `exportLocal` result back: `scope` is `"mine"` (the default: the active
+   * account's rows and the device-wide ones, PRIV-8) or `"everything"`. Login state, the
    * acknowledgements and the settings that name third parties are never imported; the report
    * counts what was written and what was left out. */
-  importLocal(json: Json): Promise<ImportReport>;
+  importLocal(json: Json, scope?: "mine" | "everything"): Promise<ImportReport>;
 
   // §3.7 Pure functions -----------------------------------------------------------------------
   /** `media`: the draft's `MediaRef`s (rendered as `publish` writes them), or `defs#media`

@@ -845,8 +845,8 @@
         "text": "# $x^2$\n\n[$y$](https://example.com)\n"
       },
       "expected": {
-        "html": "<div class=\"lfm\" dir=\"auto\">\n<h1 id=\"md-h-x2\" dir=\"auto\"><math><msup><mi>x</mi><mn>2</mn></msup></math></h1>\n<p dir=\"auto\"><a href=\"https://example.com\" rel=\"nofollow ugc noopener noreferrer\"><math><mi>y</mi></math></a></p>\n</div>\n",
-        "html_temml": "<div class=\"lfm\" dir=\"auto\">\n<h1 id=\"md-h-x2\" dir=\"auto\"><span data-tex=\"inline\">x^2</span></h1>\n<p dir=\"auto\"><a href=\"https://example.com\" rel=\"nofollow ugc noopener noreferrer\"><span data-tex=\"inline\">y</span></a></p>\n</div>\n",
+        "html": "<div class=\"lfm\" dir=\"auto\">\n<h1 id=\"md-h-x2\" dir=\"auto\"><math><msup><mi>x</mi><mn>2</mn></msup></math></h1>\n<p dir=\"auto\"><a href=\"https://example.com\" rel=\"nofollow ugc noopener noreferrer\"><math><mi>y</mi></math><span class=\"link-host\">example.com</span></a></p>\n</div>\n",
+        "html_temml": "<div class=\"lfm\" dir=\"auto\">\n<h1 id=\"md-h-x2\" dir=\"auto\"><span data-tex=\"inline\">x^2</span></h1>\n<p dir=\"auto\"><a href=\"https://example.com\" rel=\"nofollow ugc noopener noreferrer\"><span data-tex=\"inline\">y</span><span class=\"link-host\">example.com</span></a></p>\n</div>\n",
         "text": "x^2 y",
         "flags": {
           "truncated": false,

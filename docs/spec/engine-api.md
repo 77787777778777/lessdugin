@@ -63,20 +63,34 @@ Normative details of the underlying behaviour live in `data-model.md` (records, 
   (§4.4). Kept compatible with the v0 declarations: `prepare_media` takes `(bytes, MediaInput?)`
   and still accepts v0's single `MediaFile` (the TypeScript name `MediaInput` now names the hints,
   as in Rust; v0's shape is `MediaFile`); `redact_revision` resolves with a `WriteTicket`;
-  `import_local` resolves with an `ImportReport` where v0 declared nothing (the binding also
-  takes an optional second argument, the scope); `set_setting` takes every field of `Settings`
-  with a value of its type. New optional output field: `WriteState.done.report` (the adopt
-  report). `ModActionValue.restrict.capabilities` became optional: every v0 input still parses,
+  `import_local` resolves with an `ImportReport` where v0 declared nothing, and takes an
+  optional second argument, the scope (`importLocal(json, scope?)`, `"mine"` or
+  `"everything"`); `set_setting` takes every field of `Settings` with a value of its type. New
+  optional output fields: `WriteState.done.report` (the adopt report) and `MediaRef.notices`
+  (`prepare_media`'s notices, §4.4, with the new `NoticeCode` variant `missingAlt` when the file
+  has no alt text). `ModActionValue.restrict.capabilities` became optional: every v0 input still parses,
   and one that names both dimensions means what it did; a dimension left out now keeps the
   account's current value instead of resetting it, since the reset silently lifted the
   account's own restriction or nullification of the user (it still means none when there is no
   current record); likewise, while that dimension is in effect, a left-out `untilMs` or `reason`
   keeps the record's, with the notice code `sharedExpiry` when a dimension's expiry changes
-  (§3.5 `mod_action`). New operation: `edit_preflight` (§3.5), with the notice code
-  `suspendsAssertions`; new banner code: `relayDependent` (§4.2). `render` takes media (each a
+  (§3.5 `mod_action`). This changes what a valid v0 input that names only `capabilities`
+  means (under v0 it also asserted `nullifyVotes: false`): a deliberate semantic exception to
+  the freeze rule above, **orchestrator decision O-12, flagged for the U7 review**. The freeze
+  freezes shapes, not defects: the v0 reading made every client's `restrict` silently
+  un-nullify the user, the defect m3r-2 fixed. A client that wants both dimensions reset names
+  both (`social.md` §20.2). New operation: `edit_preflight` (§3.5), with the notice code
+  `suspendsAssertions`; new banner codes: `authorityInactive` (an authority's account is
+  inactive while its cached assertions still apply, `sync.md` §3.4) and `relayDependent`
+  (§4.2). `render` takes media (each a
   `MediaRef` or a stored `defs#media` value) where v0 refused any, and `RenderOpts` gains an
   optional `profile`. `LoadedMedia` gains an optional `sniffed` (the type a download card names
-  its file from, §3.4).
+  its file from, §3.4). New operation: `body_source(uri) -> BodySource` (§3.4), the markdown
+  source of a body as a composer edits it, so a client can edit a body the record stores as a
+  `textBlob` without reading the host's blob store itself (the CLI and TUI did; the SPA could
+  not). New optional output field: `BodySource.cid`, the current record CID (not a body's blob
+  CID), taken with the markdown and profile from one model/declaration view. A client combining
+  this source with `raw` for an edit MUST require equal CIDs and retry otherwise (§3.4).
 - **Errors.** Operations return `Result<T, EngineError>`; `EngineError` serialises as
   `{ "code": <string>, "message": <string>, "retryable": bool, "detail"?: object }` with codes:
   `auth_required`, `not_found`, `invalid_ref`, `invalid_input`, `conflict`, `rate_limited`,
@@ -225,6 +239,7 @@ SyncReport { dto, forum, reposTotal, reposComplete, reposStale, reposUnavailable
 | `mod_queue(forum)` | `ModQueue` (`social.md` §4.12): applicants, top-rank unordered conflicts, stale positive assertions and, in open mode, the newest newcomer items. The forum's authorities only (`blocked` for anyone else) |
 | `mod_log(forum, cursor?, limit)` | `ModLog` (`social.md` §4.12), `(time desc, uri asc)`, paged like `list_posts`. Public, except the `reason` of a `#hide` with `showReason: false`, shown to the forum's authorities only |
 | `raw(uri)` | `RawView`: the stored record JSON, its validity violations, every modAction naming it (valid or not, each with its mod-log status), its state and its score. Open to every viewer: the raw view shows everything, hidden content included (`social.md` §10.3) |
+| `body_source(uri)` | `BodySource { markdown, cid, profile?, spilled }` (M4): the markdown source of a post's or comment's body, or of a forum's `about`, as a composer edits it (`markdown` is `""` for an item without one): the inline `text`, or the spilled `textBlob` (`lfm-1.md` §1.3) decoded as the views decode it (UTF-8, one leading U+FEFF stripped), from the copy the host holds (stored CID-checked when the engine fetched it for a view) or fetched now from the AUTHOR's PDS, waiting at most `BODY_BLOB_WAIT_MS` as a view does. A user asked for it, so it is asked for whatever the item's state and the retry window (it is a request, not a prefetch, `sync.md` §11.4); one that does not come in time stays pending for `live_tail` (§3.8) and is an error here. Open to every viewer, like `raw`. Errors: `network` with `detail.kind = "bodyPending"` (retryable: not loaded yet), `not_found` with `"bodyMissing"` (the PDS has no such blob), `network` with `"bodyFailedVerification"` (CID mismatch), `too_large` (over `BLOB_TEXT_MAX_BYTES`) and `invalid_input` with `"bodyUnreadable"` (not UTF-8), `unsupported` with `"unknownBody"` (neither inline text nor a text blob), `invalid_ref` for any other collection |
 | `load_media(cid, media?)` | `LoadedMedia` (`sync.md` §11.1, M4): fetches a media blob for display from its AUTHOR's PDS, resolved from the author's DID document (`media`: the item's `MediaView`, or only the author's DID; without it, the active account's own repo). Needs no login. The cap is the declared `sizeBytes` (a longer body is aborted, and a copy already stored is held to it too), within `BLOB_HARD_MAX_BYTES`. The host streams and CID-checks the bytes, which never enter wasm memory; the core reads the first 4,096 bytes to sniff the type. `mime` is the §11.2 display type, set only when the sniffed type is on the display allowlist and agrees with the declared one (when the view gives one): absent, the client shows a download card. `sniffed` is the type the bytes sniff as (`data-model.md` §8.8's table, or `image/avif`), whatever was declared: a download card names the saved file `<cid>.<ext>` from it (`sync.md` §11.2); it is never a display type. In the browser `url` is a `blob:` object URL of type `mime` that the main-thread client makes from the verified stored `Blob`; the caller revokes it when the element unmounts. Natively it is the file's path. Errors: `not_found` with `detail.kind = "mediaMissing"` (the PDS has no such blob, and nothing is stored: a blob stored once is not asked for again, `sync.md` §12.2), `network` with `detail.kind = "mediaFailedVerification"` (CID mismatch), `too_large` (above the declared size or 300 MiB) |
 | `bookmarks()` | `Vec<BookmarkEntry>`: newest first, each with the post's summary when its forum's model is cached |
 | `bookmarked(uri)` | `bool` |
@@ -240,6 +255,14 @@ SyncReport { dto, forum, reposTotal, reposComplete, reposStale, reposUnavailable
 `ThreadOpts` to `sort = magic`. Every client opens a forum's post list with these defaults (the
 CLI's `ls`, the TUI's forum screen, the SPA's `web/src/lib/listDefaults.ts`), so the three show
 the same posts for the same forum; the parity scenario lists with explicit values.
+
+**Body source revision.** `BodySource.cid` is the CID of the record whose markdown and profile
+are returned (the declaration for a forum, including one with no `about`), never a `textBlob`
+or media blob CID. For a post or comment, the value is accepted only while its stored CID is the
+current model skeleton's; for a forum, both fields and the CID come from the model's current
+declaration. A client combining this result with a separately fetched `raw(uri)` into an edit
+draft MUST require `raw.cid == body_source.cid`; on a mismatch it MUST refuse that draft and
+retry the source reads, never substitute fields from another revision.
 
 **One fold per forum.** The engine folds a forum once per change of its cache (`social.md` §1,
 the full fold with the empty query) and answers every query from that model: a sort, filter,
@@ -283,7 +306,7 @@ emits `Auth { did, state: Expired }`, and the next login of the account (`add_ac
 |---|---|
 | `publish(PostDraft)` | `PostDraft { forum, kind, title?, body: BodyDraft, link?, tags?, labels? }`; adds membership on first content (`data-model.md` §8) |
 | `comment(CommentDraft)` | `{ root, parent?, body, quote? }`; on a locked post (forum tier, or an author lock by someone else) refused unless the writer is in A (`blocked`, `detail.kind = "locked"`; `social.md` §4.8 "Composer"): it would be published and hidden from everyone at once |
-| `edit(uri, Draft, EditOpts { history: bool, summary? })` | edit protocol with revision snapshot |
+| `edit(uri, Draft, EditOpts { history: bool, summary? })` | edit protocol with revision snapshot. A post draft's `link` to the uri the cached version links keeps the cached card: a draft that names neither `title` nor `description` keeps the cached `link` object whole (its `thumb` and unknown fields included, `data-model.md` W3), and one that names some keeps the cached `thumb`, which no draft carries; a link to another uri is written as the draft gives it. So a client that knows only the uri (the CLI's and TUI's `edit`) does not strip the card |
 | `edit_preflight(uri) -> Vec<ActionNotice>` | what a client shows, and confirms, before `edit` (`social.md` §4.5, `threat-model.md` SOC-3): one `suspendsAssertions` notice naming the positive assertions in effect on the item (mod-log status `effective`: a keep, a `frontpage` or `curated` tier, a pin), which the edit's new CID suspends until an authority asserts them again; empty when there are none or while the forum's moderation layer is pending; `not_found` when the item is not cached. Read-only |
 | `delete(uri)` / `retract(uri)` | |
 | `opinion(subject_uri, OpinionIntent) -> ActionTicket` | the active account's opinion on a cached post, comment, wiki revision or sequence (`data-model.md` §8.5): `Karma { value? }`, `Agreement { value? }` (an absent value clears the axis), `React { id, stance, quote?, remove? }` (`quote.exact` only: the engine derives `prefix`, `suffix` and `start` from the item's current text), `Tag { slug, value? }`. Held for the 4 s undo window (`OPINION_UNDO_WINDOW_MS`, `Pending { held }`); an intent on a subject whose write is still held joins it (the ticket is that write's). When sent, the record is re-read and the intents re-applied per axis, so two devices' opinions merge; an opinion left empty is deleted; `subject.cid` is the cached version's. Refused before enqueueing when it could never count: `blocked` (banned, nullified, restricted, a gate of `ViewerCaps`), `invalid_input` (an own item, a forum without agreement or reacts, an unknown react, nothing to react against, an unknown value), `invalid_ref` (not an opinion subject), `not_found` (not cached). A vote that does not carry weight yet is recorded with a `notEstablished` notice ("recorded; will count once you're established"). A public action (§3.6) |
@@ -387,7 +410,9 @@ UIs re-query on `Changed` and never move the user's cursor on live updates (TUI 
   re-query no longer shows the item as pending.
 - **Spilled bodies.** A spilled body (`textBlob`) a view returned pending (`limits.md`
   `BODY_BLOB_WAIT_MS`) is fetched again by `live_tail`: from the host's stored copy as soon as
-  there is one, else once `BODY_BLOB_RETRY_MS` has passed. When it arrives (rendered, or found
+  there is one, else once `BODY_BLOB_RETRY_MS` has passed. A view that stops waiting does not
+  stop the host's download: the host runs one download per CID at a time (`sync.md` §12.2), so
+  a slow body arrives for the next view or round rather than being restarted and aborted again. When it arrives (rendered, or found
   missing or unreadable), `live_tail` emits `Changed [Thread(post), Forum]` (a spilled `about`:
   `Changed [Forum]`), so a client re-queries and shows it. A round fetches all its due bodies
   together, so stalled PDSes hold it back by one `BODY_BLOB_WAIT_MS` at most, however many
@@ -583,6 +608,8 @@ MediaRef      { id, cid, mime, sizeBytes, alt?, aspectRatio?, durationMs?, name?
                 notices?: Vec<ActionNotice> /* prepare_media: missingAlt when alt is absent */ }
 LoadedMedia   { cid, size, url, mime? /* the §11.2 display type; absent: a download card */,
                 sniffed? /* the sniffed type, for a download card's file name */ }
+BodySource    { markdown, cid /* record CID, not a blob CID */, profile? /* absent: lfm/1 */,
+                spilled /* stored as a textBlob */ }
 PostDraft     { forum, kind: PostKind, title?, body: BodyDraft, link?: { uri, title?, description? },
                 tags?: Vec<slug>, labels?: Vec<string> }
 CommentDraft  { root, parent?, body: BodyDraft, quote?: TextQuote }

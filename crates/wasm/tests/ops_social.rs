@@ -268,6 +268,23 @@ fn the_social_operations_round_trip_through_the_dispatcher() {
     assert_eq!(raw["state"]["kind"], "hidden", "{raw}");
     assert_eq!(raw["state"]["reason"]["kind"], "removed", "{raw}");
 
+    // bodySource carries the record CID the SPA must compare with raw before editing.
+    let source = carol.call("bodySource", json!([reply]));
+    assert_eq!(source["cid"], raw["cid"], "{source}");
+    assert_eq!(source["markdown"], "Thanks!", "{source}");
+    let raw_post = carol.call("raw", json!([post]));
+    let source_post = carol.call("bodySource", json!([post]));
+    assert_eq!(source_post["cid"], raw_post["cid"], "{source_post}");
+    assert_eq!(
+        source_post["markdown"], "Hello **everyone**.",
+        "{source_post}"
+    );
+    let raw_forum = carol.call("raw", json!([forum]));
+    let source_forum = carol.call("bodySource", json!([forum]));
+    assert_eq!(source_forum["cid"], raw_forum["cid"], "{source_forum}");
+    assert_eq!(source_forum["markdown"], "", "{source_forum}");
+    assert!(source_forum.get("profile").is_none(), "{source_forum}");
+
     // notifications and unread state (only `limit` given)
     let n = bob.call("notifications", json!([{ "limit": 20 }]));
     assert_eq!(n["dto"], 1, "{n}");

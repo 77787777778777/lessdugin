@@ -571,7 +571,29 @@ impl<H: Host> Engine<H> {
                     ));
                 }
                 let p = self.post_record(post, key.uri.clone())?;
-                let pv = to_value(&p)?;
+                let mut pv = to_value(&p)?;
+                // a link to the uri the cached version links keeps its cached card (W3): a
+                // draft that names neither title nor description keeps the object whole, one
+                // that names some keeps the thumb, which no draft carries (robustness-7)
+                let kept = match (&post.link, obj.get("link")) {
+                    (Some(l), Some(old))
+                        if old.get("uri").and_then(Value::as_str) == Some(l.uri.as_str()) =>
+                    {
+                        if l.title.is_none() && l.description.is_none() {
+                            Some(old.clone())
+                        } else {
+                            let mut new = pv.get("link").cloned().unwrap_or(Value::Null);
+                            if let (Some(t), Some(n)) = (old.get("thumb"), new.as_object_mut()) {
+                                n.insert("thumb".into(), t.clone());
+                            }
+                            Some(new)
+                        }
+                    }
+                    _ => None,
+                };
+                if let (Some(kept), Some(m)) = (kept, pv.as_object_mut()) {
+                    m.insert("link".into(), kept);
+                }
                 for k in ["kind", "title", "body", "link", "tags", "labels"] {
                     set(obj, k, pv.get(k).cloned());
                 }
