@@ -18,6 +18,13 @@ use crate::styled::{StyledDoc, build, error_doc};
 /// Builds without the `math` feature use the Temml fallback (§7.5); that mode is part of the
 /// version, so it sets the top bit.
 ///
+/// `5`: the real-host test (§5.5) reads the link text as the HTML writer renders it, generated
+/// image labels included (an external image's `image: <its host>`, a `media.alt` fallback, a
+/// `span.media` label from `media.name`), always shows the host of a link that holds math (its
+/// MathML can read as a name the TeX does not spell), and treats no name in a URL's authority
+/// (after `//`) as a mailbox; before, the test read `plain` of the link's source, so a label the
+/// source did not spell, a dot a math command drew, or one character between `//` and a trusted
+/// name could link elsewhere with no host shown.
 /// `4`: the real-host span (§5.5, F9) tests every dotted name the link text names, wherever it
 /// stands, with gaps and lookalikes next to a dot read as part of the name; before, only a name
 /// at the very start of the text counted, so a leading `(` or U+2800, an earlier sentence, a
@@ -28,9 +35,9 @@ use crate::styled::{StyledDoc, build, error_doc};
 /// (which here derive from `allowlist`'s tables at run time, so they follow automatically).
 /// `2` was the last version without the normaliser.
 pub const RENDERER_VERSION: u32 = if matches!(MATH_MODE, MathMode::MathCore) {
-    4
+    5
 } else {
-    4 | (1 << 31)
+    5 | (1 << 31)
 };
 
 /// Sources longer than this are not parsed (§1.3).

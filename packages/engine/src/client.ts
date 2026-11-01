@@ -94,6 +94,7 @@ export const OP_ARITY: Readonly<Record<string, number>> = Object.freeze({
   // bytes are a separate argument from the hints (engine-api.md §3.6), so two
   prepareMedia: 2,
   loadMedia: 2,
+  importLocal: 2,
   forumFollow: 2,
   join: 2,
   members: 2,

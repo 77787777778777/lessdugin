@@ -72,6 +72,7 @@ pub const OPS: &[&str] = &[
     "modQueue",
     "modLog",
     "raw",
+    "bodySource",
     "bookmarks",
     "bookmarked",
     "subscriptions",
@@ -487,6 +488,10 @@ pub async fn call<H: Host>(engine: &Engine<H>, op: &str, a: &str) -> Result<Stri
         "raw" => {
             let (uri,): (String,) = args(op, a)?;
             out(&engine.raw(&uri).await?)
+        }
+        "bodySource" => {
+            let (uri,): (String,) = args(op, a)?;
+            out(&engine.body_source(&uri).await?)
         }
         "bookmarks" => {
             no_args(op, a)?;
@@ -1281,6 +1286,20 @@ mod tests {
         )
         .unwrap();
         assert_eq!(m, d.rkey);
+    }
+
+    #[test]
+    fn body_source_is_dispatched() {
+        let e = engine();
+        // the collection is checked before anything is asked of the network
+        let err = call_err(
+            &e,
+            "bodySource",
+            r#"["at://did:plc:ewvi7nxzyoun6zhxrhs64oiz/x.y.membership/f"]"#,
+        );
+        assert_eq!(err.code, ErrorCode::InvalidRef, "{err:?}");
+        let err = call_err(&e, "bodySource", "[]");
+        assert_eq!(err.code, ErrorCode::InvalidInput, "{err:?}");
     }
 
     #[test]

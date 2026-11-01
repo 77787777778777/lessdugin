@@ -131,6 +131,7 @@ fn all() -> Vec<(&'static str, &'static str)> {
         MediaRef,
         MediaInput,
         LoadedMedia,
+        BodySource,
         Settings,
         IndexerConsent,
         Sources,

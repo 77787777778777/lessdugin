@@ -3,10 +3,11 @@
 //! mapping (§8.1), allowlist (§8.2), serialisation (§8.3) and fixed strings (§8.6).
 //! The writer is a single forward iteration over SL with an explicit stack.
 
-use crate::event::{Align, Ev, ImageRes, LinkRes, Tag, TagKind, match_indices};
+use crate::event::{Align, Ev, ImageData, ImageRes, LinkRes, Tag, TagKind, match_indices};
 use crate::lfm::Footnote;
 use crate::math::MathRenderer;
 use crate::media::{MediaClass, MediaItem};
+use crate::plain::plain_raw;
 use crate::url::{html_host_suffix, is_valid_cid, short_did};
 
 /// `rel` of every external link.
@@ -169,6 +170,70 @@ impl Writer<'_> {
         self.out.push_str("</span>");
     }
 
+    /// The text a top-level image shows, as the `Tag::Image` arm of [`Self::flow`] writes it
+    /// (§6.2), and whether it is the alt of an `<img>`, which the picture covers once it loads:
+    /// `A` (the `media.alt` fallback included) for an `<img>`, `L` for another media item, the
+    /// alt of a miss, `image: ` and the alt or host of an external image. The real-host test
+    /// reads it (§5.5): a label the markdown alt does not spell can name a host too.
+    fn image_text(&self, d: &ImageData) -> (String, bool) {
+        match &d.res {
+            ImageRes::Media(idx) => {
+                let m = &self.media[*idx];
+                let a = m.alt_text(&d.alt, d.fallback_alt);
+                if !is_valid_cid(m.cid()) {
+                    (a, false)
+                } else if m.class() == MediaClass::Image {
+                    (a, true)
+                } else {
+                    (m.label(&a), false)
+                }
+            }
+            ImageRes::Missing | ImageRes::AltOnly | ImageRes::Pending => (d.alt.clone(), false),
+            ImageRes::External { host, .. } => {
+                let label = if d.alt.is_empty() { host } else { &d.alt };
+                (format!("{}{label}", fixed::IMAGE_PREFIX), false)
+            }
+        }
+    }
+
+    /// The text an `External` or `Mailto` link shows (§5.5): `plain` of its `content` with every
+    /// top-level image as the text this writer gives it ([`Self::image_text`]); when it holds an
+    /// `<img>`, also the same without the `<img>`s' alts, which the pictures cover once they
+    /// load; and whether it holds math, whose MathML can read as a name its source does not
+    /// spell (so the host is always shown).
+    fn link_text(&self, content: &[Ev]) -> (String, Option<String>, bool) {
+        let m = match_indices(content);
+        let (mut shown, mut without) = (String::new(), String::new());
+        let (mut has_img, mut math) = (false, false);
+        let (mut from, mut i) = (0, 0);
+        while i < content.len() {
+            match &content[i] {
+                Ev::Start(Tag::Image(d)) => {
+                    let text = plain_raw(&content[from..i], false);
+                    shown.push_str(&text);
+                    without.push_str(&text);
+                    let (label, img) = self.image_text(d);
+                    shown.push_str(&label);
+                    if img {
+                        has_img = true;
+                    } else {
+                        without.push_str(&label);
+                    }
+                    i = (m[i] + 1).min(content.len());
+                    from = i;
+                    continue;
+                }
+                Ev::InlineMath(_) | Ev::DisplayMath(_) => math = true,
+                _ => {}
+            }
+            i += 1;
+        }
+        let text = plain_raw(&content[from..], false);
+        shown.push_str(&text);
+        without.push_str(&text);
+        (shown, has_img.then_some(without), math)
+    }
+
     /// Write one flow (the body or a footnote's content).
     fn flow(&mut self, evs: &[Ev]) {
         let m = match_indices(evs);
@@ -314,11 +379,16 @@ impl Writer<'_> {
                         match res {
                             LinkRes::External { url, host } | LinkRes::Mailto { url, host } => {
                                 self.external_open(url, None);
-                                // Also as shown once its pictures load: an image covers its alt.
+                                // The text as this writer shows it, generated image labels
+                                // included, and as shown once its pictures load (an image
+                                // covers its alt); math always shows the host (§5.5).
+                                let (shown, without, math) =
+                                    self.link_text(&evs[i + 1..m[i].min(evs.len())]);
                                 let shows = |t: &str| html_host_suffix(t, host);
                                 let host = (!host.is_empty()
-                                    && (shows(&d.inner)
-                                        || d.inner_no_alts.as_deref().is_some_and(shows)))
+                                    && (math
+                                        || shows(&shown)
+                                        || without.as_deref().is_some_and(shows)))
                                 .then(|| host.clone());
                                 in_link += 1;
                                 stack.push(Close::Link {

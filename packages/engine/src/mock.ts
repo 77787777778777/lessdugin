@@ -48,6 +48,7 @@ import {
   type ActorView,
   type Anchor,
   type AtUri,
+  type BodySource,
   type BookmarkEntry,
   type Cid,
   type CommentDraft,
@@ -1871,6 +1872,16 @@ export class MockEngine implements EngineApi {
     if (c) view.root = c.root;
     if (state !== undefined) view.state = state;
     return view;
+  }
+
+  async bodySource(uri: AtUri): Promise<BodySource> {
+    const p = this.s.posts.get(uri);
+    const c = this.s.comments.get(uri);
+    const f = this.s.forums.get(uri);
+    if (!p && !c && !f) throw err("not_found", `No post, comment or forum ${uri}`);
+    // the mock stores every body inline
+    const markdown = p?.markdown ?? c?.markdown ?? f?.about ?? "";
+    return { markdown, profile: "lfm/1", spilled: false };
   }
 
   async loadMedia(cid: Cid): Promise<LoadedMedia> {

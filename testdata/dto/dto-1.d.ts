@@ -80,6 +80,12 @@ export interface BodyDraft {
     media?: MediaRef[];
 }
 
+export interface BodySource {
+    markdown: string;
+    profile?: string;
+    spilled: boolean;
+}
+
 export interface BookmarkEntry {
     uri: string;
     savedAtMs: number;

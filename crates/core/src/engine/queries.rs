@@ -18,8 +18,9 @@ use lessdugin_lexicon::collection::nsid;
 use serde_json::Value;
 
 use crate::dto::{
-    CommentSort, DiscussionItem, DiscussionList, DtoVersion, HistoryView, ListPostsQuery, ModLog,
-    ModQueue, PostList, PostView, RawView, ThreadOpts, ThreadView, TrustLevel,
+    BodySource, CommentSort, DiscussionItem, DiscussionList, DtoVersion, HistoryView,
+    ListPostsQuery, ModLog, ModQueue, PostList, PostView, RawView, ThreadOpts, ThreadView,
+    TrustLevel,
 };
 use crate::host::Host;
 use crate::limits;
@@ -361,6 +362,115 @@ impl<H: Host> Engine<H> {
             entries,
             cursor,
         })
+    }
+
+    /// `body_source(uri)` (`engine-api.md` §3.4): the markdown source of a post's or comment's
+    /// body, or of a forum's `about`, as a composer edits it (`""` for an item without one): the
+    /// inline `text`, or the spilled `textBlob` (`lfm-1.md` §1.3) decoded as the views decode
+    /// it, from the copy the host holds (stored CID-checked when the engine fetched it) or
+    /// fetched now from the author's PDS, waiting at most `BODY_BLOB_WAIT_MS` as a view does. A
+    /// user asked for it, so it is asked for whatever the item's state and the retry window; one
+    /// that does not come in time stays pending for `live_tail` and is an error here. Open to
+    /// every viewer, like `raw`.
+    pub async fn body_source(&self, uri: &str) -> Result<BodySource, EngineError> {
+        use crate::model::render::{Spilled, text_blob_cid};
+        use lessdugin_markdown::BodyError;
+        let u = parse_uri(uri)?;
+        let coll = u.collection().as_str();
+        // (forum, author, the body's `md` value)
+        let (forum, did, md) = if coll == nsid::FORUM {
+            let key = self.forum_key(u.as_str()).await?;
+            let l = self.loaded(&key).await?;
+            let md = l
+                .model
+                .decl
+                .about
+                .as_ref()
+                .map(serde_json::to_value)
+                .transpose()
+                .map_err(|e| EngineError::internal(format!("{u}: {e}")))?;
+            (key.uri.to_string(), key.owner.to_string(), md)
+        } else if coll == nsid::POST || coll == nsid::COMMENT {
+            let key = self.forum_of(&u).await?;
+            let l = self.loaded(&key).await?;
+            let uri = u.to_string();
+            let mut values = self.values(&l.model, std::slice::from_ref(&uri)).await?;
+            let v = values
+                .remove(&uri)
+                .ok_or_else(|| EngineError::not_found(format!("{uri} is not available")))?;
+            (
+                key.uri.to_string(),
+                u.did().to_string(),
+                v.get("body").cloned(),
+            )
+        } else {
+            return Err(EngineError::invalid_ref(format!(
+                "{u} is not a post, a comment or a forum"
+            )));
+        };
+        let Some(md) = md else {
+            return Ok(BodySource {
+                markdown: String::new(),
+                profile: None,
+                spilled: false,
+            });
+        };
+        let profile = md.get("profile").and_then(Value::as_str).map(str::to_owned);
+        if let Some(text) = md.get("text").and_then(Value::as_str) {
+            return Ok(BodySource {
+                markdown: text.to_owned(),
+                profile,
+                spilled: false,
+            });
+        }
+        let Some(blob) = text_blob_cid(&md) else {
+            return Err(EngineError::new(
+                ErrorCode::Unsupported,
+                format!("{u}: the body is neither inline text nor a text blob"),
+            )
+            .with_detail("kind", "unknownBody"));
+        };
+        let renders = &self.rt.renders;
+        if renders.spilled(blob).is_none() {
+            self.fetch_spilled(&forum, &[(u.as_str(), did.as_str(), blob)], renders)
+                .await;
+        }
+        let Some(spilled) = renders.spilled(blob) else {
+            return Err(EngineError::new(
+                ErrorCode::Network,
+                format!(
+                    "{u}: the body is stored as a blob that is not loaded yet; try again later"
+                ),
+            )
+            .with_retryable(true)
+            .with_detail("kind", "bodyPending"));
+        };
+        match &*spilled {
+            Spilled::Text(src) => Ok(BodySource {
+                markdown: src.to_string(),
+                profile,
+                spilled: true,
+            }),
+            Spilled::Missing => Err(EngineError::not_found(format!(
+                "{u}: the body is missing: the author's PDS does not have it"
+            ))
+            .with_detail("kind", "bodyMissing")),
+            Spilled::Unverified => Err(EngineError::new(
+                ErrorCode::Network,
+                format!("{u}: the body does not match its CID"),
+            )
+            .with_retryable(false)
+            .with_detail("kind", "bodyFailedVerification")),
+            Spilled::Error(BodyError::TooLarge) => Err(EngineError::new(
+                ErrorCode::TooLarge,
+                format!("{u}: the body is larger than a text blob may be"),
+            )
+            .with_detail("limit", limits::BLOB_TEXT_MAX_BYTES)),
+            Spilled::Error(BodyError::Encoding) => Err(EngineError::invalid_input(format!(
+                "{u}: the body is not valid UTF-8"
+            ))
+            .with_detail("kind", "bodyUnreadable")),
+        }
     }
 
     /// `raw(uri)` (`social.md` §4.12): the stored record JSON, its validity violations, every
