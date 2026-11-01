@@ -2030,3 +2030,56 @@ fn an_explicit_sync_rechecks_rejected_candidates_cheapest_first() {
     assert_eq!(fs.completeness.repos_total, 1 + n as u32);
     assert!(!fs.completeness.partial, "{:?}", fs.completeness);
 }
+
+#[test]
+fn live_marks_survive_recreate_and_run_ready_uses_cid_hints() {
+    let w = World::new();
+    let owner = w.net.add_account("owner.example.com");
+    let f = w.forum(&owner, "meta", MembershipMode::Approval, &[]);
+    let (uri, cid) = w.post(&owner, &f);
+    let rev = owner.head().1.to_string();
+    let parsed = AtUri::parse(&uri).unwrap();
+    let sy = w.syncer();
+    let s = w.session(&sy);
+    block_on(sy.mark_hint(&s, &parsed, &rev)).unwrap();
+    assert_eq!(w.repo(&owner).marks.get(&uri), Some(&rev));
+
+    // A fresh Syncer has no in-memory queue or hint state; the durable repo mark remains.
+    let fresh = Syncer::new(
+        Arc::new(w.host.clone()),
+        SyncConfig::from_engine(w.engine.config()),
+    );
+    assert!(fresh.queue_snapshot().is_empty());
+    assert_eq!(w.repo(&owner).marks.get(&uri), Some(&rev));
+    let item = lessdugin_core::sync::DirtyItem::point(
+        owner.did().as_str(),
+        &uri,
+        Priority::P1,
+        w.host.now(),
+    )
+    .with_min_rev(rev.clone())
+    .with_mark_hint(&uri, Some(cid));
+    fresh.enqueue(item);
+    let fs = w.session(&fresh);
+    block_on(fresh.run_ready(&fs, 1, |_| Vec::new()));
+    assert!(!w.repo(&owner).marks.contains_key(&uri));
+
+    // Overflow is durable and becomes a P1 repo sync, not another point-only item.
+    let mut full = w.repo(&owner);
+    for i in 0..lessdugin_core::limits::REPO_MARKS_MAX {
+        full.marks
+            .insert(format!("at://did:plc:owner/x/{i}"), rev.clone());
+    }
+    let store = w.store();
+    let mut batch = store.batch();
+    batch.put_repo(owner.did().as_str(), &full).unwrap();
+    block_on(batch.commit()).unwrap();
+    let (uri2, _) = w.post(&owner, &f);
+    let parsed2 = AtUri::parse(&uri2).unwrap();
+    block_on(fresh.mark_hint(&fs, &parsed2, &rev)).unwrap();
+    assert!(w.repo(&owner).marks_overflow);
+    let queued = fresh.queue_snapshot();
+    let item = queued.get(owner.did().as_str()).unwrap();
+    assert_eq!(item.priority, Priority::P1);
+    assert_eq!(item.action(), lessdugin_core::sync::queue::Action::Sync);
+}

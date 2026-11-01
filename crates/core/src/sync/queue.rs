@@ -61,6 +61,8 @@ pub struct DirtyItem {
     pub reasons: BTreeSet<Reason>,
     /// Uris to point-fetch.
     pub uris: BTreeSet<String>,
+    /// CID hints by URI (`None`: the hint reported a delete).
+    pub mark_hints: BTreeMap<String, Option<String>>,
     /// Not before (ms).
     pub ready_at: i64,
 }
@@ -74,6 +76,7 @@ impl DirtyItem {
             priority,
             reasons: BTreeSet::from([reason]),
             uris: BTreeSet::new(),
+            mark_hints: BTreeMap::new(),
             ready_at,
         }
     }
@@ -91,6 +94,12 @@ impl DirtyItem {
         self
     }
 
+    /// Attaches the CID hint used to satisfy this URI's persistent dirty mark.
+    pub fn with_mark_hint(mut self, uri: &str, cid: Option<String>) -> Self {
+        self.mark_hints.insert(uri.to_owned(), cid);
+        self
+    }
+
     /// Merges `other` into `self` (same DID).
     pub fn merge(&mut self, other: DirtyItem) {
         self.priority = self.priority.min(other.priority);
@@ -100,6 +109,7 @@ impl DirtyItem {
         };
         self.reasons.extend(other.reasons);
         self.uris.extend(other.uris);
+        self.mark_hints.extend(other.mark_hints);
         self.ready_at = self.ready_at.min(other.ready_at);
     }
 

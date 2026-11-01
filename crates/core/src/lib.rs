@@ -14,6 +14,7 @@ pub mod host;
 pub mod identity;
 pub mod jetstream;
 pub mod limits;
+pub mod live;
 pub mod media;
 pub mod model;
 pub mod notify;

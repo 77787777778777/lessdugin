@@ -111,6 +111,45 @@ impl DiscRow {
     }
 }
 
+/// The key tag of a completed discovery pass.
+pub const DISC_COMPLETE: &str = "discComplete";
+
+#[derive(Serialize, Deserialize)]
+struct DiscoveryComplete {
+    v: u32,
+    at_ms: i64,
+}
+
+fn disc_complete_key(fk: &str) -> Vec<u8> {
+    schema::prefix(DISC_COMPLETE, &[fk])
+}
+
+/// Records that a full scoped discovery pass reached its completion calculation.
+pub async fn mark_discovery_complete<K: KvStore>(
+    kv: &K,
+    fk: &str,
+    now_ms: i64,
+) -> Result<(), StoreError> {
+    let row = DiscoveryComplete {
+        v: ROW_VERSION,
+        at_ms: now_ms,
+    };
+    kv.write(vec![KvOp::Put(disc_complete_key(fk), row::encode(&row)?)])
+        .await?;
+    Ok(())
+}
+
+/// Whether this cache has completed at least one scoped discovery pass for `fk`.
+pub async fn discovery_complete<K: KvStore>(kv: &K, fk: &str) -> Result<bool, StoreError> {
+    Ok(kv
+        .get_many(vec![disc_complete_key(fk)])
+        .await?
+        .pop()
+        .flatten()
+        .and_then(|v| row::decode::<DiscoveryComplete>(&v).ok())
+        .is_some_and(|r| r.v == ROW_VERSION && r.at_ms >= 0))
+}
+
 /// The key `("disc", fk, did)`.
 pub fn disc_key(fk: &str, did: &str) -> Vec<u8> {
     schema::prefix(DISC, &[fk, did])
