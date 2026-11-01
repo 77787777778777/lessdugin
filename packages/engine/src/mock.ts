@@ -146,6 +146,8 @@ export interface MockEngineOptions {
   sendMs?: number;
   /** Start without a signed-in account. */
   signedOut?: boolean;
+  /** Serve every present body/about as a textBlob in `raw`; `bodySource` still reads its text. */
+  spilledBodies?: boolean;
 }
 
 type Timer = ReturnType<typeof setTimeout>;
@@ -287,6 +289,7 @@ export class MockEngine implements EngineApi {
   private readonly s: MockState;
   private readonly holdMs: number;
   private readonly sendMs: number;
+  private readonly spilledBodies: boolean;
   private ticks = 0;
   private readonly listeners = new Set<EventListener>();
   private readonly queue: EngineEvent[] = [];
@@ -299,6 +302,7 @@ export class MockEngine implements EngineApi {
     this.s = buildFixture().state;
     this.holdMs = opts.holdMs ?? OPINION_UNDO_WINDOW_MS;
     this.sendMs = opts.sendMs ?? 250;
+    this.spilledBodies = opts.spilledBodies ?? false;
     if (opts.signedOut) this.s.active = null;
   }
 
@@ -1791,7 +1795,19 @@ export class MockEngine implements EngineApi {
     const c = this.s.comments.get(uri);
     const seq = this.s.sequences.get(uri);
     const f = this.s.forums.get(uri);
-    const md = (text: string): Json => ({ $type: COLL.markdown, text, profile: "lfm/1" });
+    const md = (text: string): Json => {
+      if (!this.spilledBodies) return { $type: COLL.markdown, text, profile: "lfm/1" };
+      return {
+        $type: COLL.markdown,
+        textBlob: {
+          $type: "blob",
+          ref: { $link: fakeCid(`markdown:${text}`) },
+          mimeType: "text/markdown",
+          size: new TextEncoder().encode(text).length,
+        },
+        profile: "lfm/1",
+      };
+    };
     let record: Json | undefined;
     let cid: string | undefined;
     let state: ItemState | undefined;
@@ -1880,12 +1896,12 @@ export class MockEngine implements EngineApi {
     const f = this.s.forums.get(uri);
     if (!p && !c && !f) {
       // any other collection is `invalid_ref` (engine-api.md §3.4)
-      if (this.s.sequences.has(uri)) throw err("invalid_ref", `Not a post, comment or forum: ${uri}`);
+      if (this.s.sequences.has(uri))
+        throw err("invalid_ref", `Not a post, comment or forum: ${uri}`);
       throw err("not_found", `No post, comment or forum ${uri}`);
     }
-    // the mock stores every body inline (`raw` gives it as `text`), so none is spilled
     const markdown = p?.markdown ?? c?.markdown ?? f?.about ?? "";
-    return { markdown, profile: "lfm/1", spilled: false };
+    return { markdown, profile: "lfm/1", spilled: this.spilledBodies };
   }
 
   async loadMedia(cid: Cid): Promise<LoadedMedia> {

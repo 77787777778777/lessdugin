@@ -3,6 +3,7 @@
 // Before an author edits an item that carries positive assertions, the client warns that the
 // edit suspends them, with what the engine's editPreflight names (social.md §4.5; review
 // findings sec-7, robustness-6).
+import { EditorView } from "@codemirror/view";
 import { MockEngine } from "@lessdugin/engine/mock";
 import type { CommentNode } from "@lessdugin/engine/types";
 import { fireEvent, screen, waitFor } from "@testing-library/react";
@@ -45,6 +46,43 @@ describe("OwnCommentActions edit", () => {
       ),
     );
     expect(preflight).toHaveBeenCalledWith(node.uri);
+  });
+
+  it("loads a spilled comment's source before opening its normal editor (robustness-2)", async () => {
+    const engine = new MockEngine({ spilledBodies: true });
+    const { node, post } = await ownComment(engine);
+    const expected = await engine.bodySource(node.uri);
+    expect(expected.spilled).toBe(true);
+    const source = vi.spyOn(engine, "bodySource");
+    const { container } = renderWithApp(<OwnCommentActions node={node} postUri={post} />, {
+      engine,
+    });
+    fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
+    await screen.findByRole("button", { name: "Save edit" }, { timeout: 10_000 });
+    await waitFor(() => {
+      const host = container.querySelector('[data-testid="composer-editor"]');
+      const content = host?.shadowRoot?.querySelector(".cm-content");
+      const editor = content instanceof HTMLElement ? EditorView.findFromDOM(content) : null;
+      expect(editor?.state.doc.toString()).toBe(expected.markdown);
+    });
+    expect(source).toHaveBeenCalledWith(node.uri);
+  });
+
+  it("keeps a spilled comment closed when its source is unavailable (robustness-2)", async () => {
+    const engine = new MockEngine({ spilledBodies: true });
+    const { node, post } = await ownComment(engine);
+    const source = vi.spyOn(engine, "bodySource").mockRejectedValue({
+      code: "network",
+      message: "The source is not available.",
+      retryable: true,
+    });
+    const preflight = vi.spyOn(engine, "editPreflight");
+    renderWithApp(<OwnCommentActions node={node} postUri={post} />, { engine });
+    fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
+    await screen.findByText("The source is not available.");
+    expect(source).toHaveBeenCalledWith(node.uri);
+    expect(preflight).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: "Save edit" })).toBeNull();
   });
 
   it("says nothing when the engine names nothing, or cannot answer", async () => {

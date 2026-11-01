@@ -251,6 +251,33 @@ describe("MockEngine writes", () => {
   });
 });
 
+describe("MockEngine body sources", () => {
+  it("reads inline markdown, or the source behind a spilled record (engine-api.md §3.4)", async () => {
+    const inline = new MockEngine();
+    const post = (
+      await inline.listPosts({ forum: FORUM_URI, sort: "new", filter: "all", limit: 1 })
+    ).items[0];
+    if (post === undefined) throw new Error("no post in the fixture");
+    await expect(inline.bodySource(post.uri)).resolves.toMatchObject({
+      markdown: (await inline.raw(post.uri)).record.body.text,
+      profile: "lfm/1",
+      spilled: false,
+    });
+
+    const spilled = new MockEngine({ spilledBodies: true });
+    const raw = (await spilled.raw(post.uri)).record as {
+      body: { text?: string; textBlob?: unknown };
+    };
+    expect(raw.body.text).toBeUndefined();
+    expect(raw.body.textBlob).toBeDefined();
+    await expect(spilled.bodySource(post.uri)).resolves.toEqual({
+      markdown: (await inline.bodySource(post.uri)).markdown,
+      profile: "lfm/1",
+      spilled: true,
+    });
+  });
+});
+
 describe("MockEngine local state and declarations", () => {
   it("never gives a new draft the id of an existing one", async () => {
     const e = new MockEngine();

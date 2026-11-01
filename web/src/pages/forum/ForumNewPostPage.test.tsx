@@ -3,10 +3,10 @@
 // Writing and editing a post: the edit warning comes from the engine's editPreflight
 // (social.md §4.5; review finding robustness-6), a submission sent again after a refusal
 // lists its attachments once (robustness-5), and a post whose body spilled into a blob is
-// refused with the reason, never read as empty (robustness-2).
+// edited from its bodySource, or refused with the reason (robustness-2).
 import { EditorView } from "@codemirror/view";
 import { MockEngine } from "@lessdugin/engine/mock";
-import type { ForumView, Json } from "@lessdugin/engine/types";
+import type { ForumView } from "@lessdugin/engine/types";
 import { fireEvent, screen, waitFor } from "@testing-library/react";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { renderWithApp } from "../../test/render.tsx";
@@ -117,21 +117,33 @@ describe("EditPost", () => {
     expect(screen.queryByTestId("edit-suspends")).toBeNull();
   });
 
-  it("says why a post whose body spilled into a blob is not edited here (robustness-2)", async () => {
-    const engine = new MockEngine();
+  it("loads a spilled post's source, then uses the normal edit form (robustness-2)", async () => {
+    const engine = new MockEngine({ spilledBodies: true });
     const { view, uri } = await ownPost(engine);
-    const real = await engine.raw(uri);
-    const record = real.record as { [k: string]: Json };
-    const body: Json = {
-      $type: "online.7778777.lessdugin.temp.markdown",
-      textBlob: {
-        $type: "blob",
-        ref: { $link: "bafkreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy" },
-        mimeType: "text/markdown",
-        size: 70_000,
-      },
-    };
-    vi.spyOn(engine, "raw").mockResolvedValue({ ...real, record: { ...record, body } });
+    const expected = await engine.bodySource(uri);
+    expect(expected.spilled).toBe(true);
+    const source = vi.spyOn(engine, "bodySource");
+    const { container } = renderWithApp(
+      <ForumContext value={view}>
+        <EditPost uri={uri} />
+      </ForumContext>,
+      { engine },
+    );
+    await screen.findByRole("heading", { name: "Edit post" });
+    const cm = await editor(container);
+    expect(cm.state.doc.toString()).toBe(expected.markdown);
+    expect(source).toHaveBeenCalledWith(uri);
+    expect(screen.queryByText("This post cannot be edited")).toBeNull();
+  });
+
+  it("refuses to edit a spilled post when its source is unavailable (robustness-2)", async () => {
+    const engine = new MockEngine({ spilledBodies: true });
+    const { view, uri } = await ownPost(engine);
+    const source = vi.spyOn(engine, "bodySource").mockRejectedValue({
+      code: "network",
+      message: "The source is not available.",
+      retryable: true,
+    });
     renderWithApp(
       <ForumContext value={view}>
         <EditPost uri={uri} />
@@ -139,7 +151,8 @@ describe("EditPost", () => {
       { engine },
     );
     await screen.findByText("This post cannot be edited");
-    expect(screen.getByText(/stored in a blob this app cannot read yet/)).toBeTruthy();
+    expect(screen.getByText(/stored in a blob that could not be loaded/)).toBeTruthy();
+    expect(source).toHaveBeenCalledWith(uri);
     expect(screen.queryByRole("heading", { name: "Edit post" })).toBeNull();
   });
 });
