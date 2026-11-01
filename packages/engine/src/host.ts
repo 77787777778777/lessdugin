@@ -10,6 +10,8 @@
 //   core's `BODY_BLOB_WAIT_MS` for a spilled body) neither stops it nor starts another;
 //   `blobOpen`, `blobRead`, `blobDelete`: the same store, by CID (`blobRead` slices the stored
 //   `Blob`, so only the window it returns enters wasm memory);
+// - `websocket(url, maxBytes)`: a native browser WebSocket, with one bounded-message FIFO per
+//   socket (sync.md §6.2, §12.1); the handle pulls messages and sends v1 options updates;
 // - `lock(name, wait)`: Web Locks (locks.ts); in `lessdugin web` mode an `outbox:<did>` lock is
 //   then also the native one (bridge-lock.ts), Web Lock first;
 // - `sleep(ms)`, `now()`, `random(n)`: `setTimeout`, `Date.now()`, `crypto.getRandomValues`;
@@ -28,6 +30,18 @@ import {
   type PdsRequest,
 } from "./protocol.ts";
 
+/** A frame in the shape read by the wasm host. Exactly one of `text` and `binary` is present. */
+export type JsWsMessage =
+  | { kind: "message"; text: string }
+  | { kind: "message"; binary: Uint8Array };
+
+/** One open WebSocket. Calls to `next` drain only this socket's FIFO. */
+export interface JsWebSocketHandle {
+  next(): Promise<JsWsMessage | null>;
+  sendText(text: string): Promise<void>;
+  close(): Promise<void>;
+}
+
 /** The object the wasm `JsHost` calls. */
 export interface JsHostImports {
   http(
@@ -45,6 +59,7 @@ export interface JsHostImports {
   blobOpen(cid: string): Promise<BlobHandleValue | null>;
   blobRead(cid: string, offset: number, len: number): Promise<Uint8Array>;
   blobDelete(cid: string): Promise<void>;
+  websocket(url: string, maxBytes: number): Promise<JsWebSocketHandle>;
   lock(name: string, wait: boolean): Promise<LockHandle | null>;
   sleep(ms: number): Promise<void>;
   now(): number;
@@ -61,6 +76,8 @@ export interface HostDeps {
   userPds(req: PdsRequest): Promise<HttpResult>;
   blobs: BlobStore;
   locks: LockManagerLike;
+  /** Native browser WebSocket (injectable for the worker's scripted-socket tests). */
+  webSocket?: typeof WebSocket | undefined;
   /** `lessdugin web` mode: `outbox:<did>` locks are also taken natively (`POST /bridge/lock`). */
   bridgeLock?: BridgeLockOptions | undefined;
   /** Default `Date.now`. */
@@ -80,6 +97,161 @@ function pairs(flat: string[]): [string, string][] {
 function asHostError(e: unknown): unknown {
   if (isHostError(e)) return e;
   return hostError("other", e instanceof Error ? `${e.name}: ${e.message}` : String(e));
+}
+
+type WsQueueItem =
+  | { kind: "message"; message: JsWsMessage }
+  | { kind: "error"; error: unknown }
+  | { kind: "close" };
+
+interface WsWaiter {
+  resolve(message: JsWsMessage | null): void;
+  reject(error: unknown): void;
+}
+
+/** The event queue and terminal state of exactly one browser WebSocket. */
+class BrowserWebSocket implements JsWebSocketHandle {
+  private readonly queue: WsQueueItem[] = [];
+  private readonly waiters: WsWaiter[] = [];
+  private ended = false;
+
+  constructor(
+    private readonly socket: WebSocket,
+    private readonly maxBytes: number,
+  ) {
+    socket.binaryType = "arraybuffer";
+    socket.addEventListener("message", this.onMessage);
+    socket.addEventListener("error", this.onError);
+    socket.addEventListener("close", this.onClose);
+  }
+
+  next(): Promise<JsWsMessage | null> {
+    return new Promise((resolve, reject) => {
+      this.waiters.push({ resolve, reject });
+      this.drain();
+    });
+  }
+
+  async sendText(text: string): Promise<void> {
+    if (this.ended || this.socket.readyState !== 1) {
+      throw hostError("network", "the WebSocket is closed");
+    }
+    try {
+      this.socket.send(text);
+    } catch (e) {
+      throw asHostError(e);
+    }
+  }
+
+  close(): Promise<void> {
+    this.finish();
+    return Promise.resolve();
+  }
+
+  private readonly onMessage = (event: MessageEvent): void => {
+    if (this.ended) return;
+    let message: JsWsMessage;
+    let size: number;
+    if (typeof event.data === "string") {
+      size = new TextEncoder().encode(event.data).byteLength;
+      message = { kind: "message", text: event.data };
+    } else if (event.data instanceof ArrayBuffer) {
+      size = event.data.byteLength;
+      message = { kind: "message", binary: new Uint8Array(event.data) };
+    } else {
+      this.finish(hostError("network", "the WebSocket returned a non-ArrayBuffer binary frame"));
+      return;
+    }
+    if (size > this.maxBytes) {
+      this.finish(hostError("tooLarge", "WebSocket message exceeds the configured byte limit"));
+      return;
+    }
+    this.queue.push({ kind: "message", message });
+    this.drain();
+  };
+
+  private readonly onError = (): void => {
+    this.finish(hostError("network", "WebSocket connection failed"));
+  };
+
+  private readonly onClose = (): void => {
+    this.finish();
+  };
+
+  /** Queued frames remain readable; an error is followed by end-of-stream on the next pull. */
+  private finish(error?: unknown): void {
+    if (this.ended) return;
+    this.ended = true;
+    if (error !== undefined) this.queue.push({ kind: "error", error });
+    this.queue.push({ kind: "close" });
+    this.drain();
+    this.socket.removeEventListener("message", this.onMessage);
+    this.socket.removeEventListener("error", this.onError);
+    this.socket.removeEventListener("close", this.onClose);
+    try {
+      this.socket.close();
+    } catch {
+      // Closing an already-closed socket is intentionally harmless.
+    }
+  }
+
+  private drain(): void {
+    while (this.queue.length > 0 && this.waiters.length > 0) {
+      const item = this.queue.shift() as WsQueueItem;
+      const waiter = this.waiters.shift() as WsWaiter;
+      if (item.kind === "message") waiter.resolve(item.message);
+      else if (item.kind === "error") waiter.reject(asHostError(item.error));
+      else waiter.resolve(null);
+    }
+    if (this.ended && this.queue.length === 0) {
+      for (const waiter of this.waiters.splice(0)) waiter.resolve(null);
+    }
+  }
+}
+
+async function openWebSocket(
+  WebSocketImpl: typeof WebSocket | undefined,
+  url: string,
+  maxBytes: number,
+): Promise<JsWebSocketHandle> {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "wss:" && parsed.protocol !== "ws:") {
+      throw hostError("blocked", `not a WebSocket URL: ${parsed.protocol}`);
+    }
+    if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) {
+      throw hostError("other", "invalid WebSocket maximum message size");
+    }
+    if (!WebSocketImpl) throw hostError("unsupported", "WebSocket is unavailable in this worker");
+
+    // v2 requires this subprotocol; v1 accepts it too. No application credentials are added.
+    const socket = new WebSocketImpl(url, "xrpc.v1.json");
+    const stream = new BrowserWebSocket(socket, maxBytes);
+    return await new Promise<JsWebSocketHandle>((resolve, reject) => {
+      const cleanup = (): void => {
+        socket.removeEventListener("open", opened);
+        socket.removeEventListener("error", failed);
+        socket.removeEventListener("close", closedBeforeOpen);
+      };
+      const opened = (): void => {
+        cleanup();
+        resolve(stream);
+      };
+      const failed = (): void => {
+        cleanup();
+        reject(hostError("network", "WebSocket connection failed"));
+      };
+      const closedBeforeOpen = (): void => {
+        cleanup();
+        reject(hostError("network", "WebSocket closed before opening"));
+      };
+      socket.addEventListener("open", opened);
+      socket.addEventListener("error", failed);
+      socket.addEventListener("close", closedBeforeOpen);
+    });
+  } catch (e) {
+    throw asHostError(e);
+  }
 }
 
 export function createJsHost(deps: HostDeps): JsHostImports {
@@ -163,6 +335,9 @@ export function createJsHost(deps: HostDeps): JsHostImports {
       } catch (e) {
         throw asHostError(e);
       }
+    },
+    websocket(url, maxBytes) {
+      return openWebSocket(deps.webSocket ?? globalThis.WebSocket, url, maxBytes);
     },
     async lock(name, wait) {
       try {

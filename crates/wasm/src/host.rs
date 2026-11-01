@@ -69,6 +69,10 @@ extern "C" {
     #[wasm_bindgen(method, catch, js_name = blobDelete)]
     fn blob_delete(this: &JsHostImports, cid: &str) -> Result<Promise, JsValue>;
 
+    /// `websocket(url, maxBytes)`: resolves with an open `JsWebSocketHandle`.
+    #[wasm_bindgen(method, catch)]
+    fn websocket(this: &JsHostImports, url: &str, max_bytes: u32) -> Result<Promise, JsValue>;
+
     /// `lock(name, wait)`: resolves with a `JsLockHandle`, or `null` when busy and `!wait`.
     #[wasm_bindgen(method, catch)]
     fn lock(this: &JsHostImports, name: &str, wait: bool) -> Result<Promise, JsValue>;
@@ -135,6 +139,26 @@ extern "C" {
     fn size(this: &JsBlobHandle) -> f64;
     #[wasm_bindgen(method, getter)]
     fn locator(this: &JsBlobHandle) -> String;
+
+    /// An open WebSocket owned by one core stream.
+    #[wasm_bindgen(typescript_type = "JsWebSocketHandle")]
+    pub type JsWebSocketHandle;
+    /// Resolves with `{ kind: "message", text }`, `{ kind: "message", binary }`, or `null`.
+    #[wasm_bindgen(method, catch)]
+    fn next(this: &JsWebSocketHandle) -> Result<Promise, JsValue>;
+    #[wasm_bindgen(method, catch, js_name = sendText)]
+    fn send_text(this: &JsWebSocketHandle, text: &str) -> Result<Promise, JsValue>;
+    #[wasm_bindgen(method, catch)]
+    fn close(this: &JsWebSocketHandle) -> Result<Promise, JsValue>;
+
+    /// A message returned by `JsWebSocketHandle.next`.
+    type JsWsMessage;
+    #[wasm_bindgen(method, getter)]
+    fn kind(this: &JsWsMessage) -> String;
+    #[wasm_bindgen(method, getter)]
+    fn text(this: &JsWsMessage) -> Option<String>;
+    #[wasm_bindgen(method, getter)]
+    fn binary(this: &JsWsMessage) -> Option<Uint8Array>;
 
     /// A held Web Lock.
     #[wasm_bindgen(typescript_type = "LockHandle")]
@@ -329,19 +353,54 @@ impl Drop for JsLock {
     }
 }
 
-/// The browser has no WebSocket host in M2: Jetstream arrives with M5 and `live_tail` polls.
-pub struct NoWebSocket;
+/// A WebSocket over the worker's JS handle. Each handle owns one FIFO message stream.
+pub struct JsWebSocket {
+    handle: JsWebSocketHandle,
+}
 
-impl WebSocket for NoWebSocket {
-    async fn next(&mut self) -> Option<Result<WsMessage, HostError>> {
-        None
+fn ws_message(v: JsValue) -> Result<WsMessage, HostError> {
+    let message: JsWsMessage = v.unchecked_into();
+    if message.kind() != "message" {
+        return Err(HostError::Other(
+            "WebSocket next returned an unknown kind".into(),
+        ));
+    }
+    match (message.text(), message.binary()) {
+        (Some(text), None) => Ok(WsMessage::Text(text)),
+        (None, Some(binary)) => Ok(WsMessage::Binary(binary.to_vec())),
+        _ => Err(HostError::Other(
+            "WebSocket next returned neither text nor binary".into(),
+        )),
+    }
+}
+
+impl WebSocket for JsWebSocket {
+    fn next(&mut self) -> impl Future<Output = Option<Result<WsMessage, HostError>>> {
+        let p = self.handle.next();
+        async move {
+            match await_promise(p).await {
+                Ok(v) if v.is_null() || v.is_undefined() => None,
+                Ok(v) => Some(ws_message(v)),
+                Err(e) => Some(Err(e)),
+            }
+        }
     }
 
-    async fn send_text(&mut self, _text: String) -> Result<(), HostError> {
-        Err(HostError::Unsupported("WebSocket".into()))
+    fn send_text(&mut self, text: String) -> impl Future<Output = Result<(), HostError>> {
+        let p = self.handle.send_text(&text);
+        async move {
+            await_promise(p).await?;
+            Ok(())
+        }
     }
 
-    async fn close(&mut self) {}
+    fn close(&mut self) -> impl Future<Output = ()> {
+        let p = self.handle.close();
+        async move {
+            // The core's close operation is deliberately infallible and idempotent.
+            let _ = await_promise(p).await;
+        }
+    }
 }
 
 /// The worker's host.
@@ -389,7 +448,7 @@ fn response(v: JsValue) -> HttpResponse {
 
 impl Host for JsHost {
     type Kv = JsKv;
-    type Ws = NoWebSocket;
+    type Ws = JsWebSocket;
     type Lock = JsLock;
 
     fn cache(&self) -> &JsKv {
@@ -510,10 +569,10 @@ impl Host for JsHost {
         }
     }
 
-    async fn websocket(&self, _url: url::Url, _max: u32) -> Result<NoWebSocket, HostError> {
-        Err(HostError::Unsupported(
-            "WebSocket (Jetstream) is not available in the browser before M5".into(),
-        ))
+    async fn websocket(&self, url: url::Url, max: u32) -> Result<JsWebSocket, HostError> {
+        let p = self.imports.websocket(url.as_str(), max);
+        let handle = await_promise(p).await?.unchecked_into();
+        Ok(JsWebSocket { handle })
     }
 
     async fn resolve_txt_system(&self, _name: String) -> Result<Option<Vec<String>>, HostError> {
