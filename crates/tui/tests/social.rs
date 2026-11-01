@@ -1469,6 +1469,54 @@ fn the_menu_presets_add_only_to_a_restriction_in_effect() {
     assert_eq!(m.restricted, ["react", "vote"], "{m:?}");
 }
 
+/// m3r-2, the neighbour of the lapsed case: a timed restriction still in effect keeps its
+/// `until` (and its reason) when the menu's preset adds capabilities to it, since the one
+/// record's expiry belongs to everything it states (`social.md` §4.2); the TUI used to send the
+/// merged capabilities with no `until`, which made the whole restriction permanent.
+#[test]
+fn the_menu_presets_keep_a_timed_restrictions_expiry() {
+    use lessdugin_core::host::Host as _;
+    let s = scenario();
+    let bob = s.w.bob.did();
+    let mut t = alice_tui(&s, 100, 30);
+    block_on(t.start(Some(s.forum.clone())));
+    // ten minutes from alice's clock
+    let until = lessdugin_atp::syntax::Datetime::from_millis(s.w.alice.host.now_ms() + 10 * MINUTE)
+        .unwrap()
+        .as_str()
+        .to_owned();
+    run_command(
+        &mut t,
+        &format!("mod restrict post,comment --until {until} {bob}"),
+    );
+    block_on(t.engine().outbox_flush()).unwrap();
+    s.w.tick(MINUTE);
+    block_on(t.settle());
+    assert_eq!(bob_member(&t, &s).restricted, ["comment", "post"]);
+    // the preset adds voting and reacting while the restriction has minutes left
+    block_on(t.open_thread(&s.bob_post));
+    block_on(t.press("m"));
+    let menu = t.state.mod_menu.as_ref().expect("the menu opened");
+    let label = "restrict the author (voting, reacting)";
+    let n = menu.entries.iter().position(|e| e.label == label).unwrap();
+    for _ in 0..n {
+        block_on(t.press("j"));
+    }
+    block_on(t.press("Enter"));
+    block_on(t.press("Enter"));
+    assert!(status(&t).contains("Mod action recorded"), "{}", status(&t));
+    block_on(t.engine().outbox_flush()).unwrap();
+    s.w.tick(MINUTE);
+    block_on(t.settle());
+    let m = bob_member(&t, &s);
+    assert_eq!(m.restricted, ["comment", "post", "react", "vote"], "{m:?}");
+    // the record kept its until: past it, nothing is restricted any more
+    s.w.tick(10 * MINUTE);
+    block_on(t.settle());
+    let m = bob_member(&t, &s);
+    assert!(m.restricted.is_empty(), "it lapsed with the rest: {m:?}");
+}
+
 /// The "this is public" interstitial (`social.md` §17, `threat-model.md` PRIV-9,
 /// `engine-api.md` §3.6): the first public action of each kind waits behind it; `n` drops it,
 /// `y` sends it and records the acknowledgement, which every client on the device shares.

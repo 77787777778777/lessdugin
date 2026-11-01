@@ -868,7 +868,9 @@ pub async fn item_uri<H: Host>(
 /// The intent as the engine takes it: an item subject named by any reference resolved to its
 /// uri, and a `#restrict` assertion that adds capabilities completed with the ones the
 /// account's current record restricts (the engine keeps the dimension an assertion leaves out,
-/// `engine-api.md` §3.5).
+/// `engine-api.md` §3.5). Such a merge also keeps the record's `until` and `reason` when the
+/// intent states none: the one record's expiry belongs to everything it states (`social.md`
+/// §4.2), so adding to a timed restriction does not make it permanent (m3r-2).
 pub async fn mod_intent<H: Host>(
     engine: &Engine<H>,
     mut intent: ModActionIntent,
@@ -892,35 +894,55 @@ pub async fn mod_intent<H: Host>(
                     capabilities: Some(capabilities),
                     ..
                 },
-            ..
+            reason,
+            until_ms,
         },
     ) = (merge, &mut intent)
     else {
         return Ok(intent);
     };
-    let held = held_capabilities(engine, forum, *scope, subject).await?;
+    let held = held_restriction(engine, forum, *scope, subject).await?;
     let added = std::mem::take(capabilities);
     *capabilities = ALL_CAPABILITIES
         .iter()
-        .filter(|c| held.contains(c) || added.contains(c))
+        .filter(|c| held.capabilities.contains(c) || added.contains(c))
         .cloned()
         .collect();
+    if until_ms.is_none() {
+        *until_ms = held.until_ms;
+    }
+    if reason.as_deref().is_none_or(|r| r.trim().is_empty()) {
+        *reason = held.reason;
+    }
     Ok(intent)
 }
 
-/// The capabilities the account's own `#restrict` record on `subject` in `forum` restricts (one
-/// record per scope, subject and key, `data-model.md` §6.7); none when it has no record, or its
-/// `until` has passed. A write of that record still in the outbox is newer than the cache,
-/// which holds confirmed writes only (`lessdugin_core::outbox::apply`): the latest such write
-/// is the state, so two restrictions in quick succession, or made offline, keep each other.
-async fn held_capabilities<H: Host>(
+/// What the account's own `#restrict` record on a subject holds, while it is in effect.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Held {
+    /// The capabilities it restricts.
+    capabilities: Vec<Capability>,
+    /// Its `until`, in ms.
+    until_ms: Option<i64>,
+    /// Its `reason`.
+    reason: Option<String>,
+}
+
+/// The account's own `#restrict` record on `subject` in `forum` (one record per scope, subject
+/// and key, `data-model.md` §6.7): the capabilities it restricts, and its `until` and `reason`,
+/// which a merge keeps (`social.md` §4.2: the one record's expiry belongs to everything it
+/// states); nothing when it has no record, or its `until` has passed. A write of that record
+/// still in the outbox is newer than the cache, which holds confirmed writes only
+/// (`lessdugin_core::outbox::apply`): the latest such write is the state, so two restrictions
+/// in quick succession, or made offline, keep each other.
+async fn held_restriction<H: Host>(
     engine: &Engine<H>,
     forum: &str,
     scope: ModScope,
     subject: &str,
-) -> Result<Vec<Capability>, EngineError> {
+) -> Result<Held, EngineError> {
     let Some(me) = engine.active_account().await?.map(|a| a.did) else {
-        return Ok(Vec::new());
+        return Ok(Held::default());
     };
     let did = if subject.starts_with("did:") {
         subject.to_owned()
@@ -943,7 +965,7 @@ async fn held_capabilities<H: Host>(
     let rkey = lessdugin_lexicon::keys::mod_action_rkey(NS, &forum, scope, &did, &action)
         .map_err(|e| EngineError::invalid_input(e.to_string()))?;
     let Ok(uri) = AtUri::parse(&format!("at://{me}/{}/{rkey}", nsid::MOD_ACTION)) else {
-        return Ok(Vec::new());
+        return Ok(Held::default());
     };
     let pending = engine.outbox().pending(&me).await?;
     let latest = pending
@@ -953,7 +975,7 @@ async fn held_capabilities<H: Host>(
         .find(|op| op.collection == nsid::MOD_ACTION && op.rkey == rkey);
     let value = match latest {
         // a retraction on its way: nothing is held
-        Some(op) if op.action == OpAction::Delete => return Ok(Vec::new()),
+        Some(op) if op.action == OpAction::Delete => return Ok(Held::default()),
         Some(op) => op
             .value
             .as_deref()
@@ -964,7 +986,7 @@ async fn held_capabilities<H: Host>(
         },
     };
     let Some(action) = value.as_ref().and_then(|v| v.get("action")) else {
-        return Ok(Vec::new());
+        return Ok(Held::default());
     };
     // a restriction whose `until` passed holds nothing, as the engine reads it (`social.md` §4.2)
     let until = value
@@ -972,18 +994,29 @@ async fn held_capabilities<H: Host>(
         .and_then(|v| v.get("until"))
         .and_then(serde_json::Value::as_str)
         .and_then(|u| lessdugin_atp::syntax::Datetime::parse(u).ok());
-    if until.is_some_and(|u| u.timestamp_micros() <= engine.host().now_ms().saturating_mul(1000)) {
-        return Ok(Vec::new());
+    if until
+        .as_ref()
+        .is_some_and(|u| u.timestamp_micros() <= engine.host().now_ms().saturating_mul(1000))
+    {
+        return Ok(Held::default());
     }
-    Ok(action
-        .get("capabilities")
-        .and_then(serde_json::Value::as_array)
-        .map(|a| {
-            a.iter()
-                .filter_map(|c| serde_json::from_value(c.clone()).ok())
-                .collect()
-        })
-        .unwrap_or_default())
+    Ok(Held {
+        capabilities: action
+            .get("capabilities")
+            .and_then(serde_json::Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|c| serde_json::from_value(c.clone()).ok())
+                    .collect()
+            })
+            .unwrap_or_default(),
+        until_ms: until.map(|u| u.timestamp_micros().div_euclid(1000)),
+        reason: value
+            .as_ref()
+            .and_then(|v| v.get("reason"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+    })
 }
 
 fn unverified<'a>(mut actors: impl Iterator<Item = &'a ActorView>) -> bool {
