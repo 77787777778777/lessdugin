@@ -510,8 +510,9 @@ fn adopting_names_the_engines_reason() {
 
 /// An edit suspends the positive assertions on the item's current version (`social.md` §4.5,
 /// `threat-model.md` SOC-3: a keep, a frontpage or curated tier, a pin stop until an authority
-/// asserts them again), so the author is told first: off a terminal the edit needs `--yes`
-/// (sec-7). An item without one edits as before.
+/// asserts them again), so the author is told first, in the engine's words (`edit_preflight`,
+/// which names the tier in effect): off a terminal the edit needs `--yes` (sec-7). An item
+/// without one edits as before.
 #[test]
 fn editing_a_kept_item_says_what_it_suspends_first() {
     let net = Net::new();
@@ -542,7 +543,7 @@ fn editing_a_kept_item_says_what_it_suspends_first() {
     let e = carol.fails(2, &["edit", &kept, "-m", "As it is now."]);
     let msg = e["message"].as_str().unwrap_or_default();
     assert!(
-        msg.contains("suspends a moderator's keep and its frontpage or curated tier"),
+        msg.contains("editing suspends a moderator's keep and its curated tier"),
         "{e}"
     );
     assert!(msg.contains("--yes"), "{e}");

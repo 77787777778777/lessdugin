@@ -1469,6 +1469,54 @@ fn the_menu_presets_add_only_to_a_restriction_in_effect() {
     assert_eq!(m.restricted, ["react", "vote"], "{m:?}");
 }
 
+/// m3r-2, the neighbour of the lapsed case: a timed restriction still in effect keeps its
+/// `until` (and its reason) when the menu's preset adds capabilities to it, since the one
+/// record's expiry belongs to everything it states (`social.md` §4.2); the TUI used to send the
+/// merged capabilities with no `until`, which made the whole restriction permanent.
+#[test]
+fn the_menu_presets_keep_a_timed_restrictions_expiry() {
+    use lessdugin_core::host::Host as _;
+    let s = scenario();
+    let bob = s.w.bob.did();
+    let mut t = alice_tui(&s, 100, 30);
+    block_on(t.start(Some(s.forum.clone())));
+    // ten minutes from alice's clock
+    let until = lessdugin_atp::syntax::Datetime::from_millis(s.w.alice.host.now_ms() + 10 * MINUTE)
+        .unwrap()
+        .as_str()
+        .to_owned();
+    run_command(
+        &mut t,
+        &format!("mod restrict post,comment --until {until} {bob}"),
+    );
+    block_on(t.engine().outbox_flush()).unwrap();
+    s.w.tick(MINUTE);
+    block_on(t.settle());
+    assert_eq!(bob_member(&t, &s).restricted, ["comment", "post"]);
+    // the preset adds voting and reacting while the restriction has minutes left
+    block_on(t.open_thread(&s.bob_post));
+    block_on(t.press("m"));
+    let menu = t.state.mod_menu.as_ref().expect("the menu opened");
+    let label = "restrict the author (voting, reacting)";
+    let n = menu.entries.iter().position(|e| e.label == label).unwrap();
+    for _ in 0..n {
+        block_on(t.press("j"));
+    }
+    block_on(t.press("Enter"));
+    block_on(t.press("Enter"));
+    assert!(status(&t).contains("Mod action recorded"), "{}", status(&t));
+    block_on(t.engine().outbox_flush()).unwrap();
+    s.w.tick(MINUTE);
+    block_on(t.settle());
+    let m = bob_member(&t, &s);
+    assert_eq!(m.restricted, ["comment", "post", "react", "vote"], "{m:?}");
+    // the record kept its until: past it, nothing is restricted any more
+    s.w.tick(10 * MINUTE);
+    block_on(t.settle());
+    let m = bob_member(&t, &s);
+    assert!(m.restricted.is_empty(), "it lapsed with the rest: {m:?}");
+}
+
 /// The "this is public" interstitial (`social.md` §17, `threat-model.md` PRIV-9,
 /// `engine-api.md` §3.6): the first public action of each kind waits behind it; `n` drops it,
 /// `y` sends it and records the acknowledgement, which every client on the device shares.
@@ -1942,6 +1990,121 @@ fn the_command_line_reaches_membership_items_and_local_state() {
     assert!(!status(&ta).contains(label), "{}", status(&ta));
 }
 
+/// robustness-3 (`social.md` §4.2, `engine-api.md` §3.5): every notice of an action's result
+/// shows, not only the first. A restriction on top of a timed nullification comes back with
+/// two: it is retroactive, and it shares the nullification's expiry; the TUI used to drop the
+/// second, so the moderator never learnt the permanent-looking restriction ends.
+#[test]
+fn a_restrict_over_a_timed_nullification_shows_the_shared_expiry() {
+    let s = scenario();
+    let bob = s.w.bob.did();
+    let mut t = alice_tui(&s, 100, 30);
+    block_on(t.start(Some(s.forum.clone())));
+    let until = until_soon(&s);
+    run_command(&mut t, &format!("mod nullify --until {until} {bob}"));
+    assert!(status(&t).contains("Mod action recorded"), "{}", status(&t));
+    block_on(t.engine().outbox_flush()).unwrap();
+    s.w.tick(MINUTE);
+    block_on(t.settle());
+    run_command(&mut t, &format!("mod restrict post {bob}"));
+    let st = status(&t);
+    assert!(st.contains("Mod action recorded: "), "{st}");
+    assert!(st.contains("retroactive"), "the first notice: {st}");
+    assert!(
+        st.contains("ends with your nullification"),
+        "the second notice (sharedExpiry): {st}"
+    );
+    assert!(st.contains(&until), "{st}");
+    // both are on the screen (the status line wraps)
+    let screen = t.render();
+    assert!(screen.contains("retroactive"), "{screen}");
+    assert!(screen.contains("ends with your nullification"), "{screen}");
+}
+
+/// bob made a moderator, who hid bob_c1; alice un-hid it, so bob's hide is not in effect.
+fn bob_moderator_with_an_overridden_hide(s: &common::Scenario) {
+    use lessdugin_core::dto::{ModRole, ModsChange};
+    let (alice, bob) = (&s.w.alice, &s.w.bob);
+    block_on(alice.engine.mods_set(
+        &s.forum,
+        &ModsChange::Add {
+            did: bob.did(),
+            role: ModRole::Moderator,
+            title: None,
+        },
+    ))
+    .unwrap();
+    alice.flush();
+    s.w.tick(MINUTE);
+    bob.sync(&s.forum);
+    let hide = |hidden| ModActionIntent::Assert {
+        forum: s.forum.clone(),
+        scope: ModScope::Forum,
+        subject: s.bob_c1.clone(),
+        action: ModActionValue::Hide {
+            hidden,
+            spam: false,
+            show_reason: true,
+        },
+        reason: None,
+        until_ms: None,
+    };
+    block_on(bob.engine.mod_action(&hide(true))).unwrap();
+    bob.flush();
+    s.w.tick(MINUTE);
+    alice.sync(&s.forum);
+    block_on(alice.engine.mod_action(&hide(false))).unwrap();
+    alice.flush();
+    s.w.tick(MINUTE);
+    alice.sync(&s.forum);
+}
+
+/// sec-8 and robustness-3 (`engine-api.md` §3.5 `mods_set`, `data-model.md` §8.6): `:mods
+/// remove` runs `mod adopt` first, and its result says so AND lists what the adoption does not
+/// adopt (the second notice, which the TUI used to drop); the adoption's own report follows
+/// once it is sent.
+#[test]
+fn mods_remove_shows_the_adoption_and_what_it_does_not_adopt() {
+    let s = scenario();
+    bob_moderator_with_an_overridden_hide(&s);
+    let bob = s.w.bob.did();
+    let mut t = alice_tui(&s, 100, 30);
+    block_on(t.start(Some(s.forum.clone())));
+    run_command(&mut t, &format!("mods remove {bob}"));
+    let st = status(&t);
+    assert!(st.starts_with("Moderator list updated: "), "{st}");
+    assert!(st.contains("mod adopt runs first"), "{st}");
+    assert!(
+        st.contains("not adopted, since they are not in effect: 1 overridden"),
+        "the second notice: {st}"
+    );
+    // more than the status line holds: the panel lists each notice
+    let p = t.state.panel.as_ref().expect("the notices panel");
+    assert_eq!(p.title, "Moderator change");
+    let lines: Vec<String> = p.lines.iter().map(|l| l.to_plain_string()).collect();
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert!(lines[0].starts_with("mod adopt runs first"), "{lines:?}");
+    assert!(
+        lines[1].starts_with("not adopted, since they are not in effect: 1 overridden"),
+        "{lines:?}"
+    );
+    assert!(t.render().contains("not adopted"), "{}", t.render());
+
+    // sent: the adoption's report lists the same assertion, and bob is no longer a moderator
+    block_on(t.engine().outbox_flush()).unwrap();
+    block_on(t.settle());
+    let st = status(&t);
+    assert!(st.contains("1 assertion not adopted"), "{st}");
+    let p = t.state.panel.as_ref().expect("the report");
+    assert_eq!(p.title, "Adoption report");
+    let f = block_on(s.w.alice.engine.forum_open(&s.forum)).unwrap();
+    assert!(
+        f.moderators.iter().all(|m| m.actor.did != bob),
+        "{:?}",
+        f.moderators
+    );
+}
+
 /// sec-8 (`engine-api.md` §3.5 `mod_adopt`, `data-model.md` §8.6): what an adoption did not
 /// adopt comes back in its `done` state, and the TUI lists it: here bob's hide, which alice's
 /// keep overrode, so it never counted.
@@ -2046,4 +2209,146 @@ fn forum_edit_keeps_a_spilled_about() {
     let (name, again) = blob_of();
     assert_eq!(name, "Longer");
     assert_eq!(again, spilled, "the same source, spilled again");
+}
+
+/// robustness-1 (`data-model.md` §8.8): `:forum edit` keeps the about's media, as an edit
+/// keeps a body's; before, a name change dropped every image of the about.
+#[test]
+fn forum_edit_keeps_the_abouts_media() {
+    use lessdugin_core::dto::{BodyDraft, ForumDraft, MediaInput, PostDraft};
+    let s = scenario();
+    let alice = &s.w.alice;
+    let pic = block_on(alice.engine.prepare_media(
+        lessdugin_testkit::fake_pds::tiny_png(3),
+        &MediaInput {
+            declared_mime: Some("image/png".into()),
+            alt: Some("the rules, drawn".into()),
+            name: None,
+            aspect_ratio: None,
+        },
+    ))
+    .unwrap();
+    let cid = pic.cid.clone();
+    // the picture reaches alice's PDS with a post (`forum_create` uploads nothing); the
+    // forum's about then refers to it
+    let mut d = PostDraft::article(&s.forum, "Drawn", format!("![the rules](cid:{cid})"));
+    d.body.media.push(pic.clone());
+    block_on(alice.engine.publish(&d)).unwrap();
+    alice.flush();
+    let mut draft = ForumDraft::new("pics", "Pics");
+    draft.about = Some(BodyDraft {
+        markdown: format!("# Rules\n\n![the rules, drawn](cid:{cid})"),
+        media: vec![pic],
+    });
+    let t = block_on(alice.engine.forum_create(&draft)).unwrap();
+    alice.flush();
+    let forum = alice.done(&t);
+    let about = || {
+        use lessdugin_core::host::Host as _;
+        let u = lessdugin_atp::syntax::AtUri::parse(&forum).unwrap();
+        let v = block_on(
+            lessdugin_core::store::records::RecordStore::new(alice.engine.host().cache()).get(&u),
+        )
+        .unwrap()
+        .unwrap()
+        .value_json()
+        .unwrap();
+        (v["name"].clone(), v["about"]["media"].clone())
+    };
+    let (_, media) = about();
+    assert_eq!(media.as_array().map(Vec::len), Some(1), "{media}");
+
+    let mut ta = alice_tui(&s, 100, 30);
+    block_on(ta.start(Some(forum.clone())));
+    run_command(&mut ta, "forum edit --name Pictures");
+    assert!(
+        status(&ta).contains("Forum edit: queued"),
+        "{}",
+        status(&ta)
+    );
+    block_on(ta.engine().outbox_flush()).unwrap();
+    block_on(alice.engine.forum_open(&forum)).unwrap();
+    let (name, again) = about();
+    assert_eq!(name, "Pictures");
+    assert_eq!(again, media, "the about keeps its picture");
+    assert_eq!(again[0]["blob"]["ref"]["$link"], cid);
+}
+
+/// m4-5, from the owner's other device, which never held the spilled about's blob: `:forum
+/// edit` fetches its source from the owner's PDS (as `forum_open` does for the header) and
+/// sends it again, so the about survives. Here the PDS fails the fetch while the Forum screen
+/// opens, so the header's attempt leaves the body pending and the edit itself runs the fallback
+/// once the retry is due.
+#[test]
+fn forum_edit_fetches_a_spilled_about_from_the_owners_pds() {
+    use lessdugin_core::dto::{BodyDraft, ForumDraft};
+    use lessdugin_core::host::Host as _;
+    use lessdugin_tui::{Headless, HeadlessOpts};
+    let s = scenario();
+    let alice = &s.w.alice;
+    let mut about = "# Rules\n\n".to_owned();
+    while about.len() <= 65_536 {
+        about.push_str("Be kind to each other. ");
+    }
+    let mut draft = ForumDraft::new("long", "Long");
+    draft.about = Some(BodyDraft::text(about));
+    let t = block_on(alice.engine.forum_create(&draft)).unwrap();
+    alice.flush();
+    let forum = alice.done(&t);
+    let on_pds = || {
+        let v = alice
+            .acct
+            .get(lessdugin_lexicon::collection::nsid::FORUM, "long")
+            .unwrap();
+        (v["name"].clone(), v["about"]["textBlob"].clone())
+    };
+    let (_, spilled) = on_pds();
+    assert!(spilled.is_object(), "it spilled: {spilled}");
+
+    // alice's laptop: its own stores and clock, the same account and network
+    let laptop = MemHost::new();
+    laptop.set_now_ms(alice.host.now_ms());
+    laptop.set_seed(7);
+    s.w.net.install_as(&laptop, "laptop");
+    let e2 = Engine::new(laptop.clone(), EngineConfig::default());
+    block_on(e2.add_account(AccountInfo::app_password(
+        alice.acct.did().as_str(),
+        alice.acct.pds_base(),
+    )))
+    .unwrap();
+    // the blob cannot be fetched while the screen opens
+    let outage = s.w.net.inject(
+        Fault::status(500)
+            .on_nsid("com.atproto.sync.getBlob")
+            .for_caller("laptop"),
+    );
+    let mut t = block_on(Headless::new(
+        e2,
+        HeadlessOpts {
+            width: 100,
+            height: 30,
+            ..HeadlessOpts::default()
+        },
+    ))
+    .unwrap();
+    block_on(t.start(Some(forum.clone())));
+    assert!(
+        !t.render().contains("Be kind to each other"),
+        "{}",
+        t.render()
+    );
+    s.w.net.remove_fault(outage);
+    // the retry is due (`BODY_BLOB_RETRY_MS`)
+    laptop.advance_ms(2 * MINUTE);
+    s.w.tick(2 * MINUTE);
+
+    run_command(&mut t, "forum edit --name Longer");
+    assert!(status(&t).contains("Forum edit: queued"), "{}", status(&t));
+    block_on(t.engine().outbox_flush()).unwrap();
+    let (name, again) = on_pds();
+    assert_eq!(name, "Longer");
+    assert_eq!(
+        again, spilled,
+        "the same source, fetched from the PDS and spilled again"
+    );
 }

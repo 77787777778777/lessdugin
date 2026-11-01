@@ -11,10 +11,10 @@ use std::collections::BTreeMap;
 
 use lessdugin_atp::syntax::AtUri;
 use lessdugin_core::dto::{
-    ActionNotice, ActorView, BodyDraft, Capability, CommentDraft, DefaultTier, Draft, EditOpts,
-    ExternalLinkDraft, ForumDraft, KarmaCadence, ListPostsQuery, MembersQuery, MembershipMode,
-    ModActionIntent, ModActionValue, ModScope, NotificationsQuery, PostDraft, PostFilter, PostKind,
-    PostSort, Ref, RefContext, SyncOpts, TextQuote, ThreadOpts, ThreadRoot,
+    ActorView, AspectRatio, BodyDraft, Capability, CommentDraft, DefaultTier, Draft, EditOpts,
+    ExternalLinkDraft, ForumDraft, KarmaCadence, ListPostsQuery, MediaRef, MembersQuery,
+    MembershipMode, ModActionIntent, ModActionValue, ModScope, NotificationsQuery, PostDraft,
+    PostFilter, PostKind, PostSort, Ref, RefContext, SyncOpts, TextQuote, ThreadOpts, ThreadRoot,
 };
 use lessdugin_core::engine::{Engine, EngineError};
 use lessdugin_core::host::Host;
@@ -25,8 +25,8 @@ use lessdugin_lexicon::collection::nsid;
 use lessdugin_lexicon::ns::NS;
 
 use crate::app::{
-    Action, ActivityData, Compose, EditorRequest, Effect, ForumData, HomeData, ItemOp, SyncTarget,
-    ThreadData,
+    Action, ActivityData, Compose, EditStart, EditorRequest, Effect, ForumData, HomeData, ItemOp,
+    SyncTarget, ThreadData,
 };
 use crate::body::Body;
 use crate::command::{ALL_CAPABILITIES, AccessOp, ForumChanges, RestrictDim};
@@ -582,14 +582,56 @@ async fn body_markdown<H: Host>(
     })
 }
 
-/// `:edit`: your post or comment's draft as cached (the fields the CLI's `edit` keeps) and the
-/// editor session on its text, with what the edit would suspend (`edit_preflight`, `social.md`
-/// §4.5) for the user to confirm first.
+/// The media items of a cached body as the references an edit sends again (the engine keeps
+/// their blob objects, `data-model.md` §8.8, so a `cid:` image of the text still resolves). An
+/// item that does not read as `defs#media` refuses the edit: leaving it out would delete it.
+fn media_of(uri: &str, body: Option<&serde_json::Value>) -> Result<Vec<MediaRef>, EngineError> {
+    let Some(items) = body.and_then(|b| b.get("media")) else {
+        return Ok(Vec::new());
+    };
+    let items = items.as_array().ok_or_else(|| {
+        EngineError::invalid_input(format!("{uri}: the body's media is not a list"))
+    })?;
+    let mut out = Vec::with_capacity(items.len());
+    for (i, item) in items.iter().enumerate() {
+        let m = serde_json::from_value::<lessdugin_lexicon::records::Media>(item.clone()).map_err(
+            |e| {
+                EngineError::invalid_input(format!(
+                    "{uri}: media item {} cannot be read ({e}); an edit would drop it",
+                    i + 1
+                ))
+            },
+        )?;
+        let cid = m.blob.r#ref.link.clone();
+        out.push(MediaRef {
+            id: cid.clone(),
+            cid,
+            mime: m.blob.mime_type.clone(),
+            size_bytes: u64::try_from(m.blob.size).unwrap_or(0),
+            alt: m.alt.clone(),
+            aspect_ratio: m.aspect_ratio.as_ref().and_then(|a| {
+                Some(AspectRatio {
+                    width: u32::try_from(a.width).ok()?,
+                    height: u32::try_from(a.height).ok()?,
+                })
+            }),
+            duration_ms: m.duration_ms.and_then(|d| u64::try_from(d).ok()),
+            name: m.name.clone(),
+            notices: Vec::new(),
+        });
+    }
+    Ok(out)
+}
+
+/// `:edit`: your post or comment's draft as cached (the fields the CLI's `edit` keeps: the
+/// body's media and a link's card with it) and the editor session on its text, with what the
+/// edit would suspend (`edit_preflight`, `social.md` §4.5) for the user to confirm first. A
+/// preflight that cannot run does not stop the edit: the user is told it is unchecked (sec-7).
 async fn start_edit<H: Host>(
     engine: &Engine<H>,
     uri: &str,
     forum: &str,
-) -> Result<(EditorRequest, Vec<ActionNotice>), EngineError> {
+) -> Result<EditStart, EngineError> {
     let uri = item_uri(engine, uri, forum).await?;
     let me = engine.active_account().await?.map(|a| a.did);
     let u = AtUri::parse(&uri).map_err(|e| EngineError::invalid_ref(format!("{uri:?}: {e}")))?;
@@ -600,6 +642,10 @@ async fn start_edit<H: Host>(
     }
     let v = cached(engine, &uri).await?;
     let markdown = body_markdown(engine, &uri, &v).await?;
+    let body = BodyDraft {
+        markdown: markdown.clone(),
+        media: media_of(&uri, v.get("body"))?,
+    };
     let s = |k: &str| {
         v.get(k)
             .and_then(serde_json::Value::as_str)
@@ -619,15 +665,23 @@ async fn start_edit<H: Host>(
             // a quick take has no title (data-model.md PO4): its text is all body
             let quick = kind == PostKind::QuickTake;
             let title = s("title");
+            // the card's title and description stay with the uri the TUI cannot change (the
+            // engine writes `link` from the draft, `data-model.md` §8.3)
+            let link_field = |k: &str| {
+                v.get("link")
+                    .and_then(|l| l.get(k))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+            };
             let draft = PostDraft {
                 forum: s("forum").unwrap_or_default(),
                 kind,
                 title: title.clone(),
-                body: BodyDraft::text(markdown.clone()),
+                body,
                 link: strong("link").map(|uri| ExternalLinkDraft {
                     uri,
-                    title: None,
-                    description: None,
+                    title: link_field("title"),
+                    description: link_field("description"),
                 }),
                 tags: strs(v.get("tags")),
                 labels: v
@@ -666,7 +720,7 @@ async fn start_edit<H: Host>(
                 comment: CommentDraft {
                     root: strong("root").unwrap_or_default(),
                     parent: strong("parent"),
-                    body: BodyDraft::text(markdown.clone()),
+                    body,
                     quote: v
                         .get("quote")
                         .and_then(|q| serde_json::from_value::<TextQuote>(q.clone()).ok()),
@@ -682,9 +736,12 @@ async fn start_edit<H: Host>(
             )));
         }
     };
-    let notices = engine.edit_preflight(&uri).await?;
-    Ok((
-        EditorRequest {
+    let (notices, unchecked) = match engine.edit_preflight(&uri).await {
+        Ok(n) => (n, None),
+        Err(e) => (Vec::new(), Some(e.message)),
+    };
+    Ok(EditStart {
+        request: EditorRequest {
             compose: Compose::Edit {
                 uri,
                 base: Box::new(base),
@@ -692,7 +749,8 @@ async fn start_edit<H: Host>(
             template: crate::editor::edit_template(&prefill, &context, post),
         },
         notices,
-    ))
+        unchecked,
+    })
 }
 
 /// The source of the forum's spilled `about` `md`: the `textBlob` the host holds, else as
@@ -739,14 +797,19 @@ async fn forum_draft<H: Host>(
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned)
     };
+    // the about's media go with its text (as an edit's, `data-model.md` §8.8)
     let about = match v.get("about") {
         None => None,
-        Some(b) => match b.get("text").and_then(serde_json::Value::as_str) {
-            Some(t) => Some(BodyDraft::text(t)),
-            // a spilled `about` (`data-model.md` §5.3) is sent as its source, which the outbox
-            // spills again: as `forum_open` fetched it from the owner's PDS for the header
-            None => Some(BodyDraft::text(spilled_about(engine, forum, b).await?)),
-        },
+        Some(b) => Some(BodyDraft {
+            markdown: match b.get("text").and_then(serde_json::Value::as_str) {
+                Some(t) => t.to_owned(),
+                // a spilled `about` (`data-model.md` §5.3) is sent as its source, which the
+                // outbox spills again: as `forum_open` fetched it from the owner's PDS for
+                // the header
+                None => spilled_about(engine, forum, b).await?,
+            },
+            media: media_of(forum, Some(b))?,
+        }),
     };
     let empty_is_none = |o: &Option<String>| o.clone().filter(|t| !t.is_empty());
     Ok(ForumDraft {
@@ -810,7 +873,9 @@ pub async fn item_uri<H: Host>(
 /// The intent as the engine takes it: an item subject named by any reference resolved to its
 /// uri, and a `#restrict` assertion that adds capabilities completed with the ones the
 /// account's current record restricts (the engine keeps the dimension an assertion leaves out,
-/// `engine-api.md` §3.5).
+/// `engine-api.md` §3.5). Such a merge also keeps the record's `until` and `reason` when the
+/// intent states none: the one record's expiry belongs to everything it states (`social.md`
+/// §4.2), so adding to a timed restriction does not make it permanent (m3r-2).
 pub async fn mod_intent<H: Host>(
     engine: &Engine<H>,
     mut intent: ModActionIntent,
@@ -834,35 +899,55 @@ pub async fn mod_intent<H: Host>(
                     capabilities: Some(capabilities),
                     ..
                 },
-            ..
+            reason,
+            until_ms,
         },
     ) = (merge, &mut intent)
     else {
         return Ok(intent);
     };
-    let held = held_capabilities(engine, forum, *scope, subject).await?;
+    let held = held_restriction(engine, forum, *scope, subject).await?;
     let added = std::mem::take(capabilities);
     *capabilities = ALL_CAPABILITIES
         .iter()
-        .filter(|c| held.contains(c) || added.contains(c))
+        .filter(|c| held.capabilities.contains(c) || added.contains(c))
         .cloned()
         .collect();
+    if until_ms.is_none() {
+        *until_ms = held.until_ms;
+    }
+    if reason.as_deref().is_none_or(|r| r.trim().is_empty()) {
+        *reason = held.reason;
+    }
     Ok(intent)
 }
 
-/// The capabilities the account's own `#restrict` record on `subject` in `forum` restricts (one
-/// record per scope, subject and key, `data-model.md` §6.7); none when it has no record, or its
-/// `until` has passed. A write of that record still in the outbox is newer than the cache,
-/// which holds confirmed writes only (`lessdugin_core::outbox::apply`): the latest such write
-/// is the state, so two restrictions in quick succession, or made offline, keep each other.
-async fn held_capabilities<H: Host>(
+/// What the account's own `#restrict` record on a subject holds, while it is in effect.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Held {
+    /// The capabilities it restricts.
+    capabilities: Vec<Capability>,
+    /// Its `until`, in ms.
+    until_ms: Option<i64>,
+    /// Its `reason`.
+    reason: Option<String>,
+}
+
+/// The account's own `#restrict` record on `subject` in `forum` (one record per scope, subject
+/// and key, `data-model.md` §6.7): the capabilities it restricts, and its `until` and `reason`,
+/// which a merge keeps (`social.md` §4.2: the one record's expiry belongs to everything it
+/// states); nothing when it has no record, or its `until` has passed. A write of that record
+/// still in the outbox is newer than the cache, which holds confirmed writes only
+/// (`lessdugin_core::outbox::apply`): the latest such write is the state, so two restrictions
+/// in quick succession, or made offline, keep each other.
+async fn held_restriction<H: Host>(
     engine: &Engine<H>,
     forum: &str,
     scope: ModScope,
     subject: &str,
-) -> Result<Vec<Capability>, EngineError> {
+) -> Result<Held, EngineError> {
     let Some(me) = engine.active_account().await?.map(|a| a.did) else {
-        return Ok(Vec::new());
+        return Ok(Held::default());
     };
     let did = if subject.starts_with("did:") {
         subject.to_owned()
@@ -885,7 +970,7 @@ async fn held_capabilities<H: Host>(
     let rkey = lessdugin_lexicon::keys::mod_action_rkey(NS, &forum, scope, &did, &action)
         .map_err(|e| EngineError::invalid_input(e.to_string()))?;
     let Ok(uri) = AtUri::parse(&format!("at://{me}/{}/{rkey}", nsid::MOD_ACTION)) else {
-        return Ok(Vec::new());
+        return Ok(Held::default());
     };
     let pending = engine.outbox().pending(&me).await?;
     let latest = pending
@@ -895,7 +980,7 @@ async fn held_capabilities<H: Host>(
         .find(|op| op.collection == nsid::MOD_ACTION && op.rkey == rkey);
     let value = match latest {
         // a retraction on its way: nothing is held
-        Some(op) if op.action == OpAction::Delete => return Ok(Vec::new()),
+        Some(op) if op.action == OpAction::Delete => return Ok(Held::default()),
         Some(op) => op
             .value
             .as_deref()
@@ -906,7 +991,7 @@ async fn held_capabilities<H: Host>(
         },
     };
     let Some(action) = value.as_ref().and_then(|v| v.get("action")) else {
-        return Ok(Vec::new());
+        return Ok(Held::default());
     };
     // a restriction whose `until` passed holds nothing, as the engine reads it (`social.md` §4.2)
     let until = value
@@ -914,18 +999,29 @@ async fn held_capabilities<H: Host>(
         .and_then(|v| v.get("until"))
         .and_then(serde_json::Value::as_str)
         .and_then(|u| lessdugin_atp::syntax::Datetime::parse(u).ok());
-    if until.is_some_and(|u| u.timestamp_micros() <= engine.host().now_ms().saturating_mul(1000)) {
-        return Ok(Vec::new());
+    if until
+        .as_ref()
+        .is_some_and(|u| u.timestamp_micros() <= engine.host().now_ms().saturating_mul(1000))
+    {
+        return Ok(Held::default());
     }
-    Ok(action
-        .get("capabilities")
-        .and_then(serde_json::Value::as_array)
-        .map(|a| {
-            a.iter()
-                .filter_map(|c| serde_json::from_value(c.clone()).ok())
-                .collect()
-        })
-        .unwrap_or_default())
+    Ok(Held {
+        capabilities: action
+            .get("capabilities")
+            .and_then(serde_json::Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|c| serde_json::from_value(c.clone()).ok())
+                    .collect()
+            })
+            .unwrap_or_default(),
+        until_ms: until.map(|u| u.timestamp_micros().div_euclid(1000)),
+        reason: value
+            .as_ref()
+            .and_then(|v| v.get("reason"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+    })
 }
 
 fn unverified<'a>(mut actors: impl Iterator<Item = &'a ActorView>) -> bool {

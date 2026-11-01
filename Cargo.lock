@@ -3240,6 +3240,7 @@ dependencies = [
  "lessdugin-testkit",
  "ratatui",
  "ratatui-image",
+ "rustix 1.1.5",
  "serde_json",
  "tempfile",
  "tokio",

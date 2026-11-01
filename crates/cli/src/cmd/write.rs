@@ -234,7 +234,8 @@ pub async fn cached(engine: &Engine<NativeHost>, uri: &str) -> Result<(String, V
     Ok((row.cid.to_string(), v))
 }
 
-fn owner_of(uri: &str) -> Result<String, CliError> {
+/// The DID whose repository holds `uri`.
+pub fn owner_of(uri: &str) -> Result<String, CliError> {
     let u = AtUri::parse(uri).map_err(|e| EngineError::invalid_ref(format!("{uri:?}: {e}")))?;
     Ok(u.did().to_string())
 }
@@ -556,6 +557,10 @@ struct Current {
     title: Option<String>,
     kind: String,
     link: Option<String>,
+    /// The link card's title and description: an edit that keeps the uri keeps them too (the
+    /// engine writes `link` from the draft, `data-model.md` §8.3).
+    link_title: Option<String>,
+    link_description: Option<String>,
     tags: Vec<String>,
     labels: Vec<String>,
     root: Option<String>,
@@ -687,6 +692,12 @@ async fn current(w: &Writer, uri: &str) -> Result<Current, CliError> {
         None => String::new(),
     };
     let s = |k: &str| v.get(k).and_then(Value::as_str).map(str::to_owned);
+    let link = |k: &str| {
+        v.get("link")
+            .and_then(|l| l.get(k))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    };
     Ok(Current {
         is_post,
         forum: s("forum").unwrap_or_default(),
@@ -694,11 +705,9 @@ async fn current(w: &Writer, uri: &str) -> Result<Current, CliError> {
         markdown,
         title: s("title"),
         kind: s("kind").unwrap_or_else(|| "article".into()),
-        link: v
-            .get("link")
-            .and_then(|l| l.get("uri"))
-            .and_then(Value::as_str)
-            .map(str::to_owned),
+        link: link("uri"),
+        link_title: link("title"),
+        link_description: link("description"),
         tags: strs(v.get("tags")),
         labels: v
             .get("labels")
@@ -777,10 +786,14 @@ fn edit_draft(c: &Current, doc: &Doc, body: Option<String>) -> Result<Draft, Cli
                     c.title.clone()
                 },
                 body,
-                link: link.map(|uri| ExternalLinkDraft {
-                    uri,
-                    title: None,
-                    description: None,
+                link: link.map(|uri| {
+                    // the card's title and description describe the uri they came with
+                    let same = c.link.as_deref() == Some(uri.as_str());
+                    ExternalLinkDraft {
+                        uri,
+                        title: c.link_title.clone().filter(|_| same),
+                        description: c.link_description.clone().filter(|_| same),
+                    }
                 }),
                 tags: if has("tags") {
                     doc.list("tags")
@@ -811,81 +824,36 @@ fn body_mut(d: &mut Draft) -> &mut BodyDraft {
     }
 }
 
-/// What an edit of `uri` suspends (`social.md` §4.5, `threat-model.md` SOC-3): the positive
-/// assertions in effect on its current version (a keep, a frontpage or curated tier, a pin),
-/// as the raw view lists them. They name that version's CID, so they stop counting until an
-/// authority asserts them again on the new one.
-async fn suspended_by_edit(engine: &Engine<NativeHost>, uri: &str) -> Vec<&'static str> {
-    use lessdugin_lexicon::records::{Action, ModAction};
-    use lessdugin_lexicon::values::Tier;
-    let Ok(raw) = engine.raw(uri).await else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    for a in &raw.assertions {
-        if a.get("status").and_then(Value::as_str) != Some("effective") {
-            continue;
-        }
-        let Some(m) = a
-            .get("record")
-            .and_then(|r| serde_json::from_value::<ModAction>(r.clone()).ok())
-        else {
-            continue;
-        };
-        let what = match &m.action {
-            Action::Hide(h) if !h.hidden() => "a moderator's keep",
-            Action::Tier(t) if t.tier().is_some_and(|t| t != Tier::Personal) => {
-                "its frontpage or curated tier"
-            }
-            Action::Pin(p) if p.pinned() => "its pin",
-            _ => continue,
-        };
-        if !out.contains(&what) {
-            out.push(what);
-        }
-    }
-    // in one order, whatever the order of the records
-    out.sort_by_key(|w| {
-        [
-            "a moderator's keep",
-            "its frontpage or curated tier",
-            "its pin",
-        ]
-        .iter()
-        .position(|k| k == w)
-    });
-    out
-}
-
-/// Before an edit of an item that carries positive assertions (`social.md` §4.5): says what
-/// the edit suspends ([`suspended_by_edit`], in the view [`read::sync_for_read`] brought up
-/// to date, as `read` shows it), then asks on a terminal; headless use needs `--yes` (`yes`).
-/// An item with none asks nothing.
+/// Before an edit of an item that carries positive assertions (`social.md` §4.5,
+/// `threat-model.md` SOC-3): says what the edit suspends (the engine's `edit_preflight`, in
+/// the view [`read::sync_for_read`] brought up to date, as `read` shows it), then asks on a
+/// terminal; headless use needs `--yes` (`yes`). An item with none asks nothing. A preflight
+/// that cannot run does not refuse the edit: the user is told what could not be checked and
+/// why, and asked the same (sec-7).
 async fn confirm_suspension(
     ctx: &Ctx,
     engine: &Engine<NativeHost>,
     uri: &str,
     yes: bool,
 ) -> Result<(), CliError> {
-    let what = suspended_by_edit(engine, uri).await;
-    let Some((last, rest)) = what.split_last() else {
+    let (notices, unchecked) = match engine.edit_preflight(uri).await {
+        Ok(n) => (n, None),
+        Err(e) => (Vec::new(), Some(e.message)),
+    };
+    if notices.is_empty() && unchecked.is_none() {
         return Ok(());
-    };
-    let named = if rest.is_empty() {
-        (*last).to_owned()
-    } else {
-        format!("{} and {last}", rest.join(", "))
-    };
-    ctx.out.warn(cat([
-        lit("editing "),
-        tt(uri),
-        lit(" suspends "),
-        tt(&named),
-        lit(
-            ": they apply to the version a moderator saw, and stop until one asserts them again \
-             on the new version",
-        ),
-    ]));
+    }
+    for n in &notices {
+        ctx.out.warn(cat([tt(uri), lit(": "), tt(&n.message)]));
+    }
+    if let Some(why) = &unchecked {
+        ctx.out.warn(cat([
+            lit("what editing "),
+            tt(uri),
+            lit(" would suspend could not be checked: "),
+            tt(why),
+        ]));
+    }
     if yes {
         return Ok(());
     }
@@ -895,9 +863,16 @@ async fn confirm_suspension(
         }
         return Err(CliError::Reported(1));
     }
+    let said = match unchecked {
+        Some(why) => format!("what it would suspend could not be checked ({why})"),
+        None => notices
+            .iter()
+            .map(|n| n.message.as_str())
+            .collect::<Vec<_>>()
+            .join("; "),
+    };
     Err(CliError::usage(format!(
-        "editing {uri} suspends {named} (see above): add --yes to edit it when not running \
-         interactively"
+        "editing {uri}: {said}; add --yes to edit it when not running interactively"
     )))
 }
 

@@ -285,6 +285,23 @@ fn approval_mode_with_three_users_and_anonymous_reading() {
         insta::assert_snapshot!("members", redact(&users, &alice.ok(&["members"])));
     });
 
+    // `members revoke` is the direct engine.revoke alias: it removes the owner's #access
+    // grant, while bob's own membership record makes him an applicant again.
+    let r = alice.json(&["members", "revoke", "bob.test", "--yes"]);
+    assert_eq!(r["dto"], 1, "{r}");
+    assert_eq!(r["writes"].as_array().unwrap().len(), 1, "{r}");
+    assert_eq!(r["writes"][0]["state"]["kind"], "done", "{r}");
+    let members = alice.json(&["members", "--pending"]);
+    let b = members["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["actor"]["did"] == bob.did().as_str())
+        .unwrap_or_else(|| panic!("{members}"));
+    assert_eq!(b["granted"], false, "{b}");
+    let r = alice.json(&["approve", "bob.test", "--yes"]);
+    assert_eq!(r["writes"][0]["state"]["kind"], "done", "{r}");
+
     // bob posts (the forum by alias), carol replies after reading it
     let f = bob.file("p.md", "Bob's question body.\n");
     let t = bob.json(&[
@@ -1011,6 +1028,68 @@ fn a_spilled_body_is_edited_as_its_text() {
     let rec = alice.account.get(nsid::POST, &rkey).unwrap();
     assert_eq!(rec["body"]["text"], "Short now.\n", "{}", rec["body"]);
     assert!(rec["body"].get("textBlob").is_none(), "{}", rec["body"]);
+}
+
+/// An edit keeps a link post's card (`link.title`, `link.description`, entered by another
+/// client) while the uri stays: the engine writes `link` from the draft (`data-model.md`
+/// §8.3), so a title-only or text-only edit must send the card again (robustness-7). A new
+/// uri drops the card that described the old one.
+#[test]
+fn an_edit_keeps_a_link_posts_card() {
+    let net = Net::new();
+    let alice = net.user("alice.test", true);
+    alice.json(&["forum", "create", "meta", "--frontpage"]);
+    let t = json_stdin(
+        &alice,
+        &[
+            "post",
+            "-",
+            "--kind",
+            "link",
+            "--link",
+            "https://example.com/x",
+            "--title",
+            "A link",
+            "--yes",
+        ],
+        "Worth reading.\n",
+    );
+    assert_eq!(t["state"]["kind"], "done", "{t}");
+    let post = t["state"]["uri"].as_str().unwrap().to_owned();
+    let rkey = post.rsplit('/').next().unwrap().to_owned();
+    // another client fills in the card
+    let mut rec = alice.account.get(nsid::POST, &rkey).unwrap();
+    rec["link"]["title"] = serde_json::json!("Example: x");
+    rec["link"]["description"] = serde_json::json!("What x is about.");
+    alice.account.put(nsid::POST, &rkey, &rec);
+    alice.ok(&["sync", "alice.test/meta"]);
+
+    let e = alice.json(&["edit", &post, "--title", "A link, retitled"]);
+    assert_eq!(e["state"]["kind"], "done", "{e}");
+    let rec = alice.account.get(nsid::POST, &rkey).unwrap();
+    assert_eq!(rec["title"], "A link, retitled", "{rec}");
+    assert_eq!(rec["link"]["uri"], "https://example.com/x", "{rec}");
+    assert_eq!(rec["link"]["title"], "Example: x", "{rec}");
+    assert_eq!(rec["link"]["description"], "What x is about.", "{rec}");
+
+    let e = alice.json(&["edit", &post, "-m", "Still worth reading."]);
+    assert_eq!(e["state"]["kind"], "done", "{e}");
+    let rec = alice.account.get(nsid::POST, &rkey).unwrap();
+    assert_eq!(rec["body"]["text"], "Still worth reading.\n", "{rec}");
+    assert_eq!(rec["link"]["title"], "Example: x", "{rec}");
+    assert_eq!(rec["link"]["description"], "What x is about.", "{rec}");
+
+    // a new uri: the card described the old one
+    let f = alice.file(
+        "moved.md",
+        "---\nlink: https://example.com/y\n---\nMoved.\n",
+    );
+    let e = alice.json(&["edit", &post, s(&f)]);
+    assert_eq!(e["state"]["kind"], "done", "{e}");
+    let rec = alice.account.get(nsid::POST, &rkey).unwrap();
+    assert_eq!(rec["link"]["uri"], "https://example.com/y", "{rec}");
+    assert!(rec["link"].get("title").is_none(), "{rec}");
+    assert!(rec["link"].get("description").is_none(), "{rec}");
 }
 
 /// `redact --yes` is always sent (decision O-10): the engine lists the author's PDS when the

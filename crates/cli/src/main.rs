@@ -54,6 +54,10 @@ async fn run(ctx: &Ctx, command: Command) -> Result<(), CliError> {
         Command::Mute(a) => cmd::social::mute(ctx, a, true).await,
         Command::Unmute(a) => cmd::social::mute(ctx, a, false).await,
         Command::Mutes => cmd::social::mutes(ctx).await,
+        Command::Bookmark(a) => cmd::local::bookmark(ctx, a).await,
+        Command::Subscribe(a) => cmd::local::subscribe(ctx, a, true).await,
+        Command::Unsubscribe(a) => cmd::local::subscribe(ctx, a, false).await,
+        Command::Subs => cmd::local::subs(ctx).await,
         Command::Export(a) => cmd::social::export(ctx, a).await,
         Command::Activity(a) => cmd::social::activity(ctx, a).await,
         Command::Mods(a) => cmd::social::mods(ctx, a).await,
@@ -68,6 +72,7 @@ async fn run(ctx: &Ctx, command: Command) -> Result<(), CliError> {
         Command::Resolve(a) => cmd::identity::resolve(ctx, a).await,
         Command::Verify(a) => cmd::identity::verify(ctx, a).await,
         Command::Doctor(a) => cmd::doctor::run(ctx, a).await,
+        Command::Config(a) => cmd::local::config(ctx, a).await,
         #[cfg(feature = "web")]
         Command::Web(a) => web::run(ctx, a).await,
         #[cfg(feature = "tui")]

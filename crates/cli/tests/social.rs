@@ -34,6 +34,132 @@ struct World {
     forum: String,
 }
 
+/// The local-state commands (`engine-api.md` §3.6): bookmarks, every MVP subscription target
+/// and settings go through the real CLI, survive a new process and can be removed again.
+#[test]
+fn local_state_commands_round_trip() {
+    let net = Net::new();
+    let alice = net.user("alice.test", true);
+    let bob = net.user("bob.test", true);
+    alice.json(&["forum", "create", "meta", "--frontpage"]);
+    let p = alice.file("local.md", "---\ntitle: Local state\n---\nA post.\n");
+    let t = alice.json(&["post", s(&p), "--yes"]);
+    assert_eq!(t["state"]["kind"], "done", "{t}");
+    let post = t["state"]["uri"].as_str().unwrap().to_owned();
+    let forum = format!(
+        "at://{}/{}/meta",
+        alice.did(),
+        lessdugin_lexicon::collection::nsid::FORUM
+    );
+
+    let added = alice.json(&["bookmark", "add", &post]);
+    assert_eq!(added["dto"], 1);
+    assert_eq!(added["bookmarks"].as_array().unwrap().len(), 1);
+    assert_eq!(added["bookmarks"][0]["uri"], post);
+    assert_eq!(added["bookmarks"][0]["post"]["title"], "Local state");
+    let listed = alice.json(&["bookmark", "ls"]);
+    assert_eq!(listed, added);
+    let removed = alice.json(&["bookmark", "rm", &post]);
+    assert_eq!(removed["bookmarks"].as_array().unwrap().len(), 0);
+    assert!(alice.ok(&["bookmark"]).contains("No bookmarks."));
+
+    for args in [
+        vec!["subscribe", "post", post.as_str()],
+        vec!["subscribe", "forum"],
+        vec!["subscribe", "user", "bob.test"],
+        vec!["subscribe", "tag", "rust"],
+    ] {
+        let v = alice.json(&args);
+        assert_eq!(v["dto"], 1, "{args:?}: {v}");
+    }
+    let subs = alice.json(&["subs"]);
+    let entries = subs["subscriptions"].as_array().unwrap();
+    assert_eq!(entries.len(), 4, "{subs}");
+    assert_eq!(
+        entries[0]["subscription"],
+        serde_json::json!({"kind": "post", "uri": post})
+    );
+    assert_eq!(
+        entries[1]["subscription"],
+        serde_json::json!({"kind": "forum", "uri": forum})
+    );
+    assert_eq!(
+        entries[2]["subscription"],
+        serde_json::json!({"kind": "user", "did": bob.did()})
+    );
+    assert_eq!(
+        entries[3]["subscription"],
+        serde_json::json!({"kind": "tag", "forum": forum, "slug": "rust"})
+    );
+    for args in [
+        vec!["unsubscribe", "post", post.as_str()],
+        vec!["unsubscribe", "forum"],
+        vec!["unsubscribe", "user", "bob.test"],
+        vec!["unsubscribe", "tag", "rust"],
+    ] {
+        alice.json(&args);
+    }
+    assert_eq!(
+        alice.json(&["subs"])["subscriptions"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+
+    let settings = alice.json(&["config", "set", "sources", "direct"]);
+    assert_eq!(settings["dto"], 1);
+    assert_eq!(settings["settings"]["sources"], "direct");
+    assert_eq!(alice.json(&["config", "get", "sources"]), settings);
+    let settings = alice.json(&["config", "set", "karmaNotifications", "weekly"]);
+    assert_eq!(settings["settings"]["karmaNotifications"], "weekly");
+    let settings = alice.json(&[
+        "config",
+        "set",
+        "mediaAutoloadHosts",
+        "a.example, b.example",
+    ]);
+    assert_eq!(
+        settings["settings"]["mediaAutoloadHosts"],
+        serde_json::json!(["a.example", "b.example"])
+    );
+    let settings = alice.json(&["config", "set", "externalImagesForums", &forum]);
+    assert_eq!(
+        settings["settings"]["externalImagesForums"],
+        serde_json::json!([forum])
+    );
+    let settings = alice.json(&["config", "set", "indexers", "https://idx.example"]);
+    assert_eq!(
+        settings["settings"]["indexers"][0]["url"],
+        "https://idx.example"
+    );
+    let settings = alice.json(&["config", "set", "acknowledgedPublicActions", "vote,join"]);
+    assert_eq!(
+        settings["settings"]["acknowledgedPublicActions"],
+        serde_json::json!(["vote", "join"])
+    );
+    let settings = alice.json(&["config", "set", "sources"]);
+    assert_eq!(settings["settings"]["sources"], "direct");
+    assert_eq!(settings["pinned"], serde_json::json!(["sources"]));
+    let e = alice.fails(1, &["config", "get", "notASetting"]);
+    assert_eq!(e["detail"]["kind"], "unknownSetting", "{e}");
+    let e = alice.fails(1, &["config", "set", "karmaNotifications", "hourly"]);
+    assert_eq!(e["detail"]["kind"], "unknownSetting", "{e}");
+
+    // O-9: the file's explicit value is the pin, not a stored `config set` value.
+    alice.file("config.toml", "sources = \"direct\"\n");
+    let out = alice.run(&["config", "set", "sources", "assisted"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).contains("pinned"),
+        "{}",
+        text(&out.stderr)
+    );
+    let settings = alice.json(&["config", "get", "sources"]);
+    assert_eq!(settings["settings"]["sources"], "direct");
+    assert_eq!(settings["pinned"], serde_json::json!(["sources"]));
+}
+
 impl World {
     fn new() -> Self {
         let net = Net::new();
@@ -183,6 +309,19 @@ fn votes_agreement_and_reacts_move_the_score_and_notify() {
     w.alice.json(&["notifications", "--mark-read"]);
     let n2: NotificationList = exact(&w.alice.ok(&["--json", "notifications", "--all"]));
     assert_eq!(n2.unread, 0, "{n2:?}");
+
+    // --all --mark-read reaches mark_all_notifications_read, not just the one shown item.
+    let r = w.carol.json(&["react", &w.post, "insightful", "--yes"]);
+    assert_eq!(r["state"]["kind"], "done", "{r}");
+    let r = w.bob.json(&["comment", &w.post, "-m", "Another reply."]);
+    assert_eq!(r["state"]["kind"], "done", "{r}");
+    w.alice.ok(&["sync", &w.forum]);
+    let before: NotificationList = exact(&w.alice.ok(&["--json", "notifications", "--all"]));
+    assert!(before.unread > 1, "{before:?}");
+    w.alice
+        .json(&["notifications", "--all", "--mark-read", "--limit", "1"]);
+    let after: NotificationList = exact(&w.alice.ok(&["--json", "notifications", "--all"]));
+    assert_eq!(after.unread, 0, "{after:?}");
 }
 
 #[test]
@@ -647,7 +786,8 @@ fn the_human_thread_shows_agreement_reacts_and_banners() {
 /// `forum edit` keeps the about it is not asked to change, also a spilled one (`textBlob`,
 /// over 64 KiB, `data-model.md` §5.3) and its media: the text is fetched from the owner's PDS
 /// and spilled again, the media sent again as references (m4-5). `forum show` shows a spilled
-/// about's text, which the engine fetches from the owner's PDS (m4-5, engine part).
+/// about's text, which the engine fetches from the owner's PDS (m4-5, engine part). An
+/// account that does not own the forum is refused before any fetch.
 #[test]
 fn forum_edit_keeps_a_spilled_about_and_its_media() {
     use lessdugin_lexicon::collection::nsid;
@@ -687,4 +827,16 @@ fn forum_edit_keeps_a_spilled_about_and_its_media() {
     assert_eq!(media.len(), 1, "{decl}");
     assert_eq!(media[0]["blob"]["ref"], png["ref"], "{decl}");
     assert_eq!(media[0]["alt"], "a dot", "{decl}");
+
+    // another account is refused before anything is fetched (m4-5): the about's blob is the
+    // owner's to read, and the refusal is the engine's, not a failed fetch
+    let bob = net.user("bob.test", true);
+    let blob_gets = net.net.count("com.atproto.sync.getBlob");
+    let e = bob.fails(1, &["forum", "edit", "alice.test/big", "--name", "Mine"]);
+    assert_eq!(e["code"], "blocked", "{e}");
+    assert_eq!(
+        net.net.count("com.atproto.sync.getBlob"),
+        blob_gets,
+        "a non-owner's forum edit fetched a blob"
+    );
 }

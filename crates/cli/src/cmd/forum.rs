@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Forums and membership: `forum ls|show|follow|unfollow|use|create|edit`, `join`, `leave`,
-//! `members`, `approve`, `reject` and `sync` (synthesis §6.10).
+//! `members` (and `members revoke`), `approve`, `reject` and `sync` (synthesis §6.10).
 //!
 //! `forum create` always writes the membership mode (default `approval`, `docs/plan.md` M2)
 //! and makes the new forum the current one, as `join` does. `--json` prints the engine's DTOs
@@ -20,8 +20,8 @@ use lessdugin_native::host::NativeHost;
 use serde::Serialize;
 
 use crate::args::{
-    ApproveArgs, ForumAction, ForumArgs, ForumEditArgs, JoinArgs, LeaveArgs, MembersArgs,
-    RejectArgs, SyncArgs,
+    ApproveArgs, ForumAction, ForumArgs, ForumEditArgs, JoinArgs, LeaveArgs, MembersAction,
+    MembersArgs, RejectArgs, SyncArgs,
 };
 use crate::cmd::{read, refs, social, write};
 use crate::ctx::{CliError, Ctx};
@@ -218,10 +218,18 @@ fn text_option(given: Option<String>, current: Option<String>) -> Option<String>
 
 /// `lessdugin forum edit [forum] …` (`engine-api.md` §3.2 `forum_update`): the owner changes
 /// the declaration through the edit protocol; every field not given keeps its current value
-/// (read from the cached declaration).
+/// (read from the cached declaration). Another account is refused before anything is read:
+/// the declaration lives in the owner's repository, and a spilled about is fetched only by its
+/// owner (m4-5), so the engine's refusal of the write never comes after a fetch.
 async fn edit(ctx: &Ctx, a: ForumEditArgs) -> Result<(), CliError> {
     let w = ctx.writer().await?;
     let uri = refs::forum_or_current(ctx, &w.engine, a.forum.as_deref()).await?;
+    if write::owner_of(&uri)? != w.account.did {
+        return Err(EngineError::blocked(
+            "only the forum's owner can change it (the declaration is in the owner's repo)",
+        )
+        .into());
+    }
     // loads (and caches) the declaration
     w.engine.forum_open(&uri).await?;
     let (_, decl) = write::cached(&w.engine, &uri).await?;
@@ -467,8 +475,11 @@ pub async fn leave(ctx: &Ctx, args: LeaveArgs) -> Result<(), CliError> {
     write::report(ctx, &t, "Left")
 }
 
-/// `lessdugin members [forum] [--pending]`.
+/// `lessdugin members [forum] [--pending]`, and `members revoke <actor>...`.
 pub async fn members(ctx: &Ctx, args: MembersArgs) -> Result<(), CliError> {
+    if let Some(MembersAction::Revoke { actors, yes }) = args.action {
+        return revoke(ctx, args.forum.as_deref(), &actors, yes).await;
+    }
     let engine = ctx.reader().await?;
     let uri = refs::forum_or_current(ctx, &engine, args.forum.as_deref()).await?;
     read::sync_forum_quietly(ctx, &engine, &uri).await;
@@ -531,14 +542,46 @@ pub async fn approve(ctx: &Ctx, args: ApproveArgs) -> Result<(), CliError> {
     for t in tickets {
         done.push(write::drive(ctx, &w, t).await?);
     }
+    report_each(ctx, &args.actors, &done, "Approved ", "Queued approval of ")
+}
+
+/// `lessdugin members revoke <actor>...` (`engine-api.md` §3.2 `revoke`): removes the
+/// account's grant of membership (its `#access{member}`) of each actor; the removal is a mod
+/// action (`social.md` §17).
+async fn revoke(
+    ctx: &Ctx,
+    forum: Option<&str>,
+    actors: &[String],
+    yes: bool,
+) -> Result<(), CliError> {
+    let w = ctx.writer().await?;
+    let uri = refs::forum_or_current(ctx, &w.engine, forum).await?;
+    social::acknowledge(ctx, &w, PublicActionKind::ModAction, yes).await?;
+    let tickets = w.engine.revoke(&uri, actors).await?;
+    let mut done = Vec::with_capacity(tickets.len());
+    for t in tickets {
+        done.push(write::drive(ctx, &w, t).await?);
+    }
+    report_each(ctx, actors, &done, "Revoked ", "Queued revocation of ")
+}
+
+/// Reports one write per actor (`approve`, `members revoke`): `--json` prints the tickets as
+/// one list; the first failure is the exit code.
+fn report_each(
+    ctx: &Ctx,
+    actors: &[String],
+    done: &[WriteTicket],
+    did: &'static str,
+    queued: &'static str,
+) -> Result<(), CliError> {
     if ctx.out.is_json() {
         ctx.out.json(&WriteList {
             dto: DTO_VERSION,
-            writes: &done,
+            writes: done,
         });
     }
     let mut first_error = None;
-    for (actor, t) in args.actors.iter().zip(&done) {
+    for (actor, t) in actors.iter().zip(done) {
         match &t.state {
             lessdugin_core::dto::WriteState::Failed { error } => {
                 if !ctx.out.is_json() {
@@ -554,9 +597,9 @@ pub async fn approve(ctx: &Ctx, args: ApproveArgs) -> Result<(), CliError> {
             _ if ctx.out.is_json() => {}
             lessdugin_core::dto::WriteState::Done { .. } => ctx
                 .out
-                .line(&[(lit("Approved "), Style::Good), (name(actor), Style::Bold)]),
+                .line(&[(lit(did), Style::Good), (name(actor), Style::Bold)]),
             _ => ctx.out.line(&[
-                (lit("Queued approval of "), Style::Warn),
+                (lit(queued), Style::Warn),
                 (name(actor), Style::Bold),
                 (lit(": write "), Style::Plain),
                 (tt(&t.id), Style::Plain),

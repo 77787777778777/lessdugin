@@ -21,6 +21,9 @@ pub use content::*;
 mod social;
 pub use social::*;
 
+mod local;
+pub use local::*;
+
 /// A serverless markdown and media forum on atproto.
 #[derive(Debug, Parser)]
 #[command(
@@ -152,6 +155,15 @@ pub enum Command {
     Unmute(MuteArgs),
     /// List the authors you muted.
     Mutes,
+    /// Bookmarks, kept on this device: add, rm, ls.
+    Bookmark(BookmarkArgs),
+    /// Be notified of new comments on a post, or new posts in a forum, by a user or with a tag
+    /// (kept on this device).
+    Subscribe(SubscribeArgs),
+    /// Remove a subscription.
+    Unsubscribe(SubscribeArgs),
+    /// List your subscriptions.
+    Subs,
     /// Export your posts and comments, or a forum, as JSON or markdown (--local: this device's
     /// local state, which --import merges back).
     Export(ExportArgs),
@@ -181,6 +193,8 @@ pub enum Command {
     Verify(VerifyArgs),
     /// Check the configuration, keyring, network and the account's PDS.
     Doctor(DoctorArgs),
+    /// This device's settings: get [key], set <key> [value].
+    Config(ConfigArgs),
     /// Print a shell completion script.
     Completions(CompletionsArgs),
     /// Serve the web app on 127.0.0.1 with a bridge to your logged-in accounts (the browser
@@ -307,4 +321,270 @@ pub struct CompletionsArgs {
     /// The shell.
     #[arg(value_enum)]
     pub shell: clap_complete::Shell,
+}
+
+/// How the CLI reaches each operation of `engine-api.md` §3.2 (forums and membership), §3.5
+/// (writes) and §3.6 (local state): `docs/plan.md` §M3, "every MVP action is reachable in all
+/// three clients". The TUI keeps the same table (`lessdugin_tui::command::REACH`); the test
+/// holds this one to the spec's tables, and each command line it names to the parser, so an
+/// operation the spec adds fails here until the CLI reaches it (or says why it does not).
+#[cfg(test)]
+mod reach {
+    use std::collections::BTreeSet;
+
+    use clap::CommandFactory;
+
+    use super::Cli;
+
+    /// How the CLI reaches an engine operation.
+    enum Reach {
+        /// This command line (its words are checked against the parser).
+        Command(&'static str),
+        /// No command of its own: a command calls it on the way, as the text says.
+        Automatic(&'static str),
+        /// Not in the CLI, for the reason given (a later milestone, or another client's job).
+        NotHere(&'static str),
+    }
+
+    const REACH: &[(&str, Reach)] = &[
+        // §3.2
+        ("forum_open", Reach::Command("forum show")),
+        ("forum_discover", Reach::NotHere("M5 (engine-api.md §3.9)")),
+        (
+            "forum_follow",
+            Reach::Command("forum follow alice.example.com/meta"),
+        ),
+        ("forum_unfollow", Reach::Command("forum unfollow")),
+        ("followed", Reach::Command("forum ls")),
+        ("forum_create", Reach::Command("forum create meta")),
+        ("forum_update", Reach::Command("forum edit --name Meta")),
+        ("join", Reach::Command("join alice.example.com/meta")),
+        ("leave", Reach::Command("leave")),
+        ("members", Reach::Command("members --pending")),
+        (
+            "grant",
+            Reach::Automatic("`approve` grants (and forgets a rejection); `mod approve` too"),
+        ),
+        (
+            "revoke",
+            Reach::Command("members revoke did:plc:aaaaaaaaaaaaaaaaaaaaaaaa"),
+        ),
+        (
+            "approve",
+            Reach::Command("approve did:plc:aaaaaaaaaaaaaaaaaaaaaaaa"),
+        ),
+        (
+            "reject",
+            Reach::Command("reject did:plc:aaaaaaaaaaaaaaaaaaaaaaaa"),
+        ),
+        (
+            "rejected_applicants",
+            Reach::Automatic("`members --pending` leaves out the applicants rejected here"),
+        ),
+        (
+            "mods_set",
+            Reach::Command("mods add did:plc:aaaaaaaaaaaaaaaaaaaaaaaa"),
+        ),
+        // §3.5
+        ("publish", Reach::Command("post --title Hello")),
+        ("comment", Reach::Command("comment 3 -m Hi")),
+        ("edit", Reach::Command("edit 3 -m Changed")),
+        (
+            "edit_preflight",
+            Reach::Automatic("`edit` asks first when the edit suspends a keep, tier or pin"),
+        ),
+        ("delete", Reach::Command("delete 3 --yes")),
+        ("retract", Reach::Command("retract c1")),
+        ("opinion", Reach::Command("vote 3 up")),
+        ("mod_action", Reach::Command("mod hide 3")),
+        (
+            "mod_adopt",
+            Reach::Command("mod adopt did:plc:aaaaaaaaaaaaaaaaaaaaaaaa"),
+        ),
+        ("wiki_edit", Reach::NotHere("M5 (engine-api.md §3.9)")),
+        ("seq_create", Reach::NotHere("M5 (engine-api.md §3.9)")),
+        ("seq_edit", Reach::NotHere("M5 (engine-api.md §3.9)")),
+        ("seq_add", Reach::NotHere("M5 (engine-api.md §3.9)")),
+        ("seq_remove", Reach::NotHere("M5 (engine-api.md §3.9)")),
+        ("seq_move", Reach::NotHere("M5 (engine-api.md §3.9)")),
+        ("redact_revision", Reach::Command("redact 3 --yes")),
+        ("prepare_media", Reach::Command("media add chart.png")),
+        ("undo", Reach::Command("outbox undo 1")),
+        ("retry_write", Reach::Command("outbox retry 1")),
+        (
+            "write_status",
+            Reach::Automatic("a writing command reports its write's final ticket"),
+        ),
+        ("writes", Reach::Command("outbox ls")),
+        // §3.6
+        (
+            "mark_read",
+            Reach::Automatic("`read` marks the thread read"),
+        ),
+        (
+            "mark_notifications_read",
+            Reach::Command("notifications --mark-read"),
+        ),
+        (
+            "mark_all_notifications_read",
+            Reach::Command("notifications --all --mark-read"),
+        ),
+        ("bookmark", Reach::Command("bookmark add 3")),
+        ("subscribe", Reach::Command("subscribe forum")),
+        (
+            "mute",
+            Reach::Command("mute did:plc:aaaaaaaaaaaaaaaaaaaaaaaa"),
+        ),
+        (
+            "acknowledged_public_actions",
+            Reach::Command("config get acknowledgedPublicActions"),
+        ),
+        (
+            "public_action_acknowledged",
+            Reach::Automatic("the first public action of a kind shows the interstitial"),
+        ),
+        (
+            "acknowledge_public_action",
+            Reach::Automatic("answering the interstitial (or --yes) records it"),
+        ),
+        (
+            "karma_notifications",
+            Reach::Command("config get karmaNotifications"),
+        ),
+        (
+            "set_karma_notifications",
+            Reach::Command("notifications --karma-cadence weekly"),
+        ),
+        (
+            "save_draft",
+            Reach::NotHere("the CLI's drafts are files of the data directory (`draft`)"),
+        ),
+        (
+            "delete_draft",
+            Reach::NotHere("the CLI's drafts are files of the data directory (`draft`)"),
+        ),
+        ("settings", Reach::Command("config get")),
+        (
+            "set_setting",
+            Reach::Command("config set mediaAutoload off"),
+        ),
+        ("export_local", Reach::Command("export --local")),
+        ("import_local", Reach::Command("export --import state.json")),
+    ];
+
+    /// The operations of the spec's §3.2, §3.5 and §3.6 tables (the first cell of each row).
+    fn spec_operations() -> BTreeSet<String> {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/spec/engine-api.md");
+        let spec = std::fs::read_to_string(path).expect("docs/spec/engine-api.md");
+        let mut ops = BTreeSet::new();
+        let mut on = false;
+        for line in spec.lines() {
+            if line.starts_with("### ") {
+                on = ["### 3.2 ", "### 3.5 ", "### 3.6 "]
+                    .iter()
+                    .any(|h| line.starts_with(h));
+                continue;
+            }
+            if !on || !line.starts_with("| `") {
+                continue;
+            }
+            let first = line.split('|').nth(1).unwrap_or_default();
+            for code in first.split('`').skip(1).step_by(2) {
+                let name: String = code
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                    .collect();
+                if !name.is_empty() {
+                    ops.insert(name);
+                }
+            }
+        }
+        ops
+    }
+
+    /// `line` parses as far as its subcommands and flags go: every leading word is a
+    /// subcommand of the one before, and every `--flag` an argument of the last one.
+    fn parses(line: &str) {
+        let root = Cli::command();
+        let mut cur = &root;
+        let mut depth = 0;
+        let mut positional = false;
+        for word in line.split_whitespace() {
+            if let Some(flag) = word.strip_prefix("--") {
+                let flag = flag.split('=').next().unwrap_or_default();
+                let known = cur
+                    .get_arguments()
+                    .chain(root.get_arguments())
+                    .any(|a| a.get_long() == Some(flag));
+                assert!(
+                    known,
+                    "{line}: `{word}` is no option of `{}`",
+                    cur.get_name()
+                );
+                continue;
+            }
+            if let Some(flag) = word.strip_prefix('-')
+                && let Some(flag) = flag.chars().next()
+            {
+                let known = cur
+                    .get_arguments()
+                    .chain(root.get_arguments())
+                    .any(|a| a.get_short() == Some(flag));
+                assert!(
+                    known,
+                    "{line}: `{word}` is no option of `{}`",
+                    cur.get_name()
+                );
+                continue;
+            }
+            if depth > 0
+                && positional
+                && !word.starts_with('-')
+                && cur.find_subcommand(word).is_none()
+            {
+                // a value
+                continue;
+            }
+            match cur.find_subcommand(word) {
+                Some(sub) => {
+                    cur = sub;
+                    depth += 1;
+                    positional = false;
+                }
+                None if depth > 0 && cur.has_subcommands() => {
+                    panic!("{line}: `{word}` is no subcommand of `{}`", cur.get_name())
+                }
+                None => {
+                    positional = true;
+                }
+            }
+        }
+        assert!(depth > 0, "{line}: no command");
+    }
+
+    #[test]
+    fn every_engine_operation_has_a_way_in() {
+        let spec = spec_operations();
+        assert!(spec.len() > 40, "the spec's tables were not read: {spec:?}");
+        let reach: BTreeSet<String> = REACH.iter().map(|(op, _)| (*op).to_owned()).collect();
+        assert_eq!(REACH.len(), reach.len(), "an operation is listed twice");
+        let missing: Vec<&String> = spec.difference(&reach).collect();
+        assert!(
+            missing.is_empty(),
+            "not reachable from the CLI: {missing:?}"
+        );
+        let stale: Vec<&String> = reach.difference(&spec).collect();
+        assert!(stale.is_empty(), "not operations of the spec: {stale:?}");
+        for (op, r) in REACH {
+            match r {
+                Reach::Command(line) => parses(line),
+                Reach::Automatic(how) => assert!(!how.is_empty(), "{op}: say how"),
+                // every operation an M3 client must offer is a command
+                Reach::NotHere(why) => assert!(
+                    why.starts_with("M5") || op.contains("draft"),
+                    "{op} must be reachable: {why}"
+                ),
+            }
+        }
+    }
 }

@@ -163,6 +163,19 @@ pub struct EditorRequest {
     pub template: String,
 }
 
+/// What `:edit` found before the editor opens ([`Effect::StartEdit`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct EditStart {
+    /// The editor session.
+    pub request: EditorRequest,
+    /// What the edit would suspend (`edit_preflight`, `social.md` §4.5): the user confirms
+    /// first.
+    pub notices: Vec<ActionNotice>,
+    /// Why `edit_preflight` could not run, when it could not: the edit goes on unchecked, once
+    /// the user, told why, confirms (sec-7).
+    pub unchecked: Option<String>,
+}
+
 /// Something for the runtime to do.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Effect {
@@ -785,7 +798,7 @@ pub enum Action {
     LocalDone(Result<String, EngineError>),
     /// [`Effect::StartEdit`]: the editor session and what the edit would suspend
     /// (`edit_preflight`), or why there is none.
-    EditReady(Result<(EditorRequest, Vec<ActionNotice>), EngineError>),
+    EditReady(Result<EditStart, EngineError>),
     /// [`Effect::LoadMembers`] finished.
     MembersLoaded(Result<Vec<MemberView>, EngineError>),
     /// [`Effect::LoadRaw`] finished.
@@ -1759,6 +1772,16 @@ pub fn status_text(s: &Status) -> TermText {
     cat([lit(" "), s.text.clone()])
 }
 
+/// Every notice of an action's result, `; `-separated (the engine returns them in a fixed
+/// order, each telling the user something the others do not: a restriction's retroactivity
+/// and the expiry it now shares, an adoption and what it does not adopt).
+fn notices_text(notices: &[ActionNotice]) -> TermText {
+    cat(notices
+        .iter()
+        .enumerate()
+        .flat_map(|(i, n)| [lit(if i == 0 { "" } else { "; " }), tt(&n.message)]))
+}
+
 impl State {
     /// A new state for a terminal of `width` × `height`.
     pub fn new(width: u16, height: u16, account: Option<AccountView>, offline: bool) -> Self {
@@ -1980,10 +2003,19 @@ impl State {
                 Err(e) => self.say(Tone::Error, tt(&e.message)),
             },
             Action::EditReady(result) => match result {
-                Ok((req, notices)) if notices.is_empty() => fx.push(Effect::Editor(req)),
+                Ok(EditStart {
+                    request,
+                    notices,
+                    unchecked: None,
+                }) if notices.is_empty() => fx.push(Effect::Editor(request)),
                 // an edit suspends the keep, tier or pin in effect on the item: ask first
-                // (`social.md` §4.5, `threat-model.md` SOC-3)
-                Ok((req, notices)) => {
+                // (`social.md` §4.5, `threat-model.md` SOC-3); when that could not be checked,
+                // say why and ask the same, rather than refuse the edit (sec-7)
+                Ok(EditStart {
+                    request,
+                    notices,
+                    unchecked,
+                }) => {
                     let mut text = String::new();
                     for n in &notices {
                         let mut c = n.message.chars();
@@ -1991,10 +2023,15 @@ impl State {
                         text.push_str(c.as_str());
                         text.push_str(". ");
                     }
+                    if let Some(why) = unchecked {
+                        text.push_str(&format!(
+                            "What this edit would suspend could not be checked ({why}). "
+                        ));
+                    }
                     text.push_str("Edit it anyway?");
                     self.confirm = Some(Confirm {
                         text,
-                        effects: vec![Effect::Editor(req)],
+                        effects: vec![Effect::Editor(request)],
                     });
                 }
                 Err(e) => self.say(Tone::Error, cat([lit("Cannot edit it: "), tt(&e.message)])),
@@ -3066,9 +3103,11 @@ impl State {
             Compose::Edit { uri, base } => {
                 let mut draft = (**base).clone();
                 match &mut draft {
+                    // the text replaces the body's markdown; its media (the cached items, as
+                    // `start_edit` read them) stay, or the edit would delete them
                     // a quick take has no title line (data-model.md PO4): the text is its body
                     Draft::Post { post, .. } if post.kind == PostKind::QuickTake => {
-                        post.body = lessdugin_core::dto::BodyDraft::text(text.clone());
+                        post.body.markdown = text.clone();
                     }
                     Draft::Post { post, .. } => match editor::split_post(&text) {
                         Ok((title, body)) => {
@@ -3078,7 +3117,7 @@ impl State {
                             if post.title.as_deref().map(str::trim) != Some(first) {
                                 post.title = Some(title);
                             }
-                            post.body = lessdugin_core::dto::BodyDraft::text(body);
+                            post.body.markdown = body;
                         }
                         Err(why) => {
                             self.say(
@@ -3093,7 +3132,7 @@ impl State {
                         }
                     },
                     Draft::Comment { comment, .. } => {
-                        comment.body = lessdugin_core::dto::BodyDraft::text(text.clone());
+                        comment.body.markdown = text.clone();
                     }
                 }
                 self.say(Tone::Info, lit("Queuing the edit..."));
@@ -3996,10 +4035,22 @@ impl State {
         match result {
             Ok(t) => {
                 let mut msg = lit("Moderator list updated.");
-                if let Some(n) = t.notices.first() {
-                    msg = cat([lit("Moderator list updated: "), tt(&n.message), lit(".")]);
+                if !t.notices.is_empty() {
+                    msg = cat([
+                        lit("Moderator list updated: "),
+                        notices_text(&t.notices),
+                        lit("."),
+                    ]);
                 }
                 self.say(Tone::Good, msg);
+                // a removal's notices name the adoption write and list what it does not
+                // adopt (`data-model.md` §8.6): more than the status line holds
+                if t.notices.len() > 1 {
+                    self.show_panel(
+                        "Moderator change",
+                        t.notices.iter().map(|n| tt(&n.message)).collect(),
+                    );
+                }
                 self.follow_own = Some(screen);
                 if let Some(i) = self.index_of(screen) {
                     self.reload(i, Origin::User, fx);
@@ -5117,8 +5168,12 @@ impl State {
                     self.writes.insert(t.id.clone(), t.state);
                 }
                 let mut msg = lit("Mod action recorded.");
-                if let Some(n) = t.notices.first() {
-                    msg = cat([lit("Mod action recorded: "), tt(&n.message), lit(".")]);
+                if !t.notices.is_empty() {
+                    msg = cat([
+                        lit("Mod action recorded: "),
+                        notices_text(&t.notices),
+                        lit("."),
+                    ]);
                 }
                 self.say(Tone::Good, msg);
                 self.follow_own = Some(screen);
@@ -5184,11 +5239,11 @@ impl State {
                     self.writes.insert(t.id.clone(), t.state);
                 }
                 let mut msg = cat([lit(label), lit(" recorded (Backspace undoes).")]);
-                if let Some(n) = t.notices.first() {
+                if !t.notices.is_empty() {
                     msg = cat([
                         lit(label),
                         lit(" recorded: "),
-                        tt(&n.message),
+                        notices_text(&t.notices),
                         lit(" (Backspace undoes)."),
                     ]);
                 }

@@ -19,23 +19,451 @@
 //! - Decoded images are scaled down to [`limits::SHOWN_MAX_SIDE`] and at most
 //!   [`limits::MAX_SHOWN`] are kept; the oldest is dropped first ([`Images::poll`] says which).
 //!
-//! The picker is queried once (it talks to the terminal) and its answer decides the protocol:
-//! Kitty graphics, iTerm2 inline images, Sixel, or the halfblock fallback that needs nothing from
-//! the terminal at all. Which media load, and when, is the state's business (the autoload policy,
-//! `sync.md` §11.3); this module only decodes and draws what it is handed.
+//! # How the protocol is detected
+//!
+//! The protocol (Kitty graphics, iTerm2 inline images, Sixel, or the halfblock fallback that
+//! needs nothing from the terminal) can only be learnt by ASKING the terminal: the query writes a
+//! few control sequences and reads the answer from stdin. A terminal that never answers (a pty
+//! with no emulator behind it, `script` to a pipe, some multiplexers and IDE consoles) turns that
+//! read into a trap: whatever is typed next is swallowed by the reader waiting for the answer.
+//! `ratatui-image`'s own query leaves such a reader behind (a thread blocked in `read`, which
+//! eats the next keystroke before it dies), so it is not used. Instead:
+//!
+//! 1. [`detection`] decides, from the `LESSDUGIN_TUI_IMAGES` setting ([`Setting`]) and the
+//!    environment, whether the terminal is worth asking at all. `auto` (the default) asks only a
+//!    terminal the environment names (`TERM_PROGRAM`, `KITTY_WINDOW_ID`, `WEZTERM_*`,
+//!    `ITERM_SESSION_ID`, `TMUX` and the like, or a `TERM` of a known emulator) or one that
+//!    reports its cell size in pixels (which an emulator sets and a bare pty does not); anything
+//!    else gets halfblocks without a query. `query`, `halfblocks` and `off` force the answer.
+//! 2. When it asks, [`query_terminal`] writes the query and reads the answer ITSELF, on the UI
+//!    thread's behalf, by polling stdin with one bounded wait ([`QUERY_TIMEOUT`]): the terminal's
+//!    answer ends with a Device Status Report every terminal implements, so the read stops at it,
+//!    at the timeout, or at end of input, and no reader is left on stdin afterwards. The TUI's
+//!    input thread starts only then, so it is the only reader stdin ever has.
+//! 3. Bytes read that are not the terminal's answer (keys typed before it arrived, or right after
+//!    it) are handed back as key events ([`keys_of`]), so a keystroke is never lost to the query.
+//!
+//! Which media load, and when, is the state's business (the autoload policy, `sync.md` §11.3);
+//! this module only decodes and draws what it is handed.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
+use std::time::Duration;
 
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use image::DynamicImage;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
-use ratatui_image::picker::Picker;
+use ratatui_image::FontSize;
+use ratatui_image::picker::cap_parser::{Parser, QueryStdioOptions, Response};
+use ratatui_image::picker::{Picker, ProtocolType};
 use ratatui_image::protocol::StatefulProtocol;
 use ratatui_image::thread::{ResizeRequest, ResizeResponse, ThreadProtocol};
+
+/// The whole terminal query waits at most this long for the answer (a terminal answers within
+/// a round trip; one that never answers costs a forced `query` this much at startup).
+pub const QUERY_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// The `LESSDUGIN_TUI_IMAGES` setting: whether the terminal is asked for its graphics protocol.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Setting {
+    /// Ask a terminal the environment names, or one that reports its cell size; halfblocks
+    /// otherwise.
+    #[default]
+    Auto,
+    /// Always ask (over SSH, where the emulator's variables are not forwarded).
+    Query,
+    /// Never ask: halfblocks.
+    Halfblocks,
+    /// Decode nothing.
+    Off,
+}
+
+impl Setting {
+    /// The environment variable.
+    pub const VAR: &'static str = "LESSDUGIN_TUI_IMAGES";
+
+    /// `auto`, `query`, `halfblocks` or `off` (case does not matter); `None` for anything else.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "auto" => Some(Self::Auto),
+            "query" => Some(Self::Query),
+            "halfblocks" => Some(Self::Halfblocks),
+            "off" => Some(Self::Off),
+            _ => None,
+        }
+    }
+
+    /// The setting from `$LESSDUGIN_TUI_IMAGES` (`auto` when unset or unknown).
+    pub fn from_env() -> Self {
+        Self::from_var(|k| std::env::var(k).ok())
+    }
+
+    /// [`Setting::from_env`] over `var`.
+    pub fn from_var(var: impl Fn(&str) -> Option<String>) -> Self {
+        let Some(v) = var(Self::VAR) else {
+            return Self::Auto;
+        };
+        Self::parse(&v).unwrap_or_else(|| {
+            tracing::warn!(value = %v, "unknown {}: using auto", Self::VAR);
+            Self::Auto
+        })
+    }
+}
+
+/// What the runtime does about images before its input reader starts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Detection {
+    /// Ask the terminal ([`query_terminal`]).
+    Query,
+    /// Halfblocks, no query.
+    Halfblocks,
+    /// No images ([`Images::off`]).
+    Off,
+}
+
+/// Variables an emulator (or a multiplexer, which answers queries itself) sets; `TERM` alone is
+/// not evidence, since a bare pty inherits one.
+const EMULATOR_VARS: [&str; 19] = [
+    "TERM_PROGRAM",
+    "KITTY_WINDOW_ID",
+    "KITTY_PID",
+    "WEZTERM_EXECUTABLE",
+    "WEZTERM_PANE",
+    "ITERM_SESSION_ID",
+    "LC_TERMINAL",
+    "KONSOLE_VERSION",
+    "VTE_VERSION",
+    "GHOSTTY_RESOURCES_DIR",
+    "ALACRITTY_WINDOW_ID",
+    "ALACRITTY_SOCKET",
+    "XTERM_VERSION",
+    "WT_SESSION",
+    "MLTERM",
+    "TERMINATOR_UUID",
+    "GNOME_TERMINAL_SCREEN",
+    "TMUX",
+    "STY",
+];
+
+/// `TERM` values (by prefix) only an emulator sets.
+const EMULATOR_TERMS: [&str; 15] = [
+    "xterm-kitty",
+    "xterm-ghostty",
+    "ghostty",
+    "foot",
+    "wezterm",
+    "alacritty",
+    "contour",
+    "rio",
+    "mintty",
+    "konsole",
+    "iterm",
+    "mlterm",
+    "rxvt",
+    "tmux",
+    "screen",
+];
+
+/// Whether the terminal is worth asking: `setting` decides, and under `auto` the environment
+/// does (see the module docs). `cell_pixels_known`: the terminal reports its size in pixels
+/// (`TIOCGWINSZ`), which an emulator does and a bare pty does not. A `TERM` that is unset or
+/// `dumb` is never asked under `auto`.
+pub fn detection(
+    setting: Setting,
+    var: impl Fn(&str) -> Option<String>,
+    cell_pixels_known: bool,
+) -> Detection {
+    let set = |k: &str| var(k).is_some_and(|v| !v.trim().is_empty());
+    match setting {
+        Setting::Off => Detection::Off,
+        Setting::Halfblocks => Detection::Halfblocks,
+        Setting::Query => Detection::Query,
+        Setting::Auto => {
+            let term = var("TERM").unwrap_or_default();
+            if term.is_empty() || term == "dumb" {
+                return Detection::Halfblocks;
+            }
+            if cell_pixels_known
+                || EMULATOR_VARS.iter().any(|k| set(k))
+                || EMULATOR_TERMS.iter().any(|p| term.starts_with(p))
+            {
+                Detection::Query
+            } else {
+                Detection::Halfblocks
+            }
+        }
+    }
+}
+
+/// The emulators whose Kitty and Sixel implementations `ratatui-image` does not trust (its own
+/// blacklist): they are not asked for those, and may still draw iTerm2 images.
+fn distrusts_kitty_and_sixel(var: &impl Fn(&str) -> Option<String>) -> bool {
+    ["WEZTERM_EXECUTABLE", "KONSOLE_VERSION"]
+        .iter()
+        .any(|k| var(k).is_some_and(|v| !v.is_empty()))
+}
+
+/// iTerm2 inline images cannot be queried for: the emulators known to draw them, from the
+/// environment, as `ratatui-image` reads it (inside tmux only the outer terminal's variables
+/// count).
+fn iterm2_hint(is_tmux: bool, var: &impl Fn(&str) -> Option<String>) -> Option<ProtocolType> {
+    let set = |k: &str| var(k).is_some_and(|v| !v.is_empty());
+    if is_tmux {
+        return (set("ITERM_SESSION_ID") || set("WEZTERM_EXECUTABLE"))
+            .then_some(ProtocolType::Iterm2);
+    }
+    const PROGRAMS: [&str; 9] = [
+        "iTerm",
+        "WezTerm",
+        "mintty",
+        "vscode",
+        "Tabby",
+        "Hyper",
+        "rio",
+        "Bobcat",
+        "WarpTerminal",
+    ];
+    let program = var("TERM_PROGRAM").unwrap_or_default();
+    if PROGRAMS.iter().any(|p| program.contains(p))
+        || var("LC_TERMINAL").is_some_and(|t| t.contains("iTerm"))
+    {
+        return Some(ProtocolType::Iterm2);
+    }
+    None
+}
+
+/// The query to write to the terminal (`ratatui-image`'s, so its parser reads the answer):
+/// Kitty and Sixel probes unless the emulator is distrusted for them, the cell size, and the
+/// Device Status Report that ends the answer; wrapped for tmux passthrough when `is_tmux`.
+pub fn query_string(is_tmux: bool, var: &impl Fn(&str) -> Option<String>) -> String {
+    let mut options = QueryStdioOptions::default();
+    if distrusts_kitty_and_sixel(var) {
+        options.blacklist_protocols = vec![ProtocolType::Kitty, ProtocolType::Sixel];
+    }
+    Parser::query(is_tmux, options)
+}
+
+/// The terminal's answer to [`query_string`], fed byte by byte as it is read.
+///
+/// Bytes before the first ESC were typed before the terminal answered, and bytes after the
+/// Device Status Report that ends the answer were typed after it: both are kept as
+/// [`QueryAnswer::typed`], for the caller to forward as keys. (A key typed in the middle of the
+/// answer burst would be lost; the terminal writes its answer in one go, so the window is a
+/// single write.)
+#[derive(Default)]
+pub struct QueryAnswer {
+    parser: Parser,
+    responses: Vec<Response>,
+    typed: Vec<u8>,
+    seen_esc: bool,
+    done: bool,
+}
+
+impl QueryAnswer {
+    /// Nothing read yet.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Feeds bytes; `true` once the whole answer has arrived (nothing more should be read).
+    pub fn push(&mut self, bytes: &[u8]) -> bool {
+        for (i, &b) in bytes.iter().enumerate() {
+            if self.done {
+                self.typed.extend_from_slice(&bytes[i..]);
+                return true;
+            }
+            if !self.seen_esc {
+                if b != 0x1b {
+                    self.typed.push(b);
+                    continue;
+                }
+                self.seen_esc = true;
+            }
+            // the parser reads one byte as one char, as ratatui-image feeds it
+            for r in self.parser.push(char::from(b)) {
+                if r == Response::Status {
+                    self.done = true;
+                } else {
+                    self.responses.push(r);
+                }
+            }
+        }
+        self.done
+    }
+
+    /// `true` once the Device Status Report arrived.
+    pub fn complete(&self) -> bool {
+        self.done
+    }
+
+    /// The bytes that were not the terminal's answer.
+    pub fn typed(&self) -> &[u8] {
+        &self.typed
+    }
+
+    /// The picker for what the terminal answered, as `ratatui-image` would pick it: Kitty when
+    /// supported, else Sixel, else the iTerm2 hint from the environment; the cell size from the
+    /// answer, else `cell_pixels` (the window size in pixels over its size in cells). A protocol
+    /// cannot draw without a cell size, and halfblocks need neither: they are the fallback.
+    pub fn picker(
+        &self,
+        is_tmux: bool,
+        var: &impl Fn(&str) -> Option<String>,
+        cell_pixels: Option<(u16, u16)>,
+    ) -> Picker {
+        let distrusted = distrusts_kitty_and_sixel(var);
+        let mut proto = None;
+        let mut font: Option<FontSize> = None;
+        for r in &self.responses {
+            match r {
+                Response::Kitty if !distrusted => proto = Some(ProtocolType::Kitty),
+                Response::Sixel if !distrusted && proto.is_none() => {
+                    proto = Some(ProtocolType::Sixel);
+                }
+                Response::CellSize(Some((w, h))) => font = Some(FontSize::new(*w, *h)),
+                _ => {}
+            }
+        }
+        let proto = proto
+            .or_else(|| iterm2_hint(is_tmux, var))
+            .unwrap_or(ProtocolType::Halfblocks);
+        let font = font.or_else(|| {
+            cell_pixels
+                .filter(|(w, h)| *w > 0 && *h > 0)
+                .map(|(w, h)| FontSize::new(w, h))
+        });
+        match (proto, font) {
+            (ProtocolType::Halfblocks, _) | (_, None) => Picker::halfblocks(),
+            (proto, Some(font)) => {
+                // the only constructor that takes a measured cell size (the other one runs
+                // the query this module replaces); the protocol it guesses from the
+                // environment is overridden by what the terminal answered
+                #[allow(deprecated)]
+                let mut p = Picker::from_fontsize(font);
+                p.set_protocol_type(proto);
+                p
+            }
+        }
+    }
+}
+
+/// The key events of bytes the terminal query read but that were not its answer: the keys a
+/// terminal in raw mode sends for them (printable text, Enter, Tab, Backspace, Ctrl-letter).
+/// Nothing in them is an escape sequence (those were the answer), so no key with Alt or an
+/// arrow is among them.
+pub fn keys_of(bytes: &[u8]) -> Vec<KeyEvent> {
+    let mut out = Vec::new();
+    for c in String::from_utf8_lossy(bytes).chars() {
+        let k = match c {
+            '\r' | '\n' => KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            '\t' => KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            '\x7f' | '\x08' => KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+            '\x1b' => KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            c if (c as u32) >= 1 && (c as u32) <= 26 => KeyEvent::new(
+                KeyCode::Char(char::from(b'a' + (c as u8) - 1)),
+                KeyModifiers::CONTROL,
+            ),
+            c if c.is_control() || c == '\u{fffd}' => continue,
+            c => KeyEvent::new(
+                KeyCode::Char(c),
+                if c.is_uppercase() {
+                    KeyModifiers::SHIFT
+                } else {
+                    KeyModifiers::NONE
+                },
+            ),
+        };
+        out.push(k);
+    }
+    out
+}
+
+/// The terminal's cell size in pixels from its window size (`TIOCGWINSZ`), when it reports one.
+pub fn cell_pixels() -> Option<(u16, u16)> {
+    let w = crossterm::terminal::window_size().ok()?;
+    if w.width == 0 || w.height == 0 || w.columns == 0 || w.rows == 0 {
+        return None;
+    }
+    Some((w.width / w.columns, w.height / w.rows))
+}
+
+/// Asks the terminal for its graphics protocol and cell size (see the module docs). Call it in
+/// raw mode, on the alternate screen, BEFORE anything else reads the terminal: it writes the
+/// query to stdout and polls stdin for the answer, at most `timeout` in all, and leaves no
+/// reader behind. Returns the picker for the answer (halfblocks when the terminal answered
+/// nothing, or nothing useful) and the bytes that were typed rather than answered, for
+/// [`keys_of`].
+#[cfg(unix)]
+#[allow(clippy::disallowed_methods)] // the terminal answers on wall time
+pub fn query_terminal(timeout: Duration) -> (Picker, Vec<u8>) {
+    use std::io::Write as _;
+    use std::time::Instant;
+
+    use rustix::event::{PollFd, PollFlags, Timespec, poll};
+
+    let var = |k: &str| std::env::var(k).ok();
+    // (this also turns tmux passthrough on, as ratatui-image does)
+    let is_tmux = Picker::halfblocks().tmux_detected();
+    let pixels = cell_pixels();
+    let mut answer = QueryAnswer::new();
+    let query = query_string(is_tmux, &var);
+    let mut out = std::io::stdout();
+    if out
+        .write_all(query.as_bytes())
+        .and_then(|()| out.flush())
+        .is_err()
+    {
+        return (Picker::halfblocks(), Vec::new());
+    }
+    let stdin = rustix::stdio::stdin();
+    let deadline = Instant::now() + timeout;
+    let mut buf = [0u8; 1024];
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        let ts = Timespec {
+            tv_sec: i64::try_from(left.as_secs()).unwrap_or(i64::MAX),
+            tv_nsec: i64::from(left.subsec_nanos()),
+        };
+        let mut fds = [PollFd::new(&stdin, PollFlags::IN)];
+        match poll(&mut fds, Some(&ts)) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(rustix::io::Errno::INTR) => continue,
+            Err(_) => break,
+        }
+        let ready = fds[0].revents();
+        if ready.intersects(PollFlags::HUP | PollFlags::ERR | PollFlags::NVAL)
+            && !ready.contains(PollFlags::IN)
+        {
+            break;
+        }
+        match rustix::io::read(stdin, &mut buf[..]) {
+            Ok(0) => break,
+            Ok(n) => {
+                if answer.push(&buf[..n]) {
+                    break;
+                }
+            }
+            Err(rustix::io::Errno::INTR | rustix::io::Errno::AGAIN) => continue,
+            Err(_) => break,
+        }
+    }
+    let picker = answer.picker(is_tmux, &var, pixels);
+    (picker, answer.typed().to_vec())
+}
+
+/// Without `poll` on stdin the terminal cannot be asked safely: halfblocks.
+#[cfg(not(unix))]
+pub fn query_terminal(_timeout: Duration) -> (Picker, Vec<u8>) {
+    (Picker::halfblocks(), Vec::new())
+}
 
 /// The limits this module enforces (F35/F36, `limits.md` §6).
 pub mod limits {
@@ -73,6 +501,8 @@ pub enum Placeholder {
     Loading,
     /// Decoding failed (corrupt, or past the timeout).
     Failed,
+    /// Images are off (`LESSDUGIN_TUI_IMAGES=off`).
+    Off,
 }
 
 impl Placeholder {
@@ -83,6 +513,7 @@ impl Placeholder {
             Placeholder::Unsupported => "[image: unsupported format]",
             Placeholder::Loading => "[image loading]",
             Placeholder::Failed => "[image failed to decode]",
+            Placeholder::Off => "[images off]",
         }
     }
 }
@@ -168,8 +599,10 @@ struct Shown {
 /// The images a terminal shows: the picker (queried once), the decodes under way and the
 /// decoded images, by blob CID.
 pub struct Images {
-    /// `None`: nothing is decoded (a pipe, a test backend).
+    /// `None`: nothing is decoded (a pipe, a test backend, images off).
     picker: Option<Picker>,
+    /// Why, when nothing is decoded.
+    disabled_as: Placeholder,
     notify: Notify,
     timeout: std::time::Duration,
     decoder: Decoder,
@@ -206,25 +639,25 @@ impl Images {
         Self::with(Some(picker), notify)
     }
 
-    /// Queries the terminal for its graphics protocol (call it in raw mode, before anything
-    /// else reads the terminal's input). Falls back to halfblocks, which every terminal shows,
-    /// when the query fails (an unknown TERM, no answer).
-    pub fn query(notify: Notify) -> Self {
-        Self::new(
-            Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks()),
-            notify,
-        )
-    }
-
     /// A client that never decodes: a headless test, or stdout that is a pipe.
     pub fn disabled() -> Self {
         Self::with(None, Arc::new(|| {}))
+    }
+
+    /// A client whose user turned images off (`LESSDUGIN_TUI_IMAGES=off`): nothing is decoded,
+    /// and the cells say so.
+    pub fn off() -> Self {
+        Self {
+            disabled_as: Placeholder::Off,
+            ..Self::disabled()
+        }
     }
 
     fn with(picker: Option<Picker>, notify: Notify) -> Self {
         let (done_tx, done_rx) = channel();
         Self {
             picker,
+            disabled_as: Placeholder::Unsupported,
             notify,
             timeout: limits::DECODE_TIMEOUT,
             decoder: Arc::new(decode),
@@ -259,7 +692,7 @@ impl Images {
     /// The input cap is checked here, before anything is handed on.
     pub fn decode(&mut self, cid: String, bytes: MediaBytes) {
         if self.picker.is_none() {
-            self.early.push((cid, Err(Placeholder::Unsupported)));
+            self.early.push((cid, Err(self.disabled_as)));
             return;
         }
         if bytes.0.len() > limits::MAX_INPUT_BYTES {
