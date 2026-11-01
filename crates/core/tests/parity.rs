@@ -188,3 +188,107 @@ fn parity_mode_fixes_now_and_obs() {
         (c_list, c_thread)
     );
 }
+
+/// Parity mode ignores the device's read marks (`engine-api.md` §2.1, decision O-13): which
+/// threads a device visited is not a function of the synced records, so a device that visited a
+/// thread and one that did not must still produce the same bytes. Without parity mode the same
+/// mark counts the unread comments as before.
+#[test]
+fn parity_mode_ignores_read_marks() {
+    let ha = MemHost::new();
+    let net = FakeNet::on(&ha);
+    let _ = net.default_pds();
+    let hb = MemHost::new();
+    hb.set_seed(2);
+    net.install_as(&hb, "bob");
+    let alice = User::new(&net, ha, "alice.example.com");
+    let bob = User::new(&net, hb, "bob.example.com");
+    let start = alice.host.now();
+    let tick = || {
+        for u in [&alice, &bob] {
+            u.host.advance_ms(MINUTE);
+        }
+    };
+
+    // alice's forum and welcome post; bob granted, who comments
+    let mut draft = ForumDraft::new("meta", "Meta");
+    draft.default_tier = DefaultTier::Frontpage;
+    let t = block_on(alice.engine.forum_create(&draft)).unwrap();
+    alice.flush();
+    let forum = alice.done(&t);
+    block_on(alice.engine.grant(&forum, &[bob.acct.did().to_string()])).unwrap();
+    tick();
+    let t = block_on(
+        alice
+            .engine
+            .publish(&PostDraft::article(&forum, "Welcome", "Hello.")),
+    )
+    .unwrap();
+    alice.flush();
+    let welcome = alice.done(&t);
+    block_on(bob.engine.forum_open(&forum)).unwrap();
+    let t = block_on(
+        bob.engine
+            .comment(&CommentDraft::new(&welcome, None, "First!")),
+    )
+    .unwrap();
+    bob.flush();
+    bob.done(&t);
+
+    // alice visits the thread (her mark passes bob's first comment), then bob comments again
+    tick();
+    alice.sync(&forum);
+    block_on(alice.engine.mark_read(&welcome)).unwrap();
+    tick();
+    let t = block_on(
+        bob.engine
+            .comment(&CommentDraft::new(&welcome, None, "Second.")),
+    )
+    .unwrap();
+    bob.flush();
+    let second = bob.done(&t);
+    tick();
+    alice.sync(&forum);
+    bob.sync(&forum);
+
+    // without parity mode alice's mark counts: one unread comment
+    let q = ListPostsQuery {
+        sort: PostSort::Magic,
+        filter: PostFilter::All,
+        ..ListPostsQuery::new(&forum)
+    };
+    let list: PostList = block_on(alice.engine.list_posts(&q)).unwrap();
+    let item = list.items.iter().find(|p| p.uri == welcome).unwrap();
+    assert_eq!(item.unread_comments, Some(1), "{item:?}");
+    let thread: ThreadView =
+        block_on(alice.engine.get_thread(&welcome, &ThreadOpts::default())).unwrap();
+    let unread: Vec<&str> = thread
+        .comments
+        .iter()
+        .filter(|c| c.unread)
+        .map(|c| c.uri.as_str())
+        .collect();
+    assert_eq!(unread, vec![second.as_str()], "{thread:?}");
+
+    // in parity mode the mark is ignored: the views are those of a device with no marks
+    let fixed = start + 24 * 60 * MINUTE;
+    let e = alice.parity(fixed);
+    let list: PostList = block_on(e.list_posts(&q)).unwrap();
+    let item = list.items.iter().find(|p| p.uri == welcome).unwrap();
+    assert_eq!(item.unread_comments, None, "{item:?}");
+    let thread: ThreadView = block_on(e.get_thread(&welcome, &ThreadOpts::default())).unwrap();
+    assert!(thread.comments.len() == 2, "{thread:?}");
+    assert!(thread.comments.iter().all(|c| !c.unread), "{thread:?}");
+    let (a_list, a_thread) = views(&e, &forum, &welcome);
+    assert!(!a_list.contains("unreadComments"), "{a_list}");
+    assert!(!a_thread.contains("unreadComments"), "{a_thread}");
+    // so alice, who visited the thread, and bob, who never did, agree byte for byte
+    assert_eq!(
+        (a_list, a_thread),
+        views(&bob.parity(fixed), &forum, &welcome)
+    );
+    // and the mark itself is kept: it counts again outside parity mode
+    let list: PostList = block_on(alice.engine.list_posts(&q)).unwrap();
+    let item = list.items.iter().find(|p| p.uri == welcome).unwrap();
+    assert_eq!(item.unread_comments, Some(1), "{item:?}");
+}

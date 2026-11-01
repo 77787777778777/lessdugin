@@ -1271,6 +1271,7 @@ Everything in this section is computed locally from the fold and local state. Th
 - `lastVisited[post]` is local.
 - A comment c is unread if `t_obs(c) > lastVisited[root]`.
 - Viewing a thread sets `lastVisited` to the greatest `t_obs` among the comments displayed.
+- In parity mode (`engine-api.md` §2.1, decision O-13) the engine ignores `lastVisited`: every view is computed as for a device with no marks (`unreadComments` omitted, `unread` false), since which threads a device visited is not a function of the synced records.
 
 **Subscriptions, follows, bookmarks**
 - Subscriptions to a forum, post, user, tag or sequence are local.

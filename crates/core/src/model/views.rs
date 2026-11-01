@@ -257,7 +257,9 @@ pub struct Viewer {
     pub muted: BTreeSet<String>,
     /// `lastVisited[post]` (µs, on the `t_obs` scale) of the posts the view shows: a comment is
     /// unread iff `t_obs(c) > lastVisited[root]` (§16). Posts without a mark have no unread
-    /// state.
+    /// state (`unreadComments` omitted, `unread` false). Empty in parity mode (`engine-api.md`
+    /// §2.1, decision O-13): read marks are device state, which parity mode cannot inject, so
+    /// the engine builds every view as for a device with no marks.
     pub read: BTreeMap<String, i64>,
     /// The device's media autoload inputs (`sync.md` §11.3).
     pub media: MediaPrefs,

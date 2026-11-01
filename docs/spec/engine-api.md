@@ -122,6 +122,13 @@ time windows) and each version's first-seen time `obs` (`social.md` §1, §2: fu
   `members`, `forum_open`, …) is computed at `now = t`, whatever the host clock says;
 - every admitted version's `obs`, and the declaration's, is taken to be `t` (the stored
   first-seen times are not changed);
+- the viewer's device-local read marks (`lastVisited`, `social.md` §16) are ignored: every view
+  is computed as for a device with no marks, so `PostSummary.unreadComments` is omitted and
+  `CommentNode.unread` is `false`, whatever the stored marks say. Which threads a device has
+  visited is not a function of the synced records, so parity mode cannot inject it the way it
+  injects `now` and `obs`, and two clients that read different threads could otherwise never
+  agree. `mark_read` still stores the marks, and nothing changes outside parity mode.
+  (Orchestrator decision O-13, for the U7 review.)
 - the handles of the actors a view shows are verified by the query itself (`sync.md` §3.3),
   instead of being queued for `live_tail`, so the handle state does not depend on whether a
   client ran `live_tail`.
@@ -250,10 +257,11 @@ cache, local state and clock give byte-identical JSON on every engine.
 next page's offset) and `limit` (0: `LIST_PAGE_DEFAULT`, at most `LIST_PAGE_MAX`).
 
 **Viewer.** Views are computed for the active account (the viewer): its own opinions (`mine`),
-react stances, read marks (`unread`, `unreadComments`), mutes (the lens: a muted author's listed
-items are `collapsed/muted`, `social.md` §10.3) and `ForumView.viewer` capabilities. Hidden and
-tombstoned items carry no author content (title, link, tags, labels, body, reacts) and a zero
-score for viewers who are not the forum's authorities; `raw` shows everything.
+react stances, read marks (`unread`, `unreadComments`; ignored in parity mode, §2.1), mutes (the
+lens: a muted author's listed items are `collapsed/muted`, `social.md` §10.3) and
+`ForumView.viewer` capabilities. Hidden and tombstoned items carry no author content (title,
+link, tags, labels, body, reacts) and a zero score for viewers who are not the forum's
+authorities; `raw` shows everything.
 
 ### 3.5 Writes
 

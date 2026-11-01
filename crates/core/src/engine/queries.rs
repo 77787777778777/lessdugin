@@ -67,19 +67,24 @@ fn fold_pending(p: impl std::fmt::Display) -> EngineError {
 
 impl<H: Host> Engine<H> {
     /// The viewer of the views over `m`: the active account, its mutes (the lens,
-    /// `social.md` §10.3) and the read marks of the posts among `uris` (§16).
+    /// `social.md` §10.3) and the read marks of the posts among `uris` (§16). In parity mode
+    /// (`engine-api.md` §2.1, decision O-13) the read marks are left out: they are device
+    /// state, which parity mode cannot inject, so every view is computed as for a device with
+    /// no marks (`unreadComments` omitted, `unread` false), whatever this device stored.
     pub(crate) async fn viewer(
         &self,
         _m: &ForumModel,
         uris: &[String],
     ) -> Result<Viewer, EngineError> {
         let mut read = BTreeMap::new();
-        for u in uris {
-            if split_uri(u).is_some_and(|(_, c, _)| c == nsid::POST)
-                && !read.contains_key(u)
-                && let Some(at) = self.read_mark(u).await?
-            {
-                read.insert(u.clone(), at);
+        if self.config.parity_now_ms.is_none() {
+            for u in uris {
+                if split_uri(u).is_some_and(|(_, c, _)| c == nsid::POST)
+                    && !read.contains_key(u)
+                    && let Some(at) = self.read_mark(u).await?
+                {
+                    read.insert(u.clone(), at);
+                }
             }
         }
         Ok(Viewer {
