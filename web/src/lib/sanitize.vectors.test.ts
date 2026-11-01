@@ -6,7 +6,9 @@
 // the real renderer gives for the input of every render and terminal vector, including the ones
 // whose expected values are only sizes, heads, tails, text or styled output: the release engine
 // wasm (packages/engine/pkg, `cargo xtask wasm`) renders each input through its `render`
-// operation. That part is skipped locally without pkg/ and required under CI (or with
+// operation, with the input's media items (`defs#media` values) and the body's `profile`, as a
+// stored record is rendered. Only an input that is an encoding error (not a string) is left to
+// its blessed html. That part is skipped locally without pkg/ and required under CI (or with
 // LESSDUGIN_WASM_TEST=1), as in the engine package's tests.
 //
 // jsdom's serialiser differs from the pinned browser's in one respect: it does not escape `<` and
@@ -87,34 +89,40 @@ function inputText(input: RenderInput): string {
 interface RenderCase {
   id: string;
   text: string;
+  /** The input's media items, as a record stores them (`defs#media` values). */
+  media: unknown[];
+  /** The body's `profile`, when the input names one. */
+  profile?: string;
   /** `expected.html`, when the vector has one. */
   expected?: string;
 }
 
-/** The render and terminal vectors the `render` operation can take (markdown only: it refuses
- * media items and takes no profile, and an encoding error is not markdown), and the ids of the
- * others that have no expected html either. */
-function renderInputs(): { take: RenderCase[]; uncovered: string[] } {
+/** The render and terminal vectors the `render` operation takes (a markdown string with its
+ * media items and profile), and the ids of the ones it cannot: an encoding error is bytes that
+ * are not a string, so only its blessed html is sanitised (`loadVectors`). */
+function renderInputs(): { take: RenderCase[]; encodingErrors: string[] } {
   const take: RenderCase[] = [];
-  const uncovered: string[] = [];
+  const encodingErrors: string[] = [];
   for (const { id, json } of vectorFiles(["lfm1", "xss", "terminal"])) {
     for (const v of json.vectors ?? []) {
       const kind = v.kind ?? json.kind;
       if ((kind !== "render" && kind !== "terminal") || !v.input) continue;
       const i = v.input;
-      if ((i.media?.length ?? 0) > 0 || i.profile !== undefined || i.encoding_error) {
-        if (typeof v.expected?.html !== "string") uncovered.push(`${id}#${v.name}`);
-      } else {
-        const html = v.expected?.html;
-        take.push({
-          id: `${id}#${v.name}`,
-          text: inputText(i),
-          ...(typeof html === "string" ? { expected: html } : {}),
-        });
+      if (i.encoding_error) {
+        encodingErrors.push(`${id}#${v.name}`);
+        continue;
       }
+      const html = v.expected?.html;
+      take.push({
+        id: `${id}#${v.name}`,
+        text: inputText(i),
+        media: i.media ?? [],
+        ...(i.profile !== undefined ? { profile: i.profile } : {}),
+        ...(typeof html === "string" ? { expected: html } : {}),
+      });
     }
   }
-  return { take, uncovered };
+  return { take, encodingErrors };
 }
 
 /** `html` as jsdom serialises it: `<` and `>` unescaped inside attribute values (the renderer, and
@@ -193,16 +201,26 @@ describe("LFM vectors through the sanitiser (jsdom)", () => {
     async () => {
       expect(wasmPresent, `${WASM} is missing: run \`cargo xtask wasm\``).toBe(true);
       const e = await engine();
-      const { take, uncovered } = renderInputs();
+      const { take, encodingErrors } = renderInputs();
       expect(take.length).toBeGreaterThan(500);
-      // with media items (until `render` takes MediaRefs) or a render profile, and without an
-      // expected html: only crates/markdown/tests/vectors.rs renders these (check_html, ammonia)
-      expect(uncovered.length).toBeLessThan(15);
+      // every render input is taken, media items and profiles included; the one input that is
+      // not a string is left to its blessed html, which `loadVectors` sanitises
+      expect(take.some((v) => v.media.length > 0)).toBe(true);
+      expect(take.some((v) => v.profile !== undefined)).toBe(true);
+      expect(encodingErrors).toEqual(["lfm1/limits.json#encoding-error"]);
+      for (const id of encodingErrors) {
+        expect(
+          vectors.some((v) => v.id === `${id}:html`),
+          id,
+        ).toBe(true);
+      }
       const rendered: Vector[] = [];
       const notBlessed: string[] = [];
       const tooLarge: string[] = [];
       for (const v of take) {
-        const body = JSON.parse(await e.call("render", JSON.stringify([v.text, [], null]))) as {
+        // `[markdown, media, opts]`, as the engine renders a stored body (crates/wasm ops.rs)
+        const args = [v.text, v.media, v.profile !== undefined ? { profile: v.profile } : null];
+        const body = JSON.parse(await e.call("render", JSON.stringify(args))) as {
           html: string;
         };
         if (v.expected !== undefined && body.html !== v.expected) notBlessed.push(v.id);
@@ -218,9 +236,21 @@ describe("LFM vectors through the sanitiser (jsdom)", () => {
         tooLarge.join(", "),
       ).toBe(true);
       expect(tooLarge.length).toBeLessThan(8);
-      // the vectors without an expected html are among them
+      // the vectors without an expected html are among them, the media and profile ones too
       expect(rendered.some((r) => r.id.startsWith("lfm1/limits.json#"))).toBe(true);
       expect(rendered.some((r) => r.id.startsWith("terminal/escapes.json#"))).toBe(true);
+      for (const id of [
+        "lfm1/images.json#media-alt-amplification-bounded",
+        "lfm1/images.json#media-alt-amplification-video-bounded",
+        "lfm1/gallery.json#gallery-styled",
+        "lfm1/limits.json#flattened-keeps-footnote-reference-and-image",
+        "lfm1/limits.json#lfm1-profile",
+      ]) {
+        expect(
+          rendered.some((r) => r.id === id),
+          id,
+        ).toBe(true);
+      }
       expect(changedBySanitiser(rendered)).toEqual([]);
     },
     120_000,
