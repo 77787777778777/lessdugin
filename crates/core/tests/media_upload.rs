@@ -7,8 +7,8 @@ mod common;
 
 use common::block_on;
 use lessdugin_core::dto::{
-    CommentDraft, Draft, EditOpts, ForumDraft, MediaInput, MediaRef, PostDraft, WriteState,
-    WriteTicket,
+    BodyDraft, CommentDraft, Draft, EditOpts, ExternalLinkDraft, ForumDraft, MediaInput, MediaRef,
+    PostDraft, PostKind, SyncOpts, WriteState, WriteTicket,
 };
 use lessdugin_core::engine::{AccountInfo, Engine, EngineConfig, ErrorCode};
 use lessdugin_core::media::{Format, sniff};
@@ -281,6 +281,70 @@ fn an_edit_uploads_the_media_it_adds_and_keeps_the_blob_objects_it_had() {
     assert!(
         a.acct
             .serves_blob(&lessdugin_atp::cid::parse(&second.cid).unwrap())
+    );
+}
+
+#[test]
+fn an_edit_keeps_the_link_card_the_draft_does_not_change() {
+    // robustness-7: edit rebuilt `link` from the draft, so a client that sent only the uri (the
+    // CLI's and TUI's edit) dropped the card's title and description, and every client its thumb
+    let a = Author::new(PdsConfig::default());
+    let link = |title: Option<&str>, description: Option<&str>| ExternalLinkDraft {
+        uri: "https://example.com/x".into(),
+        title: title.map(str::to_owned),
+        description: description.map(str::to_owned),
+    };
+    let mut d = PostDraft::article(&a.forum, "A link", "See this.");
+    d.kind = PostKind::Link;
+    d.link = Some(link(Some("Example"), Some("An example page")));
+    let uri = a.done(&block_on(a.engine.publish(&d)).unwrap());
+    // a thumb and an unknown field another writer added, straight in the repo
+    let thumb = a.acct.upload_blob(noise_png(8, 8, 9), "image/png");
+    let rkey = uri.rsplit('/').next().unwrap().to_owned();
+    let mut rec = a.record(&uri);
+    rec["link"]["thumb"] = thumb.clone();
+    rec["link"]["x-card"] = Value::from("kept");
+    a.acct.put(nsid::POST, &rkey, &rec);
+    let r = block_on(a.engine.sync_forum(&a.forum, &SyncOpts::default())).unwrap();
+    assert!(r.errors.is_empty(), "{r:?}");
+    let edit = |post: PostDraft| {
+        let t = block_on(a.engine.edit(
+            &uri,
+            &Draft::Post { id: None, post },
+            &EditOpts::default(),
+        ))
+        .unwrap();
+        assert_eq!(a.done(&t), uri);
+        a.record(&uri)
+    };
+    // the uri alone, as the CLI and TUI send it: the card stays whole
+    let mut e = d.clone();
+    e.body = BodyDraft::text("See this, fixed.");
+    e.link = Some(link(None, None));
+    let rec = edit(e);
+    assert_eq!(rec["body"]["text"], "See this, fixed.");
+    assert_eq!(rec["link"]["title"], "Example");
+    assert_eq!(rec["link"]["description"], "An example page");
+    assert_eq!(rec["link"]["thumb"], thumb);
+    assert_eq!(rec["link"]["x-card"], "kept");
+    // new metadata: taken, and the thumb (which no draft carries) kept
+    let mut e = d.clone();
+    e.link = Some(link(Some("Example, retitled"), None));
+    let rec = edit(e);
+    assert_eq!(rec["link"]["title"], "Example, retitled");
+    assert_eq!(rec["link"].get("description"), None);
+    assert_eq!(rec["link"]["thumb"], thumb);
+    // another uri: the card is the draft's
+    let mut e = d.clone();
+    e.link = Some(ExternalLinkDraft {
+        uri: "https://example.org/y".into(),
+        title: None,
+        description: None,
+    });
+    let rec = edit(e);
+    assert_eq!(
+        rec["link"],
+        serde_json::json!({"uri": "https://example.org/y"})
     );
 }
 
