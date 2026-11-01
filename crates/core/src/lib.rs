@@ -12,6 +12,7 @@ pub mod dto;
 pub mod engine;
 pub mod host;
 pub mod identity;
+pub mod indexer;
 pub mod jetstream;
 pub mod limits;
 pub mod live;

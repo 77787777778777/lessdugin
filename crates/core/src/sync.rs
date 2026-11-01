@@ -164,6 +164,19 @@ pub struct SyncShared {
     /// First-seen times learned from hints, applied when the version is admitted (§5.6.5):
     /// `(uri, cid) → µs`.
     hints: Mutex<BTreeMap<(String, String), i64>>,
+    /// Jetstream changes observed by this engine session, retained for manual A2 audit.
+    observed_changes: Mutex<BTreeMap<(String, String), ObservedChange>>,
+}
+
+/// A session-local Jetstream observation used only by the manual indexer audit (§15.4 A2).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ObservedChange {
+    pub fk: String,
+    pub uri: String,
+    pub did: String,
+    pub rev: String,
+    pub cid: Option<String>,
+    pub observed_us: i64,
 }
 
 impl std::fmt::Debug for SyncShared {
@@ -190,6 +203,7 @@ impl SyncShared {
             net: Arc::new(net),
             queue: Mutex::new(DirtyQueue::new()),
             hints: Mutex::new(BTreeMap::new()),
+            observed_changes: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -305,6 +319,33 @@ impl<H: Host> Syncer<H> {
             .hints()
             .get(&(uri.to_owned(), cid.to_owned()))
             .copied()
+    }
+
+    /// Records a Jetstream change for a later manual A2 audit. This is session state, not content.
+    pub fn note_observed_change(&self, change: ObservedChange) {
+        let mut rows = self
+            .shared
+            .observed_changes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        rows.insert((change.uri.clone(), change.rev.clone()), change);
+        while rows.len() > HINT_FIRST_SEEN_MAX {
+            let Some(key) = rows.keys().next().cloned() else {
+                break;
+            };
+            rows.remove(&key);
+        }
+    }
+
+    /// A snapshot of session Jetstream observations for A2.
+    pub fn observed_changes(&self) -> Vec<ObservedChange> {
+        self.shared
+            .observed_changes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .cloned()
+            .collect()
     }
 
     fn random(&self) -> u64 {

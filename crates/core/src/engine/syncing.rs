@@ -119,6 +119,12 @@ impl<H: Host> Engine<H> {
         let key = self.forum_key(forum).await?;
         let mut opts = opts.discovery_opts();
         if self.sources().await? == super::Sources::Assisted {
+            match self.poll_indexer_changes_resolved(&key).await {
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(forum = %key.uri, error = %e, "indexer changes unavailable")
+                }
+            }
             // CORE+ sources are hints: an unavailable hint service must not prevent the ordinary
             // PDS sync. Explicit discover_* calls still report their source errors to callers.
             match self.discover_forum_hints(&key).await {

@@ -258,8 +258,11 @@ pub struct SyncArgs {
     #[arg(value_name = "FORUM")]
     pub forum: Option<String>,
     /// Re-list every repository instead of checking heads.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "audit")]
     pub full: bool,
+    /// Cross-check one consented indexer against PDS heads and local recomputation (A1–A5).
+    #[arg(long)]
+    pub audit: bool,
 }
 
 /// `join`.

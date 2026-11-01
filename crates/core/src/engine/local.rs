@@ -475,7 +475,7 @@ impl<H: crate::host::Host> Engine<H> {
     }
 
     /// The stored key/value rows, the raw form `set_setting` writes.
-    async fn stored_settings(
+    pub(crate) async fn stored_settings(
         &self,
     ) -> Result<std::collections::BTreeMap<String, String>, EngineError> {
         let rows = self.loc_rows(crate::key!("loc", "setting")).await?;

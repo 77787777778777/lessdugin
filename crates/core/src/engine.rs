@@ -16,6 +16,7 @@ mod config;
 mod error;
 mod events;
 mod forums;
+mod indexer;
 mod live;
 mod local;
 mod models;

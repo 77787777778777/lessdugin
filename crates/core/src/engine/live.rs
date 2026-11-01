@@ -347,11 +347,23 @@ impl<H: Host> Engine<H> {
                     priority,
                     first_seen_us,
                 } => {
+                    let parsed =
+                        AtUri::parse(&uri).map_err(|e| EngineError::invalid_ref(e.to_string()))?;
+                    sy.note_observed_change(crate::sync::ObservedChange {
+                        fk: crate::store::schema::scope_of(
+                            parsed.collection().as_str(),
+                            parsed.rkey().as_str(),
+                        )
+                        .to_owned(),
+                        uri: uri.clone(),
+                        did: did.clone(),
+                        rev: rev.clone(),
+                        cid: cid.clone(),
+                        observed_us: self.host.now_ms().saturating_mul(1000),
+                    });
                     if let Some(cid) = &cid {
                         sy.note_hint_first_seen(&uri, cid, first_seen_us);
                     }
-                    let parsed =
-                        AtUri::parse(&uri).map_err(|e| EngineError::invalid_ref(e.to_string()))?;
                     let stats = Arc::new(Stats::capped(Some(8)));
                     let session = sy.session(priority, stats);
                     sy.mark_hint(&session, &parsed, &rev).await?;
@@ -370,6 +382,14 @@ impl<H: Host> Engine<H> {
                     cid,
                     first_seen_us,
                 } => {
+                    sy.note_observed_change(crate::sync::ObservedChange {
+                        fk: fk.clone(),
+                        uri: uri.clone(),
+                        did: did.clone(),
+                        rev: rev.clone(),
+                        cid: cid.clone(),
+                        observed_us: self.host.now_ms().saturating_mul(1000),
+                    });
                     let mut rows = crate::discovery::state::disc_rows(self.host.cache(), &fk)
                         .await
                         .map_err(store_error)?;

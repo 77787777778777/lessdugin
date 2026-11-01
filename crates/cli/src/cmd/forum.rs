@@ -16,6 +16,7 @@ use lessdugin_core::dto::{
     MembersQuery, MembershipMode, PublicActionKind, SyncOpts, SyncReport, WriteTicket,
 };
 use lessdugin_core::engine::{Engine, EngineError};
+use lessdugin_core::indexer::AuditReport;
 use lessdugin_native::host::NativeHost;
 use serde::Serialize;
 
@@ -700,6 +701,29 @@ pub async fn sync(ctx: &Ctx, args: SyncArgs) -> Result<(), CliError> {
         return Err(CliError::usage("sync needs the network; drop --offline"));
     }
     let engine = ctx.reader().await?;
+    if args.audit {
+        let input = args
+            .forum
+            .clone()
+            .or_else(|| ctx.g.forum.clone())
+            .or_else(|| ctx.state.current_forum());
+        let forum = match input {
+            Some(f) => refs::forum(ctx, &engine, &f).await?,
+            None => {
+                return Err(CliError::usage(
+                    "sync --audit needs exactly one forum (name it or set a current forum)",
+                ));
+            }
+        };
+        let report = engine.audit_indexer(&forum).await?.ok_or_else(|| {
+            CliError::usage("sync --audit needs assisted mode and a consented indexer")
+        })?;
+        print_audit(ctx, &report);
+        if report.has_contradiction_or_omission() {
+            return Err(CliError::Reported(6));
+        }
+        return Ok(());
+    }
     // queued writes first, so the sync reads them back
     if engine.active_account().await?.is_some() || ctx.g.account.is_some() {
         match ctx.writer().await {
@@ -826,4 +850,47 @@ pub async fn sync(ctx: &Ctx, args: SyncArgs) -> Result<(), CliError> {
         return Err(CliError::Reported(e.exit_code()));
     }
     Ok(())
+}
+
+fn print_audit(ctx: &Ctx, report: &AuditReport) {
+    if ctx.out.is_json() {
+        ctx.out.json(report);
+        return;
+    }
+    ctx.out.line(&[
+        (lit("Audited "), Style::Plain),
+        (tt(&report.forum), Style::Bold),
+        (lit(" against "), Style::Plain),
+        (tt(&report.indexer), Style::Bold),
+    ]);
+    for check in &report.checks {
+        ctx.out.line(&[(
+            cat([
+                lit("  "),
+                tt(&check.name),
+                lit(": "),
+                tt(&check.counts.checked.to_string()),
+                lit(" checked · "),
+                tt(&check.counts.contradictions.to_string()),
+                lit(" contradictions · "),
+                tt(&check.counts.omissions.to_string()),
+                lit(" omissions · "),
+                tt(&check.counts.lag.to_string()),
+                lit(" lag"),
+            ]),
+            Style::Dim,
+        )]);
+        for finding in &check.findings {
+            ctx.out.warn(cat([
+                lit(match finding.kind {
+                    lessdugin_core::indexer::AuditKind::Contradiction => "CONTRADICTION: ",
+                    lessdugin_core::indexer::AuditKind::Omission => "OMISSION: ",
+                    lessdugin_core::indexer::AuditKind::Lag => "LAG: ",
+                }),
+                tt(&finding.subject),
+                lit(" — "),
+                tt(&finding.detail),
+            ]));
+        }
+    }
 }
