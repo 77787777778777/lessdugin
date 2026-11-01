@@ -398,6 +398,7 @@ pub fn cell_pixels() -> Option<(u16, u16)> {
 /// nothing, or nothing useful) and the bytes that were typed rather than answered, for
 /// [`keys_of`].
 #[cfg(unix)]
+#[allow(clippy::disallowed_methods)] // the terminal answers on wall time
 pub fn query_terminal(timeout: Duration) -> (Picker, Vec<u8>) {
     use std::io::Write as _;
     use std::time::Instant;
@@ -443,7 +444,7 @@ pub fn query_terminal(timeout: Duration) -> (Picker, Vec<u8>) {
         {
             break;
         }
-        match rustix::io::read(&stdin, &mut buf[..]) {
+        match rustix::io::read(stdin, &mut buf[..]) {
             Ok(0) => break,
             Ok(n) => {
                 if answer.push(&buf[..n]) {
