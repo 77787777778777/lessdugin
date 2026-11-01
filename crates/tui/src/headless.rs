@@ -223,7 +223,9 @@ impl<H: Host> Headless<H> {
                             | Effect::SequenceRemove { .. }
                             | Effect::SequenceMove { .. }
                     );
-                    if let Some(a) = exec::run(&self.engine, other, exec_opts).await {
+                    // The effect runner contains the whole engine sync future. Keep it off the
+                    // synchronous headless caller's stack (Rust test workers have a small one).
+                    if let Some(a) = Box::pin(exec::run(&self.engine, other, exec_opts)).await {
                         // the events the call emitted come first, as on the runtime's channel
                         self.drain_events();
                         let queued = matches!(
