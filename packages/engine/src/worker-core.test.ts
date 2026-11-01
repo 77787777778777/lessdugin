@@ -320,9 +320,10 @@ describe.runIf(present)("WorkerEngine over the real wasm", () => {
 
   it("rejects with EngineError objects", async () => {
     const { engine } = await tab(origin(), { elect: false });
-    const search = await rejects(engine.call("search", [{}]));
-    expect(search.code).toBe("unsupported");
-    expect(search.detail).toEqual({ milestone: "M5" });
+    const search = await engine.call("search", [{ q: "local", limit: 10 }]);
+    expect(search).toEqual({ dto: 1, hits: [] });
+    const malformedSearch = await rejects(engine.call("search", [{}]));
+    expect(malformedSearch.code).toBe("invalid_input");
     expect((await rejects(engine.call("noSuchOp", []))).code).toBe("unsupported");
     expect((await rejects(engine.callJson("accounts", "[1]"))).code).toBe("invalid_input");
     const join = await rejects(

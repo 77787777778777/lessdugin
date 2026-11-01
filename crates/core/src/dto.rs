@@ -309,6 +309,7 @@ dto! {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "tsify", derive(Tsify))]
 #[serde(rename_all = "camelCase")]
 /// A chapter of a sequence create/edit draft.
 pub struct SequenceChapterDraft {
@@ -320,6 +321,7 @@ pub struct SequenceChapterDraft {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "tsify", derive(Tsify))]
 #[serde(rename_all = "camelCase")]
 /// A sequence create/edit draft.
 pub struct SequenceDraft {
@@ -331,6 +333,7 @@ pub struct SequenceDraft {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "tsify", derive(Tsify))]
 #[serde(rename_all = "camelCase")]
 /// A chapter-local sequence position.
 pub struct SequencePosition {
@@ -339,6 +342,7 @@ pub struct SequencePosition {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "tsify", derive(Tsify))]
 #[serde(rename_all = "camelCase")]
 /// A new immutable wiki revision.
 pub struct WikiDraft {

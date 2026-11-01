@@ -985,7 +985,7 @@ export interface WikiDraft {
   description?: string;
   body?: BodyDraft;
   isTag: boolean;
-  parentTags: Slug[];
+  parentTags?: Slug[];
   summary?: string;
 }
 

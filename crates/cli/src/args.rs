@@ -24,6 +24,9 @@ pub use social::*;
 mod local;
 pub use local::*;
 
+mod organisation;
+pub use organisation::*;
+
 /// A serverless markdown and media forum on atproto.
 #[derive(Debug, Parser)]
 #[command(
@@ -115,6 +118,16 @@ pub enum Command {
     Discover(DiscoverArgs),
     /// List the listed posts that link to an item.
     Linked(RefArgs),
+    /// Search local titles and rendered bodies; nothing is sent to a search service.
+    Search(SearchArgs),
+    /// Show a cached user page.
+    User(UserArgs),
+    /// List or read a forum's tag pages.
+    Tag(TagArgs),
+    /// Edit a tag/wiki page (owner and moderators).
+    Wiki(WikiArgs),
+    /// Read or edit sequence libraries.
+    Sequence(SequenceArgs),
     /// Publish a post from a markdown file, or write it in $EDITOR.
     Post(PostArgs),
     /// Comment on a post, or reply to a comment.
@@ -413,12 +426,38 @@ mod reach {
             "mod_adopt",
             Reach::Command("mod adopt did:plc:aaaaaaaaaaaaaaaaaaaaaaaa"),
         ),
-        ("wiki_edit", Reach::NotHere("M5 (engine-api.md §3.9)")),
-        ("seq_create", Reach::NotHere("M5 (engine-api.md §3.9)")),
-        ("seq_edit", Reach::NotHere("M5 (engine-api.md §3.9)")),
-        ("seq_add", Reach::NotHere("M5 (engine-api.md §3.9)")),
-        ("seq_remove", Reach::NotHere("M5 (engine-api.md §3.9)")),
-        ("seq_move", Reach::NotHere("M5 (engine-api.md §3.9)")),
+        (
+            "wiki_edit",
+            Reach::Command("wiki edit rust --name Rust --file page.md"),
+        ),
+        (
+            "seq_create",
+            Reach::Command("sequence create sequence.json"),
+        ),
+        (
+            "seq_edit",
+            Reach::Command(
+                "sequence edit at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/online.7778777.lessdugin.sequence/s1 sequence.json",
+            ),
+        ),
+        (
+            "seq_add",
+            Reach::Command(
+                "sequence add at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/online.7778777.lessdugin.sequence/s1 at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/online.7778777.lessdugin.post/p1 --chapter 0 --index 0",
+            ),
+        ),
+        (
+            "seq_remove",
+            Reach::Command(
+                "sequence remove at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/online.7778777.lessdugin.sequence/s1 at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/online.7778777.lessdugin.post/p1",
+            ),
+        ),
+        (
+            "seq_move",
+            Reach::Command(
+                "sequence move at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/online.7778777.lessdugin.sequence/s1 --chapter 0 --index 0 --to-chapter 0 --to-index 1",
+            ),
+        ),
         ("redact_revision", Reach::Command("redact 3 --yes")),
         ("prepare_media", Reach::Command("media add chart.png")),
         ("undo", Reach::Command("outbox undo 1")),

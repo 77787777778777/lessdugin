@@ -11,7 +11,8 @@
 use lessdugin_core::dto::{
     CommentDraft, Draft, EditOpts, ForumDraft, KarmaCadence, ListPostsQuery, MediaInput,
     MembersQuery, ModActionIntent, ModsChange, NotificationsQuery, OpinionIntent, PostDraft,
-    PublicActionKind, RefContext, Subscription, SyncOpts, ThreadOpts, Topic, WikiDraft,
+    PublicActionKind, RefContext, SearchQuery, SequenceDraft, SequencePosition, Subscription,
+    SyncOpts, ThreadOpts, Topic, WikiDraft,
 };
 use lessdugin_core::engine::{AccountInfo, Engine, EngineError, ErrorCode};
 use lessdugin_core::host::Host;
@@ -41,6 +42,11 @@ pub const OPS: &[&str] = &[
     "forumCreate",
     "forumUpdate",
     "wikiEdit",
+    "seqCreate",
+    "seqEdit",
+    "seqAdd",
+    "seqRemove",
+    "seqMove",
     "join",
     "leave",
     "members",
@@ -72,6 +78,8 @@ pub const OPS: &[&str] = &[
     "tag",
     "sequences",
     "sequence",
+    "user",
+    "search",
     "getThread",
     "history",
     "notifications",
@@ -134,15 +142,6 @@ pub const OPS: &[&str] = &[
 /// (`engine-api.md` §3.9): they reject with `unsupported` (`detail.milestone`). Implementing
 /// one later is a compatible change of engine API v0.
 pub const UNSUPPORTED: &[(&str, &str)] = &[
-    // §3.4: tags, sequences, user pages, search
-    ("user", "M5"),
-    ("search", "M5"),
-    // §3.5: the wiki and sequences (M5), media and redaction (M4)
-    ("seqCreate", "M5"),
-    ("seqEdit", "M5"),
-    ("seqAdd", "M5"),
-    ("seqRemove", "M5"),
-    ("seqMove", "M5"),
     // test builds only (the social vectors run natively and in the wasm32 test harness)
     ("runVector", "tests"),
 ];
@@ -482,6 +481,34 @@ pub async fn call<H: Host>(engine: &Engine<H>, op: &str, a: &str) -> Result<Stri
         "sequence" => {
             let (uri,): (String,) = args(op, a)?;
             out(&engine.sequence(&uri).await?)
+        }
+        "user" => {
+            let (forum, actor): (Option<String>, String) = padded(op, a, 2)?;
+            out(&engine.user(forum.as_deref(), &actor).await?)
+        }
+        "search" => {
+            let (query,): (SearchQuery,) = args(op, a)?;
+            out(&engine.search(&query).await?)
+        }
+        "seqCreate" => {
+            let (draft,): (SequenceDraft,) = args(op, a)?;
+            out(&engine.seq_create(&draft).await?)
+        }
+        "seqEdit" => {
+            let (uri, draft): (String, SequenceDraft) = args(op, a)?;
+            out(&engine.seq_edit(&uri, &draft).await?)
+        }
+        "seqAdd" => {
+            let (uri, post, at): (String, String, SequencePosition) = args(op, a)?;
+            out(&engine.seq_add(&uri, &post, &at).await?)
+        }
+        "seqRemove" => {
+            let (uri, post): (String, String) = args(op, a)?;
+            out(&engine.seq_remove(&uri, &post).await?)
+        }
+        "seqMove" => {
+            let (uri, from, to): (String, SequencePosition, SequencePosition) = args(op, a)?;
+            out(&engine.seq_move(&uri, &from, &to).await?)
         }
         "wikiEdit" => {
             let (forum, slug, draft): (String, String, WikiDraft) = args(op, a)?;

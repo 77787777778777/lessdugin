@@ -589,9 +589,29 @@ export interface SearchHit {
 
 export type SearchItem = PostSummary | CommentNode;
 
+export interface SearchQuery {
+    q: string;
+    forum?: string;
+    author?: string;
+    limit: number;
+}
+
 export interface SearchResults {
     dto: DtoVersion;
     hits: SearchHit[];
+}
+
+export interface SequenceChapterDraft {
+    title?: string;
+    body?: BodyDraft;
+    posts: string[];
+}
+
+export interface SequenceDraft {
+    forum: string;
+    title: string;
+    body?: BodyDraft;
+    chapters: SequenceChapterDraft[];
 }
 
 export interface SequenceNav {
@@ -599,6 +619,11 @@ export interface SequenceNav {
     title: string;
     prev?: string;
     next?: string;
+}
+
+export interface SequencePosition {
+    chapter: number;
+    index: number;
 }
 
 export interface SequenceSummary {
@@ -793,6 +818,15 @@ export interface ViewerCaps {
 }
 
 export type WarningKind = "equivocation" | "indexerContradiction" | "degraded" | "renderFailure" | "other";
+
+export interface WikiDraft {
+    name: string;
+    description?: string;
+    body?: BodyDraft;
+    isTag: boolean;
+    parentTags?: string[];
+    summary?: string;
+}
 
 export type WriteState = { kind: "pending"; notBeforeMs?: number; held?: boolean; throttled?: boolean; needsLogin?: boolean; error?: EngineError } | { kind: "sending" } | { kind: "done"; uri: string; cid?: string; report?: string[] } | { kind: "failed"; error: EngineError } | { kind: "undone" };
 
