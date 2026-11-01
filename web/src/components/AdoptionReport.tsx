@@ -27,8 +27,9 @@ export function AdoptionReport({ store = writeStore }: { store?: WriteStore | un
             your own assertion for it stands.
           </p>
           <ul className={ui.list} data-testid="adoption-report">
-            {report.lines.map((line, i) => (
-              <li key={`${i}:${line}`}>{line}</li>
+            {/* one line per assertion uri (data-model.md §8.6), so the line is the key */}
+            {report.lines.map((line) => (
+              <li key={line}>{line}</li>
             ))}
           </ul>
           <div className={ui.row}>
