@@ -25,7 +25,9 @@ mod notify_local;
 mod organisation;
 mod queries;
 mod refs;
+mod search;
 mod syncing;
+mod users;
 mod writes;
 
 use std::sync::Arc;
