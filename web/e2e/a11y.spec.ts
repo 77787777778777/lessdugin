@@ -5,12 +5,39 @@
 
 import AxeBuilder from "@axe-core/playwright";
 import { expect, type Page, test } from "@playwright/test";
+import { buildFixture } from "../../packages/engine/src/mock/fixture.ts";
 import { FORUM_PATH, WELCOME, WELCOME_PATH, watch } from "./helpers.ts";
 
 const TAGS = ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"];
+const sequenceParts = buildFixture().sequenceUri.split("/");
+const SEQUENCE_PATH = `/s/${sequenceParts[2]}/${sequenceParts[4]}`;
 
-async function axe(page: Page, label: string): Promise<string[]> {
+interface AxeScore {
+  label: string;
+  /** Rule-level axe score: passed applicable rules / (passed + violated rules). */
+  score: number;
+  passedRules: number;
+  violatedRules: number;
+  incompleteRules: number;
+  violations: { id: string; impact: string | null; nodes: number; targets: string[] }[];
+}
+
+async function axe(page: Page, label: string, scores?: AxeScore[]): Promise<string[]> {
   const result = await new AxeBuilder({ page }).withTags(TAGS).analyze();
+  const applicable = result.passes.length + result.violations.length;
+  scores?.push({
+    label,
+    score: applicable === 0 ? 100 : (100 * result.passes.length) / applicable,
+    passedRules: result.passes.length,
+    violatedRules: result.violations.length,
+    incompleteRules: result.incomplete.length,
+    violations: result.violations.map((v) => ({
+      id: v.id,
+      impact: v.impact ?? null,
+      nodes: v.nodes.length,
+      targets: v.nodes.map((n) => n.target.join(" ")),
+    })),
+  });
   return result.violations.map(
     (v) =>
       `${label}: ${v.id} (${v.nodes.length}) ${v.nodes
@@ -29,9 +56,10 @@ for (const scheme of ["light", "dark"] as const) {
   test.describe(`axe, ${scheme} mode`, () => {
     test.use({ colorScheme: scheme });
 
-    test("pages", async ({ page }) => {
+    test("pages", async ({ page }, info) => {
       const w = await watch(page);
       const found: string[] = [];
+      const scores: AxeScore[] = [];
       const pages: [string, string][] = [
         ["/", "Your forums"],
         [FORUM_PATH, "LessDugin Test Forum"],
@@ -44,6 +72,11 @@ for (const scheme of ["light", "dark"] as const) {
         ["/drafts", "Drafts"],
         ["/settings", "Settings"],
         ["/search?q=vote", "Search"],
+        [`${FORUM_PATH}/tags`, "LessDugin Test Forum"],
+        [`${FORUM_PATH}/t/decision-theory`, "LessDugin Test Forum"],
+        [`${FORUM_PATH}/seqs`, "LessDugin Test Forum"],
+        [SEQUENCE_PATH, "Map and Territory"],
+        ["/u/ada.test", "Ada Lovelace"],
       ];
       for (const [path, h1] of pages) {
         await open(page, path, () =>
@@ -51,8 +84,30 @@ for (const scheme of ["light", "dark"] as const) {
         );
         // Let queries settle (lists, threads) before scanning.
         await page.waitForLoadState("networkidle");
-        found.push(...(await axe(page, path)));
+        found.push(...(await axe(page, path, scores)));
       }
+      const m5 = scores.filter((s) =>
+        [
+          "/search?q=vote",
+          `${FORUM_PATH}/tags`,
+          `${FORUM_PATH}/t/decision-theory`,
+          `${FORUM_PATH}/seqs`,
+          SEQUENCE_PATH,
+          "/u/ada.test",
+        ].includes(s.label),
+      );
+      expect(m5, "all six M5 routes were scanned").toHaveLength(6);
+      for (const s of m5)
+        expect(s.score, `${s.label}: ${JSON.stringify(s)}`).toBeGreaterThanOrEqual(90);
+      await info.attach(`axe-scores-${scheme}`, {
+        body: JSON.stringify(
+          { formula: "100 * passed / (passed + violated), incomplete excluded", scores },
+          null,
+          2,
+        ),
+        contentType: "application/json",
+      });
+      console.log(`axe ${scheme}: ${JSON.stringify(scores)}`);
       expect(found).toEqual([]);
       expect(w.errors).toEqual([]);
     });

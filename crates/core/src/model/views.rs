@@ -698,7 +698,6 @@ impl Views<'_> {
         let SkelData::Post {
             kind,
             title,
-            tags,
             labels,
             link,
             excerpt,
@@ -741,7 +740,18 @@ impl Views<'_> {
                 title.clone()
             },
             excerpt,
-            tags: if listed { tags.clone() } else { Vec::new() },
+            tags: if listed {
+                self.model
+                    .view
+                    .wiki
+                    .as_ref()
+                    .ok()
+                    .and_then(|w| w.applies.get(uri))
+                    .map(|applied| applied.iter().cloned().collect())
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            },
             tier: tier(m.tier(uri)),
             pinned: m.pinned_forum(uri),
             locked: m.lock(uri).is_some() || author_locked,

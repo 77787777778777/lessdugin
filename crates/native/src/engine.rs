@@ -24,29 +24,44 @@ use crate::host::NativeHost;
 
 /// Maps the native configuration to the engine's (without parity mode; see [`open_engine`]).
 pub fn engine_config(cfg: &Config) -> EngineConfig {
-    match &cfg.network {
-        NetworkProfile::Devnet(d) => EngineConfig::devnet(d.plc.clone(), d.pds.clone()),
-        NetworkProfile::Production => EngineConfig {
-            // a `sources` the file states pins it like a flag (O-9): a CLI flag, then
-            // config.toml, then the stored setting, then the build default (`sync.md` §2.3)
-            sources_flag: cfg.sources.map(|s| match s {
-                Sources::Direct => EngineSources::Direct,
-                Sources::Assisted => EngineSources::Assisted,
-            }),
-            verify: match cfg.verify {
-                VerifyMode::Pds => EngineVerifyMode::Pds,
-                VerifyMode::Proof => EngineVerifyMode::Proof,
-            },
-            doh: cfg.doh.clone(),
-            // The native host has no system TXT resolver yet; DoH is used instead.
-            dns: EngineDns::Doh,
-            plc: cfg.plc.clone(),
-            relays: cfg.relays.clone(),
-            jetstream: cfg.jetstream.clone(),
-            constellation: cfg.constellation.clone(),
-            slingshot: cfg.slingshot.clone(),
-            ..EngineConfig::default()
+    // a `sources` the file states pins it like a flag (O-9): a CLI flag, then config.toml,
+    // then the stored setting, then the build default (`sync.md` §2.3). Devnet defaults to
+    // direct, but an explicit setting is honoured so local CORE+ services can be tested too.
+    let sources = cfg.sources.map(|s| match s {
+        Sources::Direct => EngineSources::Direct,
+        Sources::Assisted => EngineSources::Assisted,
+    });
+    let devnet = matches!(&cfg.network, NetworkProfile::Devnet(_));
+    let common = EngineConfig {
+        sources: sources.unwrap_or(if devnet {
+            EngineSources::Direct
+        } else {
+            EngineSources::Assisted
+        }),
+        sources_flag: sources,
+        verify: match cfg.verify {
+            VerifyMode::Pds => EngineVerifyMode::Pds,
+            VerifyMode::Proof => EngineVerifyMode::Proof,
         },
+        doh: cfg.doh.clone(),
+        // The native host has no system TXT resolver yet; DoH is used instead.
+        dns: EngineDns::Doh,
+        plc: cfg.plc.clone(),
+        relays: cfg.relays.clone(),
+        jetstream: cfg.jetstream.clone(),
+        constellation: cfg.constellation.clone(),
+        slingshot: cfg.slingshot.clone(),
+        ..EngineConfig::default()
+    };
+    match &cfg.network {
+        NetworkProfile::Devnet(d) => EngineConfig {
+            network: lessdugin_core::engine::Network::Devnet {
+                plc: d.plc.clone(),
+                pds: d.pds.clone(),
+            },
+            ..common
+        },
+        NetworkProfile::Production => common,
     }
 }
 
@@ -68,6 +83,31 @@ pub fn open_engine(paths: &Paths, config: &Config) -> Result<Engine<NativeHost>,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_assisted_devnet_uses_only_its_configured_services() {
+        let cfg = Config::from_toml_str(
+            r#"sources = "assisted"
+            relays = []
+            jetstream = []
+            constellation = false
+            slingshot = false
+            [network]
+            mode = "devnet"
+            plc = "http://localhost:2582"
+            pds = "http://localhost:2583""#,
+        )
+        .unwrap();
+        let c = engine_config(&cfg);
+        assert_eq!(c.sources_flag, Some(EngineSources::Assisted));
+        assert!(c.relays.is_empty() && c.jetstream.is_empty());
+        assert_eq!(c.constellation, None);
+        assert_eq!(c.slingshot, None);
+        assert_eq!(
+            engine_config(&Config::default()).sources,
+            EngineSources::Assisted
+        );
+    }
 
     /// O-9: a `sources` in config.toml wins over the stored setting; without one the stored
     /// setting decides.
