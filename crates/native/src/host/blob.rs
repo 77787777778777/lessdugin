@@ -370,13 +370,16 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let store = BlobStore::new(tmp.path().join("blobs"));
         let did = Did::parse("did:plc:alice").unwrap();
-        let fetch = |cid: &str| store.fetch(&net, &base, &did, cid, 1 << 20);
         let wait = Duration::from_millis(100);
 
         // the caller stops waiting: the download runs on, and a later caller joins it
-        assert!(tokio::time::timeout(wait, fetch(&cid)).await.is_err());
+        assert!(
+            tokio::time::timeout(wait, store.fetch(&net, &base, &did, &cid, 1 << 20))
+                .await
+                .is_err()
+        );
         assert_eq!(store.inflight.lock().unwrap().len(), 1);
-        let h = fetch(&cid).await.unwrap();
+        let h = store.fetch(&net, &base, &did, &cid, 1 << 20).await.unwrap();
         assert_eq!(h.size, bytes.len() as u64);
         assert_eq!(std::fs::read(&h.locator).unwrap(), bytes);
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
