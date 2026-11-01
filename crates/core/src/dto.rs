@@ -1357,6 +1357,18 @@ dto! {
     }
 }
 
+dto! {
+    /// Local search over listed, synced posts and comments.
+    pub struct SearchQuery {
+        pub q: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub forum: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub author: Option<String>,
+        pub limit: u32,
+    }
+}
+
 impl ListPostsQuery {
     /// The default view of `forum`: `magic` over `frontpage`, one page.
     pub fn new(forum: impl Into<String>) -> Self {
