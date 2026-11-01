@@ -1577,6 +1577,34 @@ impl<H: Host> Syncer<H> {
             .collect())
     }
 
+    /// Persists a Jetstream/indexer dirty mark before its queue item is served. A fresh repo row
+    /// is created only from a document-level identity; an identity hint may update an existing
+    /// row but cannot establish its PDS. Overflow queues the required P1 full-repo pass.
+    pub async fn mark_hint(&self, s: &Session<H>, uri: &AtUri, rev: &str) -> Result<(), SyncError> {
+        let did = uri.did();
+        let _guard = self.net().repo_lock(did).await;
+        let (_, pds, id_hint) = self.pds_of(s, did).await?;
+        let store = RecordStore::new(s.host().cache());
+        let existing = store.repo(did.as_str()).await?;
+        if id_hint && existing.is_none() {
+            return Ok(());
+        }
+        let mut repo = existing.unwrap_or_else(|| RepoRow::new(&pds));
+        if !id_hint {
+            repo.pds = pds;
+        }
+        let overflow = !repo.add_mark(uri.as_str(), rev);
+        let mut batch = store.batch();
+        batch.put_repo(did.as_str(), &repo)?;
+        batch.commit().await?;
+        if overflow {
+            let now = s.host().now_ms();
+            let at = ready_time(Priority::P1, now, self.random(), None);
+            self.enqueue(DirtyItem::new(did.as_str(), Priority::P1, Reason::Hint, at));
+        }
+        Ok(())
+    }
+
     /// A point fetch (§5.7): `getRecord(uri)` at the author's PDS, admitted at level `pds` with
     /// key `(repo.headSeen.rev, sentAt)`; `RecordNotFound` tombstones it. A matching `hint`
     /// satisfies the uri's dirty mark (§6.5).
@@ -1844,7 +1872,7 @@ impl<H: Host> Syncer<H> {
         scopes_of: impl Fn(&str) -> Vec<Scope>,
     ) -> Vec<RepoReport> {
         enum Job {
-            Point(Vec<AtUri>),
+            Point(Vec<(AtUri, Option<MarkHint>)>),
             Sync(Box<SyncRequest>),
         }
         let now = s.host().now_ms();
@@ -1857,9 +1885,21 @@ impl<H: Host> Syncer<H> {
                 continue;
             };
             let job = match item.action() {
-                crate::sync::queue::Action::PointFetch(uris) => {
-                    Job::Point(uris.iter().filter_map(|u| AtUri::parse(u).ok()).collect())
-                }
+                crate::sync::queue::Action::PointFetch(uris) => Job::Point(
+                    uris.iter()
+                        .filter_map(|u| {
+                            let uri = AtUri::parse(u).ok()?;
+                            let hint = match item.mark_hints.get(u) {
+                                None => None,
+                                Some(None) => Some(MarkHint { cid: None }),
+                                Some(Some(cid)) => Cid::try_from(cid.as_str())
+                                    .ok()
+                                    .map(|cid| MarkHint { cid: Some(cid) }),
+                            };
+                            Some((uri, hint))
+                        })
+                        .collect(),
+                ),
                 crate::sync::queue::Action::Sync => {
                     let scopes = scopes_of(&item.did);
                     if scopes.is_empty() {
@@ -1889,8 +1929,8 @@ impl<H: Host> Syncer<H> {
         let futs = jobs.iter().map(|(sess, job)| async move {
             match job {
                 Job::Point(uris) => {
-                    for uri in uris {
-                        if let Err(e) = self.point_fetch(sess, uri, None).await {
+                    for (uri, hint) in uris {
+                        if let Err(e) = self.point_fetch(sess, uri, hint.as_ref()).await {
                             tracing::debug!(uri = %uri, error = %e, "point fetch failed");
                         }
                     }

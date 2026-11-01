@@ -29,14 +29,19 @@ use futures::StreamExt;
 use lessdugin_atp::syntax::{AtUri, Did};
 
 use crate::dto::Topic;
-use crate::host::Host;
+use crate::host::{Dir, Host, KeyRange, KvStore};
 use crate::limits;
+use crate::live::{
+    Action as LiveAction, Context as LiveContext, LiveConfig, LiveSource, SourceStatus,
+};
 use crate::outbox;
 use crate::store::RepoRow;
+use crate::store::key::{self, Part};
 use crate::store::records::RecordStore;
-use crate::store::schema::{GLOBAL_SCOPE, scope_of};
+use crate::store::schema::{self, GLOBAL_SCOPE, scope_of};
+use crate::sync::queue::ready_time;
 use crate::sync::schedule::{self, ReconcileRole};
-use crate::sync::{Action, Priority, RepoOutcome, Scope, Stats};
+use crate::sync::{Action, DirtyItem, Priority, Reason, RepoOutcome, Scope, Stats};
 
 use super::models::store_error;
 use super::{Engine, EngineError};
@@ -89,20 +94,91 @@ impl<H: Host> Engine<H> {
         let generation = self.rt.live_gen.load(Ordering::SeqCst);
         let mut woken = self.rt.live_waker();
         let running = || self.rt.live_gen.load(Ordering::SeqCst) == generation;
+        let mut source: Option<LiveSource<H>> = None;
+        let mut wait = 1;
         while running() {
-            let wait = match self.live_step().await {
+            let assisted = self.sources().await? == super::Sources::Assisted;
+            if !assisted && let Some(mut old) = source.take() {
+                old.stop().await;
+            }
+            let mut actions = Vec::new();
+            if assisted {
+                let live = source.get_or_insert_with(|| {
+                    LiveSource::new(
+                        self.shared_host(),
+                        LiveConfig::new(
+                            self.config.jetstream.clone(),
+                            self.config.platform == super::Platform::Browser,
+                        ),
+                    )
+                });
+                let cx = self.live_context().await?;
+                let retry = live.retry_in_ms();
+                let next = async {
+                    if retry > 0 {
+                        // Do not let an immediately-ready Waiting result starve the stop waker
+                        // while a fake host clock is parked during reconnect backoff.
+                        futures::future::pending().await
+                    } else {
+                        live.next(&cx).await
+                    }
+                };
+                futures::pin_mut!(next);
+                let sleep = self.host.sleep(u64::try_from(wait.max(1)).unwrap_or(1));
+                futures::pin_mut!(sleep);
+                let wake = woken.next();
+                futures::pin_mut!(wake);
+                let timeout = futures::future::select(sleep, wake);
+                futures::pin_mut!(timeout);
+                if let futures::future::Either::Left((result, _)) =
+                    futures::future::select(next, timeout).await
+                {
+                    match result {
+                        Ok(SourceStatus::Actions(a)) => actions = a,
+                        Ok(SourceStatus::Stopped) => break,
+                        Ok(SourceStatus::Waiting | SourceStatus::LeaderUnavailable) => {}
+                        Err(e) => tracing::warn!(error = %e, "live source round failed"),
+                    }
+                }
+            } else {
+                let sleep = self.host.sleep(u64::try_from(wait.max(1)).unwrap_or(1));
+                futures::pin_mut!(sleep);
+                futures::future::select(sleep, woken.next()).await;
+            }
+            if !running() {
+                break;
+            }
+            match self.apply_live_actions(actions).await {
+                Ok(()) => {
+                    if let Some(live) = &mut source
+                        && let Err(e) = live.acknowledge().await
+                    {
+                        tracing::warn!(error = %e, "acknowledging live source actions failed");
+                    }
+                }
+                Err(e) => {
+                    // LiveSource retains the actionable frame and its old cursor. The next round
+                    // replays it instead of reading past work that was not applied.
+                    tracing::warn!(error = %e, "applying live source actions failed");
+                }
+            }
+            let polling = !assisted || source.as_ref().is_none_or(LiveSource::polling_enabled);
+            wait = match self.live_step_with_polling(polling).await {
                 Ok(r) => r.next_ms,
                 Err(e) => {
                     tracing::warn!(error = %e, "live tail round failed");
                     outbox::ERROR_WAIT_MS
                 }
             };
-            if !running() {
-                break;
+            if let Some(live) = &source {
+                let retry = live.retry_in_ms();
+                if retry > 0 {
+                    wait = wait.min(retry);
+                }
             }
-            let sleep = self.host.sleep(u64::try_from(wait.max(1)).unwrap_or(1));
-            futures::pin_mut!(sleep);
-            futures::future::select(sleep, woken.next()).await;
+        }
+        if let Some(mut live) = source {
+            live.stop().await;
         }
         Ok(())
     }
@@ -123,6 +199,13 @@ impl<H: Host> Engine<H> {
     async fn relevant_repos(&self) -> Result<BTreeMap<String, Relevance>, EngineError> {
         let mut rel: BTreeMap<String, Relevance> = BTreeMap::new();
         for key in self.followed_keys().await? {
+            for did in crate::discovery::state::disc_rows(self.host.cache(), &key.fk)
+                .await
+                .map_err(store_error)?
+                .into_keys()
+            {
+                rel.entry(did).or_default().fks.insert(key.fk.clone());
+            }
             let l = match self.loaded(&key).await {
                 Ok(l) => l,
                 Err(e) => {
@@ -146,8 +229,227 @@ impl<H: Host> Engine<H> {
         Ok(rel)
     }
 
+    /// Every actual DID-document cache row, including repos unrelated to the current fold.
+    async fn known_identity_dids(&self) -> Result<BTreeSet<String>, EngineError> {
+        let mut out = BTreeSet::new();
+        let prefix = schema::prefix("id", &["did"]);
+        let mut range = Some(KeyRange::prefix(&prefix));
+        while let Some(r) = range.take() {
+            let page = self
+                .host
+                .cache()
+                .scan(r.clone(), Dir::Forward, 1_000)
+                .await?;
+            let full = page.len() == 1_000;
+            for (k, _) in &page {
+                let Ok(parts) = key::decode(k) else { continue };
+                let Some(Part::Bytes(did)) = parts.get(2) else {
+                    continue;
+                };
+                let Ok(did) = std::str::from_utf8(did) else {
+                    continue;
+                };
+                if Did::parse(did).is_ok() {
+                    out.insert(did.to_owned());
+                }
+            }
+            if full && let Some((last, _)) = page.last() {
+                range = Some(KeyRange {
+                    start: std::ops::Bound::Excluded(last.clone()),
+                    end: r.end,
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    /// Builds live filtering state from all identity/discovery rows. Fold completeness is not a
+    /// substitute for having finished discovery: an incomplete fold may still have a known D set.
+    async fn live_context(&self) -> Result<LiveContext, EngineError> {
+        let rel = self.relevant_repos().await?;
+        let followed = self.followed_keys().await?;
+        let mut cx = LiveContext {
+            known_dids: self.known_identity_dids().await?,
+            ..LiveContext::default()
+        };
+        cx.known_dids.extend(rel.keys().cloned());
+        cx.filter_dids.extend(rel.keys().cloned());
+        for (did, relevance) in &rel {
+            if relevance.own {
+                cx.own_dids.insert(did.clone());
+            }
+            if relevance.authority {
+                cx.authorities.insert(did.clone());
+            }
+            cx.forums.extend(relevance.fks.iter().cloned());
+        }
+        let mut complete = !followed.is_empty();
+        for key in followed {
+            cx.declarations
+                .insert((key.owner.to_string(), key.slug.clone()));
+            let disc = crate::discovery::state::disc_rows(self.host.cache(), &key.fk)
+                .await
+                .map_err(store_error)?;
+            cx.filter_dids.extend(disc.keys().cloned());
+            cx.newcomer_dids.extend(disc.keys().cloned());
+            complete &= crate::discovery::state::discovery_complete(self.host.cache(), &key.fk)
+                .await
+                .map_err(store_error)?;
+            if let Ok(loaded) = self.loaded(&key).await {
+                let viewer_authority = cx
+                    .own_dids
+                    .iter()
+                    .any(|did| loaded.model.view.authorities.contains_key(did));
+                if loaded.model.view.policy.membership
+                    == lessdugin_lexicon::values::MembershipMode::Open
+                    || viewer_authority
+                {
+                    cx.newcomer_forums.insert(key.fk.clone());
+                }
+            }
+        }
+        cx.filter_dids.sort();
+        cx.filter_dids.dedup();
+        cx.participants_known = complete;
+        Ok(cx)
+    }
+
+    fn live_random(&self) -> u64 {
+        let mut b = [0u8; 8];
+        self.host.fill_random(&mut b);
+        u64::from_le_bytes(b)
+    }
+
+    fn live_item(&self, did: &str, priority: Priority, reason: Reason) -> DirtyItem {
+        let now = self.host.now_ms();
+        DirtyItem::new(
+            did,
+            priority,
+            reason,
+            ready_time(priority, now, self.live_random(), None),
+        )
+    }
+
+    /// Applies live hints to the existing dirty queue and identity/account APIs. Candidate rows
+    /// remain candidates until the normal forum sync confirms their membership at the PDS.
+    async fn apply_live_actions(&self, actions: Vec<LiveAction>) -> Result<(), EngineError> {
+        if actions.is_empty() {
+            return Ok(());
+        }
+        let sy = self.syncer();
+        for action in actions {
+            match action {
+                LiveAction::PointFetch {
+                    did,
+                    uri,
+                    rev,
+                    cid,
+                    priority,
+                    first_seen_us,
+                } => {
+                    if let Some(cid) = &cid {
+                        sy.note_hint_first_seen(&uri, cid, first_seen_us);
+                    }
+                    let parsed =
+                        AtUri::parse(&uri).map_err(|e| EngineError::invalid_ref(e.to_string()))?;
+                    let stats = Arc::new(Stats::capped(Some(8)));
+                    let session = sy.session(priority, stats);
+                    sy.mark_hint(&session, &parsed, &rev).await?;
+                    let at = ready_time(priority, self.host.now_ms(), self.live_random(), None);
+                    sy.enqueue(
+                        DirtyItem::point(did, &uri, priority, at)
+                            .with_min_rev(rev)
+                            .with_mark_hint(&uri, cid),
+                    );
+                }
+                LiveAction::Candidate {
+                    did,
+                    fk,
+                    uri,
+                    rev,
+                    cid,
+                    first_seen_us,
+                } => {
+                    let mut rows = crate::discovery::state::disc_rows(self.host.cache(), &fk)
+                        .await
+                        .map_err(store_error)?;
+                    let now = self.host.now_ms();
+                    rows.entry(did.clone())
+                        .or_insert_with(|| crate::discovery::DiscRow::new("hint:jetstream", now))
+                        .add_src("hint:jetstream");
+                    crate::discovery::state::put_disc_rows(self.host.cache(), &fk, &rows)
+                        .await
+                        .map_err(store_error)?;
+                    if let Some(cid) = &cid {
+                        sy.note_hint_first_seen(&uri, cid, first_seen_us);
+                    }
+                    let parsed =
+                        AtUri::parse(&uri).map_err(|e| EngineError::invalid_ref(e.to_string()))?;
+                    let stats = Arc::new(Stats::capped(Some(8)));
+                    let session = sy.session(Priority::P1, stats);
+                    sy.mark_hint(&session, &parsed, &rev).await?;
+                    let at = ready_time(Priority::P1, now, self.live_random(), None);
+                    sy.enqueue(
+                        DirtyItem::point(did.clone(), &uri, Priority::P1, at)
+                            .with_min_rev(rev)
+                            .with_mark_hint(&uri, cid),
+                    );
+                    // A point fetch admits the membership record but does not confirm the
+                    // candidate. Only this scoped discovery pass may change its DiscState.
+                    if let Some(forum) = self.rt.forum_of_fk(&fk) {
+                        let opts = crate::discovery::SyncOpts {
+                            budget_ms: Some(30_000),
+                            max_requests: Some(64),
+                            newcomers: vec![(did, "jetstream".into())],
+                            background: true,
+                            ..crate::discovery::SyncOpts::default()
+                        };
+                        self.sync_forum(&forum, &opts).await?;
+                    }
+                }
+                LiveAction::InvalidateIdentity { did, authority } => {
+                    self.invalidate_identity(&did).await?;
+                    if authority {
+                        sy.enqueue(self.live_item(&did, Priority::P1, Reason::Hint));
+                    }
+                }
+                LiveAction::AccountStatus { did, .. } => {
+                    let Ok(did) = Did::parse(&did) else { continue };
+                    let stats = Arc::new(Stats::capped(None));
+                    let session = sy.session(Priority::P1, stats);
+                    if let Err(e) = sy.check_account_status(&session, &did).await {
+                        tracing::debug!(did = %did, error = %e, "live account status check failed");
+                    }
+                }
+                LiveAction::Resync { did } => {
+                    sy.enqueue(self.live_item(&did, Priority::P1, Reason::Resync));
+                }
+                LiveAction::CatchUp { did } => {
+                    sy.enqueue(self.live_item(&did, Priority::P2, Reason::Hint));
+                }
+                LiveAction::Reconcile(gap) => {
+                    tracing::warn!(?gap, "Jetstream cursor gap: scheduling reconcile");
+                    for (did, relevance) in self.relevant_repos().await? {
+                        if relevance.authority {
+                            sy.enqueue(self.live_item(&did, Priority::P1, Reason::Reconcile));
+                        } else if !relevance.own {
+                            let mut item = self.live_item(&did, Priority::P3, Reason::Reconcile);
+                            item.ready_at = self.host.now_ms();
+                            sy.enqueue(item);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// One `live_tail` round (see the module docs); also for one-shot use (`tail --once`).
     pub async fn live_step(&self) -> Result<LiveRound, EngineError> {
+        self.live_step_with_polling(true).await
+    }
+
+    async fn live_step_with_polling(&self, polling: bool) -> Result<LiveRound, EngineError> {
         let mut out = LiveRound::default();
         self.seed_pending().await?;
         let rel = self.relevant_repos().await?;
@@ -170,12 +472,16 @@ impl<H: Host> Engine<H> {
         // polls and reconciles
         let stats = Arc::new(Stats::capped(None));
         let s = sy.session(Priority::P1, Arc::clone(&stats));
-        let polls = schedule::due_polls(
-            rel.iter()
-                .filter_map(|(d, r)| Some((d.as_str(), rows.get(d.as_str())?, r.authority))),
-            now,
-            |d| jitter(d, rows.get(d)),
-        );
+        let polls = if polling {
+            schedule::due_polls(
+                rel.iter()
+                    .filter_map(|(d, r)| Some((d.as_str(), rows.get(d.as_str())?, r.authority))),
+                now,
+                |d| jitter(d, rows.get(d)),
+            )
+        } else {
+            Vec::new()
+        };
         out.polled = polls.len();
         for (did, res) in sy.run_polls(&s, &polls).await {
             if let Err(e) = res {
@@ -306,7 +612,7 @@ impl<H: Host> Engine<H> {
         let rel_dids: Vec<&str> = rel.keys().map(String::as_str).collect();
         let rows = store.repos(&rel_dids).await.map_err(store_error)?;
         for ((d, r), row) in rel.iter().zip(rows) {
-            if let Some(row) = row {
+            if polling && let Some(row) = row {
                 let at = schedule::next_poll_at(&row, r.authority, now, jitter(d, Some(&row)));
                 // a poll that is still due (it failed) waits a little, not a whole idle time
                 next = next.min(at.max(now.saturating_add(1_000)));
@@ -348,5 +654,146 @@ impl<H: Host> Engine<H> {
             self.rt.bus.changed(changed);
         }
         dids.len()
+    }
+}
+
+#[cfg(test)]
+mod context_tests {
+    use serde::Serialize;
+
+    use super::*;
+    use crate::discovery::{DiscRow, ForumKey};
+    use crate::engine::EngineConfig;
+    use crate::host::{
+        BlobHandle, HostError, HttpRequest, HttpResponse, KvOp, WebSocket, WsMessage,
+    };
+    use crate::store::{mem::MemKv, row};
+
+    #[derive(Clone, Default)]
+    struct TestHost {
+        cache: MemKv,
+        state: MemKv,
+    }
+
+    struct TestWs;
+
+    impl WebSocket for TestWs {
+        async fn next(&mut self) -> Option<Result<WsMessage, HostError>> {
+            None
+        }
+
+        async fn send_text(&mut self, _text: String) -> Result<(), HostError> {
+            Ok(())
+        }
+
+        async fn close(&mut self) {}
+    }
+
+    impl Host for TestHost {
+        type Kv = MemKv;
+        type Ws = TestWs;
+        type Lock = ();
+
+        fn cache(&self) -> &MemKv {
+            &self.cache
+        }
+
+        fn state(&self) -> &MemKv {
+            &self.state
+        }
+
+        async fn http(&self, _req: HttpRequest) -> Result<HttpResponse, HostError> {
+            Err(HostError::Unsupported("test".into()))
+        }
+
+        async fn fetch_blob(
+            &self,
+            _pds: url::Url,
+            _did: Did,
+            _cid: String,
+            _max_bytes: u64,
+        ) -> Result<BlobHandle, HostError> {
+            Err(HostError::Unsupported("test".into()))
+        }
+
+        async fn websocket(&self, _url: url::Url, _max: u32) -> Result<TestWs, HostError> {
+            Err(HostError::Unsupported("test".into()))
+        }
+
+        async fn resolve_txt_system(
+            &self,
+            _name: String,
+        ) -> Result<Option<Vec<String>>, HostError> {
+            Ok(None)
+        }
+
+        async fn lock(&self, _name: &str, _wait: bool) -> Result<Option<()>, HostError> {
+            Ok(Some(()))
+        }
+
+        async fn sleep(&self, _ms: u64) {}
+
+        fn now_ms(&self) -> i64 {
+            1
+        }
+
+        fn fill_random(&self, buf: &mut [u8]) {
+            buf.fill(0);
+        }
+    }
+
+    #[derive(Serialize)]
+    struct FollowRow {
+        v: u32,
+        at: i64,
+        seeded: bool,
+    }
+
+    #[test]
+    fn context_uses_all_identity_rows_and_discovery_not_fold_completeness() {
+        futures::executor::block_on(async {
+            let host = TestHost::default();
+            let engine = Engine::new(host.clone(), EngineConfig::default());
+            let owner = Did::parse("did:plc:aaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
+            let key = ForumKey::new(&owner, "meta").unwrap();
+            let follow = FollowRow {
+                v: 1,
+                at: 1,
+                seeded: false,
+            };
+            host.state()
+                .write(vec![KvOp::Put(
+                    crate::key!("loc", "follow", key.uri.as_str()),
+                    row::encode(&follow).unwrap(),
+                )])
+                .await
+                .unwrap();
+            let candidate = "did:plc:candidate".to_owned();
+            let rows =
+                BTreeMap::from([(candidate.clone(), DiscRow::new("hint:test", host.now_ms()))]);
+            crate::discovery::state::put_disc_rows(host.cache(), &key.fk, &rows)
+                .await
+                .unwrap();
+            let unrelated = "did:plc:unrelated";
+            host.cache()
+                .write(vec![KvOp::Put(
+                    schema::prefix("id", &["did", unrelated]),
+                    vec![1],
+                )])
+                .await
+                .unwrap();
+
+            let cx = engine.live_context().await.unwrap();
+            assert!(cx.known_dids.contains(unrelated));
+            assert!(cx.filter_dids.contains(&candidate));
+            assert!(!cx.participants_known);
+
+            crate::discovery::state::mark_discovery_complete(host.cache(), &key.fk, host.now_ms())
+                .await
+                .unwrap();
+            let cx = engine.live_context().await.unwrap();
+            assert!(cx.participants_known, "no complete fold was loaded");
+            assert!(cx.filter_dids.contains(&candidate));
+        });
     }
 }

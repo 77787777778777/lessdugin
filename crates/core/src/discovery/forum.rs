@@ -744,6 +744,7 @@ impl<H: Host> Syncer<H> {
         let now_us = self.host().now_ms().saturating_mul(1000);
         let st = ForumState::load(kv, &key, &forum.decl, now_us).await?;
         let (completeness, counts) = state::completeness(kv, &key, &st).await?;
+        state::mark_discovery_complete(kv, fk, self.host().now_ms()).await?;
         let report = self.report(&forum, &completeness, &counts, &repos, &stats);
         Ok(ForumSync {
             forum,
