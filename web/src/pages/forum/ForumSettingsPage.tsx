@@ -64,11 +64,7 @@ function EditDeclaration({ uri, onDone }: { uri: string; onDone: () => void }) {
     return <Loading label="Loading the declaration…" />;
   }
   if (raw.isError) return <ErrorView error={raw.error} />;
-  const initial = forumDraftOf(
-    raw.data.record,
-    parseAtUri(uri)?.rkey ?? "",
-    source.data?.markdown,
-  );
+  const initial = forumDraftOf(raw.data.record, parseAtUri(uri)?.rkey ?? "", source.data?.markdown);
   if (!initial) return <ErrorView error={new Error("The forum declaration is not readable.")} />;
   // without the source the form says so and refuses to save, never reading the about as empty
   const aboutUnavailable =
