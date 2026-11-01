@@ -100,6 +100,23 @@ fn invalid(message: impl Into<String>) -> XrpcCallError {
     XrpcCallError::InvalidRequest(message.into())
 }
 
+fn bundle_too_large(e: &XrpcCallError) -> bool {
+    match e {
+        XrpcCallError::TooLarge => true,
+        XrpcCallError::Http(status) => *status == 413,
+        XrpcCallError::Xrpc {
+            status, message, ..
+        } => {
+            *status == 413
+                || (*status == 500
+                    && message.as_deref().is_some_and(|m| {
+                        m.contains("proof bundle exceeds") || m.contains("response too large")
+                    }))
+        }
+        _ => false,
+    }
+}
+
 fn store_error(e: crate::store::StoreError) -> XrpcCallError {
     invalid(format!("proof record store: {e}"))
 }
@@ -127,7 +144,39 @@ async fn hydrate_chunk<H: Host>(
     session: &Session<H>,
     uris: &[AtUri],
 ) -> Result<ProofReport, XrpcCallError> {
-    let car = client.get_record_proofs(session, uris).await?;
+    let car = match client.get_record_proofs(session, uris).await {
+        Ok(car) => car,
+        Err(e) if bundle_too_large(&e) && uris.len() > 1 => {
+            // Split into ordered, strictly smaller batches. The one-URI base case below makes
+            // this recursion finite even if a service rejects every request as oversized.
+            let mid = uris.len() / 2;
+            let mut left = Box::pin(hydrate_chunk(syncer, client, session, &uris[..mid])).await?;
+            let right = Box::pin(hydrate_chunk(syncer, client, session, &uris[mid..])).await?;
+            left.items.extend(right.items);
+            left.finish_counts();
+            return Ok(left);
+        }
+        Err(e) if bundle_too_large(&e) => {
+            // An individually oversized proof is not evidence of indexer misconduct. Fetch the
+            // record from its author's PDS instead, as required by sync.md §8.6.
+            let mut item = ProofItemStatus {
+                uri: uris[0].to_string(),
+                status: ProofStatus::Failed,
+                rev: None,
+                error: Some(format!("proof bundle exceeds its cap: {e}")),
+                point_fetched: false,
+            };
+            point_fallback(syncer, session, &uris[0], &mut item).await;
+            return Ok(ProofReport {
+                requested: 1,
+                failed: 1,
+                point_fetched: usize::from(item.point_fetched),
+                items: vec![item],
+                ..ProofReport::default()
+            });
+        }
+        Err(e) => return Err(e),
+    };
     let received_at = session.host().now_ms();
     let origin = client.origin();
     let store = RecordStore::new(session.host().cache());

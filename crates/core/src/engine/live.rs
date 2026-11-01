@@ -95,6 +95,8 @@ impl<H: Host> Engine<H> {
         let mut woken = self.rt.live_waker();
         let running = || self.rt.live_gen.load(Ordering::SeqCst) == generation;
         let mut source: Option<LiveSource<H>> = None;
+        let mut proof_batch: Option<crate::indexer::LiveProofBatch> = None;
+        let mut pending_actions: Vec<LiveAction> = Vec::new();
         let mut wait = 1;
         while running() {
             let assisted = self.sources().await? == super::Sources::Assisted;
@@ -112,33 +114,41 @@ impl<H: Host> Engine<H> {
                         ),
                     )
                 });
-                let cx = self.live_context().await?;
-                let retry = live.retry_in_ms();
-                let next = async {
-                    if retry > 0 {
-                        // Do not let an immediately-ready Waiting result starve the stop waker
-                        // while a fake host clock is parked during reconnect backoff.
-                        futures::future::pending().await
-                    } else {
-                        live.next(&cx).await
+                // An unacknowledged proof frame is retained locally until its timer fires. Do
+                // not poll `next` in a busy loop: it intentionally replays that frame at once.
+                if pending_actions.is_empty() {
+                    let cx = self.live_context().await?;
+                    let retry = live.retry_in_ms();
+                    let next = async {
+                        if retry > 0 {
+                            // Do not let an immediately-ready Waiting result starve the stop waker
+                            // while a fake host clock is parked during reconnect backoff.
+                            futures::future::pending().await
+                        } else {
+                            live.next(&cx).await
+                        }
+                    };
+                    futures::pin_mut!(next);
+                    let sleep = self.host.sleep(u64::try_from(wait.max(1)).unwrap_or(1));
+                    futures::pin_mut!(sleep);
+                    let wake = woken.next();
+                    futures::pin_mut!(wake);
+                    let timeout = futures::future::select(sleep, wake);
+                    futures::pin_mut!(timeout);
+                    if let futures::future::Either::Left((result, _)) =
+                        futures::future::select(next, timeout).await
+                    {
+                        match result {
+                            Ok(SourceStatus::Actions(a)) => actions = a,
+                            Ok(SourceStatus::Stopped) => break,
+                            Ok(SourceStatus::Waiting | SourceStatus::LeaderUnavailable) => {}
+                            Err(e) => tracing::warn!(error = %e, "live source round failed"),
+                        }
                     }
-                };
-                futures::pin_mut!(next);
-                let sleep = self.host.sleep(u64::try_from(wait.max(1)).unwrap_or(1));
-                futures::pin_mut!(sleep);
-                let wake = woken.next();
-                futures::pin_mut!(wake);
-                let timeout = futures::future::select(sleep, wake);
-                futures::pin_mut!(timeout);
-                if let futures::future::Either::Left((result, _)) =
-                    futures::future::select(next, timeout).await
-                {
-                    match result {
-                        Ok(SourceStatus::Actions(a)) => actions = a,
-                        Ok(SourceStatus::Stopped) => break,
-                        Ok(SourceStatus::Waiting | SourceStatus::LeaderUnavailable) => {}
-                        Err(e) => tracing::warn!(error = %e, "live source round failed"),
-                    }
+                } else {
+                    let sleep = self.host.sleep(u64::try_from(wait.max(1)).unwrap_or(1));
+                    futures::pin_mut!(sleep);
+                    futures::future::select(sleep, woken.next()).await;
                 }
             } else {
                 let sleep = self.host.sleep(u64::try_from(wait.max(1)).unwrap_or(1));
@@ -148,18 +158,62 @@ impl<H: Host> Engine<H> {
             if !running() {
                 break;
             }
-            match self.apply_live_actions(actions).await {
-                Ok(()) => {
-                    if let Some(live) = &mut source
-                        && let Err(e) = live.acknowledge().await
-                    {
-                        tracing::warn!(error = %e, "acknowledging live source actions failed");
+            if !actions.is_empty() {
+                pending_actions = actions;
+            }
+            if !pending_actions.is_empty() {
+                let has_proofs = pending_actions
+                    .iter()
+                    .any(|a| matches!(a, LiveAction::PointFetch { .. }));
+                if has_proofs && proof_batch.as_ref().is_none_or(|b| b.is_empty()) {
+                    let mut batch =
+                        crate::indexer::LiveProofBatch::new(self.host.now_ms(), self.live_random());
+                    for action in &pending_actions {
+                        if let LiveAction::PointFetch { uri, .. } = action
+                            && let Ok(uri) = AtUri::parse(uri)
+                        {
+                            batch.push(uri);
+                        }
                     }
+                    proof_batch = Some(batch);
                 }
-                Err(e) => {
-                    // LiveSource retains the actionable frame and its old cursor. The next round
-                    // replays it instead of reading past work that was not applied.
-                    tracing::warn!(error = %e, "applying live source actions failed");
+                let due = proof_batch
+                    .as_ref()
+                    .is_none_or(|b| b.is_empty() || b.is_due(self.host.now_ms()));
+                if due {
+                    let result = if has_proofs {
+                        self.apply_batched_live_actions(
+                            pending_actions.clone(),
+                            proof_batch.as_mut().expect("proof batch created"),
+                        )
+                        .await
+                    } else {
+                        self.apply_live_actions(pending_actions.clone()).await
+                    };
+                    match result {
+                        Ok(()) => {
+                            let acknowledged = if let Some(live) = &mut source {
+                                match live.acknowledge().await {
+                                    Ok(()) => true,
+                                    Err(e) => {
+                                        tracing::warn!(error = %e, "acknowledging live source actions failed");
+                                        false
+                                    }
+                                }
+                            } else {
+                                true
+                            };
+                            if acknowledged {
+                                pending_actions.clear();
+                                proof_batch = None;
+                            }
+                        }
+                        Err(e) => {
+                            // The actionable frame stays unacknowledged. Its old cursor and all
+                            // live actions are replayed; no failed proof batch can advance it.
+                            tracing::warn!(error = %e, "applying live source actions failed");
+                        }
+                    }
                 }
             }
             let polling = !assisted || source.as_ref().is_none_or(LiveSource::polling_enabled);
@@ -170,6 +224,16 @@ impl<H: Host> Engine<H> {
                     outbox::ERROR_WAIT_MS
                 }
             };
+            if let Some(batch) = &proof_batch
+                && !pending_actions.is_empty()
+            {
+                wait = wait.min(
+                    batch
+                        .flush_at_ms()
+                        .saturating_sub(self.host.now_ms())
+                        .max(1),
+                );
+            }
             if let Some(live) = &source {
                 let retry = live.retry_in_ms();
                 if retry > 0 {
@@ -328,6 +392,70 @@ impl<H: Host> Engine<H> {
             reason,
             ready_time(priority, now, self.live_random(), None),
         )
+    }
+
+    /// Applies one actionable frame after its live proof delay. Proof-backed point actions are
+    /// grouped by forum and hydrated in <=25-URI requests. If no consented indexer advertises
+    /// proofs, the exact original actions go through the ordinary PDS dirty queue. Any failed
+    /// hydration or PDS fallback returns an error, so the caller cannot acknowledge the frame.
+    async fn apply_batched_live_actions(
+        &self,
+        actions: Vec<LiveAction>,
+        batch: &mut crate::indexer::LiveProofBatch,
+    ) -> Result<(), EngineError> {
+        let now = self.host.now_ms();
+        while !batch.is_empty() {
+            let _ = batch.take(now);
+        }
+
+        let mut ordinary = Vec::new();
+        let mut grouped: BTreeMap<String, Vec<LiveAction>> = BTreeMap::new();
+        for action in actions {
+            let LiveAction::PointFetch { uri, .. } = &action else {
+                ordinary.push(action);
+                continue;
+            };
+            let parsed = AtUri::parse(uri).map_err(|e| EngineError::invalid_ref(e.to_string()))?;
+            let fk = scope_of(parsed.collection().as_str(), parsed.rkey().as_str());
+            if let Some(forum) = self.rt.forum_of_fk(fk) {
+                grouped.entry(forum).or_default().push(action);
+            } else {
+                ordinary.push(action);
+            }
+        }
+
+        for (forum, actions) in grouped {
+            let uris = actions
+                .iter()
+                .filter_map(|a| match a {
+                    LiveAction::PointFetch { uri, .. } => AtUri::parse(uri).ok(),
+                    _ => None,
+                })
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+            match self.hydrate_indexer_records(&forum, &uris).await? {
+                Some(report)
+                    if report.items.len() == uris.len()
+                        && report.items.iter().all(|i| {
+                            matches!(
+                                i.status,
+                                crate::indexer::ProofStatus::Admitted
+                                    | crate::indexer::ProofStatus::Absent
+                            ) || i.point_fetched
+                        }) =>
+                {
+                    self.rt.bus.changed([Topic::Forum { uri: forum.clone() }]);
+                }
+                Some(report) => {
+                    return Err(EngineError::internal(format!(
+                        "live proof hydration and PDS fallback did not apply every action: {report:?}"
+                    )));
+                }
+                None => ordinary.extend(actions),
+            }
+        }
+        self.apply_live_actions(ordinary).await
     }
 
     /// Applies live hints to the existing dirty queue and identity/account APIs. Candidate rows

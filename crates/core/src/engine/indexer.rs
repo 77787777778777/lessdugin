@@ -161,9 +161,56 @@ impl<H: Host> Engine<H> {
         let Some((client, session)) = self.selected(Some(&key), false).await? else {
             return Ok(None);
         };
+        if !client.supports("getRecordProofs") {
+            return Ok(None);
+        }
         let report =
             crate::indexer::proofs::hydrate_visible(&self.syncer(), &client, &session, uris)
                 .await?;
+        self.rt.invalidate(key.uri.as_str());
+        Ok(Some(report))
+    }
+
+    /// Hydrates the first visible post page from URI-only ordering hints. Remote text, tallies
+    /// and states never enter this path: after proof/PDS admission the caller uses `list_posts`,
+    /// which recomputes order and every displayed value with the local fold. Hosts may ignore an
+    /// error and continue their ordinary PDS sync. Direct mode returns before any indexer call.
+    pub async fn hydrate_indexer_page(
+        &self,
+        query: &crate::dto::ListPostsQuery,
+    ) -> Result<Option<ProofReport>, EngineError> {
+        if query.cursor.is_some() {
+            return Ok(None);
+        }
+        let key = self.forum_key(&query.forum).await?;
+        let Some((client, session)) = self.selected(Some(&key), false).await? else {
+            return Ok(None);
+        };
+        if !client.supports("listPosts") || !client.supports("getRecordProofs") {
+            return Ok(None);
+        }
+        let sort = match query.sort {
+            crate::dto::PostSort::Magic => "magic",
+            crate::dto::PostSort::Top => "top",
+            crate::dto::PostSort::New => "new",
+            crate::dto::PostSort::Old => "old",
+            crate::dto::PostSort::RecentComments => "recentComments",
+        };
+        let limit = if query.limit == 0 {
+            crate::limits::LIST_PAGE_DEFAULT
+        } else {
+            query.limit.min(100)
+        };
+        let ordering = client
+            .post_ordering(&session, &key.uri, sort, limit.max(1), None)
+            .await?;
+        let report = crate::indexer::proofs::hydrate_visible(
+            &self.syncer(),
+            &client,
+            &session,
+            &ordering.uris,
+        )
+        .await?;
         self.rt.invalidate(key.uri.as_str());
         Ok(Some(report))
     }

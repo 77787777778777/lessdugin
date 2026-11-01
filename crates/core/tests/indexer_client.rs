@@ -29,11 +29,13 @@ use lessdugin_testkit::{FakeNet, MemHost, resp};
 use serde_json::{Value, json};
 
 const INDEX: &str = "https://index.example.com";
-const DESCRIBE: &str = "online.7778777.lessdugin.index.describeIndexer";
-const HEADS: &str = "online.7778777.lessdugin.index.getRepoHeads";
-const CHANGES: &str = "online.7778777.lessdugin.index.getChanges";
-const POSTS: &str = "online.7778777.lessdugin.index.listPosts";
-const PROOFS: &str = "online.7778777.lessdugin.index.getRecordProofs";
+
+fn endpoint(method: &str) -> String {
+    format!(
+        "{INDEX}/xrpc/{}",
+        lessdugin_core::indexer::contract::method_nsid(method)
+    )
+}
 
 fn engine(host: &MemHost, sources: Sources) -> Engine<MemHost> {
     Engine::new(
@@ -50,7 +52,7 @@ fn engine(host: &MemHost, sources: Sources) -> Engine<MemHost> {
 
 fn describe(host: &MemHost, features: &[&str], seq: i64) {
     host.respond_get(
-        &format!("{INDEX}/xrpc/{DESCRIBE}"),
+        &endpoint("describeIndexer"),
         resp::ok_json(&json!({
             "did": "did:web:index.example.com",
             "version": "1",
@@ -77,29 +79,42 @@ fn with_meta(mut value: Value, seq: i64) -> Value {
 }
 
 fn bundle(repo: &TestRepo, rev: lessdugin_atp::tid::Tid, forged: bool) -> Vec<u8> {
+    bundle_many(repo, rev, &[RKEY], forged)
+}
+
+fn bundle_many(
+    repo: &TestRepo,
+    rev: lessdugin_atp::tid::Tid,
+    rkeys: &[&str],
+    forged: bool,
+) -> Vec<u8> {
     let commit = if forged {
         repo.commit_signed_by(rev, &fake_key("99"))
     } else {
         repo.commit(rev)
     };
-    let blocks = repo.proof_blocks(POST, RKEY, &commit);
-    let mut item = BTreeMap::new();
-    item.insert(
-        "uri".to_owned(),
-        Ipld::String(format!("at://{}/{POST}/{RKEY}", repo.did())),
-    );
-    item.insert(
-        "cid".to_owned(),
-        repo.cid(POST, RKEY).map_or(Ipld::Null, Ipld::Link),
-    );
-    item.insert("commit".to_owned(), Ipld::Link(commit.cid));
+    let mut items = Vec::new();
+    let mut all = BTreeMap::new();
+    for rkey in rkeys {
+        let mut item = BTreeMap::new();
+        item.insert(
+            "uri".to_owned(),
+            Ipld::String(format!("at://{}/{POST}/{rkey}", repo.did())),
+        );
+        item.insert(
+            "cid".to_owned(),
+            repo.cid(POST, rkey).map_or(Ipld::Null, Ipld::Link),
+        );
+        item.insert("commit".to_owned(), Ipld::Link(commit.cid));
+        items.push(Ipld::Map(item));
+        all.extend(repo.proof_blocks(POST, rkey, &commit));
+    }
     let mut manifest = BTreeMap::new();
     manifest.insert("v".to_owned(), Ipld::Integer(1));
-    manifest.insert("items".to_owned(), Ipld::List(vec![Ipld::Map(item)]));
+    manifest.insert("items".to_owned(), Ipld::List(items));
     let manifest = dagcbor::encode(&Ipld::Map(manifest)).unwrap();
     let root = lessdugin_atp::cid::for_dag_cbor(&manifest);
-    let mut all = vec![(root, manifest)];
-    all.extend(blocks);
+    all.insert(root, manifest);
     write_car(&[root], all.iter().map(|(c, b)| (c, b.as_slice())))
 }
 
@@ -109,9 +124,9 @@ fn current_proof_world(sources: Sources, forged: bool) -> (World, Engine<MemHost
     let car = w
         .pds
         .update(&w.alice.did, None, |repo| bundle(repo, rev, forged));
-    describe(&w.host, &[PROOFS], 0);
+    describe(&w.host, &["getRecordProofs"], 0);
     w.host
-        .respond_get(&format!("{INDEX}/xrpc/{PROOFS}"), resp::car(car));
+        .respond_get(&endpoint("getRecordProofs"), resp::car(car));
     let e = engine(&w.host, sources);
     let uri = AtUri::parse(&w.uri(RKEY)).unwrap();
     (w, e, uri)
@@ -126,12 +141,100 @@ fn direct_mode_generates_no_indexer_traffic() {
     )
     .unwrap();
     assert!(report.is_none());
+    let query =
+        lessdugin_core::dto::ListPostsQuery::new(format!("at://{}/{}/f", w.alice.did, nsid::FORUM));
+    assert!(block_on(e.hydrate_indexer_page(&query)).unwrap().is_none());
     assert!(w.host.requests_to(INDEX).is_empty());
     assert!(
         !block_on(RecordStore::new(w.host.cache()).repo(w.alice.did.as_str()))
             .unwrap()
             .is_some_and(|r| r.head_seen.is_some())
     );
+}
+
+#[test]
+fn oversized_bundles_halve_then_use_pds_for_one_oversized_item() {
+    let w = World::new();
+    let rev = tid_at_ms(w.host.now() - 60_000);
+    describe(&w.host, &["getRecordProofs"], 0);
+    let first = w
+        .pds
+        .update(&w.alice.did, None, |repo| bundle(repo, rev, false));
+    let second = w.pds.update(&w.alice.did, None, |repo| {
+        bundle_many(repo, rev, &["3l2s5xxv2zaa3"], false)
+    });
+    w.host.respond_seq(
+        &endpoint("getRecordProofs"),
+        vec![
+            Err(lessdugin_core::host::HostError::TooLarge),
+            Ok(resp::car(first)),
+            Ok(resp::car(second)),
+        ],
+    );
+    let e = engine(&w.host, Sources::Assisted);
+    let forum = format!("at://{}/{}/f", w.alice.did, nsid::FORUM);
+    let uris = [RKEY, "3l2s5xxv2zaa3"].map(|r| AtUri::parse(&w.uri(r)).unwrap());
+    let report = block_on(e.hydrate_indexer_records(&forum, &uris))
+        .unwrap()
+        .unwrap();
+    assert_eq!(report.admitted, 2, "{report:?}");
+    assert_eq!(w.host.requests_to(&endpoint("getRecordProofs")).len(), 3);
+
+    let w = World::new();
+    describe(&w.host, &["getRecordProofs"], 0);
+    w.host.fail(
+        &endpoint("getRecordProofs"),
+        lessdugin_core::host::HostError::TooLarge,
+    );
+    let e = engine(&w.host, Sources::Assisted);
+    let uri = AtUri::parse(&w.uri(RKEY)).unwrap();
+    let report = block_on(e.hydrate_indexer_records(&forum, std::slice::from_ref(&uri)))
+        .unwrap()
+        .unwrap();
+    assert_eq!(report.failed, 1);
+    assert_eq!(report.point_fetched, 1);
+    assert_eq!(w.host.requests_to(&endpoint("getRecordProofs")).len(), 1);
+    assert_eq!(
+        block_on(RecordStore::new(w.host.cache()).get(&uri))
+            .unwrap()
+            .unwrap()
+            .level,
+        Level::Pds
+    );
+}
+
+#[test]
+fn visible_page_uses_only_uri_hints_then_hydrates_proofs() {
+    let (w, e, uri) = current_proof_world(Sources::Assisted, false);
+    let forum = format!("at://{}/{}/f", w.alice.did, nsid::FORUM);
+    describe(&w.host, &["listPosts", "getRecordProofs"], 0);
+    w.host.respond_get(
+        &endpoint("listPosts"),
+        resp::ok_json(&with_meta(
+            json!({
+                "posts": [{
+                    "ref": {"uri": uri.to_string(), "value": {"title": "UNTRUSTED"}},
+                    "effectiveAt": "2025-01-01T00:00:00Z",
+                    "state": "visible",
+                    "tally": {"subject": uri.to_string(), "policy": "karma/1", "score": 999999}
+                }],
+                "policy": {"karma": "karma/1", "ranking": "magic/1"},
+                "inputDigest": "00"
+            }),
+            0,
+        )),
+    );
+    let query = lessdugin_core::dto::ListPostsQuery::new(&forum);
+    let report = block_on(e.hydrate_indexer_page(&query)).unwrap().unwrap();
+    assert_eq!(report.admitted, 1, "{report:?}");
+    let stored = block_on(RecordStore::new(w.host.cache()).get(&uri))
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.value_json().unwrap()["title"], "hello");
+    assert_ne!(stored.value_json().unwrap()["title"], "UNTRUSTED");
+    let ordering = w.host.requests_to(&endpoint("listPosts"));
+    assert_eq!(ordering.len(), 1);
+    assert!(ordering[0].url.contains("hydrate=false"));
 }
 
 #[test]
@@ -164,7 +267,7 @@ fn a_current_proof_has_direct_sync_content_parity() {
     assert_eq!(proven.cbor, pds.cbor);
     assert_eq!(proven.valid, pds.valid);
     assert_eq!(proven.value_json().unwrap(), pds.value_json().unwrap());
-    let requests = w.host.requests_to(&format!("{INDEX}/xrpc/{PROOFS}"));
+    let requests = w.host.requests_to(&endpoint("getRecordProofs"));
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].max_bytes, 8 * 1024 * 1024);
     assert_eq!(
@@ -272,9 +375,9 @@ fn forum_world() -> ForumWorld {
         &rkey,
         &serde_json::to_value(post_value).unwrap(),
     );
-    describe(&host, &[CHANGES], 0);
+    describe(&host, &["getChanges"], 0);
     host.respond_get(
-        &format!("{INDEX}/xrpc/{CHANGES}"),
+        &endpoint("getChanges"),
         resp::ok_json(&with_meta(json!({"changes": [], "cursor": 0}), 0)),
     );
     let e = engine(&host, Sources::Assisted);
@@ -300,10 +403,10 @@ fn forum_world() -> ForumWorld {
 #[test]
 fn head_hints_only_queue_and_changes_restart_at_the_durable_cursor() {
     let w = forum_world();
-    describe(&w.host, &[HEADS, CHANGES], 0);
+    describe(&w.host, &["getRepoHeads", "getChanges"], 0);
     let (cid, rev) = w.owner.head();
     w.host.respond_get(
-        &format!("{INDEX}/xrpc/{HEADS}"),
+        &endpoint("getRepoHeads"),
         resp::ok_json(&with_meta(json!({"heads": [{"did": w.owner.did(), "rev": rev.to_string(), "commit": cid.to_string()}]}), 0)),
     );
     let before = block_on(RecordStore::new(w.host.cache()).repo(w.owner.did().as_str()))
@@ -323,7 +426,7 @@ fn head_hints_only_queue_and_changes_restart_at_the_durable_cursor() {
     assert_eq!(before, after, "an indexer head is not a PDS observation");
 
     w.host.respond_seq(
-        &format!("{INDEX}/xrpc/{CHANGES}"),
+        &endpoint("getChanges"),
         vec![
             Ok(resp::ok_json(&with_meta(json!({
                 "changes": [{"seq": 7, "uri": w.post, "cid": w.owner.cid(nsid::POST, w.post.split('/').next_back().unwrap()).unwrap().to_string(), "did": w.owner.did(), "rev": rev.to_string(), "op": "update"}],
@@ -348,14 +451,14 @@ fn head_hints_only_queue_and_changes_restart_at_the_durable_cursor() {
 
     let restarted = engine(&w.host, Sources::Assisted);
     w.host.respond_get(
-        &format!("{INDEX}/xrpc/{CHANGES}"),
+        &endpoint("getChanges"),
         resp::ok_json(&with_meta(json!({"changes": [], "cursor": 7}), 7)),
     );
     w.host.clear_requests();
     block_on(restarted.poll_indexer_changes(w.key.uri.as_str()))
         .unwrap()
         .unwrap();
-    let calls = w.host.requests_to(&format!("{INDEX}/xrpc/{CHANGES}"));
+    let calls = w.host.requests_to(&endpoint("getChanges"));
     assert_eq!(calls.len(), 1);
     assert!(calls[0].url.contains("since=7"), "{}", calls[0].url);
 }
@@ -363,9 +466,9 @@ fn head_hints_only_queue_and_changes_restart_at_the_durable_cursor() {
 #[test]
 fn malformed_changes_do_not_advance_and_old_cursors_reconcile() {
     let w = forum_world();
-    describe(&w.host, &[CHANGES], 0);
+    describe(&w.host, &["getChanges"], 0);
     w.host.respond_get(
-        &format!("{INDEX}/xrpc/{CHANGES}"),
+        &endpoint("getChanges"),
         resp::ok_json(&with_meta(
             json!({"changes": [{"seq": 1, "uri": "not a URI", "did": w.owner.did(), "rev": "3l2s5xxv2z2aa", "op": "update"}], "cursor": 1}),
             1,
@@ -380,9 +483,9 @@ fn malformed_changes_do_not_advance_and_old_cursors_reconcile() {
         Some(0)
     );
 
-    describe(&w.host, &[CHANGES], 50);
+    describe(&w.host, &["getChanges"], 50);
     w.host.respond_seq(
-        &format!("{INDEX}/xrpc/{CHANGES}"),
+        &endpoint("getChanges"),
         vec![
             Ok(resp::xrpc_error(400, "CursorTooOld", "cursor expired")),
             Ok(resp::ok_json(&with_meta(
@@ -410,16 +513,20 @@ fn audit_reports_omissions_and_forged_proofs() {
     let w = forum_world();
     w.host.advance_ms(180_000);
     let (_, rev) = w.owner.head();
-    describe(&w.host, &[HEADS, CHANGES, POSTS, PROOFS], 0);
+    describe(
+        &w.host,
+        &["getRepoHeads", "getChanges", "listPosts", "getRecordProofs"],
+        0,
+    );
     w.host.respond_get(
-        &format!("{INDEX}/xrpc/{HEADS}"),
+        &endpoint("getRepoHeads"),
         resp::ok_json(&with_meta(
             json!({"heads": [{"did": w.owner.did(), "rev": rev.to_string()}]}),
             0,
         )),
     );
     w.host.respond_get(
-        &format!("{INDEX}/xrpc/{POSTS}"),
+        &endpoint("listPosts"),
         resp::ok_json(&with_meta(
             json!({
                 "posts": [], "policy": {"karma": "karma/1", "ranking": "magic/1"},
@@ -429,7 +536,7 @@ fn audit_reports_omissions_and_forged_proofs() {
         )),
     );
     w.host.respond_get(
-        &format!("{INDEX}/xrpc/{PROOFS}"),
+        &endpoint("getRecordProofs"),
         resp::car(b"not a car".to_vec()),
     );
     let report = block_on(w.engine.audit_indexer(w.key.uri.as_str()))

@@ -8,7 +8,11 @@
 use lessdugin_atp::syntax::{AtUri, Did};
 use serde::{Deserialize, Serialize};
 
-pub const NSID_PREFIX: &str = "online.7778777.lessdugin.index.";
+/// Builds the method NSID in this build's namespace (`NS` in the normative contract).
+pub fn method_nsid(method: &str) -> String {
+    format!("{}.index.{method}", lessdugin_lexicon::ns::NS)
+}
+
 pub const MAX_PROOF_URIS: usize = 25;
 pub const MAX_HEAD_DIDS: usize = 50;
 pub const MAX_CHANGES: usize = 1_000;

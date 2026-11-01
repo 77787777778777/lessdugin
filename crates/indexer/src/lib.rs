@@ -42,6 +42,8 @@ pub struct Indexer {
     pub config: Arc<IndexerConfig>,
     pub metrics: Arc<Metrics>,
     pub sync_lock: Arc<tokio::sync::Mutex<()>>,
+    pub(crate) rate_windows:
+        Arc<std::sync::Mutex<std::collections::HashMap<String, (tokio::time::Instant, u8)>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -131,6 +133,7 @@ impl Indexer {
             config: Arc::new(config),
             metrics: Arc::new(Metrics::default()),
             sync_lock: Arc::new(tokio::sync::Mutex::new(())),
+            rate_windows: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 

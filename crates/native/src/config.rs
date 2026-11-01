@@ -539,7 +539,11 @@ impl Config {
                     .into_iter()
                     .chain(d.jetstream.as_ref())
                     .chain(self.relays.iter())
-                    .chain(self.constellation.as_ref()),
+                    .chain(self.constellation.as_ref())
+                    .chain(match &self.indexer {
+                        IndexerSetting::Urls(urls) => urls.as_slice(),
+                        IndexerSetting::Mode(_) => &[],
+                    }),
             ),
         }
     }

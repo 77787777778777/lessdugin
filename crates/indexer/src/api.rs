@@ -4,7 +4,6 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::SocketAddr;
-use std::sync::Mutex;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
@@ -77,8 +76,6 @@ impl IntoResponse for ApiError {
     }
 }
 
-static RATE: std::sync::OnceLock<Mutex<HashMap<String, (Instant, u8)>>> =
-    std::sync::OnceLock::new();
 async fn rate_limit(State(indexer): State<Indexer>, req: Request<Body>, next: Next) -> Response {
     indexer.metrics.requests.fetch_add(1, Ordering::Relaxed);
     let ip = req
@@ -87,8 +84,8 @@ async fn rate_limit(State(indexer): State<Indexer>, req: Request<Body>, next: Ne
         .map(|c| c.0.ip().to_string())
         .unwrap_or_else(|| "local".into());
     let allowed = {
-        let mut windows = RATE
-            .get_or_init(|| Mutex::new(HashMap::new()))
+        let mut windows = indexer
+            .rate_windows
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let now = Instant::now();

@@ -19,8 +19,23 @@ use lessdugin_core::engine::{
 };
 use lessdugin_core::identity::DnsMode as EngineDns;
 
-use crate::config::{Config, NetworkProfile, Paths, Sources, VerifyMode, parity_now_ms};
+use crate::config::{
+    Config, IndexerSetting, NetworkProfile, Paths, Sources, VerifyMode, parity_now_ms,
+};
 use crate::host::NativeHost;
+
+fn indexers(cfg: &Config) -> Vec<lessdugin_core::engine::IndexerConsent> {
+    match &cfg.indexer {
+        // Explicit URLs in the local configuration are the user's consent. Forum discovery and
+        // "none" add no implicit consent; forum-scoped consent comes from the state store.
+        IndexerSetting::Urls(urls) => urls
+            .iter()
+            .cloned()
+            .map(|url| lessdugin_core::engine::IndexerConsent { url })
+            .collect(),
+        IndexerSetting::Mode(_) => Vec::new(),
+    }
+}
 
 /// Maps the native configuration to the engine's (without parity mode; see [`open_engine`]).
 pub fn engine_config(cfg: &Config) -> EngineConfig {
@@ -50,7 +65,7 @@ pub fn engine_config(cfg: &Config) -> EngineConfig {
             jetstream: d.jetstream.iter().cloned().collect(),
             constellation: cfg.constellation.clone(),
             slingshot: cfg.slingshot.clone(),
-            indexers: Vec::new(),
+            indexers: indexers(cfg),
             platform: lessdugin_core::engine::Platform::Native,
             ..EngineConfig::default()
         },
@@ -73,6 +88,7 @@ pub fn engine_config(cfg: &Config) -> EngineConfig {
             jetstream: cfg.jetstream.clone(),
             constellation: cfg.constellation.clone(),
             slingshot: cfg.slingshot.clone(),
+            indexers: indexers(cfg),
             ..EngineConfig::default()
         },
     }
@@ -111,6 +127,28 @@ mod tests {
         assert!(c.slingshot.is_none());
         assert!(c.doh.is_empty());
         assert_eq!(c.sources, EngineSources::Assisted);
+    }
+
+    #[test]
+    fn only_explicit_indexer_urls_become_configuration_consent() {
+        let url = url::Url::parse("https://index.example.com").unwrap();
+        let mut cfg = Config {
+            indexer: crate::config::IndexerSetting::Urls(vec![url.clone()]),
+            ..Config::default()
+        };
+        assert_eq!(engine_config(&cfg).indexers.len(), 1);
+        assert_eq!(engine_config(&cfg).indexers[0].url, url);
+        cfg.indexer = crate::config::IndexerSetting::Mode(crate::config::IndexerMode::Forum);
+        assert!(engine_config(&cfg).indexers.is_empty());
+        cfg.indexer = crate::config::IndexerSetting::Mode(crate::config::IndexerMode::None);
+        assert!(engine_config(&cfg).indexers.is_empty());
+
+        let mut devnet = Config::devnet(
+            url::Url::parse("http://127.0.0.1:2582").unwrap(),
+            url::Url::parse("http://127.0.0.1:2583").unwrap(),
+        );
+        devnet.indexer = crate::config::IndexerSetting::Urls(vec![url]);
+        assert_eq!(engine_config(&devnet).indexers.len(), 1);
     }
 
     /// O-9: a `sources` in config.toml wins over the stored setting; without one the stored

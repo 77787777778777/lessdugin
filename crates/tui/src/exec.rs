@@ -1124,6 +1124,12 @@ pub async fn load_forum<H: Host>(
 ) -> Result<ForumData, EngineError> {
     let view = engine.forum_open(forum).await?;
     let q = posts_query(forum, sort, filter, LIST_LIMIT);
+    if !opts.offline {
+        // Cold assisted start: only URI ordering crosses the indexer JSON boundary. Every
+        // displayed value below still comes from the local fold; failure leaves ordinary PDS
+        // sync as the fallback.
+        let _ = engine.hydrate_indexer_page(&q).await;
+    }
     let mut list = engine.list_posts(&q).await?;
     if !opts.offline
         && unverified(list.items.iter().map(|p| &p.author))

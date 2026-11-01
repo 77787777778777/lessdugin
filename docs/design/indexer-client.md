@@ -10,9 +10,9 @@ An engine constructs a client only when `sources=assisted` and a stored or confi
 matches. Forum-scoped consent matches the complete forum AT URI; a global consent is usable for
 any forum. Production endpoints are HTTPS on the default port, without credentials, query or
 fragment. Explicit devnet mode additionally permits HTTP on `localhost` or a loopback IP.
-`describeIndexer` establishes the DID and feature set. Every other call is refused unless its
-method name is advertised. Direct mode returns before `describeIndexer`, so it generates no
-indexer traffic.
+`describeIndexer` establishes the DID and feature set. Features are the short method names listed
+in the normative contract, not full NSIDs. Every other call is refused unless its method name is
+advertised. Direct mode returns before `describeIndexer`, so it generates no indexer traffic.
 
 All methods are anonymous GETs under
 `/xrpc/online.7778777.lessdugin.index.<method>`, with no redirects, scheduled host budgets and a

@@ -97,7 +97,7 @@ impl Client {
             .xrpc()
             .query(
                 &service,
-                &format!("{NSID_PREFIX}describeIndexer"),
+                &method_nsid("describeIndexer"),
                 &[],
                 &CallOpts::capped(limits::DEFAULT_RESPONSE_MAX_BYTES),
             )
@@ -129,7 +129,7 @@ impl Client {
             .xrpc()
             .query(
                 &self.service,
-                &format!("{NSID_PREFIX}describeIndexer"),
+                &method_nsid("describeIndexer"),
                 &[],
                 &CallOpts::capped(limits::DEFAULT_RESPONSE_MAX_BYTES),
             )
@@ -154,13 +154,12 @@ impl Client {
     }
 
     pub fn supports(&self, method: &str) -> bool {
-        let nsid = format!("{NSID_PREFIX}{method}");
-        self.description.features.contains(&nsid)
+        self.description.features.iter().any(|f| f == method)
     }
 
     fn gate(&self, method: &str) -> Result<String, XrpcCallError> {
         self.supports(method)
-            .then(|| format!("{NSID_PREFIX}{method}"))
+            .then(|| method_nsid(method))
             .ok_or_else(|| invalid(format!("indexer does not advertise {method}")))
     }
 
