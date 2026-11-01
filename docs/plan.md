@@ -164,6 +164,8 @@ A milestone is done when all of the following hold:
 
 ### M3 — Social core
 
+**Status:** done (2026-11-01). Every [auto] criterion passes: the social vectors and properties P1–P9 run natively and on wasm32; hidden content stays hidden while a moderator's PDS is unavailable; every MVP action is reachable from the CLI, TUI and SPA, with spec-driven reach tests; the social parity scenario is byte-identical in approval and open modes; and the CLI tests refuse a lock above 5,000 allowed comments and prove `mods rm` adopts first. The engine's `dto/1` shape is frozen, with compatible additions recorded in `engine-api.md`. Parity mode ignores device-local read marks (decision O-13), so clients that visited different threads still compare the same record-derived views. Local gate on the integrated tree: `CI=1 cargo xtask ci` and `cargo xtask e2e`, including 26 Chromium tests and all 8 devnet scenarios. GitHub CI is recorded below after the milestone push.
+
 **Scope**
 - **Opinions:** a 4 s undo and coalescing window; merging across devices (swap failure → re-read → re-apply the intent per axis).
 - **`karma/1`:** K1 → E → KP → K with the per-pair cap. Scores, agreement, and unweighted counts ("n votes not yet counted").
@@ -191,6 +193,8 @@ A milestone is done when all of the following hold:
 - [auto] CLI tests: a lock is refused above 5,000 allowed comments; `mods rm` runs `mod adopt` first.
 
 ### M4 — Rich content and media
+
+**Status:** done (2026-11-01). Every [auto] criterion passes: the LFM, hostile-input, terminal and MathML corpora pass with byte-identical DOMPurify and ammonia output; metadata stripping, orientation and bounded downscaling are covered; a 300 MiB blob streams through both hosts without entering wasm linear memory; and the media parity subset is byte-identical. `cargo xtask fuzz` ran all seven targets for 600 seconds each without a crash: CAR 9,789,650; commit 6,226,349; DAG-CBOR 6,468,947; lexicon 3,786,620; MST 288,675; renderer 57,507; media 54,494,437 executions. The media run found an oversized extended-box header panic, fixed and retained as `fuzz/regressions/media/oversized-extended-box-header` before its clean rerun. The release engine wasm is 4,821,850 bytes raw and 1,829,162 bytes gzipped: above ADR 0008's warning lines, below its 2.5 MB failure tripwire. `CI=1 cargo xtask ci` and `cargo xtask e2e` pass on the integrated tree, including the cold-sync budget, 26 Chromium tests and all 8 devnet scenarios. GitHub CI is recorded below after the milestone push.
 
 **Scope**
 - **Full LFM/1:** math (math-core `=0.9.0` with the pre-scan and the MathML normaliser, ADR 0002), footnotes and sidenotes, table of contents, alerts, spoilers, details, figure captions, hover previews, verified mentions.
