@@ -624,3 +624,192 @@ fn i_loads_from_the_authors_pds_whatever_the_view_says() {
         "{shown}"
     );
 }
+
+/// An environment of `vars` for the detection logic.
+fn env(vars: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+    let vars: Vec<(String, String)> = vars
+        .iter()
+        .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+        .collect();
+    move |k: &str| vars.iter().find(|(a, _)| a == k).map(|(_, b)| b.clone())
+}
+
+/// How image support is detected (`image.rs`'s module docs): under `auto` the terminal is
+/// asked only when the environment names an emulator (or a multiplexer, which answers itself)
+/// or the terminal reports its cell size; a bare pty with an inherited `TERM` is not, since a
+/// terminal that never answers would swallow the next keystroke. The setting forces either way.
+#[test]
+fn only_a_terminal_the_environment_names_is_asked() {
+    use lessdugin_tui::image::{Detection, Setting, detection};
+    let xterm = ("TERM", "xterm-256color");
+    // a bare pty (`script`, a CI shell): the TERM of every emulator, nothing else
+    assert_eq!(
+        detection(Setting::Auto, env(&[xterm]), false),
+        Detection::Halfblocks
+    );
+    // no terminal to speak of, even one that reports pixels
+    assert_eq!(
+        detection(Setting::Auto, env(&[]), true),
+        Detection::Halfblocks
+    );
+    assert_eq!(
+        detection(
+            Setting::Auto,
+            env(&[("TERM", "dumb"), ("TERM_PROGRAM", "x")]),
+            true
+        ),
+        Detection::Halfblocks
+    );
+    // an empty variable is not evidence
+    assert_eq!(
+        detection(Setting::Auto, env(&[xterm, ("TERM_PROGRAM", "")]), false),
+        Detection::Halfblocks
+    );
+    // emulators, by their variables or their own TERM; tmux answers queries itself
+    for vars in [
+        vec![xterm, ("TERM_PROGRAM", "WezTerm")],
+        vec![xterm, ("KITTY_WINDOW_ID", "1")],
+        vec![xterm, ("ITERM_SESSION_ID", "w0t0p0")],
+        vec![xterm, ("VTE_VERSION", "7600")],
+        vec![("TERM", "xterm-kitty")],
+        vec![("TERM", "foot")],
+        vec![
+            ("TERM", "screen-256color"),
+            ("TMUX", "/tmp/tmux-1000/default,1,0"),
+        ],
+        vec![("TERM", "tmux-256color")],
+    ] {
+        assert_eq!(
+            detection(Setting::Auto, env(&vars), false),
+            Detection::Query,
+            "{vars:?}"
+        );
+    }
+    // a terminal that reports its size in pixels (over SSH the variables are gone, the ioctl
+    // is forwarded)
+    assert_eq!(
+        detection(Setting::Auto, env(&[xterm]), true),
+        Detection::Query
+    );
+    // the setting wins
+    assert_eq!(
+        detection(Setting::Query, env(&[("TERM", "dumb")]), false),
+        Detection::Query
+    );
+    assert_eq!(
+        detection(
+            Setting::Halfblocks,
+            env(&[("TERM", "xterm-kitty"), ("KITTY_WINDOW_ID", "1")]),
+            true
+        ),
+        Detection::Halfblocks
+    );
+    assert_eq!(
+        detection(
+            Setting::Off,
+            env(&[xterm, ("TERM_PROGRAM", "WezTerm")]),
+            true
+        ),
+        Detection::Off
+    );
+    // the setting's spelling
+    assert_eq!(Setting::parse(" Query "), Some(Setting::Query));
+    assert_eq!(Setting::parse("HALFBLOCKS"), Some(Setting::Halfblocks));
+    assert_eq!(Setting::parse("off"), Some(Setting::Off));
+    assert_eq!(Setting::parse("yes"), None);
+    assert_eq!(Setting::from_var(env(&[])), Setting::Auto);
+    assert_eq!(
+        Setting::from_var(env(&[(Setting::VAR, "nonsense")])),
+        Setting::Auto
+    );
+    assert_eq!(
+        Setting::from_var(env(&[(Setting::VAR, "off")])),
+        Setting::Off
+    );
+}
+
+/// The terminal's answer is read by the TUI itself: the responses pick the protocol and the
+/// cell size, the Device Status Report ends the read, and the bytes typed before or after the
+/// answer come back as the keys they are, so no keystroke is lost to the query.
+#[test]
+fn the_terminals_answer_is_parsed_and_the_keys_around_it_kept() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use lessdugin_tui::image::{QueryAnswer, keys_of, query_string};
+    use ratatui_image::picker::ProtocolType;
+    let none = env(&[]);
+    // a key before the answer; Kitty, DA1 with Sixel, the cell size, the DSR; keys after it
+    let mut a = QueryAnswer::new();
+    assert!(!a.push(b"j"));
+    assert!(!a.complete());
+    assert!(a.push(b"\x1b_Gi=31;OK\x1b\\\x1b[?64;4c\x1b[6;7;14t\x1b[0nk\r"));
+    assert!(a.complete());
+    assert_eq!(a.typed(), b"jk\r");
+    let p = a.picker(false, &none, None);
+    assert_eq!(p.protocol_type(), ProtocolType::Kitty);
+    assert_eq!((p.font_size().width, p.font_size().height), (14, 7));
+    // Sixel when there is no Kitty; the cell size from the window when the terminal gives none
+    let mut a = QueryAnswer::new();
+    assert!(a.push(b"\x1b[?64;4c\x1b[0n"));
+    assert_eq!(
+        a.picker(false, &none, Some((9, 18))).protocol_type(),
+        ProtocolType::Sixel
+    );
+    // ... and halfblocks without any cell size: a protocol cannot draw without one
+    assert_eq!(
+        a.picker(false, &none, None).protocol_type(),
+        ProtocolType::Halfblocks
+    );
+    // a distrusted emulator's Kitty is not used, and it is not asked for it either
+    let wez = env(&[
+        ("WEZTERM_EXECUTABLE", "/usr/bin/wezterm"),
+        ("TERM_PROGRAM", "WezTerm"),
+    ]);
+    let mut a = QueryAnswer::new();
+    assert!(a.push(b"\x1b_Gi=31;OK\x1b\\\x1b[6;7;14t\x1b[0n"));
+    assert_eq!(
+        a.picker(false, &wez, None).protocol_type(),
+        ProtocolType::Iterm2
+    );
+    assert!(!query_string(false, &wez).contains("_Gi=31"));
+    assert!(query_string(false, &none).contains("_Gi=31"));
+    // the query ends with the DSR every terminal answers, and is wrapped for tmux
+    assert!(query_string(false, &none).ends_with("\x1b[5n"));
+    assert!(query_string(true, &none).starts_with("\x1bPtmux;"));
+    // no answer at all: halfblocks, and what was typed is kept
+    let mut a = QueryAnswer::new();
+    assert!(!a.push(b"\r"));
+    assert!(!a.complete());
+    assert_eq!(a.typed(), b"\r");
+    assert_eq!(
+        a.picker(false, &none, Some((9, 18))).protocol_type(),
+        ProtocolType::Halfblocks
+    );
+    // the keys of the typed bytes, as a raw-mode terminal sends them
+    let k = |code: KeyCode, m: KeyModifiers| KeyEvent::new(code, m);
+    assert_eq!(
+        keys_of(b"jk\r\t\x7f\x03A"),
+        [
+            k(KeyCode::Char('j'), KeyModifiers::NONE),
+            k(KeyCode::Char('k'), KeyModifiers::NONE),
+            k(KeyCode::Enter, KeyModifiers::NONE),
+            k(KeyCode::Tab, KeyModifiers::NONE),
+            k(KeyCode::Backspace, KeyModifiers::NONE),
+            k(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            k(KeyCode::Char('A'), KeyModifiers::SHIFT),
+        ]
+    );
+    assert!(keys_of(b"").is_empty());
+}
+
+/// `LESSDUGIN_TUI_IMAGES=off`: nothing is decoded, and the cell says why.
+#[test]
+fn images_off_decode_nothing_and_say_so() {
+    let mut img = Images::off();
+    img.decode("a".into(), bytes(png(4, 4)));
+    assert_eq!(
+        img.poll().decoded,
+        [("a".to_owned(), Err(Placeholder::Off))]
+    );
+    assert_eq!(Placeholder::Off.text(), "[images off]");
+    assert!(!img.busy());
+}
