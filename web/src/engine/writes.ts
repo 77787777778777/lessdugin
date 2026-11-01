@@ -62,7 +62,8 @@ export class WriteStore {
   private readonly reported = new Set<string>();
   private version = 0;
 
-  update(id: string, state: WriteState): void {
+  /** Queues a report once, however the done state arrived (event, ticket or outbox listing). */
+  private record(id: string, state: WriteState): void {
     this.states.set(id, state);
     if (
       state.kind === "done" &&
@@ -73,6 +74,10 @@ export class WriteStore {
       this.reported.add(id);
       this.reports.push({ id, lines: [...state.report] });
     }
+  }
+
+  update(id: string, state: WriteState): void {
+    this.record(id, state);
     this.version++;
     for (const l of [...this.listeners]) l();
     if (isTerminal(state)) {
@@ -86,7 +91,7 @@ export class WriteStore {
    * at-uri it writes about (the item edited, voted on, reacted to, …), if any. */
   track(ticket: WriteTicket, subject?: string): void {
     if (subject !== undefined) this.subjects.set(ticket.id, subject);
-    if (!this.states.has(ticket.id)) this.update(ticket.id, ticket.state);
+    if (!this.states.has(ticket.id)) this.record(ticket.id, ticket.state);
     else if (subject !== undefined) {
       this.version++;
       for (const l of [...this.listeners]) l();
@@ -99,7 +104,7 @@ export class WriteStore {
     let changed = false;
     for (const t of tickets) {
       if (this.states.has(t.id)) continue;
-      this.states.set(t.id, t.state);
+      this.record(t.id, t.state);
       changed = true;
     }
     if (changed) {

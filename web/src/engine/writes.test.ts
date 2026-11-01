@@ -80,4 +80,20 @@ describe("WriteStore", () => {
     expect(s.failedCount()).toBe(1);
     expect(s.inFlight()).toBe(1);
   });
+
+  it("shows a done adoption report recovered from the outbox, once (sec-8)", () => {
+    const s = new WriteStore();
+    const report = ["cannot adopt at://did:plc:example/record: not in effect"];
+    s.track({ id: "w1", state: { kind: "done", uri: "at://x", report } });
+    expect(s.pendingReport()).toEqual({ id: "w1", lines: report });
+    // a write that completed before the app subscribed is not repeated from the listing
+    s.seed([{ id: "w1", state: { kind: "done", uri: "at://x", report } }]);
+    // one recovered on a later page load is shown too
+    s.seed([{ id: "w2", state: { kind: "done", uri: "at://y", report } }]);
+    expect(s.pendingReport()?.id).toBe("w1");
+    s.dismissReport("w1");
+    expect(s.pendingReport()?.id).toBe("w2");
+    s.dismissReport("w2");
+    expect(s.pendingReport()).toBeUndefined();
+  });
 });
