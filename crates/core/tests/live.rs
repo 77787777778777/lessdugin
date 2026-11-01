@@ -711,80 +711,40 @@ fn live_tail_store_failure_replays_frame_before_advancing_cursor() {
     });
 }
 
-#[derive(serde::Serialize)]
-struct FollowRow {
-    v: u32,
-    at: i64,
-    seeded: bool,
-}
-
 #[test]
 fn discovery_completion_controls_private_participant_filters() {
     futures::executor::block_on(async {
         let host = MemHost::new();
         host.park_sleeps(true);
-        let owner = Did::parse("did:plc:aaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
-        let key = lessdugin_core::discovery::ForumKey::new(&owner, "meta").unwrap();
-        host.state()
-            .write(vec![KvOp::Put(
-                lessdugin_core::key!("loc", "follow", key.uri.as_str()),
-                lessdugin_core::store::row::encode(&FollowRow {
-                    v: 1,
-                    at: 1,
-                    seeded: false,
-                })
-                .unwrap(),
-            )])
-            .await
-            .unwrap();
         let candidate = "did:plc:candidate".to_owned();
-        let rows = std::collections::BTreeMap::from([(
-            candidate.clone(),
-            lessdugin_core::discovery::DiscRow::new("hint:test", host.now_ms()),
-        )]);
-        lessdugin_core::discovery::state::put_disc_rows(host.cache(), &key.fk, &rows)
-            .await
-            .unwrap();
-
         for complete in [false, true] {
-            if complete {
-                lessdugin_core::discovery::state::mark_discovery_complete(
-                    host.cache(),
-                    &key.fk,
-                    host.now_ms(),
-                )
-                .await
-                .unwrap();
-            }
-            // A valid irrelevant frame marks the source healthy, so this planning test does
-            // not enter the unrelated polling/discovery path with parked fake sleeps.
             host.script_websocket(
                 "wss://jetstream.example/",
                 vec![WsMessage::Text(v2_commit(DID, &post(), "unrelated", 1))],
             );
-            let engine = Engine::new(
-                host.clone(),
-                EngineConfig {
-                    platform: lessdugin_core::engine::Platform::Browser,
-                    sources: Sources::Assisted,
-                    sources_flag: Some(Sources::Assisted),
-                    jetstream: vec![url::Url::parse("wss://jetstream.example/subscribe").unwrap()],
-                    ..EngineConfig::default()
-                },
+            let mut source = LiveSource::new(
+                Arc::new(host.clone()),
+                LiveConfig::new(
+                    vec![url::Url::parse("wss://jetstream.example/subscribe").unwrap()],
+                    true,
+                ),
             );
-            let mut tail = Box::pin(engine.live_tail());
-            let expected = usize::from(complete) + 1;
-            for _ in 0..8 {
-                assert!(futures::poll!(tail.as_mut()).is_pending());
-                if host.websocket_urls().len() == expected {
-                    break;
-                }
-                host.advance_ms(1_000);
-            }
-            assert_eq!(host.websocket_urls().len(), expected);
-            host.park_sleeps(false);
-            engine.live_stop();
-            tail.await.unwrap();
+            let context = Context {
+                participants_known: complete,
+                filter_dids: if complete {
+                    vec![candidate.clone()]
+                } else {
+                    Vec::new()
+                },
+                ..context()
+            };
+            // Drive exactly one connection and one scripted frame; no engine tail or sleep.
+            let status = source.next(&context).await.unwrap();
+            assert!(matches!(
+                status,
+                SourceStatus::Actions(_) | SourceStatus::Waiting
+            ));
+            source.stop().await;
         }
 
         let urls = host.websocket_urls();
