@@ -379,32 +379,70 @@ async fn native_devnet_all_first_pass_methods_and_restart() {
     );
 }
 
+/// sync.md §15.1 (m6-acceptance-9): a forum whose sync fails retries on its own back-off, from one
+/// minute, while discovery keeps its six-hour cadence; a seed whose declaration is proven absent
+/// is quarantined instead of being retried as a failure.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_failed_backfill_sync_retries_within_one_minute() {
     let fixture = Fixture::new().await;
     let missing = fixture.forum.uri.as_str().replace("/m6", "/missing");
     fixture.indexer.store.add_forum_seed(&missing).unwrap();
+    let unreachable = fixture.owner.pds().add_account("unreachable.test");
+    let broken = ForumKey::new(unreachable.did(), "broken").unwrap();
+    unreachable.put(
+        nsid::FORUM,
+        "broken",
+        &serde_json::to_value(Forum::create(
+            "Broken",
+            Datetime::from_millis(fixture.net.now_ms() - 3_600_000).unwrap(),
+            MembershipMode::Open,
+        ))
+        .unwrap(),
+    );
+    fixture
+        .indexer
+        .store
+        .add_forum_seed(broken.uri.as_str())
+        .unwrap();
+    fixture.net.inject(
+        lessdugin_testkit::fake_pds::Fault::status(500).on_repo(unreachable.did().as_str()),
+    );
+    let started = fixture.indexer.now_ms();
     let task = ingest::spawn(fixture.indexer.clone());
     let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        let failed = fixture.indexer.metrics.sync_errors.load(Ordering::Relaxed) > 0;
-        if failed
-            && !fixture
-                .indexer
-                .store
-                .schedule_due("backfill", fixture.indexer.now_ms())
-        {
-            break;
-        }
+    let row = |uri: &str| fixture.indexer.store.forum_row(uri).unwrap();
+    while row(broken.uri.as_str()).failures == 0 || row(&missing).absent_ms == 0 {
         assert!(Instant::now() < deadline, "backfill did not run");
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    let retry = fixture.indexer.store.scheduled_at("backfill").unwrap();
+    let retry = row(broken.uri.as_str()).retry_ms;
     assert!(
         retry <= fixture.indexer.now_ms() + 60_001,
-        "failed discovery/sync scheduled {retry} at {}, errors={}",
+        "failed forum sync scheduled {retry} at {}, errors={}",
         fixture.indexer.now_ms(),
         fixture.indexer.metrics.sync_errors.load(Ordering::Relaxed),
+    );
+    assert!(fixture.indexer.metrics.sync_errors.load(Ordering::Relaxed) > 0);
+    // Discovery is not re-run because one forum failed or one declaration is absent.
+    let backfill = fixture.indexer.store.scheduled_at("backfill").unwrap();
+    assert!(
+        backfill >= started + ingest::BACKFILL_EVERY_MS,
+        "discovery rescheduled at {backfill}"
+    );
+    // The absent seed leaves every pass until its daily recheck; the healthy forum is indexed.
+    assert!(
+        !fixture
+            .indexer
+            .store
+            .forums_for_pass(fixture.indexer.now_ms())
+            .contains(&missing)
+    );
+    assert!(
+        fixture
+            .indexer
+            .store
+            .forum(fixture.forum.uri.as_str())
+            .is_some()
     );
     task.abort();
 }
@@ -2116,11 +2154,10 @@ async fn daily_gc_drops_expired_tombstones_and_orphaned_proofs() {
     assert!(records.tombstone_of(&uri).await.unwrap().is_none());
     assert!(fixture.indexer.store.proof(&post).is_none());
     // The scheduler runs the pass once a day.
+    let before = fixture.indexer.now_ms();
     ingest::tick(&fixture.indexer).await;
     let next = fixture.indexer.store.scheduled_at("gc").unwrap();
-    assert!(
-        next >= fixture.indexer.now_ms() + lessdugin_core::limits::TOMBSTONE_GC_EVERY_MS - 1_000
-    );
+    assert!(next >= before + lessdugin_core::limits::TOMBSTONE_GC_EVERY_MS);
 }
 
 /// security-net-11: one account's memberships cannot seed more than its quota of forums.
