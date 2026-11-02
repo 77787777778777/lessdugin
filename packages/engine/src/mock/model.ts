@@ -144,6 +144,8 @@ export interface TagRec {
   page?: string;
   head?: AtUri;
   unmergedEdits: number;
+  /** The canonical revision's `isTag` (absent: true); a page that is not a tag never applies. */
+  isTag?: boolean;
 }
 
 export interface SequenceRec {

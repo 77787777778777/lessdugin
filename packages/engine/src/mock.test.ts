@@ -205,6 +205,45 @@ describe("MockEngine writes", () => {
     expect(ticket.state.kind).toBe("pending");
   });
 
+  it("lists a post's applied tags, sorted, not its declared ones (social.md §13.3)", async () => {
+    const e = new MockEngine({ sendMs: 10 });
+    const all = await e.listPosts({ forum: FORUM_URI, sort: "new", filter: "all", limit: 100 });
+    // declared in the order rationality, practical; both have a page
+    const declaredOutOfOrder = all.items.find((p) => p.title === "Noticing confusion");
+    expect(declaredOutOfOrder?.tags).toEqual(["practical", "rationality"]);
+    const ticket = await e.publish({
+      forum: FORUM_URI,
+      kind: "article",
+      title: "Tagged without a page",
+      body: { markdown: "Body", media: [] },
+      tags: ["no-such-page", "meta", "meta"],
+    });
+    await vi.advanceTimersByTimeAsync(50);
+    const state = (await e.writes()).find((w) => w.id === ticket.id)?.state;
+    if (state?.kind !== "done") throw new Error("the publish did not finish");
+    // a tag without a wiki page never applies; the record keeps what the author declared
+    expect((await e.getPost(state.uri)).post.tags).toEqual(["meta"]);
+    expect((await e.raw(state.uri)).record).toMatchObject({
+      tags: ["no-such-page", "meta", "meta"],
+    });
+    const byMissing = await e.listPosts({
+      forum: FORUM_URI,
+      sort: "new",
+      filter: "all",
+      tag: "no-such-page",
+      limit: 100,
+    });
+    expect(byMissing.items).toEqual([]);
+    const byMeta = await e.listPosts({
+      forum: FORUM_URI,
+      sort: "new",
+      filter: "all",
+      tag: "meta",
+      limit: 100,
+    });
+    expect(byMeta.items.map((p) => p.uri)).toContain(state.uri);
+  });
+
   it("keeps the #restrict dimension an intent leaves out, as the engine merges (m3r-2)", async () => {
     const e = new MockEngine({ sendMs: 10 });
     const target = (await e.members(FORUM_URI, {})).find(

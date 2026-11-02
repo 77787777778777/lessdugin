@@ -566,6 +566,21 @@ export class MockEngine implements EngineApi {
     return clone(state);
   }
 
+  /** The post's applied tags (social.md §13.3 `applies(p, t)`), sorted, as `PostSummary.tags`
+   * has them: a declared tag applies once its wiki page exists and is a tag, unless the author
+   * is restricted from `tag`. The mock records no tag votes of other voters, so `rel` is the
+   * author's own; the declared tags stay in the record (`raw`, an edit's draft). */
+  private appliedTags(p: PostRec): Slug[] {
+    const tags = this.s.tags.get(p.forum);
+    if (!tags || this.s.actors.get(p.author)?.restricted?.includes("tag") === true) return [];
+    return [...new Set(p.tags)]
+      .filter((slug) => {
+        const t = tags.get(slug);
+        return t !== undefined && t.isTag !== false;
+      })
+      .sort();
+  }
+
   private postSummary(p: PostRec): PostSummary {
     const thread = [...this.s.comments.values()].filter((c) => c.root === p.uri);
     const listedComments = thread.filter((c) => listed(c.state));
@@ -577,7 +592,8 @@ export class MockEngine implements EngineApi {
       author: this.actor(p.author),
       kind: p.kind,
       excerpt: p.body.excerpt,
-      tags: [...p.tags],
+      // the engine lists a post's tags only while it is listed (views.rs `post_summary`)
+      tags: listed(p.state) ? this.appliedTags(p) : [],
       tier: p.tier,
       pinned: p.pinned,
       locked: p.locked,
@@ -1406,7 +1422,7 @@ export class MockEngine implements EngineApi {
       if (q.filter === "frontpage" && (p.tier === "personal" || p.kind === "quickTake"))
         return false;
       if (q.filter === "curated" && (p.tier !== "curated" || p.kind === "quickTake")) return false;
-      if (q.tag !== undefined && !p.tags.includes(q.tag)) return false;
+      if (q.tag !== undefined && !this.appliedTags(p).includes(q.tag)) return false;
       if (q.kind !== undefined && p.kind !== q.kind) return false;
       if (q.author !== undefined && p.author !== q.author) return false;
       return true;
@@ -1577,7 +1593,7 @@ export class MockEngine implements EngineApi {
     const s: TagSummary = {
       slug: t.slug,
       name: t.name,
-      postCount: this.listedPosts(forum).filter((p) => p.tags.includes(t.slug)).length,
+      postCount: this.listedPosts(forum).filter((p) => this.appliedTags(p).includes(t.slug)).length,
       unmergedEdits: t.unmergedEdits,
     };
     if (t.description !== undefined) s.description = t.description;
@@ -1594,7 +1610,7 @@ export class MockEngine implements EngineApi {
     const t = this.tagMap(forum).get(slug);
     if (!t) throw err("not_found", `No tag ${slug}`);
     const posts = this.listedPosts(forum)
-      .filter((p) => p.tags.includes(slug))
+      .filter((p) => this.appliedTags(p).includes(slug))
       .map((p) => this.postSummary(p))
       .sort((a, b) => b.score.score - a.score.score || (a.uri < b.uri ? -1 : 1));
     const view: TagView = { dto: DTO_VERSION, tag: this.tagSummary(forum, t), posts };
