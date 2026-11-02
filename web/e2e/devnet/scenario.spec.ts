@@ -1369,7 +1369,14 @@ async function runScenario(
           .length,
         "Constellation pages followed by cursor",
       ).toBeGreaterThan(0);
+      // identity and account noise for unrelated DIDs reached the clients (a subscription
+      // without a DID filter, as the browser's before it knows the participants, gets it all)
+      // and was dropped: no view below names a noise DID
       expect(servicesLog.mirror.noise, "the Jetstream log carries noise").toBeGreaterThan(0);
+      expect(
+        servicesLog.jetstream.reduce((n, j) => n + j.noiseFrames, 0),
+        "noise frames delivered to the clients' Jetstream connections",
+      ).toBeGreaterThan(0);
     } else {
       expect(servicesLog.http, "direct: nothing asked the Constellation or the relay").toEqual([]);
       expect(servicesLog.jetstream, "direct: nothing connected to Jetstream").toEqual([]);
@@ -1390,6 +1397,13 @@ async function runScenario(
           `/xrpc/${NS}.index.getRecordProofs`,
         ]),
       );
+      // and their proof bundles admitted records at level proven (the badge U-D2 lets differ)
+      for (const [client, text] of [
+        ["TUI", idx.tui.list.compact],
+        ["SPA", idx.spa.list],
+      ] as const) {
+        expect(hasProvenance(text, "verified"), `${client}: a proof-admitted post`).toBe(true);
+      }
     }
 
     // and what the scenario wrote is in the view (equal outputs are not equally empty)
@@ -1416,9 +1430,14 @@ async function runScenario(
     }
     // steps 4 and 5 (the social subset, M3): the counted opinions and the pin. In approval mode
     // carol's pre-edit vote is the one weighted, earlier-version vote, with her agreement. In open
-    // mode alice's seed upvote is weighted, while carol's newcomer vote is absent from the readers'
-    // input (reposTotal 2 below). Alice's later tag action updates that same opinion to the edited
-    // post's current CID, so her open-mode vote no longer counts as cast on an earlier version.
+    // mode alice's seed upvote is weighted, while carol's newcomer vote carries no weight; it is
+    // absent from the direct readers' input (reposTotal 2 below) and, found through CORE+, an
+    // unweighted vote in the assisted readers' (sync.md §4.3: "K, scores and the visibility of
+    // other users are the same with or without CORE+ discovery. `unweighted` counts and the
+    // collapsed content of newcomers do differ"). Alice's later tag action updates that same
+    // opinion to the edited post's current CID, so her open-mode vote no longer counts as cast on
+    // an earlier version.
+    const introduced = !approval && sources === "assisted";
     const score = thread.post.post.score as {
       score: number;
       agreement?: number;
@@ -1431,7 +1450,7 @@ async function runScenario(
     expect([score.weightedVotes, score.earlierVersionVotes, score.unweighted], shown).toEqual([
       1,
       approval ? 1 : 0,
-      0,
+      introduced ? 1 : 0,
     ]);
     expect(score.agreement, `carol's agreement counts only when she is established: ${shown}`).toBe(
       approval ? 1 : 0,
@@ -1442,13 +1461,12 @@ async function runScenario(
     // is as much a parity assertion as the byte comparison above - all three clients must agree
     // that the comment is gone.
     // The newcomer's comment (step 6d) is the one other comment: it is in the view exactly when
-    // CORE+ can introduce it (open mode, assisted; sync.md §2.2, §4.4), and never in approval
-    // mode, where its author is an applicant.
-    const introduced = !approval && sources === "assisted";
+    // CORE+ can introduce it (open mode, assisted; sync.md §2.2, §4.4), collapsed as a new
+    // user's (social.md §6.5 V8), and never in approval mode, where its author is an applicant.
     expect(
-      thread.comments.map((c: { uri: string }) => c.uri),
+      thread.comments.map((c: { uri: string; state: unknown }) => [c.uri, c.state]),
       "a hidden comment must not be in the anonymous view; the newcomer's only through CORE+",
-    ).toEqual(introduced ? [newcomerComment] : []);
+    ).toEqual(introduced ? [[newcomerComment, { kind: "collapsed", reason: "newUser" }]] : []);
     expect(
       JSON.stringify(thread),
       "the hidden comment's body must not survive anywhere in the view",

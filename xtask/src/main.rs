@@ -15,11 +15,13 @@
 //!                      its raw and gzipped size; --budget fails above 2.5 MB gzipped (warns
 //!                      above 1.5 MB gzipped or 4 MB raw), --report adds the `verify` marginal, --kv-test
 //!                      builds the test-only KV conformance module into pkg/kvtest
-//!   e2e [--rust] [--web] [--parity] [--no-build]
+//!   e2e [--rust] [--web] [--parity] [--cold-start] [--no-build]
 //!                      the end-to-end tests against the local devnet (ADR 0006;
 //!                      packages/e2e/README.md): --rust the Rust e2e tests (LESSDUGIN_E2E=1),
 //!                      --web the SPA's devnet Playwright suite including the M2 parity
 //!                      scenario, --parity only that scenario; none of them: --rust and --web.
+//!                      --cold-start (opt in; minutes of pre-indexing) the M6 cold paint of a
+//!                      2,000-participant forum (scripts/m6-cold-start.sh).
 //!                      The web runs first build the engine wasm, the e2e SPA, the CLI (embedding
 //!                      it), the TUI parity driver, the devnet CORE+ services and the indexer,
 //!                      unless --no-build
@@ -370,28 +372,30 @@ const RUST_E2E: &[(&str, &str, &[&str])] = &[
 fn e2e(args: &[String]) -> Result<(), String> {
     if matches!(args, [a] if a == "--help" || a == "-h") {
         println!(
-            "usage: cargo xtask e2e [--rust] [--web] [--parity] [--no-build]\n\
+            "usage: cargo xtask e2e [--rust] [--web] [--parity] [--cold-start] [--no-build]\n\
              --rust runs the Rust devnet tests; --web runs the SPA devnet suite;\n\
-             --parity runs only the M2 parity scenario; no selection runs Rust and web"
+             --parity runs only the M2 parity scenario; no selection runs Rust and web;\n\
+             --cold-start (only when asked) runs the M6 cold-start acceptance"
         );
         return Ok(());
     }
-    let (mut rust, mut web, mut parity, mut build) = (false, false, false, true);
+    let (mut rust, mut web, mut parity, mut cold, mut build) = (false, false, false, false, true);
     for a in args {
         match a.as_str() {
             "--rust" => rust = true,
             "--web" => web = true,
             "--parity" => parity = true,
+            "--cold-start" => cold = true,
             "--no-build" => build = false,
             _ => {
                 return Err(format!(
-                    "usage: cargo xtask e2e [--rust] [--web] [--parity] [--no-build] (unknown \
-                     argument {a})"
+                    "usage: cargo xtask e2e [--rust] [--web] [--parity] [--cold-start] \
+                     [--no-build] (unknown argument {a})"
                 ));
             }
         }
     }
-    if !(rust || web || parity) {
+    if !(rust || web || parity || cold) {
         rust = true;
         web = true;
     }
@@ -500,6 +504,17 @@ fn e2e(args: &[String]) -> Result<(), String> {
             a.push("scenario.spec.ts");
         }
         run_env("pnpm", &a, &vars)?;
+    }
+    if cold {
+        // docs/plan.md M6: the signed 2,000-participant fixture, pre-indexed (minutes), then
+        // three fresh Chromium contexts paint its first page; the script builds what it runs
+        let results = root().join("test-results/m6-cold-start/results.json");
+        let mut v = vars.clone();
+        v.push((
+            "LESSDUGIN_COLD_START_RESULTS".into(),
+            results.display().to_string(),
+        ));
+        run_env("bash", &["scripts/m6-cold-start.sh"], &v)?;
     }
     Ok(())
 }
@@ -1437,6 +1452,32 @@ mod tests {
     #[test]
     fn e2e_help_is_a_cheap_probe() {
         e2e(&["--help".into()]).expect("e2e --help must not build or start a devnet");
+    }
+
+    /// The M6 cold-start acceptance runs in a gate: e2e.yml's scheduled (and on-demand) job
+    /// `cold-start` runs `cargo xtask e2e --cold-start`, which runs scripts/m6-cold-start.sh;
+    /// it is opt in (not on pull requests, not in a bare `cargo xtask e2e`).
+    #[test]
+    fn the_cold_start_acceptance_runs_nightly() {
+        let wf = file(".github/workflows/e2e.yml");
+        let (before, job) = wf
+            .split_once("\n  cold-start:\n")
+            .expect("a cold-start job");
+        assert!(job.contains("\n        run: cargo xtask e2e --cold-start\n"));
+        assert!(job.contains(
+            "if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'"
+        ));
+        assert!(
+            !before
+                .lines()
+                .any(|l| !l.trim_start().starts_with('#') && l.contains("--cold-start")),
+            "not in the pull-request jobs"
+        );
+        assert!(wf.contains("schedule:"));
+        let main = file("xtask/src/main.rs");
+        assert!(main.contains("run_env(\"bash\", &[\"scripts/m6-cold-start.sh\"], &v)"));
+        assert!(file("scripts/m6-cold-start.sh").contains("e2e/cold-start/cold-start.config.ts"));
+        assert!(e2e(&["--cold-strt".into()]).is_err());
     }
 
     /// fuzz.yml runs every target `cargo xtask fuzz` knows, and the seed generator seeds each of
