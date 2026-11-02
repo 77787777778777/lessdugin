@@ -1940,7 +1940,7 @@ fn the_command_line_tags_posts_and_moderates_tags() {
     let t = block_on(alice.engine.wiki_edit(
         &s.forum,
         "rust",
-        &WikiDraft {
+        WikiDraft {
             name: "Rust".into(),
             description: None,
             body: Some(lessdugin_core::dto::BodyDraft::text("About Rust.")),
