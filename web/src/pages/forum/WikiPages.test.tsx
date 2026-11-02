@@ -29,7 +29,7 @@ async function setup(page: "edit" | "history", tag = SLUG) {
       route: { path: `/f/$owner/$slug/t/$tag/${page}`, at: `/f/${owner}/${slug}/t/${tag}/${page}` },
     },
   );
-  return { engine, forum, ...rendered };
+  return { ...rendered, engine, forum };
 }
 
 describe("WikiEditPage", () => {

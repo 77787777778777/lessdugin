@@ -112,6 +112,26 @@ for (const scheme of ["light", "dark"] as const) {
       expect(w.errors).toEqual([]);
     });
 
+    test("wiki and sequence editors", async ({ page }) => {
+      const w = await watch(page);
+      const found: string[] = [];
+      for (const path of [
+        `${FORUM_PATH}/t/decision-theory/edit`,
+        `${FORUM_PATH}/t/decision-theory/history`,
+        `${FORUM_PATH}/seqs/new`,
+      ]) {
+        await open(page, path, () =>
+          expect(
+            page.getByRole("heading", { level: 1, name: "LessDugin Test Forum" }),
+          ).toBeVisible(),
+        );
+        await page.waitForLoadState("networkidle");
+        found.push(...(await axe(page, path)));
+      }
+      expect(found).toEqual([]);
+      expect(w.errors).toEqual([]);
+    });
+
     test("interactive states: dialogs, palette, composer, toasts, forms", async ({ page }) => {
       const w = await watch(page);
       const found: string[] = [];
