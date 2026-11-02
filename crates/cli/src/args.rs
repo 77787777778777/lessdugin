@@ -532,6 +532,167 @@ mod reach {
         ("import_local", Reach::Command("export --import state.json")),
     ];
 
+    /// How the CLI writes each value `opinion` and `mod_action` take: every `kind` of
+    /// `OpinionIntent` and `ModActionValue` (`testdata/dto/dto-1.d.ts`, `engine-api.md` §3.5),
+    /// since reaching the operation with one value (`vote 3 up`) does not reach the others (a
+    /// tag vote, the moderator's `#tag`).
+    const VARIANTS: &[(&str, &str)] = &[
+        ("OpinionIntent.karma", "vote 3 up"),
+        ("OpinionIntent.agreement", "agree 3 agree"),
+        ("OpinionIntent.react", "react 3 heart --quote Thanks"),
+        ("OpinionIntent.tag", "vote 3 up --tag rust"),
+        ("ModActionValue.hide", "mod hide 3 --spam"),
+        (
+            "ModActionValue.access",
+            "mod ban did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+        ),
+        (
+            "ModActionValue.restrict",
+            "mod restrict did:plc:aaaaaaaaaaaaaaaaaaaaaaaa --cap vote",
+        ),
+        ("ModActionValue.tier", "mod curate 3"),
+        ("ModActionValue.pin", "mod pin 3 --scope forum"),
+        ("ModActionValue.lock", "mod lock 3"),
+        ("ModActionValue.tag", "mod tag rust --removed"),
+    ];
+
+    /// The `kind`s of the TypeScript union `name` in `testdata/dto/dto-1.d.ts`.
+    fn dto_kinds(name: &str) -> BTreeSet<String> {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata/dto/dto-1.d.ts");
+        let dts = std::fs::read_to_string(path).expect("testdata/dto/dto-1.d.ts");
+        let head = format!("export type {name} = ");
+        let line = dts
+            .lines()
+            .find(|l| l.starts_with(&head))
+            .unwrap_or_else(|| panic!("no {name} in dto-1.d.ts"));
+        line.split("kind: \"")
+            .skip(1)
+            .filter_map(|k| k.split('"').next())
+            .map(|k| format!("{name}.{k}"))
+            .collect()
+    }
+
+    /// The opinion or the asserted mod-action value a command line sends, as `Type.kind`.
+    fn sent_kind(line: &str) -> String {
+        use clap::Parser;
+        let words = std::iter::once("lessdugin").chain(line.split_whitespace());
+        let cli = Cli::try_parse_from(words).unwrap_or_else(|e| panic!("{line}: {e}"));
+        let (name, value) = match cli.command {
+            Some(super::Command::Vote(a)) => ("OpinionIntent", serde_json::to_value(a.intent())),
+            Some(super::Command::Agree(a)) => ("OpinionIntent", serde_json::to_value(a.intent())),
+            Some(super::Command::React(a)) => ("OpinionIntent", serde_json::to_value(a.intent())),
+            Some(super::Command::Mod(m)) => (
+                "ModActionValue",
+                serde_json::to_value(
+                    m.action
+                        .asserted()
+                        .unwrap_or_else(|| panic!("{line} asserts nothing")),
+                ),
+            ),
+            other => panic!("{line}: neither an opinion nor a mod action: {other:?}"),
+        };
+        let value = value.unwrap();
+        format!("{name}.{}", value["kind"].as_str().unwrap_or_default())
+    }
+
+    #[test]
+    fn every_opinion_and_mod_action_value_has_a_way_in() {
+        let mut want = dto_kinds("OpinionIntent");
+        want.extend(dto_kinds("ModActionValue"));
+        assert!(want.len() >= 11, "the dto unions were not read: {want:?}");
+        let have: BTreeSet<String> = VARIANTS.iter().map(|(k, _)| (*k).to_owned()).collect();
+        assert_eq!(VARIANTS.len(), have.len(), "a variant is listed twice");
+        assert_eq!(have, want, "the variants the CLI reaches, against dto/1");
+        for (kind, line) in VARIANTS {
+            parses(line);
+            assert_eq!(sent_kind(line), *kind, "{line}");
+        }
+    }
+
+    /// The tag vote and the moderator `#tag` carry what their flags say.
+    #[test]
+    fn tag_votes_and_tag_moderation_build_their_values() {
+        use clap::Parser;
+        use lessdugin_core::dto::{KarmaValue, ModActionValue, OpinionIntent};
+        let parse = |line: &str| {
+            Cli::try_parse_from(std::iter::once("lessdugin").chain(line.split_whitespace()))
+                .unwrap_or_else(|e| panic!("{line}: {e}"))
+                .command
+        };
+        let intent = |line: &str| match parse(line) {
+            Some(super::Command::Vote(a)) => a.intent(),
+            other => panic!("{line}: {other:?}"),
+        };
+        assert_eq!(
+            intent("vote 3 down --tag #rust"),
+            OpinionIntent::Tag {
+                slug: "rust".into(),
+                value: Some(KarmaValue::Down)
+            }
+        );
+        assert_eq!(
+            intent("vote 3 clear --tag rust"),
+            OpinionIntent::Tag {
+                slug: "rust".into(),
+                value: None
+            }
+        );
+        assert_eq!(
+            intent("vote 3 strong-up"),
+            OpinionIntent::Karma {
+                value: Some(KarmaValue::StrongUp)
+            }
+        );
+        let value = |line: &str| match parse(line) {
+            Some(super::Command::Mod(m)) => m.action.asserted(),
+            other => panic!("{line}: {other:?}"),
+        };
+        let head = "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/online.7778777.lessdugin.wikiRevision/w1";
+        assert_eq!(
+            value("mod tag tag:rust --removed"),
+            Some(ModActionValue::Tag {
+                removed: true,
+                head: None
+            })
+        );
+        assert_eq!(
+            value(&format!("mod tag rust --head {head}")),
+            Some(ModActionValue::Tag {
+                removed: false,
+                head: Some(head.into())
+            })
+        );
+        assert_eq!(
+            value(&format!("mod tag rust --removed --head {head}")),
+            Some(ModActionValue::Tag {
+                removed: true,
+                head: Some(head.into())
+            })
+        );
+        assert_eq!(
+            value("mod tag rust --restore"),
+            Some(ModActionValue::Tag {
+                removed: false,
+                head: None
+            })
+        );
+        assert_eq!(value("mod untag rust"), None);
+        assert_eq!(super::tag_subject("rust"), "tag:rust");
+        assert_eq!(super::tag_subject("tag:rust"), "tag:rust");
+        // a `#tag` record must say something; --removed and --restore contradict each other
+        for bad in [
+            "mod tag rust",
+            "mod tag rust --removed --restore",
+            "mod tag rust --author-scope --removed",
+        ] {
+            assert!(
+                Cli::try_parse_from(std::iter::once("lessdugin").chain(bad.split_whitespace()))
+                    .is_err(),
+                "{bad}"
+            );
+        }
+    }
+
     /// The operations of the spec's §3.2, §3.5 and §3.6 tables (the first cell of each row).
     fn spec_operations() -> BTreeSet<String> {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/spec/engine-api.md");

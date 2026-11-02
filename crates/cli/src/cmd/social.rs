@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! The M3 social commands (synthesis §6.10): opinions (`vote`, `agree`, `react`, `reacts`),
-//! `notifications`, `activity`, `mods` and `mod`.
+//! The M3 social commands (synthesis §6.10): opinions (`vote`, `vote --tag`, `agree`, `react`,
+//! `reacts`), `notifications`, `activity`, `mods` and `mod`.
 //!
 //! Opinions and mod actions are public records (`social.md` §17): the first use of each kind
 //! shows the "this is public" interstitial and records the acknowledgement
@@ -11,8 +11,8 @@
 
 use lessdugin_atp::syntax::Datetime;
 use lessdugin_core::dto::{
-    ActionTicket, Capability, ModActionIntent, ModActionValue, ModScope, ModsChange,
-    NotificationsQuery, OpinionIntent, PublicActionKind, TextQuote, Tier, WriteState,
+    ActionTicket, ModActionIntent, ModActionValue, ModScope, ModsChange, NotificationsQuery,
+    OpinionIntent, PublicActionKind, WriteState,
 };
 use lessdugin_core::engine::EngineError;
 use lessdugin_core::model::palette;
@@ -21,8 +21,8 @@ use serde_json::Value;
 
 use crate::args::{
     ActivityArgs, AgreeArgs, ExportArgs, ExportScopeArg, KarmaCadenceArg, ModAction, ModArgs,
-    ModSubject, ModsAction, ModsArgs, MuteArgs, NotificationsArgs, PinArgs, ReactArgs, VoteArgs,
-    scope_of, stance_of,
+    ModSubject, ModTagSubject, ModsAction, ModsArgs, MuteArgs, NotificationsArgs, PinArgs,
+    ReactArgs, VoteArgs, scope_of, tag_subject,
 };
 use crate::cmd::{read, refs, write};
 use crate::ctx::{CliError, Ctx, Writer};
@@ -120,31 +120,19 @@ async fn drive_action(
 // ---------------------------------------------------------------------------------------------
 // vote, agree, react
 
-/// `lessdugin vote <ref> <value>`.
+/// `lessdugin vote <ref> <value> [--tag <slug>]`: karma, or a tag vote on a post.
 pub async fn vote(ctx: &Ctx, args: VoteArgs) -> Result<(), CliError> {
-    opinion(
-        ctx,
-        &args.reference,
-        OpinionIntent::Karma {
-            value: args.value.into(),
-        },
-        "Voted",
-        args.yes,
-    )
-    .await
+    let done = if args.tag.is_some() {
+        "Tag vote recorded"
+    } else {
+        "Voted"
+    };
+    opinion(ctx, &args.reference, args.intent(), done, args.yes).await
 }
 
 /// `lessdugin agree <ref> <value>`.
 pub async fn agree(ctx: &Ctx, args: AgreeArgs) -> Result<(), CliError> {
-    let value = Option::<lessdugin_core::dto::AgreementValue>::from(args.value);
-    opinion(
-        ctx,
-        &args.reference,
-        OpinionIntent::Agreement { value },
-        "Recorded",
-        args.yes,
-    )
-    .await
+    opinion(ctx, &args.reference, args.intent(), "Recorded", args.yes).await
 }
 
 /// `lessdugin react <ref> <react> [--quote …] [--against] [--remove]`.
@@ -152,25 +140,7 @@ pub async fn react(ctx: &Ctx, args: ReactArgs) -> Result<(), CliError> {
     if args.remove && args.against {
         return Err(CliError::usage("--remove and --against conflict"));
     }
-    let quote = args.quote.map(|exact| TextQuote {
-        exact,
-        prefix: None,
-        suffix: None,
-        start: None,
-    });
-    opinion(
-        ctx,
-        &args.reference,
-        OpinionIntent::React {
-            id: args.react,
-            stance: stance_of(args.against),
-            quote,
-            remove: args.remove,
-        },
-        "Reacted",
-        args.yes,
-    )
-    .await
+    opinion(ctx, &args.reference, args.intent(), "Reacted", args.yes).await
 }
 
 /// One opinion on an item: the interstitial, a quiet thread sync (the subject's version is the
@@ -851,20 +821,17 @@ async fn adopt(ctx: &Ctx, actor: &str, forum: Option<&str>, yes: bool) -> Result
     Ok(())
 }
 
-/// Every `mod <verb> <subject>` that asserts or removes one action.
+/// Every `mod <verb> <subject>` that asserts or removes one action. The value asserted is
+/// [`ModAction::asserted`]'s.
 async fn assert_or_remove(ctx: &Ctx, action: ModAction, yes: bool) -> Result<(), CliError> {
     let w = ctx.writer().await?;
     let is_restrict = matches!(&action, ModAction::Restrict(_) | ModAction::Nullify(_));
-    let (subject, forum_opt, scope, value, reason, until, done) = match action {
+    let asserted = action.asserted();
+    let (subject, forum_opt, scope, reason, until, done) = match action {
         ModAction::Hide(a) => (
             a.subject.clone(),
             a.forum.clone(),
             scope_of(a.author_scope),
-            ModActionValue::Hide {
-                hidden: true,
-                spam: a.spam,
-                show_reason: true,
-            },
             a.reason.clone(),
             until_ms(a.until.as_deref())?,
             "Hidden",
@@ -873,11 +840,6 @@ async fn assert_or_remove(ctx: &Ctx, action: ModAction, yes: bool) -> Result<(),
             a.subject.clone(),
             a.forum.clone(),
             scope_of(a.author_scope),
-            ModActionValue::Hide {
-                hidden: false,
-                spam: false,
-                show_reason: true,
-            },
             a.reason.clone(),
             until_ms(a.until.as_deref())?,
             "Kept",
@@ -886,9 +848,6 @@ async fn assert_or_remove(ctx: &Ctx, action: ModAction, yes: bool) -> Result<(),
             a.subject.clone(),
             a.forum.clone(),
             scope_of(a.author_scope),
-            ModActionValue::Access {
-                level: lessdugin_core::dto::AccessLevel::Banned,
-            },
             a.reason.clone(),
             until_ms(a.until.as_deref())?,
             "Banned",
@@ -897,23 +856,6 @@ async fn assert_or_remove(ctx: &Ctx, action: ModAction, yes: bool) -> Result<(),
             a.subject.clone(),
             a.forum.clone(),
             scope_of(a.author_scope),
-            ModActionValue::Restrict {
-                capabilities: Some(if a.capabilities.is_empty() {
-                    vec![
-                        Capability::Post,
-                        Capability::Comment,
-                        Capability::Vote,
-                        Capability::React,
-                        Capability::Tag,
-                        Capability::Wiki,
-                        Capability::Sequence,
-                    ]
-                } else {
-                    a.capabilities.iter().map(|c| (*c).into()).collect()
-                }),
-                // the engine keeps the current nullification (m3r-2)
-                nullify_votes: None,
-            },
             a.reason.clone(),
             until_ms(a.until.as_deref())?,
             "Restricted",
@@ -922,35 +864,29 @@ async fn assert_or_remove(ctx: &Ctx, action: ModAction, yes: bool) -> Result<(),
             a.subject.clone(),
             a.forum.clone(),
             scope_of(a.author_scope),
-            ModActionValue::Restrict {
-                // the engine keeps the current restriction (m3r-2)
-                capabilities: None,
-                nullify_votes: Some(true),
-            },
             a.reason.clone(),
             until_ms(a.until.as_deref())?,
             "Votes nullified",
         ),
         ModAction::Personal(s) => {
-            return tier(ctx, &w, s, Tier::Personal, "Moved to personal", yes).await;
+            return tier(ctx, &w, s, asserted, "Moved to personal", yes).await;
         }
         ModAction::Frontpage(s) => {
-            return tier(ctx, &w, s, Tier::Frontpage, "Moved to frontpage", yes).await;
+            return tier(ctx, &w, s, asserted, "Moved to frontpage", yes).await;
         }
         ModAction::Curate(s) => {
-            return tier(ctx, &w, s, Tier::Curated, "Curated", yes).await;
+            return tier(ctx, &w, s, asserted, "Curated", yes).await;
         }
         ModAction::Pin(a) => {
-            return pin(ctx, &w, a, true, yes).await;
+            return pin(ctx, &w, a, asserted, "Pinned", yes).await;
         }
         ModAction::Unpin(a) => {
-            return pin(ctx, &w, a, false, yes).await;
+            return pin(ctx, &w, a, asserted, "Unpinned", yes).await;
         }
         ModAction::Lock(s) => (
             s.subject.clone(),
             s.forum.clone(),
             scope_of(s.author_scope),
-            ModActionValue::Lock { locked: true },
             None,
             None,
             "Locked",
@@ -959,11 +895,42 @@ async fn assert_or_remove(ctx: &Ctx, action: ModAction, yes: bool) -> Result<(),
             s.subject.clone(),
             s.forum.clone(),
             scope_of(s.author_scope),
-            ModActionValue::Lock { locked: false },
             None,
             None,
             "Unlocked",
         ),
+        ModAction::Tag(a) => {
+            // a tag is a forum subject: its forum is --forum or the current one, and a
+            // `--head` revision must be in the cache (a sync of the forum brings it)
+            let forum = refs::forum_or_current(ctx, &w.engine, a.forum.as_deref()).await?;
+            read::sync_forum_quietly(ctx, &w.engine, &forum).await;
+            let done = match (a.removed, &a.head) {
+                (true, _) => "Tag removed",
+                (false, Some(_)) => "Tag page head set",
+                (false, None) => "Tag restored",
+            };
+            let Some(value) = asserted else {
+                return Err(EngineError::internal("mod tag asserts a value").into());
+            };
+            return mod_action(
+                ctx,
+                &w,
+                assert(
+                    forum,
+                    ModScope::Forum,
+                    tag_subject(&a.slug),
+                    value,
+                    a.reason.clone(),
+                    until_ms(a.until.as_deref())?,
+                ),
+                done,
+                yes,
+            )
+            .await;
+        }
+        ModAction::Untag(t) => {
+            return untag(ctx, &w, t, yes).await;
+        }
         ModAction::Unhide(s) => {
             return removal(ctx, &w, s, "hide", "Unhidden", yes).await;
         }
@@ -1024,6 +991,9 @@ async fn assert_or_remove(ctx: &Ctx, action: ModAction, yes: bool) -> Result<(),
         // m3r-2). A record written from another device reaches the cache by this sync.
         read::sync_forum_quietly(ctx, &w.engine, &forum).await;
     }
+    let Some(value) = asserted else {
+        return Err(EngineError::internal("this mod verb asserts no value").into());
+    };
     mod_action(
         ctx,
         &w,
@@ -1039,24 +1009,20 @@ async fn tier(
     ctx: &Ctx,
     w: &Writer,
     s: ModSubject,
-    tier: Tier,
+    value: Option<ModActionValue>,
     done: &'static str,
     yes: bool,
 ) -> Result<(), CliError> {
+    let Some(value) = value else {
+        return Err(EngineError::internal("a tier verb asserts a tier").into());
+    };
     let forum = mod_forum(ctx, &w.engine, s.forum.as_deref(), &s.subject).await?;
     let subject = subject_of(ctx, &w.engine, &s.subject).await?;
     read::sync_thread_quietly(ctx, &w.engine, &subject).await;
     mod_action(
         ctx,
         w,
-        assert(
-            forum,
-            scope_of(s.author_scope),
-            subject,
-            ModActionValue::Tier { tier, notice: None },
-            None,
-            None,
-        ),
+        assert(forum, scope_of(s.author_scope), subject, value, None, None),
         done,
         yes,
     )
@@ -1064,7 +1030,17 @@ async fn tier(
 }
 
 /// `mod pin|unpin`.
-async fn pin(ctx: &Ctx, w: &Writer, a: PinArgs, pinned: bool, yes: bool) -> Result<(), CliError> {
+async fn pin(
+    ctx: &Ctx,
+    w: &Writer,
+    a: PinArgs,
+    value: Option<ModActionValue>,
+    done: &'static str,
+    yes: bool,
+) -> Result<(), CliError> {
+    let Some(value) = value else {
+        return Err(EngineError::internal("a pin verb asserts a pin").into());
+    };
     let forum = mod_forum(ctx, &w.engine, a.forum.as_deref(), &a.subject).await?;
     let subject = subject_of(ctx, &w.engine, &a.subject).await?;
     read::sync_thread_quietly(ctx, &w.engine, &subject).await;
@@ -1075,14 +1051,24 @@ async fn pin(ctx: &Ctx, w: &Writer, a: PinArgs, pinned: bool, yes: bool) -> Resu
             forum,
             scope_of(a.author_scope),
             subject,
-            ModActionValue::Pin {
-                scope: a.scope.into(),
-                pinned,
-            },
+            value,
             a.reason.clone(),
             None,
         ),
-        if pinned { "Pinned" } else { "Unpinned" },
+        done,
+        yes,
+    )
+    .await
+}
+
+/// `mod untag <slug>`: removes the account's `#tag` assertion of the tag (a forum record).
+async fn untag(ctx: &Ctx, w: &Writer, t: ModTagSubject, yes: bool) -> Result<(), CliError> {
+    let forum = refs::forum_or_current(ctx, &w.engine, t.forum.as_deref()).await?;
+    mod_action(
+        ctx,
+        w,
+        remove(forum, ModScope::Forum, tag_subject(&t.slug), "tag"),
+        "Tag assertion removed",
         yes,
     )
     .await
