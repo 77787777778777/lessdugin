@@ -279,6 +279,11 @@ pub struct LoginArgs {
     #[arg(long, value_enum)]
     pub oauth_client: Option<OAuthClientArg>,
 
+    /// The hosted native client metadata URL (default: config.toml's `oauth_client_id`, else
+    /// the production metadata): a preview or self-hosted origin serving it for itself.
+    #[arg(long, value_name = "URL", conflicts_with_all = ["app_password", "password_stdin"])]
+    pub oauth_client_id: Option<Url>,
+
     /// Refused: passwords are never read from the command line.
     #[arg(long = "password", short = 'p', hide = true, num_args = 0..=1, value_name = "X")]
     pub password_argv: Option<Option<String>>,

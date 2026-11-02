@@ -77,6 +77,7 @@ pub enum ClientKind {
     /// `http://localhost?redirect_uri=…&scope=…` (no metadata document).
     #[default]
     Loopback,
+    /// The hosted native metadata: [`OAuthOptions::hosted_client_id`], by default
     /// `https://lessdugin.7778777.online/oauth/cli-client-metadata.json`.
     Hosted,
 }
@@ -91,6 +92,10 @@ pub struct OAuthOptions {
     /// Listen on the loopback port for the redirect. `false` for `--no-browser`: the port is
     /// only reserved for the redirect URI, and the user pastes the failed redirect back.
     pub listen: bool,
+    /// The hosted native `client_id` (a preview or self-hosted origin's metadata, decision
+    /// O-6; `config.toml` `oauth_client_id`, `--oauth-client-id`). `None`: the production
+    /// metadata, [`scope::HOSTED_CLIENT_ID`].
+    pub hosted_client_id: Option<Url>,
 }
 
 impl Default for OAuthOptions {
@@ -99,6 +104,20 @@ impl Default for OAuthOptions {
             client: ClientKind::Loopback,
             hosted_fallback: true,
             listen: true,
+            hosted_client_id: None,
+        }
+    }
+}
+
+impl OAuthOptions {
+    /// The `client_id` of `kind` for the loopback `redirect_uri`.
+    fn client_id(&self, kind: ClientKind, redirect_uri: &str) -> String {
+        match kind {
+            ClientKind::Loopback => scope::loopback_client_id(redirect_uri),
+            ClientKind::Hosted => self
+                .hosted_client_id
+                .as_ref()
+                .map_or_else(|| scope::HOSTED_CLIENT_ID.to_owned(), |u| u.to_string()),
         }
     }
 }
@@ -386,10 +405,7 @@ pub async fn begin<K: KvStore + 'static>(
     let scopes = scope::scope_candidates();
     let mut last_err = None;
     'clients: for client_kind in clients {
-        let client_id = match client_kind {
-            ClientKind::Loopback => scope::loopback_client_id(&redirect_uri),
-            ClientKind::Hosted => scope::HOSTED_CLIENT_ID.to_owned(),
-        };
+        let client_id = opts.client_id(client_kind, &redirect_uri);
         for scope in &scopes {
             let state = generate_nonce();
             let (challenge, verifier) = generate_pkce();
@@ -1062,6 +1078,29 @@ mod tests {
         assert_eq!(auth_error(&resp).as_deref(), Some("ExpiredToken"));
         assert_eq!(host_of("http://localhost:2583"), "localhost:2583");
         assert_eq!(host_of("https://bsky.social"), "bsky.social");
+    }
+
+    /// Decision O-6: the hosted native client id is the configured one, else the production
+    /// metadata; the loopback client is not affected.
+    #[test]
+    fn the_hosted_client_id_is_configurable() {
+        let redirect = "http://127.0.0.1:53124/callback";
+        let default = OAuthOptions::default();
+        assert_eq!(
+            default.client_id(ClientKind::Hosted, redirect),
+            scope::HOSTED_CLIENT_ID
+        );
+        let preview = Url::parse("https://preview.example.com/oauth/cli-client-metadata.json")
+            .unwrap();
+        let opts = OAuthOptions {
+            hosted_client_id: Some(preview.clone()),
+            ..OAuthOptions::default()
+        };
+        assert_eq!(opts.client_id(ClientKind::Hosted, redirect), preview.as_str());
+        assert_eq!(
+            opts.client_id(ClientKind::Loopback, redirect),
+            scope::loopback_client_id(redirect)
+        );
     }
 
     #[test]

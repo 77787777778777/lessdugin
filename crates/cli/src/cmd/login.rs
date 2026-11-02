@@ -117,6 +117,12 @@ pub async fn run(ctx: &Ctx, args: LoginArgs) -> Result<(), CliError> {
     if args.actor.as_deref().is_some_and(is_app_password_shape) {
         return Err(argv_password_refusal());
     }
+    // a hosted client id is the URL an authorization server fetches (config.toml's is checked
+    // when it is loaded)
+    if let Some(u) = &args.oauth_client_id {
+        lessdugin_native::config::oauth_client_id(u)
+            .map_err(|e| CliError::usage(format!("--oauth-client-id: {e}")))?;
+    }
     let app_password_mode = args.app_password || args.password_stdin;
     // The password is checked before anything touches the network (AUTH-3).
     let password = if app_password_mode {
@@ -150,10 +156,16 @@ async fn oauth_login(
         Some(OAuthClientArg::Hosted) => ClientKind::Hosted,
         _ => ClientKind::Loopback,
     };
+    // decision O-6: a flag, then config.toml, then the production metadata
+    let hosted_client_id = args
+        .oauth_client_id
+        .clone()
+        .or_else(|| ctx.config.oauth_client_id.clone());
     let opts = OAuthOptions {
         client,
         hosted_fallback: args.oauth_client.is_none(),
         listen: !args.no_browser,
+        hosted_client_id,
     };
     let pending = oauth::begin(engine, target, &opts).await?;
     let out = &ctx.out;
