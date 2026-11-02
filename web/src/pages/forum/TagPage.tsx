@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { getRouteApi } from "@tanstack/react-router";
+import { getRouteApi, Link } from "@tanstack/react-router";
 import { PostListItem } from "../../components/PostListItem.tsx";
 import { RenderedHtml } from "../../components/RenderedHtml.tsx";
 import { ErrorView, Loading } from "../../components/Status.tsx";
 import { useEngine } from "../../engine/context.tsx";
 import { qk } from "../../engine/queries.ts";
-import { cleanName } from "../../lib/text.ts";
+import { cleanName, plural } from "../../lib/text.ts";
 import ui from "../../styles/ui.module.css";
-import { useForumView } from "./forumContext.tsx";
+import { forumParams, useForumView } from "./forumContext.tsx";
 
 const route = getRouteApi("/f/$owner/$slug/t/$tag");
 
@@ -51,6 +51,25 @@ export function TagPage() {
         </button>
       </div>
       {q.data.tag.description && <p className={ui.muted}>{q.data.tag.description}</p>}
+      <div className={ui.row}>
+        <Link
+          to="/f/$owner/$slug/t/$tag/edit"
+          params={{ ...forumParams(forum.uri), tag }}
+          className={ui.button}
+        >
+          Edit page
+        </Link>
+        <Link
+          to="/f/$owner/$slug/t/$tag/history"
+          params={{ ...forumParams(forum.uri), tag }}
+          className={ui.button}
+        >
+          History
+        </Link>
+        {q.data.tag.unmergedEdits > 0 && (
+          <span className={ui.muted}>{plural(q.data.tag.unmergedEdits, "unmerged edit")}</span>
+        )}
+      </div>
       {q.data.page && (
         <div className={ui.card}>
           <RenderedHtml html={q.data.page.html} media={q.data.page.media} />

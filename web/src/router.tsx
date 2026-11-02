@@ -21,6 +21,8 @@ import { ForumSequencesPage } from "./pages/forum/ForumSequencesPage.tsx";
 import { ForumSettingsPage } from "./pages/forum/ForumSettingsPage.tsx";
 import { ForumTagsPage } from "./pages/forum/ForumTagsPage.tsx";
 import { TagPage } from "./pages/forum/TagPage.tsx";
+import { WikiEditPage } from "./pages/forum/WikiEditPage.tsx";
+import { WikiHistoryPage } from "./pages/forum/WikiHistoryPage.tsx";
 import { HomePage } from "./pages/HomePage.tsx";
 import { LoginPage } from "./pages/LoginPage.tsx";
 import { NotFoundPage } from "./pages/NotFoundPage.tsx";
@@ -97,6 +99,16 @@ const forumTagRoute = createRoute({
   getParentRoute: () => forumRoute,
   path: "t/$tag",
   component: TagPage,
+});
+const forumTagEditRoute = createRoute({
+  getParentRoute: () => forumRoute,
+  path: "t/$tag/edit",
+  component: WikiEditPage,
+});
+const forumTagHistoryRoute = createRoute({
+  getParentRoute: () => forumRoute,
+  path: "t/$tag/history",
+  component: WikiHistoryPage,
 });
 const forumSeqsRoute = createRoute({
   getParentRoute: () => forumRoute,
@@ -193,6 +205,8 @@ export const routeTree = rootRoute.addChildren([
     forumNewRoute,
     forumTagsRoute,
     forumTagRoute,
+    forumTagEditRoute,
+    forumTagHistoryRoute,
     forumSeqsRoute,
     forumModRoute,
     forumMembersRoute,
