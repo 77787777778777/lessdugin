@@ -1548,12 +1548,18 @@ The indexer is the same core engine (native host, `SqliteKv`) running continuous
 
 ### 15.1 Ingest
 
-- **Live:** Jetstream `wildcard` mode (§6.2) from two endpoints at once, deduplicated, with the cursor rewound 10 s on restart. `identity`, `account` and `sync` events for DIDs outside its participant and candidate sets are dropped; the rest are handled as in §6.4 and §3.4.
-- **Proofs:** for each relevant commit event, one `sync.getRecord` at the author's PDS; the verified proof is stored in `proof_cache` keyed by `(uri, rev)`. Proofs of backfilled records are fetched lazily on the first `getRecordProofs` request and cached per rev.
-- **Backfill:** every 6 h, `listReposByCollection` for each collection in `OURS` across `network.relays` (one NSID per call); then `sync_repo` of each forum owner and participant (level `pds`).
+- **Live:** Jetstream `wildcard` mode (§6.2) from two endpoints at once, deduplicated, with the cursor rewound 10 s on restart. `identity`, `account` and `sync` events for DIDs outside its participant and candidate sets are dropped; the rest are handled as in §6.4 and §3.4:
+  - a commit is point-fetched at the author's PDS, and each forum whose range holds it is **re-projected from the cache** (fold, side tables, change log). A live event never runs an ordinary forum sync (§4.5): that sync, which checks every authority and participant, runs for backfill, reconcile, and, debounced by 2 s, for a membership or declaration change (newcomer confirmation, a changed roster). A newcomer's membership (§6.4 `Candidate`) only records a durable candidate hint. `#sync` re-lists that one repo;
+  - frames are filtered in arrival order and their fetches run concurrently, each within 30 s (*tunable*). Both cursors advance only over the completed prefix of frames: a frame is complete once its fetch was projected or, after any failure (a refused or failed fetch, the 30 s bound, a failed projection), once the repo was handed to a durable **per-repo retry** (a `sync_repo` of its forum range, then a projection; back-off from 2 s doubling to 6 h). No single event can hold a cursor;
+  - a declaration proven absent (`RecordNotFound`) empties the forum's snapshot, logs each indexed record as deleted, and quarantines the seed (below);
+  - a message over 1,200,000 bytes follows the oversize rule of §6.2: after the first failure the endpoint reconnects at exactly the position of the last frame read; if that connection fails on oversize at the same position, it resumes 1 s past it and schedules a reconcile. Progress past the position resets the count; a replay of earlier frames does not. A non-UTF-8 binary frame is skipped. A socket with no frame for 120 s (*tunable*) is presumed half-open and replaced;
+  - a change log row of a live change carries the commit's `rev` (and CID) when the projection admitted that same version; other rows carry the repo's synced head rev.
+- **Proofs:** for each relevant commit event, one `sync.getRecord` at the author's PDS, fetched off the ingest path; the verified proof is stored in `proof_cache` keyed by `(uri, rev)`. A proof that cannot be fetched or verified is simply not cached: the record is still indexed. Proofs are verified against a DID document at most 1 hour old (§1.1, third-party proofs), and once more against a fresh one when that fails. Proofs of backfilled records are fetched lazily on the first `getRecordProofs` request and cached per rev (§15.3).
+- **Backfill:** every 6 h, `listReposByCollection` for each collection in `OURS` across `network.relays` (one NSID per call); then `sync_repo` of each forum owner and participant (level `pds`). The 6 h cadence does not depend on individual forums: a failed discovery retries after 1 min, doubling to 6 h, and a forum whose sync fails backs off on its own (1 min, doubling to 6 h, *tunable*) without re-running discovery.
 - **Reconcile:** daily `getLatestCommit` for every indexed repo (§6.8).
-- **Scope and quotas:** only forum declarations and confirmed forum participants are indexed, with the normative fetch caps per range (§5.4), and per-host politeness of at most 5 requests/s and 4 in flight per PDS host, 200 in flight globally (*tunable*).
-- `--poll <pds>…` replaces Jetstream with polling of the listed PDSes, for the devnet and air-gapped setups.
+- **Scope and quotas:** only forum declarations and confirmed forum participants are indexed, with the normative fetch caps per range (§5.4), and per-host politeness of at most 5 requests/s and 4 in flight per PDS host, 200 in flight globally (*tunable*); a request takes its host's permit and rate slot before a global permit. Discovery hints are capped (`threat-model.md` INFRA-12, *tunable*): at most 32 forum seeds attributed to one DID (its declarations and the forums its memberships name) and 2,000 to the DIDs of one PDS host; at most 500 pending membership hints per forum from one host and 10,000 per forum. A seed whose declaration is proven absent is quarantined: it is not served or synced, it is rechecked at most daily (or at once when a live commit shows the declaration again), and it is dropped after 7 days.
+- **Garbage collection:** daily, tombstones older than the 30-day retention leave the record store (§5.6.3), and cached proofs of records no forum indexes any more leave `proof_cache` after the same retention.
+- `--poll <pds>…` replaces Jetstream with polling of the listed PDSes, for the devnet and air-gapped setups. It selects a source, never a network: devnet mode needs `--dev` (or a devnet profile) and a development build (`threat-model.md` INFRA-9), and outside devnet mode a poll URL must be `https`.
 
 ### 15.2 Storage
 
@@ -1563,16 +1569,20 @@ The indexer is the same core engine (native host, `SqliteKv`) running continuous
 - `proof_cache(uri, rev, car)`;
 - `backlink` and `fts5`: only with `listBacklinks` and `searchPosts`, **Reserved (P2)**.
 
+Per-forum participant and post counts are maintained columns, and the record snapshot is indexed by uri, so no query scans the indexed records or every forum. Projections write only the rows that changed. The per-forum back-off, quarantine and per-repo retries are durable.
+
 It is comfortable up to about 50M records; a Postgres adapter can come later.
 
 ### 15.3 Serving
 
 - **First pass (M6):** `describeIndexer`, `listForums`, `listParticipants`, `getRepoHeads`, `getChanges`, `listPosts`, `listRecentDiscussion`, `getThread`, `getRecordProofs`. **Reserved (P2):** `searchPosts` (fts5), `listBacklinks`, `getActivity`, `getKarma`, `getTallies`, `getRecords`. `describeIndexer.features` lists exactly the served methods, and clients call nothing else.
-- Every method is an unauthenticated GET with `Access-Control-Allow-Origin: *`. JSON responses carry `asOf` and `indexer`; lists are `Cache-Control: max-age=5` with ETags; nothing is `immutable`.
-- `listPosts`, `getThread` and `getKarma` carry the fold's `inputDigest` (`social.md` §1.2), which includes `absent`.
+- Every method is an unauthenticated GET with `Access-Control-Allow-Origin: *`. JSON responses carry `asOf` and `indexer`; lists are `Cache-Control: max-age=5` with ETags; nothing is `immutable`. Absent optional fields (a last page's `cursor`, a delete's `cid`, a top-level comment's `parent`) are left out, never `null`.
+- `listForums` and `describeIndexer` list only synced forums with a declaration CID: a seed named by a membership is never advertised before its declaration was fetched.
+- `listPosts`, `getThread` and `getKarma` carry the fold's `inputDigest` (`social.md` §1.2), which includes `absent`. Queries read the forum's last projected model (cached; folded once after a restart); no request refolds a forum.
+- `getRecordProofs` serves cached proofs; it fetches at most 2 missing proofs at a time (*tunable*) and omits the other missing items instead of waiting on the ingest budget.
 - Rate limit 20 requests/s per client IP (HTTP 429 `RateLimitExceeded`); per-actor limits on `getActivity` when it ships.
 - `/metrics` (Prometheus), `/_health`, and `/` (a status page with the source link, AGPL §13).
-- **Operations.** An operator blocklist of DIDs, uris, CIDs and hosts is applied at query time. Takedowns and deactivations reported by the relay are honoured within minutes. No blobs are stored. It ships as a distroless image on GHCR.
+- **Operations.** An operator blocklist of DIDs, uris, CIDs and hosts is applied at query time, to every method: a host entry hides its accounts' records, participant entries and repo heads, and a forum owned on a blocked host is no longer listed (forum-scoped queries still answer, with that host's records hidden). Takedowns and deactivations reported by the relay are honoured within minutes. No blobs are stored. It ships as a distroless image on GHCR.
 
 ### 15.4 Client rules and audit
 

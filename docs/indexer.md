@@ -23,26 +23,49 @@ lessdugin-indexer \
 
 Use the ordinary native `config.toml` in the data directory for PLC/devnet settings. Repeat
 `--forum <at-uri>` to seed declarations directly. `--poll <pds-url>` enables the durable polling
-loop (`--poll-interval-ms`, default 5000; 250 ms is useful for a loopback devnet). Poll mode is
-particularly useful without a relay or Jetstream. Relay backfill runs every six hours, scanning
-forum declarations and membership records. A membership is only a forum-discovery hint; normal
-sync must still admit it before that author becomes a participant. Durable candidate rows retain
-those hints across restarts; they never become participant rows without PDS confirmation. A
-failed discovery or forum sync retries after one minute instead of waiting for the next six-hour
-pass.
+loop (`--poll-interval-ms`, default 5000; 250 ms is useful for a loopback devnet) and is
+particularly useful without a relay or Jetstream. `--poll` selects a source, never a network: it
+keeps the configured profile, and outside devnet mode the URL must be `https`. Devnet mode needs
+`--dev` (with `--poll` naming the devnet PDS) or a devnet `config.toml` profile, and a
+development build (a debug build, or `--features devnet`); release builds refuse both.
+
+Relay backfill (discovery) runs every six hours, scanning forum declarations and membership
+records; a failed discovery retries after one minute, doubling up to six hours. A membership is
+only a forum-discovery hint; normal sync must still admit it before that author becomes a
+participant. Durable candidate rows retain those hints across restarts; they never become
+participant rows without PDS confirmation. Hints are capped per DID and per PDS host (32 forum
+seeds per DID, 2,000 per host, 500 pending membership hints per forum and host), so one account
+cannot fill the index with seeds. A forum whose sync fails backs off on its own (one minute,
+doubling up to six hours) without re-running discovery. A seed whose declaration is proven
+absent is quarantined: it is no longer listed or synced, is rechecked daily (or as soon as a
+live commit shows the declaration again), and is dropped after a week. A forum that was indexed
+and whose declaration is deleted logs a delete for each of its records.
+
 Daily reconcile makes one `getLatestCommit` head check per unique indexed owner/participant DID and
 refreshes only forums containing a repo whose head moved; an individual head failure is logged and
-does not stop checks of other repos. Two configured Jetstream endpoints are consumed concurrently
-with a shared deduplicator and independent durable cursors. Reconnects rewind ten seconds, and
-cursors advance only after admission, proof acquisition and snapshot persistence. A failed event
-therefore remains unacknowledged and is replayed after reconnect; a permanently failing record can
-currently stall later frames on that stream rather than being silently skipped.
+does not stop checks of other repos. The same daily pass drops tombstones older than 30 days from
+the record store, and cached proofs of records no forum indexes any more.
+
+Two configured Jetstream endpoints are consumed concurrently with a shared deduplicator and
+independent durable cursors; reconnects rewind ten seconds. A live commit is point-fetched and
+the affected forums are re-projected from the cache, so a write is served within seconds without
+a forum-wide sync; only membership and declaration changes request an ordinary (debounced) forum
+sync. Fetches of different frames run concurrently, each bounded to 30 seconds. Cursors advance
+over the completed prefix of frames: a frame is complete when it was projected or, after any
+failure, when its repository was handed to the durable per-repo retry (two seconds, doubling up
+to six hours). One failing record, PDS or deleted forum therefore never stalls the stream. Live
+proofs are fetched in the background; a proof that cannot be fetched is simply not cached. An
+oversized message is skipped after two connections fail on it at one position (the stream
+resumes one second later and a reconcile is scheduled); a connection with no frame for two
+minutes is replaced.
 
 The blocklist contains one DID, at-uri, CID or host per line; blank lines and `#` comments are
-ignored. Host entries also match `host:port` and exact origins. It is applied when answering
-queries, not as a content-admission or moderation mechanism. Restart after editing it. Outbound
-HTTP is limited to five requests/second and four requests in flight per host,
-with 200 in flight globally. Inbound requests are limited to 20/second/IP and use XRPC
+ignored. Host entries also match `host:port` and exact origins, and apply to every method: the
+host's records, participant entries and repo heads are hidden, and forums owned on it are no
+longer listed. It is applied when answering queries, not as a content-admission or moderation
+mechanism. Restart after editing it. Outbound HTTP is limited to five requests/second and four
+requests in flight per host, with 200 in flight globally (a request waits for its host's budget
+before taking a global slot). Inbound requests are limited to 20/second/IP and use XRPC
 `RateLimitExceeded` errors.
 
 The state database contains forum/change/cursor/proof side tables. Change entries are retained for
@@ -58,9 +81,12 @@ The nine GET methods are under
 - `listPosts`, `listRecentDiscussion`, `getThread`, `getRecordProofs`
 
 JSON responses include `asOf` and `indexer`. List responses have `Cache-Control: max-age=5` and an
-ETag. All routes allow CORS `*`. `listPosts` and `getThread` expose the core fold's real
-`inputDigest`; their values and tallies remain hints. `getRecordProofs` accepts at most 25 `uris`
-and returns an `application/vnd.ipld.car` manifest bundle. Failed items are omitted; absence proofs
+ETag. All routes allow CORS `*`. Absent optional fields are left out, never `null`. `listForums`
+and `describeIndexer` list only synced forums. `listPosts` and `getThread` expose the core fold's
+real `inputDigest`; their values and tallies remain hints. Queries read each forum's last
+projected model, so a request never refolds a forum. `getRecordProofs` accepts at most 25 `uris`
+and returns an `application/vnd.ipld.car` manifest bundle. It serves cached proofs and fetches at
+most two missing ones at a time; failed or not-yet-available items are omitted; absence proofs
 have `cid: null`.
 
 Operational endpoints:
@@ -80,8 +106,8 @@ M6.
 whose user is non-root. Build it with the repository root as context and mount persistent storage
 at `/data`. Pass `SOURCE_URL` as a build argument so `/` links to the exact corresponding source.
 
-`.github/workflows/indexer.yml` builds and smoke-tests the image without publishing on ordinary
-branch pushes. An explicit workflow dispatch publishes `ghcr.io/<owner>/lessdugin-indexer:sha-<full
+`.github/workflows/indexer.yml` builds and smoke-tests the image without publishing on pull
+requests and on pushes to `claude/**` branches. An explicit workflow dispatch publishes `ghcr.io/<owner>/lessdugin-indexer:sha-<full
 commit>`; a push to the default branch also publishes `latest`. This is the M6 image pipeline,
 not the M7 release workflow. The workflow has only `contents: read` and `packages: write`.
 
@@ -92,6 +118,9 @@ nix develop --impure -c cargo test -p lessdugin-indexer
 nix develop --impure -c cargo clippy -p lessdugin-indexer --all-targets -- -D warnings
 ```
 
-The integration tests use signed repositories and real loopback HTTP PDS/PLC fixtures. They cover
-all nine methods, durable poll convergence within five seconds, restart continuity, proof manifest
-verification, omission and forged-bundle detection. They do not contact production services.
+The integration tests use signed repositories, real loopback HTTP PDS/PLC fixtures and the
+testkit mini-Jetstream. They cover all nine methods, live ingest on two endpoints within five
+seconds (also in a 200-participant forum, without a forum-wide sync), failing fetches, missing
+proofs and a deleted declaration that do not stall the stream, a restart that resumes from the
+persisted cursors, durable poll convergence, proof manifest verification, omission and
+forged-bundle detection. They do not contact production services.

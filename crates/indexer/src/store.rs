@@ -368,6 +368,15 @@ impl Store {
         Ok(())
     }
 
+    /// A live commit showed the declaration again: the quarantine ends and a sync is due.
+    pub fn lift_quarantine(&self, forum: &str, at_ms: i64) -> rusqlite::Result<()> {
+        self.db().execute(
+            "UPDATE forums SET absent_ms=0,sync_due_ms=?2 WHERE uri=?1 AND absent_ms>0",
+            params![forum, at_ms],
+        )?;
+        Ok(())
+    }
+
     /// A successful ordinary sync: clears the back-off, quarantine and pending sync request.
     pub fn note_forum_synced(&self, forum: &str) -> rusqlite::Result<()> {
         self.db().execute(

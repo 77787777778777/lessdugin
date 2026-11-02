@@ -791,12 +791,21 @@ async fn point(
         .engine
         .syncer()
         .session(priority, Arc::new(Stats::new()));
-    if let Err(e) = indexer
+    let outcome = indexer
         .engine
         .syncer()
         .point_fetch(&session, &at, Some(&hint))
-        .await
+        .await;
+    if let Ok(lessdugin_core::sync::repo::PointOutcome::Admitted { .. }) = &outcome
+        && at.collection().as_str() == nsid::FORUM
+        && indexer
+            .store
+            .lift_quarantine(at.as_str(), indexer.now_ms())
+            .is_err()
     {
+        work.unrecorded = true;
+    }
+    if let Err(e) = outcome {
         if forums.is_empty() {
             debug!(uri=%uri,error=%e,"live point fetch failed outside any forum");
             indexer
