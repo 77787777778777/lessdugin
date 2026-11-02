@@ -58,6 +58,7 @@ pub struct ForumRow {
     pub failures: i64,
     pub retry_ms: i64,
     pub absent_ms: i64,
+    pub sync_due_ms: i64,
 }
 
 #[derive(Clone, Debug)]
@@ -536,6 +537,7 @@ impl Store {
             failures: r.get(11)?,
             retry_ms: r.get(12)?,
             absent_ms: r.get(13)?,
+            sync_due_ms: r.get(14)?,
         })
     }
 
@@ -1063,7 +1065,7 @@ impl Store {
     }
 }
 
-const FORUM_COLUMNS: &str = "uri,did,name,description,created_at,cid,synced_ms,input_digest,participant_count,post_count,fk,failures,retry_ms,absent_ms";
+const FORUM_COLUMNS: &str = "uri,did,name,description,created_at,cid,synced_ms,input_digest,participant_count,post_count,fk,failures,retry_ms,absent_ms,sync_due_ms";
 
 /// The snapshot rows of `m`: every fold input record and the declaration.
 fn snapshot(m: &ForumModel) -> BTreeMap<String, String> {

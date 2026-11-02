@@ -1370,6 +1370,32 @@ async fn connected(indexer: &Indexer, n: u64) {
     tokio::time::sleep(Duration::from_millis(100)).await;
 }
 
+/// Both endpoints' cursors passed the last event, and no forum sync is pending.
+async fn drained(f: &Fixture, urls: &[Url]) {
+    let last = f.net.events().last().map_or(0, |e| e.time_us);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let cursors = urls.iter().all(|u| {
+            f.indexer
+                .store
+                .cursor(&format!("jetstream:{}", u.origin().ascii_serialization()))
+                .and_then(|c| c.parse::<i64>().ok())
+                .is_some_and(|c| c >= last)
+        });
+        let pending = f
+            .indexer
+            .store
+            .forums(None)
+            .iter()
+            .any(|r| r.sync_due_ms > 0);
+        if cursors && !pending {
+            return;
+        }
+        assert!(Instant::now() < deadline, "the live replay did not drain");
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
 fn post_by(f: &Fixture, author: &AccountHandle, title: &str) -> String {
     static NEXT: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(1_000);
     let sequence = NEXT.fetch_add(1, Ordering::Relaxed);
@@ -1417,7 +1443,8 @@ async fn until_served(f: &Fixture, uri: &str, since: i64, within: Duration) -> D
             "{uri} was not served within {within:?}; metrics:\n{}",
             f.indexer.metrics.render(true)
         );
-        tokio::time::sleep(Duration::from_millis(25)).await;
+        // Two requests per probe stay under the 20 requests/s per-IP limit.
+        tokio::time::sleep(Duration::from_millis(120)).await;
     }
 }
 
@@ -1661,13 +1688,15 @@ async fn failing_live_events_are_handed_off_and_never_wedge_ingest() {
     let mut tasks = live::spawn(f.indexer.clone());
     tasks.push(ingest::spawn(f.indexer.clone()));
     connected(&f.indexer, 2).await;
+    // The replay of the setup writes (and the roster syncs it asks for) is done first, so only
+    // the live path can serve what follows.
+    drained(&f, &urls).await;
 
-    // 1. The member's PDS refuses every read: its post cannot be point-fetched.
-    let refused = f.net.inject(
-        lessdugin_testkit::fake_pds::Fault::status(500)
-            .on_repo(member.did().as_str())
-            .on_nsid("com.atproto.repo.getRecord"),
-    );
+    // 1. The member's PDS refuses every read of its repository: its post cannot be fetched,
+    //    and neither can its retry until the PDS recovers.
+    let refused = f
+        .net
+        .inject(lessdugin_testkit::fake_pds::Fault::status(500).on_repo(member.did().as_str()));
     // 2. No proof can be fetched for the owner's next post.
     let no_proof = f.net.inject(
         lessdugin_testkit::fake_pds::Fault::status(500)
@@ -1688,13 +1717,22 @@ async fn failing_live_events_are_handed_off_and_never_wedge_ingest() {
         "no proof is cached while sync.getRecord fails"
     );
     assert!(!served(&f, &failed, since).await);
-    let retries = f.indexer.store.repo_retries();
-    assert!(
-        retries
-            .iter()
-            .any(|r| r.did == member.did().as_str() && r.forum == f.forum.uri.as_str()),
-        "{retries:?}"
-    );
+    // The refused fetch ends (its transport retries are exhausted) in a durable hand-off.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !f
+        .indexer
+        .store
+        .repo_retries()
+        .iter()
+        .any(|r| r.did == member.did().as_str() && r.forum == f.forum.uri.as_str())
+    {
+        assert!(
+            Instant::now() < deadline,
+            "the refused event was not handed off: {:?}",
+            f.indexer.store.repo_retries()
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
     let deadline = Instant::now() + Duration::from_secs(5);
     while f
         .indexer

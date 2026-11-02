@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Two concurrent wildcard Jetstream readers feed one sequential applier, which owns the core
-//! relevance filter and the shared 10,000-entry deduplicator (sync.md §15.1). A frame's cursor
-//! is persisted only after its point fetch, proof and projection completed, or after its
-//! failure was handed to the durable per-repo retry path. No single event can hold a cursor:
-//! a failed fetch, a missing proof or an absent declaration is recorded, not replayed forever.
-//! Because one applier handles every frame in arrival order, a duplicate from the other
-//! endpoint advances that endpoint's cursor only after the original was applied.
+//! Two concurrent wildcard Jetstream readers feed one applier, which owns the core relevance
+//! filter and the shared 10,000-entry deduplicator (sync.md §15.1). The applier filters frames
+//! in arrival order, runs their point fetches concurrently (each within [`ACTION_TIMEOUT`]),
+//! rebuilds the affected projections from the cache as fetches finish, and persists cursors
+//! over the completed prefix of frames only. A frame is complete once its fetch was projected
+//! or its failure was handed to the durable per-repo retry path, so no single event can hold a
+//! cursor: a failed fetch or an absent declaration is recorded, not replayed forever, and a
+//! proof is fetched off this path (a missing one is "no proof cached"). Because completion is
+//! tracked in arrival order across both endpoints, a duplicate from the other endpoint advances
+//! that endpoint's cursor only after the original was applied.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
@@ -35,11 +38,16 @@ const REWIND_US: i64 = 10_000_000;
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 /// Frames read ahead of the applier, per indexer.
 const QUEUE: usize = 1_024;
-/// Frames applied before one projection pass.
-const BATCH: usize = 32;
+/// Frames whose fetches may be in flight at once.
+const IN_FLIGHT: usize = 64;
+/// Live proof fetches waiting for the proof task; beyond it a proof is left to `getRecordProofs`.
+const PROOF_QUEUE: usize = 4_096;
 /// An ordinary forum sync requested by a membership or declaration event waits this long, so
 /// a burst of newcomers costs one sync.
 pub const ROSTER_SYNC_DEBOUNCE_MS: i64 = 2_000;
+/// The longest one event's fetches may take. Frames are fetched concurrently, so a slow or
+/// hanging PDS delays only its own events, by at most this long, and then they are handed off.
+pub const ACTION_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// What a reader hands to the applier.
 #[derive(Debug)]
@@ -60,7 +68,11 @@ pub fn spawn(indexer: Indexer) -> Vec<tokio::task::JoinHandle<()>> {
         return Vec::new();
     }
     let (tx, rx) = mpsc::channel(QUEUE);
-    let mut tasks = vec![tokio::spawn(applier(indexer.clone(), rx))];
+    let (proof_tx, proof_rx) = mpsc::channel(PROOF_QUEUE);
+    let mut tasks = vec![
+        tokio::spawn(applier(indexer.clone(), rx, proof_tx)),
+        tokio::spawn(prover(indexer.clone(), proof_rx)),
+    ];
     for endpoint in indexer.config.jetstream.iter().take(2).cloned() {
         let host = indexer.engine.host().clone();
         let env = ReaderEnv::of(&indexer);
@@ -312,21 +324,22 @@ pub(crate) async fn read_connection<W: WebSocket>(
     }
 }
 
-/// Cursor writes of one batch, in frame order.
+/// Cursor writes of one frame.
 enum Ack {
     Advance(String, i64),
     Set(String, i64),
 }
 
-/// The effects of one batch: projections to rebuild, repositories to hand off, cursors.
+/// The effects of finished fetches: projections to rebuild, and whether to reconcile.
 #[derive(Default)]
 struct Work {
     /// Forum → (live commits, authors whose head rows to refresh).
     project: BTreeMap<String, (BTreeMap<String, LiveChange>, BTreeSet<String>)>,
-    acks: Vec<Ack>,
     reconcile: bool,
-    /// A hand-off could not be persisted: the cursors of this batch must not move.
-    unsafe_acks: bool,
+    /// A hand-off or roster request could not be recorded (the local database failed).
+    unrecorded: bool,
+    /// Commit URIs whose proof the prover should fetch.
+    proofs: Vec<String>,
 }
 
 impl Work {
@@ -336,6 +349,17 @@ impl Work {
         if let Some((uri, change)) = live {
             entry.0.insert(uri.to_owned(), change);
         }
+    }
+
+    fn merge(&mut self, other: Work) {
+        for (forum, (live, authors)) in other.project {
+            let entry = self.project.entry(forum).or_default();
+            entry.0.extend(live);
+            entry.1.extend(authors);
+        }
+        self.reconcile |= other.reconcile;
+        self.unrecorded |= other.unrecorded;
+        self.proofs.extend(other.proofs);
     }
 
     fn hand_off(&mut self, indexer: &Indexer, did: &str, forum: &str, error: &str) {
@@ -352,101 +376,164 @@ impl Work {
             }
             Err(e) => {
                 warn!(did=%did,forum=%forum,error=%e,"live event hand-off failed");
-                self.unsafe_acks = true;
+                self.unrecorded = true;
             }
         }
     }
 }
 
-async fn applier(indexer: Indexer, mut rx: mpsc::Receiver<Item>) {
-    let mut filter = EventFilter::with_dedup_capacity(DEDUP_CAPACITY);
-    let mut cx: Option<(u64, Context)> = None;
-    let mut carry = None;
-    loop {
-        let first = match carry.take() {
-            Some(item) => item,
-            None => match rx.recv().await {
-                Some(item) => item,
-                None => return,
-            },
-        };
-        let mut uris = BTreeSet::new();
-        distinct(&first, &mut uris);
-        let mut batch = vec![first];
-        while batch.len() < BATCH {
-            let Ok(item) = rx.try_recv() else { break };
-            // Two commits of one record get their own projections, so each is logged with its
-            // own rev and CID.
-            if !distinct(&item, &mut uris) {
-                carry = Some(item);
+/// Frames in arrival order, with their cursor writes, until the completed prefix is persisted.
+#[derive(Default)]
+struct Order {
+    frames: std::collections::VecDeque<(u64, Vec<Ack>)>,
+    /// Frames whose fetches finished but whose projections are not applied yet.
+    fetched: BTreeSet<u64>,
+    /// Frames fully applied (projected, or handed off).
+    done: BTreeSet<u64>,
+}
+
+impl Order {
+    /// The cursor writes of the completed prefix, removed from the queue.
+    fn completed(&mut self) -> Vec<Ack> {
+        let mut acks = Vec::new();
+        while let Some((id, _)) = self.frames.front() {
+            if !self.done.remove(id) {
                 break;
             }
-            batch.push(item);
+            if let Some((_, a)) = self.frames.pop_front() {
+                acks.extend(a);
+            }
         }
-        apply_batch(&indexer, &mut filter, &mut cx, batch).await;
+        acks
     }
 }
 
-/// False when `item` is a commit of a record already in this batch.
-fn distinct(item: &Item, uris: &mut BTreeSet<String>) -> bool {
-    match item {
-        Item::Event { event, .. } => match (&event.did, &event.kind) {
-            (
-                Some(did),
-                EventKind::Commit {
-                    collection, rkey, ..
-                },
-            ) => uris.insert(format!("{did}/{collection}/{rkey}")),
-            _ => true,
-        },
-        Item::Skip { .. } => true,
+async fn applier(indexer: Indexer, mut rx: mpsc::Receiver<Item>, proofs: mpsc::Sender<String>) {
+    use futures::StreamExt;
+    use futures::stream::FuturesUnordered;
+    let mut filter = EventFilter::with_dedup_capacity(DEDUP_CAPACITY);
+    let mut cx: Option<(u64, Context)> = None;
+    let mut order = Order::default();
+    let mut work = Work::default();
+    let mut inflight = FuturesUnordered::new();
+    let mut next = 0u64;
+    // Once a hand-off could not be recorded, no cursor moves again in this process: a restart
+    // replays from the last safe position.
+    let mut frozen = false;
+    let mut open = true;
+    loop {
+        tokio::select! {
+            biased;
+            Some((id, done)) = inflight.next(), if !inflight.is_empty() => {
+                work.merge(done);
+                order.fetched.insert(id);
+            }
+            item = rx.recv(), if open && inflight.len() < IN_FLIGHT => match item {
+                None => open = false,
+                Some(item) => {
+                    let id = next;
+                    next += 1;
+                    let (acks, actions) = accept(&indexer, &mut filter, &mut cx, item, &mut work);
+                    order.frames.push_back((id, acks));
+                    if actions.is_empty() {
+                        order.fetched.insert(id);
+                    } else {
+                        let indexer = indexer.clone();
+                        inflight.push(async move {
+                            let mut done = Work::default();
+                            for action in actions {
+                                done.merge(run(&indexer, action).await);
+                            }
+                            (id, done)
+                        });
+                    }
+                }
+            },
+            else => return,
+        }
+        // Take whatever else is ready, so a burst is projected once.
+        while let Some(Some((id, done))) = futures::FutureExt::now_or_never(inflight.next()) {
+            work.merge(done);
+            order.fetched.insert(id);
+        }
+        let more = open && !rx.is_empty() && inflight.len() < IN_FLIGHT;
+        if order.fetched.is_empty() || (more && order.fetched.len() < 32) {
+            continue;
+        }
+        flush(&indexer, &mut work, &proofs).await;
+        frozen |= std::mem::take(&mut work.unrecorded);
+        order.done.append(&mut order.fetched);
+        let acks = order.completed();
+        if frozen {
+            if !acks.is_empty() {
+                warn!(
+                    "a live hand-off could not be recorded; Jetstream cursors stay put until restart"
+                );
+            }
+            continue;
+        }
+        for ack in acks {
+            let result = match &ack {
+                Ack::Advance(source, at) => indexer.store.advance_cursor(source, *at),
+                Ack::Set(source, at) => indexer.store.set_cursor(source, &at.to_string()),
+            };
+            if let Err(e) = result {
+                warn!(error=%e,"persisting a Jetstream cursor failed");
+            }
+        }
     }
 }
 
-async fn apply_batch(
+/// Filters one item in arrival order: its cursor writes and the actions to run.
+fn accept(
     indexer: &Indexer,
     filter: &mut EventFilter,
     cx: &mut Option<(u64, Context)>,
-    batch: Vec<Item>,
-) {
-    let mut work = Work::default();
-    for item in batch {
-        match item {
-            Item::Skip { source, time_us } => {
-                work.acks.push(Ack::Set(source, time_us));
-                work.reconcile = true;
+    item: Item,
+    work: &mut Work,
+) -> (Vec<Ack>, Vec<Action>) {
+    match item {
+        Item::Skip { source, time_us } => {
+            work.reconcile = true;
+            (vec![Ack::Set(source, time_us)], Vec::new())
+        }
+        Item::Event {
+            source,
+            origin,
+            event,
+        } => {
+            let generation = indexer.store.generation();
+            if cx.as_ref().is_none_or(|(g, _)| *g != generation) {
+                *cx = Some((generation, context(indexer)));
             }
-            Item::Event {
-                source,
-                origin,
-                event,
-            } => {
-                let generation = indexer.store.generation();
-                if cx.as_ref().is_none_or(|(g, _)| *g != generation) {
-                    *cx = Some((generation, context(indexer)));
-                }
-                let Some((_, context)) = cx.as_ref() else {
-                    continue;
-                };
-                let out = filter.apply(Wire::V2, &origin, event, context);
-                if out.duplicate {
-                    indexer
-                        .metrics
-                        .live_duplicates
-                        .fetch_add(1, Ordering::Relaxed);
-                }
-                for action in out.actions {
-                    handle(indexer, action, &mut work).await;
-                }
-                // Every effect is applied or handed off: nothing is left to replay.
-                filter.acknowledge();
-                if out.restart_cursor {
-                    work.acks
-                        .push(Ack::Set(source, indexer.now_ms().saturating_mul(1000)));
-                } else if let Some(cursor) = out.cursor {
-                    work.acks.push(Ack::Advance(source, cursor.time_us));
-                }
+            let Some((_, context)) = cx.as_ref() else {
+                return (Vec::new(), Vec::new());
+            };
+            let out = filter.apply(Wire::V2, &origin, event, context);
+            if out.duplicate {
+                indexer
+                    .metrics
+                    .live_duplicates
+                    .fetch_add(1, Ordering::Relaxed);
             }
+            // The frame's effects are applied or handed off before its cursor is persisted
+            // (the completed prefix), so the filter never needs to replay it.
+            filter.acknowledge();
+            let ack = if out.restart_cursor {
+                Some(Ack::Set(source, indexer.now_ms().saturating_mul(1000)))
+            } else {
+                out.cursor.map(|c| Ack::Advance(source, c.time_us))
+            };
+            (ack.into_iter().collect(), out.actions)
+        }
+    }
+}
+
+/// Applies the projections of the finished fetches; a failure hands the authors off.
+async fn flush(indexer: &Indexer, work: &mut Work, proofs: &mpsc::Sender<String>) {
+    for uri in std::mem::take(&mut work.proofs) {
+        if proofs.try_send(uri).is_err() {
+            debug!("live proof queue full; the proof is left to getRecordProofs");
         }
     }
     for (forum, (live, authors)) in std::mem::take(&mut work.project) {
@@ -472,7 +559,7 @@ async fn apply_batch(
                     }
                     Err(e) => {
                         warn!(forum=%forum,error=%e,"recording an absent forum failed");
-                        work.unsafe_acks = true;
+                        work.unrecorded = true;
                     }
                 }
             }
@@ -483,23 +570,19 @@ async fn apply_batch(
             }
         }
     }
-    if work.reconcile
+    if std::mem::take(&mut work.reconcile)
         && let Err(e) = indexer.store.schedule_next("reconcile", indexer.now_ms())
     {
         warn!(error=%e,"scheduling a reconcile failed");
-        work.unsafe_acks = true;
+        work.unrecorded = true;
     }
-    if work.unsafe_acks {
-        warn!("live batch effects could not all be recorded; its cursors are not advanced");
-        return;
-    }
-    for ack in work.acks {
-        let result = match &ack {
-            Ack::Advance(source, at) => indexer.store.advance_cursor(source, *at),
-            Ack::Set(source, at) => indexer.store.set_cursor(source, &at.to_string()),
-        };
-        if let Err(e) = result {
-            warn!(error=%e,"persisting a Jetstream cursor failed");
+}
+
+/// One `sync.getRecord` proof per relevant live commit (sync.md §15.1), off the ingest path.
+async fn prover(indexer: Indexer, mut rx: mpsc::Receiver<String>) {
+    while let Some(uri) = rx.recv().await {
+        if let Err(e) = proofs::fetch(&indexer, &uri).await {
+            debug!(uri=%uri,error=%e,"no proof cached for a live commit");
         }
     }
 }
@@ -544,6 +627,33 @@ fn record_forums(indexer: &Indexer, uri: &AtUri) -> Vec<String> {
     out.into_iter().collect()
 }
 
+/// One action within [`ACTION_TIMEOUT`]; past it, the repository is handed off.
+async fn run(indexer: &Indexer, action: Action) -> Work {
+    let target = match &action {
+        Action::PointFetch { did, uri, .. } => AtUri::parse(uri)
+            .ok()
+            .map(|u| (did.clone(), record_forums(indexer, &u))),
+        Action::AccountStatus { did, .. } | Action::Resync { did } | Action::CatchUp { did } => {
+            Some((did.clone(), indexer.store.did_forums(did)))
+        }
+        _ => None,
+    };
+    let mut work = Work::default();
+    if tokio::time::timeout(ACTION_TIMEOUT, handle(indexer, action, &mut work))
+        .await
+        .is_ok()
+    {
+        return work;
+    }
+    let mut work = Work::default();
+    if let Some((did, forums)) = target {
+        for forum in forums {
+            work.hand_off(indexer, &did, &forum, "timed out");
+        }
+    }
+    work
+}
+
 async fn handle(indexer: &Indexer, action: Action, work: &mut Work) {
     let now = indexer.now_ms();
     match action {
@@ -579,13 +689,13 @@ async fn handle(indexer: &Indexer, action: Action, work: &mut Work) {
                             .schedule_forum_sync(&forum, now + ROSTER_SYNC_DEBOUNCE_MS)
                         {
                             warn!(forum=%forum,error=%e,"scheduling a newcomer sync failed");
-                            work.unsafe_acks = true;
+                            work.unrecorded = true;
                         }
                     }
                     Ok(false) => debug!(forum=%forum,did=%did,"membership hint over quota"),
                     Err(e) => {
                         warn!(forum=%forum,error=%e,"recording a membership hint failed");
-                        work.unsafe_acks = true;
+                        work.unrecorded = true;
                     }
                 }
             }
@@ -603,7 +713,7 @@ async fn handle(indexer: &Indexer, action: Action, work: &mut Work) {
                         .is_some_and(|f| f.did == did)
                         && indexer.store.schedule_forum_sync(&forum, now).is_err()
                     {
-                        work.unsafe_acks = true;
+                        work.unrecorded = true;
                     }
                 }
             }
@@ -702,11 +812,9 @@ async fn point(
     if forums.is_empty() {
         return;
     }
-    // One proof per relevant commit (sync.md §15.1). A proof that cannot be fetched or verified
-    // now is simply not cached: `getRecordProofs` omits it, and the record is still indexed.
-    if let Err(e) = proofs::fetch(indexer, at.as_str()).await {
-        debug!(uri=%uri,error=%e,"no proof cached for a live commit");
-    }
+    // One proof per relevant commit (sync.md §15.1), fetched by the prover: a proof that cannot
+    // be fetched or verified is simply not cached, and the record is still indexed now.
+    work.proofs.push(at.to_string());
     let roster =
         at.collection().as_str() == nsid::MEMBERSHIP || at.collection().as_str() == nsid::FORUM;
     for forum in forums {
@@ -732,7 +840,7 @@ async fn point(
                 .schedule_forum_sync(&forum, indexer.now_ms() + ROSTER_SYNC_DEBOUNCE_MS)
         {
             warn!(forum=%forum,error=%e,"scheduling a roster sync failed");
-            work.unsafe_acks = true;
+            work.unrecorded = true;
         }
     }
 }
