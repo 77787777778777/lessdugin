@@ -1855,3 +1855,337 @@ async fn a_live_restart_resumes_from_the_persisted_cursor() {
         t.abort();
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// The query surface: cost, blocklist, response shape.
+
+/// Every JSON object member that is null (absent optional fields must be left out).
+fn nulls(value: &Value, path: &str, out: &mut Vec<String>) {
+    match value {
+        Value::Null => out.push(path.to_owned()),
+        Value::Object(map) => {
+            for (k, v) in map {
+                nulls(v, &format!("{path}.{k}"), out);
+            }
+        }
+        Value::Array(items) => {
+            for (i, v) in items.iter().enumerate() {
+                nulls(v, &format!("{path}[{i}]"), out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// m6-acceptance-12: only synced forums with a declaration CID are listed, and no response
+/// carries a null (a last page has no cursor, a delete no cid, a top-level comment no parent).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn listings_omit_seeds_and_absent_fields() {
+    let fixture = Fixture::new().await;
+    let post = fixture.post("Shape");
+    let gone = fixture.post("Deleted");
+    // A seed any membership could name: never synced, so never listed.
+    let seed = fixture.forum.uri.as_str().replace("/m6", "/seed");
+    fixture.indexer.store.add_forum_seed(&seed).unwrap();
+    ingest::sync_forum(&fixture.indexer, fixture.forum.uri.as_str())
+        .await
+        .unwrap();
+    fixture
+        .owner
+        .delete(nsid::POST, gone.rsplit('/').next().unwrap());
+    ingest::sync_forum(&fixture.indexer, fixture.forum.uri.as_str())
+        .await
+        .unwrap();
+    let base = format!("/xrpc/{NS}.index");
+    let encoded = urlencoding(fixture.forum.uri.as_ref());
+    let (_, forums, _) = fixture.request(&format!("{base}.listForums")).await;
+    let listed = forums["forums"].as_array().unwrap();
+    assert_eq!(listed.len(), 1, "{forums}");
+    assert_eq!(listed[0]["ref"]["uri"], fixture.forum.uri.as_str());
+    assert!(!listed[0]["ref"]["cid"].as_str().unwrap().is_empty());
+    assert!(!listed[0]["ref"]["firstSeen"].as_str().unwrap().is_empty());
+    let (_, describe, _) = fixture.request(&format!("{base}.describeIndexer")).await;
+    assert!(
+        describe["forums"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|f| f["uri"] != seed.as_str()),
+        "{describe}"
+    );
+    let mut found = Vec::new();
+    for path in [
+        format!("{base}.listForums"),
+        format!("{base}.describeIndexer"),
+        format!("{base}.listParticipants?forum={encoded}"),
+        format!("{base}.getRepoHeads?dids={}", fixture.owner.did()),
+        format!("{base}.getChanges?forum={encoded}&since=0"),
+        format!("{base}.listPosts?forum={encoded}&sort=new"),
+        format!("{base}.listRecentDiscussion?forum={encoded}"),
+        format!("{base}.getThread?post={}", urlencoding(&post)),
+    ] {
+        let (status, body, _) = fixture.request(&path).await;
+        assert_eq!(status, StatusCode::OK, "{path}: {body}");
+        nulls(&body, &path, &mut found);
+    }
+    assert!(found.is_empty(), "null members: {found:?}");
+    let (_, changes, _) = fixture
+        .request(&format!("{base}.getChanges?forum={encoded}&since=0"))
+        .await;
+    let delete = changes["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["uri"] == gone.as_str() && c["op"] == "delete")
+        .expect("the delete is logged");
+    assert!(delete.get("cid").is_none(), "{delete}");
+}
+
+/// security-net-12: a blocked PDS host hides its accounts from every method, and forums owned
+/// on it are no longer advertised.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_blocked_host_is_hidden_from_participants_heads_and_forum_listings() {
+    let mut fixture = Fixture::new().await;
+    fixture.post("Hosted");
+    ingest::sync_forum(&fixture.indexer, fixture.forum.uri.as_str())
+        .await
+        .unwrap();
+    let base = format!("/xrpc/{NS}.index");
+    let encoded = urlencoding(fixture.forum.uri.as_ref());
+    let host = fixture.owner.pds().url().host_str().unwrap().to_owned();
+    Arc::get_mut(&mut fixture.indexer.config).unwrap().blocklist = Arc::new(BTreeSet::from([host]));
+    let (_, participants, _) = fixture
+        .request(&format!("{base}.listParticipants?forum={encoded}"))
+        .await;
+    assert!(
+        participants["participants"].as_array().unwrap().is_empty(),
+        "{participants}"
+    );
+    let (_, heads, _) = fixture
+        .request(&format!("{base}.getRepoHeads?dids={}", fixture.owner.did()))
+        .await;
+    assert!(heads["heads"].as_array().unwrap().is_empty(), "{heads}");
+    let (_, forums, _) = fixture.request(&format!("{base}.listForums")).await;
+    assert!(forums["forums"].as_array().unwrap().is_empty(), "{forums}");
+    let (_, describe, _) = fixture.request(&format!("{base}.describeIndexer")).await;
+    assert!(
+        describe["forums"].as_array().unwrap().is_empty(),
+        "{describe}"
+    );
+}
+
+/// security-net-13: list and thread queries read the projected model; no request refolds the
+/// forum. After a restart the model is folded once, then reused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn queries_reuse_the_projected_model_instead_of_refolding() {
+    let fixture = Fixture::new().await;
+    let post = fixture.post("Folded once");
+    ingest::sync_forum(&fixture.indexer, fixture.forum.uri.as_str())
+        .await
+        .unwrap();
+    let base = format!("/xrpc/{NS}.index");
+    let encoded = urlencoding(fixture.forum.uri.as_ref());
+    let paths = [
+        format!("{base}.listPosts?forum={encoded}"),
+        format!("{base}.listPosts?forum={encoded}&sort=top"),
+        format!("{base}.listRecentDiscussion?forum={encoded}"),
+        format!("{base}.getThread?post={}", urlencoding(&post)),
+    ];
+    for path in &paths {
+        for _ in 0..3 {
+            let (status, body, _) = fixture.request(path).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+        }
+    }
+    let builds = |f: &Fixture| f.indexer.metrics.query_model_builds.load(Ordering::Relaxed);
+    assert_eq!(builds(&fixture), 0, "a query refolded a projected forum");
+    let restarted = Fixture::at(
+        &fixture.dir,
+        fixture.net.clone(),
+        fixture.owner.clone(),
+        fixture.forum.clone(),
+    )
+    .await;
+    for path in &paths {
+        for _ in 0..3 {
+            let (status, body, _) = restarted.request(path).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+        }
+    }
+    assert_eq!(builds(&restarted), 1, "folded once after the restart");
+}
+
+/// security-net-10: getRecordProofs never queues on the ingest budget. A missing proof is
+/// verified against the cached (at most one hour old) DID document, without a PLC request, and
+/// when the request pool is busy the item is omitted instead of waiting.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn record_proofs_use_cached_identities_and_a_bounded_pool() {
+    let fixture = Fixture::new().await;
+    let post = fixture.post("Proof on demand");
+    ingest::sync_forum(&fixture.indexer, fixture.forum.uri.as_str())
+        .await
+        .unwrap();
+    // Make the cached proof unusable for the current snapshot, so the request must fetch.
+    let mut stale = fixture.indexer.store.proof(&post).unwrap();
+    stale.cid = Some("bafyreiaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into());
+    stale.rev = "zzzzzzzzzzzzz".into();
+    fixture
+        .indexer
+        .store
+        .put_proof(&stale, fixture.indexer.now_ms())
+        .unwrap();
+    let path = format!(
+        "/xrpc/{NS}.index.getRecordProofs?uris={}",
+        urlencoding(&post)
+    );
+    let fetch = |indexer: Indexer| {
+        let path = path.clone();
+        async move {
+            let response = lessdugin_indexer::api::router(indexer)
+                .oneshot(Request::builder().uri(&path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let car = axum::body::to_bytes(response.into_body(), 20_000_000)
+                .await
+                .unwrap();
+            ProofBundle::parse(&car, &Default::default())
+                .unwrap()
+                .items
+                .len()
+        }
+    };
+    // Pool busy: omitted at once, nothing sent to the author's PDS or to PLC.
+    let held = Arc::clone(&fixture.indexer.api_proofs)
+        .try_acquire_many_owned(lessdugin_indexer::API_PROOF_FETCHES as u32)
+        .unwrap();
+    fixture.net.clear_requests();
+    assert_eq!(fetch(fixture.indexer.clone()).await, 0);
+    assert!(
+        fixture.net.requests().is_empty(),
+        "{:?}",
+        fixture.net.requests()
+    );
+    drop(held);
+    // Pool free: fetched and verified against the cached document.
+    fixture.net.clear_requests();
+    assert_eq!(fetch(fixture.indexer.clone()).await, 1);
+    let plc = Url::parse(&fixture.net.plc()).unwrap();
+    let to_plc = fixture
+        .net
+        .requests()
+        .into_iter()
+        .filter(|r| Url::parse(&r.url).is_ok_and(|u| u.origin() == plc.origin()))
+        .collect::<Vec<_>>();
+    assert!(
+        to_plc.is_empty(),
+        "a proof request resolved PLC: {to_plc:?}"
+    );
+    assert_eq!(
+        fixture.net.requests_for("com.atproto.sync.getRecord").len(),
+        1
+    );
+}
+
+/// robustness-12: the daily pass drops tombstones past the 30-day retention from the core record
+/// store, and cached proofs of records no forum indexes any more.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn daily_gc_drops_expired_tombstones_and_orphaned_proofs() {
+    let fixture = Fixture::new().await;
+    let post = fixture.post("Short-lived");
+    ingest::sync_forum(&fixture.indexer, fixture.forum.uri.as_str())
+        .await
+        .unwrap();
+    assert!(fixture.indexer.store.proof(&post).is_some());
+    fixture
+        .owner
+        .delete(nsid::POST, post.rsplit('/').next().unwrap());
+    ingest::sync_forum(&fixture.indexer, fixture.forum.uri.as_str())
+        .await
+        .unwrap();
+    let uri = lessdugin_atp::syntax::AtUri::parse(&post).unwrap();
+    let records =
+        lessdugin_core::store::records::RecordStore::new(fixture.indexer.engine.host().cache());
+    assert!(records.tombstone_of(&uri).await.unwrap().is_some());
+    // Within the retention nothing is dropped.
+    ingest::gc(&fixture.indexer, fixture.indexer.now_ms()).await;
+    assert!(records.tombstone_of(&uri).await.unwrap().is_some());
+    assert!(fixture.indexer.store.proof(&post).is_some());
+    let later = fixture.indexer.now_ms() + lessdugin_core::limits::TOMBSTONE_MIN_RETENTION_MS + 1;
+    ingest::gc(&fixture.indexer, later).await;
+    assert!(records.tombstone_of(&uri).await.unwrap().is_none());
+    assert!(fixture.indexer.store.proof(&post).is_none());
+    // The scheduler runs the pass once a day.
+    ingest::tick(&fixture.indexer).await;
+    let next = fixture.indexer.store.scheduled_at("gc").unwrap();
+    assert!(
+        next >= fixture.indexer.now_ms() + lessdugin_core::limits::TOMBSTONE_GC_EVERY_MS - 1_000
+    );
+}
+
+/// security-net-11: one account's memberships cannot seed more than its quota of forums.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn discovery_caps_the_forum_seeds_of_one_account() {
+    let mut fixture = Fixture::new().await;
+    let spammer = fixture.owner.pds().add_account("spammer.test");
+    let at = Datetime::from_millis(fixture.net.now_ms() - 3_600_000).unwrap();
+    let names = (0..lessdugin_indexer::store::SEEDS_PER_DID + 8)
+        .map(|n| format!("nowhere{n}"))
+        .collect::<Vec<_>>();
+    spammer.batch(|repo| {
+        for name in &names {
+            let forum = ForumKey::new(spammer.did(), name).unwrap();
+            let m = Membership::new(forum.uri.clone(), at.clone());
+            repo.put(
+                nsid::MEMBERSHIP,
+                &forum.fk,
+                &serde_json::to_value(m).unwrap(),
+            );
+        }
+    });
+    Arc::get_mut(&mut fixture.indexer.config).unwrap().relays = fixture
+        .net
+        .relays()
+        .into_iter()
+        .map(|r| Url::parse(&r).unwrap())
+        .collect();
+    ingest::discover(&fixture.indexer).await.unwrap();
+    let seeds = fixture.indexer.store.forum_seeds();
+    let from_spammer = seeds
+        .iter()
+        .filter(|s| s.contains(spammer.did().as_str()))
+        .count() as i64;
+    assert_eq!(from_spammer, lessdugin_indexer::store::SEEDS_PER_DID);
+    // The real forum is still discovered.
+    assert!(seeds.contains(&fixture.forum.uri.to_string()));
+}
+
+/// m6-acceptance-11: the image workflow validates branch pushes and pull requests and publishes
+/// only from main or an explicit dispatch.
+#[test]
+fn the_image_workflow_builds_every_branch_and_publishes_only_from_main() {
+    let workflow = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github/workflows/indexer.yml"),
+    )
+    .unwrap();
+    let on = workflow
+        .split("\non:")
+        .nth(1)
+        .and_then(|rest| rest.split("\npermissions:").next())
+        .unwrap();
+    assert!(on.contains("pull_request:"), "{on}");
+    assert!(on.contains("\"claude/**\""), "{on}");
+    let gate = "if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'";
+    for step in ["docker/login-action", "publish the immutable SHA tag"] {
+        let at = workflow.find(step).unwrap();
+        assert!(
+            workflow[at..].lines().take(3).any(|l| l.trim() == gate),
+            "{step} is not gated"
+        );
+    }
+    assert!(
+        workflow
+            .contains("if: github.ref == 'refs/heads/main'\n        run: |\n          podman tag"),
+        "latest is published only from main"
+    );
+}
