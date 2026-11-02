@@ -978,6 +978,79 @@ fn sequence_engine_views_keep_unavailable_entries_and_skip_them_in_navigation() 
     assert_eq!(last.sequences[0].next, None);
 }
 
+/// `social.md` §14: next and previous follow the sequence the reader came from when it contains
+/// the post, and "continue reading" (local, §16) is the post of a sequence last opened from it;
+/// it is exported and imported with the other local state and shown only while the post is a
+/// displayable entry.
+#[test]
+fn next_and_previous_follow_the_sequence_the_reader_came_from_and_continue_reading_is_local() {
+    let mut n = Net::new();
+    let c = Cast::new(&n);
+    let reader = n.device("reader", Some(&c.carol));
+    let fresh = n.device("fresh", Some(&c.carol));
+    let s = scene(&n, &c);
+    let at = n.now();
+    let sequence = |who: &AccountHandle, title: &str, posts: &[&str], t: i64| {
+        let value = json!({
+            "$type": nsid::SEQUENCE, "forum": s.f.uri, "title": title,
+            "chapters": [{"posts": posts}], "createdAt": dt(t),
+        });
+        s.f.put(
+            who,
+            nsid::SEQUENCE,
+            &keys::sequence_rkey(&s.f.uri, tid_at_ms(t).as_str()).unwrap(),
+            &value,
+        )
+    };
+    // the post's author's sequence, and another reading order of the same posts
+    let own = sequence(&c.alice, "Alice's guide", &[&s.welcome.uri, &s.bob_post.uri], at);
+    let other = sequence(&c.alice, "Another guide", &[&s.bob_post.uri, &s.welcome.uri], at + 1);
+    let unrelated = sequence(&c.alice, "Unrelated", &[&s.bob_post.uri], at + 2);
+    sync(&reader, &s.f.uri);
+
+    let nav = |p: &Rec, from: Option<&Rec>| {
+        let v = block_on(reader.get_post_in(&p.uri, from.map(|r| r.uri.as_str()))).unwrap();
+        let n = v.sequences.into_iter().next().unwrap();
+        (n.sequence, n.prev, n.next)
+    };
+    // without a context: the author's sequence
+    assert_eq!(nav(&s.welcome, None), (own.uri.clone(), None, Some(s.bob_post.uri.clone())));
+    let continued = |q: &Rec| block_on(reader.sequence(&q.uri)).unwrap().continue_reading;
+    assert_eq!(continued(&own), None, "a post opened without a context moves nothing");
+    // from the other sequence: its order
+    assert_eq!(
+        nav(&s.welcome, Some(&other)),
+        (other.uri.clone(), Some(s.bob_post.uri.clone()), None)
+    );
+    // a context that does not contain the post is ignored, and records nothing
+    assert_eq!(nav(&s.welcome, Some(&unrelated)).0, own.uri);
+    assert_eq!(continued(&unrelated), None);
+    let pos = continued(&other).expect("continue reading");
+    assert_eq!(pos.post, s.welcome.uri);
+    assert_eq!(continued(&own), None);
+    n.tick(MINUTE);
+    nav(&s.bob_post, Some(&other));
+    assert_eq!(continued(&other).unwrap().post, s.bob_post.uri);
+
+    // exported and imported like the other local lists
+    let x = block_on(reader.export_local(lessdugin_core::engine::ExportScope::Mine)).unwrap();
+    assert!(
+        x.members.iter().any(|m| m.parts.get(1).map(String::as_str) == Some("seqpos")),
+        "{:?}",
+        x.members
+    );
+    let report = block_on(fresh.import_local(&x, lessdugin_core::engine::ExportScope::Mine)).unwrap();
+    assert!(
+        report.kinds.iter().any(|(k, n)| k == "seqpos" && *n == 1),
+        "{report:?}"
+    );
+    sync(&fresh, &s.f.uri);
+    assert_eq!(
+        block_on(fresh.sequence(&other.uri)).unwrap().continue_reading.unwrap().post,
+        s.bob_post.uri
+    );
+}
+
 // ---------------------------------------------------------------------------------------------
 // Fail closed
 

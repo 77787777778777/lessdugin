@@ -8,13 +8,13 @@ use lessdugin_lexicon::records::{Chapter, Md, Sequence, StrongRef, WikiRevision}
 use serde_json::{Map, Value};
 
 use crate::dto::{
-    SequenceDraft, SequencePosition, SequenceSummary, SequenceView, TagSummary, TagView, WikiDraft,
-    Topic, WriteTicket,
+    SequenceDraft, SequencePosition, SequenceSummary, SequenceView, TagSummary, TagView, Topic,
+    WikiDraft, WriteTicket,
 };
 use crate::engine::forums::{excerpt_of, markdown_body};
 use crate::engine::queries::fold_pending;
 use crate::engine::{Engine, EngineError};
-use crate::host::Host;
+use crate::host::{Host, KvStore};
 use crate::outbox::ContentOpts;
 
 impl<H: Host> Engine<H> {
@@ -115,12 +115,15 @@ impl<H: Host> Engine<H> {
         // device-local, so parity mode leaves it out (engine-api.md §2.1)
         let reading = match self.config.parity_now_ms {
             Some(_) => None,
-            None => self.loc_row::<ReadingRow>(reading_key(uri.as_str())).await?,
+            None => {
+                self.loc_row::<ReadingRow>(reading_key(uri.as_str()))
+                    .await?
+            }
         };
         self.with_views(&l, &uris, &uris, |views| {
             let mut view = views.sequence_view(uri.as_str())?;
-            view.continue_reading = reading
-                .and_then(|r| views.continue_reading(uri.as_str(), &r.post, r.at));
+            view.continue_reading =
+                reading.and_then(|r| views.continue_reading(uri.as_str(), &r.post, r.at));
             Some(view)
         })
         .await?
