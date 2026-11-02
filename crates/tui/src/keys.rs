@@ -80,8 +80,9 @@ pub enum Cmd {
     Stance,
     /// `m`: open the mod menu on the selected item (or its author).
     ModMenu,
-    /// `N`: open the Notifications screen (`synthesis-v1.md` §6.11 lists it; `n`/`N` are
-    /// reserved for search matches there, and search is not built yet).
+    /// `N`: open the Notifications screen (`synthesis-v1.md` §6.11). In the search results
+    /// panel `n` and `N` step to the next and previous hit instead (decision O-7); `n` is no
+    /// command anywhere else.
     Notifications,
     /// `M` (on the Notifications screen): mark every listed notification read.
     MarkAllRead,
@@ -91,6 +92,8 @@ pub enum Cmd {
     Help,
     /// `:`: the command line overlay (`synthesis-v1.md` §6.11 Overlays).
     Command,
+    /// `/`: the command line, opened on `search ` (the local search, `:search`).
+    Search,
 }
 
 /// The command of a key press, if any (key releases and repeats on some platforms are ignored).
@@ -140,6 +143,7 @@ pub fn command(k: &KeyEvent) -> Option<Cmd> {
         KeyCode::Char('M') => Cmd::MarkAllRead,
         KeyCode::Char('?') => Cmd::Help,
         KeyCode::Char(':') => Cmd::Command,
+        KeyCode::Char('/') => Cmd::Search,
         _ => return None,
     })
 }
@@ -236,6 +240,8 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
         &[
             ("m", "mod menu (queue, log, actions)"),
             (":", "command line (any M3 verb; : help)"),
+            ("/", "search the synced cache"),
+            ("n N", "next / previous hit (search results)"),
             ("E", "versions of the selected item"),
             ("N", "notifications"),
             ("M", "mark all notifications read"),
@@ -281,6 +287,9 @@ mod tests {
         assert_eq!(c("i"), Some(Cmd::LoadMedia));
         // the `:` command line (synthesis §6.11 Overlays)
         assert_eq!(c(":"), Some(Cmd::Command));
+        // `/` searches; `n` is no command outside the search results (decision O-7)
+        assert_eq!(c("/"), Some(Cmd::Search));
+        assert_eq!(c("n"), None);
         assert_eq!(c("Ctrl-x"), None);
         assert!(parse_key("Ctrl-").is_none());
     }
