@@ -263,7 +263,7 @@ fn json_result(i: &Indexer, value: Result<Value>, list: bool, headers: HeaderMap
 }
 
 async fn describe(State(i): State<Indexer>, headers: HeaderMap) -> Response {
-    let forums=i.store.indexed_forums(None).into_iter().filter(|f|!i.blocked_forum(f)).take(1000).map(|f|json!({"uri":f.uri,"lagMs":(i.now_ms()-f.synced_ms).max(0),"backfilled":f.synced_ms>0})).collect::<Vec<_>>();
+    let forums=i.store.indexed_forums(None).into_iter().filter(|f|!i.blocked_forum(f,true)).take(1000).map(|f|json!({"uri":f.uri,"lagMs":(i.now_ms()-f.synced_ms).max(0),"backfilled":f.synced_ms>0})).collect::<Vec<_>>();
     json_result(
         &i,
         Ok(
@@ -285,7 +285,7 @@ async fn list_forums(
             &i.store
                 .indexed_forums(one(&p, "q"))
                 .into_iter()
-                .filter(|f| !i.blocked_forum(f))
+                .filter(|f| !i.blocked_forum(f, true))
                 .collect::<Vec<_>>(),
             offset(&p)?,
             limit(&p, 50, 100)?,
@@ -385,7 +385,11 @@ fn known_forum(i: &Indexer, forum: &str) -> Result<(ForumKey, ForumRow)> {
         return Err(ApiError::not_indexed("forum is not indexed"));
     }
     let uri = AtUri::parse(forum).map_err(|e| ApiError::invalid(e.to_string()))?;
-    let Some(row) = i.store.forum(forum).filter(|row| !i.blocked_forum(row)) else {
+    let Some(row) = i
+        .store
+        .forum(forum)
+        .filter(|row| !i.blocked_forum(row, false))
+    else {
         return Err(ApiError::not_indexed("forum is not indexed"));
     };
     let key = ForumKey::of_uri(&uri).map_err(|e| ApiError::invalid(e.to_string()))?;

@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use lessdugin_atp::syntax::AtUri;
 use lessdugin_core::engine::Engine;
 use lessdugin_core::model::ForumModel;
+use lessdugin_native::config::NetworkProfile;
 use url::Url;
 
 use crate::host::PoliteHost;
@@ -35,6 +36,49 @@ pub const FEATURES: [&str; 9] = [
 ];
 
 pub type IndexerEngine = Engine<PoliteHost>;
+
+/// True in builds with devnet mode: debug builds, and release builds with the `devnet` feature.
+/// Other builds refuse `--dev` and devnet profiles (`threat-model.md` INFRA-9).
+pub const DEVNET_AVAILABLE: bool = cfg!(any(debug_assertions, feature = "devnet"));
+
+/// The network profile the service runs with. Devnet mode is never implicit: `--poll` only
+/// selects the polling source, and keeps the configured profile. `dev` (with `--poll` naming
+/// the devnet PDS) or a devnet `config.toml` profile selects devnet mode, and only where
+/// `devnet_available`. Outside devnet mode a `--poll` URL must be https.
+pub fn network_profile(
+    configured: NetworkProfile,
+    plc: &Url,
+    poll: Option<&Url>,
+    dev: bool,
+    devnet_available: bool,
+) -> anyhow::Result<NetworkProfile> {
+    let network = if dev {
+        let pds = poll
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("--dev needs --poll <devnet PDS URL>"))?;
+        let plc = match &configured {
+            NetworkProfile::Devnet(d) => d.plc.clone(),
+            NetworkProfile::Production => plc.clone(),
+        };
+        NetworkProfile::Devnet(lessdugin_native::config::DevnetProfile {
+            plc,
+            pds,
+            jetstream: None,
+        })
+    } else {
+        configured
+    };
+    match &network {
+        NetworkProfile::Devnet(_) if !devnet_available => Err(anyhow::anyhow!(
+            "devnet mode (--dev, or a devnet [network] profile) is not available in this build; \
+             it is for development builds only"
+        )),
+        NetworkProfile::Production if poll.is_some_and(|u| u.scheme() != "https") => Err(
+            anyhow::anyhow!("--poll needs an https PDS URL outside devnet mode"),
+        ),
+        _ => Ok(network),
+    }
+}
 
 /// At most this many folded forum models are kept for the query methods.
 pub const MODEL_CACHE_ENTRIES: usize = 32;
@@ -238,12 +282,14 @@ impl Indexer {
                     .is_some_and(|pds| self.blocked_host(&pds)))
     }
 
-    /// The forum's URI, owner, owner's PDS host or declaration CID is blocklisted.
-    pub(crate) fn blocked_forum(&self, forum: &crate::store::ForumRow) -> bool {
+    /// The forum's URI, owner or declaration CID is blocklisted, or (`host`) its owner's PDS
+    /// host. Listings apply the host too; forum-scoped queries still answer for a forum on a
+    /// blocked host, with that host's records hidden.
+    pub(crate) fn blocked_forum(&self, forum: &crate::store::ForumRow, host: bool) -> bool {
         !self.config.blocklist.is_empty()
             && (self.blocked(&forum.uri)
                 || (!forum.cid.is_empty() && self.blocked(&forum.cid))
-                || self.blocked_did(&forum.did))
+                || (host && self.blocked_did(&forum.did)))
     }
 
     /// A record of `forum` is hidden by its URI, its indexed CID, its forum's declaration CID,
@@ -290,5 +336,46 @@ impl Indexer {
             map.insert("indexer".into(), self.info());
         }
         value
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn poll_never_switches_a_production_profile_into_devnet() {
+        let plc = Url::parse("https://plc.example.test").unwrap();
+        let https = Url::parse("https://pds.example.test").unwrap();
+        let plain = Url::parse("http://127.0.0.1:2583").unwrap();
+        // --poll alone keeps the configured production profile (and its identity rules).
+        let network =
+            network_profile(NetworkProfile::Production, &plc, Some(&https), false, true).unwrap();
+        assert_eq!(network, NetworkProfile::Production);
+        // ...and a plaintext poll source is refused outside devnet mode.
+        assert!(
+            network_profile(NetworkProfile::Production, &plc, Some(&plain), false, true).is_err()
+        );
+        // Devnet mode needs the explicit flag, and a build that has devnet mode.
+        let NetworkProfile::Devnet(d) =
+            network_profile(NetworkProfile::Production, &plc, Some(&plain), true, true).unwrap()
+        else {
+            panic!("--dev selects devnet mode");
+        };
+        assert_eq!((d.plc, d.pds), (plc.clone(), plain.clone()));
+        assert!(
+            network_profile(NetworkProfile::Production, &plc, Some(&plain), true, false).is_err()
+        );
+        assert!(network_profile(NetworkProfile::Production, &plc, None, true, true).is_err());
+        let devnet = NetworkProfile::Devnet(lessdugin_native::config::DevnetProfile {
+            plc: plc.clone(),
+            pds: plain.clone(),
+            jetstream: None,
+        });
+        assert!(network_profile(devnet.clone(), &plc, None, false, false).is_err());
+        assert_eq!(
+            network_profile(devnet.clone(), &plc, Some(&plain), false, true).unwrap(),
+            devnet
+        );
     }
 }

@@ -756,4 +756,201 @@ mod tests {
     }
 
     use std::collections::HashMap;
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+
+    /// A socket that plays a script, then closes (or, with `hang`, stays silent forever).
+    struct Scripted {
+        frames: VecDeque<Result<WsMessage, HostError>>,
+        hang: bool,
+    }
+
+    impl WebSocket for Scripted {
+        async fn next(&mut self) -> Option<Result<WsMessage, HostError>> {
+            match self.frames.pop_front() {
+                Some(frame) => Some(frame),
+                None if self.hang => std::future::pending().await,
+                None => None,
+            }
+        }
+        async fn send_text(&mut self, _text: String) -> Result<(), HostError> {
+            Ok(())
+        }
+        async fn close(&mut self) {}
+    }
+
+    fn frame(time_us: i64) -> Result<WsMessage, HostError> {
+        let at = lessdugin_atp::syntax::Datetime::from_micros(time_us)
+            .unwrap()
+            .to_string();
+        Ok(WsMessage::Text(
+            serde_json::json!({"$type":"message","payload":{
+                "$type":"network.bsky.jetstream.subscribeEvents#commit",
+                "did":"did:plc:aaaaaaaaaaaaaaaaaaaaaaaa","seq":1,"witnessedAt":at,
+                "rev":"3l2s5xxv2zaa2","operation":"create","collection":nsid::POST,
+                "rkey":"aaaaaaaaaaaa-3l2s5xxv2zaa2",
+                "cid":lessdugin_atp::cid::for_raw(&[1]).to_string(),
+            }})
+            .to_string(),
+        ))
+    }
+
+    fn env() -> ReaderEnv {
+        ReaderEnv {
+            store: Store::in_memory().unwrap(),
+            metrics: Arc::new(Metrics::default()),
+            now_ms: Arc::new(|| 1_800_000_000_000),
+        }
+    }
+
+    fn times(items: &[Item]) -> Vec<(char, i64)> {
+        items
+            .iter()
+            .map(|i| match i {
+                Item::Event { event, .. } => ('e', event.time_us),
+                Item::Skip { time_us, .. } => ('s', *time_us),
+            })
+            .collect()
+    }
+
+    const T: i64 = 1_790_000_000_000_000;
+
+    #[tokio::test]
+    async fn an_oversized_message_is_skipped_after_two_failures_at_one_position() {
+        // Every connection replays the frame before the oversized message (a rewind), then hits
+        // it. The reader retries once at exactly that position, then resumes one second past it
+        // and asks for a reconcile; the frame after the oversized message is then delivered.
+        let script = Arc::new(Mutex::new(VecDeque::from([
+            vec![frame(T), Err(HostError::TooLarge)],
+            vec![frame(T), Err(HostError::TooLarge)],
+            vec![frame(T + 1_500_000)],
+        ])));
+        let urls = Arc::new(Mutex::new(Vec::new()));
+        let env = env();
+        env.store
+            .set_cursor(
+                "jetstream:wss://js.example.test",
+                &(T - 5_000_000).to_string(),
+            )
+            .unwrap();
+        let (tx, mut rx) = mpsc::channel(16);
+        let task = {
+            let (script, urls) = (Arc::clone(&script), Arc::clone(&urls));
+            tokio::spawn(endpoint_loop(
+                env,
+                Url::parse("wss://js.example.test").unwrap(),
+                tx,
+                Duration::from_secs(5),
+                move |url: Url| {
+                    urls.lock().unwrap().push(url);
+                    let next = script.lock().unwrap().pop_front();
+                    async move {
+                        next.map(|frames| Scripted {
+                            frames: frames.into(),
+                            hang: false,
+                        })
+                        .ok_or(HostError::Network("script over".into()))
+                    }
+                },
+            ))
+        };
+        let mut items = Vec::new();
+        while items.len() < 4 {
+            items.push(
+                tokio::time::timeout(Duration::from_secs(10), rx.recv())
+                    .await
+                    .unwrap()
+                    .unwrap(),
+            );
+        }
+        task.abort();
+        assert_eq!(
+            times(&items),
+            vec![
+                ('e', T),
+                ('e', T),
+                ('s', T + 1_000_000),
+                ('e', T + 1_500_000)
+            ]
+        );
+        let cursors = urls
+            .lock()
+            .unwrap()
+            .iter()
+            .take(3)
+            .map(|u| {
+                u.query_pairs()
+                    .find(|(k, _)| k == "cursor")
+                    .unwrap()
+                    .1
+                    .parse::<i64>()
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(cursors, vec![T - 15_000_000, T, T + 1_000_000]);
+    }
+
+    #[test]
+    fn a_replayed_frame_does_not_reset_the_oversize_rule() {
+        let mut state = ReaderState::default();
+        assert_eq!(state.on_oversize(T), None);
+        state.on_frame(T - 1);
+        state.on_frame(T);
+        assert_eq!(state.on_oversize(T), Some(T + 1_000_000));
+        // Progress past the position starts a new count.
+        assert_eq!(state.on_oversize(T + 2), None);
+        state.on_frame(T + 3);
+        assert_eq!(state.on_oversize(T + 3), None);
+    }
+
+    #[tokio::test]
+    async fn non_utf8_binary_frames_are_skipped_not_fatal() {
+        let env = env();
+        let (tx, mut rx) = mpsc::channel(16);
+        let mut socket = Scripted {
+            frames: VecDeque::from([Ok(WsMessage::Binary(vec![0xff, 0xfe, 0xfd])), frame(T)]),
+            hang: false,
+        };
+        let mut state = ReaderState::default();
+        let (end, n) = read_connection(
+            &mut socket,
+            Duration::from_secs(5),
+            T - 1,
+            &mut state,
+            "s",
+            "o",
+            &env,
+            &tx,
+        )
+        .await;
+        assert_eq!((end, n), (End::Closed, 1));
+        assert!(matches!(rx.try_recv(), Ok(Item::Event { event, .. }) if event.time_us == T));
+    }
+
+    #[tokio::test]
+    async fn a_silent_socket_is_replaced_after_the_idle_bound() {
+        let env = env();
+        let (tx, _rx) = mpsc::channel(16);
+        let mut socket = Scripted {
+            frames: VecDeque::from([frame(T)]),
+            hang: true,
+        };
+        let mut state = ReaderState::default();
+        let ended = tokio::time::timeout(
+            Duration::from_secs(5),
+            read_connection(
+                &mut socket,
+                Duration::from_millis(50),
+                T - 1,
+                &mut state,
+                "s",
+                "o",
+                &env,
+                &tx,
+            ),
+        )
+        .await
+        .expect("a half-open socket must not block the reader");
+        assert_eq!(ended, (End::Idle, 1));
+    }
 }

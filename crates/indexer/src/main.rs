@@ -29,8 +29,12 @@ struct Args {
     /// Public did:web of this service (metadata only; the indexer has no signing authority).
     #[arg(long, default_value = "did:web:indexer.example.invalid")]
     did: String,
+    /// Poll this PDS instead of following Jetstream (https outside devnet mode).
     #[arg(long)]
     poll: Option<Url>,
+    /// Devnet mode, with `--poll` naming the devnet PDS. Development builds only.
+    #[arg(long)]
+    dev: bool,
     #[arg(long, default_value_t = 5_000)]
     poll_interval_ms: u64,
     #[arg(long = "forum")]
@@ -56,17 +60,13 @@ async fn main() -> Result<()> {
         .ensure_dirs()
         .context("create indexer data directories")?;
     let mut config = Config::load(&paths.config_file).context("load indexer config")?;
-    if let Some(poll) = &args.poll {
-        let plc = match &config.network {
-            NetworkProfile::Devnet(d) => d.plc.clone(),
-            NetworkProfile::Production => Url::parse("https://plc.directory")?,
-        };
-        config.network = NetworkProfile::Devnet(lessdugin_native::config::DevnetProfile {
-            plc,
-            pds: poll.clone(),
-            jetstream: None,
-        });
-    }
+    config.network = lessdugin_indexer::network_profile(
+        config.network.clone(),
+        &config.plc,
+        args.poll.as_ref(),
+        args.dev,
+        lessdugin_indexer::DEVNET_AVAILABLE,
+    )?;
     let engine_config = lessdugin_native::engine::engine_config(&config);
     let host = NativeHost::open(&paths, &config).context("open native cache")?;
     let engine = lessdugin_core::engine::Engine::new(PoliteHost::new(host), engine_config);
