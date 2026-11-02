@@ -4,10 +4,14 @@
 use std::collections::BTreeSet;
 
 use lessdugin_lexicon::Collection;
+use lessdugin_markdown::{PlainProjection, plain_projection};
+use serde_json::Value;
 
 use crate::discovery::forum_ref::ForumKey;
-use crate::dto::{DtoVersion, SearchHit, SearchItem, SearchQuery, SearchResults};
+use crate::dto::{DtoVersion, RenderedBody, SearchHit, SearchItem, SearchQuery, SearchResults};
 use crate::host::{Dir, Host, KeyRange, KvStore};
+use crate::model::render::{RenderCache, Spilled, text_blob_cid};
+use crate::model::views::Views;
 use crate::social::input::SkelData;
 use crate::store::blob::ForumRow;
 use crate::store::{row, schema};
@@ -50,8 +54,9 @@ impl<H: Host> Engine<H> {
     }
 
     /// Search title and rendered body text of listed, locally synced posts and comments. Hidden
-    /// and tombstoned content is never inspected. Results are newest first, then URI, and capped
-    /// at 100 hits.
+    /// and tombstoned content is never inspected. Terms match the title and P; snippets and
+    /// highlights are cut from the title and P_x, so they never show spoiler content
+    /// (`lfm-1.md` §12). Results are newest first, then URI, and capped at 100 hits.
     pub async fn search(&self, q: &SearchQuery) -> Result<SearchResults, EngineError> {
         let empty = || SearchResults {
             dto: DtoVersion::default(),
@@ -101,32 +106,28 @@ impl<H: Host> Engine<H> {
                         };
                         match &skel.data {
                             SkelData::Post { .. } => {
-                                let Some(post) = views.post_view(uri) else {
+                                let Some(post) = views.post_summary(uri) else {
                                     continue;
                                 };
                                 if !matches!(
-                                    post.post.state,
+                                    post.state,
                                     crate::dto::ItemState::Visible
                                         | crate::dto::ItemState::Collapsed { .. }
                                 ) {
                                     continue;
                                 }
-                                let text = match post.post.title.as_deref() {
-                                    Some(title) if !title.is_empty() => {
-                                        format!("{title} {}", post.body.text)
-                                    }
-                                    _ => post.body.text.clone(),
-                                };
+                                let body = views.body(skel, views.listed(uri));
+                                let title = post.title.as_deref().unwrap_or_default();
                                 let Some((snippet, highlights)) =
-                                    crate::search::snippet(&text, &q.q)
+                                    hit(views, uri, title, &body, &q.q)
                                 else {
                                     continue;
                                 };
                                 found.push((
-                                    post.post.t_rank_ms,
+                                    post.t_rank_ms,
                                     uri.clone(),
                                     SearchHit {
-                                        item: SearchItem::Post(post.post),
+                                        item: SearchItem::Post(post),
                                         snippet,
                                         highlights,
                                     },
@@ -147,7 +148,7 @@ impl<H: Host> Engine<H> {
                                     continue;
                                 }
                                 let Some((snippet, highlights)) =
-                                    crate::search::snippet(&comment.body.text, &q.q)
+                                    hit(views, uri, "", &comment.body, &q.q)
                                 else {
                                     continue;
                                 };
@@ -176,4 +177,61 @@ impl<H: Host> Engine<H> {
             hits: hits.into_iter().map(|(_, _, hit)| hit).collect(),
         })
     }
+}
+
+/// P and P_x of the body `md` as the views render it, from its source (`None`: a spilled body
+/// whose source is not in memory, rendered from the LRU or still pending).
+fn projection(md: &Value, ns: &str, renders: &RenderCache) -> Option<PlainProjection> {
+    let markdown = format!("{ns}.markdown");
+    let known = md
+        .get("$type")
+        .and_then(Value::as_str)
+        .is_some_and(|t| t == markdown || t == format!("{markdown}#main"));
+    let empty = || PlainProjection {
+        text: String::new(),
+        text_x: String::new(),
+    };
+    if !known {
+        return Some(empty());
+    }
+    if let Some(text) = md.get("text").and_then(Value::as_str) {
+        return Some(plain_projection(text));
+    }
+    match text_blob_cid(md)
+        .and_then(|blob| renders.spilled(blob))
+        .as_deref()
+    {
+        Some(Spilled::Text(src)) => Some(plain_projection(src)),
+        Some(_) => Some(empty()),
+        None => None,
+    }
+}
+
+/// `title` and `text` joined by a space when both are present.
+fn joined(title: &str, text: &str) -> String {
+    match (title.is_empty(), text.is_empty()) {
+        (false, false) => format!("{title} {text}"),
+        (false, true) => title.to_owned(),
+        _ => text.to_owned(),
+    }
+}
+
+/// The hit of item `uri` (title `title`, rendered `body`): matched over the title and P, its
+/// snippet cut from the title and P_x of the body's source. Without the source in memory (a
+/// spilled body), the rendered excerpt stands in for P_x: it is cut from P_x too.
+fn hit(
+    views: &Views<'_>,
+    uri: &str,
+    title: &str,
+    body: &RenderedBody,
+    q: &str,
+) -> Option<(String, Vec<(u32, u32)>)> {
+    let matched = joined(title, &body.text);
+    let px = views
+        .values
+        .get(uri)
+        .and_then(|v| v.get("body"))
+        .and_then(|md| projection(md, &views.model.input.ns, views.renders))
+        .map_or_else(|| body.excerpt.clone(), |p| p.text_x);
+    crate::search::hit(&matched, &joined(title, &px), q)
 }
