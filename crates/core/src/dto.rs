@@ -413,6 +413,11 @@ pub struct WikiDraft {
     pub parent_tags: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
+    /// The page head the author edited (`TagView.head`): written as the only parent, and the
+    /// edit is refused (`conflict`) when the cached canonical head is another revision or there
+    /// is none. Absent: the current canonical head, or none for a new page (engine API v0).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
 }
 
 dto! {

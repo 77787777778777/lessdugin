@@ -117,8 +117,10 @@ impl<H: Host> Engine<H> {
             .ok_or_else(|| EngineError::not_found(format!("sequence {uri}")))
     }
 
-    /// Create an immutable wiki revision. An edit names exactly the current canonical revision
-    /// and its model CID as its parent; a new page has no parent.
+    /// Create an immutable wiki revision. An edit names exactly one parent with its model CID:
+    /// the draft's `base` (the head the author edited, decision O-2), which must still be the
+    /// cached canonical revision (`conflict` otherwise), or without one the current canonical
+    /// revision; a new page has no parent.
     pub async fn wiki_edit(
         &self,
         forum: &str,
@@ -129,10 +131,26 @@ impl<H: Host> Engine<H> {
         let key = self.forum_key(forum).await?;
         let l = self.loaded(&key).await?;
         let wiki = l.model.view.wiki.as_ref().map_err(fold_pending)?;
-        let parents = wiki
+        let head = wiki
             .pages
             .get(slug)
-            .and_then(|page| page.canonical.as_ref())
+            .and_then(|page| page.canonical.as_ref());
+        if let Some(base) = &draft.base {
+            let base = records_uri(base)?.to_string();
+            if head != Some(&base) {
+                let mut e = EngineError::conflict(format!(
+                    "the page {slug} has changed since {base} was loaded: reload it and edit the \
+                     current head"
+                ))
+                .with_detail("kind", "wikiHeadMoved")
+                .with_detail("base", base);
+                if let Some(head) = head {
+                    e = e.with_detail("head", head.clone());
+                }
+                return Err(e);
+            }
+        }
+        let parents = head
             .map(|canonical| {
                 let skel = l.model.skel(canonical).ok_or_else(|| {
                     EngineError::internal(format!("missing canonical wiki skeleton: {canonical}"))

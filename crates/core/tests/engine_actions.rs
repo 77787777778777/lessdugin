@@ -304,6 +304,7 @@ fn wiki_revisions_parent_the_canonical_head_and_drive_tag_views() {
         is_tag,
         parent_tags: vec!["programming".to_owned()],
         summary: Some("test revision".to_owned()),
+        base: None,
     };
     let first = block_on(w.alice.engine.wiki_edit(
         &w.forum,
@@ -384,6 +385,64 @@ fn wiki_revisions_parent_the_canonical_head_and_drive_tag_views() {
     );
 }
 
+/// Decision O-2: an edit names the head its author loaded (`WikiDraft.base`), and is refused
+/// when the cached canonical head has moved past it, instead of silently parenting the newer
+/// head (which overwrote the other editor's change).
+#[test]
+fn wiki_edits_parent_their_base_and_refuse_a_moved_head() {
+    let w = World::new();
+    let draft = |name: &str, base: Option<&str>| WikiDraft {
+        name: name.to_owned(),
+        description: None,
+        body: Some(BodyDraft::text(format!("About {name}"))),
+        is_tag: true,
+        parent_tags: vec![],
+        summary: None,
+        base: base.map(str::to_owned),
+    };
+    let edit = |u: &User, d: WikiDraft| block_on(u.engine.wiki_edit(&w.forum, "rust", d));
+    // a new page: no base, no parent
+    let t = edit(&w.alice, draft("Rust", None)).unwrap();
+    w.alice.flush();
+    let (r1, r1_cid) = match w.alice.state(&t.id) {
+        WriteState::Done { uri, cid, .. } => (uri, cid.unwrap()),
+        other => panic!("wiki write is {other:?}"),
+    };
+    w.sync_all();
+    // both editors load the page at r1
+    let loaded = block_on(w.bob.engine.tag(&w.forum, "rust")).unwrap();
+    assert_eq!(loaded.head.as_deref(), Some(r1.as_str()));
+    // alice saves first
+    let t = edit(&w.alice, draft("Rust two", Some(&r1))).unwrap();
+    w.alice.flush();
+    let r2 = w.alice.done(&t);
+    assert_eq!(
+        w.alice.record(nsid::WIKI_REVISION, r2.rsplit('/').next().unwrap()).unwrap()["parents"],
+        json!([{"uri": r1, "cid": r1_cid}])
+    );
+    w.sync_all();
+    // bob saves the edit he made against r1: refused, nothing is queued
+    let before = block_on(w.bob.engine.writes()).unwrap().len();
+    let e = edit(&w.bob, draft("Rust three", Some(&r1))).unwrap_err();
+    assert_eq!(e.code, ErrorCode::Conflict, "{e:?}");
+    let detail = e.detail.unwrap();
+    assert_eq!(detail["kind"], "wikiHeadMoved");
+    assert_eq!(detail["base"], r1.as_str());
+    assert_eq!(detail["head"], r2.as_str());
+    assert_eq!(block_on(w.bob.engine.writes()).unwrap().len(), before);
+    // a base that is not the page's head at all (here: no page) is refused too
+    let e = block_on(w.bob.engine.wiki_edit(&w.forum, "python", draft("Python", Some(&r2))))
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::Conflict);
+    assert!(e.detail.unwrap().get("head").is_none());
+    // reloaded at r2, his edit parents r2
+    let t = edit(&w.bob, draft("Rust three", Some(&r2))).unwrap();
+    w.bob.flush();
+    let r3 = w.bob.done(&t);
+    let parents = &w.bob.record(nsid::WIKI_REVISION, r3.rsplit('/').next().unwrap()).unwrap()["parents"];
+    assert_eq!(parents.as_array().unwrap().len(), 1);
+    assert_eq!(parents[0]["uri"], r2.as_str());
+}
 #[test]
 fn a_seed_tag_vote_resolves_on_another_users_post() {
     let w = World::new();
@@ -397,6 +456,7 @@ fn a_seed_tag_vote_resolves_on_another_users_post() {
             is_tag: true,
             parent_tags: vec![],
             summary: None,
+            base: None,
         },
     ))
     .unwrap();

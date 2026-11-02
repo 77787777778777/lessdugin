@@ -63,6 +63,7 @@ fn search_and_organisation_reads_render_engine_results_and_open_stable_refs() {
             is_tag: true,
             parent_tags: vec![],
             summary: Some("Initial page".into()),
+            base: None,
         },
     ))
     .unwrap();

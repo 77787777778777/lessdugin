@@ -292,6 +292,7 @@ pub async fn wiki(ctx: &Ctx, args: WikiArgs) -> Result<(), CliError> {
                         is_tag: tag,
                         parent_tags,
                         summary,
+                        base: None,
                     },
                 )
                 .await?;
