@@ -5,10 +5,10 @@ use std::sync::Arc;
 use futures::executor::block_on;
 use lessdugin_atp::syntax::{AtUri, Datetime, Did};
 use lessdugin_core::discovery::sources::{
-    CONSTELLATION_PAGE_LIMIT, CorePlusHints, DIRECTORY_OWNERS_MAX, DidHints, GET_BACKLINKS,
-    GET_BACKLINKS_COUNT, LIST_REPOS_BY_COLLECTION, NEWCOMER_RELAY_UNION_LIMIT, NewcomerHints,
-    RECENT_POSTS_DISCOVERY, RELAY_PAGE_LIMIT, SOURCE_HINTS_MAX, SourceEndpoints, SourceError,
-    Sources,
+    CONSTELLATION_HINTS_MAX, CONSTELLATION_PAGE_LIMIT, CorePlusHints, DIRECTORY_OWNERS_MAX,
+    DidHints, GET_BACKLINKS, GET_BACKLINKS_COUNT, LIST_REPOS_BY_COLLECTION,
+    NEWCOMER_RELAY_UNION_LIMIT, NewcomerHints, RECENT_POSTS_DISCOVERY, RELAY_PAGE_LIMIT,
+    SourceEndpoints, SourceError, Sources,
 };
 use lessdugin_core::discovery::state::{DiscState, disc_rows};
 use lessdugin_core::discovery::{ForumKey, SyncOpts};
@@ -818,12 +818,12 @@ fn constellation_listings_are_bounded_per_page_and_in_total() {
     let host = MemHost::new();
     endless(&host, nsid::MEMBERSHIP);
     let hints = block_on(service(&host).constellation_newcomers(&f)).unwrap();
-    assert_eq!(hints.dids.len(), SOURCE_HINTS_MAX);
+    assert_eq!(hints.dids.len(), CONSTELLATION_HINTS_MAX);
     assert_eq!(hints.dids[0], "did:web:u000000.example.com", "newest first");
     assert!(hints.stats.truncated);
     assert_eq!(
         host.requests().len(),
-        SOURCE_HINTS_MAX / CONSTELLATION_PAGE_LIMIT,
+        CONSTELLATION_HINTS_MAX / CONSTELLATION_PAGE_LIMIT,
         "paging stops at the bound"
     );
 

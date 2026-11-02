@@ -6,7 +6,7 @@
 //! helpers additionally re-read `Engine::sources()` immediately before every HTTP request.
 //!
 //! Every listing is bounded per page (a page with more entries than the requested `limit` is
-//! malformed) and in total: Constellation is read newest first up to [`SOURCE_HINTS_MAX`]
+//! malformed) and in total: Constellation is read newest first up to [`CONSTELLATION_HINTS_MAX`]
 //! entries ([`RECENT_POSTS_DISCOVERY`] for recently active authors), relay newcomers up to the
 //! 5,000-DID union, the relay directory up to [`DIRECTORY_OWNERS_MAX`] owners. Paging stops at
 //! the bound and the rest is dropped with a warning ([`SourceStats::truncated`]).
@@ -46,7 +46,7 @@ pub const RELAY_PAGE_LIMIT: usize = 500;
 /// Relay newcomer discovery is disabled above this union size for the session.
 pub const NEWCOMER_RELAY_UNION_LIMIT: usize = 5_000;
 /// Constellation membership hints read per forum, newest first: twice the newcomer budget.
-pub const SOURCE_HINTS_MAX: usize = 2 * NEWCOMER_BUDGET;
+pub const CONSTELLATION_HINTS_MAX: usize = 2 * NEWCOMER_BUDGET;
 /// Newest `NS.post` backlinks read to find recently active authors (`limits.md` §11).
 pub const RECENT_POSTS_DISCOVERY: usize = 100;
 /// Forum owners read from the relays for the directory (`sync.md` §4.7).
@@ -311,13 +311,13 @@ impl<H: Host> Sources<H> {
 
     /// Exact-filtered Constellation membership hints, in the service's newest-first order.
     /// Paging continues until `cursor: null`, including after short and empty pages, or until
-    /// [`SOURCE_HINTS_MAX`] hints were read.
+    /// [`CONSTELLATION_HINTS_MAX`] hints were read.
     pub async fn constellation_newcomers(&self, forum: &ForumKey) -> Result<DidHints, SourceError> {
         self.backlinks(
             forum,
             nsid::MEMBERSHIP,
             Some(forum.fk.as_str()),
-            SOURCE_HINTS_MAX,
+            CONSTELLATION_HINTS_MAX,
         )
         .await
     }

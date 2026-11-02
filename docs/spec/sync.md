@@ -449,12 +449,14 @@ Newcomers are participants found only through hints. They are discovered in `ass
 
 | Source | Exact use |
 |---|---|
-| Constellation | `GET <constellation>/xrpc/blue.microcosm.links.getBacklinks?subject=<F>&source=<NS>.membership:forum&limit=100[&cursor=…]`. Keep paging while `cursor ≠ null`: a short page does not mean the end. Entries `{did, collection, rkey}` with `rkey ≠ fk` are dropped without a fetch. `getBacklinksCount` with the same parameters gives the "N members (hint)" badge. (ADR 0003) |
+| Constellation | `GET <constellation>/xrpc/blue.microcosm.links.getBacklinks?subject=<F>&source=<NS>.membership:forum&limit=100[&cursor=…]`. Keep paging while `cursor ≠ null`: a short page does not mean the end. Entries `{did, collection, rkey}` with `rkey ≠ fk` are dropped without a fetch. At most `CONSTELLATION_HINTS_MAX` (1,000, twice the budget) entries are read, newest first; paging stops there. `getBacklinksCount` with the same parameters gives the "N members (hint)" badge. (ADR 0003) |
 | Jetstream | commit events of `NS.membership` with `rkey = fk` (§6.4) |
 | Indexer | `listParticipants(forum = F)`, paging by cursor |
-| Relay | `listReposByCollection(collection = NS.membership, limit = 500)` across `network.relays`, only while the union of returned DIDs is ≤ 5,000. Above that, this source is disabled for the session. |
+| Relay | `listReposByCollection(collection = NS.membership, limit = 500)` across `network.relays`, only while the union of returned DIDs is ≤ 5,000. Above that, this source is disabled for the session. An entry names a repo with some membership record, not a forum: each DID is a candidate confirmed at its PDS (§4.2.1), with no per-DID query to another service, and a relay entry is never a new hint for a rejected candidate. |
 
-- **Budget.** At most 500 newcomer candidates per forum are confirmed and synced (*tunable*). Candidates are taken most recent first: by Jetstream `time_us`, then Constellation order (newest first), then indexer order; ties by DID ascending. The rest stay as `disc` rows.
+- **Budget.** At most 500 newcomer candidates per forum are confirmed and synced (*tunable*). Candidates are taken most recent first: by Jetstream `time_us`, then Constellation order (newest first), then indexer order; ties by DID ascending. A rejected relay candidate still in its back-off (§4.2.1) is taken after all the others, so it never holds a place another candidate could use. The rest stay as `disc` rows.
+- **Bounds.** A listing page with more entries than the `limit` it asked for is malformed, and that source fails. Constellation is read newest first up to its bound (`CONSTELLATION_HINTS_MAX` membership entries; `RECENT_POSTS_DISCOVERY` post entries for step 3 of §4.5); paging stops there and the older entries are dropped with a warning.
+- **Independent sources.** Recently active authors, Constellation newcomers and relay newcomers are independent and best-effort: a source that fails (its service is down, malformed, or over a bound that fails it) is logged and reported, and the other sources' hints are still used; the PDS sync of §4.5 runs either way. `sources = direct` contacts none of them (§2.3). One `sync_forum` discovers hints once.
 - **Applications (approval mode).** Applicants (`member(d) ∧ access(d) = none`) are found in the same way, so moderators see them only through CORE+ or out of band. The mod queue says so.
 
 ### 4.5 Sync order and completeness
@@ -499,7 +501,7 @@ directory():
   group by owner: the verified handle, else short_did (F9); sort groups by handle, then DID
 ```
 
-`listReposByCollection` takes one exact NSID; wildcards are rejected (ADR 0003). Its entries carry only `did`. The directory is CORE+ (relay) or EXT; a forum can always be opened directly by reference.
+`listReposByCollection` takes one exact NSID; wildcards are rejected (ADR 0003). Its entries carry only `did`. A page with more than the 500 entries asked for is malformed, and at most `DIRECTORY_OWNERS_MAX` (10,000) distinct owners are read; further owners are dropped with a warning. The directory is CORE+ (relay) or EXT; a forum can always be opened directly by reference.
 
 ### 4.8 Followed forums
 
