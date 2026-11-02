@@ -1125,7 +1125,8 @@ async function runScenario(
 
         // M5 cached forum rendering: return to the forum while the devnet is live, then reload the
         // real SPA/worker against the IndexedDB this page just warmed. During the reload, only the
-        // forum's own declaration refresh stays live; every other PLC/PDS request gets 503. Thus the
+        // forum's own declaration refresh stays live; every other PLC/PDS request gets 503, and so
+        // does every request to the CORE+ services (which carry no record text anyway). Thus the
         // non-empty post list can only come from the real cache, without charging the render budget
         // for the declaration fetcher's offline retry schedule. This is a warm page/worker restart,
         // not a cold browser process start or a claim that the whole network was offline.
@@ -1133,6 +1134,9 @@ async function runScenario(
         await expect(apage.getByRole("heading", { level: 1, name: FORUM_NAME })).toBeVisible();
         const blockedRequests: string[] = [];
         const forumParts = forum.split("/");
+        const corePlusOrigins = [services.urls.constellation, services.urls.relay].map(
+          (u) => new URL(u).origin,
+        );
         await apage.route("**/*", async (r) => {
           const url = r.request().url();
           const parsed = new URL(url);
@@ -1143,7 +1147,8 @@ async function runScenario(
             parsed.searchParams.get("repo") === forumParts[2] &&
             parsed.searchParams.get("collection") === forumParts[3] &&
             parsed.searchParams.get("rkey") === forumParts[4];
-          if ((origin === s.devnet.pds || origin === s.devnet.plc) && !declaration) {
+          const network = origin === s.devnet.pds || origin === s.devnet.plc;
+          if ((network && !declaration) || corePlusOrigins.includes(origin)) {
             blockedRequests.push(url);
             await r.fulfill({ status: 503, contentType: "text/plain", body: "cache-only reload" });
           } else {
@@ -1156,15 +1161,21 @@ async function runScenario(
         await expect(apage.getByRole("link", { name: EDITED_TITLE })).toBeVisible();
         await expect(apage.getByRole("link", { name: CANARY_TITLE })).toBeVisible();
         const ms = Date.now() - cache0;
+        // The reloaded page's sync must have been refused. In direct mode its first requests
+        // (the live tail's head polls) come at once; in assisted mode Jetstream replaces those
+        // polls and the forum sync asks the CORE+ services before the PDS, so the refusals may
+        // follow the paint. The render time above is unaffected by this wait.
+        await expect
+          .poll(() => blockedRequests.length, {
+            message: "the cached reload really refused repository/sync traffic",
+            timeout: 15_000,
+          })
+          .toBeGreaterThan(0);
         cachedRender = { ms, blockedRequests };
         writeFileSync(
           join(out, "cached-render.json"),
-          `${JSON.stringify({ ...cachedRender, budgetMs: 1500, coldBrowserRestart: false, declarationRefresh: "loopback only; all other PLC/PDS requests returned 503" }, null, 2)}\n`,
+          `${JSON.stringify({ ...cachedRender, budgetMs: 1500, coldBrowserRestart: false, declarationRefresh: "loopback only; all other PLC/PDS and CORE+ HTTP requests returned 503" }, null, 2)}\n`,
         );
-        expect(
-          blockedRequests.length,
-          "the cached reload really refused repository/sync traffic",
-        ).toBeGreaterThan(0);
         expect(ms, `warm IndexedDB forum render (${ms} ms); see cached-render.json`).toBeLessThan(
           1500,
         );
