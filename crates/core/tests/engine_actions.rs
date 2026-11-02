@@ -417,7 +417,9 @@ fn wiki_edits_parent_their_base_and_refuse_a_moved_head() {
     w.alice.flush();
     let r2 = w.alice.done(&t);
     assert_eq!(
-        w.alice.record(nsid::WIKI_REVISION, r2.rsplit('/').next().unwrap()).unwrap()["parents"],
+        w.alice
+            .record(nsid::WIKI_REVISION, r2.rsplit('/').next().unwrap())
+            .unwrap()["parents"],
         json!([{"uri": r1, "cid": r1_cid}])
     );
     w.sync_all();
@@ -431,15 +433,22 @@ fn wiki_edits_parent_their_base_and_refuse_a_moved_head() {
     assert_eq!(detail["head"], r2.as_str());
     assert_eq!(block_on(w.bob.engine.writes()).unwrap().len(), before);
     // a base that is not the page's head at all (here: no page) is refused too
-    let e = block_on(w.bob.engine.wiki_edit(&w.forum, "python", draft("Python", Some(&r2))))
-        .unwrap_err();
+    let e = block_on(
+        w.bob
+            .engine
+            .wiki_edit(&w.forum, "python", draft("Python", Some(&r2))),
+    )
+    .unwrap_err();
     assert_eq!(e.code, ErrorCode::Conflict);
     assert!(e.detail.unwrap().get("head").is_none());
     // reloaded at r2, his edit parents r2
     let t = edit(&w.bob, draft("Rust three", Some(&r2))).unwrap();
     w.bob.flush();
     let r3 = w.bob.done(&t);
-    let parents = &w.bob.record(nsid::WIKI_REVISION, r3.rsplit('/').next().unwrap()).unwrap()["parents"];
+    let parents = &w
+        .bob
+        .record(nsid::WIKI_REVISION, r3.rsplit('/').next().unwrap())
+        .unwrap()["parents"];
     assert_eq!(parents.as_array().unwrap().len(), 1);
     assert_eq!(parents[0]["uri"], r2.as_str());
 }

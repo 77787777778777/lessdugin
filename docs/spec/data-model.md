@@ -976,7 +976,7 @@ edit(target, base, newValue, summary?):          // base = CID the user edited; 
 | Join | Create-if-absent of `NS.membership` with rkey `fk` (below). If it already exists, re-read; an existing record means success. |
 | Leave | `deleteRecord(NS.membership, fk, swapRecord = cid)`. |
 | First content in a forum | `applyWrites[#create membership (only if a fresh getRecord shows it absent), #create post or comment]` with `swapCommit` = fresh head. If the batch fails (an HTTP 500 is ambiguous), re-read the membership and the head, and retry once without the membership if it now exists. |
-| Create post, comment, sequence or wikiRevision | `createRecord(rkey)` with the rkey fixed per W6. The MVP wiki writes `parents` = [the current head] or [] (§6.8). |
+| Create post, comment, sequence or wikiRevision | `createRecord(rkey)` with the rkey fixed per W6. The MVP wiki writes `parents` = [the head the author edited] or [] (§6.8); the engine refuses the edit (`conflict`) when its cached head is no longer that revision (`engine-api.md` §3.5 `wiki_edit`, orchestrator decision O-2). |
 | Edit content | Edit protocol (§8.3). |
 | Delete content (post, comment, sequence, forum) | Delete protocol (§8.7): removes the target and purges its revisions. |
 | Delete wikiRevision | `deleteRecord`. A wikiRevision has no revisions. |

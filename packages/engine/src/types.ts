@@ -987,6 +987,10 @@ export interface WikiDraft {
   isTag: boolean;
   parentTags?: Slug[];
   summary?: string;
+  /** The head the author edited (`TagView.head`, decision O-2): written as the only parent;
+   * `conflict` (`detail.kind = "wikiHeadMoved"`) when the cached head is another revision.
+   * Absent: the current head, or none for a new page. */
+  base?: AtUri;
 }
 
 /** A draft for `edit` and for the local draft store, tagged by what is drafted (sequence
