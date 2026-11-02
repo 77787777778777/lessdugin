@@ -1059,7 +1059,10 @@ fn read_waits_for_a_slow_spilled_body() {
         let long = "word ".repeat(14_000);
         let f = alice.file(
             &format!("{title}.md"),
-            &format!("---\ntitle: {title}\n---\nThe opening.\n\n{long}\n\nThe last words.\n"),
+            // each body its own blob
+            &format!(
+                "---\ntitle: {title}\n---\nThe opening of {title}.\n\n{long}\n\nThe last words.\n"
+            ),
         );
         let p = alice.json(&["post", s(&f), "--yes"]);
         p["state"]["uri"].as_str().unwrap().to_owned()
@@ -1100,6 +1103,27 @@ fn read_waits_for_a_slow_spilled_body() {
     let stderr = text(&out.stderr);
     assert!(
         stderr.contains("still not loaded") && stderr.contains(&broken),
+        "{stderr}"
+    );
+    // `export` awaits each download to its end; the one that fails is named, not left out
+    // quietly
+    let out = reader.run(&["--json", "export", "alice.test/meta"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let x: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let markdown = |uri: &str| {
+        x["posts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["uri"] == uri)
+            .map(|p| p["markdown"].clone())
+            .unwrap_or_else(|| panic!("{uri} not exported: {x}"))
+    };
+    assert!(markdown(&slow).as_str().unwrap().contains("The last words."));
+    assert!(markdown(&broken).is_null());
+    let stderr = text(&out.stderr);
+    assert!(
+        stderr.contains("could not be downloaded") && stderr.contains(&broken),
         "{stderr}"
     );
 }
