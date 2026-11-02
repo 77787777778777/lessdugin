@@ -533,6 +533,15 @@ fn a_seed_tag_vote_resolves_on_another_users_post() {
     );
     let view = block_on(w.carol.engine.get_post(&w.bob_post)).unwrap();
     assert_eq!(view.post.tags, vec!["rust".to_owned()]);
+    // PostView.tagRelevance (m5-acceptance-12): the relevance for every reader, the vote for
+    // its voter only
+    let tag = |v: &lessdugin_core::dto::PostView| {
+        let t = v.tag_relevance.iter().find(|t| t.slug == "rust").cloned();
+        t.map(|t| (t.relevance > 0, t.applies, t.mine))
+    };
+    assert_eq!(tag(&view), Some((true, true, None)));
+    let mine = block_on(w.alice.engine.get_post(&w.bob_post)).unwrap();
+    assert_eq!(tag(&mine), Some((true, true, Some(KarmaValue::Up))));
 }
 
 #[test]

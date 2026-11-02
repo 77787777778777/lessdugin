@@ -861,7 +861,9 @@ impl Views<'_> {
         for e in &entries {
             let (Some(slug), Some(value)) = (
                 e.get("tag").and_then(Value::as_str),
-                e.get("value").and_then(Value::as_str).and_then(VoteValue::parse),
+                e.get("value")
+                    .and_then(Value::as_str)
+                    .and_then(VoteValue::parse),
             ) else {
                 continue;
             };

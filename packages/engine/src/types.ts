@@ -298,6 +298,17 @@ export interface PostView {
   reacts: ReactTally[];
   history: HistorySummary;
   sequences: SequenceNav[];
+  /** Tag relevance (social.md §13.3) and the viewer's own tag votes, by slug; empty for a post
+   * that is not listed, except to the forum's authorities. */
+  tagRelevance?: PostTag[];
+}
+
+/** A tag of a post: `rel(p, slug)`, whether it applies, and the viewer's own tag vote. */
+export interface PostTag {
+  slug: Slug;
+  relevance: number;
+  applies: boolean;
+  mine?: KarmaValue;
 }
 
 /** Untagged: `{ revision: n }` ("on revision n") or `{ unavailable }` ("on an unavailable

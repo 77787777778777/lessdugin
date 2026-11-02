@@ -554,6 +554,13 @@ export interface PostSummary {
     labels: string[];
 }
 
+export interface PostTag {
+    slug: string;
+    relevance: number;
+    applies: boolean;
+    mine?: KarmaValue;
+}
+
 export interface PostView {
     dto: DtoVersion;
     post: PostSummary;
@@ -561,6 +568,7 @@ export interface PostView {
     reacts: ReactTally[];
     history: HistorySummary;
     sequences: SequenceNav[];
+    tagRelevance?: PostTag[];
 }
 
 export type PublicActionKind = "vote" | "react" | "tagVote" | "join" | "modAction";

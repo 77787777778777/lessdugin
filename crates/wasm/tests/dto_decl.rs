@@ -66,6 +66,7 @@ fn all() -> Vec<(&'static str, &'static str)> {
         PostList,
         HistorySummary,
         SequenceNav,
+        PostTag,
         PostView,
         VersionRef,
         CommentNode,
