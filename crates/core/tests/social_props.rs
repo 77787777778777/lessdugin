@@ -221,81 +221,7 @@ proptest! {
     /// P3: every stage reads only earlier stages (§1.4).
     #[test]
     fn p3_stages_read_only_earlier_stages(s in spec(SMALL), seed in any::<u64>()) {
-        let f = build(&s);
-        let (_, a) = fold_all(&f, &Query::default());
-        let mut rng = Rng(seed);
-
-        // opinions are L3+ inputs: L0–L2, V1–V5 and the placement are unchanged without them
-        let b = fold(&f.input_where(&|r| r.kind != Kind::Opinion), &Query::default());
-        prop_assert_eq!(&a.authorities, &b.authorities);
-        prop_assert_eq!(&a.moderation, &b.moderation);
-        prop_assert_eq!(&a.tiers, &b.tiers);
-        prop_assert_eq!(&a.mod_queue, &b.mod_queue);
-        prop_assert_eq!(&a.raw.assertions, &b.raw.assertions);
-        prop_assert_eq!(&a.participation, &b.participation);
-        prop_assert_eq!(&a.v1_v5, &b.v1_v5);
-        prop_assert_eq!(&a.locked_out, &b.locked_out);
-        prop_assert_eq!(&a.threads, &b.threads);
-        prop_assert_eq!(&a.times, &b.times);
-
-        // memberships are L2 inputs: L0 and L1 are unchanged without them
-        let c = fold(&f.input_where(&|r| r.kind != Kind::Membership), &Query::default());
-        prop_assert_eq!(&a.authorities, &c.authorities);
-        prop_assert_eq!(&a.moderation, &c.moderation);
-        prop_assert_eq!(&a.tiers, &c.tiers);
-
-        // L5-only inputs: L0–L4 are unchanged without (some of) them
-        let drop = l5_subset(&f, &mut rng);
-        let g = strip_entries(&f, &drop);
-        let d = fold(&g.input_where(&|r| !drop.removed.contains(&r.uri)), &Query::default());
-        prop_assert_eq!(&a.authorities, &d.authorities);
-        prop_assert_eq!(&a.participation, &d.participation);
-        // L1 reads the existence and CIDs of records (positive assertions, `#tag.head`, §4.5):
-        // compare it on the subjects that are still there, `tag:` subjects aside
-        let kept = |subject: &str| !subject.starts_with("tag:") && !drop.removed.contains(subject);
-        let status = |v: &ForumView| v.moderation.forum_status.iter()
-            .filter(|(u, _)| f.get(u).and_then(Rec::subject).is_some_and(kept))
-            .map(|(u, st)| (u.clone(), *st))
-            .collect::<BTreeMap<_, _>>();
-        prop_assert_eq!(status(&a), status(&d));
-        let resolved = |v: &ForumView| v.moderation.resolved.iter()
-            .filter(|(s, _)| kept(s))
-            .map(|(s, r)| (s.clone(), r.clone()))
-            .collect::<BTreeMap<_, _>>();
-        prop_assert_eq!(resolved(&a), resolved(&d));
-        prop_assert_eq!(stages(karma(&a)), stages(karma(&d)));
-        // scores of posts and comments (a wikiRevision's or sequence's own score reads the
-        // opinions on it, which are L3.5 inputs for that item)
-        let (sa, sd) = (a.scores.as_ref().unwrap(), d.scores.as_ref().unwrap());
-        let thread_item = |u: &str| {
-            u.contains(&format!("/{NS}.post/")) || u.contains(&format!("/{NS}.comment/"))
-        };
-        for (uri, x) in sd.iter().filter(|(u, _)| thread_item(u)) {
-            prop_assert_eq!(Some(x), sa.get(uri), "score of {}", uri);
-        }
-        let (ga, gd) = (a.gates.as_ref().unwrap(), d.gates.as_ref().unwrap());
-        for (did, x) in &gd.passes {
-            prop_assert_eq!(Some(x), ga.passes.get(did), "gates of {}", did);
-        }
-        for (uri, x) in &d.v1_v5 {
-            prop_assert_eq!(Some(x), a.v1_v5.get(uri), "V1–V5 of {}", uri);
-        }
-
-        // time (§2) is read by L6 only: moving first-seen times (and `now`, unless an `until`
-        // reads it) changes no layer below the orderings
-        let mut h = f.clone();
-        for r in &mut h.recs {
-            r.obs += (i64::try_from(rng.below(4 * 1440)).unwrap() - 2 * 1440) * social_gen::MINUTE;
-        }
-        let untimed = !f.recs.iter().any(|r| r.value.get("until").is_some());
-        if untimed {
-            h.now += i64::try_from(rng.below(200)).unwrap() * social_gen::DAY;
-        }
-        let e = fold(&h.input(), &Query::default());
-        let mut e2 = e.clone();
-        e2.times = a.times.clone();
-        e2.orderings = a.orderings.clone();
-        prop_assert!(serialize(&a) == serialize(&e2), "a layer below L6 read time");
+        check_p3(&s, seed)?;
     }
 
     /// P4: L5–L7-only inputs never change K1, seedUp, E, KP or K.
@@ -525,6 +451,288 @@ fn strip_entries(f: &Forum, drop: &L5Drop) -> Forum {
             m.remove("tags");
         }
     })
+}
+
+// ---------------------------------------------------------------------------------------------
+// P3
+
+/// P3 for `s` with the generator seed `seed`: every stage reads only earlier stages (§1.4).
+/// Returns whether moving time re-sorted the sequence library (its `t_rank` tie-break).
+fn check_p3(s: &Spec, seed: u64) -> Result<bool, TestCaseError> {
+    let f = build(s);
+    let (_, a) = fold_all(&f, &Query::default());
+    let mut rng = Rng(seed);
+
+    // opinions are L3+ inputs: L0–L2, V1–V5 and the placement are unchanged without them
+    let b = fold(
+        &f.input_where(&|r| r.kind != Kind::Opinion),
+        &Query::default(),
+    );
+    prop_assert_eq!(&a.authorities, &b.authorities);
+    prop_assert_eq!(&a.moderation, &b.moderation);
+    prop_assert_eq!(&a.tiers, &b.tiers);
+    prop_assert_eq!(&a.mod_queue, &b.mod_queue);
+    prop_assert_eq!(&a.raw.assertions, &b.raw.assertions);
+    prop_assert_eq!(&a.participation, &b.participation);
+    prop_assert_eq!(&a.v1_v5, &b.v1_v5);
+    prop_assert_eq!(&a.locked_out, &b.locked_out);
+    prop_assert_eq!(&a.threads, &b.threads);
+    prop_assert_eq!(&a.times, &b.times);
+
+    // memberships are L2 inputs: L0 and L1 are unchanged without them
+    let c = fold(
+        &f.input_where(&|r| r.kind != Kind::Membership),
+        &Query::default(),
+    );
+    prop_assert_eq!(&a.authorities, &c.authorities);
+    prop_assert_eq!(&a.moderation, &c.moderation);
+    prop_assert_eq!(&a.tiers, &c.tiers);
+
+    // L5-only inputs: L0–L4 are unchanged without (some of) them
+    let drop = l5_subset(&f, &mut rng);
+    let g = strip_entries(&f, &drop);
+    let d = fold(
+        &g.input_where(&|r| !drop.removed.contains(&r.uri)),
+        &Query::default(),
+    );
+    prop_assert_eq!(&a.authorities, &d.authorities);
+    prop_assert_eq!(&a.participation, &d.participation);
+    // L1 reads the existence and CIDs of records (positive assertions, `#tag.head`, §4.5):
+    // compare it on the subjects that are still there, `tag:` subjects aside
+    let kept = |subject: &str| !subject.starts_with("tag:") && !drop.removed.contains(subject);
+    let status = |v: &ForumView| {
+        v.moderation
+            .forum_status
+            .iter()
+            .filter(|(u, _)| f.get(u).and_then(Rec::subject).is_some_and(kept))
+            .map(|(u, st)| (u.clone(), *st))
+            .collect::<BTreeMap<_, _>>()
+    };
+    prop_assert_eq!(status(&a), status(&d));
+    let resolved = |v: &ForumView| {
+        v.moderation
+            .resolved
+            .iter()
+            .filter(|(s, _)| kept(s))
+            .map(|(s, r)| (s.clone(), r.clone()))
+            .collect::<BTreeMap<_, _>>()
+    };
+    prop_assert_eq!(resolved(&a), resolved(&d));
+    prop_assert_eq!(stages(karma(&a)), stages(karma(&d)));
+    // scores of posts and comments (a wikiRevision's or sequence's own score reads the
+    // opinions on it, which are L3.5 inputs for that item)
+    let (sa, sd) = (a.scores.as_ref().unwrap(), d.scores.as_ref().unwrap());
+    let thread_item =
+        |u: &str| u.contains(&format!("/{NS}.post/")) || u.contains(&format!("/{NS}.comment/"));
+    for (uri, x) in sd.iter().filter(|(u, _)| thread_item(u)) {
+        prop_assert_eq!(Some(x), sa.get(uri), "score of {}", uri);
+    }
+    let (ga, gd) = (a.gates.as_ref().unwrap(), d.gates.as_ref().unwrap());
+    for (did, x) in &gd.passes {
+        prop_assert_eq!(Some(x), ga.passes.get(did), "gates of {}", did);
+    }
+    for (uri, x) in &d.v1_v5 {
+        prop_assert_eq!(Some(x), a.v1_v5.get(uri), "V1–V5 of {}", uri);
+    }
+
+    // time (§2) is read by L6 only: moving first-seen times (and `now`, unless an `until`
+    // reads it) changes no layer below the orderings
+    let mut h = f.clone();
+    for r in &mut h.recs {
+        r.obs += (i64::try_from(rng.below(4 * 1440)).unwrap() - 2 * 1440) * social_gen::MINUTE;
+    }
+    let untimed = !f.recs.iter().any(|r| r.value.get("until").is_some());
+    if untimed {
+        h.now += i64::try_from(rng.below(200)).unwrap() * social_gen::DAY;
+    }
+    let e = fold(&h.input(), &Query::default());
+    let mut e2 = e.clone();
+    e2.times = a.times.clone();
+    e2.orderings = a.orderings.clone();
+    prop_assert!(
+        serialize(&a) == serialize(&e2),
+        "a layer below L6 read time"
+    );
+    Ok(false)
+}
+
+/// The CI counterexample of P3 (run 41336047294): two listed, unpinned sequences with equal
+/// scores whose first-seen times the jitter reorders. The §14 library order breaks that tie by
+/// `t_rank` (§1.4), so time may re-sort the library, and only those ties.
+#[test]
+fn p3_library_ties_follow_time() {
+    use social_gen::{
+        CommentSpec, ModSpec, OpSpec, ParentSpec, PostSpec, SeqSpec, UserSpec, WikiSpec,
+    };
+    let u = |member, access, restrict| UserSpec {
+        member,
+        access,
+        by: 0,
+        restrict,
+        status: 0,
+    };
+    let post = PostSpec {
+        author: 0,
+        kind: 0,
+        tags: 0,
+        minute: 0,
+        invalid: 0,
+        deleted: false,
+        edited: false,
+    };
+    let c = |author, root, parent, minute, edited| CommentSpec {
+        author,
+        root,
+        ghost_root: false,
+        parent,
+        minute,
+        invalid: false,
+        deleted: false,
+        edited,
+    };
+    let m = |actor, author_scope, action, subject, variant, own, stale, until, minute| ModSpec {
+        actor,
+        author_scope,
+        action,
+        subject,
+        variant,
+        own,
+        stale,
+        until,
+        minute,
+    };
+    let op =
+        |voter, subject, karma, agreement, reacts: &[(u8, u8, u8)], tags: &[(u8, u8)], earlier| {
+            OpSpec {
+                voter,
+                subject,
+                karma,
+                agreement,
+                reacts: reacts.to_vec(),
+                tags: tags.to_vec(),
+                earlier,
+            }
+        };
+    use ParentSpec::{Comment, None as Top};
+    let s = Spec {
+        open: false,
+        voting: 0,
+        pair_cap: 1,
+        establish: 0,
+        establish_seeds: 1,
+        author_moderation: false,
+        new_users: 0,
+        collapse_below: -5,
+        low_gates: false,
+        tag_creation_mods: false,
+        frontpage_default: false,
+        late: false,
+        users: vec![
+            u(true, 0, 0),
+            u(false, 0, 0),
+            u(false, 1, 0),
+            u(false, 0, 1),
+            u(false, 1, 0),
+            u(true, 0, 0),
+            u(true, 0, 0),
+            u(false, 1, 0),
+            u(true, 0, 0),
+            u(true, 1, 0),
+        ],
+        posts: vec![post.clone(), post.clone(), post.clone(), post],
+        comments: vec![
+            c(0, 0, Top, 32, false),
+            c(2, 49, Top, 22796, false),
+            c(3, 42, Comment(39), 18459, false),
+            c(5, 22, Comment(59), 327, true),
+            c(9, 40, Comment(61), 31288, false),
+            c(3, 21, Top, 37159, false),
+            c(9, 23, Comment(62), 23867, false),
+            c(9, 2, Top, 3716, false),
+            c(3, 10, Comment(14), 5354, false),
+            c(5, 52, Comment(47), 34675, false),
+            c(5, 58, Comment(54), 32787, false),
+            c(7, 58, Comment(15), 23520, false),
+        ],
+        wikis: vec![
+            WikiSpec {
+                author: 5,
+                slug: 0,
+                parents: vec![14, 6],
+                is_tag: Some(false),
+                minute: 40232,
+            },
+            WikiSpec {
+                author: 9,
+                slug: 1,
+                parents: vec![11, 10],
+                is_tag: Some(false),
+                minute: 19686,
+            },
+        ],
+        sequences: vec![
+            SeqSpec {
+                author: 1,
+                posts: vec![18, 36, 37],
+                minute: 9877,
+            },
+            SeqSpec {
+                author: 0,
+                posts: vec![3, 24],
+                minute: 9809,
+            },
+        ],
+        mods: vec![
+            m(9, true, 6, 9, 124, false, true, 0, 29366),
+            m(7, true, 0, 10, 30, true, false, 0, 23599),
+            m(0, true, 7, 15, 114, true, false, 0, 15790),
+            m(7, false, 7, 0, 117, true, false, 0, 19057),
+            m(1, false, 2, 46, 130, true, false, 0, 8254),
+            m(1, false, 3, 52, 49, true, false, 0, 16109),
+            m(1, true, 6, 47, 35, true, false, 1, 7675),
+            m(4, false, 6, 50, 102, true, false, 0, 38029),
+            m(1, true, 3, 0, 27, true, true, 0, 2821),
+            m(1, false, 6, 57, 181, true, true, 0, 39189),
+            m(3, false, 7, 3, 163, true, false, 0, 24686),
+            m(0, true, 7, 49, 108, true, false, 2, 5887),
+        ],
+        ops: vec![
+            op(5, 45, Some(0), None, &[(1, 2, 0), (0, 1, 0)], &[], false),
+            op(9, 219, Some(1), None, &[], &[(1, 3)], true),
+            op(1, 128, None, None, &[], &[(0, 4), (1, 4)], false),
+            op(2, 137, Some(1), None, &[(3, 1, 0), (0, 2, 1)], &[], true),
+            op(
+                1,
+                154,
+                Some(1),
+                Some(3),
+                &[(3, 2, 2), (0, 1, 2)],
+                &[],
+                false,
+            ),
+            op(3, 149, Some(0), Some(3), &[], &[(0, 1), (0, 4)], false),
+            op(0, 141, Some(0), Some(3), &[], &[], false),
+            op(
+                8,
+                32,
+                Some(1),
+                None,
+                &[(1, 2, 2), (0, 1, 0)],
+                &[(0, 1)],
+                false,
+            ),
+            op(7, 38, Some(0), Some(1), &[], &[], false),
+            op(2, 225, Some(2), None, &[], &[], false),
+            op(7, 219, Some(0), None, &[], &[], false),
+            op(3, 16, Some(1), None, &[], &[], false),
+            op(7, 130, Some(4), None, &[], &[], false),
+        ],
+    };
+    let moved = check_p3(&s, 15_764_489_866_994_455_248).unwrap_or_else(|e| panic!("{e}"));
+    assert!(
+        moved,
+        "the counterexample re-sorts the library's t_rank tie"
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
