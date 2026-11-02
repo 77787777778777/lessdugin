@@ -22,6 +22,7 @@ import type {
   PostRec,
   SequenceRec,
   TagRec,
+  WikiRevRec,
 } from "./mock/model.ts";
 import { renderMarkdown } from "./mock/render.ts";
 import { isDid, isHandle, safeHref } from "./mock/safe-href.ts";
@@ -1857,6 +1858,7 @@ export class MockEngine implements EngineApi {
     const c = this.s.comments.get(uri);
     const seq = this.s.sequences.get(uri);
     const f = this.s.forums.get(uri);
+    const w = this.s.wiki.get(uri);
     const md = (text: string, media: readonly MediaRef[]): Json => {
       const mediaRecords = media.map((m) => ({
         blob: {
@@ -1930,17 +1932,37 @@ export class MockEngine implements EngineApi {
       cid = c.cid;
       state = clone(c.state);
     } else if (seq) {
+      // a sequence's bodies are inline (a chapter's always is, data-model.md §6.9)
+      const inline = (text: string): Json => ({ $type: COLL.markdown, text, profile: "lfm/1" });
       record = {
         $type: COLL.sequence,
         forum: FORUM_URI,
         title: seq.title,
+        ...(seq.body !== undefined ? { body: inline(seq.body) } : {}),
         chapters: seq.chapters.map((ch) => ({
           ...(ch.title ? { title: ch.title } : {}),
+          ...(ch.body !== undefined ? { body: inline(ch.body) } : {}),
           posts: ch.posts,
         })),
         createdAt: new Date(seq.createdAtMs).toISOString(),
       };
       cid = fakeCid(seq.uri);
+    } else if (w) {
+      const r: { [k: string]: Json } = {
+        $type: COLL.wikiRevision,
+        forum: w.forum,
+        slug: w.slug,
+        parents: w.parents.map((x) => ({ uri: x.uri, cid: x.cid })),
+        name: w.name,
+        createdAt: new Date(w.createdAtMs).toISOString(),
+      };
+      if (w.description !== undefined) r.description = w.description;
+      if (w.body !== undefined) r.body = md(w.body, []);
+      if (w.isTag !== undefined) r.isTag = w.isTag;
+      if (w.parentTags.length > 0) r.parentTags = [...w.parentTags];
+      if (w.summary !== undefined) r.summary = w.summary;
+      record = r;
+      cid = w.cid;
     } else if (f) {
       const r: { [k: string]: Json } = {
         $type: COLL.forum,
@@ -2545,6 +2567,18 @@ export class MockEngine implements EngineApi {
   async wikiEdit(forum: AtUri, slug: Slug, draft: WikiDraft): Promise<WriteTicket> {
     const me = this.me();
     const tags = this.tagMap(forum);
+    if (draft.name.trim() === "") throw err("invalid_input", "A wiki page needs a name.");
+    // `base` (decision O-2, engine-api.md §3.5 `wiki_edit`): the head the author edited, refused
+    // before enqueueing when the page's head is another revision (or the page has none)
+    const base = (draft as WikiDraft & { base?: AtUri }).base;
+    const head = tags.get(slug)?.head;
+    if (base !== undefined && base !== head) {
+      const e = err("conflict", "This page changed since you opened it.");
+      e.detail = { kind: "wikiHeadMoved", base, ...(head !== undefined ? { head } : {}) };
+      throw e;
+    }
+    const parent = base ?? head;
+    const d = clone(draft);
     return this.write(false, () => {
       const t = this.tick();
       const uri = atUri(
@@ -2552,17 +2586,36 @@ export class MockEngine implements EngineApi {
         COLL.wikiRevision,
         `${this.fkOf(forum)}-${tid(t, this.s.nextId % 1024)}`,
       );
+      const rev: WikiRevRec = {
+        uri,
+        cid: fakeCid(`${uri}#wiki`),
+        author: me,
+        forum,
+        slug,
+        parents: [],
+        name: d.name,
+        isTag: d.isTag,
+        parentTags: [...(d.parentTags ?? [])],
+        createdAtMs: t,
+      };
+      const parentRec = parent !== undefined ? this.s.wiki.get(parent) : undefined;
+      if (parentRec) rev.parents = [{ uri: parentRec.uri, cid: parentRec.cid }];
+      if (d.description !== undefined) rev.description = d.description;
+      if (d.body) rev.body = d.body.markdown;
+      if (d.summary !== undefined) rev.summary = d.summary;
+      this.s.wiki.set(uri, rev);
       const prev = tags.get(slug);
       const rec: TagRec = {
         slug,
-        name: draft.name,
+        name: d.name,
         unmergedEdits: prev?.unmergedEdits ?? 0,
         head: uri,
+        isTag: d.isTag,
       };
-      if (draft.description !== undefined) rec.description = draft.description;
-      if (draft.body) rec.page = draft.body.markdown;
+      if (d.description !== undefined) rec.description = d.description;
+      if (d.body) rec.page = d.body.markdown;
       tags.set(slug, rec);
-      return { uri, cid: fakeCid(uri), topics: [{ kind: "forum", uri: forum }] };
+      return { uri, cid: rev.cid, topics: [{ kind: "forum", uri: forum }] };
     });
   }
 
@@ -2611,7 +2664,9 @@ export class MockEngine implements EngineApi {
     const s = this.seqRec(uri);
     return this.write(false, () => {
       s.title = draft.title;
+      // the draft replaces the editable content: no body removes it (organisation.rs `seq_edit`)
       if (draft.body) s.body = draft.body.markdown;
+      else delete s.body;
       s.chapters = draft.chapters.map((c) => {
         const ch: SequenceRec["chapters"][number] = { posts: [...c.posts] };
         if (c.title !== undefined) ch.title = c.title;
@@ -2624,9 +2679,12 @@ export class MockEngine implements EngineApi {
 
   async seqAdd(uri: AtUri, post: AtUri, at: SequencePosition): Promise<WriteTicket> {
     const s = this.seqRec(uri);
+    if (splitAtUri(post)?.collection !== COLL.post)
+      throw err("invalid_input", `${post} is not a post`);
     return this.write(false, () => {
       const ch = s.chapters[at.chapter];
       if (!ch) throw err("invalid_input", "No such chapter.");
+      if (at.index > ch.posts.length) throw err("invalid_input", "No such sequence position.");
       ch.posts.splice(at.index, 0, post);
       return { uri, cid: fakeCid(`${uri}@${this.tick()}`), topics: this.seqTopics() };
     });
@@ -2645,9 +2703,13 @@ export class MockEngine implements EngineApi {
     return this.write(false, () => {
       const src = s.chapters[from.chapter];
       const dst = s.chapters[to.chapter];
-      const [moved] = src ? src.posts.splice(from.index, 1) : [];
-      if (!dst || moved === undefined) throw err("invalid_input", "No such position.");
-      dst.posts.splice(to.index, 0, moved);
+      // the destination index is read after the entry is removed (organisation.rs `seq_move`)
+      const room = (dst?.posts.length ?? 0) - (from.chapter === to.chapter ? 1 : 0);
+      if (!src || !dst || from.index >= src.posts.length || to.index > room) {
+        throw err("invalid_input", "No such position.");
+      }
+      const [moved] = src.posts.splice(from.index, 1);
+      if (moved !== undefined) dst.posts.splice(to.index, 0, moved);
       return { uri, cid: fakeCid(`${uri}@${this.tick()}`), topics: this.seqTopics() };
     });
   }

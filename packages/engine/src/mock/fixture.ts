@@ -32,6 +32,7 @@ import type {
   PostRec,
   SequenceRec,
   TagRec,
+  WikiRevRec,
 } from "./model.ts";
 import { renderMarkdown } from "./render.ts";
 import { safeHref } from "./safe-href.ts";
@@ -1191,6 +1192,57 @@ export function buildFixture(): Fixture {
       unmergedEdits: 0,
     },
   ];
+  // Each page's revisions (data-model.md §6.8): a genesis by the owner; decision-theory's head
+  // is carol's edit of it, and dan's other edit of the same genesis is its unmerged edit (the
+  // mod queue's unordered conflict).
+  const wiki = new Map<AtUri, WikiRevRec>();
+  const revise = (
+    t: TagRec,
+    author: string,
+    atMs: number,
+    clock: number,
+    parent?: WikiRevRec,
+    edit?: { body?: string; summary: string },
+  ): WikiRevRec => {
+    const uri = atUri(did(author), COLL.wikiRevision, `${FK}-${tid(atMs, clock)}`);
+    const rec: WikiRevRec = {
+      uri,
+      cid: fakeCid(`${uri}#wiki`),
+      author: did(author),
+      forum: FORUM_URI,
+      slug: t.slug,
+      parents: parent ? [{ uri: parent.uri, cid: parent.cid }] : [],
+      name: t.name,
+      parentTags: [],
+      createdAtMs: atMs,
+    };
+    if (t.description !== undefined) rec.description = t.description;
+    const body = edit ? edit.body : t.page;
+    if (body !== undefined) rec.body = body;
+    if (edit) rec.summary = edit.summary;
+    wiki.set(uri, rec);
+    return rec;
+  };
+  tagRecs.forEach((t, i) => {
+    if (t.slug !== "decision-theory") {
+      t.head = revise(t, "ada", FIXTURE_NOW - 30 * D, 20 + i).uri;
+      return;
+    }
+    const genesis = revise(t, "ada", FIXTURE_NOW - 30 * D, 20 + i, undefined, {
+      body: "Decision theory studies how an agent should choose between actions.",
+      summary: "New page",
+    });
+    revise(t, "dan", FIXTURE_NOW - 4 * D, 8, genesis, {
+      body: "How to choose.",
+      summary: "Shorter introduction",
+    });
+    // the canonical revision (tagRecs above names it as the head)
+    const head = revise(t, "carol", FIXTURE_NOW - 5 * D, 7, genesis, {
+      ...(t.page !== undefined ? { body: t.page } : {}),
+      summary: "Classic problems and further reading",
+    });
+    if (head.uri !== t.head) throw new Error("the decision-theory head moved");
+  });
   const tags = new Map([[FORUM_URI, new Map(tagRecs.map((t) => [t.slug, t]))]]);
 
   // ---------------------------------------------------------------------------- sequence
@@ -1394,6 +1446,7 @@ export function buildFixture(): Fixture {
     posts,
     comments,
     tags,
+    wiki,
     sequences: new Map([[sequenceUri, sequence]]),
     opinions: new Map([
       [
