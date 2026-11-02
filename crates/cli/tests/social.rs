@@ -140,10 +140,7 @@ fn local_state_commands_round_trip() {
     );
     let settings = alice.json(&["config", "set", "sources"]);
     assert_eq!(settings["settings"]["sources"], "direct");
-    assert!(
-        settings.get("pinned").is_none(),
-        "a stored setting is not a config.toml pin: {settings}"
-    );
+    assert_eq!(settings["pinned"], serde_json::json!(["sources"]));
     let e = alice.fails(1, &["config", "get", "notASetting"]);
     assert_eq!(e["detail"]["kind"], "unknownSetting", "{e}");
     let e = alice.fails(1, &["config", "set", "karmaNotifications", "hourly"]);
