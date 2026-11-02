@@ -1316,4 +1316,243 @@ mod tests {
         assert!(store.indexed_record_has_cid(record, "new"));
         assert!(!store.indexed_record_has_cid(record, "forged"));
     }
+
+    /// SQLite VM steps spent by `f` (deterministic, unlike a timing budget).
+    fn steps<T>(store: &Store, f: impl FnOnce() -> T) -> u64 {
+        let counter = Arc::new(AtomicU64::new(0));
+        let c = Arc::clone(&counter);
+        store
+            .db()
+            .progress_handler(
+                1,
+                Some(move || {
+                    c.fetch_add(1, Ordering::Relaxed);
+                    false
+                }),
+            )
+            .unwrap();
+        f();
+        store
+            .db()
+            .progress_handler(1, None::<fn() -> bool>)
+            .unwrap();
+        counter.load(Ordering::Relaxed)
+    }
+
+    const FORUM: &str =
+        "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/online.7778777.lessdugin.temp.forum/big";
+
+    fn grow(store: &Store, from: usize, n: usize) {
+        let mut db = store.db();
+        let tx = db.transaction().unwrap();
+        for i in from..from + n {
+            tx.execute(
+                "INSERT INTO record_state(forum,uri,cid) VALUES(?1,?2,'c')",
+                params![
+                    FORUM,
+                    format!(
+                        "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/online.7778777.lessdugin.temp.post/r{i}"
+                    )
+                ],
+            )
+            .unwrap();
+            tx.execute(
+                "INSERT INTO participants(forum,did,status,rev,last_seen_ms) VALUES(?1,?2,'member',NULL,0)",
+                params![FORUM, format!("did:plc:p{i:023}")],
+            )
+            .unwrap();
+        }
+        tx.commit().unwrap();
+    }
+
+    #[test]
+    fn lookups_do_not_scan_indexed_records_or_every_forum() {
+        let store = Store::in_memory().unwrap();
+        store.add_forum_seed(FORUM).unwrap();
+        store
+            .db()
+            .execute(
+                "UPDATE forums SET synced_ms=1,cid='decl' WHERE uri=?1",
+                [FORUM],
+            )
+            .unwrap();
+        for i in 0..200 {
+            store
+                .add_forum_seed(&format!(
+                    "at://did:plc:bbbbbbbbbbbbbbbbbbbbbbbb/online.7778777.lessdugin.temp.forum/s{i}"
+                ))
+                .unwrap();
+        }
+        let probe = "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/online.7778777.lessdugin.temp.post/r7";
+        let fk = store.forum_row(FORUM).unwrap().fk;
+        let cost = |store: &Store| {
+            [
+                steps(store, || store.forum(FORUM)),
+                steps(store, || store.forum_row(FORUM)),
+                steps(store, || store.indexed_record_cids(probe)),
+                steps(store, || store.indexed_record_has_cid(probe, "c")),
+                steps(store, || store.forums_by_fk(&fk)),
+                steps(store, || {
+                    store.did_forums("did:plc:p00000000000000000000007")
+                }),
+                steps(store, || store.forums(None)),
+            ]
+        };
+        grow(&store, 0, 2_000);
+        let small = cost(&store);
+        grow(&store, 2_000, 20_000);
+        let large = cost(&store);
+        // Ten times the records and participants: no lookup may cost more (security-net-1,
+        // robustness-5, robustness-6). The forum list grows with forums only.
+        assert_eq!(small, large, "lookup cost grew with the indexed records");
+        assert!(large[..6].iter().all(|s| *s < 500), "{large:?}");
+    }
+
+    #[test]
+    fn forum_hints_are_capped_per_did_and_per_host() {
+        let store = Store::in_memory().unwrap();
+        let forum = |owner: &str, n: usize| {
+            format!("at://did:plc:{owner}/online.7778777.lessdugin.temp.forum/f{n}")
+        };
+        let spammer = "did:plc:ssssssssssssssssssssssss";
+        let mut accepted = 0;
+        for n in 0..(SEEDS_PER_DID as usize + 8) {
+            accepted += usize::from(
+                store
+                    .add_forum_hint(&forum("xxxxxxxxxxxxxxxxxxxxxxxx", n), spammer, "spam.test")
+                    .unwrap(),
+            );
+        }
+        assert_eq!(accepted as i64, SEEDS_PER_DID);
+        assert_eq!(store.forum_count(), SEEDS_PER_DID);
+        // An already known forum is never refused and does not count again.
+        assert!(
+            store
+                .add_forum_hint(&forum("xxxxxxxxxxxxxxxxxxxxxxxx", 0), spammer, "spam.test")
+                .unwrap()
+        );
+        // Many accounts of one host share the host quota.
+        let mut by_host = SEEDS_PER_DID;
+        for n in 0.. {
+            let did = format!("did:plc:h{n:023}");
+            let ok = store
+                .add_forum_hint(&forum("yyyyyyyyyyyyyyyyyyyyyyyy", n), &did, "spam.test")
+                .unwrap();
+            if !ok {
+                break;
+            }
+            by_host += 1;
+        }
+        assert_eq!(by_host, SEEDS_PER_HOST);
+        // Another host is unaffected; operator seeds are never capped.
+        assert!(
+            store
+                .add_forum_hint(
+                    &forum("zzzzzzzzzzzzzzzzzzzzzzzz", 0),
+                    "did:plc:o",
+                    "ok.test"
+                )
+                .unwrap()
+        );
+        store
+            .add_forum_seed(&forum("zzzzzzzzzzzzzzzzzzzzzzzz", 1))
+            .unwrap();
+
+        // Pending membership hints: per host, per forum.
+        let real = lessdugin_core::discovery::ForumKey::new(
+            &lessdugin_atp::syntax::Did::parse("did:plc:abcdefghijklmnopqrstuvwx").unwrap(),
+            "real",
+        )
+        .unwrap()
+        .uri
+        .to_string();
+        let mut pending = 0;
+        for n in 0..(CANDIDATES_PER_HOST as usize + 5) {
+            let did = format!("did:plc:c{n:023}");
+            pending += usize::from(
+                store
+                    .add_candidate_from(&real, &did, "cid", 1, "spam.test")
+                    .unwrap(),
+            );
+        }
+        assert_eq!(pending as i64, CANDIDATES_PER_HOST);
+        assert!(
+            store
+                .add_candidate_from(
+                    &real,
+                    "did:plc:dddddddddddddddddddddddd",
+                    "cid",
+                    1,
+                    "ok.test"
+                )
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn failing_forums_back_off_alone_and_absent_ones_are_quarantined_then_dropped() {
+        let store = Store::in_memory().unwrap();
+        store.add_forum_seed(FORUM).unwrap();
+        assert_eq!(store.forums_for_pass(0), vec![FORUM.to_owned()]);
+        // Exponential back-off from one minute; the forum leaves passes until it is due.
+        let first = store.note_forum_failed(FORUM, 1_000, "boom").unwrap();
+        assert_eq!(first, 1_000 + RETRY_BASE_MS);
+        assert!(store.forums_for_pass(1_001).is_empty());
+        assert!(store.forums_due(first - 1).is_empty());
+        assert_eq!(store.forums_due(first), vec![FORUM.to_owned()]);
+        let second = store.note_forum_failed(FORUM, first, "boom").unwrap();
+        assert_eq!(second, first + 2 * RETRY_BASE_MS);
+        for _ in 0..40 {
+            store.note_forum_failed(FORUM, 0, "boom").unwrap();
+        }
+        assert_eq!(store.forum_row(FORUM).unwrap().retry_ms, RETRY_MAX_MS);
+        store.note_forum_synced(FORUM).unwrap();
+        assert_eq!(store.forum_row(FORUM).unwrap().failures, 0);
+
+        // An indexed forum whose declaration is proven absent logs a delete per record and
+        // leaves listings; it is rechecked daily and dropped after a week.
+        grow(&store, 0, 3);
+        store
+            .db()
+            .execute(
+                "UPDATE forums SET synced_ms=1,cid='decl' WHERE uri=?1",
+                [FORUM],
+            )
+            .unwrap();
+        assert!(store.forum(FORUM).is_some());
+        let before = store.latest_seq();
+        assert_eq!(store.note_forum_absent(FORUM, 10).unwrap(), 3);
+        let deletes = store.changes(Some(FORUM), before, 10);
+        assert!(deletes.iter().all(|c| c.op == "delete" && c.cid.is_none()));
+        assert!(store.forum(FORUM).is_none());
+        assert!(store.indexed_forums(None).is_empty());
+        assert!(store.forums_due(i64::MAX - 1).is_empty());
+        assert!(store.forums_for_pass(10 + ABSENT_RECHECK_MS - 1).is_empty());
+        assert_eq!(
+            store.forums_for_pass(10 + ABSENT_RECHECK_MS),
+            vec![FORUM.to_owned()]
+        );
+        store.note_forum_absent(FORUM, 10 + ABSENT_DROP_MS).unwrap();
+        assert!(
+            store.forum_row(FORUM).is_none(),
+            "an absent seed is dropped"
+        );
+    }
+
+    #[test]
+    fn repo_retries_back_off_exponentially() {
+        let store = Store::in_memory().unwrap();
+        let at = store
+            .schedule_repo_retry("did:plc:x", FORUM, 0, "e")
+            .unwrap();
+        assert_eq!(at, REPO_RETRY_BASE_MS);
+        assert!(store.due_repo_retries(at - 1, 10).is_empty());
+        assert_eq!(store.due_repo_retries(at, 10).len(), 1);
+        let again = store
+            .schedule_repo_retry("did:plc:x", FORUM, at, "e")
+            .unwrap();
+        assert_eq!(again, at + 2 * REPO_RETRY_BASE_MS);
+        store.clear_repo_retry("did:plc:x", FORUM).unwrap();
+        assert!(store.repo_retries().is_empty());
+    }
 }

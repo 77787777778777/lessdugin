@@ -439,6 +439,10 @@ pub async fn model(indexer: &Indexer, key: &ForumKey) -> anyhow::Result<Arc<Foru
     }
     let now_us = indexer.now_ms().saturating_mul(1000);
     let model = Arc::new(ForumModel::build(indexer.engine.host().cache(), key, now_us).await?);
+    indexer
+        .metrics
+        .query_model_builds
+        .fetch_add(1, Ordering::Relaxed);
     lock(&indexer.models).put(key.uri.as_str(), Arc::clone(&model));
     Ok(model)
 }

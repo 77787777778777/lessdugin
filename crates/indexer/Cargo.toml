@@ -46,6 +46,8 @@ url.workspace = true
 
 [dev-dependencies]
 lessdugin-testkit = { workspace = true, features = ["http"] }
+# `hooks`: cost tests count SQLite VM steps instead of timing queries.
+rusqlite = { workspace = true, features = ["bundled", "hooks"] }
 tempfile.workspace = true
 tower = { version = "0.5", features = ["util"] }
 reqwest.workspace = true

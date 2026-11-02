@@ -98,7 +98,8 @@ pub struct Indexer {
     /// an older build can never overwrite a newer projection.
     pub(crate) project_lock: Arc<tokio::sync::Mutex<()>>,
     pub(crate) models: Arc<std::sync::Mutex<Models>>,
-    pub(crate) api_proofs: Arc<tokio::sync::Semaphore>,
+    /// Permits for proofs fetched on behalf of `getRecordProofs` ([`API_PROOF_FETCHES`]).
+    pub api_proofs: Arc<tokio::sync::Semaphore>,
     pub(crate) rate_windows:
         Arc<std::sync::Mutex<std::collections::HashMap<String, (tokio::time::Instant, u8)>>>,
 }
@@ -169,6 +170,9 @@ pub struct Metrics {
     pub live_failures: AtomicU64,
     pub live_oversized: AtomicU64,
     pub repo_retries: AtomicU64,
+    /// Folds built for queries because no projected model was cached (after a restart or an
+    /// eviction); a request never refolds a cached forum.
+    pub query_model_builds: AtomicU64,
 }
 
 impl Metrics {
@@ -226,6 +230,10 @@ impl Metrics {
             (
                 "lessdugin_indexer_repo_retries_total",
                 self.repo_retries.load(Ordering::Relaxed),
+            ),
+            (
+                "lessdugin_indexer_query_model_builds_total",
+                self.query_model_builds.load(Ordering::Relaxed),
             ),
         ];
         let mut out = String::new();
