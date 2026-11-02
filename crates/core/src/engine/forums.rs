@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::discovery::forum_ref::ForumKey;
+use crate::discovery::sources::DIRECTORY_OWNERS_MAX;
 use crate::dto::{
     DefaultTier, ForumDraft, ForumSummary, ForumView, MemberView, MembersQuery, MembershipMode,
     ModRole, WriteTicket,
@@ -372,17 +373,58 @@ impl<H: Host> Engine<H> {
         &self.rt.relay_newcomers_off
     }
 
-    /// `forum_discover(q)` (`engine-api.md` §3.9): the relay forum directory. Relay results
-    /// are only owner hints; every returned declaration came from its owner's PDS and passed
-    /// the ordinary record admission and validity checks. An owner that cannot be read is
-    /// skipped; no hinted text is substituted.
+    /// `forum_discover(q)` (`engine-api.md` §3.9, `sync.md` §4.7): the forum directory. The
+    /// relays' `NS.forum` listings and a consented indexer's `listForums` give only owner hints;
+    /// every returned declaration came from its owner's PDS and passed the ordinary record
+    /// admission and validity checks. An owner that cannot be read is skipped; no hinted text is
+    /// substituted. Either hint source may fail alone; the call fails only when both did (or
+    /// `sources = direct`). Results are grouped by owner: owners with a verified handle first,
+    /// by handle, then by DID; within an owner by name, then uri.
     pub async fn forum_discover(&self, q: &str) -> Result<Vec<ForumSummary>, EngineError> {
-        let hints = self.discover_forum_owners().await?;
+        let mut owners: Vec<String> = Vec::new();
+        let mut hinted = BTreeSet::new();
+        let mut failed: Option<EngineError> = None;
+        match self.discover_forum_owners().await {
+            Ok(hints) => {
+                for did in hints.dids {
+                    if hinted.insert(did.clone()) {
+                        owners.push(did);
+                    }
+                }
+            }
+            Err(e) if e.is_gate() => return Err(e.into()),
+            Err(e) => {
+                tracing::warn!(error = %e, "relay forum directory unavailable");
+                failed = Some(e.into());
+            }
+        }
+        match self.indexer_forum_owners().await {
+            Ok(dids) => {
+                for did in dids {
+                    if hinted.len() >= DIRECTORY_OWNERS_MAX {
+                        tracing::warn!("forum directory truncated at its owner bound");
+                        break;
+                    }
+                    if hinted.insert(did.clone()) {
+                        owners.push(did);
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "indexer forum directory unavailable");
+                failed.get_or_insert(e);
+            }
+        }
+        if owners.is_empty()
+            && let Some(e) = failed
+        {
+            return Err(e);
+        }
         let stats = std::sync::Arc::new(crate::sync::Stats::new());
         let session = self.syncer().session(crate::sync::Priority::P1, stats);
         let query = q.trim().to_lowercase();
         let mut out = Vec::new();
-        for did in hints.dids {
+        for did in owners {
             let Ok(did) = Did::parse(&did) else { continue };
             let declarations = match self.syncer().list_forum_declarations(&session, &did).await {
                 Ok(r) => r,
@@ -428,13 +470,61 @@ impl<H: Host> Engine<H> {
                 ));
             }
         }
+        // grouped by owner (F9: a lookalike forum name shows under its real owner)
+        let owner_key = |s: &ForumSummary| {
+            (
+                s.owner.handle.is_none(),
+                s.owner.handle.as_deref().unwrap_or_default().to_lowercase(),
+                s.owner.did.clone(),
+            )
+        };
         out.sort_by(|a, b| {
-            a.name
-                .to_lowercase()
-                .cmp(&b.name.to_lowercase())
+            owner_key(a)
+                .cmp(&owner_key(b))
+                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
                 .then_with(|| a.uri.cmp(&b.uri))
         });
         Ok(out)
+    }
+
+    /// Forum owners named by the consented indexer's `listForums` (`sync.md` §4.7), in its
+    /// order: hints only, at most [`DIRECTORY_OWNERS_MAX`] forums read. Empty without an
+    /// indexer, or in `sources = direct`.
+    async fn indexer_forum_owners(&self) -> Result<Vec<String>, EngineError> {
+        let mut owners = Vec::new();
+        let mut cursor: Option<String> = None;
+        let mut cursors = BTreeSet::new();
+        let mut read = 0usize;
+        loop {
+            let page = match self.indexer_forums(None, cursor.as_deref()).await {
+                Ok(Some(page)) => page,
+                Ok(None) => break,
+                Err(e) if owners.is_empty() => return Err(e),
+                Err(e) => {
+                    tracing::warn!(error = %e, "indexer forum directory ended early");
+                    break;
+                }
+            };
+            for hint in &page.forums {
+                read += 1;
+                if let Some(uri) = hint.record.at_uri()
+                    && uri.collection().as_str() == nsid::FORUM
+                {
+                    owners.push(uri.did().to_string());
+                }
+            }
+            match page.cursor {
+                Some(next) if read < DIRECTORY_OWNERS_MAX && cursors.insert(next.clone()) => {
+                    cursor = Some(next);
+                }
+                Some(_) if read >= DIRECTORY_OWNERS_MAX => {
+                    tracing::warn!("indexer forum directory truncated at its bound");
+                    break;
+                }
+                _ => break,
+            }
+        }
+        Ok(owners)
     }
 
     /// `backlinks(uri)`: listed synced posts whose rendered bodies link to `uri`. The record's

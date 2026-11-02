@@ -501,6 +501,10 @@ directory():
   group by owner: the verified handle, else short_did (F9); sort groups by handle, then DID
 ```
 
+- Both sources give only owner DIDs: an indexer entry's uri names the owner, whose `NS.forum` collection is then listed at its PDS like a relay owner's; the indexer's own text is never shown or matched. Each owner is listed once.
+- Either source may fail alone, and the directory then shows the other's forums; it fails only when both did, or in `sources = direct`.
+- The result is one list in group order: owners with a verified handle first, by handle, then the others by DID; within an owner, forums by name (case-insensitive), then uri. Forums of one owner are therefore never interleaved with another's, so a lookalike name shows under its real owner.
+
 `listReposByCollection` takes one exact NSID; wildcards are rejected (ADR 0003). Its entries carry only `did`. A page with more than the 500 entries asked for is malformed, and at most `DIRECTORY_OWNERS_MAX` (10,000) distinct owners are read; further owners are dropped with a warning. The directory is CORE+ (relay) or EXT; a forum can always be opened directly by reference.
 
 ### 4.8 Followed forums
