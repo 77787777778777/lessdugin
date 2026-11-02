@@ -94,6 +94,7 @@ fn all() -> Vec<(&'static str, &'static str)> {
         SequenceSummary,
         ChapterView,
         SequenceView,
+        ReadingPosition,
         SearchItem,
         SearchHit,
         SearchResults,

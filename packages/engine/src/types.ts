@@ -548,6 +548,15 @@ export interface SequenceView {
   sequence: SequenceSummary;
   body?: RenderedBody;
   chapters: ChapterView[];
+  /** "Continue reading" (local, social.md §14, §16): the post of this sequence last opened
+   * from it (`getPost(uri, sequence)`), while it is a displayable entry; absent in parity mode. */
+  continueReading?: ReadingPosition;
+}
+
+/** Where the reader stopped in a sequence: the last post opened from it, and when. */
+export interface ReadingPosition {
+  post: AtUri;
+  atMs: number;
 }
 
 /** Untagged `PostSummary | CommentNode` (see `isCommentNode`). */

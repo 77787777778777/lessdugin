@@ -1207,7 +1207,7 @@ Sequence scores come from opinions on the sequence. They earn no karma.
    - else none.
 2. Next and previous are the adjacent displayable entries around the **first** occurrence of p in `entries(context)`.
 
-"Continue reading" is local state (§17).
+"Continue reading" is local state (§17): per sequence, the post the reader last opened from that sequence (the sequence it came from, step 1), shown on the sequence's page while that post is a displayable entry of it. It is device-wide like the read marks (§16), exported and imported with them, and ignored by parity mode (`engine-api.md` §2.1, §3.4 `get_post`).
 
 ---
 

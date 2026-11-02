@@ -590,6 +590,11 @@ export interface ReactTally {
     uncounted?: boolean;
 }
 
+export interface ReadingPosition {
+    post: string;
+    atMs: number;
+}
+
 export type Ref = { kind: "forum"; uri: string } | { kind: "post"; uri: string } | { kind: "comment"; uri: string } | { kind: "sequence"; uri: string } | { kind: "record"; uri: string } | { kind: "actor"; did: string };
 
 export interface RefContext {
@@ -679,6 +684,7 @@ export interface SequenceView {
     sequence: SequenceSummary;
     body?: RenderedBody;
     chapters: ChapterView[];
+    continueReading?: ReadingPosition;
 }
 
 export interface Settings {

@@ -1003,8 +1003,18 @@ fn next_and_previous_follow_the_sequence_the_reader_came_from_and_continue_readi
         )
     };
     // the post's author's sequence, and another reading order of the same posts
-    let own = sequence(&c.alice, "Alice's guide", &[&s.welcome.uri, &s.bob_post.uri], at);
-    let other = sequence(&c.alice, "Another guide", &[&s.bob_post.uri, &s.welcome.uri], at + 1);
+    let own = sequence(
+        &c.alice,
+        "Alice's guide",
+        &[&s.welcome.uri, &s.bob_post.uri],
+        at,
+    );
+    let other = sequence(
+        &c.alice,
+        "Another guide",
+        &[&s.bob_post.uri, &s.welcome.uri],
+        at + 1,
+    );
     let unrelated = sequence(&c.alice, "Unrelated", &[&s.bob_post.uri], at + 2);
     sync(&reader, &s.f.uri);
 
@@ -1014,9 +1024,16 @@ fn next_and_previous_follow_the_sequence_the_reader_came_from_and_continue_readi
         (n.sequence, n.prev, n.next)
     };
     // without a context: the author's sequence
-    assert_eq!(nav(&s.welcome, None), (own.uri.clone(), None, Some(s.bob_post.uri.clone())));
+    assert_eq!(
+        nav(&s.welcome, None),
+        (own.uri.clone(), None, Some(s.bob_post.uri.clone()))
+    );
     let continued = |q: &Rec| block_on(reader.sequence(&q.uri)).unwrap().continue_reading;
-    assert_eq!(continued(&own), None, "a post opened without a context moves nothing");
+    assert_eq!(
+        continued(&own),
+        None,
+        "a post opened without a context moves nothing"
+    );
     // from the other sequence: its order
     assert_eq!(
         nav(&s.welcome, Some(&other)),
@@ -1035,18 +1052,25 @@ fn next_and_previous_follow_the_sequence_the_reader_came_from_and_continue_readi
     // exported and imported like the other local lists
     let x = block_on(reader.export_local(lessdugin_core::engine::ExportScope::Mine)).unwrap();
     assert!(
-        x.members.iter().any(|m| m.parts.get(1).map(String::as_str) == Some("seqpos")),
+        x.members
+            .iter()
+            .any(|m| m.parts.get(1).map(String::as_str) == Some("seqpos")),
         "{:?}",
         x.members
     );
-    let report = block_on(fresh.import_local(&x, lessdugin_core::engine::ExportScope::Mine)).unwrap();
+    let report =
+        block_on(fresh.import_local(&x, lessdugin_core::engine::ExportScope::Mine)).unwrap();
     assert!(
         report.kinds.iter().any(|(k, n)| k == "seqpos" && *n == 1),
         "{report:?}"
     );
     sync(&fresh, &s.f.uri);
     assert_eq!(
-        block_on(fresh.sequence(&other.uri)).unwrap().continue_reading.unwrap().post,
+        block_on(fresh.sequence(&other.uri))
+            .unwrap()
+            .continue_reading
+            .unwrap()
+            .post,
         s.bob_post.uri
     );
 }

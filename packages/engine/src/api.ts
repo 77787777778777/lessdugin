@@ -176,7 +176,9 @@ export interface EngineApi {
     cursor: string | undefined,
     limit: number,
   ): Promise<DiscussionList>;
-  getPost(uri: AtUri): Promise<PostView>;
+  /** `sequence`: the sequence the reader came from (social.md §14); when it contains the post,
+   * `sequences` navigates it and the post becomes its "continue reading" position. */
+  getPost(uri: AtUri, sequence?: AtUri): Promise<PostView>;
   /** Listed posts whose rendered bodies link to this item ("linked from"). */
   backlinks(uri: AtUri): Promise<PostSummary[]>;
   getThread(uri: AtUri, opts: ThreadOpts): Promise<ThreadView>;
