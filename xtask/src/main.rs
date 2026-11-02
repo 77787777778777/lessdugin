@@ -23,6 +23,12 @@
 //!                      The web runs first build the engine wasm, the e2e SPA, the CLI (embedding
 //!                      it), the TUI parity driver, the devnet CORE+ services and the indexer,
 //!                      unless --no-build
+//!   site --origin <url> [--ns temp|final] [--out <dir>] [--no-build]
+//!                      the hosted SPA for one origin (threat-model SITE-4, data-model §10.4):
+//!                      the release build with `_headers` (Cloudflare Pages, Netlify) and the
+//!                      GitHub Pages fallback build, each with both client metadata documents
+//!                      for the origin; --ns final writes the final-namespace documents (only
+//!                      with --no-build before the release); see xtask/src/site.rs
 //!   lex lint           lint lexicons with goat (if installed)
 //!   vectors            run shared test vectors (Rust)
 //!   fuzz [<target>…|all] [--seconds N] [--jobs J] [--sanitizer S] [--list] [-- <libFuzzer args>]
@@ -35,6 +41,8 @@ use std::collections::BTreeMap;
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
+
+mod site;
 
 /// Crates that must compile for wasm32-unknown-unknown (no tokio, no clocks).
 const WASM_SAFE: &[&str] = &[
@@ -117,13 +125,14 @@ fn main() -> ExitCode {
         Some("wasm") => wasm(&args[1..]),
         Some("e2e") => e2e(&args[1..]),
         Some("lex") => lex(&args[1..]),
+        Some("site") => site::site(&args[1..]),
         Some("vectors") => run(
             "cargo",
             &["test", "-p", "lessdugin-testkit", "--", "vectors"],
         ),
         Some("fuzz") => fuzz(&args[1..]),
         _ => {
-            eprintln!("usage: cargo xtask <ci|test-wasm|wasm|e2e|lex|vectors|fuzz> [args]");
+            eprintln!("usage: cargo xtask <ci|test-wasm|wasm|e2e|lex|site|vectors|fuzz> [args]");
             return ExitCode::from(2);
         }
     };
