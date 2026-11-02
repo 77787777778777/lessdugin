@@ -202,6 +202,10 @@ pub struct CommentArgs {
     /// The comment text.
     #[arg(long, short = 'm', value_name = "TEXT")]
     pub message: Option<String>,
+    /// Do not ask: confirms uploading the local images of a file under the drafts directory
+    /// (a file elsewhere is confirmed on a terminal, even with --yes).
+    #[arg(long, short = 'y')]
+    pub yes: bool,
 }
 
 /// `edit`.
@@ -227,7 +231,9 @@ pub struct EditArgs {
     #[arg(long)]
     pub no_history: bool,
     /// Do not ask for confirmation when the edit suspends a keep, a frontpage or curated tier
-    /// or a pin of the item (needed then when not running interactively).
+    /// or a pin of the item, nor before uploading the local images of a file under the drafts
+    /// directory (needed then when not running interactively; a file elsewhere is confirmed on
+    /// a terminal, even with --yes).
     #[arg(long, short = 'y')]
     pub yes: bool,
 }

@@ -440,6 +440,65 @@ fn a_comment_attaches_its_draft_local_images() {
     assert_eq!(alice.account.list(nsid::COMMENT).len(), 1);
 }
 
+/// `comment` and `edit` take `--yes` like `post`: it confirms the uploads of a file of the
+/// drafts directory (FILE-2), which headless use otherwise refuses, and never those of a file
+/// elsewhere.
+#[test]
+fn comment_and_edit_confirm_draft_directory_uploads_with_yes() {
+    let (_net, alice) = forum();
+    let f = alice.file("p.md", "---\ntitle: Dots\n---\nShow me a dot.\n");
+    let p = alice.json(&["post", s(&f), "--yes"]);
+    let post = p["state"]["uri"].as_str().unwrap().to_owned();
+    // a plain markdown file of the drafts directory, with an image next to it
+    let scratch = alice.file("scratch.md", "---\ntitle: Scratch\n---\nScratch.\n");
+    let d = alice.json(&["post", "--draft", s(&scratch)]);
+    let dir = std::path::Path::new(d["path"].as_str().unwrap())
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    std::fs::write(dir.join("dot.png"), PNG).unwrap();
+    let text = dir.join("comment.md");
+    std::fs::write(&text, "Here: ![a dot](dot.png)\n").unwrap();
+
+    // headless without --yes: refused, nothing written
+    let e = alice.fails(2, &["comment", &post, s(&text)]);
+    assert!(e["message"].as_str().unwrap().contains("dot.png"), "{e}");
+    assert!(alice.account.list(nsid::COMMENT).is_empty());
+    // with --yes: the comment carries the image as cid: media
+    let c = alice.json(&["comment", &post, s(&text), "--yes"]);
+    assert_eq!(c["state"]["kind"], "done", "{c}");
+    let comment = c["state"]["uri"].as_str().unwrap().to_owned();
+    let comments = alice.account.list(nsid::COMMENT);
+    let rec = alice.account.get(nsid::COMMENT, &comments[0].0).unwrap();
+    assert_eq!(
+        rec["body"]["text"],
+        format!("Here: ![a dot](cid:{})\n", raw_cid(PNG)),
+        "{rec}"
+    );
+
+    // the same for an edit of the comment with a new image
+    std::fs::write(dir.join("red.png"), RED).unwrap();
+    let edit = dir.join("edit.md");
+    std::fs::write(&edit, "Now red: ![red](red.png)\n").unwrap();
+    let e = alice.fails(2, &["edit", &comment, s(&edit)]);
+    assert!(e["message"].as_str().unwrap().contains("red.png"), "{e}");
+    let t = alice.json(&["edit", &comment, s(&edit), "--yes"]);
+    assert_eq!(t["state"]["kind"], "done", "{t}");
+    let rec = alice.account.get(nsid::COMMENT, &comments[0].0).unwrap();
+    assert_eq!(
+        rec["body"]["text"],
+        format!("Now red: ![red](cid:{})\n", raw_cid(RED)),
+        "{rec}"
+    );
+
+    // a file outside the drafts directory is confirmed on a terminal, even with --yes
+    let foreign = alice.file("foreign.md", "Foreign: ![a dot](dot.png)\n");
+    std::fs::write(foreign.parent().unwrap().join("dot.png"), PNG).unwrap();
+    let e = alice.fails(2, &["comment", &post, s(&foreign), "--yes"]);
+    assert!(e["message"].as_str().unwrap().contains("even with --yes"), "{e}");
+    assert_eq!(alice.account.list(nsid::COMMENT).len(), 1);
+}
+
 /// `docs/plan.md` M4 acceptance: a blob at the hard limit (300 MiB, `limits.md` §5) that
 /// FakePds generates a chunk at a time is fetched and CID-checked by `lessdugin media get`
 /// without being held in memory (`threat-model.md` INFRA-6): the CLI process's peak resident
