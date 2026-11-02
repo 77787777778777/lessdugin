@@ -1501,7 +1501,7 @@ build(F):
 - **Skeletons.** For each record the model keeps what the fold and list views need: uri, cid, author, collection, rkey, references (forum, root, parent, subject, adopts, head, parents, chapter entries), opinion values, modAction fields, kind, title, tags, self-labels, `createdAt`, `updatedAt`, TID time, `obs`, validity and rule ID. Bodies are dropped and re-read with `get_many` when a stage or a view needs them (quote and react anchors, rendering, search indexing), then released.
 - **Incremental updates** on `Changed` events (own commits and broadcasts) re-run the affected layers. Incremental results MUST be property-tested equal to the batch fold (`social.md` §1.3).
 - **Provisional items** (§1.5) are evaluated against the model's current result and never enter `records`.
-- **Search.** Each client builds the core's in-memory inverted index per forum from titles and the plain-text projection P (`lfm-1.md` §10) of listed items. SQLite fts5 is used only inside the indexer (§15).
+- **Search.** Each client builds the core's in-memory inverted index per forum from titles and the plain-text projection P (`lfm-1.md` §10) of listed items. SQLite fts5 is used only inside the indexer (§15). Like lists, search results leave out comments under a Missing root (`social.md` §11), as user pages do.
 - **Rendering.** Render output is cached in an in-memory LRU keyed by `(cid, RENDERER_VERSION)`.
 - The model also keeps `BlobRow.refs` current (§11.4) and records `ForumRow.lastViewed`.
 

@@ -137,6 +137,16 @@ impl<H: Host> Engine<H> {
                                 let Some(root) = model.comment_root(uri) else {
                                     continue;
                                 };
+                                // like lists, search omits comments under a Missing root
+                                // (`social.md` §11)
+                                if model
+                                    .view
+                                    .threads
+                                    .get(root)
+                                    .is_none_or(|pl| pl.root_missing)
+                                {
+                                    continue;
+                                }
                                 let Some(comment) = views.comment_node(uri, root) else {
                                     continue;
                                 };

@@ -205,6 +205,29 @@ fn snippets_never_show_spoiler_text() {
     );
 }
 
+/// Search and the user page leave out comments under a Missing root, as lists and Recent
+/// Discussion do (`social.md` §11; security-web-4): here, after the root post is deleted.
+#[test]
+fn comments_under_a_missing_root_are_neither_found_nor_listed() {
+    let w = World::new();
+    let root = w.alice.post(&w.forum, "Root", "The root post.");
+    w.tick();
+    let comment = w.bob.comment(&root, "An orphanword reply.");
+    w.tick();
+    let bob = w.bob.account.did().to_string();
+    let user = || block_on(w.bob.engine.user(Some(&w.forum), &bob)).unwrap();
+    assert!(hit_of(&w.bob.search(&w.forum, "orphanword"), &comment).is_some());
+    assert!(user().recent_comments.iter().any(|c| c.uri == comment));
+
+    let ticket = block_on(w.alice.engine.delete(&root)).unwrap();
+    w.alice.done(&ticket);
+    w.tick();
+    let recent = block_on(w.bob.engine.recent_discussion(&w.forum, None, 100)).unwrap();
+    assert!(!format!("{recent:?}").contains(&comment), "Recent Discussion omits it");
+    assert!(hit_of(&w.bob.search(&w.forum, "orphanword"), &comment).is_none());
+    assert!(!user().recent_comments.iter().any(|c| c.uri == comment));
+}
+
 /// Matching and snippets are linear in the body (security-web-1, robustness-7). A body made of
 /// one short word repeated used to cost a count of the whole folded prefix per match, so k
 /// matches cost O(k · |P|) (78 ms for a 100 kB comment, 7.8 s for a 1 MB post). Eight times the

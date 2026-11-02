@@ -108,7 +108,13 @@ impl<H: Host> Engine<H> {
                             }
                             continue;
                         }
+                        // a comment under a Missing root is in no list (`social.md` §11)
                         if let Some(root) = model.comment_root(uri)
+                            && model
+                                .view
+                                .threads
+                                .get(root)
+                                .is_some_and(|pl| !pl.root_missing)
                             && let Some(comment) = views.comment_node(uri, root)
                             && listed(&comment.state)
                             && comment.author.did == did
