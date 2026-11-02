@@ -475,8 +475,13 @@ mod tests {
             Did::parse("did:plc:mallory").unwrap(),
         );
         let failing = {
-            let (store, net, pds, did, cid) =
-                (store.clone(), net.clone(), mallory_pds.clone(), mallory.clone(), cid.clone());
+            let (store, net, pds, did, cid) = (
+                store.clone(),
+                net.clone(),
+                mallory_pds.clone(),
+                mallory.clone(),
+                cid.clone(),
+            );
             tokio::spawn(async move { store.fetch(&net, &pds, &did, &cid, 1 << 20).await })
         };
         // mallory's download is in flight
@@ -487,7 +492,10 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         assert_eq!(store.inflight.lock().unwrap().len(), 1);
-        let h = store.fetch(&net, &bob_pds, &bob, &cid, 1 << 20).await.unwrap();
+        let h = store
+            .fetch(&net, &bob_pds, &bob, &cid, 1 << 20)
+            .await
+            .unwrap();
         assert_eq!(std::fs::read(&h.locator).unwrap(), bytes);
         assert_eq!(bob_hits.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert!(matches!(
