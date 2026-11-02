@@ -324,9 +324,9 @@ pub enum ModAction {
     Lock(ModSubject),
     /// Unlock.
     Unlock(ModSubject),
-    /// Moderate a tag (`#tag`, admins and the owner, `social.md` §13): remove it from the
-    /// forum (--removed), restore it over a lower rank's removal (--restore), and/or pin its
-    /// wiki page to a revision (--head).
+    /// Moderate a tag (`#tag`, a forum moderator's action, `social.md` §4.3, §13): remove it
+    /// from the forum (--removed), restore it over a lower rank's removal (--restore), and/or
+    /// pin its wiki page to a revision (--head).
     Tag(ModTagArgs),
     /// Remove your `#tag` assertion of a tag.
     Untag(ModTagSubject),
