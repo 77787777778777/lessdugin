@@ -69,6 +69,18 @@ pub const NEWCOMER_QUEUE_MAX: usize = 100;
 /// infrastructure.
 pub const OPEN_MODE_LABEL: &str = "Open mode relies on Bluesky relay, Jetstream and Constellation";
 
+/// The approval-mode mod queue's `applicantsViaHints` banner (`sync.md` §4.4, decision O-8):
+/// applicants are found only through CORE+ hints, so the list may be incomplete.
+pub const APPLICANTS_ASSISTED: &str = "Applicants are found only through Constellation, \
+    Jetstream, a relay or an indexer, so some may be missing. Applicants can also reach you out \
+    of band.";
+
+/// The `applicantsNotDiscovered` banner: with direct sources this device looks for applicants
+/// nowhere, so the list holds only those it found before.
+pub const APPLICANTS_DIRECT: &str = "This device uses direct sources only, so it does not look \
+    for applicants: the list shows only those found before. Switch sources to assisted, or hear \
+    from applicants out of band.";
+
 /// An actor view with only the DID (no cached identity).
 pub fn bare_actor(did: &str) -> ActorView {
     ActorView {
@@ -1479,8 +1491,10 @@ impl Views<'_> {
 
     /// The mod queue (`social.md` §4.12): applicants, top-rank tag-head conflicts and stale
     /// positive assertions (the fold's, by type then key), then, in open mode, the newest
-    /// [`NEWCOMER_QUEUE_MAX`] collapsed or hidden newcomer items (`t_rank` desc, uri).
-    pub fn mod_queue(&self) -> ModQueue {
+    /// [`NEWCOMER_QUEUE_MAX`] collapsed or hidden newcomer items (`t_rank` desc, uri). In approval
+    /// mode it says where applicants come from (`sync.md` §4.4, decision O-8): `direct` is whether
+    /// this device uses direct sources only, so it discovers no applicants at all.
+    pub fn mod_queue(&self, direct: bool) -> ModQueue {
         let v = &self.model.view;
         let mut items = Vec::new();
         for q in &v.mod_queue {
@@ -1562,9 +1576,25 @@ impl Views<'_> {
                 });
             }
         }
+        let banners = if v.policy.membership == MembershipMode::Approval {
+            vec![if direct {
+                Banner {
+                    code: "applicantsNotDiscovered".into(),
+                    message: APPLICANTS_DIRECT.into(),
+                }
+            } else {
+                Banner {
+                    code: "applicantsViaHints".into(),
+                    message: APPLICANTS_ASSISTED.into(),
+                }
+            }]
+        } else {
+            Vec::new()
+        };
         ModQueue {
             dto: DtoVersion::default(),
             items,
+            banners,
         }
     }
 

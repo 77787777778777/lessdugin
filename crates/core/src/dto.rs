@@ -1064,6 +1064,11 @@ dto! {
     pub struct ModQueue {
         pub dto: DtoVersion,
         pub items: Vec<ModQueueItem>,
+        /// In approval mode, what the applicant list relies on (`sync.md` §4.4, decision O-8):
+        /// `applicantsViaHints` (assisted sources: applicants are found only through CORE+
+        /// hints), or `applicantsNotDiscovered` (direct sources: this device looks for none).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub banners: Vec<Banner>,
     }
 }
 

@@ -4,7 +4,9 @@
 //! They read the cache only (a forum whose declaration is not cached is opened first) and
 //! return `dto/1` objects that are byte-identical for the same cache, local state and clock.
 //!
-//! Every view comes from the forum model's full fold (`social.md` §1); a sort, filter or thread
+//! E        let direct = self.sources().await? == super::Sources::Direct;
+        self.with_views(&l, &[], &people, |v| v.mod_queue(direct))
+            .awaitery view comes from the forum model's full fold (`social.md` §1); a sort, filter or thread
 //! that the model's base fold did not compute is re-ranked from its cached layers
 //! ([`crate::model::ForumModel::orderings`]), never refolded. `list_posts`, `recent_discussion`
 //! and `mod_log` page with an opaque cursor (the offset into the sorted list, as decimal); a
@@ -343,7 +345,9 @@ impl<H: Host> Engine<H> {
 
     /// `mod_queue(forum)` (`social.md` §4.12), for the forum's authorities: applicants,
     /// top-rank tag-head conflicts, stale positive assertions, and (open mode) the newest
-    /// newcomer items. `blocked` for anyone else.
+    /// newcomer items; in approval mode a banner says applicants are found only through CORE+
+    /// hints, or (direct sources) not looked for (`sync.md` §4.4, O-8). `blocked` for anyone
+    /// else.
     pub async fn mod_queue(&self, forum: &str) -> Result<ModQueue, EngineError> {
         let key = self.forum_key(forum).await?;
         let l = self.loaded(&key).await?;
@@ -360,7 +364,9 @@ impl<H: Host> Engine<H> {
         if let Ok(vis) = &v.visibility {
             people.extend(vis.states.keys().cloned());
         }
-        self.with_views(&l, &[], &people, |v| v.mod_queue()).await
+        let direct = self.sources().await? == super::Sources::Direct;
+        self.with_views(&l, &[], &people, |v| v.mod_queue(direct))
+            .await
     }
 
     /// `mod_log(forum, cursor?, limit)` (`social.md` §4.12): every listed modAction of the forum

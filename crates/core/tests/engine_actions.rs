@@ -291,6 +291,34 @@ impl World {
     }
 }
 
+/// `sync.md` §4.4, decision O-8: approval-mode applicants are found only through CORE+ hints,
+/// and the mod queue says so, more strongly when this device uses direct sources only.
+#[test]
+fn the_approval_mode_mod_queue_says_where_applicants_come_from() {
+    let w = World::new();
+    let codes = |u: &User| {
+        block_on(u.engine.mod_queue(&w.forum))
+            .unwrap()
+            .banners
+            .into_iter()
+            .map(|b| b.code)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(codes(&w.alice), ["applicantsViaHints"]);
+    block_on(w.alice.engine.set_setting("sources", Some(&json!("direct")))).unwrap();
+    assert_eq!(codes(&w.alice), ["applicantsNotDiscovered"]);
+    let q = block_on(w.alice.engine.mod_queue(&w.forum)).unwrap();
+    assert!(q.banners[0].message.contains("direct sources"), "{q:?}");
+    let open = World::with_mode(MembershipMode::Open);
+    assert!(
+        block_on(open.alice.engine.mod_queue(&open.forum))
+            .unwrap()
+            .banners
+            .is_empty(),
+        "open mode has no applicants"
+    );
+}
+
 // ---------------------------------------------------------------------------------------------
 // Wiki and tags (M5)
 
