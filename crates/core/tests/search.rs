@@ -4,15 +4,22 @@
 
 mod common;
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use common::block_on;
+use lessdugin_atp::syntax::Did;
 use lessdugin_core::dto::{
     CommentDraft, ForumDraft, MembershipMode, PostDraft, SearchItem, SearchQuery, SearchResults,
     SyncOpts, WriteState, WriteTicket,
 };
 use lessdugin_core::engine::{AccountInfo, Engine, EngineConfig};
+use lessdugin_core::host::{
+    BlobHandle, Dir, Host, HostError, HttpRequest, HttpResponse, KeyRange, KvOp, KvStore,
+};
 use lessdugin_core::search::snippet;
+use lessdugin_core::store::mem::MemKv;
 use lessdugin_testkit::fake_pds::AccountHandle;
 use lessdugin_testkit::{FakeNet, MemHost};
 
@@ -205,6 +212,181 @@ fn snippets_never_show_spoiler_text() {
     );
 }
 
+/// A cache store that counts the keys read with `get_many` (record bodies are read so).
+#[derive(Clone)]
+struct CountingKv {
+    inner: MemKv,
+    keys: Arc<AtomicUsize>,
+}
+
+impl KvStore for CountingKv {
+    async fn get_many(&self, keys: Vec<Vec<u8>>) -> Result<Vec<Option<Vec<u8>>>, HostError> {
+        self.keys.fetch_add(keys.len(), Ordering::SeqCst);
+        self.inner.get_many(keys).await
+    }
+
+    async fn scan(
+        &self,
+        range: KeyRange,
+        dir: Dir,
+        limit: u32,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, HostError> {
+        self.inner.scan(range, dir, limit).await
+    }
+
+    async fn write(&self, batch: Vec<KvOp>) -> Result<(), HostError> {
+        self.inner.write(batch).await
+    }
+}
+
+/// A [`MemHost`] whose cache store counts its point reads.
+#[derive(Clone)]
+struct CountingHost {
+    inner: MemHost,
+    cache: CountingKv,
+    state: CountingKv,
+}
+
+impl CountingHost {
+    fn new(inner: &MemHost) -> Self {
+        let kv = |kv: &MemKv| CountingKv {
+            inner: kv.clone(),
+            keys: Arc::default(),
+        };
+        Self {
+            cache: kv(inner.cache_kv()),
+            state: kv(inner.state_kv()),
+            inner: inner.clone(),
+        }
+    }
+
+    /// Keys read since the last call.
+    fn take_keys(&self) -> usize {
+        self.cache.keys.swap(0, Ordering::SeqCst)
+    }
+}
+
+impl Host for CountingHost {
+    type Kv = CountingKv;
+    type Ws = <MemHost as Host>::Ws;
+    type Lock = <MemHost as Host>::Lock;
+
+    fn cache(&self) -> &CountingKv {
+        &self.cache
+    }
+
+    fn state(&self) -> &CountingKv {
+        &self.state
+    }
+
+    async fn http(&self, req: HttpRequest) -> Result<HttpResponse, HostError> {
+        self.inner.http(req).await
+    }
+
+    async fn fetch_blob(
+        &self,
+        pds: url::Url,
+        did: Did,
+        cid: String,
+        max_bytes: u64,
+    ) -> Result<BlobHandle, HostError> {
+        self.inner.fetch_blob(pds, did, cid, max_bytes).await
+    }
+
+    async fn websocket(&self, url: url::Url, max: u32) -> Result<Self::Ws, HostError> {
+        self.inner.websocket(url, max).await
+    }
+
+    async fn resolve_txt_system(&self, name: String) -> Result<Option<Vec<String>>, HostError> {
+        self.inner.resolve_txt_system(name).await
+    }
+
+    async fn lock(&self, name: &str, wait: bool) -> Result<Option<Self::Lock>, HostError> {
+        self.inner.lock(name, wait).await
+    }
+
+    async fn sleep(&self, ms: u64) {
+        self.inner.sleep(ms).await;
+    }
+
+    fn now_ms(&self) -> i64 {
+        self.inner.now_ms()
+    }
+
+    fn fill_random(&self, buf: &mut [u8]) {
+        self.inner.fill_random(buf);
+    }
+}
+
+/// Each forum's in-memory inverted index (`sync.md` §13; m5-acceptance-14) is built once per
+/// model from every listed body; a search then reads and renders only its candidates, and a new
+/// model (here after a sync) gets a new index.
+#[test]
+fn search_reads_only_the_candidates_of_the_forum_index() {
+    let w = World::new();
+    for i in 0..40 {
+        w.alice.post(
+            &w.forum,
+            &format!("Post {i}"),
+            &format!("Common words {i}."),
+        );
+    }
+    let rare = w.alice.post(&w.forum, "Rare", "A zqrareword appears once.");
+    w.tick();
+    let host = CountingHost::new(&w.alice.host);
+    let engine = Engine::new(host.clone(), EngineConfig::default());
+    let search = |q: &str| {
+        let results = block_on(engine.search(&SearchQuery {
+            q: q.into(),
+            forum: Some(w.forum.clone()),
+            author: None,
+            limit: 100,
+        }))
+        .unwrap();
+        let mut uris: Vec<String> = results
+            .hits
+            .iter()
+            .map(|h| match &h.item {
+                SearchItem::Post(p) => p.uri.clone(),
+                SearchItem::Comment(c) => c.uri.clone(),
+            })
+            .collect();
+        uris.sort();
+        (uris, host.take_keys())
+    };
+
+    let (hits, built) = search("zqrareword");
+    assert_eq!(hits, [rare.clone()]);
+    assert!(
+        built > 41,
+        "the index reads every listed body once ({built} keys)"
+    );
+    let (hits, read) = search("ZQRAREWORD");
+    assert_eq!(hits, [rare.clone()]);
+    assert!(
+        read < 10,
+        "only the candidate is read and rendered ({read} keys)"
+    );
+    let (hits, read) = search("zqnowhere");
+    assert!(hits.is_empty());
+    assert!(read < 10, "no candidate, no body ({read} keys)");
+    let (hits, read) = search("common");
+    assert_eq!(hits.len(), 40);
+    assert!((40..60).contains(&read), "{read} keys");
+
+    let second = w.alice.post(&w.forum, "More", "Another zqrareword.");
+    block_on(engine.sync_forum(&w.forum, &SyncOpts::default())).unwrap();
+    host.take_keys();
+    let (hits, rebuilt) = search("zqrareword");
+    let mut expected = vec![rare, second];
+    expected.sort();
+    assert_eq!(hits, expected);
+    assert!(
+        rebuilt > 42,
+        "the new model is indexed again ({rebuilt} keys)"
+    );
+}
+
 /// Search and the user page leave out comments under a Missing root, as lists and Recent
 /// Discussion do (`social.md` §11; security-web-4): here, after the root post is deleted.
 #[test]
@@ -223,7 +405,10 @@ fn comments_under_a_missing_root_are_neither_found_nor_listed() {
     w.alice.done(&ticket);
     w.tick();
     let recent = block_on(w.bob.engine.recent_discussion(&w.forum, None, 100)).unwrap();
-    assert!(!format!("{recent:?}").contains(&comment), "Recent Discussion omits it");
+    assert!(
+        !format!("{recent:?}").contains(&comment),
+        "Recent Discussion omits it"
+    );
     assert!(hit_of(&w.bob.search(&w.forum, "orphanword"), &comment).is_none());
     assert!(!user().recent_comments.iter().any(|c| c.uri == comment));
 }

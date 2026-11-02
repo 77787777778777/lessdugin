@@ -5,6 +5,8 @@
 //! the 160-code-point snippet), however many times a term occurs: a body made of one short word
 //! repeated must not cost the engine more than one pass over it per term.
 
+pub(crate) mod index;
+
 const CONTEXT: usize = 60;
 const SNIPPET: usize = 160;
 
