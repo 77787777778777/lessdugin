@@ -4,7 +4,7 @@
 import { MockEngine } from "@lessdugin/engine/mock";
 import type { ForumIndexer, IndexerConsent } from "@lessdugin/engine/types";
 
-import { fireEvent, screen, waitFor } from "@testing-library/react";
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { renderWithApp } from "../test/render.tsx";
 import { SettingsPage } from "./SettingsPage.tsx";
@@ -26,6 +26,16 @@ describe("SettingsPage", () => {
         true,
       ),
     );
+  });
+
+  it("says that assisted mode names the participants' DIDs to Jetstream (U-D1, PRIV-11)", async () => {
+    renderWithApp(<SettingsPage />, { engine: new MockEngine() });
+    const sources = await screen.findByRole("region", { name: "Data sources" });
+    const note = within(sources).getByTestId("jetstream-disclosure").textContent ?? "";
+    expect(note).toMatch(/^Assisted, in this browser/);
+    expect(note).toMatch(/participants of your followed and open forums/);
+    expect(note).toMatch(/Jetstream server's operator then learns their DIDs/);
+    expect(note).toMatch(/which forums you read/);
   });
 
   it("shows a refused setting instead of leaving the rejection unhandled", async () => {
