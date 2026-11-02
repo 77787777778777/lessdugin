@@ -139,7 +139,10 @@ mod tests {
             url::Url::parse("http://127.0.0.1:2583").unwrap(),
         );
         assert_eq!(cfg.sources, None);
-        assert_eq!(engine_config(&cfg).sources_flag, Some(EngineSources::Direct));
+        assert_eq!(
+            engine_config(&cfg).sources_flag,
+            Some(EngineSources::Direct)
+        );
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::under(dir.path());
         let engine = open_engine(&paths, &cfg).unwrap();

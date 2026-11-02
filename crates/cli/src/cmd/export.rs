@@ -103,8 +103,10 @@ pub async fn content(ctx: &Ctx, args: ExportArgs) -> Result<(), CliError> {
             ctx.out.warn(cat([
                 lit("the body of "),
                 tt(&i.uri),
-                lit(" could not be downloaded from its author's PDS: it is exported without \
-                     its markdown"),
+                lit(
+                    " could not be downloaded from its author's PDS: it is exported without \
+                     its markdown",
+                ),
             ]));
         }
     }

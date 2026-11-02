@@ -1090,7 +1090,11 @@ fn read_waits_for_a_slow_spilled_body() {
     assert!(started.elapsed() >= std::time::Duration::from_secs(5));
     let body = body_of(&out);
     assert!(body.contains("The last words."), "{body}");
-    assert!(!text(&out.stderr).contains("still not loaded"), "{}", text(&out.stderr));
+    assert!(
+        !text(&out.stderr).contains("still not loaded"),
+        "{}",
+        text(&out.stderr)
+    );
 
     // a body its PDS will not serve: the excerpt, and a warning naming the item
     let broken = post_of("Broken");
@@ -1119,7 +1123,12 @@ fn read_waits_for_a_slow_spilled_body() {
             .map(|p| p["markdown"].clone())
             .unwrap_or_else(|| panic!("{uri} not exported: {x}"))
     };
-    assert!(markdown(&slow).as_str().unwrap().contains("The last words."));
+    assert!(
+        markdown(&slow)
+            .as_str()
+            .unwrap()
+            .contains("The last words.")
+    );
     assert!(markdown(&broken).is_null());
     let stderr = text(&out.stderr);
     assert!(

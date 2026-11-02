@@ -1090,13 +1090,16 @@ mod tests {
             default.client_id(ClientKind::Hosted, redirect),
             scope::HOSTED_CLIENT_ID
         );
-        let preview = Url::parse("https://preview.example.com/oauth/cli-client-metadata.json")
-            .unwrap();
+        let preview =
+            Url::parse("https://preview.example.com/oauth/cli-client-metadata.json").unwrap();
         let opts = OAuthOptions {
             hosted_client_id: Some(preview.clone()),
             ..OAuthOptions::default()
         };
-        assert_eq!(opts.client_id(ClientKind::Hosted, redirect), preview.as_str());
+        assert_eq!(
+            opts.client_id(ClientKind::Hosted, redirect),
+            preview.as_str()
+        );
         assert_eq!(
             opts.client_id(ClientKind::Loopback, redirect),
             scope::loopback_client_id(redirect)

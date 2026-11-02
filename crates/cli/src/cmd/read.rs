@@ -379,8 +379,10 @@ pub async fn read(ctx: &Ctx, args: ReadArgs) -> Result<(), CliError> {
         ctx.out.warn(cat([
             lit("the body of "),
             tt(&item),
-            lit(" is still not loaded from its author's PDS (the excerpt shows); read it again \
-                 later"),
+            lit(
+                " is still not loaded from its author's PDS (the excerpt shows); read it again \
+                 later",
+            ),
         ]));
     }
     let root = match &thread.post {
@@ -433,7 +435,8 @@ pub async fn read(ctx: &Ctx, args: ReadArgs) -> Result<(), CliError> {
 /// `NOTICE_SPILLED`), with their authors.
 fn pending_bodies(thread: &ThreadView) -> Vec<(String, String)> {
     use lessdugin_core::model::render::NOTICE_SPILLED;
-    let pending = |b: &lessdugin_core::dto::RenderedBody| b.notices.iter().any(|n| n == NOTICE_SPILLED);
+    let pending =
+        |b: &lessdugin_core::dto::RenderedBody| b.notices.iter().any(|n| n == NOTICE_SPILLED);
     let mut out = Vec::new();
     if let ThreadRoot::Post(p) = &thread.post
         && pending(&p.body)

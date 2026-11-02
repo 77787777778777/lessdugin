@@ -4721,9 +4721,7 @@ impl State {
     /// Runs a `:` command line against the engine through the same effects the keys use
     /// (`synthesis-v1.md` §6.11: the backstop that makes every MVP action reachable).
     fn run_command(&mut self, line: &str, fx: &mut Vec<Effect>) {
-        use crate::command::{
-            ModTarget, Verb, agree_intent, mod_intent, tag_intent, vote_intent,
-        };
+        use crate::command::{ModTarget, Verb, agree_intent, mod_intent, tag_intent, vote_intent};
         let line = line.trim();
         if line.is_empty() || line == "help" || line == "?" {
             self.say(Tone::Info, tt(&crate::command::usage()));

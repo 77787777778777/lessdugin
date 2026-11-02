@@ -461,11 +461,12 @@ fn tag_votes_and_tag_moderation() {
     w.carol.ok(&["sync", &w.forum]);
 
     // a tag vote is its own public action (`social.md` §17): headless, the first needs --yes
-    let e = w
-        .carol
-        .fails(2, &["vote", &w.post, "up", "--tag", "rust"]);
+    let e = w.carol.fails(2, &["vote", &w.post, "up", "--tag", "rust"]);
     assert!(
-        e["message"].as_str().unwrap().contains("tag votes are public"),
+        e["message"]
+            .as_str()
+            .unwrap()
+            .contains("tag votes are public"),
         "{e}"
     );
     assert!(w.carol.account.list(nsid::OPINION).is_empty());
@@ -473,7 +474,11 @@ fn tag_votes_and_tag_moderation() {
         .carol
         .run(&["vote", &w.post, "up", "--tag", "#rust", "--yes"]);
     assert!(out.status.success(), "{}", text(&out.stderr));
-    assert!(text(&out.stdout).contains("Tag vote recorded"), "{}", text(&out.stdout));
+    assert!(
+        text(&out.stdout).contains("Tag vote recorded"),
+        "{}",
+        text(&out.stdout)
+    );
     let opinions = w.carol.account.list(nsid::OPINION);
     assert_eq!(opinions.len(), 1, "{opinions:?}");
     let rec = w.carol.account.get(nsid::OPINION, &opinions[0].0).unwrap();
@@ -497,9 +502,9 @@ fn tag_votes_and_tag_moderation() {
             .filter_map(|(rkey, _)| w.alice.account.get(nsid::MOD_ACTION, &rkey))
             .find(|r| r["subject"] == "tag:rust")
     };
-    let t = w.alice.json(&[
-        "mod", "tag", "rust", "--removed", "--reason", "off topic",
-    ]);
+    let t = w
+        .alice
+        .json(&["mod", "tag", "rust", "--removed", "--reason", "off topic"]);
     assert_eq!(t["state"]["kind"], "done", "{t}");
     let rec = tag_record().expect("a #tag record");
     assert_eq!(rec["action"]["removed"], true, "{rec}");

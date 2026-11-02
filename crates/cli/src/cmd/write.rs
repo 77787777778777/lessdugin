@@ -518,7 +518,16 @@ pub async fn comment(ctx: &Ctx, args: CommentArgs) -> Result<(), CliError> {
         return Err(CliError::usage("the comment is empty; nothing was posted"));
     }
     let mut d = CommentDraft::new(root, parent, text);
-    attach_media(ctx, &w, &mut d.body, dir.as_deref(), foreign, args.yes, None).await?;
+    attach_media(
+        ctx,
+        &w,
+        &mut d.body,
+        dir.as_deref(),
+        foreign,
+        args.yes,
+        None,
+    )
+    .await?;
     send_comment(ctx, &w, &d).await
 }
 

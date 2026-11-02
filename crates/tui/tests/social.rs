@@ -1979,8 +1979,9 @@ fn the_command_line_tags_posts_and_moderates_tags() {
         .filter_map(|(rkey, _)| carol.acct.get(opinion, &rkey))
         .collect();
     assert!(
-        recs.iter().any(|r| r["subject"]["uri"] == s.bob_post.as_str()
-            && r["tags"] == serde_json::json!([{ "tag": "rust", "value": "up" }])),
+        recs.iter()
+            .any(|r| r["subject"]["uri"] == s.bob_post.as_str()
+                && r["tags"] == serde_json::json!([{ "tag": "rust", "value": "up" }])),
         "carol's tag vote on bob's post: {recs:?}"
     );
 
@@ -2008,7 +2009,10 @@ fn the_command_line_tags_posts_and_moderates_tags() {
     block_on(a.engine().outbox_flush()).unwrap();
     block_on(a.settle());
     let pinned = log_of("");
-    assert!(!pinned.is_empty() && pinned != removed, "{removed} -> {pinned}");
+    assert!(
+        !pinned.is_empty() && pinned != removed,
+        "{removed} -> {pinned}"
+    );
     run_command(&mut a, "mod untag rust");
     block_on(a.settle());
     block_on(a.engine().outbox_flush()).unwrap();

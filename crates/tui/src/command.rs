@@ -512,11 +512,17 @@ pub const VALUE_REACH: &[(&str, Reach)] = &[
     ("OpinionIntent.tag", Reach::Command("vote up --tag rust")),
     ("ModActionValue.hide", Reach::Command("mod hide off topic")),
     ("ModActionValue.access", Reach::Command("mod ban")),
-    ("ModActionValue.restrict", Reach::Command("mod restrict vote")),
+    (
+        "ModActionValue.restrict",
+        Reach::Command("mod restrict vote"),
+    ),
     ("ModActionValue.tier", Reach::Command("mod tier curated")),
     ("ModActionValue.pin", Reach::Command("mod pin")),
     ("ModActionValue.lock", Reach::Command("mod lock")),
-    ("ModActionValue.tag", Reach::Command("mod tag rust --removed")),
+    (
+        "ModActionValue.tag",
+        Reach::Command("mod tag rust --removed"),
+    ),
 ];
 
 /// A sort `sort` names: a post sort (`social.md` §12.2) or a comment sort (§12.4).
@@ -1780,7 +1786,9 @@ fn tag_mod_verb(action: &str, args: &[&str], opts: ModOpts) -> Parsed {
         return Err(format!("mod {action} needs a tag slug."));
     };
     if opts.author_scope {
-        return Err(format!("mod {action} is a forum action; --author does not apply."));
+        return Err(format!(
+            "mod {action} is a forum action; --author does not apply."
+        ));
     }
     let slug = slug.strip_prefix("tag:").unwrap_or(slug);
     let subject = Some(format!("tag:{}", slug.strip_prefix('#').unwrap_or(slug)));
@@ -1818,9 +1826,7 @@ fn tag_mod_verb(action: &str, args: &[&str], opts: ModOpts) -> Parsed {
         }
     }
     if removed.is_none() && head.is_none() {
-        return Err(
-            "mod tag needs --removed, --restore or --head <wiki revision at-uri>.".into(),
-        );
+        return Err("mod tag needs --removed, --restore or --head <wiki revision at-uri>.".into());
     }
     Ok(Command {
         verb: Verb::Mod(ModVerb::Tag {

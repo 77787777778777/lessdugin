@@ -495,7 +495,10 @@ fn comment_and_edit_confirm_draft_directory_uploads_with_yes() {
     let foreign = alice.file("foreign.md", "Foreign: ![a dot](dot.png)\n");
     std::fs::write(foreign.parent().unwrap().join("dot.png"), PNG).unwrap();
     let e = alice.fails(2, &["comment", &post, s(&foreign), "--yes"]);
-    assert!(e["message"].as_str().unwrap().contains("even with --yes"), "{e}");
+    assert!(
+        e["message"].as_str().unwrap().contains("even with --yes"),
+        "{e}"
+    );
     assert_eq!(alice.account.list(nsid::COMMENT).len(), 1);
 }
 
