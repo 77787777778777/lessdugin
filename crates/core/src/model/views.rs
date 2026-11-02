@@ -663,7 +663,7 @@ impl Views<'_> {
         }
         let body = self.values.get(uri)?.get("body")?;
         let fetched = crate::model::render::text_blob_cid(body)
-            .is_some_and(|b| self.renders.spilled(b).is_some() || self.renders.contains(&x.cid));
+            .is_some_and(|b| self.renders.spilled(&x.did, b).is_some() || self.renders.contains(&x.cid));
         if body.get("textBlob").is_some() && !fetched {
             return None;
         }
@@ -1107,15 +1107,13 @@ impl Views<'_> {
         }) else {
             return Vec::new();
         };
+        let skel = self.model.skel(uri);
         self.renders.links(
-            &self
-                .model
-                .skel(uri)
-                .map(|s| s.cid.clone())
-                .unwrap_or_default(),
+            &skel.map(|s| s.cid.clone()).unwrap_or_default(),
             &serde_json::to_value(post.body).unwrap_or(Value::Null),
             NS,
             post.excerpt.as_deref(),
+            skel.map_or("", |s| s.did.as_str()),
         )
     }
 
@@ -1480,7 +1478,7 @@ impl Views<'_> {
         let d = &self.model.decl;
         let about = d.about.as_ref().and_then(|md| {
             let v = serde_json::to_value(md).ok()?;
-            Some(self.renders.uncached(&v, &self.model.input.ns))
+            Some(self.renders.uncached(&v, &self.model.input.ns, self.model.key.owner.as_str()))
         });
         let moderators = lessdugin_lexicon::validity::entry::moderators(d, &self.model.key.owner)
             .into_iter()

@@ -499,11 +499,11 @@ impl<H: Host> Engine<H> {
             .with_detail("kind", "unknownBody"));
         };
         let renders = &self.rt.renders;
-        if renders.spilled(blob).is_none() {
+        if renders.spilled(did.as_str(), blob).is_none() {
             self.fetch_spilled(&forum, &[(u.as_str(), did.as_str(), blob)], renders)
                 .await;
         }
-        let Some(spilled) = renders.spilled(blob) else {
+        let Some(spilled) = renders.spilled(did.as_str(), blob) else {
             return Err(EngineError::new(
                 ErrorCode::Network,
                 format!(

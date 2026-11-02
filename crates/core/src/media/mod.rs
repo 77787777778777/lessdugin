@@ -36,6 +36,15 @@ use crate::engine::EngineError;
 /// The largest container the pipeline will walk (`limits.md` §6).
 pub const MAX_SCAN_BYTES: usize = 300 * 1024 * 1024;
 
+/// The XRPC errors of a `getBlob` HTTP 400 that say the repo is not served now, not that the
+/// blob is missing (`sync.md` §3.4): a spilled body asked for then stays pending.
+const REPO_UNAVAILABLE: [&str; 4] = [
+    "RepoNotFound",
+    "RepoDeactivated",
+    "RepoTakendown",
+    "RepoSuspended",
+];
+
 /// What a sniff found.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Format {
@@ -1650,10 +1659,10 @@ impl<H: crate::host::Host> crate::engine::Engine<H> {
             let (Some(blob), Some(x)) = (text_blob_cid(md), model.skel(uri)) else {
                 continue;
             };
-            if renders.contains(&x.cid) || renders.spilled(blob).is_some() {
+            if renders.contains(&x.cid) || renders.spilled(&x.did, blob).is_some() {
                 continue;
             }
-            if renders.spilled_retry_at(blob).is_some_and(|t| now < t)
+            if renders.spilled_retry_at(&x.did, blob).is_some_and(|t| now < t)
                 && !matches!(self.host().blob_open(blob).await, Ok(Some(_)))
             {
                 continue;
@@ -1684,14 +1693,14 @@ impl<H: crate::host::Host> crate::engine::Engine<H> {
             return;
         };
         let now = self.host().now_ms();
-        if renders.spilled(blob).is_some()
-            || renders.spilled_retry_at(blob).is_some_and(|t| now < t)
+        let owner = model.key.owner.as_str();
+        if renders.spilled(owner, blob).is_some()
+            || renders.spilled_retry_at(owner, blob).is_some_and(|t| now < t)
                 && !matches!(self.host().blob_open(blob).await, Ok(Some(_)))
         {
             return;
         }
         let forum = model.key.uri.as_str();
-        let owner = model.key.owner.as_str();
         self.fetch_spilled(forum, &[(forum, owner, blob)], renders)
             .await;
     }
@@ -1723,7 +1732,7 @@ impl<H: crate::host::Host> crate::engine::Engine<H> {
         let fetches =
             futures::future::join_all(wanted.iter().map(|&(uri, did, blob)| async move {
                 match self.fetch_text_blob(did, blob).await {
-                    Ok(s) => renders.put_spilled(blob, s),
+                    Ok(s) => renders.put_spilled(did, blob, s),
                     Err(e) => {
                         tracing::debug!(uri = %uri, error = %e, "a spilled body stays pending");
                         renders.spilled_unavailable(blob, pending(uri, did));
@@ -1736,7 +1745,7 @@ impl<H: crate::host::Host> crate::engine::Engine<H> {
         let waited = futures::future::select(fetches, wait).await;
         if let futures::future::Either::Right(_) = waited {
             for &(uri, did, blob) in wanted {
-                if renders.spilled(blob).is_none() {
+                if renders.spilled(did, blob).is_none() {
                     tracing::debug!(uri = %uri, "a spilled body is slow to come: it stays pending");
                     renders.spilled_unavailable(blob, pending(uri, did));
                 }
@@ -1776,8 +1785,8 @@ impl<H: crate::host::Host> crate::engine::Engine<H> {
         futures::future::join_all(by_forum.iter().map(|(&forum, items)| async move {
             self.fetch_spilled(forum, items, renders).await;
             let mut topics: Vec<Topic> = Vec::new();
-            for &(uri, _, blob) in items {
-                if renders.spilled(blob).is_some() && uri != forum {
+            for &(uri, did, blob) in items {
+                if renders.spilled(did, blob).is_some() && uri != forum {
                     topics.push(Topic::Thread {
                         uri: uri.to_owned(),
                     });
@@ -1785,7 +1794,7 @@ impl<H: crate::host::Host> crate::engine::Engine<H> {
             }
             if items
                 .iter()
-                .any(|&(_, _, blob)| renders.spilled(blob).is_some())
+                .any(|&(_, did, blob)| renders.spilled(did, blob).is_some())
             {
                 topics.push(Topic::Forum {
                     uri: forum.to_owned(),
@@ -1829,7 +1838,12 @@ impl<H: crate::host::Host> crate::engine::Engine<H> {
             Ok(h) => h,
             Err(HostError::CidMismatch) => return Ok(Spilled::Unverified),
             Err(HostError::TooLarge) => return Ok(Spilled::Error(BodyError::TooLarge)),
-            // "Blob not found": missing, not retried (sync.md §11.1); nothing was stored
+            // "Blob not found": missing, not retried (sync.md §11.1); nothing was stored. A
+            // repo that is not served now (deactivated, taken down, suspended) is not a missing
+            // blob: it stays pending and is asked for again
+            Err(HostError::HttpStatus(400, Some(name))) if REPO_UNAVAILABLE.contains(&name.as_str()) => {
+                return Err(HostError::HttpStatus(400, Some(name)).into());
+            }
             Err(HostError::HttpStatus(400, _)) => return Ok(Spilled::Missing),
             Err(e) => return Err(e.into()),
         };
