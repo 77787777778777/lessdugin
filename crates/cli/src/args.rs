@@ -693,6 +693,55 @@ mod reach {
         }
     }
 
+    /// `engine-api.md` §3.6: headless, the first public action of a kind needs `--yes`, so
+    /// every command that writes one takes it (and `-y`); so does every write that asks a
+    /// question of its own (publishing, uploads of this machine's files, what an edit
+    /// suspends, a deletion), so a script confirms each the same way. `redact` alone has no
+    /// `-y`: deleting history is kept a long flag away from a typo (`RedactArgs`).
+    #[test]
+    fn every_write_that_asks_takes_yes() {
+        use clap::Parser;
+        const ASKS: &[&str] = &[
+            // public actions (social.md §17)
+            "vote 3 up",
+            "vote 3 up --tag rust",
+            "agree 3 agree",
+            "react 3 heart",
+            "join alice.example.com/meta",
+            "approve did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+            "members revoke did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+            "mods add did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+            "mods rm did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+            "mod hide 3",
+            "mod unhide 3",
+            "mod tag rust --removed",
+            "mod untag rust",
+            "mod adopt did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+            // writes with a question of their own
+            "post page.md",
+            "comment 3 page.md",
+            "edit 3 page.md",
+            "delete 3",
+            "redact 3",
+            "draft publish abc123",
+        ];
+        for line in ASKS {
+            let short: &[&str] = if line.starts_with("redact") {
+                &[]
+            } else {
+                &["-y"]
+            };
+            for yes in std::iter::once("--yes").chain(short.iter().copied()) {
+                let words = std::iter::once("lessdugin")
+                    .chain(line.split_whitespace())
+                    .chain([yes]);
+                if let Err(e) = Cli::try_parse_from(words) {
+                    panic!("`{line} {yes}`: {e}");
+                }
+            }
+        }
+    }
+
     /// The operations of the spec's §3.2, §3.5 and §3.6 tables (the first cell of each row).
     fn spec_operations() -> BTreeSet<String> {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/spec/engine-api.md");
