@@ -244,6 +244,59 @@ describe("MockEngine writes", () => {
     expect(byMeta.items.map((p) => p.uri)).toContain(state.uri);
   });
 
+  it("writes a wiki revision on its base, and refuses one whose head moved (O-2)", async () => {
+    const e = new MockEngine({ sendMs: 10 });
+    const slug = "decision-theory";
+    const head = (await e.tag(FORUM_URI, slug)).head ?? "";
+    // a page's revisions are records: the head names the genesis as its parent
+    const genesis = (await e.raw(head)).record as { parents: { uri: string }[] };
+    expect(genesis.parents).toHaveLength(1);
+    expect((await e.raw(genesis.parents[0]?.uri ?? "")).record).toMatchObject({
+      slug,
+      parents: [],
+    });
+    const draft = { name: "Decision theory", isTag: true, base: head };
+    await e.wikiEdit(FORUM_URI, slug, draft);
+    await vi.advanceTimersByTimeAsync(50);
+    const next = (await e.tag(FORUM_URI, slug)).head ?? "";
+    expect(next).not.toBe(head);
+    expect((await e.raw(next)).record).toMatchObject({ parents: [{ uri: head }] });
+    await expect(e.wikiEdit(FORUM_URI, slug, draft)).rejects.toMatchObject({
+      code: "conflict",
+      detail: { kind: "wikiHeadMoved", base: head, head: next },
+    });
+  });
+
+  it("bounds sequence positions before enqueueing, as the engine does", async () => {
+    const e = new MockEngine({ sendMs: 10 });
+    const posts = (await e.listPosts({ forum: FORUM_URI, sort: "new", filter: "all", limit: 3 }))
+      .items;
+    const [a, b] = posts;
+    if (!a || !b) throw new Error("no posts");
+    const t = await e.seqCreate({
+      forum: FORUM_URI,
+      title: "Mine",
+      chapters: [{ posts: [a.uri] }],
+    });
+    await vi.advanceTimersByTimeAsync(50);
+    const s = (await e.writes()).find((w) => w.id === t.id)?.state;
+    if (s?.kind !== "done") throw new Error("not created");
+    await expect(e.seqAdd(s.uri, b.uri, { chapter: 0, index: 2 })).rejects.toMatchObject({
+      code: "invalid_input",
+    });
+    await expect(e.seqAdd(s.uri, s.uri, { chapter: 0, index: 0 })).rejects.toMatchObject({
+      code: "invalid_input",
+    });
+    await expect(
+      e.seqMove(s.uri, { chapter: 0, index: 0 }, { chapter: 0, index: 1 }),
+    ).rejects.toMatchObject({ code: "invalid_input" });
+    await e.seqAdd(s.uri, b.uri, { chapter: 0, index: 1 });
+    await vi.advanceTimersByTimeAsync(50);
+    await e.seqMove(s.uri, { chapter: 0, index: 1 }, { chapter: 0, index: 0 });
+    await vi.advanceTimersByTimeAsync(50);
+    expect((await e.sequence(s.uri)).chapters[0]?.posts.map((p) => p.uri)).toEqual([b.uri, a.uri]);
+  });
+
   it("keeps the #restrict dimension an intent leaves out, as the engine merges (m3r-2)", async () => {
     const e = new MockEngine({ sendMs: 10 });
     const target = (await e.members(FORUM_URI, {})).find(

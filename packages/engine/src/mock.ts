@@ -2681,11 +2681,12 @@ export class MockEngine implements EngineApi {
     const s = this.seqRec(uri);
     if (splitAtUri(post)?.collection !== COLL.post)
       throw err("invalid_input", `${post} is not a post`);
+    // refused before enqueueing, as organisation.rs `seq_add` does
+    const ch = s.chapters[at.chapter];
+    if (!ch) throw err("invalid_input", "No such chapter.");
+    if (at.index > ch.posts.length) throw err("invalid_input", "No such sequence position.");
     return this.write(false, () => {
-      const ch = s.chapters[at.chapter];
-      if (!ch) throw err("invalid_input", "No such chapter.");
-      if (at.index > ch.posts.length) throw err("invalid_input", "No such sequence position.");
-      ch.posts.splice(at.index, 0, post);
+      ch.posts.splice(Math.min(at.index, ch.posts.length), 0, post);
       return { uri, cid: fakeCid(`${uri}@${this.tick()}`), topics: this.seqTopics() };
     });
   }
@@ -2700,14 +2701,15 @@ export class MockEngine implements EngineApi {
 
   async seqMove(uri: AtUri, from: SequencePosition, to: SequencePosition): Promise<WriteTicket> {
     const s = this.seqRec(uri);
+    // refused before enqueueing, as organisation.rs `seq_move` does; the destination index is
+    // read after the entry is removed
+    const src = s.chapters[from.chapter];
+    const dst = s.chapters[to.chapter];
+    const room = (dst?.posts.length ?? 0) - (from.chapter === to.chapter ? 1 : 0);
+    if (!src || !dst || from.index >= src.posts.length || to.index > room) {
+      throw err("invalid_input", "No such sequence position.");
+    }
     return this.write(false, () => {
-      const src = s.chapters[from.chapter];
-      const dst = s.chapters[to.chapter];
-      // the destination index is read after the entry is removed (organisation.rs `seq_move`)
-      const room = (dst?.posts.length ?? 0) - (from.chapter === to.chapter ? 1 : 0);
-      if (!src || !dst || from.index >= src.posts.length || to.index > room) {
-        throw err("invalid_input", "No such position.");
-      }
       const [moved] = src.posts.splice(from.index, 1);
       if (moved !== undefined) dst.posts.splice(to.index, 0, moved);
       return { uri, cid: fakeCid(`${uri}@${this.tick()}`), topics: this.seqTopics() };
