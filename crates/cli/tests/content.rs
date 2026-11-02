@@ -1050,6 +1050,7 @@ fn a_spilled_body_is_edited_as_its_text() {
 /// that still shows (m3m4-continuation-5, `limits.md` `BODY_BLOB_WAIT_MS`). One that cannot be
 /// downloaded at all shows its excerpt, and a warning names it.
 #[test]
+#[allow(clippy::disallowed_methods)] // a real clock for a real process
 fn read_waits_for_a_slow_spilled_body() {
     use lessdugin_testkit::fake_pds::Fault;
     let net = Net::new();
