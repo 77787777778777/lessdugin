@@ -98,7 +98,44 @@ Normative details of the underlying behaviour live in `data-model.md` (records, 
   not). New optional output field: `BodySource.cid`, the current record CID (not a body's blob
   CID), taken with the markdown and profile from one model/declaration view. A client combining
   this source with `raw` for an edit MUST require equal CIDs and retry otherwise (§3.4).
-- **After the freeze (M5).** New optional request field: `WikiDraft.base` (§3.5 `wiki_edit`, §4.4), the page head the author edited, written as the only parent; `wiki_edit` refuses an edit whose `base` is no longer the cached canonical revision with `conflict` (`detail.kind = "wikiHeadMoved"`). Without it the v0 behaviour is kept (the current canonical revision, or none for a new page). **Orchestrator decision O-2, flagged for the U7 review** (`social.md` §20.2). New optional output field: `ModQueue.banners`, with the banner codes `applicantsViaHints` and `applicantsNotDiscovered` (§3.4 `mod_queue`): in approval mode the queue says that applicants are found only through CORE+ hints, more strongly with direct sources (`sync.md` §4.4). **Orchestrator decision O-8, flagged for the U7 review** (`social.md` §20.2). New optional request argument: `get_post(uri, sequence?)` (§3.4; TypeScript `getPost(uri, sequence?)`, the Rust `get_post_in`), the sequence the reader came from, which next and previous follow (`social.md` §14) and which records the sequence's "continue reading" position; new optional output field `SequenceView.continueReading` with the new DTO `ReadingPosition`; the local family `seqpos` is exported and imported (§3.6). New optional request field: `EditOpts.dropLinkCard` (§3.5 `edit`), which writes a post draft's `link` as given, so a client can drop a card and keep the link (the v0 result of a draft of the uri alone, see "After the freeze (M4)").
+- **After the freeze (M5).** Implemented (they rejected with `unsupported` in v0):
+  `forum_discover`, `tags`, `tag`, `sequences`, `sequence`, `user`, `search`, `wiki_edit`,
+  `seq_create`, `seq_edit`, `seq_add`, `seq_remove`, `seq_move` (§§3.2–3.5). New operation:
+  `backlinks(uri)` (§3.4). Request DTOs first declared to the generated schema
+  (`testdata/dto/dto-1.d.ts`) in M5, with the shapes v0's TypeScript declared: `SearchQuery`,
+  `SequenceDraft`, `SequenceChapterDraft`, `SequencePosition`, `WikiDraft` (§4.4). New optional
+  output field: `PostView.tagRelevance` with the new DTO `PostTag` (§4.2), the viewer's own tag
+  votes and tag relevance that v0 listed as planned. `PostSummary.tags` now lists the slugs that
+  apply to the post (`applies(p, t)`, `social.md` §13.3), sorted, where v0 listed the post's
+  declared `tags` in the author's order (7f7ca1f): an author's declared slug without a page no
+  longer shows, and another user's tag vote can add one. The shape is unchanged; the meaning is
+  the one `social.md` §1.1 names among the per-item fold outputs ("applied tags"), and edit forms
+  read the declared tags from `raw`, not from the summary. This is a **deliberate semantic
+  exception to the freeze, flagged for the U7 review** like O-12 (review test-integrity-3). New
+  optional request field: `WikiDraft.base` (§3.5 `wiki_edit`, §4.4), the page head the author
+  edited, written as the only parent; `wiki_edit` refuses an edit whose `base` is no longer the
+  cached canonical revision with `conflict` (`detail.kind = "wikiHeadMoved"`). Without it the v0
+  behaviour is kept (the current canonical revision, or none for a new page). **Orchestrator
+  decision O-2, flagged for the U7 review** (`social.md` §20.2). New optional output field:
+  `ModQueue.banners`, with the banner codes `applicantsViaHints` and `applicantsNotDiscovered`
+  (§3.4 `mod_queue`): in approval mode the queue says that applicants are found only through
+  CORE+ hints, more strongly with direct sources (`sync.md` §4.4). **Orchestrator decision O-8,
+  flagged for the U7 review** (`social.md` §20.2). New optional request argument:
+  `get_post(uri, sequence?)` (§3.4; TypeScript `getPost(uri, sequence?)`, the Rust
+  `get_post_in`), the sequence the reader came from, which next and previous follow (`social.md`
+  §14) and which records the sequence's "continue reading" position; new optional output field
+  `SequenceView.continueReading` with the new DTO `ReadingPosition`; the local family `seqpos` is
+  exported and imported (§3.6). New optional request field: `EditOpts.dropLinkCard` (§3.5
+  `edit`), which writes a post draft's `link` as given, so a client can drop a card and keep the
+  link (the v0 result of a draft of the uri alone, see "After the freeze (M4)").
+- **After the freeze (M6).** New operations: `forum_indexers(ref)` (§3.2) and
+  `audit_indexer(forum)` (§3.3), with the DTOs `ForumIndexer`, `AuditReport`, `AuditCheck`,
+  `AuditCounts`, `AuditFinding` and the enum `AuditKind` (§4.3). New Rust-only operations for
+  native hosts and the indexer (not dispatched by the wasm binding, §3.9): `list_posts_page`,
+  `hydrate_indexer_page`, `hydrate_indexer_records`, `poll_indexer_changes`,
+  `indexer_post_ordering`, `indexer_thread_ordering`, `indexer_participants`, `indexer_forums`,
+  `indexer_head_hints`. New `EngineConfig` fields: `indexer_mode` and `stored_indexer_consent`
+  (§2).
 - **Errors.** Operations return `Result<T, EngineError>`; `EngineError` serialises as
   `{ "code": <string>, "message": <string>, "retryable": bool, "detail"?: object }` with codes:
   `auth_required`, `not_found`, `invalid_ref`, `invalid_input`, `conflict`, `rate_limited`,
@@ -124,7 +161,11 @@ EngineConfig {
   jetstream: Vec<Url>,              // default jetstream.us-east / us-west
   constellation: Option<Url>,       // default constellation.microcosm.blue (Assisted only)
   slingshot: Option<Url>,           // hint-only identity fallback
+  indexer_mode: IndexerMode,        // Forum (default): configured and consented indexers may be
+                                    // used; None: no indexer at all, whatever was consented (M6)
   indexers: Vec<IndexerConsent>,    // user-configured or consented forum indexers
+  stored_indexer_consent: bool,     // also use the consents stored on this device, global or
+                                    // for one forum (`Settings.indexers`) (M6)
   user_agent: String,
   platform: Platform,               // Native | Browser (concurrency limits, CORS rules)
   parity_now_ms: Option<i64>,       // test-only parity mode (§2.1); None in production
@@ -194,6 +235,7 @@ when the engine is dropped or the corresponding stop method is called.
 | Operation | Result / notes |
 |---|---|
 | `forum_open(ref)` | `ForumView` header (§4.3). Resolves the declaration (first open fetches a proof), schedules authority sync: authorities never synced are synced now (P0), stale ones are queued. It emits `Changed [Forum]` only if that sync changed the cache (a record, or a repo's status), so re-querying on `Changed` cannot loop on an authority that stays unavailable; an authority whose sync failed is not tried again by `forum_open` for `FORUM_REOPEN_MS`. |
+| `forum_indexers(ref)` | `Vec<ForumIndexer { url, did?, note?, consented }>` (M6): the forum's declared `discovery.indexers` entries that pass validation (`sync.md` §2.4), in declaration order, each with this device's consent state: `consented` when the URL is configured (`EngineConfig.indexers`) or has a stored consent, global or for this forum, and never with `indexer_mode = None`. It reads the cached declaration and local state only and never contacts an indexer, so it answers the same with `direct` sources (clients show the list, so the user can consent or not). Errors: those of resolving the forum (`invalid_ref`, `not_found`); `invalid_input` when the stored consent setting is unreadable |
 | `forum_discover(q)` | `Vec<ForumSummary>` (relay + owners' listings + indexers; grouped by owner). M5 (§3.9) |
 | `forum_follow(uri, alias?)`, `forum_unfollow(uri)`, `followed()` | local; `followed()` also seeds from the user's own `membership` records |
 | `forum_create(ForumDraft)` | `WriteTicket`; writes the declaration and the owner's membership in one `applyWrites` |
@@ -211,6 +253,7 @@ when the engine is dropped or the corresponding stop method is called.
 | Operation | Notes |
 |---|---|
 | `sync_forum(uri, SyncOpts { budget_ms, max_requests, full })` | `SyncReport`. User-initiated: stale collection lists are refreshed (`sync.md` §5.2) and up to `REJECTED_RECHECK_BATCH` rejected candidates are confirmed again, cheapest first (`sync.md` §4.2.1) |
+| `audit_indexer(forum)` | `AuditReport` (M6, `sync.md` §15.4): the manual A1–A5 audit of the forum's one consented indexer (heads, changes, records, digest and aggregates, proofs), each check with its `counts` and `findings` (`contradiction`, `omission`, `lag`), and the totals. Findings are reported, never acted on: they do not demote or deselect the indexer. Errors: `invalid_input` when the `sources` in effect are `direct` (no indexer is contacted), when the forum has no consented indexer, or more than one ("exactly one"); `blocked` when the consented endpoint violates the endpoint policy; the errors of the audit's requests (`network`, …). The Rust method returns `Option<AuditReport>` and never `None` (the wasm binding would map it to `invalid_input`) |
 | `sync_thread(post_or_comment_uri, SyncOpts)` | P0 fetch of the thread's participants' ranges; opens an unknown forum from the record itself; `degraded` reflects the state after the sync |
 | `live_tail()` | long-lived: Jetstream / polling / indexer `getChanges`, feeds the dirty queue; runs `live_step` rounds until `live_stop()` |
 | `live_step() -> LiveRound` | one `live_tail` round (seeding, head polls, reconciles, up to `LIVE_TAIL_BATCH` queued syncs, handle verification, tombstone GC); for one-shot use (`tail --once`). `LiveRound { polled, reconciles, synced, changed: Vec<forum uri>, verified, gc, nextMs }` is a Rust value, not a DTO |
@@ -240,6 +283,7 @@ SyncReport { dto, forum, reposTotal, reposComplete, reposStale, reposUnavailable
 | `get_post(uri, sequence?)` | `PostView`. `sequence` (M5) is the sequence the reader came from (`social.md` §14, step 1 of next and previous): when it is an eligible sequence that contains the post, `PostView.sequences` navigates it instead of the author's or the top listed one, and the post becomes that sequence's "continue reading" position on this device (`("loc", "seqpos", sequence)`, device-wide like the read marks, in `export_local` and `import_local`), with `Changed [Thread(sequence)]` when it moved. A `sequence` that does not contain the post is ignored and records nothing; an unparsable one is `invalid_ref`. Rust: `get_post_in(uri, sequence)`; `get_post(uri)` is `get_post_in(uri, None)` |
 | `get_thread(uri, ThreadOpts { sort, unreadOnly })` | `ThreadView` (comments in pre-order with depth) |
 | `history(uri)` | `HistoryView` |
+| `backlinks(uri)` | `Vec<PostSummary>` (M5, "linked from", `social.md` §16 Pingbacks): the listed posts of the forum of `uri` whose rendered bodies link to `uri` (any at-uri: a post, a comment, a record), by uri. Links come from the shared renderer's output over the synced inline bodies, never from a record's `markdown.links` hint, and a spilled body (`textBlob`) is not read here, so it does not count. Errors: `invalid_ref` (not an at-uri), `not_found` (no forum is known for it) |
 | `tags(forum)` / `tag(forum, slug)` | `Vec<TagSummary>` / `TagView` (M5) |
 | `sequences(forum)` / `sequence(uri)` | `Vec<SequenceSummary>` / `SequenceView` (M5) |
 | `user(forum?, actor)` | `UserView` (M5) |
@@ -463,19 +507,20 @@ engine API v0. Only test vectors remain unavailable in release modules:
 |---|---|
 | `run_vector` | never in a release module (the social vectors run natively and in the wasm32 test harness) |
 
-**Planned additions** (compatible, not in v0):
-
-| Operation / field | Milestone | Notes |
-|---|---|---|
-| viewer's own tag votes and tag relevance on `PostView` | M5 | `applies(p, t)` (`social.md` §13.3); until then a client only knows the votes it made itself |
-| `backlinks(uri)` ("linked from") | M5 | listed posts linking to an item, from rendered bodies (`social.md` §16 Pingbacks) |
+**Planned additions** (compatible, not in v0): none remain. The M5 rows are implemented: the viewer's own tag votes and tag relevance on `PostView` (`PostView.tagRelevance`, §4.2) and `backlinks(uri)` (§3.4).
 
 **Rust API only** (native hosts and tests; not dispatched by the wasm binding): `acting_as`
 (§3.1), the native login plumbing (`bind_login`, `record_account`, `refresh_account`,
 `account`), identity helpers (`resolve_identity`, `resolve_identity_fresh`,
 `invalidate_identity`), `read_mark(post)` (the read mark in µs behind `unread` and
 `unreadComments`) and `muted()` (the DIDs behind `mutes()`). `live_step` and `outbox_flush`
-are reachable from the worker as glue (§5).
+are reachable from the worker as glue (§5). The M6 indexer entry points of native hosts and
+the indexer (`sync.md` §15): `list_posts_page(query, fallback_sync)` (a first page hydrated
+from an indexer, else one bounded PDS sync, then `list_posts`), `hydrate_indexer_page`,
+`hydrate_indexer_records`, `poll_indexer_changes`, and the hints `indexer_post_ordering`,
+`indexer_thread_ordering`, `indexer_participants`, `indexer_forums` and `indexer_head_hints`.
+They return ordering and discovery hints, or admit proven records; displayed values always come
+from the local fold, and with `direct` sources none of them contacts an indexer.
 
 ## 4. DTO schema (`dto/1`)
 
@@ -523,7 +568,9 @@ source); `StyledDoc` is not part of the JSON schema.
 ### 4.2 Posts and threads
 
 ```
-PostSummary   { uri, cid, forum, author: ActorView, kind, title?, excerpt, tags: Vec<slug>,
+PostSummary   { uri, cid, forum, author: ActorView, kind, title?, excerpt,
+                tags: Vec<slug> /* the slugs t with applies(p, t), sorted (social.md §13.3);
+                                   not the declared post.tags (M5, §1) */,
                 tier: personal|frontpage|curated, pinned: bool, locked: bool,
                 createdAtMs, tRankMs, commentCount, lastCommentAtMs?, score: ScoreView,
                 state: ItemState, badges: Badges, unreadComments?: u32, link?: ExternalLinkView,
@@ -531,7 +578,13 @@ PostSummary   { uri, cid, forum, author: ActorView, kind, title?, excerpt, tags:
 PostList      { dto, forum, sort, filter, items: Vec<PostSummary>, cursor?, completeness,
                 banners?: Vec<Banner> }
 PostView      { dto, post: PostSummary, body: RenderedBody, reacts: Vec<ReactTally>,
-                history: { revisions: u32, redacted: bool }, sequences: Vec<SequenceNav> }
+                history: { revisions: u32, redacted: bool }, sequences: Vec<SequenceNav>,
+                tagRelevance?: Vec<PostTag> /* M5: by slug, every slug with rel(p, slug) ≠ 0
+                or a tag vote of the viewer's; empty for a post that is not listed, except to
+                the forum's authorities (like its score) */ }
+PostTag       { slug, relevance: i64 /* rel(p, slug), social.md §13.3 */, applies: bool,
+                mine?: KarmaValue /* the viewer's tag vote in its cached opinion record (OP3,
+                OP4: conflicting entries give none); a vote still in the outbox is not shown */ }
 CommentNode   { uri, cid, root: uri /* the thread the engine placed it in */, parent?: uri,
                 depth: u32, author: ActorView, body: RenderedBody,
                 quote?: TextQuote, quoteAnchor?: Anchor, createdAtMs, tRankMs, score: ScoreView,
@@ -603,6 +656,14 @@ RawView       { dto, uri, cid?, root?: uri /* a comment's thread, as placed by t
                 assertions: Vec<{ uri, cid, valid, record, rule?, status?: ModLogStatus }>,
                 state?: ItemState, score?: ScoreView }
 VerifyReport  { dto, uri, result: proven|absent|failed, rev?, commitCid?, keySource, checks: Vec<{ name, ok, detail? }> }
+ForumIndexer  { url /* https */, did?, note?, consented: bool }             // M6, §3.2 forum_indexers
+AuditReport   { forum, indexer /* its DID */, endpoint, checks: Vec<AuditCheck>,
+                counts: AuditCounts /* the totals */ }                      // M6, §3.3 audit_indexer
+AuditCheck    { name /* A1 heads … A5 proofs, sync.md §15.4 */, counts: AuditCounts,
+                findings: Vec<AuditFinding> }
+AuditCounts   { checked, contradictions, omissions, lag }
+AuditFinding  { check, kind: AuditKind, subject /* uri or DID */, detail }
+AuditKind     = contradiction|omission|lag
 ```
 
 ### 4.4 Operation inputs and results
