@@ -433,6 +433,7 @@ export type ModLogStatus = "effective" | "overridden" | "lapsed" | "expired" | "
 export interface ModQueue {
     dto: DtoVersion;
     items: ModQueueItem[];
+    banners?: Banner[];
 }
 
 export interface ModQueueItem {

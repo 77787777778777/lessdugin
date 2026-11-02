@@ -632,6 +632,10 @@ export interface ModQueueItem {
 export interface ModQueue {
   dto: DtoVersion;
   items: ModQueueItem[];
+  /** Approval mode (sync.md §4.4, decision O-8): `applicantsViaHints` (applicants are found
+   * only through CORE+ hints) or `applicantsNotDiscovered` (direct sources: none are looked
+   * for). Shown above the queue. */
+  banners?: Banner[];
 }
 
 /** The status of a mod-log entry (social.md §4.12). */

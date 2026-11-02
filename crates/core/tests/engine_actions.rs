@@ -305,7 +305,12 @@ fn the_approval_mode_mod_queue_says_where_applicants_come_from() {
             .collect::<Vec<_>>()
     };
     assert_eq!(codes(&w.alice), ["applicantsViaHints"]);
-    block_on(w.alice.engine.set_setting("sources", Some(&json!("direct")))).unwrap();
+    block_on(
+        w.alice
+            .engine
+            .set_setting("sources", Some(&json!("direct"))),
+    )
+    .unwrap();
     assert_eq!(codes(&w.alice), ["applicantsNotDiscovered"]);
     let q = block_on(w.alice.engine.mod_queue(&w.forum)).unwrap();
     assert!(q.banners[0].message.contains("direct sources"), "{q:?}");

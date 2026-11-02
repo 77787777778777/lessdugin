@@ -4,9 +4,7 @@
 //! They read the cache only (a forum whose declaration is not cached is opened first) and
 //! return `dto/1` objects that are byte-identical for the same cache, local state and clock.
 //!
-//! E        let direct = self.sources().await? == super::Sources::Direct;
-        self.with_views(&l, &[], &people, |v| v.mod_queue(direct))
-            .awaitery view comes from the forum model's full fold (`social.md` §1); a sort, filter or thread
+//! Every view comes from the forum model's full fold (`social.md` §1); a sort, filter or thread
 //! that the model's base fold did not compute is re-ranked from its cached layers
 //! ([`crate::model::ForumModel::orderings`]), never refolded. `list_posts`, `recent_discussion`
 //! and `mod_log` page with an opaque cursor (the offset into the sorted list, as decimal); a
