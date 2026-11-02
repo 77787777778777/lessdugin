@@ -113,7 +113,10 @@ describe("startEngine", () => {
     const { worker, state } = fakeWorker();
     const c = start({ worker });
     expect(await c.getPost("at://x")).toEqual({ op: "getPost" });
-    expect(state.calls.at(-1)).toEqual(["getPost", ["at://x"]]);
+    // getPost's optional sequence context (engine-api.md §3.4) is sent as null when left out
+    expect(state.calls.at(-1)).toEqual(["getPost", ["at://x", null]]);
+    await c.getPost("at://x", "at://s");
+    expect(state.calls.at(-1)).toEqual(["getPost", ["at://x", "at://s"]]);
     await c.forumDiscover("rust");
     expect(state.calls.at(-1)).toEqual(["forumDiscover", ["rust"]]);
     await c.backlinks("at://x");
@@ -124,6 +127,7 @@ describe("startEngine", () => {
     await c.outboxPump();
     await c.liveTail();
     expect(state.calls.map(([op]) => op)).toEqual([
+      "getPost",
       "getPost",
       "forumDiscover",
       "backlinks",
