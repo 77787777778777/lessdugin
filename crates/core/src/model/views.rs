@@ -42,7 +42,7 @@ use crate::dto::{
     CommentSort, Completeness, DtoVersion, ExternalLinkView, ForumRole, ForumSummary, ForumView,
     HandleState, HiddenReason, HistorySummary, HistoryView, ItemState, KarmaValue, MemberView,
     MembersQuery, MembershipMode as DtoMode, ModLogEntry, ModLogStatus, ModQueue, ModQueueItem,
-    ModRole, ModeratorView, MyOpinion, PostKind, PostSummary, PostView, ReactTally, RenderedBody,
+    ModRole, ModeratorView, MyOpinion, PostKind, PostSummary, PostView, ReactTally, ReadingPosition, RenderedBody,
     ScoreView, SequenceNav, SequenceSummary, SequenceView, Stance as DtoStance, TagSummary,
     TagView, TextQuote, ThreadRoot, ThreadView, Tier, VersionEntry, VersionRef, ViewerCaps,
 };
@@ -812,6 +812,12 @@ impl Views<'_> {
 
     /// The view of post `uri` with its rendered body and reacts (M5: sequences).
     pub fn post_view(&self, uri: &str) -> Option<PostView> {
+        self.post_view_in(uri, None)
+    }
+
+    /// [`Self::post_view`] read from sequence `from` (`social.md` §14 "the sequence the reader
+    /// came from"): its navigation follows `from` when that sequence contains the post.
+    pub fn post_view_in(&self, uri: &str, from: Option<&str>) -> Option<PostView> {
         let post = self.post_summary(uri)?;
         let x = self.model.skel(uri)?;
         let listed = self.listed(uri);
@@ -828,7 +834,7 @@ impl Views<'_> {
             body,
             reacts,
             history: self.history_summary(uri),
-            sequences: self.sequence_nav(uri),
+            sequences: self.sequence_nav(uri, from),
         })
     }
 
@@ -995,12 +1001,32 @@ impl Views<'_> {
             sequence: self.sequence_summary(uri)?,
             body,
             chapters,
+            continue_reading: None,
         })
     }
 
-    /// Sequence navigation around the first displayable occurrence of a post. The post author's
-    /// eligible sequence wins (score desc, uri asc), then a listed sequence in the same order.
-    pub fn sequence_nav(&self, post: &str) -> Vec<SequenceNav> {
+    /// The "continue reading" position of `sequence` (`social.md` §14, §16) from a stored row:
+    /// only while `post` is a displayable entry of it, so a stale or planted row shows nothing.
+    pub fn continue_reading(
+        &self,
+        sequence: &str,
+        post: &str,
+        at_ms: i64,
+    ) -> Option<ReadingPosition> {
+        self.sequence_posts(sequence)
+            .iter()
+            .any(|p| p.uri == post)
+            .then(|| ReadingPosition {
+                post: post.to_owned(),
+                at_ms,
+            })
+    }
+
+    /// Sequence navigation around the first displayable occurrence of a post (`social.md`
+    /// §14). The context is `from`, the sequence the reader came from, when it is eligible and
+    /// contains the post; else the post author's eligible sequence (score desc, uri asc); else a
+    /// listed sequence in the same order.
+    pub fn sequence_nav(&self, post: &str, from: Option<&str>) -> Vec<SequenceNav> {
         let Ok(library) = self.model.view.library.as_ref() else {
             return Vec::new();
         };
@@ -1030,7 +1056,10 @@ impl Views<'_> {
                 .cmp(&self.raw_score(a).map(|s| s.score).unwrap_or(0))
                 .then_with(|| a.cmp(b))
         });
-        let selected = own.first().copied().or_else(|| {
+        let came_from = from
+            .and_then(|s| library.eligible.get(s))
+            .filter(|s| contains(s));
+        let selected = came_from.or_else(|| own.first().copied()).or_else(|| {
             let mut listed: Vec<_> = library.listed.iter().filter(|uri| contains(uri)).collect();
             listed.sort_by(|a, b| {
                 self.raw_score(b)

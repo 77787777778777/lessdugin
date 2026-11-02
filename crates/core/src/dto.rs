@@ -972,6 +972,19 @@ dto! {
         #[serde(skip_serializing_if = "Option::is_none")]
         pub body: Option<RenderedBody>,
         pub chapters: Vec<ChapterView>,
+        /// "Continue reading" (`social.md` §14, §16; local): the post of this sequence the
+        /// reader last opened from it (`get_post` with this sequence as its context), while it
+        /// is a displayable entry. Absent in parity mode (`engine-api.md` §2.1).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub continue_reading: Option<ReadingPosition>,
+    }
+}
+
+dto! {
+    /// Where the reader stopped in a sequence: the last post opened from it, and when.
+    pub struct ReadingPosition {
+        pub post: String,
+        pub at_ms: i64,
     }
 }
 

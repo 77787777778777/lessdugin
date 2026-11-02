@@ -175,7 +175,22 @@ impl<H: Host> Engine<H> {
     /// `get_post(uri)`: the post with its rendered body and reacts (hidden posts carry an
     /// empty body and no reacts).
     pub async fn get_post(&self, uri: &str) -> Result<PostView, EngineError> {
+        self.get_post_in(uri, None).await
+    }
+
+    /// `get_post(uri, sequence?)`: [`Self::get_post`] opened from `sequence`, the sequence the
+    /// reader came from (`social.md` §14): when it is eligible and contains the post, `sequences`
+    /// navigates it, and it becomes the sequence's "continue reading" position on this device
+    /// (`SequenceView.continueReading`, §16).
+    pub async fn get_post_in(
+        &self,
+        uri: &str,
+        sequence: Option<&str>,
+    ) -> Result<PostView, EngineError> {
         let u = parse_uri(uri)?;
+        let from = sequence
+            .map(|s| parse_uri(s).map(|s| s.to_string()))
+            .transpose()?;
         let key = self.forum_of(&u).await?;
         let l = self.loaded(&key).await?;
         let uri = u.to_string();
@@ -185,9 +200,18 @@ impl<H: Host> Engine<H> {
             .await;
         let mut values = vec![uri.clone()];
         values.extend(sequence_contexts(&l.model, &uri));
-        self.with_views(&l, &values, one, |v| v.post_view(&uri))
+        let view = self
+            .with_views(&l, &values, one, |v| v.post_view_in(&uri, from.as_deref()))
             .await?
-            .ok_or_else(|| EngineError::not_found(format!("no post {uri} in the forum")))
+            .ok_or_else(|| EngineError::not_found(format!("no post {uri} in the forum")))?;
+        if let Some(nav) = view
+            .sequences
+            .first()
+            .filter(|n| from.as_deref() == Some(n.sequence.as_str()))
+        {
+            self.set_reading_position(&nav.sequence, &uri).await?;
+        }
+        Ok(view)
     }
 
     /// `get_thread(uri, ThreadOpts)`: the post and its displayed comments in pre-order with
