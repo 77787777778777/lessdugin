@@ -16,8 +16,7 @@ import { ErrorView, errorMessage, Loading } from "../../components/Status.tsx";
 import { toasts } from "../../components/Toast.tsx";
 import { useEngine } from "../../engine/context.tsx";
 import { qk, useActiveAccount } from "../../engine/queries.ts";
-import { useAnnounceQueued } from "../../engine/queued.ts";
-import { writeStore } from "../../engine/writes.ts";
+import { useSendWrite } from "../../engine/queued.ts";
 import { cleanName } from "../../lib/text.ts";
 import { EMPTY_WIKI_FORM, type WikiForm, wikiFormOf } from "../../lib/wiki.ts";
 import ui from "../../styles/ui.module.css";
@@ -47,7 +46,7 @@ export function WikiPageForm({
   const engine = useEngine();
   const qc = useQueryClient();
   const navigate = useNavigate();
-  const announceQueued = useAnnounceQueued();
+  const send = useSendWrite();
   const { forum } = useForumView();
   const ids = { name: useId(), description: useId(), body: useId(), summary: useId() };
   const [name, setName] = useState(initial.name);
@@ -62,7 +61,9 @@ export function WikiPageForm({
   const tags = useQuery({ queryKey: qk.tags(forum.uri), queryFn: () => engine.tags(forum.uri) });
   // the forum's tags, and any parent the record names that is not one (kept unless unticked)
   const choices = [
-    ...(tags.data ?? []).filter((t) => t.slug !== slug).map((t) => ({ slug: t.slug, name: t.name })),
+    ...(tags.data ?? [])
+      .filter((t) => t.slug !== slug)
+      .map((t) => ({ slug: t.slug, name: t.name })),
     ...initial.parentTags
       .filter((p) => !(tags.data ?? []).some((t) => t.slug === p))
       .map((p) => ({ slug: p, name: p })),
@@ -90,16 +91,11 @@ export function WikiPageForm({
     setBusy(true);
     setProblem(null);
     try {
-      const ticket = await engine.wikiEdit(forum.uri, slug, draft);
-      writeStore.track(ticket);
-      const final = await writeStore.settle(ticket.id);
-      if (final.kind === "failed") throw final.error;
-      if (final.kind === "queued") {
-        announceQueued("Your page edit", final.state);
+      const done = await send(await engine.wikiEdit(forum.uri, slug, draft), "Your page edit");
+      if (done === null) {
         void navigate({ to: "/outbox" });
         return;
       }
-      if (final.kind !== "done") return;
       toasts.show({ message: "Page saved (a public revision)", tone: "success" });
       void qc.invalidateQueries({ queryKey: qk.tag(forum.uri, slug) });
       void qc.invalidateQueries({ queryKey: qk.tags(forum.uri) });

@@ -16,6 +16,7 @@ import { ForumLayout } from "./pages/forum/ForumLayout.tsx";
 import { ForumMembersPage } from "./pages/forum/ForumMembersPage.tsx";
 import { ForumModPage } from "./pages/forum/ForumModPage.tsx";
 import { ForumNewPostPage } from "./pages/forum/ForumNewPostPage.tsx";
+import { ForumNewSequencePage } from "./pages/forum/ForumNewSequencePage.tsx";
 import { ForumPostsPage } from "./pages/forum/ForumPostsPage.tsx";
 import { ForumSequencesPage } from "./pages/forum/ForumSequencesPage.tsx";
 import { ForumSettingsPage } from "./pages/forum/ForumSettingsPage.tsx";
@@ -30,6 +31,7 @@ import { NotificationsPage } from "./pages/NotificationsPage.tsx";
 import { OutboxPage } from "./pages/OutboxPage.tsx";
 import { PostPage } from "./pages/PostPage.tsx";
 import { SearchPage } from "./pages/SearchPage.tsx";
+import { SequenceEditPage } from "./pages/SequenceEditPage.tsx";
 import { SequencePage } from "./pages/SequencePage.tsx";
 import { SettingsPage } from "./pages/SettingsPage.tsx";
 import { UserPage } from "./pages/UserPage.tsx";
@@ -115,6 +117,11 @@ const forumSeqsRoute = createRoute({
   path: "seqs",
   component: ForumSequencesPage,
 });
+const forumNewSeqRoute = createRoute({
+  getParentRoute: () => forumRoute,
+  path: "seqs/new",
+  component: ForumNewSequencePage,
+});
 const forumModRoute = createRoute({
   getParentRoute: () => forumRoute,
   path: "mod",
@@ -145,6 +152,11 @@ const sequenceRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/s/$author/$rkey",
   component: SequencePage,
+});
+const sequenceEditRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/s/$author/$rkey/edit",
+  component: SequenceEditPage,
 });
 const userRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -208,6 +220,7 @@ export const routeTree = rootRoute.addChildren([
     forumTagEditRoute,
     forumTagHistoryRoute,
     forumSeqsRoute,
+    forumNewSeqRoute,
     forumModRoute,
     forumMembersRoute,
     forumSettingsRoute,
@@ -215,6 +228,7 @@ export const routeTree = rootRoute.addChildren([
   postRoute,
   commentRoute,
   sequenceRoute,
+  sequenceEditRoute,
   userRoute,
   atRoute,
   notificationsRoute,
