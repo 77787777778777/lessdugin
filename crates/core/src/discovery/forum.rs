@@ -75,6 +75,10 @@ use crate::xrpc::{CallOpts, Service};
 /// Newcomer candidates confirmed and synced per forum and command (§4.4, *tunable*).
 pub const NEWCOMER_BUDGET: usize = 500;
 
+/// The [`SyncOpts::newcomers`] source of relay hints: a repo with some membership, not one of
+/// this forum, so it never re-opens a rejected candidate's back-off (§4.4).
+pub const RELAY_SOURCE: &str = "relay";
+
 /// A progress callback of [`Syncer::sync_forum`]: `(done, total)`, the repos synced so far and
 /// the repos planned so far (the total grows as each step plans its candidates). Called as each
 /// repo finishes, on the task that drives the sync.
@@ -693,9 +697,12 @@ impl<H: Host> Syncer<H> {
             self.note_candidates(&key, &closure, &reports, &mut disc, &mut touched);
             repos.extend(reports);
 
-            // 6. newcomers from hints at P2, most recent first, within the budget
+            // 6. newcomers from hints at P2, most recent first, within the budget. A relay hint
+            //    names no forum, so it is no new hint for a rejected candidate (§4.4): those
+            //    wait out their back-off after the others, taking no place they could use.
             let mut seen = BTreeSet::new();
-            let newcomers: Vec<Candidate> = opts
+            let now = self.host().now_ms();
+            let (mut newcomers, waiting): (Vec<Candidate>, Vec<Candidate>) = opts
                 .newcomers
                 .iter()
                 .filter(|(d, _)| !done.contains(d) && seen.insert(d.clone()))
@@ -703,11 +710,17 @@ impl<H: Host> Syncer<H> {
                     Some(Candidate {
                         did: Did::parse(d).ok()?,
                         src: format!("hint:{src}"),
-                        hinted: true,
+                        hinted: src != RELAY_SOURCE,
                         granted: false,
                     })
                 })
-                .collect();
+                .partition(|c| {
+                    c.hinted
+                        || !disc
+                            .get(c.did.as_str())
+                            .is_some_and(|r| r.skip_rejected(now))
+                });
+            newcomers.extend(waiting);
             let (now_list, later) = newcomers.split_at(newcomers.len().min(budget));
             let jobs = self
                 .candidate_jobs(

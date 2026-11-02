@@ -202,22 +202,10 @@ impl<H: Host> Engine<H> {
             outer.report(done, total);
             p2.report(done, total);
         });
-        let res = async {
-            // CORE+ services provide only DID hints. The normal sync path still confirms every
-            // candidate at its own PDS before admitting or displaying any record. A failed hint
-            // source degrades discovery, not an already readable forum; PDS errors still fail.
-            let assisted = self.sources().await.unwrap_or(super::Sources::Direct);
-            if assisted == super::Sources::Assisted {
-                match self.discover_forum_hints(key).await {
-                    Ok(hints) => hints.apply_to(&mut opts),
-                    Err(e) => {
-                        tracing::warn!(forum = %key.uri, error = %e, "CORE+ discovery unavailable");
-                    }
-                }
-            }
-            self.syncer().sync_forum(&f, &opts).await
-        }
-        .await;
+        // CORE+ hints were resolved by the caller (`sync_forum` discovers them once); the normal
+        // sync path still confirms every candidate at its own PDS before admitting or
+        // displaying any record.
+        let res = self.syncer().sync_forum(&f, &opts).await;
         self.rt.invalidate(&f);
         let res = match res {
             Ok(fs) => {

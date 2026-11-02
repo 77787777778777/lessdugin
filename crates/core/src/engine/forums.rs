@@ -366,6 +366,12 @@ impl<H: Host> Engine<H> {
         Ok(self.active_account().await?.map(|a| a.did))
     }
 
+    /// The session flag that turns the relay newcomer source off (`sync.md` §4.4), shared by
+    /// the engine's clones.
+    pub(crate) fn relay_newcomers_off(&self) -> &std::sync::Arc<std::sync::atomic::AtomicBool> {
+        &self.rt.relay_newcomers_off
+    }
+
     /// `forum_discover(q)` (`engine-api.md` §3.9): the relay forum directory. Relay results
     /// are only owner hints; every returned declaration came from its owner's PDS and passed
     /// the ordinary record admission and validity checks. An owner that cannot be read is
