@@ -900,6 +900,7 @@ pub async fn edit(ctx: &Ctx, args: EditArgs) -> Result<(), CliError> {
     let mut opts = EditOpts {
         history: !args.no_history,
         summary: args.summary.clone(),
+        drop_link_card: false,
     };
     let (dir, foreign) = text_dir(ctx, args.message.as_ref(), args.file.as_deref());
     let given = text_arg(args.message, args.file.as_deref())?;
@@ -988,6 +989,7 @@ pub async fn publish_edit_draft(ctx: &Ctx, id: &str, doc: Doc, yes: bool) -> Res
     let opts = EditOpts {
         history: doc.get("history") != Some("false"),
         summary: doc.get("summary").map(str::to_owned),
+        drop_link_card: false,
     };
     queue_from_draft(ctx, &w, id, w.engine.edit(&uri, &d, &opts), "Edited").await
 }

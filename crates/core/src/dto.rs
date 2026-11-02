@@ -1714,6 +1714,11 @@ dto! {
         pub history: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub summary: Option<String>,
+        /// Write a post draft's `link` exactly as the draft gives it, dropping the cached card
+        /// (its title, description and thumb) even when the uri is the cached one: how a client
+        /// removes a link's card and keeps the link (`engine-api.md` §3.5 `edit`).
+        #[serde(default, skip_serializing_if = "is_false")]
+        pub drop_link_card: bool,
     }
 }
 
@@ -1722,6 +1727,7 @@ impl Default for EditOpts {
         Self {
             history: true,
             summary: None,
+            drop_link_card: false,
         }
     }
 }

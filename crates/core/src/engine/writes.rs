@@ -575,7 +575,10 @@ impl<H: Host> Engine<H> {
                 // a link to the uri the cached version links keeps its cached card (W3): a
                 // draft that names neither title nor description keeps the object whole, one
                 // that names some keeps the thumb, which no draft carries (robustness-7)
+                // unless the edit drops the card (EditOpts.dropLinkCard): then the draft's link
+                // is written as it is
                 let kept = match (&post.link, obj.get("link")) {
+                    _ if opts.drop_link_card => None,
                     (Some(l), Some(old))
                         if old.get("uri").and_then(Value::as_str) == Some(l.uri.as_str()) =>
                     {
