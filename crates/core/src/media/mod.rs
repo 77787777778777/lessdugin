@@ -1662,7 +1662,9 @@ impl<H: crate::host::Host> crate::engine::Engine<H> {
             if renders.contains(&x.cid) || renders.spilled(&x.did, blob).is_some() {
                 continue;
             }
-            if renders.spilled_retry_at(&x.did, blob).is_some_and(|t| now < t)
+            if renders
+                .spilled_retry_at(&x.did, blob)
+                .is_some_and(|t| now < t)
                 && !matches!(self.host().blob_open(blob).await, Ok(Some(_)))
             {
                 continue;
@@ -1695,7 +1697,9 @@ impl<H: crate::host::Host> crate::engine::Engine<H> {
         let now = self.host().now_ms();
         let owner = model.key.owner.as_str();
         if renders.spilled(owner, blob).is_some()
-            || renders.spilled_retry_at(owner, blob).is_some_and(|t| now < t)
+            || renders
+                .spilled_retry_at(owner, blob)
+                .is_some_and(|t| now < t)
                 && !matches!(self.host().blob_open(blob).await, Ok(Some(_)))
         {
             return;
@@ -1841,7 +1845,9 @@ impl<H: crate::host::Host> crate::engine::Engine<H> {
             // "Blob not found": missing, not retried (sync.md §11.1); nothing was stored. A
             // repo that is not served now (deactivated, taken down, suspended) is not a missing
             // blob: it stays pending and is asked for again
-            Err(HostError::HttpStatus(400, Some(name))) if REPO_UNAVAILABLE.contains(&name.as_str()) => {
+            Err(HostError::HttpStatus(400, Some(name)))
+                if REPO_UNAVAILABLE.contains(&name.as_str()) =>
+            {
                 return Err(HostError::HttpStatus(400, Some(name)).into());
             }
             Err(HostError::HttpStatus(400, _)) => return Ok(Spilled::Missing),

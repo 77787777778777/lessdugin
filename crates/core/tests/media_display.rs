@@ -510,6 +510,92 @@ fn a_spilled_body_is_fetched_from_its_authors_pds_and_rendered() {
 }
 
 #[test]
+fn another_authors_failing_copy_of_a_text_blob_does_not_change_a_body() {
+    // review m3m4-continuation-1: the spilled-body cache kept every result by the blob CID, so
+    // a post of mallory's naming bob's textBlob, which her PDS answers 400 for, made bob's body
+    // "missing" (and body_source refuse it) for the engine's lifetime, in any forum
+    let mut n = Net::new();
+    let bob = n
+        .net
+        .add_pds("bob.example.com")
+        .add_account("bob.example.com");
+    let mallory = n
+        .net
+        .add_pds("mallory.example.com")
+        .add_account("mallory.example.com");
+    let f = forum(&n, &bob);
+    let mf = forum(&n, &mallory);
+    let mut source = "# Bob's long text\n\n".to_owned();
+    while source.len() <= 65_536 {
+        source.push_str("Honest words. ");
+    }
+    let bob_post = spilled_post(&n, &bob, &f, source.as_bytes());
+    let blob = bob
+        .get(nsid::POST, bob_post.rsplit('/').next().unwrap())
+        .unwrap()["body"]["textBlob"]
+        .clone();
+    let at = n.now();
+    let v = json!({
+        "$type": nsid::POST, "forum": mf, "title": "Copy", "excerpt": "x",
+        "body": {"$type": nsid::MARKDOWN, "textBlob": blob}, "createdAt": dt(at),
+    });
+    let rkey = keys::post_rkey(&mf, tid_at_ms(at).as_str()).unwrap();
+    mallory.put(nsid::POST, &rkey, &v);
+    let mal_post = mallory.uri(nsid::POST, &rkey);
+    n.tick(MINUTE);
+    let e = n.device("anon", None);
+    n.net.clear_requests();
+    let m = read(&e, &mf, &mal_post);
+    assert_eq!(
+        m.body.notices,
+        [lessdugin_core::model::render::NOTICE_MISSING_BODY]
+    );
+    let b = read(&e, &f, &bob_post);
+    assert!(b.body.notices.is_empty(), "{:?}", b.body.notices);
+    assert!(b.body.html.contains("Honest words"));
+    assert_eq!(
+        blob_requests(&n),
+        [
+            (mallory.pds_base(), mallory.did().to_string()),
+            (bob.pds_base(), bob.did().to_string())
+        ],
+        "each author's copy is asked for at that author's PDS"
+    );
+    let src = block_on(e.body_source(&bob_post)).unwrap();
+    assert_eq!(src.markdown, source);
+    // and bob's verified source is the same bytes for mallory's reference
+    let m = block_on(e.get_post(&mal_post)).unwrap();
+    assert!(m.body.html.contains("Honest words"));
+}
+
+#[test]
+fn a_spilled_body_of_a_repo_that_is_not_served_now_stays_pending() {
+    // a deactivated (or taken-down, suspended) repo answers getBlob with HTTP 400 too; that is
+    // not a missing blob (sync.md §3.4, §11.1), so the body stays pending and is asked again
+    let mut n = Net::new();
+    let bob = n
+        .net
+        .add_pds("bob.example.com")
+        .add_account("bob.example.com");
+    let f = forum(&n, &bob);
+    let uri = spilled_post(&n, &bob, &f, b"# The whole body");
+    n.net.inject(
+        Fault::error(400, "RepoDeactivated", "Repo has been deactivated")
+            .on_nsid("com.atproto.sync.getBlob")
+            .once(),
+    );
+    let e = n.device("anon", None);
+    let pv = read(&e, &f, &uri);
+    assert_eq!(
+        pv.body.notices,
+        [lessdugin_core::model::render::NOTICE_SPILLED]
+    );
+    n.tick(lessdugin_core::limits::BODY_BLOB_RETRY_MS);
+    let pv = block_on(e.get_post(&uri)).unwrap();
+    assert_eq!(pv.body.text, "The whole body");
+}
+
+#[test]
 fn a_hidden_spilled_post_is_never_fetched() {
     // sync.md §11.4: hidden content is never prefetched. get_post fetched the textBlob of any
     // post it was asked for, and kept it, while the view rendered the hidden post empty

@@ -6,10 +6,12 @@
 //! SHA-256; the file is renamed to its final name only when the digest equals the CID's.
 //! On any failure the temporary file is removed and nothing is stored.
 //!
-//! One download runs per CID at a time (`sync.md` §12.2): it is a detached task, capped by
-//! `BLOB_TOTAL_TIMEOUT_MS`, that every `fetch` of the CID awaits, so a caller that stops
-//! waiting (the engine's `BODY_BLOB_WAIT_MS` for a spilled body) neither cancels it nor starts
-//! another, and the stored copy is there for the next caller.
+//! One download runs per (PDS, DID, CID) at a time (`sync.md` §12.2): it is a detached task,
+//! capped by `BLOB_TOTAL_TIMEOUT_MS`, that every `fetch` of that author's copy awaits, so a
+//! caller that stops waiting (the engine's `BODY_BLOB_WAIT_MS` for a spilled body) neither
+//! cancels it nor starts another, and the stored copy is there for the next caller. A fetch of
+//! the same CID from another author or PDS does not join it: that copy may fail where this one
+//! succeeds (review m3m4-continuation-1).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -35,14 +37,17 @@ pub const BLOB_READ_MAX: u32 = 1_048_576;
 /// Cap on the body of an error response from `getBlob`.
 const ERROR_BODY_MAX: u64 = 64 * 1024;
 
-/// A download in flight, as every `fetch` of its CID awaits it: the detached task's result.
+/// A download in flight, as every `fetch` of its copy awaits it: the detached task's result.
 type Download = Shared<BoxFuture<'static, Result<BlobHandle, HostError>>>;
+
+/// The copy a download fetches: (PDS, DID, CID).
+type CopyKey = (String, String, String);
 
 /// The blob directory, and the downloads in flight (shared by every clone).
 #[derive(Clone)]
 pub struct BlobStore {
     dir: PathBuf,
-    inflight: Arc<Mutex<HashMap<String, Download>>>,
+    inflight: Arc<Mutex<HashMap<CopyKey, Download>>>,
 }
 
 impl std::fmt::Debug for BlobStore {
@@ -154,10 +159,10 @@ impl BlobStore {
         }
     }
 
-    /// `Host::fetch_blob`: download, verify and store, or return the stored copy. A CID being
-    /// downloaded is awaited, not fetched again; the download is a detached task (see the module
-    /// docs), so dropping this future does not stop it. The first caller's `max_bytes` caps the
-    /// download; the core holds a stored copy to its own declaration.
+    /// `Host::fetch_blob`: download, verify and store, or return the stored copy. A copy (PDS,
+    /// DID, CID) being downloaded is awaited, not fetched again; the download is a detached task
+    /// (see the module docs), so dropping this future does not stop it. The first caller's
+    /// `max_bytes` caps the download; the core holds a stored copy to its own declaration.
     pub async fn fetch(
         &self,
         net: &Net,
@@ -170,9 +175,10 @@ impl BlobStore {
         if let Some(handle) = self.open(cid).await? {
             return Ok(handle);
         }
+        let key: CopyKey = (pds.to_string(), did.to_string(), cid.to_owned());
         let download = {
             let mut inflight = self.inflight.lock().unwrap_or_else(PoisonError::into_inner);
-            if let Some(d) = inflight.get(cid) {
+            if let Some(d) = inflight.get(&key) {
                 d.clone()
             } else {
                 let max = max_bytes.min(limits::BLOB_HARD_MAX_BYTES);
@@ -188,7 +194,8 @@ impl BlobStore {
                     ..NetRequest::get(url)
                 };
                 let total = Duration::from_millis(u64::from(limits::BLOB_TOTAL_TIMEOUT_MS));
-                let (store, net, cid_owned) = (self.clone(), net.clone(), cid.to_owned());
+                let (store, net, cid_owned, key_owned) =
+                    (self.clone(), net.clone(), cid.to_owned(), key.clone());
                 let digest = parsed.hash().digest().to_vec();
                 let task = tokio::spawn(async move {
                     let r = tokio::time::timeout(
@@ -203,7 +210,7 @@ impl BlobStore {
                         .inflight
                         .lock()
                         .unwrap_or_else(PoisonError::into_inner)
-                        .remove(&cid_owned);
+                        .remove(&key_owned);
                     r
                 });
                 let d: Download = async move {
@@ -213,7 +220,7 @@ impl BlobStore {
                 }
                 .boxed()
                 .shared();
-                inflight.insert(cid.to_owned(), d.clone());
+                inflight.insert(key, d.clone());
                 d
             }
         };
@@ -418,5 +425,76 @@ mod tests {
             0,
             "no temporary files left"
         );
+    }
+
+    /// A local `getBlob` that answers HTTP 400 after `delay`, counting hits.
+    async fn failing_pds(delay: Duration) -> (Url, Arc<std::sync::atomic::AtomicUsize>) {
+        use axum::routing::get;
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let served = Arc::clone(&hits);
+        let app = axum::Router::new().route(
+            "/xrpc/com.atproto.sync.getBlob",
+            get(move || {
+                let served = Arc::clone(&served);
+                async move {
+                    served.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    tokio::time::sleep(delay).await;
+                    (
+                        axum::http::StatusCode::BAD_REQUEST,
+                        r#"{"error":"InvalidRequest","message":"Blob not found"}"#,
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let base = Url::parse(&format!("http://127.0.0.1:{}", addr.port())).unwrap();
+        (base, hits)
+    }
+
+    #[tokio::test]
+    async fn a_fetch_of_another_authors_copy_does_not_join_a_failing_download() {
+        // review m3m4-continuation-1: downloads were joined by CID alone, so a fetch of bob's
+        // body from bob's PDS joined mallory's download of the same CID from hers and got her
+        // failure (HTTP 400, a CID mismatch or a stall)
+        use super::super::guard::{FixedDns, NetPolicy};
+        let bytes: Vec<u8> = (0..2_000u32).map(|i| (i % 251) as u8).collect();
+        let cid = atp_cid::for_raw(&bytes).to_string();
+        let (bob_pds, bob_hits) = trickling_pds(bytes.clone(), 1, Duration::from_millis(1)).await;
+        let (mallory_pds, mallory_hits) = failing_pds(Duration::from_millis(300)).await;
+        let net = Net::with_dns(
+            NetPolicy::devnet([&bob_pds, &mallory_pds]),
+            Arc::new(FixedDns::new()),
+        )
+        .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let store = BlobStore::new(tmp.path().join("blobs"));
+        let (bob, mallory) = (
+            Did::parse("did:plc:bob").unwrap(),
+            Did::parse("did:plc:mallory").unwrap(),
+        );
+        let failing = {
+            let (store, net, pds, did, cid) =
+                (store.clone(), net.clone(), mallory_pds.clone(), mallory.clone(), cid.clone());
+            tokio::spawn(async move { store.fetch(&net, &pds, &did, &cid, 1 << 20).await })
+        };
+        // mallory's download is in flight
+        for _ in 0..50 {
+            if mallory_hits.load(std::sync::atomic::Ordering::SeqCst) == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(store.inflight.lock().unwrap().len(), 1);
+        let h = store.fetch(&net, &bob_pds, &bob, &cid, 1 << 20).await.unwrap();
+        assert_eq!(std::fs::read(&h.locator).unwrap(), bytes);
+        assert_eq!(bob_hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(matches!(
+            failing.await.unwrap(),
+            Err(HostError::HttpStatus(400, _))
+        ));
+        assert_eq!(mallory_hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(store.inflight.lock().unwrap().is_empty());
     }
 }

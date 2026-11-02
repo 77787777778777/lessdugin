@@ -342,7 +342,11 @@ fn by_author(did: &str, blob: &str) -> (String, String) {
 /// Drops the least recently put entries of `m` past `cap`.
 fn evict<K: Ord + Clone>(m: &mut BTreeMap<K, (u64, Arc<Spilled>)>, cap: usize) {
     while m.len() > cap {
-        let Some(oldest) = m.iter().min_by_key(|(_, (t, _))| *t).map(|(k, _)| k.clone()) else {
+        let Some(oldest) = m
+            .iter()
+            .min_by_key(|(_, (t, _))| *t)
+            .map(|(k, _)| k.clone())
+        else {
             break;
         };
         m.remove(&oldest);
@@ -704,6 +708,39 @@ mod tests {
         );
         assert!(!links.iter().any(|link| link.as_str() == hint));
         assert_eq!(cache.links("cid", &md, NS, None, "did:plc:a"), links);
+    }
+
+    #[test]
+    fn only_a_verified_source_is_shared_between_authors() {
+        let c = RenderCache::default();
+        let (a, b, blob) = ("did:plc:a", "did:plc:b", "bafkblob");
+        let pending = |did: &str| PendingSpilled {
+            at_ms: 5,
+            forum: "f".into(),
+            uri: "u".into(),
+            did: did.into(),
+        };
+        c.spilled_unavailable(blob, pending(a));
+        assert_eq!(c.spilled_retry_at(a, blob), Some(5));
+        assert_eq!(c.spilled_retry_at(b, blob), None);
+        c.put_spilled(a, blob, Spilled::Missing);
+        assert_eq!(c.spilled(a, blob).as_deref(), Some(&Spilled::Missing));
+        assert_eq!(c.spilled(b, blob), None, "a's PDS answered for a only");
+        assert_eq!(c.spilled_retry_at(a, blob), None);
+        c.put_spilled(b, blob, Spilled::Text("verified".into()));
+        assert_eq!(
+            c.spilled(a, blob).as_deref(),
+            Some(&Spilled::Text("verified".into())),
+            "verified bytes are the blob's, whoever served them"
+        );
+        // a failure is never cached as the record's render; a verified render is
+        let md = json!({"$type": format!("{NS}.markdown"), "textBlob": {"ref": {"$link": "x"}}});
+        c.put_spilled(a, "x", Spilled::Unverified);
+        c.links("rec", &md, NS, None, a);
+        assert!(!c.contains("rec"));
+        c.put_spilled(b, "x", Spilled::Text("# Hi".into()));
+        c.links("rec", &md, NS, None, b);
+        assert!(c.contains("rec"));
     }
 
     #[test]
