@@ -103,6 +103,9 @@ fn constants() -> BTreeMap<&'static str, i128> {
     ]
 }
 
+/// Rows whose `limits.rs` constant has another name: (row, constant).
+const ALIASES: [(&str, &str); 1] = [("REDIRECTS_MAX", "MAX_REDIRECTS")];
+
 /// A row's value: one integer, or a range `a–b`.
 #[derive(Debug, PartialEq)]
 enum Value {
@@ -167,11 +170,17 @@ fn every_row_limits_rs_mirrors_has_the_rows_value() {
     let mut compared = 0;
     let mut wrong = Vec::new();
     for (name, cell, line) in rows() {
-        if let Some(&have) = c.get(name) {
+        let rs = ALIASES
+            .iter()
+            .find(|(row, _)| *row == name)
+            .map_or(name, |(_, rs)| *rs);
+        if let Some(&have) = c.get(rs) {
             compared += 1;
             match parse_value(cell) {
                 Some(Value::One(want)) if want == have => {}
-                other => wrong.push(format!("limits.md:{line} {name} = {cell:?} ({other:?}), limits.rs {have}")),
+                other => wrong.push(format!(
+                    "limits.md:{line} {name} = {cell:?} ({other:?}), limits.rs {have}"
+                )),
             }
             continue;
         }
@@ -184,17 +193,26 @@ fn every_row_limits_rs_mirrors_has_the_rows_value() {
         compared += 1;
         let have = Value::Range(c[lo.as_str()], c[hi.as_str()]);
         if parse_value(cell).as_ref() != Some(&have) {
-            wrong.push(format!("limits.md:{line} {name} = {cell:?}, limits.rs {lo}/{hi} {have:?}"));
+            wrong.push(format!(
+                "limits.md:{line} {name} = {cell:?}, limits.rs {lo}/{hi} {have:?}"
+            ));
         }
     }
-    assert!(wrong.is_empty(), "limits.rs disagrees with limits.md:\n{}", wrong.join("\n"));
+    assert!(
+        wrong.is_empty(),
+        "limits.rs disagrees with limits.md:\n{}",
+        wrong.join("\n")
+    );
     // the comparison is not vacuous: most of limits.rs mirrors a row
     assert!(compared >= 40, "only {compared} rows compared");
 }
 
 #[test]
 fn the_value_parser_reads_the_tables_forms() {
-    assert_eq!(parse_value("4,194,304 (4 MiB)"), Some(Value::One(4_194_304)));
+    assert_eq!(
+        parse_value("4,194,304 (4 MiB)"),
+        Some(Value::One(4_194_304))
+    );
     assert_eq!(parse_value("1,048,576 (2^20)"), Some(Value::One(1_048_576)));
     assert_eq!(parse_value("0–5,000"), Some(Value::Range(0, 5_000)));
     assert_eq!(parse_value("[10, 1]"), None);
