@@ -215,13 +215,13 @@ PARAMS = membership, defaultTier, voting, authorModeration, tagCreation, pairCap
 | L3 | opinion validity (§5); K1, `seedUp`, E, KP, K (§6) | L0–L2, opinions, items, `absent` |
 | L3.5 | score, agreement, unweighted (§7) | L0–L3 |
 | L4 | gates (§8) | L0–L3 |
-| L5 | author-tier moderation (§4.9), reacts (§9), tag relevance and wiki heads (§13), the sequence library (§14) | L0–L4, plus states from rules V1–V5 |
+| L5 | author-tier moderation (§4.9), reacts (§9), tag relevance and wiki heads (§13), the sequence library (§14) | L0–L4, plus states from rules V1–V5; the library order also reads time (below) |
 | L6 | visibility V1–V10 and the thread pass (§10); threads (§11); ranking (§12) | L0–L5, time |
 | L7 | lens (§10.3) | L6, local state |
 
 **Rules that sit outside the layer stack**
 - Rules V1–V5 read only validity and layers L0–L2, so L5 may use their results.
-- Time (§2) and thread placement (§11, steps 1–4) read only validity, `obs` and `decl`. Any layer may use them, but only L6 and display do.
+- Time (§2) and thread placement (§11, steps 1–4) read only validity, `obs` and `decl`. Any layer may use them, but only L6, display and the §14 library order do: the library breaks a tie of (forum-pinned, score) by `t_rank`, so moving first-seen times can re-sort such ties and change nothing else in L5 (§6.3 P3; §20.1 item 52).
 
 ### 1.5 Unknown is not absent; partial input
 
@@ -1507,6 +1507,7 @@ These choices fill gaps in the sources or resolve ambiguities. Each takes the si
     - A valid root in F's key range names F (G9), so CO5 fails only on a 60-bit fk collision, like the other forum checks (item 23).
     - P7 holds without hypothesis (c), which is withdrawn.
     - Vectors: `visibility/visibility.json` `v1-before-v2-and-v3` and `karma/staged.json` `opinions-that-never-count` were regenerated (the comment under a root whose `forum` names another forum is no longer Excluded, and the opinion on it counts), and `visibility/visibility.json` `co5-invalid-root-is-a-missing-root`, `karma/staged.json` `co5-invalid-root-opinions-count` and `thread/thread.json` `root-names-another-forum` pin the edit-the-root case.
+52. **The library order reads time (§1.4, §6.3 P3, §14).** §14 orders the listed sequences by `(forum-pinned desc, score desc, t_rank desc, uri asc)`, but §1.4 said only L6 and display read time, and P3 checked that moving first-seen times changed no layer below L6. The two disagreed whenever two listed sequences tied on pin and score (CI run 41336047294). §14 is kept: a newer sequence is the better tie-break for a reader. §1.4 now names the library order as the one L5 use of time, and P3 allows exactly that: the eligible set and the entries are unchanged, and `listed` is the same set in §14 order under the moved `t_rank` (`crates/core/tests/social_props.rs`, `p3_library_ties_follow_time`).
 
 ### 20.2 Open questions
 

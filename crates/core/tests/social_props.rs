@@ -9,7 +9,7 @@
 //! |---|---|
 //! | P1 | every output is independent of the order of records: the vector JSON form with `records`, `absent`, `obs` and `repoStatus` shuffled folds to a byte-identical serialised view and `inputDigest`, under every query (so the visibility and ranking outputs too, §19); set-valued entries and object keys inside records, reordered, change no projected output |
 //! | P2 | supplying the same `(uri, cid)` twice (and the same `absent` and `obs` entries) changes nothing; duplicated set entries inside records (MA8, OP4, PO7, WR2, §9.2) change no projected output |
-//! | P3 | each stage reads only earlier stages: removing opinions leaves L0–L2 and V1–V5 unchanged, removing memberships leaves L0–L1, removing L5-only inputs leaves L0–L4, and moving `obs` (and `now` without `until`) changes only `t_rank` and the orderings (§1.4: time is read by L6 only). "One pass over V" is the linear scaling of `social_perf.rs` |
+//! | P3 | each stage reads only earlier stages: removing opinions leaves L0–L2 and V1–V5 unchanged, removing memberships leaves L0–L1, removing L5-only inputs leaves L0–L4, and moving `obs` (and `now` without `until`) changes only `t_rank`, the orderings and the order of the sequence library's (pin, score) ties (§1.4: time is read by L6 and the §14 library order's `t_rank` tie-break only; `p3_library_ties_follow_time` pins the CI counterexample). "One pass over V" is the linear scaling of `social_perf.rs` |
 //! | P4 | adding or removing L5–L7-only inputs (author-scope modActions, the `reacts` and `tags` entries of opinions, wikiRevisions, sequences, opinions on wikiRevisions or sequences) never changes K1, `seedUp`, E, KP or K |
 //! | P5 | per stage: removing voter u's opinions on recipient r's items (none on an absent subject) moves `K1[r]` by at most `pairCap` and no other K1; with E and the K1 basis unchanged, `KP[r]` by at most `pairCap × strong(max(K1[u], 0))` and no other KP; with E and the KP basis unchanged, `K[r]` by at most `pairCap × strong(max(KP[u], 0))` and no other K. The corollary: removing all opinions of u ∉ S (none on an absent subject) changes no K1, `seedUp` or E and moves each `KP[r]` by at most `pairCap × strong(max(K1[u], 0))` |
 //! | P6 | s ∈ S ⇒ s ∈ E, whatever K1[s] is |
@@ -535,8 +535,9 @@ fn check_p3(s: &Spec, seed: u64) -> Result<bool, TestCaseError> {
         prop_assert_eq!(Some(x), a.v1_v5.get(uri), "V1–V5 of {}", uri);
     }
 
-    // time (§2) is read by L6 only: moving first-seen times (and `now`, unless an `until`
-    // reads it) changes no layer below the orderings
+    // time (§2) is read by L6 and the §14 library order's `t_rank` tie-break only (§1.4):
+    // moving first-seen times (and `now`, unless an `until` reads it) changes no layer below
+    // the orderings, and the library only by re-sorting its (pin, score) ties
     let mut h = f.clone();
     for r in &mut h.recs {
         r.obs += (i64::try_from(rng.below(4 * 1440)).unwrap() - 2 * 1440) * social_gen::MINUTE;
@@ -546,14 +547,37 @@ fn check_p3(s: &Spec, seed: u64) -> Result<bool, TestCaseError> {
         h.now += i64::try_from(rng.below(200)).unwrap() * social_gen::DAY;
     }
     let e = fold(&h.input(), &Query::default());
+    let (la, le) = (a.library.as_ref().unwrap(), e.library.as_ref().unwrap());
+    prop_assert_eq!(&la.eligible, &le.eligible);
+    prop_assert_eq!(&la.entries, &le.entries);
+    // a's listed sequences in the §14 order, with e's `t_rank` (pins and scores are a's, and
+    // equal to e's by the comparison below)
+    let mut resorted = la.listed.clone();
+    resorted.sort_by(|x, y| {
+        let pin = |u: &String| a.moderation.pinned_forum(u);
+        let score = |u: &String| sa.get(u).map_or(0, |s| s.score);
+        let time = |u: &String| e.times.get(u).map_or(0, |t| t.t_rank);
+        pin(y)
+            .cmp(&pin(x))
+            .then_with(|| score(y).cmp(&score(x)))
+            .then_with(|| time(y).cmp(&time(x)))
+            .then_with(|| x.cmp(y))
+    });
+    prop_assert_eq!(
+        &resorted,
+        &le.listed,
+        "the library order read more than t_rank"
+    );
+    let moved = la.listed != le.listed;
     let mut e2 = e.clone();
     e2.times = a.times.clone();
     e2.orderings = a.orderings.clone();
+    e2.library = a.library.clone();
     prop_assert!(
         serialize(&a) == serialize(&e2),
         "a layer below L6 read time"
     );
-    Ok(false)
+    Ok(moved)
 }
 
 /// The CI counterexample of P3 (run 41336047294): two listed, unpinned sequences with equal
