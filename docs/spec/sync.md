@@ -362,7 +362,8 @@ bind_login(token_response, intended?):       // intended = the DID the user aske
 Devnet mode (`--dev` or a config profile; never enabled implicitly; ADR 0006):
 - handles resolve through the PDS's `com.atproto.identity.resolveHandle` (method `devnet`), and `.test` handles are allowed;
 - the PLC base URL is configurable, and `http://` PDS, PLC and Jetstream endpoints and IP-literal hosts are allowed;
-- the SSRF guard (§12.1) allows loopback.
+- the SSRF guard (§12.1) allows loopback;
+- `sources` is pinned to `direct` at the flag level (`EngineConfig.sources_flag`), whatever the stored setting says, unless a CLI flag or the native `config.toml` states `sources`: a stored `sources = assisted` never turns on CORE+ services in a devnet.
 
 ---
 
@@ -1658,5 +1659,5 @@ These choices fill gaps or resolve ambiguities in the sources. Each takes the si
 3. Does Jetstream's DID filter also filter `identity` and `account` events? This document drops unknown DIDs client-side either way. M5 should measure it, because it changes browser bandwidth.
 4. ADR 0004's per-host verdict is statistical (rotating egress IPs). The M1 fixed-IP check may still show a shared budget, which would change §9.2 and §14.
 5. ADR 0003 asks whether the public v1 Jetstream hosts will be retired. If they are, filters of more than 150 DIDs need several v2 connections of at most 150 DIDs each.
-6. *(Orchestrator decisions O-3 and O-9, for the U7 review.)* The `sources` setting is honoured at runtime by the running engine (§2.3). In `direct`, no CORE+ or EXT endpoint is contacted. A `sources` the native configuration file states is an explicit local pin at the flag level: `crates/native` passes it as `EngineConfig.sources_flag`. Precedence: CLI flag > `config.toml` > stored setting > build default. A file that does not state `sources` leaves it to the stored setting.
+6. *(Orchestrator decisions O-3 and O-9, for the U7 review.)* The `sources` setting is honoured at runtime by the running engine (§2.3). In `direct`, no CORE+ or EXT endpoint is contacted. A `sources` the native configuration file states is an explicit local pin at the flag level: `crates/native` passes it as `EngineConfig.sources_flag`. Precedence: CLI flag > `config.toml` > stored setting > build default. A file that does not state `sources` leaves it to the stored setting, except in devnet mode, where it pins `direct` (§3.7).
 7. **Blob deletion on forum eviction depends on eviction (review finding m4-27, M3–M6 review).** §10.7 says evicting a forum drops its blob references and deletes the blobs no forum references any more (§11.4). No client implements the §10.7 budget yet, so no forum is evicted and that deletion never runs: a blob referenced only by a forum the user stopped visiting stays stored until the cache is cleared. The reference counting, the deletion of a blob that loses its last counted reference and the purge of loose blobs (§11.4, m4-27) are in place and will serve eviction when it lands; until then this is a recorded, accepted limit.
