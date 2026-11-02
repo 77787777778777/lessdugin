@@ -356,13 +356,13 @@ fn search_reads_only_the_candidates_of_the_forum_index() {
     };
 
     let (hits, built) = search("zqrareword");
-    assert_eq!(hits, [rare.clone()]);
+    assert_eq!(hits, std::slice::from_ref(&rare));
     assert!(
         built > 41,
         "the index reads every listed body once ({built} keys)"
     );
     let (hits, read) = search("ZQRAREWORD");
-    assert_eq!(hits, [rare.clone()]);
+    assert_eq!(hits, std::slice::from_ref(&rare));
     assert!(
         read < 10,
         "only the candidate is read and rendered ({read} keys)"
