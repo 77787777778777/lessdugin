@@ -20,14 +20,16 @@ use lessdugin_core::dto::{self, CommentSort, ItemState, PostFilter, PostSort, Ti
 use lessdugin_core::host::Host;
 use lessdugin_core::model::ForumModel;
 use lessdugin_core::model::render::RenderCache;
-use lessdugin_core::model::views::{Viewer, Views};
+use lessdugin_core::model::views::{Viewer, Views, post_filter, post_sort};
+use lessdugin_core::social::full::query::{PostQuery, Query};
 use lessdugin_core::store::records::RecordStore;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::time::Instant;
 use tower_http::cors::{Any, CorsLayer};
 
-use crate::{FEATURES, Indexer, proofs};
+use crate::store::ForumRow;
+use crate::{FEATURES, Indexer, ingest, proofs};
 
 type Result<T> = std::result::Result<T, ApiError>;
 
@@ -144,7 +146,7 @@ fn html(s: &str) -> String {
 }
 async fn health(State(i): State<Indexer>) -> Json<Value> {
     Json(
-        json!({"ok":true,"version":env!("CARGO_PKG_VERSION"),"forums":i.store.forums(None).len(),"latestSeq":i.store.latest_seq()}),
+        json!({"ok":true,"version":env!("CARGO_PKG_VERSION"),"forums":i.store.forum_count(),"latestSeq":i.store.latest_seq()}),
     )
 }
 async fn metrics(State(i): State<Indexer>) -> Response {
@@ -200,6 +202,14 @@ fn offset(p: &HashMap<String, Vec<String>>) -> Result<usize> {
         .transpose()
         .map(|v| v.unwrap_or(0))
 }
+/// Drops the null members of a JSON object: absent optional fields are left out, never null
+/// (`data-model.md` §11.3; lexicon strings are not nullable).
+fn compact(mut value: Value) -> Value {
+    if let Some(map) = value.as_object_mut() {
+        map.retain(|_, v| !v.is_null());
+    }
+    value
+}
 fn page<T: Clone>(items: &[T], offset: usize, limit: usize) -> (Vec<T>, Option<String>) {
     let v = items
         .iter()
@@ -253,7 +263,7 @@ fn json_result(i: &Indexer, value: Result<Value>, list: bool, headers: HeaderMap
 }
 
 async fn describe(State(i): State<Indexer>, headers: HeaderMap) -> Response {
-    let forums=i.store.forums(None).into_iter().filter(|f|!i.blocked(&f.uri)).take(1000).map(|f|json!({"uri":f.uri,"lagMs":(i.now_ms()-f.synced_ms).max(0),"backfilled":f.synced_ms>0})).collect::<Vec<_>>();
+    let forums=i.store.indexed_forums(None).into_iter().filter(|f|!i.blocked_forum(f)).take(1000).map(|f|json!({"uri":f.uri,"lagMs":(i.now_ms()-f.synced_ms).max(0),"backfilled":f.synced_ms>0})).collect::<Vec<_>>();
     json_result(
         &i,
         Ok(
@@ -273,15 +283,15 @@ async fn list_forums(
         let p = params(raw);
         let (rows, cursor) = page(
             &i.store
-                .forums(one(&p, "q"))
+                .indexed_forums(one(&p, "q"))
                 .into_iter()
-                .filter(|f| !i.blocked(&f.uri))
+                .filter(|f| !i.blocked_forum(f))
                 .collect::<Vec<_>>(),
             offset(&p)?,
             limit(&p, 50, 100)?,
         );
-        let forums=rows.into_iter().map(|f|json!({"ref":{"uri":f.uri,"cid":f.cid,"firstSeen":f.created_at},"participants":f.participants,"posts":f.posts})).collect::<Vec<_>>();
-        Ok(json!({"forums":forums,"cursor":cursor}))
+        let forums=rows.into_iter().map(|f|json!({"ref":compact(json!({"uri":f.uri,"cid":f.cid,"firstSeen":(!f.created_at.is_empty()).then_some(f.created_at)})),"participants":f.participants,"posts":f.posts})).collect::<Vec<_>>();
+        Ok(compact(json!({"forums":forums,"cursor":cursor})))
     })();
     json_result(&i, result, true, headers)
 }
@@ -299,13 +309,15 @@ async fn list_participants(
             &i.store
                 .participants(forum, one(&p, "status"))
                 .into_iter()
-                .filter(|p| !i.blocked(&p.did))
+                .filter(|p| !i.blocked_did(&p.did))
                 .collect::<Vec<_>>(),
             offset(&p)?,
             limit(&p, 500, 1000)?,
         );
-        let participants=rows.into_iter().map(|p|json!({"did":p.did,"status":p.status,"rev":p.rev,"lastSeen":dt_ms(p.last_seen_ms)})).collect::<Vec<_>>();
-        Ok(json!({"participants":participants,"cursor":cursor}))
+        let participants=rows.into_iter().map(|p|compact(json!({"did":p.did,"status":p.status,"rev":p.rev,"lastSeen":dt_ms(p.last_seen_ms)}))).collect::<Vec<_>>();
+        Ok(compact(
+            json!({"participants":participants,"cursor":cursor}),
+        ))
     })();
     json_result(&i, result, true, headers)
 }
@@ -324,7 +336,8 @@ async fn get_repo_heads(
         for d in &dids {
             Did::parse(d).map_err(|e| ApiError::invalid(e.to_string()))?;
         }
-        let heads=i.store.heads(&dids).into_iter().filter(|h|!i.blocked(&h.did)).map(|h|json!({"did":h.did,"rev":h.rev,"commit":h.commit,"pds":h.pds,"checkedAt":dt_ms(h.checked_ms),"status":h.status})).collect::<Vec<_>>();
+        // A blocked host hides the repository entirely, like its records (INFRA-12).
+        let heads=i.store.heads(&dids).into_iter().filter(|h|!i.blocked(&h.did)&&!h.pds.as_deref().is_some_and(|pds|i.blocked_host(pds))).map(|h|compact(json!({"did":h.did,"rev":h.rev,"commit":h.commit,"pds":h.pds,"checkedAt":dt_ms(h.checked_ms),"status":h.status}))).collect::<Vec<_>>();
         Ok(json!({"heads":heads}))
     })();
     json_result(&i, result, true, headers)
@@ -355,42 +368,72 @@ async fn get_changes(
         let changes = rows
             .into_iter()
             .filter(|c| !i.blocked_change(c))
-            .map(|c| json!({"seq":c.seq,"uri":c.uri,"cid":c.cid,"did":c.did,"rev":c.rev,"op":c.op}))
+            .map(|c| {
+                compact(
+                    json!({"seq":c.seq,"uri":c.uri,"cid":c.cid,"did":c.did,"rev":c.rev,"op":c.op}),
+                )
+            })
             .collect::<Vec<_>>();
         Ok(json!({"changes":changes,"cursor":cursor}))
     })();
     json_result(&i, result, true, headers)
 }
 
-fn known_forum(i: &Indexer, forum: &str) -> Result<ForumKey> {
+/// An indexed forum: one primary-key lookup, never a scan of the forum table.
+fn known_forum(i: &Indexer, forum: &str) -> Result<(ForumKey, ForumRow)> {
     if i.blocked(forum) {
         return Err(ApiError::not_indexed("forum is not indexed"));
     }
     let uri = AtUri::parse(forum).map_err(|e| ApiError::invalid(e.to_string()))?;
-    if i.store.forum(forum).is_none() {
+    let Some(row) = i.store.forum(forum).filter(|row| !i.blocked_forum(row)) else {
         return Err(ApiError::not_indexed("forum is not indexed"));
-    }
-    ForumKey::of_uri(&uri).map_err(|e| ApiError::invalid(e.to_string()))
+    };
+    let key = ForumKey::of_uri(&uri).map_err(|e| ApiError::invalid(e.to_string()))?;
+    Ok((key, row))
 }
-fn forum_of(i: &Indexer, uri: &AtUri) -> Result<ForumKey> {
-    for f in i.store.forums(None) {
-        if let Ok(u) = AtUri::parse(&f.uri)
-            && let Ok(k) = ForumKey::of_uri(&u)
-            && uri.rkey().as_str().starts_with(&k.fk)
-        {
-            return known_forum(i, &f.uri);
+/// The indexed forum whose key range holds `uri` (an indexed lookup by its fk).
+fn forum_of(i: &Indexer, uri: &AtUri) -> Result<(ForumKey, ForumRow)> {
+    let rkey = uri.rkey().as_str();
+    if let Some(fk) = lessdugin_lexicon::keys::fk_of(rkey)
+        && rkey[fk.len()..].starts_with('-')
+    {
+        for f in i.store.forums_by_fk(fk) {
+            if let Ok(found) = known_forum(i, &f) {
+                return Ok(found);
+            }
         }
     }
     Err(ApiError::not_indexed("the record's forum is not indexed"))
 }
-async fn model(i: &Indexer, key: &ForumKey) -> Result<ForumModel> {
-    ForumModel::build(
-        i.engine.host().cache(),
-        key,
-        i.now_ms().saturating_mul(1000),
-    )
-    .await
-    .map_err(ApiError::internal)
+/// The forum's projected model, cached between projections (never refolded per request).
+async fn model(i: &Indexer, key: &ForumKey) -> Result<std::sync::Arc<ForumModel>> {
+    ingest::model(i, key).await.map_err(ApiError::internal)
+}
+fn views<'a>(
+    m: &'a ForumModel,
+    values: &'a BTreeMap<String, Value>,
+    empty: &'a Empty,
+) -> Views<'a> {
+    Views {
+        model: m,
+        actors: &empty.actors,
+        pds: &empty.pds,
+        values,
+        renders: &empty.renders,
+        pending: &empty.pending,
+        completeness: &empty.completeness,
+        viewer: &empty.viewer,
+    }
+}
+/// What hint views need besides the model: no actor, PDS, viewer or render state.
+#[derive(Default)]
+struct Empty {
+    actors: BTreeMap<String, dto::ActorView>,
+    pds: BTreeMap<String, String>,
+    renders: RenderCache,
+    pending: BTreeSet<String>,
+    completeness: dto::Completeness,
+    viewer: Viewer,
 }
 fn parse_enum<T: serde::de::DeserializeOwned>(
     p: &HashMap<String, Vec<String>>,
@@ -429,18 +472,22 @@ fn tier(t: &Tier) -> &'static str {
     }
 }
 fn post_hint(p: &dto::PostSummary, value: Option<Value>, hydrate: bool) -> Value {
-    let mut ref_ = json!({"uri":p.uri,"cid":p.cid,"firstSeen":dt_ms(p.created_at_ms)});
+    let mut ref_ = compact(json!({"uri":p.uri,"cid":p.cid,"firstSeen":dt_ms(p.created_at_ms)}));
     if hydrate && let Some(v) = value {
         ref_["value"] = v;
     }
-    json!({"ref":ref_,"tally":tally(&p.uri,&p.score),"state":state(&p.state),"tier":tier(&p.tier),"tags":p.tags,"comments":p.comment_count,"lastCommentAt":p.last_comment_at_ms.and_then(dt_ms),"effectiveAt":dt_ms(p.t_rank_ms)})
+    compact(
+        json!({"ref":ref_,"tally":tally(&p.uri,&p.score),"state":state(&p.state),"tier":tier(&p.tier),"tags":p.tags,"comments":p.comment_count,"lastCommentAt":p.last_comment_at_ms.and_then(dt_ms),"effectiveAt":dt_ms(p.t_rank_ms)}),
+    )
 }
 fn comment_hint(c: &dto::CommentNode, hydrate: bool, value: Option<Value>) -> Value {
-    let mut ref_ = json!({"uri":c.uri,"cid":c.cid,"firstSeen":dt_ms(c.created_at_ms)});
+    let mut ref_ = compact(json!({"uri":c.uri,"cid":c.cid,"firstSeen":dt_ms(c.created_at_ms)}));
     if hydrate && let Some(v) = value {
         ref_["value"] = v;
     }
-    json!({"ref":ref_,"parent":c.parent,"depth":c.depth,"tally":tally(&c.uri,&c.score),"state":state(&c.state)})
+    compact(
+        json!({"ref":ref_,"parent":c.parent,"depth":c.depth,"tally":tally(&c.uri,&c.score),"state":state(&c.state)}),
+    )
 }
 async fn stored_value(i: &Indexer, uri: &str) -> Option<Value> {
     let u = AtUri::parse(uri).ok()?;
@@ -457,14 +504,72 @@ async fn list_posts(
     RawQuery(raw): RawQuery,
     headers: HeaderMap,
 ) -> Response {
-    let result=async {let p=params(raw);let forum=required(&p,"forum")?;let key=known_forum(&i,forum)?;let sort:PostSort=parse_enum(&p,"sort",PostSort::Magic)?;
-        let filter=match one(&p,"tier"){Some("frontpage")=>PostFilter::Frontpage,Some("curated")=>PostFilter::Curated,Some("personal")|None=>PostFilter::All,_=>return Err(ApiError::invalid("bad tier"))};
-        if let Some(author)=one(&p,"author"){Did::parse(author).map_err(|e|ApiError::invalid(e.to_string()))?;}
-        let kind=one(&p,"kind").map(|k|serde_json::from_value(Value::String(k.into())).map_err(|_|ApiError::invalid("bad kind"))).transpose()?;
-        let hydrate=bool_param(&p,"hydrate")?;
-        let out=i.engine.list_posts(&dto::ListPostsQuery{forum:forum.into(),sort,filter,tag:one(&p,"tag").map(str::to_owned),author:one(&p,"author").map(str::to_owned),kind,cursor:one(&p,"cursor").map(str::to_owned),limit:limit(&p,25,100)? as u32}).await.map_err(ApiError::internal)?;
-                let mut posts=Vec::new();for post in out.items{if i.blocked_record(key.uri.as_str(),&post.uri)||i.blocked(&post.author.did){continue;}let value=if hydrate{stored_value(&i,&post.uri).await}else{None};posts.push(post_hint(&post,value,hydrate));}
-        let m=model(&i,&key).await?;Ok(json!({"posts":posts,"cursor":out.cursor,"policy":{"karma":"karma/1","ranking":"magic/1"},"inputDigest":m.view.input_digest}))}.await;
+    let result = async {
+        let p = params(raw);
+        let forum = required(&p, "forum")?;
+        let (key, row) = known_forum(&i, forum)?;
+        let sort: PostSort = parse_enum(&p, "sort", PostSort::Magic)?;
+        let filter = match one(&p, "tier") {
+            Some("frontpage") => PostFilter::Frontpage,
+            Some("curated") => PostFilter::Curated,
+            Some("personal") | None => PostFilter::All,
+            _ => return Err(ApiError::invalid("bad tier")),
+        };
+        if let Some(author) = one(&p, "author") {
+            Did::parse(author).map_err(|e| ApiError::invalid(e.to_string()))?;
+        }
+        let kind = one(&p, "kind")
+            .map(|k| {
+                serde_json::from_value::<dto::PostKind>(Value::String(k.into()))
+                    .map_err(|_| ApiError::invalid("bad kind"))
+                    .map(|_| k.to_owned())
+            })
+            .transpose()?;
+        let hydrate = bool_param(&p, "hydrate")?;
+        let (offset, limit) = (offset(&p)?, limit(&p, 25, 100)?);
+        // Views come from the cached projection: a request never refolds the forum.
+        let m = model(&i, &key).await?;
+        let query = Query {
+            thread: None,
+            posts: Some(PostQuery {
+                sort: post_sort(sort),
+                filter: post_filter(filter),
+                tag: one(&p, "tag").map(str::to_owned),
+                kind,
+                author: one(&p, "author").map(str::to_owned),
+            }),
+            comments: None,
+        };
+        let order = m
+            .orderings(&query)
+            .map_err(|e| ApiError::internal(format!("the fold layer is pending: {e}")))?
+            .post_order
+            .unwrap_or_default();
+        let (uris, cursor) = page(&order, offset, limit);
+        let (values, empty) = (BTreeMap::new(), Empty::default());
+        let summaries = {
+            let v = views(&m, &values, &empty);
+            uris.iter()
+                .filter_map(|u| v.post_summary(u))
+                .collect::<Vec<_>>()
+        };
+        let mut posts = Vec::new();
+        for post in summaries {
+            if i.blocked_record(&row, &post.uri) || i.blocked(&post.author.did) {
+                continue;
+            }
+            let value = if hydrate {
+                stored_value(&i, &post.uri).await
+            } else {
+                None
+            };
+            posts.push(post_hint(&post, value, hydrate));
+        }
+        Ok(compact(
+            json!({"posts":posts,"cursor":cursor,"policy":{"karma":"karma/1","ranking":"magic/1"},"inputDigest":m.view.input_digest}),
+        ))
+    }
+    .await;
     json_result(&i, result, true, headers)
 }
 
@@ -476,33 +581,38 @@ async fn recent_discussion(
     let result = async {
         let p = params(raw);
         let forum = required(&p, "forum")?;
-        known_forum(&i, forum)?;
-        let key =
-            ForumKey::of_uri(&AtUri::parse(forum).map_err(|e| ApiError::invalid(e.to_string()))?)
-                .map_err(|e| ApiError::invalid(e.to_string()))?;
-        let out = i
-            .engine
-            .recent_discussion(forum, one(&p, "cursor"), limit(&p, 20, 50)? as u32)
-            .await
-            .map_err(ApiError::internal)?;
+        let (key, row) = known_forum(&i, forum)?;
+        let (offset, limit) = (offset(&p)?, limit(&p, 20, 50)?);
+        let m = model(&i, &key).await?;
+        let entries = m
+            .view
+            .orderings
+            .as_ref()
+            .map_err(|e| ApiError::internal(format!("the fold layer is pending: {e}")))?
+            .recent_discussion
+            .clone();
+        let (page, cursor) = page(&entries, offset, limit);
+        let (values, empty) = (BTreeMap::new(), Empty::default());
+        let v = views(&m, &values, &empty);
         let mut items = Vec::new();
-        for item in out.items {
-            if i.blocked_record(key.uri.as_str(), &item.post.uri)
-                || i.blocked(&item.post.author.did)
-            {
+        for entry in page {
+            let Some(post) = v.post_summary(&entry.post) else {
+                continue;
+            };
+            if i.blocked_record(&row, &post.uri) || i.blocked(&post.author.did) {
                 continue;
             }
-            let comments = item
+            let comments = entry
                 .comments
-                .into_iter()
-                .filter(|c| {
-                    !i.blocked_record(key.uri.as_str(), &c.uri) && !i.blocked(&c.author.did)
-                })
+                .iter()
+                .take(lessdugin_core::limits::DISCUSSION_COMMENTS)
+                .filter_map(|c| v.comment_node(c, &entry.post))
+                .filter(|c| !i.blocked_record(&row, &c.uri) && !i.blocked(&c.author.did))
                 .map(|c| comment_hint(&c, false, None))
                 .collect::<Vec<_>>();
-            items.push(json!({"post":post_hint(&item.post,None,false),"comments":comments}));
+            items.push(json!({"post":post_hint(&post,None,false),"comments":comments}));
         }
-        Ok(json!({"items":items,"cursor":out.cursor}))
+        Ok(compact(json!({"items":items,"cursor":cursor})))
     }
     .await;
     json_result(&i, result, true, headers)
@@ -513,17 +623,57 @@ async fn get_thread(
     RawQuery(raw): RawQuery,
     headers: HeaderMap,
 ) -> Response {
-    let result=async {let p=params(raw);let post=AtUri::parse(required(&p,"post")?).map_err(|e|ApiError::invalid(e.to_string()))?;if i.blocked(post.as_str()){return Err(ApiError::not_indexed("post is not indexed"));}let key=forum_of(&i,&post)?;let sort:CommentSort=parse_enum(&p,"sort",CommentSort::Magic)?;let hydrate=bool_param(&p,"hydrate")?;
-        let m=model(&i,&key).await?;let root=m.comment_root(post.as_str()).unwrap_or(post.as_str()).to_owned();
-        let actors=BTreeMap::new();let pds=BTreeMap::new();let mut values=BTreeMap::new();let renders=RenderCache::default();let pending=BTreeSet::new();let completeness=dto::Completeness::default();let viewer=Viewer::default();
-        if let Some(v)=stored_value(&i,&root).await{values.insert(root.clone(),v);}
-        let views=Views{model:&m,actors:&actors,pds:&pds,values:&values,renders:&renders,pending:&pending,completeness:&completeness,viewer:&viewer};
-        let thread=views.thread_view(&root,sort);
-        let dto::ThreadRoot::Post(post_view)=thread.post else{return Err(ApiError::not_indexed("thread root is not indexed"));};
-        if i.blocked_record(key.uri.as_str(), &post_view.post.uri) || i.blocked(&post_view.post.author.did) {return Err(ApiError::not_indexed("post is not indexed"));}
-        let value=if hydrate{stored_value(&i,&post_view.post.uri).await}else{None};let post_out=post_hint(&post_view.post,value,hydrate);
-        let truncated=thread.comments.len()>10000;let mut comments=Vec::new();for c in thread.comments.into_iter().take(10000){if i.blocked_record(key.uri.as_str(), &c.uri)||i.blocked(&c.author.did){continue;}let value=if hydrate{stored_value(&i,&c.uri).await}else{None};comments.push(comment_hint(&c,hydrate,value));}
-        Ok(json!({"post":post_out,"comments":comments,"truncated":truncated,"inputDigest":m.view.input_digest}))}.await;
+    let result = async {
+        let p = params(raw);
+        let post = AtUri::parse(required(&p, "post")?)
+            .map_err(|e| ApiError::invalid(e.to_string()))?;
+        if i.blocked(post.as_str()) {
+            return Err(ApiError::not_indexed("post is not indexed"));
+        }
+        let (key, row) = forum_of(&i, &post)?;
+        let sort: CommentSort = parse_enum(&p, "sort", CommentSort::Magic)?;
+        let hydrate = bool_param(&p, "hydrate")?;
+        let m = model(&i, &key).await?;
+        let root = m
+            .comment_root(post.as_str())
+            .unwrap_or(post.as_str())
+            .to_owned();
+        let mut values = BTreeMap::new();
+        if let Some(v) = stored_value(&i, &root).await {
+            values.insert(root.clone(), v);
+        }
+        let empty = Empty::default();
+        let thread = views(&m, &values, &empty).thread_view(&root, sort);
+        let dto::ThreadRoot::Post(post_view) = thread.post else {
+            return Err(ApiError::not_indexed("thread root is not indexed"));
+        };
+        if i.blocked_record(&row, &post_view.post.uri) || i.blocked(&post_view.post.author.did) {
+            return Err(ApiError::not_indexed("post is not indexed"));
+        }
+        let value = if hydrate {
+            stored_value(&i, &post_view.post.uri).await
+        } else {
+            None
+        };
+        let post_out = post_hint(&post_view.post, value, hydrate);
+        let truncated = thread.comments.len() > 10000;
+        let mut comments = Vec::new();
+        for c in thread.comments.into_iter().take(10000) {
+            if i.blocked_record(&row, &c.uri) || i.blocked(&c.author.did) {
+                continue;
+            }
+            let value = if hydrate {
+                stored_value(&i, &c.uri).await
+            } else {
+                None
+            };
+            comments.push(comment_hint(&c, hydrate, value));
+        }
+        Ok(
+            json!({"post":post_out,"comments":comments,"truncated":truncated,"inputDigest":m.view.input_digest}),
+        )
+    }
+    .await;
     json_result(&i, result, false, headers)
 }
 

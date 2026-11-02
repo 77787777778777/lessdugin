@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! `proofs/1` acquisition and bounded CAR bundles. Only proofs verified against a freshly
-//! resolved DID document enter `proof_cache`; failed bundle items are omitted, never substituted.
+//! `proofs/1` acquisition and bounded CAR bundles. Only proofs verified against a DID document
+//! at most one hour old (sync.md §1.1, third-party proofs) enter `proof_cache`; a proof that
+//! fails against a cached document is retried once against a fresh one. Failed bundle items are
+//! omitted, never substituted. `getRecordProofs` serves cached proofs and fetches at most
+//! [`crate::API_PROOF_FETCHES`] missing ones at a time, so requests never queue on the ingest
+//! budget (sync.md §15.3).
 
 use std::collections::BTreeMap;
 use std::sync::atomic::Ordering;
@@ -18,7 +22,20 @@ use lessdugin_core::xrpc::{CallOpts, Service};
 use crate::Indexer;
 use crate::store::ProofRow;
 
+/// The oldest DID document a proof is verified against (sync.md §1.1).
+pub const PROOF_DOC_MAX_AGE_MS: i64 = 60 * 60 * 1000;
+
 pub async fn fetch(indexer: &Indexer, uri: &str) -> anyhow::Result<ProofRow> {
+    match fetch_with(indexer, uri, PROOF_DOC_MAX_AGE_MS).await {
+        // A rotated key: the cached document may be the stale one.
+        Err(e) if e.to_string().contains("proof verification failed") => {
+            fetch_with(indexer, uri, 0).await
+        }
+        r => r,
+    }
+}
+
+async fn fetch_with(indexer: &Indexer, uri: &str, max_age_ms: i64) -> anyhow::Result<ProofRow> {
     let uri = AtUri::parse(uri).context("invalid proof URI")?;
     if indexer.blocked(uri.as_str()) {
         return Err(anyhow!("blocked"));
@@ -26,7 +43,7 @@ pub async fn fetch(indexer: &Indexer, uri: &str) -> anyhow::Result<ProofRow> {
     let ident = indexer
         .engine
         .resolver()
-        .resolve_did_fresh(uri.did(), 0)
+        .resolve_did_fresh(uri.did(), max_age_ms)
         .await?;
     let pds = ident
         .pds_url()
@@ -112,10 +129,17 @@ pub async fn bundle(indexer: &Indexer, uris: &[String]) -> anyhow::Result<Vec<u8
                 .is_some_and(|cid| indexed_cids.contains(cid))
         }) {
             Some(row) => row,
-            None => match fetch(indexer, uri).await {
-                Ok(row) => row,
-                Err(_) => continue,
-            },
+            None => {
+                // A missing proof is fetched only while a request permit is free; otherwise
+                // the item is omitted now and the client falls back to the author's PDS.
+                let Ok(_permit) = indexer.api_proofs.try_acquire() else {
+                    continue;
+                };
+                match fetch(indexer, uri).await {
+                    Ok(row) => row,
+                    Err(_) => continue,
+                }
+            }
         };
         if row.cid.as_deref().is_some_and(|cid| indexer.blocked(cid)) {
             continue;

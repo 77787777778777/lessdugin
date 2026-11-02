@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Poll, six-hour backfill and daily reconcile scheduling. Every pass uses the real native core
-//! sync engine; relay listings and Jetstream are discovery hints only.
+//! Poll, six-hour backfill, per-forum retry, per-repo retry and daily reconcile scheduling. Every
+//! network pass uses the real native core sync engine; relay listings and Jetstream are
+//! discovery hints only. Projections are rebuilt from the cache under one lock, so live events
+//! never need an ordinary forum sync (sync.md §15.1).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -10,17 +12,23 @@ use std::time::Duration;
 use lessdugin_atp::syntax::{AtIdentifier, AtUri, Did, Nsid};
 use lessdugin_atp::xrpc::{ListRecords, ListReposByCollection};
 use lessdugin_core::discovery::{ForumKey, SyncOpts};
+use lessdugin_core::engine::{EngineError, ErrorCode};
 use lessdugin_core::host::Host;
-use lessdugin_core::model::ForumModel;
+use lessdugin_core::model::{ForumModel, ModelError};
 use lessdugin_core::store::records::RecordStore;
 use lessdugin_core::store::repo::AccountStatus;
-use lessdugin_core::sync::{Priority, Stats};
+use lessdugin_core::sync::{Priority, Reason, Stats, SyncRequest};
 use lessdugin_core::xrpc::{CallOpts, Service};
 use tracing::{info, warn};
 
 use crate::Indexer;
 use crate::proofs;
-use crate::store::HeadRow;
+use crate::store::{HeadRow, LiveChange, RETRY_BASE_MS, backoff_ms};
+
+/// Discovery (relay enumeration) runs every six hours whatever individual forums do.
+pub const BACKFILL_EVERY_MS: i64 = 6 * 60 * 60 * 1000;
+/// Due per-repo retries run per scheduler tick, at most this many.
+const REPO_RETRIES_PER_TICK: usize = 64;
 
 pub fn spawn(indexer: Indexer) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -29,55 +37,105 @@ pub fn spawn(indexer: Indexer) -> tokio::task::JoinHandle<()> {
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             interval.tick().await;
-            let now = indexer.now_ms();
-            let backfill = indexer.store.schedule_due("backfill", now);
-            let mut discovery = Ok(());
-            if backfill {
-                discovery = discover(&indexer).await;
-                if let Err(e) = &discovery {
-                    warn!(error=%e,"declaration backfill discovery failed");
-                }
-            }
-            let mut synced = true;
-            if backfill || indexer.config.poll.is_some() {
-                let forums = indexer.store.forum_seeds();
-                for forum in forums {
-                    if indexer.blocked(&forum) {
-                        continue;
-                    }
-                    if let Err(e) = sync_forum(&indexer, &forum).await {
-                        synced = false;
-                        indexer.metrics.sync_errors.fetch_add(1, Ordering::Relaxed);
-                        warn!(forum=%forum,error=%e,"forum sync failed");
-                    }
-                }
-            }
-            if backfill {
-                indexer
-                    .store
-                    .schedule_next(
-                        "backfill",
-                        now.saturating_add(if discovery.is_ok() && synced {
-                            6 * 60 * 60 * 1000
-                        } else {
-                            60 * 1000
-                        }),
-                    )
-                    .ok();
-            }
-            if indexer.store.schedule_due("reconcile", now) {
-                reconcile(&indexer).await;
-                indexer
-                    .store
-                    .schedule_next("reconcile", now.saturating_add(24 * 60 * 60 * 1000))
-                    .ok();
-            }
-            indexer
-                .store
-                .prune_changes(now.saturating_sub(30 * 24 * 60 * 60 * 1000))
-                .ok();
+            tick(&indexer).await;
         }
     })
+}
+
+/// One scheduler pass.
+pub async fn tick(indexer: &Indexer) {
+    let now = indexer.now_ms();
+    let backfill = indexer.store.schedule_due("backfill", now);
+    if backfill {
+        // The discovery cadence does not depend on whether individual forums sync: a forum
+        // that fails backs off on its own (m6 per-forum retry), never by re-enumerating relays.
+        let next = match discover(indexer).await {
+            Ok(()) => {
+                indexer.store.schedule_next("backfill_failures", 0).ok();
+                now.saturating_add(BACKFILL_EVERY_MS)
+            }
+            Err(e) => {
+                warn!(error=%e,"declaration backfill discovery failed");
+                let failures = indexer
+                    .store
+                    .scheduled_at("backfill_failures")
+                    .unwrap_or(0)
+                    .saturating_add(1);
+                indexer
+                    .store
+                    .schedule_next("backfill_failures", failures)
+                    .ok();
+                now.saturating_add(backoff_ms(RETRY_BASE_MS, failures).min(BACKFILL_EVERY_MS))
+            }
+        };
+        indexer.store.schedule_next("backfill", next).ok();
+    }
+    let mut synced = BTreeSet::new();
+    if backfill || indexer.config.poll.is_some() {
+        for forum in indexer.store.forums_for_pass(now) {
+            pass(indexer, &forum).await;
+            synced.insert(forum);
+        }
+    }
+    for forum in indexer.store.forums_due(now) {
+        if !synced.contains(&forum) {
+            pass(indexer, &forum).await;
+        }
+    }
+    for retry in indexer.store.due_repo_retries(now, REPO_RETRIES_PER_TICK) {
+        retry_repo(indexer, &retry.did, &retry.forum).await;
+    }
+    if indexer.store.schedule_due("reconcile", now) {
+        reconcile(indexer).await;
+        indexer
+            .store
+            .schedule_next("reconcile", now.saturating_add(24 * 60 * 60 * 1000))
+            .ok();
+    }
+    indexer
+        .store
+        .prune_changes(now.saturating_sub(30 * 24 * 60 * 60 * 1000))
+        .ok();
+    if indexer.store.schedule_due("gc", now) {
+        gc(indexer, now).await;
+        indexer
+            .store
+            .schedule_next(
+                "gc",
+                now.saturating_add(lessdugin_core::limits::TOMBSTONE_GC_EVERY_MS),
+            )
+            .ok();
+    }
+}
+
+async fn pass(indexer: &Indexer, forum: &str) {
+    if indexer.blocked(forum) {
+        return;
+    }
+    if let Err(e) = sync_forum(indexer, forum).await {
+        indexer.metrics.sync_errors.fetch_add(1, Ordering::Relaxed);
+        warn!(forum=%forum,error=%e,"forum sync failed");
+    }
+}
+
+/// Daily garbage collection (sync.md §5.6.3): tombstones older than the 30-day retention leave
+/// the core record store, and cached proofs of records no forum indexes any more leave
+/// `proof_cache` after the same retention.
+pub async fn gc(indexer: &Indexer, now_ms: i64) {
+    let retention = lessdugin_core::limits::TOMBSTONE_MIN_RETENTION_MS;
+    match RecordStore::new(indexer.engine.host().cache())
+        .gc_tombstones(now_ms, retention)
+        .await
+    {
+        Ok(n) if n > 0 => info!(tombstones = n, "expired tombstones dropped"),
+        Ok(_) => {}
+        Err(e) => warn!(error=%e,"tombstone GC failed"),
+    }
+    match indexer.store.prune_proofs(now_ms.saturating_sub(retention)) {
+        Ok(n) if n > 0 => info!(proofs = n, "unindexed cached proofs dropped"),
+        Ok(_) => {}
+        Err(e) => warn!(error=%e,"proof cache GC failed"),
+    }
 }
 
 /// Checks every indexed owner/participant repo once, deduplicated across forums. Only forums
@@ -85,7 +143,7 @@ pub fn spawn(indexer: Indexer) -> tokio::task::JoinHandle<()> {
 /// isolated so it cannot prevent the remaining repos from being reconciled.
 pub async fn reconcile(indexer: &Indexer) {
     let mut repos: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    for forum in indexer.store.forums(None) {
+    for forum in indexer.store.indexed_forums(None) {
         if indexer.blocked(&forum.uri) {
             continue;
         }
@@ -130,7 +188,40 @@ pub async fn reconcile(indexer: &Indexer) {
     }
 }
 
+/// The declaration (or its owner's DID) is proven absent, not merely unreachable.
+fn declaration_absent(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<EngineError>()
+        .is_some_and(|e| e.code == ErrorCode::NotFound)
+        || e.downcast_ref::<ModelError>()
+            .is_some_and(|e| matches!(e, ModelError::NoDeclaration(_)))
+}
+
+/// An ordinary forum sync (backfill, poll, reconcile, newcomer confirmation, a changed roster):
+/// the core sync of the authorities and participants, then a projection. A declaration proven
+/// absent is a successful outcome: the snapshot is emptied (each record logged as deleted) and
+/// the seed quarantined. Any other failure backs off this forum only.
 pub async fn sync_forum(indexer: &Indexer, forum: &str) -> anyhow::Result<()> {
+    match sync_forum_inner(indexer, forum).await {
+        Ok(()) => {
+            indexer.store.note_forum_synced(forum)?;
+            Ok(())
+        }
+        Err(e) if declaration_absent(&e) => {
+            let deletes = indexer.store.note_forum_absent(forum, indexer.now_ms())?;
+            lock(&indexer.models).remove(forum);
+            info!(forum=%forum,deletes,"forum declaration is absent; seed quarantined");
+            Ok(())
+        }
+        Err(e) => {
+            let retry = indexer
+                .store
+                .note_forum_failed(forum, indexer.now_ms(), &e.to_string())?;
+            Err(e.context(format!("forum retry at {retry}")))
+        }
+    }
+}
+
+async fn sync_forum_inner(indexer: &Indexer, forum: &str) -> anyhow::Result<()> {
     let _one = indexer.sync_lock.lock().await;
     let uri = AtUri::parse(forum)?;
     let key = ForumKey::of_uri(&uri)?;
@@ -213,15 +304,71 @@ pub async fn sync_forum(indexer: &Indexer, forum: &str) -> anyhow::Result<()> {
             }
         }
     }
+    drop(_one);
+    let projection = project_forum(indexer, &key, None, &BTreeMap::new()).await?;
+    indexer
+        .metrics
+        .synced_forums
+        .fetch_add(1, Ordering::Relaxed);
+    // Backfill proofs are lazy: a query may fetch them on demand. Refresh at most two bundles
+    // after a changed snapshot so a large forum does not synchronously hydrate its whole history.
+    if projection.changes > 0 {
+        let mut proof_uris = vec![key.uri.to_string()];
+        proof_uris.extend(projection.model.input.records.keys().take(49).cloned());
+        for uri in proof_uris {
+            let stale = indexer.store.proof(&uri).is_none_or(|proof| {
+                proof
+                    .cid
+                    .as_deref()
+                    .is_none_or(|cid| !indexer.store.indexed_record_has_cid(&uri, cid))
+            });
+            if stale && let Err(e) = proofs::fetch(indexer, &uri).await {
+                warn!(uri=%uri,error=%e,"background proof fetch failed");
+            }
+        }
+    }
+    info!(forum=%forum,changes=projection.changes,"forum snapshot indexed");
+    Ok(())
+}
+
+/// A projection applied by [`project_forum`].
+pub struct Projection {
+    pub model: Arc<ForumModel>,
+    pub changes: usize,
+}
+
+pub(crate) fn lock<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Rebuilds `key`'s projection from the cache alone (no request): the fold, the side tables and
+/// the cached query model. Head rows are refreshed for `authors` and for every repository with
+/// a changed record (`None`: for every owner, participant and author, after an ordinary sync).
+/// Changes matching a `live` commit are logged with that commit's rev.
+pub async fn project_forum(
+    indexer: &Indexer,
+    key: &ForumKey,
+    authors: Option<&BTreeSet<String>>,
+    live: &BTreeMap<String, LiveChange>,
+) -> anyhow::Result<Projection> {
+    let _one = indexer.project_lock.lock().await;
     let now_us = indexer.now_ms().saturating_mul(1000);
-    let model = ForumModel::build(indexer.engine.host().cache(), &key, now_us).await?;
+    let model = ForumModel::build(indexer.engine.host().cache(), key, now_us).await?;
     let store = RecordStore::new(indexer.engine.host().cache());
-    let mut dids: BTreeSet<String> = model.participants().iter().cloned().collect();
-    dids.insert(key.owner.to_string());
-    dids.extend(model.input.records.values().map(|s| s.did.clone()));
+    let mut dids: BTreeSet<String> = match authors {
+        Some(authors) => authors.clone(),
+        None => {
+            let mut all: BTreeSet<String> = model.participants().iter().cloned().collect();
+            all.insert(key.owner.to_string());
+            all.extend(model.input.records.values().map(|s| s.did.clone()));
+            all
+        }
+    };
+    dids.extend(indexer.store.changed_dids(&model)?);
     let refs: Vec<&str> = dids.iter().map(String::as_str).collect();
     let rows = store.repos(&refs).await?;
     let mut revs = BTreeMap::new();
+    let mut heads = Vec::new();
     for (did, row) in dids.iter().zip(rows) {
         if let Some(row) = row {
             let rev = row
@@ -257,44 +404,110 @@ pub async fn sync_forum(indexer: &Indexer, forum: &str) -> anyhow::Result<()> {
             } else {
                 indexer.now_ms()
             };
-            indexer.store.put_head(&HeadRow {
+            heads.push(HeadRow {
                 did: did.clone(),
                 rev: (!rev.is_empty()).then_some(rev),
                 commit,
                 pds: (!row.pds.is_empty()).then_some(row.pds),
                 checked_ms,
                 status,
-            })?;
+            });
         }
     }
-    let changes = indexer.store.apply_model(&model, indexer.now_ms(), &revs)?;
-    indexer
-        .metrics
-        .synced_forums
-        .fetch_add(1, Ordering::Relaxed);
+    indexer.store.put_heads(&heads)?;
+    let changes = indexer
+        .store
+        .apply_model(&model, indexer.now_ms(), &revs, live)?;
+    let model = Arc::new(model);
+    lock(&indexer.models).put(key.uri.as_str(), Arc::clone(&model));
     indexer
         .metrics
         .changes_written
         .fetch_add(changes as u64, Ordering::Relaxed);
-    // Backfill proofs are lazy: a query may fetch them on demand. Refresh at most two bundles
-    // after a changed snapshot so a large forum does not synchronously hydrate its whole history.
-    if changes > 0 {
-        let mut proof_uris = vec![model.key.uri.to_string()];
-        proof_uris.extend(model.input.records.keys().take(49).cloned());
-        for uri in proof_uris {
-            let stale = indexer.store.proof(&uri).is_none_or(|proof| {
-                proof
-                    .cid
-                    .as_deref()
-                    .is_none_or(|cid| !indexer.store.indexed_record_has_cid(&uri, cid))
-            });
-            if stale && let Err(e) = proofs::fetch(indexer, &uri).await {
-                warn!(uri=%uri,error=%e,"background proof fetch failed");
-            }
+    Ok(Projection { model, changes })
+}
+
+/// The cached query model of an indexed forum, built once from the cache when it is missing
+/// (after a restart or an eviction), never per request.
+pub async fn model(indexer: &Indexer, key: &ForumKey) -> anyhow::Result<Arc<ForumModel>> {
+    if let Some(m) = lock(&indexer.models).get(key.uri.as_str()) {
+        return Ok(m);
+    }
+    let _one = indexer.project_lock.lock().await;
+    if let Some(m) = lock(&indexer.models).get(key.uri.as_str()) {
+        return Ok(m);
+    }
+    let now_us = indexer.now_ms().saturating_mul(1000);
+    let model = Arc::new(ForumModel::build(indexer.engine.host().cache(), key, now_us).await?);
+    lock(&indexer.models).put(key.uri.as_str(), Arc::clone(&model));
+    Ok(model)
+}
+
+/// The per-repo retry of a live event that could not be applied: a targeted resync of the
+/// repository's range of `forum`, then a projection from the cache. A failure backs off
+/// exponentially; it never holds the Jetstream cursor.
+pub async fn retry_repo(indexer: &Indexer, did: &str, forum: &str) {
+    indexer.metrics.repo_retries.fetch_add(1, Ordering::Relaxed);
+    let result = async {
+        let parsed = Did::parse(did)?;
+        let key = ForumKey::of_uri(&AtUri::parse(forum)?)?;
+        if indexer.store.forum(forum).is_none() {
+            // Not indexed (yet): an ordinary sync of the forum covers this repository.
+            indexer.store.schedule_forum_sync(forum, indexer.now_ms())?;
+            return Ok(());
+        }
+        resync_repo(indexer, &parsed, &key).await?;
+        project_forum(
+            indexer,
+            &key,
+            Some(&BTreeSet::from([did.to_owned()])),
+            &BTreeMap::new(),
+        )
+        .await?;
+        anyhow::Ok(())
+    }
+    .await;
+    match result {
+        Ok(()) => {
+            indexer.store.clear_repo_retry(did, forum).ok();
+        }
+        Err(e) if declaration_absent(&e) => {
+            indexer.store.clear_repo_retry(did, forum).ok();
+            indexer
+                .store
+                .schedule_forum_sync(forum, indexer.now_ms())
+                .ok();
+        }
+        Err(e) => {
+            let at = indexer
+                .store
+                .schedule_repo_retry(did, forum, indexer.now_ms(), &e.to_string())
+                .unwrap_or(0);
+            warn!(did=%did,forum=%forum,error=%e,retry_at=at,"repository retry failed");
         }
     }
-    info!(forum=%forum,changes,"forum snapshot indexed");
-    Ok(())
+}
+
+/// One `sync_repo` of `did`'s range of `key` (no forum-wide sync).
+pub async fn resync_repo(indexer: &Indexer, did: &Did, key: &ForumKey) -> anyhow::Result<()> {
+    let session = indexer
+        .engine
+        .syncer()
+        .session(Priority::P1, Arc::new(Stats::new()));
+    let report = indexer
+        .engine
+        .syncer()
+        .sync_repo(
+            &session,
+            &SyncRequest::forum(did.clone(), &key.fk, Reason::Resync),
+        )
+        .await;
+    match report.error {
+        Some(error) => Err(anyhow::anyhow!(
+            "targeted repository resync failed: {error}"
+        )),
+        None => Ok(()),
+    }
 }
 
 pub async fn discover(indexer: &Indexer) -> anyhow::Result<()> {
@@ -355,6 +568,12 @@ async fn records_of(indexer: &Indexer, did: &Did, collection: &str) -> anyhow::R
     let Some(pds) = ident.pds_url() else {
         return Ok(());
     };
+    // Quotas are per DID and per PDS host (threat-model.md INFRA-12).
+    let host = pds.host_str().unwrap_or_default().to_owned();
+    if indexer.blocked_host(pds.as_str()) {
+        return Ok(());
+    }
+    let mut refused = 0usize;
     let mut cursor = None;
     for _ in 0..100 {
         let params = ListRecords {
@@ -400,7 +619,13 @@ async fn records_of(indexer: &Indexer, did: &Did, collection: &str) -> anyhow::R
             if let Some(forum) = forum
                 && !indexer.blocked(forum.as_str())
             {
-                indexer.store.add_forum_seed(forum.as_str())?;
+                if !indexer
+                    .store
+                    .add_forum_hint(forum.as_str(), did.as_str(), &host)?
+                {
+                    refused += 1;
+                    continue;
+                }
                 if collection == lessdugin_lexicon::nsid::MEMBERSHIP {
                     let created_ms =
                         lessdugin_lexicon::records::Record::from_nsid_value(collection, value)
@@ -411,9 +636,15 @@ async fn records_of(indexer: &Indexer, did: &Did, collection: &str) -> anyhow::R
                                 _ => None,
                             })
                             .unwrap_or(0);
-                    indexer
-                        .store
-                        .add_candidate(forum.as_str(), did.as_str(), &cid, created_ms)?;
+                    if !indexer.store.add_candidate_from(
+                        forum.as_str(),
+                        did.as_str(),
+                        &cid,
+                        created_ms,
+                        &host,
+                    )? {
+                        refused += 1;
+                    }
                 }
             }
         }
@@ -421,6 +652,9 @@ async fn records_of(indexer: &Indexer, did: &Did, collection: &str) -> anyhow::R
             Some(next) if Some(&next) != cursor.as_ref() => cursor = Some(next),
             _ => break,
         }
+    }
+    if refused > 0 {
+        warn!(did=%did,host=%host,collection,refused,"forum hints beyond the per-DID or per-host quota were ignored");
     }
     Ok(())
 }

@@ -14,6 +14,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use lessdugin_atp::syntax::AtUri;
 use lessdugin_core::engine::Engine;
+use lessdugin_core::model::ForumModel;
 use url::Url;
 
 use crate::host::PoliteHost;
@@ -35,15 +36,66 @@ pub const FEATURES: [&str; 9] = [
 
 pub type IndexerEngine = Engine<PoliteHost>;
 
+/// At most this many folded forum models are kept for the query methods.
+pub const MODEL_CACHE_ENTRIES: usize = 32;
+/// At most this many proofs are fetched for `getRecordProofs` at a time; other uncached items
+/// are omitted (the client falls back to its PDS) instead of waiting on the ingest budget.
+pub const API_PROOF_FETCHES: usize = 2;
+
 #[derive(Clone)]
 pub struct Indexer {
     pub engine: Arc<IndexerEngine>,
     pub store: Store,
     pub config: Arc<IndexerConfig>,
     pub metrics: Arc<Metrics>,
+    /// Serialises ordinary (network) forum syncs.
     pub sync_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Serialises projections: a model is built from the cache and applied under this lock, so
+    /// an older build can never overwrite a newer projection.
+    pub(crate) project_lock: Arc<tokio::sync::Mutex<()>>,
+    pub(crate) models: Arc<std::sync::Mutex<Models>>,
+    pub(crate) api_proofs: Arc<tokio::sync::Semaphore>,
     pub(crate) rate_windows:
         Arc<std::sync::Mutex<std::collections::HashMap<String, (tokio::time::Instant, u8)>>>,
+}
+
+/// The last projected model of each forum (least recently used first out). Queries read views
+/// from it instead of refolding the forum per request.
+#[derive(Default)]
+pub(crate) struct Models {
+    entries: std::collections::HashMap<String, (u64, Arc<ForumModel>)>,
+    tick: u64,
+}
+
+impl Models {
+    pub(crate) fn get(&mut self, forum: &str) -> Option<Arc<ForumModel>> {
+        self.tick += 1;
+        let tick = self.tick;
+        self.entries.get_mut(forum).map(|(used, m)| {
+            *used = tick;
+            Arc::clone(m)
+        })
+    }
+
+    pub(crate) fn put(&mut self, forum: &str, model: Arc<ForumModel>) {
+        self.tick += 1;
+        self.entries.insert(forum.to_owned(), (self.tick, model));
+        while self.entries.len() > MODEL_CACHE_ENTRIES {
+            let Some(oldest) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, (used, _))| *used)
+                .map(|(f, _)| f.clone())
+            else {
+                break;
+            };
+            self.entries.remove(&oldest);
+        }
+    }
+
+    pub(crate) fn remove(&mut self, forum: &str) {
+        self.entries.remove(forum);
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -70,6 +122,9 @@ pub struct Metrics {
     pub proofs_fetched: AtomicU64,
     pub proofs_failed: AtomicU64,
     pub changes_written: AtomicU64,
+    pub live_failures: AtomicU64,
+    pub live_oversized: AtomicU64,
+    pub repo_retries: AtomicU64,
 }
 
 impl Metrics {
@@ -116,6 +171,18 @@ impl Metrics {
                 "lessdugin_indexer_changes_written_total",
                 self.changes_written.load(Ordering::Relaxed),
             ),
+            (
+                "lessdugin_indexer_live_failures_total",
+                self.live_failures.load(Ordering::Relaxed),
+            ),
+            (
+                "lessdugin_indexer_live_oversized_total",
+                self.live_oversized.load(Ordering::Relaxed),
+            ),
+            (
+                "lessdugin_indexer_repo_retries_total",
+                self.repo_retries.load(Ordering::Relaxed),
+            ),
         ];
         let mut out = String::new();
         for (name, value) in values {
@@ -133,6 +200,9 @@ impl Indexer {
             config: Arc::new(config),
             metrics: Arc::new(Metrics::default()),
             sync_lock: Arc::new(tokio::sync::Mutex::new(())),
+            project_lock: Arc::new(tokio::sync::Mutex::new(())),
+            models: Arc::new(std::sync::Mutex::new(Models::default())),
+            api_proofs: Arc::new(tokio::sync::Semaphore::new(API_PROOF_FETCHES)),
             rate_windows: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
@@ -158,27 +228,44 @@ impl Indexer {
         })
     }
 
-    pub(crate) fn blocked_record(&self, forum: &str, uri: &str) -> bool {
-        self.blocked(uri)
-            || self
-                .store
-                .record_cid(forum, uri)
-                .is_some_and(|cid| self.blocked(&cid))
-            || self.store.forum(uri).is_some_and(|f| self.blocked(&f.cid))
-            || AtUri::parse(uri).ok().is_some_and(|u| {
-                self.store
-                    .record_pds(u.did().as_str())
-                    .is_some_and(|pds| self.blocked_host(&pds))
-            })
+    /// A DID, or its repository's PDS host, is blocklisted.
+    pub(crate) fn blocked_did(&self, did: &str) -> bool {
+        !self.config.blocklist.is_empty()
+            && (self.blocked(did)
+                || self
+                    .store
+                    .record_pds(did)
+                    .is_some_and(|pds| self.blocked_host(&pds)))
+    }
+
+    /// The forum's URI, owner, owner's PDS host or declaration CID is blocklisted.
+    pub(crate) fn blocked_forum(&self, forum: &crate::store::ForumRow) -> bool {
+        !self.config.blocklist.is_empty()
+            && (self.blocked(&forum.uri)
+                || (!forum.cid.is_empty() && self.blocked(&forum.cid))
+                || self.blocked_did(&forum.did))
+    }
+
+    /// A record of `forum` is hidden by its URI, its indexed CID, its forum's declaration CID,
+    /// its author or its author's PDS host.
+    pub(crate) fn blocked_record(&self, forum: &crate::store::ForumRow, uri: &str) -> bool {
+        !self.config.blocklist.is_empty()
+            && (self.blocked(uri)
+                || self
+                    .store
+                    .record_cid(&forum.uri, uri)
+                    .is_some_and(|cid| self.blocked(&cid))
+                || (!forum.cid.is_empty() && self.blocked(&forum.cid))
+                || AtUri::parse(uri)
+                    .ok()
+                    .is_some_and(|u| self.blocked_did(u.did().as_str())))
     }
 
     fn blocked_change(&self, c: &crate::store::ChangeRow) -> bool {
-        self.blocked(&c.uri)
-            || c.cid.as_deref().is_some_and(|cid| self.blocked(cid))
-            || self
-                .store
-                .record_pds(&c.did)
-                .is_some_and(|pds| self.blocked_host(&pds))
+        !self.config.blocklist.is_empty()
+            && (self.blocked(&c.uri)
+                || c.cid.as_deref().is_some_and(|cid| self.blocked(cid))
+                || self.blocked_did(&c.did))
     }
 
     pub fn now_ms(&self) -> i64 {

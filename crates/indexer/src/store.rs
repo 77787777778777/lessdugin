@@ -2,16 +2,45 @@
 //! Durable indexer side tables. They share the native durable SQLite database but never replace
 //! or duplicate the core record store.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use lessdugin_atp::syntax::AtUri;
 use lessdugin_core::model::ForumModel;
 use rusqlite::{Connection, OptionalExtension, params};
 
+/// At most this many forum seeds are attributed to one DID (its own declarations, or the forums
+/// its memberships name before they are verified), `threat-model.md` INFRA-12.
+pub const SEEDS_PER_DID: i64 = 32;
+/// At most this many forum seeds are attributed to the DIDs of one PDS host (INFRA-12).
+pub const SEEDS_PER_HOST: i64 = 2_000;
+/// At most this many pending relay membership hints per forum from the DIDs of one PDS host.
+pub const CANDIDATES_PER_HOST: i64 = 500;
+/// At most this many pending membership hints per forum in all.
+pub const CANDIDATES_PER_FORUM: i64 = 10_000;
+/// A forum whose sync failed is retried after `RETRY_BASE_MS · 2^(failures-1)`, at most
+/// [`RETRY_MAX_MS`], independently of the six-hour discovery cadence.
+pub const RETRY_BASE_MS: i64 = 60_000;
+/// The longest per-forum or per-repo back-off.
+pub const RETRY_MAX_MS: i64 = 6 * 60 * 60 * 1000;
+/// The first retry of a repository whose live event could not be applied.
+pub const REPO_RETRY_BASE_MS: i64 = 2_000;
+/// A seed whose declaration is proven absent is rechecked at most this often.
+pub const ABSENT_RECHECK_MS: i64 = 24 * 60 * 60 * 1000;
+/// A seed whose declaration has been absent this long (and never indexed since) is dropped.
+pub const ABSENT_DROP_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+
 #[derive(Clone)]
-pub struct Store(Arc<Mutex<Connection>>);
+pub struct Store(Arc<Inner>);
+
+struct Inner {
+    conn: Mutex<Connection>,
+    /// Incremented whenever the forum set, a forum's identity or its participants change, so the
+    /// live relevance context is rebuilt only then.
+    generation: AtomicU64,
+}
 
 #[derive(Clone, Debug)]
 pub struct ForumRow {
@@ -25,6 +54,10 @@ pub struct ForumRow {
     pub posts: usize,
     pub synced_ms: i64,
     pub input_digest: String,
+    pub fk: String,
+    pub failures: i64,
+    pub retry_ms: i64,
+    pub absent_ms: i64,
 }
 
 #[derive(Clone, Debug)]
@@ -64,6 +97,33 @@ pub struct ProofRow {
     pub cid: Option<String>,
 }
 
+/// A Jetstream commit applied by live ingest: its claimed rev, and its CID (absent for a
+/// delete). The change log records this rev when the projection admitted that same version.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LiveChange {
+    pub rev: String,
+    pub cid: Option<String>,
+}
+
+/// A repository whose live event could not be applied, waiting for its per-repo retry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RepoRetry {
+    pub did: String,
+    pub forum: String,
+    pub attempts: i64,
+    pub next_ms: i64,
+}
+
+fn invalid(e: impl std::fmt::Display) -> rusqlite::Error {
+    rusqlite::Error::InvalidParameterName(e.to_string())
+}
+
+/// `base · 2^(attempts-1)`, at most [`RETRY_MAX_MS`].
+pub fn backoff_ms(base: i64, attempts: i64) -> i64 {
+    let shift = attempts.saturating_sub(1).clamp(0, 30) as u32;
+    base.saturating_mul(1i64 << shift).min(RETRY_MAX_MS)
+}
+
 impl Store {
     pub fn open(path: &Path) -> rusqlite::Result<Self> {
         let conn = Connection::open(path)?;
@@ -71,28 +131,96 @@ impl Store {
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.execute_batch(SCHEMA)?;
         migrate_candidates(&conn)?;
-        Ok(Self(Arc::new(Mutex::new(conn))))
+        migrate_forums(&conn)?;
+        Ok(Self::wrap(conn))
     }
 
     pub fn in_memory() -> rusqlite::Result<Self> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch(SCHEMA)?;
         migrate_candidates(&conn)?;
-        Ok(Self(Arc::new(Mutex::new(conn))))
+        migrate_forums(&conn)?;
+        Ok(Self::wrap(conn))
+    }
+
+    fn wrap(conn: Connection) -> Self {
+        Self(Arc::new(Inner {
+            conn: Mutex::new(conn),
+            generation: AtomicU64::new(1),
+        }))
     }
 
     fn db(&self) -> MutexGuard<'_, Connection> {
-        self.0.lock().unwrap_or_else(|e| e.into_inner())
+        self.0.conn.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    fn bump(&self) {
+        self.0.generation.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Changes whenever a forum is added, removed or re-indexed with other participants.
+    pub fn generation(&self) -> u64 {
+        self.0.generation.load(Ordering::Relaxed)
+    }
+
+    /// An operator seed (`--forum`): never subject to the hint quotas.
     pub fn add_forum_seed(&self, forum: &str) -> rusqlite::Result<()> {
-        let uri = AtUri::parse(forum)
-            .map_err(|e| rusqlite::Error::InvalidParameterName(e.to_string()))?;
-        self.db().execute(
-            "INSERT INTO forums(uri,did,rkey,name,created_at,cid,synced_ms,input_digest) VALUES(?1,?2,?3,'','','',0,'') ON CONFLICT(uri) DO NOTHING",
-            params![uri.to_string(), uri.did().as_str(), uri.rkey().as_str()],
+        self.add_seed(forum, "", "").map(|_| ())
+    }
+
+    /// A forum hint from a declaration or a membership found by discovery, attributed to the DID
+    /// whose record named it and that DID's PDS host. Returns false when the hint was refused by
+    /// the per-DID or per-host quota (`threat-model.md` INFRA-12). A known forum is never
+    /// refused, and does not count again.
+    pub fn add_forum_hint(&self, forum: &str, via: &str, via_host: &str) -> rusqlite::Result<bool> {
+        let known = self
+            .db()
+            .query_row("SELECT 1 FROM forums WHERE uri=?1", [forum], |_| Ok(()))
+            .optional()?
+            .is_some();
+        if known {
+            return Ok(true);
+        }
+        let (by_did, by_host): (i64, i64) = {
+            let db = self.db();
+            let by_did = db.query_row("SELECT COUNT(*) FROM forums WHERE via=?1", [via], |r| {
+                r.get(0)
+            })?;
+            let by_host = if via_host.is_empty() {
+                0
+            } else {
+                db.query_row(
+                    "SELECT COUNT(*) FROM forums WHERE via_host=?1",
+                    [via_host],
+                    |r| r.get(0),
+                )?
+            };
+            (by_did, by_host)
+        };
+        if by_did >= SEEDS_PER_DID || by_host >= SEEDS_PER_HOST {
+            return Ok(false);
+        }
+        self.add_seed(forum, via, via_host)
+    }
+
+    fn add_seed(&self, forum: &str, via: &str, via_host: &str) -> rusqlite::Result<bool> {
+        let uri = AtUri::parse(forum).map_err(invalid)?;
+        let fk = lessdugin_lexicon::keys::fk(uri.as_str()).map_err(invalid)?;
+        let inserted = self.db().execute(
+            "INSERT INTO forums(uri,did,rkey,name,created_at,cid,synced_ms,input_digest,fk,via,via_host) VALUES(?1,?2,?3,'','','',0,'',?4,?5,?6) ON CONFLICT(uri) DO NOTHING",
+            params![
+                uri.to_string(),
+                uri.did().as_str(),
+                uri.rkey().as_str(),
+                fk,
+                via,
+                via_host
+            ],
         )?;
-        Ok(())
+        if inserted > 0 {
+            self.bump();
+        }
+        Ok(true)
     }
 
     /// Persist a relay membership hint, never a confirmed participant. Ordinary forum sync
@@ -105,18 +233,57 @@ impl Store {
         cid: &str,
         created_ms: i64,
     ) -> rusqlite::Result<()> {
-        lessdugin_core::discovery::ForumKey::of_uri(
-            &AtUri::parse(forum)
-                .map_err(|e| rusqlite::Error::InvalidParameterName(e.to_string()))?,
-        )
-        .map_err(|e| rusqlite::Error::InvalidParameterName(e.to_string()))?;
-        lessdugin_atp::syntax::Did::parse(did)
-            .map_err(|e| rusqlite::Error::InvalidParameterName(e.to_string()))?;
-        self.db().execute(
-            "INSERT INTO forum_candidates(forum,did,cid,created_ms,state,observed_ms) VALUES(?1,?2,?3,?4,'pending',0) ON CONFLICT(forum,did) DO UPDATE SET cid=excluded.cid,created_ms=excluded.created_ms,state=CASE WHEN forum_candidates.state='rejected' AND forum_candidates.cid=excluded.cid THEN 'rejected' WHEN forum_candidates.cid<>excluded.cid OR forum_candidates.state='confirmed' THEN 'pending' ELSE forum_candidates.state END WHERE forum_candidates.cid<>excluded.cid OR forum_candidates.created_ms<excluded.created_ms OR forum_candidates.state='confirmed'",
-            params![forum, did, cid, created_ms],
+        self.add_candidate_from(forum, did, cid, created_ms, "")
+            .map(|_| ())
+    }
+
+    /// [`Store::add_candidate`] for a hint from a DID on PDS host `host` (empty when unknown).
+    /// A new hint is refused (false) beyond [`CANDIDATES_PER_HOST`] pending hints of that host
+    /// or [`CANDIDATES_PER_FORUM`] pending hints in all, for this forum.
+    pub fn add_candidate_from(
+        &self,
+        forum: &str,
+        did: &str,
+        cid: &str,
+        created_ms: i64,
+        host: &str,
+    ) -> rusqlite::Result<bool> {
+        lessdugin_core::discovery::ForumKey::of_uri(&AtUri::parse(forum).map_err(invalid)?)
+            .map_err(invalid)?;
+        lessdugin_atp::syntax::Did::parse(did).map_err(invalid)?;
+        let db = self.db();
+        let known = db
+            .query_row(
+                "SELECT 1 FROM forum_candidates WHERE forum=?1 AND did=?2",
+                params![forum, did],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !known {
+            let pending: i64 = db.query_row(
+                "SELECT COUNT(*) FROM forum_candidates WHERE forum=?1 AND state='pending'",
+                [forum],
+                |r| r.get(0),
+            )?;
+            let from_host: i64 = if host.is_empty() {
+                0
+            } else {
+                db.query_row(
+                    "SELECT COUNT(*) FROM forum_candidates WHERE forum=?1 AND host=?2 AND state='pending'",
+                    params![forum, host],
+                    |r| r.get(0),
+                )?
+            };
+            if pending >= CANDIDATES_PER_FORUM || from_host >= CANDIDATES_PER_HOST {
+                return Ok(false);
+            }
+        }
+        db.execute(
+            "INSERT INTO forum_candidates(forum,did,cid,created_ms,state,observed_ms,host) VALUES(?1,?2,?3,?4,'pending',0,?5) ON CONFLICT(forum,did) DO UPDATE SET cid=excluded.cid,created_ms=excluded.created_ms,state=CASE WHEN forum_candidates.state='rejected' AND forum_candidates.cid=excluded.cid THEN 'rejected' WHEN forum_candidates.cid<>excluded.cid OR forum_candidates.state='confirmed' THEN 'pending' ELSE forum_candidates.state END WHERE forum_candidates.cid<>excluded.cid OR forum_candidates.created_ms<excluded.created_ms OR forum_candidates.state='confirmed'",
+            params![forum, did, cid, created_ms, host],
         )?;
-        Ok(())
+        Ok(true)
     }
 
     /// At most 500 unconfirmed candidates, most recently declared first within this relay
@@ -165,6 +332,123 @@ impl Store {
             .collect()
     }
 
+    /// The seeds a sync pass visits at `now_ms`: neither in a failure back-off nor quarantined
+    /// as absent (an absent seed is rechecked after [`ABSENT_RECHECK_MS`]).
+    pub fn forums_for_pass(&self, now_ms: i64) -> Vec<String> {
+        let db = self.db();
+        let mut q = db
+            .prepare("SELECT uri FROM forums WHERE (failures=0 OR retry_ms<=?1) AND (absent_ms=0 OR absent_ms<=?2) ORDER BY uri")
+            .unwrap();
+        q.query_map(params![now_ms, now_ms - ABSENT_RECHECK_MS], |r| r.get(0))
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect()
+    }
+
+    /// Forums whose own retry or newcomer sync is due, independently of the discovery cadence.
+    pub fn forums_due(&self, now_ms: i64) -> Vec<String> {
+        let db = self.db();
+        let mut q = db
+            .prepare("SELECT uri FROM forums WHERE absent_ms=0 AND ((failures>0 AND retry_ms<=?1) OR (sync_due_ms>0 AND sync_due_ms<=?1 AND (failures=0 OR retry_ms<=?1))) ORDER BY uri")
+            .unwrap();
+        q.query_map([now_ms], |r| r.get(0))
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect()
+    }
+
+    /// Asks for an ordinary sync of `forum` (newcomer confirmation, a changed roster) no later
+    /// than `at_ms`. An earlier request is kept.
+    pub fn schedule_forum_sync(&self, forum: &str, at_ms: i64) -> rusqlite::Result<()> {
+        self.db().execute(
+            "UPDATE forums SET sync_due_ms=?2 WHERE uri=?1 AND (sync_due_ms=0 OR sync_due_ms>?2)",
+            params![forum, at_ms],
+        )?;
+        Ok(())
+    }
+
+    /// A successful ordinary sync: clears the back-off, quarantine and pending sync request.
+    pub fn note_forum_synced(&self, forum: &str) -> rusqlite::Result<()> {
+        self.db().execute(
+            "UPDATE forums SET failures=0,retry_ms=0,absent_ms=0,sync_due_ms=0,error='' WHERE uri=?1",
+            [forum],
+        )?;
+        Ok(())
+    }
+
+    /// A failed sync: exponential per-forum back-off. Returns the retry time.
+    pub fn note_forum_failed(
+        &self,
+        forum: &str,
+        now_ms: i64,
+        error: &str,
+    ) -> rusqlite::Result<i64> {
+        let mut db = self.db();
+        let tx = db.transaction()?;
+        let failures: i64 = tx
+            .query_row("SELECT failures FROM forums WHERE uri=?1", [forum], |r| {
+                r.get(0)
+            })
+            .optional()?
+            .unwrap_or(0i64)
+            .saturating_add(1);
+        let at = now_ms.saturating_add(backoff_ms(RETRY_BASE_MS, failures));
+        tx.execute(
+            "UPDATE forums SET failures=?2,retry_ms=?3,sync_due_ms=0,error=?4 WHERE uri=?1",
+            params![forum, failures, at, error],
+        )?;
+        tx.commit()?;
+        Ok(at)
+    }
+
+    /// The declaration is proven absent: the forum's snapshot is replaced by an empty one (each
+    /// indexed record is logged as deleted) and the seed is quarantined. A seed absent for
+    /// [`ABSENT_DROP_MS`] is dropped with its candidates. Returns the number of logged deletes.
+    pub fn note_forum_absent(&self, forum: &str, now_ms: i64) -> rusqlite::Result<usize> {
+        let mut db = self.db();
+        let tx = db.transaction()?;
+        let since: Option<i64> = tx
+            .query_row("SELECT absent_ms FROM forums WHERE uri=?1", [forum], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        let Some(since) = since else {
+            return Ok(0);
+        };
+        let mut deletes = 0;
+        {
+            let mut q = tx.prepare("SELECT uri FROM record_state WHERE forum=?1")?;
+            let gone = q
+                .query_map([forum], |r| r.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            let mut log = tx.prepare(
+                "INSERT INTO change_log(forum,uri,cid,did,rev,op,at_ms) VALUES(?1,?2,NULL,?3,'','delete',?4)",
+            )?;
+            for u in gone {
+                let did = AtUri::parse(&u)
+                    .map(|u| u.did().to_string())
+                    .unwrap_or_default();
+                log.execute(params![forum, u, did, now_ms])?;
+                deletes += 1;
+            }
+        }
+        tx.execute("DELETE FROM record_state WHERE forum=?1", [forum])?;
+        tx.execute("DELETE FROM participants WHERE forum=?1", [forum])?;
+        if since > 0 && now_ms.saturating_sub(since) >= ABSENT_DROP_MS {
+            tx.execute("DELETE FROM forum_candidates WHERE forum=?1", [forum])?;
+            tx.execute("DELETE FROM repo_retry WHERE forum=?1", [forum])?;
+            tx.execute("DELETE FROM forums WHERE uri=?1", [forum])?;
+        } else {
+            tx.execute(
+                "UPDATE forums SET synced_ms=0,cid='',input_digest='',participant_count=0,post_count=0,failures=0,retry_ms=0,sync_due_ms=0,error='absent',absent_ms=CASE WHEN absent_ms=0 THEN ?2 ELSE absent_ms END WHERE uri=?1",
+                params![forum, now_ms],
+            )?;
+        }
+        tx.commit()?;
+        self.bump();
+        Ok(deletes)
+    }
+
     pub fn latest_seq(&self) -> i64 {
         self.db()
             .query_row("SELECT COALESCE(MAX(seq),0) FROM change_log", [], |r| {
@@ -206,6 +490,12 @@ impl Store {
         Ok(())
     }
 
+    /// Moves a numeric cursor forward only: a replayed (rewound) frame never moves it back.
+    pub fn advance_cursor(&self, source: &str, value: i64) -> rusqlite::Result<()> {
+        self.db().execute("INSERT INTO cursors(name,value) VALUES(?1,?2) ON CONFLICT(name) DO UPDATE SET value=excluded.value WHERE CAST(cursors.value AS INTEGER)<CAST(excluded.value AS INTEGER)", params![source,value.to_string()])?;
+        Ok(())
+    }
+
     pub fn scheduled_at(&self, name: &str) -> Option<i64> {
         self.db()
             .query_row("SELECT value FROM schedule WHERE name=?1", [name], |r| {
@@ -230,49 +520,112 @@ impl Store {
         Ok(())
     }
 
-    pub fn forums(&self, q: Option<&str>) -> Vec<ForumRow> {
-        let db = self.db();
-        let pattern = q.map(|s| format!("%{}%", s.replace(['%', '_'], "")));
-        let sql = "SELECT uri,did,name,description,created_at,cid,synced_ms,input_digest FROM forums WHERE (?1 IS NULL OR uri LIKE ?1 OR name LIKE ?1) ORDER BY uri";
-        let mut q = db.prepare(sql).unwrap();
-        q.query_map([&pattern], |r| {
-            let uri: String = r.get(0)?;
-            let participants = db
-                .query_row(
-                    "SELECT COUNT(*) FROM participants WHERE forum=?1",
-                    [&uri],
-                    |r| r.get::<_, i64>(0),
-                )
-                .unwrap_or(0) as usize;
-            let posts = db
-                .query_row(
-                    "SELECT COUNT(*) FROM record_state WHERE forum=?1 AND uri LIKE '%.post/%'",
-                    [&uri],
-                    |r| r.get::<_, i64>(0),
-                )
-                .unwrap_or(0) as usize;
-            Ok(ForumRow {
-                uri,
-                did: r.get(1)?,
-                name: r.get(2)?,
-                description: r.get(3)?,
-                created_at: r.get(4)?,
-                cid: r.get(5)?,
-                synced_ms: r.get(6)?,
-                input_digest: r.get(7)?,
-                participants,
-                posts,
-            })
+    fn forum_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ForumRow> {
+        Ok(ForumRow {
+            uri: r.get(0)?,
+            did: r.get(1)?,
+            name: r.get(2)?,
+            description: r.get(3)?,
+            created_at: r.get(4)?,
+            cid: r.get(5)?,
+            synced_ms: r.get(6)?,
+            input_digest: r.get(7)?,
+            participants: r.get::<_, i64>(8)? as usize,
+            posts: r.get::<_, i64>(9)? as usize,
+            fk: r.get(10)?,
+            failures: r.get(11)?,
+            retry_ms: r.get(12)?,
+            absent_ms: r.get(13)?,
         })
-        .unwrap()
-        .filter_map(Result::ok)
-        .collect()
     }
 
+    /// Every forum row, seeds included. Counts are maintained columns, so this costs one pass
+    /// over `forums`, never a scan of the indexed records.
+    pub fn forums(&self, q: Option<&str>) -> Vec<ForumRow> {
+        self.forums_where(q, false)
+    }
+
+    /// The forums served by `listForums` and `describeIndexer`: synced, with a declaration CID,
+    /// not quarantined.
+    pub fn indexed_forums(&self, q: Option<&str>) -> Vec<ForumRow> {
+        self.forums_where(q, true)
+    }
+
+    fn forums_where(&self, q: Option<&str>, indexed: bool) -> Vec<ForumRow> {
+        let db = self.db();
+        let pattern = q.map(|s| format!("%{}%", s.replace(['%', '_'], "")));
+        let sql = format!(
+            "SELECT {FORUM_COLUMNS} FROM forums WHERE (?1 IS NULL OR uri LIKE ?1 OR name LIKE ?1){} ORDER BY uri",
+            if indexed {
+                " AND synced_ms>0 AND cid<>'' AND absent_ms=0"
+            } else {
+                ""
+            }
+        );
+        let mut q = db.prepare(&sql).unwrap();
+        q.query_map([&pattern], Self::forum_from_row)
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect()
+    }
+
+    pub fn forum_count(&self) -> i64 {
+        self.db()
+            .query_row("SELECT COUNT(*) FROM forums", [], |r| r.get(0))
+            .unwrap_or(0)
+    }
+
+    /// One synced forum by its declaration URI (a primary-key lookup).
     pub fn forum(&self, uri: &str) -> Option<ForumRow> {
-        self.forums(None)
-            .into_iter()
-            .find(|f| f.uri == uri && !f.synced_ms.eq(&0))
+        self.forum_row(uri)
+            .filter(|f| f.synced_ms != 0 && !f.cid.is_empty() && f.absent_ms == 0)
+    }
+
+    /// One forum row (a seed too) by its declaration URI.
+    pub fn forum_row(&self, uri: &str) -> Option<ForumRow> {
+        self.db()
+            .query_row(
+                &format!("SELECT {FORUM_COLUMNS} FROM forums WHERE uri=?1"),
+                [uri],
+                Self::forum_from_row,
+            )
+            .optional()
+            .ok()
+            .flatten()
+    }
+
+    /// The forum seeds whose key is `fk` (an indexed lookup; at most a handful).
+    pub fn forums_by_fk(&self, fk: &str) -> Vec<String> {
+        let db = self.db();
+        let mut q = db
+            .prepare("SELECT uri FROM forums WHERE fk=?1 ORDER BY uri")
+            .unwrap();
+        q.query_map([fk], |r| r.get(0))
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect()
+    }
+
+    /// Forums that `did` owns or participates in (indexed lookups).
+    pub fn did_forums(&self, did: &str) -> Vec<String> {
+        let db = self.db();
+        let mut q = db
+            .prepare("SELECT uri FROM forums WHERE did=?1 UNION SELECT forum FROM participants WHERE did=?1 ORDER BY 1")
+            .unwrap();
+        q.query_map([did], |r| r.get(0))
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect()
+    }
+
+    /// Every participant DID of every forum, once.
+    pub fn participant_dids(&self) -> BTreeSet<String> {
+        let db = self.db();
+        let mut q = db.prepare("SELECT DISTINCT did FROM participants").unwrap();
+        q.query_map([], |r| r.get(0))
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect()
     }
 
     pub fn participants(&self, forum: &str, status: Option<&str>) -> Vec<ParticipantRow> {
@@ -292,8 +645,30 @@ impl Store {
     }
 
     pub fn put_head(&self, row: &HeadRow) -> rusqlite::Result<()> {
-        self.db().execute("INSERT INTO repo_heads(did,rev,commit_cid,pds,checked_ms,status) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(did) DO UPDATE SET rev=excluded.rev,commit_cid=excluded.commit_cid,pds=excluded.pds,checked_ms=excluded.checked_ms,status=excluded.status", params![row.did,row.rev,row.commit,row.pds,row.checked_ms,row.status])?;
-        Ok(())
+        self.put_heads(std::slice::from_ref(row))
+    }
+
+    /// Upserts head rows in one transaction; unchanged rows are not rewritten.
+    pub fn put_heads(&self, rows: &[HeadRow]) -> rusqlite::Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let mut db = self.db();
+        let tx = db.transaction()?;
+        {
+            let mut up = tx.prepare("INSERT INTO repo_heads(did,rev,commit_cid,pds,checked_ms,status) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(did) DO UPDATE SET rev=excluded.rev,commit_cid=excluded.commit_cid,pds=excluded.pds,checked_ms=excluded.checked_ms,status=excluded.status WHERE repo_heads.rev IS NOT excluded.rev OR repo_heads.commit_cid IS NOT excluded.commit_cid OR repo_heads.pds IS NOT excluded.pds OR repo_heads.checked_ms<>excluded.checked_ms OR repo_heads.status<>excluded.status")?;
+            for row in rows {
+                up.execute(params![
+                    row.did,
+                    row.rev,
+                    row.commit,
+                    row.pds,
+                    row.checked_ms,
+                    row.status
+                ])?;
+            }
+        }
+        tx.commit()
     }
 
     pub fn heads(&self, dids: &[String]) -> Vec<HeadRow> {
@@ -356,6 +731,15 @@ impl Store {
         tx.commit()
     }
 
+    /// Drops cached proofs verified before `cutoff_ms` whose record no forum indexes any more
+    /// (deleted, or its forum dropped). Returns the count.
+    pub fn prune_proofs(&self, cutoff_ms: i64) -> rusqlite::Result<usize> {
+        self.db().execute(
+            "DELETE FROM proof_cache WHERE verified_ms<?1 AND NOT EXISTS(SELECT 1 FROM record_state WHERE record_state.uri=proof_cache.uri)",
+            [cutoff_ms],
+        )
+    }
+
     pub fn proof(&self, uri: &str) -> Option<ProofRow> {
         self.db()
             .query_row(
@@ -381,12 +765,38 @@ impl Store {
         Ok(())
     }
 
-    /// Atomically replaces the derived forum snapshot and appends its differences to the log.
+    /// The repositories of the records whose indexed CID differs from `m`'s (created, updated or
+    /// deleted): the rows [`Store::apply_model`] would log.
+    pub fn changed_dids(&self, m: &ForumModel) -> rusqlite::Result<BTreeSet<String>> {
+        let old = self.record_state(m.key.uri.as_str())?;
+        let new = snapshot(m);
+        Ok(new
+            .iter()
+            .filter(|(u, c)| old.get(*u) != Some(*c))
+            .map(|(u, _)| u.clone())
+            .chain(old.keys().filter(|u| !new.contains_key(*u)).cloned())
+            .filter_map(|u| AtUri::parse(&u).ok().map(|u| u.did().to_string()))
+            .collect())
+    }
+
+    fn record_state(&self, forum: &str) -> rusqlite::Result<BTreeMap<String, String>> {
+        let db = self.db();
+        let mut q = db.prepare("SELECT uri,cid FROM record_state WHERE forum=?1")?;
+        q.query_map([forum], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?
+        .collect()
+    }
+
+    /// Atomically brings the derived forum snapshot to `m` and appends its differences to the
+    /// log. Only changed rows are written. A change matching a `live` commit (same CID, or a
+    /// delete) is logged with that commit's rev; other changes with the repo's synced head rev.
     pub fn apply_model(
         &self,
         m: &ForumModel,
         now_ms: i64,
         repo_revs: &BTreeMap<String, String>,
+        live: &BTreeMap<String, LiveChange>,
     ) -> rusqlite::Result<usize> {
         let mut db = self.db();
         let tx = db.transaction()?;
@@ -401,23 +811,81 @@ impl Store {
                 old.insert(u, c);
             }
         }
-        let mut new: BTreeMap<String, String> = m
-            .input
-            .records
-            .iter()
-            .map(|(u, s)| (u.clone(), s.cid.clone()))
-            .collect();
-        new.insert(m.key.uri.to_string(), m.input.decl_cid.clone());
-        tx.execute("DELETE FROM record_state WHERE forum=?1", [&forum])?;
-        tx.execute("DELETE FROM participants WHERE forum=?1", [&forum])?;
+        let new = snapshot(m);
+        let mut old_participants: BTreeMap<String, (String, Option<String>, i64)> = BTreeMap::new();
         {
-            let mut ins = tx.prepare("INSERT INTO record_state(forum,uri,cid) VALUES(?1,?2,?3)")?;
-            for (u, c) in &new {
-                ins.execute(params![forum, u, c])?;
+            let mut q =
+                tx.prepare("SELECT did,status,rev,last_seen_ms FROM participants WHERE forum=?1")?;
+            for row in q.query_map([&forum], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    (r.get::<_, String>(1)?, r.get(2)?, r.get(3)?),
+                ))
+            })? {
+                let (d, p) = row?;
+                old_participants.insert(d, p);
             }
         }
+        let mut changes = 0;
+        let mut touched: BTreeSet<String> = BTreeSet::new();
         {
-            let mut ins = tx.prepare("INSERT INTO participants(forum,did,status,rev,last_seen_ms) VALUES(?1,?2,?3,NULL,?4)")?;
+            let mut put = tx.prepare(
+                "INSERT INTO record_state(forum,uri,cid) VALUES(?1,?2,?3) ON CONFLICT(forum,uri) DO UPDATE SET cid=excluded.cid",
+            )?;
+            let mut del = tx.prepare("DELETE FROM record_state WHERE forum=?1 AND uri=?2")?;
+            let mut log = tx.prepare(
+                "INSERT INTO change_log(forum,uri,cid,did,rev,op,at_ms) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+            )?;
+            for (u, c) in &new {
+                if old.get(u) != Some(c) {
+                    put.execute(params![forum, u, c])?;
+                    let did = AtUri::parse(u)
+                        .map(|u| u.did().to_string())
+                        .unwrap_or_default();
+                    let op = if old.contains_key(u) {
+                        "update"
+                    } else {
+                        "create"
+                    };
+                    let rev = live
+                        .get(u)
+                        .filter(|l| l.cid.as_deref() == Some(c.as_str()) && !l.rev.is_empty())
+                        .map(|l| l.rev.clone())
+                        .or_else(|| repo_revs.get(&did).cloned())
+                        .unwrap_or_default();
+                    log.execute(params![forum, u, c, did, rev, op, now_ms])?;
+                    touched.insert(did);
+                    changes += 1;
+                }
+            }
+            for u in old.keys().filter(|u| !new.contains_key(*u)) {
+                del.execute(params![forum, u])?;
+                let did = AtUri::parse(u)
+                    .map(|u| u.did().to_string())
+                    .unwrap_or_default();
+                let rev = live
+                    .get(u)
+                    .filter(|l| l.cid.is_none() && !l.rev.is_empty())
+                    .map(|l| l.rev.clone())
+                    .or_else(|| repo_revs.get(&did).cloned())
+                    .unwrap_or_default();
+                log.execute(params![
+                    forum,
+                    u,
+                    Option::<String>::None,
+                    did,
+                    rev,
+                    "delete",
+                    now_ms
+                ])?;
+                touched.insert(did);
+                changes += 1;
+            }
+        }
+        let mut roster_changed = false;
+        {
+            let mut put = tx.prepare("INSERT INTO participants(forum,did,status,rev,last_seen_ms) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(forum,did) DO UPDATE SET status=excluded.status,rev=excluded.rev,last_seen_ms=excluded.last_seen_ms")?;
+            let mut del = tx.prepare("DELETE FROM participants WHERE forum=?1 AND did=?2")?;
             for did in m.participants() {
                 let status = match m.rank(did) {
                     3 => "owner",
@@ -427,47 +895,48 @@ impl Store {
                     _ if m.view.participation.members.contains(did) => "member",
                     _ => "newcomer",
                 };
-                ins.execute(params![forum, did, status, now_ms])?;
-            }
-        }
-        let mut changes = 0;
-        let mut log = tx.prepare(
-            "INSERT INTO change_log(forum,uri,cid,did,rev,op,at_ms) VALUES(?1,?2,?3,?4,?5,?6,?7)",
-        )?;
-        for (u, c) in &new {
-            if old.get(u) != Some(c) {
-                let did = AtUri::parse(u)
-                    .map(|u| u.did().to_string())
-                    .unwrap_or_default();
-                let op = if old.contains_key(u) {
-                    "update"
-                } else {
-                    "create"
+                let previous = old_participants.get(did);
+                let rev = repo_revs
+                    .get(did)
+                    .cloned()
+                    .or_else(|| previous.and_then(|p| p.1.clone()));
+                // When the participant's repository last changed, as far as this index saw.
+                let last_seen = match previous {
+                    Some((_, _, at)) if !touched.contains(did) => *at,
+                    _ => now_ms,
                 };
-                let rev = repo_revs.get(&did).cloned().unwrap_or_default();
-                log.execute(params![forum, u, c, did, rev, op, now_ms])?;
-                changes += 1;
+                if previous.is_none_or(|(s, r, at)| s != status || *r != rev || *at != last_seen) {
+                    put.execute(params![forum, did, status, rev, last_seen])?;
+                    roster_changed |= previous.is_none_or(|(s, _, _)| s != status);
+                }
+            }
+            for did in old_participants
+                .keys()
+                .filter(|d| !m.participants().contains(*d))
+            {
+                del.execute(params![forum, did])?;
+                roster_changed = true;
             }
         }
-        for u in old.keys().filter(|u| !new.contains_key(*u)) {
-            let did = AtUri::parse(u)
-                .map(|u| u.did().to_string())
-                .unwrap_or_default();
-            let rev = repo_revs.get(&did).cloned().unwrap_or_default();
-            log.execute(params![
-                forum,
-                u,
-                Option::<String>::None,
-                did,
-                rev,
-                "delete",
-                now_ms
-            ])?;
-            changes += 1;
-        }
-        drop(log);
-        tx.execute("INSERT INTO forums(uri,did,rkey,name,description,created_at,cid,synced_ms,input_digest) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9) ON CONFLICT(uri) DO UPDATE SET name=excluded.name,description=excluded.description,created_at=excluded.created_at,cid=excluded.cid,synced_ms=excluded.synced_ms,input_digest=excluded.input_digest", params![forum,m.key.owner.as_str(),m.key.uri.rkey().as_str(),m.decl.name,m.decl.description,m.decl.created_at.as_str(),m.input.decl_cid,now_ms,m.view.input_digest])?;
+        let posts = new
+            .keys()
+            .filter(|u| {
+                m.input
+                    .records
+                    .get(*u)
+                    .is_some_and(|s| s.collection == lessdugin_lexicon::nsid::POST)
+            })
+            .count() as i64;
+        let previous_cid: Option<String> = tx
+            .query_row("SELECT cid FROM forums WHERE uri=?1", [&forum], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        tx.execute("INSERT INTO forums(uri,did,rkey,name,description,created_at,cid,synced_ms,input_digest,fk,participant_count,post_count,absent_ms) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,0) ON CONFLICT(uri) DO UPDATE SET name=excluded.name,description=excluded.description,created_at=excluded.created_at,cid=excluded.cid,synced_ms=excluded.synced_ms,input_digest=excluded.input_digest,fk=excluded.fk,participant_count=excluded.participant_count,post_count=excluded.post_count,absent_ms=0", params![forum,m.key.owner.as_str(),m.key.uri.rkey().as_str(),m.decl.name,m.decl.description,m.decl.created_at.as_str(),m.input.decl_cid,now_ms,m.view.input_digest,m.key.fk,m.participants().len() as i64,posts])?;
         tx.commit()?;
+        if roster_changed || previous_cid.as_deref() != Some(m.input.decl_cid.as_str()) {
+            self.bump();
+        }
         Ok(changes)
     }
 
@@ -480,8 +949,7 @@ impl Store {
         op: &str,
         now_ms: i64,
     ) -> rusqlite::Result<()> {
-        let did =
-            AtUri::parse(uri).map_err(|e| rusqlite::Error::InvalidParameterName(e.to_string()))?;
+        let did = AtUri::parse(uri).map_err(invalid)?;
         self.db().execute(
             "INSERT INTO change_log(forum,uri,cid,did,rev,op,at_ms) VALUES(?1,?2,?3,?4,?5,?6,?7)",
             params![forum, uri, cid, did.did().as_str(), rev, op, now_ms],
@@ -535,18 +1003,94 @@ impl Store {
             .ok()
             .flatten()
     }
+
+    /// Hands a repository whose live event failed to the per-repo retry path: exponential
+    /// back-off from [`REPO_RETRY_BASE_MS`]. Returns the retry time.
+    pub fn schedule_repo_retry(
+        &self,
+        did: &str,
+        forum: &str,
+        now_ms: i64,
+        error: &str,
+    ) -> rusqlite::Result<i64> {
+        let mut db = self.db();
+        let tx = db.transaction()?;
+        let attempts: i64 = tx
+            .query_row(
+                "SELECT attempts FROM repo_retry WHERE did=?1 AND forum=?2",
+                params![did, forum],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(0i64)
+            .saturating_add(1);
+        let at = now_ms.saturating_add(backoff_ms(REPO_RETRY_BASE_MS, attempts));
+        tx.execute("INSERT INTO repo_retry(did,forum,attempts,next_ms,error) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(did,forum) DO UPDATE SET attempts=excluded.attempts,next_ms=excluded.next_ms,error=excluded.error", params![did, forum, attempts, at, error])?;
+        tx.commit()?;
+        Ok(at)
+    }
+
+    /// Due per-repo retries, oldest first.
+    pub fn due_repo_retries(&self, now_ms: i64, limit: usize) -> Vec<RepoRetry> {
+        let db = self.db();
+        let mut q = db
+            .prepare("SELECT did,forum,attempts,next_ms FROM repo_retry WHERE next_ms<=?1 ORDER BY next_ms,did,forum LIMIT ?2")
+            .unwrap();
+        q.query_map(params![now_ms, limit as i64], |r| {
+            Ok(RepoRetry {
+                did: r.get(0)?,
+                forum: r.get(1)?,
+                attempts: r.get(2)?,
+                next_ms: r.get(3)?,
+            })
+        })
+        .unwrap()
+        .filter_map(Result::ok)
+        .collect()
+    }
+
+    /// Every pending per-repo retry (diagnostics and tests).
+    pub fn repo_retries(&self) -> Vec<RepoRetry> {
+        self.due_repo_retries(i64::MAX, usize::MAX >> 1)
+    }
+
+    pub fn clear_repo_retry(&self, did: &str, forum: &str) -> rusqlite::Result<()> {
+        self.db().execute(
+            "DELETE FROM repo_retry WHERE did=?1 AND forum=?2",
+            params![did, forum],
+        )?;
+        Ok(())
+    }
+}
+
+const FORUM_COLUMNS: &str = "uri,did,name,description,created_at,cid,synced_ms,input_digest,participant_count,post_count,fk,failures,retry_ms,absent_ms";
+
+/// The snapshot rows of `m`: every fold input record and the declaration.
+fn snapshot(m: &ForumModel) -> BTreeMap<String, String> {
+    let mut new: BTreeMap<String, String> = m
+        .input
+        .records
+        .iter()
+        .map(|(u, s)| (u.clone(), s.cid.clone()))
+        .collect();
+    new.insert(m.key.uri.to_string(), m.input.decl_cid.clone());
+    new
+}
+
+fn columns(conn: &Connection, table: &str) -> rusqlite::Result<Vec<String>> {
+    conn.prepare(&format!("PRAGMA table_info({table})"))?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .collect()
 }
 
 fn migrate_candidates(conn: &Connection) -> rusqlite::Result<()> {
-    let columns = conn
-        .prepare("PRAGMA table_info(forum_candidates)")?
-        .query_map([], |r| r.get::<_, String>(1))?
-        .collect::<Result<Vec<_>, _>>()?;
+    let columns = columns(conn, "forum_candidates")?;
     for (name, declaration) in [
         ("cid", "TEXT NOT NULL DEFAULT ''"),
         ("created_ms", "INTEGER NOT NULL DEFAULT 0"),
         ("state", "TEXT NOT NULL DEFAULT 'pending'"),
         ("observed_ms", "INTEGER NOT NULL DEFAULT 0"),
+        ("host", "TEXT NOT NULL DEFAULT ''"),
     ] {
         if !columns.iter().any(|column| column == name) {
             conn.execute(
@@ -563,6 +1107,56 @@ fn migrate_candidates(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// Maintained counts, the forum key and the per-forum back-off and quota columns. Older
+/// databases get them on open, with the counts computed once.
+fn migrate_forums(conn: &Connection) -> rusqlite::Result<()> {
+    let columns = columns(conn, "forums")?;
+    let mut counted = true;
+    for (name, declaration) in [
+        ("fk", "TEXT NOT NULL DEFAULT ''"),
+        ("participant_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("post_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("failures", "INTEGER NOT NULL DEFAULT 0"),
+        ("retry_ms", "INTEGER NOT NULL DEFAULT 0"),
+        ("absent_ms", "INTEGER NOT NULL DEFAULT 0"),
+        ("sync_due_ms", "INTEGER NOT NULL DEFAULT 0"),
+        ("error", "TEXT NOT NULL DEFAULT ''"),
+        ("via", "TEXT NOT NULL DEFAULT ''"),
+        ("via_host", "TEXT NOT NULL DEFAULT ''"),
+    ] {
+        if !columns.iter().any(|column| column == name) {
+            conn.execute(
+                &format!("ALTER TABLE forums ADD COLUMN {name} {declaration}"),
+                [],
+            )?;
+            counted &= name != "participant_count";
+        }
+    }
+    if !counted {
+        conn.execute(
+            "UPDATE forums SET participant_count=(SELECT COUNT(*) FROM participants WHERE participants.forum=forums.uri),post_count=(SELECT COUNT(*) FROM record_state WHERE record_state.forum=forums.uri AND record_state.uri LIKE '%.post/%')",
+            [],
+        )?;
+    }
+    let unkeyed = conn
+        .prepare("SELECT uri FROM forums WHERE fk=''")?
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    for uri in unkeyed {
+        if let Ok(fk) = lessdugin_lexicon::keys::fk(&uri) {
+            conn.execute("UPDATE forums SET fk=?2 WHERE uri=?1", params![uri, fk])?;
+        }
+    }
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS forums_fk ON forums(fk);
+         CREATE INDEX IF NOT EXISTS forums_owner ON forums(did);
+         CREATE INDEX IF NOT EXISTS forums_via ON forums(via);
+         CREATE INDEX IF NOT EXISTS forums_via_host ON forums(via_host);
+         CREATE INDEX IF NOT EXISTS candidates_host ON forum_candidates(forum,host,state);",
+    )?;
+    Ok(())
+}
+
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS forum_candidates(
  forum TEXT NOT NULL,did TEXT NOT NULL,
@@ -574,9 +1168,11 @@ CREATE TABLE IF NOT EXISTS forums(
 CREATE TABLE IF NOT EXISTS participants(
  forum TEXT NOT NULL,did TEXT NOT NULL,status TEXT NOT NULL,rev TEXT,last_seen_ms INTEGER NOT NULL,
  PRIMARY KEY(forum,did));
+CREATE INDEX IF NOT EXISTS participants_did ON participants(did);
 CREATE TABLE IF NOT EXISTS repo_heads(
  did TEXT PRIMARY KEY,rev TEXT,commit_cid TEXT,pds TEXT,checked_ms INTEGER NOT NULL,status TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS record_state(forum TEXT NOT NULL,uri TEXT NOT NULL,cid TEXT NOT NULL,PRIMARY KEY(forum,uri));
+CREATE INDEX IF NOT EXISTS record_state_uri ON record_state(uri,cid);
 CREATE TABLE IF NOT EXISTS change_log(
  seq INTEGER PRIMARY KEY AUTOINCREMENT,forum TEXT NOT NULL,uri TEXT NOT NULL,cid TEXT,did TEXT NOT NULL,
  rev TEXT NOT NULL,op TEXT NOT NULL,at_ms INTEGER NOT NULL);
@@ -586,6 +1182,9 @@ CREATE TABLE IF NOT EXISTS proof_cache(
  uri TEXT PRIMARY KEY,rev TEXT NOT NULL,car BLOB NOT NULL,commit_cid TEXT NOT NULL,cid TEXT,verified_ms INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS cursors(name TEXT PRIMARY KEY,value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS schedule(name TEXT PRIMARY KEY,value INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS repo_retry(
+ did TEXT NOT NULL,forum TEXT NOT NULL,attempts INTEGER NOT NULL,next_ms INTEGER NOT NULL,error TEXT NOT NULL,
+ PRIMARY KEY(did,forum));
 "#;
 
 #[cfg(test)]
