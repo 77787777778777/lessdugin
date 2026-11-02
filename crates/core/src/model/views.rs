@@ -42,7 +42,7 @@ use crate::dto::{
     CommentSort, Completeness, DtoVersion, ExternalLinkView, ForumRole, ForumSummary, ForumView,
     HandleState, HiddenReason, HistorySummary, HistoryView, ItemState, KarmaValue, MemberView,
     MembersQuery, MembershipMode as DtoMode, ModLogEntry, ModLogStatus, ModQueue, ModQueueItem,
-    ModRole, ModeratorView, MyOpinion, PostKind, PostSummary, PostView, ReactTally,
+    ModRole, ModeratorView, MyOpinion, PostKind, PostSummary, PostTag, PostView, ReactTally,
     ReadingPosition, RenderedBody, ScoreView, SequenceNav, SequenceSummary, SequenceView,
     Stance as DtoStance, TagSummary, TagView, TextQuote, ThreadRoot, ThreadView, Tier,
     VersionEntry, VersionRef, ViewerCaps,
@@ -837,7 +837,63 @@ impl Views<'_> {
             reacts,
             history: self.history_summary(uri),
             sequences: self.sequence_nav(uri, from),
+            tag_relevance: self.post_tags(uri, listed),
         })
+    }
+
+    /// `PostView.tagRelevance`: `rel(p, slug)` and `applies(p, slug)` of every slug with a
+    /// non-zero relevance or a tag vote of the viewer's, by slug (`social.md` §13.3). The
+    /// viewer's vote on a slug is its entries' one value (OP3: unknown values dropped; OP4:
+    /// conflicting entries give none). A post that is not listed shows none, except to the
+    /// forum's authorities.
+    fn post_tags(&self, uri: &str, listed: bool) -> Vec<PostTag> {
+        if !listed && !self.viewer_is_authority() {
+            return Vec::new();
+        }
+        let Ok(wiki) = self.model.view.wiki.as_ref() else {
+            return Vec::new();
+        };
+        let mut mine: BTreeMap<String, Option<VoteValue>> = BTreeMap::new();
+        let entries = self
+            .my_opinion(uri)
+            .and_then(|(_, v)| v.get("tags")?.as_array().cloned())
+            .unwrap_or_default();
+        for e in &entries {
+            let (Some(slug), Some(value)) = (
+                e.get("tag").and_then(Value::as_str),
+                e.get("value").and_then(Value::as_str).and_then(VoteValue::parse),
+            ) else {
+                continue;
+            };
+            mine.entry(slug.to_owned())
+                .and_modify(|v| {
+                    if *v != Some(value) {
+                        *v = None;
+                    }
+                })
+                .or_insert(Some(value));
+        }
+        let rel = wiki.rel.get(uri);
+        let slugs: BTreeSet<&str> = rel
+            .into_iter()
+            .flat_map(|r| r.keys())
+            .chain(mine.keys())
+            .map(String::as_str)
+            .collect();
+        slugs
+            .into_iter()
+            .map(|slug| PostTag {
+                slug: slug.to_owned(),
+                relevance: rel.and_then(|r| r.get(slug)).copied().unwrap_or(0),
+                applies: wiki.applies_to(uri, slug),
+                mine: mine.get(slug).copied().flatten().map(|v| match v {
+                    VoteValue::Up => KarmaValue::Up,
+                    VoteValue::Down => KarmaValue::Down,
+                    VoteValue::StrongUp => KarmaValue::StrongUp,
+                    VoteValue::StrongDown => KarmaValue::StrongDown,
+                }),
+            })
+            .collect()
     }
 
     fn wiki_revision(&self, uri: &str) -> Option<lessdugin_lexicon::records::WikiRevision> {

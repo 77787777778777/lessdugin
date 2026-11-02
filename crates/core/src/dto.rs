@@ -594,6 +594,23 @@ dto! {
         pub reacts: Vec<ReactTally>,
         pub history: HistorySummary,
         pub sequences: Vec<SequenceNav>,
+        /// Tag relevance (`social.md` §13.3) and the viewer's own tag votes, by slug: every
+        /// slug with a non-zero `rel(p, slug)` or a tag vote of the viewer's. Empty for a post
+        /// that is not listed, except to the forum's authorities (like its score).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub tag_relevance: Vec<PostTag>,
+    }
+}
+
+dto! {
+    /// A tag of a post (`social.md` §13.3): `rel(p, slug)`, whether it applies, and the viewer's
+    /// own tag vote on it, as its cached opinion record carries it.
+    pub struct PostTag {
+        pub slug: String,
+        pub relevance: i64,
+        pub applies: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub mine: Option<KarmaValue>,
     }
 }
 
