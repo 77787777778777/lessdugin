@@ -1045,6 +1045,65 @@ fn a_spilled_body_is_edited_as_its_text() {
     assert!(rec["body"].get("textBlob").is_none(), "{}", rec["body"]);
 }
 
+/// `read` is one view per process, and a view waits `BODY_BLOB_WAIT_MS` (3 s) for a spilled
+/// body: the CLI awaits the download the view started before it prints, so a body slower than
+/// that still shows (m3m4-continuation-5, `limits.md` `BODY_BLOB_WAIT_MS`). One that cannot be
+/// downloaded at all shows its excerpt, and a warning names it.
+#[test]
+fn read_waits_for_a_slow_spilled_body() {
+    use lessdugin_testkit::fake_pds::Fault;
+    let net = Net::new();
+    let alice = net.user("alice.test", true);
+    alice.json(&["forum", "create", "meta", "--frontpage"]);
+    let post_of = |title: &str| {
+        let long = "word ".repeat(14_000);
+        let f = alice.file(
+            &format!("{title}.md"),
+            &format!("---\ntitle: {title}\n---\nThe opening.\n\n{long}\n\nThe last words.\n"),
+        );
+        let p = alice.json(&["post", s(&f), "--yes"]);
+        p["state"]["uri"].as_str().unwrap().to_owned()
+    };
+    let slow = post_of("Slow");
+    let reader = net.reader(&alice);
+    let body_of = |out: &std::process::Output| -> String {
+        let tv: ThreadView = serde_json::from_slice(&out.stdout)
+            .unwrap_or_else(|e| panic!("{e}: {}", text(&out.stderr)));
+        match tv.post {
+            lessdugin_core::dto::ThreadRoot::Post(p) => p.body.text,
+            other => panic!("{other:?}"),
+        }
+    };
+
+    // the author's PDS takes 6 s to answer getBlob: twice the view's wait
+    alice.account.inject(
+        Fault::latency(6_000)
+            .on_nsid("com.atproto.sync.getBlob")
+            .once(),
+    );
+    let started = std::time::Instant::now();
+    let out = reader.run(&["--json", "read", &slow]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(started.elapsed() >= std::time::Duration::from_secs(5));
+    let body = body_of(&out);
+    assert!(body.contains("The last words."), "{body}");
+    assert!(!text(&out.stderr).contains("still not loaded"), "{}", text(&out.stderr));
+
+    // a body its PDS will not serve: the excerpt, and a warning naming the item
+    let broken = post_of("Broken");
+    alice
+        .account
+        .inject(Fault::status(500).on_nsid("com.atproto.sync.getBlob"));
+    let out = reader.run(&["--json", "read", &broken]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(!body_of(&out).contains("The last words."));
+    let stderr = text(&out.stderr);
+    assert!(
+        stderr.contains("still not loaded") && stderr.contains(&broken),
+        "{stderr}"
+    );
+}
+
 /// An edit keeps a link post's card (`link.title`, `link.description`, entered by another
 /// client) while the uri stays: the engine writes `link` from the draft (`data-model.md`
 /// §8.3), so a title-only or text-only edit must send the card again (robustness-7). A new
