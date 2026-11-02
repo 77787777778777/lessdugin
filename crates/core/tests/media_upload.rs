@@ -380,7 +380,11 @@ fn an_edit_can_drop_a_link_card_and_keep_the_link() {
         title: None,
         description: None,
     });
-    let t = block_on(a.engine.edit(&uri, &Draft::Post { id: None, post: e }, &opts)).unwrap();
+    let t = block_on(
+        a.engine
+            .edit(&uri, &Draft::Post { id: None, post: e }, &opts),
+    )
+    .unwrap();
     assert_eq!(a.done(&t), uri);
     assert_eq!(
         a.record(&uri)["link"],
@@ -393,7 +397,11 @@ fn an_edit_can_drop_a_link_card_and_keep_the_link() {
         title: Some("Example".into()),
         description: None,
     });
-    let t = block_on(a.engine.edit(&uri, &Draft::Post { id: None, post: e }, &opts)).unwrap();
+    let t = block_on(
+        a.engine
+            .edit(&uri, &Draft::Post { id: None, post: e }, &opts),
+    )
+    .unwrap();
     a.done(&t);
     assert_eq!(
         a.record(&uri)["link"],

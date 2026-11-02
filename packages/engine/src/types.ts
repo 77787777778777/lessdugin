@@ -1015,6 +1015,9 @@ export type Draft =
 export interface EditOpts {
   history: boolean;
   summary?: string;
+  /** Write the draft's `link` as it is, dropping the cached card (title, description, thumb)
+   * even for the cached uri: how a client removes a card and keeps the link (§3.5 `edit`). */
+  dropLinkCard?: boolean;
 }
 
 /** `Karma(v|clear) | Agreement(v|clear) | React{…} | Tag{slug, v|clear}`; an absent `value`

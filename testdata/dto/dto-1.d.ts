@@ -196,6 +196,7 @@ export type DtoVersion = number;
 export interface EditOpts {
     history: boolean;
     summary?: string;
+    dropLinkCard?: boolean;
 }
 
 export interface EffectivePolicy {
