@@ -114,7 +114,7 @@ export function WikiHistoryPage() {
           {plural(unmerged, "unmerged edit")}: other revisions that are not part of this history.
         </p>
       )}
-      <ol className={ui.list}>
+      <ol className={ui.list} aria-label="Revisions">
         {chain.steps.map((s, i) => (
           <Revision key={s.node.uri} step={s} n={chain.steps.length - i} current={i === 0} />
         ))}

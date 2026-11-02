@@ -106,7 +106,7 @@ describe("WikiEditPage", () => {
 describe("WikiHistoryPage", () => {
   it("lists the chain from the canonical revision and the unmerged edits", async () => {
     await setup("history");
-    const list = await screen.findByRole("list");
+    const list = await screen.findByRole("list", { name: "Revisions" });
     const items = within(list).getAllByRole("listitem");
     // carol's edit (current) of ada's genesis; dan's other edit is the unmerged one
     expect(items.map((li) => li.getAttribute("aria-label"))).toEqual(["Revision 2", "Revision 1"]);
