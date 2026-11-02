@@ -543,6 +543,11 @@ async fn flush(indexer: &Indexer, work: &mut Work, proofs: &mpsc::Sender<String>
         else {
             continue;
         };
+        // Only an indexed forum has a projection; a seed is first synced (and a missing
+        // declaration in the cache then means it was never fetched, not that it is absent).
+        if indexer.store.forum(&forum).is_none() {
+            continue;
+        }
         match ingest::project_forum(indexer, &key, Some(&authors), &live).await {
             Ok(_) => {}
             Err(e)

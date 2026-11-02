@@ -2226,3 +2226,49 @@ fn the_image_workflow_builds_every_branch_and_publishes_only_from_main() {
         "latest is published only from main"
     );
 }
+
+/// A live identity or account event of a seed's owner never quarantines a seed that was not
+/// synced yet: its declaration is missing from the cache because it was never fetched.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_live_event_never_quarantines_an_unsynced_seed() {
+    let (f, _jetstreams, urls) = live_fixture().await;
+    let pending = ForumKey::new(f.owner.did(), "pending").unwrap();
+    f.owner.put(
+        nsid::FORUM,
+        "pending",
+        &serde_json::to_value(Forum::create(
+            "Pending",
+            Datetime::from_millis(f.net.now_ms() - 3_600_000).unwrap(),
+            MembershipMode::Open,
+        ))
+        .unwrap(),
+    );
+    f.indexer
+        .store
+        .add_forum_seed(pending.uri.as_str())
+        .unwrap();
+    ingest::sync_forum(&f.indexer, f.forum.uri.as_str())
+        .await
+        .unwrap();
+    quiet(&f.indexer);
+    let tasks = live::spawn(f.indexer.clone());
+    connected(&f.indexer, 2).await;
+    // The replay includes the owner's identity and account events and its commits.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let last = f.net.events().last().unwrap().time_us;
+    while urls.iter().any(|u| {
+        f.indexer
+            .store
+            .cursor(&format!("jetstream:{}", u.origin().ascii_serialization()))
+            .and_then(|c| c.parse::<i64>().ok())
+            .is_none_or(|c| c < last)
+    }) {
+        assert!(Instant::now() < deadline, "the replay did not drain");
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let row = f.indexer.store.forum_row(pending.uri.as_str()).unwrap();
+    assert_eq!(row.absent_ms, 0, "an unsynced seed was quarantined");
+    for t in tasks {
+        t.abort();
+    }
+}

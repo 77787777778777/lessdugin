@@ -170,7 +170,8 @@ impl Store {
     }
 
     /// A forum hint from a declaration or a membership found by discovery, attributed to the DID
-    /// whose record named it and that DID's PDS host. Returns false when the hint was refused by
+    /// whose record named it and that DID's PDS host (once indexed, a forum counts against its
+    /// owner instead of the DID that first named it). Returns false when the hint was refused by
     /// the per-DID or per-host quota (`threat-model.md` INFRA-12). A known forum is never
     /// refused, and does not count again.
     pub fn add_forum_hint(&self, forum: &str, via: &str, via_host: &str) -> rusqlite::Result<bool> {
@@ -943,7 +944,7 @@ impl Store {
                 r.get(0)
             })
             .optional()?;
-        tx.execute("INSERT INTO forums(uri,did,rkey,name,description,created_at,cid,synced_ms,input_digest,fk,participant_count,post_count,absent_ms) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,0) ON CONFLICT(uri) DO UPDATE SET name=excluded.name,description=excluded.description,created_at=excluded.created_at,cid=excluded.cid,synced_ms=excluded.synced_ms,input_digest=excluded.input_digest,fk=excluded.fk,participant_count=excluded.participant_count,post_count=excluded.post_count,absent_ms=0", params![forum,m.key.owner.as_str(),m.key.uri.rkey().as_str(),m.decl.name,m.decl.description,m.decl.created_at.as_str(),m.input.decl_cid,now_ms,m.view.input_digest,m.key.fk,m.participants().len() as i64,posts])?;
+        tx.execute("INSERT INTO forums(uri,did,rkey,name,description,created_at,cid,synced_ms,input_digest,fk,participant_count,post_count,absent_ms) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,0) ON CONFLICT(uri) DO UPDATE SET name=excluded.name,description=excluded.description,created_at=excluded.created_at,cid=excluded.cid,synced_ms=excluded.synced_ms,input_digest=excluded.input_digest,fk=excluded.fk,participant_count=excluded.participant_count,post_count=excluded.post_count,absent_ms=0,via=CASE WHEN forums.via='' THEN '' ELSE excluded.did END", params![forum,m.key.owner.as_str(),m.key.uri.rkey().as_str(),m.decl.name,m.decl.description,m.decl.created_at.as_str(),m.input.decl_cid,now_ms,m.view.input_digest,m.key.fk,m.participants().len() as i64,posts])?;
         tx.commit()?;
         if roster_changed || previous_cid.as_deref() != Some(m.input.decl_cid.as_str()) {
             self.bump();
