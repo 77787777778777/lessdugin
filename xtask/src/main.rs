@@ -21,7 +21,8 @@
 //!                      --web the SPA's devnet Playwright suite including the M2 parity
 //!                      scenario, --parity only that scenario; none of them: --rust and --web.
 //!                      The web runs first build the engine wasm, the e2e SPA, the CLI (embedding
-//!                      it) and the TUI parity driver, unless --no-build
+//!                      it), the TUI parity driver, the devnet CORE+ services and the indexer,
+//!                      unless --no-build
 //!   lex lint           lint lexicons with goat (if installed)
 //!   vectors            run shared test vectors (Rust)
 //!   fuzz [<target>…|all] [--seconds N] [--jobs J] [--sanitizer S] [--list] [-- <libFuzzer args>]
@@ -327,19 +328,26 @@ fn ci_web_e2e() -> Result<(), String> {
     run_env("pnpm", &["--filter", "@lessdugin/web", "run", "e2e"], &vars)
 }
 
-/// The Rust end-to-end tests against the devnet: (package, test targets). They run only with
-/// `LESSDUGIN_E2E=1`; each starts its own devnet (`packages/e2e/devnet.mjs`) unless
+/// The Rust end-to-end tests against the devnet: (package, features, test targets). They run
+/// only with `LESSDUGIN_E2E=1`; each starts its own devnet (`packages/e2e/devnet.mjs`) unless
 /// `LESSDUGIN_DEVNET_JSON` names a running one.
-const RUST_E2E: &[(&str, &[&str])] = &[
+const RUST_E2E: &[(&str, &str, &[&str])] = &[
     // identity resolution, login binding and `verify`
-    ("lessdugin-testkit", &["e2e_devnet"]),
+    ("lessdugin-testkit", "", &["e2e_devnet"]),
+    // the devnet's CORE+ services (firehose mirror, Jetstream both wires and noise,
+    // Constellation, relay) that the parity scenario's assisted variant uses
+    ("lessdugin-testkit", "http", &["e2e_devnet_services"]),
     // the native host against the reference PDS
-    ("lessdugin-native", &["devnet"]),
+    ("lessdugin-native", "", &["devnet"]),
     // the CLI: app-password and OAuth logins, concurrent refresh, the forum scenario with
     // parity mode, `lessdugin web`'s browser sign-in
-    ("lessdugin", &["e2e_devnet", "e2e_forum", "web_e2e_devnet"]),
+    (
+        "lessdugin",
+        "",
+        &["e2e_devnet", "e2e_forum", "web_e2e_devnet"],
+    ),
     // the TUI's reply through $EDITOR and its parity capture
-    ("lessdugin-tui", &["e2e_devnet"]),
+    ("lessdugin-tui", "", &["e2e_devnet"]),
 ];
 
 /// `cargo xtask e2e`: the end-to-end tests against the local devnet (`docs/plan.md` §4.1,
@@ -347,8 +355,9 @@ const RUST_E2E: &[(&str, &[&str])] = &[
 /// (`web/e2e/devnet`: hosted mode, parity mode, `lessdugin web`, and the M2 parity scenario
 /// `scenario.spec.ts`). `--parity`: only the parity scenario. Without a selection, `--rust` and
 /// `--web`. The Playwright runs first build what they use (unless `--no-build`): the engine
-/// wasm, the e2e SPA (`web/dist-e2e`), the CLI embedding it (so the `lessdugin web` spec runs)
-/// and the TUI parity driver (`crates/tui/examples/parity_driver.rs`).
+/// wasm, the e2e SPA (`web/dist-e2e`), the CLI embedding it (so the `lessdugin web` spec runs),
+/// the TUI parity driver (`crates/tui/examples/parity_driver.rs`), the devnet's CORE+ services
+/// (`crates/testkit/examples/devnet_services.rs`) and `lessdugin-indexer`.
 fn e2e(args: &[String]) -> Result<(), String> {
     if matches!(args, [a] if a == "--help" || a == "-h") {
         println!(
@@ -396,8 +405,11 @@ fn e2e(args: &[String]) -> Result<(), String> {
         ));
     }
     if rust {
-        for (package, tests) in RUST_E2E {
+        for (package, features, tests) in RUST_E2E {
             let mut a = vec!["test", "-p", package];
+            if !features.is_empty() {
+                a.extend(["--features", features]);
+            }
             for t in *tests {
                 a.extend(["--test", t]);
             }
@@ -419,6 +431,29 @@ fn e2e(args: &[String]) -> Result<(), String> {
                 "cargo",
                 &["build", "-p", "lessdugin-tui", "--example", "parity_driver"],
             )?;
+            // the parity scenario's CORE+ services and its indexer-on variant (M5, M6)
+            run(
+                "cargo",
+                &[
+                    "build",
+                    "-p",
+                    "lessdugin-testkit",
+                    "--features",
+                    "http",
+                    "--example",
+                    "devnet_services",
+                ],
+            )?;
+            run(
+                "cargo",
+                &[
+                    "build",
+                    "-p",
+                    "lessdugin-indexer",
+                    "--bin",
+                    "lessdugin-indexer",
+                ],
+            )?;
             eprintln!(
                 "note: the debug `lessdugin` now embeds the e2e SPA ({dist}); the next \
                  `cargo build -p lessdugin` without LESSDUGIN_WEB_DIST embeds web/dist again"
@@ -432,6 +467,14 @@ fn e2e(args: &[String]) -> Result<(), String> {
         vars.push((
             "LESSDUGIN_TUI_DRIVER".into(),
             debug.join("examples/parity_driver").display().to_string(),
+        ));
+        vars.push((
+            "LESSDUGIN_DEVNET_SERVICES".into(),
+            debug.join("examples/devnet_services").display().to_string(),
+        ));
+        vars.push((
+            "LESSDUGIN_INDEXER_BIN".into(),
+            debug.join("lessdugin-indexer").display().to_string(),
         ));
         // the scenario fails instead of skipping when a binary is missing
         vars.push(("LESSDUGIN_PARITY_REQUIRED".into(), "1".into()));

@@ -34,27 +34,58 @@
 // this test's output directory (test-results/web-e2e-devnet/…/parity), and the diffs are
 // attached to the report.
 //
-// Needs the `lessdugin` binary (LESSDUGIN_BIN, default target/debug/lessdugin) and the TUI
-// driver (LESSDUGIN_TUI_DRIVER, default target/debug/examples/parity_driver). `cargo xtask e2e
+// Sources (docs/plan.md §4.2 variants, §4.1; sync.md §2.2-§2.4, §4.4): both variants configure
+// every client (config.toml, the SPA's source options) with the devnet's CORE+ services
+// (crates/testkit/examples/devnet_services.rs: a mini-Jetstream serving both wires, with
+// identity and account noise for unrelated DIDs, a Constellation and a relay whose pages are
+// short and still carry a cursor, all over the devnet PDS's firehose). Only `sources` differs.
+// Every reader must contact them in `assisted` and no client may contact them in `direct`
+// (sync.md §2.4). A newcomer (a fresh account no seed references) joins and comments: in open
+// mode only CORE+ can introduce it (sync.md §2.2, §4.4), so the assisted readers show the
+// comment and the direct ones do not; in approval mode an applicant's content is never shown.
+//
+// Indexer (M6, plan §4.2 "indexer on and off"; decision U-D2): in the assisted variants
+// `lessdugin-indexer --poll` follows the devnet from step 1 on. After the readers above, three
+// more fresh readers (CLI, TUI, SPA) are configured with that indexer (configuration consent,
+// sync.md §2.4) and no prior sync: the TUI and the SPA hydrate their cold forum page through
+// the indexer's ordering and proof bundles. Their views must equal the indexer-off views byte
+// for byte once the provenance badges (verified, hint, stale) are removed.
+//
+// Needs the `lessdugin` binary (LESSDUGIN_BIN, default target/debug/lessdugin), the TUI
+// driver (LESSDUGIN_TUI_DRIVER, default target/debug/examples/parity_driver), the devnet
+// services (LESSDUGIN_DEVNET_SERVICES, default target/debug/examples/devnet_services) and the
+// indexer (LESSDUGIN_INDEXER_BIN, default target/debug/lessdugin-indexer). `cargo xtask e2e
 // --parity` builds everything and runs this test alone (packages/e2e/README.md). Without the
 // binaries the test is skipped, except under CI or LESSDUGIN_PARITY_REQUIRED=1, where it fails.
 
-import { execFile, spawnSync } from "node:child_process";
+import { type ChildProcess, execFile, spawn, spawnSync } from "node:child_process";
 import {
   appendFileSync,
   chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { type Browser, expect, type Page, type TestInfo, test } from "@playwright/test";
-import { login as atpLogin, createPostAt, fk, NS, xrpc } from "./atp.mjs";
+import {
+  login as atpLogin,
+  createComment,
+  createPostAt,
+  fk,
+  NS,
+  now,
+  put,
+  type Session,
+  xrpc,
+} from "./atp.mjs";
 import { e2eState, route, signIn, watchStrict, withDevnet } from "./state.ts";
 
 const s = e2eState();
@@ -62,8 +93,11 @@ const ROOT = fileURLToPath(new URL("../../../", import.meta.url));
 const BIN = process.env.LESSDUGIN_BIN ?? join(ROOT, "target/debug/lessdugin");
 const DRIVER =
   process.env.LESSDUGIN_TUI_DRIVER ?? join(ROOT, "target/debug/examples/parity_driver");
+const SERVICES =
+  process.env.LESSDUGIN_DEVNET_SERVICES ?? join(ROOT, "target/debug/examples/devnet_services");
+const INDEXER = process.env.LESSDUGIN_INDEXER_BIN ?? join(ROOT, "target/debug/lessdugin-indexer");
 const REQUIRED = Boolean(process.env.CI) || process.env.LESSDUGIN_PARITY_REQUIRED === "1";
-const MISSING = [BIN, DRIVER].filter((p) => !existsSync(p));
+const MISSING = [BIN, DRIVER, SERVICES, INDEXER].filter((p) => !existsSync(p));
 
 const FORUM_NAME = "Parity scenario";
 const TITLE = "Bob's question";
@@ -77,6 +111,16 @@ const CANARY_TITLE = "Dated an hour ahead";
 const TAG_SLUG = "parity";
 const TAG_NAME = "Parity evidence";
 const WIKI_BODY = "A real wiki page created for the M5 cross-client parity scenario.";
+const NEWCOMER_REPLY = "A newcomer's comment: only CORE+ discovery can find it.";
+/** The unrelated DIDs of the services' identity and account noise
+ * (crates/testkit/src/devnet_services.rs, `NOISE_DIDS`). */
+const NOISE_DIDS = [
+  "did:plc:noiseaaaaaaaaaaaaaaaaaab",
+  "did:plc:noiseaaaaaaaaaaaaaaaaaac",
+  "did:plc:noiseaaaaaaaaaaaaaaaaaad",
+];
+/** The provenance badges decision U-D2 lets differ with and without the indexer. */
+const PROVENANCE_BADGES = ["verified", "hint", "stale"];
 
 type SourceMode = "direct" | "assisted";
 
@@ -104,6 +148,250 @@ function run(file: string, args: string[], env: NodeJS.ProcessEnv, input?: strin
   });
 }
 
+/** Waits for the JSON file a child process writes once it is up. */
+async function waitForJson<T>(path: string, child: ChildProcess, what: string): Promise<T> {
+  const deadline = Date.now() + 60_000;
+  while (Date.now() < deadline) {
+    if (child.exitCode !== null) throw new Error(`${what} exited with ${child.exitCode}`);
+    try {
+      return JSON.parse(readFileSync(path, "utf8")) as T;
+    } catch {
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  }
+  throw new Error(`${what} did not start within 60 s`);
+}
+
+async function stop(child: ChildProcess): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  const exited = new Promise((r) => child.once("exit", r));
+  child.kill("SIGTERM");
+  await exited;
+}
+
+/** The loopback URLs of the devnet's CORE+ services. */
+interface CorePlus {
+  jetstream: string;
+  constellation: string;
+  relay: string;
+  control: string;
+}
+
+/** What the services answered (`/_devnet/log`). */
+interface ServicesLog {
+  http: { service: string; nsid: string; url: string; status: number }[];
+  jetstream: {
+    url: string;
+    wire: "v1" | "v2";
+    options: unknown;
+    frames: number;
+    noiseFrames: number;
+  }[];
+  mirror: { events: number; upstreamSeq: number; skipped: number; noise: number };
+}
+
+/** The CORE+ traffic between two logs. */
+function since(a: ServicesLog, b: ServicesLog): Pick<ServicesLog, "http" | "jetstream"> {
+  return { http: b.http.slice(a.http.length), jetstream: b.jetstream.slice(a.jetstream.length) };
+}
+
+/** `devnet_services --pds <pds>`: the CORE+ services of one variant. */
+class Services {
+  private constructor(
+    readonly urls: CorePlus,
+    private readonly child: ChildProcess,
+  ) {}
+
+  static async start(dir: string, pds: string): Promise<Services> {
+    const json = join(dir, "services.json");
+    const child = spawn(SERVICES, ["--pds", pds, "--json", json], {
+      stdio: ["ignore", "ignore", "inherit"],
+    });
+    return new Services(await waitForJson<CorePlus>(json, child, "devnet_services"), child);
+  }
+
+  async log(): Promise<ServicesLog> {
+    const res = await fetch(`${this.urls.control}/_devnet/log`);
+    expect(res.status).toBe(200);
+    return (await res.json()) as ServicesLog;
+  }
+
+  /** Waits until the firehose mirror holds `uri`, so every reader sees the same hints. */
+  async waitForRecord(uri: string): Promise<void> {
+    const deadline = Date.now() + 30_000;
+    while (Date.now() < deadline) {
+      const res = await fetch(`${this.urls.control}/_devnet/record?uri=${encodeURIComponent(uri)}`);
+      if (res.status === 200) return;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    throw new Error(`the services' firehose mirror never saw ${uri}`);
+  }
+
+  stop(): Promise<void> {
+    return stop(this.child);
+  }
+}
+
+async function freePort(): Promise<number> {
+  return await new Promise((ok, fail) => {
+    const server = createServer();
+    server.once("error", fail);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      server.close(() => ok(typeof address === "object" && address ? address.port : 0));
+    });
+  });
+}
+
+/** `lessdugin-indexer --poll <pds> --forum <forum>` (M6): follows the devnet PDS. */
+class Indexer {
+  private constructor(
+    readonly url: string,
+    private readonly child: ChildProcess,
+  ) {}
+
+  static async start(dir: string, forum: string, out: string): Promise<Indexer> {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "config.toml"),
+      [
+        "doh = []",
+        "",
+        "[network]",
+        'mode = "devnet"',
+        `plc = ${JSON.stringify(s.devnet.plc)}`,
+        `pds = ${JSON.stringify(s.devnet.pds)}`,
+        "",
+      ].join("\n"),
+      { mode: 0o600 },
+    );
+    const port = await freePort();
+    const url = `http://127.0.0.1:${port}`;
+    const log = openSync(join(out, "indexer.log"), "w");
+    const child = spawn(
+      INDEXER,
+      [
+        "--listen",
+        `127.0.0.1:${port}`,
+        "--data-dir",
+        dir,
+        "--poll",
+        s.devnet.pds,
+        "--poll-interval-ms",
+        "500",
+        "--forum",
+        forum,
+      ],
+      { stdio: ["ignore", log, log], env: { ...process.env, RUST_LOG: "info" } },
+    );
+    const deadline = Date.now() + 60_000;
+    for (;;) {
+      if (child.exitCode !== null)
+        throw new Error(`lessdugin-indexer exited with ${child.exitCode}`);
+      const up = await fetch(`${url}/_health`).then(
+        (r) => r.ok,
+        () => false,
+      );
+      if (up) return new Indexer(url, child);
+      if (Date.now() > deadline) throw new Error("lessdugin-indexer did not start within 60 s");
+      await new Promise((r) => setTimeout(r, 200));
+    }
+  }
+
+  /** `lessdugin_indexer_http_requests_total` (this request included). */
+  async requests(): Promise<number> {
+    const text = await (await fetch(`${this.url}/metrics`)).text();
+    const m = /^lessdugin_indexer_http_requests_total (\d+)$/m.exec(text);
+    if (!m) throw new Error(`no request counter in the indexer metrics:\n${text}`);
+    return Number(m[1]);
+  }
+
+  /** Waits until the indexer lists `required` among the forum's participants and its heads
+   * of every participant it lists are the devnet PDS's (it converged). */
+  async converge(forum: string, required: string[]): Promise<void> {
+    const deadline = Date.now() + 60_000;
+    let last = "";
+    while (Date.now() < deadline) {
+      const listed = await fetch(
+        `${this.url}/xrpc/${NS}.index.listParticipants?${new URLSearchParams({ forum, limit: "100" })}`,
+      ).then(
+        async (r) =>
+          r.ok
+            ? ((await r.json()) as { participants: { did: string }[] }).participants.map(
+                (p) => p.did,
+              )
+            : [],
+        () => [] as string[],
+      );
+      const dids = [...new Set([...required, ...listed])].sort();
+      const pds = await Promise.all(
+        dids.map(
+          async (did) =>
+            (
+              (await xrpc(s.devnet.pds, "com.atproto.sync.getLatestCommit", {
+                query: { did },
+              })) as { rev: string }
+            ).rev,
+        ),
+      );
+      const q = new URLSearchParams(dids.map((d) => ["dids", d]));
+      const res = await fetch(`${this.url}/xrpc/${NS}.index.getRepoHeads?${q}`);
+      const heads = res.ok
+        ? ((await res.json()) as { heads: { did: string; rev?: string }[] }).heads
+        : [];
+      const indexed = dids.map((d) => heads.find((h) => h.did === d)?.rev ?? null);
+      last = JSON.stringify({ dids, listed, pds, indexed });
+      if (required.every((d) => listed.includes(d)) && indexed.every((rev, i) => rev === pds[i]))
+        return;
+      // the indexer allows 20 requests per second per address; stay well below
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    throw new Error(`the indexer did not converge on the devnet heads: ${last}`);
+  }
+
+  stop(): Promise<void> {
+    return stop(this.child);
+  }
+}
+
+/** `text` (dto/1 JSON) without the provenance badges, re-serialised compactly or as
+ * `serde_json::to_string_pretty` plus a newline. */
+function withoutProvenance(text: string, pretty: boolean): string {
+  const strip = (v: unknown): unknown => {
+    if (Array.isArray(v)) return v.map(strip);
+    if (typeof v !== "object" || v === null) return v;
+    const out: Record<string, unknown> = {};
+    for (const [k, x] of Object.entries(v)) {
+      if (k === "badges" && typeof x === "object" && x !== null && !Array.isArray(x)) {
+        out[k] = Object.fromEntries(
+          Object.entries(x).filter(([b]) => !PROVENANCE_BADGES.includes(b)),
+        );
+      } else {
+        out[k] = strip(x);
+      }
+    }
+    return out;
+  };
+  const value = strip(JSON.parse(text));
+  return pretty ? `${JSON.stringify(value, null, 2)}\n` : JSON.stringify(value);
+}
+
+/** True if a provenance badge is set anywhere in `text`. */
+function hasProvenance(text: string, badge: string): boolean {
+  let found = false;
+  const walk = (v: unknown) => {
+    if (Array.isArray(v)) v.forEach(walk);
+    else if (typeof v === "object" && v !== null) {
+      for (const [k, x] of Object.entries(v)) {
+        if (k === "badges" && (x as Record<string, unknown>)?.[badge] === true) found = true;
+        walk(x);
+      }
+    }
+  };
+  walk(JSON.parse(text));
+  return found;
+}
+
 /** One client user: a data directory and the environment of `lessdugin --dev` (and of the TUI
  * driver, which opens the engine the same way). */
 class User {
@@ -113,28 +401,33 @@ class User {
     readonly dir: string,
     parityNowMs: number,
     readonly sources: SourceMode,
+    core: CorePlus,
     private readonly log: (name: string, r: Run) => void,
+    indexer: string | null = null,
   ) {
     mkdirSync(dir, { recursive: true });
-    // TOML has no null: false maps these optional services to None. Keep every endpoint local
-    // and every unused CORE+ service disabled, in BOTH variants; assisted must not silently
-    // inherit the production relay/Jetstream/Constellation/Slingshot defaults.
+    // TOML has no null: false maps an optional service to None. Every endpoint is local, in
+    // BOTH variants: the devnet's CORE+ services (the relay, the Constellation, and the
+    // Jetstream of the devnet profile), and no Slingshot. Only `sources` differs, so direct
+    // mode is what keeps a client from contacting them (sync.md §2.4). An explicit indexer URL
+    // is the user's configuration consent (sync.md §2.4); every other client uses none.
     writeFileSync(
       join(dir, "config.toml"),
       [
         `sources = "${sources}"`,
         "doh = []",
         'plc = "http://127.0.0.1:9"',
-        "relays = []",
+        `relays = [${JSON.stringify(core.relay)}]`,
         "jetstream = []",
-        "constellation = false",
+        `constellation = ${JSON.stringify(core.constellation)}`,
         "slingshot = false",
-        'indexer = "none"',
+        indexer ? `indexer = [${JSON.stringify(indexer)}]` : 'indexer = "none"',
         "",
         "[network]",
         'mode = "devnet"',
         `plc = ${JSON.stringify(s.devnet.plc)}`,
         `pds = ${JSON.stringify(s.devnet.pds)}`,
+        `jetstream = ${JSON.stringify(core.jetstream)}`,
         "",
       ].join("\n"),
       { mode: 0o600 },
@@ -247,7 +540,7 @@ interface MediaItem {
 
 /** Compares the three clients' outputs; on a mismatch writes unified diffs (attached). */
 async function compare(
-  what: "thread" | "list",
+  what: string,
   cli: string,
   tui: { compact: string; pretty: string },
   spa: string,
@@ -307,7 +600,8 @@ test("M5 full parity scenario: approval/open × direct/assisted; CLI, SPA and TU
   // docs/plan.md §4.2 "Variants: approval and open mode (M3)": the scenario runs once per
   // membership mode and source mode. Approval mode needs the owner's grant before bob and carol
   // can post; open mode lets them join and post at once. Both source variants use the same local
-  // PDS/PLC; assisted has no CORE+ service enabled, rather than contacting production defaults.
+  // PDS/PLC and the same local CORE+ services; only `sources` differs. The assisted variants
+  // also read with and without the indexer (M6).
   for (const mode of ["approval", "open"] as const) {
     for (const sources of ["direct", "assisted"] as const) {
       await runScenario(browser, info, mode, sources);
@@ -343,7 +637,11 @@ async function runScenario(
       timings.push({ step: name, ms: Date.now() - t0 });
     }
   };
-  const user = (name: string) => new User(name, join(work, name), t, sources, logRun);
+  // this variant's CORE+ services; every client is configured with them (see User)
+  const services = await Services.start(work, s.devnet.pds);
+  let indexer: Indexer | null = null;
+  const user = (name: string, indexerUrl: string | null = null) =>
+    new User(name, join(work, name), t, sources, services.urls, logRun, indexerUrl);
   const alice = user("alice");
   const carol = user("carol");
   // the slug is per variant: all four runs share a devnet, so a reused slug would collide
@@ -353,6 +651,9 @@ async function runScenario(
   let post = "";
   let reply = "";
   let canary = "";
+  // the newcomer's comment (step 6d), which only CORE+ discovery can introduce in open mode
+  let newcomerComment = "";
+  let newcomer = "";
   // step 4's settled opinion, kept so the report can show what the keys recorded
   let socialVote: unknown = null;
   let cachedRender: { ms: number; blockedRequests: string[] } | null = null;
@@ -360,10 +661,17 @@ async function runScenario(
   const total0 = Date.now();
   const spaSourceOptions = {
     sources,
-    relays: [],
-    jetstream: [],
-    constellation: null,
+    relays: [services.urls.relay],
+    jetstream: [services.urls.jetstream],
+    constellation: services.urls.constellation,
     slingshot: null,
+  };
+  // the CORE+ requests each reader made (the services' log, before and after its step)
+  const traffic: Record<string, Pick<ServicesLog, "http" | "jetstream">> = {};
+  const watched = async (client: string, body: () => Promise<void>): Promise<void> => {
+    const before = await services.log();
+    await body();
+    traffic[client] = since(before, await services.log());
   };
   const spaRequests: Record<string, string[]> = {};
   const recordRequests = (name: string, page: Page) => {
@@ -462,6 +770,14 @@ async function runScenario(
       );
       canary = r.uri;
     });
+
+    // M6: in the assisted variants the indexer follows the devnet from here on (poll mode,
+    // seeded with this forum), as a deployed one follows the network
+    if (sources === "assisted") {
+      await step("1c. lessdugin-indexer --poll follows the forum", async () => {
+        indexer = await Indexer.start(join(work, "indexer"), forum, out);
+      });
+    }
 
     // 2. bob, SPA: signs in (OAuth), joins, posts
     const ctx = await browser.newContext();
@@ -710,6 +1026,34 @@ async function runScenario(
       expect(ownList.items.find((p) => p.uri === post)?.tags).toEqual([TAG_SLUG]);
     });
 
+    // 6d. a newcomer, PDS API: a fresh account that no seed references joins and comments on
+    // bob's post. In open mode only CORE+ can introduce it (sync.md §2.2, §4.4: Constellation
+    // backlinks, the relay, Jetstream); the closure (§4.3) never reaches it. In approval mode it
+    // is an applicant, whose content no reader is shown.
+    await step("6d. a newcomer (PDS API): joins and comments", async () => {
+      const handle = `nc${Date.now().toString(36)}.test`;
+      const acct = (await xrpc(s.devnet.pds, "com.atproto.server.createAccount", {
+        body: { handle, email: `${handle}@example.test`, password: `${handle}-password` },
+      })) as { did: string; accessJwt: string };
+      newcomer = acct.did;
+      const session: Session = { did: acct.did, token: acct.accessJwt, pds: s.devnet.pds };
+      const ref = { uri: forum, fk: fk(forum) };
+      await put(session, "membership", ref.fk, { forum, createdAt: now() });
+      const rkey = post.split("/").pop() ?? "";
+      const current = (await xrpc(s.devnet.pds, "com.atproto.repo.getRecord", {
+        query: { repo: s.devnet.accounts.bob.did, collection: `${NS}.post`, rkey },
+      })) as { uri: string; cid: string };
+      const c = await createComment(
+        session,
+        ref,
+        { uri: current.uri, cid: current.cid, rkey },
+        NEWCOMER_REPLY,
+      );
+      newcomerComment = c.uri;
+      // every reader below is given the same hints
+      await services.waitForRecord(newcomerComment);
+    });
+
     // the blob the SPA prepared and uploaded in step 2, as bob's post record names it (the edit
     // keeps the blob object verbatim, data-model.md §8.8)
     const rkey = post.split("/").pop() ?? "";
@@ -726,105 +1070,194 @@ async function runScenario(
     const tuiOut = { thread: { compact: "", pretty: "" }, list: { compact: "", pretty: "" } };
     const spaOut: Outputs = { thread: "", list: "" };
 
-    await step("read: CLI (ls --json, read --json)", async () => {
-      await cli.verifySources();
-      // the DEFAULT view (magic sort, frontpage filter since M3, engine-api.md §3.4), which is
-      // what the TUI's Forum screen shows: the three clients must agree on the default, so none
-      // of them pins a sort or filter the others do not.
-      cliOut.list = await cli.cli("ls", ["--json", "ls", forum]);
-      cliOut.thread = await cli.cli("read", ["--json", "read", post]);
-    });
+    await step("read: CLI (ls --json, read --json)", () =>
+      watched("cli", async () => {
+        await cli.verifySources();
+        // the DEFAULT view (magic sort, frontpage filter since M3, engine-api.md §3.4), which is
+        // what the TUI's Forum screen shows: the three clients must agree on the default, so
+        // none of them pins a sort or filter the others do not.
+        cliOut.list = await cli.cli("ls", ["--json", "ls", forum]);
+        cliOut.thread = await cli.cli("read", ["--json", "read", post]);
+      }),
+    );
 
-    await step("read: TUI (Forum and Thread screens)", async () => {
-      const dir = join(out, "tui");
-      await tuiReader.tui("read", ["read", forum, post, dir]);
-      const f = (n: string) => readFileSync(join(dir, n), "utf8");
-      tuiOut.thread = { compact: f("thread.json"), pretty: f("thread.pretty.json") };
-      tuiOut.list = { compact: f("list.json"), pretty: f("list.pretty.json") };
-      const effective = JSON.parse(f("settings.json")) as { sources: string };
-      expect(effective.sources, "the TUI engine's effective source mode").toBe(sources);
-    });
+    await step("read: TUI (Forum and Thread screens)", () =>
+      watched("tui", async () => {
+        const dir = join(out, "tui");
+        await tuiReader.tui("read", ["read", forum, post, dir]);
+        const f = (n: string) => readFileSync(join(dir, n), "utf8");
+        tuiOut.thread = { compact: f("thread.json"), pretty: f("thread.pretty.json") };
+        tuiOut.list = { compact: f("list.json"), pretty: f("list.pretty.json") };
+        const effective = JSON.parse(f("settings.json")) as { sources: string };
+        expect(effective.sources, "the TUI engine's effective source mode").toBe(sources);
+      }),
+    );
 
-    await step("read: SPA (forum page, post page; debug hook)", async () => {
-      const actx = await browser.newContext();
-      const apage = await actx.newPage();
-      const aw = await watchStrict(apage);
-      recordRequests("anonymous", apage);
-      await withDevnet(apage, s, { parityNowMs: t, ...spaSourceOptions });
-      await apage.goto(`${s.app}/${route(forum)}`);
-      await expect(apage.getByRole("heading", { level: 1, name: FORUM_NAME })).toBeVisible();
-      await apage.getByRole("link", { name: EDITED_TITLE }).click();
-      await expect(apage.getByRole("heading", { level: 1, name: EDITED_TITLE })).toBeVisible();
-      // carol's reply was HIDDEN by the moderator in step 5, so an anonymous reader must not see
-      // its body; what matters here is that the three clients agree (compared below), not the
-      // text itself.
-      await expect(
-        apage.getByText(REPLY),
-        "a hidden comment must not show its body to an anonymous reader",
-      ).toHaveCount(0);
-      // the forum sync the page started has finished before the views are read
-      await hook(apage, "syncForum", [forum, { full: false }]);
-      spaOut.thread = await hook(apage, "getThread", [post, { sort: "magic", unreadOnly: false }]);
-      spaOut.list = await hook(apage, "listPosts", [
-        // the same default view as the CLI and the TUI (magic, frontpage)
-        { forum, sort: "magic", filter: "frontpage", limit: 30 },
-      ]);
-      expect(await aw.problems()).toEqual([]);
+    await step("read: SPA (forum page, post page; debug hook)", () =>
+      watched("spa", async () => {
+        const actx = await browser.newContext();
+        const apage = await actx.newPage();
+        const aw = await watchStrict(apage);
+        recordRequests("anonymous", apage);
+        await withDevnet(apage, s, { parityNowMs: t, ...spaSourceOptions });
+        await apage.goto(`${s.app}/${route(forum)}`);
+        await expect(apage.getByRole("heading", { level: 1, name: FORUM_NAME })).toBeVisible();
+        await apage.getByRole("link", { name: EDITED_TITLE }).click();
+        await expect(apage.getByRole("heading", { level: 1, name: EDITED_TITLE })).toBeVisible();
+        // carol's reply was HIDDEN by the moderator in step 5, so an anonymous reader must not see
+        // its body; what matters here is that the three clients agree (compared below), not the
+        // text itself.
+        await expect(
+          apage.getByText(REPLY),
+          "a hidden comment must not show its body to an anonymous reader",
+        ).toHaveCount(0);
+        // the forum sync the page started has finished before the views are read
+        await hook(apage, "syncForum", [forum, { full: false }]);
+        spaOut.thread = await hook(apage, "getThread", [
+          post,
+          { sort: "magic", unreadOnly: false },
+        ]);
+        spaOut.list = await hook(apage, "listPosts", [
+          // the same default view as the CLI and the TUI (magic, frontpage)
+          { forum, sort: "magic", filter: "frontpage", limit: 30 },
+        ]);
+        expect(await aw.problems()).toEqual([]);
 
-      // M5 cached forum rendering: return to the forum while the devnet is live, then reload the
-      // real SPA/worker against the IndexedDB this page just warmed. During the reload, only the
-      // forum's own declaration refresh stays live; every other PLC/PDS request gets 503. Thus the
-      // non-empty post list can only come from the real cache, without charging the render budget
-      // for the declaration fetcher's offline retry schedule. This is a warm page/worker restart,
-      // not a cold browser process start or a claim that the whole network was offline.
-      await apage.goto(`${s.app}/${route(forum)}`);
-      await expect(apage.getByRole("heading", { level: 1, name: FORUM_NAME })).toBeVisible();
-      const blockedRequests: string[] = [];
-      const forumParts = forum.split("/");
-      await apage.route("**/*", async (r) => {
-        const url = r.request().url();
-        const parsed = new URL(url);
-        const origin = parsed.origin;
-        const declaration =
-          origin === s.devnet.pds &&
-          parsed.pathname === "/xrpc/com.atproto.repo.getRecord" &&
-          parsed.searchParams.get("repo") === forumParts[2] &&
-          parsed.searchParams.get("collection") === forumParts[3] &&
-          parsed.searchParams.get("rkey") === forumParts[4];
-        if ((origin === s.devnet.pds || origin === s.devnet.plc) && !declaration) {
-          blockedRequests.push(url);
-          await r.fulfill({ status: 503, contentType: "text/plain", body: "cache-only reload" });
-        } else {
-          await r.continue();
-        }
+        // M5 cached forum rendering: return to the forum while the devnet is live, then reload the
+        // real SPA/worker against the IndexedDB this page just warmed. During the reload, only the
+        // forum's own declaration refresh stays live; every other PLC/PDS request gets 503. Thus the
+        // non-empty post list can only come from the real cache, without charging the render budget
+        // for the declaration fetcher's offline retry schedule. This is a warm page/worker restart,
+        // not a cold browser process start or a claim that the whole network was offline.
+        await apage.goto(`${s.app}/${route(forum)}`);
+        await expect(apage.getByRole("heading", { level: 1, name: FORUM_NAME })).toBeVisible();
+        const blockedRequests: string[] = [];
+        const forumParts = forum.split("/");
+        await apage.route("**/*", async (r) => {
+          const url = r.request().url();
+          const parsed = new URL(url);
+          const origin = parsed.origin;
+          const declaration =
+            origin === s.devnet.pds &&
+            parsed.pathname === "/xrpc/com.atproto.repo.getRecord" &&
+            parsed.searchParams.get("repo") === forumParts[2] &&
+            parsed.searchParams.get("collection") === forumParts[3] &&
+            parsed.searchParams.get("rkey") === forumParts[4];
+          if ((origin === s.devnet.pds || origin === s.devnet.plc) && !declaration) {
+            blockedRequests.push(url);
+            await r.fulfill({ status: 503, contentType: "text/plain", body: "cache-only reload" });
+          } else {
+            await r.continue();
+          }
+        });
+        const cache0 = Date.now();
+        await apage.reload();
+        await expect(apage.getByRole("heading", { level: 1, name: FORUM_NAME })).toBeVisible();
+        await expect(apage.getByRole("link", { name: EDITED_TITLE })).toBeVisible();
+        await expect(apage.getByRole("link", { name: CANARY_TITLE })).toBeVisible();
+        const ms = Date.now() - cache0;
+        cachedRender = { ms, blockedRequests };
+        writeFileSync(
+          join(out, "cached-render.json"),
+          `${JSON.stringify({ ...cachedRender, budgetMs: 1500, coldBrowserRestart: false, declarationRefresh: "loopback only; all other PLC/PDS requests returned 503" }, null, 2)}\n`,
+        );
+        expect(
+          blockedRequests.length,
+          "the cached reload really refused repository/sync traffic",
+        ).toBeGreaterThan(0);
+        expect(ms, `warm IndexedDB forum render (${ms} ms); see cached-render.json`).toBeLessThan(
+          1500,
+        );
+        expectLoopbackOnly("anonymous");
+        await actx.close();
+      }),
+    );
+
+    // M6, the indexer on: three more fresh readers, configured with the indexer that followed
+    // the scenario (configuration consent), and no sync before they open the forum. The TUI's
+    // Forum screen and the SPA's forum page hydrate the cold page from the indexer's ordering
+    // and proof bundles (engine-api.md: list_posts_page, hydrate_indexer_page); the CLI's sync
+    // polls the indexer's change feed. They then read exactly as the readers above.
+    const idx = {
+      cli: { thread: "", list: "" } as Outputs,
+      tui: { thread: { compact: "", pretty: "" }, list: { compact: "", pretty: "" } },
+      spa: { thread: "", list: "" } as Outputs,
+      requests: {} as Record<string, number>,
+      spaPaths: [] as string[],
+    };
+    const runIndexer = indexer as Indexer | null;
+    if (runIndexer) {
+      const idxUrl = runIndexer.url;
+      await step("indexer: converged on the devnet heads", async () => {
+        const required = [s.devnet.accounts.alice.did, s.devnet.accounts.bob.did];
+        if (approval) required.push(s.devnet.accounts.carol.did);
+        await runIndexer.converge(forum, required);
       });
-      const cache0 = Date.now();
-      await apage.reload();
-      await expect(apage.getByRole("heading", { level: 1, name: FORUM_NAME })).toBeVisible();
-      await expect(apage.getByRole("link", { name: EDITED_TITLE })).toBeVisible();
-      await expect(apage.getByRole("link", { name: CANARY_TITLE })).toBeVisible();
-      const ms = Date.now() - cache0;
-      cachedRender = { ms, blockedRequests };
-      writeFileSync(
-        join(out, "cached-render.json"),
-        `${JSON.stringify({ ...cachedRender, budgetMs: 1500, coldBrowserRestart: false, declarationRefresh: "loopback only; all other PLC/PDS requests returned 503" }, null, 2)}\n`,
+      // the indexer's request counter around a reader (its own two /metrics reads excluded)
+      const counted = async (client: string, body: () => Promise<void>) => {
+        const before = await runIndexer.requests();
+        await body();
+        idx.requests[client] = (await runIndexer.requests()) - before - 1;
+      };
+      const idxCli = user("idx-cli", idxUrl);
+      const idxTui = user("idx-tui", idxUrl);
+      await step("read with the indexer: CLI", () =>
+        counted("cli", async () => {
+          idx.cli.list = await idxCli.cli("ls", ["--json", "ls", forum]);
+          idx.cli.thread = await idxCli.cli("read", ["--json", "read", post]);
+        }),
       );
-      expect(
-        blockedRequests.length,
-        "the cached reload really refused repository/sync traffic",
-      ).toBeGreaterThan(0);
-      expect(ms, `warm IndexedDB forum render (${ms} ms); see cached-render.json`).toBeLessThan(
-        1500,
+      await step("read with the indexer: TUI", () =>
+        counted("tui", async () => {
+          const dir = join(out, "tui-indexer");
+          await idxTui.tui("read", ["read", forum, post, dir]);
+          const f = (n: string) => readFileSync(join(dir, n), "utf8");
+          idx.tui.thread = { compact: f("thread.json"), pretty: f("thread.pretty.json") };
+          idx.tui.list = { compact: f("list.json"), pretty: f("list.pretty.json") };
+        }),
       );
-      expectLoopbackOnly("anonymous");
-      await actx.close();
-    });
+      await step("read with the indexer: SPA", () =>
+        counted("spa", async () => {
+          const ictx = await browser.newContext();
+          const ipage = await ictx.newPage();
+          const iw = await watchStrict(ipage);
+          recordRequests("indexer-reader", ipage);
+          ipage.on("request", (r) => {
+            if (r.url().startsWith(idxUrl)) idx.spaPaths.push(new URL(r.url()).pathname);
+          });
+          await withDevnet(ipage, s, { parityNowMs: t, ...spaSourceOptions, indexers: [idxUrl] });
+          await ipage.goto(`${s.app}/${route(forum)}`);
+          await expect(ipage.getByRole("heading", { level: 1, name: FORUM_NAME })).toBeVisible();
+          await ipage.getByRole("link", { name: EDITED_TITLE }).click();
+          await expect(ipage.getByRole("heading", { level: 1, name: EDITED_TITLE })).toBeVisible();
+          await hook(ipage, "syncForum", [forum, { full: false }]);
+          idx.spa.thread = await hook(ipage, "getThread", [
+            post,
+            { sort: "magic", unreadOnly: false },
+          ]);
+          idx.spa.list = await hook(ipage, "listPosts", [
+            { forum, sort: "magic", filter: "frontpage", limit: 30 },
+          ]);
+          expect(await iw.problems()).toEqual([]);
+          expectLoopbackOnly("indexer-reader");
+          await ictx.close();
+        }),
+      );
+    }
 
     for (const [name, text] of [
       ["cli.thread.json", cliOut.thread],
       ["cli.list.json", cliOut.list],
       ["spa.thread.json", spaOut.thread],
       ["spa.list.json", spaOut.list],
+      ...(runIndexer
+        ? ([
+            ["indexer.cli.thread.json", idx.cli.thread],
+            ["indexer.cli.list.json", idx.cli.list],
+            ["indexer.spa.thread.json", idx.spa.thread],
+            ["indexer.spa.list.json", idx.spa.list],
+          ] as const)
+        : []),
     ] as const) {
       writeFileSync(join(out, name), text);
     }
@@ -834,13 +1267,119 @@ async function runScenario(
       ...(await compare("thread", cliOut.thread, tuiOut.thread, spaOut.thread, out, info)),
       ...(await compare("list", cliOut.list, tuiOut.list, spaOut.list, out, info)),
     ];
+    if (runIndexer) {
+      // U-D2: with the indexer on, every client's view equals the indexer-off view once the
+      // provenance badges are removed: content, scores, states and order byte for byte
+      const bare = (o: Outputs, tui: typeof tuiOut) => ({
+        cli: { thread: withoutProvenance(o.thread, true), list: withoutProvenance(o.list, true) },
+        tui: {
+          thread: {
+            compact: withoutProvenance(tui.thread.compact, false),
+            pretty: withoutProvenance(tui.thread.pretty, true),
+          },
+          list: {
+            compact: withoutProvenance(tui.list.compact, false),
+            pretty: withoutProvenance(tui.list.pretty, true),
+          },
+        },
+      });
+      const on = bare(idx.cli, idx.tui);
+      const onSpa = {
+        thread: withoutProvenance(idx.spa.thread, false),
+        list: withoutProvenance(idx.spa.list, false),
+      };
+      problems.push(
+        ...(await compare("thread-indexer", on.cli.thread, on.tui.thread, onSpa.thread, out, info)),
+        ...(await compare("list-indexer", on.cli.list, on.tui.list, onSpa.list, out, info)),
+      );
+      const off = bare(cliOut, tuiOut);
+      for (const what of ["thread", "list"] as const) {
+        if (on.tui[what].compact !== off.tui[what].compact) {
+          const a = join(out, `${what}-indexer-off.json`);
+          const b = join(out, `${what}-indexer-on.json`);
+          writeFileSync(a, off.tui[what].pretty);
+          writeFileSync(b, on.tui[what].pretty);
+          const r = spawnSync(
+            "diff",
+            ["-u", "--label", "indexer off", "--label", "indexer on", a, b],
+            {
+              encoding: "utf8",
+            },
+          );
+          const path = join(out, `${what}-indexer-off-vs-on.diff`);
+          writeFileSync(path, r.stdout || r.error?.message || "(no diff output)");
+          await info.attach(`${what}-indexer-off-vs-on.diff`, { path, contentType: "text/plain" });
+          problems.push(
+            `${what}: the indexer-hydrated view differs from the indexer-off view (${path})`,
+          );
+        }
+      }
+    }
     writeFileSync(join(out, "native-config.toml"), readFileSync(join(alice.dir, "config.toml")));
     writeFileSync(join(out, "spa-requests.json"), `${JSON.stringify(spaRequests, null, 2)}\n`);
+    const servicesLog = await services.log();
+    writeFileSync(
+      join(out, "core-plus.json"),
+      `${JSON.stringify({ urls: services.urls, readers: traffic, log: servicesLog }, null, 2)}\n`,
+    );
+    const corePlus = Object.fromEntries(
+      Object.entries(traffic).map(([client, d]) => [
+        client,
+        {
+          http: d.http.map((r) => `${r.service} ${r.nsid} ${r.status}`),
+          jetstream: d.jetstream.map((j) => `${j.wire} ${j.url.split("?")[0]}`),
+        },
+      ]),
+    );
     writeFileSync(
       join(out, "result.json"),
-      `${JSON.stringify({ parityNowMs: t, mode, sources, forum, wiki, tag: TAG_SLUG, post, reply, mediaCid, socialVote, cachedRender, identical: problems.length === 0, problems }, null, 2)}\n`,
+      `${JSON.stringify({ parityNowMs: t, mode, sources, forum, wiki, tag: TAG_SLUG, post, reply, newcomer, newcomerComment, mediaCid, socialVote, cachedRender, corePlus, indexer: runIndexer ? { url: runIndexer.url, requests: idx.requests, spaPaths: idx.spaPaths } : null, identical: problems.length === 0, problems }, null, 2)}\n`,
     );
     expect(problems, `the clients disagree; diffs in ${out}`).toEqual([]);
+
+    // The sources dimension (sync.md §2.4, decision O-3): every client was configured with the
+    // same CORE+ services. In assisted mode each reader contacted them; in direct mode no client
+    // (writer or reader, native or browser) contacted any of them during the whole variant.
+    if (sources === "assisted") {
+      for (const client of ["cli", "tui", "spa"]) {
+        const d = traffic[client];
+        expect(
+          (d?.http.length ?? 0) + (d?.jetstream.length ?? 0),
+          `${client}: CORE+ requests in assisted mode (core-plus.json)`,
+        ).toBeGreaterThan(0);
+        expect(
+          d?.http.every((r) => r.status === 200),
+          `${client}: every CORE+ request was answered`,
+        ).toBe(true);
+      }
+      // the readers followed the short pages to the end (each page carries a cursor)
+      expect(
+        servicesLog.http.filter((r) => r.service === "constellation" && /[?&]cursor=/.test(r.url))
+          .length,
+        "Constellation pages followed by cursor",
+      ).toBeGreaterThan(0);
+      expect(servicesLog.mirror.noise, "the Jetstream log carries noise").toBeGreaterThan(0);
+    } else {
+      expect(servicesLog.http, "direct: nothing asked the Constellation or the relay").toEqual([]);
+      expect(servicesLog.jetstream, "direct: nothing connected to Jetstream").toEqual([]);
+    }
+    // the noise of unrelated DIDs never becomes forum content
+    for (const text of [cliOut.thread, cliOut.list, spaOut.thread, spaOut.list]) {
+      for (const did of NOISE_DIDS) expect(text).not.toContain(did);
+    }
+    if (runIndexer) {
+      // the indexer path was taken: every indexer-on reader asked the indexer, and the SPA's
+      // cold page was hydrated from its ordering and a proof bundle
+      for (const client of ["cli", "tui", "spa"]) {
+        expect(idx.requests[client], `${client}: requests to the indexer`).toBeGreaterThan(0);
+      }
+      expect(idx.spaPaths, "the SPA's cold page hydration").toEqual(
+        expect.arrayContaining([
+          `/xrpc/${NS}.index.listPosts`,
+          `/xrpc/${NS}.index.getRecordProofs`,
+        ]),
+      );
+    }
 
     // and what the scenario wrote is in the view (equal outputs are not equally empty)
     const thread = JSON.parse(tuiOut.thread.compact);
@@ -891,10 +1430,14 @@ async function runScenario(
     // from the anonymous view entirely: it is not listed, and no part of its body survives. This
     // is as much a parity assertion as the byte comparison above - all three clients must agree
     // that the comment is gone.
+    // The newcomer's comment (step 6d) is the one other comment: it is in the view exactly when
+    // CORE+ can introduce it (open mode, assisted; sync.md §2.2, §4.4), and never in approval
+    // mode, where its author is an applicant.
+    const introduced = !approval && sources === "assisted";
     expect(
       thread.comments.map((c: { uri: string }) => c.uri),
-      "a hidden comment must not be in the anonymous view",
-    ).toEqual([]);
+      "a hidden comment must not be in the anonymous view; the newcomer's only through CORE+",
+    ).toEqual(introduced ? [newcomerComment] : []);
     expect(
       JSON.stringify(thread),
       "the hidden comment's body must not survive anywhere in the view",
@@ -961,6 +1504,8 @@ async function runScenario(
     if (summary) {
       appendFileSync(summary, `\n### M2 parity scenario\n\n| step | ms |\n|---|---|\n${table}\n`);
     }
+    await (indexer as Indexer | null)?.stop();
+    await services.stop();
     rmSync(work, { recursive: true, force: true });
   }
 }
