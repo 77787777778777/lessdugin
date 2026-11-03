@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::host::{Host, HostError, KvOp, KvStore, WebSocket, WsMessage};
+use crate::store::blob::{CursorRow, Wire as RowWire};
 use crate::store::{row, schema};
 
 use super::events::{Action, Context, EventFilter, Gap};
@@ -22,7 +23,6 @@ pub const CURSOR_KEY: &str = "jetstream";
 pub const DEDUP_CAPACITY: usize = 10_000;
 /// Maximum decompressed WebSocket message.
 pub const MAX_MESSAGE_BYTES: u32 = 1_200_000;
-const CURSOR_ROW_VERSION: u32 = 1;
 const PERSIST_MS: i64 = 5_000;
 const PERSIST_EVENTS: u32 = 1_000;
 const CURSOR_REWIND_US: i64 = 5_000_000;
@@ -45,14 +45,36 @@ pub struct Cursor {
     pub time_us: i64,
 }
 
-#[derive(Serialize, Deserialize)]
-struct CursorRow {
-    v: u32,
-    #[serde(flatten)]
-    cursor: Cursor,
-}
-
 impl Cursor {
+    /// The `cur/jetstream` row (`sync.md` §10.5 `CursorRow`), stamped `now_ms`.
+    fn to_row(&self, now_ms: i64) -> CursorRow {
+        let mut r = CursorRow::new(now_ms);
+        r.wire = Some(match self.wire {
+            Wire::V1 => RowWire::V1,
+            Wire::V2 => RowWire::V2,
+        });
+        r.instance = (!self.instance.is_empty()).then(|| self.instance.clone());
+        r.seq = self.seq.and_then(|s| i64::try_from(s).ok());
+        r.time_us = Some(self.time_us);
+        r
+    }
+
+    /// The cursor of a stored row; `None` for another version or a row without a wire or time.
+    fn from_row(r: CursorRow) -> Option<Self> {
+        if r.v != row::ROW_VERSION {
+            return None;
+        }
+        Some(Self {
+            wire: match r.wire? {
+                RowWire::V1 => Wire::V1,
+                RowWire::V2 => Wire::V2,
+            },
+            instance: r.instance.unwrap_or_default(),
+            seq: r.seq.and_then(|s| u64::try_from(s).ok()),
+            time_us: r.time_us?,
+        })
+    }
+
     /// Query cursor for a connection. Same-instance v2 uses inclusive `seq`; everything else
     /// rewinds five seconds. Returns also whether the persisted cursor is too old to trust.
     pub fn resume(&self, instance: &str, wire: Wire, now_us: i64) -> (String, bool) {
@@ -335,11 +357,12 @@ impl<H: Host> LiveSource<H> {
         self.loaded = true;
         let key = schema::cur_key(CURSOR_KEY);
         let raw = self.host.cache().get_many(vec![key]).await?.pop().flatten();
-        self.cursor = raw.and_then(|bytes| {
-            row::decode::<CursorRow>(&bytes)
-                .ok()
-                .filter(|r| r.v == CURSOR_ROW_VERSION)
-                .map(|r| r.cursor)
+        self.cursor = raw.and_then(|bytes| match row::decode::<CursorRow>(&bytes) {
+            Ok(r) => Cursor::from_row(r),
+            Err(e) => {
+                tracing::warn!(error = %e, "unreadable Jetstream cursor row ignored");
+                None
+            }
         });
         self.last_saved_ms = self.host.now_ms();
         if let Some(c) = &self.cursor {
@@ -363,10 +386,7 @@ impl<H: Host> LiveSource<H> {
         {
             return Ok(());
         }
-        let bytes = row::encode(&CursorRow {
-            v: CURSOR_ROW_VERSION,
-            cursor,
-        })?;
+        let bytes = row::encode(&cursor.to_row(now))?;
         self.host
             .cache()
             .write(vec![KvOp::Put(schema::cur_key(CURSOR_KEY), bytes)])

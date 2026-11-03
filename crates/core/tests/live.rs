@@ -34,11 +34,35 @@ const TIME_US: i64 = 1_760_000_000_000_000;
 struct FailOnceKv {
     inner: MemKv,
     fail_next: Arc<AtomicBool>,
+    /// The next `get_many` is pending once before it reads (a caller can drop it there).
+    yield_next_read: Arc<AtomicBool>,
     successful_writes: Arc<futures::lock::Mutex<()>>,
+}
+
+/// Pending exactly once, then ready.
+struct YieldOnce(bool);
+
+impl std::future::Future for YieldOnce {
+    type Output = ();
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<()> {
+        if self.0 {
+            return std::task::Poll::Ready(());
+        }
+        self.0 = true;
+        cx.waker().wake_by_ref();
+        std::task::Poll::Pending
+    }
 }
 
 impl KvStore for FailOnceKv {
     async fn get_many(&self, keys: Vec<Vec<u8>>) -> Result<Vec<Option<Vec<u8>>>, HostError> {
+        if self.yield_next_read.swap(false, Ordering::SeqCst) {
+            YieldOnce(false).await;
+        }
         self.inner.get_many(keys).await
     }
 
@@ -72,11 +96,13 @@ impl FailHost {
         let cache = FailOnceKv {
             inner: inner.cache_kv().clone(),
             fail_next: Arc::new(AtomicBool::new(false)),
+            yield_next_read: Arc::new(AtomicBool::new(false)),
             successful_writes: Arc::new(futures::lock::Mutex::new(())),
         };
         let state = FailOnceKv {
             inner: inner.state_kv().clone(),
             fail_next: Arc::new(AtomicBool::new(false)),
+            yield_next_read: Arc::new(AtomicBool::new(false)),
             successful_writes: Arc::new(futures::lock::Mutex::new(())),
         };
         Self {
@@ -939,5 +965,96 @@ fn browser_filter_reconnect_is_rate_limited_and_catches_up_new_dids() {
         assert_eq!(urls.len(), 2);
         assert!(urls[1].contains("dids=did%3Aplc%3Aother"));
         assert!(!urls[1].contains("kinds=commit"));
+    });
+}
+
+fn url_cursor(url: &str) -> String {
+    url::Url::parse(url)
+        .unwrap()
+        .query_pairs()
+        .find(|(k, _)| k == "cursor")
+        .map(|(_, v)| v.into_owned())
+        .expect("every subscription carries a cursor")
+}
+
+fn jetstream_source<H: Host>(host: H, base: &str, browser: bool) -> LiveSource<H> {
+    LiveSource::new(
+        Arc::new(host),
+        LiveConfig::new(vec![url::Url::parse(base).unwrap()], browser),
+    )
+}
+
+/// Runs one source until its first frame is acknowledged and the scripted socket has closed, so
+/// the cursor of that frame is persisted (a close always flushes it).
+async fn persist_seq_42(host: &MemHost) {
+    host.script_websocket(
+        "wss://jetstream.example/",
+        vec![WsMessage::Text(v2_commit(DID, &post(), &format!("{FK}-3l"), 42))],
+    );
+    let mut first = jetstream_source(host.clone(), "wss://jetstream.example/subscribe", false);
+    assert!(matches!(
+        first.next(&context()).await.unwrap(),
+        SourceStatus::Actions(_)
+    ));
+    first.acknowledge().await.unwrap();
+    assert_eq!(first.next(&context()).await.unwrap(), SourceStatus::Waiting);
+    first.stop().await;
+}
+
+#[test]
+fn persisted_cursor_is_resumed_after_a_restart() {
+    futures::executor::block_on(async {
+        let host = MemHost::new();
+        persist_seq_42(&host).await;
+
+        // Same instance, v2: the inclusive seq.
+        host.script_websocket("wss://jetstream.example/", Vec::new());
+        let mut same = jetstream_source(host.clone(), "wss://jetstream.example/subscribe", false);
+        assert_eq!(same.next(&context()).await.unwrap(), SourceStatus::Waiting);
+        assert_eq!(same.cursor().map(|c| c.seq), Some(Some(42)));
+        let urls = host.websocket_urls();
+        assert_eq!(url_cursor(&urls[1]), "42", "restart must resume at the stored seq");
+        same.stop().await;
+
+        // Another instance an hour later: the stored time rewound 5 s, not now - 5 s.
+        host.advance_ms(3_600_000);
+        host.script_websocket("wss://other.example/", Vec::new());
+        let mut other = jetstream_source(host.clone(), "wss://other.example/subscribe", false);
+        assert_eq!(other.next(&context()).await.unwrap(), SourceStatus::Waiting);
+        let urls = host.websocket_urls();
+        assert_eq!(
+            url_cursor(&urls[2]),
+            (TIME_US - 5_000_000).to_string(),
+            "a restart must replay the hour the client was closed"
+        );
+        other.stop().await;
+
+        // More than 36 h later the stored cursor is a gap: a reconcile first, then near now.
+        host.advance_ms(36 * 3_600_000);
+        let mut late = jetstream_source(host.clone(), "wss://other.example/subscribe", false);
+        assert_eq!(
+            late.next(&context()).await.unwrap(),
+            SourceStatus::Actions(vec![Action::Reconcile(Gap::OutdatedCursor)])
+        );
+    });
+}
+
+#[test]
+fn a_dropped_first_call_still_loads_the_persisted_cursor() {
+    futures::executor::block_on(async {
+        let mem = MemHost::new();
+        persist_seq_42(&mem).await;
+        let host = FailHost::new(mem.clone());
+        mem.script_websocket("wss://jetstream.example/", Vec::new());
+        let mut source = jetstream_source(host.clone(), "wss://jetstream.example/subscribe", false);
+        host.cache.yield_next_read.store(true, Ordering::SeqCst);
+        // The caller's timer wins while the cursor row is being read.
+        assert!(
+            futures::FutureExt::now_or_never(source.next(&context())).is_none(),
+            "the first call must be pending inside the cursor read"
+        );
+        assert_eq!(source.next(&context()).await.unwrap(), SourceStatus::Waiting);
+        let urls = mem.websocket_urls();
+        assert_eq!(url_cursor(urls.last().unwrap()), "42");
     });
 }
