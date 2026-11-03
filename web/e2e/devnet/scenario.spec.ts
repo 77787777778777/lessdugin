@@ -443,13 +443,17 @@ function hasProvenance(text: string, badge: string): boolean {
   return found;
 }
 
-/** How a cold page (a dto/1 PostList hydrated from the indexer, before any participant's repo
- * was listed) departs from the converged indexer-off list: other posts or another order, a
- * proof-admitted post at another version, or no proof-admitted post at all. Its comment
- * counts and scores still lack what only the participants' repos hold, so they are not
- * compared here (the converged views are, byte for byte). */
+/** How a cold page (`{items: [{uri, cid, badges}]}`: the posts a page hydrated from the
+ * indexer listed before any participant's repo was listed, in its order, with their local
+ * views; "" when those could not be read) departs from the converged indexer-off list: other
+ * posts or another order, a proof-admitted post at another version, or no proof-admitted
+ * post at all. Its comment counts and scores still lack what only the participants' repos
+ * hold, so they are not compared here (the converged views are, byte for byte). */
 function coldPageProblems(cold: string, off: string): string[] {
   type Item = { uri: string; cid: string; badges?: Record<string, boolean> };
+  if (cold === "") {
+    return ["cold page: its posts' local views could not be read while the listings were held"];
+  }
   const coldItems = (JSON.parse(cold) as { items: Item[] }).items;
   const offItems = (JSON.parse(off) as { items: Item[] }).items;
   const problems: string[] = [];
@@ -1364,9 +1368,33 @@ async function runScenario(
                 .catch(() => {}),
             ),
           );
-          idx.spaCold = await hook(ipage, "listPosts", [
-            { forum, sort: "magic", filter: "frontpage", limit: 30 },
+          // Read without hydrating again: the posts the page lists, in its order, and each one's
+          // local view (getPost reads the cache). A listPosts call here would re-hydrate, and its
+          // head check of an author waits for that author's repo lock, which the author's held
+          // sync keeps (crates/core/src/sync/repo.rs, head_check).
+          const hrefs = await ipage
+            .getByRole("region", { name: "Posts" })
+            .getByRole("article")
+            .evaluateAll((articles) =>
+              articles.map((a) => a.querySelector("h3 a")?.getAttribute("href") ?? ""),
+            );
+          const local = Promise.all(
+            hrefs.map(async (href) => {
+              const m = /#\/p\/([^/]+)\/([^/?#]+)$/.exec(href);
+              // (a hidden or removed post is listed as its reason only, without a link)
+              if (!m) return { uri: href || "(a row without a link)", cid: "", badges: {} };
+              const uri = `at://${decodeURIComponent(m[1] ?? "")}/${NS}.post/${m[2]}`;
+              const view = JSON.parse(await hook(ipage, "getPost", [uri])) as {
+                post: { uri: string; cid: string; badges: Record<string, boolean> };
+              };
+              return { uri: view.post.uri, cid: view.post.cid, badges: view.post.badges };
+            }),
+          );
+          const items = await Promise.race([
+            local,
+            new Promise<null>((ok) => setTimeout(() => ok(null), 15_000)),
           ]);
+          idx.spaCold = items ? JSON.stringify({ items }) : "";
           // the page's ordinary sync did ask for the participants' listings meanwhile
           await expect
             .poll(() => idx.spaHeld.length, {
@@ -1376,6 +1404,7 @@ async function runScenario(
             .toBeGreaterThan(0);
           release();
           await ipage.unrouteAll({ behavior: "wait" });
+          await local;
           await ipage.getByRole("link", { name: EDITED_TITLE }).click();
           await expect(ipage.getByRole("heading", { level: 1, name: EDITED_TITLE })).toBeVisible();
           await hook(ipage, "syncForum", [forum, { full: false }]);
