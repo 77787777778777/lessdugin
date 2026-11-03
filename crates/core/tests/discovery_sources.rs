@@ -10,9 +10,11 @@ use lessdugin_core::discovery::sources::{
     NEWCOMER_RELAY_UNION_LIMIT, NewcomerHints, RECENT_POSTS_DISCOVERY, RELAY_PAGE_LIMIT,
     SourceEndpoints, SourceError, Sources,
 };
-use lessdugin_core::discovery::state::{DiscState, disc_rows};
-use lessdugin_core::discovery::{ForumKey, SyncOpts};
-use lessdugin_core::engine::{Engine, EngineConfig, Sources as SourceMode};
+use lessdugin_core::discovery::state::{
+    DISC_ROWS_MAX, DiscRow, DiscState, disc_rows, put_disc_rows, relay_rows,
+};
+use lessdugin_core::discovery::{ForumKey, NEWCOMER_BUDGET, SyncOpts};
+use lessdugin_core::engine::{Engine, EngineConfig, Platform, Sources as SourceMode};
 use lessdugin_core::host::{Host, HttpRequest, KvOp, KvStore, Target};
 use lessdugin_core::store::RecordStore;
 use lessdugin_lexicon::collection::nsid;
@@ -524,7 +526,15 @@ fn engine_sync_forum_assisted_confirms_relay_candidates_and_direct_uses_no_core_
     let state = |d: &Did| disc.get(d.as_str()).map(|row| row.state);
     assert_eq!(state(selected.did()), Some(DiscState::Confirmed));
     assert_eq!(state(relayed.did()), Some(DiscState::Confirmed));
-    assert_eq!(state(outsider.did()), Some(DiscState::Rejected));
+    // a relay-only candidate is a disc row only once confirmed: its rejection is a relay row,
+    // which keeps the back-off (sync.md §4.4)
+    assert_eq!(state(outsider.did()), None);
+    let rejected = block_on(relay_rows(host.cache(), &key.fk)).unwrap();
+    assert_eq!(
+        rejected.keys().collect::<Vec<_>>(),
+        [&outsider.did().to_string()]
+    );
+    assert_eq!(rejected[outsider.did().as_str()].state, DiscState::Rejected);
     let store = RecordStore::new(host.cache());
     for member in [&selected, &relayed] {
         let membership_uri = AtUri::parse(&member.uri(nsid::MEMBERSHIP, &key.fk)).unwrap();
@@ -584,6 +594,232 @@ fn engine_sync_forum_assisted_confirms_relay_candidates_and_direct_uses_no_core_
             .iter()
             .all(|request| request.service != ServiceKind::Relay)
     );
+}
+
+/// A relay entry names a repo with some membership, not one of this forum: of an honest relay's
+/// directory, the relay-only candidates that are checked and rejected, or left over the budget,
+/// must not become repos `live_tail` polls or DIDs of the browser's Jetstream filter (they get no
+/// discovery row; the review of m5-acceptance-2 found each of them a followed repo).
+#[test]
+fn rejected_or_over_budget_relay_candidates_are_not_followed_live() {
+    let host = MemHost::new();
+    let net = FakeNet::on(&host);
+    let _ = net.default_pds();
+    let owner = net.add_account("owner.example.com");
+    let relayed = net.add_account("relayed.example.com");
+    let rejected = net.add_account("rejected.example.com");
+    let over = net.add_account("over.example.com");
+    let key = ForumKey::new(owner.did(), "open").unwrap();
+    let elsewhere = ForumKey::new(owner.did(), "elsewhere").unwrap();
+    let at = Datetime::from_millis(host.now() - 60_000).unwrap();
+    for slug in ["open", "elsewhere"] {
+        let declaration = Forum::create(slug, at.clone(), MembershipMode::Open);
+        owner.put(
+            nsid::FORUM,
+            slug,
+            &serde_json::to_value(declaration).unwrap(),
+        );
+    }
+    for (account, forum) in [
+        (&relayed, &key),
+        (&rejected, &elsewhere),
+        (&over, &elsewhere),
+    ] {
+        let membership = Membership::new(forum.uri.clone(), at.clone());
+        account.put(
+            nsid::MEMBERSHIP,
+            &forum.fk,
+            &serde_json::to_value(membership).unwrap(),
+        );
+    }
+    host.respond_get(
+        &format!("{CONSTELLATION}/xrpc/{GET_BACKLINKS}"),
+        resp::ok_json(&json!({"records": [], "cursor": null})),
+    );
+    // the relay lists the member and one non-member within the budget, then more repos than
+    // the budget holds (whose DIDs do not resolve), then another non-member
+    let mut listed = vec![relayed.did().to_string(), rejected.did().to_string()];
+    listed.extend((0..NEWCOMER_BUDGET + 10).map(|i| format!("did:web:user{i:04}.example.com")));
+    listed.push(over.did().to_string());
+    paged_relay(&host, RELAY1, listed);
+    let engine = Engine::new(
+        host.clone(),
+        EngineConfig {
+            sources: SourceMode::Assisted,
+            constellation: Some(Url::parse(CONSTELLATION).unwrap()),
+            relays: vec![Url::parse(RELAY1).unwrap()],
+            jetstream: vec![Url::parse("wss://jetstream.example/subscribe").unwrap()],
+            platform: Platform::Browser,
+            ..EngineConfig::default()
+        },
+    );
+    block_on(engine.forum_follow(key.uri.as_str(), None)).unwrap();
+    block_on(engine.sync_forum(key.uri.as_str(), &SyncOpts::default())).unwrap();
+    let disc = block_on(disc_rows(host.cache(), &key.fk)).unwrap();
+    assert_eq!(
+        disc.get(relayed.did().as_str()).map(|r| r.state),
+        Some(DiscState::Confirmed),
+        "a relay-only member is confirmed at its PDS"
+    );
+    let others: Vec<&String> = disc
+        .keys()
+        .filter(|d| d.as_str() != relayed.did().as_str())
+        .collect();
+    assert!(
+        others.is_empty(),
+        "only the confirmed relay candidate is a discovery row; {} others, from {:?}",
+        others.len(),
+        others.first()
+    );
+    let checked = block_on(relay_rows(host.cache(), &key.fk)).unwrap();
+    assert_eq!(
+        checked.keys().collect::<Vec<_>>(),
+        [&rejected.did().to_string()],
+        "the checked non-member keeps its back-off; the one over the budget is not kept"
+    );
+
+    let outsiders = [rejected.did().to_string(), over.did().to_string()];
+    let names = |url: &str| {
+        outsiders
+            .iter()
+            .any(|d| url.contains(d.as_str()) || url.contains(&d.replace(':', "%3A")))
+    };
+    host.clear_requests();
+    net.clear_requests();
+    for _ in 0..10 {
+        block_on(engine.live_step()).unwrap();
+        host.advance_ms(2 * 60 * 60_000);
+    }
+    let touched: Vec<String> = host
+        .requests()
+        .into_iter()
+        .map(|r| r.url)
+        .filter(|u| names(u))
+        .collect();
+    assert!(
+        touched.is_empty(),
+        "live_step polled outsiders: {touched:?}"
+    );
+    assert!(
+        net.requests().iter().all(|r| r
+            .did
+            .as_deref()
+            .is_none_or(|d| !outsiders.iter().any(|o| o == d))),
+        "no request of live_step is for an outsider's repo"
+    );
+
+    // the browser's Jetstream filter: the forum's DIDs, not the relay's directory (in the
+    // connection URL up to 150 DIDs, else in an `options_update` sent once connected)
+    host.script_websocket("wss://jetstream.example/", Vec::new());
+    host.park_sleeps(true);
+    block_on(async {
+        let tail = engine.live_tail();
+        futures::pin_mut!(tail);
+        assert!(futures::poll!(tail.as_mut()).is_pending());
+        engine.live_stop();
+        host.park_sleeps(false);
+        tail.await.unwrap();
+    });
+    let urls = host.websocket_urls();
+    let mut filters: Vec<String> = urls
+        .iter()
+        .flat_map(|u| {
+            Url::parse(u)
+                .unwrap()
+                .query_pairs()
+                .filter(|(k, _)| k == "dids")
+                .map(|(_, v)| v.into_owned())
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    for sent in host.websocket_sent() {
+        let sent: Value = serde_json::from_str(&sent).unwrap();
+        if let Some(dids) = sent["payload"]["wantedDids"].as_array() {
+            filters.extend(dids.iter().filter_map(|d| Some(d.as_str()?.to_owned())));
+        }
+    }
+    assert!(
+        filters.iter().any(|d| d == owner.did().as_str()),
+        "a DID-filtered connection was opened: {urls:?}"
+    );
+    let named: Vec<&String> = filters.iter().filter(|d| outsiders.contains(d)).collect();
+    assert!(
+        named.is_empty(),
+        "the Jetstream filter of {} DIDs names outsiders: {named:?}",
+        filters.len()
+    );
+}
+
+/// Discovery's own writes keep at most `DISC_ROWS_MAX` discovery rows per forum, dropping the
+/// oldest rows that are not confirmed, as the Jetstream candidate write does (sync.md §4.4,
+/// §6.4): hint sources that name ever new DIDs cannot grow the cache without bound.
+#[test]
+fn discovery_keeps_at_most_disc_rows_max_rows_per_forum() {
+    let host = MemHost::new();
+    let net = FakeNet::on(&host);
+    let _ = net.default_pds();
+    let owner = net.add_account("owner.example.com");
+    let key = ForumKey::new(owner.did(), "open").unwrap();
+    let at = Datetime::from_millis(host.now() - 60_000).unwrap();
+    let declaration = Forum::create("open", at.clone(), MembershipMode::Open);
+    owner.put(
+        nsid::FORUM,
+        "open",
+        &serde_json::to_value(declaration).unwrap(),
+    );
+    let membership = Membership::new(key.uri.clone(), at.clone());
+    owner.put(
+        nsid::MEMBERSHIP,
+        &key.fk,
+        &serde_json::to_value(membership).unwrap(),
+    );
+    // a full forum: the oldest row is confirmed, the next two are the oldest unconfirmed
+    let old = host.now() - 30 * 86_400_000;
+    let rows: std::collections::BTreeMap<String, DiscRow> = (0..DISC_ROWS_MAX)
+        .map(|i| {
+            let mut row = DiscRow::new("hint:constellation", old + i as i64);
+            if i == 0 {
+                row.set(DiscState::Confirmed, old);
+            }
+            (format!("did:web:old{i:05}.example.com"), row)
+        })
+        .collect();
+    block_on(put_disc_rows(host.cache(), &key.fk, &rows)).unwrap();
+    let opts = SyncOpts {
+        background: true,
+        newcomers: vec![
+            (
+                "did:web:new1.example.com".to_owned(),
+                "jetstream".to_owned(),
+            ),
+            (
+                "did:web:new2.example.com".to_owned(),
+                "jetstream".to_owned(),
+            ),
+        ],
+        ..SyncOpts::default()
+    };
+    let direct = engine(&host, SourceMode::Direct);
+    block_on(direct.sync_forum(key.uri.as_str(), &opts)).unwrap();
+    let disc = block_on(disc_rows(host.cache(), &key.fk)).unwrap();
+    assert_eq!(disc.len(), DISC_ROWS_MAX);
+    assert!(
+        disc.contains_key("did:web:old00000.example.com"),
+        "confirmed"
+    );
+    for dropped in [
+        "did:web:old00001.example.com",
+        "did:web:old00002.example.com",
+    ] {
+        assert!(
+            !disc.contains_key(dropped),
+            "{dropped} is the oldest unconfirmed"
+        );
+    }
+    assert!(disc.contains_key("did:web:old00003.example.com"));
+    for new in ["did:web:new1.example.com", "did:web:new2.example.com"] {
+        assert!(disc.contains_key(new), "{new} was just hinted");
+    }
 }
 
 #[test]

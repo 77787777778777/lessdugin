@@ -286,7 +286,11 @@ pub async fn write_disc<K: KvStore>(kv: &K, fk: &str, w: &DiscWrite) -> Result<(
     for (did, r) in &w.relay {
         ops.push(KvOp::Put(relay_key(fk, did), row::encode(r)?));
     }
-    ops.extend(w.relay_dropped.iter().map(|d| KvOp::Delete(relay_key(fk, d))));
+    ops.extend(
+        w.relay_dropped
+            .iter()
+            .map(|d| KvOp::Delete(relay_key(fk, d))),
+    );
     if !ops.is_empty() {
         kv.write(ops).await?;
     }

@@ -721,7 +721,7 @@ impl<H: Host> Syncer<H> {
             // candidates) their relay rejections
             let mut rows: BTreeMap<String, DiscRow> = BTreeMap::new();
             let mut relay_only: BTreeSet<String> = BTreeSet::new();
-            let (mut newcomers, waiting): (Vec<Candidate>, Vec<Candidate>) = opts
+            let newcomers: Vec<Candidate> = opts
                 .newcomers
                 .iter()
                 .filter(|(d, _)| !done.contains(d) && seen.insert(d.clone()))
@@ -742,7 +742,9 @@ impl<H: Host> Syncer<H> {
                         granted: false,
                     })
                 })
-                .partition(|c| {
+                .collect();
+            let (mut newcomers, waiting): (Vec<Candidate>, Vec<Candidate>) =
+                newcomers.into_iter().partition(|c| {
                     c.hinted
                         || !rows
                             .get(c.did.as_str())
