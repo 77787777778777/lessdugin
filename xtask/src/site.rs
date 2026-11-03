@@ -397,6 +397,16 @@ mod tests {
         );
     }
 
+    /// The deployed documents in `deploy/site/oauth` are the ones `site --ns final` writes for
+    /// the canonical origin.
+    #[test]
+    fn the_deployed_documents_are_the_generated_ones() {
+        let base = base_url("https://lessdugin.7778777.online").unwrap();
+        let (web, cli) = metadata(&base, Ns::Final);
+        assert_eq!(spec("deploy/site/oauth/client-metadata.json"), web);
+        assert_eq!(spec("deploy/site/oauth/cli-client-metadata.json"), cli);
+    }
+
     /// A self-hosted `.temp` site: §10.4 with the origin substituted in `client_id`,
     /// `client_uri` and `redirect_uris`, the `.temp` collections (§1.3) and no `include:`.
     #[test]

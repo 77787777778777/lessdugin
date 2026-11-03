@@ -10,8 +10,10 @@
 //   4. carol, TUI: votes, agrees and reacts through the keys;
 //   5. alice, CLI: hides carol's comment and pins the post;
 //   6. bob, SPA: edits the post, which creates a revision;
+//   6c. alice, SPA: applies the forum's wiki-backed tag to the post;
 //   6b. alice, CLI: pins the edited post again (a pin is bound to the version it was made on,
-//      social.md §4.5, so the edit suspended step 5's pin), so the compared views carry it.
+//      social.md §4.5, so the edit suspended step 5's pin), so the compared views carry it;
+//   7. carol, TUI: tags the post too (`:vote up --tag`); her vote counts in approval mode only.
 //
 // Alice also writes one post straight to her PDS whose TID and `createdAt` are an hour ahead of
 // the real clock (the parity canary, conformance review M3): a client that ignored parity mode
@@ -1108,6 +1110,51 @@ async function runScenario(
         items: { uri: string; tags: string[] }[];
       };
       expect(ownList.items.find((p) => p.uri === post)?.tags).toEqual([TAG_SLUG]);
+    });
+
+    // 7. carol, TUI: tags the post (docs/plan.md §4.2 step 7). The driver types
+    // `:vote up --tag <slug>` past the public-action notice and sends the write. A tag vote
+    // counts only from a voter in E (social.md §13.3): approval mode establishes carol, so
+    // rel(p, slug) grows by her power (1); in open mode she is a newcomer and the vote is
+    // recorded without weight (§6.5). Alice's vote (6c) applies the tag either way, and the
+    // compared views below carry whichever holds.
+    await step("7. carol (TUI): tags the post; relevance applies", async () => {
+      type Tagged = { slug: string; relevance: number; applies: boolean; mine?: string };
+      const tagOf = async (label: string): Promise<Tagged | undefined> => {
+        await carol.cli(`sync-${label}`, ["--json", "sync", forum]);
+        const thread = JSON.parse(await carol.cli(`read-${label}`, ["--json", "read", post])) as {
+          post: { tagRelevance?: Tagged[] };
+        };
+        return thread.post.tagRelevance?.find((t) => t.slug === TAG_SLUG);
+      };
+      const before = await tagOf("before-tag");
+      expect(before?.applies, `alice's tag vote applies: ${JSON.stringify(before)}`).toBe(true);
+      expect(before?.mine).toBeUndefined();
+      const r = JSON.parse(await carol.tui("tag", ["tag", forum, post, TAG_SLUG]));
+      expect(r).toEqual({ subject: post, tag: TAG_SLUG });
+      const opinions = (await xrpc(s.devnet.pds, "com.atproto.repo.listRecords", {
+        query: { repo: s.devnet.accounts.carol.did, collection: `${NS}.opinion`, limit: "100" },
+      })) as {
+        records: {
+          uri: string;
+          value: { subject?: { uri?: string }; tags?: { tag: string; value: string }[] };
+        }[];
+      };
+      writeFileSync(join(out, "carol-opinions.json"), `${JSON.stringify(opinions, null, 2)}\n`);
+      expect(
+        opinions.records.find(
+          (o) =>
+            o.value.subject?.uri === post &&
+            o.value.tags?.some((v) => v.tag === TAG_SLUG && v.value === "up"),
+        ),
+        "carol's public opinion carries the tag vote",
+      ).toBeTruthy();
+      const after = await tagOf("after-tag");
+      expect(after?.mine, `carol's own tag vote: ${JSON.stringify(after)}`).toBe("up");
+      expect(after?.applies).toBe(true);
+      expect(after?.relevance, `rel(p, ${TAG_SLUG}) in ${mode} mode`).toBe(
+        (before?.relevance ?? 0) + (approval ? 1 : 0),
+      );
     });
 
     // 6d. a newcomer, PDS API: a fresh account that no seed references joins and comments on
