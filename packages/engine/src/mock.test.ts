@@ -205,6 +205,117 @@ describe("MockEngine writes", () => {
     expect(ticket.state.kind).toBe("pending");
   });
 
+  it("lists a post's applied tags, sorted, not its declared ones (social.md §13.3)", async () => {
+    const e = new MockEngine({ sendMs: 10 });
+    const all = await e.listPosts({ forum: FORUM_URI, sort: "new", filter: "all", limit: 100 });
+    // declared in the order rationality, practical; both have a page
+    const declaredOutOfOrder = all.items.find((p) => p.title === "Noticing confusion");
+    expect(declaredOutOfOrder?.tags).toEqual(["practical", "rationality"]);
+    const ticket = await e.publish({
+      forum: FORUM_URI,
+      kind: "article",
+      title: "Tagged without a page",
+      body: { markdown: "Body", media: [] },
+      tags: ["no-such-page", "meta", "meta"],
+    });
+    await vi.advanceTimersByTimeAsync(50);
+    const state = (await e.writes()).find((w) => w.id === ticket.id)?.state;
+    if (state?.kind !== "done") throw new Error("the publish did not finish");
+    // a tag without a wiki page never applies; the record keeps what the author declared
+    expect((await e.getPost(state.uri)).post.tags).toEqual(["meta"]);
+    expect((await e.raw(state.uri)).record).toMatchObject({
+      tags: ["no-such-page", "meta", "meta"],
+    });
+    const byMissing = await e.listPosts({
+      forum: FORUM_URI,
+      sort: "new",
+      filter: "all",
+      tag: "no-such-page",
+      limit: 100,
+    });
+    expect(byMissing.items).toEqual([]);
+    const byMeta = await e.listPosts({
+      forum: FORUM_URI,
+      sort: "new",
+      filter: "all",
+      tag: "meta",
+      limit: 100,
+    });
+    expect(byMeta.items.map((p) => p.uri)).toContain(state.uri);
+  });
+
+  it("writes a wiki revision on its base, and refuses one whose head moved (O-2)", async () => {
+    const e = new MockEngine({ sendMs: 10 });
+    const slug = "decision-theory";
+    const head = (await e.tag(FORUM_URI, slug)).head ?? "";
+    // a page's revisions are records: the head names the genesis as its parent
+    const genesis = (await e.raw(head)).record as { parents: { uri: string }[] };
+    expect(genesis.parents).toHaveLength(1);
+    expect((await e.raw(genesis.parents[0]?.uri ?? "")).record).toMatchObject({
+      slug,
+      parents: [],
+    });
+    const draft = { name: "Decision theory", isTag: true, base: head };
+    await e.wikiEdit(FORUM_URI, slug, draft);
+    await vi.advanceTimersByTimeAsync(50);
+    const next = (await e.tag(FORUM_URI, slug)).head ?? "";
+    expect(next).not.toBe(head);
+    expect((await e.raw(next)).record).toMatchObject({ parents: [{ uri: head }] });
+    await expect(e.wikiEdit(FORUM_URI, slug, draft)).rejects.toMatchObject({
+      code: "conflict",
+      detail: { kind: "wikiHeadMoved", base: head, head: next },
+    });
+  });
+
+  // views.rs `tag_summary`: a page that exists but is not a tag (applicable = false) is no tag
+  it("treats a page that is not a tag as no tag, and edits it on its head", async () => {
+    const e = new MockEngine({ sendMs: 10 });
+    const slug = "decision-theory";
+    const head = (await e.tag(FORUM_URI, slug)).head ?? "";
+    const notTag = { name: "Glossary", isTag: false, base: head };
+    const t = await e.wikiEdit(FORUM_URI, slug, notTag);
+    await vi.advanceTimersByTimeAsync(50);
+    const s = (await e.writes()).find((w) => w.id === t.id)?.state;
+    if (s?.kind !== "done") throw new Error("not written");
+    await expect(e.tag(FORUM_URI, slug)).rejects.toMatchObject({ code: "not_found" });
+    expect((await e.tags(FORUM_URI)).map((x) => x.slug)).not.toContain(slug);
+    // an edit without a base still names the page's head, as organisation.rs `wiki_edit` does
+    await e.wikiEdit(FORUM_URI, slug, { name: "Decision theory", isTag: true });
+    await vi.advanceTimersByTimeAsync(50);
+    const back = (await e.tag(FORUM_URI, slug)).head ?? "";
+    expect((await e.raw(back)).record).toMatchObject({ parents: [{ uri: s.uri }] });
+  });
+
+  it("bounds sequence positions before enqueueing, as the engine does", async () => {
+    const e = new MockEngine({ sendMs: 10 });
+    const posts = (await e.listPosts({ forum: FORUM_URI, sort: "new", filter: "all", limit: 3 }))
+      .items;
+    const [a, b] = posts;
+    if (!a || !b) throw new Error("no posts");
+    const t = await e.seqCreate({
+      forum: FORUM_URI,
+      title: "Mine",
+      chapters: [{ posts: [a.uri] }],
+    });
+    await vi.advanceTimersByTimeAsync(50);
+    const s = (await e.writes()).find((w) => w.id === t.id)?.state;
+    if (s?.kind !== "done") throw new Error("not created");
+    await expect(e.seqAdd(s.uri, b.uri, { chapter: 0, index: 2 })).rejects.toMatchObject({
+      code: "invalid_input",
+    });
+    await expect(e.seqAdd(s.uri, s.uri, { chapter: 0, index: 0 })).rejects.toMatchObject({
+      code: "invalid_input",
+    });
+    await expect(
+      e.seqMove(s.uri, { chapter: 0, index: 0 }, { chapter: 0, index: 1 }),
+    ).rejects.toMatchObject({ code: "invalid_input" });
+    await e.seqAdd(s.uri, b.uri, { chapter: 0, index: 1 });
+    await vi.advanceTimersByTimeAsync(50);
+    await e.seqMove(s.uri, { chapter: 0, index: 1 }, { chapter: 0, index: 0 });
+    await vi.advanceTimersByTimeAsync(50);
+    expect((await e.sequence(s.uri)).chapters[0]?.posts.map((p) => p.uri)).toEqual([b.uri, a.uri]);
+  });
+
   it("keeps the #restrict dimension an intent leaves out, as the engine merges (m3r-2)", async () => {
     const e = new MockEngine({ sendMs: 10 });
     const target = (await e.members(FORUM_URI, {})).find(

@@ -12,17 +12,22 @@ import { describe, expect, it } from "vitest";
 
 // vitest runs from web/
 const SPEC = resolve(process.cwd(), "../docs/spec/engine-api.md");
+const PLAN = resolve(process.cwd(), "../docs/plan.md");
 const SRC = `${resolve(process.cwd(), "src")}/`;
 
 /** How the SPA reaches an operation: a source file (under src/) that calls `engine.<op>(`
  * (`call` when the method is not the camelCased name), the result read from another operation's
- * call in that file (`through`), or not here, for the reason given (a later milestone). */
+ * call in that file (`through`), or not here, for the reason given (a later milestone, named
+ * first: `M<n> (…)`). */
 type Reach =
   | { file: string; call?: string }
   | { file: string; through: string; why: string }
   | { notHere: string };
 
-const M5 = { notHere: "M5 (engine-api.md §3.9)" };
+/** The first milestone an exemption may name. M5 and M6 have landed their operations (the
+ * engine implements them and the CLI and TUI reach them) while plan.md records their status, so
+ * neither is "later" any more; M7 is the release. */
+const FIRST_OPEN_MILESTONE = 7;
 
 const REACH: Record<string, Reach> = {
   // §3.2
@@ -56,12 +61,12 @@ const REACH: Record<string, Reach> = {
   opinion: { file: "components/VoteControls.tsx" },
   mod_action: { file: "components/ModMenu.tsx" },
   mod_adopt: { file: "pages/forum/ForumModPage.tsx" },
-  wiki_edit: M5,
-  seq_create: M5,
-  seq_edit: M5,
-  seq_add: M5,
-  seq_remove: M5,
-  seq_move: M5,
+  wiki_edit: { file: "pages/forum/WikiEditPage.tsx" },
+  seq_create: { file: "pages/forum/ForumNewSequencePage.tsx" },
+  seq_edit: { file: "pages/SequenceEditPage.tsx" },
+  seq_add: { file: "pages/SequencePage.tsx" },
+  seq_remove: { file: "pages/SequencePage.tsx" },
+  seq_move: { file: "pages/SequencePage.tsx" },
   redact_revision: { file: "pages/PostPage.tsx" },
   prepare_media: { file: "components/Attachments.tsx" },
   undo: { file: "pages/OutboxPage.tsx" },
@@ -124,6 +129,19 @@ function specOperations(): Set<string> {
   return ops;
 }
 
+/** The milestones plan.md marks done: a `**Status:** done` line under `### M<n>`. */
+function doneMilestones(): Set<number> {
+  const done = new Set<number>();
+  let current: number | null = null;
+  for (const line of readFileSync(PLAN, "utf8").split("\n")) {
+    const heading = /^### M(\d+)\b/.exec(line);
+    if (heading) current = Number(heading[1]);
+    else if (line.startsWith("#")) current = null;
+    else if (current !== null && line.startsWith("**Status:** done")) done.add(current);
+  }
+  return done;
+}
+
 const camel = (op: string): string => op.replace(/_([a-z])/g, (_, c: string) => c.toUpperCase());
 
 describe("every engine operation has a way in (docs/plan.md §M3)", () => {
@@ -150,9 +168,17 @@ describe("every engine operation has a way in (docs/plan.md §M3)", () => {
     expect(missing).toEqual([]);
   });
 
-  it("leaves out only the operations of a later milestone", () => {
+  it("leaves out only the operations of a milestone that has not landed", () => {
+    const done = doneMilestones();
+    // the plan's status lines are read: M0 to M4 are done
+    expect([0, 1, 2, 3, 4].every((m) => done.has(m))).toBe(true);
     for (const [op, r] of Object.entries(REACH)) {
-      if ("notHere" in r) expect(r.notHere, op).toMatch(/^M5/);
+      if (!("notHere" in r)) continue;
+      const m = /^M(\d+)\b/.exec(r.notHere);
+      expect(m, `${op}: ${r.notHere}`).not.toBeNull();
+      const n = Number(m?.[1]);
+      expect(done.has(n), `${op} names done milestone M${n}`).toBe(false);
+      expect(n, `${op} names landed milestone M${n}`).toBeGreaterThanOrEqual(FIRST_OPEN_MILESTONE);
     }
   });
 });

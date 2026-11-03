@@ -308,3 +308,58 @@ test("vote on the tags of someone else's post", async ({ page }) => {
       .getByRole("button", { name: /Applies/ }),
   ).toHaveAttribute("aria-pressed", "true");
 });
+
+test("edit a wiki page against its head and read its history (engine-api.md §3.5)", async ({
+  page,
+}) => {
+  await go(page, `${FORUM_PATH}/t/decision-theory`, FORUM);
+  await page.getByRole("link", { name: "Edit page" }).click();
+  const body = page.getByRole("textbox", { name: /^Page/ });
+  await expect(body).toHaveValue(/## Classic problems/);
+  await body.fill("Decision theory studies choice.\n\n## Classic problems\n\n- Newcomb's problem");
+  await page.getByRole("textbox", { name: /^Edit summary/ }).fill("Trim the page");
+  await page.getByRole("button", { name: "Save page" }).click();
+  await expect(page.getByText("Page saved (a public revision)")).toBeVisible();
+  await expect(page.getByText("Decision theory studies choice.")).toBeVisible();
+  await page.getByRole("link", { name: "History", exact: true }).click();
+  const revisions = page.getByRole("list", { name: "Revisions" }).getByRole("listitem");
+  await expect(revisions).toHaveCount(3);
+  await expect(revisions.first()).toContainText("(current)");
+  await expect(revisions.first()).toContainText("Trim the page");
+
+  // a new page, started from the tags list
+  await page.getByRole("link", { name: "Tags", exact: true }).click();
+  await page.getByLabel("New page address").fill("calibration");
+  await page.getByRole("button", { name: "Start page" }).click();
+  // the engine opens only tag pages: a page here that is not a tag would be replaced
+  await expect(page.getByText(/^Only pages that are tags open here\./)).toBeVisible();
+  await page.getByRole("textbox", { name: "Name", exact: true }).fill("Calibration");
+  await page.getByRole("button", { name: "Create page" }).click();
+  await expect(page.getByRole("heading", { level: 2, name: "Calibration" })).toBeVisible();
+});
+
+test("create a sequence, then reorder and remove its entries (engine-api.md §3.5)", async ({
+  page,
+}) => {
+  await go(page, `${FORUM_PATH}/seqs`, FORUM);
+  await page.getByRole("link", { name: "New sequence" }).click();
+  await page.getByRole("textbox", { name: "Title", exact: true }).fill("Starter pack");
+  const add = page.getByRole("textbox", { name: "Add a post to chapter 1" });
+  await add.fill(`#${WELCOME_PATH}`);
+  await page.getByRole("button", { name: "Add", exact: true }).click();
+  await expect(page.getByRole("list", { name: "Posts of chapter 1" })).toContainText(WELCOME);
+  await page.getByRole("button", { name: "Create sequence" }).click();
+  await expect(page.getByRole("heading", { level: 1, name: "Starter pack" })).toBeVisible();
+  await expect(page.getByRole("article", { name: WELCOME })).toBeVisible();
+
+  await page.getByRole("button", { name: /^Remove Welcome to LessDugin/ }).click();
+  await expect(page.getByText("Removed from the sequence")).toBeVisible();
+  await expect(page.getByRole("article", { name: WELCOME })).toHaveCount(0);
+
+  await page.getByRole("link", { name: "Edit sequence" }).click();
+  await page.getByRole("textbox", { name: "Title", exact: true }).fill("Starter pack, revised");
+  await page.getByRole("button", { name: "Save sequence" }).click();
+  await expect(
+    page.getByRole("heading", { level: 1, name: "Starter pack, revised" }),
+  ).toBeVisible();
+});
