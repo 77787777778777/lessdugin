@@ -8,7 +8,7 @@
 //! The rows that `limits.rs` does not mirror (§22 "Open questions": it mirrors part of the
 //! table; other crates define some of the rest) are not compared here.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use lessdugin_core::limits::*;
 
@@ -103,8 +103,32 @@ fn constants() -> BTreeMap<&'static str, i128> {
     ]
 }
 
-/// Rows whose `limits.rs` constant has another name: (row, constant).
-const ALIASES: [(&str, &str); 1] = [("REDIRECTS_MAX", "MAX_REDIRECTS")];
+/// Rows whose `limits.rs` constant has another name: (row, constant). One row may stand for
+/// several constants (`IDENTITY_RESPONSE_MAX_BYTES` caps each kind of identity answer).
+const ALIASES: [(&str, &str); 5] = [
+    ("REDIRECTS_MAX", "MAX_REDIRECTS"),
+    ("HANDLE_WELLKNOWN_MAX_BYTES", "WELLKNOWN_DID_MAX_BYTES"),
+    ("IDENTITY_RESPONSE_MAX_BYTES", "DID_DOC_MAX_BYTES"),
+    ("IDENTITY_RESPONSE_MAX_BYTES", "DOH_RESPONSE_MAX_BYTES"),
+    ("IDENTITY_RESPONSE_MAX_BYTES", "OAUTH_METADATA_MAX_BYTES"),
+];
+
+/// The constants of `limits.rs` that no row of `limits.md` names yet (`limits.md` §22 "Open
+/// questions" lists them), so nothing here compares them. Every other constant must be
+/// compared with a row.
+const UNLISTED: [&str; 7] = [
+    // the REDIRECTS_MAX row's prose: identity requests follow at most 3
+    "IDENTITY_REDIRECTS",
+    // sync.md §6.5 (marks: at most 1,000 per repo)
+    "REPO_MARKS_MAX",
+    // transport internals
+    "SMALL_RESPONSE_MAX_BYTES",
+    "RECORD_RESPONSE_MAX_BYTES",
+    "RETRY_AFTER_MAX_WAIT_MS",
+    // sync.md §4.2 declaration-fetch budgets
+    "FORUM_DECL_CACHED_BUDGET_MS",
+    "FORUM_DECL_FIRST_BUDGET_MS",
+];
 
 /// A row's value: one integer, or a range `a–b`.
 #[derive(Debug, PartialEq)]
@@ -164,24 +188,36 @@ fn the_registry_lists_every_constant_of_limits_rs() {
     assert_eq!(listed, declared_sorted, "update the registry of this test");
 }
 
-#[test]
-fn every_row_limits_rs_mirrors_has_the_rows_value() {
+/// Compares every row with the constants that mirror it: the names of the constants compared,
+/// and one line per disagreement.
+fn compare() -> (BTreeSet<String>, Vec<String>) {
     let c = constants();
-    let mut compared = 0;
+    let mut compared = BTreeSet::new();
     let mut wrong = Vec::new();
     for (name, cell, line) in rows() {
-        let rs = ALIASES
+        let aliased: Vec<&str> = ALIASES
             .iter()
-            .find(|(row, _)| *row == name)
-            .map_or(name, |(_, rs)| *rs);
-        if let Some(&have) = c.get(rs) {
-            compared += 1;
+            .filter(|(row, _)| *row == name)
+            .map(|(_, rs)| *rs)
+            .collect();
+        let names = if aliased.is_empty() {
+            vec![name]
+        } else {
+            aliased
+        };
+        let mut mirrored = false;
+        for rs in names {
+            let Some(&have) = c.get(rs) else { continue };
+            mirrored = true;
+            compared.insert(rs.to_owned());
             match parse_value(cell) {
                 Some(Value::One(want)) if want == have => {}
                 other => wrong.push(format!(
-                    "limits.md:{line} {name} = {cell:?} ({other:?}), limits.rs {have}"
+                    "limits.md:{line} {name} = {cell:?} ({other:?}), limits.rs {rs} {have}"
                 )),
             }
+        }
+        if mirrored {
             continue;
         }
         let Some((lo, hi)) = range_names(name)
@@ -190,21 +226,58 @@ fn every_row_limits_rs_mirrors_has_the_rows_value() {
         else {
             continue;
         };
-        compared += 1;
         let have = Value::Range(c[lo.as_str()], c[hi.as_str()]);
         if parse_value(cell).as_ref() != Some(&have) {
             wrong.push(format!(
                 "limits.md:{line} {name} = {cell:?}, limits.rs {lo}/{hi} {have:?}"
             ));
         }
+        compared.insert(lo);
+        compared.insert(hi);
     }
+    (compared, wrong)
+}
+
+#[test]
+fn every_row_limits_rs_mirrors_has_the_rows_value() {
+    let (compared, wrong) = compare();
     assert!(
         wrong.is_empty(),
         "limits.rs disagrees with limits.md:\n{}",
         wrong.join("\n")
     );
     // the comparison is not vacuous: most of limits.rs mirrors a row
-    assert!(compared >= 40, "only {compared} rows compared");
+    assert!(compared.len() >= 40, "only {} compared", compared.len());
+}
+
+/// m3m4-continuation-6: a constant that no row names escaped the comparison, and the spec could
+/// drift from it unseen (`BLOB_TOTAL_TIMEOUT_MS` had no row, and the `BLOB_IDLE_TIMEOUT_MS`
+/// row said blob downloads have no total timeout). Every constant is compared with a row, or
+/// listed in [`UNLISTED`]; an unlisted one has no row, so the list hides no comparison.
+#[test]
+fn every_constant_of_limits_rs_is_compared_or_listed_as_without_a_row() {
+    let (compared, _) = compare();
+    let uncompared: Vec<&str> = constants()
+        .into_keys()
+        .filter(|k| !compared.contains(*k) && !UNLISTED.contains(k))
+        .collect();
+    assert!(
+        uncompared.is_empty(),
+        "limits.rs constants no limits.md row names: {uncompared:?} (add the row, an alias, or \
+         list them in UNLISTED and in limits.md §22)"
+    );
+    let named: BTreeSet<&str> = rows().into_iter().map(|(n, _, _)| n).collect();
+    for k in UNLISTED {
+        assert!(
+            !compared.contains(k),
+            "{k} is compared: remove it from UNLISTED"
+        );
+        assert!(!named.contains(k), "{k} has a row: remove it from UNLISTED");
+        assert!(
+            constants().contains_key(k),
+            "{k} is not a constant of limits.rs"
+        );
+    }
 }
 
 #[test]
