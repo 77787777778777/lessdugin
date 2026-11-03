@@ -553,10 +553,11 @@ fn dotted_end(t: &[char], i: usize) -> Option<usize> {
 ///
 /// The visible text is first normalised the way it is displayed: Default_Ignorable code points
 /// removed (invisible characters cannot split a name), NFKC (fullwidth and other compatibility
-/// forms become ASCII), the code points that read as a dot mapped to `.`, and blanks, symbols
-/// and other gaps next to a dot removed (`google.⠀com`). Every dotted name of any script in it
-/// is then a host the text names, except an e-mail address's mailbox (never one in a URL's
-/// authority, after `//`) and the names in a URL's path, query or fragment. The host is shown
+/// forms become ASCII), the code points that read as a dot mapped to `.`, `\` and the symbols
+/// that read as `/` or `\` mapped to `/`, and blanks, symbols and other gaps next to a dot
+/// removed (`google.⠀com`). Every dotted name of any script in it is then a host the text
+/// names, except an e-mail address's mailbox (never one in a URL's authority, after `//`) and
+/// the names in a URL's path, query or fragment. The host is shown
 /// unless every name the text names is exactly the link's host (one `www.` stripped from
 /// both): wherever a name stands in the text, a different one cannot go unflagged (red-team
 /// F2).
@@ -615,7 +616,8 @@ pub(crate) fn html_host_suffix(inner: &str, host: &str) -> bool {
     // Step 5. `seen`: the current URL run has had a dotted name; `path`: a `/`, `?` or `#`
     // has followed one, so the names after it are in a path, query or fragment; `authority`:
     // the run has had `//`, so every name before that `/`, `?` or `#` is a host, whatever
-    // stands between the `//` and it (`https://u@google.com@evil.com` names both).
+    // stands between the `//` and it (`https://u@google.com@evil.com` names both). Step 2
+    // made every `\` and lookalike slash a `/`, so they count here as `/` does.
     let h = host.strip_prefix("www.").unwrap_or(host);
     let (mut seen, mut path, mut authority) = (false, false, false);
     let mut i = 0;

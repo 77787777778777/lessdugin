@@ -523,6 +523,26 @@
       }
     },
     {
+      "name": "host-display-backslash-authority",
+      "input": {
+        "text": "[https:\\\\\\\\u@trusted.example@evil.example](https://evil.example) [https:\\\\\\\\@trusted.example@evil.example](https://evil.example) [https:/\\\\u@trusted.example@evil.example](https://evil.example) [https:＼＼u@trusted.example@evil.example](https://evil.example) [https:\\\\\\\\u:p@evil.example](https://evil.example) [https:\\\\\\\\evil.example\\\\trusted.example](https://evil.example) [C:\\\\docs\\\\trusted.example](https://evil.example)\n"
+      },
+      "expected": {
+        "html": null,
+        "text": null
+      }
+    },
+    {
+      "name": "host-display-lookalike-slashes",
+      "input": {
+        "text": "[https:∕∕u@trusted.example@evil.example](https://evil.example) [https:⁄⁄u@trusted.example@evil.example](https://evil.example) [https:⧸⧸@trusted.example@evil.example](https://evil.example) [https:∖∖u@trusted.example@evil.example](https://evil.example) [https:／／u@trusted.example@evil.example](https://evil.example) [https:∕∕.trusted.example@evil.example](https://evil.example) [evil.example∕trusted.example](https://evil.example) [trusted.∕example](https://evil.example) [evil.exampleノtrusted.example](https://evil.example)\n"
+      },
+      "expected": {
+        "html": null,
+        "text": null
+      }
+    },
+    {
       "name": "mailto-empty-address-dropped",
       "input": {
         "text": "[support@google.com](mailto:?to=attacker@evil.com)\n"

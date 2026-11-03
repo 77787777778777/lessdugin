@@ -18,6 +18,12 @@ use crate::styled::{StyledDoc, build, error_doc};
 /// Builds without the `math` feature use the Temml fallback (§7.5); that mode is part of the
 /// version, so it sets the top bit.
 ///
+/// `6`: the real-host test (§5.5 step 2) reads `\` and the symbols that read as `/` or `\`
+/// (U+2215 DIVISION SLASH, U+2044 FRACTION SLASH and the rest of what UTS #39 maps there) as
+/// `/`, so they start a URL's authority and path as `/` does; before, they reset the URL run,
+/// so a trusted name that followed `https:`, two backslashes (or two lookalike slashes) and a
+/// user name, and came before a later `@`, passed as a mailbox with no host shown (review2
+/// m3m4-continuation-4).
 /// `5`: the real-host test (§5.5) reads the link text as the HTML writer renders it, generated
 /// image labels included (an external image's `image: <its host>`, a `media.alt` fallback, a
 /// `span.media` label from `media.name`), always shows the host of a link that holds math (its
@@ -35,9 +41,9 @@ use crate::styled::{StyledDoc, build, error_doc};
 /// (which here derive from `allowlist`'s tables at run time, so they follow automatically).
 /// `2` was the last version without the normaliser.
 pub const RENDERER_VERSION: u32 = if matches!(MATH_MODE, MathMode::MathCore) {
-    5
+    6
 } else {
-    5 | (1 << 31)
+    6 | (1 << 31)
 };
 
 /// Sources longer than this are not parsed (§1.3).
