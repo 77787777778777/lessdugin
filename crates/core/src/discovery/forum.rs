@@ -25,7 +25,9 @@
 //! stops the pass if absent or invalid, §4.2.1), so a confirmed candidate costs no extra request.
 //! Rejected candidates get a `rejected` disc row. A background pass ([`SyncOpts::background`])
 //! skips them until a new hint names them or [`state::REJECTED_RECHECK_MS`] has passed since
-//! their last check. A user-initiated `sync_forum` (with or without `full`) re-checks up to
+//! their last check. A relay-only candidate ([`RELAY_SOURCE`], named by no other hint and with no
+//! disc row) gets a disc row only once confirmed: its rejection is a relay row with the same
+//! back-off, and it is not kept while over the budget (the relay lists it again), §4.4. A user-initiated `sync_forum` (with or without `full`) re-checks up to
 //! [`state::REJECTED_RECHECK_BATCH`] of them, cheapest first ([`recheck_cost`]): a candidate
 //! whose membership was created after this device last looked shows up at the next explicit
 //! sync instead of a day later.
@@ -54,7 +56,7 @@ use lessdugin_lexicon::records::Forum;
 
 use crate::discovery::forum_ref::{ForumKey, ForumRefError, parse_forum_ref};
 use crate::discovery::roster;
-use crate::discovery::state::{self, DiscRow, DiscState, ForumState, put_disc_rows};
+use crate::discovery::state::{self, DiscRow, DiscState, DiscWrite, ForumState};
 use crate::dto::{Completeness, DtoVersion, SyncIssue, SyncReport};
 use crate::engine::EngineError;
 use crate::host::{Host, MaybeSendSync};
@@ -74,6 +76,10 @@ use crate::xrpc::{CallOpts, Service};
 
 /// Newcomer candidates confirmed and synced per forum and command (§4.4, *tunable*).
 pub const NEWCOMER_BUDGET: usize = 500;
+
+/// The [`SyncOpts::newcomers`] source of relay hints: a repo with some membership, not one of
+/// this forum, so it never re-opens a rejected candidate's back-off (§4.4).
+pub const RELAY_SOURCE: &str = "relay";
 
 /// A progress callback of [`Syncer::sync_forum`]: `(done, total)`, the repos synced so far and
 /// the repos planned so far (the total grows as each step plans its candidates). Called as each
@@ -267,6 +273,7 @@ pub struct ForumSync {
 }
 
 /// A candidate to confirm and sync.
+#[derive(Clone)]
 struct Candidate {
     did: Did,
     src: String,
@@ -565,11 +572,23 @@ impl<H: Host> Syncer<H> {
             row.add_src(src);
             touched.insert(d);
         }
+        // A relay entry names no forum: it is a hint of this forum only for a DID that some other
+        // hint names or that already has a row (§4.4).
+        let hinted: BTreeSet<&str> = opts
+            .newcomers
+            .iter()
+            .filter(|(_, src)| src != RELAY_SOURCE)
+            .map(|(d, _)| d.as_str())
+            .chain(opts.recently_active.iter().map(String::as_str))
+            .collect();
         for (raw, src) in &opts.newcomers {
             let Ok(did) = Did::parse(raw) else {
                 continue;
             };
             let d = did.to_string();
+            if src == RELAY_SOURCE && !hinted.contains(d.as_str()) && !disc.contains_key(&d) {
+                continue;
+            }
             let src = format!("hint:{src}");
             let row = disc
                 .entry(d.clone())
@@ -577,12 +596,6 @@ impl<H: Host> Syncer<H> {
             row.add_src(&src);
             touched.insert(d);
         }
-        let hinted: BTreeSet<&str> = opts
-            .newcomers
-            .iter()
-            .map(|(d, _)| d.as_str())
-            .chain(opts.recently_active.iter().map(String::as_str))
-            .collect();
         let mut budget = NEWCOMER_BUDGET;
         // a granted author on screen was gated by its membership at step 2 (the roster was not
         // known yet): a rejection there does not stop the ungated grant sync below
@@ -666,6 +679,7 @@ impl<H: Host> Syncer<H> {
         self.note_candidates(&key, &grants, &reports, &mut disc, &mut touched);
         repos.extend(reports);
 
+        let mut writes = DiscWrite::default();
         if r.is_open() {
             // 5. the closure of S at P1 (S's records are synced now)
             let st = ForumState::load(kv, &key, &forum.decl, now_us).await?;
@@ -693,21 +707,50 @@ impl<H: Host> Syncer<H> {
             self.note_candidates(&key, &closure, &reports, &mut disc, &mut touched);
             repos.extend(reports);
 
-            // 6. newcomers from hints at P2, most recent first, within the budget
+            // 6. newcomers from hints at P2, most recent first, within the budget. A relay hint
+            //    names no forum, so it is no new hint for a rejected candidate (§4.4): those
+            //    wait out their back-off after the others, taking no place they could use.
             let mut seen = BTreeSet::new();
+            let now = self.host().now_ms();
+            let rejected = if opts.newcomers.iter().any(|(_, src)| src == RELAY_SOURCE) {
+                state::relay_rows(kv, fk).await?
+            } else {
+                BTreeMap::new()
+            };
+            // the rows the candidates are held back by: their disc rows, else (relay-only
+            // candidates) their relay rejections
+            let mut rows: BTreeMap<String, DiscRow> = BTreeMap::new();
+            let mut relay_only: BTreeSet<String> = BTreeSet::new();
             let newcomers: Vec<Candidate> = opts
                 .newcomers
                 .iter()
                 .filter(|(d, _)| !done.contains(d) && seen.insert(d.clone()))
                 .filter_map(|(d, src)| {
+                    let did = Did::parse(d).ok()?;
+                    let hinted = hinted.contains(did.as_str());
+                    let row = disc.get(did.as_str());
+                    if !hinted && row.is_none() {
+                        relay_only.insert(did.to_string());
+                    }
+                    if let Some(r) = row.or_else(|| rejected.get(did.as_str())) {
+                        rows.insert(did.to_string(), r.clone());
+                    }
                     Some(Candidate {
-                        did: Did::parse(d).ok()?,
+                        did,
                         src: format!("hint:{src}"),
-                        hinted: true,
+                        hinted,
                         granted: false,
                     })
                 })
                 .collect();
+            let (mut newcomers, waiting): (Vec<Candidate>, Vec<Candidate>) =
+                newcomers.into_iter().partition(|c| {
+                    c.hinted
+                        || !rows
+                            .get(c.did.as_str())
+                            .is_some_and(|r| r.skip_rejected(now))
+                });
+            newcomers.extend(waiting);
             let (now_list, later) = newcomers.split_at(newcomers.len().min(budget));
             let jobs = self
                 .candidate_jobs(
@@ -715,30 +758,73 @@ impl<H: Host> Syncer<H> {
                     &key,
                     now_list,
                     &mut done,
-                    &disc,
+                    &rows,
                     reason(Reason::Participant),
                     &mut recheck,
                 )
                 .await?;
             let reports = self.run_jobs(&p2, &jobs, &tally, &opts.progress).await;
-            self.note_candidates(&key, now_list, &reports, &mut disc, &mut touched);
+            let (relayed, scoped): (Vec<Candidate>, Vec<Candidate>) = now_list
+                .iter()
+                .cloned()
+                .partition(|c| relay_only.contains(c.did.as_str()));
+            self.note_candidates(&key, &scoped, &reports, &mut disc, &mut touched);
+            // a relay-only candidate is a disc row once confirmed; a rejection is a relay row;
+            // anything else leaves nothing (the relay lists it again)
+            let mut checked: BTreeMap<String, DiscRow> = relayed
+                .iter()
+                .filter_map(|c| Some((c.did.to_string(), rejected.get(c.did.as_str())?.clone())))
+                .collect();
+            self.note_candidates(&key, &relayed, &reports, &mut checked, &mut BTreeSet::new());
+            for (d, row) in checked {
+                match row.state {
+                    DiscState::Confirmed => {
+                        touched.insert(d.clone());
+                        disc.insert(d, row);
+                    }
+                    DiscState::Rejected if rejected.get(&d) != Some(&row) => {
+                        writes.relay.insert(d, row);
+                    }
+                    _ => {}
+                }
+            }
             repos.extend(reports);
-            // the rest stay candidates
+            // the rest stay candidates (relay-only ones are listed again by the relay)
             let now = self.host().now_ms();
             for c in later {
+                if relay_only.contains(c.did.as_str()) {
+                    continue;
+                }
                 let row = disc
                     .entry(c.did.to_string())
                     .or_insert_with(|| DiscRow::new(&c.src, now));
                 row.add_src(&c.src);
                 touched.insert(c.did.to_string());
             }
+            // a relay rejection that a disc row now stands for is dropped, and at most
+            // DISC_ROWS_MAX are kept
+            let mut kept = rejected.clone();
+            kept.extend(writes.relay.clone());
+            kept.retain(|d, _| !disc.contains_key(d));
+            for d in state::disc_rows_over_cap(&kept, "") {
+                kept.remove(&d);
+            }
+            writes.relay.retain(|d, _| kept.contains_key(d));
+            writes.relay_dropped = rejected
+                .into_keys()
+                .filter(|d| !kept.contains_key(d))
+                .collect();
         }
 
-        let changed: BTreeMap<String, DiscRow> = touched
+        // at most DISC_ROWS_MAX rows per forum, the oldest unconfirmed dropped first (§4.4)
+        let dropped = state::disc_rows_over_cap(&disc, "");
+        writes.dropped.extend(dropped);
+        writes.rows = touched
             .iter()
+            .filter(|d| !writes.dropped.contains(*d))
             .filter_map(|d| Some((d.clone(), disc.get(d)?.clone())))
             .collect();
-        put_disc_rows(kv, fk, &changed).await?;
+        state::write_disc(kv, fk, &writes).await?;
 
         // completeness
         let now_us = self.host().now_ms().saturating_mul(1000);

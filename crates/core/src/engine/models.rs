@@ -143,6 +143,11 @@ pub(crate) struct Runtime {
     /// A cold assisted page may need one bounded ordinary PDS sync, shared with other queries.
     pub(crate) cold_sync: AsyncMutex<()>,
     pub(crate) renders: RenderCache,
+    /// Search indexes, one per forum, each for the model it was built from (`sync.md` §13).
+    pub(crate) search: crate::search::index::IndexCache,
+    /// The relay newcomer source crossed its 5,000-DID union: off for the session (`sync.md`
+    /// §4.4).
+    pub(crate) relay_newcomers_off: Arc<std::sync::atomic::AtomicBool>,
     /// The last `open_forum` result per forum, with its time (ms).
     opened: Mutex<BTreeMap<String, (i64, OpenedForum)>>,
     /// Authors shown whose handle state is due (`sync.md` §3.3), verified by `live_tail`.
@@ -173,6 +178,8 @@ impl Runtime {
             flights: Mutex::new(BTreeMap::new()),
             cold_sync: AsyncMutex::new(()),
             renders: RenderCache::default(),
+            search: Default::default(),
+            relay_newcomers_off: Arc::default(),
             opened: Mutex::new(BTreeMap::new()),
             verify: Mutex::new(BTreeSet::new()),
             live_gen: AtomicU64::new(0),

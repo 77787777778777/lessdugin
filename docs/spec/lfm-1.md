@@ -1140,7 +1140,11 @@ lcp_prefix(a, b) = length of the longest common prefix of a and b
 - Pingbacks consider only targets in our collections.
 - External backlink indexes, and the indexer's `listBacklinks`, are hints only.
 
-**Search.** The core's in-memory search index and the indexer index P. Snippets shown to readers are plain text cut from P_x (`derive_metadata(..).text_x`), with highlight ranges in P_x offsets, so that they never reveal a spoiler.
+**Search.** The core's in-memory search index and the indexer index P, so a word inside a spoiler still finds its item. Snippets shown to readers are plain text cut from the title and P_x (`derive_metadata(..).text_x`, equal to `plain_projection(..).text_x`), so that they never reveal a spoiler:
+- a snippet holds at most 160 code points of title + P_x, up to 60 of them before the first match of any term, with `…` where text is cut off;
+- highlight ranges are Unicode code-point offsets into the snippet (a leading `…` counts as one), one per occurrence of a term inside it, never on an added `…`;
+- when no term occurs in title + P_x (every match lies in spoiler content), the item is still a hit and its snippet is the start of title + P_x, with no highlights;
+- a spilled body whose source the client does not hold in memory (not fetched yet, §1.3, or not read by a view since; search fetches no blob itself) is matched and shown by the record's own `excerpt`, as lists show it, in place of P and P_x (writers compute that excerpt from P_x, §10.4, but it is the author's text); once a view has read the source, by its P and P_x. A body that cannot be shown (an unknown type, or a spilled source that is unverified, missing or not renderable) has an empty P and P_x.
 
 ---
 
@@ -1251,5 +1255,6 @@ These resolve ambiguities in the design. Each takes the simplest safe option.
 - **General_Category data.** *(Resolved: `unicode-general-category =1.1.0`, Unicode 16.0, an exact workspace pin; see §2 "Unicode data".)*
 - **HTML serialiser drift.** *(Resolved for now.)* Escaping `<` and `>` in attributes is recent browser behaviour, which jsdom does not have yet: the jsdom runner compares DOMPurify's output with the renderer's own bytes after applying that one difference to them (`jsdomForm`, §8.5), never with a re-serialisation of the output, and Chromium checks exact equality.
 - **Sanitiser configuration: generated, or checked entry for entry.** *(Orchestrator decision O-11, for the U7 review.)* §8.5 said the SPA's DOMPurify configuration is generated from §8.2 and §7.3. The SPA keeps hand-written tables instead, and a CI test (`web/src/lib/sanitize.allowlist.test.ts`) compares them entry for entry, both ways, with the Rust tables `allowlist::dompurify_config_json()` is built from, which gives the same guarantee (review finding m4-25); §8.5 now allows either.
+- **Search snippets from P_x.** *(Orchestrator decision O-1, for the U7 review.)* Snippets and highlights come from the title and P_x only, so they never reveal spoiler text, and highlight ranges are code points into the snippet (they were "P_x offsets", which a snippet with a leading `…` cannot carry; `engine-api.md` `SearchResults` gives them per snippet). A match found only in spoiler content keeps its hit, shown with the start of title + P_x and no highlight, rather than being dropped: matching still reads P (§12). Before, the core cut snippets from P (review finding m5-acceptance-1).
 - **Shared definitions.** `short_did` (§5.4) and the badge set (§9.1) should be shared with `glossary.md` and the TUI and CLI specs once those exist.
 - **CLI spoiler reveal.** The name of the CLI option that reveals spoilers is left to the CLI spec.

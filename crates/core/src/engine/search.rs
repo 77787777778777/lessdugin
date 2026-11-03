@@ -2,19 +2,33 @@
 //! Local search over listed posts and comments in synced forum models.
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use lessdugin_lexicon::Collection;
+use lessdugin_markdown::{PlainProjection, plain_projection};
+use serde_json::Value;
 
 use crate::discovery::forum_ref::ForumKey;
-use crate::dto::{DtoVersion, SearchHit, SearchItem, SearchQuery, SearchResults};
+use crate::dto::{
+    DtoVersion, ItemState, RenderedBody, SearchHit, SearchItem, SearchQuery, SearchResults,
+};
 use crate::host::{Dir, Host, KeyRange, KvStore};
-use crate::social::input::SkelData;
+use crate::model::ForumModel;
+use crate::model::render::{RenderCache, Spilled, text_blob_cid};
+use crate::model::views::Views;
+use crate::search::index::{self, ForumIndex};
+use crate::social::full::view::State;
+use crate::social::input::{SkelData, split_uri};
+use crate::social::time::ms;
 use crate::store::blob::ForumRow;
 use crate::store::{row, schema};
 
+use super::models::Loaded;
 use super::{Engine, EngineError};
 
 const SEARCH_MAX: u32 = 100;
+/// Bodies read at a time while an index is built.
+const INDEX_BATCH: usize = 256;
 
 impl<H: Host> Engine<H> {
     /// Canonical keys of forums with local models or sync metadata. This enumerates local state
@@ -49,17 +63,78 @@ impl<H: Host> Engine<H> {
         Ok(keys)
     }
 
+    /// The search index of a loaded forum (`sync.md` §13): built on first use from the title and
+    /// P of every listed post and comment (bodies are read in batches, never rendered, and
+    /// released), and kept until the model is replaced. The tokens of an item the forum's
+    /// previous index held at the same CID are carried over; only the others are read.
+    async fn search_index(&self, l: &Loaded) -> Result<Arc<ForumIndex>, EngineError> {
+        let model = &l.model;
+        let f = model.key.uri.as_str();
+        let previous = match self.rt.search.get(f, model) {
+            Ok(ix) => return Ok(ix),
+            Err(previous) => previous,
+        };
+        let docs: Vec<String> = model
+            .input
+            .records
+            .iter()
+            .filter(|(uri, record)| {
+                record.valid
+                    && matches!(record.coll, Some(Collection::Post | Collection::Comment))
+                    && model.displayed(uri).is_some_and(State::listed)
+                    && searchable(model, uri)
+            })
+            .map(|(uri, _)| uri.clone())
+            .collect();
+        let mut builder = index::Builder::default();
+        let carried = previous
+            .as_deref()
+            .map(ForumIndex::tokens_by_item)
+            .unwrap_or_default();
+        let cid = |uri: &str| model.skel(uri).map_or("", |x| x.cid.as_str());
+        let mut read = Vec::new();
+        for uri in docs {
+            match carried.get(uri.as_str()) {
+                Some((at, tokens)) if *at == cid(&uri) => builder.add_tokens(&uri, at, tokens),
+                _ => read.push(uri),
+            }
+        }
+        for batch in read.chunks(INDEX_BATCH) {
+            let values = self.values(model, batch).await?;
+            for uri in batch {
+                let title = match model.skel(uri).map(|x| &x.data) {
+                    Some(SkelData::Post { title, .. }) => title.as_deref(),
+                    _ => None,
+                };
+                let p = match values.get(uri).and_then(|v| v.get("body")) {
+                    Some(md) => {
+                        projection(uri, md, &model.input.ns, &self.rt.renders).map(|p| p.text)
+                    }
+                    None => Some(String::new()),
+                };
+                builder.add(uri, cid(uri), title, p.as_deref());
+            }
+        }
+        let ix = Arc::new(builder.finish(model));
+        self.rt.search.put(f, Arc::clone(&ix));
+        Ok(ix)
+    }
+
     /// Search title and rendered body text of listed, locally synced posts and comments. Hidden
-    /// and tombstoned content is never inspected. Results are newest first, then URI, and capped
-    /// at 100 hits.
+    /// and tombstoned content is never inspected. Each forum's in-memory index selects the
+    /// candidates; only those are rendered and checked. Terms match the title and P; snippets
+    /// and highlights are cut from the title and P_x, so they never show spoiler content
+    /// (`lfm-1.md` §12). Results are newest first, then URI, and capped at 100 hits.
     pub async fn search(&self, q: &SearchQuery) -> Result<SearchResults, EngineError> {
         let empty = || SearchResults {
             dto: DtoVersion::default(),
             hits: Vec::new(),
         };
-        if q.q.trim().is_empty() || q.limit == 0 {
+        let terms = crate::search::terms(&q.q);
+        if terms.is_empty() || q.limit == 0 {
             return Ok(empty());
         }
+        let want = q.limit.min(SEARCH_MAX) as usize;
         let author = match q.author.as_deref() {
             Some(a) if a.starts_with("did:") => Some(a.to_owned()),
             Some(a) => Some(self.resolve_actor(a).await?.did),
@@ -78,102 +153,163 @@ impl<H: Host> Engine<H> {
                 Err(e) => return Err(e),
             };
             let model = &loaded.model;
-            let uris: Vec<String> = model
-                .input
-                .records
-                .iter()
-                .filter(|(uri, record)| {
-                    record.valid
-                        && matches!(record.coll, Some(Collection::Post | Collection::Comment))
-                        && author.as_deref().is_none_or(|did| {
-                            lessdugin_atp::syntax::AtUri::parse(uri)
-                                .is_ok_and(|uri| uri.did().as_str() == did)
-                        })
+            let index = self.search_index(&loaded).await?;
+            let rank = |uri: &str| model.view.times.get(uri).map_or(0, |t| ms(t.t_rank));
+            let mut candidates: Vec<(i64, &str)> = index
+                .candidates(&terms)
+                .into_iter()
+                .filter(|uri| {
+                    author.as_deref().is_none_or(|did| {
+                        split_uri(uri).is_some_and(|(author, _, _)| author == did)
+                    })
                 })
-                .map(|(uri, _)| uri.clone())
+                .map(|uri| (rank(uri), uri))
                 .collect();
-            let found = self
-                .with_views(&loaded, &uris, &uris, |views| {
-                    let mut found = Vec::new();
-                    for uri in &uris {
-                        let Some(skel) = model.skel(uri) else {
-                            continue;
-                        };
-                        match &skel.data {
-                            SkelData::Post { .. } => {
-                                let Some(post) = views.post_view(uri) else {
-                                    continue;
-                                };
-                                if !matches!(
-                                    post.post.state,
-                                    crate::dto::ItemState::Visible
-                                        | crate::dto::ItemState::Collapsed { .. }
-                                ) {
-                                    continue;
-                                }
-                                let text = match post.post.title.as_deref() {
-                                    Some(title) if !title.is_empty() => {
-                                        format!("{title} {}", post.body.text)
-                                    }
-                                    _ => post.body.text.clone(),
-                                };
-                                let Some((snippet, highlights)) =
-                                    crate::search::snippet(&text, &q.q)
-                                else {
-                                    continue;
-                                };
-                                found.push((
-                                    post.post.t_rank_ms,
-                                    uri.clone(),
-                                    SearchHit {
-                                        item: SearchItem::Post(post.post),
-                                        snippet,
-                                        highlights,
-                                    },
-                                ));
-                            }
-                            SkelData::Comment { .. } => {
-                                let Some(root) = model.comment_root(uri) else {
-                                    continue;
-                                };
-                                let Some(comment) = views.comment_node(uri, root) else {
-                                    continue;
-                                };
-                                if !matches!(
-                                    comment.state,
-                                    crate::dto::ItemState::Visible
-                                        | crate::dto::ItemState::Collapsed { .. }
-                                ) {
-                                    continue;
-                                }
-                                let Some((snippet, highlights)) =
-                                    crate::search::snippet(&comment.body.text, &q.q)
-                                else {
-                                    continue;
-                                };
-                                found.push((
-                                    comment.t_rank_ms,
-                                    uri.clone(),
-                                    SearchHit {
-                                        item: SearchItem::Comment(Box::new(comment)),
-                                        snippet,
-                                        highlights,
-                                    },
-                                ));
-                            }
-                            _ => {}
-                        }
-                    }
-                    found
-                })
-                .await?;
-            hits.extend(found);
+            // the order of the results: the first `want` hits of the forum are all it can give
+            candidates.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(b.1)));
+            let mut found = 0;
+            for batch in candidates.chunks(want.max(16)) {
+                let uris: Vec<String> = batch.iter().map(|(_, u)| (*u).to_owned()).collect();
+                let batch = self
+                    .with_views(&loaded, &uris, &uris, |views| {
+                        uris.iter()
+                            .filter_map(|uri| search_hit(views, uri, &q.q))
+                            .collect::<Vec<_>>()
+                    })
+                    .await?;
+                found += batch.len();
+                hits.extend(batch);
+                if found >= want {
+                    break;
+                }
+            }
         }
         hits.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-        hits.truncate(q.limit.min(SEARCH_MAX) as usize);
+        hits.truncate(want);
         Ok(SearchResults {
             dto: DtoVersion::default(),
             hits: hits.into_iter().map(|(_, _, hit)| hit).collect(),
         })
     }
+}
+
+/// `false` for a comment under a Missing root (or none): like lists, search leaves it out
+/// (`social.md` §11).
+fn searchable(model: &ForumModel, uri: &str) -> bool {
+    match &model.skel(uri).map(|x| &x.data) {
+        Some(SkelData::Comment { .. }) => model.comment_root(uri).is_some_and(|root| {
+            model
+                .view
+                .threads
+                .get(root)
+                .is_some_and(|pl| !pl.root_missing)
+        }),
+        _ => true,
+    }
+}
+
+/// The hit of the listed post or comment `uri`, with its `t_rank` (ms) and uri for ordering.
+fn search_hit(views: &Views<'_>, uri: &str, q: &str) -> Option<(i64, String, SearchHit)> {
+    let model = views.model;
+    let skel = model.skel(uri)?;
+    let listed =
+        |state: &ItemState| matches!(state, ItemState::Visible | ItemState::Collapsed { .. });
+    match &skel.data {
+        SkelData::Post { .. } => {
+            let post = views.post_summary(uri)?;
+            if !listed(&post.state) {
+                return None;
+            }
+            let body = views.body(skel, views.listed(uri));
+            let title = post.title.as_deref().unwrap_or_default();
+            let (snippet, highlights) = hit(views, uri, title, &body, q)?;
+            Some((
+                post.t_rank_ms,
+                uri.to_owned(),
+                SearchHit {
+                    item: SearchItem::Post(post),
+                    snippet,
+                    highlights,
+                },
+            ))
+        }
+        SkelData::Comment { .. } => {
+            if !searchable(model, uri) {
+                return None;
+            }
+            let comment = views.comment_node(uri, model.comment_root(uri)?)?;
+            if !listed(&comment.state) {
+                return None;
+            }
+            let (snippet, highlights) = hit(views, uri, "", &comment.body, q)?;
+            Some((
+                comment.t_rank_ms,
+                uri.to_owned(),
+                SearchHit {
+                    item: SearchItem::Comment(Box::new(comment)),
+                    snippet,
+                    highlights,
+                },
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// P and P_x of the body `md` of the record `uri` as the views render it, from its source
+/// (`None`: a spilled body whose source is not in memory, rendered from the LRU or still pending).
+fn projection(uri: &str, md: &Value, ns: &str, renders: &RenderCache) -> Option<PlainProjection> {
+    let markdown = format!("{ns}.markdown");
+    let known = md
+        .get("$type")
+        .and_then(Value::as_str)
+        .is_some_and(|t| t == markdown || t == format!("{markdown}#main"));
+    let empty = || PlainProjection {
+        text: String::new(),
+        text_x: String::new(),
+    };
+    if !known {
+        return Some(empty());
+    }
+    if let Some(text) = md.get("text").and_then(Value::as_str) {
+        return Some(plain_projection(text));
+    }
+    match text_blob_cid(md)
+        .and_then(|blob| renders.spilled(split_uri(uri)?.0, blob))
+        .as_deref()
+    {
+        Some(Spilled::Text(src)) => Some(plain_projection(src)),
+        Some(_) => Some(empty()),
+        None => None,
+    }
+}
+
+/// `title` and `text` joined by a space when both are present.
+fn joined(title: &str, text: &str) -> String {
+    match (title.is_empty(), text.is_empty()) {
+        (false, false) => format!("{title} {text}"),
+        (false, true) => title.to_owned(),
+        _ => text.to_owned(),
+    }
+}
+
+/// The hit of item `uri` (title `title`, rendered `body`): matched over the title and P, its
+/// snippet cut from the title and P_x of the body's source. A spilled body whose source is not
+/// in memory (search fetches no blob) renders pending, with the record's own excerpt as its
+/// text: that excerpt is matched and shown, as lists show it.
+fn hit(
+    views: &Views<'_>,
+    uri: &str,
+    title: &str,
+    body: &RenderedBody,
+    q: &str,
+) -> Option<(String, Vec<(u32, u32)>)> {
+    let matched = joined(title, &body.text);
+    let px = views
+        .values
+        .get(uri)
+        .and_then(|v| v.get("body"))
+        .and_then(|md| projection(uri, md, &views.model.input.ns, views.renders))
+        .map_or_else(|| body.excerpt.clone(), |p| p.text_x);
+    crate::search::hit(&matched, &joined(title, &px), q)
 }

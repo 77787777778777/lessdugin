@@ -449,12 +449,14 @@ Newcomers are participants found only through hints. They are discovered in `ass
 
 | Source | Exact use |
 |---|---|
-| Constellation | `GET <constellation>/xrpc/blue.microcosm.links.getBacklinks?subject=<F>&source=<NS>.membership:forum&limit=100[&cursor=…]`. Keep paging while `cursor ≠ null`: a short page does not mean the end. Entries `{did, collection, rkey}` with `rkey ≠ fk` are dropped without a fetch. `getBacklinksCount` with the same parameters gives the "N members (hint)" badge. (ADR 0003) |
+| Constellation | `GET <constellation>/xrpc/blue.microcosm.links.getBacklinks?subject=<F>&source=<NS>.membership:forum&limit=100[&cursor=…]`. Keep paging while `cursor ≠ null`: a short page does not mean the end. Entries `{did, collection, rkey}` with `rkey ≠ fk` are dropped without a fetch. At most `CONSTELLATION_HINTS_MAX` (1,000, twice the budget) entries are read, newest first; paging stops there. `getBacklinksCount` with the same parameters gives the "N members (hint)" badge. (ADR 0003) |
 | Jetstream | commit events of `NS.membership` with `rkey = fk` (§6.4) |
 | Indexer | `listParticipants(forum = F)`, paging by cursor |
-| Relay | `listReposByCollection(collection = NS.membership, limit = 500)` across `network.relays`, only while the union of returned DIDs is ≤ 5,000. Above that, this source is disabled for the session. |
+| Relay | `listReposByCollection(collection = NS.membership, limit = 500)` across `network.relays`, only while the union of returned DIDs is ≤ 5,000. Above that, this source is disabled for the session. An entry names a repo with some membership record, not a forum: each DID is a candidate confirmed at its PDS (§4.2.1), with no per-DID query to another service, and a relay entry is never a new hint for a rejected candidate. A **relay-only** candidate (no other hint names it and it has no `disc` row) gets a `disc` row only once confirmed: a check that rejects it writes a `("disc.relay", fk, did)` row instead (§10.4), which keeps its back-off and is no discovery row, and one left over the budget is not kept (the relay lists it again). The relay's membership directory therefore never becomes repos that `live_tail` follows or DIDs of a Jetstream filter (§6.2). |
 
-- **Budget.** At most 500 newcomer candidates per forum are confirmed and synced (*tunable*). Candidates are taken most recent first: by Jetstream `time_us`, then Constellation order (newest first), then indexer order; ties by DID ascending. The rest stay as `disc` rows.
+- **Budget.** At most 500 newcomer candidates per forum are confirmed and synced (*tunable*). Candidates are taken most recent first: by Jetstream `time_us`, then Constellation order (newest first), then indexer order; ties by DID ascending. A rejected relay candidate still in its back-off (§4.2.1) is taken after all the others, so it never holds a place another candidate could use. The rest stay as `disc` rows, except relay-only ones. A forum keeps at most `DISC_ROWS_MAX` (10,000, *tunable*) `disc` rows, and as many `disc.relay` rows: past that, a discovery pass drops the oldest that are not confirmed (by first-seen time, then DID), as the Jetstream candidate write does (§6.4).
+- **Bounds.** A listing page with more entries than the `limit` it asked for is malformed, and that source fails. Constellation is read newest first up to its bound (`CONSTELLATION_HINTS_MAX` membership entries; `RECENT_POSTS_DISCOVERY` post entries for step 3 of §4.5); paging stops there and the older entries are dropped with a warning.
+- **Independent sources.** Recently active authors, Constellation newcomers and relay newcomers are independent and best-effort: a source that fails (its service is down, malformed, or over a bound that fails it) is logged and reported, and the other sources' hints are still used; the PDS sync of §4.5 runs either way. `sources = direct` contacts none of them (§2.3). One `sync_forum` discovers hints once.
 - **Applications (approval mode).** Applicants (`member(d) ∧ access(d) = none`) are found in the same way, so moderators see them only through CORE+ or out of band. The mod queue says so.
 
 ### 4.5 Sync order and completeness
@@ -499,7 +501,11 @@ directory():
   group by owner: the verified handle, else short_did (F9); sort groups by handle, then DID
 ```
 
-`listReposByCollection` takes one exact NSID; wildcards are rejected (ADR 0003). Its entries carry only `did`. The directory is CORE+ (relay) or EXT; a forum can always be opened directly by reference.
+- Both sources give only owner DIDs: an indexer entry's uri names the owner, whose `NS.forum` collection is then listed at its PDS like a relay owner's; the indexer's own text is never shown or matched. Each owner is listed once.
+- Either source may fail alone, and the directory then shows the other's forums (an empty list when the other answered with none); it fails only when no configured source answered, or in `sources = direct`. A source that is not configured (no `network.relays`, no consented indexer) gives nothing and does not answer: with no relay configured, a failing indexer fails the directory.
+- The result is one list in group order: owners with a verified handle first, by handle, then the others by DID; within an owner, forums by name (case-insensitive), then uri. Forums of one owner are therefore never interleaved with another's, so a lookalike name shows under its real owner.
+
+`listReposByCollection` takes one exact NSID; wildcards are rejected (ADR 0003). Its entries carry only `did`. A page with more than the 500 entries asked for is malformed, and at most `DIRECTORY_OWNERS_MAX` (10,000) distinct owners are read; further owners are dropped with a warning. The directory is CORE+ (relay) or EXT; a forum can always be opened directly by reference.
 
 ### 4.8 Followed forums
 
@@ -1231,6 +1237,7 @@ The key of a tuple is the concatenation of its elements. A prefix scan over `(e1
 | cache | `("id", "did", did)` | `IdentityRow` | |
 | cache | `("id", "handle", handle)` | `HandleRow` | |
 | cache | `("disc", fk, did)` | `DiscRow` | discovery candidates; not records |
+| cache | `("disc.relay", fk, did)` | `DiscRow` | a relay-only candidate whose check rejected it, with its back-off (§4.4); not a discovery row |
 | cache | `("blob", cid)` | `BlobRow` | the bytes live in the host's blob storage (§12.2) |
 | cache | `("blob.ref", cid, fk)` | `BlobRefRow` | how many of forum fk's counted records reference the CID (§11.4); absent at 0 |
 | cache | `("blob.forum", fk, cid)` | `BlobRefRow` | the same row, by forum: what the next build of fk and its eviction start from |
@@ -1505,7 +1512,9 @@ build(F):
 - **Skeletons.** For each record the model keeps what the fold and list views need: uri, cid, author, collection, rkey, references (forum, root, parent, subject, adopts, head, parents, chapter entries), opinion values, modAction fields, kind, title, tags, self-labels, `createdAt`, `updatedAt`, TID time, `obs`, validity and rule ID. Bodies are dropped and re-read with `get_many` when a stage or a view needs them (quote and react anchors, rendering, search indexing), then released.
 - **Incremental updates** on `Changed` events (own commits and broadcasts) re-run the affected layers. Incremental results MUST be property-tested equal to the batch fold (`social.md` §1.3).
 - **Provisional items** (§1.5) are evaluated against the model's current result and never enter `records`.
-- **Search.** Each client builds the core's in-memory inverted index per forum from titles and the plain-text projection P (`lfm-1.md` §10) of listed items. SQLite fts5 is used only inside the indexer (§15).
+- **Search.** Each client builds the core's in-memory inverted index per forum from titles and the plain-text projection P (`lfm-1.md` §10) of listed items. SQLite fts5 is used only inside the indexer (§15). Like lists, search results leave out comments under a Missing root (`social.md` §11), as user pages do.
+  - The index maps each case-folded token of a title or P (split at White_Space) to the items holding it. A query's whitespace-separated terms are ANDed, each matching every token it is a substring of; a term holds no white space, so this finds every item whose title or P contains all the terms case-insensitively, and only those candidates are rendered and checked. A spilled body whose source is not in memory is always a candidate.
+  - An index belongs to one model build: the first search after the model is built (or rebuilt, after a `Changed` event) builds it, reading the bodies in batches without rendering them, and it is dropped with the model. An item's tokens depend only on its record, so the new build carries over the tokens of the items the forum's previous index held at the same uri and CID (a spilled body whose source was not in memory excepted) and reads only the other bodies.
 - **Rendering.** Render output is cached in an in-memory LRU keyed by `(cid, RENDERER_VERSION)`.
 - The model also keeps `BlobRow.refs` current (§11.4) and records `ForumRow.lastViewed`.
 
