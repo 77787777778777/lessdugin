@@ -5,8 +5,9 @@
 // engine writes it as the only parent and refuses the edit when the page's head has moved since,
 // so an edit made against an older head never silently replaces a newer one. The editor keeps
 // the head it loaded while the author writes; when the head moves (or a save is refused), the
-// author's text stays, and "Reload the page" loads the newer version and keeps their text
-// beside it so they can redo the edit. A page with no revision yet starts empty and is written
+// author's text stays, and "Reload the page" loads the newer version and keeps their edit
+// beside it so they can redo it: only the fields they changed on the version they started from
+// are shown and restored, so a redo never undoes what the newer version changed. A page with no revision yet starts empty and is written
 // without a parent. The engine opens only applicable pages (`tag` is not_found for a page that
 // is not a tag, views.rs `tag_summary`), so such a page cannot be loaded here: the editor says
 // so for a new address, and before a page stops being a tag.
@@ -25,9 +26,9 @@ import { useSendWrite } from "../../engine/queued.ts";
 import { cleanName } from "../../lib/text.ts";
 import {
   EMPTY_WIKI_FORM,
-  sameTags,
   sameWikiForm,
   type WikiForm,
+  wikiChanges,
   wikiFormOf,
 } from "../../lib/wiki.ts";
 import ui from "../../styles/ui.module.css";
@@ -60,9 +61,11 @@ export const NOT_A_TAG_WARNING =
   "Once saved, a page that is not a tag leaves the tags list and no longer applies to posts, " +
   "and this app cannot open it again: an edit here would start from an empty page.";
 
-/** The author's edit as a reload carries it: the form, and the edit summary they wrote. */
+/** The author's edit as a reload carries it: the form, the edit summary they wrote, and the form
+ * the edit started from (`from`), which tells the fields they changed. */
 export interface CarriedEdit extends WikiForm {
   summary: string;
+  from: WikiForm;
 }
 
 /** The form (exported for its tests). `base`: the head the form started from, absent for a page
@@ -123,11 +126,8 @@ export function WikiPageForm({
       .map((p) => ({ slug: p, name: p })),
   ];
   const tagName = (p: string): string => choices.find((c) => c.slug === p)?.name ?? p;
-  // the carried edit's parent tags, when they are not the loaded version's
-  const carriedTags =
-    carried && !sameTags(carried.parentTags, initial.parentTags)
-      ? [...new Set(carried.parentTags)]
-      : null;
+  // what the carried edit changed on the version it started from: only that is the author's
+  const own = carried ? wikiChanges(carried.from, carried) : null;
 
   const submit = async (e: FormEvent): Promise<void> => {
     e.preventDefault();
@@ -188,6 +188,7 @@ export function WikiPageForm({
     isTag,
     parentTags,
     summary,
+    from: initial,
   });
   const reload = (): void => {
     // only text the author wrote is carried: an unchanged form is the head it loaded
@@ -198,31 +199,31 @@ export function WikiPageForm({
 
   return (
     <form className={ui.stack} onSubmit={(e) => void submit(e)} noValidate>
-      {carried && (
+      {carried && own && (
         <section className={ui.notice} aria-labelledby={ids.carried}>
           <h3 id={ids.carried} className={ui.label}>
             Your unsaved edit
           </h3>
           <p>{CARRIED_NOTE}</p>
-          {carried.name !== initial.name && (
+          {own.name !== undefined && (
             <p>
-              Your name: <bdi>{cleanName(carried.name)}</bdi>
+              Your name: <bdi>{cleanName(own.name)}</bdi>
             </p>
           )}
-          {carried.description !== initial.description && (
+          {own.description !== undefined && (
             <p>
-              Your description: <bdi>{carried.description}</bdi>
+              Your description: <bdi>{own.description}</bdi>
             </p>
           )}
-          {carried.isTag !== initial.isTag && (
-            <p>Your edit makes this page {carried.isTag ? "a tag" : "not a tag"}.</p>
+          {own.isTag !== undefined && (
+            <p>Your edit makes this page {own.isTag ? "a tag" : "not a tag"}.</p>
           )}
-          {carriedTags && (
+          {own.parentTags && (
             <p>
               Your parent tags:{" "}
-              {carriedTags.length === 0
+              {own.parentTags.length === 0
                 ? "none"
-                : carriedTags.map((p, i) => (
+                : own.parentTags.map((p, i) => (
                     <span key={p}>
                       {i > 0 && ", "}
                       <bdi>{cleanName(tagName(p))}</bdi>
@@ -235,22 +236,27 @@ export function WikiPageForm({
               Your edit summary: <bdi>{carried.summary}</bdi>
             </p>
           )}
-          <label className={ui.label}>
-            Your unsaved text
-            <textarea className={ui.input} rows={8} value={carried.markdown} readOnly />
-          </label>
+          {own.body && (
+            <label className={ui.label}>
+              Your unsaved text
+              <textarea className={ui.input} rows={8} value={own.body.markdown} readOnly />
+            </label>
+          )}
           <div className={ui.row}>
-            {/* the whole edit: its text and the media it refers to, settings and summary */}
+            {/* the author's changes only (the text with the media it refers to), and the
+                summary; the fields they left alone keep the newer version's values */}
             <button
               type="button"
               className={ui.button}
               onClick={() => {
-                setName(carried.name);
-                setDescription(carried.description);
-                setMarkdown(carried.markdown);
-                setMedia(carried.media);
-                setIsTag(carried.isTag);
-                setParentTags(carried.parentTags);
+                if (own.name !== undefined) setName(own.name);
+                if (own.description !== undefined) setDescription(own.description);
+                if (own.body) {
+                  setMarkdown(own.body.markdown);
+                  setMedia(own.body.media);
+                }
+                if (own.isTag !== undefined) setIsTag(own.isTag);
+                if (own.parentTags) setParentTags(own.parentTags);
                 setSummary(carried.summary);
               }}
             >

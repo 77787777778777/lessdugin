@@ -52,6 +52,34 @@ export function sameWikiForm(a: WikiForm, b: WikiForm): boolean {
   );
 }
 
+/** What an edit changes on the form it started from: each field the author changed, the body
+ * and the media it refers to as one field. */
+export interface WikiChanges {
+  name?: string;
+  description?: string;
+  body?: { markdown: string; media: MediaRef[] };
+  isTag?: boolean;
+  parentTags?: string[];
+}
+
+/** The fields `edit` changes on `from`, the form it started from. */
+export function wikiChanges(from: WikiForm, edit: WikiForm): WikiChanges {
+  const changes: WikiChanges = {};
+  if (edit.name !== from.name) changes.name = edit.name;
+  if (edit.description !== from.description) changes.description = edit.description;
+  if (
+    edit.markdown !== from.markdown ||
+    JSON.stringify(edit.media) !== JSON.stringify(from.media)
+  ) {
+    changes.body = { markdown: edit.markdown, media: edit.media };
+  }
+  if (edit.isTag !== from.isTag) changes.isTag = edit.isTag;
+  if (!sameTags(edit.parentTags, from.parentTags)) {
+    changes.parentTags = [...new Set(edit.parentTags)];
+  }
+  return changes;
+}
+
 /** The editable fields of a revision record, or null when its body spilled into a blob (the
  * source is not in the record, and a draft sent without it would drop the page's text). */
 export function wikiFormOf(record: unknown): WikiForm | null {

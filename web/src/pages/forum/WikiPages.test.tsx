@@ -289,6 +289,54 @@ describe("WikiEditPage", () => {
     ]);
   });
 
+  // the carried edit is what the author changed on the version they started from: a redo keeps
+  // what the newer version changed in the fields they left alone (the lost update O-2 prevents)
+  it("redoes only the author's changes, keeping the newer version's other fields", async () => {
+    const { engine, forum } = await setup("edit");
+    const head = (await engine.tag(forum, SLUG)).head ?? "";
+    const body = (await screen.findByRole("textbox", { name: /^Page/ })) as HTMLTextAreaElement;
+    const mine = `${body.value}\n- Parfit's hitchhiker`;
+    fireEvent.change(body, { target: { value: mine } });
+    // another participant renames the page and gives it a parent tag
+    await engine.wikiEdit(forum, SLUG, {
+      name: "Decision theory (CDT and EDT)",
+      isTag: true,
+      parentTags: ["rationality"],
+      base: head,
+      body: { markdown: "Someone else's version.", media: [] },
+    });
+    const status = await screen.findByRole("status");
+    fireEvent.click(within(status).getByRole("button", { name: "Reload the page" }));
+    const kept = await screen.findByRole("region", { name: "Your unsaved edit" });
+    expect(kept.textContent).not.toContain("Your name");
+    expect(kept.textContent).not.toContain("Your parent tags");
+    expect(kept.textContent).not.toContain("not a tag");
+    expect(
+      (within(kept).getByRole("textbox", { name: "Your unsaved text" }) as HTMLTextAreaElement)
+        .value,
+    ).toBe(mine);
+    const moved = (await engine.tag(forum, SLUG)).head;
+    fireEvent.click(within(kept).getByRole("button", { name: "Use my text" }));
+    expect((screen.getByRole("textbox", { name: /^Page/ }) as HTMLTextAreaElement).value).toBe(
+      mine,
+    );
+    expect((screen.getByRole("textbox", { name: "Name" }) as HTMLInputElement).value).toBe(
+      "Decision theory (CDT and EDT)",
+    );
+    expect(
+      (screen.getByRole("checkbox", { name: "Rationality" }) as HTMLInputElement).checked,
+    ).toBe(true);
+    const edit = vi.spyOn(engine, "wikiEdit");
+    fireEvent.click(screen.getByRole("button", { name: "Save page" }));
+    await waitFor(() => expect(edit).toHaveBeenCalledTimes(1));
+    expect(edit.mock.calls[0]?.[2]).toMatchObject({
+      name: "Decision theory (CDT and EDT)",
+      parentTags: ["rationality"],
+      body: { markdown: mine },
+      base: moved,
+    });
+  });
+
   it("carries nothing when the author reloads before writing anything", async () => {
     const { engine, forum } = await setup("edit");
     const head = (await engine.tag(forum, SLUG)).head ?? "";
