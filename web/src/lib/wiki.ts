@@ -34,15 +34,20 @@ export const EMPTY_WIKI_FORM: WikiForm = {
   parentTags: [],
 };
 
+/** The two lists name the same parent tags, in any order. */
+export function sameTags(a: readonly string[], b: readonly string[]): boolean {
+  const set = (l: readonly string[]): string => JSON.stringify([...new Set(l)].sort());
+  return set(a) === set(b);
+}
+
 /** The two forms hold the same page: parent tags compare as a set, media by their fields. */
 export function sameWikiForm(a: WikiForm, b: WikiForm): boolean {
-  const tags = (f: WikiForm): string => JSON.stringify([...new Set(f.parentTags)].sort());
   return (
     a.name === b.name &&
     a.description === b.description &&
     a.markdown === b.markdown &&
     a.isTag === b.isTag &&
-    tags(a) === tags(b) &&
+    sameTags(a.parentTags, b.parentTags) &&
     JSON.stringify(a.media) === JSON.stringify(b.media)
   );
 }

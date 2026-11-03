@@ -11,7 +11,7 @@
 // is not a tag, views.rs `tag_summary`), so such a page cannot be loaded here: the editor says
 // so for a new address, and before a page stops being a tag.
 
-import type { WikiDraft } from "@lessdugin/engine/types";
+import type { MediaRef, WikiDraft } from "@lessdugin/engine/types";
 import { isEngineError } from "@lessdugin/engine/types";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { getRouteApi, useNavigate } from "@tanstack/react-router";
@@ -23,7 +23,13 @@ import { useEngine } from "../../engine/context.tsx";
 import { qk, useActiveAccount } from "../../engine/queries.ts";
 import { useSendWrite } from "../../engine/queued.ts";
 import { cleanName } from "../../lib/text.ts";
-import { EMPTY_WIKI_FORM, sameWikiForm, type WikiForm, wikiFormOf } from "../../lib/wiki.ts";
+import {
+  EMPTY_WIKI_FORM,
+  sameTags,
+  sameWikiForm,
+  type WikiForm,
+  wikiFormOf,
+} from "../../lib/wiki.ts";
 import ui from "../../styles/ui.module.css";
 import { forumParams, useForumView } from "./forumContext.tsx";
 
@@ -92,6 +98,8 @@ export function WikiPageForm({
   const [name, setName] = useState(initial.name);
   const [description, setDescription] = useState(initial.description);
   const [markdown, setMarkdown] = useState(initial.markdown);
+  // the media the body refers to: the loaded version's, or the carried edit's once it is used
+  const [media, setMedia] = useState<MediaRef[]>(initial.media);
   const [isTag, setIsTag] = useState(initial.isTag);
   const [parentTags, setParentTags] = useState<string[]>(initial.parentTags);
   const [summary, setSummary] = useState("");
@@ -99,15 +107,22 @@ export function WikiPageForm({
   const [moved, setMoved] = useState(false);
   const [busy, setBusy] = useState(false);
   const tags = useQuery({ queryKey: qk.tags(forum.uri), queryFn: () => engine.tags(forum.uri) });
-  // the forum's tags, and any parent the record names that is not one (kept unless unticked)
+  // the forum's tags, and any parent the record (or the carried edit) names that is not one
+  // (kept unless unticked)
   const choices = [
     ...(tags.data ?? [])
       .filter((t) => t.slug !== slug)
       .map((t) => ({ slug: t.slug, name: t.name })),
-    ...initial.parentTags
+    ...[...new Set([...initial.parentTags, ...(carried?.parentTags ?? [])])]
       .filter((p) => !(tags.data ?? []).some((t) => t.slug === p))
       .map((p) => ({ slug: p, name: p })),
   ];
+  const tagName = (p: string): string => choices.find((c) => c.slug === p)?.name ?? p;
+  // the carried edit's parent tags, when they are not the loaded version's
+  const carriedTags =
+    carried && !sameTags(carried.parentTags, initial.parentTags)
+      ? [...new Set(carried.parentTags)]
+      : null;
 
   const submit = async (e: FormEvent): Promise<void> => {
     e.preventDefault();
@@ -123,8 +138,8 @@ export function WikiPageForm({
       parentTags,
     };
     if (description.trim() !== "") draft.description = description.trim();
-    if (markdown.trim() !== "" || initial.media.length > 0) {
-      draft.body = { markdown, media: initial.media };
+    if (markdown.trim() !== "" || media.length > 0) {
+      draft.body = { markdown, media };
     }
     if (summary.trim() !== "") draft.summary = summary.trim();
     if (base !== undefined) draft.base = base;
@@ -164,7 +179,7 @@ export function WikiPageForm({
     name,
     description,
     markdown,
-    media: initial.media,
+    media,
     isTag,
     parentTags,
   });
@@ -192,11 +207,28 @@ export function WikiPageForm({
               Your description: <bdi>{carried.description}</bdi>
             </p>
           )}
+          {carried.isTag !== initial.isTag && (
+            <p>Your edit makes this page {carried.isTag ? "a tag" : "not a tag"}.</p>
+          )}
+          {carriedTags && (
+            <p>
+              Your parent tags:{" "}
+              {carriedTags.length === 0
+                ? "none"
+                : carriedTags.map((p, i) => (
+                    <span key={p}>
+                      {i > 0 && ", "}
+                      <bdi>{cleanName(tagName(p))}</bdi>
+                    </span>
+                  ))}
+            </p>
+          )}
           <label className={ui.label}>
             Your unsaved text
             <textarea className={ui.input} rows={8} value={carried.markdown} readOnly />
           </label>
           <div className={ui.row}>
+            {/* the whole edit: its text with the media it refers to, and its page settings */}
             <button
               type="button"
               className={ui.button}
@@ -204,6 +236,9 @@ export function WikiPageForm({
                 setName(carried.name);
                 setDescription(carried.description);
                 setMarkdown(carried.markdown);
+                setMedia(carried.media);
+                setIsTag(carried.isTag);
+                setParentTags(carried.parentTags);
               }}
             >
               Use my text

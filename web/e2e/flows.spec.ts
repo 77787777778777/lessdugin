@@ -455,6 +455,9 @@ test("a wiki save that meets a newer head keeps the text and is redone after a r
   await expect(body).toHaveValue(/## Classic problems/);
   const mine = "Decision theory, rewritten by me.";
   await body.fill(mine);
+  const parent = page.getByRole("checkbox", { name: "Rationality" });
+  await page.getByRole("group", { name: "Parent tags" }).getByText("Rationality").click();
+  await expect(parent).toBeChecked();
   await page.getByRole("button", { name: "Save page" }).click();
   const alert = page.getByRole("alert");
   await expect(alert).toContainText("This page changed since you opened it.");
@@ -462,9 +465,13 @@ test("a wiki save that meets a newer head keeps the text and is redone after a r
   await alert.getByRole("button", { name: "Reload the page" }).click();
   const kept = page.getByRole("region", { name: "Your unsaved edit" });
   await expect(kept.getByRole("textbox", { name: "Your unsaved text" })).toHaveValue(mine);
+  await expect(kept).toContainText("Your parent tags: Rationality");
   await expect(body).toHaveValue(/An edit made elsewhere/);
+  await expect(parent).not.toBeChecked();
+  // the whole edit comes back: its text and its parent tag
   await kept.getByRole("button", { name: "Use my text" }).click();
   await expect(body).toHaveValue(mine);
+  await expect(parent).toBeChecked();
   await page.getByRole("button", { name: "Save page" }).click();
   await expect(page.getByText("Page saved (a public revision)")).toBeVisible();
   await expect(page.getByText(mine)).toBeVisible();

@@ -133,12 +133,15 @@ for (const scheme of ["light", "dark"] as const) {
       // a save that meets a newer head (`?wikirace`), then the reload with the author's text
       await page.goto(`/?mock&wikirace#${FORUM_PATH}/t/decision-theory/edit`);
       await page.getByRole("textbox", { name: /^Page/ }).fill("My edit.");
+      await page.getByRole("group", { name: "Parent tags" }).getByText("Rationality").click();
       await page.getByRole("button", { name: "Save page" }).click();
       const alert = page.getByRole("alert");
       await expect(alert).toContainText("This page changed since you opened it.");
       found.push(...(await axe(page, "wiki head moved")));
       await alert.getByRole("button", { name: "Reload the page" }).click();
-      await expect(page.getByRole("region", { name: "Your unsaved edit" })).toBeVisible();
+      await expect(page.getByRole("region", { name: "Your unsaved edit" })).toContainText(
+        "Your parent tags: Rationality",
+      );
       found.push(...(await axe(page, "wiki reloaded with the unsaved edit")));
       expect(found).toEqual([]);
       expect(w.errors).toEqual([]);

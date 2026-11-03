@@ -200,6 +200,72 @@ describe("WikiEditPage", () => {
     expect(edit.mock.calls[0]?.[2].body?.markdown).toBe("My second try.");
   });
 
+  it("carries the author's tag setting and parent tags, and restores them with their text", async () => {
+    const engine = new MockEngine({ holdMs: 0, sendMs: 0, wikiRace: true });
+    const { forum } = await setup("edit", SLUG, engine);
+    await screen.findByRole("textbox", { name: /^Page/ });
+    fireEvent.click(await screen.findByRole("checkbox", { name: "Rationality" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: /This page is a tag/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Save page" }));
+    const alert = await screen.findByRole("alert");
+    fireEvent.click(within(alert).getByRole("button", { name: "Reload the page" }));
+    const kept = await screen.findByRole("region", { name: "Your unsaved edit" });
+    // the newer version is in the editor; the region says what the author's edit changes
+    expect(
+      (screen.getByRole("checkbox", { name: /This page is a tag/ }) as HTMLInputElement).checked,
+    ).toBe(true);
+    expect(
+      (screen.getByRole("checkbox", { name: "Rationality" }) as HTMLInputElement).checked,
+    ).toBe(false);
+    expect(kept.textContent).toContain("Your edit makes this page not a tag.");
+    expect(kept.textContent).toContain("Your parent tags: Rationality");
+    const moved = (await engine.tag(forum, SLUG)).head;
+    fireEvent.click(within(kept).getByRole("button", { name: "Use my text" }));
+    expect(
+      (screen.getByRole("checkbox", { name: /This page is a tag/ }) as HTMLInputElement).checked,
+    ).toBe(false);
+    expect(
+      (screen.getByRole("checkbox", { name: "Rationality" }) as HTMLInputElement).checked,
+    ).toBe(true);
+    const edit = vi.spyOn(engine, "wikiEdit");
+    fireEvent.click(screen.getByRole("button", { name: "Save page" }));
+    await waitFor(() => expect(edit).toHaveBeenCalledTimes(1));
+    expect(edit.mock.calls[0]?.[2]).toMatchObject({
+      isTag: false,
+      parentTags: ["rationality"],
+      base: moved,
+    });
+  });
+
+  it("restores the media the author's text refers to with it", async () => {
+    const engine = new MockEngine({ holdMs: 0, sendMs: 0, wikiRace: true });
+    const forum = (await engine.followed())[0]?.uri ?? "";
+    const head = (await engine.tag(forum, SLUG)).head ?? "";
+    // the loaded version's body has an image; the newer one (the mock's race) has none
+    const raw = engine.raw.bind(engine);
+    vi.spyOn(engine, "raw").mockImplementation(async (uri: string): Promise<RawView> => {
+      const view = await raw(uri);
+      if (uri !== head) return view;
+      const record = view.record as { body?: Record<string, unknown> };
+      const image = { blob: { ref: { $link: "bafyimage" }, mimeType: "image/png", size: 10 } };
+      return { ...view, record: { ...record, body: { ...record.body, media: [image] } } };
+    });
+    await setup("edit", SLUG, engine);
+    const body = (await screen.findByRole("textbox", { name: /^Page/ })) as HTMLTextAreaElement;
+    fireEvent.change(body, { target: { value: `${body.value}\n- With the diagram` } });
+    fireEvent.click(screen.getByRole("button", { name: "Save page" }));
+    const alert = await screen.findByRole("alert");
+    fireEvent.click(within(alert).getByRole("button", { name: "Reload the page" }));
+    const kept = await screen.findByRole("region", { name: "Your unsaved edit" });
+    fireEvent.click(within(kept).getByRole("button", { name: "Use my text" }));
+    const edit = vi.spyOn(engine, "wikiEdit");
+    fireEvent.click(screen.getByRole("button", { name: "Save page" }));
+    await waitFor(() => expect(edit).toHaveBeenCalledTimes(1));
+    expect(edit.mock.calls[0]?.[2].body?.media).toEqual([
+      { id: "bafyimage", cid: "bafyimage", mime: "image/png", sizeBytes: 10 },
+    ]);
+  });
+
   it("carries nothing when the author reloads before writing anything", async () => {
     const { engine, forum } = await setup("edit");
     const head = (await engine.tag(forum, SLUG)).head ?? "";
