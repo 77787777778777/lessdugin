@@ -557,10 +557,9 @@ fn dotted_end(t: &[char], i: usize) -> Option<usize> {
 /// that read as `/` or `\` mapped to `/`, and blanks, symbols and other gaps next to a dot
 /// removed (`google.⠀com`). Every dotted name of any script in it is then a host the text
 /// names, except an e-mail address's mailbox (never one in a URL's authority, after `//`) and
-/// the names in a URL's path, query or fragment. The host is shown
-/// unless every name the text names is exactly the link's host (one `www.` stripped from
-/// both): wherever a name stands in the text, a different one cannot go unflagged (red-team
-/// F2).
+/// the names in a URL's path, query or fragment. The host is shown unless every name the text
+/// names is exactly the link's host (one `www.` stripped from both): wherever a name stands in
+/// the text, a different one cannot go unflagged (red-team F2).
 pub(crate) fn html_host_suffix(inner: &str, host: &str) -> bool {
     // Steps 1-3. White_Space is kept out of NFKC, which would turn the narrow spaces into the
     // U+0020 that step 4 keeps.
@@ -987,7 +986,7 @@ mod tests {
             assert!(html_host_suffix(text, "evil.com"), "{text:?}");
         }
         // ... and a path as `/` does, so a name after one is no host; next to a dot one is a
-        // `/`, never a gap, so `google.∕com` reads `google./com` as `google./com` does.
+        // `/`, never a gap, so `google.∕com` names no host, as `google./com` names none.
         for (text, host) in [
             ("evil.com\\google.com", "evil.com"),
             ("evil.com\u{2215}google.com", "evil.com"),
