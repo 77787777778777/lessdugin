@@ -12,11 +12,12 @@
 for every `<NS>.*` commit of the network, filtered by forum key on the client. The browser uses
 `wildcard` only until the participants of its forums are known, then switches to `filtered`: the
 connection names the DIDs of D (the viewer's own accounts and, over every followed or open forum,
-its authorities, confirmed participants and candidates being synced). Up to 150 DIDs go into the
-URL as `dids=` parameters; 151 to 10,000 go in a v1 `options_update` frame; above 10,000 the
-browser stays in `wildcard`. While some followed or open forum is open-mode, or the viewer is one
-of its authorities (`F_new ≠ ∅`), a side connection without a DID filter carries the membership
-commits of every DID, so newcomers are still found.
+its authorities and confirmed participants; a candidate joins D only once it is confirmed, and a
+rejected or unconfirmed hint never does). Up to 150 DIDs go into the URL as `dids=` parameters;
+151 to 10,000 go in a v1 `options_update` frame; above 10,000 the browser stays in `wildcard`.
+While some followed or open forum is open-mode, or the viewer is one of its authorities
+(`F_new ≠ ∅`), a side connection without a DID filter carries the membership commits of every
+DID, so newcomers are still found.
 
 The filter keeps a tab's traffic in proportion to the forums it reads instead of to all lessdugin
 traffic, which a browser worker cannot afford for long. But the filter is data the Jetstream

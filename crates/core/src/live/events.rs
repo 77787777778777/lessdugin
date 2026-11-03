@@ -104,7 +104,8 @@ pub struct Context {
     pub known_dids: std::collections::BTreeSet<String>,
     /// Logged-in account DIDs.
     pub own_dids: std::collections::BTreeSet<String>,
-    /// Confirmed newcomer/candidate DIDs already being synced.
+    /// Confirmed participants (discovery rows and grants) that are neither authorities nor own
+    /// accounts: newcomers already being synced.
     pub newcomer_dids: std::collections::BTreeSet<String>,
     /// `fk` of followed/open forums.
     pub forums: std::collections::BTreeSet<String>,
@@ -116,7 +117,7 @@ pub struct Context {
     pub authorities: std::collections::BTreeSet<String>,
     /// Exact collections accepted as `OURS`.
     pub ours: std::collections::BTreeSet<String>,
-    /// Browser DID-filter input (own + authorities + participants + candidates).
+    /// Browser DID-filter input, D (`sync.md` §6.2): own + authorities + confirmed participants.
     pub filter_dids: Vec<String>,
     /// True only after every followed/open forum completed a discovery pass.
     pub participants_known: bool,
