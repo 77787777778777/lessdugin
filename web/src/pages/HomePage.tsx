@@ -156,8 +156,9 @@ export function HomePage() {
       {others.length > 0 && (
         <>
           <h2 className={ui.sectionTitle}>Discover</h2>
-          {ownerGroups(others).map((g, i) => (
-            <div key={`${i}:${g.owner.did}`} className={styles.cardList}>
+          {ownerGroups(others).map((g) => (
+            // a group's first forum names it: one owner may come in two runs
+            <div key={g.forums[0]?.uri ?? g.owner.did} className={styles.cardList}>
               <h3 className={styles.ownerHeading} data-owner={g.owner.did}>
                 Forums by <ActorName actor={g.owner} />
               </h3>
