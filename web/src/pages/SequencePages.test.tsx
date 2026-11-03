@@ -115,6 +115,43 @@ describe("SequencePage, the author's controls", () => {
     );
   });
 
+  // organisation.rs `seq_remove` drops every entry naming the post, in every chapter
+  it("says that Remove takes out every entry of a post listed more than once", async () => {
+    const { engine, uri, posts, gone } = await ownSequence();
+    await done(
+      engine,
+      await engine.seqEdit(uri, {
+        forum: (await engine.followed())[0]?.uri ?? "",
+        title: "Own reading list",
+        chapters: [
+          { title: "First", posts: [posts.a.uri, gone, posts.b.uri, posts.c.uri] },
+          { title: "Second", posts: [posts.d.uri, posts.a.uri] },
+        ],
+      }),
+    );
+    const remove = vi.spyOn(engine, "seqRemove");
+    renderSequence(engine, uri);
+    const both = await screen.findAllByRole("button", {
+      name: named("Remove all 2 entries of", posts.a, " from the sequence"),
+    });
+    expect(both).toHaveLength(2);
+    expect(both.map((b) => b.textContent)).toEqual(["Remove all 2", "Remove all 2"]);
+    // a post listed once keeps the plain control
+    expect(
+      screen.getByRole("button", { name: named("Remove", posts.b, " from the sequence") })
+        .textContent,
+    ).toBe("Remove");
+    fireEvent.click(both[1] as HTMLElement);
+    await waitFor(() => expect(remove).toHaveBeenCalledWith(uri, posts.a.uri));
+    expect(await screen.findByText("Removed all 2 entries from the sequence")).toBeTruthy();
+    await waitFor(async () =>
+      expect((await engine.sequence(uri)).chapters.map((c) => c.posts.map((p) => p.uri))).toEqual([
+        [posts.b.uri, posts.c.uri],
+        [posts.d.uri],
+      ]),
+    );
+  });
+
   it("shows no controls on someone else's sequence", async () => {
     const engine = new MockEngine({ holdMs: 0, sendMs: 0 });
     const forum = (await engine.followed())[0]?.uri ?? "";

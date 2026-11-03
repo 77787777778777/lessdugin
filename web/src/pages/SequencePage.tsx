@@ -3,6 +3,8 @@
 // author also edits it here: an entry moves up or down (`seq_move`) or out (`seq_remove`), a post
 // is added to a chapter (`seq_add`), and "Edit sequence" opens the full editor (`seq_edit`).
 // Positions are the record's (`raw`): the view leaves out the entries it cannot display.
+// `seq_remove` takes out every entry naming the post (organisation.rs), so the control says so
+// when the record lists the post more than once; the editor removes a single entry.
 
 import type { ChapterView, PostSummary, SequencePosition } from "@lessdugin/engine/types";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -50,7 +52,13 @@ function useEntryWrites(uri: string) {
     busy,
     move: (from: SequencePosition, to: SequencePosition) =>
       run(() => engine.seqMove(uri, from, to), "Entry moved"),
-    remove: (post: string) => run(() => engine.seqRemove(uri, post), "Removed from the sequence"),
+    remove: (post: string, entries: number) =>
+      run(
+        () => engine.seqRemove(uri, post),
+        entries > 1
+          ? `Removed all ${entries} entries from the sequence`
+          : "Removed from the sequence",
+      ),
     add: (post: string, at: SequencePosition) =>
       run(() => engine.seqAdd(uri, post, at), "Added to the sequence"),
   };
@@ -59,13 +67,17 @@ function useEntryWrites(uri: string) {
 function EntryControls({
   post,
   moves,
+  entries,
   writes,
 }: {
   post: PostSummary;
   moves: { up: EntryMove | undefined; down: EntryMove | undefined };
+  /** How many entries of the record, in every chapter, name this post. */
+  entries: number;
   writes: ReturnType<typeof useEntryWrites>;
 }) {
   const name = cleanName(post.title ?? post.excerpt, 80);
+  const all = entries > 1;
   return (
     <div className={ui.row}>
       <button
@@ -90,10 +102,14 @@ function EntryControls({
         type="button"
         className={ui.ghost}
         disabled={writes.busy}
-        aria-label={`Remove ${name} from the sequence`}
-        onClick={() => void writes.remove(post.uri)}
+        aria-label={
+          all
+            ? `Remove all ${entries} entries of ${name} from the sequence`
+            : `Remove ${name} from the sequence`
+        }
+        onClick={() => void writes.remove(post.uri, entries)}
       >
-        Remove
+        {all ? `Remove all ${entries}` : "Remove"}
       </button>
     </div>
   );
@@ -136,6 +152,7 @@ function Chapter({
                 up: entryMove(editing.record, editing.listed, i, k, "up"),
                 down: entryMove(editing.record, editing.listed, i, k, "down"),
               }}
+              entries={editing.record.flat().filter((u) => u === p.uri).length}
               writes={editing.writes}
             />
           )}
