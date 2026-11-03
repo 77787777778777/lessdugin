@@ -1084,6 +1084,7 @@ fn sequence_library_explicit_results() {
     assert_eq!(hidden_by(&restricted), Some(HiddenReason::Restricted));
     assert_eq!(hidden_by(&below), None);
 }
+
 /// §0.4: CIDs compare by their canonical string form, so `B` + upper-case base32 (which G2
 /// accepts) names the same version: a positive assertion counts, a vote is not "earlier", a
 /// wiki parent is not "altered", a `#tag.head` applies, and two equal heads spelled differently

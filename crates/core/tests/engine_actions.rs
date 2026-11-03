@@ -485,6 +485,7 @@ fn wiki_edits_parent_their_base_and_refuse_a_moved_head() {
     assert_eq!(parents.as_array().unwrap().len(), 1);
     assert_eq!(parents[0]["uri"], r2.as_str());
 }
+
 #[test]
 fn a_seed_tag_vote_resolves_on_another_users_post() {
     let w = World::new();
