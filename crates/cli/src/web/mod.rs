@@ -136,6 +136,7 @@ pub async fn run(ctx: &Ctx, args: WebArgs) -> Result<(), CliError> {
         out: ctx.out.clone(),
         login: LoginSlot::default(),
         prompt: Prompt::default(),
+        oauth_client_id: ctx.config.oauth_client_id.clone(),
         shutdown: tokio::sync::watch::channel(false).0,
     });
     let out = &ctx.out;

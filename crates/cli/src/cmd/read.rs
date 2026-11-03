@@ -9,6 +9,12 @@
 //! `--json` prints the engine's DTO exactly (`PostList`, `ThreadView`, `PostView`, `RawView`,
 //! `HistoryView`). The listing numbers (`3`) and comment labels (`c12`) are saved for this
 //! terminal even with `--json`.
+//!
+//! A view waits `BODY_BLOB_WAIT_MS` for a spilled body and returns it pending; its download runs
+//! on, but only while the process does, and `read` is one view per process. So `read` waits for
+//! the host downloads of the bodies its view left pending (each capped by
+//! `BLOB_TOTAL_TIMEOUT_MS`) and reads the thread again, or says which body is still not loaded
+//! (`limits.md` `BODY_BLOB_WAIT_MS`, `lfm-1.md` §1.3).
 
 use std::collections::BTreeMap;
 
@@ -366,6 +372,19 @@ pub async fn read(ctx: &Ctx, args: ReadArgs) -> Result<(), CliError> {
     if unverified(ctx, actors(&thread).iter()) && verify_handles(&engine).await {
         thread = engine.get_thread(&uri, &opts).await?;
     }
+    if await_spilled(ctx, &engine, "body", &pending_bodies(&thread)).await {
+        thread = engine.get_thread(&uri, &opts).await?;
+    }
+    for (item, _) in pending_bodies(&thread) {
+        ctx.out.warn(cat([
+            lit("the body of "),
+            tt(&item),
+            lit(
+                " is still not loaded from its author's PDS (the excerpt shows); read it again \
+                 later",
+            ),
+        ]));
+    }
     let root = match &thread.post {
         ThreadRoot::Post(p) => p.post.uri.clone(),
         ThreadRoot::Missing { missing } => missing.clone(),
@@ -410,6 +429,90 @@ pub async fn read(ctx: &Ctx, args: ReadArgs) -> Result<(), CliError> {
     let text = thread_text(ctx, &engine, &thread, target, !args.no_comments).await;
     ctx.out.page(&text, !args.no_pager);
     Ok(())
+}
+
+/// Whether a view left this spilled body pending (`lfm-1.md` §1.3: it carries
+/// `NOTICE_SPILLED`).
+pub(crate) fn spilled_pending(body: &lessdugin_core::dto::RenderedBody) -> bool {
+    use lessdugin_core::model::render::NOTICE_SPILLED;
+    body.notices.iter().any(|n| n == NOTICE_SPILLED)
+}
+
+/// The items of `thread` whose spilled body its view left pending, with their authors.
+fn pending_bodies(thread: &ThreadView) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    if let ThreadRoot::Post(p) = &thread.post
+        && spilled_pending(&p.body)
+    {
+        out.push((p.post.uri.clone(), p.post.author.did.clone()));
+    }
+    for c in &thread.comments {
+        if spilled_pending(&c.body) {
+            out.push((c.uri.clone(), c.author.did.clone()));
+        }
+    }
+    out
+}
+
+/// Awaits the host download of every spilled body in `pending` (the item, its author), the
+/// `field` of the item's cached record: the one its view started (the host runs one per CID,
+/// so this joins it, `sync.md` §12.2), else a new one, each capped by `BLOB_TOTAL_TIMEOUT_MS`.
+/// The blob comes from the author's PDS as their DID document names it, as the engine's own
+/// fetch does (`sync.md` §11.1). Returns true when one was stored, so the caller views again;
+/// nothing is waited for `--offline`. `read`, `forum show` (a spilled `about`), `tag <slug>` (its
+/// page) and `sequence read` use it.
+pub(crate) async fn await_spilled(
+    ctx: &Ctx,
+    engine: &Engine<NativeHost>,
+    field: &str,
+    pending: &[(String, String)],
+) -> bool {
+    use lessdugin_core::host::Host;
+    use lessdugin_core::identity::IdentityLevel;
+    if pending.is_empty() || ctx.offline() {
+        return false;
+    }
+    ctx.out.note(&[(
+        cat([
+            lit("Waiting for "),
+            render::count(
+                u32::try_from(pending.len()).unwrap_or(u32::MAX),
+                "body",
+                "bodies",
+            ),
+            lit(" still downloading from the author's PDS (Ctrl-C stops)..."),
+        ]),
+        Style::Dim,
+    )]);
+    let fetches = pending.iter().map(|(item, author)| async move {
+        let (_, record) = crate::cmd::write::cached(engine, item).await.ok()?;
+        let cid = lessdugin_core::model::render::text_blob_cid(record.get(field)?)?.to_owned();
+        let identity = engine.resolve_identity(author).await.ok()?.identity;
+        if identity.level != IdentityLevel::Doc {
+            return None;
+        }
+        let pds = url::Url::parse(identity.pds.as_deref()?).ok()?;
+        match engine
+            .host()
+            .fetch_blob(
+                pds,
+                identity.did,
+                cid,
+                lessdugin_core::limits::BLOB_TEXT_MAX_BYTES,
+            )
+            .await
+        {
+            Ok(_) => Some(()),
+            Err(e) => {
+                tracing::debug!(uri = %item, error = %e, "a spilled body did not download");
+                None
+            }
+        }
+    });
+    futures::future::join_all(fetches)
+        .await
+        .iter()
+        .any(Option::is_some)
 }
 
 fn line(ctx: &Ctx, spans: &[Span]) -> String {

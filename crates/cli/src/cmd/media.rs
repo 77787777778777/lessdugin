@@ -462,8 +462,9 @@ pub fn local_files(attached: &[Attached]) -> Vec<String> {
 
 /// FILE-2 for a write without a publish summary (a comment, an edit): the files of this machine
 /// it uploads are listed with their absolute path, type and size, and confirmed on a terminal.
-/// `yes` (`draft publish --yes`) confirms them for a draft of the drafts directory, never for a
-/// foreign one; headless use otherwise goes through `media add` and a `cid:` reference.
+/// `yes` (`comment --yes`, `edit --yes`, `draft publish --yes`) confirms them for a file of the
+/// drafts directory, never for a foreign one; headless use otherwise goes through `media add`
+/// and a `cid:` reference.
 pub fn confirm_uploads(
     ctx: &Ctx,
     attached: &[Attached],
@@ -483,7 +484,7 @@ pub fn confirm_uploads(
             if foreign {
                 ", even with --yes, for a file outside the drafts directory"
             } else {
-                " (or with `lessdugin draft publish <id> --yes`)"
+                " (or with --yes, for a file of the drafts directory)"
             }
         )));
     }

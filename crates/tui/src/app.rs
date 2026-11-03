@@ -1466,6 +1466,9 @@ pub struct Panel {
     pub items: Vec<PanelItem>,
     /// The selected result (ignored when `items` is empty).
     pub selected: usize,
+    /// The search results (`:search`): `n` and `N` step to the next and previous hit
+    /// (decision O-7).
+    pub search: bool,
 }
 
 /// A yes/no question before a write that cannot be taken back (`:delete`, `:redact`), or an
@@ -2153,6 +2156,9 @@ impl State {
                 Ok(results) => {
                     let (lines, items) = search_lines(&results);
                     self.show_result_panel("Local search", lines, items);
+                    if let Some(p) = &mut self.panel {
+                        p.search = true;
+                    }
                 }
                 Err(e) => self.say(Tone::Error, cat([lit("Search failed: "), tt(&e.message)])),
             },
@@ -2504,6 +2510,7 @@ impl State {
             scroll: 0,
             items,
             selected: 0,
+            search: false,
         });
     }
 
@@ -2840,6 +2847,28 @@ impl State {
         // Plain panels scroll. Result panels keep a cursor by stable item reference: Enter
         // resolves that reference and pushes its view, leaving the underlying screen's cursor alone.
         if let Some(p) = &mut self.panel {
+            // `/` searches again from any panel
+            if cmd == Some(Cmd::Search) {
+                self.panel = None;
+                self.command = Some("search ".into());
+                return;
+            }
+            // in the search results, `n` and `N` step to the next and previous hit, round the
+            // ends (decision O-7); `N` opens Notifications everywhere else
+            let next = matches!(k.code, crossterm::event::KeyCode::Char('n'))
+                && !k
+                    .modifiers
+                    .contains(crossterm::event::KeyModifiers::CONTROL);
+            if p.search && !p.items.is_empty() && (next || cmd == Some(Cmd::Notifications)) {
+                let n = p.items.len();
+                p.selected = if next {
+                    (p.selected + 1) % n
+                } else {
+                    (p.selected + n - 1) % n
+                };
+                p.scroll = p.items[p.selected].line;
+                return;
+            }
             if p.items.is_empty() {
                 match cmd {
                     Some(Cmd::Down) => p.scroll = p.scroll.saturating_add(1),
@@ -2940,6 +2969,7 @@ impl State {
             Cmd::ModMenu => self.open_mod_menu(),
             Cmd::Notifications => self.open_notifications(fx),
             Cmd::Command => self.command = Some(String::new()),
+            Cmd::Search => self.command = Some("search ".into()),
             Cmd::MarkAllRead => self.mark_all_read(fx),
             Cmd::Stance => {
                 // on the Mod screen, `Tab` switches the queue/log tab; on a forum, Posts and
@@ -4691,7 +4721,7 @@ impl State {
     /// Runs a `:` command line against the engine through the same effects the keys use
     /// (`synthesis-v1.md` §6.11: the backstop that makes every MVP action reachable).
     fn run_command(&mut self, line: &str, fx: &mut Vec<Effect>) {
-        use crate::command::{ModTarget, Verb, agree_intent, mod_intent, vote_intent};
+        use crate::command::{ModTarget, Verb, agree_intent, mod_intent, tag_intent, vote_intent};
         let line = line.trim();
         if line.is_empty() || line == "help" || line == "?" {
             self.say(Tone::Info, tt(&crate::command::usage()));
@@ -4719,6 +4749,18 @@ impl State {
                     return;
                 };
                 self.opinion_intent(agree_intent(a), subject, forum, "Vote", fx);
+            }
+            Verb::TagVote { slug, vote } => {
+                // a tag applies to a post: the selected comment's thread post, unless named
+                let picked = match cmd.subject.as_deref() {
+                    Some(n) => Some((n.to_owned(), self.shown_forum(n).unwrap_or_default())),
+                    None => self.mod_subject().map(|m| (m.post, m.forum)),
+                };
+                let Some((subject, forum)) = picked else {
+                    self.say(Tone::Info, lit("Nothing selected to tag."));
+                    return;
+                };
+                self.opinion_intent(tag_intent(&slug, vote), subject, forum, "Tag vote", fx);
             }
             Verb::React { id, against, quote } => {
                 let Some((subject, forum)) = self.command_subject(cmd.subject.as_deref()) else {

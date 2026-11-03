@@ -38,7 +38,7 @@ use serde_json::Value;
 use crate::args::{ExportArgs, ExportFormatArg};
 use crate::cmd::{read, refs, write};
 use crate::ctx::{CliError, Ctx};
-use crate::out::{Style, tt};
+use crate::out::{Style, cat, lit, tt};
 
 /// The largest spilled body read (`sync.md` §11.1: `textBlob` bodies are at most 1 MB).
 const TEXT_BLOB_MAX_BYTES: u64 = 1_000_000;
@@ -92,6 +92,24 @@ pub async fn content(ctx: &Ctx, args: ExportArgs) -> Result<(), CliError> {
         Some(f) => forum(ctx, f).await?,
         None => mine(ctx).await?,
     };
+    // a spilled body is awaited to the end of its download (`fetch_blob`, capped by
+    // `BLOB_TOTAL_TIMEOUT_MS`); one that still could not be read is said, not left out quietly
+    for i in x.posts.iter().chain(&x.comments) {
+        let spilled = i
+            .record
+            .get("body")
+            .is_some_and(|b| b.get("textBlob").is_some());
+        if i.markdown.is_none() && spilled {
+            ctx.out.warn(cat([
+                lit("the body of "),
+                tt(&i.uri),
+                lit(
+                    " could not be downloaded from its author's PDS: it is exported without \
+                     its markdown",
+                ),
+            ]));
+        }
+    }
     match (args.format, args.out.as_deref()) {
         (ExportFormatArg::Json, None) => {
             ctx.out.json(&x);

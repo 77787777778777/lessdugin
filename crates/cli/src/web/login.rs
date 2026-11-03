@@ -220,6 +220,7 @@ async fn begin(web: &Arc<Web>, token: &str, actor: &str) -> Result<String, Engin
         hosted_fallback: true,
         // The redirect port is reserved by `begin` and served below.
         listen: false,
+        hosted_client_id: web.oauth_client_id.clone(),
     };
     let pending = oauth::begin(&web.engine, &target, &opts).await?;
     let port = pending

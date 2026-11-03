@@ -279,6 +279,11 @@ pub struct LoginArgs {
     #[arg(long, value_enum)]
     pub oauth_client: Option<OAuthClientArg>,
 
+    /// The hosted native client metadata URL (default: config.toml's `oauth_client_id`, else
+    /// the production metadata): a preview or self-hosted origin serving it for itself.
+    #[arg(long, value_name = "URL", conflicts_with_all = ["app_password", "password_stdin"])]
+    pub oauth_client_id: Option<Url>,
+
     /// Refused: passwords are never read from the command line.
     #[arg(long = "password", short = 'p', hide = true, num_args = 0..=1, value_name = "X")]
     pub password_argv: Option<Option<String>>,
@@ -526,6 +531,353 @@ mod reach {
         ("export_local", Reach::Command("export --local")),
         ("import_local", Reach::Command("export --import state.json")),
     ];
+
+    /// How the CLI writes each value `opinion` and `mod_action` take: every `kind` of
+    /// `OpinionIntent` and `ModActionValue` (`testdata/dto/dto-1.d.ts`, `engine-api.md` §3.5),
+    /// since reaching the operation with one value (`vote 3 up`) does not reach the others (a
+    /// tag vote, the moderator's `#tag`).
+    const VARIANTS: &[(&str, &str)] = &[
+        ("OpinionIntent.karma", "vote 3 up"),
+        ("OpinionIntent.agreement", "agree 3 agree"),
+        ("OpinionIntent.react", "react 3 heart --quote Thanks"),
+        ("OpinionIntent.tag", "vote 3 up --tag rust"),
+        ("ModActionValue.hide", "mod hide 3 --spam"),
+        (
+            "ModActionValue.access",
+            "mod ban did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+        ),
+        (
+            "ModActionValue.restrict",
+            "mod restrict did:plc:aaaaaaaaaaaaaaaaaaaaaaaa --cap vote",
+        ),
+        ("ModActionValue.tier", "mod curate 3"),
+        ("ModActionValue.pin", "mod pin 3 --scope forum"),
+        ("ModActionValue.lock", "mod lock 3"),
+        ("ModActionValue.tag", "mod tag rust --removed"),
+    ];
+
+    /// The `kind`s of the TypeScript union `name` in `testdata/dto/dto-1.d.ts`.
+    fn dto_kinds(name: &str) -> BTreeSet<String> {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata/dto/dto-1.d.ts");
+        let dts = std::fs::read_to_string(path).expect("testdata/dto/dto-1.d.ts");
+        let head = format!("export type {name} = ");
+        let line = dts
+            .lines()
+            .find(|l| l.starts_with(&head))
+            .unwrap_or_else(|| panic!("no {name} in dto-1.d.ts"));
+        line.split("kind: \"")
+            .skip(1)
+            .filter_map(|k| k.split('"').next())
+            .map(|k| format!("{name}.{k}"))
+            .collect()
+    }
+
+    /// The opinion or the asserted mod-action value a command line sends, as `Type.kind`.
+    fn sent_kind(line: &str) -> String {
+        use clap::Parser;
+        let words = std::iter::once("lessdugin").chain(line.split_whitespace());
+        let cli = Cli::try_parse_from(words).unwrap_or_else(|e| panic!("{line}: {e}"));
+        let (name, value) = match cli.command {
+            Some(super::Command::Vote(a)) => ("OpinionIntent", serde_json::to_value(a.intent())),
+            Some(super::Command::Agree(a)) => ("OpinionIntent", serde_json::to_value(a.intent())),
+            Some(super::Command::React(a)) => ("OpinionIntent", serde_json::to_value(a.intent())),
+            Some(super::Command::Mod(m)) => (
+                "ModActionValue",
+                serde_json::to_value(
+                    m.action
+                        .asserted()
+                        .unwrap_or_else(|| panic!("{line} asserts nothing")),
+                ),
+            ),
+            other => panic!("{line}: neither an opinion nor a mod action: {other:?}"),
+        };
+        let value = value.unwrap();
+        format!("{name}.{}", value["kind"].as_str().unwrap_or_default())
+    }
+
+    #[test]
+    fn every_opinion_and_mod_action_value_has_a_way_in() {
+        let mut want = dto_kinds("OpinionIntent");
+        want.extend(dto_kinds("ModActionValue"));
+        assert!(want.len() >= 11, "the dto unions were not read: {want:?}");
+        let have: BTreeSet<String> = VARIANTS.iter().map(|(k, _)| (*k).to_owned()).collect();
+        assert_eq!(VARIANTS.len(), have.len(), "a variant is listed twice");
+        assert_eq!(have, want, "the variants the CLI reaches, against dto/1");
+        for (kind, line) in VARIANTS {
+            parses(line);
+            assert_eq!(sent_kind(line), *kind, "{line}");
+        }
+    }
+
+    /// The tag vote and the moderator `#tag` carry what their flags say.
+    #[test]
+    fn tag_votes_and_tag_moderation_build_their_values() {
+        use clap::Parser;
+        use lessdugin_core::dto::{KarmaValue, ModActionValue, OpinionIntent};
+        let parse = |line: &str| {
+            Cli::try_parse_from(std::iter::once("lessdugin").chain(line.split_whitespace()))
+                .unwrap_or_else(|e| panic!("{line}: {e}"))
+                .command
+        };
+        let intent = |line: &str| match parse(line) {
+            Some(super::Command::Vote(a)) => a.intent(),
+            other => panic!("{line}: {other:?}"),
+        };
+        assert_eq!(
+            intent("vote 3 down --tag #rust"),
+            OpinionIntent::Tag {
+                slug: "rust".into(),
+                value: Some(KarmaValue::Down)
+            }
+        );
+        assert_eq!(
+            intent("vote 3 clear --tag rust"),
+            OpinionIntent::Tag {
+                slug: "rust".into(),
+                value: None
+            }
+        );
+        assert_eq!(
+            intent("vote 3 strong-up"),
+            OpinionIntent::Karma {
+                value: Some(KarmaValue::StrongUp)
+            }
+        );
+        let value = |line: &str| match parse(line) {
+            Some(super::Command::Mod(m)) => m.action.asserted(),
+            other => panic!("{line}: {other:?}"),
+        };
+        let head = "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/online.7778777.lessdugin.wikiRevision/w1";
+        assert_eq!(
+            value("mod tag tag:rust --removed"),
+            Some(ModActionValue::Tag {
+                removed: true,
+                head: None
+            })
+        );
+        assert_eq!(
+            value(&format!("mod tag rust --head {head}")),
+            Some(ModActionValue::Tag {
+                removed: false,
+                head: Some(head.into())
+            })
+        );
+        assert_eq!(
+            value(&format!("mod tag rust --removed --head {head}")),
+            Some(ModActionValue::Tag {
+                removed: true,
+                head: Some(head.into())
+            })
+        );
+        assert_eq!(
+            value("mod tag rust --restore"),
+            Some(ModActionValue::Tag {
+                removed: false,
+                head: None
+            })
+        );
+        assert_eq!(value("mod untag rust"), None);
+        assert_eq!(super::tag_subject("rust"), "tag:rust");
+        assert_eq!(super::tag_subject("tag:rust"), "tag:rust");
+        // a `#tag` record must say something; --removed and --restore contradict each other
+        for bad in [
+            "mod tag rust",
+            "mod tag rust --removed --restore",
+            "mod tag rust --author-scope --removed",
+        ] {
+            assert!(
+                Cli::try_parse_from(std::iter::once("lessdugin").chain(bad.split_whitespace()))
+                    .is_err(),
+                "{bad}"
+            );
+        }
+    }
+
+    /// `engine-api.md` §3.6: headless, the first public action of a kind needs `--yes`, so
+    /// every command that writes one takes it (and `-y`); so does every write that asks a
+    /// question of its own (publishing, uploads of this machine's files, what an edit
+    /// suspends, a deletion), so a script confirms each the same way. `redact` alone has no
+    /// `-y`: deleting history is kept a long flag away from a typo (`RedactArgs`).
+    #[test]
+    fn every_write_that_asks_takes_yes() {
+        use clap::Parser;
+        const ASKS: &[&str] = &[
+            // public actions (social.md §17)
+            "vote 3 up",
+            "vote 3 up --tag rust",
+            "agree 3 agree",
+            "react 3 heart",
+            "join alice.example.com/meta",
+            "approve did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+            "members revoke did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+            "mods add did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+            "mods rm did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+            "mod hide 3",
+            "mod unhide 3",
+            "mod tag rust --removed",
+            "mod untag rust",
+            "mod adopt did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+            // writes with a question of their own
+            "post page.md",
+            "comment 3 page.md",
+            "edit 3 page.md",
+            "delete 3",
+            "redact 3",
+            "draft publish abc123",
+        ];
+        for line in ASKS {
+            let short: &[&str] = if line.starts_with("redact") {
+                &[]
+            } else {
+                &["-y"]
+            };
+            for yes in std::iter::once("--yes").chain(short.iter().copied()) {
+                let words = std::iter::once("lessdugin")
+                    .chain(line.split_whitespace())
+                    .chain([yes]);
+                if let Err(e) = Cli::try_parse_from(words) {
+                    panic!("`{line} {yes}`: {e}");
+                }
+            }
+        }
+    }
+
+    /// Every command (`mod hide`, `post`; a command whose subcommand is optional counts
+    /// itself), with whether it takes `--yes`: its own, or a global one of a parent.
+    fn commands() -> Vec<(String, bool)> {
+        fn walk(c: &clap::Command, path: &str, inherited: bool, out: &mut Vec<(String, bool)>) {
+            let yes = c.get_arguments().find(|a| a.get_id() == "yes");
+            let takes = inherited || yes.is_some();
+            let subs: Vec<&clap::Command> = c
+                .get_subcommands()
+                .filter(|s| s.get_name() != "help")
+                .collect();
+            if !path.is_empty() && (subs.is_empty() || !c.is_subcommand_required_set()) {
+                out.push((path.to_owned(), takes));
+            }
+            let global = inherited || yes.is_some_and(clap::Arg::is_global_set);
+            for s in subs {
+                let p = format!("{path} {}", s.get_name());
+                walk(s, p.trim_start(), global, out);
+            }
+        }
+        let mut out = Vec::new();
+        walk(&Cli::command(), "", false, &mut out);
+        out
+    }
+
+    /// The other side of `every_write_that_asks_takes_yes`: a command without `--yes` is listed
+    /// here with the reason it never asks, so a new write command cannot ship without `--yes`
+    /// (`engine-api.md` §3.6) unless it is classified. What is a public action follows
+    /// `social.md` §17 as the TUI (`Effect::public_kind`) and the SPA (`requestAck`) gate it:
+    /// content writes, leaving, and dismissing applicants are not.
+    #[test]
+    fn every_command_without_yes_asks_nothing() {
+        const ASKS_NOTHING: &[&str] = &[
+            // reads, and listings of this device's state
+            "read",
+            "ls",
+            "discover",
+            "linked",
+            "search",
+            "user",
+            "tag",
+            "history",
+            "members",
+            "reacts",
+            "notifications",
+            "mutes",
+            "subs",
+            "export",
+            "activity",
+            "sequence ls",
+            "sequence read",
+            "forum ls",
+            "forum show",
+            "bookmark",
+            "bookmark ls",
+            "draft",
+            "draft ls",
+            "media get",
+            "media open",
+            "outbox",
+            "outbox ls",
+            "accounts",
+            "whoami",
+            "resolve",
+            "verify",
+            "doctor",
+            "config get",
+            "completions",
+            // local state, never written to a PDS (`engine-api.md` §3.6)
+            "mute",
+            "unmute",
+            "bookmark add",
+            "bookmark rm",
+            "subscribe post",
+            "subscribe forum",
+            "subscribe user",
+            "subscribe tag",
+            "unsubscribe post",
+            "unsubscribe forum",
+            "unsubscribe user",
+            "unsubscribe tag",
+            "forum follow",
+            "forum unfollow",
+            "forum use",
+            "draft edit",
+            "draft rm",
+            "media add",
+            "accounts use",
+            "config set",
+            // writes that are no public action and ask no question: content (wiki, sequences,
+            // a forum's declaration), a retraction, leaving, dismissing applicants (with the
+            // removal of one's own grant), and what the outbox already holds
+            "wiki edit",
+            "sequence create",
+            "sequence edit",
+            "sequence add",
+            "sequence remove",
+            "sequence move",
+            "retract",
+            "leave",
+            "reject",
+            "forum create",
+            "forum edit",
+            "sync",
+            "outbox flush",
+            "outbox retry",
+            "outbox undo",
+            // a login's question (an unverified handle) has no --yes on purpose: headless, it
+            // is refused and the DID is given instead (`cmd::login::confirm_target`)
+            "login",
+            "web",
+            "tui",
+        ];
+        let all = commands();
+        let names: BTreeSet<&str> = all.iter().map(|(c, _)| c.as_str()).collect();
+        for c in ASKS_NOTHING {
+            assert!(names.contains(c), "`{c}` is no command");
+        }
+        let listed: BTreeSet<&str> = ASKS_NOTHING.iter().copied().collect();
+        assert_eq!(
+            listed.len(),
+            ASKS_NOTHING.len(),
+            "a command is listed twice"
+        );
+        let wrong: Vec<String> = all
+            .iter()
+            .filter(|(c, takes)| *takes == listed.contains(c.as_str()))
+            .map(|(c, takes)| {
+                if *takes {
+                    format!("`{c}` takes --yes but is listed as asking nothing")
+                } else {
+                    format!("`{c}` takes no --yes and is not listed as asking nothing")
+                }
+            })
+            .collect();
+        assert!(wrong.is_empty(), "{wrong:#?}");
+    }
 
     /// The operations of the spec's §3.2, §3.5 and §3.6 tables (the first cell of each row).
     fn spec_operations() -> BTreeSet<String> {

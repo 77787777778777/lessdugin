@@ -1830,6 +1830,205 @@ fn every_key_and_command_reaches_its_operation() {
     }
 }
 
+/// The `kind`s of the TypeScript union `name` in `testdata/dto/dto-1.d.ts`, as `name.kind`.
+fn dto_kinds(name: &str) -> std::collections::BTreeSet<String> {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata/dto/dto-1.d.ts");
+    let dts = std::fs::read_to_string(path).expect("testdata/dto/dto-1.d.ts");
+    let head = format!("export type {name} = ");
+    let line = dts
+        .lines()
+        .find(|l| l.starts_with(&head))
+        .unwrap_or_else(|| panic!("no {name} in dto-1.d.ts"));
+    line.split("kind: \"")
+        .skip(1)
+        .filter_map(|k| k.split('"').next())
+        .map(|k| format!("{name}.{k}"))
+        .collect()
+}
+
+/// Each value `opinion` and `mod_action` take is reachable (`command::VALUE_REACH`, held to
+/// dto/1's `OpinionIntent` and `ModActionValue`): run on alice's welcome thread with bob's
+/// comment selected, the effects each entry queues (or holds behind a confirmation or the
+/// public-action interstitial) include an opinion or an assertion of that kind.
+#[test]
+fn every_opinion_and_mod_action_value_has_a_way_in() {
+    use lessdugin_core::dto::ModActionIntent;
+    use lessdugin_tui::command::{Reach, VALUE_REACH};
+    let mut want = dto_kinds("OpinionIntent");
+    want.extend(dto_kinds("ModActionValue"));
+    assert!(want.len() >= 11, "the dto unions were not read: {want:?}");
+    let have: std::collections::BTreeSet<String> =
+        VALUE_REACH.iter().map(|(k, _)| (*k).to_owned()).collect();
+    assert_eq!(VALUE_REACH.len(), have.len(), "a value is listed twice");
+    assert_eq!(have, want, "the values the TUI reaches, against dto/1");
+
+    let s = scenario();
+    let mut t = alice_tui(&s, 100, 30);
+    block_on(t.start(Some(s.forum.clone())));
+    block_on(t.open_thread(&s.welcome));
+    let on_comment = |t: &Tui| {
+        t.state
+            .top_thread()
+            .and_then(|th| th.layout.items.get(th.pos.selected))
+            .is_some_and(|i| i.uri == s.bob_c1)
+    };
+    for _ in 0..4 {
+        if !on_comment(&t) {
+            block_on(t.press("j"));
+        }
+    }
+    assert!(on_comment(&t), "{}", t.render());
+    for (kind, r) in VALUE_REACH {
+        let mut all = match r {
+            Reach::Command(line) => command_effects(&mut t, line),
+            Reach::Keys(keys) => {
+                let (last, first) = keys.split_last().unwrap();
+                for k in first {
+                    block_on(t.press(k));
+                }
+                t.state.update(lessdugin_tui::Action::Key(
+                    lessdugin_tui::keys::parse_key(last).unwrap(),
+                ))
+            }
+            other => panic!("{kind}: {other:?} is not a way in"),
+        };
+        if let Some(c) = t.state.confirm.take() {
+            all.extend(c.effects);
+        }
+        if let Some(n) = t.state.public_notice.take() {
+            all.extend(n.held);
+        }
+        t.state.panel = None;
+        let sent: Vec<String> = all
+            .iter()
+            .filter_map(|e| match e {
+                lessdugin_tui::Effect::Opinion { intent, .. } => Some(format!(
+                    "OpinionIntent.{}",
+                    serde_json::to_value(intent).unwrap()["kind"]
+                        .as_str()
+                        .unwrap()
+                )),
+                lessdugin_tui::Effect::ModAction {
+                    intent: ModActionIntent::Assert { action, .. },
+                    ..
+                } => Some(format!(
+                    "ModActionValue.{}",
+                    serde_json::to_value(action).unwrap()["kind"]
+                        .as_str()
+                        .unwrap()
+                )),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            sent.iter().any(|k| k == kind),
+            "{kind} via {r:?}: {sent:?}, status {}",
+            status(&t)
+        );
+        assert!(on_comment(&t), "{kind} moved away:\n{}", t.render());
+    }
+}
+
+/// The `:` line's tag vote and `#tag`, end to end: carol applies a wiki-backed tag to bob's
+/// post (`docs/plan.md` §4.2 step 7, carol in the TUI), and alice removes the tag, pins its page
+/// to a revision and takes her assertion back.
+#[test]
+fn the_command_line_tags_posts_and_moderates_tags() {
+    use lessdugin_core::dto::{OpinionIntent, WikiDraft};
+    let s = scenario();
+    let (alice, carol) = (&s.w.alice, &s.w.carol);
+    let t = block_on(alice.engine.wiki_edit(
+        &s.forum,
+        "rust",
+        WikiDraft {
+            name: "Rust".into(),
+            description: None,
+            body: Some(lessdugin_core::dto::BodyDraft::text("About Rust.")),
+            is_tag: true,
+            parent_tags: Vec::new(),
+            summary: None,
+            base: None,
+        },
+    ))
+    .unwrap();
+    alice.flush();
+    let revision = alice.done(&t);
+    carol.sync(&s.forum);
+
+    // carol, on bob's post: `:vote up --tag rust`
+    let mut t = tui(&s, 100, 30);
+    block_on(t.start(Some(s.forum.clone())));
+    block_on(t.open_thread(&s.bob_post));
+    let fx = command_effects(&mut t, "vote up --tag rust");
+    let tagged = fx.iter().any(|e| {
+        matches!(e, lessdugin_tui::Effect::Opinion {
+            subject,
+            intent: OpinionIntent::Tag { slug, value: Some(lessdugin_core::dto::KarmaValue::Up) },
+            ..
+        } if slug == "rust" && *subject == s.bob_post)
+    });
+    assert!(tagged, "{fx:?}");
+    run_command(&mut t, "vote up --tag rust");
+    block_on(t.settle());
+    assert!(status(&t).contains("Tag vote recorded"), "{}", status(&t));
+    block_on(t.engine().outbox_flush()).unwrap();
+    let opinion = lessdugin_lexicon::collection::nsid::OPINION;
+    let recs: Vec<serde_json::Value> = carol
+        .acct
+        .list(opinion)
+        .into_iter()
+        .filter_map(|(rkey, _)| carol.acct.get(opinion, &rkey))
+        .collect();
+    assert!(
+        recs.iter()
+            .any(|r| r["subject"]["uri"] == s.bob_post.as_str()
+                && r["tags"] == serde_json::json!([{ "tag": "rust", "value": "up" }])),
+        "carol's tag vote on bob's post: {recs:?}"
+    );
+
+    // alice, the owner: `:mod tag rust --removed`, then `--head`, then `:mod untag`
+    let mut a = alice_tui(&s, 100, 30);
+    block_on(a.start(Some(s.forum.clone())));
+    let log_of = |what: &str| {
+        let log = block_on(alice.engine.mod_log(&s.forum, None, 50)).unwrap();
+        log.entries
+            .into_iter()
+            .filter(|e| e.subject == "tag:rust" && e.action == "tag")
+            .map(|e| format!("{} {:?}", e.value, e.status))
+            .collect::<Vec<_>>()
+            .join("; ")
+            + what
+    };
+    run_command(&mut a, "mod tag rust --removed off topic");
+    block_on(a.settle());
+    block_on(a.engine().outbox_flush()).unwrap();
+    block_on(a.settle());
+    let removed = log_of("");
+    assert!(removed.contains("removed"), "{removed}");
+    run_command(&mut a, &format!("mod tag rust --head {revision}"));
+    block_on(a.settle());
+    block_on(a.engine().outbox_flush()).unwrap();
+    block_on(a.settle());
+    let pinned = log_of("");
+    assert!(
+        !pinned.is_empty() && pinned != removed,
+        "{removed} -> {pinned}"
+    );
+    run_command(&mut a, "mod untag rust");
+    block_on(a.settle());
+    block_on(a.engine().outbox_flush()).unwrap();
+    block_on(a.settle());
+    alice.sync(&s.forum);
+    let log = block_on(alice.engine.mod_log(&s.forum, None, 50)).unwrap();
+    assert!(
+        !log.entries.iter().any(|e| e.subject == "tag:rust"
+            && e.action == "tag"
+            && e.status == lessdugin_core::dto::ModLogStatus::Effective),
+        "{:?}",
+        log.entries
+    );
+}
+
 /// Membership, own items and local state from the `:` line, end to end: carol joins with a
 /// note, alice sees her in `:members`, carol deletes her comment after confirming, reads an
 /// item's raw view, bookmarks, mutes, and alice renames the forum.

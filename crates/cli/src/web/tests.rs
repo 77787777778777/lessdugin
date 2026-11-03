@@ -44,6 +44,7 @@ async fn start(assets: Assets, dev: bool) -> Running {
         out: Printer::new(false, ColorChoice::Never, true),
         login: LoginSlot::default(),
         prompt: Prompt::default(),
+        oauth_client_id: None,
         shutdown: tokio::sync::watch::channel(false).0,
     });
     let app = Router::new()

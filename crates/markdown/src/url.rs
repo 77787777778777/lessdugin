@@ -474,6 +474,40 @@ fn is_dot(c: char) -> bool {
     )
 }
 
+/// How many `/` a code point reads as (§5.5 step 2): browsers read `\` as `/` in an `http` or
+/// `https` URL, and these are the symbols and punctuation UTS #39 `confusables.txt` maps to
+/// one or more U+002F or U+005C (U+FF0F is `/` and U+FE68 and U+FF3C are `\` after NFKC
+/// already; U+29F6 is `/` with a macron, a mark on the `/`). The letters it maps there (U+30CE
+/// KATAKANA LETTER NO, U+4E3F and the like) stay name characters.
+fn slashes(c: char) -> usize {
+    match c {
+        '\\' | '\u{1735}' | '\u{2041}' | '\u{2044}' | '\u{2215}' | '\u{2216}' | '\u{2571}'
+        | '\u{2572}' | '\u{27CB}' | '\u{27CD}' | '\u{29F5}' | '\u{29F6}' | '\u{29F8}'
+        | '\u{29F9}' | '\u{31D2}' | '\u{31D3}' | '\u{31D4}' | '\u{1D20F}' | '\u{1D23A}'
+        | '\u{1D23B}' => 1,
+        '\u{244A}' | '\u{2AFD}' | '\u{2CF9}' => 2,
+        '\u{2AFB}' => 3,
+        _ => 0,
+    }
+}
+
+/// A nonspacing or enclosing mark: after a `/` it draws on the `/` (§5.5 step 2).
+fn is_mark_on(c: char) -> bool {
+    use unicode_general_category::{GeneralCategory as G, get_general_category};
+    matches!(
+        get_general_category(c),
+        G::NonspacingMark | G::EnclosingMark
+    )
+}
+
+/// A WHATWG special scheme other than `file`, after which URL parsers read an authority with
+/// one `/` or none (§5.5).
+fn is_authority_scheme(name: &[char]) -> bool {
+    ["ftp", "http", "https", "ws", "wss"]
+        .iter()
+        .any(|s| s.chars().eq(name.iter().copied()))
+}
+
 /// The RFC 3986 delimiters, `%` and `~`: with name characters and `.`, the code points of a URL
 /// run (§5.5).
 fn is_url_char(c: char) -> bool {
@@ -526,24 +560,30 @@ fn dotted_end(t: &[char], i: usize) -> Option<usize> {
 ///
 /// The visible text is first normalised the way it is displayed: Default_Ignorable code points
 /// removed (invisible characters cannot split a name), NFKC (fullwidth and other compatibility
-/// forms become ASCII), the code points that read as a dot mapped to `.`, and blanks, symbols
+/// forms become ASCII), the code points that read as a dot mapped to `.`, `\` and the symbols
+/// that read as `/` or `\` mapped to as many `/` (a mark on one dropped), and blanks, symbols
 /// and other gaps next to a dot removed (`google.⠀com`). Every dotted name of any script in it
 /// is then a host the text names, except an e-mail address's mailbox (never one in a URL's
-/// authority, after `//`) and the names in a URL's path, query or fragment. The host is shown
-/// unless every name the text names is exactly the link's host (one `www.` stripped from
-/// both): wherever a name stands in the text, a different one cannot go unflagged (red-team
-/// F2).
+/// authority, after `//` or `https:`) and the names in a URL's path, query or fragment. The
+/// host is shown unless every name the text names is exactly the link's host (one `www.`
+/// stripped from both): wherever a name stands in the text, a different one cannot go
+/// unflagged (red-team F2).
 pub(crate) fn html_host_suffix(inner: &str, host: &str) -> bool {
     // Steps 1-3. White_Space is kept out of NFKC, which would turn the narrow spaces into the
     // U+0020 that step 4 keeps.
     fn push_nfkc(t: &mut Vec<char>, s: &str) {
-        t.extend(s.nfkc().map(|c| {
-            if is_dot(c) {
-                '.'
+        for c in s.nfkc() {
+            let n = slashes(c);
+            if n > 0 {
+                t.extend(std::iter::repeat_n('/', n));
+            } else if t.last() == Some(&'/') && is_mark_on(c) {
+                // A `/` with a mark on it (U+0338, U+29F6's macron) stays one `/`.
+            } else if is_dot(c) {
+                t.push('.');
             } else {
-                c.to_ascii_lowercase()
+                t.push(c.to_ascii_lowercase());
             }
-        }));
+        }
     }
     let mut t: Vec<char> = Vec::with_capacity(inner.len());
     let mut word = String::new();
@@ -586,7 +626,9 @@ pub(crate) fn html_host_suffix(inner: &str, host: &str) -> bool {
     // Step 5. `seen`: the current URL run has had a dotted name; `path`: a `/`, `?` or `#`
     // has followed one, so the names after it are in a path, query or fragment; `authority`:
     // the run has had `//`, so every name before that `/`, `?` or `#` is a host, whatever
-    // stands between the `//` and it (`https://u@google.com@evil.com` names both).
+    // stands between the `//` and it (`https://u@google.com@evil.com` names both), or since
+    // `https:` and the like, which take an authority with one `/` or none. Step 2 made every
+    // `\` and lookalike slash a `/`, so they count here as `/` does.
     let h = host.strip_prefix("www.").unwrap_or(host);
     let (mut seen, mut path, mut authority) = (false, false, false);
     let mut i = 0;
@@ -603,7 +645,9 @@ pub(crate) fn html_host_suffix(inner: &str, host: &str) -> bool {
             continue;
         }
         let Some(end) = dotted_end(&u, i) else {
-            i = name_end(&u, i);
+            let end = name_end(&u, i);
+            authority |= u.get(end) == Some(&':') && is_authority_scheme(&u[i..end]);
+            i = end;
             continue;
         };
         // `first.last@corp.com` names only `corp.com`; in a URL's authority no name is a mailbox.
@@ -933,6 +977,104 @@ mod tests {
         // ... while outside one the mailbox rule stands, and a user name is no host.
         assert!(!html_host_suffix("https://u:p@evil.com", "evil.com"));
         assert!(!html_host_suffix("bob@google.com@evil.com", "evil.com"));
+        // A backslash, which URL parsers read as `/` in an `https` URL, and the symbols that
+        // read as `/` or `\` start an authority as `//` does, also next to a dot (review2
+        // m3m4-continuation-4): before, they reset the URL run, so the name passed as a mailbox.
+        for text in [
+            "https:\\\\u@google.com@evil.com",
+            "https:/\\u@google.com@evil.com",
+            "https:\\\\@google.com@evil.com",
+            "https:\\\\.google.com@evil.com",
+            "https:\u{FF3C}\u{FE68}u@google.com@evil.com",
+            "https:\u{2215}\u{2215}u@google.com@evil.com",
+            "https:\u{2044}\u{2044}u@google.com@evil.com",
+            "https:\u{29F8}\u{29F8}u@google.com@evil.com",
+            "https:\u{2571}\u{27CB}u@google.com@evil.com",
+            "https:\u{1735}\u{2041}u@google.com@evil.com",
+            "https:\u{31D3}\u{1D23A}u@google.com@evil.com",
+            "https:\u{2216}\u{29F5}u@google.com@evil.com",
+            "https:\u{29F9}\u{27CD}u@google.com@evil.com",
+            "https:\u{31D4}\u{1D20F}\u{1D23B}u@google.com@evil.com",
+            "https:\u{2215}\u{2215}.google.com@evil.com",
+        ] {
+            assert!(html_host_suffix(text, "evil.com"), "{text:?}");
+        }
+        // ... and a path as `/` does, so a name after one is no host; next to a dot one is a
+        // `/`, never a gap, so `google.∕com` names no host, as `google./com` names none.
+        for (text, host) in [
+            ("evil.com\\google.com", "evil.com"),
+            ("evil.com\u{2215}google.com", "evil.com"),
+            ("https:\\\\evil.com\\a\\b.html", "evil.com"),
+            ("https:\u{2044}\u{2044}evil.com\u{2044}a.html", "evil.com"),
+            ("google.\u{2215}com", "evil.com"),
+            ("google\\.com", "evil.com"),
+        ] {
+            assert!(!html_host_suffix(text, host), "{text:?} {host}");
+        }
+        // The code points that read as two or three slashes are as many `/`, and a nonspacing
+        // or enclosing mark after a `/` draws on it (U+29F6 is `/` with a macron), so the `//`
+        // stands, also without a scheme or next to a dot (review 2, m3m4-continuation-4).
+        for lead in [
+            "\u{2AFD}",
+            "\u{2AFB}",
+            "\u{244A}",
+            "\u{2CF9}",
+            "\u{29F6}\u{29F6}",
+            "\u{2572}\u{31D2}",
+            "/\u{0338}/\u{0338}",
+            "\u{2215}\u{20DD}\u{2215}",
+        ] {
+            for text in [
+                format!("{lead}u@google.com@evil.com"),
+                format!("x:{lead}u@google.com@evil.com"),
+                format!("{lead}.google.com@evil.com"),
+            ] {
+                assert!(html_host_suffix(&text, "evil.com"), "{text:?}");
+            }
+        }
+        for (text, host) in [
+            ("evil.com\u{2AFD}google.com", "evil.com"),
+            ("evil.com\u{2CF9}google.com", "evil.com"),
+            ("evil.com\u{29F6}google.com", "evil.com"),
+            ("evil.com\u{2572}google.com", "evil.com"),
+            ("google.\u{2AFB}com", "evil.com"),
+            ("google\u{244A}.com", "evil.com"),
+            ("/\u{0338}google.com", "google.com"),
+        ] {
+            assert!(!html_host_suffix(text, host), "{text:?} {host}");
+        }
+        // After a special scheme other than `file` and its `:`, URL parsers read an authority
+        // with one `/` or none, so no name there is a mailbox either.
+        for text in [
+            "https:u@google.com@evil.com",
+            "https:/u@google.com@evil.com",
+            "https:\\u@google.com@evil.com",
+            "HTTP:u@google.com@evil.com",
+            "\u{FF48}ttps\u{FF1A}u@google.com@evil.com",
+            "ftp:google.com@evil.com",
+            "ws:u@google.com@evil.com",
+            "wss:/@google.com@evil.com",
+            "(https:u@google.com@evil.com)",
+        ] {
+            assert!(html_host_suffix(text, "evil.com"), "{text:?}");
+        }
+        // ... and only there: other schemes and longer names keep the mailbox rule.
+        for (text, host) in [
+            ("news:first.last@corp.com", "corp.com"),
+            ("file:first.last@corp.com", "corp.com"),
+            ("xhttps:first.last@corp.com", "corp.com"),
+            ("https-x:first.last@corp.com", "corp.com"),
+            ("https:u:p@evil.com", "evil.com"),
+        ] {
+            assert!(!html_host_suffix(text, host), "{text:?} {host}");
+        }
+        // The letters that read as `/` stay name characters (Japanese and Chinese words), and
+        // the symbols that read as a slash beside a set sign stay gaps.
+        assert!(html_host_suffix("evil.com\u{30CE}google.com", "evil.com"));
+        assert!(html_host_suffix("evil.com\u{4E3F}google.com", "evil.com"));
+        assert!(html_host_suffix("evil.com\u{FF89}google.com", "evil.com"));
+        assert!(html_host_suffix("evil.com\u{2CC7}google.com", "evil.com"));
+        assert!(html_host_suffix("evil.com\u{27C8}google.com", "evil.com"));
         // Mailboxes and path, query or fragment names are not hosts; ASCII whitespace still
         // ends a name, so prose is not one.
         for (text, host) in [

@@ -10,10 +10,12 @@
 //! | Command | Engine call | Same as key |
 //! |---|---|---|
 //! | `vote up\|down\|strong-up\|strong-down\|clear` | `opinion` (`Karma`) | `u`/`U`/`d`/`D`/`0` |
+//! | `vote <value> [post] --tag <slug>` | `opinion` (`Tag`) | - |
 //! | `agree for\|against\|strong-for\|strong-against\|clear` | `opinion` (`Agreement`) | `a`/`A`/`z`/`Z`/`0` |
 //! | `react <id> [for\|against]` | `opinion` (`React`) | `x`, then Enter |
 //! | `unreact <id>` | `opinion` (`React`, remove) | `x`, then Enter again |
 //! | `mod <action> [subject] [reason] [--until WHEN] [--author]` | `mod_action` | `m` |
+//! | `mod tag <slug> [--removed\|--restore] [--head <uri>] [reason]`, `mod untag <slug>` | `mod_action` (`#tag`) | - |
 //! | `notifications [all]`, `read`, `read-all` | `notifications`, `mark_notifications_read`, `mark_all_notifications_read` | `N`, `a`, `M` |
 //! | `activity` | `recent_discussion` | `Tab` on a forum |
 //! | `sort <sort>`, `filter <filter>` | `list_posts`, `get_thread` | `s`, `f` |
@@ -47,6 +49,13 @@ use lessdugin_core::dto::{
 pub enum Verb {
     /// `vote up|down|strong-up|strong-down|clear`: the karma axis.
     Vote(Vote),
+    /// `vote <value> [post] --tag <slug>`: a tag vote on a post (its relevance for the tag).
+    TagVote {
+        /// The tag.
+        slug: String,
+        /// The value (`up` applies the tag, `clear` takes the vote back).
+        vote: Vote,
+    },
     /// `agree for|against|strong-for|strong-against|clear`: the agreement axis.
     Agree(Agree),
     /// `react <id> [for|against] [subject] [--quote <text>]`: one react from the `default/1`
@@ -492,6 +501,30 @@ pub const REACH: &[(&str, Reach)] = &[
     ),
 ];
 
+/// How the TUI writes each value `opinion` and `mod_action` take: every `kind` of
+/// `OpinionIntent` and `ModActionValue` (`testdata/dto/dto-1.d.ts`, `engine-api.md` §3.5), as
+/// `Type.kind`. Reaching the operation with one value (`u`) does not reach the others (a tag
+/// vote, the moderator's `#tag`); a test holds this table to dto/1 and runs each entry.
+pub const VALUE_REACH: &[(&str, Reach)] = &[
+    ("OpinionIntent.karma", Reach::Keys(&["u"])),
+    ("OpinionIntent.agreement", Reach::Command("agree for")),
+    ("OpinionIntent.react", Reach::Command("react crux")),
+    ("OpinionIntent.tag", Reach::Command("vote up --tag rust")),
+    ("ModActionValue.hide", Reach::Command("mod hide off topic")),
+    ("ModActionValue.access", Reach::Command("mod ban")),
+    (
+        "ModActionValue.restrict",
+        Reach::Command("mod restrict vote"),
+    ),
+    ("ModActionValue.tier", Reach::Command("mod tier curated")),
+    ("ModActionValue.pin", Reach::Command("mod pin")),
+    ("ModActionValue.lock", Reach::Command("mod lock")),
+    (
+        "ModActionValue.tag",
+        Reach::Command("mod tag rust --removed"),
+    ),
+];
+
 /// A sort `sort` names: a post sort (`social.md` §12.2) or a comment sort (§12.4).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SortName {
@@ -604,6 +637,16 @@ pub enum ModVerb {
     Unnullify,
     /// `approve`: grants a membership (`engine.grant`).
     Approve,
+    /// `tag <slug> [--removed|--restore] [--head <uri>]`: the forum's `#tag` (the subject is
+    /// `tag:<slug>`): the tag removed or not, its page pinned to a revision.
+    Tag {
+        /// `--removed` (`--restore`, or neither with `--head`: not removed).
+        removed: bool,
+        /// `--head`: the wikiRevision the page is pinned to.
+        head: Option<String>,
+    },
+    /// `untag <slug>`: removes your `#tag` assertion.
+    Untag,
 }
 
 /// What a [`ModVerb`] acts on when the command line names no subject.
@@ -631,6 +674,8 @@ impl ModVerb {
             ModVerb::Lock | ModVerb::Unlock | ModVerb::Tier(_) => ModTarget::Post,
             ModVerb::Hide | ModVerb::Spam | ModVerb::Unhide | ModVerb::Keep => ModTarget::Item,
             ModVerb::Pin | ModVerb::Unpin => ModTarget::Item,
+            // the command line always names the `tag:<slug>` subject
+            ModVerb::Tag { .. } | ModVerb::Untag => ModTarget::Item,
         }
     }
 }
@@ -693,12 +738,31 @@ pub fn parse(line: &str) -> Parsed {
     };
     let rest: Vec<&str> = words.map(String::as_str).collect();
     match verb {
-        "vote" => Ok(Command {
-            verb: Verb::Vote(vote(rest.first().copied())?),
-            subject: rest.get(1).map(|s| (*s).to_owned()),
-            reason: None,
-            opts: ModOpts::default(),
-        }),
+        "vote" => {
+            // `--tag <slug>`: a tag vote instead of karma
+            let (rest, tag) = match rest.iter().position(|w| *w == "--tag") {
+                Some(i) => {
+                    let Some(slug) = rest.get(i + 1) else {
+                        return Err("vote --tag needs a tag slug.".into());
+                    };
+                    let slug = slug.strip_prefix('#').unwrap_or(slug).to_owned();
+                    let mut words = rest.clone();
+                    words.drain(i..=i + 1);
+                    (words, Some(slug))
+                }
+                None => (rest, None),
+            };
+            let v = vote(rest.first().copied())?;
+            Ok(Command {
+                verb: match tag {
+                    Some(slug) => Verb::TagVote { slug, vote: v },
+                    None => Verb::Vote(v),
+                },
+                subject: rest.get(1).map(|s| (*s).to_owned()),
+                reason: None,
+                opts: ModOpts::default(),
+            })
+        }
         "agree" => Ok(Command {
             verb: Verb::Agree(agree(rest.first().copied())?),
             subject: rest.get(1).map(|s| (*s).to_owned()),
@@ -1631,7 +1695,7 @@ fn mod_verb(rest: &[&str]) -> Parsed {
     let Some(action) = rest.first().copied() else {
         return Err(format!(
             "mod needs an action (hide, spam, unhide, keep, ban, unban, pin, unpin, lock, unlock, \
-             tier, restrict, unrestrict, nullify, unnullify, approve, adopt).\n{}",
+             tier, restrict, unrestrict, nullify, unnullify, approve, tag, untag, adopt).\n{}",
             usage()
         ));
     };
@@ -1663,6 +1727,7 @@ fn mod_verb(rest: &[&str]) -> Parsed {
         "nullify" => ModVerb::Nullify,
         "unnullify" => ModVerb::Unnullify,
         "approve" => ModVerb::Approve,
+        "tag" | "untag" => return tag_mod_verb(action, args, opts),
         "adopt" => {
             let Some(former) = args.first() else {
                 return Err("mod adopt needs the former moderator (a DID or handle).".into());
@@ -1700,8 +1765,8 @@ fn mod_verb(rest: &[&str]) -> Parsed {
         other => {
             return Err(format!(
                 "Unknown mod action `{other}`. Try hide, spam, unhide, keep, ban, unban, pin, \
-                 unpin, lock, unlock, tier, restrict, unrestrict, nullify, unnullify, approve \
-                 or adopt."
+                 unpin, lock, unlock, tier, restrict, unrestrict, nullify, unnullify, approve, \
+                 tag, untag or adopt."
             ));
         }
     };
@@ -1710,6 +1775,67 @@ fn mod_verb(rest: &[&str]) -> Parsed {
         verb: Verb::Mod(verb),
         subject,
         reason,
+        opts,
+    })
+}
+
+/// `mod tag <slug> [--removed|--restore] [--head <uri>] [reason]`, `mod untag <slug>`: the
+/// subject is `tag:<slug>`; a `#tag` is a forum record (no `--author`), and one that asserts
+/// says something (`--removed`, `--restore` or `--head`).
+fn tag_mod_verb(action: &str, args: &[&str], opts: ModOpts) -> Parsed {
+    let Some((slug, tail)) = args.split_first() else {
+        return Err(format!("mod {action} needs a tag slug."));
+    };
+    if opts.author_scope {
+        return Err(format!(
+            "mod {action} is a forum action; --author does not apply."
+        ));
+    }
+    let slug = slug.strip_prefix("tag:").unwrap_or(slug);
+    let subject = Some(format!("tag:{}", slug.strip_prefix('#').unwrap_or(slug)));
+    if action == "untag" {
+        if !tail.is_empty() {
+            return Err("mod untag takes only the tag slug.".into());
+        }
+        return Ok(Command {
+            verb: Verb::Mod(ModVerb::Untag),
+            subject,
+            reason: None,
+            opts,
+        });
+    }
+    let mut removed = None;
+    let mut head = None;
+    let mut words = Vec::new();
+    let mut it = tail.iter().copied();
+    while let Some(w) = it.next() {
+        match w {
+            "--removed" | "--restore" => {
+                let value = w == "--removed";
+                if removed.is_some_and(|r| r != value) {
+                    return Err("mod tag takes --removed or --restore, not both.".into());
+                }
+                removed = Some(value);
+            }
+            "--head" => {
+                let Some(uri) = it.next() else {
+                    return Err("mod tag --head needs a wiki revision at-uri.".into());
+                };
+                head = Some(uri.to_owned());
+            }
+            w => words.push(w),
+        }
+    }
+    if removed.is_none() && head.is_none() {
+        return Err("mod tag needs --removed, --restore or --head <wiki revision at-uri>.".into());
+    }
+    Ok(Command {
+        verb: Verb::Mod(ModVerb::Tag {
+            removed: removed.unwrap_or(false),
+            head,
+        }),
+        subject,
+        reason: trim_reason(&words.join(" ")),
         opts,
     })
 }
@@ -1764,12 +1890,14 @@ fn trim_reason(s: &str) -> Option<String> {
 pub fn usage() -> String {
     [
         "vote up|strong-up|down|strong-down|clear [subject]",
+        "vote up|down|clear [post] --tag <slug>  (a tag vote)",
         "agree for|strong-for|against|strong-against|clear [subject]",
         "react <id> [for|against] [subject]",
         "unreact <id> [subject]",
         "mod hide|spam|unhide|keep|ban|unban|pin|unpin|lock|unlock|unrestrict|nullify|unnullify|approve [subject] [reason]",
         "mod restrict [cap,cap...] [subject] [reason]",
         "mod tier personal|frontpage|curated [subject] [reason]",
+        "mod tag <slug> [--removed|--restore] [--head <wiki revision uri>] [reason], mod untag <slug>",
         "  mod flags: --until <RFC 3339>, --author (author scope), --spam, --cap <cap>",
         "notifications [all|unread]",
         "read",
@@ -1814,17 +1942,28 @@ pub fn usage() -> String {
     .join("\n")
 }
 
+fn karma_value(v: Vote) -> Option<KarmaValue> {
+    match v {
+        Vote::Up => Some(KarmaValue::Up),
+        Vote::StrongUp => Some(KarmaValue::StrongUp),
+        Vote::Down => Some(KarmaValue::Down),
+        Vote::StrongDown => Some(KarmaValue::StrongDown),
+        Vote::Clear => None,
+    }
+}
+
 /// The karma intent a [`Vote`] names.
 pub fn vote_intent(v: Vote) -> lessdugin_core::dto::OpinionIntent {
-    use lessdugin_core::dto::OpinionIntent;
-    OpinionIntent::Karma {
-        value: match v {
-            Vote::Up => Some(KarmaValue::Up),
-            Vote::StrongUp => Some(KarmaValue::StrongUp),
-            Vote::Down => Some(KarmaValue::Down),
-            Vote::StrongDown => Some(KarmaValue::StrongDown),
-            Vote::Clear => None,
-        },
+    lessdugin_core::dto::OpinionIntent::Karma {
+        value: karma_value(v),
+    }
+}
+
+/// The tag-vote intent of [`Vote`] `v` on `slug` (a tag vote takes the karma values).
+pub fn tag_intent(slug: &str, v: Vote) -> lessdugin_core::dto::OpinionIntent {
+    lessdugin_core::dto::OpinionIntent::Tag {
+        slug: slug.to_owned(),
+        value: karma_value(v),
     }
 }
 
@@ -1938,6 +2077,11 @@ pub fn mod_intent(
             nullify_votes: Some(false),
         }),
         ModVerb::Unrestrict => remove("restrict"),
+        ModVerb::Tag { removed, head } => assert(ModActionValue::Tag {
+            removed: *removed,
+            head: head.clone(),
+        }),
+        ModVerb::Untag => remove("tag"),
         // `approve` is a grant, not a mod action: the caller sends `Effect::Grant` instead
         ModVerb::Approve => return None,
     })
@@ -2292,6 +2436,96 @@ mod tests {
             parse("mod hide --spam").unwrap().verb,
             Verb::Mod(ModVerb::Spam)
         );
+    }
+
+    /// `vote --tag` is a tag vote; `mod tag`/`mod untag` are the forum's `#tag` on
+    /// `tag:<slug>`, and a `#tag` that asserts must say something.
+    #[test]
+    fn tag_votes_and_tag_moderation_parse() {
+        use lessdugin_core::dto::OpinionIntent;
+        let c = parse("vote up --tag #rust").unwrap();
+        assert_eq!(
+            c.verb,
+            Verb::TagVote {
+                slug: "rust".into(),
+                vote: Vote::Up
+            }
+        );
+        assert_eq!(c.subject, None);
+        let c = parse("vote clear at://did:plc:x/p/1 --tag rust").unwrap();
+        assert_eq!(c.subject.as_deref(), Some("at://did:plc:x/p/1"));
+        assert_eq!(
+            c.verb,
+            Verb::TagVote {
+                slug: "rust".into(),
+                vote: Vote::Clear
+            }
+        );
+        assert_eq!(
+            tag_intent("rust", Vote::StrongDown),
+            OpinionIntent::Tag {
+                slug: "rust".into(),
+                value: Some(KarmaValue::StrongDown)
+            }
+        );
+        assert!(parse("vote up --tag").unwrap_err().contains("tag slug"));
+
+        let action = |line: &str| {
+            let c = parse(line).unwrap();
+            assert_eq!(c.subject.as_deref(), Some("tag:rust"), "{line}");
+            let Verb::Mod(v) = &c.verb else {
+                panic!("{line}")
+            };
+            mod_intent(v, "at://f", "tag:rust", c.reason.clone(), &c.opts).unwrap()
+        };
+        let head = "at://did:plc:x/online.7778777.lessdugin.wikiRevision/w1";
+        match action("mod tag tag:rust --removed \"off topic\"") {
+            ModActionIntent::Assert {
+                action,
+                reason,
+                scope,
+                subject,
+                ..
+            } => {
+                assert_eq!(
+                    action,
+                    ModActionValue::Tag {
+                        removed: true,
+                        head: None
+                    }
+                );
+                assert_eq!(reason.as_deref(), Some("off topic"));
+                assert_eq!(scope, ModScope::Forum);
+                assert_eq!(subject, "tag:rust");
+            }
+            r => panic!("{r:?}"),
+        }
+        assert!(matches!(
+            action(&format!("mod tag rust --head {head}")),
+            ModActionIntent::Assert {
+                action: ModActionValue::Tag { removed: false, head: Some(h) },
+                ..
+            } if h == head
+        ));
+        assert!(matches!(
+            action("mod tag rust --restore"),
+            ModActionIntent::Assert {
+                action: ModActionValue::Tag {
+                    removed: false,
+                    head: None
+                },
+                ..
+            }
+        ));
+        assert!(matches!(
+            action("mod untag rust"),
+            ModActionIntent::Remove { action_key, .. } if action_key == "tag"
+        ));
+        assert!(parse("mod tag rust").unwrap_err().contains("--removed"));
+        assert!(parse("mod tag rust --removed --restore").is_err());
+        assert!(parse("mod tag rust --removed --author").is_err());
+        assert!(parse("mod tag").unwrap_err().contains("slug"));
+        assert!(parse("mod untag rust extra").is_err());
     }
 
     #[test]

@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Arguments of the M3 social commands and M4 `export` (`docs/design/synthesis-v1.md` §6.10): opinions
-//! (`vote`, `agree`, `react`), `notifications`, `activity`, `mods`, `mod`.
+//! (`vote`, `vote --tag`, `agree`, `react`), `notifications`, `activity`, `mods`, `mod`.
 //!
 //! References are the ones `refs` resolves (`3`, `c12`, an at-uri, an SPA link,
 //! `<handle>/<rkey>`); actor references are a handle or a DID.
 
 use clap::{Args, Subcommand, ValueEnum};
-use lessdugin_core::dto::{AgreementValue, KarmaCadence, KarmaValue, ModRole, ModScope, Stance};
+use lessdugin_core::dto::{
+    AccessLevel, AgreementValue, Capability, KarmaCadence, KarmaValue, ModActionValue, ModRole,
+    ModScope, OpinionIntent, Stance, TextQuote, Tier,
+};
 
 /// The value of `vote` (the karma axis).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -71,10 +74,28 @@ pub struct VoteArgs {
     /// The vote.
     #[arg(value_enum)]
     pub value: KarmaArg,
+    /// Vote on whether the post carries this tag (its relevance) instead of its karma: `up`
+    /// applies the tag, `down` opposes it, `clear` takes your tag vote back.
+    #[arg(long, value_name = "SLUG")]
+    pub tag: Option<String>,
     /// Confirm the public action without asking (the first one of its kind needs it when not
     /// running interactively).
     #[arg(long, short = 'y')]
     pub yes: bool,
+}
+
+impl VoteArgs {
+    /// The opinion this vote is: the karma axis, or with `--tag` a tag vote.
+    pub fn intent(&self) -> OpinionIntent {
+        let value = self.value.into();
+        match &self.tag {
+            Some(slug) => OpinionIntent::Tag {
+                slug: slug.strip_prefix('#').unwrap_or(slug).to_owned(),
+                value,
+            },
+            None => OpinionIntent::Karma { value },
+        }
+    }
 }
 
 /// `agree`.
@@ -90,6 +111,15 @@ pub struct AgreeArgs {
     /// running interactively).
     #[arg(long, short = 'y')]
     pub yes: bool,
+}
+
+impl AgreeArgs {
+    /// The opinion this vote is (the agreement axis).
+    pub fn intent(&self) -> OpinionIntent {
+        OpinionIntent::Agreement {
+            value: self.value.into(),
+        }
+    }
 }
 
 /// `react`.
@@ -114,6 +144,23 @@ pub struct ReactArgs {
     /// running interactively).
     #[arg(long, short = 'y')]
     pub yes: bool,
+}
+
+impl ReactArgs {
+    /// The opinion this react is (`quote.exact` only: the engine derives the rest).
+    pub fn intent(&self) -> OpinionIntent {
+        OpinionIntent::React {
+            id: self.react.clone(),
+            stance: stance_of(self.against),
+            quote: self.quote.clone().map(|exact| TextQuote {
+                exact,
+                prefix: None,
+                suffix: None,
+                start: None,
+            }),
+            remove: self.remove,
+        }
+    }
 }
 
 /// `--karma-cadence` of `notifications`.
@@ -277,6 +324,12 @@ pub enum ModAction {
     Lock(ModSubject),
     /// Unlock.
     Unlock(ModSubject),
+    /// Moderate a tag (`#tag`, a forum moderator's action, `social.md` §4.3, §13): remove it
+    /// from the forum (--removed), restore it over a lower rank's removal (--restore), and/or
+    /// pin its wiki page to a revision (--head).
+    Tag(ModTagArgs),
+    /// Remove your `#tag` assertion of a tag.
+    Untag(ModTagSubject),
     /// The queue for moderators: applicants, tag conflicts, stale assertions, newcomers.
     Queue {
         /// The forum (default: --forum, then the current forum).
@@ -341,6 +394,126 @@ pub struct ModCommon {
     /// The action stops applying at this time (RFC 3339, e.g. 2026-11-01T00:00:00Z).
     #[arg(long, value_name = "WHEN")]
     pub until: Option<String>,
+}
+
+/// `mod tag`.
+#[derive(Debug, Args)]
+#[command(group(clap::ArgGroup::new("tag_state").required(true).multiple(true).args(["removed", "restore", "head"])))]
+pub struct ModTagArgs {
+    /// The tag (a slug, or `tag:<slug>`).
+    #[arg(value_name = "SLUG")]
+    pub slug: String,
+    /// The forum (default: --forum, then the current forum).
+    #[arg(long, value_name = "FORUM")]
+    pub forum: Option<String>,
+    /// Remove the tag: its votes and `post.tags` stop applying it.
+    #[arg(long, conflicts_with = "restore")]
+    pub removed: bool,
+    /// Assert that the tag is not removed (overrides a lower rank's removal).
+    #[arg(long)]
+    pub restore: bool,
+    /// Pin the tag's wiki page to this revision (a wikiRevision at-uri, synced). A record
+    /// states the whole `#tag`, so without --removed it also asserts the tag is not removed.
+    #[arg(long, value_name = "AT-URI")]
+    pub head: Option<String>,
+    /// Why (public).
+    #[arg(long, value_name = "TEXT")]
+    pub reason: Option<String>,
+    /// The action stops applying at this time (RFC 3339).
+    #[arg(long, value_name = "WHEN")]
+    pub until: Option<String>,
+}
+
+/// `mod untag`.
+#[derive(Debug, Args)]
+pub struct ModTagSubject {
+    /// The tag (a slug, or `tag:<slug>`).
+    #[arg(value_name = "SLUG")]
+    pub slug: String,
+    /// The forum (default: --forum, then the current forum).
+    #[arg(long, value_name = "FORUM")]
+    pub forum: Option<String>,
+}
+
+/// The `tag:<slug>` mod-action subject of a slug given with or without the prefix.
+pub fn tag_subject(slug: &str) -> String {
+    let slug = slug.strip_prefix("tag:").unwrap_or(slug);
+    format!("tag:{}", slug.strip_prefix('#').unwrap_or(slug))
+}
+
+impl ModAction {
+    /// The value this verb asserts (`data-model.md` §6.7), as `mod` sends it; `None` for a
+    /// removal (`unhide`, `unban`, `unrestrict`, `untag`), a grant (`approve`) and the verbs
+    /// that write no assertion.
+    pub fn asserted(&self) -> Option<ModActionValue> {
+        Some(match self {
+            ModAction::Hide(a) => ModActionValue::Hide {
+                hidden: true,
+                spam: a.spam,
+                show_reason: true,
+            },
+            ModAction::Keep(_) => ModActionValue::Hide {
+                hidden: false,
+                spam: false,
+                show_reason: true,
+            },
+            ModAction::Ban(_) => ModActionValue::Access {
+                level: AccessLevel::Banned,
+            },
+            ModAction::Restrict(a) => ModActionValue::Restrict {
+                capabilities: Some(if a.capabilities.is_empty() {
+                    vec![
+                        Capability::Post,
+                        Capability::Comment,
+                        Capability::Vote,
+                        Capability::React,
+                        Capability::Tag,
+                        Capability::Wiki,
+                        Capability::Sequence,
+                    ]
+                } else {
+                    a.capabilities.iter().map(|c| (*c).into()).collect()
+                }),
+                // the engine keeps the current nullification (m3r-2)
+                nullify_votes: None,
+            },
+            ModAction::Nullify(_) => ModActionValue::Restrict {
+                // the engine keeps the current restriction (m3r-2)
+                capabilities: None,
+                nullify_votes: Some(true),
+            },
+            ModAction::Personal(_) => ModActionValue::Tier {
+                tier: Tier::Personal,
+                notice: None,
+            },
+            ModAction::Frontpage(_) => ModActionValue::Tier {
+                tier: Tier::Frontpage,
+                notice: None,
+            },
+            ModAction::Curate(_) => ModActionValue::Tier {
+                tier: Tier::Curated,
+                notice: None,
+            },
+            ModAction::Pin(a) | ModAction::Unpin(a) => ModActionValue::Pin {
+                scope: a.scope.into(),
+                pinned: matches!(self, ModAction::Pin(_)),
+            },
+            ModAction::Lock(_) => ModActionValue::Lock { locked: true },
+            ModAction::Unlock(_) => ModActionValue::Lock { locked: false },
+            ModAction::Tag(a) => ModActionValue::Tag {
+                removed: a.removed,
+                head: a.head.clone(),
+            },
+            ModAction::Unhide(_)
+            | ModAction::Unban(_)
+            | ModAction::Unrestrict(_)
+            | ModAction::Untag(_)
+            | ModAction::Approve(_)
+            | ModAction::Queue { .. }
+            | ModAction::Log { .. }
+            | ModAction::Adopt { .. } => return None,
+        })
+    }
 }
 
 /// `mod restrict`.

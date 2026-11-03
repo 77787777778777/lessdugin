@@ -1261,6 +1261,7 @@ The port of a loopback redirect is ignored when matching. The CLI listens on an 
 - `pct` is percent-encoding (RFC 3986, unreserved characters kept).
 - The `client_id` has no port and an empty path.
 - The hosted native metadata is used automatically after `invalid_client`, or with `--oauth-client hosted`.
+- Its `client_id` is the production URL above unless `login --oauth-client-id <url>` or the native `config.toml` (`oauth_client_id`) names another, in that order: an `https` URL of the native document as another origin serves it for itself (a preview deployment, a self-hosted site; decision O-6). A `.temp` build needs a document whose `scope` is the `.temp` `SUPERSET`.
 
 **Self-hosting.** `xtask site --origin <url>` regenerates both files, substituting the origin in `client_id`, `client_uri` and `redirect_uris`. `client_uri` MUST have the same host as `client_id`.
 
@@ -1529,4 +1530,5 @@ These choices fill gaps or resolve ambiguities in the sources. Each takes the si
 - confirm item 6 (quickTake requires a body);
 - confirm the opt-out in item 11;
 - `goat lex validate` rejects every record whose union holds `com.atproto.label.defs#selfLabels` ("NSID syntax didn't validate via regex"), `app.bsky.feed.post` included. This is a goat bug. Spike S4 should record it, and no lessdugin check may rely on `goat lex validate` for `post`.
+- *(Orchestrator decision O-6, for the U7 review.)* The hosted native `client_id` is configurable (§10.4: `login --oauth-client-id`, then `config.toml` `oauth_client_id`), so a preview origin can serve `.temp` native metadata; the production default is unchanged.
 - *(Orchestrator decision O-10, for the U7 review.)* "Redact history" (§8) is decided by the listing made when the write is sent, so a client never refuses a redaction because its cached view shows no history (a sync that failed quietly, a device that never synced the item, invalid revisions): the CLI's `redact --yes` always sends it, and without `--yes` only reports what its view holds.

@@ -67,6 +67,8 @@ pub struct Web {
     pub login: LoginSlot,
     /// Questions to the terminal (a browser sign-in's confirmation).
     pub prompt: Prompt,
+    /// The hosted native OAuth client id of `config.toml` (`oauth_client_id`, decision O-6).
+    pub oauth_client_id: Option<url::Url>,
     /// Set to `true` when the server stops (held `/bridge/lock` bodies end).
     pub shutdown: tokio::sync::watch::Sender<bool>,
 }

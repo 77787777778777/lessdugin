@@ -50,6 +50,59 @@ fn done_in(writes: &[WriteTicket], collection: &str) -> String {
         .unwrap_or_else(|| panic!("no done {collection} write: {writes:?}"))
 }
 
+/// Decision O-7: in the search results `n` and `N` step to the next and previous hit (round
+/// the ends), `/` opens the command line on `search `, and `N` stays Notifications elsewhere,
+/// a result panel that is not a search included (it closes, as any key does).
+#[test]
+fn search_results_step_with_n_and_shift_n() {
+    let s = scenario();
+    let mut t = common::tui(&s, 100, 32);
+    block_on(t.start(Some(s.forum.clone())));
+
+    block_on(t.press("/"));
+    assert_eq!(t.state.command.as_deref(), Some("search "));
+    for c in "Hello --limit 10".chars() {
+        block_on(t.press(&c.to_string()));
+    }
+    block_on(t.press("Enter"));
+    let hits = t.state.panel.as_ref().expect("search panel").items.len();
+    assert!(hits >= 2, "{}", t.render());
+    insta::assert_snapshot!("search_results_100x32", t.render());
+    block_on(t.press("n"));
+    assert_eq!(t.state.panel.as_ref().unwrap().selected, 1);
+    insta::assert_snapshot!("search_results_next_100x32", t.render());
+    block_on(t.press("N"));
+    assert_eq!(t.state.panel.as_ref().unwrap().selected, 0);
+    // round the ends: N on the first hit is the last, n on the last the first
+    block_on(t.press("N"));
+    assert_eq!(t.state.panel.as_ref().unwrap().selected, hits - 1);
+    block_on(t.press("n"));
+    assert_eq!(t.state.panel.as_ref().unwrap().selected, 0);
+    // `/` from the results searches again
+    block_on(t.press("/"));
+    assert!(t.state.panel.is_none());
+    assert_eq!(t.state.command.as_deref(), Some("search "));
+    block_on(t.press("Esc"));
+    assert!(t.state.command.is_none());
+
+    // another result panel: N closes it and moves nothing
+    run_command(&mut t, "user bob.example.com");
+    assert!(!t.state.panel.as_ref().unwrap().search);
+    block_on(t.press("N"));
+    assert!(t.state.panel.is_none(), "{}", t.render());
+    assert!(t.state.top_forum_screen().is_some(), "{}", t.render());
+    // and on a screen, N is Notifications
+    block_on(t.press("N"));
+    assert!(
+        matches!(
+            t.state.top().map(|s| &s.kind),
+            Some(lessdugin_tui::app::ScreenKind::Notifications(_))
+        ),
+        "{}",
+        t.render()
+    );
+}
+
 #[test]
 fn search_and_organisation_reads_render_engine_results_and_open_stable_refs() {
     let s = scenario();

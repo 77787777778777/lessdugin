@@ -424,6 +424,8 @@ pub enum IndexerMode {
 /// doh = ["https://cloudflare-dns.com/dns-query", "https://dns.google/resolve"]
 /// plc = "https://plc.directory"
 /// indexer = "forum"               # forum | none | ["https://…"]
+/// # the hosted native OAuth client (`data-model.md` §10.4); unset: the production metadata
+/// oauth_client_id = "https://lessdugin.7778777.online/oauth/cli-client-metadata.json"
 ///
 /// [network]
 /// mode = "devnet"                 # production | devnet
@@ -494,6 +496,11 @@ pub struct Config {
     pub indexer: IndexerSetting,
     /// Media autoload allowlist (hostnames, `sync.md` §11.3).
     pub media_hosts: Vec<String>,
+    /// The hosted native OAuth `client_id` (its metadata URL, `data-model.md` §10.4): a
+    /// preview or self-hosted origin serving the same document for itself (decision O-6).
+    /// Unset: the production metadata (`auth::oauth::scope::HOSTED_CLIENT_ID`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oauth_client_id: Option<Url>,
     /// Network profile; a table, so it must stay the last field for TOML output.
     pub network: NetworkProfile,
 }
@@ -526,6 +533,7 @@ impl Default for Config {
             slingshot: Some(url("https://slingshot.microcosm.blue")),
             indexer: IndexerSetting::default(),
             media_hosts: Vec::new(),
+            oauth_client_id: None,
             network: NetworkProfile::Production,
         }
     }
@@ -624,6 +632,9 @@ impl Config {
                 https("indexer", u)?;
             }
         }
+        if let Some(u) = &self.oauth_client_id {
+            oauth_client_id(u)?;
+        }
         if let NetworkProfile::Devnet(d) = &self.network {
             for (what, u) in [("network.plc", &d.plc), ("network.pds", &d.pds)] {
                 if !matches!(u.scheme(), "http" | "https") || u.host().is_none() {
@@ -679,6 +690,26 @@ impl Config {
     pub fn save(&self, path: &Path) -> Result<(), ConfigError> {
         self.validate()?;
         fsutil::write_private_atomic(path, self.to_toml_string().as_bytes()).map_err(io_err(path))
+    }
+}
+
+/// Checks a hosted native OAuth `client_id` (`oauth_client_id`, `login --oauth-client-id`): an
+/// authorization server fetches the metadata document from it, so it is an `https` URL with a
+/// host and a path, and no userinfo, query or fragment, in devnet mode too.
+pub fn oauth_client_id(u: &Url) -> Result<(), ConfigError> {
+    let shaped = u.scheme() == "https"
+        && u.host().is_some()
+        && u.username().is_empty()
+        && u.password().is_none()
+        && u.query().is_none()
+        && u.fragment().is_none()
+        && u.path() != "/";
+    if shaped {
+        Ok(())
+    } else {
+        Err(ConfigError::Invalid(format!(
+            "oauth_client_id must be the https URL of a client metadata document: {u}"
+        )))
     }
 }
 
@@ -799,6 +830,31 @@ mod tests {
         let cfg = Config::from_toml_str("plc = \"http://plc.example\"").unwrap();
         assert!(matches!(cfg.validate(), Err(ConfigError::Invalid(_))));
         assert!(Config::from_toml_str("sources = \"sideways\"").is_err());
+    }
+
+    /// Decision O-6: the hosted native client id is configurable; unset, it is the production
+    /// metadata, and only an https metadata URL is accepted.
+    #[test]
+    fn the_hosted_oauth_client_id_is_configurable() {
+        assert_eq!(Config::default().oauth_client_id, None);
+        let preview = "https://preview.example.com/oauth/cli-client-metadata.json";
+        let cfg = Config::from_toml_str(&format!("oauth_client_id = \"{preview}\"")).unwrap();
+        assert_eq!(cfg.oauth_client_id.as_ref().map(Url::as_str), Some(preview));
+        cfg.validate().unwrap();
+        assert_eq!(Config::from_toml_str(&cfg.to_toml_string()).unwrap(), cfg);
+        for bad in [
+            "http://preview.example.com/oauth/cli-client-metadata.json",
+            "https://preview.example.com/",
+            "https://preview.example.com/m.json?x=1",
+            "https://user@preview.example.com/m.json",
+            "https://preview.example.com/m.json#f",
+        ] {
+            let cfg = Config::from_toml_str(&format!("oauth_client_id = \"{bad}\"")).unwrap();
+            assert!(
+                matches!(cfg.validate(), Err(ConfigError::Invalid(_))),
+                "{bad}"
+            );
+        }
     }
 
     #[test]

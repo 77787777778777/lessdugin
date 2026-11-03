@@ -1045,6 +1045,280 @@ fn a_spilled_body_is_edited_as_its_text() {
     assert!(rec["body"].get("textBlob").is_none(), "{}", rec["body"]);
 }
 
+/// `read` is one view per process, and a view waits `BODY_BLOB_WAIT_MS` (3 s) for a spilled
+/// body: the CLI awaits the download the view started before it prints, so a body slower than
+/// that still shows (m3m4-continuation-5, `limits.md` `BODY_BLOB_WAIT_MS`). One that cannot be
+/// downloaded at all shows its excerpt, and a warning names it.
+#[test]
+#[allow(clippy::disallowed_methods)] // a real clock for a real process
+fn read_waits_for_a_slow_spilled_body() {
+    use lessdugin_testkit::fake_pds::Fault;
+    let net = Net::new();
+    let alice = net.user("alice.test", true);
+    alice.json(&["forum", "create", "meta", "--frontpage"]);
+    let post_of = |title: &str| {
+        let long = "word ".repeat(14_000);
+        let f = alice.file(
+            &format!("{title}.md"),
+            // each body its own blob
+            &format!(
+                "---\ntitle: {title}\n---\nThe opening of {title}.\n\n{long}\n\nThe last words.\n"
+            ),
+        );
+        let p = alice.json(&["post", s(&f), "--yes"]);
+        p["state"]["uri"].as_str().unwrap().to_owned()
+    };
+    let slow = post_of("Slow");
+    let reader = net.reader(&alice);
+    let body_of = |out: &std::process::Output| -> String {
+        let tv: ThreadView = serde_json::from_slice(&out.stdout)
+            .unwrap_or_else(|e| panic!("{e}: {}", text(&out.stderr)));
+        match tv.post {
+            lessdugin_core::dto::ThreadRoot::Post(p) => p.body.text,
+            other => panic!("{other:?}"),
+        }
+    };
+
+    // the author's PDS takes 6 s to answer getBlob: twice the view's wait
+    alice.account.inject(
+        Fault::latency(6_000)
+            .on_nsid("com.atproto.sync.getBlob")
+            .once(),
+    );
+    let started = std::time::Instant::now();
+    let out = reader.run(&["--json", "read", &slow]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(started.elapsed() >= std::time::Duration::from_secs(5));
+    let body = body_of(&out);
+    assert!(body.contains("The last words."), "{body}");
+    assert!(
+        !text(&out.stderr).contains("still not loaded"),
+        "{}",
+        text(&out.stderr)
+    );
+
+    // a body its PDS will not serve: the excerpt, and a warning naming the item
+    let broken = post_of("Broken");
+    alice
+        .account
+        .inject(Fault::status(500).on_nsid("com.atproto.sync.getBlob"));
+    let out = reader.run(&["--json", "read", &broken]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(!body_of(&out).contains("The last words."));
+    let stderr = text(&out.stderr);
+    assert!(
+        stderr.contains("still not loaded") && stderr.contains(&broken),
+        "{stderr}"
+    );
+    // `export` awaits each download to its end; the one that fails is named, not left out
+    // quietly
+    let out = reader.run(&["--json", "export", "alice.test/meta"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let x: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let markdown = |uri: &str| {
+        x["posts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["uri"] == uri)
+            .map(|p| p["markdown"].clone())
+            .unwrap_or_else(|| panic!("{uri} not exported: {x}"))
+    };
+    assert!(
+        markdown(&slow)
+            .as_str()
+            .unwrap()
+            .contains("The last words.")
+    );
+    assert!(markdown(&broken).is_null());
+    let stderr = text(&out.stderr);
+    assert!(
+        stderr.contains("could not be downloaded") && stderr.contains(&broken),
+        "{stderr}"
+    );
+}
+
+/// `forum show` is one view per process too, and `forum_open` waits `BODY_BLOB_WAIT_MS` (3 s)
+/// for a spilled `about`: the CLI awaits the download the view started before it prints, so an
+/// about slower than that still shows (m3m4-continuation-5, `limits.md` `BODY_BLOB_WAIT_MS`).
+/// One that cannot be downloaded at all shows its notice, and a warning says so.
+#[test]
+#[allow(clippy::disallowed_methods)] // a real clock for a real process
+fn forum_show_waits_for_a_slow_spilled_about() {
+    use lessdugin_core::model::render::NOTICE_SPILLED;
+    use lessdugin_testkit::fake_pds::Fault;
+    let net = Net::new();
+    let alice = net.user("alice.test", true);
+    let forum_of = |name: &str| {
+        // each about its own blob, over 64 KiB so it spills (`data-model.md` §5.3)
+        let about = format!(
+            "# About {name}\n\n{}\n\nThe last words.\n",
+            "All about it. ".repeat(5_000)
+        );
+        let c = alice.json(&["forum", "create", name, "--about", &about]);
+        assert_eq!(c["state"]["kind"], "done", "{c}");
+        let decl = alice.account.get(nsid::FORUM, name).unwrap();
+        assert!(decl["about"]["textBlob"].is_object(), "spilled: {decl}");
+        format!("alice.test/{name}")
+    };
+    let slow = forum_of("slow");
+    let reader = net.reader(&alice);
+    let about_of = |out: &std::process::Output| {
+        let v: ForumView = serde_json::from_slice(&out.stdout)
+            .unwrap_or_else(|e| panic!("{e}: {}", text(&out.stderr)));
+        v.about.expect("an about")
+    };
+
+    // the owner's PDS takes 6 s to answer getBlob: twice the view's wait
+    alice.account.inject(
+        Fault::latency(6_000)
+            .on_nsid("com.atproto.sync.getBlob")
+            .once(),
+    );
+    let started = std::time::Instant::now();
+    let out = reader.run(&["--json", "forum", "show", &slow]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(started.elapsed() >= std::time::Duration::from_secs(5));
+    let about = about_of(&out);
+    assert!(about.text.contains("The last words."), "{about:?}");
+    assert!(
+        !about.notices.iter().any(|n| n == NOTICE_SPILLED),
+        "{about:?}"
+    );
+    assert!(
+        !text(&out.stderr).contains("still not loaded"),
+        "{}",
+        text(&out.stderr)
+    );
+
+    // an about its PDS will not serve: the notice, and a warning, in both outputs
+    let broken = forum_of("broken");
+    alice
+        .account
+        .inject(Fault::status(500).on_nsid("com.atproto.sync.getBlob"));
+    let out = reader.run(&["--json", "forum", "show", &broken]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let about = about_of(&out);
+    assert!(!about.text.contains("The last words."), "{about:?}");
+    assert!(
+        about.notices.iter().any(|n| n == NOTICE_SPILLED),
+        "{about:?}"
+    );
+    assert!(
+        text(&out.stderr).contains("about is still not loaded"),
+        "{}",
+        text(&out.stderr)
+    );
+    let out = reader.run(&["forum", "show", &broken]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stdout).contains(NOTICE_SPILLED),
+        "{}",
+        text(&out.stdout)
+    );
+    assert!(
+        text(&out.stderr).contains("about is still not loaded"),
+        "{}",
+        text(&out.stderr)
+    );
+}
+
+/// `tag <slug>` (its wiki page) and `sequence read` are one view per process too, and both
+/// bodies may spill (`data-model.md` §5.2 rule 2): the CLI awaits the download their view
+/// started before it prints, as `read` does (m3m4-continuation-5, `limits.md`
+/// `BODY_BLOB_WAIT_MS`).
+#[test]
+#[allow(clippy::disallowed_methods)] // a real clock for a real process
+fn tag_and_sequence_wait_for_slow_spilled_bodies() {
+    use lessdugin_core::dto::{SequenceView, TagView};
+    use lessdugin_core::model::render::NOTICE_SPILLED;
+    use lessdugin_testkit::fake_pds::Fault;
+    let net = Net::new();
+    let alice = net.user("alice.test", true);
+    alice.json(&["forum", "create", "meta", "--frontpage"]);
+    // over 64 KiB, so it spills (`data-model.md` §5.3); each its own blob
+    let long = |name: &str| {
+        format!(
+            "# {name}\n\n{}\n\nThe last words.\n",
+            "All about it. ".repeat(5_000)
+        )
+    };
+    let rkey = |uri: &str| uri.rsplit('/').next().unwrap().to_owned();
+    let page = alice.file("rust.md", &long("Rust"));
+    let t = alice.json(&["wiki", "edit", "rust", "--name", "Rust", "--file", s(&page)]);
+    assert_eq!(t["state"]["kind"], "done", "{t}");
+    let revision = t["state"]["uri"].as_str().unwrap().to_owned();
+    let rec = alice
+        .account
+        .get(nsid::WIKI_REVISION, &rkey(&revision))
+        .unwrap();
+    assert!(rec["body"]["textBlob"].is_object(), "spilled: {rec}");
+    let f = alice.file("p.md", "---\ntitle: A chapter's post\n---\nShort.\n");
+    let p = alice.json(&["post", s(&f), "--yes"]);
+    let post = p["state"]["uri"].as_str().unwrap().to_owned();
+    let draft = alice.file(
+        "seq.json",
+        &serde_json::json!({
+            "forum": "alice.test/meta",
+            "title": "Slow",
+            "body": { "markdown": long("Slow") },
+            "chapters": [{ "title": "One", "posts": [post] }],
+        })
+        .to_string(),
+    );
+    let t = alice.json(&["sequence", "create", s(&draft)]);
+    assert_eq!(t["state"]["kind"], "done", "{t}");
+    let sequence = t["state"]["uri"].as_str().unwrap().to_owned();
+    let rec = alice.account.get(nsid::SEQUENCE, &rkey(&sequence)).unwrap();
+    assert!(rec["body"]["textBlob"].is_object(), "spilled: {rec}");
+    let reader = net.reader(&alice);
+    reader.ok(&["sync", "alice.test/meta"]);
+    let slow_get_blob = || {
+        // the author's PDS takes 6 s to answer getBlob: twice the view's wait
+        alice.account.inject(
+            Fault::latency(6_000)
+                .on_nsid("com.atproto.sync.getBlob")
+                .once(),
+        );
+    };
+
+    slow_get_blob();
+    let started = std::time::Instant::now();
+    let out = reader.run(&["--json", "tag", "rust", "--forum", "alice.test/meta"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(started.elapsed() >= std::time::Duration::from_secs(5));
+    let v: TagView = serde_json::from_slice(&out.stdout).unwrap();
+    let body = v.page.expect("a page");
+    assert!(body.text.contains("The last words."), "{body:?}");
+    assert!(
+        !body.notices.iter().any(|n| n == NOTICE_SPILLED),
+        "{body:?}"
+    );
+    assert!(
+        !text(&out.stderr).contains("still not loaded"),
+        "{}",
+        text(&out.stderr)
+    );
+
+    slow_get_blob();
+    let started = std::time::Instant::now();
+    let out = reader.run(&["--json", "sequence", "read", &sequence]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(started.elapsed() >= std::time::Duration::from_secs(5));
+    let v: SequenceView = serde_json::from_slice(&out.stdout).unwrap();
+    let body = v.body.expect("a body");
+    assert!(body.text.contains("The last words."), "{body:?}");
+    assert!(
+        !body.notices.iter().any(|n| n == NOTICE_SPILLED),
+        "{body:?}"
+    );
+    assert!(
+        !text(&out.stderr).contains("still not loaded"),
+        "{}",
+        text(&out.stderr)
+    );
+}
+
 /// An edit keeps a link post's card (`link.title`, `link.description`, entered by another
 /// client) while the uri stays: the engine writes `link` from the draft (`data-model.md`
 /// §8.3), so a title-only or text-only edit must send the card again (robustness-7). A new

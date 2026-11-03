@@ -154,6 +154,12 @@ fn panel(f: &mut Frame<'_>, p: &Panel, area: Rect) {
             (scroll + rows).min(total),
             total
         )
+    } else if p.search {
+        format!(
+            " result {}/{} · n/N next/previous · Enter opens · Esc closes ",
+            p.selected + 1,
+            p.items.len()
+        )
     } else {
         format!(
             " result {}/{} · j/k select · Enter opens · Esc closes ",

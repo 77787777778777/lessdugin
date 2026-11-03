@@ -5,24 +5,23 @@ expression: help
  lessdugin › Meta › Welcome                                                                                                                  @carol.example.com
  Meta · synced
 ▌ Welcome
-▌ @alice.example.com · 2025-10-09 08:54 UTC · 1 comment · 1 point
-▌                                               ┌ Keys ────────────────────────────────────────────────────────┐
-▌ Hello everyone, and welcome to the forum.     │Navigation                                                    │
-▌                                               │  j k  Down Up    next / previous                             │
-▌ ## Rules                                      │  g G             first / last                                │
-▌                                               │  Ctrl-d Ctrl-u   half a page down / up                       │
-▌ • Be kind.                                    │  Enter l         open                                        │
-▌ • Stay on topic; see the guide ⟨example.com⟩. │  h Esc q         back (q on the home screen quits)           │
-▌                                               │Threads                                                       │
-▌ lessdugin tui                                 │  Space           collapse / expand replies                   │
-                                                │  p               parent comment                              │
-  1 comment                                     │  r               reply in $EDITOR                            │
-                                                │  c               comment on the post in $EDITOR              │
-  @bob.example.com · 2025-10-09 08:57 UTC · 1 po│  s               comment sort (magic, top, new, old, latest) │
-    Thanks for the forum!                       │  i               load the item's images (their host sees you)│
-                                                │Forums                                                        │
-    It looks great.                             │  s               sort: magic, top, new, old, recent comments │
-                                                │  f               filter: frontpage, all, curated             │
+▌ @alice.example.com · 2025-10-09 08:54 UTC · 1 ┌ Keys ────────────────────────────────────────────────────────┐
+▌                                               │Navigation                                                    │
+▌ Hello everyone, and welcome to the forum.     │  j k  Down Up    next / previous                             │
+▌                                               │  g G             first / last                                │
+▌ ## Rules                                      │  Ctrl-d Ctrl-u   half a page down / up                       │
+▌                                               │  Enter l         open                                        │
+▌ • Be kind.                                    │  h Esc q         back (q on the home screen quits)           │
+▌ • Stay on topic; see the guide ⟨example.com⟩. │Threads                                                       │
+▌                                               │  Space           collapse / expand replies                   │
+▌ lessdugin tui                                 │  p               parent comment                              │
+                                                │  r               reply in $EDITOR                            │
+  1 comment                                     │  c               comment on the post in $EDITOR              │
+                                                │  s               comment sort (magic, top, new, old, latest) │
+  @bob.example.com · 2025-10-09 08:57 UTC · 1 po│  i               load the item's images (their host sees you)│
+    Thanks for the forum!                       │Forums                                                        │
+                                                │  s               sort: magic, top, new, old, recent comments │
+    It looks great.                             │  f               filter: frontpage, all, curated             │
                                                 │  Tab             posts / activity                            │
                                                 │  P               new post in $EDITOR                         │
                                                 │  R               sync and show new items                     │
@@ -37,6 +36,8 @@ expression: help
                                                 │Other                                                         │
                                                 │  m               mod menu (queue, log, actions)              │
                                                 │  :               command line (any M3 verb; : help)          │
+                                                │  /               search the synced cache                     │
+                                                │  n N             next / previous hit (search results)        │
                                                 │  E               versions of the selected item               │
                                                 │  N               notifications                               │
                                                 │  M               mark all notifications read                 │
@@ -45,7 +46,6 @@ expression: help
                                                 │                                                              │
                                                 │Any key closes this help.                                     │
                                                 └──────────────────────────────────────────────────────────────┘
-
 
 
 

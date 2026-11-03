@@ -479,7 +479,8 @@ fn edit_draft_file(
     Err(e)
 }
 
-/// `lessdugin comment <ref> [file|-] [-m text]`.
+/// `lessdugin comment <ref> [file|-] [-m text] [--yes]` (`--yes` confirms the uploads of a
+/// file of the drafts directory, as `post --yes` does: FILE-2).
 pub async fn comment(ctx: &Ctx, args: CommentArgs) -> Result<(), CliError> {
     let w = ctx.writer().await?;
     let (uri, is_comment) = refs::post_or_comment(ctx, &w.engine, &args.reference).await?;
@@ -509,7 +510,7 @@ pub async fn comment(ctx: &Ctx, args: CommentArgs) -> Result<(), CliError> {
             }
             let mut d = CommentDraft::new(root, parent, doc.body_text());
             let dir = ctx.paths.drafts_dir();
-            attach_media(ctx, &w, &mut d.body, Some(&dir), false, false, Some(&id)).await?;
+            attach_media(ctx, &w, &mut d.body, Some(&dir), false, args.yes, Some(&id)).await?;
             return queue_from_draft(ctx, &w, &id, w.engine.comment(&d), "Commented").await;
         }
     };
@@ -517,7 +518,16 @@ pub async fn comment(ctx: &Ctx, args: CommentArgs) -> Result<(), CliError> {
         return Err(CliError::usage("the comment is empty; nothing was posted"));
     }
     let mut d = CommentDraft::new(root, parent, text);
-    attach_media(ctx, &w, &mut d.body, dir.as_deref(), foreign, false, None).await?;
+    attach_media(
+        ctx,
+        &w,
+        &mut d.body,
+        dir.as_deref(),
+        foreign,
+        args.yes,
+        None,
+    )
+    .await?;
     send_comment(ctx, &w, &d).await
 }
 
@@ -888,7 +898,8 @@ async fn send_edit(
     report(ctx, &t, "Edited")
 }
 
-/// `lessdugin edit <ref> [file|-] [-m text] [--title t] [--summary s] [--no-history]`.
+/// `lessdugin edit <ref> [file|-] [-m text] [--title t] [--summary s] [--no-history] [--yes]`
+/// (`--yes` confirms what the edit suspends and the uploads of a file of the drafts directory).
 pub async fn edit(ctx: &Ctx, args: EditArgs) -> Result<(), CliError> {
     let reader = ctx.reader().await?;
     let (uri, _) = refs::post_or_comment(ctx, &reader, &args.reference).await?;
@@ -939,7 +950,7 @@ pub async fn edit(ctx: &Ctx, args: EditArgs) -> Result<(), CliError> {
                 body_mut(&mut d),
                 Some(&dir),
                 false,
-                false,
+                args.yes,
                 Some(&id),
             )
             .await?;
@@ -964,7 +975,7 @@ pub async fn edit(ctx: &Ctx, args: EditArgs) -> Result<(), CliError> {
             body_mut(&mut d),
             dir.as_deref(),
             foreign,
-            false,
+            args.yes,
             None,
         )
         .await?;

@@ -117,6 +117,31 @@ fn usage_errors_exit_2() {
         .args(["login", "--app-password", "--no-browser", "alice.test"])
         .assert()
         .code(2);
+    // a hosted client id is an https metadata URL, checked before the network is touched
+    // (decision O-6); it never goes with an app password
+    let mut dead = DEAD.to_vec();
+    dead.extend([
+        "login",
+        "alice.test",
+        "--oauth-client-id",
+        "http://preview.example.com/oauth/cli-client-metadata.json",
+    ]);
+    let out = bin(dir.path()).args(&dead).output().unwrap();
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("--oauth-client-id"),
+        "{out:?}"
+    );
+    bin(dir.path())
+        .args([
+            "login",
+            "--app-password",
+            "--oauth-client-id",
+            "https://preview.example.com/oauth/cli-client-metadata.json",
+            "alice.test",
+        ])
+        .assert()
+        .code(2);
 }
 
 #[test]
