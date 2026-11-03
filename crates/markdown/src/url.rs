@@ -997,9 +997,70 @@ mod tests {
         ] {
             assert!(!html_host_suffix(text, host), "{text:?} {host}");
         }
-        // The letters that read as `/` stay name characters (Japanese and Chinese words).
+        // The code points that read as two or three slashes are as many `/`, and a nonspacing
+        // or enclosing mark after a `/` draws on it (U+29F6 is `/` with a macron), so the `//`
+        // stands, also without a scheme or next to a dot (review 2, m3m4-continuation-4).
+        for lead in [
+            "\u{2AFD}",
+            "\u{2AFB}",
+            "\u{244A}",
+            "\u{2CF9}",
+            "\u{29F6}\u{29F6}",
+            "\u{2572}\u{31D2}",
+            "/\u{0338}/\u{0338}",
+            "\u{2215}\u{20DD}\u{2215}",
+        ] {
+            for text in [
+                format!("{lead}u@google.com@evil.com"),
+                format!("x:{lead}u@google.com@evil.com"),
+                format!("{lead}.google.com@evil.com"),
+            ] {
+                assert!(html_host_suffix(&text, "evil.com"), "{text:?}");
+            }
+        }
+        for (text, host) in [
+            ("evil.com\u{2AFD}google.com", "evil.com"),
+            ("evil.com\u{2CF9}google.com", "evil.com"),
+            ("evil.com\u{29F6}google.com", "evil.com"),
+            ("evil.com\u{2572}google.com", "evil.com"),
+            ("google.\u{2AFB}com", "evil.com"),
+            ("google\u{244A}.com", "evil.com"),
+            ("/\u{0338}google.com", "google.com"),
+        ] {
+            assert!(!html_host_suffix(text, host), "{text:?} {host}");
+        }
+        // After a special scheme other than `file` and its `:`, URL parsers read an authority
+        // with one `/` or none, so no name there is a mailbox either.
+        for text in [
+            "https:u@google.com@evil.com",
+            "https:/u@google.com@evil.com",
+            "https:\\u@google.com@evil.com",
+            "HTTP:u@google.com@evil.com",
+            "\u{FF48}ttps\u{FF1A}u@google.com@evil.com",
+            "ftp:google.com@evil.com",
+            "ws:u@google.com@evil.com",
+            "wss:/@google.com@evil.com",
+            "(https:u@google.com@evil.com)",
+        ] {
+            assert!(html_host_suffix(text, "evil.com"), "{text:?}");
+        }
+        // ... and only there: other schemes and longer names keep the mailbox rule.
+        for (text, host) in [
+            ("news:first.last@corp.com", "corp.com"),
+            ("file:first.last@corp.com", "corp.com"),
+            ("xhttps:first.last@corp.com", "corp.com"),
+            ("https-x:first.last@corp.com", "corp.com"),
+            ("https:u:p@evil.com", "evil.com"),
+        ] {
+            assert!(!html_host_suffix(text, host), "{text:?} {host}");
+        }
+        // The letters that read as `/` stay name characters (Japanese and Chinese words), and
+        // the symbols that read as a slash beside a set sign stay gaps.
         assert!(html_host_suffix("evil.com\u{30CE}google.com", "evil.com"));
         assert!(html_host_suffix("evil.com\u{4E3F}google.com", "evil.com"));
+        assert!(html_host_suffix("evil.com\u{FF89}google.com", "evil.com"));
+        assert!(html_host_suffix("evil.com\u{2CC7}google.com", "evil.com"));
+        assert!(html_host_suffix("evil.com\u{27C8}google.com", "evil.com"));
         // Mailboxes and path, query or fragment names are not hosts; ASCII whitespace still
         // ends a name, so prose is not one.
         for (text, host) in [
