@@ -37,6 +37,29 @@ describe("MockEngine fixture", () => {
     await expect(e.backlinks("not an at-uri")).rejects.toMatchObject({ code: "invalid_ref" });
   });
 
+  // sync.md §4.7: verified owners by handle, then the others by DID; by name within an owner
+  it("orders the directory by owner group, then by name", async () => {
+    vi.useFakeTimers();
+    try {
+      const e = new MockEngine({ sendMs: 10 });
+      for (const [slug, name] of [
+        ["zeta", "zeta"],
+        ["alpha", "Alpha"],
+      ] as const) {
+        await e.forumCreate({ slug, name, membership: "open", defaultTier: "personal" });
+      }
+      await vi.advanceTimersByTimeAsync(50);
+      const all = await e.forumDiscover("");
+      expect(all.map((f) => [f.owner.handle, f.name])).toEqual([
+        ["ada.test", "LessDugin Test Forum"],
+        ["you.test", "Alpha"],
+        ["you.test", "zeta"],
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("lists posts of every kind with the frontpage filter excluding quick takes", async () => {
     const e = new MockEngine();
     const all = await e.listPosts({ forum: FORUM_URI, sort: "new", filter: "all", limit: 100 });

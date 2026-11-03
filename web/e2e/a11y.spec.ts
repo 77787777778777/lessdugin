@@ -186,6 +186,20 @@ for (const scheme of ["light", "dark"] as const) {
       expect(w.errors).toEqual([]);
     });
 
+    test("the forum directory's owner headings", async ({ page }) => {
+      const w = await watch(page);
+      await open(page, "/", () =>
+        expect(page.getByRole("heading", { level: 1, name: "Your forums" })).toBeVisible(),
+      );
+      await page
+        .getByRole("article", { name: "LessDugin Test Forum" })
+        .getByRole("button", { name: "Unfollow" })
+        .click();
+      await expect(page.getByRole("heading", { level: 3, name: /^Forums by / })).toBeVisible();
+      expect(await axe(page, "directory with owner headings")).toEqual([]);
+      expect(w.errors).toEqual([]);
+    });
+
     test("mod queue banners of an approval forum (O-8)", async ({ page }) => {
       const w = await watch(page);
       const found: string[] = [];

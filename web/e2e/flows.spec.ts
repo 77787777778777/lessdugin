@@ -280,6 +280,22 @@ test("an edit removes a link post's card and keeps the link (EditOpts.dropLinkCa
   await expect(page.getByRole("checkbox", { name: "Remove the link card" })).toHaveCount(0);
 });
 
+test("the forum directory lists forums under their owner (sync.md §4.7)", async ({ page }) => {
+  await go(page, "/", "Your forums");
+  await expect(page.getByRole("heading", { level: 2, name: "Discover" })).toHaveCount(0);
+  await page
+    .getByRole("article", { name: FORUM })
+    .getByRole("button", { name: "Unfollow" })
+    .click();
+  await expect(page.getByRole("heading", { level: 2, name: "Discover" })).toBeVisible();
+  const owner = page.getByRole("heading", { level: 3, name: /^Forums by Ada Lovelace/ });
+  await expect(owner).toBeVisible();
+  // the forum's card is in its owner's group, titled one level below the owner
+  await expect(
+    owner.locator("xpath=..").getByRole("heading", { level: 4, name: FORUM }),
+  ).toBeVisible();
+});
+
 test("create a forum, edit its declaration and manage a moderator", async ({ page }) => {
   await go(page, "/", "Your forums");
   await page.getByRole("button", { name: "Create a forum" }).click();

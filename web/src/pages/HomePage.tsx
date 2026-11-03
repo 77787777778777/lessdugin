@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import type { ForumDraft, ForumSummary } from "@lessdugin/engine/types";
+// The followed forums, creating a forum, and the forum directory (`forum_discover`), which comes
+// grouped by owner (sync.md §4.7): each owner's forums are listed under a heading naming the
+// owner, so a lookalike forum name shows under its real owner.
+import type { ActorView, ForumDraft, ForumSummary } from "@lessdugin/engine/types";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
@@ -16,18 +19,20 @@ import { parseAtUri } from "../lib/uri.ts";
 import ui from "../styles/ui.module.css";
 import styles from "./pages.module.css";
 
-function ForumCard({ forum }: { forum: ForumSummary }) {
+/** `heading`: the title's level, below an owner heading in the directory. */
+function ForumCard({ forum, heading = "h2" }: { forum: ForumSummary; heading?: "h2" | "h4" }) {
   const engine = useEngine();
   const qc = useQueryClient();
   const p = parseAtUri(forum.uri);
   if (!p) return null;
+  const Title = heading;
   return (
     <article className={styles.forumCard} aria-label={cleanName(forum.name)}>
-      <h2 className={styles.forumCardTitle}>
+      <Title className={styles.forumCardTitle}>
         <Link to="/f/$owner/$slug" params={{ owner: p.did, slug: p.rkey }}>
           <bdi>{cleanName(forum.alias ?? forum.name)}</bdi>
         </Link>
-      </h2>
+      </Title>
       {forum.description && <p className={ui.muted}>{forum.description}</p>}
       <div className={ui.row}>
         <span className={ui.small}>
@@ -51,6 +56,19 @@ function ForumCard({ forum }: { forum: ForumSummary }) {
       </div>
     </article>
   );
+}
+
+/** The directory's runs of one owner's forums, in the order given. */
+export function ownerGroups(
+  forums: readonly ForumSummary[],
+): { owner: ActorView; forums: ForumSummary[] }[] {
+  const groups: { owner: ActorView; forums: ForumSummary[] }[] = [];
+  for (const f of forums) {
+    const last = groups[groups.length - 1];
+    if (last && last.owner.did === f.owner.did) last.forums.push(f);
+    else groups.push({ owner: f.owner, forums: [f] });
+  }
+  return groups;
 }
 
 /** "Create a forum": the declaration and the owner's membership, in the viewer's repository. */
@@ -138,11 +156,16 @@ export function HomePage() {
       {others.length > 0 && (
         <>
           <h2 className={ui.sectionTitle}>Discover</h2>
-          <div className={styles.cardList}>
-            {others.map((f) => (
-              <ForumCard key={f.uri} forum={f} />
-            ))}
-          </div>
+          {ownerGroups(others).map((g, i) => (
+            <div key={`${i}:${g.owner.did}`} className={styles.cardList}>
+              <h3 className={styles.ownerHeading} data-owner={g.owner.did}>
+                Forums by <ActorName actor={g.owner} />
+              </h3>
+              {g.forums.map((f) => (
+                <ForumCard key={f.uri} forum={f} heading="h4" />
+              ))}
+            </div>
+          ))}
         </>
       )}
     </div>

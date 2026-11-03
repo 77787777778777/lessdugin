@@ -1136,11 +1136,30 @@ export class MockEngine implements EngineApi {
     return view;
   }
 
+  /** Grouped by owner as sync.md §4.7 orders the directory: owners with a verified handle
+   * first, by handle, then the others by DID; within an owner, by name (case-insensitive),
+   * then uri. */
   async forumDiscover(q: string): Promise<ForumSummary[]> {
     const needle = q.trim().toLowerCase();
+    const owner = (f: ForumSummary): [number, string] =>
+      f.owner.handleState === "verified" && f.owner.handle !== undefined
+        ? [0, f.owner.handle]
+        : [1, f.owner.did];
+    const cmp = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
     return [...this.s.forums.values()]
       .filter((f) => needle === "" || f.summary.name.toLowerCase().includes(needle))
-      .map((f) => this.forumSummary(f));
+      .map((f) => this.forumSummary(f))
+      .sort((a, b) => {
+        const [ga, ka] = owner(a);
+        const [gb, kb] = owner(b);
+        return (
+          ga - gb ||
+          cmp(ka, kb) ||
+          cmp(a.owner.did, b.owner.did) ||
+          cmp(a.name.toLowerCase(), b.name.toLowerCase()) ||
+          cmp(a.uri, b.uri)
+        );
+      });
   }
 
   async forumFollow(uri: AtUri, alias?: string): Promise<void> {
