@@ -1456,6 +1456,104 @@ fn an_edit_can_drop_a_link_posts_card() {
     assert_eq!(alice.account.list(nsid::REVISION).len(), 2);
 }
 
+/// `dropLinkCard` in an edit document (`EditOpts.dropLinkCard`, decision O-14): the `$EDITOR`
+/// template of a link post has the field (`false`); set to `true` there, in a kept edit draft
+/// that `draft publish` sends later, or in an edit file's frontmatter, it drops the card as
+/// `--drop-link-card` does. Left `false`, the card stays.
+#[test]
+fn an_edit_document_can_drop_a_link_posts_card() {
+    let net = Net::new();
+    let alice = net.user("alice.test", true);
+    alice.json(&["forum", "create", "meta", "--frontpage"]);
+    let t = json_stdin(
+        &alice,
+        &[
+            "post",
+            "-",
+            "--kind",
+            "link",
+            "--link",
+            "https://example.com/x",
+            "--title",
+            "A link",
+            "--yes",
+        ],
+        "Worth reading.\n",
+    );
+    assert_eq!(t["state"]["kind"], "done", "{t}");
+    let post = t["state"]["uri"].as_str().unwrap().to_owned();
+    let rkey = post.rsplit('/').next().unwrap().to_owned();
+    let card = || {
+        let mut rec = alice.account.get(nsid::POST, &rkey).unwrap();
+        rec["link"]["title"] = serde_json::json!("Example: x");
+        rec["link"]["description"] = serde_json::json!("A misleading description.");
+        alice.account.put(nsid::POST, &rkey, &rec);
+        alice.ok(&["sync", "alice.test/meta"]);
+    };
+    let link = || alice.account.get(nsid::POST, &rkey).unwrap()["link"].clone();
+    let bare = serde_json::json!({ "uri": "https://example.com/x" });
+    let in_editor = |name: &str, script: &str| {
+        let editor = alice.file(name, &format!("#!/bin/sh\n{script}"));
+        make_executable(&editor);
+        alice
+            .cmd()
+            .env("VISUAL", &editor)
+            .args(["--json", "edit", &post])
+            .write_stdin("")
+            .output()
+            .unwrap()
+    };
+    let flip = "sed -i 's/^dropLinkCard: false$/dropLinkCard: true/' \"$1\"\n";
+
+    // the editor's template offers the field; left alone, the card stays
+    card();
+    let out = in_editor("keep.sh", "sed -i '/ >8 /i Kept card.' \"$1\"\n");
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(link()["title"], "Example: x");
+    assert_eq!(link()["description"], "A misleading description.");
+
+    // set to true in the editor, the card goes and the link and the new text stay
+    let out = in_editor(
+        "drop.sh",
+        &format!("{flip}sed -i '/ >8 /i Dropped card.' \"$1\"\n"),
+    );
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(link(), bare);
+    let rec = alice.account.get(nsid::POST, &rkey).unwrap();
+    assert!(
+        rec["body"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Dropped card."),
+        "{rec}"
+    );
+    assert_eq!(
+        alice.json(&["draft", "ls"])["drafts"],
+        serde_json::json!([])
+    );
+
+    // an editor that fails after setting it keeps the edit draft; `draft publish` drops the card
+    card();
+    let out = in_editor("fail.sh", &format!("{flip}exit 1\n"));
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
+    assert_eq!(link()["title"], "Example: x");
+    let drafts = alice.json(&["draft", "ls"]);
+    assert_eq!(drafts["drafts"][0]["type"], "edit", "{drafts}");
+    let id = drafts["drafts"][0]["id"].as_str().unwrap().to_owned();
+    let kept = std::fs::read_to_string(alice.devnet_dir().join(format!("drafts/{id}.md"))).unwrap();
+    assert!(kept.contains("\ndropLinkCard: true\n"), "{kept}");
+    let e = alice.json(&["draft", "publish", &id, "--yes"]);
+    assert_eq!(e["state"]["kind"], "done", "{e}");
+    assert_eq!(link(), bare);
+
+    // the same field in an edit file's frontmatter
+    card();
+    let f = alice.file("edit.md", "---\ndropLinkCard: true\n---\nFrom a file.\n");
+    let e = alice.json(&["edit", &post, s(&f)]);
+    assert_eq!(e["state"]["kind"], "done", "{e}");
+    assert_eq!(link(), bare);
+}
+
 /// `redact --yes` is always sent (decision O-10): the engine lists the author's PDS when the
 /// write is sent and deletes every revision that names the item, also when this device's view
 /// shows none (here another device of the author, offline, so its sync fails quietly).

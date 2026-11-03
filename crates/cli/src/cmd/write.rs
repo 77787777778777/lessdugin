@@ -761,6 +761,10 @@ fn edit_doc(uri: &str, c: &Current) -> Doc {
         );
         doc.set("kind", draft::Value::Str(c.kind.clone()));
         doc.set_opt("link", c.link.as_deref());
+        if c.link.is_some() {
+            // the author sets it to `true` to drop the card, as `--drop-link-card` does
+            doc.set(DROP_LINK_CARD, draft::Value::Str("false".into()));
+        }
         doc.set("tags", draft::Value::List(c.tags.clone()));
     }
     doc.set("summary", draft::Value::Str(String::new()));
@@ -826,8 +830,9 @@ fn edit_draft(c: &Current, doc: &Doc, body: Option<String>) -> Result<Draft, Cli
     }
 }
 
-/// The edit draft field (frontmatter) of `edit --drop-link-card`, so a kept draft publishes
-/// the same edit.
+/// The edit draft field (frontmatter) that does what `edit --drop-link-card` does: the
+/// `$EDITOR` template of a post with a link has it (`false`), and an edit file or a kept edit
+/// draft that sets it to `true` drops the card when it is published.
 const DROP_LINK_CARD: &str = "dropLinkCard";
 
 /// `--drop-link-card` (`EditOpts.dropLinkCard`, `engine-api.md` §3.5 `edit`): the post's link
@@ -946,6 +951,7 @@ pub async fn edit(ctx: &Ctx, args: EditArgs) -> Result<(), CliError> {
         Some(text) => {
             // a file may carry post fields in frontmatter
             let doc = Doc::parse(&text).map_err(EngineError::invalid_input)?;
+            opts.drop_link_card |= doc.get(DROP_LINK_CARD) == Some("true");
             let body = doc.body_text();
             (doc, Some(body))
         }
@@ -954,11 +960,7 @@ pub async fn edit(ctx: &Ctx, args: EditArgs) -> Result<(), CliError> {
         None => {
             let drafts = Drafts::new(ctx);
             let id = drafts.new_id(w.engine.host());
-            let mut start = edit_doc(&uri, &c);
-            if args.drop_link_card {
-                start.set(DROP_LINK_CARD, draft::Value::Str("true".into()));
-            }
-            let path = drafts.save(&id, &start, &[])?;
+            let path = drafts.save(&id, &edit_doc(&uri, &c), &[])?;
             edit_draft_file(ctx, &drafts, &id, &path)?;
             let doc = drafts.load(&id)?;
             if opts.summary.is_none() {

@@ -237,8 +237,9 @@ pub struct EditArgs {
     #[arg(long)]
     pub no_history: bool,
     /// Drop the post's link card (its title, description and image) and keep the link (alone,
-    /// without new text, the text stays as it is); an edit otherwise keeps the card while the
-    /// link stays the same.
+    /// without new text, the text stays as it is; in the editor or a file's frontmatter,
+    /// `dropLinkCard: true` does the same); an edit otherwise keeps the card while the link
+    /// stays the same.
     #[arg(long)]
     pub drop_link_card: bool,
     /// Do not ask for confirmation when the edit suspends a keep, a frontpage or curated tier
