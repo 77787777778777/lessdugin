@@ -26,8 +26,16 @@ pub enum ProofStatus {
     Admitted,
     Absent,
     StaleProof,
+    /// The bundle presented a proof that failed `proofs/1` (§8.6): counted against the source.
     Failed,
+    /// The bundle omitted this requested URI.
     Missing,
+    /// `getRecordProofs` could not be fetched (transport failure, 5xx after retries): no proof
+    /// was presented, so this says nothing about the indexer's honesty.
+    Unavailable,
+    /// This single URI's bundle is still over the cap; the record is fetched from the author's
+    /// PDS instead (§8.6). Not a failure.
+    TooLarge,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,6 +60,10 @@ pub struct ProofReport {
     pub stale: usize,
     pub failed: usize,
     pub missing: usize,
+    #[serde(default)]
+    pub unavailable: usize,
+    #[serde(default)]
+    pub too_large: usize,
     pub point_fetched: usize,
     pub items: Vec<ProofItemStatus>,
 }
@@ -83,6 +95,16 @@ impl ProofReport {
             .items
             .iter()
             .filter(|i| i.status == ProofStatus::Missing)
+            .count();
+        self.unavailable = self
+            .items
+            .iter()
+            .filter(|i| i.status == ProofStatus::Unavailable)
+            .count();
+        self.too_large = self
+            .items
+            .iter()
+            .filter(|i| i.status == ProofStatus::TooLarge)
             .count();
         self.point_fetched = self.items.iter().filter(|i| i.point_fetched).count();
     }
@@ -162,19 +184,18 @@ async fn hydrate_chunk<H: Host>(
             // record from its author's PDS instead, as required by sync.md §8.6.
             let mut item = ProofItemStatus {
                 uri: uris[0].to_string(),
-                status: ProofStatus::Failed,
+                status: ProofStatus::TooLarge,
                 rev: None,
                 error: Some(format!("proof bundle exceeds its cap: {e}")),
                 point_fetched: false,
             };
             point_fallback(syncer, session, &uris[0], &mut item).await;
-            return Ok(ProofReport {
-                requested: 1,
-                failed: 1,
-                point_fetched: usize::from(item.point_fetched),
+            let mut report = ProofReport {
                 items: vec![item],
                 ..ProofReport::default()
-            });
+            };
+            report.finish_counts();
+            return Ok(report);
         }
         Err(e) => {
             // A failed bundle request says nothing about the author's PDS. Keep the source error
@@ -183,7 +204,7 @@ async fn hydrate_chunk<H: Host>(
             for uri in uris {
                 let mut item = ProofItemStatus {
                     uri: uri.to_string(),
-                    status: ProofStatus::Failed,
+                    status: ProofStatus::Unavailable,
                     rev: None,
                     error: Some(format!("indexer proof request failed: {e}")),
                     point_fetched: false,

@@ -7,8 +7,9 @@ use std::collections::BTreeSet;
 use lessdugin_atp::syntax::{AtUri, Did};
 
 use crate::discovery::forum_ref::ForumKey;
-use crate::discovery::state::ForumState;
+use crate::discovery::state::{self, DiscState, ForumState};
 use crate::host::Host;
+use crate::indexer::changes::ChangeScope;
 use crate::indexer::client::endpoint_allowed;
 use crate::indexer::contract::{ForumsPage, OrderingHint, ParticipantsPage};
 use crate::indexer::{AuditReport, ChangePollReport, Client, Consent, EndpointPolicy, ProofReport};
@@ -212,6 +213,23 @@ impl<H: Host> Engine<H> {
         if !client.supports("getChanges") {
             return Ok(None);
         }
+        let scope = self.change_scope(key).await?;
+        Ok(Some(
+            crate::indexer::changes::poll_changes(
+                &self.syncer(),
+                &client,
+                &session,
+                Some(&key.uri),
+                &scope,
+                dedup,
+            )
+            .await?,
+        ))
+    }
+
+    /// The DIDs whose records an indexer hint for this forum may make the client fetch
+    /// (`sync.md` §15.4): A, G and C(F), confirmed participants and the viewer's own accounts.
+    async fn change_scope(&self, key: &ForumKey) -> Result<ChangeScope, EngineError> {
         let opened = self.open_key(key, false).await?;
         let state = ForumState::load(
             self.host.cache(),
@@ -221,22 +239,27 @@ impl<H: Host> Engine<H> {
         )
         .await
         .map_err(super::models::store_error)?;
-        let dids = state
-            .completeness_set()
-            .iter()
-            .filter_map(|d| Did::parse(d).ok())
-            .collect::<Vec<_>>();
-        Ok(Some(
-            crate::indexer::changes::poll_changes(
-                &self.syncer(),
-                &client,
-                &session,
-                Some(&key.uri),
-                &dids,
-                dedup,
-            )
-            .await?,
-        ))
+        let reconcile = state.completeness_set();
+        let own: BTreeSet<String> = self.accounts().await?.into_iter().map(|a| a.did).collect();
+        let authorities: BTreeSet<String> = state.roster.authorities.keys().cloned().collect();
+        let mut participants = reconcile.clone();
+        participants.extend(state.roster.granted.iter().cloned());
+        participants.extend(
+            state
+                .disc
+                .iter()
+                .filter(|(_, row)| row.state == DiscState::Confirmed)
+                .map(|(did, _)| did.clone()),
+        );
+        participants.extend(own.iter().cloned());
+        Ok(ChangeScope {
+            fk: key.fk.clone(),
+            declaration: (key.owner.to_string(), key.uri.rkey().to_string()),
+            participants,
+            newcomers: state.roster.is_open() || own.iter().any(|d| authorities.contains(d)),
+            authorities,
+            reconcile,
+        })
     }
 
     /// Cold-start/live hydration entry point for native and service hosts. Every URI still has a
@@ -296,13 +319,31 @@ impl<H: Host> Engine<H> {
         let ordering = client
             .post_ordering(&session, &key.uri, sort, limit.max(1), None)
             .await?;
-        let report = crate::indexer::proofs::hydrate_visible(
-            &self.syncer(),
-            &client,
-            &session,
-            &ordering.uris,
-        )
-        .await?;
+        // Only posts of this forum (its {fk}- range) are hydrated, and once the forum's
+        // participants are known, only theirs: the indexer does not choose whom the client
+        // contacts. A cold start (§14.3) cannot tell participants yet; one visible page bounds it.
+        let scope = if state::discovery_complete(self.host.cache(), &key.fk)
+            .await
+            .map_err(super::models::store_error)?
+        {
+            Some(self.change_scope(&key).await?)
+        } else {
+            None
+        };
+        let uris: Vec<AtUri> = ordering
+            .uris
+            .into_iter()
+            .filter(|u| {
+                u.collection().as_str() == lessdugin_lexicon::collection::nsid::POST
+                    && crate::store::schema::in_range(&key.fk, u.rkey().as_str())
+                    && scope
+                        .as_ref()
+                        .is_none_or(|s| s.participants.contains(u.did().as_str()))
+            })
+            .collect();
+        let report =
+            crate::indexer::proofs::hydrate_visible(&self.syncer(), &client, &session, &uris)
+                .await?;
         self.rt.invalidate(key.uri.as_str());
         Ok(Some(report))
     }
@@ -381,7 +422,8 @@ impl<H: Host> Engine<H> {
         for chunk in dids.chunks(50) {
             let hints = client.get_repo_heads(&session, chunk).await?;
             for hint in hints.heads {
-                if Did::parse(&hint.did).is_err() {
+                // A head for a DID that was not asked about is not a hint about this forum.
+                if !chunk.iter().any(|d| d.as_str() == hint.did) {
                     continue;
                 }
                 self.syncer().enqueue(DirtyItem::new(

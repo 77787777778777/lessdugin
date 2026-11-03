@@ -1097,7 +1097,8 @@ verify_proof(…):
 `getRecordProofs(uris ≤ 25)` returns `application/vnd.ipld.car` (`data-model.md` §11.3):
 - the root block is a DAG-CBOR manifest `{v: 1, items: [{uri, cid: CID | null, commit: CID}]}`, followed by deduplicated blocks;
 - the manifest's `v` MUST be 1; unknown keys are ignored; `items` ≤ 25;
-- a response over the bundle byte cap is retried with the `uris` list halved, down to one uri; an item still too large is fetched from the author's PDS instead (`limits.md` §5).
+- a response over the bundle byte cap is retried with the `uris` list halved, down to one uri; an item still too large is fetched from the author's PDS instead (`limits.md` §5);
+- a request that returns no bundle (a transport or XRPC error after the retries of §9.3) presents no proof: its items are fetched from the authors' PDSes. Neither this nor an item still too large is a failure, and neither counts against the indexer. A requested uri that the bundle omits or repeats does count against it.
 
 ```
 for each item (independently):
@@ -1609,17 +1610,27 @@ It is comfortable up to about 50M records; a Postgres adapter can come later.
 
 Displayed values are always recomputed locally from admitted records. Indexer aggregates MAY show as `~n` until then. `getRepoHeads` results are hints: they can mark repos dirty but never count as head observations.
 
+**Scope.** An indexer's hints never choose whom the client contacts:
+- a `#change` of `getChanges(forum = F)` is handled (§6.6) only for a record of F (an rkey of F's scope, §10.4: its `{fk}-` range or its membership key; F's declaration; or a profile) written by a DID in C(F) (§4.5), a granted DID, a confirmed participant or an own account. A membership at F's key by any other DID is a newcomer candidate when F ∈ F_new (§6.4): nothing is fetched for it, and the next forum sync confirms it like the other newcomer hints, after them and within the same budget (§4.4). Every other change is dropped, also before any identity resolution;
+- `listPosts` uris are hydrated (§14.3) only for posts in F's `{fk}-` range and, once a discovery pass of F has completed (§4.2), only for posts by those DIDs. A cold start cannot tell participants yet; its one visible page bounds it;
+- a `getRepoHeads` head for a DID that was not asked about is ignored;
+- `CursorTooOld` reconciles F as a Jetstream gap does (§6.3): authorities at P1, the other DIDs of C(F) at P3. A feed that keeps answering `CursorTooOld` gets this at most once per 24 h for each indexer and forum (the cursor row's `timeUs` records the last one); the daily reconcile (§6.8) bounds what it can hide.
+
+**Change cursor.** The operator blocklist is applied after paging (§15.3), so a `getChanges` cursor may be above the last returned seq (and above `since` on an empty page). The client follows it. A cursor below the last returned seq, or above both that seq and the response's `asOf.seq`, is refused and does not advance the stored cursor.
+
 **Audit.** `lessdugin sync <forum> --audit` (and an SPA settings action) cross-checks one indexer for one forum:
 
 | Check | Procedure | Finding |
 |---|---|---|
 | A1 heads | `getRepoHeads` for every repo in the completeness set (batches of 50), then `getLatestCommit` at each PDS | the indexer's rev is above the PDS head → contradiction; below it by more than `asOf.lagMs + 2 min` → lag |
-| A2 changes | for every change the client saw from Jetstream during the session, more than 2 minutes old, with a matching fk | missing from `getChanges` → omission |
-| A3 records | the client's eligible, listed posts (complete repos only, older than 2 minutes) against `listPosts(sort = new)`, all pages up to 10,000 | missing → omission; present at the indexer but confirmed absent at the PDS → contradiction |
+| A2 changes | for every change the client saw from Jetstream during the session, more than 2 minutes old, with a matching fk, against `getChanges(forum)` read back as below | no matching row → omission |
+| A3 records | the client's eligible, listed posts (listed by the local fold, `Visible` or `Collapsed` (`social.md` §10.1), so a hidden or removed post is not one; complete repos only, older than 2 minutes) against `listPosts(sort = new)`, all pages up to 10,000 (a short page is not the end: paging stops when the cursor is absent or repeats) | missing → omission; present at the indexer but confirmed absent at the PDS, or not a post in the forum's `{fk}-` range (never fetched) → contradiction |
 | A4 digest and aggregates | when the local view is complete: `inputDigest` and every `#tally` (score, agreement, unweighted) against local recomputation | digest mismatch, or equal digests with unequal tallies → contradiction |
-| A5 proofs | `getRecordProofs` for up to 25 sampled uris | an item that fails `proofs/1` (other than `stale-proof`) → contradiction |
+| A5 proofs | `getRecordProofs` for up to 25 sampled uris | an item whose presented proof fails `proofs/1` (other than `stale-proof`) → contradiction; a requested uri the bundle omits → omission |
 
-The report lists findings with counts, and the command exits with code 6 if any contradiction or omission was found. Every failed proof item (§8.6) is also counted against the indexer in `HostRow.strikes`.
+**A2 rows.** A change observed at `(rev, cid)` (`cid` absent for a delete) is matched by a `#change` row for the same uri and DID whose rev is above `rev`, whatever its CID or op (a later version supersedes the observed one), or whose rev is `rev` with the same CID (none for a delete). This holds whether the indexer logs a live event's own commit rev and CID, or logs a change found by a snapshot diff at the repo's head rev, which may be above the commit's rev and covers versions collapsed between two snapshots. The log is kept 30 days (§15.2) and the session's changes are its newest rows, so the client reads it back from its head: a first window of 5,000 seqs below `asOf.seq` (from `describeIndexer`), paged until the cursor stops advancing, then windows of doubling width below it, until every observed change is matched or the oldest retained row has been read. `CursorTooOld` at a window's start restarts that window at the oldest cursor the indexer accepts, found by bisection with `limit = 1`. A short or empty page is not the end (the indexer drops blocklisted rows after paging). A change still unmatched when the scan stops early (at most 1,000 pages) is unchecked, not an omission.
+
+The report lists findings with counts, and the command exits with code 6 if any contradiction or omission was found. An item the audit cannot check is neither a finding nor counted as checked, and never ends the audit: in A1 and A3, a repo whose head check or point fetch fails (an unreachable or deactivated PDS); in A5, an item for which no proof could be fetched (a transport failure, or a single proof still over the cap, §8.6). Every failed proof item (§8.6) is also counted against the indexer in `HostRow.strikes`.
 
 **Reserved (P2):** the automatic 1%-per-hour audit sample, and automatic demotion of an indexer above the thresholds (more than 2% contradictions, or more than 3 omissions per day) with a warning.
 

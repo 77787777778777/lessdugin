@@ -32,6 +32,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use futures::StreamExt;
 use lessdugin_atp::syntax::{AtUri, Did};
 
+use crate::discovery::state::disc_rows_over_cap;
 use crate::dto::{Event, Topic};
 use crate::host::{Dir, Host, KeyRange, KvOp, KvStore};
 use crate::limits;
@@ -70,10 +71,6 @@ const CHANGES_OPEN_MS: i64 = 10_000;
 const CHANGES_IDLE_MS: i64 = 60_000;
 /// A live source is healthy for this long after its last good frame or poll (`sync.md` §6.2).
 const HEALTHY_MS: i64 = 120_000;
-/// Discovery rows kept per forum: past it, the oldest rows that are not confirmed are dropped
-/// (`sync.md` §6.4, *tunable*).
-pub(crate) const DISC_ROWS_MAX: usize = 10_000;
-
 /// What one `live_tail` round did.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LiveRound {
@@ -112,30 +109,6 @@ fn jitter(did: &str, row: Option<&RepoRow>) -> u64 {
         h = h.wrapping_mul(0x0100_0000_01b3);
     }
     h ^ row.map_or(0, |r| r.checked_at as u64)
-}
-
-/// The discovery rows to drop so that at most [`DISC_ROWS_MAX`] remain: the oldest rows that
-/// are not confirmed (by first-seen time, then DID), never `keep` (the row just written).
-pub(crate) fn disc_rows_over_cap(
-    rows: &BTreeMap<String, crate::discovery::DiscRow>,
-    keep: &str,
-) -> Vec<String> {
-    let Some(excess) = rows.len().checked_sub(DISC_ROWS_MAX).filter(|n| *n > 0) else {
-        return Vec::new();
-    };
-    let mut unconfirmed: Vec<(&i64, &String)> = rows
-        .iter()
-        .filter(|(d, r)| {
-            d.as_str() != keep && r.state != crate::discovery::state::DiscState::Confirmed
-        })
-        .map(|(d, r)| (&r.first, d))
-        .collect();
-    unconfirmed.sort();
-    unconfirmed
-        .into_iter()
-        .take(excess)
-        .map(|(_, d)| d.clone())
-        .collect()
 }
 
 /// The actionable live frame `live_tail` is applying.
@@ -1179,6 +1152,7 @@ mod context_tests {
     use serde::Serialize;
 
     use super::*;
+    use crate::discovery::state::DISC_ROWS_MAX;
     use crate::discovery::{DiscRow, ForumKey};
     use crate::engine::EngineConfig;
     use crate::host::{
