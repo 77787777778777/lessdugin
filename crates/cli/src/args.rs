@@ -742,6 +742,136 @@ mod reach {
         }
     }
 
+    /// Every command (`mod hide`, `post`; a command whose subcommand is optional counts
+    /// itself), with whether it takes `--yes`: its own, or a global one of a parent.
+    fn commands() -> Vec<(String, bool)> {
+        fn walk(c: &clap::Command, path: &str, inherited: bool, out: &mut Vec<(String, bool)>) {
+            let yes = c.get_arguments().find(|a| a.get_id() == "yes");
+            let takes = inherited || yes.is_some();
+            let subs: Vec<&clap::Command> = c
+                .get_subcommands()
+                .filter(|s| s.get_name() != "help")
+                .collect();
+            if !path.is_empty() && (subs.is_empty() || !c.is_subcommand_required_set()) {
+                out.push((path.to_owned(), takes));
+            }
+            let global = inherited || yes.is_some_and(clap::Arg::is_global_set);
+            for s in subs {
+                let p = format!("{path} {}", s.get_name());
+                walk(s, p.trim_start(), global, out);
+            }
+        }
+        let mut out = Vec::new();
+        walk(&Cli::command(), "", false, &mut out);
+        out
+    }
+
+    /// The other side of `every_write_that_asks_takes_yes`: a command without `--yes` is listed
+    /// here with the reason it never asks, so a new write command cannot ship without `--yes`
+    /// (`engine-api.md` §3.6) unless it is classified. What is a public action follows
+    /// `social.md` §17 as the TUI (`Effect::public_kind`) and the SPA (`requestAck`) gate it:
+    /// content writes, leaving, and dismissing applicants are not.
+    #[test]
+    fn every_command_without_yes_asks_nothing() {
+        const ASKS_NOTHING: &[&str] = &[
+            // reads, and listings of this device's state
+            "read",
+            "ls",
+            "discover",
+            "linked",
+            "search",
+            "user",
+            "tag",
+            "history",
+            "members",
+            "reacts",
+            "notifications",
+            "mutes",
+            "subs",
+            "export",
+            "activity",
+            "sequence ls",
+            "sequence read",
+            "forum ls",
+            "forum show",
+            "bookmark ls",
+            "draft ls",
+            "media get",
+            "media open",
+            "outbox ls",
+            "accounts",
+            "whoami",
+            "resolve",
+            "verify",
+            "doctor",
+            "config get",
+            "completions",
+            // local state, never written to a PDS (`engine-api.md` §3.6)
+            "mute",
+            "unmute",
+            "bookmark add",
+            "bookmark rm",
+            "subscribe post",
+            "subscribe forum",
+            "subscribe user",
+            "subscribe tag",
+            "unsubscribe post",
+            "unsubscribe forum",
+            "unsubscribe user",
+            "unsubscribe tag",
+            "forum follow",
+            "forum unfollow",
+            "forum use",
+            "draft edit",
+            "draft rm",
+            "media add",
+            "accounts use",
+            "config set",
+            // writes that are no public action and ask no question: content (wiki, sequences,
+            // a forum's declaration), a retraction, leaving, dismissing applicants (with the
+            // removal of one's own grant), and what the outbox already holds
+            "wiki edit",
+            "sequence create",
+            "sequence edit",
+            "sequence add",
+            "sequence remove",
+            "sequence move",
+            "retract",
+            "leave",
+            "reject",
+            "forum create",
+            "forum edit",
+            "sync",
+            "outbox flush",
+            "outbox retry",
+            "outbox undo",
+            // a login's question (an unverified handle) has no --yes on purpose: headless, it
+            // is refused and the DID is given instead (`cmd::login::confirm_target`)
+            "login",
+            "web",
+            "tui",
+        ];
+        let all = commands();
+        let names: BTreeSet<&str> = all.iter().map(|(c, _)| c.as_str()).collect();
+        for c in ASKS_NOTHING {
+            assert!(names.contains(c), "`{c}` is no command");
+        }
+        let listed: BTreeSet<&str> = ASKS_NOTHING.iter().copied().collect();
+        assert_eq!(listed.len(), ASKS_NOTHING.len(), "a command is listed twice");
+        for (c, takes) in &all {
+            assert_eq!(
+                *takes,
+                !listed.contains(c.as_str()),
+                "`{c}`: {} --yes",
+                if *takes {
+                    "listed as asking nothing, but takes"
+                } else {
+                    "neither listed as asking nothing nor takes"
+                }
+            );
+        }
+    }
+
     /// The operations of the spec's §3.2, §3.5 and §3.6 tables (the first cell of each row).
     fn spec_operations() -> BTreeSet<String> {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/spec/engine-api.md");
