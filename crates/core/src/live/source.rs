@@ -22,7 +22,7 @@ use crate::store::blob::{CursorRow, Wire as RowWire};
 use crate::store::{row, schema};
 
 use super::events::{Action, Context, EventFilter, Gap};
-use super::wire::{self, EventKind, Wire};
+use super::wire::{self, EventKind, InfoKind, Wire};
 
 /// `("cur", "jetstream")`.
 pub const CURSOR_KEY: &str = "jetstream";
@@ -41,6 +41,9 @@ const MAX_BACKOFF_MS: i64 = 60_000;
 /// frames arrive (*tunable*; longer than [`MAX_BACKOFF_MS`], so an endpoint that answers every
 /// connection with a gap never ends its streak).
 const GAP_QUIET_MS: i64 = 120_000;
+/// At most one gap-triggered reconcile per endpoint in this long (ms, *tunable*; the hourly
+/// authority reconcile period of `sync.md` §6.8), whatever its gap streaks.
+const GAP_RECONCILE_MS: i64 = 3_600_000;
 /// How long [`LiveSource::stop`] waits for a connect or lock request in flight, to close or
 /// release what it returns (ms).
 const STOP_WAIT_MS: u64 = 1_000;
@@ -422,6 +425,10 @@ pub struct LiveSource<H: Host> {
     failures: u32,
     gaps: u32,
     last_gap_ms: Option<i64>,
+    /// The current gap streak already had an `OutdatedCursor`.
+    streak_outdated: bool,
+    /// When each endpoint instance's last gap-triggered reconcile was scheduled (ms).
+    gap_reconciles: std::collections::BTreeMap<String, i64>,
     retry_at_ms: i64,
     last_saved_ms: i64,
     events_since_save: u32,
@@ -458,6 +465,8 @@ impl<H: Host> LiveSource<H> {
             failures: 0,
             gaps: 0,
             last_gap_ms: None,
+            streak_outdated: false,
+            gap_reconciles: std::collections::BTreeMap::new(),
             retry_at_ms: 0,
             last_saved_ms: 0,
             events_since_save: 0,
@@ -952,13 +961,26 @@ impl<H: Host> LiveSource<H> {
                 };
                 let now = self.host.now_ms();
                 self.oversized = None;
+                let instance = self
+                    .main
+                    .as_ref()
+                    .map(|c| c.instance.clone())
+                    .unwrap_or_default();
                 let gap = matches!(event.kind, EventKind::Info(_));
+                let outdated = matches!(event.kind, EventKind::Info(InfoKind::OutdatedCursor));
                 // A gap is no sign of health: it neither resets the reconnect back-off nor
-                // keeps polling off. Only the first gap of a streak schedules a reconcile.
-                let first_gap = gap && self.gaps == 0;
+                // keeps polling off. Only the first OutdatedCursor of a streak schedules a
+                // reconcile, and at most one per endpoint per GAP_RECONCILE_MS.
+                let reconcile = outdated
+                    && !self.streak_outdated
+                    && self
+                        .gap_reconciles
+                        .get(&instance)
+                        .is_none_or(|t| now.saturating_sub(*t) >= GAP_RECONCILE_MS);
                 if gap {
                     self.gaps = self.gaps.saturating_add(1);
                     self.last_gap_ms = Some(now);
+                    self.streak_outdated |= outdated;
                 } else {
                     self.failures = 0;
                     self.last_healthy_ms = Some(now);
@@ -967,20 +989,20 @@ impl<H: Host> LiveSource<H> {
                         .is_none_or(|t| now.saturating_sub(t) >= GAP_QUIET_MS)
                     {
                         self.gaps = 0;
+                        self.streak_outdated = false;
                     }
                 }
-                let instance = self
-                    .main
-                    .as_ref()
-                    .map(|c| c.instance.clone())
-                    .unwrap_or_default();
                 let mut out =
                     self.filter
                         .apply(wire, &instance, event, cx, now.saturating_mul(1_000));
-                if gap && !first_gap && !out.actions.is_empty() {
-                    tracing::debug!("Jetstream gap within a gap streak: no second reconcile");
-                    self.filter.acknowledge();
-                    out.actions.clear();
+                if gap && !out.actions.is_empty() {
+                    if reconcile {
+                        self.gap_reconciles.insert(instance, now);
+                    } else {
+                        tracing::debug!("Jetstream gap: a reconcile was scheduled recently");
+                        self.filter.acknowledge();
+                        out.actions.clear();
+                    }
                 }
                 self.events_since_save = self.events_since_save.saturating_add(1);
                 let frame = PendingFrame {

@@ -1438,6 +1438,71 @@ fn a_gap_on_every_connection_backs_off_and_reconciles_once() {
 }
 
 #[test]
+fn gap_reconciles_are_limited_per_endpoint_by_time() {
+    // An endpoint that sends a valid frame and then OutdatedCursor on every connection, its gaps
+    // more than 2 minutes apart: every gap streak ends, yet it reconciles once an hour at most.
+    futures::executor::block_on(async {
+        let host = MemHost::new();
+        host.script_websocket(
+            "wss://jetstream.example/",
+            vec![
+                WsMessage::Text(v2_commit(OTHER, &post(), "unrelated", 1)),
+                WsMessage::Text(info("OutdatedCursor")),
+            ],
+        );
+        let mut source = jetstream_source(host.clone(), "wss://jetstream.example/subscribe", false);
+        let start = host.now();
+        let mut reconciles = Vec::new();
+        while host.now() - start < 3 * 3_600_000 {
+            match source.next(&context()).await.unwrap() {
+                SourceStatus::Actions(actions) => {
+                    if actions.contains(&Action::Reconcile(Gap::OutdatedCursor)) {
+                        reconciles.push(host.now() - start);
+                    }
+                    source.acknowledge().await.unwrap();
+                }
+                // every frame comes 130 s after the one before it
+                SourceStatus::Waiting => host.advance_ms(source.retry_in_ms().max(130_000)),
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        assert!(host.websocket_urls().len() > 20, "the streaks did not end");
+        assert_eq!(reconciles.len(), 3, "one reconcile an hour: {reconciles:?}");
+        assert!(
+            reconciles.windows(2).all(|w| w[1] - w[0] >= 3_600_000),
+            "{reconciles:?}"
+        );
+    });
+}
+
+#[test]
+fn a_future_cursor_does_not_hide_a_later_outdated_cursor() {
+    futures::executor::block_on(async {
+        let host = MemHost::new();
+        host.script_websocket(
+            "wss://jetstream.example/",
+            vec![WsMessage::Text(info("FutureCursor"))],
+        );
+        let mut source = jetstream_source(host.clone(), "wss://jetstream.example/subscribe", false);
+        assert_eq!(
+            source.next(&context()).await.unwrap(),
+            SourceStatus::Waiting
+        );
+        // The same gap streak: the first OutdatedCursor of it still schedules the reconcile.
+        host.script_websocket(
+            "wss://jetstream.example/",
+            vec![WsMessage::Text(info("OutdatedCursor"))],
+        );
+        host.advance_ms(source.retry_in_ms().max(1));
+        assert_eq!(
+            source.next(&context()).await.unwrap(),
+            SourceStatus::Actions(vec![Action::Reconcile(Gap::OutdatedCursor)])
+        );
+        assert_eq!(host.websocket_urls().len(), 2);
+    });
+}
+
+#[test]
 fn the_first_switch_to_filtered_is_immediate_and_later_changes_wait() {
     futures::executor::block_on(async {
         use futures::FutureExt;
