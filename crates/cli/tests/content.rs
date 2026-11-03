@@ -1213,6 +1213,91 @@ fn forum_show_waits_for_a_slow_spilled_about() {
     );
 }
 
+/// `tag <slug>` (its wiki page) and `sequence read` are one view per process too, and both
+/// bodies may spill (`data-model.md` §5.2 rule 2): the CLI awaits the download their view
+/// started before it prints, as `read` does (m3m4-continuation-5, `limits.md`
+/// `BODY_BLOB_WAIT_MS`).
+#[test]
+#[allow(clippy::disallowed_methods)] // a real clock for a real process
+fn tag_and_sequence_wait_for_slow_spilled_bodies() {
+    use lessdugin_core::dto::{SequenceView, TagView};
+    use lessdugin_core::model::render::NOTICE_SPILLED;
+    use lessdugin_testkit::fake_pds::Fault;
+    let net = Net::new();
+    let alice = net.user("alice.test", true);
+    alice.json(&["forum", "create", "meta", "--frontpage"]);
+    // over 64 KiB, so it spills (`data-model.md` §5.3); each its own blob
+    let long = |name: &str| {
+        format!(
+            "# {name}\n\n{}\n\nThe last words.\n",
+            "All about it. ".repeat(5_000)
+        )
+    };
+    let rkey = |uri: &str| uri.rsplit('/').next().unwrap().to_owned();
+    let page = alice.file("rust.md", &long("Rust"));
+    let t = alice.json(&["wiki", "edit", "rust", "--name", "Rust", "--file", s(&page)]);
+    assert_eq!(t["state"]["kind"], "done", "{t}");
+    let revision = t["state"]["uri"].as_str().unwrap().to_owned();
+    let rec = alice
+        .account
+        .get(nsid::WIKI_REVISION, &rkey(&revision))
+        .unwrap();
+    assert!(rec["body"]["textBlob"].is_object(), "spilled: {rec}");
+    let f = alice.file("p.md", "---\ntitle: A chapter's post\n---\nShort.\n");
+    let p = alice.json(&["post", s(&f), "--yes"]);
+    let post = p["state"]["uri"].as_str().unwrap().to_owned();
+    let draft = alice.file(
+        "seq.json",
+        &serde_json::json!({
+            "forum": "alice.test/meta",
+            "title": "Slow",
+            "body": { "markdown": long("Slow") },
+            "chapters": [{ "title": "One", "posts": [post] }],
+        })
+        .to_string(),
+    );
+    let t = alice.json(&["sequence", "create", s(&draft)]);
+    assert_eq!(t["state"]["kind"], "done", "{t}");
+    let sequence = t["state"]["uri"].as_str().unwrap().to_owned();
+    let rec = alice
+        .account
+        .get(nsid::SEQUENCE, &rkey(&sequence))
+        .unwrap();
+    assert!(rec["body"]["textBlob"].is_object(), "spilled: {rec}");
+    let reader = net.reader(&alice);
+    reader.ok(&["sync", "alice.test/meta"]);
+    let slow_get_blob = || {
+        // the author's PDS takes 6 s to answer getBlob: twice the view's wait
+        alice.account.inject(
+            Fault::latency(6_000)
+                .on_nsid("com.atproto.sync.getBlob")
+                .once(),
+        );
+    };
+
+    slow_get_blob();
+    let started = std::time::Instant::now();
+    let out = reader.run(&["--json", "tag", "rust", "--forum", "alice.test/meta"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(started.elapsed() >= std::time::Duration::from_secs(5));
+    let v: TagView = serde_json::from_slice(&out.stdout).unwrap();
+    let body = v.page.expect("a page");
+    assert!(body.text.contains("The last words."), "{body:?}");
+    assert!(!body.notices.iter().any(|n| n == NOTICE_SPILLED), "{body:?}");
+    assert!(!text(&out.stderr).contains("still not loaded"), "{}", text(&out.stderr));
+
+    slow_get_blob();
+    let started = std::time::Instant::now();
+    let out = reader.run(&["--json", "sequence", "read", &sequence]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(started.elapsed() >= std::time::Duration::from_secs(5));
+    let v: SequenceView = serde_json::from_slice(&out.stdout).unwrap();
+    let body = v.body.expect("a body");
+    assert!(body.text.contains("The last words."), "{body:?}");
+    assert!(!body.notices.iter().any(|n| n == NOTICE_SPILLED), "{body:?}");
+    assert!(!text(&out.stderr).contains("still not loaded"), "{}", text(&out.stderr));
+}
+
 /// An edit keeps a link post's card (`link.title`, `link.description`, entered by another
 /// client) while the uri stays: the engine writes `link` from the draft (`data-model.md`
 /// §8.3), so a title-only or text-only edit must send the card again (robustness-7). A new

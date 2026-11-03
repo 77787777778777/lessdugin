@@ -384,13 +384,8 @@ async fn show(ctx: &Ctx, forum: Option<&str>) -> Result<(), CliError> {
     // one view per process, as `read`: the download of a spilled about the view left pending
     // ends with the process, so it is awaited and the forum opened again (`limits.md`
     // `BODY_BLOB_WAIT_MS`)
-    let about_pending = |v: &lessdugin_core::dto::ForumView| {
-        v.about.as_ref().is_some_and(|a| {
-            a.notices
-                .iter()
-                .any(|n| n == lessdugin_core::model::render::NOTICE_SPILLED)
-        })
-    };
+    let about_pending =
+        |v: &lessdugin_core::dto::ForumView| v.about.as_ref().is_some_and(read::spilled_pending);
     if about_pending(&v) {
         let owner = [(v.forum.uri.clone(), v.forum.owner.did.clone())];
         if read::await_spilled(ctx, &engine, "about", &owner).await {

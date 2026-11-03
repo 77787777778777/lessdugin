@@ -8,7 +8,7 @@ use std::path::Path;
 
 use lessdugin_core::dto::{
     BodyDraft, DTO_VERSION, ForumRole, PostSummary, SearchItem, SearchQuery, SequenceDraft,
-    SequencePosition, SequenceSummary, SequenceView, TagSummary, UserView, WikiDraft,
+    SequencePosition, SequenceSummary, SequenceView, TagSummary, TagView, UserView, WikiDraft,
 };
 use lessdugin_core::engine::{Engine, EngineError};
 use lessdugin_native::host::NativeHost;
@@ -18,7 +18,7 @@ use crate::args::{
     SearchArgs, SequenceAction, SequenceArgs, SequencePositionArgs, TagArgs, UserArgs, WikiAction,
     WikiArgs,
 };
-use crate::cmd::{draft, refs, write};
+use crate::cmd::{draft, read, refs, write};
 use crate::ctx::{CliError, Ctx};
 use crate::out::{Style, TermText, cat, lit, name, tt};
 use crate::render::{self, BodyStyle};
@@ -245,7 +245,25 @@ pub async fn tag(ctx: &Ctx, args: TagArgs) -> Result<(), CliError> {
             }
         }
         Some(slug) => {
-            let view = engine.tag(&forum, &slug).await?;
+            let mut view = engine.tag(&forum, &slug).await?;
+            // one view per process: a spilled page the view left pending is awaited, as `read`
+            // awaits a body (`limits.md` `BODY_BLOB_WAIT_MS`)
+            let pending = |v: &TagView| v.page.as_ref().is_some_and(read::spilled_pending);
+            if pending(&view)
+                && let Some(head) = view.head.clone()
+                && let Ok(author) = write::owner_of(&head)
+                && read::await_spilled(ctx, &engine, "body", &[(head, author)]).await
+            {
+                view = engine.tag(&forum, &slug).await?;
+            }
+            if pending(&view) {
+                ctx.out.warn(cat([
+                    lit("the page of "),
+                    tt(&slug),
+                    lit(" is still not loaded from its author's PDS (the excerpt shows); show \
+                         it again later"),
+                ]));
+            }
             if ctx.out.is_json() {
                 ctx.out.json(&view);
                 return Ok(());
@@ -389,7 +407,23 @@ pub async fn sequence(ctx: &Ctx, args: SequenceArgs) -> Result<(), CliError> {
         }
         SequenceAction::Read { uri } => {
             let engine = ctx.reader().await?;
-            let view = engine.sequence(&uri).await?;
+            let mut view = engine.sequence(&uri).await?;
+            // as `tag <slug>` awaits its page
+            let pending = |v: &SequenceView| v.body.as_ref().is_some_and(read::spilled_pending);
+            if pending(&view) {
+                let author = [(view.sequence.uri.clone(), view.sequence.author.did.clone())];
+                if read::await_spilled(ctx, &engine, "body", &author).await {
+                    view = engine.sequence(&uri).await?;
+                }
+            }
+            if pending(&view) {
+                ctx.out.warn(cat([
+                    lit("the body of "),
+                    tt(&view.sequence.uri),
+                    lit(" is still not loaded from its author's PDS (the excerpt shows); read \
+                         it again later"),
+                ]));
+            }
             if ctx.out.is_json() {
                 ctx.out.json(&view);
             } else {

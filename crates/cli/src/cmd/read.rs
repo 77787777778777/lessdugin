@@ -431,20 +431,23 @@ pub async fn read(ctx: &Ctx, args: ReadArgs) -> Result<(), CliError> {
     Ok(())
 }
 
-/// The items of `thread` whose spilled body its view left pending (`lfm-1.md` §1.3: it carries
-/// `NOTICE_SPILLED`), with their authors.
-fn pending_bodies(thread: &ThreadView) -> Vec<(String, String)> {
+/// Whether a view left this spilled body pending (`lfm-1.md` §1.3: it carries
+/// `NOTICE_SPILLED`).
+pub(crate) fn spilled_pending(body: &lessdugin_core::dto::RenderedBody) -> bool {
     use lessdugin_core::model::render::NOTICE_SPILLED;
-    let pending =
-        |b: &lessdugin_core::dto::RenderedBody| b.notices.iter().any(|n| n == NOTICE_SPILLED);
+    body.notices.iter().any(|n| n == NOTICE_SPILLED)
+}
+
+/// The items of `thread` whose spilled body its view left pending, with their authors.
+fn pending_bodies(thread: &ThreadView) -> Vec<(String, String)> {
     let mut out = Vec::new();
     if let ThreadRoot::Post(p) = &thread.post
-        && pending(&p.body)
+        && spilled_pending(&p.body)
     {
         out.push((p.post.uri.clone(), p.post.author.did.clone()));
     }
     for c in &thread.comments {
-        if pending(&c.body) {
+        if spilled_pending(&c.body) {
             out.push((c.uri.clone(), c.author.did.clone()));
         }
     }
@@ -456,7 +459,8 @@ fn pending_bodies(thread: &ThreadView) -> Vec<(String, String)> {
 /// so this joins it, `sync.md` §12.2), else a new one, each capped by `BLOB_TOTAL_TIMEOUT_MS`.
 /// The blob comes from the author's PDS as their DID document names it, as the engine's own
 /// fetch does (`sync.md` §11.1). Returns true when one was stored, so the caller views again;
-/// nothing is waited for `--offline`. `read` and `forum show` (a spilled `about`) use it.
+/// nothing is waited for `--offline`. `read`, `forum show` (a spilled `about`), `tag <slug>` (its
+/// page) and `sequence read` use it.
 pub(crate) async fn await_spilled(
     ctx: &Ctx,
     engine: &Engine<NativeHost>,
