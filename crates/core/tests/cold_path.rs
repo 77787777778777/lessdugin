@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 
-use lessdugin_atp::syntax::Did;
+use lessdugin_atp::syntax::{AtUri, Did};
 use lessdugin_core::discovery::ForumKey;
 use lessdugin_core::engine::{Engine, EngineConfig};
 use lessdugin_core::host::{BlobHandle, Host, HostError, HttpRequest, HttpResponse};
@@ -280,4 +280,186 @@ fn a_head_check_does_not_wait_for_a_sync_in_flight() {
         (head_rev.as_str(), head_cid, checked_at),
         "the head check's observation was lost"
     );
+}
+
+const INDEX: &str = "https://index.example.com";
+
+fn endpoint(method: &str) -> String {
+    format!(
+        "{INDEX}/xrpc/{}",
+        lessdugin_core::indexer::contract::method_nsid(method)
+    )
+}
+
+fn as_of() -> serde_json::Value {
+    serde_json::json!({
+        "asOf": {"seq": 0, "timeUs": lessdugin_testkit::memhost::DEFAULT_NOW_MS * 1000, "lagMs": 0},
+        "indexer": {"did": "did:web:index.example.com", "coreVersion": "test"}
+    })
+}
+
+/// A consented indexer at [`INDEX`] serving `listPosts` with `posts` (uris, in order) and
+/// `getRecordProofs` with proofs fetched from the authors' PDSes, as a real indexer caches them.
+fn serve_indexer(mem: &MemHost, net: &FakeNet, posts: &[String]) {
+    let mut describe = serde_json::json!({
+        "did": "did:web:index.example.com", "version": "1", "coreVersion": "test",
+        "policies": [], "features": ["listPosts", "getRecordProofs"], "forums": []
+    });
+    describe
+        .as_object_mut()
+        .unwrap()
+        .extend(as_of().as_object().unwrap().clone());
+    mem.respond_get(
+        &endpoint("describeIndexer"),
+        lessdugin_testkit::resp::ok_json(&describe),
+    );
+    let mut page = serde_json::json!({
+        "posts": posts.iter().map(|u| serde_json::json!({
+            "ref": {"uri": u}, "effectiveAt": "2025-01-01T00:00:00Z", "state": "visible"
+        })).collect::<Vec<_>>(),
+        "policy": {"karma": "karma/1", "ranking": "magic/1"}, "inputDigest": "00"
+    });
+    page.as_object_mut()
+        .unwrap()
+        .extend(as_of().as_object().unwrap().clone());
+    mem.respond_get(
+        &endpoint("listPosts"),
+        lessdugin_testkit::resp::ok_json(&page),
+    );
+    let net = net.clone();
+    mem.on_get(&endpoint("getRecordProofs"), move |req| {
+        let url = url::Url::parse(&lessdugin_testkit::memhost::target_url(&req.target)).unwrap();
+        let uris: Vec<String> = url
+            .query_pairs()
+            .filter(|(k, _)| k == "uris")
+            .map(|(_, v)| v.into_owned())
+            .collect();
+        Ok(lessdugin_testkit::resp::car(proof_bundle(&net, &uris)))
+    });
+}
+
+/// A `getRecordProofs` bundle (`sync.md` §8.6) of the records' current proofs at their PDSes.
+fn proof_bundle(net: &FakeNet, uris: &[String]) -> Vec<u8> {
+    use lessdugin_atp::Ipld;
+    use std::collections::BTreeMap;
+    let mut items = Vec::new();
+    let mut blocks = BTreeMap::new();
+    for u in uris {
+        let uri = AtUri::parse(u).unwrap();
+        let account = net.account(uri.did().as_str()).unwrap();
+        let qs = lessdugin_atp::xrpc::query_string(&[
+            ("did", uri.did().as_str()),
+            ("collection", uri.collection().as_str()),
+            ("rkey", uri.rkey().as_str()),
+        ]);
+        let url = format!(
+            "{}/xrpc/com.atproto.sync.getRecord?{qs}",
+            account.pds_base()
+        );
+        let req = HttpRequest::get(lessdugin_core::host::Target::Anon(
+            url::Url::parse(&url).unwrap(),
+        ));
+        let resp = net.request(&req, "indexer").unwrap();
+        assert_eq!(resp.status, 200, "no proof for {u}");
+        let car = lessdugin_atp::car::read_car(&resp.body, &lessdugin_atp::car::CarLimits::PROOF)
+            .unwrap();
+        let mut item = BTreeMap::new();
+        item.insert("uri".to_owned(), Ipld::String(u.clone()));
+        item.insert(
+            "cid".to_owned(),
+            account
+                .cid(uri.collection().as_str(), uri.rkey().as_str())
+                .map_or(Ipld::Null, Ipld::Link),
+        );
+        item.insert("commit".to_owned(), Ipld::Link(car.roots[0]));
+        items.push(Ipld::Map(item));
+        blocks.extend(car.blocks);
+    }
+    let mut manifest = BTreeMap::new();
+    manifest.insert("v".to_owned(), Ipld::Integer(1));
+    manifest.insert("items".to_owned(), Ipld::List(items));
+    let manifest = lessdugin_atp::dagcbor::encode(&Ipld::Map(manifest)).unwrap();
+    let root = lessdugin_atp::cid::for_dag_cbor(&manifest);
+    blocks.insert(root, manifest);
+    lessdugin_atp::car::write_car(&[root], blocks.iter().map(|(c, b)| (c, b.as_slice())))
+}
+
+fn assisted<H: Host>(host: H) -> Engine<H> {
+    Engine::new(
+        host,
+        EngineConfig {
+            indexers: vec![lessdugin_core::engine::IndexerConsent {
+                url: url::Url::parse(INDEX).unwrap(),
+            }],
+            ..EngineConfig::default()
+        },
+    )
+}
+
+/// A grant of `#access member` to `member`, by the owner.
+fn grant(host: &MemHost, owner: &AccountHandle, key: &ForumKey, member: &Did) {
+    use lessdugin_lexicon::records::{AccessAction, Action, ModAction};
+    let m = ModAction::new(
+        key.uri.clone(),
+        member.as_str(),
+        Action::Access(AccessAction::new(
+            lessdugin_lexicon::values::AccessLevel::Member,
+        )),
+        dt(host),
+    );
+    let r = lessdugin_core::outbox::records::mod_action(&m).unwrap();
+    owner.put(nsid::MOD_ACTION, &r.rkey, &r.value);
+}
+
+fn all_posts(forum: &ForumKey) -> lessdugin_core::dto::ListPostsQuery {
+    let mut q = lessdugin_core::dto::ListPostsQuery::new(forum.uri.to_string());
+    q.sort = lessdugin_core::dto::PostSort::New;
+    q.filter = lessdugin_core::dto::PostFilter::All;
+    q
+}
+
+/// `social.md` §3.1 makes an author a participant only once their membership record is held,
+/// and §4.2.1 reads a granted member's membership only inside their repo sync. The cold page
+/// (`sync.md` §14.3) therefore reads it itself: a granted member's post hydrated from the
+/// indexer is listed while the member's own repo cannot be listed at all.
+#[test]
+fn a_granted_members_hydrated_post_is_listed_before_their_repo_sync() {
+    futures::executor::block_on(async {
+        let mem = MemHost::new();
+        let net = FakeNet::on(&mem);
+        let _ = net.default_pds();
+        let owner = net.add_account("owner.example.com");
+        let key = forum(&mem, &owner, MembershipMode::Approval);
+        let member = net.add_account("member.example.com");
+        join(&mem, &member, &key);
+        grant(&mem, &owner, &key, member.did());
+        let mine = post(&mem, &owner, &key, "Owner's post", 1);
+        let theirs = post(&mem, &member, &key, "Member's post", 2);
+        serve_indexer(&mem, &net, &[theirs.clone(), mine.clone()]);
+        // The member's repo cannot be listed or described: only the cold path can read it.
+        for m in [
+            "com.atproto.repo.listRecords",
+            "com.atproto.repo.describeRepo",
+        ] {
+            net.inject(Fault::status(500).on_repo(member.did().as_str()).on_nsid(m));
+        }
+        let engine = assisted(mem.clone());
+        engine.forum_open(key.uri.as_str()).await.unwrap();
+        let page = engine
+            .list_posts_page(&all_posts(&key), &lessdugin_core::dto::SyncOpts::default())
+            .await
+            .unwrap();
+        let listed: Vec<&str> = page.items.iter().map(|p| p.uri.as_str()).collect();
+        assert_eq!(listed, [theirs.as_str(), mine.as_str()], "{page:?}");
+        let item = &page.items[0];
+        assert_eq!(item.title.as_deref(), Some("Member's post"));
+        // The membership came with the page's proofs, not from a point fetch at the PDS.
+        let fetched: Vec<String> = mem
+            .requests()
+            .into_iter()
+            .map(|r| r.url)
+            .filter(|u| u.contains("com.atproto.repo.getRecord") && u.contains(tail(member.did())))
+            .collect();
+        assert!(fetched.is_empty(), "{fetched:?}");
+    });
 }

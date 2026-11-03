@@ -1566,8 +1566,8 @@ Read budgets are per host (ADR 0004), so a cold sync spread over many Bluesky PD
 
 1. Forum resolution: about 3 requests (PLC, declaration, declaration proof).
 2. `listPosts`: placeholders render (`[hint]`, no text).
-3. `getRecordProofs` for the visible posts (about 30), in 1–2 requests; each item is verified (§8.6).
-4. One `getLatestCommit` per author on screen, in parallel: current proofs are admitted and their text appears `[verified]`; stale ones are point-fetched from the PDS (§1.2.1).
+3. `getRecordProofs` for the visible posts (about 30), and for the membership record at the forum's key of each of their authors who is not an authority and whose membership is neither cached nor tombstoned, in 1–3 requests; each item is verified (§8.6). An author is a participant only once their membership record is held (`social.md` §3.1), and a granted member's is otherwise read only inside their repo sync (§4.2.1), so without it the page could not list a granted member's post before that sync.
+4. One `getLatestCommit` per author on screen, in parallel: current proofs (memberships included) are admitted and their text appears `[verified]`; stale ones are point-fetched from the PDS (§1.2.1).
 5. Authorities sync at P0 in parallel; the view is `degraded` until they complete. Text appears in about 1–2 s.
 
 ---
@@ -1626,7 +1626,7 @@ Displayed values are always recomputed locally from admitted records. Indexer ag
 
 **Scope.** An indexer's hints never choose whom the client contacts:
 - a `#change` of `getChanges(forum = F)` is handled (§6.6) only for a record of F (an rkey of F's scope, §10.4: its `{fk}-` range or its membership key; F's declaration; or a profile) written by a DID in C(F) (§4.5), a granted DID, a confirmed participant or an own account. A membership at F's key by any other DID is a newcomer candidate when F ∈ F_new (§6.4): nothing is fetched for it, and the next forum sync confirms it like the other newcomer hints, after them and within the same budget (§4.4). Every other change is dropped, also before any identity resolution;
-- `listPosts` uris are hydrated (§14.3) only for posts in F's `{fk}-` range and, once a discovery pass of F has completed (§4.2), only for posts by those DIDs. A cold start cannot tell participants yet; its one visible page bounds it;
+- `listPosts` uris are hydrated (§14.3) only for posts in F's `{fk}-` range and, once a discovery pass of F has completed (§4.2), only for posts by those DIDs; the memberships proven with them are those of these posts' authors. A cold start cannot tell participants yet; its one visible page bounds it;
 - a `getRepoHeads` head for a DID that was not asked about is ignored;
 - `CursorTooOld` reconciles F as a Jetstream gap does (§6.3): authorities at P1, the other DIDs of C(F) at P3. A feed that keeps answering `CursorTooOld` gets this at most once per 24 h for each indexer and forum (the cursor row's `timeUs` records the last one); the daily reconcile (§6.8) bounds what it can hide.
 
