@@ -233,7 +233,8 @@ struct BrowserLikeWs {
 impl WebSocket for BrowserLikeWs {
     fn next(
         &mut self,
-    ) -> impl std::future::Future<Output = Option<Result<WsMessage, HostError>>> + Send {
+    ) -> impl std::future::Future<Output = Option<Result<WsMessage, HostError>>>
+    + lessdugin_core::host::MaybeSend {
         let (tx, rx) = futures::channel::oneshot::channel();
         {
             let mut st = self.feed.state.lock().unwrap();
