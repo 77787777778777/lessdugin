@@ -7,6 +7,7 @@
 // Record JSON is untrusted: every field is checked.
 
 import type { MediaRef, RawView } from "@lessdugin/engine/types";
+import { sameCid } from "./cid.ts";
 import { isSpilledBody, markdownOf, mediaRefsOf, objectField, stringField } from "./records.ts";
 import { parseAtUri } from "./uri.ts";
 
@@ -66,7 +67,7 @@ export interface WikiNode {
 }
 
 /** A step of the history chain: the revision and whether the edge from the step before it (its
- * child) names it with another CID ("ancestor altered", social.md §13.2). */
+ * child) names it with another CID ("ancestor altered", social.md §13.2; by canonical form). */
 export interface WikiStep {
   node: WikiNode;
   altered: boolean;
@@ -156,8 +157,11 @@ export function wikiChain(head: string, nodes: ReadonlyMap<string, WikiNode>): W
     if (!next) {
       return { steps, parentUnavailable: cur.parents.length > 0 && parentsOf(cur).length === 0 };
     }
-    // any entry naming the parent with another CID marks the edge
-    const altered = cur.parents.some((p) => p.uri === next.uri && p.cid !== next.cid);
+    // any entry naming the parent with another CID marks the edge; CIDs compare by canonical
+    // form (social.md §0.4), and a parent whose CID is not known here is not marked
+    const cid = next.cid;
+    const altered =
+      cid !== undefined && cur.parents.some((p) => p.uri === next.uri && !sameCid(p.cid, cid));
     steps.push({ node: next, altered });
     seen.add(next.uri);
     cur = next;

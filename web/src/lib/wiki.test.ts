@@ -64,6 +64,24 @@ describe("wikiChain (social.md §13.2)", () => {
     expect(c.steps.map((s) => s.altered)).toEqual([false, true]);
   });
 
+  // social.md §0.4, §20.1 item 45: CIDs written in records compare by canonical form
+  it("compares the stored CID by canonical form, and marks nothing when the CID is unknown", () => {
+    const cid = "bafyreidxu3yzmtdaxrwfoy5aat26xhjjnqqovbasr6c2ppkxhe2s4mlnuy";
+    const a: WikiNode = { uri: "a", cid, parents: [], available: true };
+    const named = (written: string) => graph(node("b", [["a", written]]), a);
+    // the same CID in base32 upper case and in base58btc
+    for (const written of [
+      cid.toUpperCase(),
+      "zdpuAtUWeK5yk4sUmYZPr3dHAdxomre84zdDURT8MMJYvyB3T",
+    ]) {
+      expect(wikiChain("b", named(written)).steps.map((s) => s.altered)).toEqual([false, false]);
+    }
+    const other = "bafyreifzvthwdovtvvxdaxve22ggopxkbajqydipahdx4nk52xo6ivoyyu";
+    expect(wikiChain("b", named(other)).steps.map((s) => s.altered)).toEqual([false, true]);
+    const unknown = graph(node("b", [["a", other]]), { ...a, cid: undefined });
+    expect(wikiChain("b", unknown).steps.map((s) => s.altered)).toEqual([false, false]);
+  });
+
   it("ends at a revision whose parents are all unavailable (a flagged root)", () => {
     const c = wikiChain("b", graph(node("b", [["a"]]), node("a", [], false)));
     expect(uris(c)).toEqual(["b"]);
