@@ -122,8 +122,8 @@ direct reader's; in approval mode it is an applicant, whose content no reader is
 In the assisted variants `lessdugin-indexer --poll <pds> --forum <forum>` follows the devnet from
 step 1. After the readers above, three more fresh readers (CLI, TUI, SPA) are configured with it
 and open the forum with no prior sync: the TUI and the SPA hydrate their cold page from its
-ordering and proof bundles (`listPosts`, `getRecordProofs`), and the forum syncs of the CLI and
-the SPA poll its change feed (`getChanges`). The native readers reach it through a recording
+ordering and proof bundles (`listPosts`, `getRecordProofs`), and every reader's forum sync
+polls its change feed (`getChanges`). The native readers reach it through a recording
 proxy each, so the scenario requires those methods per client. Their views must equal the
 indexer-off views byte for byte once the provenance badges (`verified`, `hint`, `stale`;
 decision U-D2) are removed.

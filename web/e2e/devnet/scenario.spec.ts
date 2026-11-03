@@ -1439,15 +1439,15 @@ async function runScenario(
     if (runIndexer) {
       // the indexer path was taken: every indexer-on reader asked the indexer; the TUI's and
       // the SPA's cold forum page was hydrated from its ordering and a proof bundle
-      // (hydrate_indexer_page, list_posts_page), and the forum syncs of the CLI and the SPA
-      // polled its change feed (poll_indexer_changes) instead of starting from a full sync
+      // (hydrate_indexer_page, list_posts_page), and every reader's forum sync polled its
+      // change feed (poll_indexer_changes) instead of starting from a full sync
       for (const client of ["cli", "tui", "spa"]) {
         expect(idx.requests[client], `${client}: requests to the indexer`).toBeGreaterThan(0);
       }
       const hydration = [`/xrpc/${NS}.index.listPosts`, `/xrpc/${NS}.index.getRecordProofs`];
       const changes = `/xrpc/${NS}.index.getChanges`;
-      expect(idx.tuiPaths, "the TUI's cold page hydration").toEqual(
-        expect.arrayContaining(hydration),
+      expect(idx.tuiPaths, "the TUI's cold page hydration and change feed").toEqual(
+        expect.arrayContaining([...hydration, changes]),
       );
       expect(idx.spaPaths, "the SPA's cold page hydration and change feed").toEqual(
         expect.arrayContaining([...hydration, changes]),
