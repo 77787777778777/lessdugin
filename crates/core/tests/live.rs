@@ -7,7 +7,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use lessdugin_atp::syntax::Did;
 use lessdugin_core::engine::{AccountInfo, Engine, EngineConfig, Sources};
 use lessdugin_core::host::{
-    BlobHandle, Dir, Host, HostError, HttpRequest, HttpResponse, KeyRange, KvOp, KvStore, WsMessage,
+    BlobHandle, Dir, Host, HostError, HttpRequest, HttpResponse, KeyRange, KvOp, KvStore,
+    WebSocket, WsMessage,
 };
 use lessdugin_core::live::source::{Cursor, Subscription};
 use lessdugin_core::live::wire::{self, Wire};
@@ -29,6 +30,8 @@ const REV: &str = "3mxyfycmgv32r";
 const CID: &str = "bafyreiarbommdbe24mq6atxsq4ms6dzmkh2nlyagyn35bh7zdaardjmr2q";
 const TIME: &str = "2025-10-09T08:53:20.000Z";
 const TIME_US: i64 = 1_760_000_000_000_000;
+/// When the test client received a frame: an hour after the frames' own time.
+const RECEIVED_US: i64 = TIME_US + 3_600_000_000;
 
 #[derive(Clone)]
 struct FailOnceKv {
@@ -173,6 +176,176 @@ impl Host for FailHost {
     }
 }
 
+/// The frames of one browser-like socket. Like `BrowserWebSocket` in packages/engine/src/host.ts,
+/// a `next()` call registers its waiter at once, and a frame goes to the oldest waiter even if
+/// that receive was abandoned: the frame is then lost.
+#[derive(Clone, Default)]
+struct Feed {
+    state: Arc<std::sync::Mutex<FeedState>>,
+}
+
+#[derive(Default)]
+struct FeedState {
+    waiters: std::collections::VecDeque<futures::channel::oneshot::Sender<WsMessage>>,
+    queue: std::collections::VecDeque<WsMessage>,
+    lost: usize,
+    closed: bool,
+}
+
+impl Feed {
+    fn push(&self, message: WsMessage) {
+        let mut st = self.state.lock().unwrap();
+        if st.closed {
+            st.lost += 1;
+        } else if let Some(waiter) = st.waiters.pop_front() {
+            if waiter.send(message).is_err() {
+                st.lost += 1;
+            }
+        } else {
+            st.queue.push_back(message);
+        }
+    }
+
+    fn lost(&self) -> usize {
+        self.state.lock().unwrap().lost
+    }
+
+    fn closed(&self) -> bool {
+        self.state.lock().unwrap().closed
+    }
+}
+
+struct BrowserLikeWs {
+    feed: Feed,
+}
+
+impl WebSocket for BrowserLikeWs {
+    fn next(
+        &mut self,
+    ) -> impl std::future::Future<Output = Option<Result<WsMessage, HostError>>> + Send {
+        let (tx, rx) = futures::channel::oneshot::channel();
+        {
+            let mut st = self.feed.state.lock().unwrap();
+            if let Some(message) = st.queue.pop_front() {
+                let _ = tx.send(message);
+            } else if !st.closed {
+                st.waiters.push_back(tx);
+            }
+        }
+        async move { rx.await.ok().map(Ok) }
+    }
+
+    async fn send_text(&mut self, _text: String) -> Result<(), HostError> {
+        Ok(())
+    }
+
+    async fn close(&mut self) {
+        let mut st = self.feed.state.lock().unwrap();
+        st.closed = true;
+        st.waiters.clear();
+    }
+}
+
+/// MemHost with browser-like sockets that stay open until closed: each connection gets its own
+/// [`Feed`].
+#[derive(Clone)]
+struct BrowserLikeHost {
+    inner: MemHost,
+    sockets: Arc<std::sync::Mutex<Vec<(String, Feed)>>>,
+}
+
+impl BrowserLikeHost {
+    fn new(inner: MemHost) -> Self {
+        Self {
+            inner,
+            sockets: Arc::default(),
+        }
+    }
+
+    fn urls(&self) -> Vec<String> {
+        self.sockets
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(u, _)| u.clone())
+            .collect()
+    }
+
+    /// The feed of the `i`-th connection.
+    fn feed_at(&self, i: usize) -> Feed {
+        self.sockets.lock().unwrap()[i].1.clone()
+    }
+
+    /// The feed of the last connection whose URL contains `pattern`.
+    fn feed(&self, pattern: &str) -> Feed {
+        self.sockets
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|(u, _)| u.contains(pattern))
+            .map(|(_, f)| f.clone())
+            .expect("no such connection")
+    }
+}
+
+impl Host for BrowserLikeHost {
+    type Kv = MemKv;
+    type Ws = BrowserLikeWs;
+    type Lock = <MemHost as Host>::Lock;
+
+    fn cache(&self) -> &MemKv {
+        self.inner.cache()
+    }
+
+    fn state(&self) -> &MemKv {
+        self.inner.state()
+    }
+
+    async fn http(&self, req: HttpRequest) -> Result<HttpResponse, HostError> {
+        self.inner.http(req).await
+    }
+
+    async fn fetch_blob(
+        &self,
+        pds: url::Url,
+        did: Did,
+        cid: String,
+        max_bytes: u64,
+    ) -> Result<BlobHandle, HostError> {
+        self.inner.fetch_blob(pds, did, cid, max_bytes).await
+    }
+
+    async fn websocket(&self, url: url::Url, _max: u32) -> Result<BrowserLikeWs, HostError> {
+        let feed = Feed::default();
+        self.sockets
+            .lock()
+            .unwrap()
+            .push((url.to_string(), feed.clone()));
+        Ok(BrowserLikeWs { feed })
+    }
+
+    async fn resolve_txt_system(&self, name: String) -> Result<Option<Vec<String>>, HostError> {
+        self.inner.resolve_txt_system(name).await
+    }
+
+    async fn lock(&self, name: &str, wait: bool) -> Result<Option<Self::Lock>, HostError> {
+        self.inner.lock(name, wait).await
+    }
+
+    async fn sleep(&self, ms: u64) {
+        self.inner.sleep(ms).await;
+    }
+
+    fn now_ms(&self) -> i64 {
+        self.inner.now_ms()
+    }
+
+    fn fill_random(&self, buf: &mut [u8]) {
+        self.inner.fill_random(buf);
+    }
+}
+
 fn context() -> Context {
     Context {
         known_dids: BTreeSet::from([DID.to_owned()]),
@@ -238,24 +411,25 @@ fn v2_exact_filter_and_record_is_only_a_hint() {
     let event = wire::parse(Wire::V2, &v2_commit(DID, &post(), &format!("{FK}-3l"), 9))
         .unwrap()
         .unwrap();
-    let out = filter.apply(Wire::V2, "one", event, &cx);
+    let out = filter.apply(Wire::V2, "one", event, &cx, RECEIVED_US);
     let (uri, cid, first) = point(&out);
     assert_eq!(uri, format!("at://{DID}/{}/{FK}-3l", post()));
     assert_eq!(cid.as_deref(), Some(CID));
-    assert_eq!(first, TIME_US);
+    // first-seen is when this client received the frame, not the server's time (security-web-5)
+    assert_eq!(first, RECEIVED_US);
     assert!(!format!("{:?}", out).contains("UNTRUSTED"));
 
     for bad_rkey in [format!("{FK}x-3l"), format!("{FK}x"), "other".into()] {
         let e = wire::parse(Wire::V2, &v2_commit(DID, &post(), &bad_rkey, 10))
             .unwrap()
             .unwrap();
-        assert!(filter.apply(Wire::V2, "one", e, &cx).actions.is_empty());
+        assert!(filter.apply(Wire::V2, "one", e, &cx, RECEIVED_US).actions.is_empty());
     }
     let spoof = format!("{}.spoof", post());
     let e = wire::parse(Wire::V2, &v2_commit(DID, &spoof, &format!("{FK}-3l"), 11))
         .unwrap()
         .unwrap();
-    assert!(filter.apply(Wire::V2, "one", e, &cx).actions.is_empty());
+    assert!(filter.apply(Wire::V2, "one", e, &cx, RECEIVED_US).actions.is_empty());
 }
 
 #[test]
@@ -265,14 +439,14 @@ fn shared_v1_v2_dedup_and_cursor() {
     let v1 = wire::parse(Wire::V1, &v1_commit(DID, &post(), &format!("{FK}-3l")))
         .unwrap()
         .unwrap();
-    let first = filter.apply(Wire::V1, "old", v1, &cx);
+    let first = filter.apply(Wire::V1, "old", v1, &cx, RECEIVED_US);
     assert_eq!(first.actions.len(), 1);
     assert_eq!(first.cursor.unwrap().time_us, TIME_US);
     filter.acknowledge();
     let v2 = wire::parse(Wire::V2, &v2_commit(DID, &post(), &format!("{FK}-3l"), 42))
         .unwrap()
         .unwrap();
-    let replay = filter.apply(Wire::V2, "new", v2, &cx);
+    let replay = filter.apply(Wire::V2, "new", v2, &cx, RECEIVED_US);
     assert!(replay.duplicate);
     assert!(replay.actions.is_empty());
     assert_eq!(replay.cursor.unwrap().seq, Some(42));
@@ -290,13 +464,13 @@ fn failed_actionable_frame_replays_instead_of_becoming_a_duplicate() {
         .unwrap()
         .unwrap()
     };
-    let first = filter.apply(Wire::V2, "one", event(), &cx);
+    let first = filter.apply(Wire::V2, "one", event(), &cx, RECEIVED_US);
     assert_eq!(first.actions.len(), 1);
     assert!(filter.has_pending());
     // The integrator fails before committing effects: the wire replay cannot skip this work.
     assert!(
         filter
-            .apply(Wire::V2, "one", event(), &cx)
+            .apply(Wire::V2, "one", event(), &cx, RECEIVED_US)
             .actions
             .is_empty()
     );
@@ -307,7 +481,7 @@ fn failed_actionable_frame_replays_instead_of_becoming_a_duplicate() {
     assert!(filter.has_pending());
     assert!(filter.acknowledge_for(Wire::V2, "one"));
     assert!(!filter.has_pending());
-    let duplicate = filter.apply(Wire::V2, "one", event(), &cx);
+    let duplicate = filter.apply(Wire::V2, "one", event(), &cx, RECEIVED_US);
     assert!(duplicate.duplicate);
     assert!(duplicate.actions.is_empty());
 }
@@ -331,9 +505,9 @@ fn identity_account_sync_drop_network_noise() {
     .to_string();
     let mut filter = EventFilter::default();
     let noise = wire::parse(Wire::V2, &identity).unwrap().unwrap();
-    assert!(filter.apply(Wire::V2, "i", noise, &cx).actions.is_empty());
+    assert!(filter.apply(Wire::V2, "i", noise, &cx, RECEIVED_US).actions.is_empty());
     let account = wire::parse(Wire::V2, &account).unwrap().unwrap();
-    let out = filter.apply(Wire::V2, "i", account, &cx);
+    let out = filter.apply(Wire::V2, "i", account, &cx, RECEIVED_US);
     assert!(matches!(
         out.actions[..],
         [Action::AccountStatus { active: false, .. }]
@@ -341,7 +515,7 @@ fn identity_account_sync_drop_network_noise() {
     filter.acknowledge();
     let sync = wire::parse(Wire::V2, &sync).unwrap().unwrap();
     assert!(matches!(
-        filter.apply(Wire::V2, "i", sync, &cx).actions[..],
+        filter.apply(Wire::V2, "i", sync, &cx, RECEIVED_US).actions[..],
         [Action::Resync { .. }]
     ));
 }
@@ -371,7 +545,7 @@ fn unknown_did_only_exact_f_new_membership_candidate() {
     let e = wire::parse(Wire::V2, &v2_commit(NEW, &membership(), FK, 1))
         .unwrap()
         .unwrap();
-    let out = filter.apply(Wire::V2, "i", e, &cx);
+    let out = filter.apply(Wire::V2, "i", e, &cx, RECEIVED_US);
     assert!(matches!(
         out.actions[..],
         [Action::Candidate { ref did, ref fk, .. }] if did == NEW && fk == FK
@@ -380,7 +554,7 @@ fn unknown_did_only_exact_f_new_membership_candidate() {
         let e = wire::parse(Wire::V2, &v2_commit(NEW, &collection, &rkey, 2))
             .unwrap()
             .unwrap();
-        assert!(filter.apply(Wire::V2, "i", e, &cx).actions.is_empty());
+        assert!(filter.apply(Wire::V2, "i", e, &cx, RECEIVED_US).actions.is_empty());
     }
 }
 
@@ -396,7 +570,7 @@ fn info_actions_restart_cursor() {
         .to_string();
         let e = wire::parse(Wire::V2, &text).unwrap().unwrap();
         let mut filter = EventFilter::default();
-        let out = filter.apply(Wire::V2, "i", e, &context());
+        let out = filter.apply(Wire::V2, "i", e, &context(), RECEIVED_US);
         if gap == Gap::OutdatedCursor {
             assert_eq!(out.actions, vec![Action::Reconcile(gap)]);
             let retry = filter.retry().unwrap().4;
@@ -650,24 +824,24 @@ fn dedup_is_bounded_lru() {
         let e = wire::parse(Wire::V2, &v2_commit(DID, &post(), rkey, 1))
             .unwrap()
             .unwrap();
-        assert_eq!(filter.apply(Wire::V2, "i", e, &cx).actions.len(), 1);
+        assert_eq!(filter.apply(Wire::V2, "i", e, &cx, RECEIVED_US).actions.len(), 1);
         filter.acknowledge();
     }
     // Promote the first key, then insert a third: the second is the least recently used.
     let first = wire::parse(Wire::V2, &v2_commit(DID, &post(), "aaaaaaaaaaaa-1", 1))
         .unwrap()
         .unwrap();
-    assert!(filter.apply(Wire::V2, "i", first, &cx).duplicate);
+    assert!(filter.apply(Wire::V2, "i", first, &cx, RECEIVED_US).duplicate);
     let third = wire::parse(Wire::V2, &v2_commit(DID, &post(), "aaaaaaaaaaaa-3", 1))
         .unwrap()
         .unwrap();
-    assert_eq!(filter.apply(Wire::V2, "i", third, &cx).actions.len(), 1);
+    assert_eq!(filter.apply(Wire::V2, "i", third, &cx, RECEIVED_US).actions.len(), 1);
     filter.acknowledge();
     assert_eq!(filter.dedup().len(), 2);
     let second = wire::parse(Wire::V2, &v2_commit(DID, &post(), "aaaaaaaaaaaa-2", 1))
         .unwrap()
         .unwrap();
-    assert_eq!(filter.apply(Wire::V2, "i", second, &cx).actions.len(), 1);
+    assert_eq!(filter.apply(Wire::V2, "i", second, &cx, RECEIVED_US).actions.len(), 1);
 }
 
 #[test]
@@ -881,7 +1055,12 @@ fn discovery_completion_controls_private_participant_filters() {
             source.stop().await;
         }
 
-        let urls = host.websocket_urls();
+        // sync.md §6.2: filtered mode with F_new non-empty adds the membership side connection.
+        let (side, urls): (Vec<String>, Vec<String>) = host
+            .websocket_urls()
+            .into_iter()
+            .partition(|u| u.contains("kinds=commit"));
+        assert_eq!(side.len(), 1, "only the filtered source opens the side connection");
         assert_eq!(urls.len(), 2);
         let filtered = |url: &str| {
             url::Url::parse(url)
@@ -947,12 +1126,19 @@ fn browser_filter_reconnect_is_rate_limited_and_catches_up_new_dids() {
         let mut cx = context();
         cx.participants_known = true;
         cx.filter_dids = vec![DID.to_owned()];
+        // sync.md §6.2: the membership side connection (F_new is not empty) is not counted.
+        let main_urls = || {
+            host.websocket_urls()
+                .into_iter()
+                .filter(|u| !u.contains("kinds=commit"))
+                .collect::<Vec<_>>()
+        };
         assert_eq!(source.next(&cx).await.unwrap(), SourceStatus::Waiting);
-        assert_eq!(host.websocket_urls().len(), 1);
+        assert_eq!(main_urls().len(), 1);
 
         cx.filter_dids.push(OTHER.to_owned());
         assert_eq!(source.next(&cx).await.unwrap(), SourceStatus::Waiting);
-        assert_eq!(host.websocket_urls().len(), 1, "changed D is rate-limited");
+        assert_eq!(main_urls().len(), 1, "changed D is rate-limited");
 
         host.advance_ms(600_000);
         assert_eq!(
@@ -961,7 +1147,7 @@ fn browser_filter_reconnect_is_rate_limited_and_catches_up_new_dids() {
                 did: OTHER.to_owned()
             }])
         );
-        let urls = host.websocket_urls();
+        let urls = main_urls();
         assert_eq!(urls.len(), 2);
         assert!(urls[1].contains("dids=did%3Aplc%3Aother"));
         assert!(!urls[1].contains("kinds=commit"));
@@ -1056,5 +1242,199 @@ fn a_dropped_first_call_still_loads_the_persisted_cursor() {
         assert_eq!(source.next(&context()).await.unwrap(), SourceStatus::Waiting);
         let urls = mem.websocket_urls();
         assert_eq!(url_cursor(urls.last().unwrap()), "42");
+    });
+}
+
+fn info(name: &str) -> String {
+    json!({"$type":"message","payload":{
+        "$type":"network.bsky.jetstream.subscribeEvents#info","name":name
+    }})
+    .to_string()
+}
+
+#[test]
+fn a_dropped_next_never_loses_a_browser_frame() {
+    futures::executor::block_on(async {
+        use futures::FutureExt;
+        let host = BrowserLikeHost::new(MemHost::new());
+        let mut source = jetstream_source(host.clone(), "wss://jetstream.example/subscribe", true);
+        // live_tail's timer wins while the source waits for a frame: the next() is dropped.
+        assert!(source.next(&context()).now_or_never().is_none());
+        let main = host.feed("subscribeEvents");
+        main.push(WsMessage::Text(v2_commit(DID, &post(), &format!("{FK}-3l"), 42)));
+        assert_eq!(main.lost(), 0, "the frame went to an abandoned receive");
+        assert!(matches!(
+            source.next(&context()).now_or_never(),
+            Some(Ok(SourceStatus::Actions(ref a))) if a.len() == 1
+        ));
+        source.acknowledge().await.unwrap();
+        // Many abandoned rounds still leave exactly one receive in flight.
+        for _ in 0..5 {
+            assert!(source.next(&context()).now_or_never().is_none());
+        }
+        assert_eq!(main.state.lock().unwrap().waiters.len(), 1);
+        source.stop().await;
+        assert!(main.closed(), "stop closes the socket");
+        assert_eq!(host.urls().len(), 1, "no socket was opened twice");
+    });
+}
+
+#[test]
+fn a_frame_time_never_becomes_first_seen() {
+    futures::executor::block_on(async {
+        let host = MemHost::new();
+        // A Jetstream that claims a commit is a day older (or newer) than it is.
+        let day = 86_400_000;
+        for shift in [-day, day] {
+            let frame_us = (host.now() + shift) * 1_000;
+            let time = lessdugin_atp::syntax::Datetime::from_micros(frame_us)
+                .unwrap()
+                .to_string();
+            host.script_websocket(
+                "wss://jetstream.example/",
+                vec![WsMessage::Text(
+                    v2_commit(DID, &post(), &format!("{FK}-3l"), 42).replace(TIME, &time),
+                )],
+            );
+            let mut source =
+                jetstream_source(host.clone(), "wss://jetstream.example/subscribe", false);
+            let SourceStatus::Actions(actions) = source.next(&context()).await.unwrap() else {
+                panic!("no action");
+            };
+            let [Action::PointFetch { first_seen_us, .. }] = &actions[..] else {
+                panic!("expected a point fetch, got {actions:?}");
+            };
+            assert_eq!(*first_seen_us, host.now() * 1_000, "first seen is the receive time");
+            source.acknowledge().await.unwrap();
+            assert_eq!(source.cursor().unwrap().time_us, frame_us, "the cursor keeps it");
+            source.stop().await;
+        }
+    });
+}
+
+#[test]
+fn a_gap_on_every_connection_backs_off_and_reconciles_once() {
+    // An endpoint that answers every connection with OutdatedCursor, at once or after a frame.
+    let scripts = [
+        vec![WsMessage::Text(info("OutdatedCursor"))],
+        vec![
+            WsMessage::Text(v2_commit(OTHER, &post(), "unrelated", 1)),
+            WsMessage::Text(info("OutdatedCursor")),
+        ],
+    ];
+    for script in scripts {
+        futures::executor::block_on(async {
+            let host = MemHost::new();
+            host.script_websocket("wss://jetstream.example/", script);
+            let mut source =
+                jetstream_source(host.clone(), "wss://jetstream.example/subscribe", false);
+            let start = host.now();
+            let mut reconciles = 0;
+            while host.now() - start < 60_000 {
+                match source.next(&context()).await.unwrap() {
+                    SourceStatus::Actions(actions) => {
+                        reconciles += actions
+                            .iter()
+                            .filter(|a| **a == Action::Reconcile(Gap::OutdatedCursor))
+                            .count();
+                        source.acknowledge().await.unwrap();
+                    }
+                    SourceStatus::Waiting => host.advance_ms(source.retry_in_ms().max(1)),
+                    other => panic!("unexpected {other:?}"),
+                }
+            }
+            let connections = host.websocket_urls().len();
+            assert_eq!(reconciles, 1, "one reconcile per gap streak");
+            assert!(
+                connections <= 8,
+                "{connections} connections in 60 s: the reconnects must back off"
+            );
+            assert!(source.polling_enabled() || connections > 1);
+        });
+    }
+}
+
+#[test]
+fn the_first_switch_to_filtered_is_immediate_and_later_changes_wait() {
+    futures::executor::block_on(async {
+        use futures::FutureExt;
+        let host = BrowserLikeHost::new(MemHost::new());
+        let mut source = jetstream_source(host.clone(), "wss://jetstream.example/subscribe", true);
+        let mut cx = Context {
+            newcomer_forums: BTreeSet::new(),
+            ..context()
+        };
+        assert!(source.next(&cx).now_or_never().is_none());
+        assert_eq!(host.urls().len(), 1);
+        assert!(!host.urls()[0].contains("dids="), "participants are not known yet");
+
+        cx.participants_known = true;
+        cx.filter_dids = vec![DID.to_owned()];
+        // Pending, not a CatchUp: the wildcard connection missed nothing.
+        assert!(source.next(&cx).now_or_never().is_none());
+        let urls = host.urls();
+        assert_eq!(urls.len(), 2, "known participants switch to filtered at once");
+        assert!(urls[1].contains("dids=did%3Aplc%3Aknown"));
+        assert!(host.feed_at(0).closed(), "the wildcard socket is closed");
+        assert!(!host.feed_at(1).closed());
+
+        cx.filter_dids.push(OTHER.to_owned());
+        assert!(source.next(&cx).now_or_never().is_none());
+        assert_eq!(host.urls().len(), 2, "a later change of D is rate-limited");
+    });
+}
+
+#[test]
+fn browser_filtered_mode_drives_a_membership_side_connection() {
+    futures::executor::block_on(async {
+        use futures::FutureExt;
+        let host = BrowserLikeHost::new(MemHost::new());
+        let mut source = jetstream_source(host.clone(), "wss://jetstream.example/subscribe", true);
+        let mut cx = context();
+        cx.participants_known = true;
+        cx.filter_dids = vec![DID.to_owned()];
+        assert!(source.next(&cx).now_or_never().is_none());
+        let urls = host.urls();
+        assert_eq!(urls.len(), 2, "{urls:?}");
+        let ns = lessdugin_lexicon::ns::NS;
+        let side_url = url::Url::parse(&urls[1]).unwrap();
+        let pairs: Vec<(String, String)> = side_url.query_pairs().into_owned().collect();
+        assert!(pairs.contains(&("collections".into(), format!("{ns}.membership"))));
+        assert!(pairs.contains(&("kinds".into(), "commit".into())));
+        assert!(!pairs.iter().any(|(k, _)| k == "dids"), "no DID filter");
+        assert!(urls[0].contains("dids=did%3Aplc%3Aknown"));
+
+        let main = host.feed("dids=");
+        let side = host.feed("kinds=commit");
+        // A newcomer's membership arrives only on the side connection.
+        side.push(WsMessage::Text(v2_commit(NEW, &membership(), FK, 8)));
+        assert!(matches!(
+            source.next(&cx).now_or_never(),
+            Some(Ok(SourceStatus::Actions(ref a)))
+                if matches!(&a[..], [Action::Candidate { did, .. }] if did == NEW)
+        ));
+        source.acknowledge().await.unwrap();
+        // One commit seen on both connections is handled once (the shared LRU).
+        let known = v2_commit(DID, &membership(), FK, 9);
+        main.push(WsMessage::Text(known.clone()));
+        assert!(matches!(
+            source.next(&cx).now_or_never(),
+            Some(Ok(SourceStatus::Actions(ref a))) if a.len() == 1
+        ));
+        source.acknowledge().await.unwrap();
+        side.push(WsMessage::Text(known));
+        assert_eq!(
+            source.next(&cx).now_or_never().map(Result::unwrap),
+            Some(SourceStatus::Waiting)
+        );
+        // The main cursor is the main connection's only.
+        assert_eq!(source.cursor().unwrap().seq, Some(9));
+
+        // Without newcomer forums the side connection is closed.
+        cx.newcomer_forums.clear();
+        assert!(source.next(&cx).now_or_never().is_none());
+        assert!(side.closed());
+        assert!(!main.closed());
+        assert_eq!(host.urls().len(), 2);
     });
 }

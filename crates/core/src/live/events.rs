@@ -47,7 +47,8 @@ pub enum Action {
         cid: Option<String>,
         /// Queue priority.
         priority: Priority,
-        /// `obs` hint.
+        /// `obs` hint: the local receive time (µs), never the server's event time, which a
+        /// Jetstream could move (`sync.md` §5.6.5, §6.4).
         first_seen_us: i64,
     },
     /// A previously unknown DID wrote an exact membership key in `F_new`.
@@ -62,7 +63,7 @@ pub enum Action {
         rev: String,
         /// Claimed CID, absent for a delete.
         cid: Option<String>,
-        /// `obs` hint.
+        /// `obs` hint: the local receive time (µs), as for [`Action::PointFetch`].
         first_seen_us: i64,
     },
     /// Drop DID/handle caches. Authorities also need a P1 refresh.
@@ -259,8 +260,16 @@ impl EventFilter {
         &self.dedup
     }
 
-    /// Filters one parsed event. Invalid events never reach this function.
-    pub fn apply(&mut self, wire: Wire, instance: &str, e: Event, cx: &Context) -> FilterOutput {
+    /// Filters one parsed event received at `received_us` (local µs, the `obs` hint of its
+    /// actions). Invalid events never reach this function.
+    pub fn apply(
+        &mut self,
+        wire: Wire,
+        instance: &str,
+        e: Event,
+        cx: &Context,
+        received_us: i64,
+    ) -> FilterOutput {
         let mut out = FilterOutput {
             cursor: Some(Cursor {
                 wire,
@@ -315,7 +324,7 @@ impl EventFilter {
                             uri,
                             rev,
                             cid,
-                            first_seen_us: e.time_us,
+                            first_seen_us: received_us,
                         });
                     }
                     return out;
@@ -331,7 +340,7 @@ impl EventFilter {
                     rev,
                     cid,
                     priority,
-                    first_seen_us: e.time_us,
+                    first_seen_us: received_us,
                 });
             }
             EventKind::Identity { inner_seq } => {
