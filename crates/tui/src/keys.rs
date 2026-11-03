@@ -74,6 +74,10 @@ pub enum Cmd {
     ReactPalette,
     /// `E`: show the version history of the selected item (M4).
     History,
+    /// `]` (on a thread): the next post of the post's sequence (`social.md` §14).
+    SequenceNext,
+    /// `[` (on a thread): the previous post of the post's sequence.
+    SequencePrev,
     /// `i`: load the selected item's images (their author's PDS sees the address).
     LoadMedia,
     /// `Tab` (inside the react palette): switch the stance.
@@ -136,6 +140,8 @@ pub fn command(k: &KeyEvent) -> Option<Cmd> {
         KeyCode::Backspace => Cmd::Undo,
         KeyCode::Char('x') => Cmd::ReactPalette,
         KeyCode::Char('E') => Cmd::History,
+        KeyCode::Char(']') => Cmd::SequenceNext,
+        KeyCode::Char('[') => Cmd::SequencePrev,
         KeyCode::Char('i') => Cmd::LoadMedia,
         KeyCode::Tab => Cmd::Stance,
         KeyCode::Char('m') => Cmd::ModMenu,
@@ -210,6 +216,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("r", "reply in $EDITOR"),
             ("c", "comment on the post in $EDITOR"),
             ("s", "comment sort (magic, top, new, old, latest)"),
+            ("[ ]", "previous / next post of its sequence"),
             ("i", "load the item's images (their host sees you)"),
         ],
     ),
@@ -285,6 +292,8 @@ mod tests {
         assert_eq!(c("N"), Some(Cmd::Notifications));
         assert_eq!(c("M"), Some(Cmd::MarkAllRead));
         assert_eq!(c("i"), Some(Cmd::LoadMedia));
+        assert_eq!(c("]"), Some(Cmd::SequenceNext));
+        assert_eq!(c("["), Some(Cmd::SequencePrev));
         // the `:` command line (synthesis §6.11 Overlays)
         assert_eq!(c(":"), Some(Cmd::Command));
         // `/` searches; `n` is no command outside the search results (decision O-7)

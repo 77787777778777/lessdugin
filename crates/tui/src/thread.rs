@@ -266,6 +266,10 @@ pub fn layout_for(
                 meta.push(count(p.history.revisions, "revision", "revisions"));
             }
             lines.push(line([(joined(meta), dim())]));
+            // the tags with their relevance and the viewer's own tag votes (social.md §13.3)
+            if let Some(tags) = crate::text::tag_relevance(&p.tag_relevance) {
+                lines.push(line([(tags, dim())]));
+            }
             if let Some(l) = &p.post.link {
                 lines.push(line([
                     (lit("link: "), dim()),
@@ -300,6 +304,17 @@ pub fn layout_for(
                 for t in react_lines(&p.reacts, 0, &handles) {
                     lines.push(line([(t, dim())]));
                 }
+            }
+            // its place in a sequence (social.md §14), which `[` and `]` step along
+            for nav in &p.sequences {
+                let mut parts = vec![lit("sequence: "), tt(&nav.title)];
+                if nav.prev.is_some() {
+                    parts.push(lit("  [ previous"));
+                }
+                if nav.next.is_some() {
+                    parts.push(lit("  ] next"));
+                }
+                lines.push(line([(crate::text::cat(parts), dim())]));
             }
         }
         ThreadRoot::Missing { missing } => {

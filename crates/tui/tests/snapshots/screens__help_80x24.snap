@@ -15,14 +15,14 @@ expression: help
 ▌ • Stay│  r               reply in $EDITOR                            │
 ▌       │  c               comment on the post in $EDITOR              │
 ▌ lessdu│  s               comment sort (magic, top, new, old, latest) │
-        │  i               load the item's images (their host sees you)│
-  1 comm│Forums                                                        │
-        │  s               sort: magic, top, new, old, recent comments │
-  @bob.e│  f               filter: frontpage, all, curated             │
-    Than│  Tab             posts / activity                            │
-        │  P               new post in $EDITOR                         │
-    It l│  R               sync and show new items                     │
+        │  [ ]             previous / next post of its sequence        │
+  1 comm│  i               load the item's images (their host sees you)│
+        │Forums                                                        │
+  @bob.e│  s               sort: magic, top, new, old, recent comments │
+    Than│  f               filter: frontpage, all, curated             │
+        │  Tab             posts / activity                            │
+    It l│  P               new post in $EDITOR                         │
+        │  R               sync and show new items                     │
         │Opinions                                                      │
         │  u U             upvote / strong upvote                      │
-        │  d D             downvote / strong downvote                  │
- r reply└ 1-22 of 39 ──────────────────────────────────────────────────┘
+ r reply└ 1-22 of 40 ──────────────────────────────────────────────────┘

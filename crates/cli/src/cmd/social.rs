@@ -730,6 +730,9 @@ pub async fn run(ctx: &Ctx, args: ModArgs) -> Result<(), CliError> {
     }
 }
 
+/// The mod queue's banner that is a notice, not a warning (`engine-api.md` §4.2 `Banner`).
+const APPLICANTS_VIA_HINTS: &str = "applicantsViaHints";
+
 /// `mod queue`.
 async fn queue(ctx: &Ctx, forum: Option<&str>) -> Result<(), CliError> {
     let engine = ctx.reader().await?;
@@ -739,6 +742,18 @@ async fn queue(ctx: &Ctx, forum: Option<&str>) -> Result<(), CliError> {
     if ctx.out.is_json() {
         ctx.out.json(&q);
         return Ok(());
+    }
+    // above the queue, also when it is empty: in approval mode, where the applicants come from
+    // (`sync.md` §4.4, decision O-8), a notice with assisted sources and a warning with direct
+    // ones, which look for none
+    for b in &q.banners {
+        if b.code == APPLICANTS_VIA_HINTS {
+            ctx.out
+                .line(&[(cat([lit("note: "), tt(&b.message)]), Style::Dim)]);
+        } else {
+            ctx.out
+                .line(&[(cat([lit("! "), tt(&b.message)]), Style::Warn)]);
+        }
     }
     if q.items.is_empty() {
         ctx.out.line(&[(lit("The queue is empty."), Style::Dim)]);

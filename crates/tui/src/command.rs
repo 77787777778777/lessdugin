@@ -10,7 +10,7 @@
 //! | Command | Engine call | Same as key |
 //! |---|---|---|
 //! | `vote up\|down\|strong-up\|strong-down\|clear` | `opinion` (`Karma`) | `u`/`U`/`d`/`D`/`0` |
-//! | `vote <value> [post] --tag <slug>` | `opinion` (`Tag`) | - |
+//! | `vote <value> [post] --tag <slug>` (nothing when it is the viewer's own vote) | `opinion` (`Tag`) | - |
 //! | `agree for\|against\|strong-for\|strong-against\|clear` | `opinion` (`Agreement`) | `a`/`A`/`z`/`Z`/`0` |
 //! | `react <id> [for\|against]` | `opinion` (`React`) | `x`, then Enter |
 //! | `unreact <id>` | `opinion` (`React`, remove) | `x`, then Enter again |
@@ -20,7 +20,9 @@
 //! | `activity` | `recent_discussion` | `Tab` on a forum |
 //! | `sort <sort>`, `filter <filter>` | `list_posts`, `get_thread` | `s`, `f` |
 //! | `user [actor]`, `search <terms>`, `tags [slug]`, `sequences`, `sequence <uri>` | `user`, `search`, `tags`/`tag`, `sequences`/`sequence` | - |
-//! | `wiki edit`, `sequence create\|edit\|add\|remove\|move` | `wiki_edit`, `seq_*` | - |
+//! | a post opened from `sequence <uri>` (or its "Continue reading"), and stepped along it | `get_post(uri, sequence)` | `Enter`, then `[`/`]` |
+//! | `wiki edit` (on the page as loaded, based on its head) | `tag`, then `wiki_edit` | - |
+//! | `sequence create\|edit\|add\|remove\|move` | `seq_*` | - |
 //! | `mods [role]` | the forum view's `moderators` | - |
 //! | `mods add <actor> [admin|moderator]`, `mods remove <actor>` | `mods_set` | - |
 //! | `open <ref>`, `follow [forum]`, `unfollow [forum]` | `forum_open`, `forum_follow`, `forum_unfollow` | `Enter` |
@@ -29,13 +31,15 @@
 //! | `grant`, `revoke`, `approve`, `reject <actor...>` | the same | `Enter` on an applicant |
 //! | `mod adopt <actor>` | `mod_adopt` | - |
 //! | `forum create <slug> <name> [--open]`, `forum edit [--name ...]` | `forum_create`, `forum_update` | - |
-//! | `edit`, `delete`, `retract`, `redact`, `raw` `[subject]` | the same, `redact_revision` | - |
+//! | `edit [subject] [--drop-link-card]` | `edit` (`EditOpts.dropLinkCard`) | - |
+//! | `delete`, `retract`, `redact`, `raw` `[subject]` | the same, `redact_revision` | - |
 //! | `bookmark`, `subscribe`, `mute <actor>` (and `un...`) | `bookmark`, `subscribe`, `mute` | - |
 //! | `karma-notifications [cadence]`, `settings`, `set <key> <value>`, `unset <key>` | the same | - |
 //! | `undo`, `retry [write]` | `undo`, `retry_write` | `Backspace` |
 //!
-//! [`REACH`] says how the TUI reaches each operation of `engine-api.md` §3.2, §3.5 and §3.6;
-//! a test holds it to the spec, so an operation cannot go missing. `parse` is pure (no engine,
+//! [`REACH`] says how the TUI reaches each operation of `engine-api.md` §3.2, §3.5 and §3.6,
+//! and [`FIELD_REACH`] each operation argument and field that M5 adds; tests hold them to the
+//! spec, so an operation or a field cannot go missing. `parse` is pure (no engine,
 //! no state); `State::command` runs it.
 
 use lessdugin_core::dto::{
@@ -118,7 +122,8 @@ pub enum Verb {
     },
     /// `sequence …`: read a sequence or change one through the ordinary outbox.
     Sequence(SequenceVerb),
-    /// `wiki edit <slug> --name NAME …`: the body is written in `$EDITOR`.
+    /// `wiki edit <slug> --name NAME …`: the body is written in `$EDITOR`, which opens on the
+    /// page as loaded; the edit is based on the head loaded (decision O-2).
     WikiEdit {
         /// The forum (default: the current forum).
         forum: Option<String>,
@@ -202,8 +207,12 @@ pub enum Verb {
     /// `forum edit [--name N] [--description D] [--mode open|approval] [--tier T]
     /// [--report-contact C]`: the forum on screen; what is not named is kept.
     ForumEdit(ForumChanges),
-    /// `edit [subject]`: your post or comment, in `$EDITOR`.
-    Edit,
+    /// `edit [subject] [--drop-link-card]`: your post or comment, in `$EDITOR`.
+    Edit {
+        /// `--drop-link-card`: write the post's link as the uri alone, its card (title,
+        /// description, image) dropped (`EditOpts.dropLinkCard`).
+        drop_link_card: bool,
+    },
     /// `delete [subject]`: your post or comment, with its revisions (asks first).
     Delete,
     /// `retract [subject]`: your comment stays, marked retracted.
@@ -522,6 +531,37 @@ pub const VALUE_REACH: &[(&str, Reach)] = &[
     (
         "ModActionValue.tag",
         Reach::Command("mod tag rust --removed"),
+    ),
+];
+
+/// How the TUI reaches each operation argument and field that `engine-api.md` §1 "After the
+/// freeze (M5)" adds to dto/1: a new optional request field or argument by the key or command
+/// that sends it (on the Thread screen of a post of a sequence, the post selected), a new
+/// optional output field by where the TUI shows it. A test holds this table to that paragraph
+/// and runs each request entry.
+pub const FIELD_REACH: &[(&str, Reach)] = &[
+    (
+        "PostView.tagRelevance",
+        Reach::Automatic(
+            "a thread shows its post's tags line, and `:vote --tag` starts from the viewer's vote",
+        ),
+    ),
+    (
+        "WikiDraft.base",
+        Reach::Command("wiki edit rust --name Rust"),
+    ),
+    (
+        "ModQueue.banners",
+        Reach::Automatic("the Mod screen's queue tab shows them above the queue"),
+    ),
+    ("get_post.sequence", Reach::Keys(&["]"])),
+    (
+        "SequenceView.continueReading",
+        Reach::Automatic("`:sequence <uri>` offers it first, opened in the sequence"),
+    ),
+    (
+        "EditOpts.dropLinkCard",
+        Reach::Command("edit --drop-link-card"),
     ),
 ];
 
@@ -1092,7 +1132,20 @@ fn more(verb: &str, rest: &[&str]) -> Option<Parsed> {
         "approve" => access(AccessOp::Approve, "approve"),
         "reject" => access(AccessOp::Reject, "reject"),
         "forum" => forum_verb(rest),
-        "edit" => bare(Verb::Edit, rest.first()),
+        "edit" => {
+            let drop_link_card = rest.contains(&"--drop-link-card");
+            let words: Vec<&str> = rest
+                .iter()
+                .copied()
+                .filter(|w| *w != "--drop-link-card")
+                .collect();
+            if let Some(flag) = words.iter().find(|w| w.starts_with("--")) {
+                return Some(Err(format!(
+                    "Unknown edit option `{flag}` (edit [subject] [--drop-link-card])."
+                )));
+            }
+            bare(Verb::Edit { drop_link_card }, words.first())
+        }
         "delete" | "rm" => bare(Verb::Delete, rest.first()),
         "retract" => bare(Verb::Retract, rest.first()),
         "redact" => bare(Verb::Redact, rest.first()),
@@ -1909,7 +1962,7 @@ pub fn usage() -> String {
         "search <terms> [--forum FORUM|--all] [--author ACTOR] [--limit 1..100]",
         "tags [slug] [--forum FORUM]",
         "sequences [--forum FORUM]",
-        "sequence <uri>",
+        "sequence <uri>  (Enter reads a post in it; then [ and ] step along it)",
         "sequence create <SequenceDraft JSON>  (`forum`: `.` uses the current forum)",
         "sequence edit <uri> <SequenceDraft JSON>",
         "sequence add <uri> <post> --chapter N --index N",
@@ -1930,7 +1983,8 @@ pub fn usage() -> String {
         "grant|revoke|approve|reject <did|handle...>",
         "forum create <slug> <name> [--open]",
         "forum edit [--name N] [--description D] [--mode open|approval] [--tier personal|frontpage] [--report-contact C]",
-        "edit|delete|retract|redact|raw [subject]",
+        "edit [subject] [--drop-link-card]  (drop a post's link card, keep the link)",
+        "delete|retract|redact|raw [subject]",
         "react <id> [for|against] [subject] --quote <passage>",
         "bookmark [subject], unbookmark [subject]",
         "subscribe|unsubscribe [post [subject]|forum|user <actor>|tag <slug>]",

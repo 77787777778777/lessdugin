@@ -114,7 +114,8 @@ pub struct GlobalArgs {
 /// Commands.
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Read a post and its comments (labelled c1…cN; no login needed).
+    /// Read a post and its comments (labelled c1…cN; `next` and `prev` step along its
+    /// sequence; no login needed).
     Read(ReadArgs),
     /// List a forum's posts, numbered (`read 3` reads the third).
     Ls(LsArgs),
@@ -606,6 +607,103 @@ mod reach {
         for (kind, line) in VARIANTS {
             parses(line);
             assert_eq!(sent_kind(line), *kind, "{line}");
+        }
+    }
+
+    /// How the CLI reaches each operation argument and field that `engine-api.md` §1 "After
+    /// the freeze (M5)" adds to dto/1: a new optional request field or argument by the command
+    /// line that sends it, a new optional output field by the command that shows it. A test
+    /// holds this table to that paragraph, so a field the spec adds there fails until the CLI
+    /// reaches it.
+    const FIELDS: &[(&str, &str)] = &[
+        ("PostView.tagRelevance", "read 3"),
+        (
+            "WikiDraft.base",
+            "wiki edit rust --name Rust --file page.md --base at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/online.7778777.lessdugin.wikiRevision/w1",
+        ),
+        ("ModQueue.banners", "mod queue"),
+        (
+            "get_post.sequence",
+            "read 3 --sequence at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/online.7778777.lessdugin.sequence/s1",
+        ),
+        (
+            "SequenceView.continueReading",
+            "sequence read at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/online.7778777.lessdugin.sequence/s1",
+        ),
+        ("EditOpts.dropLinkCard", "edit 3 --drop-link-card"),
+    ];
+
+    /// The new optional request fields and arguments (`request`) and output fields (`output`)
+    /// that `engine-api.md` §1 "After the freeze (`milestone`)" names, as `Type.field` (an
+    /// argument `op(a, b?)` as `op.b`).
+    fn freeze_fields(milestone: &str) -> std::collections::BTreeMap<String, &'static str> {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/spec/engine-api.md");
+        let spec = std::fs::read_to_string(path).expect("docs/spec/engine-api.md");
+        let head = format!("- **After the freeze ({milestone}).**");
+        let start = spec.find(&head).unwrap_or_else(|| panic!("no {head:?}"));
+        let rest = &spec[start + head.len()..];
+        let para = &rest[..rest.find("\n- **").unwrap_or(rest.len())];
+        let para = para.split_whitespace().collect::<Vec<_>>().join(" ");
+        let mut out = std::collections::BTreeMap::new();
+        for (marker, kind) in [
+            ("ew optional request field", "request"),
+            ("ew optional request argument", "request"),
+            ("ew optional output field", "output"),
+        ] {
+            for (i, _) in para.match_indices(marker) {
+                let Some(code) = para[i + marker.len()..].split('`').nth(1) else {
+                    continue;
+                };
+                match code.split_once('(') {
+                    Some((op, args)) => {
+                        for a in args.trim_end_matches(')').split(',') {
+                            if let Some(a) = a.trim().strip_suffix('?') {
+                                out.insert(format!("{op}.{a}"), kind);
+                            }
+                        }
+                    }
+                    None => {
+                        out.insert(code.to_owned(), kind);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// The fields of [`FIELDS`] that the command line `line` sends.
+    fn sends(line: &str) -> Vec<&'static str> {
+        use clap::Parser;
+        let words = std::iter::once("lessdugin").chain(line.split_whitespace());
+        let cli = Cli::try_parse_from(words).unwrap_or_else(|e| panic!("{line}: {e}"));
+        let mut out = Vec::new();
+        match cli.command {
+            Some(super::Command::Wiki(super::WikiArgs {
+                action: super::WikiAction::Edit { base: Some(_), .. },
+            })) => out.push("WikiDraft.base"),
+            Some(super::Command::Read(a)) if a.sequence.is_some() => out.push("get_post.sequence"),
+            Some(super::Command::Edit(a)) if a.drop_link_card => out.push("EditOpts.dropLinkCard"),
+            _ => {}
+        }
+        out
+    }
+
+    #[test]
+    fn every_new_field_has_a_way_in() {
+        let spec = freeze_fields("M5");
+        let have: BTreeSet<String> = FIELDS.iter().map(|(f, _)| (*f).to_owned()).collect();
+        assert_eq!(FIELDS.len(), have.len(), "a field is listed twice");
+        let want: BTreeSet<String> = spec.keys().cloned().collect();
+        assert!(want.len() >= 6, "the paragraph was not read: {spec:?}");
+        assert_eq!(
+            have, want,
+            "the M5 fields the CLI reaches, against engine-api.md"
+        );
+        for (field, line) in FIELDS {
+            parses(line);
+            if spec[*field] == "request" {
+                assert_eq!(sends(line), [*field], "{line}");
+            }
         }
     }
 

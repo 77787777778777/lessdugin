@@ -69,8 +69,9 @@ pub struct ForumData {
     pub list: PostList,
 }
 
-/// The Thread screen's data: the engine's `ThreadView` exactly as `get_thread` returned it,
-/// and the bodies to show.
+/// The Thread screen's data: the engine's `ThreadView` exactly as `get_thread` returned it
+/// (for a thread opened from a sequence, with the post's `sequences` as `get_post(uri,
+/// sequence)` returns them), and the bodies to show.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ThreadData {
     /// The view (dto/1).
@@ -117,6 +118,9 @@ pub enum Compose {
         uri: String,
         /// Its draft as cached.
         base: Box<Draft>,
+        /// `--drop-link-card`: the link is written as `base` gives it, the uri alone
+        /// (`EditOpts.dropLinkCard`).
+        drop_link_card: bool,
     },
     /// A wiki revision; its structured fields stay out of the markdown editor.
     Wiki {
@@ -188,6 +192,18 @@ pub struct EditStart {
     pub unchecked: Option<String>,
 }
 
+/// What `:wiki edit` loaded before the editor opens ([`Effect::StartWiki`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct WikiStart {
+    /// The forum.
+    pub forum: String,
+    /// The page slug.
+    pub slug: String,
+    /// The command's fields, `base` the head loaded (none for a new page) and `body` its text
+    /// and media, which the editor's text replaces.
+    pub draft: WikiDraft,
+}
+
 /// Something for the runtime to do.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Effect {
@@ -211,7 +227,8 @@ pub enum Effect {
         /// Who asked.
         origin: Origin,
     },
-    /// `get_thread` and the bodies.
+    /// `get_thread` and the bodies; with a sequence, the post's navigation in it
+    /// (`get_post(uri, sequence)`).
     LoadThread {
         /// The screen.
         screen: ScreenId,
@@ -219,6 +236,8 @@ pub enum Effect {
         uri: String,
         /// The comment sort (`s` on the thread).
         opts: ThreadOpts,
+        /// The sequence the thread was opened from (`social.md` §14).
+        sequence: Option<String>,
         /// Who asked.
         origin: Origin,
     },
@@ -479,6 +498,16 @@ pub enum Effect {
         /// The screen to reload afterwards.
         screen: ScreenId,
     },
+    /// Loads the page `slug` (`tag(forum, slug)`) and opens `$EDITOR` on its text, the edit
+    /// based on the head it loaded (`WikiDraft.base`, decision O-2).
+    StartWiki {
+        /// The forum.
+        forum: String,
+        /// The page slug.
+        slug: String,
+        /// The command's structured fields.
+        draft: WikiDraft,
+    },
     /// `wiki_edit(forum, slug, draft)`: the markdown returned by `$EDITOR`.
     WikiEdit {
         /// The forum.
@@ -543,8 +572,10 @@ pub enum Effect {
         uri: String,
         /// Its forum, for a reference.
         forum: String,
+        /// `--drop-link-card`: the post's link card is dropped, the link kept.
+        drop_link_card: bool,
     },
-    /// `edit(uri, draft, EditOpts::default())`: the old version is kept as a revision.
+    /// `edit(uri, draft, EditOpts { dropLinkCard, .. })`: the old version is kept as a revision.
     Edit {
         /// The item.
         uri: String,
@@ -552,6 +583,8 @@ pub enum Effect {
         draft: Draft,
         /// The editor's text (offered again if the edit fails).
         text: String,
+        /// Write the draft's link exactly as given, without the cached card.
+        drop_link_card: bool,
     },
     /// `delete(uri)`, `retract(uri)` or `redact_revision(uri)` of your post or comment.
     ItemWrite {
@@ -715,7 +748,7 @@ impl Effect {
             Effect::Adopt { .. } => "mod_adopt",
             Effect::ForumCreate { .. } => "forum_create",
             Effect::ForumEdit { .. } => "forum_update",
-            Effect::WikiEdit { .. } => "wiki_edit",
+            Effect::StartWiki { .. } | Effect::WikiEdit { .. } => "wiki_edit",
             Effect::SequenceCreate { .. } => "seq_create",
             Effect::SequenceEdit { .. } => "seq_edit",
             Effect::SequenceAdd { .. } => "seq_add",
@@ -941,6 +974,8 @@ pub enum Action {
     /// [`Effect::StartEdit`]: the editor session and what the edit would suspend
     /// (`edit_preflight`), or why there is none.
     EditReady(Result<EditStart, EngineError>),
+    /// [`Effect::StartWiki`]: the page as loaded, or why it could not be.
+    WikiReady(Result<WikiStart, EngineError>),
     /// [`Effect::LoadMembers`] finished.
     MembersLoaded(Result<Vec<MemberView>, EngineError>),
     /// [`Effect::LoadRaw`] finished.
@@ -1201,6 +1236,9 @@ impl ForumScreen {
 pub struct ThreadScreen {
     /// The uri opened (a post, or a comment of the thread).
     pub uri: String,
+    /// The sequence it was opened from (a sequence's panel, or `[` and `]` along one): the
+    /// post's next and previous are that sequence's, and it continues there (`social.md` §14).
+    pub sequence: Option<String>,
     /// The comment sort (`s`: magic, top, new, old, latest reply; `social.md` §12.4).
     pub opts: ThreadOpts,
     /// The data, once loaded.
@@ -1329,6 +1367,21 @@ pub struct ModScreen {
 }
 
 impl ModScreen {
+    /// The screen rows the queue's banners take above it at `width` columns (on the queue
+    /// tab; `crate::text::queue_banner_lines`).
+    pub fn banner_rows(&self, width: u16) -> usize {
+        match (self.tab, &self.queue) {
+            (ModTab::Queue, Some(Ok(q))) => crate::text::queue_banner_lines(
+                &q.banners,
+                usize::from(width),
+                ratatui::style::Style::default(),
+                ratatui::style::Style::default(),
+            )
+            .len(),
+            _ => 0,
+        }
+    }
+
     /// The number of rows the current tab has.
     pub fn row_count(&self) -> usize {
         match self.tab {
@@ -1450,6 +1503,9 @@ pub struct PanelItem {
     pub line: usize,
     /// Its stable reference, resolved by the ordinary `:open` path.
     pub target: String,
+    /// The sequence a post of a sequence's panel is read in (`social.md` §14): its thread
+    /// opens with that sequence's next and previous.
+    pub sequence: Option<String>,
 }
 
 /// A text panel over the screen (`:members`, `:raw`, `:settings`): the navigation keys
@@ -1540,6 +1596,7 @@ impl Screen {
                 screen,
                 uri: t.uri.clone(),
                 opts: t.opts.clone(),
+                sequence: t.sequence.clone(),
                 origin,
             },
             ScreenKind::Mod(m) => Effect::LoadQueue {
@@ -1937,6 +1994,17 @@ pub fn status_text(s: &Status) -> TermText {
     cat([lit(" "), s.text.clone()])
 }
 
+/// `wiki_edit`'s refusal of an edit made against a head that is no longer the page's
+/// (`conflict`, `detail.kind = "wikiHeadMoved"`, decision O-2).
+fn wiki_head_moved(e: &EngineError) -> bool {
+    e.code == lessdugin_core::engine::ErrorCode::Conflict
+        && e.detail
+            .as_ref()
+            .and_then(|d| d.get("kind"))
+            .and_then(serde_json::Value::as_str)
+            == Some("wikiHeadMoved")
+}
+
 /// Every notice of an action's result, `; `-separated (the engine returns them in a fixed
 /// order, each telling the user something the others do not: a restriction's retroactivity
 /// and the expiry it now shares, an adoption and what it does not adopt).
@@ -2238,6 +2306,13 @@ impl State {
             Action::LocalDone(result) => match result {
                 Ok(msg) => self.say(Tone::Good, tt(&msg)),
                 Err(e) => self.say(Tone::Error, tt(&e.message)),
+            },
+            Action::WikiReady(result) => match result {
+                Ok(start) => self.wiki_ready(start, &mut fx),
+                Err(e) => self.say(
+                    Tone::Error,
+                    cat([lit("Cannot load the wiki page: "), tt(&e.message)]),
+                ),
             },
             Action::EditReady(result) => match result {
                 Ok(EditStart {
@@ -2689,9 +2764,16 @@ impl State {
     }
 
     fn push_thread(&mut self, uri: String, fx: &mut Vec<Effect>) {
+        self.push_thread_in(uri, None, fx);
+    }
+
+    /// Opens the thread of `uri` read in `sequence`, the sequence the reader came from
+    /// (`social.md` §14: `get_post(uri, sequence)`).
+    fn push_thread_in(&mut self, uri: String, sequence: Option<String>, fx: &mut Vec<Effect>) {
         let i = self.push(
             ScreenKind::Thread(Box::new(ThreadScreen {
                 uri: uri.clone(),
+                sequence,
                 viewer: self.account.as_ref().map(|a| a.did.clone()),
                 ..ThreadScreen::default()
             })),
@@ -2900,9 +2982,17 @@ impl State {
                         p.scroll = p.items[p.selected].line;
                     }
                     Some(Cmd::Open) => {
-                        let target = p.items[p.selected].target.clone();
+                        let item = p.items[p.selected].clone();
                         self.panel = None;
-                        fx.push(Effect::Open { target });
+                        match item.sequence {
+                            // a post of a sequence's panel: read in that sequence
+                            Some(sequence) => {
+                                self.push_thread_in(item.target, Some(sequence), fx);
+                            }
+                            None => fx.push(Effect::Open {
+                                target: item.target,
+                            }),
+                        }
                     }
                     _ => self.panel = None,
                 }
@@ -2965,6 +3055,8 @@ impl State {
             Cmd::Undo => self.undo_last(fx),
             Cmd::ReactPalette => self.open_react(),
             Cmd::History => self.open_history(fx),
+            Cmd::SequenceNext => self.sequence_step(true, fx),
+            Cmd::SequencePrev => self.sequence_step(false, fx),
             Cmd::LoadMedia => self.load_media(fx),
             Cmd::ModMenu => self.open_mod_menu(),
             Cmd::Notifications => self.open_notifications(fx),
@@ -3047,7 +3139,8 @@ impl State {
             }
             ScreenKind::Mod(m) => {
                 let len = m.row_count();
-                m.pos.apply(cmd, len, h);
+                let visible = h.saturating_sub(m.banner_rows(w)).max(1);
+                m.pos.apply(cmd, len, visible);
             }
             ScreenKind::Notifications(s) => {
                 let len = s.data.as_ref().map_or(0, |d| d.items.len());
@@ -3084,6 +3177,42 @@ impl State {
                 }
             }
         }
+    }
+
+    /// `]` / `[`: the next or previous post of the sequence the thread's post shows
+    /// (`PostView.sequences`, `social.md` §14), read in that sequence; it replaces the thread
+    /// on top, so `h` still goes back to where the reading started.
+    fn sequence_step(&mut self, next: bool, fx: &mut Vec<Effect>) {
+        let Some(t) = self.top_thread() else {
+            self.say(
+                Tone::Info,
+                lit("Open a post of a sequence to step along it with [ and ]."),
+            );
+            return;
+        };
+        let Some(nav) = t.post().and_then(|p| p.sequences.first()) else {
+            self.say(Tone::Info, lit("This post is in no sequence."));
+            return;
+        };
+        let Some(uri) = (if next { &nav.next } else { &nav.prev }).clone() else {
+            self.say(
+                Tone::Info,
+                cat([
+                    lit(if next {
+                        "This is the last post of "
+                    } else {
+                        "This is the first post of "
+                    }),
+                    tt(&nav.title),
+                    lit("."),
+                ]),
+            );
+            return;
+        };
+        let sequence = nav.sequence.clone();
+        self.follow_own = None;
+        self.stack.pop();
+        self.push_thread_in(uri, Some(sequence), fx);
     }
 
     /// `s`: the next post sort on a forum (`social.md` §12.2), the next comment sort on a
@@ -3244,8 +3373,15 @@ impl State {
     }
 
     fn prefill(&self, compose: &Compose) -> String {
-        match &self.kept {
-            Some((c, text)) if c == compose => text.clone(),
+        match (&self.kept, compose) {
+            // a wiki text is kept for its page, whatever head or fields the next attempt has
+            (
+                Some((Compose::Wiki { forum, slug, .. }, text)),
+                Compose::Wiki {
+                    forum: f, slug: s, ..
+                },
+            ) if forum == f && slug == s => text.clone(),
+            (Some((c, text)), _) if c == compose => text.clone(),
             _ => String::new(),
         }
     }
@@ -3398,7 +3534,11 @@ impl State {
                     ]),
                 ),
             },
-            Compose::Edit { uri, base } => {
+            Compose::Edit {
+                uri,
+                base,
+                drop_link_card,
+            } => {
                 let mut draft = (**base).clone();
                 match &mut draft {
                     // the text replaces the body's markdown; its media (the cached items, as
@@ -3438,11 +3578,17 @@ impl State {
                     uri: uri.clone(),
                     draft,
                     text,
+                    drop_link_card: *drop_link_card,
                 });
             }
             Compose::Wiki { forum, slug, draft } => {
                 let mut draft = (**draft).clone();
-                draft.body = Some(lessdugin_core::dto::BodyDraft::text(text.clone()));
+                // the text replaces the loaded page's markdown; its media stay
+                let media = draft.body.take().map(|b| b.media).unwrap_or_default();
+                draft.body = Some(lessdugin_core::dto::BodyDraft {
+                    markdown: text.clone(),
+                    media,
+                });
                 self.say(Tone::Info, lit("Queuing the wiki edit..."));
                 fx.push(Effect::WikiEdit {
                     forum: forum.clone(),
@@ -3506,6 +3652,31 @@ impl State {
                     self.reload(i, Origin::User, fx);
                 }
             }
+            Err(e) if wiki_head_moved(&e) => {
+                // an edit made against a head that is no longer the page's would replace the
+                // newer revision (decision O-2): the text is kept for the redo
+                let slug = match &compose {
+                    Compose::Wiki { slug, .. } => slug.clone(),
+                    _ => String::new(),
+                };
+                self.kept = Some((compose, text));
+                self.say(
+                    Tone::Warn,
+                    cat([
+                        lit("The page "),
+                        tt(&slug),
+                        lit(
+                            " changed since it was loaded, so your edit was not queued. Your \
+                             text is kept: run :wiki edit ",
+                        ),
+                        tt(&slug),
+                        lit(
+                            " again to reload the page (it is quoted under your text) and redo \
+                             your edit on it.",
+                        ),
+                    ]),
+                );
+            }
             Err(e) => {
                 let again = compose.again();
                 self.kept = Some((compose, text));
@@ -3518,6 +3689,30 @@ impl State {
                 );
             }
         }
+    }
+
+    /// [`Action::WikiReady`]: the editor opens on the loaded page's text, or on the text kept
+    /// from an earlier attempt at the same page, with the page as it is now quoted under it.
+    fn wiki_ready(&mut self, start: WikiStart, fx: &mut Vec<Effect>) {
+        let WikiStart { forum, slug, draft } = start;
+        let current = draft
+            .body
+            .as_ref()
+            .map(|b| b.markdown.clone())
+            .unwrap_or_default();
+        let name = draft.name.clone();
+        let compose = Compose::Wiki {
+            forum,
+            slug: slug.clone(),
+            draft: Box::new(draft),
+        };
+        let kept = self.prefill(&compose);
+        let template = if kept.is_empty() {
+            editor::wiki_template(&current, &slug, &name, None)
+        } else {
+            editor::wiki_template(&kept, &slug, &name, Some(&current))
+        };
+        fx.push(Effect::Editor(EditorRequest { compose, template }));
     }
 
     // -----------------------------------------------------------------------------------------
@@ -3576,6 +3771,26 @@ impl State {
             }
             _ => None,
         })
+    }
+
+    /// The viewer's own tag vote on `slug` of the post `post`, as the thread on top shows it
+    /// (`PostView.tagRelevance[].mine`, `social.md` §13.3): `None` when it is not known there,
+    /// that is when the thread does not show that post or an opinion write of this TUI is still
+    /// open (a vote in the outbox is not shown yet).
+    fn my_tag_vote(&self, post: &str, slug: &str) -> Option<Option<KarmaValue>> {
+        if self.op_writes.iter().any(|id| self.writes.contains_key(id)) {
+            return None;
+        }
+        let p = self.top_thread()?.post()?;
+        if p.post.uri != post {
+            return None;
+        }
+        Some(
+            p.tag_relevance
+                .iter()
+                .find(|t| t.slug == slug)
+                .and_then(|t| t.mine),
+        )
     }
 
     /// True if the thread on top holds `uri` (its react tallies are known).
@@ -4760,7 +4975,30 @@ impl State {
                     self.say(Tone::Info, lit("Nothing selected to tag."));
                     return;
                 };
-                self.opinion_intent(tag_intent(&slug, vote), subject, forum, "Tag vote", fx);
+                let intent = tag_intent(&slug, vote);
+                // the vote starts from the viewer's own one as the post view shows it
+                // (`PostView.tagRelevance[].mine`): a vote it already holds, or a clear of none,
+                // writes nothing
+                if let (OpinionIntent::Tag { value, .. }, Some(mine)) =
+                    (&intent, self.my_tag_vote(&subject, &slug))
+                    && *value == mine
+                {
+                    let said = match mine {
+                        Some(_) => cat([
+                            lit("Your tag vote on #"),
+                            tt(&slug),
+                            lit(" is already that."),
+                        ]),
+                        None => cat([
+                            lit("You have no tag vote on #"),
+                            tt(&slug),
+                            lit(" to take back."),
+                        ]),
+                    };
+                    self.say(Tone::Info, said);
+                    return;
+                }
+                self.opinion_intent(intent, subject, forum, "Tag vote", fx);
             }
             Verb::React { id, against, quote } => {
                 let Some((subject, forum)) = self.command_subject(cmd.subject.as_deref()) else {
@@ -5081,13 +5319,9 @@ impl State {
                 if !self.can_write() {
                     return;
                 }
-                let compose = Compose::Wiki {
-                    forum,
-                    slug: slug.clone(),
-                    draft: Box::new(draft.clone()),
-                };
-                let template = editor::wiki_template(&self.prefill(&compose), &slug, &draft.name);
-                fx.push(Effect::Editor(EditorRequest { compose, template }));
+                // the page is loaded first: the editor opens on its text, and the edit names
+                // the head it was made against (decision O-2)
+                fx.push(Effect::StartWiki { forum, slug, draft });
             }
             Verb::Discover { query } => fx.push(Effect::Discover { query }),
             Verb::Linked { target } => fx.push(Effect::LoadBacklinks {
@@ -5181,12 +5415,16 @@ impl State {
                     });
                 }
             }
-            Verb::Edit => {
+            Verb::Edit { drop_link_card } => {
                 let Some((uri, forum)) = item(self, "edit") else {
                     return;
                 };
                 if self.can_write() {
-                    fx.push(Effect::StartEdit { uri, forum });
+                    fx.push(Effect::StartEdit {
+                        uri,
+                        forum,
+                        drop_link_card,
+                    });
                 }
             }
             Verb::Delete | Verb::Retract | Verb::Redact => {
@@ -6025,7 +6263,12 @@ fn rendered_lines(out: &mut Vec<TermText>, body: &lessdugin_core::dto::RenderedB
 }
 
 /// Appends one openable post to an organisation panel.
-fn push_post_result(lines: &mut Vec<TermText>, items: &mut Vec<PanelItem>, post: &PostSummary) {
+fn push_post_result(
+    lines: &mut Vec<TermText>,
+    items: &mut Vec<PanelItem>,
+    post: &PostSummary,
+    sequence: Option<&str>,
+) {
     let line = lines.len();
     lines.push(cat([post_title(post), lit("  "), actor(&post.author)]));
     if !post.excerpt.trim().is_empty() {
@@ -6035,6 +6278,7 @@ fn push_post_result(lines: &mut Vec<TermText>, items: &mut Vec<PanelItem>, post:
     items.push(PanelItem {
         line,
         target: post.uri.clone(),
+        sequence: sequence.map(str::to_owned),
     });
 }
 
@@ -6066,6 +6310,7 @@ fn search_lines(results: &SearchResults) -> (Vec<TermText>, Vec<PanelItem>) {
         items.push(PanelItem {
             line,
             target: uri.to_owned(),
+            sequence: None,
         });
     }
     (lines, items)
@@ -6103,7 +6348,7 @@ fn user_lines(view: &UserView) -> (Vec<TermText>, Vec<PanelItem>) {
         if !posts.is_empty() {
             lines.push(lit(heading));
             for post in posts {
-                push_post_result(&mut lines, &mut items, post);
+                push_post_result(&mut lines, &mut items, post, None);
             }
         }
     }
@@ -6117,6 +6362,7 @@ fn user_lines(view: &UserView) -> (Vec<TermText>, Vec<PanelItem>) {
             items.push(PanelItem {
                 line,
                 target: comment.uri.clone(),
+                sequence: None,
             });
         }
     }
@@ -6166,7 +6412,7 @@ fn tag_lines(view: &TagView) -> (Vec<TermText>, Vec<PanelItem>) {
     if !view.posts.is_empty() {
         lines.push(lit("Tagged posts"));
         for post in &view.posts {
-            push_post_result(&mut lines, &mut items, post);
+            push_post_result(&mut lines, &mut items, post, None);
         }
     }
     (lines, items)
@@ -6195,12 +6441,15 @@ fn sequences_lines(sequences: &[SequenceSummary]) -> (Vec<TermText>, Vec<PanelIt
         items.push(PanelItem {
             line,
             target: sequence.uri.clone(),
+            sequence: None,
         });
     }
     (lines, items)
 }
 
-/// `:sequence <uri>`: its body, chapters and openable chapter posts.
+/// `:sequence <uri>`: where this device stopped reading it, its body, chapters and openable
+/// chapter posts, each opened in this sequence (`social.md` §14: next and previous follow it,
+/// and it continues there).
 fn sequence_lines(view: &SequenceView) -> (Vec<TermText>, Vec<PanelItem>) {
     let mut lines = vec![
         tt(&view.sequence.title),
@@ -6208,6 +6457,21 @@ fn sequence_lines(view: &SequenceView) -> (Vec<TermText>, Vec<PanelItem>) {
         tt(&view.sequence.uri),
     ];
     let mut items = Vec::new();
+    let here = Some(view.sequence.uri.as_str());
+    if let Some(at) = &view.continue_reading {
+        let title = view
+            .chapters
+            .iter()
+            .flat_map(|c| &c.posts)
+            .find(|p| p.uri == at.post)
+            .map_or_else(|| tt(&at.post), post_title);
+        items.push(PanelItem {
+            line: lines.len(),
+            target: at.post.clone(),
+            sequence: here.map(str::to_owned),
+        });
+        lines.push(cat([lit("Continue reading: "), title]));
+    }
     if let Some(body) = &view.body {
         rendered_lines(&mut lines, body);
     }
@@ -6220,7 +6484,7 @@ fn sequence_lines(view: &SequenceView) -> (Vec<TermText>, Vec<PanelItem>) {
             rendered_lines(&mut lines, body);
         }
         for post in &chapter.posts {
-            push_post_result(&mut lines, &mut items, post);
+            push_post_result(&mut lines, &mut items, post, here);
         }
     }
     (lines, items)

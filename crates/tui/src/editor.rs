@@ -22,6 +22,9 @@ use crate::text::tt;
 /// The scissors line (as git writes it).
 pub use lessdugin_native::template::SCISSORS;
 
+/// The most lines of remote text a template quotes below the scissors line.
+const QUOTED_LINES: usize = 40;
+
 /// The largest file read back from the editor.
 pub const MAX_TEXT_BYTES: u64 = 1 << 20;
 
@@ -279,12 +282,12 @@ pub fn comment_template(prefill: &str, context: &[String], quoted: Option<&str>)
     if let Some(q) = quoted {
         let q = q.replace("\r\n", "\n").replace('\r', "\n");
         let lines: Vec<&str> = q.trim_end().lines().collect();
-        for l in lines.iter().take(40) {
+        for l in lines.iter().take(QUOTED_LINES) {
             s.push_str("# > ");
             s.push_str(&remote(l));
             s.push('\n');
         }
-        if lines.len() > 40 {
+        if lines.len() > QUOTED_LINES {
             s.push_str("# > ...\n");
         }
     }
@@ -316,14 +319,34 @@ pub fn post_template(prefill: &str, forum: &str) -> String {
 }
 
 /// The template of a wiki revision. Structured fields stay in the command's typed draft; only
-/// markdown is edited here, so a one-line command never has to encode a whole page.
-pub fn wiki_template(prefill: &str, slug: &str, name: &str) -> String {
+/// markdown is edited here, so a one-line command never has to encode a whole page. `prefill`
+/// is the page's text as loaded, or the user's text kept from an earlier attempt; then
+/// `current` is the page as it is now (remote), quoted below the scissors line for the redo.
+pub fn wiki_template(prefill: &str, slug: &str, name: &str, current: Option<&str>) -> String {
     let mut s = head(prefill);
     s.push_str("#\n# Wiki page: ");
     s.push_str(&remote(name));
     s.push_str("\n# Slug: ");
     s.push_str(&remote(slug));
     s.push('\n');
+    if let Some(page) = current {
+        s.push_str(
+            "#\n# Your text above was kept from an earlier attempt. The page as it is now:\n",
+        );
+        let page = page.replace("\r\n", "\n").replace('\r', "\n");
+        let lines: Vec<&str> = page.trim_end().lines().collect();
+        if lines.is_empty() {
+            s.push_str("# > (no text)\n");
+        }
+        for l in lines.iter().take(QUOTED_LINES) {
+            s.push_str("# > ");
+            s.push_str(&remote(l));
+            s.push('\n');
+        }
+        if lines.len() > QUOTED_LINES {
+            s.push_str("# > ...\n");
+        }
+    }
     s.push_str(&tail([
         "Write the page body above the scissors line, in markdown.",
         "An empty text cancels: nothing is sent.",

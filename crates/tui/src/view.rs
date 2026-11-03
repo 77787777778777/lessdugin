@@ -24,7 +24,8 @@ use crate::app::{
 use crate::keys::HELP;
 use crate::text::{
     TermText, actor, banner_lines, cat, clock, count, joined, line, lit, mod_log_entry,
-    mod_queue_item, name, notification_line, pad, post_meta, post_title, spans, tt, wrapped,
+    mod_queue_item, name, notification_line, pad, post_meta, post_title, queue_banner_lines, spans,
+    tt, wrapped,
 };
 
 /// The label open mode carries in the forum header (`threat-model.md` L7): it finds brand-new
@@ -810,7 +811,7 @@ fn content_lines(state: &State, top: &Screen, h: usize) -> Vec<Line<'static>> {
         ScreenKind::Home(s) => home(state, top, s, h, &mut lines),
         ScreenKind::Forum(s) => forum(top, s, h, w, &mut lines),
         ScreenKind::Thread(t) => thread(top, t, h, &mut lines),
-        ScreenKind::Mod(m) => mod_screen(top, m, h, &mut lines),
+        ScreenKind::Mod(m) => mod_screen(top, m, h, w, &mut lines),
         ScreenKind::Notifications(n) => notifications(top, n, h, &mut lines),
     }
     lines
@@ -1078,7 +1079,7 @@ fn history_panel(h: &Result<HistoryView, String>, lines: &mut Vec<Line<'static>>
     }
 }
 
-fn mod_screen(top: &Screen, m: &ModScreen, h: usize, lines: &mut Vec<Line<'static>>) {
+fn mod_screen(top: &Screen, m: &ModScreen, h: usize, w: usize, lines: &mut Vec<Line<'static>>) {
     match m.tab {
         ModTab::Queue => match &m.queue {
             None => loading_or_error(top, lines),
@@ -1088,12 +1089,17 @@ fn mod_screen(top: &Screen, m: &ModScreen, h: usize, lines: &mut Vec<Line<'stati
                 Style::default().fg(Color::Red),
             ),
             Some(Ok(q)) => {
+                // where the applicants come from, above the queue (decision O-8)
+                let banners = queue_banner_lines(&q.banners, w, warn_style(), dim());
+                let rows = banners.len();
+                lines.extend(banners);
                 if q.items.is_empty() {
                     lines.push(Line::default());
                     message(lines, lit("The queue is empty."), bold());
                     return;
                 }
-                for (i, it) in q.items.iter().enumerate().skip(m.pos.top).take(h) {
+                let visible = h.saturating_sub(rows).max(1);
+                for (i, it) in q.items.iter().enumerate().skip(m.pos.top).take(visible) {
                     let on = i == m.pos.cursor;
                     lines.push(line([
                         gutter(on),

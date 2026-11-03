@@ -9,8 +9,9 @@ use std::path::Path;
 use lessdugin_core::dto::{
     BodyDraft, DTO_VERSION, ForumRole, PostSummary, SearchItem, SearchQuery, SequenceDraft,
     SequencePosition, SequenceSummary, SequenceView, TagSummary, TagView, UserView, WikiDraft,
+    WriteState,
 };
-use lessdugin_core::engine::{Engine, EngineError};
+use lessdugin_core::engine::{Engine, EngineError, ErrorCode};
 use lessdugin_native::host::NativeHost;
 use serde::Serialize;
 
@@ -82,8 +83,16 @@ fn post_title(post: &PostSummary) -> TermText {
     }
 }
 
-fn print_post(ctx: &Ctx, post: &PostSummary) {
-    ctx.out.line(&[(post_title(post), Style::Bold)]);
+/// A post of a listing, numbered `n` when the listing saves its numbers (`sequence read`).
+fn print_post(ctx: &Ctx, post: &PostSummary, n: Option<usize>) {
+    match n {
+        Some(n) => ctx.out.line(&[
+            (tt(&n.to_string()), Style::Bold),
+            (lit("  "), Style::Plain),
+            (post_title(post), Style::Bold),
+        ]),
+        None => ctx.out.line(&[(post_title(post), Style::Bold)]),
+    }
     let mut meta = vec![
         render::actor(&post.author),
         tt(&render::time(post.t_rank_ms)),
@@ -100,7 +109,7 @@ fn print_posts(ctx: &Ctx, heading: &'static str, posts: &[PostSummary]) {
     }
     ctx.out.line(&[(lit(heading), Style::Bold)]);
     for post in posts {
-        print_post(ctx, post);
+        print_post(ctx, post, None);
     }
 }
 
@@ -266,6 +275,9 @@ pub async fn tag(ctx: &Ctx, args: TagArgs) -> Result<(), CliError> {
                     ),
                 ]));
             }
+            if let Some(head) = &view.head {
+                shown_wiki_head(ctx, &forum, &slug, head);
+            }
             if ctx.out.is_json() {
                 ctx.out.json(&view);
                 return Ok(());
@@ -284,7 +296,29 @@ pub async fn tag(ctx: &Ctx, args: TagArgs) -> Result<(), CliError> {
     Ok(())
 }
 
+/// Records `head` as the head of `slug` this terminal showed or wrote ([`Listings::wiki_heads`]).
+///
+/// [`Listings::wiki_heads`]: crate::state::Listings::wiki_heads
+fn shown_wiki_head(ctx: &Ctx, forum: &str, slug: &str, head: &str) {
+    if let Err(e) = ctx
+        .state
+        .update_listings(|l| l.set_wiki_head(forum, slug, head))
+    {
+        ctx.out.warn(cat([
+            lit("could not save the page's revision: "),
+            tt(&e.to_string()),
+        ]));
+    }
+}
+
 /// `lessdugin wiki edit …`.
+///
+/// The edit names the head it was made against (`WikiDraft.base`, decision O-2): `--base`, else
+/// the head `tag <slug>` last showed in this terminal (or its last `wiki edit` of the page
+/// wrote), never the cache's current head, which any sync moves. The forum is synced before
+/// the write, so a revision published since is seen and the edit refused (`conflict`,
+/// `wikiHeadMoved`) rather than replacing it; so is an edit of a page that exists but whose
+/// head was never shown here.
 pub async fn wiki(ctx: &Ctx, args: WikiArgs) -> Result<(), CliError> {
     match args.action {
         WikiAction::Edit {
@@ -295,31 +329,166 @@ pub async fn wiki(ctx: &Ctx, args: WikiArgs) -> Result<(), CliError> {
             summary,
             tag,
             parent_tags,
+            base,
             forum,
         } => {
             let markdown = draft::read_file(Path::new(&file))?;
             let w = ctx.writer().await?;
             let forum = refs::forum_or_current(ctx, &w.engine, forum.as_deref()).await?;
-            let ticket = w
-                .engine
-                .wiki_edit(
-                    &forum,
-                    &slug,
-                    WikiDraft {
-                        name,
-                        description,
-                        body: Some(BodyDraft::text(markdown)),
-                        is_tag: tag,
-                        parent_tags,
-                        summary,
-                        base: None,
-                    },
-                )
-                .await?;
+            let base = base.or_else(|| {
+                ctx.state
+                    .listings()
+                    .wiki_head(&forum, &slug)
+                    .map(str::to_owned)
+            });
+            read::sync_forum_quietly(ctx, &w.engine, &forum).await;
+            if base.is_none() {
+                // no head of the page was shown here: a new page, or one that exists and was
+                // never loaded, which is refused rather than written on whatever head the
+                // cache holds now (a page that is no tag, which `tag` does not show, is still
+                // written on its current head, as in engine API v0)
+                let head = match w.engine.tag(&forum, &slug).await {
+                    Ok(view) => view.head,
+                    Err(e) if e.code == ErrorCode::NotFound => None,
+                    Err(e) => return Err(e.into()),
+                };
+                if let Some(head) = head {
+                    let e = EngineError::conflict(format!("the page {slug} was not loaded"))
+                        .with_detail("kind", "wikiHeadMoved")
+                        .with_detail("head", head);
+                    return Err(head_moved_error(ctx, &w.engine, &slug, &file, &markdown, e));
+                }
+            }
+            let draft = WikiDraft {
+                name,
+                description,
+                body: Some(BodyDraft::text(markdown.clone())),
+                is_tag: tag,
+                parent_tags,
+                summary,
+                base,
+            };
+            let ticket = match w.engine.wiki_edit(&forum, &slug, draft).await {
+                Ok(ticket) => ticket,
+                Err(e) if head_moved(&e) => {
+                    return Err(head_moved_error(ctx, &w.engine, &slug, &file, &markdown, e));
+                }
+                Err(e) => return Err(e.into()),
+            };
             let ticket = write::drive(ctx, &w, ticket).await?;
+            if let WriteState::Done { uri, .. } = &ticket.state {
+                // the author's own text is the page as this terminal knows it now
+                shown_wiki_head(ctx, &forum, &slug, uri);
+            }
             write::report(ctx, &ticket, "Edited wiki")
         }
     }
+}
+
+/// `wiki_edit`'s refusal of an edit made against a head that is no longer the page's.
+fn head_moved(e: &EngineError) -> bool {
+    e.code == ErrorCode::Conflict
+        && e.detail
+            .as_ref()
+            .and_then(|d| d.get("kind"))
+            .and_then(serde_json::Value::as_str)
+            == Some("wikiHeadMoved")
+}
+
+/// The `conflict` a refused wiki edit exits with: the page changed since it was loaded (or,
+/// without `detail.base`, was never loaded here). The author's text is kept (a file stays as it
+/// is; standard input is saved under the drafts directory) and the message says how to reload
+/// the page and redo the edit on it.
+fn head_moved_error(
+    ctx: &Ctx,
+    engine: &Engine<NativeHost>,
+    slug: &str,
+    file: &str,
+    markdown: &str,
+    mut e: EngineError,
+) -> CliError {
+    let detail = |k: &str| {
+        e.detail
+            .as_ref()
+            .and_then(|d| d.get(k))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+    };
+    let (base, head) = (detail("base"), detail("head"));
+    let kept = if file == "-" {
+        match keep_stdin_text(ctx, engine, markdown) {
+            Ok(path) => Some(path.display().to_string()),
+            Err(why) => {
+                ctx.out.warn(cat([
+                    lit("your text could not be kept: "),
+                    tt(&why.to_string()),
+                ]));
+                None
+            }
+        }
+    } else {
+        Some(file.to_owned())
+    };
+    let mut message = match &base {
+        Some(base) => {
+            let mut m = format!(
+                "the page {slug} changed since it was loaded (your edit was made against {base}"
+            );
+            match &head {
+                Some(head) => m.push_str(&format!(", the page is now at {head})")),
+                None => m.push(')'),
+            }
+            m
+        }
+        None => {
+            let mut m = format!(
+                "the page {slug} exists but was not loaded in this terminal, so this edit names \
+                 no revision it was made against"
+            );
+            if let Some(head) = &head {
+                m.push_str(&format!(" (the page is at {head})"));
+            }
+            m
+        }
+    };
+    message.push_str(", so nothing was written; ");
+    match &kept {
+        Some(path) => message.push_str(&format!("your text is kept in {path}. ")),
+        None => message.push_str("your text was not kept. "),
+    }
+    message.push_str(&format!(
+        "Reload the page with `lessdugin tag {slug}`, redo your edit on it, then run `lessdugin \
+         wiki edit {slug} --base {} --file <your file> …` again",
+        head.as_deref().unwrap_or("<the revision it shows>")
+    ));
+    e.message = message;
+    if let Some(path) = kept
+        && let Some(serde_json::Value::Object(d)) = &mut e.detail
+    {
+        d.insert("kept".into(), path.into());
+    }
+    CliError::Engine(e)
+}
+
+/// Saves a refused wiki edit's text read from standard input (`drafts/wiki/<id>.md`, private,
+/// outside the drafts `draft` lists) and returns its path.
+fn keep_stdin_text(
+    ctx: &Ctx,
+    engine: &Engine<NativeHost>,
+    markdown: &str,
+) -> std::io::Result<std::path::PathBuf> {
+    let drafts = draft::Drafts::new(ctx);
+    let dir = ctx.paths.drafts_dir().join("wiki");
+    lessdugin_native::fsutil::ensure_private_dir(&ctx.paths.drafts_dir())?;
+    lessdugin_native::fsutil::ensure_private_dir(&dir)?;
+    let path = loop {
+        let path = dir.join(format!("{}.md", drafts.new_id(engine.host())));
+        if !path.exists() {
+            break path;
+        }
+    };
+    lessdugin_native::fsutil::write_private_atomic(&path, markdown.as_bytes())?;
+    Ok(path)
 }
 
 fn parse_sequence_draft(text: &str, path: &Path) -> Result<SequenceDraft, CliError> {
@@ -349,16 +518,38 @@ async fn canonical_draft_forum(
     Ok(())
 }
 
+/// The posts of a sequence's chapters, in order: what `sequence read` numbers.
+fn sequence_posts(view: &SequenceView) -> Vec<&PostSummary> {
+    view.chapters.iter().flat_map(|c| &c.posts).collect()
+}
+
 fn print_sequence(ctx: &Ctx, view: &SequenceView) {
     let sequence = &view.sequence;
     ctx.out.line(&[(tt(&sequence.title), Style::Bold)]);
     ctx.out
         .line(&[(render::actor(&sequence.author), Style::Dim)]);
     ctx.out.line(&[(tt(&sequence.uri), Style::Dim)]);
+    // where this device stopped reading it (local, `social.md` §14)
+    if let Some(at) = &view.continue_reading {
+        let posts = sequence_posts(view);
+        let n = posts.iter().position(|p| p.uri == at.post);
+        let mut spans = vec![
+            (lit("Continue reading: "), Style::Bold),
+            (
+                n.map_or_else(|| tt(&at.post), |i| post_title(posts[i])),
+                Style::Plain,
+            ),
+        ];
+        if let Some(i) = n {
+            spans.push((tt(&format!("  (`read {}`)", i + 1)), Style::Dim));
+        }
+        ctx.out.line(&spans);
+    }
     if let Some(body) = &view.body {
         ctx.out
             .page(&render::view_body(body, &body_style(ctx), 0), true);
     }
+    let mut n = 0;
     for (i, chapter) in view.chapters.iter().enumerate() {
         let heading = chapter
             .title
@@ -370,7 +561,8 @@ fn print_sequence(ctx: &Ctx, view: &SequenceView) {
                 .page(&render::view_body(body, &body_style(ctx), 2), false);
         }
         for post in &chapter.posts {
-            print_post(ctx, post);
+            n += 1;
+            print_post(ctx, post, Some(n));
         }
     }
 }
@@ -427,6 +619,21 @@ pub async fn sequence(ctx: &Ctx, args: SequenceArgs) -> Result<(), CliError> {
                         " is still not loaded from its author's PDS (the excerpt shows); read \
                          it again later",
                     ),
+                ]));
+            }
+            // `read <n>` reads the n-th post in this sequence (as `ls` numbers a forum's)
+            let saved = ctx.state.update_listings(|l| {
+                l.posts_forum = None;
+                l.posts = sequence_posts(&view)
+                    .iter()
+                    .map(|p| p.uri.clone())
+                    .collect();
+                l.posts_sequence = Some(view.sequence.uri.clone());
+            });
+            if let Err(e) = saved {
+                ctx.out.warn(cat([
+                    lit("could not save the listing: "),
+                    tt(&e.to_string()),
                 ]));
             }
             if ctx.out.is_json() {
