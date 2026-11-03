@@ -36,14 +36,12 @@ use crate::engine::EngineError;
 /// The largest container the pipeline will walk (`limits.md` §6).
 pub const MAX_SCAN_BYTES: usize = 300 * 1024 * 1024;
 
-/// The XRPC errors of a `getBlob` HTTP 400 that say the repo is not served now, not that the
-/// blob is missing (`sync.md` §3.4): a spilled body asked for then stays pending.
-const REPO_UNAVAILABLE: [&str; 4] = [
-    "RepoNotFound",
-    "RepoDeactivated",
-    "RepoTakendown",
-    "RepoSuspended",
-];
+/// The XRPC errors of a `getBlob` HTTP 400 that say the blob is not found (`sync.md` §11.1):
+/// the lexicon's `BlobNotFound`, and `InvalidRequest`, which the reference PDS answers with the
+/// message "Blob not found". Any other 400 (`RepoNotFound`, `RepoDeactivated`, `RepoTakendown`,
+/// `RepoSuspended`: the repo is not served now, §3.4; an unknown or absent name) says nothing
+/// about the blob, so a spilled body asked for then stays pending.
+const BLOB_NOT_FOUND: [&str; 2] = ["BlobNotFound", "InvalidRequest"];
 
 /// What a sniff found.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1842,15 +1840,15 @@ impl<H: crate::host::Host> crate::engine::Engine<H> {
             Ok(h) => h,
             Err(HostError::CidMismatch) => return Ok(Spilled::Unverified),
             Err(HostError::TooLarge) => return Ok(Spilled::Error(BodyError::TooLarge)),
-            // "Blob not found": missing, not retried (sync.md §11.1); nothing was stored. A
-            // repo that is not served now (deactivated, taken down, suspended) is not a missing
-            // blob: it stays pending and is asked for again
+            // "Blob not found": missing, not retried (sync.md §11.1); nothing was stored. Any
+            // other 400 (a repo that is not served now: deactivated, taken down, suspended; an
+            // error this client does not know) is not a missing blob: it stays pending and is
+            // asked for again
             Err(HostError::HttpStatus(400, Some(name)))
-                if REPO_UNAVAILABLE.contains(&name.as_str()) =>
+                if BLOB_NOT_FOUND.contains(&name.as_str()) =>
             {
-                return Err(HostError::HttpStatus(400, Some(name)).into());
+                return Ok(Spilled::Missing);
             }
-            Err(HostError::HttpStatus(400, _)) => return Ok(Spilled::Missing),
             Err(e) => return Err(e.into()),
         };
         self.note_stored(&h.cid).await;

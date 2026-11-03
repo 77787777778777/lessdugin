@@ -1321,8 +1321,10 @@ fetch_media(did, blobRef, policy):
      CidMismatch → discard; strike against the host; show "media failed verification"
      HTTP 400 "Blob not found" → missing: not retried (ADR 0005); nothing is stored, and a
                                   stored CID is never asked for (§12.2), so there is no copy to purge
-                                  (a 400 RepoNotFound, RepoDeactivated, RepoTakendown or RepoSuspended
-                                  is the repo's status, §3.4, not a missing blob: a spilled body stays pending)
+                                  (only a 400 naming BlobNotFound, or InvalidRequest as the reference PDS
+                                  answers "Blob not found"; any other 400, such as RepoNotFound,
+                                  RepoDeactivated, RepoTakendown or RepoSuspended (the repo's status,
+                                  §3.4), or an unknown name, is not a missing blob: a spilled body stays pending)
   sniff = sniff_type(Host::blob_read(h.cid, 0, 4096))
   require normalise(declared blobRef.mimeType) = normalise(sniff) ∧ that type is on the display allowlist (§11.2)
           else: download card only

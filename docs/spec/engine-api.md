@@ -479,7 +479,8 @@ UIs re-query on `Changed` and never move the user's cursor on live updates (TUI 
   (`sync.md` §12.2), so a slow body arrives for the next view or round rather than being
   restarted and aborted again. Only a verified source is shared between authors who name the
   same blob; what a fetch from one author's PDS found otherwise (missing, failed verification,
-  too large, unreadable, a 400 for a repo not served now: pending) is that author's only, so
+  too large, unreadable; a 400 other than "Blob not found", such as a repo not served now, is
+  pending) is that author's only, so
   another author's failing copy never makes a body missing or `body_source` refuse it. When it arrives (rendered, or found
   missing or unreadable), `live_tail` emits `Changed [Thread(post), Forum]` (a spilled `about`:
   `Changed [Forum]`), so a client re-queries and shows it. A round fetches all its due bodies

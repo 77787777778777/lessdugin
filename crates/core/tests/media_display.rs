@@ -596,6 +596,34 @@ fn a_spilled_body_of_a_repo_that_is_not_served_now_stays_pending() {
 }
 
 #[test]
+fn a_spilled_body_is_missing_only_when_the_pds_says_the_blob_is_not_found() {
+    // sync.md §11.1: only "Blob not found" is missing for good; a 400 naming another error
+    // (one this client does not know, here) says nothing about the blob, so the body stays
+    // pending and is asked for again (review m3m4-continuation-1)
+    let mut n = Net::new();
+    let bob = n
+        .net
+        .add_pds("bob.example.com")
+        .add_account("bob.example.com");
+    let f = forum(&n, &bob);
+    let uri = spilled_post(&n, &bob, &f, b"# The whole body");
+    n.net.inject(
+        Fault::error(400, "AccountNotServedHere", "Try again later")
+            .on_nsid("com.atproto.sync.getBlob")
+            .once(),
+    );
+    let e = n.device("anon", None);
+    let pv = read(&e, &f, &uri);
+    assert_eq!(
+        pv.body.notices,
+        [lessdugin_core::model::render::NOTICE_SPILLED]
+    );
+    n.tick(lessdugin_core::limits::BODY_BLOB_RETRY_MS);
+    let pv = block_on(e.get_post(&uri)).unwrap();
+    assert_eq!(pv.body.text, "The whole body");
+}
+
+#[test]
 fn a_hidden_spilled_post_is_never_fetched() {
     // sync.md §11.4: hidden content is never prefetched. get_post fetched the textBlob of any
     // post it was asked for, and kept it, while the view rendered the hidden post empty
