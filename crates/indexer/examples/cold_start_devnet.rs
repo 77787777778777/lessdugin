@@ -5,7 +5,9 @@
 //! the loopback endpoints to JSON, and stays alive for the focused Playwright acceptance test.
 //! Besides the owner's post, [`MEMBER_POSTS`] distinct members each post once, so the first page
 //! the browser paints holds posts by distinct participants: one proof per post, and one head
-//! check and one DID document per author on screen (`sync.md` §14.3).
+//! check and one DID document per author on screen (`sync.md` §14.3). The pre-index also caches
+//! the posts' proofs, as live ingest does for a new post (`sync.md` §15.1), so the measured
+//! readers do not pay the lazy proof fetch of a freshly backfilled record.
 //! It never configures or contacts a production service.
 
 use std::collections::BTreeSet;
@@ -70,7 +72,10 @@ async fn main() -> Result<()> {
     let owner = pds[0].add_account("owner.test");
     let forum = ForumKey::new(owner.did(), "cold-start")?;
     let now = Datetime::from_millis(net.now_ms() - 3_600_000)?;
-    let declaration = Forum::create("M6 cold start", now.clone(), MembershipMode::Approval);
+    // declared before every post: a post's t_rank is max(t_decl, its createdAt) (social.md §2.2),
+    // so a declaration after the posts would rank them all at t_decl and order them by uri
+    let declared = Datetime::from_millis(net.now_ms() - 7_200_000)?;
+    let declaration = Forum::create("M6 cold start", declared, MembershipMode::Approval);
     let membership = Membership::new(forum.uri.clone(), now.clone());
 
     let accounts = (1..participants)
@@ -298,6 +303,30 @@ async fn main() -> Result<()> {
     assert_eq!(served.rev, proven.rev);
     assert_eq!(served.commit_cid, proven.commit_cid);
     assert_eq!(served.record_cid(), proven.record_cid());
+    // The posts' proofs are in the cache, as live ingest puts each new post's there (sync.md
+    // §15.1 "Proofs"): only a backfilled record's proof is fetched lazily, on the first
+    // getRecordProofs that names it, and the measured readers are not a backfill's first.
+    let post_uris: Vec<String> = std::iter::once(post_uri.clone())
+        .chain(
+            member_posts
+                .iter()
+                .filter_map(|p| p["uri"].as_str().map(String::from)),
+        )
+        .collect();
+    let mut warmed = 0;
+    for page in post_uris.chunks(25) {
+        let bundle = lessdugin_indexer::proofs::bundle(&indexer, page)
+            .await
+            .context("warm the post proofs")?;
+        warmed += ProofBundle::parse(&bundle, &Default::default())?
+            .items
+            .len();
+    }
+    anyhow::ensure!(
+        warmed == post_uris.len(),
+        "{warmed} of {} post proofs warmed",
+        post_uris.len()
+    );
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let indexer_url = Url::parse(&format!("http://{}", listener.local_addr()?))?;
@@ -335,6 +364,7 @@ async fn main() -> Result<()> {
                 "titleVerified": true,
                 "currentHeadVerified": true,
             },
+            "warmedPostProofs": warmed,
             "servedProofBundle": {
                 "bytes": bundle.len(),
                 "items": parsed.items.len(),
