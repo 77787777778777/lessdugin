@@ -1012,11 +1012,11 @@ fn audit_leaves_an_unreachable_pds_unchecked_instead_of_failing() {
     let a3 = check(&report, "A3 records");
     // The local post was compared; the other one could not be fetched and stays unchecked.
     assert_eq!(a3.counts.checked, 2, "{report:?}");
-    assert_eq!(unchecked(a3), [other.clone()], "{report:?}");
+    assert_eq!(unchecked(a3), std::slice::from_ref(&other), "{report:?}");
     // The proof of the sampled post could be had from neither the indexer nor the PDS.
     assert_eq!(
         unchecked(check(&report, "A5 proofs")),
-        [w.post.clone()],
+        std::slice::from_ref(&w.post),
         "{report:?}"
     );
     assert_eq!(report.counts.omissions, 0, "{report:?}");
