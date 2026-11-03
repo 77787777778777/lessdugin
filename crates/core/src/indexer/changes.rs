@@ -7,6 +7,7 @@ use lessdugin_atp::syntax::{AtUri, Did};
 use lessdugin_atp::tid::Tid;
 
 use crate::host::Host;
+use crate::live::Operation;
 use crate::store::blob::CursorRow;
 use crate::store::records::RecordStore;
 use crate::sync::net::Priority;
@@ -61,18 +62,30 @@ fn source_name(client: &Client, forum: Option<&AtUri>) -> String {
 
 /// Polls the durable exclusive cursor. Marks are persisted before the in-memory queue and cursor;
 /// a crash therefore replays a page or leaves an ordinary persistent dirty mark, never skips it.
+/// With `dedup` (`live_tail`'s Jetstream LRU), a commit already handled is skipped and a queued
+/// one is recorded there (`sync.md` §6.6).
 pub async fn poll_changes<H: Host>(
     syncer: &Syncer<H>,
     client: &Client,
     session: &Session<H>,
     forum: Option<&AtUri>,
     reconcile_dids: &[Did],
+    mut dedup: Option<&mut crate::live::events::Dedup>,
 ) -> Result<ChangePollReport, XrpcCallError> {
     let source = source_name(client, forum);
     let store = RecordStore::new(session.host().cache());
     let now = session.host().now_ms();
     let stored = store.cursor(&source).await.map_err(store_error)?;
-    let since = stored.and_then(|c| c.seq).unwrap_or(0);
+    let since = match stored.and_then(|c| c.seq) {
+        Some(seq) => seq,
+        // A first poll starts at the indexer's current head, not at its whole log: the PDS
+        // sync covers what came before (sync.md §6.6).
+        None => {
+            let head = client.current_as_of(session).await?.seq.max(0);
+            persist_cursor(&store, &source, head, now).await?;
+            head
+        }
+    };
     let mut report = ChangePollReport {
         source: source.clone(),
         from: since,
@@ -115,6 +128,19 @@ pub async fn poll_changes<H: Host>(
             return Err(invalid("getChanges returned an inconsistent cursor"));
         }
         for (change, (uri, did)) in valid {
+            let op = match change.op.as_str() {
+                "create" => Operation::Create,
+                "update" => Operation::Update,
+                _ => Operation::Delete,
+            };
+            let commit = (uri.collection().as_str(), uri.rkey().as_str());
+            if dedup
+                .as_deref()
+                .is_some_and(|d| d.has_commit(did.as_str(), &change.rev, commit.0, commit.1, op))
+            {
+                report.changes += 1;
+                continue;
+            }
             syncer
                 .mark_hint(session, &uri, &change.rev)
                 .await
@@ -128,6 +154,9 @@ pub async fn poll_changes<H: Host>(
                     .with_min_rev(&change.rev)
                     .with_mark_hint(uri.as_str(), change.cid.clone()),
             );
+            if let Some(d) = dedup.as_deref_mut() {
+                d.insert_commit(did.as_str(), &change.rev, commit.0, commit.1, op);
+            }
             report.queued += 1;
             report.changes += 1;
         }

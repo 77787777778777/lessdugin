@@ -198,12 +198,13 @@ impl<H: Host> Engine<H> {
         forum: &str,
     ) -> Result<Option<ChangePollReport>, EngineError> {
         let key = self.forum_key(forum).await?;
-        self.poll_indexer_changes_resolved(&key).await
+        self.poll_indexer_changes_resolved(&key, None).await
     }
 
     pub(crate) async fn poll_indexer_changes_resolved(
         &self,
         key: &ForumKey,
+        dedup: Option<&mut crate::live::events::Dedup>,
     ) -> Result<Option<ChangePollReport>, EngineError> {
         let Some((client, session)) = self.selected(Some(key), false).await? else {
             return Ok(None);
@@ -232,6 +233,7 @@ impl<H: Host> Engine<H> {
                 &session,
                 Some(&key.uri),
                 &dids,
+                dedup,
             )
             .await?,
         ))

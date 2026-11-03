@@ -1,7 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { beforeEach, describe, expect, it } from "vitest";
 import { MemoryBlobStore } from "./blobs.ts";
-import { createJsHost, type JsWebSocketHandle } from "./host.ts";
+import {
+  createJsHost,
+  type JsWebSocketHandle,
+  WS_QUEUE_MAX_BYTES,
+  WS_QUEUE_MAX_FRAMES,
+} from "./host.ts";
 import { MemKv } from "./idb.ts";
 import { LocalLocks } from "./locks.ts";
 
@@ -200,5 +205,40 @@ describe("browser WebSocket host", () => {
     const [binary, binarySocket] = await connected(3);
     binarySocket.message(Uint8Array.from([1, 2, 3, 4]).buffer);
     await expect(binary.next()).rejects.toMatchObject({ kind: "tooLarge" });
+  });
+
+  it("bounds the frames it holds for the core and closes with an error on overflow", async () => {
+    const [ws, socket] = await connected(1024);
+    for (let i = 0; i < WS_QUEUE_MAX_FRAMES; i++) socket.message(`f${i}`);
+    expect(socket.closeCalls).toBe(0);
+    socket.message("one too many");
+    expect(socket.closeCalls).toBe(1);
+    // What was queued is still read, then the error makes the core reconnect from its cursor.
+    for (let i = 0; i < WS_QUEUE_MAX_FRAMES; i++) {
+      await expect(ws.next()).resolves.toEqual({ kind: "message", text: `f${i}` });
+    }
+    await expect(ws.next()).rejects.toMatchObject({ kind: "network" });
+    await expect(ws.next()).resolves.toBeNull();
+    socket.message("after the close");
+    await expect(ws.next()).resolves.toBeNull();
+  });
+
+  it("bounds the queued bytes, and a frame read at once is never counted", async () => {
+    const big = 1_048_576;
+    const [ws, socket] = await connected(big);
+    const frame = new Uint8Array(big).buffer;
+    // A pull that waits takes each frame at once: nothing is buffered, nothing overflows.
+    for (let i = 0; i < 2 * (WS_QUEUE_MAX_BYTES / big); i++) {
+      const pending = ws.next();
+      socket.message(frame);
+      await expect(pending).resolves.toMatchObject({ kind: "message" });
+    }
+    expect(socket.closeCalls).toBe(0);
+    for (let i = 0; i < WS_QUEUE_MAX_BYTES / big; i++) socket.message(frame);
+    expect(socket.closeCalls).toBe(0);
+    socket.message(frame);
+    expect(socket.closeCalls).toBe(1);
+    // Reading frees the budget only of a socket that is still open.
+    await expect(ws.next()).resolves.toMatchObject({ kind: "message" });
   });
 });

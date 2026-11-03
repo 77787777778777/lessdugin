@@ -47,7 +47,8 @@ pub enum Action {
         cid: Option<String>,
         /// Queue priority.
         priority: Priority,
-        /// `obs` hint.
+        /// `obs` hint: the local receive time (µs), never the server's event time, which a
+        /// Jetstream could move (`sync.md` §5.6.5, §6.4).
         first_seen_us: i64,
     },
     /// A previously unknown DID wrote an exact membership key in `F_new`.
@@ -62,7 +63,7 @@ pub enum Action {
         rev: String,
         /// Claimed CID, absent for a delete.
         cid: Option<String>,
-        /// `obs` hint.
+        /// `obs` hint: the local receive time (µs), as for [`Action::PointFetch`].
         first_seen_us: i64,
     },
     /// Drop DID/handle caches. Authorities also need a P1 refresh.
@@ -103,7 +104,8 @@ pub struct Context {
     pub known_dids: std::collections::BTreeSet<String>,
     /// Logged-in account DIDs.
     pub own_dids: std::collections::BTreeSet<String>,
-    /// Confirmed newcomer/candidate DIDs already being synced.
+    /// Confirmed participants (discovery rows and grants) that are neither authorities nor own
+    /// accounts: newcomers already being synced.
     pub newcomer_dids: std::collections::BTreeSet<String>,
     /// `fk` of followed/open forums.
     pub forums: std::collections::BTreeSet<String>,
@@ -115,7 +117,7 @@ pub struct Context {
     pub authorities: std::collections::BTreeSet<String>,
     /// Exact collections accepted as `OURS`.
     pub ours: std::collections::BTreeSet<String>,
-    /// Browser DID-filter input (own + authorities + participants + candidates).
+    /// Browser DID-filter input, D (`sync.md` §6.2): own + authorities + confirmed participants.
     pub filter_dids: Vec<String>,
     /// True only after every followed/open forum completed a discovery pass.
     pub participants_known: bool,
@@ -202,6 +204,49 @@ impl Dedup {
         self.entries.is_empty()
     }
 
+    /// True if this commit was already handled, by a Jetstream frame or an indexer `#change`
+    /// (`sync.md` §6.6). A hit is not promoted.
+    pub fn has_commit(
+        &self,
+        did: &str,
+        rev: &str,
+        collection: &str,
+        rkey: &str,
+        operation: Operation,
+    ) -> bool {
+        self.entries
+            .contains_key(&Self::commit_key(did, rev, collection, rkey, operation))
+    }
+
+    /// Records a commit handled outside the Jetstream filter (an indexer `#change`, `sync.md`
+    /// §6.6), so the same commit on Jetstream is a duplicate. Returns false for a duplicate.
+    pub fn insert_commit(
+        &mut self,
+        did: &str,
+        rev: &str,
+        collection: &str,
+        rkey: &str,
+        operation: Operation,
+    ) -> bool {
+        self.insert(Self::commit_key(did, rev, collection, rkey, operation))
+    }
+
+    fn commit_key(
+        did: &str,
+        rev: &str,
+        collection: &str,
+        rkey: &str,
+        operation: Operation,
+    ) -> DedupKey {
+        DedupKey::Commit(
+            did.to_owned(),
+            rev.to_owned(),
+            collection.to_owned(),
+            rkey.to_owned(),
+            operation,
+        )
+    }
+
     /// Returns false for a duplicate; a hit is promoted.
     fn insert(&mut self, key: DedupKey) -> bool {
         self.tick = self.tick.wrapping_add(1);
@@ -259,8 +304,21 @@ impl EventFilter {
         &self.dedup
     }
 
-    /// Filters one parsed event. Invalid events never reach this function.
-    pub fn apply(&mut self, wire: Wire, instance: &str, e: Event, cx: &Context) -> FilterOutput {
+    /// Shared dedup state, for the other change sources that share it (`sync.md` §6.6).
+    pub fn dedup_mut(&mut self) -> &mut Dedup {
+        &mut self.dedup
+    }
+
+    /// Filters one parsed event received at `received_us` (local µs, the `obs` hint of its
+    /// actions). Invalid events never reach this function.
+    pub fn apply(
+        &mut self,
+        wire: Wire,
+        instance: &str,
+        e: Event,
+        cx: &Context,
+        received_us: i64,
+    ) -> FilterOutput {
         let mut out = FilterOutput {
             cursor: Some(Cursor {
                 wire,
@@ -315,7 +373,7 @@ impl EventFilter {
                             uri,
                             rev,
                             cid,
-                            first_seen_us: e.time_us,
+                            first_seen_us: received_us,
                         });
                     }
                     return out;
@@ -331,7 +389,7 @@ impl EventFilter {
                     rev,
                     cid,
                     priority,
-                    first_seen_us: e.time_us,
+                    first_seen_us: received_us,
                 });
             }
             EventKind::Identity { inner_seq } => {

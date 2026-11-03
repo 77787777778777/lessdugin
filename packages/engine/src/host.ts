@@ -13,7 +13,10 @@
 //   `blobOpen`, `blobRead`, `blobDelete`: the same store, by CID (`blobRead` slices the stored
 //   `Blob`, so only the window it returns enters wasm memory);
 // - `websocket(url, maxBytes)`: a native browser WebSocket, with one bounded-message FIFO per
-//   socket (sync.md §6.2, §12.1); the handle pulls messages and sends v1 options updates;
+//   socket (sync.md §6.2, §12.1); the handle pulls messages and sends v1 options updates. The
+//   browser API has no backpressure, so the FIFO is bounded too (`WS_QUEUE_MAX_FRAMES`,
+//   `WS_QUEUE_MAX_BYTES`): on overflow the socket is closed with an error and the core reconnects
+//   from its cursor (threat-model.md INFRA-5);
 // - `lock(name, wait)`: Web Locks (locks.ts); in `lessdugin web` mode an `outbox:<did>` lock is
 //   then also the native one (bridge-lock.ts), Web Lock first;
 // - `sleep(ms)`, `now()`, `random(n)`: `setTimeout`, `Date.now()`, `crypto.getRandomValues`;
@@ -89,6 +92,11 @@ export interface HostDeps {
 /** sync.md §12.2: the most bytes one `blobRead` returns (`BLOB_READ_MAX_BYTES`, 1 MiB). */
 export const BLOB_READ_MAX_BYTES = 1_048_576;
 
+/** sync.md §6.2: the most frames one socket buffers that the core has not read yet. */
+export const WS_QUEUE_MAX_FRAMES = 256;
+/** sync.md §6.2: the most message bytes one socket buffers that the core has not read yet. */
+export const WS_QUEUE_MAX_BYTES = 16 * 1_048_576;
+
 function pairs(flat: string[]): [string, string][] {
   const out: [string, string][] = [];
   for (let i = 0; i + 1 < flat.length; i += 2) out.push([flat[i] as string, flat[i + 1] as string]);
@@ -102,7 +110,7 @@ function asHostError(e: unknown): unknown {
 }
 
 type WsQueueItem =
-  | { kind: "message"; message: JsWsMessage }
+  | { kind: "message"; message: JsWsMessage; size: number }
   | { kind: "error"; error: unknown }
   | { kind: "close" };
 
@@ -116,6 +124,9 @@ class BrowserWebSocket implements JsWebSocketHandle {
   private readonly queue: WsQueueItem[] = [];
   private readonly waiters: WsWaiter[] = [];
   private ended = false;
+  /** Message frames and bytes in `queue`. */
+  private queuedFrames = 0;
+  private queuedBytes = 0;
 
   constructor(
     private readonly socket: WebSocket,
@@ -168,7 +179,18 @@ class BrowserWebSocket implements JsWebSocketHandle {
       this.finish(hostError("tooLarge", "WebSocket message exceeds the configured byte limit"));
       return;
     }
-    this.queue.push({ kind: "message", message });
+    // A frame a waiting pull takes at once is never buffered.
+    if (
+      this.waiters.length === 0 &&
+      (this.queuedFrames + 1 > WS_QUEUE_MAX_FRAMES || this.queuedBytes + size > WS_QUEUE_MAX_BYTES)
+    ) {
+      // The core is not reading: close rather than grow; it reconnects from its cursor.
+      this.finish(hostError("network", "WebSocket frames arrive faster than they are read"));
+      return;
+    }
+    this.queue.push({ kind: "message", message, size });
+    this.queuedFrames++;
+    this.queuedBytes += size;
     this.drain();
   };
 
@@ -201,8 +223,11 @@ class BrowserWebSocket implements JsWebSocketHandle {
     while (this.queue.length > 0 && this.waiters.length > 0) {
       const item = this.queue.shift() as WsQueueItem;
       const waiter = this.waiters.shift() as WsWaiter;
-      if (item.kind === "message") waiter.resolve(item.message);
-      else if (item.kind === "error") waiter.reject(asHostError(item.error));
+      if (item.kind === "message") {
+        this.queuedFrames--;
+        this.queuedBytes -= item.size;
+        waiter.resolve(item.message);
+      } else if (item.kind === "error") waiter.reject(asHostError(item.error));
       else waiter.resolve(null);
     }
     if (this.ended && this.queue.length === 0) {
