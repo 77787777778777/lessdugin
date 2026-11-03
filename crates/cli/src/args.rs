@@ -794,10 +794,13 @@ mod reach {
             "sequence read",
             "forum ls",
             "forum show",
+            "bookmark",
             "bookmark ls",
+            "draft",
             "draft ls",
             "media get",
             "media open",
+            "outbox",
             "outbox ls",
             "accounts",
             "whoami",
@@ -857,19 +860,23 @@ mod reach {
             assert!(names.contains(c), "`{c}` is no command");
         }
         let listed: BTreeSet<&str> = ASKS_NOTHING.iter().copied().collect();
-        assert_eq!(listed.len(), ASKS_NOTHING.len(), "a command is listed twice");
-        for (c, takes) in &all {
-            assert_eq!(
-                *takes,
-                !listed.contains(c.as_str()),
-                "`{c}`: {} --yes",
+        assert_eq!(
+            listed.len(),
+            ASKS_NOTHING.len(),
+            "a command is listed twice"
+        );
+        let wrong: Vec<String> = all
+            .iter()
+            .filter(|(c, takes)| *takes == listed.contains(c.as_str()))
+            .map(|(c, takes)| {
                 if *takes {
-                    "listed as asking nothing, but takes"
+                    format!("`{c}` takes --yes but is listed as asking nothing")
                 } else {
-                    "neither listed as asking nothing nor takes"
+                    format!("`{c}` takes no --yes and is not listed as asking nothing")
                 }
-            );
-        }
+            })
+            .collect();
+        assert!(wrong.is_empty(), "{wrong:#?}");
     }
 
     /// The operations of the spec's §3.2, §3.5 and §3.6 tables (the first cell of each row).
