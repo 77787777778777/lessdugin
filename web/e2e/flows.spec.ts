@@ -244,6 +244,42 @@ test("a spilled post edit preserves its media and link-card draft fields", async
   );
 });
 
+test("an edit removes a link post's card and keeps the link (EditOpts.dropLinkCard)", async ({
+  page,
+}) => {
+  const { postUri } = buildFixture();
+  const [, , did, , rkey] = (postUri.fdt ?? "").split("/");
+  // carol's link post has a card: sign in as carol (the mock resolves the fixture handle)
+  await go(page, "/login", "Sign in");
+  await page.getByLabel("Your handle or DID").fill("carol.test");
+  await page.getByRole("button", { name: "Continue" }).click();
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
+  await expect(page.getByRole("heading", { level: 1, name: "Your forums" })).toBeVisible();
+  await page.evaluate((hash) => {
+    location.hash = hash;
+  }, `#/p/${did}/${rkey}`);
+  const title = "Paper: Functional Decision Theory";
+  await expect(page.getByRole("heading", { level: 1, name: title })).toBeVisible();
+  await expect(page.getByText("Yudkowsky and Soares, 2017.")).toBeVisible();
+  await page.getByRole("link", { name: "Edit", exact: true }).click();
+  const remove = page.getByRole("checkbox", { name: "Remove the link card" });
+  await expect(remove).not.toBeChecked();
+  await remove.check();
+  await page.getByRole("button", { name: "Save edit" }).click();
+  await expect(page.getByRole("heading", { level: 1, name: title })).toBeVisible();
+  await expect(page.getByText("Post updated")).toBeVisible();
+  await expect(page.getByText("Yudkowsky and Soares, 2017.")).toHaveCount(0);
+  await expect(
+    page.getByRole("link", { name: /Functional Decision Theory: A New Theory/ }),
+  ).toHaveCount(0);
+  // the link stays, without its card
+  await page.getByRole("link", { name: "Edit", exact: true }).click();
+  await expect(page.getByRole("textbox", { name: "Link", exact: true })).toHaveValue(
+    "https://arxiv.org/abs/1710.05060",
+  );
+  await expect(page.getByRole("checkbox", { name: "Remove the link card" })).toHaveCount(0);
+});
+
 test("create a forum, edit its declaration and manage a moderator", async ({ page }) => {
   await go(page, "/", "Your forums");
   await page.getByRole("button", { name: "Create a forum" }).click();

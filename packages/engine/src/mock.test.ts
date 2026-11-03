@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { buildFixture, FORUM_URI } from "./mock/fixture.ts";
 import { MockEngine, mockSafeHref } from "./mock.ts";
-import { type EngineEvent, isMissingRoot, OPINION_UNDO_WINDOW_MS } from "./types.ts";
+import { type Draft, type EngineEvent, isMissingRoot, OPINION_UNDO_WINDOW_MS } from "./types.ts";
 
 const LFM_ROOT = '<div class="lfm" dir="auto">';
 
@@ -311,6 +311,53 @@ describe("MockEngine writes", () => {
     expect((await e.modQueue(s.uri)).banners?.map((b) => b.code)).toEqual([
       "applicantsNotDiscovered",
     ]);
+  });
+
+  // engine-api.md §3.5 `edit` (decision O-14): the cached card stays for a draft of its uri alone
+  it("keeps a link card on an edit of its uri alone, and drops it with dropLinkCard", async () => {
+    const e = new MockEngine({ sendMs: 10 });
+    const t = await e.publish({
+      forum: FORUM_URI,
+      kind: "link",
+      title: "A paper",
+      body: { markdown: "Worth reading.", media: [] },
+      link: { uri: "https://example.test/paper", title: "The paper", description: "Abstract" },
+    });
+    await vi.advanceTimersByTimeAsync(50);
+    const s = (await e.writes()).find((w) => w.id === t.id)?.state;
+    if (s?.kind !== "done") throw new Error("not written");
+    const draft = (link: { uri: string; title?: string }): Draft => ({
+      kind: "post",
+      post: {
+        forum: FORUM_URI,
+        kind: "link",
+        title: "A paper",
+        body: { markdown: "Edited.", media: [] },
+        link,
+      },
+    });
+    await e.edit(s.uri, draft({ uri: "https://example.test/paper" }), { history: true });
+    await vi.advanceTimersByTimeAsync(50);
+    expect((await e.getPost(s.uri)).post.link).toMatchObject({
+      uri: "https://example.test/paper",
+      title: "The paper",
+      description: "Abstract",
+    });
+    // a draft naming a title writes it as given
+    await e.edit(s.uri, draft({ uri: "https://example.test/paper", title: "Renamed" }), {
+      history: true,
+    });
+    await vi.advanceTimersByTimeAsync(50);
+    expect((await e.getPost(s.uri)).post.link?.title).toBe("Renamed");
+    expect((await e.getPost(s.uri)).post.link?.description).toBeUndefined();
+    await e.edit(s.uri, draft({ uri: "https://example.test/paper" }), {
+      history: true,
+      dropLinkCard: true,
+    });
+    await vi.advanceTimersByTimeAsync(50);
+    const link = (await e.getPost(s.uri)).post.link;
+    expect(link?.uri).toBe("https://example.test/paper");
+    expect(link?.title).toBeUndefined();
   });
 
   // engine-api.md §4.2 `PostView.tagRelevance`, social.md §13.3

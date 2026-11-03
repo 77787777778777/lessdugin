@@ -15,6 +15,7 @@ import { beforeAll, describe, expect, it, vi } from "vitest";
 import * as wasm from "../../../../packages/engine/pkg/lessdugin_engine.js";
 import { NS } from "../../../../packages/engine/src/auth-bridge.ts";
 import { WorkerEngine, type WorkerEnv } from "../../../../packages/engine/src/worker-core.ts";
+import { toasts } from "../../components/Toast.tsx";
 import { renderWithApp } from "../../test/render.tsx";
 import { EditPost, PostForm } from "./ForumNewPostPage.tsx";
 import { ForumContext } from "./forumContext.tsx";
@@ -31,6 +32,11 @@ async function editor(container: HTMLElement): Promise<EditorView> {
     },
     { timeout: 10_000 },
   );
+}
+
+/** The toast store outlives a test's render: a saved edit's toast would reach the next test. */
+function dismissToasts(): void {
+  for (const t of toasts.snapshot()) toasts.dismiss(t.id);
 }
 
 async function ownPost(engine: MockEngine): Promise<{ view: ForumView; uri: string }> {
@@ -159,6 +165,96 @@ describe("EditPost", () => {
     );
     await screen.findByRole("heading", { name: "Edit post" });
     expect(screen.queryByTestId("edit-suspends")).toBeNull();
+  });
+
+  // engine-api.md §3.5 `edit`: the cached card is kept for the same link unless dropLinkCard
+  it("removes a link post's card through dropLinkCard, keeping the link", async () => {
+    const engine = new MockEngine({ holdMs: 0, sendMs: 0 });
+    const forum = (await engine.followed())[0]?.uri ?? "";
+    const view = await engine.forumOpen(forum);
+    const ticket = await engine.publish({
+      forum,
+      kind: "link",
+      title: "A paper",
+      body: { markdown: "Worth reading.", media: [] },
+      link: { uri: "https://example.test/paper", title: "The paper", description: "Its abstract" },
+    });
+    let uri = "";
+    await waitFor(async () => {
+      const s = (await engine.writeStatus(ticket.id))?.state;
+      if (s?.kind !== "done") throw new Error("not published yet");
+      uri = s.uri;
+    });
+    const edit = vi.spyOn(engine, "edit");
+    renderWithApp(
+      <ForumContext value={view}>
+        <EditPost uri={uri} />
+      </ForumContext>,
+      { engine },
+    );
+    const box = await screen.findByRole("checkbox", { name: "Remove the link card" });
+    expect(box.getAttribute("aria-describedby")).toBeTruthy();
+    // another link has no card to remove
+    const link = screen.getByRole("textbox", { name: "Link" });
+    fireEvent.change(link, { target: { value: "https://example.test/other" } });
+    expect(screen.queryByRole("checkbox", { name: "Remove the link card" })).toBeNull();
+    fireEvent.change(link, { target: { value: "https://example.test/paper" } });
+    fireEvent.click(screen.getByRole("checkbox", { name: "Remove the link card" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Save edit" }));
+    await waitFor(() => expect(edit).toHaveBeenCalledTimes(1));
+    const [, draft, opts] = edit.mock.calls[0] ?? [];
+    expect(opts).toMatchObject({ history: true, dropLinkCard: true });
+    expect(draft?.kind === "post" ? draft.post.link : null).toEqual({
+      uri: "https://example.test/paper",
+    });
+    await waitFor(async () => expect((await engine.getPost(uri)).post.link?.title).toBeUndefined());
+    expect((await engine.getPost(uri)).post.link?.uri).toBe("https://example.test/paper");
+    dismissToasts();
+  });
+
+  it("keeps the link card when it is not removed, and offers no removal without one", async () => {
+    const engine = new MockEngine({ holdMs: 0, sendMs: 0 });
+    const forum = (await engine.followed())[0]?.uri ?? "";
+    const view = await engine.forumOpen(forum);
+    const ticket = await engine.publish({
+      forum,
+      kind: "link",
+      title: "A paper",
+      body: { markdown: "Worth reading.", media: [] },
+      link: { uri: "https://example.test/paper", title: "The paper" },
+    });
+    let uri = "";
+    await waitFor(async () => {
+      const s = (await engine.writeStatus(ticket.id))?.state;
+      if (s?.kind !== "done") throw new Error("not published yet");
+      uri = s.uri;
+    });
+    const edit = vi.spyOn(engine, "edit");
+    renderWithApp(
+      <ForumContext value={view}>
+        <EditPost uri={uri} />
+      </ForumContext>,
+      { engine },
+    );
+    expect(await screen.findByRole("checkbox", { name: "Remove the link card" })).toBeTruthy();
+    fireEvent.click(await screen.findByRole("button", { name: "Save edit" }));
+    await waitFor(() => expect(edit).toHaveBeenCalledTimes(1));
+    expect(edit.mock.calls[0]?.[2]).not.toHaveProperty("dropLinkCard");
+    await waitFor(async () => expect((await engine.getPost(uri)).post.badges.edited).toBe(true));
+    expect((await engine.getPost(uri)).post.link?.title).toBe("The paper");
+    // the fixture's own quick take has no link, and no control
+    const { uri: plain } = await ownPost(engine);
+    renderWithApp(
+      <ForumContext value={view}>
+        <EditPost uri={plain} />
+      </ForumContext>,
+      { engine },
+    );
+    await waitFor(() =>
+      expect(screen.getAllByRole("heading", { name: "Edit post" })).toHaveLength(2),
+    );
+    expect(screen.getAllByRole("checkbox", { name: "Remove the link card" })).toHaveLength(1);
+    dismissToasts();
   });
 
   it("loads a spilled post's source, then uses the normal edit form (robustness-2)", async () => {

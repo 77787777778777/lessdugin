@@ -2300,9 +2300,20 @@ export class MockEngine implements EngineApi {
         if (draft.post.title !== undefined && p.kind !== "quickTake") p.title = draft.post.title;
         p.tags = [...(draft.post.tags ?? [])];
         p.labels = [...(draft.post.labels ?? [])];
-        if (draft.post.link) {
-          const href = safeHref(draft.post.link.uri, "field");
-          p.link = { ...clone(draft.post.link), host: href?.kind === "external" ? href.host : "" };
+        const given = draft.post.link;
+        if (given) {
+          // engine-api.md §3.5 `edit`: a draft of the cached uri that names no title or
+          // description keeps the cached card, unless `dropLinkCard` writes it as given (the mock
+          // has no thumb to keep for a draft that names some)
+          const keep =
+            !opts.dropLinkCard &&
+            p.link?.uri === given.uri &&
+            given.title === undefined &&
+            given.description === undefined;
+          if (!keep) {
+            const href = safeHref(given.uri, "field");
+            p.link = { ...clone(given), host: href?.kind === "external" ? href.host : "" };
+          }
         } else {
           delete p.link;
         }

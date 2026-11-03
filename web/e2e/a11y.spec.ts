@@ -166,6 +166,26 @@ for (const scheme of ["light", "dark"] as const) {
       expect(w.errors).toEqual([]);
     });
 
+    test("the post editor's link card control", async ({ page }) => {
+      const w = await watch(page);
+      const { postUri } = buildFixture();
+      const [, , did, , rkey] = (postUri.fdt ?? "").split("/");
+      // carol's link post has a card
+      await page.goto("/?mock#/login");
+      await page.getByLabel("Your handle or DID").fill("carol.test");
+      await page.getByRole("button", { name: "Continue" }).click();
+      await page.getByRole("button", { name: "Sign in", exact: true }).click();
+      await expect(page.getByRole("heading", { level: 1, name: "Your forums" })).toBeVisible();
+      await page.evaluate((hash) => {
+        location.hash = hash;
+      }, `#/p/${did}/${rkey}`);
+      await page.getByRole("link", { name: "Edit", exact: true }).click();
+      await page.getByRole("checkbox", { name: "Remove the link card" }).check();
+      await page.waitForLoadState("networkidle");
+      expect(await axe(page, "post editor, remove the link card")).toEqual([]);
+      expect(w.errors).toEqual([]);
+    });
+
     test("mod queue banners of an approval forum (O-8)", async ({ page }) => {
       const w = await watch(page);
       const found: string[] = [];
