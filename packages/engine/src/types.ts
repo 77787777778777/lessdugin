@@ -1205,7 +1205,9 @@ export interface ForumIndexer {
   consented: boolean;
 }
 
-export type AuditKind = "contradiction" | "omission" | "lag";
+/** `unchecked` (M6): an item the audit could not check, the reason in `detail`; never a
+ * contradiction or an omission. */
+export type AuditKind = "contradiction" | "omission" | "lag" | "unchecked";
 
 export interface AuditFinding {
   check: string;
@@ -1219,6 +1221,8 @@ export interface AuditCounts {
   contradictions: number;
   omissions: number;
   lag: number;
+  /** The unchecked findings (M6), never counted as checked; omitted when 0. */
+  unchecked?: number;
 }
 
 export interface AuditCheck {

@@ -913,7 +913,8 @@ fn audit_proof_check_counts_only_rejected_proofs_as_contradictions() {
     use lessdugin_core::host::HostError;
     use lessdugin_core::indexer::AuditKind;
     // An unreachable proof endpoint and a proof still over the cap at one URI present nothing
-    // to verify: neither is a contradiction, and the item is not counted as checked.
+    // to verify: neither is a contradiction, and the item is not counted as checked. It is an
+    // `unchecked` finding, counted as such (sync.md §15.4, engine-api.md §4.3).
     for failure in [HostError::Network("offline".into()), HostError::TooLarge] {
         let w = forum_world();
         w.host.advance_ms(180_000);
@@ -923,8 +924,26 @@ fn audit_proof_check_counts_only_rejected_proofs_as_contradictions() {
             .unwrap()
             .unwrap();
         let a5 = check(&report, "A5 proofs");
-        assert!(a5.findings.is_empty(), "{report:?}");
+        assert_eq!(a5.findings.len(), 1, "{report:?}");
+        assert_eq!(a5.findings[0].kind, AuditKind::Unchecked, "{report:?}");
+        assert_eq!(a5.findings[0].subject, w.post);
+        assert!(!a5.findings[0].detail.is_empty());
         assert_eq!(a5.counts.checked, 0, "{report:?}");
+        assert_eq!(
+            (
+                a5.counts.unchecked,
+                a5.counts.contradictions,
+                a5.counts.omissions
+            ),
+            (1, 0, 0),
+            "{report:?}"
+        );
+        assert_eq!(report.counts.unchecked, 1, "{report:?}");
+        // the count is in the report's JSON (omitted only when 0)
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["counts"]["unchecked"], 1);
+        assert_eq!(json["checks"][4]["findings"][0]["kind"], "unchecked");
+        assert!(json["checks"][0]["counts"].get("unchecked").is_none());
         assert!(!w.host.requests_to(&endpoint("getRecordProofs")).is_empty());
     }
 
@@ -977,18 +996,31 @@ fn audit_leaves_an_unreachable_pds_unchecked_instead_of_failing() {
     let report = block_on(w.engine.audit_indexer(w.key.uri.as_str()))
         .unwrap()
         .unwrap();
+    use lessdugin_core::indexer::AuditKind;
+    let unchecked = |c: &lessdugin_core::indexer::AuditCheck| -> Vec<String> {
+        assert!(
+            c.findings.iter().all(|f| f.kind == AuditKind::Unchecked),
+            "{c:?}"
+        );
+        assert_eq!(c.counts.unchecked, c.findings.len(), "{c:?}");
+        c.findings.iter().map(|f| f.subject.clone()).collect()
+    };
     let a1 = check(&report, "A1 heads");
     assert_eq!(a1.counts.checked, 0, "{report:?}");
-    assert!(a1.findings.is_empty(), "{report:?}");
+    // The head check failed: the repo is unchecked, a finding that says so (sync.md §15.4).
+    assert_eq!(unchecked(a1), [w.owner.did().to_string()], "{report:?}");
     let a3 = check(&report, "A3 records");
     // The local post was compared; the other one could not be fetched and stays unchecked.
     assert_eq!(a3.counts.checked, 2, "{report:?}");
-    assert!(a3.findings.is_empty(), "{report:?}");
-    assert!(
-        check(&report, "A5 proofs").findings.is_empty(),
+    assert_eq!(unchecked(a3), [other.clone()], "{report:?}");
+    // The proof of the sampled post could be had from neither the indexer nor the PDS.
+    assert_eq!(
+        unchecked(check(&report, "A5 proofs")),
+        [w.post.clone()],
         "{report:?}"
     );
     assert_eq!(report.counts.omissions, 0, "{report:?}");
+    assert_eq!(report.counts.unchecked, 3, "{report:?}");
 }
 
 #[test]

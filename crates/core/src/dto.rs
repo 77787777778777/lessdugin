@@ -102,8 +102,9 @@ dto! {
 }
 
 string_enum! {
-    /// Severity of a manual indexer audit finding.
-    pub enum AuditKind { Contradiction, Omission, Lag }
+    /// Severity of a manual indexer audit finding. `unchecked` (M6) records an item the audit
+    /// could not check, with the reason in `detail`: it is never a contradiction or an omission.
+    pub enum AuditKind { Contradiction, Omission, Lag, Unchecked }
 }
 
 dto! {
@@ -122,7 +123,16 @@ dto! {
         pub contradictions: usize,
         pub omissions: usize,
         pub lag: usize,
+        /// Items the audit could not check (M6): `unchecked` findings, never counted as
+        /// checked. Omitted when 0.
+        #[serde(default, skip_serializing_if = "is_zero_count")]
+        pub unchecked: usize,
     }
+}
+
+/// `usize` counts omitted when zero.
+fn is_zero_count(n: &usize) -> bool {
+    *n == 0
 }
 
 dto! {

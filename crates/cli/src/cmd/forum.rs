@@ -903,6 +903,7 @@ fn print_audit(ctx: &Ctx, report: &AuditReport) {
                     lessdugin_core::indexer::AuditKind::Contradiction => "CONTRADICTION: ",
                     lessdugin_core::indexer::AuditKind::Omission => "OMISSION: ",
                     lessdugin_core::indexer::AuditKind::Lag => "LAG: ",
+                    lessdugin_core::indexer::AuditKind::Unchecked => "UNCHECKED: ",
                 }),
                 tt(&finding.subject),
                 lit(" — "),

@@ -32,6 +32,7 @@ impl AuditCounts {
             AuditKind::Contradiction => self.contradictions += 1,
             AuditKind::Omission => self.omissions += 1,
             AuditKind::Lag => self.lag += 1,
+            AuditKind::Unchecked => self.unchecked += 1,
         }
     }
 }
@@ -49,10 +50,11 @@ impl AuditCheck {
     }
 
     /// An item the audit could not check (its PDS or the proof endpoint was unreachable, or its
-    /// proof is over the bundle cap). It is neither a finding nor counted as checked
-    /// (`sync.md` §15.4).
+    /// proof is over the bundle cap): an `unchecked` finding with the reason, counted in
+    /// `unchecked` and never as checked, a contradiction or an omission (`sync.md` §15.4).
     fn unchecked(&mut self, subject: &str, detail: impl std::fmt::Display) {
         tracing::warn!(check = %self.name, %subject, %detail, "indexer audit item unchecked");
+        self.finding(AuditKind::Unchecked, subject, detail.to_string());
     }
 
     fn finding(&mut self, kind: AuditKind, subject: impl Into<String>, detail: impl Into<String>) {
@@ -81,6 +83,7 @@ impl AuditReport {
             self.counts.contradictions += check.counts.contradictions;
             self.counts.omissions += check.counts.omissions;
             self.counts.lag += check.counts.lag;
+            self.counts.unchecked += check.counts.unchecked;
         }
     }
 }
@@ -529,4 +532,56 @@ async fn remote_posts_digest<H: Host>(
             .await?
             .input_digest,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_unchecked_item_is_a_finding_counted_apart_from_contradictions_and_omissions() {
+        let mut a1 = AuditCheck::new("A1 heads");
+        a1.checked(1);
+        a1.unchecked("did:plc:aaaaaaaaaaaaaaaaaaaaaaaa", "HTTP 503");
+        let mut a3 = AuditCheck::new("A3 records");
+        a3.unchecked("at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/x/y", "offline");
+        let mut report = AuditReport {
+            checks: vec![a1, a3],
+            ..AuditReport::default()
+        };
+        report.finish();
+        assert_eq!(
+            report.counts,
+            AuditCounts {
+                checked: 1,
+                unchecked: 2,
+                ..AuditCounts::default()
+            }
+        );
+        assert_eq!(report.checks[0].counts.unchecked, 1);
+        let findings: Vec<_> = report.findings().collect();
+        assert_eq!(findings.len(), 2);
+        assert_eq!(
+            findings[0],
+            &AuditFinding {
+                check: "A1 heads".into(),
+                kind: AuditKind::Unchecked,
+                subject: "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa".into(),
+                detail: "HTTP 503".into(),
+            }
+        );
+        // never a contradiction or an omission, so never exit code 6
+        assert!(!report.has_contradiction_or_omission());
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["counts"]["unchecked"], 2);
+        assert_eq!(json["checks"][1]["findings"][0]["kind"], "unchecked");
+        // omitted when 0, and a report without it still reads
+        let zero = serde_json::to_value(AuditCounts::default()).unwrap();
+        assert!(zero.get("unchecked").is_none(), "{zero}");
+        let v0: AuditCounts = serde_json::from_value(
+            serde_json::json!({"checked": 1, "contradictions": 0, "omissions": 0, "lag": 0}),
+        )
+        .unwrap();
+        assert_eq!(v0.unchecked, 0);
+    }
 }

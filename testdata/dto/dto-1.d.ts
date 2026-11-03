@@ -66,6 +66,7 @@ export interface AuditCounts {
     contradictions: number;
     omissions: number;
     lag: number;
+    unchecked?: number;
 }
 
 export interface AuditFinding {
@@ -75,7 +76,7 @@ export interface AuditFinding {
     detail: string;
 }
 
-export type AuditKind = "contradiction" | "omission" | "lag";
+export type AuditKind = "contradiction" | "omission" | "lag" | "unchecked";
 
 export interface AuditReport {
     forum: string;

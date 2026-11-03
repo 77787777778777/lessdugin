@@ -138,7 +138,13 @@ Normative details of the underlying behaviour live in `data-model.md` (records, 
   `hydrate_indexer_page`, `hydrate_indexer_records`, `poll_indexer_changes`,
   `indexer_post_ordering`, `indexer_thread_ordering`, `indexer_participants`, `indexer_forums`,
   `indexer_head_hints`. New `EngineConfig` fields: `indexer_mode` and `stored_indexer_consent`
-  (§2).
+  (§2). New enum variant `AuditKind::unchecked` and new optional output field
+  `AuditCounts.unchecked` (omitted when 0, §4.3): an item the audit could not check (an
+  unreachable PDS or proof endpoint, a single proof over the cap, an observed change the
+  `getChanges` read-back could not reach, `sync.md` §15.4) is an `unchecked` finding with the
+  reason in `detail`, counted there and never as checked, as a contradiction or as an omission,
+  so it never sets exit code 6 (review m6-acceptance-13, m6-acceptance-5); before, it was only
+  logged and a reader of the report could not tell how many items went unchecked.
 - **Errors.** Operations return `Result<T, EngineError>`; `EngineError` serialises as
   `{ "code": <string>, "message": <string>, "retryable": bool, "detail"?: object }` with codes:
   `auth_required`, `not_found`, `invalid_ref`, `invalid_input`, `conflict`, `rate_limited`,
@@ -257,7 +263,7 @@ when the engine is dropped or the corresponding stop method is called.
 |---|---|
 | `sync_forum(uri, SyncOpts { budget_ms, max_requests, full })` | `SyncReport`. User-initiated: stale collection lists are refreshed (`sync.md` §5.2) and up to `REJECTED_RECHECK_BATCH` rejected candidates are confirmed again, cheapest first (`sync.md` §4.2.1) |
 | `forum_indexers(ref)` | `Vec<ForumIndexer { url, did?, note?, consented }>` (M6): the forum's declared `discovery.indexers` entries that pass validation (`sync.md` §2.4), in declaration order, each with this device's consent state: `consented` when the URL is configured (`EngineConfig.indexers`) or has a stored consent, global or for this forum, and never with `indexer_mode = None`. It reads the cached declaration and local state only and never contacts an indexer, so it answers the same with `direct` sources (clients show the list, so the user can consent or not). Errors: those of resolving the forum (`invalid_ref`, `not_found`); `invalid_input` when the stored consent setting is unreadable |
-| `audit_indexer(forum)` | `AuditReport` (M6, `sync.md` §15.4): the manual A1–A5 audit of the forum's one consented indexer (heads, changes, records, digest and aggregates, proofs), each check with its `counts` and `findings` (`contradiction`, `omission`, `lag`), and the totals. Findings are reported, never acted on: they do not demote or deselect the indexer. Errors: `invalid_input` when the `sources` in effect are `direct` (no indexer is contacted), when the forum has no consented indexer, or more than one ("exactly one"); `blocked` when the consented endpoint violates the endpoint policy; the errors of the audit's requests (`network`, …). The Rust method returns `Option<AuditReport>` and never `None` (the wasm binding would map it to `invalid_input`) |
+| `audit_indexer(forum)` | `AuditReport` (M6, `sync.md` §15.4): the manual A1–A5 audit of the forum's one consented indexer (heads, changes, records, digest and aggregates, proofs), each check with its `counts` and `findings` (`contradiction`, `omission`, `lag`, and `unchecked` for an item it could not check, with the reason: never a contradiction or an omission), and the totals. Findings are reported, never acted on: they do not demote or deselect the indexer. Errors: `invalid_input` when the `sources` in effect are `direct` (no indexer is contacted), when the forum has no consented indexer, or more than one ("exactly one"); `blocked` when the consented endpoint violates the endpoint policy; the errors of the audit's requests (`network`, …). The Rust method returns `Option<AuditReport>` and never `None` (the wasm binding would map it to `invalid_input`) |
 | `sync_thread(post_or_comment_uri, SyncOpts)` | P0 fetch of the thread's participants' ranges; opens an unknown forum from the record itself; `degraded` reflects the state after the sync |
 | `live_tail()` | long-lived: Jetstream / polling / indexer `getChanges`, feeds the dirty queue; runs `live_step` rounds until `live_stop()` |
 | `live_step() -> LiveRound` | one `live_tail` round (seeding, head polls, reconciles, up to `LIVE_TAIL_BATCH` queued syncs, handle verification, tombstone GC); for one-shot use (`tail --once`). `LiveRound { polled, reconciles, synced, changed: Vec<forum uri>, verified, gc, nextMs }` is a Rust value, not a DTO |
@@ -666,9 +672,11 @@ AuditReport   { forum, indexer /* its DID */, endpoint, checks: Vec<AuditCheck>,
                 counts: AuditCounts /* the totals */ }                      // M6, §3.3 audit_indexer
 AuditCheck    { name /* A1 heads … A5 proofs, sync.md §15.4 */, counts: AuditCounts,
                 findings: Vec<AuditFinding> }
-AuditCounts   { checked, contradictions, omissions, lag }
-AuditFinding  { check, kind: AuditKind, subject /* uri or DID */, detail }
+AuditCounts   { checked, contradictions, omissions, lag,
+                unchecked? /* M6: the unchecked findings, never counted as checked; omitted when 0 */ }
+AuditFinding  { check, kind: AuditKind, subject /* uri or DID */, detail /* for unchecked: why */ }
 AuditKind     = contradiction|omission|lag
+              | unchecked /* M6: an item the audit could not check; never a contradiction or an omission */
 ```
 
 ### 4.4 Operation inputs and results
