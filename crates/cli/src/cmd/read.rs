@@ -618,6 +618,9 @@ async fn post_text(
         meta.push(render::count(p.history.revisions, "revision", "revisions"));
     }
     s.push_str(&line(ctx, &[(joined(meta), Style::Dim)]));
+    if let Some(tags) = render::tag_relevance(&p.tag_relevance) {
+        s.push_str(&line(ctx, &[(tags, Style::Dim)]));
+    }
     if let Some(l) = &p.post.link {
         s.push_str(&line(
             ctx,

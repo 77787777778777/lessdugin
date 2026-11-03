@@ -3762,6 +3762,26 @@ impl State {
     }
 
     /// True if the thread on top holds `uri` (its react tallies are known).
+    /// The viewer's own tag vote on `slug` of the post `post`, as the thread on top shows it
+    /// (`PostView.tagRelevance[].mine`, `social.md` §13.3): `None` when it is not known there,
+    /// that is when the thread does not show that post or an opinion write of this TUI is still
+    /// open (a vote in the outbox is not shown yet).
+    fn my_tag_vote(&self, post: &str, slug: &str) -> Option<Option<KarmaValue>> {
+        if self.op_writes.iter().any(|id| self.writes.contains_key(id)) {
+            return None;
+        }
+        let p = self.top_thread()?.post()?;
+        if p.post.uri != post {
+            return None;
+        }
+        Some(
+            p.tag_relevance
+                .iter()
+                .find(|t| t.slug == slug)
+                .and_then(|t| t.mine),
+        )
+    }
+
     fn thread_holds(&self, uri: &str) -> bool {
         self.top_thread()
             .and_then(|t| t.data.as_ref())
@@ -4943,7 +4963,30 @@ impl State {
                     self.say(Tone::Info, lit("Nothing selected to tag."));
                     return;
                 };
-                self.opinion_intent(tag_intent(&slug, vote), subject, forum, "Tag vote", fx);
+                let intent = tag_intent(&slug, vote);
+                // the vote starts from the viewer's own one as the post view shows it
+                // (`PostView.tagRelevance[].mine`): a vote it already holds, or a clear of none,
+                // writes nothing
+                if let (OpinionIntent::Tag { value, .. }, Some(mine)) =
+                    (&intent, self.my_tag_vote(&subject, &slug))
+                    && *value == mine
+                {
+                    let said = match mine {
+                        Some(_) => cat([
+                            lit("Your tag vote on #"),
+                            tt(&slug),
+                            lit(" is already that."),
+                        ]),
+                        None => cat([
+                            lit("You have no tag vote on #"),
+                            tt(&slug),
+                            lit(" to take back."),
+                        ]),
+                    };
+                    self.say(Tone::Info, said);
+                    return;
+                }
+                self.opinion_intent(intent, subject, forum, "Tag vote", fx);
             }
             Verb::React { id, against, quote } => {
                 let Some((subject, forum)) = self.command_subject(cmd.subject.as_deref()) else {

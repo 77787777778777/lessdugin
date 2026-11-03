@@ -10,7 +10,7 @@
 //! | Command | Engine call | Same as key |
 //! |---|---|---|
 //! | `vote up\|down\|strong-up\|strong-down\|clear` | `opinion` (`Karma`) | `u`/`U`/`d`/`D`/`0` |
-//! | `vote <value> [post] --tag <slug>` | `opinion` (`Tag`) | - |
+//! | `vote <value> [post] --tag <slug>` (nothing when it is the viewer's own vote) | `opinion` (`Tag`) | - |
 //! | `agree for\|against\|strong-for\|strong-against\|clear` | `opinion` (`Agreement`) | `a`/`A`/`z`/`Z`/`0` |
 //! | `react <id> [for\|against]` | `opinion` (`React`) | `x`, then Enter |
 //! | `unreact <id>` | `opinion` (`React`, remove) | `x`, then Enter again |

@@ -2093,6 +2093,83 @@ fn the_command_line_tags_posts_and_moderates_tags() {
     );
 }
 
+/// `PostView.tagRelevance` (`social.md` §13.3, review m5-acceptance-12) in the TUI: the
+/// thread lists the post's tags with their relevance, whether each applies and the viewer's own
+/// tag vote, and `:vote --tag` starts from that vote: the vote it already holds, or a clear of
+/// none, writes nothing; another value is written.
+#[test]
+fn the_thread_shows_tag_relevance_and_tag_votes_start_from_mine() {
+    use lessdugin_core::dto::{KarmaValue, OpinionIntent, WikiDraft};
+    let s = scenario();
+    let (alice, carol) = (&s.w.alice, &s.w.carol);
+    let t = block_on(alice.engine.wiki_edit(
+        &s.forum,
+        "rust",
+        WikiDraft {
+            name: "Rust".into(),
+            description: None,
+            body: Some(lessdugin_core::dto::BodyDraft::text("About Rust.")),
+            is_tag: true,
+            parent_tags: Vec::new(),
+            summary: None,
+            base: None,
+        },
+    ))
+    .unwrap();
+    alice.flush();
+    alice.done(&t);
+    carol.sync(&s.forum);
+    let tag_votes = |fx: &[lessdugin_tui::Effect]| -> Vec<Option<KarmaValue>> {
+        fx.iter()
+            .filter_map(|e| match e {
+                lessdugin_tui::Effect::Opinion {
+                    intent: OpinionIntent::Tag { value, .. },
+                    ..
+                } => Some(*value),
+                _ => None,
+            })
+            .collect()
+    };
+
+    let mut t = tui(&s, 100, 30);
+    block_on(t.start(Some(s.forum.clone())));
+    block_on(t.open_thread(&s.bob_post));
+    assert!(!t.render().contains("tags:"), "{}", t.render());
+    // nothing to take back yet
+    let fx = command_effects(&mut t, "vote clear --tag rust");
+    assert!(tag_votes(&fx).is_empty(), "{fx:?}");
+    assert!(
+        status(&t).contains("no tag vote on #rust to take back"),
+        "{}",
+        status(&t)
+    );
+
+    run_command(&mut t, "vote up --tag rust");
+    block_on(t.engine().outbox_flush()).unwrap();
+    block_on(t.settle());
+    let view = block_on(carol.engine.get_post(&s.bob_post)).unwrap();
+    let rust = view
+        .tag_relevance
+        .iter()
+        .find(|t| t.slug == "rust")
+        .expect("the voted tag is listed");
+    assert_eq!(rust.mine, Some(KarmaValue::Up));
+    let line = format!(
+        "tags: #rust relevance {}{} [your vote: up]",
+        rust.relevance,
+        if rust.applies { "" } else { " (not applied)" }
+    );
+    let screen = t.render();
+    assert!(screen.contains(&line), "{line}\n{screen}");
+
+    // the vote it holds writes nothing; another value does
+    let fx = command_effects(&mut t, "vote up --tag rust");
+    assert!(tag_votes(&fx).is_empty(), "{fx:?}");
+    assert!(status(&t).contains("already that"), "{}", status(&t));
+    let fx = command_effects(&mut t, "vote down --tag rust");
+    assert_eq!(tag_votes(&fx), [Some(KarmaValue::Down)], "{fx:?}");
+}
+
 /// Membership, own items and local state from the `:` line, end to end: carol joins with a
 /// note, alice sees her in `:members`, carol deletes her comment after confirming, reads an
 /// item's raw view, bookmarks, mutes, and alice renames the forum.

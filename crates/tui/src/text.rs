@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 
 use lessdugin_core::dto::{
     ActorView, AgreementValue, Badges, Banner, CollapseReason, HandleState, HiddenReason,
-    ItemState, KarmaValue, PostKind, PostSummary, ReactTally, ScoreView, Stance,
+    ItemState, KarmaValue, PostKind, PostSummary, PostTag, ReactTally, ScoreView, Stance,
 };
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -436,6 +436,38 @@ pub fn notification_line(n: &lessdugin_core::dto::NotificationView) -> TermText 
     }
     parts.push(tt(&time(n.at_ms)));
     cat(parts)
+}
+
+/// A post view's tags (`PostView.tagRelevance`, `social.md` §13.3): each slug with its
+/// relevance, whether it applies, and the viewer's own tag vote; `None` when it lists none.
+pub fn tag_relevance(tags: &[PostTag]) -> Option<TermText> {
+    if tags.is_empty() {
+        return None;
+    }
+    let mut parts = vec![lit("tags: ")];
+    for (i, t) in tags.iter().enumerate() {
+        if i > 0 {
+            parts.push(tt(" \u{b7} "));
+        }
+        parts.push(cat([lit("#"), name(&t.slug)]));
+        parts.push(tt(&format!(" relevance {}", t.relevance)));
+        if !t.applies {
+            parts.push(lit(" (not applied)"));
+        }
+        if let Some(v) = t.mine {
+            parts.push(cat([
+                lit(" [your vote: "),
+                lit(match v {
+                    KarmaValue::Up => "up",
+                    KarmaValue::StrongUp => "strong up",
+                    KarmaValue::Down => "down",
+                    KarmaValue::StrongDown => "strong down",
+                }),
+                lit("]"),
+            ]));
+        }
+    }
+    Some(cat(parts))
 }
 
 /// The mod queue's banner that is a notice, not a warning (`engine-api.md` §4.2 `Banner`).

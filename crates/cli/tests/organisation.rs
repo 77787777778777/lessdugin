@@ -276,3 +276,56 @@ fn posts_opened_from_a_sequence_are_read_in_it() {
     let e = reader.fails(1, &["read", &p2, "--sequence", "not a sequence"]);
     assert_eq!(e["code"], "invalid_ref", "{e}");
 }
+
+/// `PostView.tagRelevance` (`social.md` §13.3, review m5-acceptance-12): `read` lists the
+/// post's tags with their relevance, whether each applies, and the reader's own tag vote; a
+/// down vote on a tag the author did not declare lists it, below zero and not applied.
+#[test]
+fn read_shows_tag_relevance_and_the_readers_own_tag_vote() {
+    let net = Net::new();
+    let alice = net.user("alice.test", true);
+    let carol = net.user("carol.test", true);
+    alice.json(&["forum", "create", "meta", "--frontpage"]);
+    for slug in ["rust", "cli"] {
+        let page = alice.file(&format!("{slug}.md"), &format!("About {slug}.\n"));
+        done_uri(&alice.json(&["wiki", "edit", slug, "--name", slug, "--file", s(&page)]));
+    }
+    let f = alice.file("t.md", "---\ntitle: Tagged\n---\nWith a tag.\n");
+    let p = done_uri(&alice.json(&["post", s(&f), "--tag", "rust", "--yes"]));
+    carol.json(&["join", "alice.test/meta", "--yes"]);
+    let a = alice.json(&["approve", "carol.test", "--yes"]);
+    assert_eq!(a["writes"][0]["state"]["kind"], "done", "{a}");
+    carol.ok(&["sync", "alice.test/meta"]);
+
+    // the author's declared tag: relevance 1, applied; nobody has voted
+    let out = carol.ok(&["read", &p, "--no-pager"]);
+    assert!(out.contains("tags: #rust relevance 1\n"), "{out}");
+    // carol (granted) votes `cli` down: listed, with her vote for her, not applied
+    let t = carol.json(&["vote", &p, "down", "--tag", "cli", "--yes"]);
+    assert_eq!(t["state"]["kind"], "done", "{t}");
+    let v = carol.json(&["read", &p, "--no-comments"]);
+    assert_eq!(
+        v["tagRelevance"],
+        serde_json::json!([
+            { "slug": "cli", "relevance": -1, "applies": false, "mine": "down" },
+            { "slug": "rust", "relevance": 1, "applies": true },
+        ]),
+        "{v}"
+    );
+    let out = carol.ok(&["read", &p, "--no-pager"]);
+    assert!(
+        out.contains(
+            "tags: #cli relevance -1 (not applied) [your vote: down] · #rust relevance 1\n"
+        ),
+        "{out}"
+    );
+    // another reader sees carol's vote counted, and no vote of theirs
+    let reader = net.reader(&alice);
+    reader.ok(&["sync", "alice.test/meta"]);
+    let out = reader.ok(&["read", &p, "--no-pager"]);
+    assert!(
+        out.contains("tags: #cli relevance -1 (not applied) · #rust relevance 1\n"),
+        "{out}"
+    );
+    assert!(!out.contains("your vote"), "{out}");
+}

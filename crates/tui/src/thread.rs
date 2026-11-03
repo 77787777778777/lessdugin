@@ -266,6 +266,10 @@ pub fn layout_for(
                 meta.push(count(p.history.revisions, "revision", "revisions"));
             }
             lines.push(line([(joined(meta), dim())]));
+            // the tags with their relevance and the viewer's own tag votes (social.md §13.3)
+            if let Some(tags) = crate::text::tag_relevance(&p.tag_relevance) {
+                lines.push(line([(tags, dim())]));
+            }
             if let Some(l) = &p.post.link {
                 lines.push(line([
                     (lit("link: "), dim()),
