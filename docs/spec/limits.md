@@ -281,6 +281,7 @@ The 1 %-per-hour automatic audit and automatic demotion (above 2 % contradiction
 | `CONSTELLATION_PAGE_LIMIT` | 100 | O | `limit` of Constellation `getBacklinks` calls; paging continues while a cursor is returned | ADR 0003 |
 | `CONSTELLATION_HINTS_MAX` | 1,000 | O | newcomer membership entries read from Constellation per forum, newest first; paging stops there and older entries are dropped with a warning | `sync.md` §4.4 |
 | `DIRECTORY_OWNERS_MAX` | 10,000 | O | forum owners read from the relays for the directory; further owners are dropped with a warning | `sync.md` §4.7 |
+| `DISC_ROWS_MAX` | 10,000 | O | discovery rows kept per forum, and as many relay rejections; past it the oldest that are not confirmed are dropped | `sync.md` §4.4, §6.4 |
 | `HANDLE_TTL_MS` | 21,600,000 (6 h) | O | handle → DID cache | `sync.md` |
 | `DID_DOC_TTL_MS` | 86,400,000 (24 h) | O | DID document cache | `sync.md` |
 | `INACTIVE_RETENTION_MS` | 604,800,000 (7 days) | O | records of an account that is not active are hidden at once and kept this long in the cache | `sync.md` |
