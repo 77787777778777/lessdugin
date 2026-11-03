@@ -486,6 +486,98 @@ fn wiki_edits_parent_their_base_and_refuse_a_moved_head() {
     assert_eq!(parents[0]["uri"], r2.as_str());
 }
 
+/// `tag` is `not_found` for a page that is not a tag or whose tag was removed, so an editor had
+/// no head to start from and overwrote the page from an empty form. `wiki_page` gives the head
+/// and the state of any page (engine-api.md §3.4), and an edit passing it as `base` parents it.
+#[test]
+fn wiki_page_gives_the_head_of_a_page_that_is_not_a_tag_or_was_removed() {
+    use lessdugin_core::dto::WikiPageView;
+    let w = World::new();
+    let edit = |slug: &str, is_tag: bool, base: Option<String>| {
+        let t = block_on(w.alice.engine.wiki_edit(
+            &w.forum,
+            slug,
+            WikiDraft {
+                name: slug.to_owned(),
+                description: None,
+                body: Some(BodyDraft::text(format!("About {slug}"))),
+                is_tag,
+                parent_tags: vec![],
+                summary: None,
+                base,
+            },
+        ))
+        .unwrap();
+        w.alice.flush();
+        w.alice.done(&t)
+    };
+    let notes = edit("notes", false, None);
+    let rust = edit("rust", true, None);
+    let go = edit("go", true, None);
+    // a moderator removes the go tag: the page keeps its revisions
+    w.alice.mod_action(assert_mod(
+        &w.forum,
+        "tag:go",
+        ModActionValue::Tag {
+            removed: true,
+            head: None,
+        },
+    ));
+    w.alice.flush();
+    w.sync_all();
+    let page = |slug: &str| block_on(w.carol.engine.wiki_page(&w.forum, slug)).unwrap();
+    let view = |slug: &str, head: Option<&str>, exists: bool, applicable: bool| WikiPageView {
+        dto: Default::default(),
+        forum: w.forum.clone(),
+        slug: slug.to_owned(),
+        head: head.map(str::to_owned),
+        exists,
+        applicable,
+        unmerged_edits: 0,
+    };
+    // a tag: what tag() says
+    assert_eq!(page("rust"), view("rust", Some(&rust), true, true));
+    let tag = block_on(w.carol.engine.tag(&w.forum, "rust")).unwrap();
+    assert_eq!(tag.head.as_deref(), Some(rust.as_str()));
+    // not a tag, and a removed tag: tag() has nothing, wiki_page has the head
+    for (slug, head, exists) in [("notes", &notes, true), ("go", &go, false)] {
+        let e = block_on(w.carol.engine.tag(&w.forum, slug)).unwrap_err();
+        assert_eq!(e.code, ErrorCode::NotFound, "{slug}: {e:?}");
+        assert_eq!(page(slug), view(slug, Some(head), exists, false));
+    }
+    // no page: no head, an edit is a new page
+    assert_eq!(page("python"), view("python", None, false, false));
+    // the JSON a client reads
+    let json = serde_json::to_value(page("notes")).unwrap();
+    assert_eq!(
+        json,
+        json!({
+            "dto": 1, "forum": w.forum, "slug": "notes", "head": notes,
+            "exists": true, "applicable": false, "unmergedEdits": 0,
+        })
+    );
+    assert!(
+        serde_json::to_value(page("python"))
+            .unwrap()
+            .get("head")
+            .is_none()
+    );
+    // the editor's base: the edit parents the head it loaded, and the page moves on
+    let head = page("notes").head;
+    let second = edit("notes", false, head);
+    let parents = &w
+        .alice
+        .record(nsid::WIKI_REVISION, second.rsplit('/').next().unwrap())
+        .unwrap()["parents"];
+    assert_eq!(parents.as_array().unwrap().len(), 1);
+    assert_eq!(parents[0]["uri"], notes.as_str());
+    w.sync_all();
+    assert_eq!(page("notes").head.as_deref(), Some(second.as_str()));
+    // an unknown forum is not a page
+    let e = block_on(w.carol.engine.wiki_page("not a forum", "notes")).unwrap_err();
+    assert_eq!(e.code, ErrorCode::InvalidRef, "{e:?}");
+}
+
 /// A wiki revision's and a sequence's `body` may spill into a blob (`data-model.md` §5.2 rule
 /// 2), and `body_source` refused both collections (`invalid_ref`), so a client could not edit
 /// such a page or sequence from its source (engine-api.md §3.4).

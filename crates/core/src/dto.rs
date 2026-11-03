@@ -423,9 +423,9 @@ pub struct WikiDraft {
     pub parent_tags: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
-    /// The page head the author edited (`TagView.head`): written as the only parent, and the
-    /// edit is refused (`conflict`) when the cached canonical head is another revision or there
-    /// is none. Absent: the current canonical head, or none for a new page (engine API v0).
+    /// The page head the author edited (`WikiPageView.head`, or `TagView.head`): written as the
+    /// only parent, and the edit is refused (`conflict`) when the cached canonical head is
+    /// another revision or there is none. Absent: the current canonical head, or none for a new page (engine API v0).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base: Option<String>,
 }
@@ -964,6 +964,28 @@ dto! {
         #[serde(skip_serializing_if = "Option::is_none")]
         pub head: Option<String>,
         pub posts: Vec<PostSummary>,
+    }
+}
+
+dto! {
+    /// `wiki_page(forum, slug)`'s result (`engine-api.md` §3.4, M5): a wiki page's head and
+    /// state, also for a page that `tag` answers `not_found` for (one that is not a tag, or whose
+    /// tag a moderator removed), so an editor starts from the head instead of an empty form.
+    pub struct WikiPageView {
+        pub dto: DtoVersion,
+        pub forum: String,
+        pub slug: String,
+        /// The canonical revision (`social.md` §13.2), whatever `exists` and `applicable` say:
+        /// the `WikiDraft.base` of an edit. Absent when the page has none (an unknown slug, or
+        /// no eligible revision): an edit is then a new page.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub head: Option<String>,
+        /// `exists(slug)`: a head and no `tag.removed` in effect. A head without it: removed.
+        pub exists: bool,
+        /// `applicable(slug)`: it exists and its head is a tag (`isTag`); `tag` answers then.
+        pub applicable: bool,
+        /// "N unmerged edits" (`social.md` §13.2).
+        pub unmerged_edits: u32,
     }
 }
 

@@ -92,6 +92,7 @@ fn all() -> Vec<(&'static str, &'static str)> {
         MemberView,
         TagSummary,
         TagView,
+        WikiPageView,
         SequenceSummary,
         ChapterView,
         SequenceView,

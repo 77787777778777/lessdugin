@@ -883,6 +883,16 @@ export interface WikiDraft {
     base?: string;
 }
 
+export interface WikiPageView {
+    dto: DtoVersion;
+    forum: string;
+    slug: string;
+    head?: string;
+    exists: boolean;
+    applicable: boolean;
+    unmergedEdits: number;
+}
+
 export type WriteState = { kind: "pending"; notBeforeMs?: number; held?: boolean; throttled?: boolean; needsLogin?: boolean; error?: EngineError } | { kind: "sending" } | { kind: "done"; uri: string; cid?: string; report?: string[] } | { kind: "failed"; error: EngineError } | { kind: "undone" };
 
 export interface WriteTicket {

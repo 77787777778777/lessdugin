@@ -78,6 +78,7 @@ pub const OPS: &[&str] = &[
     "backlinks",
     "tags",
     "tag",
+    "wikiPage",
     "sequences",
     "sequence",
     "user",
@@ -499,6 +500,10 @@ pub async fn call<H: Host>(engine: &Engine<H>, op: &str, a: &str) -> Result<Stri
         "tag" => {
             let (forum, slug): (String, String) = args(op, a)?;
             out(&engine.tag(&forum, &slug).await?)
+        }
+        "wikiPage" => {
+            let (forum, slug): (String, String) = args(op, a)?;
+            out(&engine.wiki_page(&forum, &slug).await?)
         }
         "sequences" => {
             let (forum,): (String,) = args(op, a)?;

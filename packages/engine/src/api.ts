@@ -92,6 +92,7 @@ import type {
   ValidationReport,
   VerifyReport,
   WikiDraft,
+  WikiPageView,
   WriteTicket,
 } from "./types.ts";
 
@@ -185,6 +186,10 @@ export interface EngineApi {
   history(uri: AtUri): Promise<HistoryView>;
   tags(forum: AtUri): Promise<TagSummary[]>;
   tag(forum: AtUri, slug: Slug): Promise<TagView>;
+  /** A wiki page's head and state (M5), also for a page `tag` is `not_found` for (not a tag, or
+   * its tag removed): an editor loads `head` (`raw`, `bodySource`) and sends it as
+   * `WikiDraft.base`; no head: a new page. */
+  wikiPage(forum: AtUri, slug: Slug): Promise<WikiPageView>;
   sequences(forum: AtUri): Promise<SequenceSummary[]>;
   sequence(uri: AtUri): Promise<SequenceView>;
   user(forum: AtUri | undefined, actor: string): Promise<UserView>;
