@@ -434,13 +434,23 @@ fn v2_exact_filter_and_record_is_only_a_hint() {
         let e = wire::parse(Wire::V2, &v2_commit(DID, &post(), &bad_rkey, 10))
             .unwrap()
             .unwrap();
-        assert!(filter.apply(Wire::V2, "one", e, &cx, RECEIVED_US).actions.is_empty());
+        assert!(
+            filter
+                .apply(Wire::V2, "one", e, &cx, RECEIVED_US)
+                .actions
+                .is_empty()
+        );
     }
     let spoof = format!("{}.spoof", post());
     let e = wire::parse(Wire::V2, &v2_commit(DID, &spoof, &format!("{FK}-3l"), 11))
         .unwrap()
         .unwrap();
-    assert!(filter.apply(Wire::V2, "one", e, &cx, RECEIVED_US).actions.is_empty());
+    assert!(
+        filter
+            .apply(Wire::V2, "one", e, &cx, RECEIVED_US)
+            .actions
+            .is_empty()
+    );
 }
 
 #[test]
@@ -516,7 +526,12 @@ fn identity_account_sync_drop_network_noise() {
     .to_string();
     let mut filter = EventFilter::default();
     let noise = wire::parse(Wire::V2, &identity).unwrap().unwrap();
-    assert!(filter.apply(Wire::V2, "i", noise, &cx, RECEIVED_US).actions.is_empty());
+    assert!(
+        filter
+            .apply(Wire::V2, "i", noise, &cx, RECEIVED_US)
+            .actions
+            .is_empty()
+    );
     let account = wire::parse(Wire::V2, &account).unwrap().unwrap();
     let out = filter.apply(Wire::V2, "i", account, &cx, RECEIVED_US);
     assert!(matches!(
@@ -565,7 +580,12 @@ fn unknown_did_only_exact_f_new_membership_candidate() {
         let e = wire::parse(Wire::V2, &v2_commit(NEW, &collection, &rkey, 2))
             .unwrap()
             .unwrap();
-        assert!(filter.apply(Wire::V2, "i", e, &cx, RECEIVED_US).actions.is_empty());
+        assert!(
+            filter
+                .apply(Wire::V2, "i", e, &cx, RECEIVED_US)
+                .actions
+                .is_empty()
+        );
     }
 }
 
@@ -835,24 +855,46 @@ fn dedup_is_bounded_lru() {
         let e = wire::parse(Wire::V2, &v2_commit(DID, &post(), rkey, 1))
             .unwrap()
             .unwrap();
-        assert_eq!(filter.apply(Wire::V2, "i", e, &cx, RECEIVED_US).actions.len(), 1);
+        assert_eq!(
+            filter
+                .apply(Wire::V2, "i", e, &cx, RECEIVED_US)
+                .actions
+                .len(),
+            1
+        );
         filter.acknowledge();
     }
     // Promote the first key, then insert a third: the second is the least recently used.
     let first = wire::parse(Wire::V2, &v2_commit(DID, &post(), "aaaaaaaaaaaa-1", 1))
         .unwrap()
         .unwrap();
-    assert!(filter.apply(Wire::V2, "i", first, &cx, RECEIVED_US).duplicate);
+    assert!(
+        filter
+            .apply(Wire::V2, "i", first, &cx, RECEIVED_US)
+            .duplicate
+    );
     let third = wire::parse(Wire::V2, &v2_commit(DID, &post(), "aaaaaaaaaaaa-3", 1))
         .unwrap()
         .unwrap();
-    assert_eq!(filter.apply(Wire::V2, "i", third, &cx, RECEIVED_US).actions.len(), 1);
+    assert_eq!(
+        filter
+            .apply(Wire::V2, "i", third, &cx, RECEIVED_US)
+            .actions
+            .len(),
+        1
+    );
     filter.acknowledge();
     assert_eq!(filter.dedup().len(), 2);
     let second = wire::parse(Wire::V2, &v2_commit(DID, &post(), "aaaaaaaaaaaa-2", 1))
         .unwrap()
         .unwrap();
-    assert_eq!(filter.apply(Wire::V2, "i", second, &cx, RECEIVED_US).actions.len(), 1);
+    assert_eq!(
+        filter
+            .apply(Wire::V2, "i", second, &cx, RECEIVED_US)
+            .actions
+            .len(),
+        1
+    );
 }
 
 #[test]
@@ -1071,7 +1113,11 @@ fn discovery_completion_controls_private_participant_filters() {
             .websocket_urls()
             .into_iter()
             .partition(|u| u.contains("kinds=commit"));
-        assert_eq!(side.len(), 1, "only the filtered source opens the side connection");
+        assert_eq!(
+            side.len(),
+            1,
+            "only the filtered source opens the side connection"
+        );
         assert_eq!(urls.len(), 2);
         let filtered = |url: &str| {
             url::Url::parse(url)
@@ -1186,7 +1232,12 @@ fn jetstream_source<H: Host>(host: H, base: &str, browser: bool) -> LiveSource<H
 async fn persist_seq_42(host: &MemHost) {
     host.script_websocket(
         "wss://jetstream.example/",
-        vec![WsMessage::Text(v2_commit(DID, &post(), &format!("{FK}-3l"), 42))],
+        vec![WsMessage::Text(v2_commit(
+            DID,
+            &post(),
+            &format!("{FK}-3l"),
+            42,
+        ))],
     );
     let mut first = jetstream_source(host.clone(), "wss://jetstream.example/subscribe", false);
     assert!(matches!(
@@ -1210,7 +1261,11 @@ fn persisted_cursor_is_resumed_after_a_restart() {
         assert_eq!(same.next(&context()).await.unwrap(), SourceStatus::Waiting);
         assert_eq!(same.cursor().map(|c| c.seq), Some(Some(42)));
         let urls = host.websocket_urls();
-        assert_eq!(url_cursor(&urls[1]), "42", "restart must resume at the stored seq");
+        assert_eq!(
+            url_cursor(&urls[1]),
+            "42",
+            "restart must resume at the stored seq"
+        );
         same.stop().await;
 
         // Another instance an hour later: the stored time rewound 5 s, not now - 5 s.
@@ -1250,7 +1305,10 @@ fn a_dropped_first_call_still_loads_the_persisted_cursor() {
             futures::FutureExt::now_or_never(source.next(&context())).is_none(),
             "the first call must be pending inside the cursor read"
         );
-        assert_eq!(source.next(&context()).await.unwrap(), SourceStatus::Waiting);
+        assert_eq!(
+            source.next(&context()).await.unwrap(),
+            SourceStatus::Waiting
+        );
         let urls = mem.websocket_urls();
         assert_eq!(url_cursor(urls.last().unwrap()), "42");
     });
@@ -1272,7 +1330,12 @@ fn a_dropped_next_never_loses_a_browser_frame() {
         // live_tail's timer wins while the source waits for a frame: the next() is dropped.
         assert!(source.next(&context()).now_or_never().is_none());
         let main = host.feed("subscribeEvents");
-        main.push(WsMessage::Text(v2_commit(DID, &post(), &format!("{FK}-3l"), 42)));
+        main.push(WsMessage::Text(v2_commit(
+            DID,
+            &post(),
+            &format!("{FK}-3l"),
+            42,
+        )));
         assert_eq!(main.lost(), 0, "the frame went to an abandoned receive");
         assert!(matches!(
             source.next(&context()).now_or_never(),
@@ -1315,9 +1378,17 @@ fn a_frame_time_never_becomes_first_seen() {
             let [Action::PointFetch { first_seen_us, .. }] = &actions[..] else {
                 panic!("expected a point fetch, got {actions:?}");
             };
-            assert_eq!(*first_seen_us, host.now() * 1_000, "first seen is the receive time");
+            assert_eq!(
+                *first_seen_us,
+                host.now() * 1_000,
+                "first seen is the receive time"
+            );
             source.acknowledge().await.unwrap();
-            assert_eq!(source.cursor().unwrap().time_us, frame_us, "the cursor keeps it");
+            assert_eq!(
+                source.cursor().unwrap().time_us,
+                frame_us,
+                "the cursor keeps it"
+            );
             source.stop().await;
         }
     });
@@ -1377,14 +1448,21 @@ fn the_first_switch_to_filtered_is_immediate_and_later_changes_wait() {
         };
         assert!(source.next(&cx).now_or_never().is_none());
         assert_eq!(host.urls().len(), 1);
-        assert!(!host.urls()[0].contains("dids="), "participants are not known yet");
+        assert!(
+            !host.urls()[0].contains("dids="),
+            "participants are not known yet"
+        );
 
         cx.participants_known = true;
         cx.filter_dids = vec![DID.to_owned()];
         // Pending, not a CatchUp: the wildcard connection missed nothing.
         assert!(source.next(&cx).now_or_never().is_none());
         let urls = host.urls();
-        assert_eq!(urls.len(), 2, "known participants switch to filtered at once");
+        assert_eq!(
+            urls.len(),
+            2,
+            "known participants switch to filtered at once"
+        );
         assert!(urls[1].contains("dids=did%3Aplc%3Aknown"));
         assert!(host.feed_at(0).closed(), "the wildcard socket is closed");
         assert!(!host.feed_at(1).closed());
@@ -1508,14 +1586,22 @@ fn live_tail_loses_no_browser_frame_when_its_timer_wins() {
             assert!(futures::poll!(tail.as_mut()).is_pending());
         }
         let feed = host.feed("subscribeEvents");
-        feed.push(WsMessage::Text(v2_commit(&did, &post(), &format!("{FK}-3l"), 42)));
+        feed.push(WsMessage::Text(v2_commit(
+            &did,
+            &post(),
+            &format!("{FK}-3l"),
+            42,
+        )));
         assert_eq!(feed.lost(), 0, "the frame went to an abandoned receive");
         assert!(futures::poll!(tail.as_mut()).is_pending());
         // past the live proof delay (1-3 s): the frame is applied
         mem.advance_ms(3_001);
         assert!(futures::poll!(tail.as_mut()).is_pending());
         let uri = format!("at://{did}/{}/{FK}-3l", post());
-        assert!(queued_uris(&engine, &did).contains(&uri), "the frame was not applied");
+        assert!(
+            queued_uris(&engine, &did).contains(&uri),
+            "the frame was not applied"
+        );
         assert_eq!(host.urls().len(), 1, "one socket");
         engine.live_stop();
         tail.await.unwrap();
@@ -1558,7 +1644,9 @@ fn a_frame_that_keeps_failing_is_left_to_the_dirty_queue() {
         }
         // Three tries (now, +2 s, +4 s), then the frame is acknowledged and its repo queued for
         // a sync; the later frame is read and acknowledged too.
-        let cursor = stored_cursor(mem.cache()).await.expect("the failing frame held the cursor");
+        let cursor = stored_cursor(mem.cache())
+            .await
+            .expect("the failing frame held the cursor");
         assert_eq!(cursor.seq, Some(43), "the later frame was not read");
         let uri = format!("at://{did}/{}/{FK}-3l", post());
         let queued = engine.syncer().queue_snapshot();
@@ -1580,7 +1668,12 @@ fn a_failed_context_read_does_not_end_live_tail() {
         let did = account.did().to_string();
         mem.script_websocket(
             "wss://jetstream.example/",
-            vec![WsMessage::Text(v2_commit(&did, &post(), &format!("{FK}-3l"), 42))],
+            vec![WsMessage::Text(v2_commit(
+                &did,
+                &post(),
+                &format!("{FK}-3l"),
+                42,
+            ))],
         );
         mem.park_sleeps(true);
         host.cache.fail_next_scan.store(true, Ordering::SeqCst);
@@ -1596,7 +1689,10 @@ fn a_failed_context_read_does_not_end_live_tail() {
             assert!(futures::poll!(tail.as_mut()).is_pending());
         }
         let uri = format!("at://{did}/{}/{FK}-3l", post());
-        assert!(queued_uris(&engine, &did).contains(&uri), "the frame was never read");
+        assert!(
+            queued_uris(&engine, &did).contains(&uri),
+            "the frame was never read"
+        );
         engine.live_stop();
         tail.await.unwrap();
     });
@@ -1618,7 +1714,10 @@ fn noise_frames_do_not_rebuild_the_live_context() {
         futures::pin_mut!(tail);
         assert!(futures::poll!(tail.as_mut()).is_pending());
         // Every frame was read in this one poll, against one context.
-        assert_eq!(stored_cursor(host.cache()).await.and_then(|c| c.seq), Some(200));
+        assert_eq!(
+            stored_cursor(host.cache()).await.and_then(|c| c.seq),
+            Some(200)
+        );
         let scans = host.cache.identity_scans.load(Ordering::SeqCst);
         assert!(scans <= 2, "{scans} identity scans for 200 noise frames");
         engine.live_stop();
@@ -1648,7 +1747,10 @@ fn index_meta(mut value: serde_json::Value, seq: i64) -> serde_json::Value {
 }
 
 /// An open-mode forum of `owner`, declared an hour ago.
-fn open_forum(host: &MemHost, owner: &lessdugin_testkit::fake_pds::AccountHandle) -> lessdugin_core::discovery::ForumKey {
+fn open_forum(
+    host: &MemHost,
+    owner: &lessdugin_testkit::fake_pds::AccountHandle,
+) -> lessdugin_core::discovery::ForumKey {
     use lessdugin_lexicon::collection::nsid;
     use lessdugin_lexicon::records::{Forum, Membership};
     let key = lessdugin_core::discovery::ForumKey::new(owner.did(), "meta").unwrap();
@@ -1729,7 +1831,11 @@ fn live_tail_polls_the_indexer_change_feed_from_its_head() {
             assert!(futures::poll!(tail.as_mut()).is_pending());
         }
         let polls = host.requests_to(&index_endpoint("getChanges"));
-        assert!(polls.len() >= 4, "{} getChanges polls in 3 minutes", polls.len());
+        assert!(
+            polls.len() >= 4,
+            "{} getChanges polls in 3 minutes",
+            polls.len()
+        );
         assert!(polls.iter().all(|r| r.url.contains("since=500")));
         // A healthy change feed is a live source: no 2-minute head polling of the authority
         // (sync.md §6.2, §6.7). Only the reconcile of the never-reconciled repo, at once, reads
@@ -1799,6 +1905,9 @@ fn rejected_and_unconfirmed_hints_are_not_synced_by_live_tail() {
             .filter(|r| rows.keys().any(|d| r.url.contains(d.as_str())))
             .map(|r| r.url)
             .collect();
-        assert!(touched.is_empty(), "requests for hinted non-members: {touched:?}");
+        assert!(
+            touched.is_empty(),
+            "requests for hinted non-members: {touched:?}"
+        );
     });
 }

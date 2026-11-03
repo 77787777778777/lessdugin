@@ -64,7 +64,11 @@ async fn wire_router(v1: &Jetstream, v2: &Jetstream) -> String {
                 };
                 let line = String::from_utf8_lossy(&head[..n]);
                 let path = line.split_whitespace().nth(1).unwrap_or_default();
-                let target = if path.starts_with("/subscribe") { v1 } else { v2 };
+                let target = if path.starts_with("/subscribe") {
+                    v1
+                } else {
+                    v2
+                };
                 let Ok(mut up) = tokio::net::TcpStream::connect(target).await else {
                     return;
                 };
@@ -173,7 +177,10 @@ async fn open_mode_scenario(wire: Wire) {
     while !(server.requests().iter().any(main)
         && (wire == Wire::V2 || v2.requests().iter().any(side)))
     {
-        assert!(Instant::now() < deadline, "the live source did not subscribe");
+        assert!(
+            Instant::now() < deadline,
+            "the live source did not subscribe"
+        );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -240,7 +247,11 @@ async fn open_mode_scenario(wire: Wire) {
                 "live updates did not arrive: listed {uris:?}; post cached {cached}; late row {:?}; queue {:?}; jetstream sent {:?}",
                 rows.get(late.did().as_str()),
                 engine.syncer().queue_snapshot(),
-                server.requests().iter().map(|r| r.sent.len()).collect::<Vec<_>>()
+                server
+                    .requests()
+                    .iter()
+                    .map(|r| r.sent.len())
+                    .collect::<Vec<_>>()
             );
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
@@ -271,9 +282,9 @@ async fn open_mode_scenario(wire: Wire) {
     match wire {
         Wire::V1 => {
             assert!(v1.requests().iter().any(|r| {
-                r.options.as_ref().is_some_and(|o| {
-                    o["wantedDids"].as_array().is_some_and(|d| d.len() > 150)
-                })
+                r.options
+                    .as_ref()
+                    .is_some_and(|o| o["wantedDids"].as_array().is_some_and(|d| d.len() > 150))
             }));
             let side: Vec<String> = v2
                 .requests()

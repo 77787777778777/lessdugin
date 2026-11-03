@@ -1217,7 +1217,10 @@ mod context_tests {
             }
             rows.insert(format!("did:plc:{i:024}"), r);
         }
-        assert!(disc_rows_over_cap(&rows, "").is_empty(), "at the cap nothing is dropped");
+        assert!(
+            disc_rows_over_cap(&rows, "").is_empty(),
+            "at the cap nothing is dropped"
+        );
         rows.insert("did:plc:new".into(), DiscRow::new("hint:jetstream", 0));
         rows.insert("did:plc:newer".into(), DiscRow::new("hint:jetstream", 1));
         // the new row (first seen earliest) is kept; the oldest unconfirmed ones go
@@ -1257,7 +1260,10 @@ mod context_tests {
             rejected_row.reject(host.now_ms());
             let rows = BTreeMap::from([
                 (candidate.clone(), confirmed_row),
-                (unconfirmed.clone(), DiscRow::new("hint:test", host.now_ms())),
+                (
+                    unconfirmed.clone(),
+                    DiscRow::new("hint:test", host.now_ms()),
+                ),
                 (rejected.clone(), rejected_row),
             ]);
             crate::discovery::state::put_disc_rows(host.cache(), &key.fk, &rows)
@@ -1278,9 +1284,18 @@ mod context_tests {
             assert!(cx.newcomer_dids.contains(&candidate));
             for hint in [&unconfirmed, &rejected] {
                 assert!(!cx.filter_dids.contains(hint), "{hint} is in D");
-                assert!(!cx.newcomer_dids.contains(hint), "{hint} is a known newcomer");
+                assert!(
+                    !cx.newcomer_dids.contains(hint),
+                    "{hint} is a known newcomer"
+                );
             }
-            assert!(!engine.relevant_repos().await.unwrap().contains_key(&rejected));
+            assert!(
+                !engine
+                    .relevant_repos()
+                    .await
+                    .unwrap()
+                    .contains_key(&rejected)
+            );
             assert!(!cx.participants_known);
 
             crate::discovery::state::mark_discovery_complete(host.cache(), &key.fk, host.now_ms())

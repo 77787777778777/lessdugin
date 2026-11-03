@@ -781,10 +781,11 @@ impl<H: Host> LiveSource<H> {
                     if self.locking.is_none() {
                         let host = Arc::clone(&self.host);
                         self.locking =
-                            Some(Box::pin(async move { host.lock("sync-leader", false).await }));
+                            Some(Box::pin(
+                                async move { host.lock("sync-leader", false).await },
+                            ));
                     }
-                    let Some(lock) = drive(&mut self.locking).await.transpose()?.flatten()
-                    else {
+                    let Some(lock) = drive(&mut self.locking).await.transpose()?.flatten() else {
                         self.retry_at_ms = self.host.now_ms().saturating_add(1_000);
                         return Ok(SourceStatus::LeaderUnavailable);
                     };
@@ -901,7 +902,11 @@ impl<H: Host> LiveSource<H> {
         }
     }
 
-    async fn on_main(&mut self, message: Received, cx: &Context) -> Result<SourceStatus, LiveError> {
+    async fn on_main(
+        &mut self,
+        message: Received,
+        cx: &Context,
+    ) -> Result<SourceStatus, LiveError> {
         match message {
             None => {
                 self.disconnected();
@@ -998,10 +1003,11 @@ impl<H: Host> LiveSource<H> {
             Some(Ok(m)) => m,
             Some(Err(HostError::TooLarge)) => {
                 // Skip past the oversized frame instead of reconnecting into it.
-                let at = self.side_cursor.as_ref().or(self.cursor.as_ref()).map_or_else(
-                    || self.host.now_ms().saturating_mul(1_000),
-                    |c| c.time_us,
-                );
+                let at = self
+                    .side_cursor
+                    .as_ref()
+                    .or(self.cursor.as_ref())
+                    .map_or_else(|| self.host.now_ms().saturating_mul(1_000), |c| c.time_us);
                 self.side_cursor = Some(Cursor {
                     wire: Wire::V2,
                     instance: String::new(),
