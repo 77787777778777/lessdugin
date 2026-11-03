@@ -13,9 +13,13 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
   const fixture = JSON.parse(readFileSync(fixturePath, "utf8")) as {
     participants?: number;
     indexer?: string;
+    posts?: unknown[];
   };
   if (fixture.participants !== 2_000) {
     throw new Error(`M6 acceptance needs exactly 2,000 participants, got ${fixture.participants}`);
+  }
+  if ((fixture.posts?.length ?? 0) < 26) {
+    throw new Error("the fixture has no first page of posts by distinct participants");
   }
   if (!fixture.indexer) throw new Error("the fixture has no indexer endpoint");
   const server = await startStaticServer({ root: DIST_E2E, dev: true });

@@ -3,6 +3,9 @@
 //!
 //! The process seeds 2,000 accounts (including the owner), pre-indexes every repository, writes
 //! the loopback endpoints to JSON, and stays alive for the focused Playwright acceptance test.
+//! Besides the owner's post, [`MEMBER_POSTS`] distinct members each post once, so the first page
+//! the browser paints holds posts by distinct participants: one proof per post, and one head
+//! check and one DID document per author on screen (`sync.md` §14.3).
 //! It never configures or contacts a production service.
 
 use std::collections::BTreeSet;
@@ -33,6 +36,8 @@ use serde_json::json;
 use url::Url;
 
 const TITLE: &str = "M6 cold start: proof-backed title from 2,000 signed participants";
+/// Members with one post each (more than a first page: the SPA lists 20, the CLI 30).
+const MEMBER_POSTS: usize = 30;
 
 fn arg<T: std::str::FromStr>(name: &str, default: T) -> Result<T>
 where
@@ -51,8 +56,8 @@ async fn main() -> Result<()> {
     let output = arg("--json", PathBuf::from("cold-start-devnet.json"))?;
     let participants = arg("--participants", 2_000usize)?;
     let pds_count = arg("--pds-count", 40usize)?;
-    if participants < 2 || pds_count == 0 {
-        bail!("need at least two participants and one PDS");
+    if participants <= MEMBER_POSTS || pds_count == 0 {
+        bail!("need more than {MEMBER_POSTS} participants and one PDS");
     }
 
     // Wall-clock elapsed time is benchmark evidence only, never input to repository state.
@@ -78,6 +83,26 @@ async fn main() -> Result<()> {
             &forum.fk,
             &serde_json::to_value(membership)?,
         );
+    }
+    // one post by each of the first MEMBER_POSTS members, a minute apart and all older than the
+    // owner's post (dated `now`), so `new` order is fixed: the owner's, then member 1's, …
+    let mut member_posts = Vec::new();
+    for (i, account) in accounts.iter().take(MEMBER_POSTS).enumerate() {
+        let at_ms = now.timestamp_micros() / 1000 - 60_000 * (i64::try_from(i)? + 1);
+        let rkey = keys::post_rkey(forum.uri.as_str(), tid_at_ms(at_ms).as_ref())?;
+        let title = format!("M6 cold start post {} of {MEMBER_POSTS}", i + 1);
+        let post = Post::article(
+            forum.uri.clone(),
+            title.clone(),
+            "A post by a distinct signed participant.",
+            Datetime::from_millis(at_ms)?,
+        );
+        account.put(nsid::POST, &rkey, &serde_json::to_value(post)?);
+        member_posts.push(json!({
+            "uri": account.uri(nsid::POST, &rkey),
+            "title": title,
+            "author": account.did(),
+        }));
     }
 
     let post_rkey = keys::post_rkey(forum.uri.as_str(), tid_at_ms(net.now_ms()).as_ref())?;
@@ -189,7 +214,7 @@ async fn main() -> Result<()> {
         .store
         .forum(forum.uri.as_str())
         .context("indexed forum")?;
-    if indexed.participants != participants || indexed.posts != 1 {
+    if indexed.participants != participants || indexed.posts != 1 + MEMBER_POSTS {
         bail!(
             "pre-index incomplete: {} participants (expected {participants}), {} posts",
             indexed.participants,
@@ -285,6 +310,10 @@ async fn main() -> Result<()> {
         "post": post_uri,
         "title": TITLE,
         "ownerDid": owner.did(),
+        // every post, newest first: the owner's, then the members'
+        "posts": std::iter::once(json!({"uri": post_uri, "title": TITLE, "author": owner.did()}))
+            .chain(member_posts)
+            .collect::<Vec<_>>(),
         "participants": participants,
         "participantDids": participant_dids,
         "pdsCount": pds_count,

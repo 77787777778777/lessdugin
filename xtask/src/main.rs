@@ -15,13 +15,22 @@
 //!                      its raw and gzipped size; --budget fails above 2.5 MB gzipped (warns
 //!                      above 1.5 MB gzipped or 4 MB raw), --report adds the `verify` marginal, --kv-test
 //!                      builds the test-only KV conformance module into pkg/kvtest
-//!   e2e [--rust] [--web] [--parity] [--no-build]
+//!   e2e [--rust] [--web] [--parity] [--cold-start] [--no-build]
 //!                      the end-to-end tests against the local devnet (ADR 0006;
 //!                      packages/e2e/README.md): --rust the Rust e2e tests (LESSDUGIN_E2E=1),
 //!                      --web the SPA's devnet Playwright suite including the M2 parity
 //!                      scenario, --parity only that scenario; none of them: --rust and --web.
+//!                      --cold-start (opt in; minutes of pre-indexing) the M6 cold paint of a
+//!                      2,000-participant forum (scripts/m6-cold-start.sh).
 //!                      The web runs first build the engine wasm, the e2e SPA, the CLI (embedding
-//!                      it) and the TUI parity driver, unless --no-build
+//!                      it), the TUI parity driver, the devnet CORE+ services and the indexer,
+//!                      unless --no-build
+//!   site --origin <url> [--ns temp|final] [--out <dir>] [--no-build]
+//!                      the hosted SPA for one origin (threat-model SITE-4, data-model §10.4):
+//!                      the release build with `_headers` (Cloudflare Pages, Netlify) and the
+//!                      GitHub Pages fallback build, each with both client metadata documents
+//!                      for the origin; --ns final writes the final-namespace documents (only
+//!                      with --no-build before the release); see xtask/src/site.rs
 //!   lex lint           lint lexicons with goat (if installed)
 //!   vectors            run shared test vectors (Rust)
 //!   fuzz [<target>…|all] [--seconds N] [--jobs J] [--sanitizer S] [--list] [-- <libFuzzer args>]
@@ -34,6 +43,8 @@ use std::collections::BTreeMap;
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
+
+mod site;
 
 /// Crates that must compile for wasm32-unknown-unknown (no tokio, no clocks).
 const WASM_SAFE: &[&str] = &[
@@ -116,13 +127,14 @@ fn main() -> ExitCode {
         Some("wasm") => wasm(&args[1..]),
         Some("e2e") => e2e(&args[1..]),
         Some("lex") => lex(&args[1..]),
+        Some("site") => site::site(&args[1..]),
         Some("vectors") => run(
             "cargo",
             &["test", "-p", "lessdugin-testkit", "--", "vectors"],
         ),
         Some("fuzz") => fuzz(&args[1..]),
         _ => {
-            eprintln!("usage: cargo xtask <ci|test-wasm|wasm|e2e|lex|vectors|fuzz> [args]");
+            eprintln!("usage: cargo xtask <ci|test-wasm|wasm|e2e|lex|site|vectors|fuzz> [args]");
             return ExitCode::from(2);
         }
     };
@@ -327,19 +339,26 @@ fn ci_web_e2e() -> Result<(), String> {
     run_env("pnpm", &["--filter", "@lessdugin/web", "run", "e2e"], &vars)
 }
 
-/// The Rust end-to-end tests against the devnet: (package, test targets). They run only with
-/// `LESSDUGIN_E2E=1`; each starts its own devnet (`packages/e2e/devnet.mjs`) unless
+/// The Rust end-to-end tests against the devnet: (package, features, test targets). They run
+/// only with `LESSDUGIN_E2E=1`; each starts its own devnet (`packages/e2e/devnet.mjs`) unless
 /// `LESSDUGIN_DEVNET_JSON` names a running one.
-const RUST_E2E: &[(&str, &[&str])] = &[
+const RUST_E2E: &[(&str, &str, &[&str])] = &[
     // identity resolution, login binding and `verify`
-    ("lessdugin-testkit", &["e2e_devnet"]),
+    ("lessdugin-testkit", "", &["e2e_devnet"]),
+    // the devnet's CORE+ services (firehose mirror, Jetstream both wires and noise,
+    // Constellation, relay) that the parity scenario's assisted variant uses
+    ("lessdugin-testkit", "http", &["e2e_devnet_services"]),
     // the native host against the reference PDS
-    ("lessdugin-native", &["devnet"]),
+    ("lessdugin-native", "", &["devnet"]),
     // the CLI: app-password and OAuth logins, concurrent refresh, the forum scenario with
     // parity mode, `lessdugin web`'s browser sign-in
-    ("lessdugin", &["e2e_devnet", "e2e_forum", "web_e2e_devnet"]),
+    (
+        "lessdugin",
+        "",
+        &["e2e_devnet", "e2e_forum", "web_e2e_devnet"],
+    ),
     // the TUI's reply through $EDITOR and its parity capture
-    ("lessdugin-tui", &["e2e_devnet"]),
+    ("lessdugin-tui", "", &["e2e_devnet"]),
 ];
 
 /// `cargo xtask e2e`: the end-to-end tests against the local devnet (`docs/plan.md` §4.1,
@@ -347,33 +366,36 @@ const RUST_E2E: &[(&str, &[&str])] = &[
 /// (`web/e2e/devnet`: hosted mode, parity mode, `lessdugin web`, and the M2 parity scenario
 /// `scenario.spec.ts`). `--parity`: only the parity scenario. Without a selection, `--rust` and
 /// `--web`. The Playwright runs first build what they use (unless `--no-build`): the engine
-/// wasm, the e2e SPA (`web/dist-e2e`), the CLI embedding it (so the `lessdugin web` spec runs)
-/// and the TUI parity driver (`crates/tui/examples/parity_driver.rs`).
+/// wasm, the e2e SPA (`web/dist-e2e`), the CLI embedding it (so the `lessdugin web` spec runs),
+/// the TUI parity driver (`crates/tui/examples/parity_driver.rs`), the devnet's CORE+ services
+/// (`crates/testkit/examples/devnet_services.rs`) and `lessdugin-indexer`.
 fn e2e(args: &[String]) -> Result<(), String> {
     if matches!(args, [a] if a == "--help" || a == "-h") {
         println!(
-            "usage: cargo xtask e2e [--rust] [--web] [--parity] [--no-build]\n\
+            "usage: cargo xtask e2e [--rust] [--web] [--parity] [--cold-start] [--no-build]\n\
              --rust runs the Rust devnet tests; --web runs the SPA devnet suite;\n\
-             --parity runs only the M2 parity scenario; no selection runs Rust and web"
+             --parity runs only the M2 parity scenario; no selection runs Rust and web;\n\
+             --cold-start (only when asked) runs the M6 cold-start acceptance"
         );
         return Ok(());
     }
-    let (mut rust, mut web, mut parity, mut build) = (false, false, false, true);
+    let (mut rust, mut web, mut parity, mut cold, mut build) = (false, false, false, false, true);
     for a in args {
         match a.as_str() {
             "--rust" => rust = true,
             "--web" => web = true,
             "--parity" => parity = true,
+            "--cold-start" => cold = true,
             "--no-build" => build = false,
             _ => {
                 return Err(format!(
-                    "usage: cargo xtask e2e [--rust] [--web] [--parity] [--no-build] (unknown \
-                     argument {a})"
+                    "usage: cargo xtask e2e [--rust] [--web] [--parity] [--cold-start] \
+                     [--no-build] (unknown argument {a})"
                 ));
             }
         }
     }
-    if !(rust || web || parity) {
+    if !(rust || web || parity || cold) {
         rust = true;
         web = true;
     }
@@ -396,8 +418,11 @@ fn e2e(args: &[String]) -> Result<(), String> {
         ));
     }
     if rust {
-        for (package, tests) in RUST_E2E {
+        for (package, features, tests) in RUST_E2E {
             let mut a = vec!["test", "-p", package];
+            if !features.is_empty() {
+                a.extend(["--features", features]);
+            }
             for t in *tests {
                 a.extend(["--test", t]);
             }
@@ -419,6 +444,29 @@ fn e2e(args: &[String]) -> Result<(), String> {
                 "cargo",
                 &["build", "-p", "lessdugin-tui", "--example", "parity_driver"],
             )?;
+            // the parity scenario's CORE+ services and its indexer-on variant (M5, M6)
+            run(
+                "cargo",
+                &[
+                    "build",
+                    "-p",
+                    "lessdugin-testkit",
+                    "--features",
+                    "http",
+                    "--example",
+                    "devnet_services",
+                ],
+            )?;
+            run(
+                "cargo",
+                &[
+                    "build",
+                    "-p",
+                    "lessdugin-indexer",
+                    "--bin",
+                    "lessdugin-indexer",
+                ],
+            )?;
             eprintln!(
                 "note: the debug `lessdugin` now embeds the e2e SPA ({dist}); the next \
                  `cargo build -p lessdugin` without LESSDUGIN_WEB_DIST embeds web/dist again"
@@ -432,6 +480,14 @@ fn e2e(args: &[String]) -> Result<(), String> {
         vars.push((
             "LESSDUGIN_TUI_DRIVER".into(),
             debug.join("examples/parity_driver").display().to_string(),
+        ));
+        vars.push((
+            "LESSDUGIN_DEVNET_SERVICES".into(),
+            debug.join("examples/devnet_services").display().to_string(),
+        ));
+        vars.push((
+            "LESSDUGIN_INDEXER_BIN".into(),
+            debug.join("lessdugin-indexer").display().to_string(),
         ));
         // the scenario fails instead of skipping when a binary is missing
         vars.push(("LESSDUGIN_PARITY_REQUIRED".into(), "1".into()));
@@ -448,6 +504,17 @@ fn e2e(args: &[String]) -> Result<(), String> {
             a.push("scenario.spec.ts");
         }
         run_env("pnpm", &a, &vars)?;
+    }
+    if cold {
+        // docs/plan.md M6: the signed 2,000-participant fixture, pre-indexed (minutes), then
+        // three fresh Chromium contexts paint its first page; the script builds what it runs
+        let results = root().join("test-results/m6-cold-start/results.json");
+        let mut v = vars.clone();
+        v.push((
+            "LESSDUGIN_COLD_START_RESULTS".into(),
+            results.display().to_string(),
+        ));
+        run_env("bash", &["scripts/m6-cold-start.sh"], &v)?;
     }
     Ok(())
 }
@@ -1385,6 +1452,98 @@ mod tests {
     #[test]
     fn e2e_help_is_a_cheap_probe() {
         e2e(&["--help".into()]).expect("e2e --help must not build or start a devnet");
+    }
+
+    /// The M6 cold-start acceptance runs in a gate: e2e.yml's scheduled (and on-demand) job
+    /// `cold-start` runs `cargo xtask e2e --cold-start`, which runs scripts/m6-cold-start.sh;
+    /// it is opt in (not on pull requests, not in a bare `cargo xtask e2e`).
+    #[test]
+    fn the_cold_start_acceptance_runs_nightly() {
+        let wf = file(".github/workflows/e2e.yml");
+        let (before, job) = wf
+            .split_once("\n  cold-start:\n")
+            .expect("a cold-start job");
+        assert!(job.contains("\n        run: cargo xtask e2e --cold-start\n"));
+        assert!(job.contains(
+            "if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'"
+        ));
+        assert!(
+            !before
+                .lines()
+                .any(|l| !l.trim_start().starts_with('#') && l.contains("--cold-start")),
+            "not in the pull-request jobs"
+        );
+        assert!(wf.contains("schedule:"));
+        let main = file("xtask/src/main.rs");
+        assert!(main.contains("run_env(\"bash\", &[\"scripts/m6-cold-start.sh\"], &v)"));
+        assert!(file("scripts/m6-cold-start.sh").contains("e2e/cold-start/cold-start.config.ts"));
+        assert!(e2e(&["--cold-strt".into()]).is_err());
+    }
+
+    /// scripts/m6-cold-start.sh starts Playwright only on this run's fixture: a fixture.json
+    /// left in the state directory by an earlier run (naming endpoints that are gone), or one
+    /// still being written, is not taken; the wait ends at the fixture's ready line, which it
+    /// prints after writing the file, and fails when the fixture dies first.
+    #[test]
+    fn the_cold_start_script_waits_for_this_runs_fixture() {
+        let script = file("scripts/m6-cold-start.sh");
+        let launch = script
+            .find("cold_start_devnet --json \"$fixture\"")
+            .expect("the fixture launch");
+        let rm = script
+            .find("\nrm -f \"$fixture\"\n")
+            .expect("a stale fixture removed");
+        assert!(
+            rm < launch,
+            "the stale fixture is removed before the launch"
+        );
+        assert!(
+            script.contains("\nwait_for_fixture \"$pid\" \"$fixture\" \"$state/fixture.log\"\n")
+        );
+
+        let dir = std::env::temp_dir().join(format!("xtask-cold-start-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let wait = |fake: &str| {
+            std::fs::write(dir.join("fixture.json"), "{\"stale\": true}").unwrap();
+            std::fs::write(dir.join("fixture.log"), "").unwrap();
+            let body = format!(
+                "source scripts/m6-cold-start.sh\n\
+                 ( {fake} ) >>\"$1/fixture.log\" 2>&1 &\n\
+                 pid=$!\n\
+                 status=0\n\
+                 wait_for_fixture \"$pid\" \"$1/fixture.json\" \"$1/fixture.log\" || status=$?\n\
+                 kill \"$pid\" 2>/dev/null || true\n\
+                 exit \"$status\""
+            );
+            let ok = Command::new("bash")
+                .args(["-c", &body, "bash"])
+                .arg(&dir)
+                .current_dir(root())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap()
+                .success();
+            (
+                ok,
+                std::fs::read_to_string(dir.join("fixture.json")).unwrap(),
+            )
+        };
+        // Written in two steps, then the ready line, then serving (as the fixture does)
+        let (ok, fixture) = wait(
+            "sleep 1; printf '{\"fresh\"' >\"$1/fixture.json\"; sleep 1; \
+             printf '{\"fresh\": true}' >\"$1/fixture.json\"; \
+             echo 'M6 fixture ready: 1 participants' >&2; exec sleep 60",
+        );
+        assert!(ok, "the wait ends at the ready line");
+        assert_eq!(
+            fixture, "{\"fresh\": true}",
+            "this run's whole fixture, not the stale one"
+        );
+        // A fixture that dies before it is ready fails the wait
+        let (ok, _) = wait("sleep 1; echo 'seed failed' >&2; exit 1");
+        assert!(!ok, "a dead fixture fails the wait");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// fuzz.yml runs every target `cargo xtask fuzz` knows, and the seed generator seeds each of

@@ -59,7 +59,8 @@ jobs:
   # build), and the M2 parity scenario (docs/plan.md §4.2, text subset: alice with the CLI, bob
   # in the SPA, carol in the TUI; the three clients' anonymous views must be byte-identical).
   # Any CSP or Trusted Types violation fails. `cargo xtask e2e --web` builds the engine wasm,
-  # the e2e SPA, the CLI and the TUI parity driver first.
+  # the e2e SPA, the CLI, the TUI parity driver, the devnet's CORE+ services and the indexer
+  # first (the scenario's assisted and indexer-on variants use the last two).
   web:
     # Playwright 1.56.1 refuses to run on ubuntu-26.04 ("Playwright does not support chromium on
     # ubuntu26.04-x64") and `ubuntu-latest` now resolves there, so pin the last LTS it supports.
@@ -91,5 +92,41 @@ jobs:
         with:
           name: e2e-web-test-results
           path: test-results/web-e2e-devnet
+          if-no-files-found: ignore
+          retention-days: 14
+  # docs/plan.md M6 [auto]: with the indexer, the SPA cold-paints the first page of a
+  # 2,000-participant synthetic forum (posts by distinct participants, proof-hydrated) in under
+  # 2 s (web/e2e/cold-start). Pre-indexing the 2,000 signed repos takes minutes, so this runs
+  # nightly and on demand, not on pull requests. `cargo xtask e2e --cold-start` runs
+  # scripts/m6-cold-start.sh, which builds the fixture, the engine wasm and the e2e SPA.
+  cold-start:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    # the same Playwright 1.56.1 pin as above
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: "1.97.0"
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: "22"
+          cache: pnpm
+      - run: cargo install wasm-bindgen-cli --version =0.2.129 --locked
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @lessdugin/web exec playwright install --with-deps chromium
+      - name: M6 cold-start acceptance
+        run: cargo xtask e2e --cold-start
+      # the measured runs (results.json) and the traces of a failed run
+      - name: upload test results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: e2e-cold-start-results
+          path: test-results/m6-cold-start
           if-no-files-found: ignore
           retention-days: 14
