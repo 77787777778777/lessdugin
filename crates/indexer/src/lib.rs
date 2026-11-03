@@ -82,6 +82,10 @@ pub fn network_profile(
 
 /// At most this many folded forum models are kept for the query methods.
 pub const MODEL_CACHE_ENTRIES: usize = 32;
+/// A cached model serves queries for at least this many times its fold cost, and at least
+/// `limits::MODEL_MAX_AGE_MS`, as in the engine's own cache: `now`-dependent ranking follows the
+/// clock, and a forum is refolded for queries at most once per such period.
+pub const MODEL_AGE_FACTOR: i64 = 30;
 /// At most this many proofs are fetched for `getRecordProofs` at a time; other uncached items
 /// are omitted (the client falls back to its PDS) instead of waiting on the ingest budget.
 pub const API_PROOF_FETCHES: usize = 2;
@@ -97,6 +101,9 @@ pub struct Indexer {
     /// Serialises projections: a model is built from the cache and applied under this lock, so
     /// an older build can never overwrite a newer projection.
     pub(crate) project_lock: Arc<tokio::sync::Mutex<()>>,
+    /// One fold at a time for queries whose model is missing or expired. Separate from
+    /// `project_lock`, so query load never delays a live projection.
+    pub(crate) query_folds: Arc<tokio::sync::Semaphore>,
     pub(crate) models: Arc<std::sync::Mutex<Models>>,
     /// Permits for proofs fetched on behalf of `getRecordProofs` ([`API_PROOF_FETCHES`]).
     pub api_proofs: Arc<tokio::sync::Semaphore>,
@@ -104,32 +111,83 @@ pub struct Indexer {
         Arc<std::sync::Mutex<std::collections::HashMap<String, (tokio::time::Instant, u8)>>>,
 }
 
-/// The last projected model of each forum (least recently used first out). Queries read views
+/// The last folded model of each forum (least recently used first out). Queries read views
 /// from it instead of refolding the forum per request.
-#[derive(Default)]
-pub(crate) struct Models {
-    entries: std::collections::HashMap<String, (u64, Arc<ForumModel>)>,
+pub(crate) struct Models<M = Arc<ForumModel>> {
+    entries: std::collections::HashMap<String, CachedModel<M>>,
+    /// Per forum, bumped by every projection (and removal), so a query fold that raced one is
+    /// used for its own request but never cached over the newer projection.
+    epochs: std::collections::HashMap<String, u64>,
     tick: u64,
 }
 
-impl Models {
-    pub(crate) fn get(&mut self, forum: &str) -> Option<Arc<ForumModel>> {
+impl<M> Default for Models<M> {
+    fn default() -> Self {
+        Self {
+            entries: Default::default(),
+            epochs: Default::default(),
+            tick: 0,
+        }
+    }
+}
+
+struct CachedModel<M> {
+    used: u64,
+    /// The fold's `now` (ms) and how long the fold took.
+    built_ms: i64,
+    cost_ms: i64,
+    model: M,
+}
+
+impl<M: Clone> Models<M> {
+    /// The cached model of `forum`, unless it is older than its age bound ([`MODEL_AGE_FACTOR`]).
+    pub(crate) fn get(&mut self, forum: &str, now_ms: i64) -> Option<M> {
         self.tick += 1;
         let tick = self.tick;
-        self.entries.get_mut(forum).map(|(used, m)| {
-            *used = tick;
-            Arc::clone(m)
-        })
+        let entry = self.entries.get_mut(forum)?;
+        let max_age = lessdugin_core::limits::MODEL_MAX_AGE_MS
+            .max(entry.cost_ms.saturating_mul(MODEL_AGE_FACTOR));
+        if entry.built_ms > now_ms || now_ms.saturating_sub(entry.built_ms) > max_age {
+            return None;
+        }
+        entry.used = tick;
+        Some(entry.model.clone())
     }
 
-    pub(crate) fn put(&mut self, forum: &str, model: Arc<ForumModel>) {
+    /// The current projection epoch of `forum`.
+    pub(crate) fn epoch(&self, forum: &str) -> u64 {
+        self.epochs.get(forum).copied().unwrap_or(0)
+    }
+
+    /// A projection's model: always cached, and newer than any fold in flight.
+    pub(crate) fn project(&mut self, forum: &str, model: M, built_ms: i64, cost_ms: i64) {
+        *self.epochs.entry(forum.to_owned()).or_default() += 1;
+        self.put(forum, model, built_ms, cost_ms);
+    }
+
+    /// A query's fold, cached only when no projection of `forum` finished since `epoch`.
+    pub(crate) fn put_if(&mut self, forum: &str, epoch: u64, model: M, built_ms: i64, cost_ms: i64) {
+        if self.epoch(forum) == epoch {
+            self.put(forum, model, built_ms, cost_ms);
+        }
+    }
+
+    fn put(&mut self, forum: &str, model: M, built_ms: i64, cost_ms: i64) {
         self.tick += 1;
-        self.entries.insert(forum.to_owned(), (self.tick, model));
+        self.entries.insert(
+            forum.to_owned(),
+            CachedModel {
+                used: self.tick,
+                built_ms,
+                cost_ms,
+                model,
+            },
+        );
         while self.entries.len() > MODEL_CACHE_ENTRIES {
             let Some(oldest) = self
                 .entries
                 .iter()
-                .min_by_key(|(_, (used, _))| *used)
+                .min_by_key(|(_, e)| e.used)
                 .map(|(f, _)| f.clone())
             else {
                 break;
@@ -139,6 +197,7 @@ impl Models {
     }
 
     pub(crate) fn remove(&mut self, forum: &str) {
+        *self.epochs.entry(forum.to_owned()).or_default() += 1;
         self.entries.remove(forum);
     }
 }
@@ -253,6 +312,7 @@ impl Indexer {
             metrics: Arc::new(Metrics::default()),
             sync_lock: Arc::new(tokio::sync::Mutex::new(())),
             project_lock: Arc::new(tokio::sync::Mutex::new(())),
+            query_folds: Arc::new(tokio::sync::Semaphore::new(1)),
             models: Arc::new(std::sync::Mutex::new(Models::default())),
             api_proofs: Arc::new(tokio::sync::Semaphore::new(API_PROOF_FETCHES)),
             rate_windows: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
@@ -350,6 +410,42 @@ impl Indexer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const F: &str = "at://did:plc:aaaaaaaaaaaaaaaaaaaaaaaa/online.7778777.lessdugin.forum/f";
+
+    #[test]
+    fn a_cached_model_expires_like_the_engines() {
+        let max = lessdugin_core::limits::MODEL_MAX_AGE_MS;
+        let mut models = Models::<u32>::default();
+        // A cheap fold serves for the engine's minimum age, then is refolded.
+        models.project(F, 1, 1_000, 10);
+        assert_eq!(models.get(F, 1_000 + max), Some(1));
+        assert_eq!(models.get(F, 1_000 + max + 1), None);
+        // An expensive fold serves for 30 times its cost.
+        models.project(F, 2, 1_000, max);
+        assert_eq!(models.get(F, 1_000 + MODEL_AGE_FACTOR * max), Some(2));
+        assert_eq!(models.get(F, 1_000 + MODEL_AGE_FACTOR * max + 1), None);
+        // A clock that went backwards does not keep a model from the future.
+        assert_eq!(models.get(F, 999), None);
+    }
+
+    #[test]
+    fn a_query_fold_never_replaces_a_newer_projection() {
+        let mut models = Models::<u32>::default();
+        let epoch = models.epoch(F);
+        // A projection finishes while the query's fold runs: the fold is not cached.
+        models.project(F, 2, 10, 1);
+        models.put_if(F, epoch, 1, 5, 1);
+        assert_eq!(models.get(F, 20), Some(2));
+        // Without a racing projection the query's fold is cached; a removal also bumps.
+        let epoch = models.epoch(F);
+        models.put_if(F, epoch, 3, 15, 1);
+        assert_eq!(models.get(F, 20), Some(3));
+        let epoch = models.epoch(F);
+        models.remove(F);
+        models.put_if(F, epoch, 4, 15, 1);
+        assert_eq!(models.get(F, 20), None);
+    }
 
     #[test]
     fn poll_never_switches_a_production_profile_into_devnet() {

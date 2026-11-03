@@ -352,8 +352,11 @@ pub async fn project_forum(
     live: &BTreeMap<String, LiveChange>,
 ) -> anyhow::Result<Projection> {
     let _one = indexer.project_lock.lock().await;
-    let now_us = indexer.now_ms().saturating_mul(1000);
-    let model = ForumModel::build(indexer.engine.host().cache(), key, now_us).await?;
+    let built_ms = indexer.now_ms();
+    let model =
+        ForumModel::build(indexer.engine.host().cache(), key, built_ms.saturating_mul(1000))
+            .await?;
+    let cost_ms = indexer.now_ms().saturating_sub(built_ms);
     let store = RecordStore::new(indexer.engine.host().cache());
     let mut dids: BTreeSet<String> = match authors {
         Some(authors) => authors.clone(),
@@ -419,7 +422,7 @@ pub async fn project_forum(
         .store
         .apply_model(&model, indexer.now_ms(), &revs, live)?;
     let model = Arc::new(model);
-    lock(&indexer.models).put(key.uri.as_str(), Arc::clone(&model));
+    lock(&indexer.models).project(key.uri.as_str(), Arc::clone(&model), built_ms, cost_ms);
     indexer
         .metrics
         .changes_written
@@ -427,23 +430,37 @@ pub async fn project_forum(
     Ok(Projection { model, changes })
 }
 
-/// The cached query model of an indexed forum, built once from the cache when it is missing
-/// (after a restart or an eviction), never per request.
+/// The cached query model of an indexed forum. It is folded from the cache only when it is
+/// missing (after a restart or an eviction) or past its age bound ([`crate::MODEL_AGE_FACTOR`]),
+/// one fold at a time and never under the projection lock; never per request.
 pub async fn model(indexer: &Indexer, key: &ForumKey) -> anyhow::Result<Arc<ForumModel>> {
-    if let Some(m) = lock(&indexer.models).get(key.uri.as_str()) {
+    let forum = key.uri.as_str();
+    if let Some(m) = lock(&indexer.models).get(forum, indexer.now_ms()) {
         return Ok(m);
     }
-    let _one = indexer.project_lock.lock().await;
-    if let Some(m) = lock(&indexer.models).get(key.uri.as_str()) {
-        return Ok(m);
-    }
-    let now_us = indexer.now_ms().saturating_mul(1000);
-    let model = Arc::new(ForumModel::build(indexer.engine.host().cache(), key, now_us).await?);
+    let _one = indexer
+        .query_folds
+        .acquire()
+        .await
+        .map_err(|_| anyhow::anyhow!("the indexer is shutting down"))?;
+    let epoch = {
+        let mut models = lock(&indexer.models);
+        if let Some(m) = models.get(forum, indexer.now_ms()) {
+            return Ok(m);
+        }
+        models.epoch(forum)
+    };
+    let built_ms = indexer.now_ms();
+    let model = Arc::new(
+        ForumModel::build(indexer.engine.host().cache(), key, built_ms.saturating_mul(1000))
+            .await?,
+    );
+    let cost_ms = indexer.now_ms().saturating_sub(built_ms);
     indexer
         .metrics
         .query_model_builds
         .fetch_add(1, Ordering::Relaxed);
-    lock(&indexer.models).put(key.uri.as_str(), Arc::clone(&model));
+    lock(&indexer.models).put_if(forum, epoch, Arc::clone(&model), built_ms, cost_ms);
     Ok(model)
 }
 
