@@ -892,7 +892,7 @@ on event e:
 
 **Context.** KNOWN, F, F_new and D may be evaluated against a cached snapshot, rebuilt after a change (a `Changed` event, or an applied frame) at most once per second and at least every 30 s (*tunable*); network noise therefore costs one lookup per frame, not a scan of the identity cache. While frames arrive, the client reads several per round and runs its other live work (queue, polls, reconcile) at most once per second.
 
-**Candidates.** A newcomer candidate (§4.4) writes its discovery row with the source `hint:jetstream`. At most 10,000 discovery rows (*tunable*) are kept per forum: past that, the oldest rows that are not confirmed are dropped.
+**Candidates.** A newcomer candidate (§4.4) writes its discovery row with the source `hint:jetstream`, and that write keeps at most 10,000 discovery rows (*tunable*) for the forum: past that, the oldest rows that are not confirmed are dropped, so a Jetstream that names many DIDs cannot grow the cache without bound.
 
 The firstSeen a Jetstream event records is the time this client received it, never the event's `time_us` or `witnessedAt`: the Jetstream sets those, and one that moved them back could make an honest post `future(x)` and rank it last (`social.md` §2.2); they serve only as the cursor (§6.3).
 
