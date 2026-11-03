@@ -7,12 +7,12 @@ use crate::discovery::state::ForumState;
 use crate::engine::{Engine, EngineError};
 use crate::host::Host;
 use crate::indexer::client::Client;
-use crate::indexer::contract::{Change, PostHint, PostsPage, RepoHeadHint};
+use crate::indexer::contract::{Change, MAX_CHANGES, PostHint, PostsPage, RepoHeadHint};
 use crate::indexer::proofs::{ProofStatus, hydrate_visible};
 use crate::social::full::view::State;
 use crate::store::RepoStatus;
 use crate::store::records::RecordStore;
-use crate::sync::{PointOutcome, Session};
+use crate::sync::{ObservedChange, PointOutcome, Session};
 use lessdugin_atp::syntax::{AtUri, Did};
 use lessdugin_atp::tid::Tid;
 use lessdugin_lexicon::collection::Collection;
@@ -23,6 +23,8 @@ const TWO_MINUTES_MS: i64 = 120_000;
 const MAX_AUDIT_ITEMS: usize = 10_000;
 /// Pages read from one paged listing, so a stream of empty pages cannot hold the audit.
 const MAX_AUDIT_PAGES: usize = 1_000;
+/// The first A2 window below the change log's head (rows); each further window doubles.
+const A2_WINDOW: i64 = 5_000;
 
 impl AuditCounts {
     fn count(&mut self, kind: AuditKind) {
@@ -172,14 +174,13 @@ pub(crate) async fn run<H: Host>(
         .into_iter()
         .filter(|c| c.fk == key.fk && now_us - c.observed_us > TWO_MINUTES_MS * 1000)
         .collect();
-    a2.checked(observed.len());
     if !observed.is_empty() {
-        let changes = all_changes(client, session, &key.uri).await?;
-        for old in observed {
-            let found = changes.iter().any(|c| {
-                c.uri == old.uri && c.did == old.did && c.rev == old.rev && c.cid == old.cid
-            });
-            if !found {
+        let scan = observed_rows(client, session, &key.uri, &observed).await?;
+        for (i, old) in observed.iter().enumerate() {
+            if scan.matched.contains(&i) {
+                a2.checked(1);
+            } else if scan.complete {
+                a2.checked(1);
                 a2.finding(
                     AuditKind::Omission,
                     &old.uri,
@@ -188,6 +189,8 @@ pub(crate) async fn run<H: Host>(
                         old.rev
                     ),
                 );
+            } else {
+                a2.unchecked(&old.uri, "getChanges could not be read back far enough");
             }
         }
     }
@@ -350,24 +353,141 @@ pub(crate) async fn run<H: Host>(
     Ok(report)
 }
 
-async fn all_changes<H: Host>(
+/// A2 match (`sync.md` §15.4): a row for the same uri and DID at a later rev (a later state
+/// supersedes the observed one; a row written from a snapshot carries the repo's head rev), or at
+/// the observed rev with the observed CID (none for a delete).
+fn change_matches(seen: &ObservedChange, row: &Change) -> bool {
+    if row.uri != seen.uri || row.did != seen.did {
+        return false;
+    }
+    let (Ok(observed), Ok(logged)) = (Tid::parse(&seen.rev), Tid::parse(&row.rev)) else {
+        return false;
+    };
+    logged > observed || (logged == observed && row.cid == seen.cid)
+}
+
+/// Which observations `getChanges` holds a matching row for. `complete` is false when the scan
+/// stopped before it could rule a change out (the page bound, or a cursor rejected at the floor).
+struct ChangeScan {
+    matched: BTreeSet<usize>,
+    complete: bool,
+}
+
+/// Reads the forum's change log back from its head in doubling windows until every observation
+/// is matched or the start of the retained log is reached. The log is kept 30 days (§15.2), so
+/// reading from 0 is refused once it has been pruned, and its oldest rows are rarely the
+/// session's; on `CursorTooOld` the scan restarts at the oldest cursor the indexer accepts.
+async fn observed_rows<H: Host>(
     client: &Client,
     session: &Session<H>,
     forum: &AtUri,
-) -> Result<Vec<Change>, EngineError> {
-    let mut out = Vec::new();
-    let mut since = 0;
-    for _ in 0..20 {
-        let page = client.get_changes(session, Some(forum), since, 500).await?;
-        let len = page.changes.len();
-        since = page.cursor;
-        out.extend(page.changes);
-        if len < 500 || out.len() >= MAX_AUDIT_ITEMS {
-            break;
+    observed: &[ObservedChange],
+) -> Result<ChangeScan, EngineError> {
+    let mut by_uri: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+    for (i, o) in observed.iter().enumerate() {
+        by_uri.entry(o.uri.as_str()).or_default().push(i);
+    }
+    let mut scan = Scan {
+        observed,
+        by_uri,
+        matched: BTreeSet::new(),
+        pages: 0,
+    };
+    let head = client.current_as_of(session).await?.seq.max(0);
+    let (mut width, mut hi, mut floor) = (A2_WINDOW, None, false);
+    let mut lo = head.saturating_sub(width).max(0);
+    loop {
+        match scan.window(client, session, forum, lo, hi).await {
+            Ok(true) => {}
+            Ok(false) => break,
+            Err(e) if e.error_name() == Some("CursorTooOld") && !floor => {
+                lo = oldest_accepted(client, session, forum, lo, hi.unwrap_or(head)).await?;
+                floor = true;
+                continue;
+            }
+            Err(e) if e.error_name() == Some("CursorTooOld") => break,
+            Err(e) => return Err(e.into()),
+        }
+        if floor || lo == 0 || scan.matched.len() == observed.len() {
+            return Ok(ChangeScan {
+                matched: scan.matched,
+                complete: true,
+            });
+        }
+        hi = Some(lo);
+        width = width.saturating_mul(2);
+        lo = lo.saturating_sub(width).max(0);
+    }
+    Ok(ChangeScan {
+        matched: scan.matched,
+        complete: false,
+    })
+}
+
+struct Scan<'a> {
+    observed: &'a [ObservedChange],
+    by_uri: BTreeMap<&'a str, Vec<usize>>,
+    matched: BTreeSet<usize>,
+    pages: usize,
+}
+
+impl Scan<'_> {
+    /// Reads rows with `lo < seq` (and `seq <= hi` when bounded) until the cursor stops
+    /// advancing. A short or empty page is not the end: the indexer drops blocklisted rows after
+    /// paging. `false` when the page bound ended the read.
+    async fn window<H: Host>(
+        &mut self,
+        client: &Client,
+        session: &Session<H>,
+        forum: &AtUri,
+        lo: i64,
+        hi: Option<i64>,
+    ) -> Result<bool, crate::xrpc::XrpcCallError> {
+        let mut since = lo;
+        while hi.is_none_or(|h| since < h) {
+            if self.pages >= MAX_AUDIT_PAGES {
+                return Ok(false);
+            }
+            self.pages += 1;
+            let page = client
+                .get_changes(session, Some(forum), since, MAX_CHANGES as u32)
+                .await?;
+            for row in &page.changes {
+                if row.seq <= since || hi.is_some_and(|h| row.seq > h) {
+                    continue;
+                }
+                for &i in self.by_uri.get(row.uri.as_str()).into_iter().flatten() {
+                    if change_matches(&self.observed[i], row) {
+                        self.matched.insert(i);
+                    }
+                }
+            }
+            if page.cursor <= since {
+                break;
+            }
+            since = page.cursor;
+        }
+        Ok(true)
+    }
+}
+
+/// The smallest cursor in `(too_old, accepted]` that `getChanges` does not refuse as too old.
+async fn oldest_accepted<H: Host>(
+    client: &Client,
+    session: &Session<H>,
+    forum: &AtUri,
+    mut too_old: i64,
+    mut accepted: i64,
+) -> Result<i64, EngineError> {
+    while accepted - too_old > 1 {
+        let mid = too_old + (accepted - too_old) / 2;
+        match client.get_changes(session, Some(forum), mid, 1).await {
+            Ok(_) => accepted = mid,
+            Err(e) if e.error_name() == Some("CursorTooOld") => too_old = mid,
+            Err(e) => return Err(e.into()),
         }
     }
-    out.truncate(MAX_AUDIT_ITEMS);
-    Ok(out)
+    Ok(accepted)
 }
 
 async fn all_posts<H: Host>(

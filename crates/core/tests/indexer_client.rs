@@ -1002,6 +1002,211 @@ fn audit_pages_listings_past_short_pages_until_the_cursor_ends() {
     );
 }
 
+/// A forum change log at an indexer: rows `floor < seq <= head`, generated on demand. `rows`
+/// are placed at their seq, `blocked` seqs are dropped after paging (the cursor still covers
+/// them), every other seq is an unrelated filler change. `since < floor` is `CursorTooOld`.
+fn serve_change_log(
+    host: &MemHost,
+    floor: i64,
+    head: i64,
+    rows: BTreeMap<i64, Value>,
+    blocked: std::ops::RangeInclusive<i64>,
+) {
+    describe(
+        host,
+        &["getRepoHeads", "getChanges", "listPosts", "getRecordProofs"],
+        head,
+    );
+    host.on_get(&endpoint("getChanges"), move |req| {
+        let url = match &req.target {
+            lessdugin_core::host::Target::Anon(url) => url.clone(),
+            _ => panic!("getChanges carried credentials"),
+        };
+        let q = |name: &str| {
+            url.query_pairs()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.parse::<i64>().unwrap())
+                .unwrap()
+        };
+        let (since, limit) = (q("since"), q("limit"));
+        if since < floor {
+            return Ok(resp::xrpc_error(400, "CursorTooOld", "cursor expired"));
+        }
+        let last = head.min(since + limit);
+        let changes: Vec<Value> = (since + 1..=last)
+            .filter(|seq| !blocked.contains(seq))
+            .map(|seq| {
+                let mut row = rows.get(&seq).cloned().unwrap_or_else(|| {
+                    json!({
+                        "uri": format!("at://did:plc:ewvi7nxzyoun6zhxrhs64oiz/{POST}/{seq}"),
+                        "did": "did:plc:ewvi7nxzyoun6zhxrhs64oiz",
+                        "rev": "3l2s5xxv2zaa2", "op": "create", "cid": null
+                    })
+                });
+                row["seq"] = json!(seq);
+                row
+            })
+            .collect();
+        Ok(resp::ok_json(&with_meta(
+            json!({"changes": changes, "cursor": last.max(since)}),
+            head,
+        )))
+    });
+}
+
+fn observe(w: &ForumWorld, rev: &str, cid: Option<String>) {
+    w.engine
+        .syncer()
+        .note_observed_change(lessdugin_core::sync::ObservedChange {
+            fk: w.key.fk.clone(),
+            uri: w.post.clone(),
+            did: w.owner.did().to_string(),
+            rev: rev.to_owned(),
+            cid,
+            observed_us: w.host.now() * 1000,
+        });
+}
+
+fn change_row(w: &ForumWorld, rev: &str, cid: Option<&str>, op: &str) -> Value {
+    json!({"uri": w.post, "did": w.owner.did(), "rev": rev, "cid": cid, "op": op})
+}
+
+fn a2_after(w: &ForumWorld) -> lessdugin_core::indexer::AuditCheck {
+    w.host.clear_requests();
+    let report = block_on(w.engine.audit_indexer(w.key.uri.as_str()))
+        .unwrap()
+        .unwrap();
+    check(&report, "A2 changes").clone()
+}
+
+#[test]
+fn audit_change_check_accepts_a_row_at_or_after_the_observed_change() {
+    let post_rkey = |w: &ForumWorld| w.post.rsplit('/').next().unwrap().to_owned();
+    let observed = tid_at_ms(1_700_000_000_000).to_string();
+    let later = tid_at_ms(1_700_000_060_000).to_string();
+    let other_cid = "bafyreie5737gdxlw5i64vzichcalba3z2v5n6icifvx5xytvske7mr3hpm";
+    // (rows, expected omissions): a snapshot row at the repo's later head rev with the observed
+    // CID, a later edit, a later delete, and the exact commit all match; the observed rev with
+    // another CID, or no row, does not.
+    let cases: Vec<(Box<dyn Fn(&ForumWorld, &str) -> Vec<Value>>, usize)> = vec![
+        (
+            Box::new(|w, cid| vec![change_row(w, &later, Some(cid), "create")]),
+            0,
+        ),
+        (
+            Box::new(|w, _| vec![change_row(w, &later, Some(other_cid), "update")]),
+            0,
+        ),
+        (
+            Box::new(|w, _| vec![change_row(w, &later, None, "delete")]),
+            0,
+        ),
+        (
+            Box::new(|w, cid| vec![change_row(w, &observed, Some(cid), "create")]),
+            0,
+        ),
+        (
+            Box::new(|w, _| vec![change_row(w, &observed, Some(other_cid), "create")]),
+            1,
+        ),
+        (Box::new(|_, _| Vec::new()), 1),
+    ];
+    for (i, (rows, omissions)) in cases.into_iter().enumerate() {
+        let w = forum_world();
+        let cid = w.owner.cid(nsid::POST, &post_rkey(&w)).unwrap().to_string();
+        observe(&w, &observed, Some(cid.clone()));
+        w.host.advance_ms(180_000);
+        serve_honest_audit(&w, json!([post_hint(&w.post)]));
+        let rows = rows(&w, &cid)
+            .into_iter()
+            .enumerate()
+            .map(|(n, row)| (40 + n as i64, row))
+            .collect();
+        serve_change_log(&w.host, 0, 100, rows, 0..=0);
+        let a2 = a2_after(&w);
+        assert_eq!(a2.counts.checked, 1, "case {i}: {a2:?}");
+        assert_eq!(a2.counts.omissions, omissions, "case {i}: {a2:?}");
+    }
+
+    // An observed delete matches a delete at its rev and any row at a later rev.
+    for (rows, omissions) in [
+        (
+            vec![(5, json!({"rev": observed, "cid": null, "op": "delete"}))],
+            0,
+        ),
+        (
+            vec![(5, json!({"rev": later, "cid": other_cid, "op": "create"}))],
+            0,
+        ),
+        (
+            vec![(
+                5,
+                json!({"rev": observed, "cid": other_cid, "op": "create"}),
+            )],
+            1,
+        ),
+    ] {
+        let w = forum_world();
+        observe(&w, &observed, None);
+        w.host.advance_ms(180_000);
+        serve_honest_audit(&w, json!([post_hint(&w.post)]));
+        let rows = rows
+            .into_iter()
+            .map(|(seq, mut row): (i64, Value)| {
+                row["uri"] = json!(w.post);
+                row["did"] = json!(w.owner.did());
+                (seq, row)
+            })
+            .collect();
+        serve_change_log(&w.host, 0, 100, rows, 0..=0);
+        assert_eq!(a2_after(&w).counts.omissions, omissions);
+    }
+}
+
+#[test]
+fn audit_change_check_reads_back_from_the_head_past_a_pruned_log() {
+    let observed = tid_at_ms(1_700_000_000_000).to_string();
+    // The log was pruned below seq 12,000 and its head is 20,000. The session's change is at
+    // 13,000, below the first window; reading from 0 is refused as too old.
+    let w = forum_world();
+    let cid = w
+        .owner
+        .cid(nsid::POST, w.post.rsplit('/').next().unwrap())
+        .unwrap()
+        .to_string();
+    observe(&w, &observed, Some(cid.clone()));
+    w.host.advance_ms(180_000);
+    serve_honest_audit(&w, json!([post_hint(&w.post)]));
+    let rows = BTreeMap::from([(13_000, change_row(&w, &observed, Some(&cid), "create"))]);
+    serve_change_log(&w.host, 12_000, 20_000, rows, 0..=0);
+    let a2 = a2_after(&w);
+    assert_eq!((a2.counts.checked, a2.counts.omissions), (1, 0), "{a2:?}");
+    // It started near the head, not at the oldest rows, and never asked for the refused range
+    // twice.
+    let calls = w.host.requests_to(&endpoint("getChanges"));
+    assert!(calls[0].url.contains("since=15000"), "{}", calls[0].url);
+    assert!(calls.iter().all(|c| !c.url.contains("since=0&")));
+
+    // Pruned past the change: once the scan reaches the floor it is an omission.
+    let w = forum_world();
+    observe(&w, &observed, Some(cid.clone()));
+    w.host.advance_ms(180_000);
+    serve_honest_audit(&w, json!([post_hint(&w.post)]));
+    serve_change_log(&w.host, 12_000, 20_000, BTreeMap::new(), 0..=0);
+    let a2 = a2_after(&w);
+    assert_eq!((a2.counts.checked, a2.counts.omissions), (1, 1), "{a2:?}");
+
+    // An empty page whose cursor still advances (every row blocklisted) is not the end.
+    let w = forum_world();
+    observe(&w, &observed, Some(cid.clone()));
+    w.host.advance_ms(180_000);
+    serve_honest_audit(&w, json!([post_hint(&w.post)]));
+    let rows = BTreeMap::from([(1_500, change_row(&w, &observed, Some(&cid), "create"))]);
+    serve_change_log(&w.host, 0, 2_500, rows, 1..=1_000);
+    let a2 = a2_after(&w);
+    assert_eq!((a2.counts.checked, a2.counts.omissions), (1, 0), "{a2:?}");
+}
+
 #[test]
 fn production_endpoints_are_exact_and_devnet_is_loopback_only() {
     use lessdugin_core::indexer::endpoint_allowed;

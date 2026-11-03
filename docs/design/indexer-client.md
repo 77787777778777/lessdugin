@@ -53,7 +53,11 @@ one request per 25 visible URIs (two for 26–50).
 `Engine::audit_indexer` is the shared A1–A5 implementation. `lessdugin sync <forum> --audit`
 prints per-check and total counts and exits 6 for any contradiction or omission. A2 uses bounded
 session-local Jetstream observations; it intentionally does not invent a persistent Jetstream
-history. Audit does not automatically demote an indexer (P2).
+history. It reads `getChanges` back from the head in doubling windows (restarting a window at
+the oldest accepted cursor after `CursorTooOld`) and accepts a row at a later rev, or at the
+observed rev and CID, so both commit-rev rows and snapshot-diff rows at the repo head match
+(`sync.md` §15.4). Items the audit cannot reach (an unreachable PDS, no proof bundle, a scan
+that stopped early) are logged as unchecked; they are not findings. Audit does not automatically demote an indexer (P2).
 
 The eventual service agent should reuse `poll_indexer_changes`, the ordering methods,
 `hydrate_indexer_records`, `LiveProofBatch`, and `audit_indexer`. It must schedule the returned
