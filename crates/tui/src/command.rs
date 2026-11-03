@@ -20,7 +20,8 @@
 //! | `activity` | `recent_discussion` | `Tab` on a forum |
 //! | `sort <sort>`, `filter <filter>` | `list_posts`, `get_thread` | `s`, `f` |
 //! | `user [actor]`, `search <terms>`, `tags [slug]`, `sequences`, `sequence <uri>` | `user`, `search`, `tags`/`tag`, `sequences`/`sequence` | - |
-//! | `wiki edit`, `sequence create\|edit\|add\|remove\|move` | `wiki_edit`, `seq_*` | - |
+//! | `wiki edit` (on the page as loaded, based on its head) | `tag`, then `wiki_edit` | - |
+//! | `sequence create\|edit\|add\|remove\|move` | `seq_*` | - |
 //! | `mods [role]` | the forum view's `moderators` | - |
 //! | `mods add <actor> [admin|moderator]`, `mods remove <actor>` | `mods_set` | - |
 //! | `open <ref>`, `follow [forum]`, `unfollow [forum]` | `forum_open`, `forum_follow`, `forum_unfollow` | `Enter` |
@@ -118,7 +119,8 @@ pub enum Verb {
     },
     /// `sequence …`: read a sequence or change one through the ordinary outbox.
     Sequence(SequenceVerb),
-    /// `wiki edit <slug> --name NAME …`: the body is written in `$EDITOR`.
+    /// `wiki edit <slug> --name NAME …`: the body is written in `$EDITOR`, which opens on the
+    /// page as loaded; the edit is based on the head loaded (decision O-2).
     WikiEdit {
         /// The forum (default: the current forum).
         forum: Option<String>,

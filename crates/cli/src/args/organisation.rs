@@ -76,6 +76,10 @@ pub enum WikiAction {
         /// Parent tag slug (repeatable).
         #[arg(long = "parent-tag")]
         parent_tags: Vec<String>,
+        /// The revision the text was edited from, as `tag <slug>` shows it (default: the page
+        /// as this device last showed it). The edit is refused when the page has moved on.
+        #[arg(long, value_name = "REVISION")]
+        base: Option<String>,
         /// The forum (default: the current forum).
         #[arg(long, value_name = "FORUM")]
         forum: Option<String>,

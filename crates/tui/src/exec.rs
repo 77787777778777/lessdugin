@@ -15,8 +15,9 @@ use lessdugin_core::dto::{
     ExternalLinkDraft, ForumDraft, KarmaCadence, ListPostsQuery, MediaRef, MembersQuery,
     MembershipMode, ModActionIntent, ModActionValue, ModScope, NotificationsQuery, PostDraft,
     PostFilter, PostKind, PostSort, Ref, RefContext, SyncOpts, TextQuote, ThreadOpts, ThreadRoot,
+    WikiDraft,
 };
-use lessdugin_core::engine::{Engine, EngineError};
+use lessdugin_core::engine::{Engine, EngineError, ErrorCode};
 use lessdugin_core::host::Host;
 use lessdugin_core::outbox::model::OpAction;
 use lessdugin_core::store::records::RecordStore;
@@ -26,7 +27,7 @@ use lessdugin_lexicon::ns::NS;
 
 use crate::app::{
     Action, ActivityData, Compose, EditStart, EditorRequest, Effect, ForumData, HomeData, ItemOp,
-    SyncTarget, ThreadData,
+    SyncTarget, ThreadData, WikiStart,
 };
 use crate::body::Body;
 use crate::command::{ALL_CAPABILITIES, AccessOp, ForumChanges, RestrictDim};
@@ -432,6 +433,9 @@ pub async fn run<H: Host>(engine: &Engine<H>, effect: Effect, opts: ExecOpts) ->
         Effect::StartEdit { uri, forum } => {
             Action::EditReady(start_edit(engine, &uri, &forum).await)
         }
+        Effect::StartWiki { forum, slug, draft } => {
+            Action::WikiReady(start_wiki(engine, forum, slug, draft).await)
+        }
         Effect::Edit { uri, draft, text } => Action::Queued {
             compose: Compose::Edit {
                 uri: uri.clone(),
@@ -822,6 +826,51 @@ async fn start_edit<H: Host>(
         notices,
         unchecked,
     })
+}
+
+/// `:wiki edit`: the page `slug` as this device shows it (`tag`): its head is the edit's
+/// `base` (decision O-2) and its text and media the editor's start. A page that does not exist
+/// (or is no tag) starts empty, with no base. A head whose body is a blob the host does not
+/// hold yet is not offered as empty text: the edit is refused until it is loaded.
+async fn start_wiki<H: Host>(
+    engine: &Engine<H>,
+    forum: String,
+    slug: String,
+    mut draft: WikiDraft,
+) -> Result<WikiStart, EngineError> {
+    let head = match engine.tag(&forum, &slug).await {
+        Ok(view) => view.head,
+        Err(e) if e.code == ErrorCode::NotFound => None,
+        Err(e) => return Err(e),
+    };
+    draft.body = match &head {
+        Some(head) => {
+            let v = cached(engine, head).await?;
+            let body = v.get("body");
+            let markdown = match body
+                .and_then(|b| b.get("text"))
+                .and_then(serde_json::Value::as_str)
+            {
+                Some(t) => t.to_owned(),
+                None => match body.and_then(lessdugin_core::model::render::text_blob_cid) {
+                    Some(blob) => stored_text_blob(engine, blob).await.ok_or_else(|| {
+                        EngineError::invalid_input(
+                            "the page's text is stored as a blob that could not be loaded yet; \
+                             try again later",
+                        )
+                    })?,
+                    None => String::new(),
+                },
+            };
+            Some(BodyDraft {
+                markdown,
+                media: media_of(head, body)?,
+            })
+        }
+        None => None,
+    };
+    draft.base = head;
+    Ok(WikiStart { forum, slug, draft })
 }
 
 /// The source of the forum's spilled `about` `md`: the `textBlob` the host holds, else as

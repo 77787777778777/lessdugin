@@ -305,3 +305,136 @@ fn wiki_and_every_sequence_write_go_through_the_real_outbox() {
     assert_eq!(record["chapters"][0]["posts"], json!([]));
     assert_eq!(record["chapters"][1]["posts"], json!([s.welcome]));
 }
+
+/// An `$EDITOR` stand-in that saves the template it was given to `seen` and replaces the whole
+/// file with `text`.
+fn replacing_editor(dir: &std::path::Path, text: &str) -> lessdugin_tui::EditorConfig {
+    let reply = dir.join("reply.txt");
+    std::fs::write(&reply, text).unwrap();
+    let script = dir.join("replace.sh");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nset -e\ncat \"$1\" > '{}'\ncat '{}' > \"$1\"\n",
+            dir.join("seen.txt").display(),
+            reply.display()
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    common::editor(dir, &script)
+}
+
+fn wiki_revision(s: &common::Scenario, slug: &str, text: &str, base: Option<String>) -> String {
+    let t = block_on(s.w.alice.engine.wiki_edit(
+        &s.forum,
+        slug,
+        WikiDraft {
+            name: "Rust".into(),
+            description: None,
+            body: Some(BodyDraft::text(text)),
+            is_tag: true,
+            parent_tags: vec![],
+            summary: None,
+            base,
+        },
+    ))
+    .unwrap();
+    s.w.alice.flush();
+    s.w.alice.done(&t)
+}
+
+fn wiki_parents(s: &common::Scenario, revision: &str) -> Vec<String> {
+    let rkey = revision.rsplit('/').next().unwrap();
+    let rec = s.w.alice.acct.get(nsid::WIKI_REVISION, rkey).unwrap();
+    rec["parents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["uri"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+/// Decision O-2 (`engine-api.md` §3.5 `wiki_edit`) in the TUI: `:wiki edit` loads the page,
+/// opens the editor on its text and names the head it loaded as the edit's base. When the page
+/// moves on while the editor is open, the edit is refused instead of replacing the newer
+/// revision: the text is kept, the status line says the page changed, and the next `:wiki
+/// edit` reloads the page, offering the kept text with the page as it is now quoted under it,
+/// and writes the redo on the new head.
+#[test]
+fn a_wiki_edit_whose_page_moved_is_refused_and_redone_on_the_new_head() {
+    use lessdugin_tui::exec::{ExecOpts, run};
+    use lessdugin_tui::{Action, Effect};
+    let s = scenario();
+    let r1 = wiki_revision(&s, "rust", "The first text.", None);
+    let dir = tempfile::tempdir().unwrap();
+    let mut t = alice_tui(&s, Some(replacing_editor(dir.path(), "My redo text.")));
+    block_on(t.start(Some(s.forum.clone())));
+
+    // the command loads the page first, then opens the editor on its text, based on r1
+    block_on(t.press(":"));
+    for c in "wiki edit rust --name Rust".chars() {
+        block_on(t.press(&c.to_string()));
+    }
+    let mut fx = t.state.update(Action::Key(
+        lessdugin_tui::keys::parse_key("Enter").unwrap(),
+    ));
+    assert!(
+        matches!(fx.as_slice(), [Effect::StartWiki { slug, .. }] if slug == "rust"),
+        "{fx:?}"
+    );
+    let ready = block_on(run(t.engine(), fx.remove(0), ExecOpts::default())).unwrap();
+    let mut fx = t.state.update(ready);
+    let Some(Effect::Editor(request)) = fx.pop() else {
+        panic!("no editor session: {fx:?}");
+    };
+    let lessdugin_tui::app::Compose::Wiki { draft, .. } = &request.compose else {
+        panic!("{:?}", request.compose);
+    };
+    assert_eq!(draft.base.as_deref(), Some(r1.as_str()));
+    assert!(
+        request.template.starts_with("The first text.\n"),
+        "{}",
+        request.template
+    );
+
+    // while the editor is open, the page moves on to r2
+    let r2 = wiki_revision(&s, "rust", "The second text.", Some(r1.clone()));
+    assert_eq!(wiki_parents(&s, &r2), std::slice::from_ref(&r1));
+    t.act(Action::Edited {
+        compose: request.compose,
+        result: Ok("My edit of the first text.".into()),
+    });
+    block_on(t.settle());
+    let status = t.state.status.as_ref().unwrap().text.to_plain_string();
+    assert!(status.contains("changed since it was loaded"), "{status}");
+    assert!(status.contains(":wiki edit rust"), "{status}");
+    assert_eq!(s.w.alice.acct.list(nsid::WIKI_REVISION).len(), 2);
+
+    // `:wiki edit` again reloads the page: the kept text, the page as it is now under it, and
+    // the redo is written on r2
+    run_command(&mut t, "wiki edit rust --name Rust");
+    let seen = std::fs::read_to_string(dir.path().join("seen.txt")).unwrap();
+    assert!(seen.starts_with("My edit of the first text.\n"), "{seen}");
+    assert!(seen.contains("# > The second text."), "{seen}");
+    let writes = block_on(t.engine().writes()).unwrap();
+    let r3 = writes
+        .iter()
+        .filter_map(|w| match &w.state {
+            WriteState::Done { uri, .. } if uri.contains(nsid::WIKI_REVISION) => Some(uri.clone()),
+            _ => None,
+        })
+        .find(|u| *u != r1 && *u != r2)
+        .unwrap_or_else(|| panic!("no redo written: {writes:?}"));
+    assert_eq!(wiki_parents(&s, &r3), [r2]);
+    let rec =
+        s.w.alice
+            .acct
+            .get(nsid::WIKI_REVISION, r3.rsplit('/').next().unwrap())
+            .unwrap();
+    assert_eq!(rec["body"]["text"], "My redo text.");
+}

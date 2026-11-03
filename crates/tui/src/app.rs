@@ -188,6 +188,18 @@ pub struct EditStart {
     pub unchecked: Option<String>,
 }
 
+/// What `:wiki edit` loaded before the editor opens ([`Effect::StartWiki`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct WikiStart {
+    /// The forum.
+    pub forum: String,
+    /// The page slug.
+    pub slug: String,
+    /// The command's fields, `base` the head loaded (none for a new page) and `body` its text
+    /// and media, which the editor's text replaces.
+    pub draft: WikiDraft,
+}
+
 /// Something for the runtime to do.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Effect {
@@ -479,6 +491,16 @@ pub enum Effect {
         /// The screen to reload afterwards.
         screen: ScreenId,
     },
+    /// Loads the page `slug` (`tag(forum, slug)`) and opens `$EDITOR` on its text, the edit
+    /// based on the head it loaded (`WikiDraft.base`, decision O-2).
+    StartWiki {
+        /// The forum.
+        forum: String,
+        /// The page slug.
+        slug: String,
+        /// The command's structured fields.
+        draft: WikiDraft,
+    },
     /// `wiki_edit(forum, slug, draft)`: the markdown returned by `$EDITOR`.
     WikiEdit {
         /// The forum.
@@ -715,7 +737,7 @@ impl Effect {
             Effect::Adopt { .. } => "mod_adopt",
             Effect::ForumCreate { .. } => "forum_create",
             Effect::ForumEdit { .. } => "forum_update",
-            Effect::WikiEdit { .. } => "wiki_edit",
+            Effect::StartWiki { .. } | Effect::WikiEdit { .. } => "wiki_edit",
             Effect::SequenceCreate { .. } => "seq_create",
             Effect::SequenceEdit { .. } => "seq_edit",
             Effect::SequenceAdd { .. } => "seq_add",
@@ -941,6 +963,8 @@ pub enum Action {
     /// [`Effect::StartEdit`]: the editor session and what the edit would suspend
     /// (`edit_preflight`), or why there is none.
     EditReady(Result<EditStart, EngineError>),
+    /// [`Effect::StartWiki`]: the page as loaded, or why it could not be.
+    WikiReady(Result<WikiStart, EngineError>),
     /// [`Effect::LoadMembers`] finished.
     MembersLoaded(Result<Vec<MemberView>, EngineError>),
     /// [`Effect::LoadRaw`] finished.
@@ -1937,6 +1961,17 @@ pub fn status_text(s: &Status) -> TermText {
     cat([lit(" "), s.text.clone()])
 }
 
+/// `wiki_edit`'s refusal of an edit made against a head that is no longer the page's
+/// (`conflict`, `detail.kind = "wikiHeadMoved"`, decision O-2).
+fn wiki_head_moved(e: &EngineError) -> bool {
+    e.code == lessdugin_core::engine::ErrorCode::Conflict
+        && e.detail
+            .as_ref()
+            .and_then(|d| d.get("kind"))
+            .and_then(serde_json::Value::as_str)
+            == Some("wikiHeadMoved")
+}
+
 /// Every notice of an action's result, `; `-separated (the engine returns them in a fixed
 /// order, each telling the user something the others do not: a restriction's retroactivity
 /// and the expiry it now shares, an adoption and what it does not adopt).
@@ -2238,6 +2273,13 @@ impl State {
             Action::LocalDone(result) => match result {
                 Ok(msg) => self.say(Tone::Good, tt(&msg)),
                 Err(e) => self.say(Tone::Error, tt(&e.message)),
+            },
+            Action::WikiReady(result) => match result {
+                Ok(start) => self.wiki_ready(start, &mut fx),
+                Err(e) => self.say(
+                    Tone::Error,
+                    cat([lit("Cannot load the wiki page: "), tt(&e.message)]),
+                ),
             },
             Action::EditReady(result) => match result {
                 Ok(EditStart {
@@ -3244,8 +3286,15 @@ impl State {
     }
 
     fn prefill(&self, compose: &Compose) -> String {
-        match &self.kept {
-            Some((c, text)) if c == compose => text.clone(),
+        match (&self.kept, compose) {
+            // a wiki text is kept for its page, whatever head or fields the next attempt has
+            (
+                Some((Compose::Wiki { forum, slug, .. }, text)),
+                Compose::Wiki {
+                    forum: f, slug: s, ..
+                },
+            ) if forum == f && slug == s => text.clone(),
+            (Some((c, text)), _) if c == compose => text.clone(),
             _ => String::new(),
         }
     }
@@ -3442,7 +3491,12 @@ impl State {
             }
             Compose::Wiki { forum, slug, draft } => {
                 let mut draft = (**draft).clone();
-                draft.body = Some(lessdugin_core::dto::BodyDraft::text(text.clone()));
+                // the text replaces the loaded page's markdown; its media stay
+                let media = draft.body.take().map(|b| b.media).unwrap_or_default();
+                draft.body = Some(lessdugin_core::dto::BodyDraft {
+                    markdown: text.clone(),
+                    media,
+                });
                 self.say(Tone::Info, lit("Queuing the wiki edit..."));
                 fx.push(Effect::WikiEdit {
                     forum: forum.clone(),
@@ -3506,6 +3560,31 @@ impl State {
                     self.reload(i, Origin::User, fx);
                 }
             }
+            Err(e) if wiki_head_moved(&e) => {
+                // an edit made against a head that is no longer the page's would replace the
+                // newer revision (decision O-2): the text is kept for the redo
+                let slug = match &compose {
+                    Compose::Wiki { slug, .. } => slug.clone(),
+                    _ => String::new(),
+                };
+                self.kept = Some((compose, text));
+                self.say(
+                    Tone::Warn,
+                    cat([
+                        lit("The page "),
+                        tt(&slug),
+                        lit(
+                            " changed since it was loaded, so your edit was not queued. Your \
+                             text is kept: run :wiki edit ",
+                        ),
+                        tt(&slug),
+                        lit(
+                            " again to reload the page (it is quoted under your text) and redo \
+                             your edit on it.",
+                        ),
+                    ]),
+                );
+            }
             Err(e) => {
                 let again = compose.again();
                 self.kept = Some((compose, text));
@@ -3518,6 +3597,30 @@ impl State {
                 );
             }
         }
+    }
+
+    /// [`Action::WikiReady`]: the editor opens on the loaded page's text, or on the text kept
+    /// from an earlier attempt at the same page, with the page as it is now quoted under it.
+    fn wiki_ready(&mut self, start: WikiStart, fx: &mut Vec<Effect>) {
+        let WikiStart { forum, slug, draft } = start;
+        let current = draft
+            .body
+            .as_ref()
+            .map(|b| b.markdown.clone())
+            .unwrap_or_default();
+        let name = draft.name.clone();
+        let compose = Compose::Wiki {
+            forum,
+            slug: slug.clone(),
+            draft: Box::new(draft),
+        };
+        let kept = self.prefill(&compose);
+        let template = if kept.is_empty() {
+            editor::wiki_template(&current, &slug, &name, None)
+        } else {
+            editor::wiki_template(&kept, &slug, &name, Some(&current))
+        };
+        fx.push(Effect::Editor(EditorRequest { compose, template }));
     }
 
     // -----------------------------------------------------------------------------------------
@@ -5081,13 +5184,9 @@ impl State {
                 if !self.can_write() {
                     return;
                 }
-                let compose = Compose::Wiki {
-                    forum,
-                    slug: slug.clone(),
-                    draft: Box::new(draft.clone()),
-                };
-                let template = editor::wiki_template(&self.prefill(&compose), &slug, &draft.name);
-                fx.push(Effect::Editor(EditorRequest { compose, template }));
+                // the page is loaded first: the editor opens on its text, and the edit names
+                // the head it was made against (decision O-2)
+                fx.push(Effect::StartWiki { forum, slug, draft });
             }
             Verb::Discover { query } => fx.push(Effect::Discover { query }),
             Verb::Linked { target } => fx.push(Effect::LoadBacklinks {
