@@ -1480,6 +1480,72 @@ mod tests {
         assert!(e2e(&["--cold-strt".into()]).is_err());
     }
 
+    /// scripts/m6-cold-start.sh starts Playwright only on this run's fixture: a fixture.json
+    /// left in the state directory by an earlier run (naming endpoints that are gone), or one
+    /// still being written, is not taken; the wait ends at the fixture's ready line, which it
+    /// prints after writing the file, and fails when the fixture dies first.
+    #[test]
+    fn the_cold_start_script_waits_for_this_runs_fixture() {
+        let script = file("scripts/m6-cold-start.sh");
+        let launch = script
+            .find("cold_start_devnet --json \"$fixture\"")
+            .expect("the fixture launch");
+        let rm = script
+            .find("\nrm -f \"$fixture\"\n")
+            .expect("a stale fixture removed");
+        assert!(
+            rm < launch,
+            "the stale fixture is removed before the launch"
+        );
+        assert!(
+            script.contains("\nwait_for_fixture \"$pid\" \"$fixture\" \"$state/fixture.log\"\n")
+        );
+
+        let dir = std::env::temp_dir().join(format!("xtask-cold-start-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let wait = |fake: &str| {
+            std::fs::write(dir.join("fixture.json"), "{\"stale\": true}").unwrap();
+            std::fs::write(dir.join("fixture.log"), "").unwrap();
+            let body = format!(
+                "source scripts/m6-cold-start.sh\n\
+                 ( {fake} ) >>\"$1/fixture.log\" 2>&1 &\n\
+                 pid=$!\n\
+                 status=0\n\
+                 wait_for_fixture \"$pid\" \"$1/fixture.json\" \"$1/fixture.log\" || status=$?\n\
+                 kill \"$pid\" 2>/dev/null || true\n\
+                 exit \"$status\""
+            );
+            let ok = Command::new("bash")
+                .args(["-c", &body, "bash"])
+                .arg(&dir)
+                .current_dir(root())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap()
+                .success();
+            (
+                ok,
+                std::fs::read_to_string(dir.join("fixture.json")).unwrap(),
+            )
+        };
+        // Written in two steps, then the ready line, then serving (as the fixture does)
+        let (ok, fixture) = wait(
+            "sleep 1; printf '{\"fresh\"' >\"$1/fixture.json\"; sleep 1; \
+             printf '{\"fresh\": true}' >\"$1/fixture.json\"; \
+             echo 'M6 fixture ready: 1 participants' >&2; exec sleep 60",
+        );
+        assert!(ok, "the wait ends at the ready line");
+        assert_eq!(
+            fixture, "{\"fresh\": true}",
+            "this run's whole fixture, not the stale one"
+        );
+        // A fixture that dies before it is ready fails the wait
+        let (ok, _) = wait("sleep 1; echo 'seed failed' >&2; exit 1");
+        assert!(!ok, "a dead fixture fails the wait");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// fuzz.yml runs every target `cargo xtask fuzz` knows, and the seed generator seeds each of
     /// them (without seeds `cargo xtask fuzz` stops at the target).
     #[test]
