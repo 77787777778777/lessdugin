@@ -1307,7 +1307,10 @@ mod context_tests {
             Some(b.clone())
         );
         // an unfollowed forum is forgotten
-        assert_eq!(feeds.take_due(&[b.clone()], &open, CHANGES_IDLE_MS), None);
+        assert_eq!(
+            feeds.take_due(std::slice::from_ref(&b), &open, CHANGES_IDLE_MS),
+            None
+        );
         assert_eq!(feeds.polls.len(), 1);
     }
 
