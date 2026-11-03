@@ -683,6 +683,70 @@ fn alice_queue(s: &common::Scenario) -> Tui {
     t
 }
 
+/// Decision O-8 (`engine-api.md` §3.4 `mod_queue`, `sync.md` §4.4): in approval mode the queue
+/// says where its applicants come from, above it and also when it is empty: a warning (`!`)
+/// with direct sources, which look for no applicants, a notice (`i`) with assisted ones, which
+/// find them only through CORE+ hints. The cursor still moves over the items under it.
+#[test]
+fn the_mod_queue_says_where_its_applicants_come_from() {
+    use lessdugin_core::engine::{EngineConfig, Sources};
+    for (sources, mark, said) in [
+        (
+            Sources::Direct,
+            "! ",
+            "This device uses direct sources only",
+        ),
+        (Sources::Assisted, "i ", "Applicants are found only through"),
+    ] {
+        let s = common::scenario_with(EngineConfig {
+            sources_flag: Some(sources),
+            ..EngineConfig::default()
+        });
+        let mut t = alice_queue(&s);
+        let screen = t.render();
+        let rows: Vec<&str> = screen.lines().collect();
+        let banner = rows
+            .iter()
+            .position(|l| l.contains(said))
+            .unwrap_or_else(|| panic!("{sources:?}: no banner\n{screen}"));
+        assert!(
+            rows[banner].trim_start().starts_with(mark),
+            "{sources:?}\n{screen}"
+        );
+        let empty = rows
+            .iter()
+            .position(|l| l.contains("The queue is empty."))
+            .unwrap_or_else(|| panic!("{sources:?}\n{screen}"));
+        assert!(banner < empty, "{sources:?}: the banner is above\n{screen}");
+        // the message is whole: wrapped, not cut at the screen's edge
+        let tail = if sources == Sources::Direct {
+            "from applicants out of band."
+        } else {
+            "reach you out of band."
+        };
+        assert!(screen.contains(tail), "{sources:?}\n{screen}");
+    }
+    // with an applicant: the notice, then the applicant under the cursor
+    let s = scenario();
+    dave_applies(&s);
+    let mut t = alice_queue(&s);
+    let screen = t.render();
+    let rows: Vec<&str> = screen.lines().collect();
+    let banner = rows
+        .iter()
+        .position(|l| l.contains("Applicants are found only through"))
+        .unwrap_or_else(|| panic!("{screen}"));
+    let applicant = rows
+        .iter()
+        .position(|l| l.contains("applicant") && l.contains("dave"))
+        .unwrap_or_else(|| panic!("{screen}"));
+    assert!(banner < applicant, "{screen}");
+    assert!(
+        rows[applicant].starts_with('\u{258c}'),
+        "selected: {screen}"
+    );
+}
+
 #[test]
 fn an_applicant_shows_in_the_queue_and_enter_approves() {
     let s = scenario();

@@ -385,6 +385,55 @@ fn votes_refuse_what_cannot_count_and_activity_lists_discussion() {
     assert_eq!(hides[0]["reason"], "off topic", "{log}");
 }
 
+/// Decision O-8 (`engine-api.md` §3.4 `mod_queue`, `sync.md` §4.4): in approval mode `mod
+/// queue` says where its applicants come from, above the queue and also when it is empty: a
+/// warning with direct sources (a devnet's pin), which look for no applicants, a notice with
+/// assisted ones (config.toml's explicit `sources`), which find them only through CORE+ hints.
+/// An open forum's queue has none; `--json` carries the banners as `ModQueue.banners`.
+#[test]
+fn the_mod_queue_says_where_its_applicants_come_from() {
+    let net = Net::new();
+    let alice = net.user("alice.test", true);
+    alice.json(&["forum", "create", "meta"]);
+    alice.json(&["forum", "create", "lounge", "--mode", "open"]);
+    let first_lines = |out: &str| -> (String, String) {
+        let mut l = out.lines();
+        (
+            l.next().unwrap_or_default().to_owned(),
+            out.lines().last().unwrap_or_default().to_owned(),
+        )
+    };
+
+    let out = alice.ok(&["mod", "queue", "alice.test/meta"]);
+    let (first, last) = first_lines(&out);
+    assert!(
+        first.starts_with("! This device uses direct sources only"),
+        "{out}"
+    );
+    assert!(
+        first.ends_with("hear from applicants out of band."),
+        "{out}"
+    );
+    assert_eq!(last, "The queue is empty.", "{out}");
+    let q = alice.json(&["mod", "queue", "alice.test/meta"]);
+    assert_eq!(q["banners"].as_array().unwrap().len(), 1, "{q}");
+    assert_eq!(q["banners"][0]["code"], "applicantsNotDiscovered", "{q}");
+
+    alice.file("config.toml", "sources = \"assisted\"\n");
+    let out = alice.ok(&["mod", "queue", "alice.test/meta"]);
+    let (first, last) = first_lines(&out);
+    assert!(
+        first.starts_with("note: Applicants are found only through"),
+        "{out}"
+    );
+    assert_eq!(last, "The queue is empty.", "{out}");
+    let q = alice.json(&["mod", "queue", "alice.test/meta"]);
+    assert_eq!(q["banners"][0]["code"], "applicantsViaHints", "{q}");
+
+    let out = alice.ok(&["mod", "queue", "alice.test/lounge"]);
+    assert_eq!(out.trim_end(), "The queue is empty.", "{out}");
+}
+
 /// Joining (with its note) and granting are public actions too (`social.md` §17): the first
 /// `join`, `approve` and `mod approve` (a grant is an `#access` mod action) show the
 /// interstitial, which headless use confirms with `--yes`; without it nothing is written. Once

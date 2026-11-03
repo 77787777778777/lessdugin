@@ -438,6 +438,54 @@ pub fn notification_line(n: &lessdugin_core::dto::NotificationView) -> TermText 
     cat(parts)
 }
 
+/// The mod queue's banner that is a notice, not a warning (`engine-api.md` §4.2 `Banner`).
+pub const APPLICANTS_VIA_HINTS: &str = "applicantsViaHints";
+
+/// The mod queue's banners, drawn above it also when it is empty (in approval mode, where the
+/// applicants come from: `sync.md` §4.4, decision O-8), each wrapped at `width` columns after a
+/// two-column margin: `applicantsViaHints` (assisted sources) in the `notice` style, any other
+/// (`applicantsNotDiscovered`, direct sources, which look for none) as a warning.
+pub fn queue_banner_lines(
+    banners: &[Banner],
+    width: usize,
+    warn: Style,
+    notice: Style,
+) -> Vec<Line<'static>> {
+    use unicode_width::UnicodeWidthStr;
+    // the text after the margin and the `! ` / `i ` mark (continuation lines hang under it)
+    let room = width.saturating_sub(4).max(1);
+    let mut out = Vec::new();
+    for b in banners {
+        let (mark, style) = if b.code == APPLICANTS_VIA_HINTS {
+            ("i ", notice)
+        } else {
+            ("! ", warn)
+        };
+        // by words; a word longer than the room is wrapped where it ends up
+        let mut rows: Vec<String> = vec![String::new()];
+        for word in tt(&b.message).to_plain_string().split_whitespace() {
+            let cur = rows.last_mut().expect("one row");
+            if !cur.is_empty() && cur.width() + 1 + word.width() > room {
+                rows.push(word.to_owned());
+            } else {
+                if !cur.is_empty() {
+                    cur.push(' ');
+                }
+                cur.push_str(word);
+            }
+        }
+        for (i, row) in rows.iter().enumerate() {
+            let lead = if i == 0 { mark } else { "  " };
+            for l in wrapped(&tt(row), style, room) {
+                let mut spans = vec![Span::raw("  "), Span::styled(lead, style)];
+                spans.extend(l.spans);
+                out.push(Line::from(spans));
+            }
+        }
+    }
+    out
+}
+
 /// One mod-queue row (`social.md` §4.12): its kind, subject, reason and actor.
 pub fn mod_queue_item(i: &lessdugin_core::dto::ModQueueItem) -> TermText {
     let mut parts = vec![tt(&i.item_kind), lit("  ")];

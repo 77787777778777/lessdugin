@@ -1353,6 +1353,21 @@ pub struct ModScreen {
 }
 
 impl ModScreen {
+    /// The screen rows the queue's banners take above it at `width` columns (on the queue
+    /// tab; `crate::text::queue_banner_lines`).
+    pub fn banner_rows(&self, width: u16) -> usize {
+        match (self.tab, &self.queue) {
+            (ModTab::Queue, Some(Ok(q))) => crate::text::queue_banner_lines(
+                &q.banners,
+                usize::from(width),
+                ratatui::style::Style::default(),
+                ratatui::style::Style::default(),
+            )
+            .len(),
+            _ => 0,
+        }
+    }
+
     /// The number of rows the current tab has.
     pub fn row_count(&self) -> usize {
         match self.tab {
@@ -3089,7 +3104,8 @@ impl State {
             }
             ScreenKind::Mod(m) => {
                 let len = m.row_count();
-                m.pos.apply(cmd, len, h);
+                let visible = h.saturating_sub(m.banner_rows(w)).max(1);
+                m.pos.apply(cmd, len, visible);
             }
             ScreenKind::Notifications(s) => {
                 let len = s.data.as_ref().map_or(0, |d| d.items.len());

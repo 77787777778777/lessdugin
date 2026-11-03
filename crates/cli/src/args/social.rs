@@ -330,7 +330,8 @@ pub enum ModAction {
     Tag(ModTagArgs),
     /// Remove your `#tag` assertion of a tag.
     Untag(ModTagSubject),
-    /// The queue for moderators: applicants, tag conflicts, stale assertions, newcomers.
+    /// The queue for moderators: applicants, tag conflicts, stale assertions, newcomers (in
+    /// approval mode, under a note of where the applicants come from).
     Queue {
         /// The forum (default: --forum, then the current forum).
         #[arg(value_name = "FORUM")]
