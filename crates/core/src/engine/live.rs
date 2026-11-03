@@ -254,7 +254,9 @@ impl ChangeFeeds {
         self.refresh_at_ms = now.saturating_add(CHANGES_OPEN_MS);
         self.polls.retain(|uri, _| followed.contains(uri));
         for uri in followed {
-            self.polls.entry(uri.clone()).or_insert((i64::MIN, i64::MIN));
+            self.polls
+                .entry(uri.clone())
+                .or_insert((i64::MIN, i64::MIN));
         }
         for (uri, (last, next)) in self.polls.iter_mut() {
             if open.contains(uri) {
@@ -272,7 +274,8 @@ impl ChangeFeeds {
         } else {
             CHANGES_IDLE_MS
         };
-        self.polls.insert(uri.clone(), (now, now.saturating_add(every)));
+        self.polls
+            .insert(uri.clone(), (now, now.saturating_add(every)));
         Some(uri)
     }
 }
@@ -470,7 +473,9 @@ impl<H: Host> Engine<H> {
                 if reconcile_due {
                     match self.enqueue_gap_reconcile().await {
                         Ok(()) => reconcile_due = false,
-                        Err(e) => tracing::warn!(error = %e, "live tail: deferred reconcile failed"),
+                        Err(e) => {
+                            tracing::warn!(error = %e, "live tail: deferred reconcile failed")
+                        }
                     }
                 }
                 let polling = !assisted
@@ -1272,11 +1277,18 @@ mod context_tests {
         assert_eq!(feeds.take_due(&followed, &[], 0), Some(b.clone()));
         assert_eq!(feeds.take_due(&followed, &[], 0), None);
         // idle forums: every 60 s
-        assert_eq!(feeds.due_at(), CHANGES_OPEN_MS, "the followed list is read again");
+        assert_eq!(
+            feeds.due_at(),
+            CHANGES_OPEN_MS,
+            "the followed list is read again"
+        );
         assert_eq!(feeds.take_due(&followed, &[], CHANGES_OPEN_MS), None);
         // a view of `a` opens after its idle poll: due 10 s after that poll, not 60 s
         let open = [a.clone()];
-        assert_eq!(feeds.take_due(&followed, &open, CHANGES_OPEN_MS), Some(a.clone()));
+        assert_eq!(
+            feeds.take_due(&followed, &open, CHANGES_OPEN_MS),
+            Some(a.clone())
+        );
         assert_eq!(
             feeds.take_due(&followed, &open, 2 * CHANGES_OPEN_MS - 1),
             None

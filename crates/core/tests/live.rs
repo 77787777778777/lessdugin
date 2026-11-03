@@ -229,6 +229,13 @@ impl Feed {
     fn closed(&self) -> bool {
         self.state.lock().unwrap().closed
     }
+
+    /// The server closes the connection: a waiting receive gets the end of the stream.
+    fn hang_up(&self) {
+        let mut st = self.state.lock().unwrap();
+        st.closed = true;
+        st.waiters.clear();
+    }
 }
 
 struct BrowserLikeWs {
@@ -1541,6 +1548,57 @@ fn the_first_switch_to_filtered_is_immediate_and_later_changes_wait() {
         cx.filter_dids.push(OTHER.to_owned());
         assert!(source.next(&cx).now_or_never().is_none());
         assert_eq!(host.urls().len(), 2, "a later change of D is rate-limited");
+    });
+}
+
+#[test]
+fn back_to_filtered_after_a_wildcard_reconnect_is_immediate() {
+    futures::executor::block_on(async {
+        use futures::FutureExt;
+        let host = BrowserLikeHost::new(MemHost::new());
+        let mut source = jetstream_source(host.clone(), "wss://jetstream.example/subscribe", true);
+        let filtered = Context {
+            newcomer_forums: BTreeSet::new(),
+            participants_known: true,
+            filter_dids: vec![DID.to_owned()],
+            ..context()
+        };
+        assert!(source.next(&filtered).now_or_never().is_none());
+        assert!(host.urls()[0].contains("dids="));
+        // A minute later the connection drops while a newly followed forum is not discovered
+        // yet: the reconnect is `wildcard`.
+        host.inner.advance_ms(60_000);
+        host.feed_at(0).hang_up();
+        let unknown = Context {
+            participants_known: false,
+            ..filtered.clone()
+        };
+        assert_eq!(
+            source.next(&unknown).now_or_never().map(Result::unwrap),
+            Some(SourceStatus::Waiting)
+        );
+        host.inner.advance_ms(source.retry_in_ms().max(1));
+        assert!(source.next(&unknown).now_or_never().is_none());
+        assert_eq!(host.urls().len(), 2);
+        assert!(
+            !host.urls()[1].contains("dids="),
+            "participants are not known"
+        );
+        // Discovery completes two minutes after the filtered connection: back to `filtered` at
+        // once, not 10 minutes after it, and no CatchUp (the wildcard connection missed nothing).
+        host.inner.advance_ms(60_000);
+        let known = Context {
+            filter_dids: vec![DID.to_owned(), OTHER.to_owned()],
+            ..filtered.clone()
+        };
+        assert!(source.next(&known).now_or_never().is_none());
+        let urls = host.urls();
+        assert_eq!(urls.len(), 3, "{urls:?}");
+        assert!(
+            urls[2].contains("dids=did%3Aplc%3Aknown")
+                && urls[2].contains("dids=did%3Aplc%3Aother")
+        );
+        assert!(host.feed_at(1).closed(), "the wildcard socket is closed");
     });
 }
 
