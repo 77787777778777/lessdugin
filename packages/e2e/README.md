@@ -123,10 +123,15 @@ In the assisted variants `lessdugin-indexer --poll <pds> --forum <forum>` follow
 step 1. After the readers above, three more fresh readers (CLI, TUI, SPA) are configured with it
 and open the forum with no prior sync: the TUI and the SPA hydrate their cold page from its
 ordering and proof bundles (`listPosts`, `getRecordProofs`), and every reader's forum sync
-polls its change feed (`getChanges`). The native readers reach it through a recording
-proxy each, so the scenario requires those methods per client. Their views must equal the
-indexer-off views byte for byte once the provenance badges (`verified`, `hint`, `stale`;
-decision U-D2) are removed.
+polls its change feed (`getChanges`) before its ordinary PDS sync. The native readers reach it
+through a recording proxy each, so the scenario requires those methods per client. The SPA's
+cold page is read before that PDS sync can change it: until then the browser holds every
+`describeRepo` and `listRecords` of a repo other than the forum owner's (the indexer, head
+checks, DID documents, point fetches and the owner's sync go through, sync.md §14.3), and the
+posts it lists must be the indexer-off list's, in its order, a proof-admitted one at the same
+CID. Then the listings are released, and the converged views must equal the indexer-off views
+byte for byte once the provenance badges (`verified`, `hint`, `stale`; decision U-D2) are
+removed.
 
 The TUI runs as `crates/tui/examples/parity_driver.rs`, which drives the headless TUI
 (`lessdugin_tui::Headless`). It opens the engine the way `lessdugin --dev tui` does: the data
