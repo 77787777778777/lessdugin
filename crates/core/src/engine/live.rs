@@ -510,7 +510,8 @@ impl<H: Host> Engine<H> {
     /// Polls `getChanges` for the followed forum whose poll is due first (`sync.md` §6.6), one
     /// per round so Jetstream frames are read between polls; a successful poll makes the change
     /// feed a healthy live source. A `#change` that Jetstream already handled (`dedup`, the
-    /// shared LRU) is skipped. Without an indexer it does nothing.
+    /// shared LRU) is skipped. Newcomer candidates the feed names are handed to discovery as a
+    /// Jetstream candidate is (§6.4, §15.4). Without an indexer it does nothing.
     async fn poll_change_feeds(
         &self,
         feeds: &mut ChangeFeeds,
@@ -540,12 +541,74 @@ impl<H: Host> Engine<H> {
             Ok(Some(report)) => {
                 feeds.healthy_ms = Some(self.host.now_ms());
                 tracing::debug!(forum = %key.uri, changes = report.changes, "indexer changes");
+                if !report.candidates.is_empty()
+                    && let Err(e) = self.confirm_feed_candidates(&key, report.candidates).await
+                {
+                    // The rows stay: the next forum sync confirms them (§15.4).
+                    tracing::warn!(forum = %key.uri, error = %e, "indexer newcomers not confirmed");
+                }
             }
             Ok(None) => {}
             Err(e) => {
                 tracing::debug!(forum = %key.uri, error = %e, "indexer changes unavailable");
             }
         }
+    }
+
+    /// The newcomer candidates of a change feed poll (`sync.md` §6.6, §15.4), newest first: as
+    /// for a Jetstream candidate (§6.4), each gets its discovery row (`hint:indexer`, at most
+    /// `DISC_ROWS_MAX` rows for the forum, the oldest unconfirmed dropped first), and one scoped
+    /// background discovery pass confirms them at their PDSes, within the newcomer budget. The
+    /// feed was just polled and nothing was fetched for them, so the pass does not poll it again.
+    async fn confirm_feed_candidates(
+        &self,
+        key: &crate::discovery::ForumKey,
+        candidates: Vec<String>,
+    ) -> Result<(), EngineError> {
+        const SRC: &str = "hint:indexer";
+        let fk = key.fk.as_str();
+        let mut rows = crate::discovery::state::disc_rows(self.host.cache(), fk)
+            .await
+            .map_err(store_error)?;
+        let now = self.host.now_ms();
+        let mut dropped = BTreeSet::new();
+        for did in &candidates {
+            rows.entry(did.clone())
+                .or_insert_with(|| crate::discovery::DiscRow::new(SRC, now))
+                .add_src(SRC);
+            for d in disc_rows_over_cap(&rows, did) {
+                rows.remove(&d);
+                dropped.insert(d);
+            }
+        }
+        let mut ops = Vec::new();
+        for did in &candidates {
+            if let Some(row) = rows.get(did) {
+                ops.push(KvOp::Put(
+                    crate::discovery::state::disc_key(fk, did),
+                    crate::store::row::encode(row).map_err(|e| store_error(e.into()))?,
+                ));
+            }
+        }
+        ops.extend(
+            dropped
+                .iter()
+                .map(|d| KvOp::Delete(crate::discovery::state::disc_key(fk, d))),
+        );
+        self.host.cache().write(ops).await?;
+        let opts = crate::discovery::SyncOpts {
+            budget_ms: Some(30_000),
+            max_requests: Some(64),
+            newcomers: candidates
+                .into_iter()
+                .filter(|d| rows.contains_key(d))
+                .map(|d| (d, "indexer".into()))
+                .collect(),
+            background: true,
+            ..crate::discovery::SyncOpts::default()
+        };
+        self.sync_forum_resolved(key, opts).await?;
+        Ok(())
     }
 
     /// A live frame given up on: every repo it names goes to the dirty queue for a sync of its
