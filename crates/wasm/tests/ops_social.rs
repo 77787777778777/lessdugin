@@ -420,3 +420,58 @@ fn bad_social_arguments_are_invalid_input() {
         assert_eq!(err.code, ErrorCode::InvalidInput, "{op}: {err:?}");
     }
 }
+
+#[test]
+fn a_wiki_page_that_is_not_a_tag_is_edited_from_its_head_through_the_dispatcher() {
+    // tag is not_found for a page that is not a tag, so the SPA editor had no head: wikiPage
+    // gives it, bodySource reads its body, and wikiEdit names it as base (engine-api.md §3.4)
+    let ha = MemHost::new();
+    let net = FakeNet::on(&ha);
+    let _ = net.default_pds();
+    let alice = Client::new(ha, &net.add_account("alice.example.com"));
+    let t = alice.call(
+        "forumCreate",
+        json!([{ "slug": "meta", "name": "Meta", "membership": "open",
+                 "defaultTier": "personal" }]),
+    );
+    alice.flush();
+    let forum = alice.done(&t);
+    let page = |name: &str, base: Option<&str>| {
+        let mut draft = json!({ "name": name, "body": { "markdown": format!("About {name}") },
+                                "isTag": false });
+        if let Some(b) = base {
+            draft["base"] = json!(b);
+        }
+        let t = alice.call("wikiEdit", json!([forum, "notes", draft]));
+        alice.flush();
+        alice.done(&t)
+    };
+    let first = page("Notes", None);
+    alice.host.advance_ms(MINUTE);
+    alice.sync(&forum);
+    assert_eq!(
+        alice.err("tag", json!([forum, "notes"])).code,
+        ErrorCode::NotFound
+    );
+    let view = alice.call("wikiPage", json!([forum, "notes"]));
+    assert_eq!(
+        view,
+        json!({ "dto": 1, "forum": forum, "slug": "notes", "head": first, "exists": true,
+                "applicable": false, "unmergedEdits": 0 })
+    );
+    let source = alice.call("bodySource", json!([first]));
+    assert_eq!(source["markdown"], "About Notes", "{source}");
+    let raw = alice.call("raw", json!([first]));
+    assert_eq!(source["cid"], raw["cid"], "{source} {raw}");
+    let second = page("Notes two", Some(&first));
+    alice.host.advance_ms(MINUTE);
+    alice.sync(&forum);
+    assert_eq!(
+        alice.call("wikiPage", json!([forum, "notes"]))["head"],
+        json!(second)
+    );
+    // no page: no head
+    let none = alice.call("wikiPage", json!([forum, "python"]));
+    assert!(none.get("head").is_none(), "{none}");
+    assert_eq!(none["exists"], false);
+}

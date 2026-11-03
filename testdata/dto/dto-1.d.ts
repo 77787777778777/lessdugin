@@ -66,6 +66,7 @@ export interface AuditCounts {
     contradictions: number;
     omissions: number;
     lag: number;
+    unchecked?: number;
 }
 
 export interface AuditFinding {
@@ -75,7 +76,7 @@ export interface AuditFinding {
     detail: string;
 }
 
-export type AuditKind = "contradiction" | "omission" | "lag";
+export type AuditKind = "contradiction" | "omission" | "lag" | "unchecked";
 
 export interface AuditReport {
     forum: string;
@@ -880,6 +881,16 @@ export interface WikiDraft {
     parentTags?: string[];
     summary?: string;
     base?: string;
+}
+
+export interface WikiPageView {
+    dto: DtoVersion;
+    forum: string;
+    slug: string;
+    head?: string;
+    exists: boolean;
+    applicable: boolean;
+    unmergedEdits: number;
 }
 
 export type WriteState = { kind: "pending"; notBeforeMs?: number; held?: boolean; throttled?: boolean; needsLogin?: boolean; error?: EngineError } | { kind: "sending" } | { kind: "done"; uri: string; cid?: string; report?: string[] } | { kind: "failed"; error: EngineError } | { kind: "undone" };

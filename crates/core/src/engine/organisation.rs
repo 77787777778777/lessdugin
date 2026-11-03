@@ -8,8 +8,8 @@ use lessdugin_lexicon::records::{Chapter, Md, Sequence, StrongRef, WikiRevision}
 use serde_json::{Map, Value};
 
 use crate::dto::{
-    SequenceDraft, SequencePosition, SequenceSummary, SequenceView, TagSummary, TagView, Topic,
-    WikiDraft, WriteTicket,
+    DtoVersion, SequenceDraft, SequencePosition, SequenceSummary, SequenceView, TagSummary,
+    TagView, Topic, WikiDraft, WikiPageView, WriteTicket,
 };
 use crate::engine::forums::{excerpt_of, markdown_body};
 use crate::engine::queries::fold_pending;
@@ -72,6 +72,26 @@ impl<H: Host> Engine<H> {
         self.with_views(&l, &uris, &uris, |views| views.tag_view(slug))
             .await?
             .ok_or_else(|| EngineError::not_found(format!("tag {slug}")))
+    }
+
+    /// `wiki_page(forum, slug)` (`engine-api.md` §3.4): the page's canonical revision and its
+    /// `exists` and `applicable` state, also for a page [`Self::tag`] is `not_found` for (not a
+    /// tag, or its tag removed), so an editor can load the head (`raw`, `body_source`) and pass
+    /// it as `WikiDraft.base`. A slug without a page has no head: an edit is a new page.
+    pub async fn wiki_page(&self, forum: &str, slug: &str) -> Result<WikiPageView, EngineError> {
+        let key = self.forum_key(forum).await?;
+        let l = self.loaded(&key).await?;
+        let wiki = l.model.view.wiki.as_ref().map_err(fold_pending)?;
+        let page = wiki.pages.get(slug);
+        Ok(WikiPageView {
+            dto: DtoVersion::default(),
+            forum: key.uri.to_string(),
+            slug: slug.to_owned(),
+            head: page.and_then(|p| p.canonical.clone()),
+            exists: page.is_some_and(|p| p.exists),
+            applicable: page.is_some_and(|p| p.applicable),
+            unmerged_edits: page.map_or(0, |p| p.unmerged),
+        })
     }
 
     /// Listed library sequences in the fold's deterministic order.

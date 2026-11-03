@@ -55,7 +55,7 @@
             },
             "cursor": {
               "type": "integer",
-              "description": "The next since: the seq of the last change returned, or since when changes is empty.",
+              "description": "The next since: the last seq the page consumed, at or above the seq of the last change returned (rows the indexer drops after paging are consumed too), at least since, and at most asOf.seq.",
               "minimum": 0,
               "maximum": 9007199254740991
             },

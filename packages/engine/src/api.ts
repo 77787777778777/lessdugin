@@ -92,6 +92,7 @@ import type {
   ValidationReport,
   VerifyReport,
   WikiDraft,
+  WikiPageView,
   WriteTicket,
 } from "./types.ts";
 
@@ -185,6 +186,10 @@ export interface EngineApi {
   history(uri: AtUri): Promise<HistoryView>;
   tags(forum: AtUri): Promise<TagSummary[]>;
   tag(forum: AtUri, slug: Slug): Promise<TagView>;
+  /** A wiki page's head and state (M5), also for a page `tag` is `not_found` for (not a tag, or
+   * its tag removed): an editor loads `head` (`raw`, `bodySource`) and sends it as
+   * `WikiDraft.base`; no head: a new page. */
+  wikiPage(forum: AtUri, slug: Slug): Promise<WikiPageView>;
   sequences(forum: AtUri): Promise<SequenceSummary[]>;
   sequence(uri: AtUri): Promise<SequenceView>;
   user(forum: AtUri | undefined, actor: string): Promise<UserView>;
@@ -201,8 +206,9 @@ export interface EngineApi {
   /** Public; paged like `listPosts` (`limit` 0 or absent: the default page). */
   modLog(forum: AtUri, cursor?: string, limit?: number): Promise<ModLog>;
   raw(uri: AtUri): Promise<RawView>;
-  /** The markdown source of a post's or comment's body, or of a forum's `about`, as a composer
-   * edits it (`""` for an item without one): the inline text, or the spilled `textBlob` as the
+  /** The markdown source of the `body` of a post, a comment, a wiki revision or a sequence (M5),
+   * or of a forum's `about`, as a composer edits it (`""` for an item without one; a sequence's
+   * chapter bodies are inline, in `raw`): the inline text, or the spilled `textBlob` as the
    * host holds it, fetched from the author's PDS when it does not (waiting at most
    * `BODY_BLOB_WAIT_MS`, like a view). `cid` is the current record CID, not the blob CID;
    * markdown/profile and CID come from one coherent model view. Open to every viewer, like

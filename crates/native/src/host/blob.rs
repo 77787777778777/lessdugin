@@ -4,7 +4,9 @@
 //!
 //! `getBlob` is streamed into a 0600 temporary file in the blob directory while feeding
 //! SHA-256; the file is renamed to its final name only when the digest equals the CID's.
-//! On any failure the temporary file is removed and nothing is stored.
+//! On any failure the temporary file is removed and nothing is stored. A process killed during
+//! a download leaves its `.part` file behind (no drop guard runs); the next [`BlobStore::new`]
+//! removes such files once they are older than any download can run.
 //!
 //! One download runs per (PDS, DID, CID) at a time (`sync.md` §12.2): it is a detached task,
 //! capped by `BLOB_TOTAL_TIMEOUT_MS`, that every `fetch` of that author's copy awaits, so a
@@ -92,11 +94,55 @@ impl Drop for TempFile {
     }
 }
 
+/// Removes the part files a killed process left in `tmp_dir` (`<blob dir>/.tmp`): the regular
+/// files directly inside it whose names end in `.part`, last written more than
+/// `BLOB_TOTAL_TIMEOUT_MS` ago, so another process's download in flight (it writes as it goes,
+/// and no download runs longer) is never touched. Nothing is followed through a symlink, not
+/// even `tmp_dir`, and nothing is recursed into. A missing directory or a file already gone is
+/// the normal case; other errors are logged and leave the file.
+fn sweep_stale_parts(tmp_dir: &Path) {
+    if !std::fs::symlink_metadata(tmp_dir).is_ok_and(|m| m.is_dir()) {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(tmp_dir) else {
+        return;
+    };
+    let stale = Duration::from_millis(u64::from(limits::BLOB_TOTAL_TIMEOUT_MS));
+    // file times are wall-clock times; the ban on clocks applies to the wasm-safe crates only
+    #[allow(clippy::disallowed_methods)]
+    let now = std::time::SystemTime::now();
+    for entry in entries.flatten() {
+        if !entry.file_name().as_encoded_bytes().ends_with(b".part") {
+            continue;
+        }
+        // the entry's own metadata: a symlink is not followed
+        let Ok(meta) = entry.metadata() else { continue };
+        let old = meta
+            .modified()
+            .ok()
+            .and_then(|m| now.duration_since(m).ok())
+            .is_some_and(|age| age > stale);
+        if !meta.is_file() || !old {
+            continue;
+        }
+        match std::fs::remove_file(entry.path()) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                tracing::warn!(path = %entry.path().display(), error = %e, "stale blob part file not removed");
+            }
+        }
+    }
+}
+
 impl BlobStore {
-    /// A store rooted at `dir` (created on first use, mode 0700).
+    /// A store rooted at `dir` (created on first use, mode 0700). Stale part files of a killed
+    /// download are swept first (`sweep_stale_parts`).
     pub fn new(dir: impl Into<PathBuf>) -> Self {
+        let dir = dir.into();
+        sweep_stale_parts(&dir.join(".tmp"));
         Self {
-            dir: dir.into(),
+            dir,
             inflight: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -322,6 +368,87 @@ mod tests {
             p.parent().unwrap().file_name().unwrap().to_str().unwrap(),
             &raw[raw.len() - 2..]
         );
+    }
+
+    #[test]
+    fn stale_part_files_are_swept_when_the_store_starts() {
+        // review m3m4-continuation-5: a process killed during a download left its part file in
+        // `.tmp` for good
+        use std::time::SystemTime;
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("blobs");
+        let parts = dir.join(".tmp");
+        std::fs::create_dir_all(&parts).unwrap();
+        #[allow(clippy::disallowed_methods)]
+        let long_ago = SystemTime::now()
+            - Duration::from_millis(u64::from(limits::BLOB_TOTAL_TIMEOUT_MS) + 60_000);
+        let file = |path: &Path, aged: bool| {
+            std::fs::write(path, b"partial").unwrap();
+            if aged {
+                std::fs::File::options()
+                    .write(true)
+                    .open(path)
+                    .unwrap()
+                    .set_modified(long_ago)
+                    .unwrap();
+            }
+            path.to_owned()
+        };
+        let stale = file(&parts.join("00aa11bb22cc33dd44ee55ff.part"), true);
+        let stale2 = file(&parts.join("66aa77bb88cc99dd00ee11ff.part"), true);
+        // another process's download in flight writes its part file as it goes
+        let fresh = file(&parts.join("aa00bb11cc22dd33ee44ff55.part"), false);
+        let other = file(&parts.join("notes.txt"), true);
+        // a directory named like a part file is neither removed nor recursed into
+        let sub = parts.join("dir.part");
+        std::fs::create_dir(&sub).unwrap();
+        let nested = file(&sub.join("nested.part"), true);
+        // a stored blob is not in `.tmp`
+        std::fs::create_dir_all(dir.join("ab")).unwrap();
+        let stored = file(&dir.join("ab").join("blob.part"), true);
+        #[cfg(unix)]
+        let (link, target) = {
+            // a symlink named like a part file is not followed, and is left alone
+            let target = file(&tmp.path().join("elsewhere.part"), true);
+            let link = parts.join("link.part");
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+            (link, target)
+        };
+        let store = BlobStore::new(&dir);
+        assert_eq!(store.dir(), dir);
+        assert!(
+            !stale.exists() && !stale2.exists(),
+            "stale part files are removed"
+        );
+        for kept in [&fresh, &other, &nested, &stored] {
+            assert!(kept.exists(), "{} is kept", kept.display());
+        }
+        assert!(sub.is_dir());
+        #[cfg(unix)]
+        {
+            assert!(target.exists());
+            assert!(std::fs::symlink_metadata(&link).unwrap().is_symlink());
+        }
+
+        // a `.tmp` that is a symlink to a directory is not followed either
+        #[cfg(unix)]
+        {
+            let real = tmp.path().join("real");
+            std::fs::create_dir(&real).unwrap();
+            let victim = file(&real.join("victim.part"), true);
+            let linked = tmp.path().join("linked");
+            std::fs::create_dir(&linked).unwrap();
+            std::os::unix::fs::symlink(&real, linked.join(".tmp")).unwrap();
+            let _ = BlobStore::new(&linked);
+            assert!(victim.exists());
+        }
+        // and a store without its directory, or whose `.tmp` is a file, starts as before
+        let _ = BlobStore::new(tmp.path().join("missing"));
+        let plain = tmp.path().join("plain");
+        std::fs::create_dir(&plain).unwrap();
+        let not_a_dir = file(&plain.join(".tmp"), true);
+        let _ = BlobStore::new(&plain);
+        assert!(not_a_dir.is_file());
     }
 
     /// A local `getBlob` that trickles `bytes` in `chunks` pieces, `gap` apart, counting hits.

@@ -135,6 +135,7 @@ import {
   type VerifyReport,
   type ViewerCaps,
   type WikiDraft,
+  type WikiPageView,
   type WriteState,
   type WriteTicket,
 } from "./types.ts";
@@ -1620,6 +1621,21 @@ export class MockEngine implements EngineApi {
     const view: TagView = { dto: DTO_VERSION, tag: this.tagSummary(forum, t), posts };
     if (t.page !== undefined) view.page = renderMarkdown(t.page).body;
     if (t.head !== undefined) view.head = t.head;
+    return view;
+  }
+
+  async wikiPage(forum: AtUri, slug: Slug): Promise<WikiPageView> {
+    // the mock drops a removed tag's page (modAction), so it has no head then
+    const t = this.tagMap(forum).get(slug);
+    const view: WikiPageView = {
+      dto: DTO_VERSION,
+      forum,
+      slug,
+      exists: t !== undefined,
+      applicable: t !== undefined && t.isTag !== false,
+      unmergedEdits: t?.unmergedEdits ?? 0,
+    };
+    if (t?.head !== undefined) view.head = t.head;
     return view;
   }
 

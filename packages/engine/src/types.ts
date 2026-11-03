@@ -538,6 +538,22 @@ export interface TagView {
   posts: PostSummary[];
 }
 
+/** `wikiPage`'s result (engine-api.md §3.4, M5): a wiki page's head and state, also for a page
+ * that is not a tag or whose tag was removed (`tag` is `not_found` for those). */
+export interface WikiPageView {
+  dto: DtoVersion;
+  forum: AtUri;
+  slug: Slug;
+  /** The canonical revision, whatever `exists` and `applicable` say: the `WikiDraft.base` of an
+   * edit. Absent: no page (or no eligible revision), an edit is a new page. */
+  head?: AtUri;
+  /** A head and no `tag.removed` in effect; a head without it: the tag was removed. */
+  exists: boolean;
+  /** It exists and its head is a tag: `tag` answers for it. */
+  applicable: boolean;
+  unmergedEdits: number;
+}
+
 export interface SequenceSummary {
   uri: string;
   author: ActorView;
@@ -1011,9 +1027,9 @@ export interface WikiDraft {
   isTag: boolean;
   parentTags?: Slug[];
   summary?: string;
-  /** The head the author edited (`TagView.head`, decision O-2): written as the only parent;
-   * `conflict` (`detail.kind = "wikiHeadMoved"`) when the cached head is another revision.
-   * Absent: the current head, or none for a new page. */
+  /** The head the author edited (`WikiPageView.head` or `TagView.head`, decision O-2): written
+   * as the only parent; `conflict` (`detail.kind = "wikiHeadMoved"`) when the cached head is
+   * another revision. Absent: the current head, or none for a new page. */
   base?: AtUri;
 }
 
@@ -1205,7 +1221,9 @@ export interface ForumIndexer {
   consented: boolean;
 }
 
-export type AuditKind = "contradiction" | "omission" | "lag";
+/** `unchecked` (M6): an item the audit could not check, the reason in `detail`; never a
+ * contradiction or an omission. */
+export type AuditKind = "contradiction" | "omission" | "lag" | "unchecked";
 
 export interface AuditFinding {
   check: string;
@@ -1219,6 +1237,8 @@ export interface AuditCounts {
   contradictions: number;
   omissions: number;
   lag: number;
+  /** The unchecked findings (M6), never counted as checked; omitted when 0. */
+  unchecked?: number;
 }
 
 export interface AuditCheck {
