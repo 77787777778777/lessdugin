@@ -501,9 +501,12 @@ struct HostDelta {
 impl<H: Host> Syncer<H> {
     /// `sync_repo` (§5.2). Never panics; failures are reported in the [`RepoReport`].
     pub async fn sync_repo(&self, s: &Session<H>, req: &SyncRequest) -> RepoReport {
+        // The identity first, outside the repo lock: a pass waiting for its PLC slot (§3.5)
+        // does not hold the repo (§10.6).
+        let identity = self.pds_of(s, &req.did).await;
         let _guard = self.net().repo_lock(&req.did).await;
         let mut rep = RepoReport::new(&req.did);
-        match self.sync_repo_locked(s, req, &mut rep).await {
+        match self.sync_repo_locked(s, req, &mut rep, identity).await {
             Ok(outcome) => rep.outcome = outcome,
             Err(e) => {
                 rep.outcome = RepoOutcome::Failed;
@@ -820,6 +823,7 @@ impl<H: Host> Syncer<H> {
         s: &Session<H>,
         req: &SyncRequest,
         rep: &mut RepoReport,
+        identity: Result<(Service, String, bool), SyncError>,
     ) -> Result<RepoOutcome, SyncError> {
         let host = s.host();
         let now = host.now_ms();
@@ -828,7 +832,7 @@ impl<H: Host> Syncer<H> {
         let full = req.reason == Reason::Full;
 
         // identity and PDS
-        let (svc, pds, id_hint) = self.pds_of(s, did).await?;
+        let (svc, pds, id_hint) = identity?;
         rep.id_hint = id_hint;
         rep.pds = Some(pds.clone());
         if id_hint && req.confirm.is_some() {

@@ -463,3 +463,155 @@ fn a_granted_members_hydrated_post_is_listed_before_their_repo_sync() {
         assert!(fetched.is_empty(), "{fetched:?}");
     });
 }
+
+/// `sync.md` §14.3 step 4 and §3.5: the identities and heads of the authors on screen are
+/// resolved at P0, ahead of the forum sync's participant sweep that runs beside the cold page,
+/// though the sweep reaches them last (in DID order) and started first. Deterministic: the fake
+/// clock moves only when the test moves it, and only the order of requests is checked.
+#[test]
+fn the_authors_on_screen_are_resolved_ahead_of_the_participant_sweep() {
+    const MEMBERS: usize = 24;
+    const ON_SCREEN: usize = 6;
+    let mem = MemHost::new();
+    let net = FakeNet::on(&mem);
+    let _ = net.default_pds();
+    let owner = net.add_account("owner.example.com");
+    let key = forum(&mem, &owner, MembershipMode::Approval);
+    let mut members: Vec<AccountHandle> = (0..MEMBERS)
+        .map(|i| net.add_account(&format!("member-{i:02}.example.com")))
+        .collect();
+    members.sort_by(|a, b| a.did().as_str().cmp(b.did().as_str()));
+    let mut posts = Vec::new();
+    for (i, m) in members.iter().enumerate() {
+        join(&mem, m, &key);
+        grant(&mem, &owner, &key, m.did());
+        posts.push(post(&mem, m, &key, &format!("Post {i}"), i as i64 + 1));
+    }
+    // The page shows the posts of the members the sweep reaches last.
+    let on_screen: Vec<String> = members[MEMBERS - ON_SCREEN..]
+        .iter()
+        .map(|m| m.did().to_string())
+        .collect();
+    let page_posts: Vec<String> = posts[MEMBERS - ON_SCREEN..].iter().rev().cloned().collect();
+    serve_indexer(&mem, &net, &page_posts);
+    let engine = assisted(mem.clone());
+    futures::executor::block_on(engine.forum_open(key.uri.as_str())).unwrap();
+    mem.clear_requests();
+
+    let plc = net.plc();
+    let plc_dids = |from: usize| -> Vec<(usize, String)> {
+        mem.requests()
+            .into_iter()
+            .enumerate()
+            .skip(from)
+            .filter_map(|(i, r)| {
+                r.url
+                    .strip_prefix(&format!("{plc}/"))
+                    .map(|d| (i, d.to_owned()))
+            })
+            .collect()
+    };
+    mem.park_sleeps(true);
+    // The page's forum sync (as the SPA starts it) is resolving participants…
+    let opts = lessdugin_core::dto::SyncOpts {
+        budget_ms: Some(8_000),
+        max_requests: Some(400),
+        full: false,
+    };
+    let mut sweep = Box::pin(engine.sync_forum(key.uri.as_str(), &opts));
+    let mut sweep_done = None;
+    for _ in 0..1_000 {
+        if plc_dids(0).len() >= 2 {
+            break;
+        }
+        if let Poll::Ready(r) = poll_once(&mut sweep) {
+            sweep_done = Some((mem.now(), r));
+            break;
+        }
+        mem.advance_ms(10);
+    }
+    assert!(
+        sweep_done.is_none(),
+        "the sweep ended before the page started"
+    );
+    assert!(
+        plc_dids(0).iter().all(|(_, d)| !on_screen.contains(d)),
+        "the sweep reached an author on screen first"
+    );
+    // … when the cold page lists its posts.
+    let started = mem.requests().len();
+    let query = all_posts(&key);
+    let fallback = lessdugin_core::dto::SyncOpts::default();
+    let mut page = Box::pin(engine.list_posts_page(&query, &fallback));
+    let mut page_done = None;
+    for _ in 0..10_000 {
+        if page_done.is_none()
+            && let Poll::Ready(r) = poll_once(&mut page)
+        {
+            page_done = Some((mem.now(), r));
+        }
+        if sweep_done.is_none()
+            && let Poll::Ready(r) = poll_once(&mut sweep)
+        {
+            sweep_done = Some((mem.now(), r));
+        }
+        if page_done.is_some() && sweep_done.is_some() {
+            break;
+        }
+        mem.advance_ms(10);
+    }
+    mem.park_sleeps(false);
+    let (page_at, page) = page_done.expect("the cold page did not finish");
+    let (sweep_at, sweep) = sweep_done.expect("the sweep did not finish");
+    let page = page.unwrap();
+    sweep.unwrap();
+    // (posts of the members the sweep has synced by then are listed too)
+    let listed: Vec<&str> = page.items.iter().map(|p| p.uri.as_str()).collect();
+    for p in &page_posts {
+        assert!(
+            listed.contains(&p.as_str()),
+            "{p} not on the cold page: {listed:?}"
+        );
+    }
+    assert!(
+        page_at < sweep_at,
+        "the cold page ({page_at}) waited for the sweep ({sweep_at})"
+    );
+
+    // Once the page asked: every document request goes to an author on screen until each has
+    // its document, and each of their heads is checked before the sweep resolves anyone else.
+    // One document per author (at most 1 h old) serves both its head check and its proofs. (The
+    // sweep's own requests for these authors, queued earlier, come after its other ones.)
+    let after = plc_dids(started);
+    let next_sweep_doc = after
+        .iter()
+        .find(|(_, d)| !on_screen.contains(d))
+        .map_or(usize::MAX, |(i, _)| *i);
+    for did in &on_screen {
+        let n = after
+            .iter()
+            .filter(|(i, d)| d == did && *i < next_sweep_doc)
+            .count();
+        assert_eq!(
+            n, 1,
+            "{did}: {n} documents before the sweep's next: {after:?}"
+        );
+    }
+    let requests = mem.requests();
+    for did in &on_screen {
+        let head = requests
+            .iter()
+            .enumerate()
+            .skip(started)
+            .position(|(_, r)| {
+                r.url.contains(HEAD) && r.url.contains(did.rsplit(':').next().unwrap())
+            });
+        let head = head
+            .map(|p| p + started)
+            .expect("an author on screen was not head-checked");
+        assert!(
+            head < next_sweep_doc,
+            "{did}: head check at {head}, the sweep's next document at {next_sweep_doc}"
+        );
+    }
+}

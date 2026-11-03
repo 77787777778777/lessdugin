@@ -335,6 +335,8 @@ DIDs that merely appear in records are never resolved eagerly.
 
 Requests to the PLC directory: at most 8 in flight and at most `plcRate` requests per second, where `plcRate` starts at 20. On 429: honour `Retry-After`, and set `plcRate = max(1, plcRate / 2)`. After every 60 s without a 429: `plcRate = min(20, plcRate + 2)`. PLC sends no rate-limit headers (ADR 0004).
 
+The paced slots go to waiting requests in the order of §9.1, by priority and then arrival, and a slot is taken only when it is used. A P0 request (an author on screen, §14.3) therefore waits at most for the next free slot, never behind a forum sync's queued participant documents, and a request whose slot would come only after its time budget ends leaves without taking one, so a spent budget never delays later requests.
+
 ### 3.6 Login binding
 
 These checks apply to every OAuth session (`data-model.md` §10.5) before it is used for any write:
@@ -1113,6 +1115,8 @@ for each item (independently):
   fail → drop the item; count a failure against the indexer (§15.4)
 ```
 
+A `BadSignature` against a document fetched before the bundle arrived is checked once more against one fetched now before it counts (the key may have rotated within the hour, as for the indexer in §15.1); §8.7 then applies.
+
 A `ProvenAbsent` that is current produces a tombstone (key `(rev, sentAt of the head check)`). A stale one is ignored.
 
 ### 8.7 Key rotation (`stale-proof`)
@@ -1308,7 +1312,7 @@ HostRow    { rangeCursor: "unknown" | "yes" | "no", rcAt: ms, shortPageEnds: boo
 | Lock | Native | Browser | Holder does |
 |---|---|---|---|
 | sync leader | exclusive `fd-lock` on `<cache dir>/cache.lock`, tried without waiting | Web Lock `lessdugin-sync-leader`, requested once and held for the tab's lifetime | live sources, polling, reconcile, discovery, P1–P3 sync, eviction |
-| repo `d` | `fd-lock` on `<cache dir>/locks/repo-<h(d)>.lock` | Web Lock `lessdugin-repo-<d>` | the read-diff-write of `sync_repo`, point fetches and admissions for d |
+| repo `d` | `fd-lock` on `<cache dir>/locks/repo-<h(d)>.lock` | Web Lock `lessdugin-repo-<d>` | the read-diff-write of `sync_repo` (its identity is resolved before, so a pass waiting for PLC pacing does not hold it), point fetches and admissions for d |
 | outbox `a` | `fd-lock` on `<data dir>/locks/outbox-<h(a)>.lock` | Web Lock `lessdugin-outbox-<a>`; in `lessdugin web`, whose `state` is the native one, then also the native lock through `POST /bridge/lock` (`threat-model.md` §7.4) | the pump for account a (§7.1) |
 
 `h(x)` = the first 16 characters of `b32s(sha256(UTF8(x)))` (`data-model.md` §3.1).
@@ -1567,7 +1571,7 @@ Read budgets are per host (ADR 0004), so a cold sync spread over many Bluesky PD
 1. Forum resolution: about 3 requests (PLC, declaration, declaration proof).
 2. `listPosts`: placeholders render (`[hint]`, no text).
 3. `getRecordProofs` for the visible posts (about 30), and for the membership record at the forum's key of each of their authors who is not an authority and whose membership is neither cached nor tombstoned, in 1–3 requests; each item is verified (§8.6). An author is a participant only once their membership record is held (`social.md` §3.1), and a granted member's is otherwise read only inside their repo sync (§4.2.1), so without it the page could not list a granted member's post before that sync.
-4. One `getLatestCommit` per author on screen, in parallel: current proofs (memberships included) are admitted and their text appears `[verified]`; stale ones are point-fetched from the PDS (§1.2.1).
+4. One `getLatestCommit` per author on screen, in parallel, and in parallel with step 3, at P0: a forum sync's participant sweep that runs beside the page goes after them (§3.5), and a sync of an author's repo in flight does not hold the check up (§10.6). Each author's DID document is resolved once, at most 1 h old (§8.6), and serves both the head check and the verification of the author's proofs. Current proofs (memberships included) are admitted and their text appears `[verified]`; stale ones are point-fetched from the PDS (§1.2.1).
 5. Authorities sync at P0 in parallel; the view is `degraded` until they complete. Text appears in about 1–2 s.
 
 ---

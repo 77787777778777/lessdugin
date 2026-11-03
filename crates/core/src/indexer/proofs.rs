@@ -2,13 +2,14 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use futures::future::join_all;
 use lessdugin_atp::proof::{BundleCaps, ProofBundle, ProofCaps, ProofErrorKind, verify_proof};
 use lessdugin_atp::syntax::{AtUri, Did};
 use lessdugin_atp::xrpc::SyncGetRecord;
 use serde::{Deserialize, Serialize};
 
 use crate::host::Host;
-use crate::identity::IdentityLevel;
+use crate::identity::{IdentityLevel, THIRD_PARTY_DOC_MAX_AGE_MS};
 use crate::store::admit::{self, LexiconValidator, Observation};
 use crate::store::records::{Delete, DeleteEvidence, RecordStore};
 use crate::store::repo::HeadSeen;
@@ -147,35 +148,70 @@ fn store_error(e: crate::store::StoreError) -> XrpcCallError {
 
 /// Hydrates visible URIs in independent bundles of at most 25. Cold-start callers pass their
 /// visible page (normally 25, or two pages of 25), so no background fan-out is needed.
+///
+/// The bundle requests and one head check per author run at once, all at the session's
+/// priority (P0 for a page on screen, `sync.md` §14.3 steps 3 and 4). Each author's DID document
+/// is resolved first, at most 1 h old (§8.6), and then serves both the head check and the
+/// verification of the author's proofs.
 pub async fn hydrate_visible<H: Host>(
     syncer: &Syncer<H>,
     client: &Client,
     session: &Session<H>,
     uris: &[AtUri],
 ) -> Result<ProofReport, XrpcCallError> {
+    let authors: BTreeSet<&Did> = uris.iter().map(AtUri::did).collect();
+    let checks = join_all(authors.into_iter().map(|did| async move {
+        // A failure is handled per item as non-current and triggers the point fetch, which
+        // reports the useful identity or PDS error there.
+        if session
+            .resolver()
+            .resolve_did_doc(did, THIRD_PARTY_DOC_MAX_AGE_MS)
+            .await
+            .is_ok()
+        {
+            let _ = syncer.head_check(session, did, false).await;
+        }
+    }));
+    let chunks: Vec<&[AtUri]> = uris.chunks(MAX_PROOF_URIS).collect();
+    let fetches = join_all(chunks.iter().map(|c| fetch_bundle(client, session, c)));
+    let (_, bundles) = futures::join!(checks, fetches);
     let mut report = ProofReport::default();
-    for chunk in uris.chunks(MAX_PROOF_URIS) {
-        let part = hydrate_chunk(syncer, client, session, chunk).await?;
+    for (chunk, fetched) in chunks.into_iter().zip(bundles) {
+        let part = hydrate_chunk(syncer, client, session, chunk, fetched).await?;
         report.items.extend(part.items);
     }
     report.finish_counts();
     Ok(report)
 }
 
+/// A `getRecordProofs` bundle and the time it was received.
+async fn fetch_bundle<H: Host>(
+    client: &Client,
+    session: &Session<H>,
+    uris: &[AtUri],
+) -> Result<(Vec<u8>, i64), XrpcCallError> {
+    let car = client.get_record_proofs(session, uris).await?;
+    Ok((car, session.host().now_ms()))
+}
+
+/// Admits one bundle's items; the head checks of their authors have run.
 async fn hydrate_chunk<H: Host>(
     syncer: &Syncer<H>,
     client: &Client,
     session: &Session<H>,
     uris: &[AtUri],
+    fetched: Result<(Vec<u8>, i64), XrpcCallError>,
 ) -> Result<ProofReport, XrpcCallError> {
-    let car = match client.get_record_proofs(session, uris).await {
-        Ok(car) => car,
+    let (car, received_at) = match fetched {
+        Ok(f) => f,
         Err(e) if bundle_too_large(&e) && uris.len() > 1 => {
             // Split into ordered, strictly smaller batches. The one-URI base case below makes
             // this recursion finite even if a service rejects every request as oversized.
-            let mid = uris.len() / 2;
-            let mut left = Box::pin(hydrate_chunk(syncer, client, session, &uris[..mid])).await?;
-            let right = Box::pin(hydrate_chunk(syncer, client, session, &uris[mid..])).await?;
+            let (l, r) = uris.split_at(uris.len() / 2);
+            let fetched = fetch_bundle(client, session, l).await;
+            let mut left = Box::pin(hydrate_chunk(syncer, client, session, l, fetched)).await?;
+            let fetched = fetch_bundle(client, session, r).await;
+            let right = Box::pin(hydrate_chunk(syncer, client, session, r, fetched)).await?;
             left.items.extend(right.items);
             left.finish_counts();
             return Ok(left);
@@ -217,7 +253,6 @@ async fn hydrate_chunk<H: Host>(
             return Ok(report);
         }
     };
-    let received_at = session.host().now_ms();
     let origin = client.origin();
     let store = RecordStore::new(session.host().cache());
     let bundle = match ProofBundle::parse(&car, &BundleCaps::default()) {
@@ -240,14 +275,6 @@ async fn hydrate_chunk<H: Host>(
             return Ok(report);
         }
     };
-
-    // Check every visible author's PDS head, independently of indexer getRepoHeads.
-    let dids: BTreeSet<Did> = uris.iter().map(|u| u.did().clone()).collect();
-    for did in &dids {
-        // A failed head check is handled per item as non-current and triggers point fetch. The
-        // point fetch reports the useful identity/PDS error there.
-        let _ = syncer.head_check(session, did, false).await;
-    }
 
     let mut by_uri: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
     for (i, item) in bundle.items.iter().enumerate() {
@@ -296,7 +323,11 @@ async fn hydrate_chunk<H: Host>(
             continue;
         }
         let index = indices[0];
-        let ident = match session.resolver().resolve_did_fresh(uri.did(), 0).await {
+        let mut ident = match session
+            .resolver()
+            .resolve_did_doc(uri.did(), THIRD_PARTY_DOC_MAX_AGE_MS)
+            .await
+        {
             Ok(i) if i.level == IdentityLevel::Doc => i,
             Ok(_) => {
                 strikes += 1;
@@ -319,7 +350,7 @@ async fn hydrate_chunk<H: Host>(
                 continue;
             }
         };
-        let Some(key) = ident.public_key() else {
+        let Some(mut key) = ident.public_key() else {
             strikes += 1;
             results.push(failed(
                 uri,
@@ -330,33 +361,50 @@ async fn hydrate_chunk<H: Host>(
         let current_head = latest_head(syncer, &store, uri.did())
             .await?
             .filter(|h| h.sent_at >= received_at - HEAD_CURRENCY_MS);
-        let outcome =
-            match bundle.verify_item(index, &key, session.host().now_ms().saturating_mul(1000)) {
-                Ok(o) => o,
-                Err(e) => {
-                    if e.kind() == ProofErrorKind::BadSignature
-                        && let (Some(rev), Some(head)) = (e.rev, &current_head)
-                        && rev.as_str() < head.rev.as_str()
-                    {
-                        let mut item = ProofItemStatus {
-                            uri: uri.to_string(),
-                            status: ProofStatus::StaleProof,
-                            rev: Some(rev.to_string()),
-                            error: Some("stale-proof: fetching a fresh author-PDS proof".into()),
-                            point_fetched: false,
-                        };
-                        pds_proof_fallback(syncer, session, uri, &ident, &key, &mut item).await;
-                        results.push(ItemResult {
-                            status: item,
-                            fallback: false,
-                        });
-                    } else {
-                        strikes += 1;
-                        results.push(failed(uri, e.to_string()));
-                    }
-                    continue;
+        let now_us = session.host().now_ms().saturating_mul(1000);
+        let mut verified = bundle.verify_item(index, &key, now_us);
+        if verified
+            .as_ref()
+            .is_err_and(|e| e.kind() == ProofErrorKind::BadSignature)
+            && ident.doc_at_ms < received_at
+        {
+            // The key may have rotated since the document was fetched: once more against a
+            // document fetched now, before a bad signature counts (§8.6, as §15.1 does).
+            if let Ok(fresh) = session.resolver().resolve_did_doc(uri.did(), 0).await
+                && fresh.level == IdentityLevel::Doc
+                && let Some(k) = fresh.public_key()
+            {
+                key = k;
+                ident = fresh;
+                verified = bundle.verify_item(index, &key, now_us);
+            }
+        }
+        let outcome = match verified {
+            Ok(o) => o,
+            Err(e) => {
+                if e.kind() == ProofErrorKind::BadSignature
+                    && let (Some(rev), Some(head)) = (e.rev, &current_head)
+                    && rev.as_str() < head.rev.as_str()
+                {
+                    let mut item = ProofItemStatus {
+                        uri: uri.to_string(),
+                        status: ProofStatus::StaleProof,
+                        rev: Some(rev.to_string()),
+                        error: Some("stale-proof: fetching a fresh author-PDS proof".into()),
+                        point_fetched: false,
+                    };
+                    pds_proof_fallback(syncer, session, uri, &ident, &key, &mut item).await;
+                    results.push(ItemResult {
+                        status: item,
+                        fallback: false,
+                    });
+                } else {
+                    strikes += 1;
+                    results.push(failed(uri, e.to_string()));
                 }
-            };
+                continue;
+            }
+        };
         let rev = outcome.rev.to_string();
         let head = latest_head(syncer, &store, uri.did()).await?.filter(|h| {
             rev.as_str() >= h.rev.as_str() && h.sent_at >= received_at - HEAD_CURRENCY_MS
