@@ -29,7 +29,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 use url::Url;
 
-use crate::store::{LiveChange, Store};
+use crate::store::{LiveChange, Store, UNKNOWN_HOST};
 use crate::{Indexer, Metrics, NS, ingest, proofs};
 
 const REWIND_US: i64 = 10_000_000;
@@ -704,6 +704,29 @@ fn target(indexer: &Indexer, action: &Action) -> Target {
     }
 }
 
+/// The PDS host a live membership hint counts against for the per-host quota (sync.md §15.1):
+/// the one its indexed head or its cached DID document names. The ingest path makes no
+/// identity request, so a DID with neither shares [`UNKNOWN_HOST`], capped like one host.
+async fn candidate_host(indexer: &Indexer, did: &str) -> String {
+    let mut pds = indexer
+        .store
+        .heads(&[did.to_owned()])
+        .into_iter()
+        .find_map(|head| head.pds.and_then(|p| Url::parse(&p).ok()));
+    if pds.is_none()
+        && let Ok(parsed) = Did::parse(did)
+    {
+        pds = indexer
+            .engine
+            .resolver()
+            .cached(&parsed)
+            .await
+            .and_then(|id| id.pds_url());
+    }
+    pds.and_then(|u| u.host_str().map(str::to_owned))
+        .unwrap_or_else(|| UNKNOWN_HOST.to_owned())
+}
+
 /// One action within [`ACTION_TIMEOUT`]; past it, the repository is handed off.
 async fn run(indexer: &Indexer, action: Action, target: &Target) -> Work {
     let mut work = Work::default();
@@ -739,13 +762,14 @@ async fn handle(indexer: &Indexer, action: Action, work: &mut Work) {
             // A newcomer's membership is a durable hint; confirming it is an ordinary forum
             // sync, debounced and run by the scheduler, never inline.
             let Some(cid) = cid else { return };
+            let host = candidate_host(indexer, &did).await;
             for forum in indexer.store.forums_by_fk(&fk) {
                 match indexer.store.add_candidate_from(
                     &forum,
                     &did,
                     &cid,
                     first_seen_us.div_euclid(1000),
-                    "",
+                    &host,
                 ) {
                     Ok(true) => {
                         if let Err(e) = indexer

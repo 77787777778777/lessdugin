@@ -35,7 +35,10 @@ only a forum-discovery hint; normal sync must still admit it before that author 
 participant. Durable candidate rows retain those hints across restarts; they never become
 participant rows without PDS confirmation. Hints are capped per DID and per PDS host (32 forum
 seeds per DID, 2,000 per host, 500 pending membership hints per forum and host), so one account
-cannot fill the index with seeds. A forum whose sync fails backs off on its own (one minute,
+cannot fill the index with seeds. A live membership hint counts against the host named by the
+newcomer's indexed head or cached DID document (no identity lookup on the live path); hints of
+hosts not known yet share one 500-hint quota per forum. An indexed forum counts against its
+owner's host. A forum whose sync fails backs off on its own (one minute,
 doubling up to six hours) without re-running discovery. A seed whose declaration is proven
 absent is quarantined: it is no longer listed or synced, is rechecked once a day (a failed
 recheck also waits a day), or as soon as a live commit shows the declaration again, and is

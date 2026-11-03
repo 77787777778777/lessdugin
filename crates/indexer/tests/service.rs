@@ -2405,3 +2405,156 @@ async fn a_live_event_never_quarantines_an_unsynced_seed() {
         t.abort();
     }
 }
+
+/// security-net-11: a live membership hint counts against its newcomer's PDS host when the
+/// indexer knows that host (an indexed head or a cached DID document; the live path makes no
+/// identity request), and otherwise against one shared unknown-host bucket with the same cap.
+/// Accounts of one host therefore cannot take every pending slot of a forum.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn live_membership_hints_count_against_their_host() {
+    use lessdugin_indexer::store::{CANDIDATES_PER_HOST, UNKNOWN_HOST};
+    let (f, _jetstreams, urls) = live_fixture().await;
+    let forum = f.forum.uri.as_str();
+    ingest::sync_forum(&f.indexer, forum).await.unwrap();
+    quiet(&f.indexer);
+    let pds = f.owner.pds();
+    let host = pds.url().host_str().unwrap().to_owned();
+    let early = pds.add_account("early.test");
+    let known = pds.add_account("known.test");
+    let unknown = pds.add_account("unknown.test");
+    for account in [&early, &known] {
+        f.indexer
+            .engine
+            .resolver()
+            .resolve_did_doc(account.did(), 0)
+            .await
+            .unwrap();
+    }
+    let join = |account: &AccountHandle| {
+        let at = Datetime::from_millis(f.net.now_ms() - 60_000).unwrap();
+        account.put(
+            nsid::MEMBERSHIP,
+            &f.forum.fk,
+            &serde_json::to_value(Membership::new(f.forum.uri.clone(), at)).unwrap(),
+        );
+    };
+    // No scheduler runs, so pending hints stay pending; wait for the cursors alone.
+    let passed = || async {
+        let last = f.net.events().last().unwrap().time_us;
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while urls.iter().any(|u| {
+            f.indexer
+                .store
+                .cursor(&format!("jetstream:{}", u.origin().ascii_serialization()))
+                .and_then(|c| c.parse::<i64>().ok())
+                .is_none_or(|c| c < last)
+        }) {
+            assert!(Instant::now() < deadline, "the live stream did not drain");
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    };
+    let pending = |did: &str| {
+        f.indexer
+            .store
+            .candidates(forum, f.indexer.now_ms())
+            .iter()
+            .any(|(d, _, _)| d == did)
+    };
+    let tasks = live::spawn(f.indexer.clone());
+    connected(&f.indexer, 2).await;
+    join(&early);
+    passed().await;
+    assert!(
+        pending(early.did().as_str()),
+        "a hint below the caps was refused"
+    );
+    // The newcomers' host is at its cap with `early`; so is the unknown-host bucket.
+    for n in 1..CANDIDATES_PER_HOST {
+        let did = format!("did:plc:h{n:023}");
+        assert!(
+            f.indexer
+                .store
+                .add_candidate_from(forum, &did, "cid", 1, &host)
+                .unwrap()
+        );
+    }
+    for n in 0..CANDIDATES_PER_HOST {
+        let did = format!("did:plc:u{n:023}");
+        assert!(
+            f.indexer
+                .store
+                .add_candidate_from(forum, &did, "cid", 1, UNKNOWN_HOST)
+                .unwrap()
+        );
+    }
+    join(&known);
+    join(&unknown);
+    passed().await;
+    assert!(
+        !pending(known.did().as_str()),
+        "a hint from a host at its cap was recorded"
+    );
+    assert!(
+        !pending(unknown.did().as_str()),
+        "a hint of an unknown host escaped the bucket cap"
+    );
+    for t in tasks {
+        t.abort();
+    }
+}
+
+/// security-net-11: once indexed, a forum counts against its owner's host, not against the host
+/// of the account whose membership first named it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_indexed_forum_counts_against_its_owners_host() {
+    use lessdugin_indexer::store::{SEEDS_PER_DID, SEEDS_PER_HOST};
+    let f = Fixture::new().await;
+    let store = &f.indexer.store;
+    let named = ForumKey::new(f.owner.did(), "named").unwrap();
+    f.owner.put(
+        nsid::FORUM,
+        "named",
+        &serde_json::to_value(Forum::create(
+            "Named",
+            Datetime::from_millis(f.net.now_ms() - 3_600_000).unwrap(),
+            MembershipMode::Open,
+        ))
+        .unwrap(),
+    );
+    // Accounts of one host named this forum first, and enough others to fill the host's cap.
+    assert!(
+        store
+            .add_forum_hint(
+                named.uri.as_str(),
+                "did:plc:nnnnnnnnnnnnnnnnnnnnnnnn",
+                "spam.test"
+            )
+            .unwrap()
+    );
+    let mut seeds = 1;
+    'fill: for d in 0.. {
+        let via = format!("did:plc:s{d:023}");
+        for k in 0..SEEDS_PER_DID {
+            if seeds == SEEDS_PER_HOST {
+                break 'fill;
+            }
+            let seed = format!("at://did:plc:t{d:023}/{}/f{k}", nsid::FORUM);
+            assert!(store.add_forum_hint(&seed, &via, "spam.test").unwrap());
+            seeds += 1;
+        }
+    }
+    let extra = |i: u32| format!("at://did:plc:xxxxxxxxxxxxxxxxxxxxxxxx/{}/x{i}", nsid::FORUM);
+    let other = "did:plc:yyyyyyyyyyyyyyyyyyyyyyyy";
+    assert!(
+        !store.add_forum_hint(&extra(0), other, "spam.test").unwrap(),
+        "the host is not at its cap"
+    );
+    ingest::sync_forum(&f.indexer, named.uri.as_str())
+        .await
+        .unwrap();
+    assert!(store.forum(named.uri.as_str()).is_some());
+    assert!(
+        store.add_forum_hint(&extra(1), other, "spam.test").unwrap(),
+        "the indexed forum still counts against the host that named it"
+    );
+}

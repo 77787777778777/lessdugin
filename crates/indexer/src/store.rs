@@ -20,6 +20,9 @@ pub const SEEDS_PER_HOST: i64 = 2_000;
 pub const CANDIDATES_PER_HOST: i64 = 500;
 /// At most this many pending membership hints per forum in all.
 pub const CANDIDATES_PER_FORUM: i64 = 10_000;
+/// The host of live membership hints whose PDS host is not known yet (no indexed head, no cached
+/// DID document): they share one per-host quota. It can never be a real host name.
+pub const UNKNOWN_HOST: &str = "(unknown)";
 /// A forum whose sync failed is retried after `RETRY_BASE_MS · 2^(failures-1)`, at most
 /// [`RETRY_MAX_MS`], independently of the six-hour discovery cadence.
 pub const RETRY_BASE_MS: i64 = 60_000;
@@ -246,7 +249,9 @@ impl Store {
             .map(|_| ())
     }
 
-    /// [`Store::add_candidate`] for a hint from a DID on PDS host `host` (empty when unknown).
+    /// [`Store::add_candidate`] for a hint from a DID on PDS host `host` ([`UNKNOWN_HOST`] for a
+    /// live hint whose host is not known yet; empty: attributed to no host, so only the per-forum
+    /// cap applies).
     /// A new hint is refused (false) beyond [`CANDIDATES_PER_HOST`] pending hints of that host
     /// or [`CANDIDATES_PER_FORUM`] pending hints in all, for this forum.
     pub fn add_candidate_from(
@@ -986,7 +991,20 @@ impl Store {
                 r.get(0)
             })
             .optional()?;
-        tx.execute("INSERT INTO forums(uri,did,rkey,name,description,created_at,cid,synced_ms,input_digest,fk,participant_count,post_count,absent_ms) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,0) ON CONFLICT(uri) DO UPDATE SET name=excluded.name,description=excluded.description,created_at=excluded.created_at,cid=excluded.cid,synced_ms=excluded.synced_ms,input_digest=excluded.input_digest,fk=excluded.fk,participant_count=excluded.participant_count,post_count=excluded.post_count,absent_ms=0,via=CASE WHEN forums.via='' THEN '' ELSE excluded.did END", params![forum,m.key.owner.as_str(),m.key.uri.rkey().as_str(),m.decl.name,m.decl.description,m.decl.created_at.as_str(),m.input.decl_cid,now_ms,m.view.input_digest,m.key.fk,m.participants().len() as i64,posts])?;
+        // Once indexed, a hinted forum counts against its owner and the owner's PDS host, never
+        // against the account (and host) whose record first named it (INFRA-12).
+        let owner_host = tx
+            .query_row(
+                "SELECT pds FROM repo_heads WHERE did=?1",
+                [m.key.owner.as_str()],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten()
+            .and_then(|pds| url::Url::parse(&pds).ok())
+            .and_then(|pds| pds.host_str().map(str::to_owned))
+            .unwrap_or_default();
+        tx.execute("INSERT INTO forums(uri,did,rkey,name,description,created_at,cid,synced_ms,input_digest,fk,participant_count,post_count,absent_ms) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,0) ON CONFLICT(uri) DO UPDATE SET name=excluded.name,description=excluded.description,created_at=excluded.created_at,cid=excluded.cid,synced_ms=excluded.synced_ms,input_digest=excluded.input_digest,fk=excluded.fk,participant_count=excluded.participant_count,post_count=excluded.post_count,absent_ms=0,via=CASE WHEN forums.via='' THEN '' ELSE excluded.did END,via_host=CASE WHEN forums.via='' THEN '' WHEN ?13<>'' THEN ?13 ELSE forums.via_host END", params![forum,m.key.owner.as_str(),m.key.uri.rkey().as_str(),m.decl.name,m.decl.description,m.decl.created_at.as_str(),m.input.decl_cid,now_ms,m.view.input_digest,m.key.fk,m.participants().len() as i64,posts,owner_host])?;
         tx.commit()?;
         if roster_changed || previous_cid.as_deref() != Some(m.input.decl_cid.as_str()) {
             self.bump();
