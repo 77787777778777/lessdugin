@@ -909,8 +909,8 @@ Events MAY also drive counts and placeholders ("3 new comments"), which never mo
 ### 6.6 Indexer change feed
 
 With an active indexer that advertises `getChanges` (assisted mode):
-- poll `getChanges(forum = F, since = cursor)` every 10 s while a view of F is open (its model is loaded) and every 60 s otherwise (*tunable*), per followed forum the indexer serves; `live_tail` runs these polls, and a `sync_forum` polls once before its PDS sync. A successful poll makes the change feed a healthy live source (§6.2);
-- each `#change` is handled like a Jetstream commit for that uri (§6.4), deduplicated with the same LRU;
+- poll `getChanges(forum = F, since = cursor)` every 10 s while a view of F is open (its model is loaded) and every 60 s otherwise (*tunable*), per followed forum the indexer serves; `live_tail` runs these polls, and a `sync_forum` polls once before its PDS sync. A successful poll makes the change feed a healthy live source (§6.2). `live_tail` polls after its round's queue work and one forum per round, the most overdue first, so a slow indexer delays neither the dirty queue nor the next Jetstream read by more than one poll. A view opened since a forum's last poll makes its next poll due 10 s after that poll;
+- each `#change` is handled like a Jetstream commit for that uri (§6.4), deduplicated with the same LRU: a commit that Jetstream already delivered (applied, or still unacknowledged) is skipped, and a queued `#change` makes the same commit on Jetstream a duplicate. The poll of a `sync_forum`, which a PDS sync follows, does not use the LRU;
 - the cursor (`cur/indexer:<did>:<fk>`) is the returned `cursor`. Without one, the first poll starts at the indexer's current `asOf.seq` (from `describeIndexer`), not at 0: the PDS sync covers what came before, and the log is not replayed as point fetches;
 - `CursorTooOld`: run a full reconcile of F (§6.8) and restart from the `asOf.seq` of that response.
 
