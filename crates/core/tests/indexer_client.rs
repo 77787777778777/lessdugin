@@ -1215,6 +1215,34 @@ fn audit_change_check_accepts_a_row_at_or_after_the_observed_change() {
     }
 }
 
+/// A read-back that runs out of its page budget before it reaches the observed change cannot
+/// say the change is missing: it is one unchecked finding, never an omission (sync.md §15.4).
+#[test]
+fn audit_change_check_leaves_a_change_unchecked_when_the_read_back_stops_early() {
+    use lessdugin_core::indexer::AuditKind;
+    let observed = tid_at_ms(1_700_000_000_000).to_string();
+    let w = forum_world();
+    let cid = w
+        .owner
+        .cid(nsid::POST, w.post.rsplit('/').next().unwrap())
+        .unwrap()
+        .to_string();
+    observe(&w, &observed, Some(cid));
+    w.host.advance_ms(180_000);
+    serve_honest_audit(&w, json!([post_hint(&w.post)]));
+    // a log far longer than the audit reads, every row dropped after paging
+    serve_change_log(&w.host, 0, 2_000_000, BTreeMap::new(), 1..=2_000_000);
+    let a2 = a2_after(&w);
+    assert_eq!(
+        (a2.counts.checked, a2.counts.omissions, a2.counts.unchecked),
+        (0, 0, 1),
+        "{a2:?}"
+    );
+    assert_eq!(a2.findings.len(), 1, "{a2:?}");
+    assert_eq!(a2.findings[0].kind, AuditKind::Unchecked);
+    assert_eq!(a2.findings[0].subject, w.post);
+}
+
 #[test]
 fn audit_change_check_reads_back_from_the_head_past_a_pruned_log() {
     let observed = tid_at_ms(1_700_000_000_000).to_string();
