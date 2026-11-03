@@ -13,12 +13,18 @@
 
 mod common;
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use common::block_on;
 use lessdugin_core::dto::{
     Banner, CommentSort, ForumRole, HiddenReason, ItemState, ListPostsQuery, MembersQuery,
     ModLogStatus, PostFilter, PostSort, PostView, SyncOpts, ThreadOpts, ThreadView,
 };
 use lessdugin_core::engine::{AccountInfo, Engine, EngineConfig, ErrorCode};
+use lessdugin_core::host::{
+    BlobHandle, Dir, Host, HostError, HttpRequest, HttpResponse, KeyRange, KvOp, KvStore,
+};
 use lessdugin_lexicon::collection::nsid;
 use lessdugin_lexicon::keys;
 use lessdugin_lexicon::ns::NS;
@@ -1073,6 +1079,171 @@ fn next_and_previous_follow_the_sequence_the_reader_came_from_and_continue_readi
             .post,
         s.bob_post.uri
     );
+}
+
+/// A store whose writes fail while `fail` is set.
+#[derive(Clone)]
+struct FlakyKv {
+    inner: lessdugin_core::store::mem::MemKv,
+    fail: Arc<AtomicBool>,
+}
+
+impl KvStore for FlakyKv {
+    async fn get_many(&self, keys: Vec<Vec<u8>>) -> Result<Vec<Option<Vec<u8>>>, HostError> {
+        self.inner.get_many(keys).await
+    }
+
+    async fn scan(
+        &self,
+        range: KeyRange,
+        dir: Dir,
+        limit: u32,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, HostError> {
+        self.inner.scan(range, dir, limit).await
+    }
+
+    async fn write(&self, batch: Vec<KvOp>) -> Result<(), HostError> {
+        if self.fail.load(Ordering::SeqCst) {
+            return Err(HostError::Storage("injected state write failure".into()));
+        }
+        self.inner.write(batch).await
+    }
+}
+
+/// A [`MemHost`] whose state store fails its writes on demand (the cache never does).
+#[derive(Clone)]
+struct FlakyStateHost {
+    inner: MemHost,
+    cache: FlakyKv,
+    state: FlakyKv,
+}
+
+impl Host for FlakyStateHost {
+    type Kv = FlakyKv;
+    type Ws = <MemHost as Host>::Ws;
+    type Lock = <MemHost as Host>::Lock;
+
+    fn cache(&self) -> &FlakyKv {
+        &self.cache
+    }
+
+    fn state(&self) -> &FlakyKv {
+        &self.state
+    }
+
+    async fn http(&self, req: HttpRequest) -> Result<HttpResponse, HostError> {
+        self.inner.http(req).await
+    }
+
+    async fn fetch_blob(
+        &self,
+        pds: url::Url,
+        did: lessdugin_atp::syntax::Did,
+        cid: String,
+        max_bytes: u64,
+    ) -> Result<BlobHandle, HostError> {
+        self.inner.fetch_blob(pds, did, cid, max_bytes).await
+    }
+
+    async fn blob_open(&self, cid: &str) -> Result<Option<BlobHandle>, HostError> {
+        self.inner.blob_open(cid).await
+    }
+
+    async fn blob_read(&self, cid: &str, offset: u64, len: u32) -> Result<Vec<u8>, HostError> {
+        self.inner.blob_read(cid, offset, len).await
+    }
+
+    async fn blob_delete(&self, cid: &str) -> Result<(), HostError> {
+        self.inner.blob_delete(cid).await
+    }
+
+    async fn websocket(&self, url: url::Url, max: u32) -> Result<Self::Ws, HostError> {
+        self.inner.websocket(url, max).await
+    }
+
+    async fn resolve_txt_system(&self, name: String) -> Result<Option<Vec<String>>, HostError> {
+        self.inner.resolve_txt_system(name).await
+    }
+
+    async fn lock(&self, name: &str, wait: bool) -> Result<Option<Self::Lock>, HostError> {
+        self.inner.lock(name, wait).await
+    }
+
+    async fn sleep(&self, ms: u64) {
+        self.inner.sleep(ms).await;
+    }
+
+    fn now_ms(&self) -> i64 {
+        self.inner.now_ms()
+    }
+
+    fn fill_random(&self, buf: &mut [u8]) {
+        self.inner.fill_random(buf);
+    }
+}
+
+/// "Continue reading" is a side effect of `get_post(uri, sequence)` (`social.md` §14): a state
+/// store that cannot keep it never fails the read (review m5-acceptance-8).
+#[test]
+fn a_state_store_that_cannot_keep_continue_reading_never_fails_the_read() {
+    let mut n = Net::new();
+    let c = Cast::new(&n);
+    let h = MemHost::new();
+    h.set_now_ms(n.now());
+    h.set_seed(n.hosts.len() as u64 + 1);
+    n.net.install_as(&h, "flaky");
+    n.hosts.push(h.clone());
+    let fail = Arc::new(AtomicBool::new(false));
+    let host = FlakyStateHost {
+        cache: FlakyKv {
+            inner: h.cache_kv().clone(),
+            fail: Arc::new(AtomicBool::new(false)),
+        },
+        state: FlakyKv {
+            inner: h.state_kv().clone(),
+            fail: fail.clone(),
+        },
+        inner: h,
+    };
+    let reader = Engine::new(host, EngineConfig::default());
+    block_on(reader.add_account(AccountInfo::app_password(
+        c.carol.did().as_str(),
+        c.carol.pds_base(),
+    )))
+    .unwrap();
+    let s = scene(&n, &c);
+    let at = n.now();
+    let value = json!({
+        "$type": nsid::SEQUENCE, "forum": s.f.uri, "title": "Alice's guide",
+        "chapters": [{"posts": [s.welcome.uri, s.bob_post.uri]}], "createdAt": dt(at),
+    });
+    let guide = s.f.put(
+        &c.alice,
+        nsid::SEQUENCE,
+        &keys::sequence_rkey(&s.f.uri, tid_at_ms(at).as_str()).unwrap(),
+        &value,
+    );
+    let r = block_on(reader.sync_forum(&s.f.uri, &SyncOpts::default())).unwrap();
+    assert!(r.errors.is_empty(), "{r:?}");
+
+    fail.store(true, Ordering::SeqCst);
+    let v = block_on(reader.get_post_in(&s.welcome.uri, Some(&guide.uri)))
+        .expect("the read does not depend on keeping its position");
+    let nav = &v.sequences[0];
+    assert_eq!(
+        (&nav.sequence, &nav.prev, &nav.next),
+        (&guide.uri, &None, &Some(s.bob_post.uri.clone()))
+    );
+    fail.store(false, Ordering::SeqCst);
+    let continued = || {
+        block_on(reader.sequence(&guide.uri))
+            .unwrap()
+            .continue_reading
+    };
+    assert_eq!(continued(), None, "nothing was kept");
+    // once the store keeps it again, the next open records it
+    block_on(reader.get_post_in(&s.welcome.uri, Some(&guide.uri))).unwrap();
+    assert_eq!(continued().unwrap().post, s.welcome.uri);
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -209,7 +209,10 @@ impl<H: Host> Engine<H> {
             .first()
             .filter(|n| from.as_deref() == Some(n.sequence.as_str()))
         {
-            self.set_reading_position(&nav.sequence, &uri).await?;
+            // a side effect of the read: a state store that cannot keep it never fails the read
+            if let Err(e) = self.set_reading_position(&nav.sequence, &uri).await {
+                tracing::warn!(sequence = %nav.sequence, error = %e, "continue reading not recorded");
+            }
         }
         Ok(view)
     }
