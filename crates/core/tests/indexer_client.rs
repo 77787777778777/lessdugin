@@ -1120,42 +1120,27 @@ fn audit_change_check_accepts_a_row_at_or_after_the_observed_change() {
     let observed = tid_at_ms(1_700_000_000_000).to_string();
     let later = tid_at_ms(1_700_000_060_000).to_string();
     let other_cid = "bafyreie5737gdxlw5i64vzichcalba3z2v5n6icifvx5xytvske7mr3hpm";
-    // (rows, expected omissions): a snapshot row at the repo's later head rev with the observed
-    // CID, a later edit, a later delete, and the exact commit all match; the observed rev with
-    // another CID, or no row, does not.
-    let cases: Vec<(Box<dyn Fn(&ForumWorld, &str) -> Vec<Value>>, usize)> = vec![
-        (
-            Box::new(|w, cid| vec![change_row(w, &later, Some(cid), "create")]),
-            0,
-        ),
-        (
-            Box::new(|w, _| vec![change_row(w, &later, Some(other_cid), "update")]),
-            0,
-        ),
-        (
-            Box::new(|w, _| vec![change_row(w, &later, None, "delete")]),
-            0,
-        ),
-        (
-            Box::new(|w, cid| vec![change_row(w, &observed, Some(cid), "create")]),
-            0,
-        ),
-        (
-            Box::new(|w, _| vec![change_row(w, &observed, Some(other_cid), "create")]),
-            1,
-        ),
-        (Box::new(|_, _| Vec::new()), 1),
+    // (rev, CID: the observed one, another or none, op, expected omissions): a snapshot row at
+    // the repo's later head rev with the observed CID, a later edit, a later delete and the exact
+    // commit all match; the observed rev with another CID, or no row at all, does not.
+    let cases = [
+        (Some(&later), Some(true), "create", 0),
+        (Some(&later), Some(false), "update", 0),
+        (Some(&later), None, "delete", 0),
+        (Some(&observed), Some(true), "create", 0),
+        (Some(&observed), Some(false), "create", 1),
+        (None, None, "create", 1),
     ];
-    for (i, (rows, omissions)) in cases.into_iter().enumerate() {
+    for (i, (rev, same_cid, op, omissions)) in cases.into_iter().enumerate() {
         let w = forum_world();
         let cid = w.owner.cid(nsid::POST, &post_rkey(&w)).unwrap().to_string();
         observe(&w, &observed, Some(cid.clone()));
         w.host.advance_ms(180_000);
         serve_honest_audit(&w, json!([post_hint(&w.post)]));
-        let rows = rows(&w, &cid)
+        let row_cid = same_cid.map(|same| if same { cid.as_str() } else { other_cid });
+        let rows = rev
+            .map(|rev| (40, change_row(&w, rev, row_cid, op)))
             .into_iter()
-            .enumerate()
-            .map(|(n, row)| (40 + n as i64, row))
             .collect();
         serve_change_log(&w.host, 0, 100, rows, 0..=0);
         let a2 = a2_after(&w);
