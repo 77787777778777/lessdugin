@@ -316,7 +316,7 @@ remain **pending user run** (§8). M7 has not started.
 
 ### 4.2 Parity scenario
 
-With `now` and `obs` injected, CLI `--json`, the SPA's `getThread`, the TUI snapshot and (from M6) indexer-hydrated output MUST match byte for byte.
+With `now` and `obs` injected, CLI `--json`, the SPA's `getThread`, the TUI snapshot and (from M6) indexer-hydrated output MUST match byte for byte. The one exception is the indexer variant: its comparison with the indexer-off views ignores the provenance badges (verified, hint, stale), and all content, scores, states and order must still match byte for byte (decision U-D2, §9 item 12).
 
 | Step | Actor and client | Action | Subset |
 |---|---|---|---|
@@ -465,14 +465,14 @@ S3 and S10 were run together. ADR numbers: 0000 template, 0001 decision log, 000
 |---|---|---|---|
 | U1 | DNS for `lessdugin.7778777.online`: the two `_lexicon` TXT records, site hosting records, DNSSEC, CAA, registrar lock, multi-year auto-renew | M7 | pending |
 | U2 | Publisher account (did:plc, handle `lessdugin.7778777.online`) with an offline rotation key | M7 | pending |
-| U3 | Static host account: Cloudflare Pages or Netlify preferred, GitHub Pages as the fallback | M5 preview, M7 | pending |
-| U4 | Throwaway bsky.social test accounts (and optionally one self-hosted PDS) | S1, S2, S8, M2 smoke test, M5 logins, M7 | pending |
+| U3 | Static host account: Cloudflare Pages or Netlify preferred, GitHub Pages as the fallback | M5 preview, M7 | provided for the preview (2026-10-27): Cloudflare, origin `https://lessdugin-dev.7778777.online` (decision U-D4); the production site is M7 |
+| U4 | Throwaway bsky.social test accounts (and optionally one self-hosted PDS) | S1, S2, S8, M2 smoke test, M5 logins, M7 | partly (2026-10-27): two `.temp`-only test accounts on the user's self-hosted PDS `veles.7778777.online`, a jazware vlpds 1.2.2 (decision U-D3); bsky.social accounts pending |
 | U5 | An Apple device with Safari and iOS | S11 | pending |
 | U6 | Confirmation of MIT OR Apache-2.0 for the `atp` and `lexicon` crates | M7 (D21) | pending |
 | U7 | Review of the open questions in `data-model.md` §14, `social.md` §20.2, `sync.md` §17, `lfm-1.md` §14, `limits.md` §22, `threat-model.md` §12, `docs/spec/README.md` §7, ADR 0001 and §9 below; and a decision on the known issue K3 of `docs/spec/README.md` §1.4 (math normaliser, ADR 0002 against `lfm-1.md` §7) before M4 freezes the math vectors | M4 (K3), M7 (before freezing) | pending |
 | U8 | Authorisation to publish. Publication is irreversible: published NSIDs, limits and behaviour IDs are frozen. | M7 | pending |
 
-**Pending user runs** (updated as milestones finish): S1 (passed on the devnet, ADR 0007; pending: a bsky.social entryway login, the hosted client metadata, the `include:` scope with `final-ns`, the OS keyrings), S2 (passed on the devnet in M2; pending: production authorization servers and its ADR), S8, S11; the M2 production smoke test (`.temp` NSIDs, throwaway bsky.social accounts, U4); the M5 production logins; the S4 audio MIME check on a production PDS.
+**Pending user runs** (updated as milestones finish): S1 (passed on the devnet, ADR 0007; pending: a bsky.social entryway login, the hosted client metadata, the `include:` scope with `final-ns`, the OS keyrings), S2 (passed on the devnet in M2; pending: production authorization servers and its ADR), S8, S11; the M2 production smoke test (`.temp` NSIDs, throwaway bsky.social accounts, U4); the M5 production logins. On 2026-11-02 the M2 smoke test passed on the self-hosted vlpds with one actor (forum, media, post, edit, comment, an anonymous read with every blob matching its CID); a second actor and the bsky.social run remain. The S4 audio MIME check passed in the same run: the vlpds, a production PDS that is not the reference implementation, accepted `audio/ogg`, `audio/mpeg` and `audio/mp4`.
 
 ---
 
@@ -489,6 +489,10 @@ S3 and S10 were run together. ADR numbers: 0000 template, 0001 decision log, 000
 9. **The Level-0 document of M7 is an informative implementer guide.** The normative definition of the conformance levels is in `docs/spec/README.md` §4.
 10. **One TypeScript type-check job in CI** (TypeScript 7), because running both tsgo and tsc is deferred.
 11. **A hosted SPA login at M5 uses a preview deployment** on the user's static host; the production site is deployed at M7.
+12. **The indexer parity variant ignores provenance badges** (user decision U-D2, 2026-10-27): "identical views with and without the indexer" (M6) compares the indexer-on views with the indexer-off views after removing the verified, hint and stale badges, since provenance is the one thing the indexer legitimately changes. Content, scores, states and order must still match byte for byte (§4.2; `engine-api.md` §2.1).
+13. **No PWA manifest in M5 and no CLI `sync --follow`** (decision O-5): S11 decides on installability later, and following a forum continuously is the TUI's and the SPA's job; neither is in the plan's scope.
+14. **`e2e.yml` and `fuzz.yml` run locally until the workflows reach the default branch.** GitHub runs scheduled and dispatched workflows only from the default branch, and `main` holds only the initial commit, so on the development branch only `ci.yml` (which runs on pushes to `claude/**`) can be green on GitHub. Until the first merge to `main`, §2.2's "`e2e.yml` is green" is met by `cargo xtask e2e` (the same Rust e2e and Playwright suites) and the fuzz runs by `cargo xtask fuzz`, both on the integrated tree and recorded in the milestone status.
+15. **Other decisions taken during M3–M6** are recorded where they apply, each flagged for the U7 review: U-D1 (the browser's Jetstream DID filter, ADR 0009), U-D3 and U-D4 (§8 U4 and U3), U-D5 (a DID filter in the user's own Jetstream relay, a side task outside this repository), and O-1 to O-15 in the specs' open-question sections and `engine-api.md`'s "After the freeze" paragraph.
 
 **Open questions**
 - Confirm the phases in item 3, especially recommendations (P8+) and the nofollow gate (Never).
