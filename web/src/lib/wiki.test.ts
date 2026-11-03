@@ -4,7 +4,15 @@
 // ties by the smallest uri; an edge whose CID differs is "ancestor altered".
 import type { RawView } from "@lessdugin/engine/types";
 import { describe, expect, it } from "vitest";
-import { loadWikiNodes, type WikiNode, wikiChain, wikiFormOf, wikiNodeOf } from "./wiki.ts";
+import {
+  EMPTY_WIKI_FORM,
+  loadWikiNodes,
+  sameWikiForm,
+  type WikiNode,
+  wikiChain,
+  wikiFormOf,
+  wikiNodeOf,
+} from "./wiki.ts";
 
 const node = (uri: string, parents: [string, string?][], available = true): WikiNode => ({
   uri,
@@ -37,6 +45,22 @@ describe("wikiFormOf", () => {
 
   it("refuses a page whose body spilled into a blob", () => {
     expect(wikiFormOf({ name: "Long", body: { textBlob: { ref: { $link: "b" } } } })).toBeNull();
+  });
+});
+
+// a reload carries the author's form only when it differs from the one loaded
+describe("sameWikiForm", () => {
+  it("tells a changed field, with parent tags compared as a set", () => {
+    const loaded = { ...EMPTY_WIKI_FORM, name: "Page", parentTags: ["a", "b"] };
+    expect(sameWikiForm(loaded, { ...loaded, parentTags: ["b", "a"] })).toBe(true);
+    expect(sameWikiForm(loaded, { ...loaded, parentTags: ["a"] })).toBe(false);
+    expect(sameWikiForm(loaded, { ...loaded, name: "Page 2" })).toBe(false);
+    expect(sameWikiForm(loaded, { ...loaded, description: "d" })).toBe(false);
+    expect(sameWikiForm(loaded, { ...loaded, markdown: "text" })).toBe(false);
+    expect(sameWikiForm(loaded, { ...loaded, isTag: false })).toBe(false);
+    const media = [{ id: "m1", cid: "bafy", mime: "image/png", sizeBytes: 1 }];
+    expect(sameWikiForm(loaded, { ...loaded, media })).toBe(false);
+    expect(sameWikiForm({ ...loaded, media }, { ...loaded, media: [...media] })).toBe(true);
   });
 });
 

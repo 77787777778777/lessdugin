@@ -4,7 +4,9 @@
 // is added to a chapter (`seq_add`), and "Edit sequence" opens the full editor (`seq_edit`).
 // Positions are the record's (`raw`): the view leaves out the entries it cannot display.
 // `seq_remove` takes out every entry naming the post (organisation.rs), so the control says so
-// when the record lists the post more than once; the editor removes a single entry.
+// when the record lists the post more than once; the editor removes a single entry. Posts open
+// with the sequence as their context (`get_post(uri, sequence)`), so their next and previous
+// links follow it, and the last one opened is offered as "Continue reading" (§14, §16).
 
 import type { ChapterView, PostSummary, SequencePosition } from "@lessdugin/engine/types";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -12,6 +14,7 @@ import { getRouteApi, Link } from "@tanstack/react-router";
 import { useState } from "react";
 import { ActorName } from "../components/ActorName.tsx";
 import { PostListItem } from "../components/PostListItem.tsx";
+import { RecordLink } from "../components/RecordLink.tsx";
 import { RenderedHtml } from "../components/RenderedHtml.tsx";
 import { AddPost } from "../components/SequenceForm.tsx";
 import { ErrorView, errorMessage, Loading } from "../components/Status.tsx";
@@ -22,6 +25,7 @@ import { useSendWrite } from "../engine/queued.ts";
 import { stringField } from "../lib/records.ts";
 import { type EntryMove, entryMove, MAX_CHAPTER_POSTS, recordChapters } from "../lib/sequences.ts";
 import { cleanName } from "../lib/text.ts";
+import { fullDate } from "../lib/time.ts";
 import { parseAtUri } from "../lib/uri.ts";
 import ui from "../styles/ui.module.css";
 
@@ -116,10 +120,12 @@ function EntryControls({
 }
 
 function Chapter({
+  sequence,
   chapter,
   i,
   editing,
 }: {
+  sequence: string;
   chapter: ChapterView;
   i: number;
   /** The author's controls, with the record's entries of every chapter and the view's. */
@@ -144,7 +150,7 @@ function Chapter({
       {chapter.posts.map((p, k) => (
         // biome-ignore lint/suspicious/noArrayIndexKey: a chapter may list a post twice
         <div key={`${k}:${p.uri}`}>
-          <PostListItem post={p} />
+          <PostListItem post={p} sequence={sequence} />
           {editing && (
             <EntryControls
               post={p}
@@ -184,7 +190,10 @@ function Sequence({ uri }: { uri: string }) {
   const writes = useEntryWrites(uri);
   if (q.isPending) return <Loading />;
   if (q.isError) return <ErrorView page error={q.error} title="Sequence not found" />;
-  const { sequence, body, chapters } = q.data;
+  const { sequence, body, chapters, continueReading } = q.data;
+  const resume = continueReading
+    ? chapters.flatMap((c) => c.posts).find((x) => x.uri === continueReading.post)
+    : undefined;
   const p = parseAtUri(uri);
   const record = raw.data ? recordChapters(raw.data.record) : undefined;
   const forum = raw.data ? stringField(raw.data.record, "forum") : undefined;
@@ -213,10 +222,29 @@ function Sequence({ uri }: { uri: string }) {
           </Link>
         </div>
       )}
+      {continueReading && (
+        <p className={ui.notice} data-testid="continue-reading">
+          <RecordLink uri={continueReading.post} sequence={uri}>
+            Continue reading
+            {resume && (
+              <>
+                : <bdi>{cleanName(resume.title ?? resume.excerpt, 300)}</bdi>
+              </>
+            )}
+          </RecordLink>{" "}
+          <span className={ui.small}>
+            (last opened{" "}
+            <time dateTime={new Date(continueReading.atMs).toISOString()}>
+              {fullDate(continueReading.atMs)}
+            </time>
+            )
+          </span>
+        </p>
+      )}
       {body && <RenderedHtml html={body.html} media={body.media} />}
       {chapters.map((c, i) => (
         // biome-ignore lint/suspicious/noArrayIndexKey: chapters have no identity but their order
-        <Chapter key={i} chapter={c} i={i} editing={editing} />
+        <Chapter key={i} sequence={uri} chapter={c} i={i} editing={editing} />
       ))}
     </article>
   );

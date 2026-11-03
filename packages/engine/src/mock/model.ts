@@ -25,11 +25,13 @@ import type {
   MyOpinion,
   NotificationReason,
   PostKind,
+  ReadingPosition,
   RenderedBody,
   Settings,
   Slug,
   Stance,
   SubscriptionEntry,
+  TagVoteValue,
   TextQuote,
   Tier,
   VersionEntry,
@@ -135,6 +137,8 @@ export interface MyReact {
 
 export interface MyOpinionRec extends MyOpinion {
   reacts: MyReact[];
+  /** The `#tagVote` entries, by slug (social.md §13.3). */
+  tags?: Record<Slug, TagVoteValue>;
 }
 
 export interface TagRec {
@@ -244,6 +248,8 @@ export interface MockState {
   // local state
   followed: Map<AtUri, string | undefined>;
   lastVisited: Map<AtUri, number>;
+  /** "Continue reading" (social.md §14, §16): by sequence, the post last opened from it. */
+  seqpos: Map<AtUri, ReadingPosition>;
   drafts: Map<string, DraftEntry>;
   bookmarks: Map<AtUri, BookmarkEntry>;
   subscriptions: SubscriptionEntry[];

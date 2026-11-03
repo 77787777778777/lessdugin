@@ -4,6 +4,7 @@
 // policy and nothing logged an error.
 
 import { expect, type Page, test } from "@playwright/test";
+import { buildFixture } from "../../packages/engine/src/mock/fixture.ts";
 import { FORUM, FORUM_PATH, type Watch, WELCOME, WELCOME_PATH, watch } from "./helpers.ts";
 import { startStaticServer } from "./serve.mjs";
 
@@ -243,6 +244,58 @@ test("a spilled post edit preserves its media and link-card draft fields", async
   );
 });
 
+test("an edit removes a link post's card and keeps the link (EditOpts.dropLinkCard)", async ({
+  page,
+}) => {
+  const { postUri } = buildFixture();
+  const [, , did, , rkey] = (postUri.fdt ?? "").split("/");
+  // carol's link post has a card: sign in as carol (the mock resolves the fixture handle)
+  await go(page, "/login", "Sign in");
+  await page.getByLabel("Your handle or DID").fill("carol.test");
+  await page.getByRole("button", { name: "Continue" }).click();
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
+  await expect(page.getByRole("heading", { level: 1, name: "Your forums" })).toBeVisible();
+  await page.evaluate((hash) => {
+    location.hash = hash;
+  }, `#/p/${did}/${rkey}`);
+  const title = "Paper: Functional Decision Theory";
+  await expect(page.getByRole("heading", { level: 1, name: title })).toBeVisible();
+  await expect(page.getByText("Yudkowsky and Soares, 2017.")).toBeVisible();
+  await page.getByRole("link", { name: "Edit", exact: true }).click();
+  const remove = page.getByRole("checkbox", { name: "Remove the link card" });
+  await expect(remove).not.toBeChecked();
+  await remove.check();
+  await page.getByRole("button", { name: "Save edit" }).click();
+  await expect(page.getByRole("heading", { level: 1, name: title })).toBeVisible();
+  await expect(page.getByText("Post updated")).toBeVisible();
+  await expect(page.getByText("Yudkowsky and Soares, 2017.")).toHaveCount(0);
+  await expect(
+    page.getByRole("link", { name: /Functional Decision Theory: A New Theory/ }),
+  ).toHaveCount(0);
+  // the link stays, without its card
+  await page.getByRole("link", { name: "Edit", exact: true }).click();
+  await expect(page.getByRole("textbox", { name: "Link", exact: true })).toHaveValue(
+    "https://arxiv.org/abs/1710.05060",
+  );
+  await expect(page.getByRole("checkbox", { name: "Remove the link card" })).toHaveCount(0);
+});
+
+test("the forum directory lists forums under their owner (sync.md §4.7)", async ({ page }) => {
+  await go(page, "/", "Your forums");
+  await expect(page.getByRole("heading", { level: 2, name: "Discover" })).toHaveCount(0);
+  await page
+    .getByRole("article", { name: FORUM })
+    .getByRole("button", { name: "Unfollow" })
+    .click();
+  await expect(page.getByRole("heading", { level: 2, name: "Discover" })).toBeVisible();
+  const owner = page.getByRole("heading", { level: 3, name: /^Forums by Ada Lovelace/ });
+  await expect(owner).toBeVisible();
+  // the forum's card is in its owner's group, titled one level below the owner
+  await expect(
+    owner.locator("xpath=..").getByRole("heading", { level: 4, name: FORUM }),
+  ).toBeVisible();
+});
+
 test("create a forum, edit its declaration and manage a moderator", async ({ page }) => {
   await go(page, "/", "Your forums");
   await page.getByRole("button", { name: "Create a forum" }).click();
@@ -281,6 +334,35 @@ test("create a forum, edit its declaration and manage a moderator", async ({ pag
   await expect(mods).not.toContainText("Bob Moderator");
 });
 
+test("an approval forum's mod queue says where its applicants come from (O-8)", async ({
+  page,
+}) => {
+  await go(page, "/", "Your forums");
+  await page.getByRole("button", { name: "Create a forum" }).click();
+  const form = page.getByRole("region", { name: "Create a forum" });
+  await form.getByLabel("Address").fill("by-approval");
+  await form.getByLabel("Name").fill("By approval");
+  await form.getByRole("button", { name: "Create the forum" }).click();
+  await expect(page.getByRole("heading", { level: 1, name: "By approval" })).toBeVisible();
+  await page.getByRole("link", { name: "Moderation" }).click();
+  // above the queue, also while it is empty
+  await expect(page.locator('[data-banner="applicantsViaHints"]')).toContainText(
+    "Notice: Applicants are found only through",
+  );
+  await expect(page.getByText("Nothing to review.")).toBeVisible();
+  // with direct sources, the stronger warning
+  await page.getByRole("button", { name: /You \(mock account\)/ }).click();
+  await page.getByRole("menuitem", { name: "Settings" }).click();
+  const direct = page.getByRole("radio", { name: /^Direct/ });
+  await direct.click();
+  await expect(direct).toBeChecked();
+  await page.goBack();
+  await expect(page.locator('[data-banner="applicantsNotDiscovered"]')).toContainText(
+    "Warning: This device uses direct sources only",
+  );
+  await expect(page.locator('[data-banner="applicantsViaHints"]')).toHaveCount(0);
+});
+
 test("vote on the tags of someone else's post", async ({ page }) => {
   await go(page, WELCOME_PATH, WELCOME);
   const post = page.getByRole("article", { name: WELCOME });
@@ -298,6 +380,7 @@ test("vote on the tags of someone else's post", async ({ page }) => {
   const choose = panel.getByLabel("Apply another tag");
   const option = await choose.locator("option").nth(1).getAttribute("value");
   if (!option) throw new Error("no other tag to apply");
+  const optionName = (await choose.locator("option").nth(1).textContent()) ?? "";
   await choose.selectOption(option);
   await panel.getByRole("button", { name: "Vote to apply" }).click();
   await expect(panel.getByRole("listitem")).toHaveCount(await panel.getByRole("listitem").count());
@@ -307,6 +390,31 @@ test("vote on the tags of someone else's post", async ({ page }) => {
       .last()
       .getByRole("button", { name: /Applies/ }),
   ).toHaveAttribute("aria-pressed", "true");
+  // once each vote is sent (after its undo window), the view has it, with each tag's relevance
+  const firstName = (await first.locator("span").first().textContent()) ?? "";
+  await expect(first).toContainText("relevance 2 · applies");
+  await expect(panel.getByRole("listitem").last()).toContainText("relevance 1 · applies");
+  await page.getByRole("link", { name: /^Notifications/ }).click();
+  await expect(page.getByRole("heading", { level: 1, name: "Notifications" })).toBeVisible();
+  await page.goBack();
+  await page
+    .getByRole("article", { name: WELCOME })
+    .getByRole("button", { name: "Vote on tags" })
+    .click();
+  // the votes are the engine's (PostView.tagRelevance), not this page's memory: they are still
+  // shown once the post is opened again
+  const again = page.getByRole("region", { name: "Tag votes" }).getByRole("listitem");
+  for (const [name, text] of [
+    [firstName, "relevance 2 · applies"],
+    [optionName, "relevance 1 · applies"],
+  ] as const) {
+    const item = again.filter({ hasText: name });
+    await expect(item.getByRole("button", { name: /Applies/ })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    await expect(item).toContainText(text);
+  }
 });
 
 test("edit a wiki page against its head and read its history (engine-api.md §3.5)", async ({
@@ -336,6 +444,115 @@ test("edit a wiki page against its head and read its history (engine-api.md §3.
   await page.getByRole("textbox", { name: "Name", exact: true }).fill("Calibration");
   await page.getByRole("button", { name: "Create page" }).click();
   await expect(page.getByRole("heading", { level: 2, name: "Calibration" })).toBeVisible();
+});
+
+test("a wiki save that meets a newer head keeps the text and is redone after a reload (O-2)", async ({
+  page,
+}) => {
+  // `?wikirace`: another participant's revision lands while the editor is open
+  await page.goto(`${server.url}/?mock&wikirace#${FORUM_PATH}/t/decision-theory/edit`);
+  const body = page.getByRole("textbox", { name: /^Page/ });
+  await expect(body).toHaveValue(/## Classic problems/);
+  const mine = "Decision theory, rewritten by me.";
+  await body.fill(mine);
+  const parent = page.getByRole("checkbox", { name: "Rationality" });
+  await page.getByRole("group", { name: "Parent tags" }).getByText("Rationality").click();
+  await expect(parent).toBeChecked();
+  await page.getByRole("button", { name: "Save page" }).click();
+  const alert = page.getByRole("alert");
+  await expect(alert).toContainText("This page changed since you opened it.");
+  await expect(body).toHaveValue(mine);
+  await alert.getByRole("button", { name: "Reload the page" }).click();
+  const kept = page.getByRole("region", { name: "Your unsaved edit" });
+  await expect(kept.getByRole("textbox", { name: "Your unsaved text" })).toHaveValue(mine);
+  await expect(kept).toContainText("Your parent tags: Rationality");
+  await expect(body).toHaveValue(/An edit made elsewhere/);
+  await expect(parent).not.toBeChecked();
+  // the whole edit comes back: its text and its parent tag
+  await kept.getByRole("button", { name: "Use my text" }).click();
+  await expect(body).toHaveValue(mine);
+  await expect(parent).toBeChecked();
+  await page.getByRole("button", { name: "Save page" }).click();
+  await expect(page.getByText("Page saved (a public revision)")).toBeVisible();
+  await expect(page.getByText(mine)).toBeVisible();
+  await page.getByRole("link", { name: "History", exact: true }).click();
+  const revisions = page.getByRole("list", { name: "Revisions" }).getByRole("listitem");
+  // the genesis, carol's edit, the concurrent edit and the redone one, in one chain
+  await expect(revisions).toHaveCount(4);
+  await expect(revisions.nth(1)).toContainText("A concurrent edit");
+});
+
+test("posts opened from a sequence follow it, and its page offers continue reading (§3.4)", async ({
+  page,
+}) => {
+  const { postUri } = buildFixture();
+  const path = (uri: string | undefined): string => {
+    const [, , did, , rkey] = (uri ?? "").split("/");
+    return `/p/${did}/${rkey}`;
+  };
+  const part1 = "Map and Territory, part 1: models";
+  const part2 = "Map and Territory, part 2: updating";
+  // an own sequence that lists part 2 after another post
+  await go(page, `${FORUM_PATH}/seqs`, FORUM);
+  await page.getByRole("link", { name: "New sequence" }).click();
+  await page.getByRole("textbox", { name: "Title", exact: true }).fill("Reading order");
+  const add = page.getByRole("textbox", { name: "Add a post to chapter 1" });
+  await add.fill(`#${path(postUri.confusion)}`);
+  await page.getByRole("button", { name: "Add", exact: true }).click();
+  await add.fill(`#${path(postUri.map2)}`);
+  await page.getByRole("button", { name: "Add", exact: true }).click();
+  await expect(page.getByRole("list", { name: "Posts of chapter 1" })).toContainText(part2);
+  await page.getByRole("button", { name: "Create sequence" }).click();
+  await expect(page.getByRole("heading", { level: 1, name: "Reading order" })).toBeVisible();
+  await expect(page.getByTestId("continue-reading")).toHaveCount(0);
+
+  // opened from this sequence, part 2 navigates it rather than its author's own
+  await page.getByRole("link", { name: part2, exact: true }).click();
+  await expect(page.getByRole("heading", { level: 1, name: part2 })).toBeVisible();
+  const nav = page.getByRole("navigation", { name: "Sequence: Reading order" });
+  await expect(nav).toBeVisible();
+  await expect(page.getByRole("navigation", { name: "Sequence: Map and Territory" })).toHaveCount(
+    0,
+  );
+  await nav.getByRole("link", { name: "← Previous" }).click();
+  await expect(page.getByRole("heading", { level: 1, name: "Noticing confusion" })).toBeVisible();
+  // the previous link kept the sequence: its next leads back to part 2
+  await expect(
+    page.getByRole("navigation", { name: "Sequence: Reading order" }).getByRole("link", {
+      name: "Next →",
+    }),
+  ).toBeVisible();
+  await page
+    .getByRole("navigation", { name: "Sequence: Reading order" })
+    .getByRole("link", { name: "Reading order" })
+    .click();
+  const resume = page.getByTestId("continue-reading");
+  await expect(resume).toContainText("Continue reading: Noticing confusion");
+  await resume.getByRole("link").click();
+  await expect(page.getByRole("heading", { level: 1, name: "Noticing confusion" })).toBeVisible();
+  // part 2 opened again from the sequence moves the position back, while its view is cached
+  await page
+    .getByRole("navigation", { name: "Sequence: Reading order" })
+    .getByRole("link", { name: "Next →" })
+    .click();
+  await expect(page.getByRole("heading", { level: 1, name: part2 })).toBeVisible();
+  await page
+    .getByRole("navigation", { name: "Sequence: Reading order" })
+    .getByRole("link", { name: "Reading order" })
+    .click();
+  await expect(page.getByTestId("continue-reading")).toContainText(`Continue reading: ${part2}`);
+
+  // opened on its own, part 1 navigates its author's sequence; next keeps following it
+  await go(page, path(postUri.map1), part1);
+  const theirs = page.getByRole("navigation", { name: "Sequence: Map and Territory" });
+  await theirs.getByRole("link", { name: "Next →" }).click();
+  await expect(page.getByRole("heading", { level: 1, name: part2 })).toBeVisible();
+  await expect(page.getByRole("navigation", { name: "Sequence: Map and Territory" })).toBeVisible();
+  await page
+    .getByRole("navigation", { name: "Sequence: Map and Territory" })
+    .getByRole("link", { name: "Map and Territory" })
+    .click();
+  await expect(page.getByTestId("continue-reading")).toContainText(`Continue reading: ${part2}`);
 });
 
 test("create a sequence, then reorder and remove its entries (engine-api.md §3.5)", async ({

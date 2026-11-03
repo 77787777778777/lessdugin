@@ -8,7 +8,7 @@
 // logical clock that starts at the fixture's "now" and advances one second per write.
 
 import type { EngineApi } from "./api.ts";
-import { buildFixture, FIXTURE_NOW, FK, FORUM_URI } from "./mock/fixture.ts";
+import { ACTOR_DID, buildFixture, FIXTURE_NOW, FK, FORUM_URI } from "./mock/fixture.ts";
 import type {
   ActorRec,
   BaseReact,
@@ -98,10 +98,12 @@ import {
   type PostDraft,
   type PostList,
   type PostSummary,
+  type PostTag,
   type PostView,
   type PublicActionKind,
   type RawView,
   type ReactTally,
+  type ReadingPosition,
   type Ref,
   type RefContext,
   type RenderedBody,
@@ -152,6 +154,9 @@ export interface MockEngineOptions {
   signedOut?: boolean;
   /** Serve every present body/about as a textBlob in `raw`; `bodySource` still reads its text. */
   spilledBodies?: boolean;
+  /** The first wiki edit that names a `base` meets another participant's revision of the page,
+   * made since the editor loaded it, so it is refused as `wikiHeadMoved` (decision O-2). */
+  wikiRace?: boolean;
 }
 
 type Timer = ReturnType<typeof setTimeout>;
@@ -289,11 +294,20 @@ function hot(
   return b / (h + offsetHours) ** (exponentMilli / 1000);
 }
 
+/** The approval-mode mod queue's banners (views.rs `APPLICANTS_ASSISTED`, `APPLICANTS_DIRECT`). */
+const APPLICANTS_ASSISTED =
+  "Applicants are found only through Constellation, Jetstream, a relay or an indexer, so some " +
+  "may be missing. Applicants can also reach you out of band.";
+const APPLICANTS_DIRECT =
+  "This device uses direct sources only, so it does not look for applicants: the list shows " +
+  "only those found before. Switch sources to assisted, or hear from applicants out of band.";
+
 export class MockEngine implements EngineApi {
   private readonly s: MockState;
   private readonly holdMs: number;
   private readonly sendMs: number;
   private readonly spilledBodies: boolean;
+  private wikiRace: boolean;
   private ticks = 0;
   private readonly listeners = new Set<EventListener>();
   private readonly queue: EngineEvent[] = [];
@@ -307,6 +321,7 @@ export class MockEngine implements EngineApi {
     this.holdMs = opts.holdMs ?? OPINION_UNDO_WINDOW_MS;
     this.sendMs = opts.sendMs ?? 250;
     this.spilledBodies = opts.spilledBodies ?? false;
+    this.wikiRace = opts.wikiRace ?? false;
     if (opts.signedOut) this.s.active = null;
   }
 
@@ -568,19 +583,37 @@ export class MockEngine implements EngineApi {
     return clone(state);
   }
 
+  /** The post's tags (social.md §13.3) by slug, as `PostView.tagRelevance` has them: every slug
+   * the author declared or the viewer voted on. `rel` is the author's own (1 for a declared
+   * slug, unless the author is restricted from `tag`) plus the viewer's tag vote while the
+   * viewer is in E (the mock records no other voter's tag votes); a slug applies when its wiki
+   * page exists, is a tag and `rel > 0`. */
+  private tagRelevance(p: PostRec): PostTag[] {
+    const pages = this.s.tags.get(p.forum);
+    const own = this.s.actors.get(p.author)?.restricted?.includes("tag") !== true;
+    const declared = new Set(own ? p.tags : []);
+    const votes = this.s.active === p.author ? {} : (this.myOpinion(p.uri)?.tags ?? {});
+    const counted = this.viewerWeighted();
+    return [...new Set([...declared, ...Object.keys(votes)])].sort().map((slug) => {
+      const mine = votes[slug];
+      const relevance = (declared.has(slug) ? 1 : 0) + (counted ? karmaPower(mine) : 0);
+      const page = pages?.get(slug);
+      const tag: PostTag = {
+        slug,
+        relevance,
+        applies: page !== undefined && page.isTag !== false && relevance > 0,
+      };
+      if (mine !== undefined) tag.mine = mine;
+      return tag;
+    });
+  }
+
   /** The post's applied tags (social.md §13.3 `applies(p, t)`), sorted, as `PostSummary.tags`
-   * has them: a declared tag applies once its wiki page exists and is a tag, unless the author
-   * is restricted from `tag`. The mock records no tag votes of other voters, so `rel` is the
-   * author's own; the declared tags stay in the record (`raw`, an edit's draft). */
+   * has them; the declared tags stay in the record (`raw`, an edit's draft). */
   private appliedTags(p: PostRec): Slug[] {
-    const tags = this.s.tags.get(p.forum);
-    if (!tags || this.s.actors.get(p.author)?.restricted?.includes("tag") === true) return [];
-    return [...new Set(p.tags)]
-      .filter((slug) => {
-        const t = tags.get(slug);
-        return t !== undefined && t.isTag !== false;
-      })
-      .sort();
+    return this.tagRelevance(p)
+      .filter((t) => t.applies)
+      .map((t) => t.slug);
   }
 
   private postSummary(p: PostRec): PostSummary {
@@ -623,7 +656,7 @@ export class MockEngine implements EngineApi {
     return uri === FORUM_URI ? FK : b32hash(`lessdugin-fk/1:${uri}`, 12);
   }
 
-  private postView(p: PostRec): PostView {
+  private postView(p: PostRec, from?: AtUri): PostView {
     const summary = this.postSummary(p);
     const hidden = p.state.kind === "hidden";
     const view: PostView = {
@@ -633,11 +666,24 @@ export class MockEngine implements EngineApi {
       reacts: hidden ? [] : this.reacts(p.uri, p.reacts, p.body.text, this.forumRec(p.forum)),
       history: { revisions: p.revisions.length, redacted: p.redacted },
       sequences: [],
+      // a post that is not listed shows none, except to the forum's authorities (views.rs)
+      tagRelevance: listed(p.state) || this.isAuthority(p.forum) ? this.tagRelevance(p) : [],
     };
-    for (const seq of this.s.sequences.values()) {
-      const entries = seq.chapters.flatMap((c) => c.posts).filter((u) => this.s.posts.has(u));
+    // next and previous follow one context (social.md §14): the sequence the reader came from
+    // if it contains the post, else the author's own, else a listed one (score desc, uri asc)
+    const containing = [...this.s.sequences.values()]
+      .filter((s) => this.seqEntries(s).includes(p.uri))
+      .sort((a, b) => {
+        const d = this.scoreView(b.uri, b.base).score - this.scoreView(a.uri, a.base).score;
+        return d !== 0 ? d : a.uri < b.uri ? -1 : a.uri > b.uri ? 1 : 0;
+      });
+    const seq =
+      containing.find((s) => s.uri === from) ??
+      containing.find((s) => s.author === p.author) ??
+      containing[0];
+    if (seq) {
+      const entries = this.seqEntries(seq);
       const i = entries.indexOf(p.uri);
-      if (i < 0) continue;
       const nav: PostView["sequences"][number] = { sequence: seq.uri, title: seq.title };
       const prev = entries[i - 1];
       const next = entries[i + 1];
@@ -1091,11 +1137,30 @@ export class MockEngine implements EngineApi {
     return view;
   }
 
+  /** Grouped by owner as sync.md §4.7 orders the directory: owners with a verified handle
+   * first, by handle, then the others by DID; within an owner, by name (case-insensitive),
+   * then uri. */
   async forumDiscover(q: string): Promise<ForumSummary[]> {
     const needle = q.trim().toLowerCase();
+    const owner = (f: ForumSummary): [number, string] =>
+      f.owner.handleState === "verified" && f.owner.handle !== undefined
+        ? [0, f.owner.handle]
+        : [1, f.owner.did];
+    const cmp = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
     return [...this.s.forums.values()]
       .filter((f) => needle === "" || f.summary.name.toLowerCase().includes(needle))
-      .map((f) => this.forumSummary(f));
+      .map((f) => this.forumSummary(f))
+      .sort((a, b) => {
+        const [ga, ka] = owner(a);
+        const [gb, kb] = owner(b);
+        return (
+          ga - gb ||
+          cmp(ka, kb) ||
+          cmp(a.owner.did, b.owner.did) ||
+          cmp(a.name.toLowerCase(), b.name.toLowerCase()) ||
+          cmp(a.uri, b.uri)
+        );
+      });
   }
 
   async forumFollow(uri: AtUri, alias?: string): Promise<void> {
@@ -1522,8 +1587,22 @@ export class MockEngine implements EngineApi {
     return out;
   }
 
-  async getPost(uri: AtUri): Promise<PostView> {
-    return this.postView(this.postRec(uri));
+  /** `sequence`: the sequence the reader came from (engine-api.md §3.4 `get_post`): navigated
+   * when it contains the post, which then becomes its "continue reading" position. */
+  async getPost(uri: AtUri, sequence?: AtUri): Promise<PostView> {
+    if (sequence !== undefined && !splitAtUri(sequence)) {
+      throw err("invalid_ref", `Not an at-uri: ${sequence}`);
+    }
+    const view = this.postView(this.postRec(uri), sequence);
+    const nav = view.sequences[0];
+    if (nav !== undefined && nav.sequence === sequence) {
+      // a side effect of the read, announced only when the position moved
+      if (this.s.seqpos.get(sequence)?.post !== uri) {
+        this.s.seqpos.set(sequence, { post: uri, atMs: this.now() });
+        this.changed({ kind: "thread", uri: sequence });
+      }
+    }
+    return view;
   }
 
   async backlinks(uri: AtUri): Promise<PostSummary[]> {
@@ -1682,7 +1761,22 @@ export class MockEngine implements EngineApi {
       }),
     };
     if (seq.body !== undefined) view.body = renderMarkdown(seq.body).body;
+    // only while the post is a displayable entry, so a stale position shows nothing
+    const at = this.s.seqpos.get(uri);
+    if (at !== undefined && this.seqEntries(seq).includes(at.post)) {
+      view.continueReading = clone(at);
+    }
     return view;
+  }
+
+  /** A sequence's displayable entries (social.md §14 "Entries"), in order. */
+  private seqEntries(seq: SequenceRec): AtUri[] {
+    return seq.chapters
+      .flatMap((c) => c.posts)
+      .filter((u) => {
+        const p = this.s.posts.get(u);
+        return p !== undefined && listed(p.state);
+      });
   }
 
   async user(forum: AtUri | undefined, actor: string): Promise<UserView> {
@@ -1808,7 +1902,17 @@ export class MockEngine implements EngineApi {
     if (!this.isAuthorityDid(forum, this.s.active ?? "")) {
       throw err("blocked", "The mod queue is available to this forum's authorities only.");
     }
-    return { dto: DTO_VERSION, items: clone(this.s.modQueue.get(forum) ?? []) };
+    const queue: ModQueue = { dto: DTO_VERSION, items: clone(this.s.modQueue.get(forum) ?? []) };
+    // approval mode: where the applicants come from (sync.md §4.4, decision O-8), by the
+    // `sources` in effect, as views.rs `mod_queue` words it
+    if (this.forumRec(forum).membership === "approval") {
+      queue.banners = [
+        this.s.settings.sources === "direct"
+          ? { code: "applicantsNotDiscovered", message: APPLICANTS_DIRECT }
+          : { code: "applicantsViaHints", message: APPLICANTS_ASSISTED },
+      ];
+    }
+    return queue;
   }
 
   async modLog(forum: AtUri, _cursor?: string, _limit?: number): Promise<ModLog> {
@@ -2231,9 +2335,20 @@ export class MockEngine implements EngineApi {
         if (draft.post.title !== undefined && p.kind !== "quickTake") p.title = draft.post.title;
         p.tags = [...(draft.post.tags ?? [])];
         p.labels = [...(draft.post.labels ?? [])];
-        if (draft.post.link) {
-          const href = safeHref(draft.post.link.uri, "field");
-          p.link = { ...clone(draft.post.link), host: href?.kind === "external" ? href.host : "" };
+        const given = draft.post.link;
+        if (given) {
+          // engine-api.md §3.5 `edit`: a draft of the cached uri that names no title or
+          // description keeps the cached card, unless `dropLinkCard` writes it as given (the mock
+          // has no thumb to keep for a draft that names some)
+          const keep =
+            !opts.dropLinkCard &&
+            p.link?.uri === given.uri &&
+            given.title === undefined &&
+            given.description === undefined;
+          if (!keep) {
+            const href = safeHref(given.uri, "field");
+            p.link = { ...clone(given), host: href?.kind === "external" ? href.host : "" };
+          }
         } else {
           delete p.link;
         }
@@ -2336,8 +2451,14 @@ export class MockEngine implements EngineApi {
           }
           break;
         }
-        case "tag":
+        case "tag": {
+          const tags = { ...(op.tags ?? {}) };
+          if (intentCopy.value === undefined) delete tags[intentCopy.slug];
+          else tags[intentCopy.slug] = intentCopy.value;
+          if (Object.keys(tags).length > 0) op.tags = tags;
+          else delete op.tags;
           break;
+        }
       }
       mine.set(subjectUri, op);
       const p = splitAtUri(subjectUri);
@@ -2589,7 +2710,25 @@ export class MockEngine implements EngineApi {
     if (draft.name.trim() === "") throw err("invalid_input", "A wiki page needs a name.");
     // `base` (decision O-2, engine-api.md §3.5 `wiki_edit`): the head the author edited, refused
     // before enqueueing when the page's head is another revision (or the page has none)
-    const base = (draft as WikiDraft & { base?: AtUri }).base;
+    const base = draft.base;
+    if (this.wikiRace && base !== undefined && base === tags.get(slug)?.head) {
+      // another participant's edit of the page arrived since the editor loaded it
+      this.wikiRace = false;
+      const page = this.s.wiki.get(base);
+      const other = ACTOR_DID.carol === me ? ACTOR_DID.dan : ACTOR_DID.carol;
+      this.addWikiRevision(other ?? didFor("wiki-race"), forum, slug, base, {
+        name: page?.name ?? draft.name,
+        ...(page?.description !== undefined ? { description: page.description } : {}),
+        body: {
+          markdown: `${page?.body ?? ""}\n\nAn edit made elsewhere while this page was open.`,
+          media: [],
+        },
+        isTag: page?.isTag !== false,
+        parentTags: [...(page?.parentTags ?? [])],
+        summary: "A concurrent edit",
+      });
+      this.changed({ kind: "forum", uri: forum });
+    }
     const head = tags.get(slug)?.head;
     if (base !== undefined && base !== head) {
       const e = err("conflict", "This page changed since you opened it.");
@@ -2599,43 +2738,56 @@ export class MockEngine implements EngineApi {
     const parent = base ?? head;
     const d = clone(draft);
     return this.write(false, () => {
-      const t = this.tick();
-      const uri = atUri(
-        me,
-        COLL.wikiRevision,
-        `${this.fkOf(forum)}-${tid(t, this.s.nextId % 1024)}`,
-      );
-      const rev: WikiRevRec = {
-        uri,
-        cid: fakeCid(`${uri}#wiki`),
-        author: me,
-        forum,
-        slug,
-        parents: [],
-        name: d.name,
-        isTag: d.isTag,
-        parentTags: [...(d.parentTags ?? [])],
-        createdAtMs: t,
-      };
-      const parentRec = parent !== undefined ? this.s.wiki.get(parent) : undefined;
-      if (parentRec) rev.parents = [{ uri: parentRec.uri, cid: parentRec.cid }];
-      if (d.description !== undefined) rev.description = d.description;
-      if (d.body) rev.body = d.body.markdown;
-      if (d.summary !== undefined) rev.summary = d.summary;
-      this.s.wiki.set(uri, rev);
-      const prev = tags.get(slug);
-      const rec: TagRec = {
-        slug,
-        name: d.name,
-        unmergedEdits: prev?.unmergedEdits ?? 0,
-        head: uri,
-        isTag: d.isTag,
-      };
-      if (d.description !== undefined) rec.description = d.description;
-      if (d.body) rec.page = d.body.markdown;
-      tags.set(slug, rec);
-      return { uri, cid: rev.cid, topics: [{ kind: "forum", uri: forum }] };
+      const uri = this.addWikiRevision(me, forum, slug, parent, d);
+      return { uri, cid: this.s.wiki.get(uri)?.cid ?? "", topics: [{ kind: "forum", uri: forum }] };
     });
+  }
+
+  /** Writes a wiki revision of `slug` on `parent` and makes it the page's head. */
+  private addWikiRevision(
+    author: Did,
+    forum: AtUri,
+    slug: Slug,
+    parent: AtUri | undefined,
+    d: WikiDraft,
+  ): AtUri {
+    const tags = this.tagMap(forum);
+    const t = this.tick();
+    const uri = atUri(
+      author,
+      COLL.wikiRevision,
+      `${this.fkOf(forum)}-${tid(t, this.s.nextId % 1024)}`,
+    );
+    const rev: WikiRevRec = {
+      uri,
+      cid: fakeCid(`${uri}#wiki`),
+      author,
+      forum,
+      slug,
+      parents: [],
+      name: d.name,
+      isTag: d.isTag,
+      parentTags: [...(d.parentTags ?? [])],
+      createdAtMs: t,
+    };
+    const parentRec = parent !== undefined ? this.s.wiki.get(parent) : undefined;
+    if (parentRec) rev.parents = [{ uri: parentRec.uri, cid: parentRec.cid }];
+    if (d.description !== undefined) rev.description = d.description;
+    if (d.body) rev.body = d.body.markdown;
+    if (d.summary !== undefined) rev.summary = d.summary;
+    this.s.wiki.set(uri, rev);
+    const prev = tags.get(slug);
+    const rec: TagRec = {
+      slug,
+      name: d.name,
+      unmergedEdits: prev?.unmergedEdits ?? 0,
+      head: uri,
+      isTag: d.isTag,
+    };
+    if (d.description !== undefined) rec.description = d.description;
+    if (d.body) rec.page = d.body.markdown;
+    tags.set(slug, rec);
+    return uri;
   }
 
   private seqRec(uri: AtUri): SequenceRec {
@@ -2946,6 +3098,7 @@ export class MockEngine implements EngineApi {
         alias === undefined ? { uri } : { uri, alias },
       ),
       lastVisited: Object.fromEntries(this.s.lastVisited),
+      seqpos: clone(Object.fromEntries(this.s.seqpos)) as unknown as Json,
       drafts: clone([...this.s.drafts.values()]) as unknown as Json,
       bookmarks: clone([...this.s.bookmarks.values()]) as unknown as Json,
       subscriptions: clone(this.s.subscriptions) as unknown as Json,
@@ -2968,6 +3121,7 @@ export class MockEngine implements EngineApi {
     const j = json as unknown as {
       followed?: { uri: string; alias?: string }[];
       lastVisited?: Record<string, number>;
+      seqpos?: Record<string, ReadingPosition>;
       drafts?: DraftEntry[];
       bookmarks?: BookmarkEntry[];
       subscriptions?: SubscriptionEntry[];
@@ -2976,6 +3130,7 @@ export class MockEngine implements EngineApi {
     };
     if (j.followed) this.s.followed = new Map(j.followed.map((f) => [f.uri, f.alias]));
     if (j.lastVisited) this.s.lastVisited = new Map(Object.entries(j.lastVisited));
+    if (j.seqpos) this.s.seqpos = new Map(Object.entries(j.seqpos));
     if (j.drafts) this.s.drafts = new Map(j.drafts.map((d) => [d.id, d]));
     if (j.bookmarks) this.s.bookmarks = new Map(j.bookmarks.map((b) => [b.uri, b]));
     if (j.subscriptions) this.s.subscriptions = j.subscriptions;

@@ -89,6 +89,13 @@
   border-radius: var(--radius-lg);
 }
 
+/* the forum directory's owner of the forums below (sync.md §4.7 groups by owner) */
+.ownerHeading {
+  margin: var(--space-3) 0 0;
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+
 .forumCardTitle {
   margin: 0;
   font-family: var(--font-serif);

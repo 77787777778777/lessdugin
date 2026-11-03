@@ -6,6 +6,7 @@ import type { ForumIndexer, IndexerConsent } from "@lessdugin/engine/types";
 
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { qk } from "../engine/queries.ts";
 import { renderWithApp } from "../test/render.tsx";
 import { SettingsPage } from "./SettingsPage.tsx";
 
@@ -41,6 +42,20 @@ describe("SettingsPage", () => {
     expect(note).toMatch(/ask Jetstream only for your own accounts and those participants/);
     expect(note).toMatch(/Jetstream server's operator then learns all of these DIDs/);
     expect(note).toMatch(/which forums your accounts read/);
+  });
+
+  it("refreshes the mod queues when the sources change (their banner names them, O-8)", async () => {
+    const engine = new MockEngine();
+    const { queryClient } = renderWithApp(<SettingsPage />, { engine });
+    const key = qk.modQueue("at://did:plc:owner/forum/x");
+    queryClient.setQueryData(key, { dto: 1, items: [] });
+    queryClient.setQueryData(qk.members("at://did:plc:owner/forum/x"), []);
+    fireEvent.click(await screen.findByRole("radio", { name: /^Direct/ }));
+    await waitFor(() => expect(queryClient.getQueryState(key)?.isInvalidated).toBe(true));
+    expect(await engine.settings()).toMatchObject({ sources: "direct" });
+    expect(queryClient.getQueryState(qk.members("at://did:plc:owner/forum/x"))?.isInvalidated).toBe(
+      false,
+    );
   });
 
   it("shows a refused setting instead of leaving the rejection unhandled", async () => {

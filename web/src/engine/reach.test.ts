@@ -4,7 +4,9 @@
 // (writes) and §3.6 (local state), as the TUI's `REACH` table does (crates/tui/src/command.rs,
 // checked by crates/tui/tests/social.rs): the spec's tables and this map must name the same
 // operations, and each named source file must call its operation, so an operation the spec adds
-// fails here until the SPA reaches it (or says why it does not).
+// fails here until the SPA reaches it (or says why it does not). FIELD_REACH does the same for
+// the optional request fields and arguments and the output fields that M5 added to existing
+// operations (engine-api.md §1 "After the freeze (M5)"): where the SPA passes or shows each.
 
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -109,6 +111,41 @@ const REACH: Record<string, Reach> = {
   import_local: { file: "pages/SettingsPage.tsx" },
 };
 
+/** Where the SPA passes each M5 request field or argument, or reads each M5 output field: a
+ * source file (under src/) and the use it must contain. */
+const FIELD_REACH: Record<string, { file: string; uses: RegExp }> = {
+  // the viewer's tag votes and each tag's relevance, shown by TagVotes
+  "PostView.tagRelevance": { file: "pages/PostPage.tsx", uses: /\.tagRelevance\b/ },
+  // the head the wiki editor loaded
+  "WikiDraft.base": { file: "pages/forum/WikiEditPage.tsx", uses: /\bdraft\.base\s*=/ },
+  "ModQueue.banners": { file: "pages/forum/ForumModPage.tsx", uses: /\.data\?\.banners\b/ },
+  // a post opened from a sequence
+  "get_post(uri, sequence?)": {
+    file: "pages/PostPage.tsx",
+    uses: /\bengine\s*\.\s*getPost\(\s*uri\s*,\s*sequence\b/,
+  },
+  "SequenceView.continueReading": { file: "pages/SequencePage.tsx", uses: /\bcontinueReading\b/ },
+  "EditOpts.dropLinkCard": { file: "pages/forum/ForumNewPostPage.tsx", uses: /\bdropLinkCard:/ },
+};
+
+/** The fields and arguments engine-api.md §1 "After the freeze (M5)" adds to existing
+ * operations: each backticked name after "new optional request field", "output field" or
+ * "request argument". */
+function specM5Fields(): Set<string> {
+  const text = readFileSync(SPEC, "utf8");
+  const start = text.indexOf("- **After the freeze (M5).**");
+  const end = text.indexOf("\n- **", start + 1);
+  expect(start).toBeGreaterThan(0);
+  const paragraph = text.slice(start, end).replace(/\s+/g, " ");
+  const fields = new Set<string>();
+  for (const m of paragraph.matchAll(
+    /new optional (?:request field|output field|request argument):? `([^`]+)`/gi,
+  )) {
+    fields.add(m[1] ?? "");
+  }
+  return fields;
+}
+
 /** The operations of §3.2, §3.5 and §3.6, by name, from the spec's tables (as the TUI's
  * `spec_operations` reads them): each backticked code of a row's first cell names one. */
 function specOperations(): Set<string> {
@@ -180,5 +217,22 @@ describe("every engine operation has a way in (docs/plan.md §M3)", () => {
       expect(done.has(n), `${op} names done milestone M${n}`).toBe(false);
       expect(n, `${op} names landed milestone M${n}`).toBeGreaterThanOrEqual(FIRST_OPEN_MILESTONE);
     }
+  });
+});
+
+describe("every M5 field and argument has a way in (engine-api.md §1, After the freeze)", () => {
+  it("names the fields of the spec's M5 paragraph, and nothing else", () => {
+    const spec = specM5Fields();
+    expect(spec.size).toBeGreaterThanOrEqual(6);
+    const reach = new Set(Object.keys(FIELD_REACH));
+    expect([...spec].filter((f) => !reach.has(f))).toEqual([]);
+    expect([...reach].filter((f) => !spec.has(f))).toEqual([]);
+  });
+
+  it("passes or shows each where it says", () => {
+    const missing = Object.entries(FIELD_REACH)
+      .filter(([, r]) => !r.uses.test(readFileSync(`${SRC}${r.file}`, "utf8")))
+      .map(([field, r]) => `${field} in ${r.file}`);
+    expect(missing).toEqual([]);
   });
 });

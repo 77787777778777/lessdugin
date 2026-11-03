@@ -130,6 +130,100 @@ for (const scheme of ["light", "dark"] as const) {
         await page.waitForLoadState("networkidle");
         found.push(...(await axe(page, path)));
       }
+      // a save that meets a newer head (`?wikirace`), then the reload with the author's text
+      await page.goto(`/?mock&wikirace#${FORUM_PATH}/t/decision-theory/edit`);
+      await page.getByRole("textbox", { name: /^Page/ }).fill("My edit.");
+      await page.getByRole("group", { name: "Parent tags" }).getByText("Rationality").click();
+      await page.getByRole("button", { name: "Save page" }).click();
+      const alert = page.getByRole("alert");
+      await expect(alert).toContainText("This page changed since you opened it.");
+      found.push(...(await axe(page, "wiki head moved")));
+      await alert.getByRole("button", { name: "Reload the page" }).click();
+      await expect(page.getByRole("region", { name: "Your unsaved edit" })).toContainText(
+        "Your parent tags: Rationality",
+      );
+      found.push(...(await axe(page, "wiki reloaded with the unsaved edit")));
+      expect(found).toEqual([]);
+      expect(w.errors).toEqual([]);
+    });
+
+    test("a post in a sequence, and the sequence's continue reading", async ({ page }) => {
+      const w = await watch(page);
+      const found: string[] = [];
+      await open(page, SEQUENCE_PATH, () =>
+        expect(page.getByRole("heading", { level: 1, name: "Map and Territory" })).toBeVisible(),
+      );
+      await page.getByRole("link", { name: "Map and Territory, part 1: models" }).click();
+      await expect(
+        page.getByRole("navigation", { name: "Sequence: Map and Territory" }),
+      ).toBeVisible();
+      await page.waitForLoadState("networkidle");
+      found.push(...(await axe(page, "post opened from a sequence")));
+      await page
+        .getByRole("navigation", { name: "Sequence: Map and Territory" })
+        .getByRole("link", { name: "Map and Territory" })
+        .click();
+      await expect(page.getByTestId("continue-reading")).toBeVisible();
+      found.push(...(await axe(page, "sequence with continue reading")));
+      expect(found).toEqual([]);
+      expect(w.errors).toEqual([]);
+    });
+
+    test("the post editor's link card control", async ({ page }) => {
+      const w = await watch(page);
+      const { postUri } = buildFixture();
+      const [, , did, , rkey] = (postUri.fdt ?? "").split("/");
+      // carol's link post has a card
+      await page.goto("/?mock#/login");
+      await page.getByLabel("Your handle or DID").fill("carol.test");
+      await page.getByRole("button", { name: "Continue" }).click();
+      await page.getByRole("button", { name: "Sign in", exact: true }).click();
+      await expect(page.getByRole("heading", { level: 1, name: "Your forums" })).toBeVisible();
+      await page.evaluate((hash) => {
+        location.hash = hash;
+      }, `#/p/${did}/${rkey}`);
+      await page.getByRole("link", { name: "Edit", exact: true }).click();
+      await page.getByRole("checkbox", { name: "Remove the link card" }).check();
+      await page.waitForLoadState("networkidle");
+      expect(await axe(page, "post editor, remove the link card")).toEqual([]);
+      expect(w.errors).toEqual([]);
+    });
+
+    test("the forum directory's owner headings", async ({ page }) => {
+      const w = await watch(page);
+      await open(page, "/", () =>
+        expect(page.getByRole("heading", { level: 1, name: "Your forums" })).toBeVisible(),
+      );
+      await page
+        .getByRole("article", { name: "LessDugin Test Forum" })
+        .getByRole("button", { name: "Unfollow" })
+        .click();
+      await expect(page.getByRole("heading", { level: 3, name: /^Forums by / })).toBeVisible();
+      expect(await axe(page, "directory with owner headings")).toEqual([]);
+      expect(w.errors).toEqual([]);
+    });
+
+    test("mod queue banners of an approval forum (O-8)", async ({ page }) => {
+      const w = await watch(page);
+      const found: string[] = [];
+      // an approval forum's mod queue with its applicant notice, then the direct-sources warning
+      await page.goto(`/?mock#/`);
+      await page.getByRole("button", { name: "Create a forum" }).click();
+      const form = page.getByRole("region", { name: "Create a forum" });
+      await form.getByLabel("Address").fill("by-approval");
+      await form.getByLabel("Name").fill("By approval");
+      await form.getByRole("button", { name: "Create the forum" }).click();
+      await page.getByRole("link", { name: "Moderation" }).click();
+      await expect(page.locator('[data-banner="applicantsViaHints"]')).toBeVisible();
+      found.push(...(await axe(page, "mod queue, applicants via hints")));
+      await page.getByRole("button", { name: /You \(mock account\)/ }).click();
+      await page.getByRole("menuitem", { name: "Settings" }).click();
+      const direct = page.getByRole("radio", { name: /^Direct/ });
+      await direct.click();
+      await expect(direct).toBeChecked();
+      await page.goBack();
+      await expect(page.locator('[data-banner="applicantsNotDiscovered"]')).toBeVisible();
+      found.push(...(await axe(page, "mod queue, applicants not discovered")));
       expect(found).toEqual([]);
       expect(w.errors).toEqual([]);
     });

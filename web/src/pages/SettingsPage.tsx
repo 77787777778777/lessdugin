@@ -55,6 +55,12 @@ export function useSetSetting() {
     }
     await qc.invalidateQueries({ queryKey: qk.settings() });
     if (key === "indexers") await qc.invalidateQueries({ queryKey: ["forumIndexers"] });
+    // an approval-mode mod queue says where applicants come from by the sources in effect
+    if (key === "sources") {
+      await qc.invalidateQueries({
+        predicate: (q) => q.queryKey[0] === "forum" && q.queryKey[2] === "modQueue",
+      });
+    }
     return true;
   };
 }

@@ -1465,6 +1465,7 @@ export function buildFixture(): Fixture {
     active: me,
     followed: new Map([[FORUM_URI, undefined]]),
     lastVisited: new Map([[postUri.welcome ?? "", FIXTURE_NOW - 2 * D]]),
+    seqpos: new Map(),
     drafts: new Map([
       [
         "draft-1",

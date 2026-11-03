@@ -5,9 +5,10 @@
 // assertions can be adopted.
 import { MockEngine } from "@lessdugin/engine/mock";
 import { DTO_VERSION, type ForumView, type ModLogEntry } from "@lessdugin/engine/types";
-import { fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { AdoptionReport } from "../../components/AdoptionReport.tsx";
+import { EMPTY_FORUM_DRAFT } from "../../components/ForumForm.tsx";
 import { renderWithApp } from "../../test/render.tsx";
 import { ForumModPage, isBlocked } from "./ForumModPage.tsx";
 import { ForumContext } from "./forumContext.tsx";
@@ -28,8 +29,8 @@ function entry(over: Partial<ModLogEntry>): ModLogEntry {
   };
 }
 
-async function setup(engine = new MockEngine({ holdMs: 0, sendMs: 0 })) {
-  const forum = (await engine.followed())[0]?.uri ?? "";
+async function setup(engine = new MockEngine({ holdMs: 0, sendMs: 0 }), uri?: string) {
+  const forum = uri ?? (await engine.followed())[0]?.uri ?? "";
   const view: ForumView = { ...(await engine.forumOpen(forum)), myRole: "owner" };
   delete view.viewer;
   renderWithApp(
@@ -272,5 +273,44 @@ describe("ForumModPage", () => {
     expect(approve).not.toHaveBeenCalled();
     await acknowledge();
     await waitFor(() => expect(approve).toHaveBeenCalledWith(forum, [applicant]));
+  });
+
+  // decision O-8: an owner can tell an empty queue from one whose applicants are not looked for
+  it("says above an empty approval-mode queue where applicants come from", async () => {
+    const engine = new MockEngine({ holdMs: 0, sendMs: 0 });
+    const t = await engine.forumCreate({
+      ...EMPTY_FORUM_DRAFT,
+      slug: "by-approval",
+      name: "By approval",
+      membership: "approval",
+    });
+    await waitFor(async () => expect((await engine.writeStatus(t.id))?.state.kind).toBe("done"));
+    const uri = (await engine.followed()).find((f) => f.name === "By approval")?.uri ?? "";
+    const first = await setup(engine, uri);
+    expect(await screen.findByText("Nothing to review.")).toBeTruthy();
+    const notice = document.querySelector('[data-banner="applicantsViaHints"]');
+    expect(notice?.textContent).toMatch(/^Notice: Applicants are found only through/);
+    expect(notice?.closest('[role="note"]')).toBeTruthy();
+    // it comes before the queue
+    const empty = screen.getByText("Nothing to review.");
+    expect(
+      (notice?.compareDocumentPosition(empty) ?? 0) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(first.forum).toBe(uri);
+    cleanup();
+
+    // direct sources: the stronger warning
+    await engine.setSetting("sources", "direct");
+    await setup(engine, uri);
+    expect(await screen.findByText("Nothing to review.")).toBeTruthy();
+    const warning = document.querySelector('[data-banner="applicantsNotDiscovered"]');
+    expect(warning?.textContent).toMatch(/^Warning: This device uses direct sources only/);
+    expect(document.querySelector('[data-banner="applicantsViaHints"]')).toBeNull();
+  });
+
+  it("shows no applicant banner for an open forum", async () => {
+    await setup();
+    expect(await screen.findByRole("table")).toBeTruthy();
+    expect(document.querySelector('[data-banner^="applicants"]')).toBeNull();
   });
 });
