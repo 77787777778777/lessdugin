@@ -354,9 +354,10 @@ impl<H: Host> LiveSource<H> {
         if self.loaded {
             return Ok(());
         }
-        self.loaded = true;
         let key = schema::cur_key(CURSOR_KEY);
         let raw = self.host.cache().get_many(vec![key]).await?.pop().flatten();
+        // Only once the row is read: a caller that dropped the read reads it again.
+        self.loaded = true;
         self.cursor = raw.and_then(|bytes| match row::decode::<CursorRow>(&bytes) {
             Ok(r) => Cursor::from_row(r),
             Err(e) => {
