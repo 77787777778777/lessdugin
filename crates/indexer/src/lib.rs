@@ -82,9 +82,9 @@ pub fn network_profile(
 
 /// At most this many folded forum models are kept for the query methods.
 pub const MODEL_CACHE_ENTRIES: usize = 32;
-/// A cached model serves queries for at least this many times its fold cost, and at least
+/// A cached model is fresh for at least this many times its fold cost, and at least
 /// `limits::MODEL_MAX_AGE_MS`, as in the engine's own cache: `now`-dependent ranking follows the
-/// clock, and a forum is refolded for queries at most once per such period.
+/// clock, and a forum is refolded for queries at most once per such period, in the background.
 pub const MODEL_AGE_FACTOR: i64 = 30;
 /// At most this many proofs are fetched for `getRecordProofs` at a time, so requests never
 /// queue on the ingest budget.
@@ -104,8 +104,8 @@ pub struct Indexer {
     /// Serialises projections: a model is built from the cache and applied under this lock, so
     /// an older build can never overwrite a newer projection.
     pub(crate) project_lock: Arc<tokio::sync::Mutex<()>>,
-    /// One fold at a time for queries whose model is missing or expired. Separate from
-    /// `project_lock`, so query load never delays a live projection.
+    /// One fold at a time for queries whose model is missing, or in the background for one
+    /// past its age. Separate from `project_lock`, so query load never delays a live projection.
     pub(crate) query_folds: Arc<tokio::sync::Semaphore>,
     pub(crate) models: Arc<std::sync::Mutex<Models>>,
     /// Permits for proofs fetched on behalf of `getRecordProofs` ([`API_PROOF_FETCHES`]).
@@ -142,19 +142,40 @@ struct CachedModel<M> {
     model: M,
 }
 
+/// What [`Models`] holds for a query.
+#[derive(Debug, PartialEq)]
+pub(crate) enum Cached<M> {
+    /// Within its age bound ([`MODEL_AGE_FACTOR`]).
+    Fresh(M),
+    /// Past its age bound (or folded at a later clock): still served, while one fold refreshes
+    /// it in the background.
+    Stale(M),
+    Missing,
+}
+
 impl<M: Clone> Models<M> {
-    /// The cached model of `forum`, unless it is older than its age bound ([`MODEL_AGE_FACTOR`]).
-    pub(crate) fn get(&mut self, forum: &str, now_ms: i64) -> Option<M> {
+    /// The cached model of `forum`, and whether it is within its age bound.
+    pub(crate) fn get(&mut self, forum: &str, now_ms: i64) -> Cached<M> {
         self.tick += 1;
         let tick = self.tick;
-        let entry = self.entries.get_mut(forum)?;
+        let Some(entry) = self.entries.get_mut(forum) else {
+            return Cached::Missing;
+        };
+        entry.used = tick;
         let max_age = lessdugin_core::limits::MODEL_MAX_AGE_MS
             .max(entry.cost_ms.saturating_mul(MODEL_AGE_FACTOR));
         if entry.built_ms > now_ms || now_ms.saturating_sub(entry.built_ms) > max_age {
-            return None;
+            Cached::Stale(entry.model.clone())
+        } else {
+            Cached::Fresh(entry.model.clone())
         }
-        entry.used = tick;
-        Some(entry.model.clone())
+    }
+
+    /// Puts every cached model past its age bound (tests).
+    fn expire(&mut self) {
+        for entry in self.entries.values_mut() {
+            entry.built_ms = i64::MIN;
+        }
     }
 
     /// The current projection epoch of `forum`.
@@ -242,6 +263,8 @@ pub struct Metrics {
     /// Folds built for queries because no projected model was cached (after a restart or an
     /// eviction); a request never refolds a cached forum.
     pub query_model_builds: AtomicU64,
+    /// Background folds of a cached query model past its age bound, served meanwhile.
+    pub query_model_refreshes: AtomicU64,
 }
 
 impl Metrics {
@@ -303,6 +326,10 @@ impl Metrics {
             (
                 "lessdugin_indexer_query_model_builds_total",
                 self.query_model_builds.load(Ordering::Relaxed),
+            ),
+            (
+                "lessdugin_indexer_query_model_refreshes_total",
+                self.query_model_refreshes.load(Ordering::Relaxed),
             ),
         ];
         let mut out = String::new();
@@ -396,6 +423,13 @@ impl Indexer {
         lessdugin_core::host::Host::now_ms(self.engine.host())
     }
 
+    /// Puts every cached query model past its age bound, as if its forum had been idle for
+    /// longer than [`MODEL_AGE_FACTOR`] allows (tests).
+    #[doc(hidden)]
+    pub fn expire_query_models(&self) {
+        ingest::lock(&self.models).expire();
+    }
+
     pub fn as_of(&self) -> serde_json::Value {
         let seq = self.store.latest_seq();
         let snapshot_ms = self.store.snapshot_ms();
@@ -427,16 +461,25 @@ mod tests {
     fn a_cached_model_expires_like_the_engines() {
         let max = lessdugin_core::limits::MODEL_MAX_AGE_MS;
         let mut models = Models::<u32>::default();
+        assert_eq!(models.get(F, 1_000), Cached::Missing);
         // A cheap fold serves for the engine's minimum age, then is refolded.
         models.project(F, 1, 1_000, 10);
-        assert_eq!(models.get(F, 1_000 + max), Some(1));
-        assert_eq!(models.get(F, 1_000 + max + 1), None);
+        assert_eq!(models.get(F, 1_000 + max), Cached::Fresh(1));
+        assert_eq!(models.get(F, 1_000 + max + 1), Cached::Stale(1));
         // An expensive fold serves for 30 times its cost.
         models.project(F, 2, 1_000, max);
-        assert_eq!(models.get(F, 1_000 + MODEL_AGE_FACTOR * max), Some(2));
-        assert_eq!(models.get(F, 1_000 + MODEL_AGE_FACTOR * max + 1), None);
-        // A clock that went backwards does not keep a model from the future.
-        assert_eq!(models.get(F, 999), None);
+        assert_eq!(
+            models.get(F, 1_000 + MODEL_AGE_FACTOR * max),
+            Cached::Fresh(2)
+        );
+        assert_eq!(
+            models.get(F, 1_000 + MODEL_AGE_FACTOR * max + 1),
+            Cached::Stale(2)
+        );
+        // A clock that went backwards does not keep a model from the future fresh.
+        assert_eq!(models.get(F, 999), Cached::Stale(2));
+        models.expire();
+        assert_eq!(models.get(F, 1_000), Cached::Stale(2));
     }
 
     #[test]
@@ -446,15 +489,15 @@ mod tests {
         // A projection finishes while the query's fold runs: the fold is not cached.
         models.project(F, 2, 10, 1);
         models.put_if(F, epoch, 1, 5, 1);
-        assert_eq!(models.get(F, 20), Some(2));
+        assert_eq!(models.get(F, 20), Cached::Fresh(2));
         // Without a racing projection the query's fold is cached; a removal also bumps.
         let epoch = models.epoch(F);
         models.put_if(F, epoch, 3, 15, 1);
-        assert_eq!(models.get(F, 20), Some(3));
+        assert_eq!(models.get(F, 20), Cached::Fresh(3));
         let epoch = models.epoch(F);
         models.remove(F);
         models.put_if(F, epoch, 4, 15, 1);
-        assert_eq!(models.get(F, 20), None);
+        assert_eq!(models.get(F, 20), Cached::Missing);
     }
 
     #[test]

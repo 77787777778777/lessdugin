@@ -2,7 +2,8 @@
 //! The indexer cold path (`sync.md` §14.3) next to the ordinary PDS sync it runs beside: head
 //! checks that a sync in flight does not hold up, the membership of a granted author on a
 //! hydrated page, the order in which the authors on screen are resolved, a proof admitted while
-//! a sync of its author commits, and a forum sync that its budget cut short. Offline, over
+//! a sync of its author commits, a forum sync that its budget cut short, and a forum sync
+//! started beside a cold page, which goes after it for a bounded time. Offline, over
 //! `FakeNet` on a `MemHost`, with a host that can hold chosen requests (a slow PDS) and a chosen
 //! write to its cache (a slow store) until the test releases them.
 
@@ -859,4 +860,160 @@ fn a_forum_sync_cut_short_by_its_budget_converges_in_the_background() {
         );
         assert!(!page.completeness.partial, "{:?}", page.completeness);
     });
+}
+
+/// An approval forum of `members` granted members, each with one post, served by a consented
+/// indexer whose first page shows the posts of the last `on_screen` members in DID order (the
+/// ones a participant sweep reaches last). Returns the page's posts and the members not on it.
+fn crowded_forum(
+    mem: &MemHost,
+    net: &FakeNet,
+    members: usize,
+    on_screen: usize,
+) -> (ForumKey, Vec<String>, Vec<Did>) {
+    let _ = net.default_pds();
+    let owner = net.add_account("owner.example.com");
+    let key = forum(mem, &owner, MembershipMode::Approval);
+    let mut accounts: Vec<AccountHandle> = (0..members)
+        .map(|i| net.add_account(&format!("member-{i:02}.example.com")))
+        .collect();
+    accounts.sort_by(|a, b| a.did().as_str().cmp(b.did().as_str()));
+    let mut posts = Vec::new();
+    for (i, m) in accounts.iter().enumerate() {
+        join(mem, m, &key);
+        grant(mem, &owner, &key, m.did());
+        posts.push(post(mem, m, &key, &format!("Post {i}"), i as i64 + 1));
+    }
+    let page: Vec<String> = posts[members - on_screen..].iter().rev().cloned().collect();
+    serve_indexer(mem, net, &page);
+    let off_screen = accounts[..members - on_screen]
+        .iter()
+        .map(|a| a.did().clone())
+        .collect();
+    (key, page, off_screen)
+}
+
+/// Whether a request so far names one of `dids` (a document, a head check, a listing).
+fn names_any(mem: &MemHost, dids: &[Did]) -> bool {
+    mem.requests()
+        .iter()
+        .any(|r| dids.iter().any(|d| r.url.contains(tail(d))))
+}
+
+/// The posts of `page` missing from `list`.
+fn unlisted<'a>(list: &lessdugin_core::dto::PostList, page: &'a [String]) -> Vec<&'a String> {
+    page.iter()
+        .filter(|p| !list.items.iter().any(|i| &i.uri == *p))
+        .collect()
+}
+
+/// [`crowded_forum`] opened by an assisted engine whose host holds the indexer's proofs (a
+/// slow indexer) until the test releases them: `(host, engine, forum, page posts, members not
+/// on the page)`.
+fn page_then_sync(mem: &MemHost) -> (HoldHost, Engine<HoldHost>, ForumKey, Vec<String>, Vec<Did>) {
+    let net = FakeNet::on(mem);
+    let (key, page, off_screen) = crowded_forum(mem, &net, 30, 6);
+    let host = HoldHost::new(mem);
+    let engine = assisted(host.clone());
+    futures::executor::block_on(engine.forum_open(key.uri.as_str())).unwrap();
+    mem.clear_requests();
+    host.hold(&["getRecordProofs"]);
+    (host, engine, key, page, off_screen)
+}
+
+const PAGE_SYNC: lessdugin_core::dto::SyncOpts = lessdugin_core::dto::SyncOpts {
+    budget_ms: Some(8_000),
+    max_requests: Some(400),
+    full: false,
+};
+
+/// `sync.md` §14.3 step 4: the forum sync that the SPA starts beside the cold page it is
+/// reading goes after the page. While the page waits for its proofs, and until it is listed,
+/// the sweep makes no request for a participant, so its work does not hold the page up.
+/// Deterministic: the fake clock moves only when the test moves it.
+#[test]
+fn a_forum_sync_started_beside_a_cold_page_goes_after_it() {
+    let mem = MemHost::new();
+    let (host, engine, key, posts, off_screen) = page_then_sync(&mem);
+    mem.park_sleeps(true);
+    let query = all_posts(&key);
+    let fallback = lessdugin_core::dto::SyncOpts::default();
+    let mut page = Box::pin(engine.list_posts_page(&query, &fallback));
+    assert!(poll_once(&mut page).is_pending());
+    let mut sweep = Box::pin(engine.sync_forum(key.uri.as_str(), &PAGE_SYNC));
+    // a second of a slow indexer, well within the hold
+    for _ in 0..100 {
+        assert!(poll_once(&mut page).is_pending(), "the held page finished");
+        assert!(poll_once(&mut sweep).is_pending(), "the sweep finished");
+        mem.advance_ms(10);
+    }
+    assert!(!host.held().is_empty(), "the page's proofs were not held");
+    assert!(
+        !names_any(&mem, &off_screen),
+        "the sweep reached a participant while the page was reading"
+    );
+    host.hold.release();
+    let (mut page_done, mut sweep_done) = (None, None);
+    for _ in 0..10_000 {
+        if page_done.is_none()
+            && let Poll::Ready(r) = poll_once(&mut page)
+        {
+            assert!(
+                !names_any(&mem, &off_screen),
+                "the sweep reached a participant before the page was listed"
+            );
+            page_done = Some(r);
+        }
+        if sweep_done.is_none()
+            && let Poll::Ready(r) = poll_once(&mut sweep)
+        {
+            sweep_done = Some(r);
+        }
+        if page_done.is_some() && sweep_done.is_some() {
+            break;
+        }
+        mem.advance_ms(10);
+    }
+    mem.park_sleeps(false);
+    let page = page_done.expect("the cold page did not finish").unwrap();
+    assert_eq!(unlisted(&page, &posts), Vec::<&String>::new());
+    sweep_done.expect("the sweep did not finish").unwrap();
+    assert!(names_any(&mem, &off_screen), "the sweep never ran");
+}
+
+/// The hold is bounded: a cold page that is not listed within `COLD_PAGE_HOLD_MS` (its proofs
+/// held, as by a stalled indexer) holds the forum sync beside it no longer.
+#[test]
+fn a_cold_page_holds_the_forum_sync_beside_it_for_a_bounded_time() {
+    let mem = MemHost::new();
+    let (host, engine, key, posts, off_screen) = page_then_sync(&mem);
+    mem.park_sleeps(true);
+    let query = all_posts(&key);
+    let fallback = lessdugin_core::dto::SyncOpts::default();
+    let mut page = Box::pin(engine.list_posts_page(&query, &fallback));
+    assert!(poll_once(&mut page).is_pending());
+    let started = mem.now();
+    let mut sweep = Box::pin(engine.sync_forum(key.uri.as_str(), &PAGE_SYNC));
+    let mut reached = None;
+    for _ in 0..1_000 {
+        assert!(poll_once(&mut page).is_pending(), "the held page finished");
+        let _ = poll_once(&mut sweep);
+        if names_any(&mem, &off_screen) {
+            reached = Some(mem.now());
+            break;
+        }
+        mem.advance_ms(10);
+    }
+    let held = reached.expect("the sweep stayed held by the page") - started;
+    let bound = lessdugin_core::limits::COLD_PAGE_HOLD_MS as i64;
+    assert!(
+        (bound..bound + 1_000).contains(&held),
+        "the sweep started {held} ms after it was asked (hold {bound} ms)"
+    );
+    assert!(!host.held().is_empty(), "the page's proofs were not held");
+    host.hold.release();
+    mem.park_sleeps(false);
+    let page = futures::executor::block_on(page).unwrap();
+    assert_eq!(unlisted(&page, &posts), Vec::<&String>::new());
+    futures::executor::block_on(sweep).unwrap();
 }

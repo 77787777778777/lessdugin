@@ -545,7 +545,9 @@ engine API v0. Only test vectors remain unavailable in release modules:
 `unreadComments`) and `muted()` (the DIDs behind `mutes()`). `live_step` and `outbox_flush`
 are reachable from the worker as glue (§5). The M6 indexer entry points of native hosts and
 the indexer (`sync.md` §15): `list_posts_page(query, fallback_sync)` (a first page hydrated
-from an indexer, else one bounded PDS sync, then `list_posts`), `hydrate_indexer_page`,
+from an indexer, else one bounded PDS sync, then `list_posts`; a `sync_forum` that reaches its
+participant sweep while such a first page is being read waits until the page is listed, at most
+`COLD_PAGE_HOLD_MS`, `sync.md` §14.3), `hydrate_indexer_page`,
 `hydrate_indexer_records`, `poll_indexer_changes`, and the hints `indexer_post_ordering`,
 `indexer_thread_ordering`, `indexer_participants`, `indexer_forums` and `indexer_head_hints`.
 They return ordering and discovery hints, or admit proven records; displayed values always come

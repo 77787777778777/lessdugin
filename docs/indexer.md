@@ -93,8 +93,10 @@ JSON responses include `asOf` and `indexer`. List responses have `Cache-Control:
 ETag. All routes allow CORS `*`. Absent optional fields are left out, never `null`. `listForums`
 and `describeIndexer` list only synced forums. `listPosts` and `getThread` expose the core fold's
 real `inputDigest`; their values and tallies remain hints. Queries read each forum's last
-folded model (kept for at least 60 s or 30 times its fold cost, then refolded once, one query fold
-at a time and never in the way of live projections), so a request never refolds a forum. `getRecordProofs` accepts at most 25 `uris`
+folded model. It is fresh for at least 60 s or 30 times its fold cost; past that it is still
+served while one background fold refreshes it (one query fold at a time, never in the way of live
+projections), so a request folds only a forum with no model yet, after a restart or an eviction
+(metrics `query_model_builds_total` and `query_model_refreshes_total`). `getRecordProofs` accepts at most 25 `uris`
 and returns an `application/vnd.ipld.car` manifest bundle. It serves cached proofs and fetches at
 most two missing ones at a time (a request waits at most five seconds in all for a slot); failed or
 not-yet-available items are omitted; absence proofs have `cid: null`.

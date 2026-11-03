@@ -2111,7 +2111,8 @@ async fn a_blocked_host_is_hidden_from_participants_heads_and_forum_listings() {
 }
 
 /// security-net-13: list and thread queries read the projected model; no request refolds the
-/// forum. After a restart the model is folded once, then reused.
+/// forum. After a restart the model is folded once, then reused; an expired one is served while
+/// it is refolded in the background.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn queries_reuse_the_projected_model_instead_of_refolding() {
     let fixture = Fixture::new().await;
@@ -2149,6 +2150,30 @@ async fn queries_reuse_the_projected_model_instead_of_refolding() {
         }
     }
     assert_eq!(builds(&restarted), 1, "folded once after the restart");
+
+    // After an idle spell past the age bound, the first reader is answered from the last
+    // model at once and the refold runs in the background, once.
+    let refreshes = |f: &Fixture| {
+        f.indexer
+            .metrics
+            .query_model_refreshes
+            .load(Ordering::Relaxed)
+    };
+    restarted.indexer.expire_query_models();
+    for path in &paths {
+        let (status, body, _) = restarted.request(path).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    while refreshes(&restarted) == 0 && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    for path in &paths {
+        let (status, body, _) = restarted.request(path).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    assert_eq!(builds(&restarted), 1, "a request refolded an expired model");
+    assert_eq!(refreshes(&restarted), 1, "one background refold");
 }
 
 /// security-net-10: getRecordProofs never queues on the ingest budget. A missing proof is

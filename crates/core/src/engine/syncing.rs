@@ -107,23 +107,24 @@ impl<H: Host> Engine<H> {
     /// Reads a post page locally after optional proof hydration. If hydration fails before any
     /// forum discovery has completed, a cold page converges through one bounded ordinary PDS
     /// sync. Cursor pages and already-discovered forums never trigger this fallback.
+    ///
+    /// A first page is marked as being read from the call until it is listed (or falls back):
+    /// a forum sync's participant sweep that starts meanwhile goes after it (`sync.md` §14.3
+    /// step 4), so the sweep's work does not hold up the page.
     pub async fn list_posts_page(
         &self,
         query: &dto::ListPostsQuery,
         fallback_sync: &dto::SyncOpts,
     ) -> Result<dto::PostList, EngineError> {
         if query.cursor.is_none() {
-            match self.hydrate_indexer_page(query).await {
-                Ok(Some(_)) => {}
-                Ok(None) => {
-                    self.cold_page_sync(query, fallback_sync, "no usable indexer")
-                        .await?;
-                }
-                Err(error) => {
-                    self.cold_page_sync(query, fallback_sync, &error.to_string())
-                        .await?;
-                }
-            }
+            let reading = self.rt.page_reading();
+            let reason = match self.hydrate_indexer_page(query).await {
+                Ok(Some(_)) => return self.list_posts(query).await,
+                Ok(None) => "no usable indexer".to_owned(),
+                Err(error) => error.to_string(),
+            };
+            drop(reading);
+            self.cold_page_sync(query, fallback_sync, &reason).await?;
         }
         self.list_posts(query).await
     }
@@ -145,7 +146,7 @@ impl<H: Host> Engine<H> {
         if !discovery::state::discovery_complete(self.host.cache(), &key.fk)
             .await
             .map_err(store_error)?
-            && let Err(sync_error) = self.sync_forum(&query.forum, fallback_sync).await
+            && let Err(sync_error) = self.sync_forum_in(&key, fallback_sync, false).await
         {
             tracing::debug!(%reason, %sync_error, "cold indexer and PDS sync failed");
         }
@@ -155,17 +156,29 @@ impl<H: Host> Engine<H> {
     /// `sync_forum(uri, SyncOpts)` (`engine-api.md` §3.3): opens the forum and syncs its
     /// authorities and confirmed participants in the order of `sync.md` §4.5. Emits
     /// `SyncProgress` as repos finish (see the module docs) and `Changed [Forum]`; the forum's
-    /// authorities are queued for handle verification.
+    /// authorities are queued for handle verification. A first post page being read when the
+    /// sync is about to start goes first (`sync.md` §14.3 step 4): the sync waits until it is
+    /// listed, at most [`limits::COLD_PAGE_HOLD_MS`].
     pub async fn sync_forum(
         &self,
         forum: &str,
         opts: &impl ForumSyncOpts,
     ) -> Result<SyncReport, EngineError> {
         let key = self.forum_key(forum).await?;
+        self.sync_forum_in(&key, opts, true).await
+    }
+
+    /// [`Self::sync_forum`]; `after_pages: false` for a page's own fallback sync.
+    async fn sync_forum_in(
+        &self,
+        key: &ForumKey,
+        opts: &impl ForumSyncOpts,
+        after_pages: bool,
+    ) -> Result<SyncReport, EngineError> {
         let mut opts = opts.discovery_opts();
         if self.sources().await? == super::Sources::Assisted {
             let mut indexer_newcomers = Vec::new();
-            match self.poll_indexer_changes_resolved(&key, None).await {
+            match self.poll_indexer_changes_resolved(key, None).await {
                 Ok(polled) => indexer_newcomers = polled.map(|p| p.candidates).unwrap_or_default(),
                 Err(e) => {
                     tracing::warn!(forum = %key.uri, error = %e, "indexer changes unavailable")
@@ -173,7 +186,7 @@ impl<H: Host> Engine<H> {
             }
             // CORE+ sources are hints: an unavailable hint service must not prevent the ordinary
             // PDS sync. Explicit discover_* calls still report their source errors to callers.
-            match self.discover_forum_hints(&key).await {
+            match self.discover_forum_hints(key).await {
                 Ok(hints) => hints.apply_to(&mut opts),
                 Err(e) => {
                     tracing::warn!(forum = %key.uri, error = %e, "CORE+ forum discovery failed")
@@ -187,7 +200,12 @@ impl<H: Host> Engine<H> {
                     .map(|d| (d, "indexer".to_owned())),
             );
         }
-        self.sync_forum_resolved(&key, opts).await
+        if after_pages && let Some(read) = self.rt.pages_read() {
+            let hold = self.host.sleep(limits::COLD_PAGE_HOLD_MS);
+            futures::pin_mut!(hold);
+            futures::future::select(read, hold).await;
+        }
+        self.sync_forum_resolved(key, opts).await
     }
 
     /// Runs ordinary forum sync with already resolved discovery options.

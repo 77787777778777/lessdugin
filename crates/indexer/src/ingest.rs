@@ -23,9 +23,9 @@ use lessdugin_core::sync::{Priority, Reason, Stats, SyncRequest};
 use lessdugin_core::xrpc::{CallOpts, Service};
 use tracing::{info, warn};
 
-use crate::Indexer;
 use crate::proofs;
 use crate::store::{HeadRow, LiveChange, RETRY_BASE_MS, backoff_ms};
+use crate::{Cached, Indexer};
 
 /// Discovery (relay enumeration) runs every six hours whatever individual forums do.
 pub const BACKFILL_EVERY_MS: i64 = 6 * 60 * 60 * 1000;
@@ -486,13 +486,20 @@ pub async fn project_forum(
     Ok(Projection { model, changes })
 }
 
-/// The cached query model of an indexed forum. It is folded from the cache only when it is
-/// missing (after a restart or an eviction) or past its age bound ([`crate::MODEL_AGE_FACTOR`]),
-/// one fold at a time and never under the projection lock; never per request.
+/// The cached query model of an indexed forum. A request folds it from the cache only when it
+/// is missing (after a restart or an eviction). One past its age bound
+/// ([`crate::MODEL_AGE_FACTOR`]) is served as it is while a background fold refreshes it, so a
+/// first reader after an idle spell never waits for a refold. Folds run one at a time and never
+/// under the projection lock.
 pub async fn model(indexer: &Indexer, key: &ForumKey) -> anyhow::Result<Arc<ForumModel>> {
     let forum = key.uri.as_str();
-    if let Some(m) = lock(&indexer.models).get(forum, indexer.now_ms()) {
-        return Ok(m);
+    match lock(&indexer.models).get(forum, indexer.now_ms()) {
+        Cached::Fresh(m) => return Ok(m),
+        Cached::Stale(m) => {
+            refresh_model(indexer, key);
+            return Ok(m);
+        }
+        Cached::Missing => {}
     }
     let _one = indexer
         .query_folds
@@ -501,11 +508,59 @@ pub async fn model(indexer: &Indexer, key: &ForumKey) -> anyhow::Result<Arc<Foru
         .map_err(|_| anyhow::anyhow!("the indexer is shutting down"))?;
     let epoch = {
         let mut models = lock(&indexer.models);
-        if let Some(m) = models.get(forum, indexer.now_ms()) {
-            return Ok(m);
+        match models.get(forum, indexer.now_ms()) {
+            Cached::Fresh(m) | Cached::Stale(m) => return Ok(m),
+            Cached::Missing => models.epoch(forum),
         }
-        models.epoch(forum)
     };
+    let model = query_fold(indexer, key, epoch).await?;
+    indexer
+        .metrics
+        .query_model_builds
+        .fetch_add(1, Ordering::Relaxed);
+    Ok(model)
+}
+
+/// Refolds the expired query model of `key` in the background, unless a query fold is
+/// already running (a later request asks again).
+fn refresh_model(indexer: &Indexer, key: &ForumKey) {
+    let Ok(permit) = Arc::clone(&indexer.query_folds).try_acquire_owned() else {
+        return;
+    };
+    let (indexer, key) = (indexer.clone(), key.clone());
+    tokio::spawn(async move {
+        let _permit = permit;
+        let epoch = {
+            let mut models = lock(&indexer.models);
+            // a projection, or the fold that held the permit, may have refreshed it meanwhile
+            if !matches!(
+                models.get(key.uri.as_str(), indexer.now_ms()),
+                Cached::Stale(_)
+            ) {
+                return;
+            }
+            models.epoch(key.uri.as_str())
+        };
+        match query_fold(&indexer, &key, epoch).await {
+            Ok(_) => {
+                indexer
+                    .metrics
+                    .query_model_refreshes
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            Err(e) => warn!(forum = %key.uri, error = %e, "query model refresh failed"),
+        }
+    });
+}
+
+/// Folds the query model of `key` from the cache and caches it unless a projection finished
+/// since `epoch`. The caller holds a `query_folds` permit.
+async fn query_fold(
+    indexer: &Indexer,
+    key: &ForumKey,
+    epoch: u64,
+) -> anyhow::Result<Arc<ForumModel>> {
+    let forum = key.uri.as_str();
     let built_ms = indexer.now_ms();
     let model = Arc::new(
         ForumModel::build(
@@ -516,10 +571,6 @@ pub async fn model(indexer: &Indexer, key: &ForumKey) -> anyhow::Result<Arc<Foru
         .await?,
     );
     let cost_ms = indexer.now_ms().saturating_sub(built_ms);
-    indexer
-        .metrics
-        .query_model_builds
-        .fetch_add(1, Ordering::Relaxed);
     lock(&indexer.models).put_if(forum, epoch, Arc::clone(&model), built_ms, cost_ms);
     Ok(model)
 }
