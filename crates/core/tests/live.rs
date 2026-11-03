@@ -41,6 +41,8 @@ struct FailOnceKv {
     yield_next_read: Arc<AtomicBool>,
     /// The next `scan` fails.
     fail_next_scan: Arc<AtomicBool>,
+    /// Every `scan` fails while this is set.
+    fail_scans: Arc<AtomicBool>,
     /// Scans of the identity rows (`id/did/...`) so far.
     identity_scans: Arc<AtomicUsize>,
     successful_writes: Arc<futures::lock::Mutex<()>>,
@@ -79,7 +81,9 @@ impl KvStore for FailOnceKv {
         dir: Dir,
         limit: u32,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, HostError> {
-        if self.fail_next_scan.swap(false, Ordering::SeqCst) {
+        if self.fail_next_scan.swap(false, Ordering::SeqCst)
+            || self.fail_scans.load(Ordering::SeqCst)
+        {
             return Err(HostError::Storage("injected scan failure".into()));
         }
         let identity = schema::prefix("id", &["did"]);
@@ -114,6 +118,7 @@ impl FailHost {
             fail_next: Arc::new(AtomicBool::new(false)),
             yield_next_read: Arc::new(AtomicBool::new(false)),
             fail_next_scan: Arc::new(AtomicBool::new(false)),
+            fail_scans: Arc::new(AtomicBool::new(false)),
             identity_scans: Arc::new(AtomicUsize::new(0)),
             successful_writes: Arc::new(futures::lock::Mutex::new(())),
         };
@@ -1720,6 +1725,76 @@ fn a_frame_that_keeps_failing_is_left_to_the_dirty_queue() {
         assert!(item.reasons.contains(&Reason::Reconcile), "{item:?}");
         assert!(item.uris.contains(&uri), "{item:?}");
         engine.live_stop();
+        tail.await.unwrap();
+    });
+}
+
+#[test]
+fn a_deferred_reconcile_frame_still_reconciles() {
+    futures::executor::block_on(async {
+        let mem = MemHost::new();
+        let net = FakeNet::on(&mem);
+        let owner = net.add_account("alice.example.com");
+        let key = open_forum(&mem, &owner);
+        let host = FailHost::new(mem.clone());
+        let engine = Engine::new(
+            host.clone(),
+            EngineConfig {
+                jetstream: vec![url::Url::parse("wss://jetstream.example/subscribe").unwrap()],
+                ..EngineConfig::default()
+            },
+        );
+        engine
+            .sync_forum(
+                key.uri.as_str(),
+                &lessdugin_core::discovery::SyncOpts::default(),
+            )
+            .await
+            .unwrap();
+        engine.forum_follow(key.uri.as_str(), None).await.unwrap();
+        let authority = owner.did().to_string();
+        // The first connection closes at once: the context is built and the first round runs
+        // (it reconciles the never-reconciled authority) before the gap arrives.
+        mem.script_websocket("wss://jetstream.example/", Vec::new());
+        mem.park_sleeps(true);
+        let tail = engine.live_tail();
+        futures::pin_mut!(tail);
+        assert!(futures::poll!(tail.as_mut()).is_pending());
+        mem.advance_ms(1);
+        assert!(futures::poll!(tail.as_mut()).is_pending());
+        assert!(engine.syncer().queue_snapshot().get(&authority).is_none());
+        // The gap's reconcile cannot read the relevant repos: three tries, then the frame is
+        // acknowledged, and its reconcile must not be lost with it.
+        mem.script_websocket(
+            "wss://jetstream.example/",
+            vec![WsMessage::Text(info("OutdatedCursor"))],
+        );
+        host.cache.fail_scans.store(true, Ordering::SeqCst);
+        for _ in 0..8 {
+            mem.advance_ms(1_000);
+            assert!(futures::poll!(tail.as_mut()).is_pending());
+        }
+        assert!(
+            mem.websocket_urls().len() >= 2,
+            "the gap was never read: {:?}",
+            mem.websocket_urls()
+        );
+        let cursor = stored_cursor(mem.cache())
+            .await
+            .expect("the failing gap frame was not acknowledged");
+        assert_eq!(cursor.seq, None, "the gap restarts the cursor");
+        host.cache.fail_scans.store(false, Ordering::SeqCst);
+        for _ in 0..6 {
+            mem.advance_ms(1_000);
+            assert!(futures::poll!(tail.as_mut()).is_pending());
+        }
+        let queued = engine.syncer().queue_snapshot();
+        let item = queued
+            .get(&authority)
+            .expect("the deferred reconcile was dropped");
+        assert!(item.reasons.contains(&Reason::Reconcile), "{item:?}");
+        engine.live_stop();
+        mem.park_sleeps(false);
         tail.await.unwrap();
     });
 }

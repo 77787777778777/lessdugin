@@ -293,6 +293,8 @@ impl<H: Host> Engine<H> {
         let mut feeds = ChangeFeeds::default();
         let mut step_at = self.host.now_ms();
         let mut last_step_ms = i64::MIN;
+        // A deferred frame's reconcile (§6.3), enqueued by the next round that can.
+        let mut reconcile_due = false;
         let mut wait: i64 = 1;
         while running() {
             let assisted = match self.sources().await {
@@ -409,7 +411,10 @@ impl<H: Host> Engine<H> {
                                         attempts = frame.attempts,
                                         "live frame failed; left to the dirty queue"
                                     );
-                                    self.defer_live_actions(&frame.actions);
+                                    if self.defer_live_actions(&frame.actions) {
+                                        reconcile_due = true;
+                                        step_at = now;
+                                    }
                                     frame.deferred = true;
                                     true
                                 } else {
@@ -462,6 +467,12 @@ impl<H: Host> Engine<H> {
             }
             if now >= step_at {
                 last_step_ms = now;
+                if reconcile_due {
+                    match self.enqueue_gap_reconcile().await {
+                        Ok(()) => reconcile_due = false,
+                        Err(e) => tracing::warn!(error = %e, "live tail: deferred reconcile failed"),
+                    }
+                }
                 let polling = !assisted
                     || (source.as_ref().is_none_or(LiveSource::polling_enabled)
                         && !feeds.healthy(now));
@@ -560,8 +571,9 @@ impl<H: Host> Engine<H> {
     }
 
     /// A live frame given up on: every repo it names goes to the dirty queue for a sync of its
-    /// scopes (the reconcile path, with its own retries and breakers).
-    fn defer_live_actions(&self, actions: &[LiveAction]) {
+    /// scopes (the reconcile path, with its own retries and breakers). Returns whether it held
+    /// a [`LiveAction::Reconcile`], which names every relevant repo: the caller keeps it due.
+    fn defer_live_actions(&self, actions: &[LiveAction]) -> bool {
         let sy = self.syncer();
         let dids: BTreeSet<&str> = actions
             .iter()
@@ -578,6 +590,25 @@ impl<H: Host> Engine<H> {
         for did in dids {
             sy.enqueue(self.live_item(did, Priority::P1, Reason::Reconcile));
         }
+        actions
+            .iter()
+            .any(|a| matches!(a, LiveAction::Reconcile(_)))
+    }
+
+    /// A gap's full reconcile (`sync.md` §6.3): every authority at P1, every other relevant repo
+    /// but the own ones at P3, ready at once.
+    async fn enqueue_gap_reconcile(&self) -> Result<(), EngineError> {
+        let sy = self.syncer();
+        for (did, relevance) in self.relevant_repos().await? {
+            if relevance.authority {
+                sy.enqueue(self.live_item(&did, Priority::P1, Reason::Reconcile));
+            } else if !relevance.own {
+                let mut item = self.live_item(&did, Priority::P3, Reason::Reconcile);
+                item.ready_at = self.host.now_ms();
+                sy.enqueue(item);
+            }
+        }
+        Ok(())
     }
 
     /// Stops the running `live_tail`s (they return after their current round).
@@ -918,15 +949,7 @@ impl<H: Host> Engine<H> {
                 }
                 LiveAction::Reconcile(gap) => {
                     tracing::warn!(?gap, "Jetstream cursor gap: scheduling reconcile");
-                    for (did, relevance) in self.relevant_repos().await? {
-                        if relevance.authority {
-                            sy.enqueue(self.live_item(&did, Priority::P1, Reason::Reconcile));
-                        } else if !relevance.own {
-                            let mut item = self.live_item(&did, Priority::P3, Reason::Reconcile);
-                            item.ready_at = self.host.now_ms();
-                            sy.enqueue(item);
-                        }
-                    }
+                    self.enqueue_gap_reconcile().await?;
                 }
             }
         }

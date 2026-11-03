@@ -888,7 +888,7 @@ on event e:
 | account | `getRepoStatus` at P1 (§3.4) |
 | sync (v2 `#sync`) | `enqueue(did, P1, "sync")` for every scope: a full re-list |
 
-**Failures.** A frame is acknowledged (and the cursor moves past it) only once its actions are applied. A frame whose handling fails (a store error, a failed `getRepoStatus`, a proof batch or `sync_forum` that fails) is tried again after 2 s and 4 s (*tunable*); after the third failure it is acknowledged and every repo it names is enqueued at P1 for a `sync_repo` of its scopes, which has its own retries and breakers (§9.4). No frame holds the cursor or the later frames for longer.
+**Failures.** A frame is acknowledged (and the cursor moves past it) only once its actions are applied. A frame whose handling fails (a store error, a failed `getRepoStatus`, a proof batch or `sync_forum` that fails) is tried again after 2 s and 4 s (*tunable*); after the third failure it is acknowledged and every repo it names is enqueued at P1 for a `sync_repo` of its scopes, which has its own retries and breakers (§9.4). A gap's full reconcile (§6.3) names every relevant repo: it stays due and is enqueued by the next round that can read them. No frame holds the cursor or the later frames for longer.
 
 **Context.** KNOWN, F, F_new and D may be evaluated against a cached snapshot, rebuilt after a change (a `Changed` event, or an applied frame) at most once per second and at least every 30 s (*tunable*); network noise therefore costs one lookup per frame, not a scan of the identity cache. While frames arrive, the client reads several per round and runs its other live work (queue, polls, reconcile) at most once per second.
 
