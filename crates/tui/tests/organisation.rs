@@ -566,3 +566,118 @@ fn posts_opened_from_a_sequence_are_read_in_it() {
     block_on(t.press("Enter"));
     assert_eq!(nav(&t), (p2, forward, Some(p1), Some(p3)));
 }
+
+/// The new optional request fields and arguments (`request`) and output fields (`output`) that
+/// `engine-api.md` §1 "After the freeze (`milestone`)" names, as `Type.field` (an argument
+/// `op(a, b?)` as `op.b`).
+fn freeze_fields(milestone: &str) -> std::collections::BTreeMap<String, &'static str> {
+    let spec = include_str!("../../../docs/spec/engine-api.md");
+    let head = format!("- **After the freeze ({milestone}).**");
+    let start = spec.find(&head).unwrap_or_else(|| panic!("no {head:?}"));
+    let rest = &spec[start + head.len()..];
+    let para = &rest[..rest.find("\n- **").unwrap_or(rest.len())];
+    let para = para.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut out = std::collections::BTreeMap::new();
+    for (marker, kind) in [
+        ("ew optional request field", "request"),
+        ("ew optional request argument", "request"),
+        ("ew optional output field", "output"),
+    ] {
+        for (i, _) in para.match_indices(marker) {
+            let Some(code) = para[i + marker.len()..].split('`').nth(1) else {
+                continue;
+            };
+            match code.split_once('(') {
+                Some((op, args)) => {
+                    for a in args.trim_end_matches(')').split(',') {
+                        if let Some(a) = a.trim().strip_suffix('?') {
+                            out.insert(format!("{op}.{a}"), kind);
+                        }
+                    }
+                }
+                None => {
+                    out.insert(code.to_owned(), kind);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// `engine-api.md` §1 "After the freeze (M5)": `command::FIELD_REACH` names every operation
+/// argument and field that M5 adds to dto/1, and nothing else, so a field the spec adds there
+/// fails here until the TUI reaches it. Each request entry, run on alice's welcome thread (the
+/// first post of her sequence), queues what sends its field: the wiki edit's start, whose
+/// loaded draft is based on the page's head; the thread load read in the sequence; the edit's
+/// start with the link card dropped.
+#[test]
+fn every_new_field_has_a_way_in() {
+    use lessdugin_tui::command::{FIELD_REACH, Reach};
+    use lessdugin_tui::exec::{ExecOpts, run};
+    use lessdugin_tui::{Action, Effect};
+    let spec = freeze_fields("M5");
+    let have: std::collections::BTreeSet<String> =
+        FIELD_REACH.iter().map(|(f, _)| (*f).to_owned()).collect();
+    assert_eq!(FIELD_REACH.len(), have.len(), "a field is listed twice");
+    let want: std::collections::BTreeSet<String> = spec.keys().cloned().collect();
+    assert!(want.len() >= 6, "the paragraph was not read: {spec:?}");
+    assert_eq!(
+        have, want,
+        "the M5 fields the TUI reaches, against engine-api.md"
+    );
+
+    let s = scenario();
+    wiki_revision(&s, "rust", "About Rust.", None);
+    let t = block_on(s.w.alice.engine.seq_create(&SequenceDraft {
+        forum: s.forum.clone(),
+        title: "Start here".into(),
+        body: None,
+        chapters: vec![SequenceChapterDraft {
+            title: None,
+            body: None,
+            posts: vec![s.welcome.clone(), s.bob_post.clone()],
+        }],
+    }))
+    .unwrap();
+    s.w.alice.flush();
+    s.w.alice.done(&t);
+    let mut t = alice_tui(&s, None);
+    block_on(t.start(Some(s.forum.clone())));
+    for (field, r) in FIELD_REACH {
+        if spec[*field] == "output" {
+            assert!(
+                matches!(r, Reach::Automatic(how) if !how.is_empty()),
+                "{field}: say where it shows"
+            );
+            continue;
+        }
+        block_on(t.open_thread(&s.welcome));
+        let keys: Vec<String> = match r {
+            Reach::Command(line) => std::iter::once(":".to_owned())
+                .chain(line.chars().map(String::from))
+                .chain(std::iter::once("Enter".to_owned()))
+                .collect(),
+            Reach::Keys(keys) => keys.iter().map(|k| (*k).to_owned()).collect(),
+            other => panic!("{field}: {other:?} is not a way in"),
+        };
+        let (last, first) = keys.split_last().unwrap();
+        for k in first {
+            block_on(t.press(k));
+        }
+        let fx = t
+            .state
+            .update(Action::Key(lessdugin_tui::keys::parse_key(last).unwrap()));
+        let sent = fx.iter().any(|e| match (*field, e) {
+            ("WikiDraft.base", Effect::StartWiki { .. }) => {
+                match block_on(run(t.engine(), e.clone(), ExecOpts::default())) {
+                    Some(Action::WikiReady(Ok(start))) => start.draft.base.is_some(),
+                    other => panic!("{other:?}"),
+                }
+            }
+            ("get_post.sequence", Effect::LoadThread { sequence, .. }) => sequence.is_some(),
+            ("EditOpts.dropLinkCard", Effect::StartEdit { drop_link_card, .. }) => *drop_link_card,
+            _ => false,
+        });
+        assert!(sent, "{field} via {r:?}: {fx:?}");
+    }
+}

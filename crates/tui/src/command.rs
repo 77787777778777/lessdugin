@@ -37,8 +37,9 @@
 //! | `karma-notifications [cadence]`, `settings`, `set <key> <value>`, `unset <key>` | the same | - |
 //! | `undo`, `retry [write]` | `undo`, `retry_write` | `Backspace` |
 //!
-//! [`REACH`] says how the TUI reaches each operation of `engine-api.md` §3.2, §3.5 and §3.6;
-//! a test holds it to the spec, so an operation cannot go missing. `parse` is pure (no engine,
+//! [`REACH`] says how the TUI reaches each operation of `engine-api.md` §3.2, §3.5 and §3.6,
+//! and [`FIELD_REACH`] each operation argument and field that M5 adds; tests hold them to the
+//! spec, so an operation or a field cannot go missing. `parse` is pure (no engine,
 //! no state); `State::command` runs it.
 
 use lessdugin_core::dto::{
@@ -530,6 +531,37 @@ pub const VALUE_REACH: &[(&str, Reach)] = &[
     (
         "ModActionValue.tag",
         Reach::Command("mod tag rust --removed"),
+    ),
+];
+
+/// How the TUI reaches each operation argument and field that `engine-api.md` §1 "After the
+/// freeze (M5)" adds to dto/1: a new optional request field or argument by the key or command
+/// that sends it (on the Thread screen of a post of a sequence, the post selected), a new
+/// optional output field by where the TUI shows it. A test holds this table to that paragraph
+/// and runs each request entry.
+pub const FIELD_REACH: &[(&str, Reach)] = &[
+    (
+        "PostView.tagRelevance",
+        Reach::Automatic(
+            "a thread shows its post's tags line, and `:vote --tag` starts from the viewer's vote",
+        ),
+    ),
+    (
+        "WikiDraft.base",
+        Reach::Command("wiki edit rust --name Rust"),
+    ),
+    (
+        "ModQueue.banners",
+        Reach::Automatic("the Mod screen's queue tab shows them above the queue"),
+    ),
+    ("get_post.sequence", Reach::Keys(&["]"])),
+    (
+        "SequenceView.continueReading",
+        Reach::Automatic("`:sequence <uri>` offers it first, opened in the sequence"),
+    ),
+    (
+        "EditOpts.dropLinkCard",
+        Reach::Command("edit --drop-link-card"),
     ),
 ];
 
