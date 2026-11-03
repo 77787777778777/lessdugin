@@ -1353,12 +1353,17 @@ async function runScenario(
           });
           await ipage.goto(`${s.app}/${route(forum)}`);
           await expect(ipage.getByRole("heading", { level: 1, name: FORUM_NAME })).toBeVisible();
-          for (const title of [EDITED_TITLE, CANARY_TITLE]) {
-            await expect(
-              ipage.getByRole("link", { name: title }),
-              `the cold page (no participant's repo listed yet) shows ${title}`,
-            ).toBeVisible();
-          }
+          // the cold page is painted: both posts, or what the indexer path alone shows within
+          // 20 s (sync.md §14.3 expects 1-2 s); a post missing then is reported below, by
+          // coldPageProblems, with every output written
+          await Promise.all(
+            [EDITED_TITLE, CANARY_TITLE].map((name) =>
+              ipage
+                .getByRole("link", { name })
+                .waitFor({ timeout: 20_000 })
+                .catch(() => {}),
+            ),
+          );
           idx.spaCold = await hook(ipage, "listPosts", [
             { forum, sort: "magic", filter: "frontpage", limit: 30 },
           ]);
