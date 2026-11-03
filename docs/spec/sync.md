@@ -831,7 +831,7 @@ Jetstream is used only in `assisted` mode. It is a **"this repo changed" signal*
 | `wildcard` | native, always; browser until participants are known | v2, `collections=<NS>.*`, no DID filter |
 | `filtered` | browser, once participants are known and D holds between 1 and 10,000 DIDs | at most 150 DIDs: v2 with `dids=` for each DID in D; more than 150: v1 with `options_update{wantedDids: D}` (the request-line limit makes 400 DIDs fail with 414, ADR 0003). Plus, if `F_new ≠ ∅`, a side connection: v2 `collections=<NS>.membership&kinds=commit` with no DID filter. |
 
-- `D` = the own account DIDs ∪, over every followed or open forum, its authorities, confirmed participants and candidates being synced.
+- `D` = the own account DIDs ∪, over every followed or open forum, its authorities, confirmed participants and candidates being synced. These are also the repos `live_tail` keeps fresh (polling §6.7, reconcile §6.8): a discovery row that is a rejected or unconfirmed hint is in neither. Such a DID reaches its PDS only through confirmation (§4.2.1), under its back-off and the newcomer budget (§4.4).
 - "Participants are known" means every followed or open forum has finished one discovery pass (§4.2). The browser then switches to `filtered` at once. When D changes later, it reconnects with the new set at most once per 10 minutes (*tunable*, counted from the last `filtered` connection), and DIDs newly added to D get a P2 `sync_repo` to cover the events they missed (none after a `wildcard` connection, which missed nothing). If `|D| > 10,000`, the browser stays in `wildcard`.
 - The side connection exists while the main one is `filtered` and `F_new ≠ ∅`, and is closed otherwise. It shares the deduplication LRU (§6.3) with the main connection. Its cursor is kept in memory and is never persisted: it resumes from its own cursor, else from the main cursor (`timeUs − 5 s` across a restart); a gap (`#info`) on it restarts its cursor at `now − 5 s` and schedules no reconcile. Its frames do not count as a healthy live source. Its reconnect delay follows the main connection's rule with its own failure count.
 - The DID filter discloses D to the Jetstream operator (decision U-D1, ADR 0009, `threat-model.md` PRIV-11).
@@ -887,6 +887,12 @@ on event e:
 | account | `getRepoStatus` at P1 (§3.4) |
 | sync (v2 `#sync`) | `enqueue(did, P1, "sync")` for every scope: a full re-list |
 
+**Failures.** A frame is acknowledged (and the cursor moves past it) only once its actions are applied. A frame whose handling fails (a store error, a failed `getRepoStatus`, a proof batch or `sync_forum` that fails) is tried again after 2 s and 4 s (*tunable*); after the third failure it is acknowledged and every repo it names is enqueued at P1 for a `sync_repo` of its scopes, which has its own retries and breakers (§9.4). No frame holds the cursor or the later frames for longer.
+
+**Context.** KNOWN, F, F_new and D may be evaluated against a cached snapshot, rebuilt after a change (a `Changed` event, or an applied frame) at most once per second and at least every 30 s (*tunable*); network noise therefore costs one lookup per frame, not a scan of the identity cache. While frames arrive, the client reads several per round and runs its other live work (queue, polls, reconcile) at most once per second.
+
+**Candidates.** A newcomer candidate (§4.4) writes its discovery row with the source `hint:jetstream`. At most 10,000 discovery rows (*tunable*) are kept per forum: past that, the oldest rows that are not confirmed are dropped.
+
 The firstSeen a Jetstream event records is the time this client received it, never the event's `time_us` or `witnessedAt`: the Jetstream sets those, and one that moved them back could make an honest post `future(x)` and rank it last (`social.md` §2.2); they serve only as the cursor (§6.3).
 
 Events MAY also drive counts and placeholders ("3 new comments"), which never move the cursor in the TUI and never supply text.
@@ -902,9 +908,9 @@ Events MAY also drive counts and placeholders ("3 new comments"), which never mo
 ### 6.6 Indexer change feed
 
 With an active indexer that advertises `getChanges` (assisted mode):
-- poll `getChanges(forum = F, since = cursor)` every 10 s while a view of F is open and every 60 s otherwise (*tunable*), per followed forum the indexer serves;
+- poll `getChanges(forum = F, since = cursor)` every 10 s while a view of F is open (its model is loaded) and every 60 s otherwise (*tunable*), per followed forum the indexer serves; `live_tail` runs these polls, and a `sync_forum` polls once before its PDS sync. A successful poll makes the change feed a healthy live source (§6.2);
 - each `#change` is handled like a Jetstream commit for that uri (§6.4), deduplicated with the same LRU;
-- the cursor (`cur/indexer:<did>:<fk>`) is the returned `cursor`;
+- the cursor (`cur/indexer:<did>:<fk>`) is the returned `cursor`. Without one, the first poll starts at the indexer's current `asOf.seq` (from `describeIndexer`), not at 0: the PDS sync covers what came before, and the log is not replayed as point fetches;
 - `CursorTooOld`: run a full reconcile of F (§6.8) and restart from the `asOf.seq` of that response.
 
 ### 6.7 Polling
