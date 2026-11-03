@@ -128,8 +128,8 @@ Normative details of the underlying behaviour live in `data-model.md` (records, 
   exported and imported (§3.6). New optional request field: `EditOpts.dropLinkCard` (§3.5
   `edit`), which writes a post draft's `link` as given, so a client can drop a card and keep the
   link (the v0 result of a draft of the uri alone, see "After the freeze (M4)").
-- **After the freeze (M6).** New operations: `forum_indexers(ref)` (§3.2) and
-  `audit_indexer(forum)` (§3.3), with the DTOs `ForumIndexer`, `AuditReport`, `AuditCheck`,
+- **After the freeze (M6).** New operations: `forum_indexers(ref)` and `audit_indexer(forum)`
+  (§3.3), with the DTOs `ForumIndexer`, `AuditReport`, `AuditCheck`,
   `AuditCounts`, `AuditFinding` and the enum `AuditKind` (§4.3). New Rust-only operations for
   native hosts and the indexer (not dispatched by the wasm binding, §3.9): `list_posts_page`,
   `hydrate_indexer_page`, `hydrate_indexer_records`, `poll_indexer_changes`,
@@ -235,7 +235,6 @@ when the engine is dropped or the corresponding stop method is called.
 | Operation | Result / notes |
 |---|---|
 | `forum_open(ref)` | `ForumView` header (§4.3). Resolves the declaration (first open fetches a proof), schedules authority sync: authorities never synced are synced now (P0), stale ones are queued. It emits `Changed [Forum]` only if that sync changed the cache (a record, or a repo's status), so re-querying on `Changed` cannot loop on an authority that stays unavailable; an authority whose sync failed is not tried again by `forum_open` for `FORUM_REOPEN_MS`. |
-| `forum_indexers(ref)` | `Vec<ForumIndexer { url, did?, note?, consented }>` (M6): the forum's declared `discovery.indexers` entries that pass validation (`sync.md` §2.4), in declaration order, each with this device's consent state: `consented` when the URL is configured (`EngineConfig.indexers`) or has a stored consent, global or for this forum, and never with `indexer_mode = None`. It reads the cached declaration and local state only and never contacts an indexer, so it answers the same with `direct` sources (clients show the list, so the user can consent or not). Errors: those of resolving the forum (`invalid_ref`, `not_found`); `invalid_input` when the stored consent setting is unreadable |
 | `forum_discover(q)` | `Vec<ForumSummary>` (relay + owners' listings + indexers; grouped by owner). M5 (§3.9) |
 | `forum_follow(uri, alias?)`, `forum_unfollow(uri)`, `followed()` | local; `followed()` also seeds from the user's own `membership` records |
 | `forum_create(ForumDraft)` | `WriteTicket`; writes the declaration and the owner's membership in one `applyWrites` |
@@ -253,6 +252,7 @@ when the engine is dropped or the corresponding stop method is called.
 | Operation | Notes |
 |---|---|
 | `sync_forum(uri, SyncOpts { budget_ms, max_requests, full })` | `SyncReport`. User-initiated: stale collection lists are refreshed (`sync.md` §5.2) and up to `REJECTED_RECHECK_BATCH` rejected candidates are confirmed again, cheapest first (`sync.md` §4.2.1) |
+| `forum_indexers(ref)` | `Vec<ForumIndexer { url, did?, note?, consented }>` (M6): the forum's declared `discovery.indexers` entries that pass validation (`sync.md` §2.4), in declaration order, each with this device's consent state: `consented` when the URL is configured (`EngineConfig.indexers`) or has a stored consent, global or for this forum, and never with `indexer_mode = None`. It reads the cached declaration and local state only and never contacts an indexer, so it answers the same with `direct` sources (clients show the list, so the user can consent or not). Errors: those of resolving the forum (`invalid_ref`, `not_found`); `invalid_input` when the stored consent setting is unreadable |
 | `audit_indexer(forum)` | `AuditReport` (M6, `sync.md` §15.4): the manual A1–A5 audit of the forum's one consented indexer (heads, changes, records, digest and aggregates, proofs), each check with its `counts` and `findings` (`contradiction`, `omission`, `lag`), and the totals. Findings are reported, never acted on: they do not demote or deselect the indexer. Errors: `invalid_input` when the `sources` in effect are `direct` (no indexer is contacted), when the forum has no consented indexer, or more than one ("exactly one"); `blocked` when the consented endpoint violates the endpoint policy; the errors of the audit's requests (`network`, …). The Rust method returns `Option<AuditReport>` and never `None` (the wasm binding would map it to `invalid_input`) |
 | `sync_thread(post_or_comment_uri, SyncOpts)` | P0 fetch of the thread's participants' ranges; opens an unknown forum from the record itself; `degraded` reflects the state after the sync |
 | `live_tail()` | long-lived: Jetstream / polling / indexer `getChanges`, feeds the dirty queue; runs `live_step` rounds until `live_stop()` |
@@ -657,7 +657,7 @@ RawView       { dto, uri, cid?, root?: uri /* a comment's thread, as placed by t
                 assertions: Vec<{ uri, cid, valid, record, rule?, status?: ModLogStatus }>,
                 state?: ItemState, score?: ScoreView }
 VerifyReport  { dto, uri, result: proven|absent|failed, rev?, commitCid?, keySource, checks: Vec<{ name, ok, detail? }> }
-ForumIndexer  { url /* https */, did?, note?, consented: bool }             // M6, §3.2 forum_indexers
+ForumIndexer  { url /* https */, did?, note?, consented: bool }             // M6, §3.3 forum_indexers
 AuditReport   { forum, indexer /* its DID */, endpoint, checks: Vec<AuditCheck>,
                 counts: AuditCounts /* the totals */ }                      // M6, §3.3 audit_indexer
 AuditCheck    { name /* A1 heads … A5 proofs, sync.md §15.4 */, counts: AuditCounts,
