@@ -23,7 +23,7 @@
 //! [`Host::sleep`], and the limiter is a plain future woken by released permits, so it runs the
 //! same on a Tokio runtime and in a browser worker.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -296,11 +296,13 @@ enum Gate {
     Wait(i64),
 }
 
-/// PLC pacing (`sync.md` §3.5).
+/// PLC pacing (`sync.md` §3.5): at most `rate` slots in any one second, not one every
+/// `1000 / rate` ms (decision O-16).
 #[derive(Debug)]
 struct PlcPacing {
     rate: u32,
-    next_at: i64,
+    /// The times of the last slots taken, oldest first; at most [`PLC_RATE_MAX`].
+    taken: VecDeque<i64>,
     last_429: i64,
     last_raise: i64,
 }
@@ -309,7 +311,7 @@ impl Default for PlcPacing {
     fn default() -> Self {
         Self {
             rate: PLC_RATE_MAX,
-            next_at: i64::MIN,
+            taken: VecDeque::new(),
             last_429: i64::MIN,
             last_raise: i64::MIN,
         }
@@ -327,18 +329,24 @@ impl PlcPacing {
         }
     }
 
-    /// When the next slot is free, at `now` or later; nothing is taken.
+    /// When the next slot is free, at `now` or later; nothing is taken. It is a second after the
+    /// `rate`-th most recent slot.
     fn next_slot(&mut self, now: i64) -> i64 {
         self.recover(now);
-        self.next_at.max(now)
+        let rate = self.rate.max(1) as usize;
+        match self.taken.len().checked_sub(rate) {
+            Some(i) => self.taken[i].saturating_add(1000).max(now),
+            None => now,
+        }
     }
 
     /// Takes the next slot at `now`; returns how long to wait for it.
     fn slot(&mut self, now: i64) -> i64 {
-        self.recover(now);
-        let spacing = 1000 / i64::from(self.rate.max(1));
-        let at = self.next_at.max(now);
-        self.next_at = at.saturating_add(spacing);
+        let at = self.next_slot(now);
+        self.taken.push_back(at);
+        if self.taken.len() > PLC_RATE_MAX as usize {
+            self.taken.pop_front();
+        }
         at - now
     }
 
@@ -1420,15 +1428,22 @@ mod tests {
 
     #[test]
     fn plc_pacing_halves_and_recovers() {
+        // twenty slots in any one second (O-16): the 21st comes a second after the first, the
+        // 22nd a second after the second
         let mut p = PlcPacing::default();
-        assert_eq!(p.slot(0), 0);
-        assert_eq!(p.slot(0), 50);
-        assert_eq!(p.slot(0), 100);
+        for _ in 0..20 {
+            assert_eq!(p.slot(0), 0);
+        }
+        assert_eq!(p.slot(0), 1000);
+        assert_eq!(p.slot(500), 500);
+        assert_eq!(p.slot(2_000), 0);
+        let mut p = PlcPacing::default();
         p.on_429(0);
         assert_eq!(p.rate, 10);
-        p.next_at = 0;
-        assert_eq!(p.slot(0), 0);
-        assert_eq!(p.slot(0), 100);
+        for _ in 0..10 {
+            assert_eq!(p.slot(0), 0);
+        }
+        assert_eq!(p.slot(0), 1000);
         let _ = p.slot(PLC_RECOVER_MS);
         assert_eq!(p.rate, 12);
     }

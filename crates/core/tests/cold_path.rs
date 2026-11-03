@@ -487,7 +487,9 @@ fn a_granted_members_hydrated_post_is_listed_before_their_repo_sync() {
 /// clock moves only when the test moves it, and only the order of requests is checked.
 #[test]
 fn the_authors_on_screen_are_resolved_ahead_of_the_participant_sweep() {
-    const MEMBERS: usize = 24;
+    // more members than PLC pacing admits in one second (20, O-16), so the sweep is still
+    // waiting for its next slots when the page starts
+    const MEMBERS: usize = 50;
     const ON_SCREEN: usize = 6;
     let mem = MemHost::new();
     let net = FakeNet::on(&mem);
