@@ -215,6 +215,16 @@ time windows) and each version's first-seen time `obs` (`social.md` §1, §2: fu
   instead of being queued for `live_tail`, so the handle state does not depend on whether a
   client ran `live_tail`.
 
+**Indexer on and off (M6).** The parity scenario's indexer variant (`docs/plan.md` §4.2, M6
+acceptance "identical views with and without the indexer") compares a client that used an
+indexer with one that did not. That comparison ignores the provenance badges `Badges.verified`,
+`Badges.hint` and `Badges.stale` (`sync.md` §1.6), which say how a version reached this device
+and how fresh that path is (a current proof, a row that exists only because of a hint, a
+third-party proof shown provisionally or a repo shown from cache) and so legitimately differ
+between the two. Every other byte must still match: all content, scores, states, the other
+badges, and the order of every list. The comparison removes those three keys from both sides
+and compares the rest byte for byte. **User decision U-D2.**
+
 Sync, the outbox, record `createdAt` values, caches, TTLs and back-offs keep using the host
 clock. Choose `t` later than every record of the scenario (a record whose `createdAt` is more
 than `FUTURE_SKEW_MS` after `t` would be flagged `futureDated`), e.g. the scenario's start plus
