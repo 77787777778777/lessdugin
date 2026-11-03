@@ -29,7 +29,7 @@ fn done_uri(t: &Value) -> String {
 }
 
 /// Decision O-2 (`engine-api.md` §3.5 `wiki_edit`): `wiki edit` names the head its text was
-/// edited from, the page as this device last showed it (or `--base`), and syncs before it
+/// edited from, the one `tag <slug>` showed in this terminal (or `--base`), and syncs before it
 /// writes. An edit made against a head another device has moved past is refused (`conflict`,
 /// exit 5) instead of silently replacing the newer revision; the author's text is kept (the
 /// file as it is, standard input in a file the error names) and the message says the page
@@ -157,6 +157,132 @@ fn a_wiki_edit_against_a_moved_head_is_refused_and_the_text_kept() {
     // it is no draft: `draft ls` does not list it
     assert!(!alice.ok(&["draft", "ls"]).contains("Piped"));
     assert_eq!(alice.account.list(nsid::WIKI_REVISION).len(), 3);
+}
+
+/// Decision O-2: without `--base`, `wiki edit` names the head `tag <slug>` showed in this
+/// terminal, not the cached head: `ls` and the other reading commands sync the forum and move
+/// the cache to revisions the author never saw. The redo, after `tag <slug>` shows the page
+/// again, is written on the head it showed.
+#[test]
+fn a_wiki_edit_after_a_sync_still_names_the_head_that_was_shown() {
+    let net = Net::new();
+    let alice = net.user("alice.test", true);
+    alice.json(&["forum", "create", "meta", "--frontpage"]);
+    let first = alice.file("r1.md", "The first text.\n");
+    let r1 = done_uri(&alice.json(&[
+        "wiki",
+        "edit",
+        "rust",
+        "--name",
+        "Rust",
+        "--file",
+        s(&first),
+    ]));
+
+    // the second device shows the page at r1 and its author edits from it
+    let other = net.second_device(&alice);
+    other.ok(&["forum", "follow", "alice.test/meta"]);
+    other.ok(&["forum", "use", "alice.test/meta"]);
+    other.ok(&["sync", "alice.test/meta"]);
+    assert!(other.ok(&["tag", "rust"]).contains(&r1));
+
+    // meanwhile alice publishes r2, and the second device's `ls` syncs it into its cache
+    let second = alice.file("r2.md", "The second text.\n");
+    let r2 = done_uri(&alice.json(&[
+        "wiki",
+        "edit",
+        "rust",
+        "--name",
+        "Rust",
+        "--file",
+        s(&second),
+    ]));
+    other.ok(&["ls"]);
+
+    // the edit names r1, the head shown, and is refused against the cached r2
+    let mine = other.file("mine.md", "My edit of the first text.\n");
+    let edit = ["wiki", "edit", "rust", "--name", "Rust", "--file", s(&mine)];
+    let e = other.fails(5, &edit);
+    assert_eq!(e["code"], "conflict", "{e}");
+    assert_eq!(e["detail"]["kind"], "wikiHeadMoved", "{e}");
+    assert_eq!(e["detail"]["base"], r1.as_str(), "{e}");
+    assert_eq!(e["detail"]["head"], r2.as_str(), "{e}");
+    assert!(
+        e["message"]
+            .as_str()
+            .unwrap()
+            .contains("changed since it was loaded"),
+        "{e}"
+    );
+    assert_eq!(alice.account.list(nsid::WIKI_REVISION).len(), 2);
+
+    // reloaded, the page shows r2; the redo is written on it
+    assert!(other.ok(&["tag", "rust"]).contains(&r2));
+    let r3 = done_uri(&other.json(&edit));
+    assert_eq!(parents(&alice, &r3), std::slice::from_ref(&r2));
+    // and the next edit from this terminal is made on its own r3
+    let r4 = done_uri(&other.json(&edit));
+    assert_eq!(parents(&alice, &r4), std::slice::from_ref(&r3));
+}
+
+/// Decision O-2: an existing page that was never shown in this terminal has no head the text
+/// could have been edited from, so `wiki edit` without `--base` refuses it (`conflict`,
+/// `wikiHeadMoved` naming only the head) rather than writing it on whatever head the sync
+/// brought in, keeps the text and says how to reload the page and redo the edit.
+#[test]
+fn a_wiki_edit_of_a_page_this_terminal_never_showed_is_refused() {
+    let net = Net::new();
+    let alice = net.user("alice.test", true);
+    alice.json(&["forum", "create", "meta", "--frontpage"]);
+    let first = alice.file("r1.md", "The first text.\n");
+    let r1 = done_uri(&alice.json(&[
+        "wiki",
+        "edit",
+        "rust",
+        "--name",
+        "Rust",
+        "--file",
+        s(&first),
+    ]));
+
+    // a second device that follows the forum but never showed the page
+    let mut other = net.second_device(&alice);
+    other.ok(&["forum", "follow", "alice.test/meta"]);
+    other.ok(&["forum", "use", "alice.test/meta"]);
+    let mine = other.file("mine.md", "Text written without the page.\n");
+    let edit = ["wiki", "edit", "rust", "--name", "Rust", "--file", s(&mine)];
+    let e = other.fails(5, &edit);
+    assert_eq!(e["code"], "conflict", "{e}");
+    assert_eq!(e["detail"]["kind"], "wikiHeadMoved", "{e}");
+    assert_eq!(e["detail"]["head"], r1.as_str(), "{e}");
+    assert!(e["detail"].get("base").is_none(), "{e}");
+    let message = e["message"].as_str().unwrap();
+    assert!(
+        message.contains("was not loaded in this terminal"),
+        "{message}"
+    );
+    assert!(message.contains(s(&mine)), "{message}");
+    assert!(message.contains("lessdugin tag rust"), "{message}");
+    assert!(message.contains(&format!("--base {r1}")), "{message}");
+    assert_eq!(alice.account.list(nsid::WIKI_REVISION).len(), 1);
+    assert_eq!(
+        std::fs::read_to_string(&mine).unwrap(),
+        "Text written without the page.\n"
+    );
+
+    // shown in this terminal, the page can be edited; another terminal has shown nothing
+    assert!(other.ok(&["tag", "rust"]).contains(&r1));
+    other.session = "t2".into();
+    let e = other.fails(5, &edit);
+    assert_eq!(e["detail"]["head"], r1.as_str(), "{e}");
+    assert_eq!(alice.account.list(nsid::WIKI_REVISION).len(), 1);
+    other.session = "t1".into();
+    let r2 = done_uri(&other.json(&edit));
+    assert_eq!(parents(&alice, &r2), std::slice::from_ref(&r1));
+
+    // a page that does not exist yet needs no head: its first revision has no parent
+    let new = done_uri(&other.json(&["wiki", "edit", "go", "--name", "Go", "--file", s(&mine)]));
+    assert!(parents(&alice, &new).is_empty());
 }
 
 /// Publishes a post titled `title` in alice's forum; returns its uri.

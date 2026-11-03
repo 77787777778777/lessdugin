@@ -9,6 +9,7 @@ use std::path::Path;
 use lessdugin_core::dto::{
     BodyDraft, DTO_VERSION, ForumRole, PostSummary, SearchItem, SearchQuery, SequenceDraft,
     SequencePosition, SequenceSummary, SequenceView, TagSummary, TagView, UserView, WikiDraft,
+    WriteState,
 };
 use lessdugin_core::engine::{Engine, EngineError, ErrorCode};
 use lessdugin_native::host::NativeHost;
@@ -274,6 +275,9 @@ pub async fn tag(ctx: &Ctx, args: TagArgs) -> Result<(), CliError> {
                     ),
                 ]));
             }
+            if let Some(head) = &view.head {
+                shown_wiki_head(ctx, &forum, &slug, head);
+            }
             if ctx.out.is_json() {
                 ctx.out.json(&view);
                 return Ok(());
@@ -292,12 +296,29 @@ pub async fn tag(ctx: &Ctx, args: TagArgs) -> Result<(), CliError> {
     Ok(())
 }
 
+/// Records `head` as the head of `slug` this terminal showed or wrote ([`Listings::wiki_heads`]).
+///
+/// [`Listings::wiki_heads`]: crate::state::Listings::wiki_heads
+fn shown_wiki_head(ctx: &Ctx, forum: &str, slug: &str, head: &str) {
+    if let Err(e) = ctx
+        .state
+        .update_listings(|l| l.set_wiki_head(forum, slug, head))
+    {
+        ctx.out.warn(cat([
+            lit("could not save the page's revision: "),
+            tt(&e.to_string()),
+        ]));
+    }
+}
+
 /// `lessdugin wiki edit …`.
 ///
 /// The edit names the head it was made against (`WikiDraft.base`, decision O-2): `--base`, else
-/// the page as this device last showed it (`tag <slug>` reads the same cache). The forum is
-/// synced before the write, so a revision published since is seen and the edit refused
-/// (`conflict`, `wikiHeadMoved`) rather than replacing it.
+/// the head `tag <slug>` last showed in this terminal (or its last `wiki edit` of the page
+/// wrote), never the cache's current head, which any sync moves. The forum is synced before
+/// the write, so a revision published since is seen and the edit refused (`conflict`,
+/// `wikiHeadMoved`) rather than replacing it; so is an edit of a page that exists but whose
+/// head was never shown here.
 pub async fn wiki(ctx: &Ctx, args: WikiArgs) -> Result<(), CliError> {
     match args.action {
         WikiAction::Edit {
@@ -314,16 +335,30 @@ pub async fn wiki(ctx: &Ctx, args: WikiArgs) -> Result<(), CliError> {
             let markdown = draft::read_file(Path::new(&file))?;
             let w = ctx.writer().await?;
             let forum = refs::forum_or_current(ctx, &w.engine, forum.as_deref()).await?;
-            let base = match base {
-                Some(base) => Some(base),
-                None => match w.engine.tag(&forum, &slug).await {
+            let base = base.or_else(|| {
+                ctx.state
+                    .listings()
+                    .wiki_head(&forum, &slug)
+                    .map(str::to_owned)
+            });
+            read::sync_forum_quietly(ctx, &w.engine, &forum).await;
+            if base.is_none() {
+                // no head of the page was shown here: a new page, or one that exists and was
+                // never loaded, which is refused rather than written on whatever head the
+                // cache holds now (a page that is no tag, which `tag` does not show, is still
+                // written on its current head, as in engine API v0)
+                let head = match w.engine.tag(&forum, &slug).await {
                     Ok(view) => view.head,
-                    // a new page (or one that is no tag): nothing was loaded
                     Err(e) if e.code == ErrorCode::NotFound => None,
                     Err(e) => return Err(e.into()),
-                },
-            };
-            read::sync_forum_quietly(ctx, &w.engine, &forum).await;
+                };
+                if let Some(head) = head {
+                    let e = EngineError::conflict(format!("the page {slug} was not loaded"))
+                        .with_detail("kind", "wikiHeadMoved")
+                        .with_detail("head", head);
+                    return Err(head_moved_error(ctx, &w.engine, &slug, &file, &markdown, e));
+                }
+            }
             let draft = WikiDraft {
                 name,
                 description,
@@ -341,6 +376,10 @@ pub async fn wiki(ctx: &Ctx, args: WikiArgs) -> Result<(), CliError> {
                 Err(e) => return Err(e.into()),
             };
             let ticket = write::drive(ctx, &w, ticket).await?;
+            if let WriteState::Done { uri, .. } = &ticket.state {
+                // the author's own text is the page as this terminal knows it now
+                shown_wiki_head(ctx, &forum, &slug, uri);
+            }
             write::report(ctx, &ticket, "Edited wiki")
         }
     }
@@ -356,9 +395,10 @@ fn head_moved(e: &EngineError) -> bool {
             == Some("wikiHeadMoved")
 }
 
-/// The `conflict` a refused wiki edit exits with: the page changed since it was loaded. The
-/// author's text is kept (a file stays as it is; standard input is saved under the drafts
-/// directory) and the message says how to reload the page and redo the edit on it.
+/// The `conflict` a refused wiki edit exits with: the page changed since it was loaded (or,
+/// without `detail.base`, was never loaded here). The author's text is kept (a file stays as it
+/// is; standard input is saved under the drafts directory) and the message says how to reload
+/// the page and redo the edit on it.
 fn head_moved_error(
     ctx: &Ctx,
     engine: &Engine<NativeHost>,
@@ -389,14 +429,28 @@ fn head_moved_error(
     } else {
         Some(file.to_owned())
     };
-    let mut message = format!("the page {slug} changed since it was loaded");
-    if let Some(base) = &base {
-        message.push_str(&format!(" (your edit was made against {base}"));
-        match &head {
-            Some(head) => message.push_str(&format!(", the page is now at {head})")),
-            None => message.push(')'),
+    let mut message = match &base {
+        Some(base) => {
+            let mut m = format!(
+                "the page {slug} changed since it was loaded (your edit was made against {base}"
+            );
+            match &head {
+                Some(head) => m.push_str(&format!(", the page is now at {head})")),
+                None => m.push(')'),
+            }
+            m
         }
-    }
+        None => {
+            let mut m = format!(
+                "the page {slug} exists but was not loaded in this terminal, so this edit names \
+                 no revision it was made against"
+            );
+            if let Some(head) = &head {
+                m.push_str(&format!(" (the page is at {head})"));
+            }
+            m
+        }
+    };
     message.push_str(", so nothing was written; ");
     match &kept {
         Some(path) => message.push_str(&format!("your text is kept in {path}. ")),
