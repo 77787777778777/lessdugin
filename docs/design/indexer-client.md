@@ -26,8 +26,14 @@ only by `lessdugin_atp::proof::ProofBundle` (`proofs/1`), never by JSON or an En
 Head hints can queue a PDS sync but cannot write `headSeen`, `listed`, or a repo revision.
 `getChanges` validates ascending exclusive sequence numbers, persists its integer cursor under
 `indexer:<did>:<fk>`, writes ordinary dirty marks, and enqueues point fetches. A malformed page
-does not advance the cursor. `CursorTooOld` queues reconciliation and restarts at the current
-`asOf.seq`.
+does not advance the cursor. Each change is first scoped to the polled forum (`ChangeScope`):
+only that forum's records by C(F), granted DIDs, confirmed participants and own accounts are
+marked and fetched; a membership at the forum key by another DID is returned as a candidate,
+which `sync_forum` confirms as a newcomer hint; everything else is dropped before any identity
+lookup. `CursorTooOld` queues reconciliation (authorities P1, other participants P3, at most once
+per 24 h, stamped in the cursor row's `timeUs`) and restarts at the current `asOf.seq`.
+`hydrate_indexer_page` hydrates only post URIs in the forum's range, and only participants'
+once discovery has completed; head hints for DIDs that were not asked about are ignored.
 
 `listPosts`, `listRecentDiscussion` and `getThread` expose `OrderingHint`: AT URIs, an opaque
 cursor and (where defined) `inputDigest`. Hint text, state, badges, rank and tallies never enter

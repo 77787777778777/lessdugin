@@ -1585,6 +1585,12 @@ It is comfortable up to about 50M records; a Postgres adapter can come later.
 
 Displayed values are always recomputed locally from admitted records. Indexer aggregates MAY show as `~n` until then. `getRepoHeads` results are hints: they can mark repos dirty but never count as head observations.
 
+**Scope.** An indexer's hints never choose whom the client contacts:
+- a `#change` of `getChanges(forum = F)` is handled (§6.6) only for a record of F (an rkey of F's scope, §10.4: its `{fk}-` range or its membership key; F's declaration; or a profile) written by a DID in C(F) (§4.5), a granted DID, a confirmed participant or an own account. A membership at F's key by any other DID is a newcomer candidate when F ∈ F_new (§6.4): nothing is fetched for it, and the next forum sync confirms it like the other newcomer hints, after them and within the same budget (§4.4). Every other change is dropped, also before any identity resolution;
+- `listPosts` uris are hydrated (§14.3) only for posts in F's `{fk}-` range and, once a discovery pass of F has completed (§4.2), only for posts by those DIDs. A cold start cannot tell participants yet; its one visible page bounds it;
+- a `getRepoHeads` head for a DID that was not asked about is ignored;
+- `CursorTooOld` reconciles F as a Jetstream gap does (§6.3): authorities at P1, the other DIDs of C(F) at P3. A feed that keeps answering `CursorTooOld` gets this at most once per 24 h for each indexer and forum (the cursor row's `timeUs` records the last one); the daily reconcile (§6.8) bounds what it can hide.
+
 **Audit.** `lessdugin sync <forum> --audit` (and an SPA settings action) cross-checks one indexer for one forum:
 
 | Check | Procedure | Finding |

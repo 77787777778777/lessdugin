@@ -164,8 +164,9 @@ impl<H: Host> Engine<H> {
         let key = self.forum_key(forum).await?;
         let mut opts = opts.discovery_opts();
         if self.sources().await? == super::Sources::Assisted {
+            let mut indexer_newcomers = Vec::new();
             match self.poll_indexer_changes_resolved(&key).await {
-                Ok(_) => {}
+                Ok(polled) => indexer_newcomers = polled.map(|p| p.candidates).unwrap_or_default(),
                 Err(e) => {
                     tracing::warn!(forum = %key.uri, error = %e, "indexer changes unavailable")
                 }
@@ -178,6 +179,13 @@ impl<H: Host> Engine<H> {
                     tracing::warn!(forum = %key.uri, error = %e, "CORE+ forum discovery failed")
                 }
             }
+            // Newcomers named by the change feed are confirmed like any hint, after the others
+            // and within the same budget (sync.md §4.4).
+            opts.newcomers.extend(
+                indexer_newcomers
+                    .into_iter()
+                    .map(|d| (d, "indexer".to_owned())),
+            );
         }
         self.sync_forum_resolved(&key, opts).await
     }

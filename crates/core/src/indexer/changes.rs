@@ -5,12 +5,17 @@ use std::sync::Arc;
 
 use lessdugin_atp::syntax::{AtUri, Did};
 use lessdugin_atp::tid::Tid;
+use lessdugin_lexicon::collection::nsid;
+use lessdugin_lexicon::keys::PROFILE_RKEY;
 
+use crate::discovery::forum::NEWCOMER_BUDGET;
 use crate::host::Host;
 use crate::store::blob::CursorRow;
 use crate::store::records::RecordStore;
+use crate::store::schema;
 use crate::sync::net::Priority;
 use crate::sync::queue::{DirtyItem, ready_time};
+use crate::sync::schedule::RECONCILE_PARTICIPANT_MS;
 use crate::sync::{Reason, Session, Syncer};
 use crate::xrpc::XrpcCallError;
 
@@ -26,6 +31,59 @@ pub struct ChangePollReport {
     pub changes: usize,
     pub queued: usize,
     pub restarted: bool,
+    /// Valid changes outside the forum's scope, never fetched.
+    pub dropped: usize,
+    /// Newcomer candidates (membership records at the forum's key by DIDs outside its scope),
+    /// newest first, for discovery confirmation (`sync.md` §4.4). Nothing was fetched for them.
+    pub candidates: Vec<String>,
+}
+
+/// What the change feed of one forum may make the client fetch (`sync.md` §15.4): records of
+/// that forum by its authorities, granted DIDs, confirmed participants and the viewer's own
+/// accounts. An indexer otherwise chooses which DIDs, and so which PDS hosts, every consenting
+/// client contacts.
+#[derive(Clone, Debug, Default)]
+pub struct ChangeScope {
+    /// The forum's fk.
+    pub fk: String,
+    /// The forum declaration, `(owner DID, rkey)`.
+    pub declaration: (String, String),
+    /// DIDs whose changes are fetched.
+    pub participants: BTreeSet<String>,
+    /// A: reconciled at P1 after `CursorTooOld`.
+    pub authorities: BTreeSet<String>,
+    /// C(F): reconciled after `CursorTooOld` (P3 outside A).
+    pub reconcile: BTreeSet<String>,
+    /// F ∈ F_new (open mode, or the viewer is an authority): newcomer candidates are kept.
+    pub newcomers: bool,
+}
+
+enum Scoped {
+    Fetch,
+    Candidate,
+    Drop,
+}
+
+impl ChangeScope {
+    fn classify(&self, uri: &AtUri) -> Scoped {
+        let (did, coll, rkey) = (
+            uri.did().as_str(),
+            uri.collection().as_str(),
+            uri.rkey().as_str(),
+        );
+        let of_forum = schema::scope_of(coll, rkey) == self.fk
+            || (coll == nsid::FORUM && (did, rkey) == (&*self.declaration.0, &*self.declaration.1))
+            || (coll == nsid::PROFILE && rkey == PROFILE_RKEY);
+        if !of_forum {
+            Scoped::Drop
+        } else if self.participants.contains(did) {
+            Scoped::Fetch
+        } else if self.newcomers && schema::is_membership(coll) && rkey == self.fk {
+            Scoped::Candidate
+        } else {
+            Scoped::Drop
+        }
+    }
 }
 
 fn invalid(message: impl Into<String>) -> XrpcCallError {
@@ -66,7 +124,7 @@ pub async fn poll_changes<H: Host>(
     client: &Client,
     session: &Session<H>,
     forum: Option<&AtUri>,
-    reconcile_dids: &[Did],
+    scope: &ChangeScope,
 ) -> Result<ChangePollReport, XrpcCallError> {
     let source = source_name(client, forum);
     let store = RecordStore::new(session.host().cache());
@@ -81,6 +139,7 @@ pub async fn poll_changes<H: Host>(
     };
     let mut cursor = since;
     let mut restarted = false;
+    let mut candidates = Vec::new();
     loop {
         let page = match client.get_changes(session, forum, cursor, 500).await {
             Err(e) if e.error_name() == Some("CursorTooOld") && !restarted => {
@@ -88,14 +147,27 @@ pub async fn poll_changes<H: Host>(
                 report.restarted = true;
                 // asOf is a server snapshot, not record evidence. It is only a restart point.
                 cursor = client.current_as_of(session).await?.seq.max(0);
-                for did in reconcile_dids {
-                    syncer.enqueue(DirtyItem::new(
-                        did.as_str(),
-                        Priority::P0,
-                        Reason::Reconcile,
-                        now,
-                    ));
-                    report.queued += 1;
+                // A full reconcile as for a Jetstream gap (§6.3): authorities at P1, the other
+                // participants at P3. A feed that keeps answering CursorTooOld gets it at most
+                // once per reconcile period; the daily reconcile (§6.8) covers the rest.
+                let now_us = now.saturating_mul(1000);
+                let last = store
+                    .cursor(&source)
+                    .await
+                    .map_err(store_error)?
+                    .and_then(|c| c.time_us);
+                if last.is_none_or(|t| now_us.saturating_sub(t) >= RECONCILE_PARTICIPANT_MS * 1000)
+                {
+                    for did in &scope.reconcile {
+                        let priority = if scope.authorities.contains(did) {
+                            Priority::P1
+                        } else {
+                            Priority::P3
+                        };
+                        syncer.enqueue(DirtyItem::new(did, priority, Reason::Reconcile, now));
+                        report.queued += 1;
+                    }
+                    stamp_reconcile(&store, &source, now_us, now).await?;
                 }
                 persist_cursor(&store, &source, cursor, now).await?;
                 continue;
@@ -115,6 +187,17 @@ pub async fn poll_changes<H: Host>(
             return Err(invalid("getChanges returned an inconsistent cursor"));
         }
         for (change, (uri, did)) in valid {
+            match scope.classify(&uri) {
+                Scoped::Fetch => {}
+                Scoped::Candidate => {
+                    candidates.push(did.to_string());
+                    continue;
+                }
+                Scoped::Drop => {
+                    report.dropped += 1;
+                    continue;
+                }
+            }
             syncer
                 .mark_hint(session, &uri, &change.rev)
                 .await
@@ -139,9 +222,17 @@ pub async fn poll_changes<H: Host>(
             break;
         }
     }
+    let mut seen = BTreeSet::new();
+    report.candidates = candidates
+        .into_iter()
+        .rev()
+        .filter(|d| seen.insert(d.clone()))
+        .take(NEWCOMER_BUDGET)
+        .collect();
     Ok(report)
 }
 
+/// Writes the cursor, keeping the row's last `CursorTooOld` reconcile time (`timeUs`).
 async fn persist_cursor<K: crate::host::KvStore>(
     store: &RecordStore<'_, K>,
     source: &str,
@@ -149,7 +240,30 @@ async fn persist_cursor<K: crate::host::KvStore>(
     now: i64,
 ) -> Result<(), XrpcCallError> {
     let mut row = CursorRow::new(now);
+    row.time_us = store
+        .cursor(source)
+        .await
+        .map_err(store_error)?
+        .and_then(|c| c.time_us);
     row.seq = Some(cursor);
+    let mut batch = store.batch();
+    batch.put_cursor(source, &row).map_err(store_error)?;
+    batch.commit().await.map_err(store_error)?;
+    Ok(())
+}
+
+async fn stamp_reconcile<K: crate::host::KvStore>(
+    store: &RecordStore<'_, K>,
+    source: &str,
+    now_us: i64,
+    now: i64,
+) -> Result<(), XrpcCallError> {
+    let mut row = store
+        .cursor(source)
+        .await
+        .map_err(store_error)?
+        .unwrap_or_else(|| CursorRow::new(now));
+    row.time_us = Some(now_us);
     let mut batch = store.batch();
     batch.put_cursor(source, &row).map_err(store_error)?;
     batch.commit().await.map_err(store_error)?;

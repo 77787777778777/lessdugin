@@ -88,6 +88,16 @@ fn bundle_many(
     rkeys: &[&str],
     forged: bool,
 ) -> Vec<u8> {
+    bundle_in(repo, rev, POST, rkeys, forged)
+}
+
+fn bundle_in(
+    repo: &TestRepo,
+    rev: lessdugin_atp::tid::Tid,
+    coll: &str,
+    rkeys: &[&str],
+    forged: bool,
+) -> Vec<u8> {
     let commit = if forged {
         repo.commit_signed_by(rev, &fake_key("99"))
     } else {
@@ -99,15 +109,15 @@ fn bundle_many(
         let mut item = BTreeMap::new();
         item.insert(
             "uri".to_owned(),
-            Ipld::String(format!("at://{}/{POST}/{rkey}", repo.did())),
+            Ipld::String(format!("at://{}/{coll}/{rkey}", repo.did())),
         );
         item.insert(
             "cid".to_owned(),
-            repo.cid(POST, rkey).map_or(Ipld::Null, Ipld::Link),
+            repo.cid(coll, rkey).map_or(Ipld::Null, Ipld::Link),
         );
         item.insert("commit".to_owned(), Ipld::Link(commit.cid));
         items.push(Ipld::Map(item));
-        all.extend(repo.proof_blocks(POST, rkey, &commit));
+        all.extend(repo.proof_blocks(coll, rkey, &commit));
     }
     let mut manifest = BTreeMap::new();
     manifest.insert("v".to_owned(), Ipld::Integer(1));
@@ -391,14 +401,26 @@ fn unavailable_proof_service_falls_back_to_the_authors_pds() {
 
 #[test]
 fn visible_page_uses_only_uri_hints_then_hydrates_proofs() {
-    let (w, e, uri) = current_proof_world(Sources::Assisted, false);
+    let (w, e, outside) = current_proof_world(Sources::Assisted, false);
     let forum = format!("at://{}/{}/f", w.alice.did, nsid::FORUM);
+    // listPosts(forum) names posts of that forum, whose rkeys are in its {fk}- range
+    // (data-model.md §6.3); the world's own post is outside every forum's range.
+    let rkey = keys::post_rkey(&forum, tid_at_ms(w.host.now() - 120_000).as_ref()).unwrap();
+    let rev = tid_at_ms(w.host.now() - 60_000);
+    let car = w.pds.update(&w.alice.did, None, |repo| {
+        let value = json!({"$type": nsid::POST, "title": "hello", "n": 1});
+        repo.put(nsid::POST, &rkey, &value);
+        bundle_in(repo, rev, nsid::POST, &[&rkey], false)
+    });
+    w.host
+        .respond_get(&endpoint("getRecordProofs"), resp::car(car));
+    let uri = AtUri::parse(&format!("at://{}/{}/{rkey}", w.alice.did, nsid::POST)).unwrap();
     describe(&w.host, &["listPosts", "getRecordProofs"], 0);
     w.host.respond_get(
         &endpoint("listPosts"),
         resp::ok_json(&with_meta(
             json!({
-                "posts": [{
+                "posts": [{"ref": {"uri": outside.to_string()}, "effectiveAt": "2025-01-01T00:00:00Z"}, {
                     "ref": {"uri": uri.to_string(), "value": {"title": "UNTRUSTED"}},
                     "effectiveAt": "2025-01-01T00:00:00Z",
                     "state": "visible",
@@ -421,6 +443,15 @@ fn visible_page_uses_only_uri_hints_then_hydrates_proofs() {
     let ordering = w.host.requests_to(&endpoint("listPosts"));
     assert_eq!(ordering.len(), 1);
     assert!(ordering[0].url.contains("hydrate=false"));
+    // The listed record outside the forum's range was neither requested nor fetched.
+    assert_eq!(report.requested, 1, "{report:?}");
+    let proofs = w.host.requests_to(&endpoint("getRecordProofs"));
+    assert!(proofs.iter().all(|r| !r.url.contains(RKEY)), "{proofs:?}");
+    assert!(
+        block_on(RecordStore::new(w.host.cache()).get(&outside))
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]
@@ -581,13 +612,17 @@ struct ForumWorld {
 }
 
 fn forum_world() -> ForumWorld {
+    forum_world_in(MembershipMode::Approval)
+}
+
+fn forum_world_in(mode: MembershipMode) -> ForumWorld {
     let host = MemHost::new();
     let net = FakeNet::on(&host);
     let _ = net.default_pds();
     let owner = net.add_account("alice.example.com");
     let key = ForumKey::new(owner.did(), "meta").unwrap();
     let dt = lessdugin_atp::syntax::Datetime::from_millis(host.now() - 3_600_000).unwrap();
-    let forum = Forum::create("meta", dt.clone(), MembershipMode::Approval);
+    let forum = Forum::create("meta", dt.clone(), mode);
     owner.put(nsid::FORUM, "meta", &serde_json::to_value(forum).unwrap());
     let membership = Membership::new(key.uri.clone(), dt.clone());
     owner.put(
@@ -1205,6 +1240,315 @@ fn audit_change_check_reads_back_from_the_head_past_a_pruned_log() {
     serve_change_log(&w.host, 0, 2_500, rows, 1..=1_000);
     let a2 = a2_after(&w);
     assert_eq!((a2.counts.checked, a2.counts.omissions), (1, 0), "{a2:?}");
+}
+
+/// A syntactically valid DID that no test account has.
+fn stranger(i: usize) -> String {
+    let tail: String = [b'a' + (i / 26) as u8, b'a' + (i % 26) as u8]
+        .iter()
+        .map(|b| *b as char)
+        .collect();
+    format!("did:plc:strangerxxxxxxxxxxxxxx{tail}")
+}
+
+const SOME_CID: &str = "bafyreie5737gdxlw5i64vzichcalba3z2v5n6icifvx5xytvske7mr3hpm";
+
+fn feed_change(seq: i64, did: &str, coll: &str, rkey: &str) -> Value {
+    json!({
+        "seq": seq, "uri": format!("at://{did}/{coll}/{rkey}"), "cid": SOME_CID, "did": did,
+        "rev": tid_at_ms(1_700_000_000_000).to_string(), "op": "create"
+    })
+}
+
+fn drain_queue(e: &Engine<MemHost>) {
+    while e.syncer().pop_ready(i64::MAX).is_some() {}
+}
+
+#[test]
+fn a_hostile_change_feed_cannot_steer_fetches_at_arbitrary_dids() {
+    let w = forum_world();
+    let other_fk = keys::fk("at://did:plc:ewvi7nxzyoun6zhxrhs64oiz/x.forum/other").unwrap();
+    let mut changes = Vec::new();
+    for i in 0..10 {
+        // Strangers' records in this forum's range, in another forum's range, and memberships
+        // at this forum's key (an approval forum the viewer does not moderate takes none).
+        let seq = 3 * i as i64;
+        changes.push(feed_change(
+            seq + 1,
+            &stranger(i),
+            nsid::POST,
+            &format!("{}-3l2s5xxv2z{i:03}", w.key.fk),
+        ));
+        changes.push(feed_change(
+            seq + 2,
+            &stranger(i + 10),
+            nsid::POST,
+            &format!("{other_fk}-3l2s5xxv2z{i:03}"),
+        ));
+        changes.push(feed_change(
+            seq + 3,
+            &stranger(i + 20),
+            nsid::MEMBERSHIP,
+            &w.key.fk,
+        ));
+    }
+    // The owner's own change in the forum is in scope.
+    let rkey = w.post.rsplit('/').next().unwrap();
+    changes.push(feed_change(31, w.owner.did().as_str(), nsid::POST, rkey));
+    describe(&w.host, &["getChanges"], 31);
+    w.host.respond_get(
+        &endpoint("getChanges"),
+        resp::ok_json(&with_meta(json!({"changes": changes, "cursor": 31}), 31)),
+    );
+    drain_queue(&w.engine);
+    w.host.clear_requests();
+    let polled = block_on(w.engine.poll_indexer_changes(w.key.uri.as_str()))
+        .unwrap()
+        .unwrap();
+    assert_eq!((polled.changes, polled.dropped), (1, 30), "{polled:?}");
+    assert!(polled.candidates.is_empty(), "{polled:?}");
+    assert_eq!(polled.cursor, 31);
+    let queued: Vec<String> = w
+        .engine
+        .syncer()
+        .queue_snapshot()
+        .ordered()
+        .iter()
+        .map(|i| i.did.clone())
+        .collect();
+    assert_eq!(queued, vec![w.owner.did().to_string()]);
+    for r in w.host.requests() {
+        assert!(
+            !r.url.contains("strangerxx"),
+            "contacted on a hint: {}",
+            r.url
+        );
+    }
+    // Nor does the next round of the dirty queue (or a sync) reach any of them.
+    block_on(w.engine.live_step()).unwrap();
+    for r in w.host.requests() {
+        assert!(
+            !r.url.contains("strangerxx"),
+            "contacted on a hint: {}",
+            r.url
+        );
+    }
+}
+
+#[test]
+fn a_change_feed_newcomer_goes_through_discovery_confirmation() {
+    let w = forum_world_in(MembershipMode::Open);
+    let newbie = w._net.add_account("newbie.example.com");
+    let dt = lessdugin_atp::syntax::Datetime::from_millis(w.host.now()).unwrap();
+    newbie.put(
+        nsid::MEMBERSHIP,
+        &w.key.fk,
+        &serde_json::to_value(Membership::new(w.key.uri.clone(), dt)).unwrap(),
+    );
+    describe(&w.host, &["getChanges"], 2);
+    w.host.respond_get(
+        &endpoint("getChanges"),
+        resp::ok_json(&with_meta(
+            json!({"changes": [
+                feed_change(1, newbie.did().as_str(), nsid::MEMBERSHIP, &w.key.fk),
+                feed_change(2, newbie.did().as_str(), nsid::POST, &format!("{}-3l2s5xxv2zaa2", w.key.fk)),
+            ], "cursor": 2}),
+            2,
+        )),
+    );
+    drain_queue(&w.engine);
+    w.host.clear_requests();
+    let polled = block_on(w.engine.poll_indexer_changes(w.key.uri.as_str()))
+        .unwrap()
+        .unwrap();
+    // The membership is a candidate and the post is not fetched: nothing is queued or sent.
+    assert_eq!(
+        polled.candidates,
+        vec![newbie.did().to_string()],
+        "{polled:?}"
+    );
+    assert_eq!((polled.changes, polled.dropped), (0, 1), "{polled:?}");
+    assert!(w.engine.syncer().queue_snapshot().ordered().is_empty());
+    assert!(
+        w.host
+            .requests()
+            .iter()
+            .all(|r| !r.url.contains(newbie.did().as_str()))
+    );
+
+    // A sync confirms it like any newcomer hint, within the discovery budget.
+    let source = format!("indexer:did:web:index.example.com:{}", w.key.fk);
+    let mut rewind = lessdugin_core::store::blob::CursorRow::new(w.host.now());
+    rewind.seq = Some(0);
+    let mut batch = RecordStore::new(w.host.cache()).batch();
+    batch.put_cursor(&source, &rewind).unwrap();
+    block_on(batch.commit()).unwrap();
+    block_on(
+        w.engine
+            .sync_forum(w.key.uri.as_str(), &SyncOpts::default()),
+    )
+    .unwrap();
+    let disc = block_on(lessdugin_core::discovery::state::disc_rows(
+        w.host.cache(),
+        &w.key.fk,
+    ))
+    .unwrap();
+    let row = disc.get(newbie.did().as_str()).expect("a discovery row");
+    assert!(row.src.iter().any(|s| s == "hint:indexer"), "{row:?}");
+    assert_eq!(
+        row.state,
+        lessdugin_core::discovery::DiscState::Confirmed,
+        "{row:?}"
+    );
+}
+
+#[test]
+fn indexer_page_and_head_hints_stay_inside_the_forum() {
+    let w = forum_world();
+    let rkey = w.post.rsplit('/').next().unwrap().to_owned();
+    let outsider = format!(
+        "at://{}/{}/{}-3l2s5xxv2zaa2",
+        stranger(1),
+        nsid::POST,
+        w.key.fk
+    );
+    describe(
+        &w.host,
+        &["listPosts", "getRecordProofs", "getRepoHeads"],
+        0,
+    );
+    w.host.respond_get(
+        &endpoint("listPosts"),
+        posts_page(json!([post_hint(&outsider), post_hint(&w.post)]), None),
+    );
+    w.host
+        .respond_get(&endpoint("getRecordProofs"), resp::car(empty_bundle()));
+    w.host.clear_requests();
+    let mut query = lessdugin_core::dto::ListPostsQuery::new(w.key.uri.to_string());
+    query.filter = lessdugin_core::dto::PostFilter::All;
+    let report = block_on(w.engine.hydrate_indexer_page(&query))
+        .unwrap()
+        .unwrap();
+    // The forum's participants are known: a stranger's post, even in the forum's range, is not
+    // requested, head-checked or fetched.
+    assert_eq!(report.requested, 1, "{report:?}");
+    let proofs = w.host.requests_to(&endpoint("getRecordProofs"));
+    assert!(proofs[0].url.contains(&rkey), "{}", proofs[0].url);
+    for r in w.host.requests() {
+        assert!(
+            !r.url.contains("strangerxx"),
+            "contacted on a hint: {}",
+            r.url
+        );
+    }
+
+    // A head for a DID that was not asked about queues nothing.
+    let (cid, rev) = w.owner.head();
+    w.host.respond_get(
+        &endpoint("getRepoHeads"),
+        resp::ok_json(&with_meta(
+            json!({"heads": [
+                {"did": w.owner.did(), "rev": rev.to_string(), "commit": cid.to_string()},
+                {"did": stranger(2), "rev": rev.to_string(), "commit": cid.to_string()}
+            ]}),
+            0,
+        )),
+    );
+    drain_queue(&w.engine);
+    assert_eq!(
+        block_on(
+            w.engine
+                .indexer_head_hints(w.key.uri.as_str(), std::slice::from_ref(w.owner.did()))
+        )
+        .unwrap(),
+        Some(1)
+    );
+    let queued = w.engine.syncer().queue_snapshot();
+    assert!(queued.ordered().iter().all(|i| i.did != stranger(2)));
+}
+
+#[test]
+fn an_expired_change_cursor_reconciles_at_reconcile_priority_at_most_daily() {
+    use lessdugin_lexicon::records::{AccessAction, Action, ModAction};
+    use lessdugin_lexicon::values::AccessLevel;
+    let w = forum_world();
+    // A granted member: a participant, reconciled at P3.
+    let member = w._net.add_account("member.example.com");
+    let dt = lessdugin_atp::syntax::Datetime::from_millis(w.host.now()).unwrap();
+    member.put(
+        nsid::MEMBERSHIP,
+        &w.key.fk,
+        &serde_json::to_value(Membership::new(w.key.uri.clone(), dt.clone())).unwrap(),
+    );
+    let grant = lessdugin_core::outbox::records::mod_action(&ModAction::new(
+        w.key.uri.clone(),
+        member.did().as_str(),
+        Action::Access(AccessAction::new(AccessLevel::Member)),
+        dt,
+    ))
+    .unwrap();
+    w.owner.put(nsid::MOD_ACTION, &grant.rkey, &grant.value);
+    block_on(w.engine.sync_forum(
+        w.key.uri.as_str(),
+        &SyncOpts {
+            full: true,
+            ..SyncOpts::default()
+        },
+    ))
+    .unwrap();
+    let source = format!("indexer:did:web:index.example.com:{}", w.key.fk);
+    let expire = |w: &ForumWorld| {
+        describe(&w.host, &["getChanges"], 50);
+        w.host.respond_seq(
+            &endpoint("getChanges"),
+            vec![
+                Ok(resp::xrpc_error(400, "CursorTooOld", "cursor expired")),
+                Ok(resp::ok_json(&with_meta(
+                    json!({"changes": [], "cursor": 50}),
+                    50,
+                ))),
+            ],
+        );
+        let rewind = lessdugin_core::store::blob::CursorRow {
+            seq: Some(7),
+            ..block_on(RecordStore::new(w.host.cache()).cursor(&source))
+                .unwrap()
+                .unwrap()
+        };
+        let mut batch = RecordStore::new(w.host.cache()).batch();
+        batch.put_cursor(&source, &rewind).unwrap();
+        block_on(batch.commit()).unwrap();
+        drain_queue(&w.engine);
+        block_on(w.engine.poll_indexer_changes(w.key.uri.as_str()))
+            .unwrap()
+            .unwrap()
+    };
+    let first = expire(&w);
+    assert!(first.restarted);
+    assert_eq!(first.queued, 2, "{first:?}");
+    let queued = w.engine.syncer().queue_snapshot();
+    let items: Vec<(&str, Priority)> = queued
+        .ordered()
+        .iter()
+        .map(|i| (i.did.as_str(), i.priority))
+        .collect();
+    // As for a Jetstream gap (sync.md §6.3): the authority at P1, the participant at P3; not P0.
+    assert_eq!(
+        items,
+        vec![
+            (w.owner.did().as_str(), Priority::P1),
+            (member.did().as_str(), Priority::P3)
+        ]
+    );
+
+    // An indexer that keeps answering CursorTooOld does not get a reconcile every poll.
+    w.host.advance_ms(3_600_000);
+    let again = expire(&w);
+    assert!(again.restarted);
+    assert_eq!(again.queued, 0, "{again:?}");
+    assert!(w.engine.syncer().queue_snapshot().ordered().is_empty());
+    w.host.advance_ms(86_400_000);
+    assert_eq!(expire(&w).queued, 2);
 }
 
 #[test]
