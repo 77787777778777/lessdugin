@@ -477,6 +477,11 @@ impl<H: Host> LiveSource<H> {
         &self.filter
     }
 
+    /// The deduplication LRU, which the indexer change feed shares (`sync.md` §6.6).
+    pub fn dedup_mut(&mut self) -> &mut super::events::Dedup {
+        self.filter.dedup_mut()
+    }
+
     /// Current in-memory cursor.
     pub fn cursor(&self) -> Option<&Cursor> {
         self.cursor.as_ref()

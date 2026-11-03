@@ -203,6 +203,49 @@ impl Dedup {
         self.entries.is_empty()
     }
 
+    /// True if this commit was already handled, by a Jetstream frame or an indexer `#change`
+    /// (`sync.md` §6.6). A hit is not promoted.
+    pub fn has_commit(
+        &self,
+        did: &str,
+        rev: &str,
+        collection: &str,
+        rkey: &str,
+        operation: Operation,
+    ) -> bool {
+        self.entries
+            .contains_key(&Self::commit_key(did, rev, collection, rkey, operation))
+    }
+
+    /// Records a commit handled outside the Jetstream filter (an indexer `#change`, `sync.md`
+    /// §6.6), so the same commit on Jetstream is a duplicate. Returns false for a duplicate.
+    pub fn insert_commit(
+        &mut self,
+        did: &str,
+        rev: &str,
+        collection: &str,
+        rkey: &str,
+        operation: Operation,
+    ) -> bool {
+        self.insert(Self::commit_key(did, rev, collection, rkey, operation))
+    }
+
+    fn commit_key(
+        did: &str,
+        rev: &str,
+        collection: &str,
+        rkey: &str,
+        operation: Operation,
+    ) -> DedupKey {
+        DedupKey::Commit(
+            did.to_owned(),
+            rev.to_owned(),
+            collection.to_owned(),
+            rkey.to_owned(),
+            operation,
+        )
+    }
+
     /// Returns false for a duplicate; a hit is promoted.
     fn insert(&mut self, key: DedupKey) -> bool {
         self.tick = self.tick.wrapping_add(1);
@@ -258,6 +301,11 @@ impl EventFilter {
     /// Shared dedup state.
     pub fn dedup(&self) -> &Dedup {
         &self.dedup
+    }
+
+    /// Shared dedup state, for the other change sources that share it (`sync.md` §6.6).
+    pub fn dedup_mut(&mut self) -> &mut Dedup {
+        &mut self.dedup
     }
 
     /// Filters one parsed event received at `received_us` (local µs, the `obs` hint of its

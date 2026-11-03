@@ -1752,16 +1752,25 @@ fn open_forum(
     host: &MemHost,
     owner: &lessdugin_testkit::fake_pds::AccountHandle,
 ) -> lessdugin_core::discovery::ForumKey {
+    open_forum_slug(host, owner, "meta")
+}
+
+/// [`open_forum`] with the declaration rkey `slug`.
+fn open_forum_slug(
+    host: &MemHost,
+    owner: &lessdugin_testkit::fake_pds::AccountHandle,
+    slug: &str,
+) -> lessdugin_core::discovery::ForumKey {
     use lessdugin_lexicon::collection::nsid;
     use lessdugin_lexicon::records::{Forum, Membership};
-    let key = lessdugin_core::discovery::ForumKey::new(owner.did(), "meta").unwrap();
+    let key = lessdugin_core::discovery::ForumKey::new(owner.did(), slug).unwrap();
     let dt = lessdugin_atp::syntax::Datetime::from_millis(host.now() - 3_600_000).unwrap();
     let forum = Forum::create(
-        "meta",
+        slug,
         dt.clone(),
         lessdugin_lexicon::values::MembershipMode::Open,
     );
-    owner.put(nsid::FORUM, "meta", &serde_json::to_value(forum).unwrap());
+    owner.put(nsid::FORUM, slug, &serde_json::to_value(forum).unwrap());
     let membership = Membership::new(key.uri.clone(), dt);
     owner.put(
         nsid::MEMBERSHIP,
@@ -1910,5 +1919,143 @@ fn rejected_and_unconfirmed_hints_are_not_synced_by_live_tail() {
             touched.is_empty(),
             "requests for hinted non-members: {touched:?}"
         );
+    });
+}
+
+/// A consented indexer that advertises `getChanges` at `seq` and answers it with `changes`.
+fn serve_change_feed(host: &MemHost, changes: serde_json::Value, seq: i64) {
+    host.respond_get(
+        &index_endpoint("describeIndexer"),
+        lessdugin_testkit::resp::ok_json(&json!({
+            "did": "did:web:index.example.com", "version": "1", "coreVersion": "test",
+            "policies": [], "features": ["getChanges"], "forums": [],
+            "asOf": {"seq": seq, "timeUs": TIME_US, "lagMs": 0},
+            "indexer": {"did": "did:web:index.example.com", "coreVersion": "test"}
+        })),
+    );
+    host.respond_get(
+        &index_endpoint("getChanges"),
+        lessdugin_testkit::resp::ok_json(&index_meta(
+            json!({"changes": changes, "cursor": seq}),
+            seq,
+        )),
+    );
+}
+
+/// An assisted engine with the indexer of [`serve_change_feed`] consented, following `keys`.
+async fn change_feed_engine(
+    host: &MemHost,
+    keys: &[&lessdugin_core::discovery::ForumKey],
+) -> Engine<MemHost> {
+    let engine = Engine::new(
+        host.clone(),
+        EngineConfig {
+            indexers: vec![lessdugin_core::engine::IndexerConsent {
+                url: url::Url::parse(INDEX).unwrap(),
+            }],
+            jetstream: vec![url::Url::parse("wss://jetstream.example/subscribe").unwrap()],
+            ..EngineConfig::default()
+        },
+    );
+    for key in keys {
+        engine
+            .sync_forum(
+                key.uri.as_str(),
+                &lessdugin_core::discovery::SyncOpts::default(),
+            )
+            .await
+            .unwrap();
+        engine.forum_follow(key.uri.as_str(), None).await.unwrap();
+    }
+    engine
+}
+
+fn change_polls(host: &MemHost) -> usize {
+    host.requests_to(&index_endpoint("getChanges")).len()
+}
+
+#[test]
+fn the_change_feed_is_polled_after_the_round_one_forum_at_a_time() {
+    futures::executor::block_on(async {
+        let host = MemHost::new();
+        let net = FakeNet::on(&host);
+        let owner = net.add_account("alice.example.com");
+        let meta = open_forum_slug(&host, &owner, "meta");
+        let news = open_forum_slug(&host, &owner, "news");
+        serve_change_feed(&host, json!([]), 500);
+        let engine = change_feed_engine(&host, &[&meta, &news]).await;
+        host.clear_requests();
+        host.park_sleeps(true);
+        let tail = engine.live_tail();
+        futures::pin_mut!(tail);
+        assert!(futures::poll!(tail.as_mut()).is_pending());
+        let urls: Vec<String> = host.requests().into_iter().map(|r| r.url).collect();
+        let first_poll = urls
+            .iter()
+            .position(|u| u.starts_with(&index_endpoint("getChanges")))
+            .expect("the change feed was not polled");
+        let first_head = urls
+            .iter()
+            .position(|u| u.contains("com.atproto.sync.getLatestCommit"))
+            .expect("the round did not reconcile the never-reconciled authority");
+        // The round's queue work does not wait for the indexer (a slow one would delay it).
+        assert!(
+            first_head < first_poll,
+            "the change feed was polled before the round: {urls:?}"
+        );
+        assert_eq!(change_polls(&host), 1, "one forum per round");
+        // The other forum, never polled, is due at once: polled one round later.
+        host.advance_ms(1);
+        assert!(futures::poll!(tail.as_mut()).is_pending());
+        assert_eq!(change_polls(&host), 2);
+        engine.live_stop();
+        host.park_sleeps(false);
+        tail.await.unwrap();
+    });
+}
+
+#[test]
+fn a_change_jetstream_handled_is_not_fetched_again() {
+    futures::executor::block_on(async {
+        let host = MemHost::new();
+        let net = FakeNet::on(&host);
+        let owner = net.add_account("alice.example.com");
+        let key = open_forum(&host, &owner);
+        serve_change_feed(&host, json!([]), 500);
+        let engine = change_feed_engine(&host, &[&key]).await;
+        let did = owner.did().to_string();
+        let rkey = format!("{}-3l", key.fk);
+        let uri = format!("at://{did}/{}/{rkey}", post());
+        // The indexer reports the very commit that Jetstream delivers (sync.md §6.6: one LRU).
+        serve_change_feed(
+            &host,
+            json!([{"seq": 501, "uri": uri, "cid": CID, "did": did, "rev": REV, "op": "create"}]),
+            501,
+        );
+        host.script_websocket(
+            "wss://jetstream.example/",
+            vec![WsMessage::Text(v2_commit(&did, &post(), &rkey, 42))],
+        );
+        host.clear_requests();
+        host.park_sleeps(true);
+        let tail = engine.live_tail();
+        futures::pin_mut!(tail);
+        assert!(futures::poll!(tail.as_mut()).is_pending());
+        // The frame was read and waits for its live proof delay; the poll after the round got
+        // the same commit, which is a duplicate.
+        assert_eq!(change_polls(&host), 1);
+        assert!(
+            !queued_uris(&engine, &did).contains(&uri),
+            "the change Jetstream already handled was queued again"
+        );
+        host.advance_ms(3_001);
+        assert!(futures::poll!(tail.as_mut()).is_pending());
+        assert!(
+            queued_uris(&engine, &did).contains(&uri),
+            "the Jetstream frame itself was not applied"
+        );
+        engine.live_stop();
+        host.park_sleeps(false);
+        tail.await.unwrap();
     });
 }

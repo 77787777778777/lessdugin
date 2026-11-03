@@ -20,8 +20,8 @@
 //! then sleeps (with the host) until the next queue item or poll is due, at most
 //! [`limits::LIVE_TAIL_IDLE_MS`]. Jetstream (§6.4) and indexer `getChanges` (§6.6) feed the same
 //! queue from M5 and M6: between rounds `live_tail` reads Jetstream frames (several per round;
-//! while frames arrive a round runs at most once per [`LIVE_FRAME_STEP_MS`]) and polls the
-//! change feed of each followed forum the consented indexer serves. A live frame whose
+//! while frames arrive a round runs at most once per [`LIVE_FRAME_STEP_MS`]) and, after a round,
+//! polls the change feed of one due forum the consented indexer serves. A live frame whose
 //! application fails is retried with back-off and then left to the dirty queue, so it never
 //! holds the stream. Errors are logged and the round is retried; they are never returned.
 
@@ -218,13 +218,16 @@ impl Drop for ContextCache {
     }
 }
 
-/// When each followed forum's indexer change feed is polled next (`sync.md` §6.6).
+/// When each followed forum's indexer change feed was polled and is polled next (`sync.md`
+/// §6.6).
 #[derive(Default)]
 struct ChangeFeeds {
-    next_at: BTreeMap<String, i64>,
+    /// Per forum uri: `(last poll, next poll)` (ms).
+    polls: BTreeMap<String, (i64, i64)>,
     /// The last successful poll (ms): a healthy live source (§6.2).
     healthy_ms: Option<i64>,
-    /// When the followed forums are read again (ms), to find newly followed ones.
+    /// When the followed forums are read again (ms), to find newly followed ones and views
+    /// opened since the last poll.
     refresh_at_ms: i64,
 }
 
@@ -236,12 +239,41 @@ impl ChangeFeeds {
 
     /// When the next poll is due (ms).
     fn due_at(&self) -> i64 {
-        self.next_at
+        self.polls
             .values()
-            .copied()
+            .map(|(_, next)| *next)
             .min()
             .unwrap_or(i64::MAX)
             .min(self.refresh_at_ms)
+    }
+
+    /// Of the `followed` forums (uris), the one whose poll is due first, if any; its poll is
+    /// recorded now. A forum never polled is due at once; one whose view (`open`, its model is
+    /// loaded) opened since its last poll is due [`CHANGES_OPEN_MS`] after that poll.
+    fn take_due(&mut self, followed: &[String], open: &[String], now: i64) -> Option<String> {
+        self.refresh_at_ms = now.saturating_add(CHANGES_OPEN_MS);
+        self.polls.retain(|uri, _| followed.contains(uri));
+        for uri in followed {
+            self.polls.entry(uri.clone()).or_insert((i64::MIN, i64::MIN));
+        }
+        for (uri, (last, next)) in self.polls.iter_mut() {
+            if open.contains(uri) {
+                *next = (*next).min(last.saturating_add(CHANGES_OPEN_MS));
+            }
+        }
+        let uri = self
+            .polls
+            .iter()
+            .filter(|(_, (_, next))| *next <= now)
+            .min_by_key(|(_, (_, next))| *next)
+            .map(|(uri, _)| uri.clone())?;
+        let every = if open.contains(&uri) {
+            CHANGES_OPEN_MS
+        } else {
+            CHANGES_IDLE_MS
+        };
+        self.polls.insert(uri.clone(), (now, now.saturating_add(every)));
+        Some(uri)
     }
 }
 
@@ -419,9 +451,6 @@ impl<H: Host> Engine<H> {
                     }
                 }
             }
-            if assisted && self.host.now_ms() >= feeds.due_at() {
-                self.poll_change_feeds(&mut feeds).await;
-            }
             let now = self.host.now_ms();
             if received {
                 // Frames are read several per round: one round per second at most while they
@@ -448,6 +477,15 @@ impl<H: Host> Engine<H> {
                         self.host.now_ms().saturating_add(outbox::ERROR_WAIT_MS)
                     }
                 };
+            }
+            // After the round, so a slow indexer never delays the queue's work, and one forum
+            // at a time, so it delays the next Jetstream read by one poll at most.
+            if assisted && self.host.now_ms() >= feeds.due_at() {
+                self.poll_change_feeds(&mut feeds, source.as_mut().map(LiveSource::dedup_mut))
+                    .await;
+                if let Some(t) = self.syncer().queue_snapshot().next_ready_at() {
+                    step_at = step_at.min(t);
+                }
             }
             let now = self.host.now_ms();
             let mut until = step_at;
@@ -480,9 +518,15 @@ impl<H: Host> Engine<H> {
         Ok(())
     }
 
-    /// Polls `getChanges` for each followed forum that is due (`sync.md` §6.6); a successful
-    /// poll makes the change feed a healthy live source. Without an indexer it does nothing.
-    async fn poll_change_feeds(&self, feeds: &mut ChangeFeeds) {
+    /// Polls `getChanges` for the followed forum whose poll is due first (`sync.md` §6.6), one
+    /// per round so Jetstream frames are read between polls; a successful poll makes the change
+    /// feed a healthy live source. A `#change` that Jetstream already handled (`dedup`, the
+    /// shared LRU) is skipped. Without an indexer it does nothing.
+    async fn poll_change_feeds(
+        &self,
+        feeds: &mut ChangeFeeds,
+        dedup: Option<&mut crate::live::events::Dedup>,
+    ) {
         let now = self.host.now_ms();
         if self.config.indexer_mode == IndexerMode::None {
             feeds.refresh_at_ms = i64::MAX;
@@ -496,31 +540,21 @@ impl<H: Host> Engine<H> {
                 return;
             }
         };
-        feeds.refresh_at_ms = now.saturating_add(CHANGES_OPEN_MS);
-        feeds
-            .next_at
-            .retain(|uri, _| followed.iter().any(|k| k.uri.as_str() == uri));
-        let open = self.rt.loaded_forums();
-        for key in followed {
-            let uri = key.uri.to_string();
-            if feeds.next_at.get(&uri).is_some_and(|t| now < *t) {
-                continue;
+        let uris: Vec<String> = followed.iter().map(|k| k.uri.to_string()).collect();
+        let Some(uri) = feeds.take_due(&uris, &self.rt.loaded_forums(), now) else {
+            return;
+        };
+        let Some(key) = followed.into_iter().find(|k| k.uri.as_str() == uri) else {
+            return;
+        };
+        match self.poll_indexer_changes_resolved(&key, dedup).await {
+            Ok(Some(report)) => {
+                feeds.healthy_ms = Some(self.host.now_ms());
+                tracing::debug!(forum = %key.uri, changes = report.changes, "indexer changes");
             }
-            let every = if open.contains(&uri) {
-                CHANGES_OPEN_MS
-            } else {
-                CHANGES_IDLE_MS
-            };
-            feeds.next_at.insert(uri, now.saturating_add(every));
-            match self.poll_indexer_changes_resolved(&key).await {
-                Ok(Some(report)) => {
-                    feeds.healthy_ms = Some(self.host.now_ms());
-                    tracing::debug!(forum = %key.uri, changes = report.changes, "indexer changes");
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    tracing::debug!(forum = %key.uri, error = %e, "indexer changes unavailable");
-                }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::debug!(forum = %key.uri, error = %e, "indexer changes unavailable");
             }
         }
     }
@@ -1202,6 +1236,44 @@ mod context_tests {
         v: u32,
         at: i64,
         seeded: bool,
+    }
+
+    #[test]
+    fn change_feeds_poll_one_due_forum_at_a_time_and_follow_open_views() {
+        let (a, b) = ("at://a/forum/x".to_owned(), "at://b/forum/y".to_owned());
+        let followed = [a.clone(), b.clone()];
+        let mut feeds = ChangeFeeds::default();
+        // never polled: due at once, one per call
+        assert_eq!(feeds.take_due(&followed, &[], 0), Some(a.clone()));
+        assert!(feeds.due_at() <= 0, "the other forum is still due");
+        assert_eq!(feeds.take_due(&followed, &[], 0), Some(b.clone()));
+        assert_eq!(feeds.take_due(&followed, &[], 0), None);
+        // idle forums: every 60 s
+        assert_eq!(feeds.due_at(), CHANGES_OPEN_MS, "the followed list is read again");
+        assert_eq!(feeds.take_due(&followed, &[], CHANGES_OPEN_MS), None);
+        // a view of `a` opens after its idle poll: due 10 s after that poll, not 60 s
+        let open = [a.clone()];
+        assert_eq!(feeds.take_due(&followed, &open, CHANGES_OPEN_MS), Some(a.clone()));
+        assert_eq!(
+            feeds.take_due(&followed, &open, 2 * CHANGES_OPEN_MS - 1),
+            None
+        );
+        assert_eq!(
+            feeds.take_due(&followed, &open, 2 * CHANGES_OPEN_MS),
+            Some(a.clone())
+        );
+        // the most overdue first
+        assert_eq!(
+            feeds.take_due(&followed, &open, CHANGES_IDLE_MS),
+            Some(a.clone())
+        );
+        assert_eq!(
+            feeds.take_due(&followed, &open, CHANGES_IDLE_MS),
+            Some(b.clone())
+        );
+        // an unfollowed forum is forgotten
+        assert_eq!(feeds.take_due(&[b.clone()], &open, CHANGES_IDLE_MS), None);
+        assert_eq!(feeds.polls.len(), 1);
     }
 
     #[test]
