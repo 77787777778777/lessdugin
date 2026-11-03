@@ -832,22 +832,25 @@ Jetstream is used only in `assisted` mode. It is a **"this repo changed" signal*
 | `filtered` | browser, once participants are known and D holds between 1 and 10,000 DIDs | at most 150 DIDs: v2 with `dids=` for each DID in D; more than 150: v1 with `options_update{wantedDids: D}` (the request-line limit makes 400 DIDs fail with 414, ADR 0003). Plus, if `F_new ≠ ∅`, a side connection: v2 `collections=<NS>.membership&kinds=commit` with no DID filter. |
 
 - `D` = the own account DIDs ∪, over every followed or open forum, its authorities, confirmed participants and candidates being synced.
-- "Participants are known" means every followed or open forum has finished one discovery pass (§4.2). The browser then switches to `filtered`. When D changes it reconnects with the new set, at most once per 10 minutes (*tunable*), and DIDs newly added to D get a P2 `sync_repo` to cover the events they missed. If `|D| > 10,000`, the browser stays in `wildcard`.
+- "Participants are known" means every followed or open forum has finished one discovery pass (§4.2). The browser then switches to `filtered` at once. When D changes later, it reconnects with the new set at most once per 10 minutes (*tunable*, counted from the last `filtered` connection), and DIDs newly added to D get a P2 `sync_repo` to cover the events they missed (none after a `wildcard` connection, which missed nothing). If `|D| > 10,000`, the browser stays in `wildcard`.
+- The side connection exists while the main one is `filtered` and `F_new ≠ ∅`, and is closed otherwise. It shares the deduplication LRU (§6.3) with the main connection. Its cursor is kept in memory and is never persisted: it resumes from its own cursor, else from the main cursor (`timeUs − 5 s` across a restart); a gap (`#info`) on it restarts its cursor at `now − 5 s` and schedules no reconcile. Its frames do not count as a healthy live source. Its reconnect delay follows the main connection's rule with its own failure count.
+- The DID filter discloses D to the Jetstream operator (decision U-D1, ADR 0009, `threat-model.md` PRIV-11).
 - **Reserved (P2):** switching the native client to `filtered` automatically when lessdugin-wide traffic exceeds about 50 events/s.
 - `<NS>.*` also matches `<NS>.temp.*` and `<NS>.index.*` collections; events are filtered by exact collection (§6.4).
 - Compression: v1 MAY negotiate `permessage-deflate`. Byte caps apply after decompression.
 
 **Endpoints and reconnect** (*tunable*)
-- Connect to the first host in `network.jetstream`. Reconnect after any close or error with delay `min(60 s, 1 s · 2^(n−1)) · uniform(0.8, 1.2)` for the n-th consecutive failure. After 3 consecutive failures, fail over to the next host.
+- Connect to the first host in `network.jetstream`. Reconnect after any close or error with delay `min(60 s, 1 s · 2^(n−1)) · uniform(0.8, 1.2)` for the n-th consecutive failure. After 3 consecutive failures, fail over to the next host. A frame that parses ends the failure count, except a gap (`#info`, §6.3): within a **gap streak**, `n` is the larger of the failure count and the number of gaps in the streak, so an endpoint that answers every connection with a gap backs off and fails over like a failing one. A streak ends when a frame other than a gap arrives 2 minutes (*tunable*) or more after the streak's last gap.
+- The leader keeps at most one receive in flight per socket, and one connect and one leader-lock request, across rounds: a round that stops waiting (a timer won) leaves them in flight for the next round, so no frame is handed to an abandoned receive and no socket is opened twice (browser socket handles are not cancellation-safe). Stopping the source closes its sockets, and waits up to 1 s for a connect or lock request in flight so it can close or release what that returns.
 - A message over 1,200,000 bytes closes the connection. If two consecutive connections fail on oversize at the same cursor, the client resumes at `timeUs + 1 s` and schedules a full reconcile (§6.8) at P3.
-- While no live source (Jetstream, or an indexer change feed) has been healthy for 2 minutes, polling (§6.7) runs.
+- While no live source (Jetstream, or an indexer change feed) has been healthy for 2 minutes, polling (§6.7) runs. Only frames of the main connection other than gaps make Jetstream healthy.
 
 ### 6.3 Cursor handling
 
 - **Persisted** in `cur/jetstream` (§10.4) every 5 s or every 1,000 events: `{wire, instance, seq?, timeUs}`. On v2, `seq` is the payload's `seq` and `timeUs` is `µs(witnessedAt)`; on v1, `timeUs` is `time_us`.
 - **Resume.** Same instance and wire v2: `cursor = seq` (inclusive, so the first event repeats). Otherwise (another instance, or a change of wire): `cursor = timeUs − 5,000,000`.
 - **Deduplication.** An LRU of 10,000 keys (*tunable*): `(did, rev, collection, rkey, operation)` for commits, `(did, kind, inner seq)` for identity and account events.
-- **Gaps.** `#info OutdatedCursor`, or a persisted cursor older than 36 h, triggers a full reconcile (§6.8): every participant of every followed forum is enqueued at P3 and every authority at P1; the cursor restarts at `now − 5 s`. `#info FutureCursor` restarts the cursor at `now − 5 s`.
+- **Gaps.** `#info OutdatedCursor`, or a persisted cursor older than 36 h, triggers a full reconcile (§6.8): every participant of every followed forum is enqueued at P3 and every authority at P1; the cursor restarts at `now − 5 s`. `#info FutureCursor` restarts the cursor at `now − 5 s`. Each gap closes the connection; only the first `OutdatedCursor` of a gap streak (§6.2) schedules the reconcile, so a Jetstream that reports a gap on every connection causes one reconcile, not one per connection.
 - **Replay at forum open** (§4.5 step 3, assisted only). When a forum is opened for the first time, the client MAY open a temporary v2 connection with `cursor = now − 36 h` and close it when it reaches the live cursor. It collects only the DIDs of commits in that forum's `{fk}-` ranges, as recently-active hints.
 
 ### 6.4 Event filtering and handling
@@ -868,7 +871,7 @@ on event e:
     if ¬relevant: drop
     if ¬KNOWN(e.did):
        if e.collection = NS.membership ∧ e.rkey ∈ F_new: newcomer candidate (§4.4); else drop
-    else: dedup; record firstSeen(uri, e.cid) (§5.6.5); add a dirty mark (§6.5); handle per the table
+    else: dedup; record firstSeen(uri, e.cid) = the local receive time (§5.6.5); add a dirty mark (§6.5); handle per the table
   #identity, #account, #sync:
     if ¬KNOWN(e.did): drop                                      // network-wide noise (ADR 0003)
     else: handle per the table
@@ -883,6 +886,8 @@ on event e:
 | identity | invalidate the handle and document caches (§3.3). Authorities are re-resolved at P1; others lazily. |
 | account | `getRepoStatus` at P1 (§3.4) |
 | sync (v2 `#sync`) | `enqueue(did, P1, "sync")` for every scope: a full re-list |
+
+The firstSeen a Jetstream event records is the time this client received it, never the event's `time_us` or `witnessedAt`: the Jetstream sets those, and one that moved them back could make an honest post `future(x)` and rank it last (`social.md` §2.2); they serve only as the cursor (§6.3).
 
 Events MAY also drive counts and placeholders ("3 new comments"), which never move the cursor in the TUI and never supply text.
 
