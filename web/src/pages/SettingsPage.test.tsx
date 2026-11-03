@@ -31,11 +31,16 @@ describe("SettingsPage", () => {
   it("says that assisted mode names the participants' DIDs to Jetstream (U-D1, PRIV-11)", async () => {
     renderWithApp(<SettingsPage />, { engine: new MockEngine() });
     const sources = await screen.findByRole("region", { name: "Data sources" });
-    const note = within(sources).getByTestId("jetstream-disclosure").textContent ?? "";
+    const note = (within(sources).getByTestId("jetstream-disclosure").textContent ?? "").replace(
+      /\s+/g,
+      " ",
+    );
     expect(note).toMatch(/^Assisted, in this browser/);
     expect(note).toMatch(/participants of your followed and open forums/);
-    expect(note).toMatch(/Jetstream server's operator then learns their DIDs/);
-    expect(note).toMatch(/which forums you read/);
+    // sync.md §6.2: D also holds the own account DIDs, so the operator learns who reads
+    expect(note).toMatch(/ask Jetstream only for your own accounts and those participants/);
+    expect(note).toMatch(/Jetstream server's operator then learns all of these DIDs/);
+    expect(note).toMatch(/which forums your accounts read/);
   });
 
   it("shows a refused setting instead of leaving the rejection unhandled", async () => {

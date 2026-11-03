@@ -447,11 +447,13 @@ export function SettingsPage() {
           },
         ])}
         {/* decision U-D1, threat-model.md PRIV-11: the browser's Jetstream DID filter
-            (sync.md §6.2 `filtered`) names the participants to the Jetstream server */}
+            (sync.md §6.2 `filtered`, D = the own account DIDs and the participants of every
+            followed or open forum) names them to the Jetstream server */}
         <p className={ui.hint} data-testid="jetstream-disclosure">
           Assisted, in this browser: once the participants of your followed and open forums are
-          known, live updates ask Jetstream for those accounts only. The Jetstream server's operator
-          then learns their DIDs, and so which forums you read.
+          known, live updates ask Jetstream only for your own accounts and those participants. The
+          Jetstream server's operator then learns all of these DIDs, and so which forums your
+          accounts read.
         </p>
       </section>
       <section aria-labelledby="settings-verify">
