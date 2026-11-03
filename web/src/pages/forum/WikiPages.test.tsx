@@ -135,6 +135,92 @@ describe("WikiEditPage", () => {
     expect((await engine.raw(next)).record).toMatchObject({ parents: [{ uri: moved }] });
   });
 
+  // a reload carries only text the author wrote: a second head move before the redo keeps the
+  // carried edit, and what they change after a reload is carried in its place
+  it("keeps the carried edit through a second head move before the redo", async () => {
+    const engine = new MockEngine({ holdMs: 0, sendMs: 0, wikiRace: true });
+    const { forum } = await setup("edit", SLUG, engine);
+    const body = (await screen.findByRole("textbox", { name: /^Page/ })) as HTMLTextAreaElement;
+    const mine = `${body.value}\n- Parfit's hitchhiker`;
+    fireEvent.change(body, { target: { value: mine } });
+    fireEvent.click(screen.getByRole("button", { name: "Save page" }));
+    const alert = await screen.findByRole("alert");
+    fireEvent.click(within(alert).getByRole("button", { name: "Reload the page" }));
+    await screen.findByRole("region", { name: "Your unsaved edit" });
+    const carriedText = () =>
+      (
+        within(screen.getByRole("region", { name: "Your unsaved edit" })).getByRole("textbox", {
+          name: "Your unsaved text",
+        }) as HTMLTextAreaElement
+      ).value;
+    const third = async (markdown: string) => {
+      const base = (await engine.tag(forum, SLUG)).head ?? "";
+      await engine.wikiEdit(forum, SLUG, {
+        name: "Decision theory",
+        isTag: true,
+        base,
+        body: { markdown, media: [] },
+      });
+      await waitFor(async () => expect((await engine.tag(forum, SLUG)).head).not.toBe(base));
+    };
+    // the head moves again before the author redoes the edit; they reload from the notice
+    await third("A third version.");
+    const status = await screen.findByRole("status");
+    expect(status.textContent).toContain(HEAD_MOVED_MESSAGE);
+    fireEvent.click(within(status).getByRole("button", { name: "Reload the page" }));
+    await waitFor(() =>
+      expect((screen.getByRole("textbox", { name: /^Page/ }) as HTMLTextAreaElement).value).toBe(
+        "A third version.",
+      ),
+    );
+    expect(carriedText()).toBe(mine);
+    // what the author changes on the newer version is theirs, and the next reload carries it
+    fireEvent.change(screen.getByRole("textbox", { name: /^Page/ }), {
+      target: { value: "My second try." },
+    });
+    await third("A fourth version.");
+    const again = await screen.findByRole("status");
+    fireEvent.click(within(again).getByRole("button", { name: "Reload the page" }));
+    await waitFor(() =>
+      expect((screen.getByRole("textbox", { name: /^Page/ }) as HTMLTextAreaElement).value).toBe(
+        "A fourth version.",
+      ),
+    );
+    expect(carriedText()).toBe("My second try.");
+    const head = (await engine.tag(forum, SLUG)).head;
+    const edit = vi.spyOn(engine, "wikiEdit");
+    fireEvent.click(
+      within(screen.getByRole("region", { name: "Your unsaved edit" })).getByRole("button", {
+        name: "Use my text",
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Save page" }));
+    await waitFor(() => expect(edit).toHaveBeenCalledTimes(1));
+    expect(edit.mock.calls[0]?.[2]).toMatchObject({ base: head });
+    expect(edit.mock.calls[0]?.[2].body?.markdown).toBe("My second try.");
+  });
+
+  it("carries nothing when the author reloads before writing anything", async () => {
+    const { engine, forum } = await setup("edit");
+    const head = (await engine.tag(forum, SLUG)).head ?? "";
+    await screen.findByRole("textbox", { name: /^Page/ });
+    await engine.wikiEdit(forum, SLUG, {
+      name: "Decision theory",
+      isTag: true,
+      base: head,
+      body: { markdown: "Someone else's version.", media: [] },
+    });
+    const status = await screen.findByRole("status");
+    fireEvent.click(within(status).getByRole("button", { name: "Reload the page" }));
+    await waitFor(() =>
+      expect((screen.getByRole("textbox", { name: /^Page/ }) as HTMLTextAreaElement).value).toBe(
+        "Someone else's version.",
+      ),
+    );
+    expect(screen.queryByRole("region", { name: "Your unsaved edit" })).toBeNull();
+    expect(screen.queryByRole("status")).toBeNull();
+  });
+
   it("keeps the head it loaded while a newer one arrives, and says so", async () => {
     const { engine, forum } = await setup("edit");
     const head = (await engine.tag(forum, SLUG)).head ?? "";

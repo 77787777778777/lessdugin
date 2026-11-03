@@ -34,6 +34,19 @@ export const EMPTY_WIKI_FORM: WikiForm = {
   parentTags: [],
 };
 
+/** The two forms hold the same page: parent tags compare as a set, media by their fields. */
+export function sameWikiForm(a: WikiForm, b: WikiForm): boolean {
+  const tags = (f: WikiForm): string => JSON.stringify([...new Set(f.parentTags)].sort());
+  return (
+    a.name === b.name &&
+    a.description === b.description &&
+    a.markdown === b.markdown &&
+    a.isTag === b.isTag &&
+    tags(a) === tags(b) &&
+    JSON.stringify(a.media) === JSON.stringify(b.media)
+  );
+}
+
 /** The editable fields of a revision record, or null when its body spilled into a blob (the
  * source is not in the record, and a draft sent without it would drop the page's text). */
 export function wikiFormOf(record: unknown): WikiForm | null {

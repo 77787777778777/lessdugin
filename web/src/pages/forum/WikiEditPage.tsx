@@ -23,7 +23,7 @@ import { useEngine } from "../../engine/context.tsx";
 import { qk, useActiveAccount } from "../../engine/queries.ts";
 import { useSendWrite } from "../../engine/queued.ts";
 import { cleanName } from "../../lib/text.ts";
-import { EMPTY_WIKI_FORM, type WikiForm, wikiFormOf } from "../../lib/wiki.ts";
+import { EMPTY_WIKI_FORM, sameWikiForm, type WikiForm, wikiFormOf } from "../../lib/wiki.ts";
 import ui from "../../styles/ui.module.css";
 import { forumParams, useForumView } from "./forumContext.tsx";
 
@@ -56,7 +56,8 @@ export const NOT_A_TAG_WARNING =
 
 /** The form (exported for its tests). `base`: the head the form started from, absent for a page
  * with no revision yet. `moved`: the page's head is no longer `base` (or a page appeared where
- * there was none). `onReload` gets the author's current text, and `carried` is the text a
+ * there was none). `onReload` gets the author's current text, or null when they changed nothing
+ * since the form loaded (what a reload carried is then still theirs), and `carried` is the text a
  * reload kept. */
 export function WikiPageForm({
   slug,
@@ -71,7 +72,7 @@ export function WikiPageForm({
   base: string | undefined;
   initial: WikiForm;
   moved?: boolean;
-  onReload?: (mine: WikiForm) => void;
+  onReload?: (mine: WikiForm | null) => void;
   carried?: WikiForm | null;
   onDismissCarried?: () => void;
 }) {
@@ -168,7 +169,8 @@ export function WikiPageForm({
     parentTags,
   });
   const reload = (): void => {
-    if (onReload) onReload(mine());
+    // only text the author wrote is carried: an unchanged form is the head it loaded
+    if (onReload) onReload(sameWikiForm(mine(), initial) ? null : mine());
     else void qc.invalidateQueries({ queryKey: qk.tag(forum.uri, slug) });
   };
 
@@ -366,7 +368,8 @@ function WikiEditor({ tag }: { tag: string }) {
     queryFn: () => engine.raw(head ?? ""),
     enabled: head !== undefined,
   });
-  const reload = async (mine: WikiForm): Promise<void> => {
+  // `mine` null: the author changed nothing since the last load, so what is carried stays
+  const reload = async (mine: WikiForm | null): Promise<void> => {
     try {
       const fresh = await qc.fetchQuery({
         queryKey: qk.tag(forum.uri, tag),
@@ -374,11 +377,11 @@ function WikiEditor({ tag }: { tag: string }) {
         staleTime: 0,
         retry: false,
       });
-      setCarried(mine);
+      if (mine !== null) setCarried(mine);
       setPinned({ head: fresh.head, isNew: false });
     } catch (e) {
       if (isEngineError(e) && e.code === "not_found") {
-        setCarried(mine);
+        if (mine !== null) setCarried(mine);
         setPinned({ head: undefined, isNew: true });
       } else {
         toasts.show({ message: errorMessage(e), tone: "error" });
