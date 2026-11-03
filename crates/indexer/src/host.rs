@@ -52,10 +52,8 @@ impl PoliteHost {
                 })
             }))
         };
-        let global = Arc::clone(&self.global)
-            .acquire_owned()
-            .await
-            .map_err(|_| HostError::Other("indexer shut down".into()))?;
+        // The per-origin permit and rate slot come first: requests queued on one slow origin
+        // (PLC, a hanging PDS) must not hold global permits that every other origin needs.
         let local = Arc::clone(&host.in_flight)
             .acquire_owned()
             .await
@@ -84,6 +82,10 @@ impl PoliteHost {
                 break;
             }
         }
+        let global = Arc::clone(&self.global)
+            .acquire_owned()
+            .await
+            .map_err(|_| HostError::Other("indexer shut down".into()))?;
         Ok((global, local))
     }
 }

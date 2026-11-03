@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # M6's optional indexer image. This does not enable the M7 release workflow or switch the
-# staging namespace. Branch builds validate only; publication is explicit or after the M6 merge.
+# staging namespace. Branch pushes and pull requests build and smoke-test the image only;
+# publication is an explicit dispatch or a push to main.
 name: indexer
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches: [main, "claude/**"]
+    paths: [".github/workflows/indexer.yml", "crates/indexer/Dockerfile", "crates/**", "Cargo.*"]
+  pull_request:
     paths: [".github/workflows/indexer.yml", "crates/indexer/Dockerfile", "crates/**", "Cargo.*"]
 permissions:
   contents: read
