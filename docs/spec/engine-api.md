@@ -848,6 +848,6 @@ Topic         = { kind: forum|thread, uri } | { kind: "user", did }
   tab's `Write { pending }` (`leader.ts`, `sync.md` §10.6). The React app maps `Changed`
   topics to TanStack Query invalidations.
 - **Size.** `cargo xtask wasm [--release|--dev] [--budget] [--report]` builds
-  `packages/engine/pkg` with wasm-opt (ADR 0002); `--budget` fails above 2.5 MB gzipped, and a
-  release build warns above 1.5 MB gzipped or 4 MB raw (ADR 0008). Native-only dependencies (ammonia/html5ever) are refused
+  `packages/engine/pkg` with wasm-opt and reports its size; `--budget` fails only above the
+  static host's 25 MiB per-file limit, and the size is never a target (ADR 0010). Native-only dependencies (ammonia/html5ever) are refused
   in the wasm build, and `idna` uses the ASCII-only adapter.

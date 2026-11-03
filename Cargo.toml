@@ -124,8 +124,9 @@ lto = "thin"
 strip = true
 
 [profile.wasm]
+# Built for speed, not size (ADR 0010): opt-level 3 renders about 2.5 times faster than "z".
 inherits = "release"
-opt-level = "z"
+opt-level = 3
 lto = "fat"
 codegen-units = 1
 panic = "abort"

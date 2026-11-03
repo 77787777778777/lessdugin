@@ -12,8 +12,8 @@
 //!   wasm [--release|--dev] [--budget] [--report] [--kv-test]
 //!                      build the engine wasm + JS bindings into packages/engine/pkg
 //!                      (wasm-bindgen = the workspace pin, then binaryen wasm-opt) and report
-//!                      its raw and gzipped size; --budget fails above 2.5 MB gzipped (warns
-//!                      above 1.5 MB gzipped or 4 MB raw), --report adds the `verify` marginal, --kv-test
+//!                      its raw and gzipped size; --budget fails only above the host's 25 MiB
+//!                      per-file limit (ADR 0010), --report adds the `verify` marginal, --kv-test
 //!                      builds the test-only KV conformance module into pkg/kvtest
 //!   e2e [--rust] [--web] [--parity] [--cold-start] [--no-build]
 //!                      the end-to-end tests against the local devnet (ADR 0006;
@@ -110,14 +110,10 @@ const AMMONIA_TESTS: &[&str] = &[
     "props",
 ];
 
-/// The engine wasm's `gzip -9` size (after wasm-opt) above which `wasm --budget` fails. It is a
-/// tripwire for something linked in by mistake (tokio, reqwest, ammonia, debug info), not a
-/// performance budget (ADR 0008, superseding ADR 0002 decision 4; sizes are decimal).
-const WASM_BUDGET_GZ: u64 = 2_500_000;
-/// The gzipped size above which `wasm` prints a warning (ADR 0008).
-const WASM_TARGET_GZ: u64 = 1_500_000;
-/// The raw size above which `wasm` warns (compile time scales with raw bytes; ADR 0008).
-const WASM_WARN_RAW: u64 = 4_000_000;
+/// The one hard limit on the engine wasm's size: Cloudflare Pages, the default static host
+/// (threat-model.md SITE-1), serves no file above 25 MiB. `wasm --budget` fails above it; the
+/// size is otherwise only reported, never a target (ADR 0010, superseding ADR 0008).
+const WASM_HOST_LIMIT: u64 = 25 * 1024 * 1024;
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -291,8 +287,8 @@ fn ci() -> Result<(), String> {
     }
     lex(&["lint".to_owned()])?;
     // the engine wasm and its size report, and the KV conformance module the engine package's
-    // tests load; both before the web checks, which type-check against pkg/. Being over the size
-    // budget fails the run after the web checks, so they still report.
+    // tests load; both before the web checks, which type-check against pkg/. A module over the
+    // host's per-file limit fails the run after the web checks, so they still report.
     let mut over_budget = None;
     if have("wasm-bindgen") {
         over_budget = wasm_build(&["--budget".to_owned(), "--report".to_owned()])?;
@@ -763,9 +759,9 @@ fn listed_tests(cmd: &mut Command) -> Result<Vec<String>, String> {
 /// `wasm` options.
 #[derive(Default)]
 struct WasmOpts {
-    /// Dev profile, no wasm-opt (fast; not measured against the budget).
+    /// Dev profile, no wasm-opt (fast; not checked against the host limit).
     dev: bool,
-    /// Fail above [`WASM_BUDGET_GZ`] (warn above [`WASM_WARN_RAW`] in any case).
+    /// Fail above [`WASM_HOST_LIMIT`].
     budget: bool,
     /// Also build without `verify` and print its marginal size (ADR 0002 rule 5).
     report: bool,
@@ -801,11 +797,10 @@ struct WasmSize {
     optimised: bool,
 }
 
-/// `cargo xtask wasm`: builds `lessdugin-wasm` for wasm32 (profile `wasm`: opt-level z, fat LTO,
+/// `cargo xtask wasm`: builds `lessdugin-wasm` for wasm32 (profile `wasm`: opt-level 3, fat LTO,
 /// panic=abort), runs `wasm-bindgen --target web` (the CLI must equal the workspace pin) into
 /// `packages/engine/pkg`, optimises with binaryen's `wasm-opt` (ADR 0002's flags) and reports the
-/// raw and `gzip -9` sizes. `--budget` fails above 2.5 MB gzipped; above 1.5 MB gzipped or 4 MB raw
-/// it warns.
+/// raw and `gzip -9` sizes. `--budget` fails above the host's per-file limit, [`WASM_HOST_LIMIT`].
 /// `--report` adds the marginal size of the `verify` feature. `--kv-test` builds the test-only
 /// `kv-conformance` module into `packages/engine/pkg/kvtest` for the engine package's vitest.
 fn wasm(args: &[String]) -> Result<(), String> {
@@ -834,7 +829,7 @@ fn wasm_build(args: &[String]) -> Result<Option<String>, String> {
     let out = root().join("packages/engine/pkg");
     let size = build_wasm(&[], profile, &out, !o.dev)?;
     let mut report = vec![format!(
-        "engine wasm ({}): {} raw, {} gzipped (warn above {}, fail above {}); JS glue {} gzipped",
+        "engine wasm ({}): {} raw, {} gzipped; JS glue {} gzipped",
         if o.dev {
             "dev, not optimised"
         } else {
@@ -842,8 +837,6 @@ fn wasm_build(args: &[String]) -> Result<Option<String>, String> {
         },
         bytes(size.raw),
         bytes(size.gz),
-        bytes(WASM_TARGET_GZ),
-        bytes(WASM_BUDGET_GZ),
         bytes(size.glue_gz),
     )];
     if !size.optimised && !o.dev {
@@ -860,34 +853,17 @@ fn wasm_build(args: &[String]) -> Result<Option<String>, String> {
         )?;
         let marginal = size.gz as i64 - nv.gz as i64;
         report.push(format!(
-            "without `verify`: {} raw, {} gzipped; verify's marginal size {marginal} bytes gzipped \
-             (ADR 0008: split into a lazy verify.wasm only above the 1.5 MB gz warning line with a \
-             marginal of at least 100 KB gz)",
+            "without `verify`: {} raw, {} gzipped; verify's marginal size {marginal} bytes gzipped",
             bytes(nv.raw),
             bytes(nv.gz)
         ));
     }
     let mut failed = None;
-    if size.raw > WASM_WARN_RAW && !o.dev {
-        report.push(format!(
-            "WARNING: {} raw is above {} (compile time scales with raw size, ADR 0002)",
-            bytes(size.raw),
-            bytes(WASM_WARN_RAW)
-        ));
-        github_annotation("warning", &report[report.len() - 1]);
-    }
-    if size.gz > WASM_TARGET_GZ && !o.dev {
-        report.push(format!(
-            "note: {} gzipped is above the {} target",
-            bytes(size.gz),
-            bytes(WASM_TARGET_GZ)
-        ));
-    }
-    if o.budget && !o.dev && size.gz > WASM_BUDGET_GZ {
+    if o.budget && !o.dev && size.raw > WASM_HOST_LIMIT {
         let msg = format!(
-            "wasm over budget: {} gzipped > {}",
-            bytes(size.gz),
-            bytes(WASM_BUDGET_GZ)
+            "the engine wasm is {} raw, above the host's per-file limit of {} (ADR 0010)",
+            bytes(size.raw),
+            bytes(WASM_HOST_LIMIT)
         );
         github_annotation("error", &msg);
         failed = Some(msg);
@@ -1046,9 +1022,9 @@ fn build_wasm(
     if optimise {
         match wasm_opt() {
             Some(o) => {
-                // ADR 0002: exactly the target features rustc 1.97 writes, then -Oz; no
-                // --converge
-                let mut a = vec!["-Oz"];
+                // ADR 0002: exactly the target features rustc 1.97 writes; -O3 for speed (ADR
+                // 0010); no --converge
+                let mut a = vec!["-O3"];
                 a.extend(WASM_OPT_FEATURES);
                 a.extend([
                     "--strip-debug",

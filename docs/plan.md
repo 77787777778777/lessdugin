@@ -157,7 +157,7 @@ A milestone is done when all of the following hold:
 - [auto] The devnet parity scenario, text subset (§4.2), is byte-identical across CLI `--json`, SPA and TUI.
 - [auto] A 50-member FakePds forum cold-syncs natively in under 5 s.
 - [auto] No CSP or Trusted Types violations: any `securitypolicyviolation` fails Playwright.
-- [auto] CI reports the wasm size. It warns above 1.5 MB gzipped or 4 MB raw and fails only above 2.5 MB gzipped, a tripwire for something linked in by mistake (ADR 0008, superseding the 1.1 MB line of ADR 0002).
+- [auto] CI reports the wasm size. The size is never a target: the build fails only above the static host's 25 MiB per-file limit, and the module is built for speed (ADR 0010, superseding ADR 0008 and the 1.1 MB line of ADR 0002).
 - [auto] Sync and outbox scenarios on `MemHost` + FakePds pass: idempotent sync; cursor-range fallback (opaque cursors, cursors that ignore the bound); rollback; deletes only after confirmation; the outbox survives `kill -9`; `InvalidSwap` retry versus a real conflict; the FakePds behaviours listed in ADR 0005.
 - [user] A production smoke test on `.temp` with throwaway bsky.social accounts.
 - [target] The rest of S9: a cold sync of 200 real repos (read-only, a small opt-in sample) and PLC throughput at 20 requests/s.
@@ -438,7 +438,7 @@ S3 and S10 were run together. ADR numbers: 0000 template, 0001 decision log, 000
 | `include:` resolution fails, blocking login | S8 (M14) | Fallback chosen at PAR; enumerated scopes on the devnet and `.temp` | pending user run |
 | jacquard is alpha (0.13 is breaking) | S1 | Exact pin `=0.12.2`, facade, our own OAuth client as fallback | pending user run |
 | Browser OAuth key storage | S2 | Library choice gated on non-extractable keys; strict CSP, Trusted Types, two sanitiser layers | pending user run |
-| Wasm size and math-core coverage | S3, S10 | Feature gating; size hygiene rules; `verify.wasm` split rule; Temml contingency | ADR 0002: within budget; math-core accepted with known gaps |
+| Wasm size and math-core coverage | S3, S10 | The size is reported, never a target; load and paint time are gated by the M5 and M6 criteria; Temml contingency | ADR 0010: built for speed, fails only above the host's 25 MiB file limit; math-core accepted with known gaps (ADR 0002) |
 | math-core is young and changes about monthly | S10 | Exact pin, cargo-vet entry, `mathml` vectors must pass unchanged on every bump | open |
 | Constellation or Jetstream disappear; Jetstream v1 hosts retired | S4, S6 | Approval mode and the closure need neither; indexer; relay fallback; several v2 connections of ≤ 150 DIDs | open |
 | Open mode silently depends on Bluesky infrastructure | – | `membership` defaults to `approval`; the CLI always writes the mode; open mode is labelled in the UI | fixed in spec |
