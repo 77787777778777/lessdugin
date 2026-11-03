@@ -1568,7 +1568,8 @@ impl<H: Host> Syncer<H> {
                 Some(h) => item.with_min_rev(h.rev.clone()),
                 None => item,
             };
-            self.enqueue(item);
+            // the pass's forum scopes go with it, also for a forum nobody follows (§6.1)
+            self.enqueue(item.with_fks(fk_scopes.iter().copied()));
             return Ok(RepoOutcome::Unstable);
         }
         Ok(RepoOutcome::Applied)
@@ -1933,8 +1934,8 @@ impl<H: Host> Syncer<H> {
 
     /// Serves up to `max` ready queue items (§6.1), concurrently within the scheduler's limits
     /// and each at its own priority (counted in `s`'s stats): point fetches for uri-only items,
-    /// else `sync_repo` with the scopes `scopes_of(did)` gives (an item without scopes is
-    /// dropped). Returns the `sync_repo` reports, in dispatch order.
+    /// else `sync_repo` with the scopes `scopes_of(did)` gives and the item's own forum scopes
+    /// (an item without scopes is dropped). Returns the `sync_repo` reports, in dispatch order.
     pub async fn run_ready(
         &self,
         s: &Session<H>,
@@ -1971,7 +1972,13 @@ impl<H: Host> Syncer<H> {
                         .collect(),
                 ),
                 crate::sync::queue::Action::Sync => {
-                    let scopes = scopes_of(&item.did);
+                    let mut scopes = scopes_of(&item.did);
+                    for fk in &item.fks {
+                        let sc = Scope::Forum(fk.clone());
+                        if !scopes.contains(&sc) {
+                            scopes.push(sc);
+                        }
+                    }
                     if scopes.is_empty() {
                         continue;
                     }

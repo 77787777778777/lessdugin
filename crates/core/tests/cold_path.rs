@@ -615,3 +615,62 @@ fn the_authors_on_screen_are_resolved_ahead_of_the_participant_sweep() {
         );
     }
 }
+
+/// `sync.md` §5.2 and §6.1: a page's forum sync that its time budget cut short (a participant's
+/// range listings held past it, as a slow PDS does) leaves that repo's unfinished pass to the
+/// dirty queue with the forum's scope, and `live_tail` finishes it: the page converges without
+/// another explicit sync, also for a forum the viewer does not follow.
+#[test]
+fn a_forum_sync_cut_short_by_its_budget_converges_in_the_background() {
+    futures::executor::block_on(async {
+        let mem = MemHost::new();
+        let net = FakeNet::on(&mem);
+        let _ = net.default_pds();
+        let owner = net.add_account("owner.example.com");
+        let key = forum(&mem, &owner, MembershipMode::Approval);
+        let member = net.add_account("member.example.com");
+        join(&mem, &member, &key);
+        grant(&mem, &owner, &key, member.did());
+        let mine = post(&mem, &owner, &key, "Owner's post", 1);
+        let theirs = post(&mem, &member, &key, "Member's post", 2);
+        let engine = Engine::new(
+            mem.clone(),
+            EngineConfig {
+                sources: lessdugin_core::engine::Sources::Direct,
+                ..EngineConfig::default()
+            },
+        );
+        engine.forum_open(key.uri.as_str()).await.unwrap();
+        // The member's listings answer only after the page's sync budget (8 s) is spent.
+        let held = net.inject(
+            Fault::latency(20_000)
+                .on_repo(member.did().as_str())
+                .on_nsid("com.atproto.repo.listRecords"),
+        );
+        let opts = lessdugin_core::dto::SyncOpts {
+            budget_ms: Some(8_000),
+            max_requests: Some(400),
+            full: false,
+        };
+        let report = engine.sync_forum(key.uri.as_str(), &opts).await.unwrap();
+        assert!(report.partial, "{report:?}");
+        let listed = |page: &lessdugin_core::dto::PostList| -> Vec<String> {
+            page.items.iter().map(|p| p.uri.clone()).collect()
+        };
+        let page = engine.list_posts(&all_posts(&key)).await.unwrap();
+        assert_eq!(listed(&page), std::slice::from_ref(&mine), "{page:?}");
+
+        // The PDS answers again. Nothing but live_tail's rounds run from here.
+        net.remove_fault(held);
+        for _ in 0..20 {
+            let round = engine.live_step().await.unwrap();
+            mem.advance_ms(round.next_ms.max(1_000));
+        }
+        let page = engine.list_posts(&all_posts(&key)).await.unwrap();
+        assert!(
+            listed(&page).contains(&theirs),
+            "the forum did not converge: {page:?}"
+        );
+        assert!(!page.completeness.partial, "{:?}", page.completeness);
+    });
+}

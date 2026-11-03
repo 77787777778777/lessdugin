@@ -1079,6 +1079,8 @@ impl<H: Host> Engine<H> {
             }
             let r = rel.get(&item.did);
             let mut fks: BTreeSet<String> = r.map(|r| r.fks.clone()).unwrap_or_default();
+            // the scopes of the pass that queued it (a forum open in a view, not followed)
+            fks.extend(item.fks.iter().cloned());
             if let Some(row) = rows.get(item.did.as_str()) {
                 fks.extend(
                     row.listed

@@ -568,12 +568,12 @@ sync_repo(did, scopes, reason) -> Clean | Applied | Unstable | Rollback | Failed
      remove every mark with rev ≤ h1.rev (§6.5)
   repo.colls/collsAt/collsRev/collsDirty updated if describeRepo ran (collsRev = h1.rev); repo.checkedAt = now; repo.fails = 0; repo.lastOk = now
   KvStore::write(cache, batch ++ [put repo row])                                    // one atomic batch
-  if ¬stable: enqueue(did, minRev = h2.rev, P1, "unstable"); return Unstable
+  if ¬stable: enqueue(did, minRev = h2.rev, P1, "unstable", fks = the pass's fk scopes); return Unstable
   emit Changed; return Applied
 ```
 
 **Rules**
-- An unstable pass (the head moved during listing) still admits what it listed, but writes no tombstones and advances no `listed` entry. After 3 consecutive unstable passes the repo is re-queued at P3 with the repo backoff (§9.4).
+- An unstable pass (the head moved during listing, or its head re-check failed, as when its time budget ran out while a listing was held) still admits what it listed, but writes no tombstones and advances no `listed` entry. After 3 consecutive unstable passes the repo is re-queued at P3 with the repo backoff (§9.4). The queued item carries the pass's forum scopes (§6.1), so the pass is finished also for a forum open in a view that is not followed.
 - **`describeRepo` freshness.** `repo.colls` is reused for up to 24 h. It is refreshed early when `repo.collsDirty` is set: a hint or an own write named a collection in `OURS` that is not in `repo.colls`. A background pass can therefore miss a collection created less than 24 h ago and named by no hint until the next reconcile, which always refreshes. A **user-initiated** pass (`sync_forum`, `sync_thread`, `sync --full`; `engine-api.md` §3.3) of a forum scope trusts `repo.colls` only at the head it was described at (`repo.collsRev`): when the head moved and a ranged collection or `NS.membership` is missing from `repo.colls`, it calls `describeRepo` again, even when the pass would otherwise be `Clean`. An explicit refresh therefore sees the first records of a newly granted or newly joined participant at once. If `describeRepo` fails, `colls = OURS`.
 - **Partial results.** A range that failed or hit a byte cap leaves its scope unlisted; the other ranges are still applied.
 
@@ -803,7 +803,7 @@ Every response is byte-counted while streaming, after decompression; the host ab
 
 ### 6.1 The dirty queue
 
-Every change source feeds one queue of items `(did, minRev?, priority, reasons, uris?)`:
+Every change source feeds one queue of items `(did, minRev?, priority, reasons, uris?, fks?)`:
 - Jetstream (§6.2–§6.4);
 - the indexer change feed (§6.6);
 - polling (§6.7);
@@ -812,7 +812,9 @@ Every change source feeds one queue of items `(did, minRev?, priority, reasons, 
 - discovery (§4);
 - opening a view (§6.7).
 
-**Coalescing.** The queue holds at most one item per DID. Merging takes the highest priority (P0 highest), the greatest `minRev`, the union of reasons and uris, and the earliest ready time.
+**Coalescing.** The queue holds at most one item per DID. Merging takes the highest priority (P0 highest), the greatest `minRev`, the union of reasons, uris and fks, and the earliest ready time.
+
+**Scopes.** An item's `sync_repo` covers the DID's forum scopes that the queue's server knows (the followed forums it is relevant to, and those its repo was listed for) and the item's own `fks`: the scopes of the pass that queued it (an unstable pass, §5.2). Without them, a pass a forum page's sync left unfinished (its budget spent while a participant's listing was held) would be dropped for a forum that is open but not followed, and the page would not converge until another explicit sync.
 
 | Priority | Content | Ready after (debounce plus jitter, *tunable*) |
 |---|---|---|
