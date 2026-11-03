@@ -781,6 +781,84 @@ fn audit_reports_omissions_and_forged_proofs() {
     assert!(report.counts.contradictions >= 2);
 }
 
+/// An honest audit indexer for `w`: the owner's real head and the given `listPosts` page.
+fn serve_honest_audit(w: &ForumWorld, posts: Value) {
+    let (_, rev) = w.owner.head();
+    describe(
+        &w.host,
+        &["getRepoHeads", "getChanges", "listPosts", "getRecordProofs"],
+        0,
+    );
+    w.host.respond_get(
+        &endpoint("getRepoHeads"),
+        resp::ok_json(&with_meta(
+            json!({"heads": [{"did": w.owner.did(), "rev": rev.to_string()}]}),
+            0,
+        )),
+    );
+    w.host.respond_get(
+        &endpoint("listPosts"),
+        resp::ok_json(&with_meta(
+            json!({
+                "posts": posts, "policy": {"karma": "karma/1", "ranking": "magic/1"},
+                "inputDigest": "00"
+            }),
+            0,
+        )),
+    );
+}
+
+fn check<'a>(
+    report: &'a lessdugin_core::indexer::AuditReport,
+    name: &str,
+) -> &'a lessdugin_core::indexer::AuditCheck {
+    report.checks.iter().find(|c| c.name == name).unwrap()
+}
+
+#[test]
+fn audit_does_not_count_a_hidden_post_as_an_omission() {
+    use lessdugin_lexicon::records::{Action, HideAction, ModAction};
+    let w = forum_world();
+    // The owner hides their own post: it stays a valid record but the fold no longer lists it,
+    // so an honest indexer's listPosts leaves it out (sync.md §15.4 A3).
+    let hide = lessdugin_core::outbox::records::mod_action(&ModAction::new(
+        w.key.uri.clone(),
+        w.post.as_str(),
+        Action::Hide(HideAction::hide()),
+        lessdugin_atp::syntax::Datetime::from_millis(w.host.now()).unwrap(),
+    ))
+    .unwrap();
+    w.owner.put(nsid::MOD_ACTION, &hide.rkey, &hide.value);
+    block_on(w.engine.sync_forum(
+        w.key.uri.as_str(),
+        &SyncOpts {
+            full: true,
+            ..SyncOpts::default()
+        },
+    ))
+    .unwrap();
+    let mut query = lessdugin_core::dto::ListPostsQuery::new(w.key.uri.to_string());
+    query.filter = lessdugin_core::dto::PostFilter::All;
+    assert!(
+        block_on(w.engine.list_posts(&query))
+            .unwrap()
+            .items
+            .is_empty(),
+        "the hidden post is not listed locally"
+    );
+    w.host.advance_ms(180_000);
+    serve_honest_audit(&w, json!([]));
+    w.host.clear_requests();
+    let report = block_on(w.engine.audit_indexer(w.key.uri.as_str()))
+        .unwrap()
+        .unwrap();
+    let a3 = check(&report, "A3 records");
+    assert!(a3.findings.is_empty(), "{report:?}");
+    assert_eq!(report.counts.omissions, 0, "{report:?}");
+    // The A5 sample is drawn from listed posts too: nothing to prove here.
+    assert!(w.host.requests_to(&endpoint("getRecordProofs")).is_empty());
+}
+
 #[test]
 fn production_endpoints_are_exact_and_devnet_is_loopback_only() {
     use lessdugin_core::indexer::endpoint_allowed;

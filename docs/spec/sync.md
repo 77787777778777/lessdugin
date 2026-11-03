@@ -1590,7 +1590,7 @@ Displayed values are always recomputed locally from admitted records. Indexer ag
 |---|---|---|
 | A1 heads | `getRepoHeads` for every repo in the completeness set (batches of 50), then `getLatestCommit` at each PDS | the indexer's rev is above the PDS head → contradiction; below it by more than `asOf.lagMs + 2 min` → lag |
 | A2 changes | for every change the client saw from Jetstream during the session, more than 2 minutes old, with a matching fk | missing from `getChanges` → omission |
-| A3 records | the client's eligible, listed posts (complete repos only, older than 2 minutes) against `listPosts(sort = new)`, all pages up to 10,000 | missing → omission; present at the indexer but confirmed absent at the PDS → contradiction |
+| A3 records | the client's eligible, listed posts (listed by the local fold, `Visible` or `Collapsed` (`social.md` §10.1), so a hidden or removed post is not one; complete repos only, older than 2 minutes) against `listPosts(sort = new)`, all pages up to 10,000 | missing → omission; present at the indexer but confirmed absent at the PDS → contradiction |
 | A4 digest and aggregates | when the local view is complete: `inputDigest` and every `#tally` (score, agreement, unweighted) against local recomputation | digest mismatch, or equal digests with unequal tallies → contradiction |
 | A5 proofs | `getRecordProofs` for up to 25 sampled uris | an item that fails `proofs/1` (other than `stale-proof`) → contradiction |
 

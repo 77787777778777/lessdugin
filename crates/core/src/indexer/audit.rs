@@ -9,6 +9,7 @@ use crate::host::Host;
 use crate::indexer::client::Client;
 use crate::indexer::contract::{Change, PostHint, PostsPage, RepoHeadHint};
 use crate::indexer::proofs::{ProofStatus, hydrate_visible};
+use crate::social::full::view::State;
 use crate::store::RepoStatus;
 use crate::store::records::RecordStore;
 use crate::sync::{PointOutcome, Session};
@@ -203,8 +204,11 @@ pub(crate) async fn run<H: Host>(
         .records
         .values()
         .filter(|r| {
+            // The indexer lists what its fold lists: a hidden or removed post, or one by a banned
+            // or nullified author, is valid but correctly absent from listPosts.
             r.valid
                 && r.coll == Some(Collection::Post)
+                && loaded.model.displayed(&r.uri).is_some_and(State::listed)
                 && r.times
                     .obs
                     .is_some_and(|t| now_ms.saturating_mul(1000) - t > TWO_MINUTES_MS * 1000)
