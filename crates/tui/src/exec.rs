@@ -431,19 +431,36 @@ pub async fn run<H: Host>(engine: &Engine<H>, effect: Effect, opts: ExecOpts) ->
             screen: Some(screen),
             result: engine.seq_move(&uri, &from, &to).await.map(|t| vec![t]),
         },
-        Effect::StartEdit { uri, forum } => {
-            Action::EditReady(start_edit(engine, &uri, &forum).await)
-        }
+        Effect::StartEdit {
+            uri,
+            forum,
+            drop_link_card,
+        } => Action::EditReady(start_edit(engine, &uri, &forum, drop_link_card).await),
         Effect::StartWiki { forum, slug, draft } => {
             Action::WikiReady(start_wiki(engine, forum, slug, draft).await)
         }
-        Effect::Edit { uri, draft, text } => Action::Queued {
+        Effect::Edit {
+            uri,
+            draft,
+            text,
+            drop_link_card,
+        } => Action::Queued {
             compose: Compose::Edit {
                 uri: uri.clone(),
                 base: Box::new(draft.clone()),
+                drop_link_card,
             },
             text,
-            result: engine.edit(&uri, &draft, &EditOpts::default()).await,
+            result: engine
+                .edit(
+                    &uri,
+                    &draft,
+                    &EditOpts {
+                        drop_link_card,
+                        ..EditOpts::default()
+                    },
+                )
+                .await,
         },
         Effect::ItemWrite {
             op,
@@ -707,6 +724,7 @@ async fn start_edit<H: Host>(
     engine: &Engine<H>,
     uri: &str,
     forum: &str,
+    drop_link_card: bool,
 ) -> Result<EditStart, EngineError> {
     let uri = item_uri(engine, uri, forum).await?;
     let me = engine.active_account().await?.map(|a| a.did);
@@ -749,16 +767,23 @@ async fn start_edit<H: Host>(
                     .and_then(serde_json::Value::as_str)
                     .map(str::to_owned)
             };
+            // `--drop-link-card`: the uri alone, which the engine then writes as it is
+            let link = strong("link").map(|uri| ExternalLinkDraft {
+                uri,
+                title: link_field("title").filter(|_| !drop_link_card),
+                description: link_field("description").filter(|_| !drop_link_card),
+            });
+            if drop_link_card && link.is_none() {
+                return Err(EngineError::invalid_input(
+                    "--drop-link-card: the post has no link",
+                ));
+            }
             let draft = PostDraft {
                 forum: s("forum").unwrap_or_default(),
                 kind,
                 title: title.clone(),
                 body,
-                link: strong("link").map(|uri| ExternalLinkDraft {
-                    uri,
-                    title: link_field("title"),
-                    description: link_field("description"),
-                }),
+                link,
                 tags: strs(v.get("tags")),
                 labels: v
                     .get("labels")
@@ -780,15 +805,27 @@ async fn start_edit<H: Host>(
                     format!("Editing your post: {title}"),
                 )
             };
+            let mut context = vec![context];
+            if drop_link_card {
+                context.push(
+                    "Its link card (title, description, image) is dropped; the link stays."
+                        .to_owned(),
+                );
+            }
             (
                 Draft::Post {
                     id: None,
                     post: draft,
                 },
                 prefill,
-                vec![context],
+                context,
                 !quick,
             )
+        }
+        nsid::COMMENT if drop_link_card => {
+            return Err(EngineError::invalid_input(
+                "--drop-link-card: a comment has no link card",
+            ));
         }
         nsid::COMMENT => (
             Draft::Comment {
@@ -821,6 +858,7 @@ async fn start_edit<H: Host>(
             compose: Compose::Edit {
                 uri,
                 base: Box::new(base),
+                drop_link_card,
             },
             template: crate::editor::edit_template(&prefill, &context, post),
         },

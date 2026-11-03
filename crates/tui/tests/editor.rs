@@ -640,6 +640,69 @@ fn the_edit_command_keeps_a_link_posts_card() {
     assert_eq!(card(&v), before, "{v}");
 }
 
+/// `:edit --drop-link-card` (`EditOpts.dropLinkCard`, `engine-api.md` §3.5 `edit`, decision
+/// O-14): the edit drops a link post's card (title, description, image) and keeps the link,
+/// which `:edit` alone keeps; the editor says so. A comment has no card to drop.
+#[test]
+fn the_edit_command_can_drop_a_link_posts_card() {
+    use lessdugin_core::dto::{ExternalLinkDraft, PostDraft, PostKind};
+    let s = scenario();
+    let carol = &s.w.carol;
+    let mut d = PostDraft::article(&s.forum, "A link", "Why it matters.");
+    d.kind = PostKind::Link;
+    d.link = Some(ExternalLinkDraft {
+        uri: "https://example.com/article".into(),
+        title: Some("The article".into()),
+        description: Some("A misleading description.".into()),
+    });
+    let t = block_on(carol.engine.publish(&d)).unwrap();
+    carol.flush();
+    let post = carol.done(&t);
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut t = tui_with_sed(
+        &s,
+        dir.path(),
+        "s/Why it matters./Why it still matters./",
+        true,
+    );
+    block_on(t.start(None));
+    run(&mut t, &format!("edit {post} --drop-link-card"));
+    block_on(t.engine().outbox_flush()).unwrap();
+    block_on(t.settle());
+    let seen = std::fs::read_to_string(dir.path().join("seen.txt")).unwrap();
+    assert!(
+        seen.contains("link card (title, description, image) is dropped"),
+        "{seen}"
+    );
+    let v = record(carol, &post);
+    assert_eq!(
+        v["link"],
+        serde_json::json!({ "uri": "https://example.com/article" }),
+        "{v}"
+    );
+    assert_eq!(post_of(&s, &post).1.trim(), "Why it still matters.");
+
+    // a comment has no card: refused before the editor opens
+    let c = block_on(
+        carol
+            .engine
+            .comment(&lessdugin_core::dto::CommentDraft::new(
+                &post,
+                None,
+                "A comment.",
+            )),
+    )
+    .unwrap();
+    carol.flush();
+    let comment = carol.done(&c);
+    std::fs::remove_file(dir.path().join("seen.txt")).unwrap();
+    run(&mut t, &format!("edit {comment} --drop-link-card"));
+    assert!(!dir.path().join("seen.txt").exists(), "no editor ran");
+    let status = t.state.status.as_ref().unwrap().text.to_plain_string();
+    assert!(status.contains("no link card"), "{status}");
+}
+
 /// sec-7, the other half: when `edit_preflight` cannot run, `:edit` is not refused. The TUI
 /// says what it could not check, and why, and asks the same question; `n` opens no editor, `y`
 /// edits unchecked.
@@ -658,6 +721,7 @@ fn an_edit_whose_preflight_failed_asks_before_editing_unchecked() {
                 id: None,
                 comment: CommentDraft::new(&s.welcome, None, "x"),
             }),
+            drop_link_card: false,
         },
         template: "x\n".into(),
     };

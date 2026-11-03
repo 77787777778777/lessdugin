@@ -118,6 +118,9 @@ pub enum Compose {
         uri: String,
         /// Its draft as cached.
         base: Box<Draft>,
+        /// `--drop-link-card`: the link is written as `base` gives it, the uri alone
+        /// (`EditOpts.dropLinkCard`).
+        drop_link_card: bool,
     },
     /// A wiki revision; its structured fields stay out of the markdown editor.
     Wiki {
@@ -569,8 +572,10 @@ pub enum Effect {
         uri: String,
         /// Its forum, for a reference.
         forum: String,
+        /// `--drop-link-card`: the post's link card is dropped, the link kept.
+        drop_link_card: bool,
     },
-    /// `edit(uri, draft, EditOpts::default())`: the old version is kept as a revision.
+    /// `edit(uri, draft, EditOpts { dropLinkCard, .. })`: the old version is kept as a revision.
     Edit {
         /// The item.
         uri: String,
@@ -578,6 +583,8 @@ pub enum Effect {
         draft: Draft,
         /// The editor's text (offered again if the edit fails).
         text: String,
+        /// Write the draft's link exactly as given, without the cached card.
+        drop_link_card: bool,
     },
     /// `delete(uri)`, `retract(uri)` or `redact_revision(uri)` of your post or comment.
     ItemWrite {
@@ -3527,7 +3534,11 @@ impl State {
                     ]),
                 ),
             },
-            Compose::Edit { uri, base } => {
+            Compose::Edit {
+                uri,
+                base,
+                drop_link_card,
+            } => {
                 let mut draft = (**base).clone();
                 match &mut draft {
                     // the text replaces the body's markdown; its media (the cached items, as
@@ -3567,6 +3578,7 @@ impl State {
                     uri: uri.clone(),
                     draft,
                     text,
+                    drop_link_card: *drop_link_card,
                 });
             }
             Compose::Wiki { forum, slug, draft } => {
@@ -5403,12 +5415,16 @@ impl State {
                     });
                 }
             }
-            Verb::Edit => {
+            Verb::Edit { drop_link_card } => {
                 let Some((uri, forum)) = item(self, "edit") else {
                     return;
                 };
                 if self.can_write() {
-                    fx.push(Effect::StartEdit { uri, forum });
+                    fx.push(Effect::StartEdit {
+                        uri,
+                        forum,
+                        drop_link_card,
+                    });
                 }
             }
             Verb::Delete | Verb::Retract | Verb::Redact => {

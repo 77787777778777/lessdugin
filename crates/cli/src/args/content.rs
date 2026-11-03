@@ -236,6 +236,11 @@ pub struct EditArgs {
     /// Do not keep the old version as a revision.
     #[arg(long)]
     pub no_history: bool,
+    /// Drop the post's link card (its title, description and image) and keep the link (alone,
+    /// without new text, the text stays as it is); an edit otherwise keeps the card while the
+    /// link stays the same.
+    #[arg(long)]
+    pub drop_link_card: bool,
     /// Do not ask for confirmation when the edit suspends a keep, a frontpage or curated tier
     /// or a pin of the item, nor before uploading the local images of a file under the drafts
     /// directory (needed then when not running interactively; a file elsewhere is confirmed on
