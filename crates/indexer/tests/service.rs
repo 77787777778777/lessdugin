@@ -1232,6 +1232,24 @@ async fn live_proof_batches_replay_failures_without_losing_frames() {
         tokio::spawn(async move { engine.live_tail().await })
     };
     tokio::time::sleep(Duration::from_millis(150)).await;
+    // live_tail's first round reconciles the authority (sync.md §6.8; sync_forum does not mark
+    // it reconciled). Posts written before that listing would arrive through it, not through the
+    // live frame this test exercises, so wait for it instead of trusting the sleep.
+    let owner = fixture.owner.did().to_string();
+    let settle = Instant::now() + Duration::from_secs(10);
+    while !RecordStore::new(engine.host().cache())
+        .repos(&[owner.as_str()])
+        .await
+        .unwrap()[0]
+        .as_ref()
+        .is_some_and(|r| r.last_reconcile > 0)
+    {
+        assert!(
+            Instant::now() < settle,
+            "live_tail never reconciled the authority"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     let first = fixture.post("Live proof one");
     let second = fixture.post("Live proof two");
     let deadline = Instant::now() + Duration::from_secs(30);
