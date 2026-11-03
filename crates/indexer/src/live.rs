@@ -145,6 +145,8 @@ async fn connection(
                 &endpoint.origin().ascii_serialization(),
                 event,
                 &cx,
+                // first-seen is when this indexer received the frame, never the frame's time
+                indexer.now_ms().saturating_mul(1_000),
             );
             if out.duplicate {
                 indexer
