@@ -56,9 +56,10 @@ M1.
     nothing. → §8.4 (`limits.json#link-dropped-at-boundary`, `#leaf-exemption`,
     `#flattened-empty-emits-nothing`).
 14. **Real host.** The test runs on the displayed text (Default_Ignorable removed, NFKC,
-    U+3002/U+FF61 and the other lookalike dots, `\` and the lookalike slashes read as `/`,
-    gaps next to a dot removed, names of any script) and tests every dotted name the text
-    names, except mailboxes (never in a URL's authority) and path names; the link text is
+    U+3002/U+FF61 and the other lookalike dots, `\` and the lookalike slashes read as `/`
+    (U+2AFD and the like as `//`, a mark on a `/` dropped), gaps next to a dot removed, names
+    of any script) and tests every dotted name the text names, except mailboxes (never in a
+    URL's authority, after `//` or `https:`) and path names; the link text is
     read as the HTML writer renders it, generated image labels included, and a link with
     images is also tested without their alts; a link that holds math always shows the host; a
     standalone `ext-image`'s text is its alt. → §5.5, §14 30 (`links.json#host-display-*`).
@@ -79,8 +80,11 @@ M1.
     the link text as rendered, generated labels included, always shows the host of a link with
     math and exempts no name in a URL's authority as a mailbox (§14 30, `links.json#host-display-
     generated-labels`, `#host-display-math-in-link`, `#host-display-userinfo-variants`); 6 reads
-    `\` and the lookalike slashes as `/`, so they start an authority or a path (§5.5 step 2,
-    §14 30, `links.json#host-display-backslash-authority`, `#host-display-lookalike-slashes`).
+    `\` and the lookalike slashes as `/` (those that read as two or three as many, a mark on a
+    `/` dropped), so they start an authority or a path, and starts an authority after `https:`
+    and the other special schemes but `file`, with one `/` or none (§5.5, §14 30,
+    `links.json#host-display-backslash-authority`, `#host-display-lookalike-slashes`,
+    `#host-display-scheme-authority`).
 19. **`Rendered.error`.** → §1.3, §1.4.
 20. **Escaping record strings** (CR, CRLF → LF, NUL → U+FFFD in attribute values). → §8.3.
 21. **`StyledDoc`.** Shared summary ids, empty item `Para`, single-line contexts, code `lang`,

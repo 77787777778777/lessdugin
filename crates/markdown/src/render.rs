@@ -20,10 +20,12 @@ use crate::styled::{StyledDoc, build, error_doc};
 ///
 /// `6`: the real-host test (§5.5 step 2) reads `\` and the symbols that read as `/` or `\`
 /// (U+2215 DIVISION SLASH, U+2044 FRACTION SLASH and the rest of what UTS #39 maps there) as
-/// `/`, so they start a URL's authority and path as `/` does; before, they reset the URL run,
-/// so a trusted name that followed `https:`, two backslashes (or two lookalike slashes) and a
-/// user name, and came before a later `@`, passed as a mailbox with no host shown (review2
-/// m3m4-continuation-4).
+/// `/`, those that read as two or three (U+2AFD DOUBLE SOLIDUS OPERATOR) as as many, and drops
+/// a mark on a `/`, so they start a URL's authority and path as `/` does; and `https:` and the
+/// other special schemes but `file` start an authority with one `/` or none. Before, they
+/// reset the URL run, so a trusted name that followed `https:`, two backslashes (or two
+/// lookalike slashes, or one slash or none) and a user name, and came before a later `@`,
+/// passed as a mailbox with no host shown (review2 m3m4-continuation-4).
 /// `5`: the real-host test (§5.5) reads the link text as the HTML writer renders it, generated
 /// image labels included (an external image's `image: <its host>`, a `media.alt` fallback, a
 /// `span.media` label from `media.name`), always shows the host of a link that holds math (its
