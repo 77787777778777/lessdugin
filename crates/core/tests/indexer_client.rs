@@ -348,7 +348,9 @@ fn oversized_bundles_halve_then_use_pds_for_one_oversized_item() {
     let report = block_on(e.hydrate_indexer_records(&forum, std::slice::from_ref(&uri)))
         .unwrap()
         .unwrap();
-    assert_eq!(report.failed, 1);
+    // Still too large at one URI: fetched from the PDS, not a failed proof (sync.md §8.6).
+    assert_eq!(report.items[0].status, ProofStatus::TooLarge);
+    assert_eq!((report.too_large, report.failed), (1, 0));
     assert_eq!(report.point_fetched, 1);
     assert_eq!(w.host.requests_to(&endpoint("getRecordProofs")).len(), 1);
     assert_eq!(
@@ -375,7 +377,9 @@ fn unavailable_proof_service_falls_back_to_the_authors_pds() {
         .unwrap()
         .unwrap();
     assert_eq!(report.point_fetched, 1, "{report:?}");
-    assert_eq!(report.failed, 1);
+    // No proof was presented, so nothing failed proofs/1 (sync.md §15.4 A5).
+    assert_eq!(report.items[0].status, ProofStatus::Unavailable);
+    assert_eq!((report.unavailable, report.failed), (1, 0));
     assert_eq!(
         block_on(RecordStore::new(w.host.cache()).get(&uri))
             .unwrap()
@@ -857,6 +861,52 @@ fn audit_does_not_count_a_hidden_post_as_an_omission() {
     assert_eq!(report.counts.omissions, 0, "{report:?}");
     // The A5 sample is drawn from listed posts too: nothing to prove here.
     assert!(w.host.requests_to(&endpoint("getRecordProofs")).is_empty());
+}
+
+/// A well-formed `proofs/1` bundle with no items: it omits every requested URI.
+fn empty_bundle() -> Vec<u8> {
+    let mut manifest = BTreeMap::new();
+    manifest.insert("v".to_owned(), Ipld::Integer(1));
+    manifest.insert("items".to_owned(), Ipld::List(Vec::new()));
+    let manifest = dagcbor::encode(&Ipld::Map(manifest)).unwrap();
+    let root = lessdugin_atp::cid::for_dag_cbor(&manifest);
+    write_car(&[root], [(&root, manifest.as_slice())])
+}
+
+#[test]
+fn audit_proof_check_counts_only_rejected_proofs_as_contradictions() {
+    use lessdugin_core::host::HostError;
+    use lessdugin_core::indexer::AuditKind;
+    // An unreachable proof endpoint and a proof still over the cap at one URI present nothing
+    // to verify: neither is a contradiction, and the item is not counted as checked.
+    for failure in [HostError::Network("offline".into()), HostError::TooLarge] {
+        let w = forum_world();
+        w.host.advance_ms(180_000);
+        serve_honest_audit(&w, json!([]));
+        w.host.fail(&endpoint("getRecordProofs"), failure);
+        let report = block_on(w.engine.audit_indexer(w.key.uri.as_str()))
+            .unwrap()
+            .unwrap();
+        let a5 = check(&report, "A5 proofs");
+        assert!(a5.findings.is_empty(), "{report:?}");
+        assert_eq!(a5.counts.checked, 0, "{report:?}");
+        assert!(!w.host.requests_to(&endpoint("getRecordProofs")).is_empty());
+    }
+
+    // A bundle that leaves out the requested URI presented no proof: an omission.
+    let w = forum_world();
+    w.host.advance_ms(180_000);
+    serve_honest_audit(&w, json!([]));
+    w.host
+        .respond_get(&endpoint("getRecordProofs"), resp::car(empty_bundle()));
+    let report = block_on(w.engine.audit_indexer(w.key.uri.as_str()))
+        .unwrap()
+        .unwrap();
+    let a5 = check(&report, "A5 proofs");
+    assert_eq!(a5.findings.len(), 1, "{report:?}");
+    assert_eq!(a5.findings[0].kind, AuditKind::Omission);
+    assert_eq!(a5.findings[0].subject, w.post);
+    assert_eq!(a5.counts.contradictions, 0);
 }
 
 #[test]

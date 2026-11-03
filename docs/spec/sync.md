@@ -1079,7 +1079,8 @@ verify_proof(…):
 `getRecordProofs(uris ≤ 25)` returns `application/vnd.ipld.car` (`data-model.md` §11.3):
 - the root block is a DAG-CBOR manifest `{v: 1, items: [{uri, cid: CID | null, commit: CID}]}`, followed by deduplicated blocks;
 - the manifest's `v` MUST be 1; unknown keys are ignored; `items` ≤ 25;
-- a response over the bundle byte cap is retried with the `uris` list halved, down to one uri; an item still too large is fetched from the author's PDS instead (`limits.md` §5).
+- a response over the bundle byte cap is retried with the `uris` list halved, down to one uri; an item still too large is fetched from the author's PDS instead (`limits.md` §5);
+- a request that returns no bundle (a transport or XRPC error after the retries of §9.3) presents no proof: its items are fetched from the authors' PDSes. Neither this nor an item still too large is a failure, and neither counts against the indexer. A requested uri that the bundle omits or repeats does count against it.
 
 ```
 for each item (independently):
@@ -1592,9 +1593,9 @@ Displayed values are always recomputed locally from admitted records. Indexer ag
 | A2 changes | for every change the client saw from Jetstream during the session, more than 2 minutes old, with a matching fk | missing from `getChanges` → omission |
 | A3 records | the client's eligible, listed posts (listed by the local fold, `Visible` or `Collapsed` (`social.md` §10.1), so a hidden or removed post is not one; complete repos only, older than 2 minutes) against `listPosts(sort = new)`, all pages up to 10,000 | missing → omission; present at the indexer but confirmed absent at the PDS → contradiction |
 | A4 digest and aggregates | when the local view is complete: `inputDigest` and every `#tally` (score, agreement, unweighted) against local recomputation | digest mismatch, or equal digests with unequal tallies → contradiction |
-| A5 proofs | `getRecordProofs` for up to 25 sampled uris | an item that fails `proofs/1` (other than `stale-proof`) → contradiction |
+| A5 proofs | `getRecordProofs` for up to 25 sampled uris | an item whose presented proof fails `proofs/1` (other than `stale-proof`) → contradiction; a requested uri the bundle omits → omission |
 
-The report lists findings with counts, and the command exits with code 6 if any contradiction or omission was found. Every failed proof item (§8.6) is also counted against the indexer in `HostRow.strikes`.
+The report lists findings with counts, and the command exits with code 6 if any contradiction or omission was found. An item the audit cannot check is neither a finding nor counted as checked: in A5, an item for which no proof could be fetched (a transport failure, or a single proof still over the cap, §8.6). Every failed proof item (§8.6) is also counted against the indexer in `HostRow.strikes`.
 
 **Reserved (P2):** the automatic 1%-per-hour audit sample, and automatic demotion of an indexer above the thresholds (more than 2% contradictions, or more than 3 omissions per day) with a warning.
 

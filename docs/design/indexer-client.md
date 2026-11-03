@@ -39,7 +39,9 @@ author's current PDS head. A proof is admitted only when its commit revision is 
 head and the head observation is no more than 60 seconds older than bundle receipt. Current
 proofs use the normal record validator and `Source::Indexer`; stale, missing, mismatched and
 failed items are never fold inputs and fall back to `point_fetch`. Bundle failures add persistent
-host strikes, with one breaker failure per bundle.
+host strikes, with one breaker failure per bundle. A request that returns no bundle
+(`Unavailable`) and a single URI still over the cap (`TooLarge`) also fall back to the PDS, but
+are not strikes and are not audit contradictions.
 
 `LiveProofBatch` holds at most 25 URIs and flushes a non-full batch after a host-selected 1–3
 second delay. Core does not spawn a task: the native service agent owns the timer and calls

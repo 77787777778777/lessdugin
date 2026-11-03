@@ -44,6 +44,13 @@ impl AuditCheck {
         self.counts.checked += n;
     }
 
+    /// An item the audit could not check (its PDS or the proof endpoint was unreachable, or its
+    /// proof is over the bundle cap). It is neither a finding nor counted as checked
+    /// (`sync.md` §15.4).
+    fn unchecked(&mut self, subject: &str, detail: impl std::fmt::Display) {
+        tracing::warn!(check = %self.name, %subject, %detail, "indexer audit item unchecked");
+    }
+
     fn finding(&mut self, kind: AuditKind, subject: impl Into<String>, detail: impl Into<String>) {
         self.counts.count(kind);
         self.findings.push(AuditFinding {
@@ -293,16 +300,26 @@ pub(crate) async fn run<H: Host>(
         .take(25)
         .filter_map(|r| AtUri::parse(&r.uri).ok())
         .collect();
-    a5.checked(sample.len());
     if !sample.is_empty() {
         let proofs = hydrate_visible(&engine.syncer(), client, session, &sample).await?;
         for item in proofs.items {
-            if matches!(item.status, ProofStatus::Failed | ProofStatus::Missing) {
-                a5.finding(
-                    AuditKind::Contradiction,
-                    item.uri,
-                    item.error.unwrap_or_else(|| "proof item failed".to_owned()),
-                );
+            let error = item.error.as_deref().unwrap_or("proof item failed");
+            match item.status {
+                // Only a presented proof that fails proofs/1 contradicts the indexer.
+                ProofStatus::Failed => {
+                    a5.checked(1);
+                    a5.finding(AuditKind::Contradiction, &item.uri, error);
+                }
+                // No proof was presented for a requested URI.
+                ProofStatus::Missing => {
+                    a5.checked(1);
+                    a5.finding(AuditKind::Omission, &item.uri, error);
+                }
+                // A transport failure or an oversized single proof presents nothing to verify.
+                ProofStatus::Unavailable | ProofStatus::TooLarge => a5.unchecked(&item.uri, error),
+                ProofStatus::Admitted | ProofStatus::Absent | ProofStatus::StaleProof => {
+                    a5.checked(1)
+                }
             }
         }
     }
