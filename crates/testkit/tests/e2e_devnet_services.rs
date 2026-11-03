@@ -342,7 +342,13 @@ async fn the_devnet_core_plus_services_hint_at_real_writes() {
             .did
             .as_deref()
             .is_some_and(|d| NOISE_DIDS.contains(&d));
-        let out = filter.apply(CoreWire::V2, services.jetstream_url(), event, &cx);
+        let out = filter.apply(
+            CoreWire::V2,
+            services.jetstream_url(),
+            event,
+            &cx,
+            now_ms().saturating_mul(1_000),
+        );
         if noise {
             assert!(
                 out.actions.is_empty(),
