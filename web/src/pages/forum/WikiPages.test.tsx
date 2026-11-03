@@ -159,6 +159,36 @@ describe("WikiEditPage", () => {
     expect(edit.mock.calls[0]?.[2]).toMatchObject({ base: head });
   });
 
+  // the router keeps the page's instance when only the tag changes: the head the editor keeps is
+  // the one of the page it shows
+  it("starts afresh when it moves to another page's editor", async () => {
+    const { engine, forum, router } = await setup("edit");
+    const other = (await engine.tag(forum, "rationality")).head;
+    expect(other).toBeDefined();
+    const name = (await screen.findByRole("textbox", { name: "Name" })) as HTMLInputElement;
+    expect(name.value).toBe("Decision theory");
+    fireEvent.change(screen.getByRole("textbox", { name: /^Page/ }), {
+      target: { value: "Text for decision theory." },
+    });
+    const { owner, slug } = forumParams(forum);
+    await router.navigate({ to: `/f/${owner}/${slug}/t/rationality/edit` });
+    await waitFor(() =>
+      expect((screen.getByRole("textbox", { name: "Name" }) as HTMLInputElement).value).toBe(
+        "Rationality",
+      ),
+    );
+    expect((screen.getByRole("textbox", { name: /^Page/ }) as HTMLTextAreaElement).value).not.toBe(
+      "Text for decision theory.",
+    );
+    expect(screen.queryByRole("status")).toBeNull();
+    const edit = vi.spyOn(engine, "wikiEdit");
+    fireEvent.click(screen.getByRole("button", { name: "Save page" }));
+    await waitFor(() => expect(edit).toHaveBeenCalledTimes(1));
+    expect(edit.mock.calls[0]?.[1]).toBe("rationality");
+    expect(edit.mock.calls[0]?.[2]).toMatchObject({ name: "Rationality", base: other });
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
   it("writes a new page without a base", async () => {
     const { engine, forum } = await setup("edit", "new-topic");
     const edit = vi.spyOn(engine, "wikiEdit");

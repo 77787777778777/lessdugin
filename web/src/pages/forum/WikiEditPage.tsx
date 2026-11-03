@@ -333,10 +333,17 @@ export function WikiPageForm({
 }
 
 export function WikiEditPage() {
+  const { forum } = useForumView();
+  const { tag } = route.useParams();
+  // The router keeps this instance when only the tag changes: the head an editor keeps and the
+  // text it carries belong to one page, so another page's editor starts afresh.
+  return <WikiEditor key={`${forum.uri} ${tag}`} tag={tag} />;
+}
+
+function WikiEditor({ tag }: { tag: string }) {
   const engine = useEngine();
   const qc = useQueryClient();
   const { forum } = useForumView();
-  const { tag } = route.useParams();
   const active = useActiveAccount();
   const view = useQuery({
     queryKey: qk.tag(forum.uri, tag),
