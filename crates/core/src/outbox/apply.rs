@@ -220,6 +220,7 @@ pub async fn apply_with_syncer<H: Host>(
             let now = syncer.host().now_ms();
             let report = {
                 let _guard = syncer.net().repo_lock(&w.account).await;
+                let _write = syncer.net().write_lock(&w.account).await;
                 apply_own_write(syncer.host().cache(), w, now)
                     .await
                     .map_err(|e| EngineError::internal(format!("applying an own write: {e}")))?

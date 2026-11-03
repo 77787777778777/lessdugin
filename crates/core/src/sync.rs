@@ -14,8 +14,8 @@
 //! the command's request counters, and an identity resolver over it, so that PLC and DoH
 //! requests are scheduled and counted like the rest.
 //!
-//! Repo locks are in-process ([`Net::repo_lock`]); the cross-process locks and the sync leader of
-//! §10.6 belong to the host.
+//! Repo locks and the record-slot write locks are in-process ([`Net::repo_lock`],
+//! [`Net::write_lock`]); the cross-process locks and the sync leader of §10.6 belong to the host.
 //!
 //! Records enter the store only through admission (`crate::store::admit`) and the record store's
 //! [`crate::store::Batch`]; repo state, host capabilities and the records of a pass are written

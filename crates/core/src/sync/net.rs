@@ -878,10 +878,11 @@ impl Net {
     }
 
     // -----------------------------------------------------------------------------------------
-    // Repo locks (`sync.md` §10.6, in process)
+    // Repo and write locks (`sync.md` §10.6, in process)
 
-    /// Takes the in-process lock of repo `did` (the read-diff-write of `sync_repo`, point fetches
-    /// and admissions for `did` never interleave).
+    /// Takes the in-process lock of repo `did` (the passes of `sync_repo`, point fetches and
+    /// admissions for `did` that take it never interleave; record-slot writes are ordered by
+    /// [`Net::write_lock`]).
     pub fn repo_lock(&self, did: &Did) -> RepoLock<'_> {
         RepoLock {
             net: self,
@@ -900,6 +901,21 @@ impl Net {
         }
         st.locked.insert(key.clone());
         Some(RepoGuard { net: self, key })
+    }
+
+    /// Takes the in-process write lock of `did`'s record slots (`sync.md` §10.6): every writer of
+    /// them holds it from its batch's first slot read to its commit, with no network request in
+    /// between, so writers that admit without the repo lock (the cold page's reads and proofs)
+    /// never interleave their read-diff-write with another's. It is taken last, after the repo
+    /// lock if any, and never held while taking that or awaiting the network.
+    pub fn write_lock(&self, did: &Did) -> RepoLock<'_> {
+        RepoLock {
+            net: self,
+            // a DID has no space: this key never names a repo lock
+            key: format!("write {did}"),
+            ticket: None,
+            held: false,
+        }
     }
 }
 
@@ -1025,7 +1041,8 @@ impl Drop for Acquire<'_> {
     }
 }
 
-/// The in-process lock of one repo; resolves to a guard.
+/// The in-process lock of one repo (or of its record slots, [`Net::write_lock`]); resolves to a
+/// guard.
 pub struct RepoLock<'a> {
     net: &'a Net,
     key: String,
@@ -1033,7 +1050,7 @@ pub struct RepoLock<'a> {
     held: bool,
 }
 
-/// Holds a repo lock until dropped.
+/// Holds a repo or write lock until dropped.
 pub struct RepoGuard<'a> {
     net: &'a Net,
     key: String,
