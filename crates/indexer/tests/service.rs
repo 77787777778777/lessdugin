@@ -2055,7 +2055,7 @@ async fn queries_reuse_the_projected_model_instead_of_refolding() {
 
 /// security-net-10: getRecordProofs never queues on the ingest budget. A missing proof is
 /// verified against the cached (at most one hour old) DID document, without a PLC request, and
-/// when the request pool is busy the item is omitted instead of waiting.
+/// fetched through a small pool: a request waits a bounded time for a slot, then omits the item.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn record_proofs_use_cached_identities_and_a_bounded_pool() {
     let fixture = Fixture::new().await;
@@ -2093,21 +2093,32 @@ async fn record_proofs_use_cached_identities_and_a_bounded_pool() {
                 .len()
         }
     };
-    // Pool busy: omitted at once, nothing sent to the author's PDS or to PLC.
+    // Pool busy for longer than the request's bound: omitted when the bound passes, nothing
+    // sent to the author's PDS or to PLC.
     let held = Arc::clone(&fixture.indexer.api_proofs)
         .try_acquire_many_owned(lessdugin_indexer::API_PROOF_FETCHES as u32)
         .unwrap();
     fixture.net.clear_requests();
-    assert_eq!(fetch(fixture.indexer.clone()).await, 0);
+    let busy = tokio::time::timeout(
+        lessdugin_indexer::API_PROOF_WAIT + Duration::from_secs(20),
+        fetch(fixture.indexer.clone()),
+    )
+    .await
+    .expect("a busy pool held the request past its bound");
+    assert_eq!(busy, 0);
     assert!(
         fixture.net.requests().is_empty(),
         "{:?}",
         fixture.net.requests()
     );
-    drop(held);
-    // Pool free: fetched and verified against the cached document.
+    // A slot that frees within the bound is used: the request waits for it instead of
+    // omitting, then the proof is fetched and verified against the cached document.
     fixture.net.clear_requests();
-    assert_eq!(fetch(fixture.indexer.clone()).await, 1);
+    let waiting = tokio::spawn(fetch(fixture.indexer.clone()));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!waiting.is_finished(), "the request did not wait for a slot");
+    drop(held);
+    assert_eq!(waiting.await.unwrap(), 1);
     let plc = Url::parse(&fixture.net.plc()).unwrap();
     let to_plc = fixture
         .net

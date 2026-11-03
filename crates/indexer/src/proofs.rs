@@ -4,7 +4,7 @@
 //! fails against a cached document is retried once against a fresh one. Failed bundle items are
 //! omitted, never substituted. `getRecordProofs` serves cached proofs and fetches at most
 //! [`crate::API_PROOF_FETCHES`] missing ones at a time, so requests never queue on the ingest
-//! budget (sync.md §15.3).
+//! budget; a request waits at most [`crate::API_PROOF_WAIT`] for a slot (sync.md §15.3).
 
 use std::collections::BTreeMap;
 use std::sync::atomic::Ordering;
@@ -108,6 +108,7 @@ async fn fetch_with(indexer: &Indexer, uri: &str, max_age_ms: i64) -> anyhow::Re
 pub async fn bundle(indexer: &Indexer, uris: &[String]) -> anyhow::Result<Vec<u8>> {
     let mut items = Vec::new();
     let mut blocks: BTreeMap<Cid, Vec<u8>> = BTreeMap::new();
+    let waits_until = tokio::time::Instant::now() + crate::API_PROOF_WAIT;
     for uri in uris.iter().take(25) {
         let indexed_cids = indexer.store.indexed_record_cids(uri);
         if indexed_cids.is_empty() {
@@ -130,9 +131,12 @@ pub async fn bundle(indexer: &Indexer, uris: &[String]) -> anyhow::Result<Vec<u8
         }) {
             Some(row) => row,
             None => {
-                // A missing proof is fetched only while a request permit is free; otherwise
-                // the item is omitted now and the client falls back to the author's PDS.
-                let Ok(_permit) = indexer.api_proofs.try_acquire() else {
+                // A missing proof is fetched with one of the few request permits; once the
+                // request has waited its bound for one, the item is omitted and the client
+                // falls back to the author's PDS.
+                let Ok(Ok(_permit)) =
+                    tokio::time::timeout_at(waits_until, indexer.api_proofs.acquire()).await
+                else {
                     continue;
                 };
                 match fetch(indexer, uri).await {

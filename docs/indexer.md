@@ -88,8 +88,8 @@ real `inputDigest`; their values and tallies remain hints. Queries read each for
 folded model (kept for at least 60 s or 30 times its fold cost, then refolded once, one query fold
 at a time and never in the way of live projections), so a request never refolds a forum. `getRecordProofs` accepts at most 25 `uris`
 and returns an `application/vnd.ipld.car` manifest bundle. It serves cached proofs and fetches at
-most two missing ones at a time; failed or not-yet-available items are omitted; absence proofs
-have `cid: null`.
+most two missing ones at a time (a request waits at most five seconds in all for a slot); failed or
+not-yet-available items are omitted; absence proofs have `cid: null`.
 
 Operational endpoints:
 

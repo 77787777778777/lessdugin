@@ -86,9 +86,12 @@ pub const MODEL_CACHE_ENTRIES: usize = 32;
 /// `limits::MODEL_MAX_AGE_MS`, as in the engine's own cache: `now`-dependent ranking follows the
 /// clock, and a forum is refolded for queries at most once per such period.
 pub const MODEL_AGE_FACTOR: i64 = 30;
-/// At most this many proofs are fetched for `getRecordProofs` at a time; other uncached items
-/// are omitted (the client falls back to its PDS) instead of waiting on the ingest budget.
+/// At most this many proofs are fetched for `getRecordProofs` at a time, so requests never
+/// queue on the ingest budget.
 pub const API_PROOF_FETCHES: usize = 2;
+/// A `getRecordProofs` request waits at most this long in all for a fetch slot; its remaining
+/// uncached items are then omitted (the client falls back to the author's PDS).
+pub const API_PROOF_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[derive(Clone)]
 pub struct Indexer {
