@@ -261,6 +261,8 @@ fn media_of_a_repo_that_is_not_served_now_is_not_missing() {
     let blob = bob.upload_blob(tiny_png(9), "image/png");
     let cid = blob["ref"]["$link"].as_str().unwrap().to_owned();
     post(&n, &bob, &f, image_body(&blob));
+    // a PDS serves only the blobs a record references
+    bob.commit_now();
     let e = n.device("anon", None);
     let owner = || Some(MediaOwner::author(bob.did().as_str()));
     for (name, message) in [
