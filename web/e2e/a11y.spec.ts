@@ -144,6 +144,31 @@ for (const scheme of ["light", "dark"] as const) {
       expect(w.errors).toEqual([]);
     });
 
+    test("mod queue banners of an approval forum (O-8)", async ({ page }) => {
+      const w = await watch(page);
+      const found: string[] = [];
+      // an approval forum's mod queue with its applicant notice, then the direct-sources warning
+      await page.goto(`/?mock#/`);
+      await page.getByRole("button", { name: "Create a forum" }).click();
+      const form = page.getByRole("region", { name: "Create a forum" });
+      await form.getByLabel("Address").fill("by-approval");
+      await form.getByLabel("Name").fill("By approval");
+      await form.getByRole("button", { name: "Create the forum" }).click();
+      await page.getByRole("link", { name: "Moderation" }).click();
+      await expect(page.locator('[data-banner="applicantsViaHints"]')).toBeVisible();
+      found.push(...(await axe(page, "mod queue, applicants via hints")));
+      await page.getByRole("button", { name: /You \(mock account\)/ }).click();
+      await page.getByRole("menuitem", { name: "Settings" }).click();
+      const direct = page.getByRole("radio", { name: /^Direct/ });
+      await direct.click();
+      await expect(direct).toBeChecked();
+      await page.goBack();
+      await expect(page.locator('[data-banner="applicantsNotDiscovered"]')).toBeVisible();
+      found.push(...(await axe(page, "mod queue, applicants not discovered")));
+      expect(found).toEqual([]);
+      expect(w.errors).toEqual([]);
+    });
+
     test("interactive states: dialogs, palette, composer, toasts, forms", async ({ page }) => {
       const w = await watch(page);
       const found: string[] = [];

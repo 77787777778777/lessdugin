@@ -281,6 +281,35 @@ test("create a forum, edit its declaration and manage a moderator", async ({ pag
   await expect(mods).not.toContainText("Bob Moderator");
 });
 
+test("an approval forum's mod queue says where its applicants come from (O-8)", async ({
+  page,
+}) => {
+  await go(page, "/", "Your forums");
+  await page.getByRole("button", { name: "Create a forum" }).click();
+  const form = page.getByRole("region", { name: "Create a forum" });
+  await form.getByLabel("Address").fill("by-approval");
+  await form.getByLabel("Name").fill("By approval");
+  await form.getByRole("button", { name: "Create the forum" }).click();
+  await expect(page.getByRole("heading", { level: 1, name: "By approval" })).toBeVisible();
+  await page.getByRole("link", { name: "Moderation" }).click();
+  // above the queue, also while it is empty
+  await expect(page.locator('[data-banner="applicantsViaHints"]')).toContainText(
+    "Notice: Applicants are found only through",
+  );
+  await expect(page.getByText("Nothing to review.")).toBeVisible();
+  // with direct sources, the stronger warning
+  await page.getByRole("button", { name: /You \(mock account\)/ }).click();
+  await page.getByRole("menuitem", { name: "Settings" }).click();
+  const direct = page.getByRole("radio", { name: /^Direct/ });
+  await direct.click();
+  await expect(direct).toBeChecked();
+  await page.goBack();
+  await expect(page.locator('[data-banner="applicantsNotDiscovered"]')).toContainText(
+    "Warning: This device uses direct sources only",
+  );
+  await expect(page.locator('[data-banner="applicantsViaHints"]')).toHaveCount(0);
+});
+
 test("vote on the tags of someone else's post", async ({ page }) => {
   await go(page, WELCOME_PATH, WELCOME);
   const post = page.getByRole("article", { name: WELCOME });

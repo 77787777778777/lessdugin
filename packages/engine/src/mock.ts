@@ -291,6 +291,14 @@ function hot(
   return b / (h + offsetHours) ** (exponentMilli / 1000);
 }
 
+/** The approval-mode mod queue's banners (views.rs `APPLICANTS_ASSISTED`, `APPLICANTS_DIRECT`). */
+const APPLICANTS_ASSISTED =
+  "Applicants are found only through Constellation, Jetstream, a relay or an indexer, so some " +
+  "may be missing. Applicants can also reach you out of band.";
+const APPLICANTS_DIRECT =
+  "This device uses direct sources only, so it does not look for applicants: the list shows " +
+  "only those found before. Switch sources to assisted, or hear from applicants out of band.";
+
 export class MockEngine implements EngineApi {
   private readonly s: MockState;
   private readonly holdMs: number;
@@ -1797,7 +1805,17 @@ export class MockEngine implements EngineApi {
     if (!this.isAuthorityDid(forum, this.s.active ?? "")) {
       throw err("blocked", "The mod queue is available to this forum's authorities only.");
     }
-    return { dto: DTO_VERSION, items: clone(this.s.modQueue.get(forum) ?? []) };
+    const queue: ModQueue = { dto: DTO_VERSION, items: clone(this.s.modQueue.get(forum) ?? []) };
+    // approval mode: where the applicants come from (sync.md §4.4, decision O-8), by the
+    // `sources` in effect, as views.rs `mod_queue` words it
+    if (this.forumRec(forum).membership === "approval") {
+      queue.banners = [
+        this.s.settings.sources === "direct"
+          ? { code: "applicantsNotDiscovered", message: APPLICANTS_DIRECT }
+          : { code: "applicantsViaHints", message: APPLICANTS_ASSISTED },
+      ];
+    }
+    return queue;
   }
 
   async modLog(forum: AtUri, _cursor?: string, _limit?: number): Promise<ModLog> {

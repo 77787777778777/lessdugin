@@ -292,6 +292,27 @@ describe("MockEngine writes", () => {
     expect((await e.raw(next)).record).toMatchObject({ parents: [{ uri: moved }] });
   });
 
+  it("says in an approval-mode mod queue where applicants come from (O-8)", async () => {
+    const e = new MockEngine({ sendMs: 10 });
+    expect((await e.modQueue(FORUM_URI)).banners).toBeUndefined();
+    const t = await e.forumCreate({
+      slug: "by-approval",
+      name: "By approval",
+      membership: "approval",
+      defaultTier: "personal",
+    });
+    await vi.advanceTimersByTimeAsync(50);
+    const s = (await e.writes()).find((w) => w.id === t.id)?.state;
+    if (s?.kind !== "done") throw new Error("not written");
+    const queue = await e.modQueue(s.uri);
+    expect(queue.items).toEqual([]);
+    expect(queue.banners?.map((b) => b.code)).toEqual(["applicantsViaHints"]);
+    await e.setSetting("sources", "direct");
+    expect((await e.modQueue(s.uri)).banners?.map((b) => b.code)).toEqual([
+      "applicantsNotDiscovered",
+    ]);
+  });
+
   // views.rs `tag_summary`: a page that exists but is not a tag (applicable = false) is no tag
   it("treats a page that is not a tag as no tag, and edits it on its head", async () => {
     const e = new MockEngine({ sendMs: 10 });

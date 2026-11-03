@@ -21,6 +21,7 @@ import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-quer
 import { Link } from "@tanstack/react-router";
 import { useState } from "react";
 import { ActorName } from "../../components/ActorName.tsx";
+import { Banners } from "../../components/Banners.tsx";
 import { useSendModAction } from "../../components/ModMenu.tsx";
 import { usePublicAck } from "../../components/PublicAck.tsx";
 import { RecordLink } from "../../components/RecordLink.tsx";
@@ -209,6 +210,8 @@ function ModQueue({ uri, authority }: { uri: string; authority: boolean }) {
   return (
     <>
       <h2 className={ui.sectionTitle}>Mod queue</h2>
+      {/* approval mode: where applicants come from, also above an empty queue (O-8) */}
+      <Banners banners={queue.data?.banners} />
       <label className={ui.field}>
         <span className={ui.label}>Reason for the actions below (public)</span>
         <input className={ui.input} value={reason} onChange={(e) => setReason(e.target.value)} />
