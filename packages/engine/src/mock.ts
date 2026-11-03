@@ -2698,16 +2698,17 @@ export class MockEngine implements EngineApi {
     if (this.wikiRace && base !== undefined && base === tags.get(slug)?.head) {
       // another participant's edit of the page arrived since the editor loaded it
       this.wikiRace = false;
-      const page = tags.get(slug);
+      const page = this.s.wiki.get(base);
       const other = ACTOR_DID.carol === me ? ACTOR_DID.dan : ACTOR_DID.carol;
       this.addWikiRevision(other ?? didFor("wiki-race"), forum, slug, base, {
         name: page?.name ?? draft.name,
         ...(page?.description !== undefined ? { description: page.description } : {}),
         body: {
-          markdown: `${page?.page ?? ""}\n\nAn edit made elsewhere while this page was open.`,
+          markdown: `${page?.body ?? ""}\n\nAn edit made elsewhere while this page was open.`,
           media: [],
         },
         isTag: page?.isTag !== false,
+        parentTags: [...(page?.parentTags ?? [])],
         summary: "A concurrent edit",
       });
       this.changed({ kind: "forum", uri: forum });

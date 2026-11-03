@@ -7,9 +7,9 @@
 // the head it loaded while the author writes; when the head moves (or a save is refused), the
 // author's text stays, and "Reload the page" loads the newer version and keeps their text
 // beside it so they can redo the edit. A page with no revision yet starts empty and is written
-// without a parent. The engine opens only applicable
-// pages (`tag` is not_found for a page that is not a tag, views.rs `tag_summary`), so such a page
-// cannot be loaded here: the editor says so for a new address, and before a page stops being a tag.
+// without a parent. The engine opens only applicable pages (`tag` is not_found for a page that
+// is not a tag, views.rs `tag_summary`), so such a page cannot be loaded here: the editor says
+// so for a new address, and before a page stops being a tag.
 
 import type { WikiDraft } from "@lessdugin/engine/types";
 import { isEngineError } from "@lessdugin/engine/types";
