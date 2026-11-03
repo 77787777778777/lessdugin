@@ -1203,8 +1203,9 @@ pub struct Committed {
 /// own pending writes, and [`Batch::commit`] applies them with one [`KvStore::write`].
 ///
 /// The store has no interactive transactions (IndexedDB), so a batch reads, decides and writes;
-/// concurrent writers of the same repo are excluded by the repo lock (I9), and every decision is
-/// idempotent and key-monotone, so a replayed batch converges.
+/// concurrent writers of the same repo's record slots are excluded by its write lock, held from
+/// the first slot read to the commit (`crate::sync::Net::write_lock`, `sync.md` §10.6), and
+/// every decision is idempotent and key-monotone, so a replayed batch converges.
 pub struct Batch<'k, K: KvStore> {
     kv: &'k K,
     pending: BTreeMap<Vec<u8>, Option<Vec<u8>>>,

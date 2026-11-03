@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! The indexer cold path (`sync.md` §14.3) next to the ordinary PDS sync it runs beside: head
 //! checks that a sync in flight does not hold up, the membership of a granted author on a
-//! hydrated page, the order in which the authors on screen are resolved, and a forum sync that
-//! its budget cut short. Offline, over `FakeNet` on a `MemHost`, with a host that can hold
-//! chosen requests (a slow PDS) until the test releases them.
+//! hydrated page, the order in which the authors on screen are resolved, a proof admitted while
+//! a sync of its author commits, and a forum sync that its budget cut short. Offline, over
+//! `FakeNet` on a `MemHost`, with a host that can hold chosen requests (a slow PDS) and a chosen
+//! write to its cache (a slow store) until the test releases them.
 
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -13,8 +14,11 @@ use std::task::{Context, Poll, Waker};
 use lessdugin_atp::syntax::{AtUri, Did};
 use lessdugin_core::discovery::ForumKey;
 use lessdugin_core::engine::{Engine, EngineConfig};
-use lessdugin_core::host::{BlobHandle, Host, HostError, HttpRequest, HttpResponse};
-use lessdugin_core::store::RecordStore;
+use lessdugin_core::host::{
+    BlobHandle, Dir, Host, HostError, HttpRequest, HttpResponse, KeyRange, KvOp, KvStore,
+};
+use lessdugin_core::store::mem::MemKv;
+use lessdugin_core::store::{RecKey, RecordStore};
 use lessdugin_core::sync::{Priority, Reason, Stats, SyncConfig, SyncRequest, Syncer};
 use lessdugin_lexicon::collection::nsid;
 use lessdugin_lexicon::keys;
@@ -52,11 +56,98 @@ impl Hold {
     }
 }
 
-/// A `MemHost` whose matching requests wait for [`Hold::release`].
+/// A `MemKv` whose next write of a chosen uri's slot waits for [`HoldKv::release`]: a store
+/// that is slow to take a batch's commit (IndexedDB and SQLite answer asynchronously).
+#[derive(Clone)]
+struct HoldKv {
+    inner: MemKv,
+    hold: Arc<KvHold>,
+}
+
+#[derive(Default)]
+struct KvHold {
+    /// The keys whose next write waits (that write takes them).
+    keys: Mutex<Vec<Vec<u8>>>,
+    held: AtomicBool,
+    open: AtomicBool,
+    wakers: Mutex<Vec<Waker>>,
+}
+
+impl HoldKv {
+    fn new(inner: &MemKv) -> Self {
+        Self {
+            inner: inner.clone(),
+            hold: Arc::default(),
+        }
+    }
+
+    /// Holds the next write of `uri`'s record or tombstone.
+    fn hold_next_write(&self, uri: &AtUri) {
+        let k = RecKey::of_uri(uri);
+        *self.hold.keys.lock().unwrap() = vec![k.rec(), k.tomb()];
+    }
+
+    fn held(&self) -> bool {
+        self.hold.held.load(Ordering::SeqCst)
+    }
+
+    fn release(&self) {
+        self.hold.open.store(true, Ordering::SeqCst);
+        for w in std::mem::take(&mut *self.hold.wakers.lock().unwrap()) {
+            w.wake();
+        }
+    }
+}
+
+impl KvStore for HoldKv {
+    async fn get_many(&self, keys: Vec<Vec<u8>>) -> Result<Vec<Option<Vec<u8>>>, HostError> {
+        self.inner.get_many(keys).await
+    }
+
+    async fn scan(
+        &self,
+        range: KeyRange,
+        dir: Dir,
+        limit: u32,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, HostError> {
+        self.inner.scan(range, dir, limit).await
+    }
+
+    async fn write(&self, batch: Vec<KvOp>) -> Result<(), HostError> {
+        let hit = {
+            let mut keys = self.hold.keys.lock().unwrap();
+            let hit = batch
+                .iter()
+                .any(|op| matches!(op, KvOp::Put(k, _) | KvOp::Delete(k) if keys.contains(k)));
+            if hit {
+                keys.clear();
+            }
+            hit
+        };
+        if hit {
+            self.hold.held.store(true, Ordering::SeqCst);
+            std::future::poll_fn(|cx: &mut Context<'_>| {
+                self.hold.wakers.lock().unwrap().push(cx.waker().clone());
+                if self.hold.open.load(Ordering::SeqCst) {
+                    Poll::Ready(())
+                } else {
+                    Poll::Pending
+                }
+            })
+            .await;
+        }
+        self.inner.write(batch).await
+    }
+}
+
+/// A `MemHost` whose matching requests wait for [`Hold::release`], over a cache that can hold a
+/// write ([`HoldKv`]).
 #[derive(Clone)]
 struct HoldHost {
     inner: MemHost,
     hold: Arc<Hold>,
+    cache: HoldKv,
+    state: HoldKv,
 }
 
 impl HoldHost {
@@ -64,6 +155,8 @@ impl HoldHost {
         Self {
             inner: inner.clone(),
             hold: Arc::default(),
+            cache: HoldKv::new(inner.cache_kv()),
+            state: HoldKv::new(inner.state_kv()),
         }
     }
 
@@ -83,16 +176,16 @@ impl HoldHost {
 }
 
 impl Host for HoldHost {
-    type Kv = <MemHost as Host>::Kv;
+    type Kv = HoldKv;
     type Ws = <MemHost as Host>::Ws;
     type Lock = <MemHost as Host>::Lock;
 
     fn cache(&self) -> &Self::Kv {
-        self.inner.cache()
+        &self.cache
     }
 
     fn state(&self) -> &Self::Kv {
-        self.inner.state()
+        &self.state
     }
 
     async fn http(&self, req: HttpRequest) -> Result<HttpResponse, HostError> {
@@ -479,6 +572,80 @@ fn a_granted_members_hydrated_post_is_listed_before_their_repo_sync() {
     host.hold.release();
     let report = futures::executor::block_on(sync);
     assert!(report.error.is_none(), "{report:?}");
+}
+
+/// `sync.md` §10.6: the cold page admits a proof without the repo lock, while a sync of the
+/// author is between the reads of its batch and its commit (a slow store). Each holds the write
+/// lock of the author's record slots for its read-diff-write, so the two never interleave: the
+/// slot ends as their merge (the newer of the record and the tombstone by order key, with the
+/// uri's earliest first-seen time), not as the stale state of whichever committed last.
+#[test]
+fn a_proof_admitted_while_a_sync_commits_is_merged_with_it() {
+    let mem = MemHost::new();
+    let net = FakeNet::on(&mem);
+    let _ = net.default_pds();
+    let owner = net.add_account("owner.example.com");
+    let key = forum(&mem, &owner, MembershipMode::Open);
+    let member = net.add_account("member.example.com");
+    join(&mem, &member, &key);
+    let doomed = post(&mem, &member, &key, "Doomed", 1);
+    let uri = AtUri::parse(&doomed).unwrap();
+    let rkey = uri.rkey().as_str();
+    let cid = member.cid(nsid::POST, rkey).unwrap();
+    serve_indexer(&mem, &net, std::slice::from_ref(&doomed));
+    let host = HoldHost::new(&mem);
+    let engine = assisted(host.clone());
+    futures::executor::block_on(engine.forum_open(key.uri.as_str())).unwrap();
+    let store = RecordStore::new(mem.cache());
+    assert_eq!(futures::executor::block_on(store.get(&uri)).unwrap(), None);
+
+    // A sync of the member lists the post, and the store is slow to take its batch.
+    host.cache.hold_next_write(&uri);
+    let sy = engine.syncer();
+    let s = sy.session(Priority::P1, Arc::new(Stats::capped(None)));
+    let req = SyncRequest::forum(member.did().clone(), &key.fk, Reason::Participant);
+    let mut sync = Box::pin(sy.sync_repo(&s, &req));
+    assert!(poll_once(&mut sync).is_pending());
+    assert!(host.cache.held(), "the sync did not reach its commit");
+    let listed_at = mem.now();
+
+    // The member deletes the post meanwhile, and the cold page admits its proof of absence.
+    mem.advance_ms(1_000);
+    assert!(member.delete(nsid::POST, rkey));
+    let (_, deleted) = member.head();
+    let uris = [uri.clone()];
+    let mut page = Box::pin(engine.hydrate_indexer_records(key.uri.as_str(), &uris));
+    // (under the write lock it waits here for the sync's commit; without it, it finishes and the
+    // sync's batch, read before it, commits after it)
+    let hydrated = (0..100).find_map(|_| match poll_once(&mut page) {
+        Poll::Ready(r) => Some(r),
+        Poll::Pending => None,
+    });
+    host.cache.release();
+    let report = futures::executor::block_on(sync);
+    assert!(report.error.is_none(), "{report:?}");
+    let proofs = hydrated
+        .unwrap_or_else(|| futures::executor::block_on(page))
+        .unwrap()
+        .expect("the indexer was not used");
+    assert_eq!(proofs.absent, 1, "{proofs:?}");
+
+    assert_eq!(
+        futures::executor::block_on(store.get(&uri))
+            .unwrap()
+            .map(|r| r.cid),
+        None,
+        "the sync's stale batch put the deleted post back beside its tombstone"
+    );
+    let tomb = futures::executor::block_on(store.tombstone_of(&uri))
+        .unwrap()
+        .expect("the post is not tombstoned");
+    assert_eq!(tomb.rev_lo, deleted.as_str(), "{tomb:?}");
+    assert_eq!(
+        (tomb.first_cid, tomb.first_seen_uri),
+        (Some(cid), Some(listed_at * 1000)),
+        "the post's first-seen time was lost: {tomb:?}"
+    );
 }
 
 /// `sync.md` §14.3 step 4 and §3.5: the identities and heads of the authors on screen are

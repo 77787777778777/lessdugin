@@ -444,6 +444,9 @@ async fn hydrate_chunk<H: Host>(
             });
             continue;
         };
+        // Without the repo lock: a sync of the author held at its listings does not hold the page
+        // up. The write lock orders this read-diff-write with that sync's own (`sync.md` §10.6).
+        let _guard = syncer.net().write_lock(uri.did()).await;
         let mut batch = store.batch();
         let write = if let Some(record) = outcome.record {
             match admit::admit_block(uri, &record.cid, &record.bytes, &LexiconValidator) {
@@ -590,6 +593,7 @@ async fn pds_proof_fallback<H: Host>(
         let rev = outcome.rev.to_string();
         let store = RecordStore::new(session.host().cache());
         let _guard = syncer.net().repo_lock(uri.did()).await;
+        let _write = syncer.net().write_lock(uri.did()).await;
         let mut batch = store.batch();
         if let Some(record) = outcome.record {
             let admitted = admit::admit_block(uri, &record.cid, &record.bytes, &LexiconValidator)

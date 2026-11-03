@@ -464,6 +464,7 @@ impl<H: Host> Syncer<H> {
         let rev = outcome.rev.to_string();
         let obs = Observation::proof(&rev, sent_at, Source::Proof, now);
         let _guard = self.net().repo_lock(&key.owner).await;
+        let _write = self.net().write_lock(&key.owner).await;
         let store = RecordStore::new(s.host().cache());
         let mut b = store.batch();
         if let Err(e) = b.put_version(admitted.into_version(obs)).await {

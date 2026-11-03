@@ -1035,6 +1035,7 @@ impl<H: Host> Syncer<H> {
             let check = membership_check(&fetched, &c.forum);
             rep.membership.insert(c.fk.clone(), check.clone());
             if check.rejects() {
+                let _write = self.net().write_lock(did).await;
                 let mut batch = store.batch();
                 let (changed, adm) = self
                     .apply_fetched(
@@ -1250,7 +1251,8 @@ impl<H: Host> Syncer<H> {
             }
         };
 
-        // one batch
+        // one batch, its read-diff-write under the write lock (no request until the commit)
+        let write = self.net().write_lock(did).await;
         let now = host.now_ms();
         let mut batch = store.batch();
         let mut scopes: BTreeMap<String, ScopeState> = req
@@ -1547,6 +1549,7 @@ impl<H: Host> Syncer<H> {
         batch.put_repo(did.as_str(), &repo)?;
         self.put_host(&mut batch, &origin, &host_delta, now).await?;
         batch.commit().await?;
+        drop(write);
         rep.changed = changed;
         for (u, a) in &conflicts {
             self.note_conflict(did, u, a, now);
@@ -1634,8 +1637,9 @@ impl<H: Host> Syncer<H> {
 
     /// A point fetch for a page on screen (§14.3 step 4): admitted as [`Syncer::point_fetch`]
     /// admits it, but without the repo lock and without changing the repo row (its marks and
-    /// collections), so a sync of the repo in flight never holds the page up (§10.6). The order
-    /// key's `revLo` is the latest head observation, a handed one included.
+    /// collections), so a sync of the repo in flight never holds the page up (§10.6): only its
+    /// local read-diff-write takes the write lock, which no writer holds across a request. The
+    /// order key's `revLo` is the latest head observation, a handed one included.
     pub(crate) async fn view_fetch(
         &self,
         s: &Session<H>,
@@ -1664,6 +1668,7 @@ impl<H: Host> Syncer<H> {
             Fetched::Found { rec, .. } => Some((rec.cid, rec.validity.is_valid())),
             Fetched::NotFound { .. } => None,
         };
+        let write = self.net().write_lock(did).await;
         let now = s.host().now_ms();
         let mut batch = store.batch();
         let (changed, adm) = self
@@ -1672,6 +1677,7 @@ impl<H: Host> Syncer<H> {
             )
             .await?;
         batch.commit().await?;
+        drop(write);
         if let Some(a) = &adm {
             self.note_conflict(did, uri.as_str(), a, now);
         }
@@ -1733,6 +1739,7 @@ impl<H: Host> Syncer<H> {
                 return Err(e);
             }
         };
+        let write = self.net().write_lock(did).await;
         let now = s.host().now_ms();
         let mut batch = store.batch();
         let found = match &fetched {
@@ -1766,6 +1773,7 @@ impl<H: Host> Syncer<H> {
         }
         batch.put_repo(did.as_str(), &repo)?;
         batch.commit().await?;
+        drop(write);
         if let Some(a) = &adm {
             self.note_conflict(did, uri.as_str(), a, now);
         }
@@ -1929,6 +1937,7 @@ impl<H: Host> Syncer<H> {
                 (h.rev, sent_at, false)
             }
         };
+        let write = self.net().write_lock(account).await;
         let now = s.host().now_ms();
         let mut out = OwnWritesApplied {
             rev: rev.clone(),
@@ -1976,6 +1985,7 @@ impl<H: Host> Syncer<H> {
         }
         batch.put_repo(account.as_str(), &repo)?;
         batch.commit().await?;
+        drop(write);
         for u in &out.refetch {
             let at = ready_time(Priority::P0, now, self.random(), None);
             self.enqueue(DirtyItem::point(account.as_str(), u, Priority::P0, at));
