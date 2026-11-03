@@ -353,9 +353,12 @@ pub async fn project_forum(
 ) -> anyhow::Result<Projection> {
     let _one = indexer.project_lock.lock().await;
     let built_ms = indexer.now_ms();
-    let model =
-        ForumModel::build(indexer.engine.host().cache(), key, built_ms.saturating_mul(1000))
-            .await?;
+    let model = ForumModel::build(
+        indexer.engine.host().cache(),
+        key,
+        built_ms.saturating_mul(1000),
+    )
+    .await?;
     let cost_ms = indexer.now_ms().saturating_sub(built_ms);
     let store = RecordStore::new(indexer.engine.host().cache());
     let mut dids: BTreeSet<String> = match authors {
@@ -452,8 +455,12 @@ pub async fn model(indexer: &Indexer, key: &ForumKey) -> anyhow::Result<Arc<Foru
     };
     let built_ms = indexer.now_ms();
     let model = Arc::new(
-        ForumModel::build(indexer.engine.host().cache(), key, built_ms.saturating_mul(1000))
-            .await?,
+        ForumModel::build(
+            indexer.engine.host().cache(),
+            key,
+            built_ms.saturating_mul(1000),
+        )
+        .await?,
     );
     let cost_ms = indexer.now_ms().saturating_sub(built_ms);
     indexer

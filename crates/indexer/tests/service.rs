@@ -2116,7 +2116,10 @@ async fn record_proofs_use_cached_identities_and_a_bounded_pool() {
     fixture.net.clear_requests();
     let waiting = tokio::spawn(fetch(fixture.indexer.clone()));
     tokio::time::sleep(Duration::from_millis(300)).await;
-    assert!(!waiting.is_finished(), "the request did not wait for a slot");
+    assert!(
+        !waiting.is_finished(),
+        "the request did not wait for a slot"
+    );
     drop(held);
     assert_eq!(waiting.await.unwrap(), 1);
     let plc = Url::parse(&fixture.net.plc()).unwrap();

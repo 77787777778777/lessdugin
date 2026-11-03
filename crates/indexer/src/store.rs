@@ -1465,7 +1465,11 @@ mod tests {
         seeds(0, 100);
         let small = cost(&store);
         seeds(100, 2_000);
-        assert_eq!(small, cost(&store), "response metadata scanned every forum row");
+        assert_eq!(
+            small,
+            cost(&store),
+            "response metadata scanned every forum row"
+        );
     }
 
     #[test]
@@ -1648,7 +1652,10 @@ mod tests {
         // A small forum: the debounce is the only delay.
         store
             .db()
-            .execute("UPDATE forums SET participant_count=2 WHERE uri=?1", [FORUM])
+            .execute(
+                "UPDATE forums SET participant_count=2 WHERE uri=?1",
+                [FORUM],
+            )
             .unwrap();
         store.note_forum_synced(FORUM, 200_000).unwrap();
         store.schedule_roster_sync(FORUM, 202_000).unwrap();

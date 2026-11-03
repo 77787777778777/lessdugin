@@ -1090,9 +1090,15 @@ mod tests {
     fn a_duplicate_from_the_other_endpoint_waits_for_the_original() {
         let mut order = Order::default();
         // A's actionable frame (in flight), B's deduplicated copy, then B's next frame.
-        order.frames.push_back((0, vec![Ack::Advance("a".into(), 10)]));
-        order.frames.push_back((1, vec![Ack::Advance("b".into(), 10)]));
-        order.frames.push_back((2, vec![Ack::Advance("b".into(), 11)]));
+        order
+            .frames
+            .push_back((0, vec![Ack::Advance("a".into(), 10)]));
+        order
+            .frames
+            .push_back((1, vec![Ack::Advance("b".into(), 10)]));
+        order
+            .frames
+            .push_back((2, vec![Ack::Advance("b".into(), 11)]));
         order.done.extend([1, 2]);
         assert!(order.completed().is_empty(), "B leapfrogged A's frame");
         order.done.insert(0);

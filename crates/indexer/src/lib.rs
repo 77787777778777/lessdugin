@@ -169,7 +169,14 @@ impl<M: Clone> Models<M> {
     }
 
     /// A query's fold, cached only when no projection of `forum` finished since `epoch`.
-    pub(crate) fn put_if(&mut self, forum: &str, epoch: u64, model: M, built_ms: i64, cost_ms: i64) {
+    pub(crate) fn put_if(
+        &mut self,
+        forum: &str,
+        epoch: u64,
+        model: M,
+        built_ms: i64,
+        cost_ms: i64,
+    ) {
         if self.epoch(forum) == epoch {
             self.put(forum, model, built_ms, cost_ms);
         }
