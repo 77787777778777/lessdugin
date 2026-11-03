@@ -1416,9 +1416,8 @@ async function runScenario(
             ),
           );
           // Read without hydrating again: the posts the page lists, in its order, and each one's
-          // local view (getPost reads the cache). A listPosts call here would re-hydrate, and its
-          // head check of an author waits for that author's repo lock, which the author's held
-          // sync keeps (crates/core/src/sync/repo.rs, head_check).
+          // local view (getPost reads the cache), so what is compared is what the page showed,
+          // not a second hydration.
           const hrefs = await ipage
             .getByRole("region", { name: "Posts" })
             .getByRole("article")
@@ -1452,8 +1451,9 @@ async function runScenario(
           release();
           await ipage.unrouteAll({ behavior: "wait" });
           await local;
-          // a hold that outlasted the page's sync budget (8 s) left that sync abandoned; an
-          // explicit forum sync converges the page before it is read like the readers above
+          // a hold that outlasted the page's sync budget (8 s) cut that sync short; its repos are
+          // requeued and converge in the background (sync.md §5.2), and an explicit forum sync
+          // has that done before the page is read like the readers above
           await hook(ipage, "syncForum", [forum, { full: false }]);
           await ipage.getByRole("link", { name: EDITED_TITLE }).click();
           await expect(ipage.getByRole("heading", { level: 1, name: EDITED_TITLE })).toBeVisible();
