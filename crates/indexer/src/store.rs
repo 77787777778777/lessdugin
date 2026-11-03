@@ -1183,6 +1183,7 @@ fn migrate_forums(conn: &Connection) -> rusqlite::Result<()> {
          CREATE INDEX IF NOT EXISTS forums_owner ON forums(did);
          CREATE INDEX IF NOT EXISTS forums_via ON forums(via);
          CREATE INDEX IF NOT EXISTS forums_via_host ON forums(via_host);
+         CREATE INDEX IF NOT EXISTS forums_synced ON forums(synced_ms);
          CREATE INDEX IF NOT EXISTS candidates_host ON forum_candidates(forum,host,state);",
     )?;
     Ok(())
@@ -1437,6 +1438,34 @@ mod tests {
         // robustness-5, robustness-6). The forum list grows with forums only.
         assert_eq!(small, large, "lookup cost grew with the indexed records");
         assert!(large[..6].iter().all(|s| *s < 500), "{large:?}");
+    }
+
+    /// Every JSON response carries `asOf`: its lookups must not scan the forum table, which
+    /// holds every seed.
+    #[test]
+    fn response_metadata_does_not_scan_the_forum_table() {
+        let store = Store::in_memory().unwrap();
+        let seeds = |from: usize, n: usize| {
+            for i in from..from + n {
+                store
+                    .add_forum_seed(&format!(
+                        "at://did:plc:bbbbbbbbbbbbbbbbbbbbbbbb/online.7778777.lessdugin.temp.forum/s{i}"
+                    ))
+                    .unwrap();
+            }
+        };
+        let cost = |store: &Store| {
+            [
+                steps(store, || store.snapshot_ms()),
+                steps(store, || store.latest_seq()),
+                steps(store, || store.oldest_seq()),
+                steps(store, || store.change_floor()),
+            ]
+        };
+        seeds(0, 100);
+        let small = cost(&store);
+        seeds(100, 2_000);
+        assert_eq!(small, cost(&store), "response metadata scanned every forum row");
     }
 
     #[test]
