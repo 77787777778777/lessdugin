@@ -1181,7 +1181,10 @@ fn forum_show_waits_for_a_slow_spilled_about() {
     assert!(started.elapsed() >= std::time::Duration::from_secs(5));
     let about = about_of(&out);
     assert!(about.text.contains("The last words."), "{about:?}");
-    assert!(!about.notices.iter().any(|n| n == NOTICE_SPILLED), "{about:?}");
+    assert!(
+        !about.notices.iter().any(|n| n == NOTICE_SPILLED),
+        "{about:?}"
+    );
     assert!(
         !text(&out.stderr).contains("still not loaded"),
         "{}",
@@ -1197,7 +1200,10 @@ fn forum_show_waits_for_a_slow_spilled_about() {
     assert!(out.status.success(), "{}", text(&out.stderr));
     let about = about_of(&out);
     assert!(!about.text.contains("The last words."), "{about:?}");
-    assert!(about.notices.iter().any(|n| n == NOTICE_SPILLED), "{about:?}");
+    assert!(
+        about.notices.iter().any(|n| n == NOTICE_SPILLED),
+        "{about:?}"
+    );
     assert!(
         text(&out.stderr).contains("about is still not loaded"),
         "{}",
@@ -1205,7 +1211,11 @@ fn forum_show_waits_for_a_slow_spilled_about() {
     );
     let out = reader.run(&["forum", "show", &broken]);
     assert!(out.status.success(), "{}", text(&out.stderr));
-    assert!(text(&out.stdout).contains(NOTICE_SPILLED), "{}", text(&out.stdout));
+    assert!(
+        text(&out.stdout).contains(NOTICE_SPILLED),
+        "{}",
+        text(&out.stdout)
+    );
     assert!(
         text(&out.stderr).contains("about is still not loaded"),
         "{}",
@@ -1259,10 +1269,7 @@ fn tag_and_sequence_wait_for_slow_spilled_bodies() {
     let t = alice.json(&["sequence", "create", s(&draft)]);
     assert_eq!(t["state"]["kind"], "done", "{t}");
     let sequence = t["state"]["uri"].as_str().unwrap().to_owned();
-    let rec = alice
-        .account
-        .get(nsid::SEQUENCE, &rkey(&sequence))
-        .unwrap();
+    let rec = alice.account.get(nsid::SEQUENCE, &rkey(&sequence)).unwrap();
     assert!(rec["body"]["textBlob"].is_object(), "spilled: {rec}");
     let reader = net.reader(&alice);
     reader.ok(&["sync", "alice.test/meta"]);
@@ -1283,8 +1290,15 @@ fn tag_and_sequence_wait_for_slow_spilled_bodies() {
     let v: TagView = serde_json::from_slice(&out.stdout).unwrap();
     let body = v.page.expect("a page");
     assert!(body.text.contains("The last words."), "{body:?}");
-    assert!(!body.notices.iter().any(|n| n == NOTICE_SPILLED), "{body:?}");
-    assert!(!text(&out.stderr).contains("still not loaded"), "{}", text(&out.stderr));
+    assert!(
+        !body.notices.iter().any(|n| n == NOTICE_SPILLED),
+        "{body:?}"
+    );
+    assert!(
+        !text(&out.stderr).contains("still not loaded"),
+        "{}",
+        text(&out.stderr)
+    );
 
     slow_get_blob();
     let started = std::time::Instant::now();
@@ -1294,8 +1308,15 @@ fn tag_and_sequence_wait_for_slow_spilled_bodies() {
     let v: SequenceView = serde_json::from_slice(&out.stdout).unwrap();
     let body = v.body.expect("a body");
     assert!(body.text.contains("The last words."), "{body:?}");
-    assert!(!body.notices.iter().any(|n| n == NOTICE_SPILLED), "{body:?}");
-    assert!(!text(&out.stderr).contains("still not loaded"), "{}", text(&out.stderr));
+    assert!(
+        !body.notices.iter().any(|n| n == NOTICE_SPILLED),
+        "{body:?}"
+    );
+    assert!(
+        !text(&out.stderr).contains("still not loaded"),
+        "{}",
+        text(&out.stderr)
+    );
 }
 
 /// An edit keeps a link post's card (`link.title`, `link.description`, entered by another

@@ -260,8 +260,10 @@ pub async fn tag(ctx: &Ctx, args: TagArgs) -> Result<(), CliError> {
                 ctx.out.warn(cat([
                     lit("the page of "),
                     tt(&slug),
-                    lit(" is still not loaded from its author's PDS (the excerpt shows); show \
-                         it again later"),
+                    lit(
+                        " is still not loaded from its author's PDS (the excerpt shows); show \
+                         it again later",
+                    ),
                 ]));
             }
             if ctx.out.is_json() {
@@ -420,8 +422,10 @@ pub async fn sequence(ctx: &Ctx, args: SequenceArgs) -> Result<(), CliError> {
                 ctx.out.warn(cat([
                     lit("the body of "),
                     tt(&view.sequence.uri),
-                    lit(" is still not loaded from its author's PDS (the excerpt shows); read \
-                         it again later"),
+                    lit(
+                        " is still not loaded from its author's PDS (the excerpt shows); read \
+                         it again later",
+                    ),
                 ]));
             }
             if ctx.out.is_json() {
