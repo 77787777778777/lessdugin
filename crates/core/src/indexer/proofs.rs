@@ -11,6 +11,7 @@ use crate::host::Host;
 use crate::identity::IdentityLevel;
 use crate::store::admit::{self, LexiconValidator, Observation};
 use crate::store::records::{Delete, DeleteEvidence, RecordStore};
+use crate::store::repo::HeadSeen;
 use crate::store::{OrderKey, Source};
 use crate::sync::{Session, Syncer};
 use crate::xrpc::XrpcCallError;
@@ -326,11 +327,8 @@ async fn hydrate_chunk<H: Host>(
             ));
             continue;
         };
-        let current_head = store
-            .repo(uri.did().as_str())
-            .await
-            .map_err(store_error)?
-            .and_then(|r| r.head_seen)
+        let current_head = latest_head(syncer, &store, uri.did())
+            .await?
             .filter(|h| h.sent_at >= received_at - HEAD_CURRENCY_MS);
         let outcome =
             match bundle.verify_item(index, &key, session.host().now_ms().saturating_mul(1000)) {
@@ -360,14 +358,9 @@ async fn hydrate_chunk<H: Host>(
                 }
             };
         let rev = outcome.rev.to_string();
-        let head = store
-            .repo(uri.did().as_str())
-            .await
-            .map_err(store_error)?
-            .and_then(|r| r.head_seen)
-            .filter(|h| {
-                rev.as_str() >= h.rev.as_str() && h.sent_at >= received_at - HEAD_CURRENCY_MS
-            });
+        let head = latest_head(syncer, &store, uri.did()).await?.filter(|h| {
+            rev.as_str() >= h.rev.as_str() && h.sent_at >= received_at - HEAD_CURRENCY_MS
+        });
         let Some(head) = head else {
             results.push(ItemResult {
                 status: ProofItemStatus {
@@ -451,6 +444,24 @@ async fn hydrate_chunk<H: Host>(
     }
     report.finish_counts();
     Ok(report)
+}
+
+/// The latest head observation of `did`: its stored `headSeen`, or one a head check handed to
+/// a sync in flight that has not recorded it yet (`sync.md` §10.6).
+async fn latest_head<H: Host>(
+    syncer: &Syncer<H>,
+    store: &RecordStore<'_, H::Kv>,
+    did: &Did,
+) -> Result<Option<HeadSeen>, XrpcCallError> {
+    let stored = store
+        .repo(did.as_str())
+        .await
+        .map_err(store_error)?
+        .and_then(|r| r.head_seen);
+    Ok(match (stored, syncer.pending_head(did.as_str())) {
+        (Some(a), Some(b)) if b.sent_at > a.sent_at => Some(b),
+        (a, b) => a.or(b),
+    })
 }
 
 fn failed(uri: &AtUri, error: impl ToString) -> ItemResult {

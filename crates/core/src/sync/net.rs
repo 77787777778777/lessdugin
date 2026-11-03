@@ -744,6 +744,17 @@ impl Net {
             held: false,
         }
     }
+
+    /// The lock of repo `did` if it is free and no job waits for it; never waits.
+    pub fn try_repo_lock(&self, did: &Did) -> Option<RepoGuard<'_>> {
+        let key = did.to_string();
+        let mut st = self.lock();
+        if st.locked.contains(&key) || st.lock_waiters.get(&key).is_some_and(|q| !q.is_empty()) {
+            return None;
+        }
+        st.locked.insert(key.clone());
+        Some(RepoGuard { net: self, key })
+    }
 }
 
 fn breaker_failure(b: &mut Breaker, probe: bool, now: i64) {

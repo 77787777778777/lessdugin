@@ -1314,6 +1314,7 @@ HostRow    { rangeCursor: "unknown" | "yes" | "no", rcAt: ms, shortPageEnds: boo
 `h(x)` = the first 16 characters of `b32s(sha256(UTF8(x)))` (`data-model.md` §3.1).
 
 - Processes and tabs that are not the leader read the cache and do only P0 fetches, each under the repo lock.
+- **Head checks.** A head check (§6.7, §14.3 step 4) sends its `getLatestCommit` without the repo lock and takes the lock only to record `headSeen`, and only if it is free: while another job holds the repo (a sync in flight), it hands its observation to that job, which records it with its own write (the latest by send time wins, §5.9), and a currency check (§1.2) uses it meanwhile. A head check of an author on screen therefore never waits for a sync of that author's repo, and neither write loses the other's state.
 - **Change notification.** Browser: every committed batch's `Changed{topics}` is posted on BroadcastChannel `lessdugin-changes`. Native: followers (for example a TUI next to a CLI) poll SQLite `PRAGMA data_version` every 2 s and rescan. This is a host concern and not part of the trait.
 - When the leader exits, another process or tab takes the lock and resumes from the persisted cursors and queue state.
 

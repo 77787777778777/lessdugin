@@ -42,6 +42,7 @@ use crate::engine::{EngineConfig, Platform, Sources};
 use crate::host::Host;
 use crate::identity::{IdentityConfig, IdentityError, Resolver};
 use crate::store::StoreError;
+use crate::store::repo::HeadSeen;
 use crate::xrpc::{Xrpc, XrpcCallError};
 
 /// Sync settings.
@@ -166,6 +167,9 @@ pub struct SyncShared {
     hints: Mutex<BTreeMap<(String, String), i64>>,
     /// Jetstream changes observed by this engine session, retained for manual A2 audit.
     observed_changes: Mutex<BTreeMap<(String, String), ObservedChange>>,
+    /// Head observations made while another job held the repo (`sync.md` §10.6), by DID, with
+    /// the PDS that answered: that job records them with its own write.
+    pending_heads: Mutex<BTreeMap<String, (HeadSeen, String)>>,
 }
 
 /// A session-local Jetstream observation used only by the manual indexer audit (§15.4 A2).
@@ -204,6 +208,7 @@ impl SyncShared {
             queue: Mutex::new(DirtyQueue::new()),
             hints: Mutex::new(BTreeMap::new()),
             observed_changes: Mutex::new(BTreeMap::new()),
+            pending_heads: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -223,6 +228,10 @@ impl SyncShared {
 
     fn hints(&self) -> MutexGuard<'_, BTreeMap<(String, String), i64>> {
         self.hints.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn pending_heads(&self) -> MutexGuard<'_, BTreeMap<String, (HeadSeen, String)>> {
+        self.pending_heads.lock().unwrap_or_else(|e| e.into_inner())
     }
 }
 
@@ -346,6 +355,38 @@ impl<H: Host> Syncer<H> {
             .values()
             .cloned()
             .collect()
+    }
+
+    /// Hands a head observation of `did` (from its PDS `pds`) to the job holding its repo
+    /// (`sync.md` §10.6); the latest by send time is kept.
+    fn hand_head(&self, did: &str, head: HeadSeen, pds: &str) {
+        let mut pending = self.shared.pending_heads();
+        match pending.get(did) {
+            Some((h, _)) if h.sent_at > head.sent_at => {}
+            _ => {
+                pending.insert(did.to_owned(), (head, pds.to_owned()));
+            }
+        }
+        while pending.len() > HINT_FIRST_SEEN_MAX {
+            let Some(oldest) = pending
+                .iter()
+                .min_by_key(|(_, (h, _))| h.sent_at)
+                .map(|(d, _)| d.clone())
+            else {
+                break;
+            };
+            pending.remove(&oldest);
+        }
+    }
+
+    /// Takes the head observation handed to the holder of `did`'s repo, if any.
+    fn take_pending_head(&self, did: &str) -> Option<(HeadSeen, String)> {
+        self.shared.pending_heads().remove(did)
+    }
+
+    /// The head observation handed to the holder of `did`'s repo and not recorded yet, if any.
+    pub(crate) fn pending_head(&self, did: &str) -> Option<HeadSeen> {
+        self.shared.pending_heads().get(did).map(|(h, _)| h.clone())
     }
 
     fn random(&self) -> u64 {

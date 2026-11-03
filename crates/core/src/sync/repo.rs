@@ -52,7 +52,7 @@ use crate::store::admit::{self, AdmittedRecord, Expect, LexiconValidator};
 use crate::store::records::{
     Admission, Batch, Delete, DeleteEvidence, OrderKey, RecordStore, Slot,
 };
-use crate::store::repo::{AccountStatus, HostRow, RangeCursor, RepoRow};
+use crate::store::repo::{AccountStatus, HeadSeen, HostRow, RangeCursor, RepoRow};
 use crate::store::{Observation, schema};
 use crate::sync::list::{self, ListError, Lister, RangeListing, RangeVerdict};
 use crate::sync::net::{self, Priority, url_origin};
@@ -511,7 +511,29 @@ impl<H: Host> Syncer<H> {
                 rep.error = Some(e);
             }
         }
+        // a head check made while this pass held the repo is recorded with its write (§10.6)
+        if let Err(e) = self.record_pending_head(s, &req.did).await {
+            tracing::debug!(did = %req.did, error = %e, "recording a handed head failed");
+        }
         rep
+    }
+
+    /// Writes the head observation handed to the holder of `did`'s repo into its row (the
+    /// latest by send time wins). The caller holds the repo lock.
+    async fn record_pending_head(&self, s: &Session<H>, did: &Did) -> Result<(), SyncError> {
+        let Some((head, pds)) = self.take_pending_head(did.as_str()) else {
+            return Ok(());
+        };
+        let store = RecordStore::new(s.host().cache());
+        let mut repo = store
+            .repo(did.as_str())
+            .await?
+            .unwrap_or_else(|| RepoRow::new(&pds));
+        repo.observe_head(&head.rev, head.cid, head.sent_at);
+        let mut b = store.batch();
+        b.put_repo(did.as_str(), &repo)?;
+        b.commit().await?;
+        Ok(())
     }
 
     /// The PDS service of `did` from its document (level `doc`, or a hint).
@@ -1707,15 +1729,60 @@ impl<H: Host> Syncer<H> {
         did: &Did,
         authority: bool,
     ) -> Result<Option<Priority>, SyncError> {
-        let _guard = self.net().repo_lock(did).await;
+        Ok(self.head_check_seen(s, did, authority).await?.1)
+    }
+
+    /// [`Syncer::head_check`], also returning the head it observed (`None` under an identity
+    /// hint, whose head is never `headSeen`, §1.5). The request is sent without the repo lock,
+    /// and the row is written under it only if it is free: while another job holds the repo (a
+    /// sync in flight), the observation is handed to that job, which records it with its own
+    /// write, so a head check never waits for it (§10.6, §14.3).
+    pub(crate) async fn head_check_seen(
+        &self,
+        s: &Session<H>,
+        did: &Did,
+        authority: bool,
+    ) -> Result<(Option<HeadSeen>, Option<Priority>), SyncError> {
         let (svc, pds, id_hint) = self.pds_of(s, did).await?;
+        let got = get_head(&s.xrpc(), &svc, did).await;
         let store = RecordStore::new(s.host().cache());
+        let now = s.host().now_ms();
+        // a hint PDS's head is never `headSeen` (§1.5): it could pin it far ahead
+        let seen = match &got {
+            Ok(h) if !id_hint => Some(HeadSeen {
+                rev: h.rev.clone(),
+                cid: h.cid,
+                sent_at: h.sent_at,
+            }),
+            _ => None,
+        };
+        let Some(_guard) = self.net().try_repo_lock(did) else {
+            // the job holding the repo observes the PDS itself, so a failure is only reported
+            let h = got?;
+            let Some(seen) = seen else {
+                return Ok((None, None));
+            };
+            self.hand_head(did.as_str(), seen.clone(), &pds);
+            let mut repo = store
+                .repo(did.as_str())
+                .await?
+                .unwrap_or_else(|| RepoRow::new(&pds));
+            repo.observe_head(&seen.rev, seen.cid, seen.sent_at);
+            let follow = schedule::poll_followup(&repo, repo.class_at(now, authority));
+            if let Some(p) = follow {
+                let at = ready_time(p, now, self.random(), None);
+                self.enqueue(DirtyItem::new(did.as_str(), p, Reason::Poll, at).with_min_rev(h.rev));
+            }
+            return Ok((Some(seen), follow));
+        };
         let mut repo = store
             .repo(did.as_str())
             .await?
             .unwrap_or_else(|| RepoRow::new(&pds));
-        let now = s.host().now_ms();
-        let h = match get_head(&s.xrpc(), &svc, did).await {
+        if let Some((head, _)) = self.take_pending_head(did.as_str()) {
+            repo.observe_head(&head.rev, head.cid, head.sent_at);
+        }
+        let h = match got {
             Ok(h) => h,
             Err(e) => {
                 if !id_hint && e.is_repo_status() {
@@ -1729,7 +1796,6 @@ impl<H: Host> Syncer<H> {
             }
         };
         if !id_hint {
-            // a hint PDS's head is never `headSeen` (§1.5): it could pin it far ahead
             repo.observe_head(&h.rev, h.cid, h.sent_at);
         }
         repo.checked_at = now;
@@ -1742,7 +1808,7 @@ impl<H: Host> Syncer<H> {
             let at = ready_time(p, now, self.random(), None);
             self.enqueue(DirtyItem::new(did.as_str(), p, Reason::Poll, at).with_min_rev(h.rev));
         }
-        Ok(follow)
+        Ok((seen, follow))
     }
 
     /// Runs due polls (§6.7, [`schedule::due_polls`]): one `getLatestCommit` each, concurrently
