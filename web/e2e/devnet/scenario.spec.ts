@@ -48,8 +48,13 @@
 // `lessdugin-indexer --poll` follows the devnet from step 1 on. After the readers above, three
 // more fresh readers (CLI, TUI, SPA) are configured with that indexer (configuration consent,
 // sync.md §2.4) and no prior sync: the TUI and the SPA hydrate their cold forum page through
-// the indexer's ordering and proof bundles. Their views must equal the indexer-off views byte
-// for byte once the provenance badges (verified, hint, stale) are removed.
+// the indexer's ordering and proof bundles. The SPA's cold page is read while every range
+// listing of a repo other than the forum authority's is held (sync.md §14.3: the indexer, head
+// checks, DID documents and the authority sync only), and must list the indexer-off list's
+// posts in its order, a proof-admitted one at the same CID. Then the listings are released and
+// each reader's ordinary forum sync (after its change-feed poll) runs; those converged views
+// must equal the indexer-off views byte for byte once the provenance badges (verified, hint,
+// stale) are removed.
 //
 // Needs the `lessdugin` binary (LESSDUGIN_BIN, default target/debug/lessdugin), the TUI
 // driver (LESSDUGIN_TUI_DRIVER, default target/debug/examples/parity_driver), the devnet
@@ -122,6 +127,11 @@ const NOISE_DIDS = [
 ];
 /** The provenance badges decision U-D2 lets differ with and without the indexer. */
 const PROVENANCE_BADGES = ["verified", "hint", "stale"];
+/** An ordinary repo sync's collection and range listings at the PDS (sync.md §5.2, §5.3). */
+const RANGE_LISTINGS = [
+  "/xrpc/com.atproto.repo.describeRepo",
+  "/xrpc/com.atproto.repo.listRecords",
+];
 
 type SourceMode = "direct" | "assisted";
 
@@ -431,6 +441,35 @@ function hasProvenance(text: string, badge: string): boolean {
   };
   walk(JSON.parse(text));
   return found;
+}
+
+/** How a cold page (a dto/1 PostList hydrated from the indexer, before any participant's repo
+ * was listed) departs from the converged indexer-off list: other posts or another order, a
+ * proof-admitted post at another version, or no proof-admitted post at all. Its comment
+ * counts and scores still lack what only the participants' repos hold, so they are not
+ * compared here (the converged views are, byte for byte). */
+function coldPageProblems(cold: string, off: string): string[] {
+  type Item = { uri: string; cid: string; badges?: Record<string, boolean> };
+  const coldItems = (JSON.parse(cold) as { items: Item[] }).items;
+  const offItems = (JSON.parse(off) as { items: Item[] }).items;
+  const problems: string[] = [];
+  const uris = (items: Item[]) => items.map((i) => i.uri).join(", ");
+  if (uris(coldItems) !== uris(offItems)) {
+    problems.push(
+      `cold page: the indexer-hydrated posts [${uris(coldItems)}] are not the indexer-off list [${uris(offItems)}]`,
+    );
+  }
+  const offCid = new Map(offItems.map((i) => [i.uri, i.cid]));
+  const verified = coldItems.filter((i) => i.badges?.verified === true);
+  for (const i of verified) {
+    if (offCid.get(i.uri) !== i.cid) {
+      problems.push(
+        `cold page: ${i.uri} was admitted by proof at ${i.cid}, not ${offCid.get(i.uri)}`,
+      );
+    }
+  }
+  if (verified.length === 0) problems.push("cold page: no post was admitted by proof");
+  return problems;
 }
 
 /** One client user: a data directory and the environment of `lessdugin --dev` (and of the TUI
@@ -1228,12 +1267,18 @@ async function runScenario(
     // M6, the indexer on: three more fresh readers, configured with the indexer that followed
     // the scenario (configuration consent), and no sync before they open the forum. The TUI's
     // Forum screen and the SPA's forum page hydrate the cold page from the indexer's ordering
-    // and proof bundles (engine-api.md: list_posts_page, hydrate_indexer_page); the CLI's sync
-    // polls the indexer's change feed. They then read exactly as the readers above.
+    // and proof bundles (engine-api.md: list_posts_page, hydrate_indexer_page); the SPA's is
+    // read before any participant's repo is listed. Every reader's forum sync polls the
+    // indexer's change feed and then runs the ordinary PDS sync, and they read exactly as the
+    // readers above.
     const idx = {
       cli: { thread: "", list: "" } as Outputs,
       tui: { thread: { compact: "", pretty: "" }, list: { compact: "", pretty: "" } },
       spa: { thread: "", list: "" } as Outputs,
+      /** The SPA's cold page, read while the participants' range listings were held. */
+      spaCold: "",
+      /** Those held listings (the page's ordinary sync, released after the cold page). */
+      spaHeld: [] as string[],
       requests: {} as Record<string, number>,
       spaPaths: [] as string[],
       cliPaths: [] as string[],
@@ -1286,8 +1331,46 @@ async function runScenario(
             if (r.url().startsWith(idxUrl)) idx.spaPaths.push(new URL(r.url()).pathname);
           });
           await withDevnet(ipage, s, { parityNowMs: t, ...spaSourceOptions, indexers: [idxUrl] });
+          // The cold page as the indexer path leaves it (sync.md §14.3): until it has been read,
+          // every range listing of a repo other than the forum authority's waits (held, not
+          // refused), so the page's ordinary forum sync cannot add, reorder or repair anything
+          // on it. The indexer, head checks, DID documents, the declaration, point fetches of
+          // stale proofs and the authority's P0 sync (§14.3 step 5) go through.
+          const authority = forum.split("/")[2];
+          let release = () => {};
+          const released = new Promise<void>((ok) => {
+            release = ok;
+          });
+          const participantListing = (u: URL) =>
+            u.origin === s.devnet.pds &&
+            RANGE_LISTINGS.includes(u.pathname) &&
+            u.searchParams.get("repo") !== authority;
+          await ipage.route(participantListing, async (r) => {
+            idx.spaHeld.push(r.request().url());
+            await released;
+            // (a request the page gave up on while it was held cannot be continued)
+            await r.continue().catch(() => {});
+          });
           await ipage.goto(`${s.app}/${route(forum)}`);
           await expect(ipage.getByRole("heading", { level: 1, name: FORUM_NAME })).toBeVisible();
+          for (const title of [EDITED_TITLE, CANARY_TITLE]) {
+            await expect(
+              ipage.getByRole("link", { name: title }),
+              `the cold page (no participant's repo listed yet) shows ${title}`,
+            ).toBeVisible();
+          }
+          idx.spaCold = await hook(ipage, "listPosts", [
+            { forum, sort: "magic", filter: "frontpage", limit: 30 },
+          ]);
+          // the page's ordinary sync did ask for the participants' listings meanwhile
+          await expect
+            .poll(() => idx.spaHeld.length, {
+              message: "the forum page's sync listed a participant's repo (held)",
+              timeout: 15_000,
+            })
+            .toBeGreaterThan(0);
+          release();
+          await ipage.unrouteAll({ behavior: "wait" });
           await ipage.getByRole("link", { name: EDITED_TITLE }).click();
           await expect(ipage.getByRole("heading", { level: 1, name: EDITED_TITLE })).toBeVisible();
           await hook(ipage, "syncForum", [forum, { full: false }]);
@@ -1318,6 +1401,8 @@ async function runScenario(
             ["indexer.cli.list.json", idx.cli.list],
             ["indexer.spa.thread.json", idx.spa.thread],
             ["indexer.spa.list.json", idx.spa.list],
+            ["indexer.spa.cold-list.json", idx.spaCold],
+            ["indexer.spa.held-listings.json", `${JSON.stringify(idx.spaHeld, null, 2)}\n`],
           ] as const)
         : []),
     ] as const) {
@@ -1350,6 +1435,8 @@ async function runScenario(
         thread: withoutProvenance(idx.spa.thread, false),
         list: withoutProvenance(idx.spa.list, false),
       };
+      // the SPA's cold page as the indexer path left it, before the participants' listings
+      problems.push(...coldPageProblems(idx.spaCold, spaOut.list));
       problems.push(
         ...(await compare("thread-indexer", on.cli.thread, on.tui.thread, onSpa.thread, out, info)),
         ...(await compare("list-indexer", on.cli.list, on.tui.list, onSpa.list, out, info)),
@@ -1395,7 +1482,7 @@ async function runScenario(
     );
     writeFileSync(
       join(out, "result.json"),
-      `${JSON.stringify({ parityNowMs: t, mode, sources, forum, wiki, tag: TAG_SLUG, post, reply, newcomer, newcomerComment, mediaCid, socialVote, cachedRender, corePlus, indexer: runIndexer ? { url: runIndexer.url, requests: idx.requests, cliPaths: idx.cliPaths, tuiPaths: idx.tuiPaths, spaPaths: idx.spaPaths } : null, identical: problems.length === 0, problems }, null, 2)}\n`,
+      `${JSON.stringify({ parityNowMs: t, mode, sources, forum, wiki, tag: TAG_SLUG, post, reply, newcomer, newcomerComment, mediaCid, socialVote, cachedRender, corePlus, indexer: runIndexer ? { url: runIndexer.url, requests: idx.requests, cliPaths: idx.cliPaths, tuiPaths: idx.tuiPaths, spaPaths: idx.spaPaths, spaHeldListings: idx.spaHeld.length } : null, identical: problems.length === 0, problems }, null, 2)}\n`,
     );
     expect(problems, `the clients disagree; diffs in ${out}`).toEqual([]);
 
@@ -1440,7 +1527,7 @@ async function runScenario(
       // the indexer path was taken: every indexer-on reader asked the indexer; the TUI's and
       // the SPA's cold forum page was hydrated from its ordering and a proof bundle
       // (hydrate_indexer_page, list_posts_page), and every reader's forum sync polled its
-      // change feed (poll_indexer_changes) instead of starting from a full sync
+      // change feed (poll_indexer_changes) before its ordinary PDS sync
       for (const client of ["cli", "tui", "spa"]) {
         expect(idx.requests[client], `${client}: requests to the indexer`).toBeGreaterThan(0);
       }
