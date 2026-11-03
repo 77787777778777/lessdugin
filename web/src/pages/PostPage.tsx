@@ -439,11 +439,14 @@ export function PostThread({ uri, sequence }: { uri: string; sequence?: string |
   const active = useActiveAccount();
   const root = thread.data?.post;
   const postView = root && !isMissingRoot(root) ? root : null;
-  // read with the sequence it was opened from: its navigation, and the reading position
+  // read with the sequence it was opened from: its navigation, and the reading position. The
+  // read records the position, so every open runs it, however fresh a cached view still is.
   const inSequence = useQuery({
     queryKey: qk.postIn(uri, sequence ?? ""),
     queryFn: () => engine.getPost(uri, sequence ?? ""),
     enabled: sequence !== undefined,
+    staleTime: 0,
+    refetchOnMount: "always",
   });
   const sequences =
     sequence === undefined || inSequence.isError

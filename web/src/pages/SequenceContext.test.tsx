@@ -4,8 +4,9 @@
 // previous links follow the sequence, and the sequence page offers "Continue reading" at the
 // post last opened from it.
 import { MockEngine } from "@lessdugin/engine/mock";
-import { screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
+import { createQueryClient } from "../App.tsx";
 import { parseAtUri } from "../lib/uri.ts";
 import { renderWithApp } from "../test/render.tsx";
 import { PostPage } from "./PostPage.tsx";
@@ -66,6 +67,48 @@ describe("a post opened from a sequence", () => {
     expect(seqOf(next)).toBe(mine);
     expect(getPost).toHaveBeenCalledWith(map2, mine);
     expect((await engine.sequence(mine)).continueReading?.post).toBe(map2);
+  });
+
+  // the read records the position, so it runs on every open, even while the app's query cache
+  // still holds the view (App.tsx `createQueryClient`, staleTime 30 s)
+  it("moves the position back when a post is opened again from the same sequence", async () => {
+    const { engine, mine, map2, confusion } = await withMine();
+    const getPost = vi.spyOn(engine, "getPost");
+    const p = parseAtUri(confusion);
+    const { router } = renderWithApp(<PostPage />, {
+      engine,
+      queryClient: createQueryClient(),
+      route: {
+        path: "/p/$author/$rkey",
+        at: `/p/${p?.did}/${p?.rkey}?seq=${encodeURIComponent(mine)}`,
+      },
+    });
+    const first = await screen.findByRole("navigation", { name: "Sequence: Mine" });
+    await waitFor(async () =>
+      expect((await engine.sequence(mine)).continueReading?.post).toBe(confusion),
+    );
+    fireEvent.click(within(first).getByRole("link", { name: "Next →" }));
+    await waitFor(() => expect(router.state.location.pathname).toContain(parseAtUri(map2)?.rkey));
+    await waitFor(async () =>
+      expect((await engine.sequence(mine)).continueReading?.post).toBe(map2),
+    );
+    const second = await screen.findByRole("navigation", { name: "Sequence: Mine" });
+    await waitFor(() =>
+      expect(
+        within(second).getByRole("link", { name: "← Previous" }).getAttribute("href"),
+      ).toContain(p?.rkey),
+    );
+    fireEvent.click(within(second).getByRole("link", { name: "← Previous" }));
+    await waitFor(() => expect(router.state.location.pathname).toContain(p?.rkey));
+    await waitFor(() => expect(getPost).toHaveBeenCalledTimes(3));
+    expect(getPost.mock.calls.map((c) => [c[0], c[1]])).toEqual([
+      [confusion, mine],
+      [map2, mine],
+      [confusion, mine],
+    ]);
+    await waitFor(async () =>
+      expect((await engine.sequence(mine)).continueReading?.post).toBe(confusion),
+    );
   });
 
   it("without a sequence keeps the view's own navigation, whose links carry it", async () => {

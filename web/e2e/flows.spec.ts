@@ -523,6 +523,17 @@ test("posts opened from a sequence follow it, and its page offers continue readi
   await expect(resume).toContainText("Continue reading: Noticing confusion");
   await resume.getByRole("link").click();
   await expect(page.getByRole("heading", { level: 1, name: "Noticing confusion" })).toBeVisible();
+  // part 2 opened again from the sequence moves the position back, while its view is cached
+  await page
+    .getByRole("navigation", { name: "Sequence: Reading order" })
+    .getByRole("link", { name: "Next →" })
+    .click();
+  await expect(page.getByRole("heading", { level: 1, name: part2 })).toBeVisible();
+  await page
+    .getByRole("navigation", { name: "Sequence: Reading order" })
+    .getByRole("link", { name: "Reading order" })
+    .click();
+  await expect(page.getByTestId("continue-reading")).toContainText(`Continue reading: ${part2}`);
 
   // opened on its own, part 1 navigates its author's sequence; next keeps following it
   await go(page, path(postUri.map1), part1);

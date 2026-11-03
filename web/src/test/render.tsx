@@ -29,11 +29,14 @@ export function renderWithApp(
     /** Render `ui` as the component of this route (a path with params, as router.tsx declares
      * it), with the history at `at`: for a page that reads its params through `getRouteApi`. */
     route?: { path: string; at: string };
+    /** The query client, for a test that needs the app's defaults (`createQueryClient`). */
+    queryClient?: QueryClient;
   } = {},
 ) {
   const engine = opts.engine ?? new MockEngine(opts.engineOptions);
   const handle = createMockHandle(engine);
-  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const queryClient =
+    opts.queryClient ?? new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const unsubscribe = engine.subscribe((e) => {
     if (e.kind === "changed") invalidateTopics(queryClient, e.topics);
     if (e.kind === "write") writeStore.update(e.id, e.state);
