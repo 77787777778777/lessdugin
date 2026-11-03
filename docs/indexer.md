@@ -124,5 +124,7 @@ The integration tests use signed repositories, real loopback HTTP PDS/PLC fixtur
 testkit mini-Jetstream. They cover all nine methods, live ingest on two endpoints within five
 seconds (also in a 200-participant forum, without a forum-wide sync), failing fetches, missing
 proofs and a deleted declaration that do not stall the stream, a restart that resumes from the
-persisted cursors, durable poll convergence, proof manifest verification, omission and
-forged-bundle detection. They do not contact production services.
+persisted cursors, durable poll convergence, a slow origin that cannot hold the global request
+budget, proof manifest verification, omission and forged-bundle detection. Store tests count
+SQLite VM steps, so lookup cost is checked without timing. They do not contact production
+services.
