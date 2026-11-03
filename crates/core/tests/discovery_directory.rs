@@ -7,13 +7,14 @@ mod common;
 
 use common::block_on;
 use lessdugin_atp::syntax::Datetime;
+use lessdugin_core::discovery::sources::LIST_REPOS_BY_COLLECTION;
 use lessdugin_core::dto::ForumSummary;
 use lessdugin_core::engine::{Engine, EngineConfig, IndexerConsent, Sources};
 use lessdugin_lexicon::collection::nsid;
 use lessdugin_lexicon::records::Forum;
 use lessdugin_lexicon::values::MembershipMode;
 use lessdugin_testkit::fake_pds::AccountHandle;
-use lessdugin_testkit::{FakeNet, MemHost, resp};
+use lessdugin_testkit::{FakeNet, MemHost, identity, resp};
 use serde_json::{Value, json};
 use url::Url;
 
@@ -33,8 +34,8 @@ fn metadata() -> Value {
     })
 }
 
-/// A consented indexer that advertises `listForums` and lists `uris`, two per page.
-fn indexer(host: &MemHost, uris: Vec<String>) {
+/// A consented indexer's `describeIndexer`, advertising `listForums`.
+fn describe(host: &MemHost) {
     let mut describe = json!({
         "did": "did:web:index.example.com",
         "version": "1",
@@ -48,6 +49,11 @@ fn indexer(host: &MemHost, uris: Vec<String>) {
         .unwrap()
         .extend(metadata().as_object().unwrap().clone());
     host.respond_get(&endpoint("describeIndexer"), resp::ok_json(&describe));
+}
+
+/// A consented indexer that advertises `listForums` and lists `uris`, two per page.
+fn indexer(host: &MemHost, uris: Vec<String>) {
+    describe(host);
     host.on_get(&endpoint("listForums"), move |req| {
         let url = match &req.target {
             lessdugin_core::host::Target::Anon(url) => url,
@@ -206,4 +212,117 @@ fn the_directory_merges_relay_and_indexer_owners_grouped_by_owner() {
     let mut runs = groups.clone();
     runs.dedup();
     assert_eq!(runs.len(), 3, "one run per owner: {groups:?}");
+}
+
+/// A consented indexer whose `listForums` fails.
+fn failing_indexer(host: &MemHost) {
+    describe(host);
+    host.respond_get(
+        &endpoint("listForums"),
+        resp::xrpc_error(503, "Unavailable", "down"),
+    );
+}
+
+/// Every relay of `net` fails its listing.
+fn failing_relays(host: &MemHost, net: &FakeNet) {
+    for relay in net.relays() {
+        host.respond_get(
+            &format!("{relay}/xrpc/{LIST_REPOS_BY_COLLECTION}"),
+            resp::xrpc_error(503, "Unavailable", "down"),
+        );
+    }
+}
+
+/// Either source may fail alone: the directory shows what the other answered, an empty list
+/// included, and fails only when no configured source answered (sync.md §4.7).
+#[test]
+fn the_directory_fails_only_when_no_configured_source_answers() {
+    // the relays answer with no forum owner, the indexer fails: an empty directory
+    let host = MemHost::new();
+    let net = FakeNet::on(&host);
+    let _ = net.default_pds();
+    failing_indexer(&host);
+    let found = block_on(engine(&host, &net, true, true).forum_discover("")).unwrap();
+    assert!(found.is_empty(), "{found:?}");
+    // ... and with no relay configured, the failing indexer is the only source: an error
+    assert!(
+        block_on(engine(&host, &net, false, true).forum_discover("")).is_err(),
+        "no configured source answered"
+    );
+
+    // the relays fail, the indexer answers: its owners' forums
+    let host = MemHost::new();
+    let net = FakeNet::on(&host);
+    let _ = net.default_pds();
+    let owner = net.add_account("owner.example.com");
+    let at = Datetime::from_millis(host.now() - 60_000).unwrap();
+    let meta = declare(&owner, "meta", "Meta", &at);
+    failing_relays(&host, &net);
+    indexer(&host, vec![meta.clone()]);
+    let found = block_on(engine(&host, &net, true, true).forum_discover("")).unwrap();
+    assert_eq!(found.iter().map(|f| &f.uri).collect::<Vec<_>>(), [&meta]);
+    // without the indexer, the failing relays are the only source: an error
+    assert!(block_on(engine(&host, &net, true, false).forum_discover("")).is_err());
+
+    // both fail: an error
+    let host = MemHost::new();
+    let net = FakeNet::on(&host);
+    let _ = net.default_pds();
+    failing_relays(&host, &net);
+    failing_indexer(&host);
+    assert!(block_on(engine(&host, &net, true, true).forum_discover("")).is_err());
+}
+
+/// The owner groups: owners with a verified handle first, by handle, then the others by DID.
+#[test]
+fn directory_groups_put_verified_handles_first_by_handle_then_dids() {
+    let host = MemHost::new();
+    let net = FakeNet::on(&host);
+    let _ = net.default_pds();
+    let zulu = net.add_account("zulu.example.com");
+    let alpha = net.add_account("alpha.example.com");
+    let mike = net.add_account("mike.example.com");
+    let kilo = net.add_account("kilo.example.com");
+    // two handles that do not verify (no `_atproto` record, no well-known answer)
+    for handle in ["mike.example.com", "kilo.example.com"] {
+        for doh in [identity::DOH, identity::DOH2] {
+            identity::install_nxdomain(&host, doh, handle);
+        }
+    }
+    let at = Datetime::from_millis(host.now() - 60_000).unwrap();
+    for (i, owner) in [&zulu, &alpha, &mike, &kilo].into_iter().enumerate() {
+        declare(owner, &format!("f{i}"), "Same name", &at);
+    }
+    let engine = engine(&host, &net, true, false);
+    // the first listing queues the owners shown for handle verification (sync.md §3.3)
+    block_on(engine.forum_discover("")).unwrap();
+    block_on(engine.verify_handles(10));
+    let found = block_on(engine.forum_discover("")).unwrap();
+    let order: Vec<&str> = found.iter().map(|f| f.owner.did.as_str()).collect();
+    let mut unverified = [mike.did().as_str(), kilo.did().as_str()];
+    unverified.sort();
+    let expected = [
+        alpha.did().as_str(),
+        zulu.did().as_str(),
+        unverified[0],
+        unverified[1],
+    ];
+    assert_eq!(order, expected);
+    let handles: Vec<Option<&str>> = found.iter().map(|f| f.owner.handle.as_deref()).collect();
+    assert_eq!(
+        handles,
+        [
+            Some("alpha.example.com"),
+            Some("zulu.example.com"),
+            None,
+            None
+        ]
+    );
+    // the rule decides the order, not the DIDs: a sort by DID alone gives another one
+    let mut by_did = expected;
+    by_did.sort();
+    assert_ne!(
+        by_did, expected,
+        "pick handles whose order differs from the DIDs'"
+    );
 }
