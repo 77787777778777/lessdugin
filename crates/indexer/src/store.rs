@@ -1669,8 +1669,16 @@ mod tests {
         );
         let third = second + ABSENT_RECHECK_MS;
         assert_eq!(store.forums_for_pass(third), vec![FORUM.to_owned()]);
-        assert!(store.note_forum_failed(FORUM, third, "down").unwrap().is_some());
-        assert!(store.forum(FORUM).is_none(), "a failed recheck lifted the quarantine");
+        assert!(
+            store
+                .note_forum_failed(FORUM, third, "down")
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            store.forum(FORUM).is_none(),
+            "a failed recheck lifted the quarantine"
+        );
         assert!(store.forums_for_pass(third + RETRY_BASE_MS).is_empty());
         assert!(store.forums_due(third + RETRY_BASE_MS).is_empty());
         assert_eq!(
@@ -1753,7 +1761,9 @@ mod tests {
                 .is_some()
         );
         assert_eq!(
-            store.note_forum_failed(gone, 5 + ABSENT_DROP_MS, "e").unwrap(),
+            store
+                .note_forum_failed(gone, 5 + ABSENT_DROP_MS, "e")
+                .unwrap(),
             None
         );
         // A success ends the run of failures: the week counts from the next failure.

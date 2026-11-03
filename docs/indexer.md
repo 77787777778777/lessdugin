@@ -37,8 +37,9 @@ participant rows without PDS confirmation. Hints are capped per DID and per PDS 
 seeds per DID, 2,000 per host, 500 pending membership hints per forum and host), so one account
 cannot fill the index with seeds. A forum whose sync fails backs off on its own (one minute,
 doubling up to six hours) without re-running discovery. A seed whose declaration is proven
-absent is quarantined: it is no longer listed or synced, is rechecked daily (or as soon as a
-live commit shows the declaration again), and is dropped after a week. A forum that was indexed
+absent is quarantined: it is no longer listed or synced, is rechecked once a day (a failed
+recheck also waits a day), or as soon as a live commit shows the declaration again, and is
+dropped a week after it was first found absent. A forum that was indexed
 and whose declaration is deleted logs a delete for each of its records. Only `RecordNotFound`
 for the declaration, from the PDS that a freshly fetched DID document names, counts as absence:
 a deactivated, taken-down or suspended owner, a bare 404 or an owner DID that does not resolve
