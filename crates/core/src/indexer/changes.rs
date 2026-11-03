@@ -72,7 +72,16 @@ pub async fn poll_changes<H: Host>(
     let store = RecordStore::new(session.host().cache());
     let now = session.host().now_ms();
     let stored = store.cursor(&source).await.map_err(store_error)?;
-    let since = stored.and_then(|c| c.seq).unwrap_or(0);
+    let since = match stored.and_then(|c| c.seq) {
+        Some(seq) => seq,
+        // A first poll starts at the indexer's current head, not at its whole log: the PDS
+        // sync covers what came before (sync.md §6.6).
+        None => {
+            let head = client.current_as_of(session).await?.seq.max(0);
+            persist_cursor(&store, &source, head, now).await?;
+            head
+        }
+    };
     let mut report = ChangePollReport {
         source: source.clone(),
         from: since,

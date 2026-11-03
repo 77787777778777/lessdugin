@@ -224,8 +224,8 @@ struct ChangeFeeds {
     next_at: BTreeMap<String, i64>,
     /// The last successful poll (ms): a healthy live source (§6.2).
     healthy_ms: Option<i64>,
-    /// Not before this (ms; the followed list could not be read).
-    retry_at_ms: i64,
+    /// When the followed forums are read again (ms), to find newly followed ones.
+    refresh_at_ms: i64,
 }
 
 impl ChangeFeeds {
@@ -241,7 +241,7 @@ impl ChangeFeeds {
             .copied()
             .min()
             .unwrap_or(i64::MAX)
-            .max(self.retry_at_ms)
+            .min(self.refresh_at_ms)
     }
 }
 
@@ -485,18 +485,18 @@ impl<H: Host> Engine<H> {
     async fn poll_change_feeds(&self, feeds: &mut ChangeFeeds) {
         let now = self.host.now_ms();
         if self.config.indexer_mode == IndexerMode::None {
-            feeds.retry_at_ms = now.saturating_add(CHANGES_IDLE_MS);
+            feeds.refresh_at_ms = i64::MAX;
             return;
         }
         let followed = match self.followed_keys().await {
             Ok(f) => f,
             Err(e) => {
                 tracing::warn!(error = %e, "live tail: reading the followed forums failed");
-                feeds.retry_at_ms = now.saturating_add(outbox::ERROR_WAIT_MS);
+                feeds.refresh_at_ms = now.saturating_add(outbox::ERROR_WAIT_MS);
                 return;
             }
         };
-        feeds.retry_at_ms = 0;
+        feeds.refresh_at_ms = now.saturating_add(CHANGES_OPEN_MS);
         feeds
             .next_at
             .retain(|uri, _| followed.iter().any(|k| k.uri.as_str() == uri));
@@ -1202,6 +1202,30 @@ mod context_tests {
         v: u32,
         at: i64,
         seeded: bool,
+    }
+
+    #[test]
+    fn stored_discovery_rows_are_capped_dropping_the_oldest_unconfirmed() {
+        let mut rows = BTreeMap::new();
+        for i in 0..DISC_ROWS_MAX {
+            let mut r = DiscRow::new("hint:test", 1_000 + i as i64);
+            if i < 5 {
+                // the oldest rows are confirmed members: kept
+                r.set(crate::discovery::state::DiscState::Confirmed, 1);
+            } else if i % 2 == 0 {
+                r.reject(2);
+            }
+            rows.insert(format!("did:plc:{i:024}"), r);
+        }
+        assert!(disc_rows_over_cap(&rows, "").is_empty(), "at the cap nothing is dropped");
+        rows.insert("did:plc:new".into(), DiscRow::new("hint:jetstream", 0));
+        rows.insert("did:plc:newer".into(), DiscRow::new("hint:jetstream", 1));
+        // the new row (first seen earliest) is kept; the oldest unconfirmed ones go
+        let dropped = disc_rows_over_cap(&rows, "did:plc:new");
+        assert_eq!(
+            dropped,
+            vec!["did:plc:newer".to_owned(), format!("did:plc:{:024}", 5)]
+        );
     }
 
     #[test]

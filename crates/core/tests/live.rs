@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use lessdugin_atp::syntax::Did;
 use lessdugin_core::engine::{AccountInfo, Engine, EngineConfig, Sources};
@@ -39,6 +39,10 @@ struct FailOnceKv {
     fail_next: Arc<AtomicBool>,
     /// The next `get_many` is pending once before it reads (a caller can drop it there).
     yield_next_read: Arc<AtomicBool>,
+    /// The next `scan` fails.
+    fail_next_scan: Arc<AtomicBool>,
+    /// Scans of the identity rows (`id/did/...`) so far.
+    identity_scans: Arc<AtomicUsize>,
     successful_writes: Arc<futures::lock::Mutex<()>>,
 }
 
@@ -75,6 +79,15 @@ impl KvStore for FailOnceKv {
         dir: Dir,
         limit: u32,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, HostError> {
+        if self.fail_next_scan.swap(false, Ordering::SeqCst) {
+            return Err(HostError::Storage("injected scan failure".into()));
+        }
+        let identity = schema::prefix("id", &["did"]);
+        if matches!(&range.start, std::ops::Bound::Included(k) | std::ops::Bound::Excluded(k)
+            if k.starts_with(&identity))
+        {
+            self.identity_scans.fetch_add(1, Ordering::SeqCst);
+        }
         self.inner.scan(range, dir, limit).await
     }
 
@@ -96,18 +109,16 @@ struct FailHost {
 
 impl FailHost {
     fn new(inner: MemHost) -> Self {
-        let cache = FailOnceKv {
-            inner: inner.cache_kv().clone(),
+        let kv = |inner: &MemKv| FailOnceKv {
+            inner: inner.clone(),
             fail_next: Arc::new(AtomicBool::new(false)),
             yield_next_read: Arc::new(AtomicBool::new(false)),
+            fail_next_scan: Arc::new(AtomicBool::new(false)),
+            identity_scans: Arc::new(AtomicUsize::new(0)),
             successful_writes: Arc::new(futures::lock::Mutex::new(())),
         };
-        let state = FailOnceKv {
-            inner: inner.state_kv().clone(),
-            fail_next: Arc::new(AtomicBool::new(false)),
-            yield_next_read: Arc::new(AtomicBool::new(false)),
-            successful_writes: Arc::new(futures::lock::Mutex::new(())),
-        };
+        let cache = kv(inner.cache_kv());
+        let state = kv(inner.state_kv());
         Self {
             inner,
             cache,
@@ -1436,5 +1447,358 @@ fn browser_filtered_mode_drives_a_membership_side_connection() {
         assert!(side.closed());
         assert!(!main.closed());
         assert_eq!(host.urls().len(), 2);
+    });
+}
+
+async fn own_engine<H: Host>(
+    host: H,
+    net: &FakeNet,
+) -> (Engine<H>, lessdugin_testkit::fake_pds::AccountHandle) {
+    let account = net.add_account("alice.example.com");
+    let engine = Engine::new(
+        host,
+        EngineConfig {
+            jetstream: vec![url::Url::parse("wss://jetstream.example/subscribe").unwrap()],
+            ..EngineConfig::default()
+        },
+    );
+    engine
+        .add_account(AccountInfo::app_password(
+            account.did().as_str(),
+            account.pds_base(),
+        ))
+        .await
+        .unwrap();
+    (engine, account)
+}
+
+async fn stored_cursor<K: KvStore>(kv: &K) -> Option<lessdugin_core::store::blob::CursorRow> {
+    kv.get_many(vec![schema::cur_key("jetstream")])
+        .await
+        .unwrap()
+        .pop()
+        .flatten()
+        .map(|b| lessdugin_core::store::row::decode(&b).unwrap())
+}
+
+fn queued_uris<H: Host>(engine: &Engine<H>, did: &str) -> Vec<String> {
+    engine
+        .syncer()
+        .queue_snapshot()
+        .get(did)
+        .map(|i| i.uris.iter().cloned().collect())
+        .unwrap_or_default()
+}
+
+#[test]
+fn live_tail_loses_no_browser_frame_when_its_timer_wins() {
+    futures::executor::block_on(async {
+        let mem = MemHost::new();
+        let net = FakeNet::on(&mem);
+        let host = BrowserLikeHost::new(mem.clone());
+        let (engine, account) = own_engine(host.clone(), &net).await;
+        let did = account.did().to_string();
+        mem.park_sleeps(true);
+        let tail = engine.live_tail();
+        futures::pin_mut!(tail);
+        assert!(futures::poll!(tail.as_mut()).is_pending());
+        // Rounds whose timer wins while no frame has arrived.
+        for _ in 0..3 {
+            mem.advance_ms(60_000);
+            assert!(futures::poll!(tail.as_mut()).is_pending());
+        }
+        let feed = host.feed("subscribeEvents");
+        feed.push(WsMessage::Text(v2_commit(&did, &post(), &format!("{FK}-3l"), 42)));
+        assert_eq!(feed.lost(), 0, "the frame went to an abandoned receive");
+        assert!(futures::poll!(tail.as_mut()).is_pending());
+        // past the live proof delay (1-3 s): the frame is applied
+        mem.advance_ms(3_001);
+        assert!(futures::poll!(tail.as_mut()).is_pending());
+        let uri = format!("at://{did}/{}/{FK}-3l", post());
+        assert!(queued_uris(&engine, &did).contains(&uri), "the frame was not applied");
+        assert_eq!(host.urls().len(), 1, "one socket");
+        engine.live_stop();
+        tail.await.unwrap();
+        assert!(feed.closed(), "live_stop closes the socket");
+    });
+}
+
+#[test]
+fn a_frame_that_keeps_failing_is_left_to_the_dirty_queue() {
+    futures::executor::block_on(async {
+        let mem = MemHost::new();
+        let net = FakeNet::on(&mem);
+        let (engine, account) = own_engine(mem.clone(), &net).await;
+        let did = account.did().to_string();
+        let event = json!({"$type":"message","payload":{
+            "$type":"network.bsky.jetstream.subscribeEvents#account", "did":did,
+            "seq":42,"witnessedAt":TIME,"account":{"did":did,"seq":9,"time":TIME,
+            "active":false,"status":"deactivated"}
+        }})
+        .to_string();
+        let later = v2_commit(&did, &post(), &format!("{FK}-3l"), 43);
+        mem.script_websocket(
+            "wss://jetstream.example/",
+            vec![WsMessage::Text(event), WsMessage::Text(later)],
+        );
+        // The participant's PDS keeps failing getRepoStatus.
+        net.inject(
+            lessdugin_testkit::fake_pds::Fault::disconnect()
+                .on_repo(&did)
+                .on_nsid("com.atproto.sync.getRepoStatus"),
+        );
+        mem.park_sleeps(true);
+        let tail = engine.live_tail();
+        futures::pin_mut!(tail);
+        assert!(futures::poll!(tail.as_mut()).is_pending());
+        assert!(stored_cursor(mem.cache()).await.is_none());
+        for _ in 0..15 {
+            mem.advance_ms(1_000);
+            assert!(futures::poll!(tail.as_mut()).is_pending());
+        }
+        // Three tries (now, +2 s, +4 s), then the frame is acknowledged and its repo queued for
+        // a sync; the later frame is read and acknowledged too.
+        let cursor = stored_cursor(mem.cache()).await.expect("the failing frame held the cursor");
+        assert_eq!(cursor.seq, Some(43), "the later frame was not read");
+        let uri = format!("at://{did}/{}/{FK}-3l", post());
+        let queued = engine.syncer().queue_snapshot();
+        let item = queued.get(&did).expect("the failed repo was not queued");
+        assert!(item.reasons.contains(&Reason::Reconcile), "{item:?}");
+        assert!(item.uris.contains(&uri), "{item:?}");
+        engine.live_stop();
+        tail.await.unwrap();
+    });
+}
+
+#[test]
+fn a_failed_context_read_does_not_end_live_tail() {
+    futures::executor::block_on(async {
+        let mem = MemHost::new();
+        let net = FakeNet::on(&mem);
+        let host = FailHost::new(mem.clone());
+        let (engine, account) = own_engine(host.clone(), &net).await;
+        let did = account.did().to_string();
+        mem.script_websocket(
+            "wss://jetstream.example/",
+            vec![WsMessage::Text(v2_commit(&did, &post(), &format!("{FK}-3l"), 42))],
+        );
+        mem.park_sleeps(true);
+        host.cache.fail_next_scan.store(true, Ordering::SeqCst);
+        let tail = engine.live_tail();
+        futures::pin_mut!(tail);
+        assert!(
+            futures::poll!(tail.as_mut()).is_pending(),
+            "live_tail returned on a store error"
+        );
+        assert!(!host.cache.fail_next_scan.load(Ordering::SeqCst));
+        for _ in 0..4 {
+            mem.advance_ms(3_000);
+            assert!(futures::poll!(tail.as_mut()).is_pending());
+        }
+        let uri = format!("at://{did}/{}/{FK}-3l", post());
+        assert!(queued_uris(&engine, &did).contains(&uri), "the frame was never read");
+        engine.live_stop();
+        tail.await.unwrap();
+    });
+}
+
+#[test]
+fn noise_frames_do_not_rebuild_the_live_context() {
+    futures::executor::block_on(async {
+        let mem = MemHost::new();
+        let net = FakeNet::on(&mem);
+        let host = FailHost::new(mem.clone());
+        let (engine, _account) = own_engine(host.clone(), &net).await;
+        let noise: Vec<WsMessage> = (1..=200)
+            .map(|seq| WsMessage::Text(v2_commit(OTHER, &post(), "unrelated", seq)))
+            .collect();
+        mem.script_websocket("wss://jetstream.example/", noise);
+        mem.park_sleeps(true);
+        let tail = engine.live_tail();
+        futures::pin_mut!(tail);
+        assert!(futures::poll!(tail.as_mut()).is_pending());
+        // Every frame was read in this one poll, against one context.
+        assert_eq!(stored_cursor(host.cache()).await.and_then(|c| c.seq), Some(200));
+        let scans = host.cache.identity_scans.load(Ordering::SeqCst);
+        assert!(scans <= 2, "{scans} identity scans for 200 noise frames");
+        engine.live_stop();
+        tail.await.unwrap();
+    });
+}
+
+const INDEX: &str = "https://index.example.com";
+
+fn index_endpoint(method: &str) -> String {
+    format!(
+        "{INDEX}/xrpc/{}",
+        lessdugin_core::indexer::contract::method_nsid(method)
+    )
+}
+
+fn index_meta(mut value: serde_json::Value, seq: i64) -> serde_json::Value {
+    let meta = json!({
+        "asOf": {"seq": seq, "timeUs": TIME_US, "lagMs": 0},
+        "indexer": {"did": "did:web:index.example.com", "coreVersion": "test"}
+    });
+    value
+        .as_object_mut()
+        .unwrap()
+        .extend(meta.as_object().unwrap().clone());
+    value
+}
+
+/// An open-mode forum of `owner`, declared an hour ago.
+fn open_forum(host: &MemHost, owner: &lessdugin_testkit::fake_pds::AccountHandle) -> lessdugin_core::discovery::ForumKey {
+    use lessdugin_lexicon::collection::nsid;
+    use lessdugin_lexicon::records::{Forum, Membership};
+    let key = lessdugin_core::discovery::ForumKey::new(owner.did(), "meta").unwrap();
+    let dt = lessdugin_atp::syntax::Datetime::from_millis(host.now() - 3_600_000).unwrap();
+    let forum = Forum::create(
+        "meta",
+        dt.clone(),
+        lessdugin_lexicon::values::MembershipMode::Open,
+    );
+    owner.put(nsid::FORUM, "meta", &serde_json::to_value(forum).unwrap());
+    let membership = Membership::new(key.uri.clone(), dt);
+    owner.put(
+        nsid::MEMBERSHIP,
+        &key.fk,
+        &serde_json::to_value(membership).unwrap(),
+    );
+    key
+}
+
+#[test]
+fn live_tail_polls_the_indexer_change_feed_from_its_head() {
+    futures::executor::block_on(async {
+        let host = MemHost::new();
+        let net = FakeNet::on(&host);
+        let owner = net.add_account("alice.example.com");
+        let key = open_forum(&host, &owner);
+        host.respond_get(
+            &index_endpoint("describeIndexer"),
+            lessdugin_testkit::resp::ok_json(&json!({
+                "did": "did:web:index.example.com", "version": "1", "coreVersion": "test",
+                "policies": [], "features": ["getChanges"], "forums": [],
+                "asOf": {"seq": 500, "timeUs": TIME_US, "lagMs": 0},
+                "indexer": {"did": "did:web:index.example.com", "coreVersion": "test"}
+            })),
+        );
+        host.respond_get(
+            &index_endpoint("getChanges"),
+            lessdugin_testkit::resp::ok_json(&index_meta(
+                json!({"changes": [], "cursor": 500}),
+                500,
+            )),
+        );
+        let engine = Engine::new(
+            host.clone(),
+            EngineConfig {
+                indexers: vec![lessdugin_core::engine::IndexerConsent {
+                    url: url::Url::parse(INDEX).unwrap(),
+                }],
+                jetstream: vec![url::Url::parse("wss://jetstream.example/subscribe").unwrap()],
+                ..EngineConfig::default()
+            },
+        );
+        engine
+            .sync_forum(
+                key.uri.as_str(),
+                &lessdugin_core::discovery::SyncOpts::default(),
+            )
+            .await
+            .unwrap();
+        let first = host.requests_to(&index_endpoint("getChanges"));
+        assert_eq!(first.len(), 1);
+        assert!(
+            first[0].url.contains("since=500"),
+            "a first poll starts at the indexer's head: {}",
+            first[0].url
+        );
+        engine.forum_follow(key.uri.as_str(), None).await.unwrap();
+        host.clear_requests();
+        net.clear_requests();
+        let start = host.now();
+        // No Jetstream is reachable here: the change feed is the only live source.
+        host.park_sleeps(true);
+        let tail = engine.live_tail();
+        futures::pin_mut!(tail);
+        assert!(futures::poll!(tail.as_mut()).is_pending());
+        for _ in 0..3 {
+            host.advance_ms(61_000);
+            assert!(futures::poll!(tail.as_mut()).is_pending());
+        }
+        let polls = host.requests_to(&index_endpoint("getChanges"));
+        assert!(polls.len() >= 4, "{} getChanges polls in 3 minutes", polls.len());
+        assert!(polls.iter().all(|r| r.url.contains("since=500")));
+        // A healthy change feed is a live source: no 2-minute head polling of the authority
+        // (sync.md §6.2, §6.7). Only the reconcile of the never-reconciled repo, at once, reads
+        // its head (§6.8 runs whatever the sources).
+        let heads: Vec<i64> = net
+            .requests_for("com.atproto.sync.getLatestCommit")
+            .iter()
+            .map(|r| r.at_ms)
+            .collect();
+        assert!(heads.iter().all(|t| *t == start), "head polls at {heads:?}");
+        engine.live_stop();
+        host.park_sleeps(false);
+        tail.await.unwrap();
+    });
+}
+
+#[test]
+fn rejected_and_unconfirmed_hints_are_not_synced_by_live_tail() {
+    futures::executor::block_on(async {
+        use lessdugin_core::discovery::DiscRow;
+        let host = MemHost::new();
+        let net = FakeNet::on(&host);
+        let owner = net.add_account("alice.example.com");
+        let key = open_forum(&host, &owner);
+        let engine = Engine::new(host.clone(), EngineConfig::default());
+        engine
+            .sync_forum(
+                key.uri.as_str(),
+                &lessdugin_core::discovery::SyncOpts::default(),
+            )
+            .await
+            .unwrap();
+        engine.forum_follow(key.uri.as_str(), None).await.unwrap();
+        // 40 DIDs named by hints that are not members: rejected, or never confirmed.
+        let b32 = b"abcdefghijklmnopqrstuvwxyz234567";
+        let now = host.now();
+        let rows: std::collections::BTreeMap<String, DiscRow> = (0..40usize)
+            .map(|i| {
+                let did = format!(
+                    "did:plc:{}{}{}",
+                    "z".repeat(22),
+                    b32[i / 32] as char,
+                    b32[i % 32] as char
+                );
+                let mut row = DiscRow::new("hint:constellation", now);
+                if i % 2 == 0 {
+                    row.reject(now);
+                }
+                (did, row)
+            })
+            .collect();
+        lessdugin_core::discovery::state::put_disc_rows(host.cache(), &key.fk, &rows)
+            .await
+            .unwrap();
+        host.clear_requests();
+        for _ in 0..10 {
+            engine.live_step().await.unwrap();
+            host.advance_ms(30_000);
+        }
+        let queued = engine.syncer().queue_snapshot();
+        for did in rows.keys() {
+            assert!(queued.get(did).is_none(), "{did} was queued");
+        }
+        let touched: Vec<String> = host
+            .requests()
+            .into_iter()
+            .filter(|r| rows.keys().any(|d| r.url.contains(d.as_str())))
+            .map(|r| r.url)
+            .collect();
+        assert!(touched.is_empty(), "requests for hinted non-members: {touched:?}");
     });
 }
