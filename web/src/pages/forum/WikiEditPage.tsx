@@ -4,7 +4,9 @@
 // shows (`TagView.head`, its record read with `raw`) and names it as `base` (decision O-2): the
 // engine writes it as the only parent and refuses the edit when the page's head has moved since,
 // so an edit made against an older head never silently replaces a newer one. A page with no
-// revision yet starts empty and is written without a parent.
+// revision yet starts empty and is written without a parent. The engine opens only applicable
+// pages (`tag` is not_found for a page that is not a tag, views.rs `tag_summary`), so such a page
+// cannot be loaded here: the editor says so for a new address, and before a page stops being a tag.
 
 import type { WikiDraft } from "@lessdugin/engine/types";
 import { isEngineError } from "@lessdugin/engine/types";
@@ -32,6 +34,18 @@ export function isHeadMoved(e: unknown): boolean {
 export const HEAD_MOVED_MESSAGE =
   "This page changed since you opened it. Reload it to see the new version, then make your edit again.";
 
+/** Shown for an address the engine has no tag page for: it may still have a page that is not a
+ * tag, which the edit then continues (`wiki_edit` without a base names the current head). */
+export const NEW_PAGE_NOTE =
+  "Only pages that are tags open here. If this address already has a page that is not a tag, " +
+  "what you save becomes its next revision, in place of its current name, text and parent tags " +
+  "(its history keeps them).";
+
+/** Shown while "This page is a tag" is unticked. */
+export const NOT_A_TAG_WARNING =
+  "Once saved, a page that is not a tag leaves the tags list and no longer applies to posts, " +
+  "and this app cannot open it again: an edit here would start from an empty page.";
+
 /** The form (exported for its tests). `base`: the head the form started from, absent for a page
  * with no revision yet. */
 export function WikiPageForm({
@@ -48,7 +62,13 @@ export function WikiPageForm({
   const navigate = useNavigate();
   const send = useSendWrite();
   const { forum } = useForumView();
-  const ids = { name: useId(), description: useId(), body: useId(), summary: useId() };
+  const ids = {
+    name: useId(),
+    description: useId(),
+    body: useId(),
+    summary: useId(),
+    notTag: useId(),
+  };
   const [name, setName] = useState(initial.name);
   const [description, setDescription] = useState(initial.description);
   const [markdown, setMarkdown] = useState(initial.markdown);
@@ -96,9 +116,18 @@ export function WikiPageForm({
         void navigate({ to: "/outbox" });
         return;
       }
-      toasts.show({ message: "Page saved (a public revision)", tone: "success" });
       void qc.invalidateQueries({ queryKey: qk.tag(forum.uri, slug) });
       void qc.invalidateQueries({ queryKey: qk.tags(forum.uri) });
+      if (!isTag) {
+        // the engine has no tag page for it: back to the tags list, which no longer lists it
+        toasts.show({
+          message: "Page saved (a public revision). It is not a tag, so it is not listed.",
+          tone: "success",
+        });
+        void navigate({ to: "/f/$owner/$slug/tags", params: forumParams(forum.uri) });
+        return;
+      }
+      toasts.show({ message: "Page saved (a public revision)", tone: "success" });
       void navigate({
         to: "/f/$owner/$slug/t/$tag",
         params: { ...forumParams(forum.uri), tag: slug },
@@ -139,11 +168,23 @@ export function WikiPageForm({
         />
       </div>
       <label className={ui.row}>
-        <input type="checkbox" checked={isTag} onChange={(e) => setIsTag(e.target.checked)} />
+        <input
+          type="checkbox"
+          checked={isTag}
+          onChange={(e) => setIsTag(e.target.checked)}
+          aria-describedby={isTag ? undefined : ids.notTag}
+        />
         <span>
           This page is a tag <span className={ui.hint}>(posts can be tagged with it)</span>
         </span>
       </label>
+      <div aria-live="polite">
+        {!isTag && (
+          <p id={ids.notTag} className={ui.notice}>
+            {NOT_A_TAG_WARNING}
+          </p>
+        )}
+      </div>
       {choices.length > 0 && (
         <fieldset className={ui.field}>
           <legend className={ui.label}>Parent tags</legend>
@@ -281,6 +322,7 @@ export function WikiEditPage() {
           </>
         )}
       </h2>
+      {isNew && <p className={ui.notice}>{NEW_PAGE_NOTE}</p>}
       {/* the form starts from `initial` once: a new head (after a reload) remounts it */}
       <WikiPageForm key={head ?? "new"} slug={tag} base={head} initial={initial} />
     </section>

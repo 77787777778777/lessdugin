@@ -1602,14 +1602,17 @@ export class MockEngine implements EngineApi {
   }
 
   async tags(forum: AtUri): Promise<TagSummary[]> {
+    // only applicable pages are tags (views.rs `tag_summary`): a page that is not a tag is left out
     return [...this.tagMap(forum).values()]
+      .filter((t) => t.isTag !== false)
       .map((t) => this.tagSummary(forum, t))
       .sort((a, b) => b.postCount - a.postCount || (a.slug < b.slug ? -1 : 1));
   }
 
   async tag(forum: AtUri, slug: Slug): Promise<TagView> {
     const t = this.tagMap(forum).get(slug);
-    if (!t) throw err("not_found", `No tag ${slug}`);
+    // a page that exists but is not a tag is not_found too, as the engine has it
+    if (!t || t.isTag === false) throw err("not_found", `No tag ${slug}`);
     const posts = this.listedPosts(forum)
       .filter((p) => this.appliedTags(p).includes(slug))
       .map((p) => this.postSummary(p))

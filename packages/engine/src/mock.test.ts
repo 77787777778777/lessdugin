@@ -267,6 +267,25 @@ describe("MockEngine writes", () => {
     });
   });
 
+  // views.rs `tag_summary`: a page that exists but is not a tag (applicable = false) is no tag
+  it("treats a page that is not a tag as no tag, and edits it on its head", async () => {
+    const e = new MockEngine({ sendMs: 10 });
+    const slug = "decision-theory";
+    const head = (await e.tag(FORUM_URI, slug)).head ?? "";
+    const notTag = { name: "Glossary", isTag: false, base: head };
+    const t = await e.wikiEdit(FORUM_URI, slug, notTag);
+    await vi.advanceTimersByTimeAsync(50);
+    const s = (await e.writes()).find((w) => w.id === t.id)?.state;
+    if (s?.kind !== "done") throw new Error("not written");
+    await expect(e.tag(FORUM_URI, slug)).rejects.toMatchObject({ code: "not_found" });
+    expect((await e.tags(FORUM_URI)).map((x) => x.slug)).not.toContain(slug);
+    // an edit without a base still names the page's head, as organisation.rs `wiki_edit` does
+    await e.wikiEdit(FORUM_URI, slug, { name: "Decision theory", isTag: true });
+    await vi.advanceTimersByTimeAsync(50);
+    const back = (await e.tag(FORUM_URI, slug)).head ?? "";
+    expect((await e.raw(back)).record).toMatchObject({ parents: [{ uri: s.uri }] });
+  });
+
   it("bounds sequence positions before enqueueing, as the engine does", async () => {
     const e = new MockEngine({ sendMs: 10 });
     const posts = (await e.listPosts({ forum: FORUM_URI, sort: "new", filter: "all", limit: 3 }))

@@ -4,18 +4,26 @@
 // because the head moved says so, a new page is written without a parent, and the history walks
 // the revisions from the head (social.md §13.2).
 import { MockEngine } from "@lessdugin/engine/mock";
-import type { ForumView, RawView } from "@lessdugin/engine/types";
+import type { ForumView, RawView, WikiDraft } from "@lessdugin/engine/types";
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { renderWithApp } from "../../test/render.tsx";
 import { ForumContext, forumParams } from "./forumContext.tsx";
-import { HEAD_MOVED_MESSAGE, WikiEditPage } from "./WikiEditPage.tsx";
+import {
+  HEAD_MOVED_MESSAGE,
+  NEW_PAGE_NOTE,
+  NOT_A_TAG_WARNING,
+  WikiEditPage,
+} from "./WikiEditPage.tsx";
 import { WikiHistoryPage } from "./WikiHistoryPage.tsx";
 
 const SLUG = "decision-theory";
 
-async function setup(page: "edit" | "history", tag = SLUG) {
-  const engine = new MockEngine({ holdMs: 0, sendMs: 0 });
+async function setup(
+  page: "edit" | "history",
+  tag = SLUG,
+  engine = new MockEngine({ holdMs: 0, sendMs: 0 }),
+) {
   const forum = (await engine.followed())[0]?.uri ?? "";
   const view: ForumView = await engine.forumOpen(forum);
   const { owner, slug } = forumParams(forum);
@@ -100,6 +108,44 @@ describe("WikiEditPage", () => {
     await waitFor(async () =>
       expect((await engine.tag(forum, "new-topic")).tag.name).toBe("New topic"),
     );
+  });
+});
+
+// the engine opens only pages that are tags (views.rs `tag_summary`): a page that is not a tag
+// cannot be loaded, so a save there starts from an empty form and replaces its current text
+describe("WikiEditPage and pages that are not tags", () => {
+  it("warns before a page stops being a tag, then goes to the tags list", async () => {
+    const { engine, forum, router } = await setup("edit");
+    const head = (await engine.tag(forum, SLUG)).head;
+    const edit = vi.spyOn(engine, "wikiEdit");
+    const box = await screen.findByRole("checkbox", { name: /This page is a tag/ });
+    expect(screen.queryByText(NOT_A_TAG_WARNING)).toBeNull();
+    expect(screen.queryByText(NEW_PAGE_NOTE)).toBeNull();
+    fireEvent.click(box);
+    const warning = screen.getByText(NOT_A_TAG_WARNING);
+    expect(box.getAttribute("aria-describedby")).toBe(warning.id);
+    fireEvent.click(screen.getByRole("button", { name: "Save page" }));
+    await waitFor(() => expect(edit).toHaveBeenCalledTimes(1));
+    expect(edit.mock.calls[0]?.[2]).toMatchObject({ isTag: false, base: head });
+    await waitFor(() =>
+      expect(router.state.location.pathname).toMatch(/^\/f\/[^/]+\/[^/]+\/tags$/),
+    );
+    expect((await engine.tags(forum)).map((t) => t.slug)).not.toContain(SLUG);
+  });
+
+  it("says on an address with no tag page that a page that is not a tag is replaced", async () => {
+    // a page that stopped being a tag opens as a new address, with the note
+    const engine = new MockEngine({ holdMs: 0, sendMs: 0 });
+    const forum = (await engine.followed())[0]?.uri ?? "";
+    const head = (await engine.tag(forum, SLUG)).head ?? "";
+    const draft: WikiDraft & { base?: string } = { name: "Glossary", isTag: false, base: head };
+    await engine.wikiEdit(forum, SLUG, draft);
+    await waitFor(async () =>
+      expect((await engine.tags(forum)).map((t) => t.slug)).not.toContain(SLUG),
+    );
+    await setup("edit", SLUG, engine);
+    expect(await screen.findByText(NEW_PAGE_NOTE)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Create page" })).toBeTruthy();
   });
 });
 

@@ -13,7 +13,8 @@ import { useForumView } from "./forumContext.tsx";
 const route = getRouteApi("/f/$owner/$slug/tags");
 
 /** Starts a wiki page: its address (the tag's slug) opens the page editor, which writes the
- * first revision (or edits the page, if it exists already). */
+ * first revision, or edits the page from its current revision if it is a tag already (a page
+ * that is not a tag cannot be loaded; the editor says so). */
 function NewPage() {
   const navigate = useNavigate();
   const params = route.useParams();
