@@ -29,9 +29,8 @@ for _ in $(seq 1 900); do
   fi
   [ -s "$fixture" ] && break
   # This wait is bounded by the fixture's own progress, not a claimed browser time budget.
-  if ! read -r -t 1 _ </dev/null; then
-    :
-  fi
+  # (A timed `read` from /dev/null returns at once at end of file, so it never waited.)
+  sleep 1
 done
 if [ ! -s "$fixture" ]; then
   cat "$state/fixture.log" >&2
