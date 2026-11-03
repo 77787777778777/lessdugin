@@ -117,6 +117,8 @@ for (const scheme of ["light", "dark"] as const) {
       const found: string[] = [];
       for (const path of [
         `${FORUM_PATH}/t/decision-theory/edit`,
+        // a new address, with the note about pages that are not tags
+        `${FORUM_PATH}/t/calibration/edit`,
         `${FORUM_PATH}/t/decision-theory/history`,
         `${FORUM_PATH}/seqs/new`,
       ]) {

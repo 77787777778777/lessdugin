@@ -331,6 +331,8 @@ test("edit a wiki page against its head and read its history (engine-api.md §3.
   await page.getByRole("link", { name: "Tags", exact: true }).click();
   await page.getByLabel("New page address").fill("calibration");
   await page.getByRole("button", { name: "Start page" }).click();
+  // the engine opens only tag pages: a page here that is not a tag would be replaced
+  await expect(page.getByText(/^Only pages that are tags open here\./)).toBeVisible();
   await page.getByRole("textbox", { name: "Name", exact: true }).fill("Calibration");
   await page.getByRole("button", { name: "Create page" }).click();
   await expect(page.getByRole("heading", { level: 2, name: "Calibration" })).toBeVisible();
