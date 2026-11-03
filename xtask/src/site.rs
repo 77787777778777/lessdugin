@@ -17,9 +17,11 @@
 //! The documents name the origin in `client_id`, `client_uri` and `redirect_uris`; the scope is
 //! §10.4's SUPERSET in the namespace `--ns` names. A `.temp` build (the default, and the only
 //! SPA this repository builds before the release, docs/plan.md M7) asks for the enumerated
-//! `.temp` collections and no `include:` token, since `.temp` publishes no permission set. The
-//! final-namespace documents are written only with `--no-build` (the deployed `deploy/site`
-//! files), because a final-namespace SPA does not exist before M7.
+//! `.temp` collections and no `include:` token, since `.temp` publishes no permission set. A
+//! build writes only the documents of the namespace the SPA requests scopes in
+//! (`packages/engine/src/auth-bridge.ts`, `NS`); the other namespace's are written only with
+//! `--no-build` (the deployed `deploy/site` files are the final ones, and a final-namespace SPA
+//! does not exist before M7).
 
 use std::path::{Path, PathBuf};
 
@@ -56,6 +58,26 @@ impl Ns {
             Ns::Temp => format!("{FINAL_NS}.temp"),
             Ns::Final => FINAL_NS.to_owned(),
         }
+    }
+}
+
+/// The namespace the SPA in `source` (packages/engine/src/auth-bridge.ts) asks scopes for: its
+/// `export const NS = "…";`, which web/src/host/scopes.ts imports.
+fn spa_namespace(source: &str) -> Result<Ns, String> {
+    let ns = source
+        .lines()
+        .find_map(|l| {
+            l.trim()
+                .strip_prefix("export const NS = \"")?
+                .strip_suffix("\";")
+        })
+        .ok_or("packages/engine/src/auth-bridge.ts declares no `export const NS`")?;
+    match ns {
+        n if n == Ns::Temp.prefix() => Ok(Ns::Temp),
+        n if n == Ns::Final.prefix() => Ok(Ns::Final),
+        n => Err(format!(
+            "the SPA's namespace {n} is neither {FINAL_NS} nor its .temp"
+        )),
     }
 }
 
@@ -256,12 +278,20 @@ pub fn site(args: &[String]) -> Result<(), String> {
         }
     }
     let base = base_url(&origin.ok_or_else(usage)?)?;
-    if build && ns == Ns::Final {
-        return Err(
-            "this repository builds the .temp SPA until the release (docs/plan.md M7): \
-             --ns final writes only the site files, with --no-build"
-                .into(),
-        );
+    // the documents' scope must be the one the built SPA requests (until the release, M7, it
+    // is the .temp one), so a build refuses the other namespace; --no-build writes either
+    let bridge = std::fs::read_to_string(root().join("packages/engine/src/auth-bridge.ts"))
+        .map_err(|e| format!("packages/engine/src/auth-bridge.ts: {e}"))?;
+    if build && spa_namespace(&bridge)? != ns {
+        return Err(format!(
+            "the SPA in this tree requests the {} scopes: --ns {} writes the other \
+             namespace's documents only with --no-build",
+            spa_namespace(&bridge)?.prefix(),
+            match ns {
+                Ns::Temp => "temp",
+                Ns::Final => "final",
+            }
+        ));
     }
     let out = out.unwrap_or_else(|| crate::target_dir().join("site"));
     let out = if out.is_absolute() {
@@ -458,6 +488,20 @@ mod tests {
         assert!(check_pages_index(&with_frames, policy).is_err());
         let late = good.replace("<head>\n", "<head>\n<script src=x></script>");
         assert!(check_pages_index(&late, policy).is_err());
+    }
+
+    /// A build's documents name the namespace the SPA requests scopes in (auth-bridge.ts `NS`):
+    /// the .temp one in this tree until the release.
+    #[test]
+    fn the_spa_namespace_comes_from_the_engine_bridge() {
+        let bridge = spec("packages/engine/src/auth-bridge.ts");
+        assert_eq!(spa_namespace(&bridge), Ok(Ns::Temp));
+        assert_eq!(
+            spa_namespace("export const NS = \"online.7778777.lessdugin\";\n"),
+            Ok(Ns::Final)
+        );
+        assert!(spa_namespace("export const NS = \"com.example\";").is_err());
+        assert!(spa_namespace("const ns = 1;").is_err());
     }
 
     #[test]
