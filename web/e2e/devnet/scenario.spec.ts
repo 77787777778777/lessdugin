@@ -1405,6 +1405,9 @@ async function runScenario(
           release();
           await ipage.unrouteAll({ behavior: "wait" });
           await local;
+          // a hold that outlasted the page's sync budget (8 s) left that sync abandoned; an
+          // explicit forum sync converges the page before it is read like the readers above
+          await hook(ipage, "syncForum", [forum, { full: false }]);
           await ipage.getByRole("link", { name: EDITED_TITLE }).click();
           await expect(ipage.getByRole("heading", { level: 1, name: EDITED_TITLE })).toBeVisible();
           await hook(ipage, "syncForum", [forum, { full: false }]);
