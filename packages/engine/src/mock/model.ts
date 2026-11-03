@@ -31,6 +31,7 @@ import type {
   Slug,
   Stance,
   SubscriptionEntry,
+  TagVoteValue,
   TextQuote,
   Tier,
   VersionEntry,
@@ -136,6 +137,8 @@ export interface MyReact {
 
 export interface MyOpinionRec extends MyOpinion {
   reacts: MyReact[];
+  /** The `#tagVote` entries, by slug (social.md §13.3). */
+  tags?: Record<Slug, TagVoteValue>;
 }
 
 export interface TagRec {

@@ -328,6 +328,7 @@ test("vote on the tags of someone else's post", async ({ page }) => {
   const choose = panel.getByLabel("Apply another tag");
   const option = await choose.locator("option").nth(1).getAttribute("value");
   if (!option) throw new Error("no other tag to apply");
+  const optionName = (await choose.locator("option").nth(1).textContent()) ?? "";
   await choose.selectOption(option);
   await panel.getByRole("button", { name: "Vote to apply" }).click();
   await expect(panel.getByRole("listitem")).toHaveCount(await panel.getByRole("listitem").count());
@@ -337,6 +338,31 @@ test("vote on the tags of someone else's post", async ({ page }) => {
       .last()
       .getByRole("button", { name: /Applies/ }),
   ).toHaveAttribute("aria-pressed", "true");
+  // once each vote is sent (after its undo window), the view has it, with each tag's relevance
+  const firstName = (await first.locator("span").first().textContent()) ?? "";
+  await expect(first).toContainText("relevance 2 · applies");
+  await expect(panel.getByRole("listitem").last()).toContainText("relevance 1 · applies");
+  await page.getByRole("link", { name: /^Notifications/ }).click();
+  await expect(page.getByRole("heading", { level: 1, name: "Notifications" })).toBeVisible();
+  await page.goBack();
+  await page
+    .getByRole("article", { name: WELCOME })
+    .getByRole("button", { name: "Vote on tags" })
+    .click();
+  // the votes are the engine's (PostView.tagRelevance), not this page's memory: they are still
+  // shown once the post is opened again
+  const again = page.getByRole("region", { name: "Tag votes" }).getByRole("listitem");
+  for (const [name, text] of [
+    [firstName, "relevance 2 · applies"],
+    [optionName, "relevance 1 · applies"],
+  ] as const) {
+    const item = again.filter({ hasText: name });
+    await expect(item.getByRole("button", { name: /Applies/ })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    await expect(item).toContainText(text);
+  }
 });
 
 test("edit a wiki page against its head and read its history (engine-api.md §3.5)", async ({

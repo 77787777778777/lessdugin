@@ -98,6 +98,7 @@ import {
   type PostDraft,
   type PostList,
   type PostSummary,
+  type PostTag,
   type PostView,
   type PublicActionKind,
   type RawView,
@@ -581,19 +582,37 @@ export class MockEngine implements EngineApi {
     return clone(state);
   }
 
+  /** The post's tags (social.md §13.3) by slug, as `PostView.tagRelevance` has them: every slug
+   * the author declared or the viewer voted on. `rel` is the author's own (1 for a declared
+   * slug, unless the author is restricted from `tag`) plus the viewer's tag vote while the
+   * viewer is in E (the mock records no other voter's tag votes); a slug applies when its wiki
+   * page exists, is a tag and `rel > 0`. */
+  private tagRelevance(p: PostRec): PostTag[] {
+    const pages = this.s.tags.get(p.forum);
+    const own = this.s.actors.get(p.author)?.restricted?.includes("tag") !== true;
+    const declared = new Set(own ? p.tags : []);
+    const votes = this.s.active === p.author ? {} : (this.myOpinion(p.uri)?.tags ?? {});
+    const counted = this.viewerWeighted();
+    return [...new Set([...declared, ...Object.keys(votes)])].sort().map((slug) => {
+      const mine = votes[slug];
+      const relevance = (declared.has(slug) ? 1 : 0) + (counted ? karmaPower(mine) : 0);
+      const page = pages?.get(slug);
+      const tag: PostTag = {
+        slug,
+        relevance,
+        applies: page !== undefined && page.isTag !== false && relevance > 0,
+      };
+      if (mine !== undefined) tag.mine = mine;
+      return tag;
+    });
+  }
+
   /** The post's applied tags (social.md §13.3 `applies(p, t)`), sorted, as `PostSummary.tags`
-   * has them: a declared tag applies once its wiki page exists and is a tag, unless the author
-   * is restricted from `tag`. The mock records no tag votes of other voters, so `rel` is the
-   * author's own; the declared tags stay in the record (`raw`, an edit's draft). */
+   * has them; the declared tags stay in the record (`raw`, an edit's draft). */
   private appliedTags(p: PostRec): Slug[] {
-    const tags = this.s.tags.get(p.forum);
-    if (!tags || this.s.actors.get(p.author)?.restricted?.includes("tag") === true) return [];
-    return [...new Set(p.tags)]
-      .filter((slug) => {
-        const t = tags.get(slug);
-        return t !== undefined && t.isTag !== false;
-      })
-      .sort();
+    return this.tagRelevance(p)
+      .filter((t) => t.applies)
+      .map((t) => t.slug);
   }
 
   private postSummary(p: PostRec): PostSummary {
@@ -646,6 +665,8 @@ export class MockEngine implements EngineApi {
       reacts: hidden ? [] : this.reacts(p.uri, p.reacts, p.body.text, this.forumRec(p.forum)),
       history: { revisions: p.revisions.length, redacted: p.redacted },
       sequences: [],
+      // a post that is not listed shows none, except to the forum's authorities (views.rs)
+      tagRelevance: listed(p.state) || this.isAuthority(p.forum) ? this.tagRelevance(p) : [],
     };
     // next and previous follow one context (social.md §14): the sequence the reader came from
     // if it contains the post, else the author's own, else a listed one (score desc, uri asc)
@@ -2384,8 +2405,14 @@ export class MockEngine implements EngineApi {
           }
           break;
         }
-        case "tag":
+        case "tag": {
+          const tags = { ...(op.tags ?? {}) };
+          if (intentCopy.value === undefined) delete tags[intentCopy.slug];
+          else tags[intentCopy.slug] = intentCopy.value;
+          if (Object.keys(tags).length > 0) op.tags = tags;
+          else delete op.tags;
           break;
+        }
       }
       mine.set(subjectUri, op);
       const p = splitAtUri(subjectUri);

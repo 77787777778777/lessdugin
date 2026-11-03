@@ -396,6 +396,7 @@ function PostBodyView({
               post={post.uri}
               forum={post.forum}
               applied={post.tags}
+              relevance={view.tagRelevance}
               signedIn={myDid !== null}
               caps={ctx.caps}
             />

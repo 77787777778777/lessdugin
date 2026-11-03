@@ -313,6 +313,48 @@ describe("MockEngine writes", () => {
     ]);
   });
 
+  // engine-api.md §4.2 `PostView.tagRelevance`, social.md §13.3
+  it("records tag votes and serves them as tagRelevance, with the applied tags", async () => {
+    const e = new MockEngine({ sendMs: 10 });
+    const { postUri } = buildFixture();
+    const welcome = postUri.welcome ?? "";
+    // declared meta and rationality (both pages); no vote yet
+    expect((await e.getPost(welcome)).tagRelevance).toEqual([
+      { slug: "meta", relevance: 1, applies: true },
+      { slug: "rationality", relevance: 1, applies: true },
+    ]);
+    await e.opinion(welcome, { kind: "tag", slug: "meta", value: "down" });
+    await e.opinion(welcome, { kind: "tag", slug: "practical", value: "up" });
+    await e.opinion(welcome, { kind: "tag", slug: "no-such-page", value: "strongUp" });
+    await vi.advanceTimersByTimeAsync(OPINION_UNDO_WINDOW_MS + 100);
+    const view = await e.getPost(welcome);
+    // the viewer (an authority, in E) counts: meta drops out, practical applies
+    expect(view.tagRelevance).toEqual([
+      { slug: "meta", relevance: 0, applies: false, mine: "down" },
+      { slug: "no-such-page", relevance: 3, applies: false, mine: "strongUp" },
+      { slug: "practical", relevance: 1, applies: true, mine: "up" },
+      { slug: "rationality", relevance: 1, applies: true },
+    ]);
+    // PostSummary.tags stays the applied set, sorted
+    expect(view.post.tags).toEqual(["practical", "rationality"]);
+    const byPractical = await e.listPosts({
+      forum: FORUM_URI,
+      sort: "new",
+      filter: "all",
+      tag: "practical",
+      limit: 100,
+    });
+    expect(byPractical.items.map((p) => p.uri)).toContain(welcome);
+    // clearing a vote removes its entry
+    await e.opinion(welcome, { kind: "tag", slug: "no-such-page" });
+    await vi.advanceTimersByTimeAsync(OPINION_UNDO_WINDOW_MS + 100);
+    expect((await e.getPost(welcome)).tagRelevance?.map((t) => t.slug)).toEqual([
+      "meta",
+      "practical",
+      "rationality",
+    ]);
+  });
+
   // engine-api.md §3.4 `get_post(uri, sequence?)`, social.md §14 next and previous
   it("navigates the sequence a post was opened from and records it as continue reading", async () => {
     const e = new MockEngine({ sendMs: 10 });
