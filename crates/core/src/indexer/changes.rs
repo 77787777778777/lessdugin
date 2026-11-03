@@ -182,8 +182,10 @@ pub async fn poll_changes<H: Host>(
             }
             previous = change.seq;
         }
+        // The indexer drops blocklisted rows after paging (§15.3): its cursor may pass the last
+        // returned row, never fall below it, and never pass its own snapshot.
         let expected = page.changes.last().map_or(cursor, |c| c.seq);
-        if page.cursor != expected || page.cursor < cursor {
+        if page.cursor < expected || page.cursor > page.meta.as_of.seq.max(expected) {
             return Err(invalid("getChanges returned an inconsistent cursor"));
         }
         for (change, (uri, did)) in valid {

@@ -1552,6 +1552,45 @@ fn an_expired_change_cursor_reconciles_at_reconcile_priority_at_most_daily() {
 }
 
 #[test]
+fn a_change_cursor_past_blocklisted_rows_is_followed() {
+    let w = forum_world();
+    let rkey = w.post.rsplit('/').next().unwrap();
+    describe(&w.host, &["getChanges"], 9);
+    // Rows 6 and 7 were blocklisted after paging, and so were 8 and 9 on the next page.
+    w.host.respond_seq(
+        &endpoint("getChanges"),
+        vec![
+            Ok(resp::ok_json(&with_meta(
+                json!({"changes": [feed_change(5, w.owner.did().as_str(), nsid::POST, rkey)], "cursor": 7}),
+                9,
+            ))),
+            Ok(resp::ok_json(&with_meta(json!({"changes": [], "cursor": 9}), 9))),
+            Ok(resp::ok_json(&with_meta(json!({"changes": [], "cursor": 9}), 9))),
+        ],
+    );
+    let polled = block_on(w.engine.poll_indexer_changes(w.key.uri.as_str()))
+        .unwrap()
+        .unwrap();
+    assert_eq!((polled.changes, polled.cursor), (1, 7), "{polled:?}");
+    let polled = block_on(w.engine.poll_indexer_changes(w.key.uri.as_str()))
+        .unwrap()
+        .unwrap();
+    assert_eq!(polled.cursor, 9, "{polled:?}");
+
+    // A cursor below a returned row, or past the indexer's own snapshot, is still refused.
+    for (cursor, as_of) in [(10, 12), (40, 12)] {
+        w.host.respond_get(
+            &endpoint("getChanges"),
+            resp::ok_json(&with_meta(
+                json!({"changes": [feed_change(11, w.owner.did().as_str(), nsid::POST, rkey)], "cursor": cursor}),
+                as_of,
+            )),
+        );
+        assert!(block_on(w.engine.poll_indexer_changes(w.key.uri.as_str())).is_err());
+    }
+}
+
+#[test]
 fn production_endpoints_are_exact_and_devnet_is_loopback_only() {
     use lessdugin_core::indexer::endpoint_allowed;
     let ok = |u: &str, p| endpoint_allowed(&url::Url::parse(u).unwrap(), p);

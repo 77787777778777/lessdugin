@@ -1591,6 +1591,8 @@ Displayed values are always recomputed locally from admitted records. Indexer ag
 - a `getRepoHeads` head for a DID that was not asked about is ignored;
 - `CursorTooOld` reconciles F as a Jetstream gap does (§6.3): authorities at P1, the other DIDs of C(F) at P3. A feed that keeps answering `CursorTooOld` gets this at most once per 24 h for each indexer and forum (the cursor row's `timeUs` records the last one); the daily reconcile (§6.8) bounds what it can hide.
 
+**Change cursor.** The operator blocklist is applied after paging (§15.3), so a `getChanges` cursor may be above the last returned seq (and above `since` on an empty page). The client follows it. A cursor below the last returned seq, or above both that seq and the response's `asOf.seq`, is refused and does not advance the stored cursor.
+
 **Audit.** `lessdugin sync <forum> --audit` (and an SPA settings action) cross-checks one indexer for one forum:
 
 | Check | Procedure | Finding |
