@@ -10,6 +10,7 @@ import { describe, expect, it, vi } from "vitest";
 import { renderWithApp } from "../../test/render.tsx";
 import { ForumContext, forumParams } from "./forumContext.tsx";
 import {
+  CARRIED_NOTE,
   HEAD_MOVED_MESSAGE,
   NEW_PAGE_NOTE,
   NOT_A_TAG_WARNING,
@@ -88,6 +89,76 @@ describe("WikiEditPage", () => {
     expect(within(alert).getByRole("button", { name: "Reload the page" })).toBeTruthy();
   });
 
+  // decision O-2 on the client side: the author's text is never lost to a newer head, and the
+  // reload offers the newer version with their text beside it
+  it("keeps the author's text when the save meets a newer head, and redoes it after a reload", async () => {
+    const engine = new MockEngine({ holdMs: 0, sendMs: 0, wikiRace: true });
+    const { forum } = await setup("edit", SLUG, engine);
+    const head = (await engine.tag(forum, SLUG)).head;
+    const edit = vi.spyOn(engine, "wikiEdit");
+    const body = (await screen.findByRole("textbox", { name: /^Page/ })) as HTMLTextAreaElement;
+    const mine = `${body.value}\n- Parfit's hitchhiker`;
+    fireEvent.change(body, { target: { value: mine } });
+    fireEvent.click(screen.getByRole("button", { name: "Save page" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain(HEAD_MOVED_MESSAGE);
+    expect(edit.mock.calls[0]?.[2]).toMatchObject({ base: head });
+    // the refusal keeps the text, even once the newer head reached the view
+    const moved = (await engine.tag(forum, SLUG)).head;
+    expect(moved).not.toBe(head);
+    await waitFor(() => expect(screen.getAllByText(HEAD_MOVED_MESSAGE).length).toBeGreaterThan(0));
+    expect((screen.getByRole("textbox", { name: /^Page/ }) as HTMLTextAreaElement).value).toBe(
+      mine,
+    );
+    fireEvent.click(within(alert).getByRole("button", { name: "Reload the page" }));
+    // the editor shows the newer version, the author's text beside it
+    const kept = await screen.findByRole("region", { name: "Your unsaved edit" });
+    expect(kept.textContent).toContain(CARRIED_NOTE);
+    expect(
+      (within(kept).getByRole("textbox", { name: "Your unsaved text" }) as HTMLTextAreaElement)
+        .value,
+    ).toBe(mine);
+    const fresh = screen.getByRole("textbox", { name: /^Page/ }) as HTMLTextAreaElement;
+    expect(fresh.value).toContain("An edit made elsewhere");
+    expect(fresh.value).not.toContain("Parfit's hitchhiker");
+    expect(screen.queryByRole("alert")).toBeNull();
+    // redone on the newer head
+    fireEvent.click(within(kept).getByRole("button", { name: "Use my text" }));
+    expect((screen.getByRole("textbox", { name: /^Page/ }) as HTMLTextAreaElement).value).toBe(
+      mine,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Save page" }));
+    await waitFor(() => expect(edit).toHaveBeenCalledTimes(2));
+    expect(edit.mock.calls[1]?.[2]).toMatchObject({ base: moved });
+    await waitFor(async () => expect((await engine.tag(forum, SLUG)).head).not.toBe(moved));
+    const next = (await engine.tag(forum, SLUG)).head ?? "";
+    expect((await engine.raw(next)).record).toMatchObject({ parents: [{ uri: moved }] });
+  });
+
+  it("keeps the head it loaded while a newer one arrives, and says so", async () => {
+    const { engine, forum } = await setup("edit");
+    const head = (await engine.tag(forum, SLUG)).head ?? "";
+    const body = (await screen.findByRole("textbox", { name: /^Page/ })) as HTMLTextAreaElement;
+    fireEvent.change(body, { target: { value: "My own rewrite." } });
+    // an edit made elsewhere becomes the head (a live update re-queries the page)
+    await engine.wikiEdit(forum, SLUG, {
+      name: "Decision theory",
+      isTag: true,
+      base: head,
+      body: { markdown: "Someone else's version.", media: [] },
+    });
+    const status = await screen.findByRole("status");
+    expect(status.textContent).toContain(HEAD_MOVED_MESSAGE);
+    expect((screen.getByRole("textbox", { name: /^Page/ }) as HTMLTextAreaElement).value).toBe(
+      "My own rewrite.",
+    );
+    // a save still names the head the form started from, and is refused
+    const edit = vi.spyOn(engine, "wikiEdit");
+    fireEvent.click(screen.getByRole("button", { name: "Save page" }));
+    expect((await screen.findByRole("alert")).textContent).toContain(HEAD_MOVED_MESSAGE);
+    expect(edit.mock.calls[0]?.[2]).toMatchObject({ base: head });
+  });
+
   it("writes a new page without a base", async () => {
     const { engine, forum } = await setup("edit", "new-topic");
     const edit = vi.spyOn(engine, "wikiEdit");
@@ -138,7 +209,7 @@ describe("WikiEditPage and pages that are not tags", () => {
     const engine = new MockEngine({ holdMs: 0, sendMs: 0 });
     const forum = (await engine.followed())[0]?.uri ?? "";
     const head = (await engine.tag(forum, SLUG)).head ?? "";
-    const draft: WikiDraft & { base?: string } = { name: "Glossary", isTag: false, base: head };
+    const draft: WikiDraft = { name: "Glossary", isTag: false, base: head };
     await engine.wikiEdit(forum, SLUG, draft);
     await waitFor(async () =>
       expect((await engine.tags(forum)).map((t) => t.slug)).not.toContain(SLUG),

@@ -338,6 +338,35 @@ test("edit a wiki page against its head and read its history (engine-api.md §3.
   await expect(page.getByRole("heading", { level: 2, name: "Calibration" })).toBeVisible();
 });
 
+test("a wiki save that meets a newer head keeps the text and is redone after a reload (O-2)", async ({
+  page,
+}) => {
+  // `?wikirace`: another participant's revision lands while the editor is open
+  await page.goto(`${server.url}/?mock&wikirace#${FORUM_PATH}/t/decision-theory/edit`);
+  const body = page.getByRole("textbox", { name: /^Page/ });
+  await expect(body).toHaveValue(/## Classic problems/);
+  const mine = "Decision theory, rewritten by me.";
+  await body.fill(mine);
+  await page.getByRole("button", { name: "Save page" }).click();
+  const alert = page.getByRole("alert");
+  await expect(alert).toContainText("This page changed since you opened it.");
+  await expect(body).toHaveValue(mine);
+  await alert.getByRole("button", { name: "Reload the page" }).click();
+  const kept = page.getByRole("region", { name: "Your unsaved edit" });
+  await expect(kept.getByRole("textbox", { name: "Your unsaved text" })).toHaveValue(mine);
+  await expect(body).toHaveValue(/An edit made elsewhere/);
+  await kept.getByRole("button", { name: "Use my text" }).click();
+  await expect(body).toHaveValue(mine);
+  await page.getByRole("button", { name: "Save page" }).click();
+  await expect(page.getByText("Page saved (a public revision)")).toBeVisible();
+  await expect(page.getByText(mine)).toBeVisible();
+  await page.getByRole("link", { name: "History", exact: true }).click();
+  const revisions = page.getByRole("list", { name: "Revisions" }).getByRole("listitem");
+  // the genesis, carol's edit, the concurrent edit and the redone one, in one chain
+  await expect(revisions).toHaveCount(4);
+  await expect(revisions.nth(1)).toContainText("A concurrent edit");
+});
+
 test("create a sequence, then reorder and remove its entries (engine-api.md §3.5)", async ({
   page,
 }) => {

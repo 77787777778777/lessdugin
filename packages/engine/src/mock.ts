@@ -8,7 +8,7 @@
 // logical clock that starts at the fixture's "now" and advances one second per write.
 
 import type { EngineApi } from "./api.ts";
-import { buildFixture, FIXTURE_NOW, FK, FORUM_URI } from "./mock/fixture.ts";
+import { ACTOR_DID, buildFixture, FIXTURE_NOW, FK, FORUM_URI } from "./mock/fixture.ts";
 import type {
   ActorRec,
   BaseReact,
@@ -151,6 +151,9 @@ export interface MockEngineOptions {
   signedOut?: boolean;
   /** Serve every present body/about as a textBlob in `raw`; `bodySource` still reads its text. */
   spilledBodies?: boolean;
+  /** The first wiki edit that names a `base` meets another participant's revision of the page,
+   * made since the editor loaded it, so it is refused as `wikiHeadMoved` (decision O-2). */
+  wikiRace?: boolean;
 }
 
 type Timer = ReturnType<typeof setTimeout>;
@@ -293,6 +296,7 @@ export class MockEngine implements EngineApi {
   private readonly holdMs: number;
   private readonly sendMs: number;
   private readonly spilledBodies: boolean;
+  private wikiRace: boolean;
   private ticks = 0;
   private readonly listeners = new Set<EventListener>();
   private readonly queue: EngineEvent[] = [];
@@ -306,6 +310,7 @@ export class MockEngine implements EngineApi {
     this.holdMs = opts.holdMs ?? OPINION_UNDO_WINDOW_MS;
     this.sendMs = opts.sendMs ?? 250;
     this.spilledBodies = opts.spilledBodies ?? false;
+    this.wikiRace = opts.wikiRace ?? false;
     if (opts.signedOut) this.s.active = null;
   }
 
@@ -2573,7 +2578,24 @@ export class MockEngine implements EngineApi {
     if (draft.name.trim() === "") throw err("invalid_input", "A wiki page needs a name.");
     // `base` (decision O-2, engine-api.md §3.5 `wiki_edit`): the head the author edited, refused
     // before enqueueing when the page's head is another revision (or the page has none)
-    const base = (draft as WikiDraft & { base?: AtUri }).base;
+    const base = draft.base;
+    if (this.wikiRace && base !== undefined && base === tags.get(slug)?.head) {
+      // another participant's edit of the page arrived since the editor loaded it
+      this.wikiRace = false;
+      const page = tags.get(slug);
+      const other = ACTOR_DID.carol === me ? ACTOR_DID.dan : ACTOR_DID.carol;
+      this.addWikiRevision(other ?? didFor("wiki-race"), forum, slug, base, {
+        name: page?.name ?? draft.name,
+        ...(page?.description !== undefined ? { description: page.description } : {}),
+        body: {
+          markdown: `${page?.page ?? ""}\n\nAn edit made elsewhere while this page was open.`,
+          media: [],
+        },
+        isTag: page?.isTag !== false,
+        summary: "A concurrent edit",
+      });
+      this.changed({ kind: "forum", uri: forum });
+    }
     const head = tags.get(slug)?.head;
     if (base !== undefined && base !== head) {
       const e = err("conflict", "This page changed since you opened it.");
@@ -2583,43 +2605,56 @@ export class MockEngine implements EngineApi {
     const parent = base ?? head;
     const d = clone(draft);
     return this.write(false, () => {
-      const t = this.tick();
-      const uri = atUri(
-        me,
-        COLL.wikiRevision,
-        `${this.fkOf(forum)}-${tid(t, this.s.nextId % 1024)}`,
-      );
-      const rev: WikiRevRec = {
-        uri,
-        cid: fakeCid(`${uri}#wiki`),
-        author: me,
-        forum,
-        slug,
-        parents: [],
-        name: d.name,
-        isTag: d.isTag,
-        parentTags: [...(d.parentTags ?? [])],
-        createdAtMs: t,
-      };
-      const parentRec = parent !== undefined ? this.s.wiki.get(parent) : undefined;
-      if (parentRec) rev.parents = [{ uri: parentRec.uri, cid: parentRec.cid }];
-      if (d.description !== undefined) rev.description = d.description;
-      if (d.body) rev.body = d.body.markdown;
-      if (d.summary !== undefined) rev.summary = d.summary;
-      this.s.wiki.set(uri, rev);
-      const prev = tags.get(slug);
-      const rec: TagRec = {
-        slug,
-        name: d.name,
-        unmergedEdits: prev?.unmergedEdits ?? 0,
-        head: uri,
-        isTag: d.isTag,
-      };
-      if (d.description !== undefined) rec.description = d.description;
-      if (d.body) rec.page = d.body.markdown;
-      tags.set(slug, rec);
-      return { uri, cid: rev.cid, topics: [{ kind: "forum", uri: forum }] };
+      const uri = this.addWikiRevision(me, forum, slug, parent, d);
+      return { uri, cid: this.s.wiki.get(uri)?.cid ?? "", topics: [{ kind: "forum", uri: forum }] };
     });
+  }
+
+  /** Writes a wiki revision of `slug` on `parent` and makes it the page's head. */
+  private addWikiRevision(
+    author: Did,
+    forum: AtUri,
+    slug: Slug,
+    parent: AtUri | undefined,
+    d: WikiDraft,
+  ): AtUri {
+    const tags = this.tagMap(forum);
+    const t = this.tick();
+    const uri = atUri(
+      author,
+      COLL.wikiRevision,
+      `${this.fkOf(forum)}-${tid(t, this.s.nextId % 1024)}`,
+    );
+    const rev: WikiRevRec = {
+      uri,
+      cid: fakeCid(`${uri}#wiki`),
+      author,
+      forum,
+      slug,
+      parents: [],
+      name: d.name,
+      isTag: d.isTag,
+      parentTags: [...(d.parentTags ?? [])],
+      createdAtMs: t,
+    };
+    const parentRec = parent !== undefined ? this.s.wiki.get(parent) : undefined;
+    if (parentRec) rev.parents = [{ uri: parentRec.uri, cid: parentRec.cid }];
+    if (d.description !== undefined) rev.description = d.description;
+    if (d.body) rev.body = d.body.markdown;
+    if (d.summary !== undefined) rev.summary = d.summary;
+    this.s.wiki.set(uri, rev);
+    const prev = tags.get(slug);
+    const rec: TagRec = {
+      slug,
+      name: d.name,
+      unmergedEdits: prev?.unmergedEdits ?? 0,
+      head: uri,
+      isTag: d.isTag,
+    };
+    if (d.description !== undefined) rec.description = d.description;
+    if (d.body) rec.page = d.body.markdown;
+    tags.set(slug, rec);
+    return uri;
   }
 
   private seqRec(uri: AtUri): SequenceRec {

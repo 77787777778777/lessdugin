@@ -267,6 +267,31 @@ describe("MockEngine writes", () => {
     });
   });
 
+  it("with wikiRace, meets another participant's revision on the first edit with a base", async () => {
+    const e = new MockEngine({ sendMs: 10, wikiRace: true });
+    const slug = "decision-theory";
+    const head = (await e.tag(FORUM_URI, slug)).head ?? "";
+    const events: EngineEvent[] = [];
+    e.subscribe((ev) => events.push(ev));
+    const draft = { name: "Decision theory", isTag: true, base: head };
+    await expect(e.wikiEdit(FORUM_URI, slug, draft)).rejects.toMatchObject({
+      code: "conflict",
+      detail: { kind: "wikiHeadMoved", base: head },
+    });
+    const moved = (await e.tag(FORUM_URI, slug)).head ?? "";
+    expect(moved).not.toBe(head);
+    const race = (await e.raw(moved)).record as { parents: { uri: string }[]; summary: string };
+    expect(race.parents.map((p) => p.uri)).toEqual([head]);
+    expect(moved.split("/")[2]).not.toBe((await e.activeAccount())?.did);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(events).toContainEqual({ kind: "changed", topics: [{ kind: "forum", uri: FORUM_URI }] });
+    // only once: the edit redone on the newer head is written
+    await e.wikiEdit(FORUM_URI, slug, { ...draft, base: moved });
+    await vi.advanceTimersByTimeAsync(50);
+    const next = (await e.tag(FORUM_URI, slug)).head ?? "";
+    expect((await e.raw(next)).record).toMatchObject({ parents: [{ uri: moved }] });
+  });
+
   // views.rs `tag_summary`: a page that exists but is not a tag (applicable = false) is no tag
   it("treats a page that is not a tag as no tag, and edits it on its head", async () => {
     const e = new MockEngine({ sendMs: 10 });

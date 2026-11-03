@@ -3,8 +3,11 @@
 // Every save is a new immutable revision. An edit starts from the canonical revision the page
 // shows (`TagView.head`, its record read with `raw`) and names it as `base` (decision O-2): the
 // engine writes it as the only parent and refuses the edit when the page's head has moved since,
-// so an edit made against an older head never silently replaces a newer one. A page with no
-// revision yet starts empty and is written without a parent. The engine opens only applicable
+// so an edit made against an older head never silently replaces a newer one. The editor keeps
+// the head it loaded while the author writes; when the head moves (or a save is refused), the
+// author's text stays, and "Reload the page" loads the newer version and keeps their text
+// beside it so they can redo the edit. A page with no revision yet starts empty and is written
+// without a parent. The engine opens only applicable
 // pages (`tag` is not_found for a page that is not a tag, views.rs `tag_summary`), so such a page
 // cannot be loaded here: the editor says so for a new address, and before a page stops being a tag.
 
@@ -34,6 +37,11 @@ export function isHeadMoved(e: unknown): boolean {
 export const HEAD_MOVED_MESSAGE =
   "This page changed since you opened it. Reload it to see the new version, then make your edit again.";
 
+/** Shown with the author's text after a reload. */
+export const CARRIED_NOTE =
+  "Your edit was not saved: the editor now shows the newer version of the page. Your text is " +
+  "kept here so you can make your edit again.";
+
 /** Shown for an address the engine has no tag page for: it may still have a page that is not a
  * tag, which the edit then continues (`wiki_edit` without a base names the current head). */
 export const NEW_PAGE_NOTE =
@@ -47,15 +55,25 @@ export const NOT_A_TAG_WARNING =
   "and this app cannot open it again: an edit here would start from an empty page.";
 
 /** The form (exported for its tests). `base`: the head the form started from, absent for a page
- * with no revision yet. */
+ * with no revision yet. `moved`: the page's head is no longer `base` (or a page appeared where
+ * there was none). `onReload` gets the author's current text, and `carried` is the text a
+ * reload kept. */
 export function WikiPageForm({
   slug,
   base,
   initial,
+  moved: headMoved = false,
+  onReload,
+  carried = null,
+  onDismissCarried,
 }: {
   slug: string;
   base: string | undefined;
   initial: WikiForm;
+  moved?: boolean;
+  onReload?: (mine: WikiForm) => void;
+  carried?: WikiForm | null;
+  onDismissCarried?: () => void;
 }) {
   const engine = useEngine();
   const qc = useQueryClient();
@@ -68,6 +86,7 @@ export function WikiPageForm({
     body: useId(),
     summary: useId(),
     notTag: useId(),
+    carried: useId(),
   };
   const [name, setName] = useState(initial.name);
   const [description, setDescription] = useState(initial.description);
@@ -96,8 +115,8 @@ export function WikiPageForm({
       setProblem("A page needs a name.");
       return;
     }
-    // `base` is a compatible dto/1 request field (engine-api.md §3.5 `wiki_edit`, O-2)
-    const draft: WikiDraft & { base?: string } = {
+    // `base`: the head this form started from (engine-api.md §3.5 `wiki_edit`, O-2)
+    const draft: WikiDraft = {
       name: name.trim(),
       isTag,
       parentTags,
@@ -140,8 +159,59 @@ export function WikiPageForm({
     }
   };
 
+  const mine = (): WikiForm => ({
+    name,
+    description,
+    markdown,
+    media: initial.media,
+    isTag,
+    parentTags,
+  });
+  const reload = (): void => {
+    if (onReload) onReload(mine());
+    else void qc.invalidateQueries({ queryKey: qk.tag(forum.uri, slug) });
+  };
+
   return (
     <form className={ui.stack} onSubmit={(e) => void submit(e)} noValidate>
+      {carried && (
+        <section className={ui.notice} aria-labelledby={ids.carried}>
+          <h3 id={ids.carried} className={ui.label}>
+            Your unsaved edit
+          </h3>
+          <p>{CARRIED_NOTE}</p>
+          {carried.name !== initial.name && (
+            <p>
+              Your name: <bdi>{cleanName(carried.name)}</bdi>
+            </p>
+          )}
+          {carried.description !== initial.description && (
+            <p>
+              Your description: <bdi>{carried.description}</bdi>
+            </p>
+          )}
+          <label className={ui.label}>
+            Your unsaved text
+            <textarea className={ui.input} rows={8} value={carried.markdown} readOnly />
+          </label>
+          <div className={ui.row}>
+            <button
+              type="button"
+              className={ui.button}
+              onClick={() => {
+                setName(carried.name);
+                setDescription(carried.description);
+                setMarkdown(carried.markdown);
+              }}
+            >
+              Use my text
+            </button>
+            <button type="button" className={ui.ghost} onClick={() => onDismissCarried?.()}>
+              Dismiss
+            </button>
+          </div>
+        </section>
+      )}
       <div className={ui.field}>
         <label className={ui.label} htmlFor={ids.name}>
           Name
@@ -235,14 +305,18 @@ export function WikiPageForm({
         <div className={ui.error} role="alert">
           <p>{problem}</p>
           {moved && (
-            <button
-              type="button"
-              className={ui.button}
-              onClick={() => void qc.invalidateQueries({ queryKey: qk.tag(forum.uri, slug) })}
-            >
+            <button type="button" className={ui.button} onClick={reload}>
               Reload the page
             </button>
           )}
+        </div>
+      )}
+      {headMoved && !moved && (
+        <div className={ui.notice} role="status">
+          <p>{HEAD_MOVED_MESSAGE}</p>
+          <button type="button" className={ui.button} onClick={reload}>
+            Reload the page
+          </button>
         </div>
       )}
       <p className={ui.small}>
@@ -260,6 +334,7 @@ export function WikiPageForm({
 
 export function WikiEditPage() {
   const engine = useEngine();
+  const qc = useQueryClient();
   const { forum } = useForumView();
   const { tag } = route.useParams();
   const active = useActiveAccount();
@@ -268,22 +343,52 @@ export function WikiEditPage() {
     queryFn: () => engine.tag(forum.uri, tag),
     retry: false,
   });
-  const head = view.data?.head;
+  // a page with no revision (or not a tag) is not a TagView: it is written as a new page
+  const notFound = view.isError && isEngineError(view.error) && view.error.code === "not_found";
+  // The head the form started from, kept until the author reloads: a newer head arriving while
+  // they write never replaces their text, and their save names this one as `base` (O-2).
+  const [pinned, setPinned] = useState<{ head: string | undefined; isNew: boolean } | null>(null);
+  const [carried, setCarried] = useState<WikiForm | null>(null);
+  if (pinned === null && (view.isSuccess || notFound)) {
+    setPinned({ head: view.data?.head, isNew: notFound });
+  }
+  const head = pinned?.head;
+  const isNew = pinned?.isNew ?? notFound;
   const record = useQuery({
     queryKey: qk.raw(head ?? ""),
     queryFn: () => engine.raw(head ?? ""),
     enabled: head !== undefined,
   });
+  const reload = async (mine: WikiForm): Promise<void> => {
+    try {
+      const fresh = await qc.fetchQuery({
+        queryKey: qk.tag(forum.uri, tag),
+        queryFn: () => engine.tag(forum.uri, tag),
+        staleTime: 0,
+        retry: false,
+      });
+      setCarried(mine);
+      setPinned({ head: fresh.head, isNew: false });
+    } catch (e) {
+      if (isEngineError(e) && e.code === "not_found") {
+        setCarried(mine);
+        setPinned({ head: undefined, isNew: true });
+      } else {
+        toasts.show({ message: errorMessage(e), tone: "error" });
+      }
+    }
+  };
   if (active.data === null) return <p className={ui.notice}>Sign in to edit wiki pages.</p>;
   if (!SLUG_RE.test(tag) || new TextEncoder().encode(tag).length > 64) {
     return <ErrorView error={new Error("Page addresses are lowercase words joined by hyphens.")} />;
   }
-  if (view.isPending || active.isPending) return <Loading />;
-  // a page with no revision (or not a tag) is not a TagView: it is written as a new page
-  const isNew = view.isError && isEngineError(view.error) && view.error.code === "not_found";
-  if (view.isError && !isNew) {
-    return <ErrorView error={view.error} title="This page cannot be edited" />;
+  if (pinned === null) {
+    if (view.isError && !notFound) {
+      return <ErrorView error={view.error} title="This page cannot be edited" />;
+    }
+    return <Loading />;
   }
+  if (active.isPending) return <Loading />;
   if (!isNew && head === undefined) {
     return (
       <ErrorView
@@ -309,6 +414,8 @@ export function WikiEditPage() {
       />
     );
   }
+  // the page's head is no longer the one the form started from (or a page appeared)
+  const moved = view.data !== undefined && view.data.head !== head;
   return (
     <section className={ui.page} aria-label={isNew ? "New wiki page" : "Edit wiki page"}>
       <h2 className={ui.sectionTitle}>
@@ -323,8 +430,17 @@ export function WikiEditPage() {
         )}
       </h2>
       {isNew && <p className={ui.notice}>{NEW_PAGE_NOTE}</p>}
-      {/* the form starts from `initial` once: a new head (after a reload) remounts it */}
-      <WikiPageForm key={head ?? "new"} slug={tag} base={head} initial={initial} />
+      {/* the form starts from `initial` once: a reload pins the new head and remounts it */}
+      <WikiPageForm
+        key={head ?? "new"}
+        slug={tag}
+        base={head}
+        initial={initial}
+        moved={moved}
+        onReload={(mine) => void reload(mine)}
+        carried={carried}
+        onDismissCarried={() => setCarried(null)}
+      />
     </section>
   );
 }
