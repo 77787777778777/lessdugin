@@ -413,6 +413,53 @@ fn comments_under_a_missing_root_are_neither_found_nor_listed() {
     assert!(!user().recent_comments.iter().any(|c| c.uri == comment));
 }
 
+/// A spilled body whose source is not in memory (not fetched yet, or not read by a view since)
+/// is matched and shown by the record's own excerpt, as lists show it, and by the source's P and
+/// P_x once a view has read it (`lfm-1.md` §12; the verifier found the text said the excerpt
+/// was cut from P_x).
+#[test]
+fn a_pending_spilled_body_is_searched_by_its_excerpt() {
+    use lessdugin_core::limits::BODY_BLOB_RETRY_MS;
+    use lessdugin_lexicon::collection::nsid;
+    let w = World::new();
+    let at = w.bob.host.now_ms();
+    let blob = w.bob.account.upload_blob(
+        b"# Whole body\n\nOnly the zqsource word.\n".to_vec(),
+        "text/markdown",
+    );
+    let created = lessdugin_atp::syntax::Datetime::from_millis(at).unwrap();
+    let value = serde_json::json!({
+        "$type": nsid::POST, "forum": w.forum, "title": "Long",
+        "body": {"$type": nsid::MARKDOWN, "profile": "lfm/1", "textBlob": blob},
+        "excerpt": "The zqexcerpt words", "createdAt": created.as_str(),
+    });
+    let tid = lessdugin_testkit::repo::tid_at_ms(at);
+    let rkey = lessdugin_lexicon::keys::post_rkey(&w.forum, tid.as_str()).unwrap();
+    w.bob.account.put(nsid::POST, &rkey, &value);
+    let uri = w.bob.account.uri(nsid::POST, &rkey);
+    w.tick();
+
+    let alice = &w.alice;
+    alice.host.hold_blob_fetches(true);
+    let (text, highlights) =
+        hit_of(&alice.search(&w.forum, "zqexcerpt"), &uri).expect("the excerpt is matched");
+    assert_eq!(text, "Long The zqexcerpt words");
+    assert_eq!(highlighted(&text, &highlights), ["zqexcerpt"]);
+    assert!(hit_of(&alice.search(&w.forum, "zqsource"), &uri).is_none());
+
+    alice.host.hold_blob_fetches(false);
+    alice.host.advance_ms(BODY_BLOB_RETRY_MS + 1);
+    // search reads no blob itself: a view does
+    assert!(hit_of(&alice.search(&w.forum, "zqsource"), &uri).is_none());
+    let post = block_on(alice.engine.get_post(&uri)).unwrap();
+    assert_eq!(post.body.text, "Whole body Only the zqsource word.");
+    let (text, highlights) =
+        hit_of(&alice.search(&w.forum, "zqsource"), &uri).expect("the fetched source");
+    assert_eq!(text, "Long Whole body Only the zqsource word.");
+    assert_eq!(highlighted(&text, &highlights), ["zqsource"]);
+    assert!(hit_of(&alice.search(&w.forum, "zqexcerpt"), &uri).is_none());
+}
+
 /// Matching and snippets are linear in the body (security-web-1, robustness-7). A body made of
 /// one short word repeated used to cost a count of the whole folded prefix per match, so k
 /// matches cost O(k · |P|) (78 ms for a 100 kB comment, 7.8 s for a 1 MB post). Eight times the

@@ -1144,7 +1144,7 @@ lcp_prefix(a, b) = length of the longest common prefix of a and b
 - a snippet holds at most 160 code points of title + P_x, up to 60 of them before the first match of any term, with `…` where text is cut off;
 - highlight ranges are Unicode code-point offsets into the snippet (a leading `…` counts as one), one per occurrence of a term inside it, never on an added `…`;
 - when no term occurs in title + P_x (every match lies in spoiler content), the item is still a hit and its snippet is the start of title + P_x, with no highlights;
-- a spilled body whose source is not in memory uses its rendered excerpt, which is cut from P_x too, in place of P_x.
+- a spilled body whose source the client does not hold in memory (not fetched yet, §1.3, or not read by a view since; search fetches no blob itself) is matched and shown by the record's own `excerpt`, as lists show it, in place of P and P_x (writers compute that excerpt from P_x, §10.4, but it is the author's text); once a view has read the source, by its P and P_x. A body that cannot be shown (an unknown type, or a spilled source that is unverified, missing or not renderable) has an empty P and P_x.
 
 ---
 

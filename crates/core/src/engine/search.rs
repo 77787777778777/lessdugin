@@ -278,8 +278,9 @@ fn joined(title: &str, text: &str) -> String {
 }
 
 /// The hit of item `uri` (title `title`, rendered `body`): matched over the title and P, its
-/// snippet cut from the title and P_x of the body's source. Without the source in memory (a
-/// spilled body), the rendered excerpt stands in for P_x: it is cut from P_x too.
+/// snippet cut from the title and P_x of the body's source. A spilled body whose source is not
+/// in memory (search fetches no blob) renders pending, with the record's own excerpt as its
+/// text: that excerpt is matched and shown, as lists show it.
 fn hit(
     views: &Views<'_>,
     uri: &str,
