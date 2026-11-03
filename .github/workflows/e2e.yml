@@ -59,7 +59,8 @@ jobs:
   # build), and the M2 parity scenario (docs/plan.md §4.2, text subset: alice with the CLI, bob
   # in the SPA, carol in the TUI; the three clients' anonymous views must be byte-identical).
   # Any CSP or Trusted Types violation fails. `cargo xtask e2e --web` builds the engine wasm,
-  # the e2e SPA, the CLI and the TUI parity driver first.
+  # the e2e SPA, the CLI, the TUI parity driver, the devnet's CORE+ services and the indexer
+  # first (the scenario's assisted and indexer-on variants use the last two).
   web:
     # Playwright 1.56.1 refuses to run on ubuntu-26.04 ("Playwright does not support chromium on
     # ubuntu26.04-x64") and `ubuntu-latest` now resolves there, so pin the last LTS it supports.
