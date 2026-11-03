@@ -9,8 +9,8 @@ expression: list
   "filter": "frontpage",
   "items": [
     {
-      "uri": "at://did:plc:ochphg43iudrrgiqczqt6zeb/online.7778777.lessdugin.temp.post/w5cs3cry7ban-3m2qrwsmq4lqi",
-      "cid": "bafyreialv2x4viycjxeaqgcka7mr6qbuq332ord5tvn72dqnwbkg3xvobi",
+      "uri": "at://did:plc:ochphg43iudrrgiqczqt6zeb/online.7778777.lessdugin.temp.post/w5cs3cry7ban-3m2qrwsl7c3qi",
+      "cid": "bafyreia7hw6tj5t536yakawbvx35qck3ynlaaghznfk555vj4y3a7awvaq",
       "forum": "at://did:plc:whanakmuiogult5m5wu7xbj4/online.7778777.lessdugin.temp.forum/meta",
       "author": {
         "did": "did:plc:ochphg43iudrrgiqczqt6zeb",
@@ -25,8 +25,8 @@ expression: list
       "tier": "frontpage",
       "pinned": false,
       "locked": false,
-      "createdAtMs": 1760000180050,
-      "tRankMs": 1760000180050,
+      "createdAtMs": 1760000180000,
+      "tRankMs": 1760000180000,
       "commentCount": 0,
       "score": {
         "score": 1,
@@ -42,7 +42,7 @@ expression: list
     },
     {
       "uri": "at://did:plc:whanakmuiogult5m5wu7xbj4/online.7778777.lessdugin.temp.post/w5cs3cry7ban-3m2qrta53s3hj",
-      "cid": "bafyreicn2rnqobesrmlszmllurpixq4ztezwgvkewl5sdpg6l6fuhojkpa",
+      "cid": "bafyreigfnufqlho76bpvugfo54asmpfshvir3muv2ej2ecf5lnmhe6ilta",
       "forum": "at://did:plc:whanakmuiogult5m5wu7xbj4/online.7778777.lessdugin.temp.forum/meta",
       "author": {
         "did": "did:plc:whanakmuiogult5m5wu7xbj4",
@@ -60,7 +60,7 @@ expression: list
       "createdAtMs": 1760000060000,
       "tRankMs": 1760000060000,
       "commentCount": 3,
-      "lastCommentAtMs": 1760000420050,
+      "lastCommentAtMs": 1760000420000,
       "score": {
         "score": 1,
         "agreement": 0,
