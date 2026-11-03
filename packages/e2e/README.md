@@ -22,6 +22,7 @@ cargo xtask e2e --rust     # the Rust e2e tests
 cargo xtask e2e --web      # the SPA's devnet Playwright suite, including the parity scenario
 cargo xtask e2e --parity   # only the M2 parity scenario
 cargo xtask e2e --web --no-build   # skip the builds (they must be current)
+cargo xtask e2e --cold-start   # opt in: the M6 cold paint (scripts/m6-cold-start.sh)
 ```
 
 You need `pnpm install`, Chromium for Playwright and, for `--web` and `--parity`, the wasm-bindgen
@@ -42,6 +43,7 @@ them, so it stays offline. The list is `RUST_E2E` in `xtask/src/main.rs`:
 | Package | Test | What |
 |---|---|---|
 | `lessdugin-testkit` | `e2e_devnet` | identity resolution, the login binding, `verify` |
+| `lessdugin-testkit` (feature `http`) | `e2e_devnet_services` | the devnet's CORE+ services (below) against real writes: short Constellation and relay pages that still carry a cursor, both Jetstream wires, the noise dropped by the core's filter |
 | `lessdugin-native` | `devnet` | the native host against the reference PDS |
 | `lessdugin` | `e2e_devnet` | app-password and OAuth logins (headless Chromium approves at the PDS), concurrent refresh |
 | `lessdugin` | `e2e_forum` | the CLI forum scenario, and parity between two CLI devices |
@@ -72,7 +74,24 @@ First, `cargo xtask e2e --web` builds these:
 2. the e2e SPA (`pnpm --filter @lessdugin/web run build:e2e`);
 3. the CLI, with `LESSDUGIN_WEB_DIST=web/dist-e2e` so that it embeds the e2e SPA and
    `bridge.spec.ts` runs. The next plain `cargo build -p lessdugin` embeds `web/dist` again;
-4. the TUI parity driver (`cargo build -p lessdugin-tui --example parity_driver`).
+4. the TUI parity driver (`cargo build -p lessdugin-tui --example parity_driver`);
+5. the devnet's CORE+ services (`cargo build -p lessdugin-testkit --features http --example
+   devnet_services`) and `lessdugin-indexer`, for the parity scenario's variants.
+
+## The devnet's CORE+ services
+
+`crates/testkit/examples/devnet_services.rs --pds <url> --json <file>` follows the devnet PDS's
+firehose (`com.atproto.sync.subscribeRepos` from sequence 0) and serves, on loopback:
+
+- a mini-Jetstream with both wires on one listener (v1 `/subscribe` with `requireHello` and
+  `options_update`, v2 `subscribeEvents`), whose log also carries identity and account events of
+  three unrelated DIDs (`NOISE_DIDS`), every 500 ms;
+- a Constellation (`getBacklinks`, `getBacklinksCount`) and a relay (`listReposByCollection`)
+  whose pages hold one entry and still carry a cursor, the last one to an empty final page.
+
+It logs every request (`GET /_devnet/log`), so a test can tell which client contacted which
+service; `GET /_devnet/record?uri=` says when the mirror holds a record. The services give hints
+only: no frame carries record text.
 
 ## The M2 parity scenario
 
@@ -86,7 +105,25 @@ the same fixed time `t` (`engine-api.md` §2.1: `LESSDUGIN_PARITY_NOW_MS` for th
 | 1 | alice | CLI | `forum create --mode approval --frontpage`, then `approve bob.test carol.test` |
 | 2 | bob | SPA | OAuth sign-in, Join (the public-membership dialog), a new post |
 | 3 | carol | TUI | opens the forum, then the post, presses `c` and writes the comment in `$EDITOR` |
+| 4 | carol | TUI | votes, agrees and reacts through the keys |
+| 5 | alice | CLI | hides carol's comment and pins the post |
 | 6 | bob | SPA | edits the title and body with a summary: `applyWrites [revision, update]` |
+| 6c, 6b | alice | SPA, CLI | applies the wiki-backed tag; pins the edited post again |
+| 6d | a newcomer | PDS API | a fresh account joins and comments on bob's post |
+
+The scenario runs four times: approval and open mode, each with `sources` direct and assisted.
+Every client of both source variants is configured with the same CORE+ services above (the
+relay, the Constellation and the devnet profile's Jetstream in `config.toml`; the SPA's source
+options); only `sources` differs. In assisted mode every reader must contact them; in direct
+mode nothing may, during the whole run. The newcomer is what only CORE+ can introduce: in open
+mode its comment is in every assisted reader's thread (collapsed, as a new user's) and in no
+direct reader's; in approval mode it is an applicant, whose content no reader is shown.
+
+In the assisted variants `lessdugin-indexer --poll <pds> --forum <forum>` follows the devnet from
+step 1. After the readers above, three more fresh readers (CLI, TUI, SPA) are configured with it
+and open the forum with no prior sync: the TUI and the SPA hydrate their cold page from its
+ordering and proof bundles. Their views must equal the indexer-off views byte for byte once the
+provenance badges (`verified`, `hint`, `stale`; decision U-D2) are removed.
 
 The TUI runs as `crates/tui/examples/parity_driver.rs`, which drives the headless TUI
 (`lessdugin_tui::Headless`). It opens the engine the way `lessdugin --dev tui` does: the data
@@ -135,15 +172,30 @@ To run the scenario by hand against a running devnet:
 
 ```sh
 cargo build -p lessdugin && cargo build -p lessdugin-tui --example parity_driver
+cargo build -p lessdugin-testkit --features http --example devnet_services
+cargo build -p lessdugin-indexer --bin lessdugin-indexer
 cargo xtask wasm && pnpm --filter @lessdugin/web run build:e2e
 cd web && LESSDUGIN_DEVNET_JSON=/path/to/devnet.json PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers \
   pnpm exec playwright test -c e2e/devnet/playwright.config.ts scenario.spec.ts
 ```
 
-`LESSDUGIN_BIN` and `LESSDUGIN_TUI_DRIVER` override the binaries. Their defaults are
-`target/debug/lessdugin` and `target/debug/examples/parity_driver`. When a binary is missing,
+`LESSDUGIN_BIN`, `LESSDUGIN_TUI_DRIVER`, `LESSDUGIN_DEVNET_SERVICES` and `LESSDUGIN_INDEXER_BIN`
+override the binaries. Their defaults are `target/debug/lessdugin`,
+`target/debug/examples/parity_driver`, `target/debug/examples/devnet_services` and
+`target/debug/lessdugin-indexer`. When a binary is missing,
 the scenario is skipped, but it fails instead under CI or with `LESSDUGIN_PARITY_REQUIRED=1`,
 which `cargo xtask e2e` sets.
+
+## The M6 cold start (`--cold-start`)
+
+`cargo xtask e2e --cold-start` runs `scripts/m6-cold-start.sh`: the signed loopback fixture
+(`crates/indexer/examples/cold_start_devnet.rs`: 2,000 participants on 40 FakeNet PDSes, the
+owner's post and one post by each of 30 members) is pre-indexed (minutes; outside the timing),
+then `web/e2e/cold-start/cold-start.spec.ts` has three fresh Chromium contexts paint the forum's
+first page (20 posts by 20 distinct participants) and requires each under 2 s, with a proof for
+every post, a head check and a DID document for every author on screen, and no post point
+fetch. The results go to `test-results/m6-cold-start/results.json`. It is not part of a bare
+`cargo xtask e2e`; `.github/workflows/e2e.yml` runs it nightly (job `cold-start`).
 
 ## Other M2 acceptance checks outside this package
 

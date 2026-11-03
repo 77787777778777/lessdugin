@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Real signed-loopback M6 cold-start acceptance. Pre-indexing is intentionally outside the
 # browser timing and can take several minutes. No production endpoint is configured.
+# Run by `cargo xtask e2e --cold-start` (and nightly by .github/workflows/e2e.yml, job
+# cold-start); see packages/e2e/README.md.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 export LD_LIBRARY_PATH="$(dirname "$(gcc -print-file-name=libstdc++.so.6)")${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
