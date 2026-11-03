@@ -1417,6 +1417,7 @@ fn wiki_verb(rest: &[&str]) -> Parsed {
         is_tag: true,
         parent_tags: Vec::new(),
         summary: None,
+        base: None,
     };
     let mut named = false;
     let mut i = 2;

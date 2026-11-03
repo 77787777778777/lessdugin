@@ -74,7 +74,7 @@ pub enum ExportScope {
 /// The `loc` families an import may write (see the module docs): the lists and marks of
 /// `threat-model.md` PRIV-10, follows, drafts and the validated settings. The notifications are
 /// exported but never imported: they are computed again on this device.
-pub const IMPORTABLE: [&str; 12] = [
+pub const IMPORTABLE: [&str; 13] = [
     "alias",
     "bookmark",
     "draft",
@@ -84,6 +84,7 @@ pub const IMPORTABLE: [&str; 12] = [
     "mute",
     "read",
     "rejected",
+    "seqpos",
     "setting",
     "sub",
     "unfollow",
@@ -195,6 +196,13 @@ fn importable<'a>(parts: &'a [Part], v: &[u8]) -> Option<&'a str> {
         if STRICTER_ONLY.iter().any(|(sk, sv)| *sk == k && *sv != v) {
             return None;
         }
+    }
+    // a "continue reading" position (`("loc","seqpos",sequence)`) as `sequence()` reads it
+    if tag == "seqpos"
+        && (parts.len() != 3
+            || crate::store::row::decode::<super::organisation::ReadingRow>(v).is_err())
+    {
+        return None;
     }
     // a draft of an account, that `drafts()` reads and a save would have stored
     if tag == "draft"

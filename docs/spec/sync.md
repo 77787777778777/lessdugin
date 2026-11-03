@@ -1321,6 +1321,10 @@ fetch_media(did, blobRef, policy):
      CidMismatch → discard; strike against the host; show "media failed verification"
      HTTP 400 "Blob not found" → missing: not retried (ADR 0005); nothing is stored, and a
                                   stored CID is never asked for (§12.2), so there is no copy to purge
+                                  (only a 400 naming BlobNotFound, or InvalidRequest as the reference PDS
+                                  answers "Blob not found"; any other 400, such as RepoNotFound,
+                                  RepoDeactivated, RepoTakendown or RepoSuspended (the repo's status,
+                                  §3.4), or an unknown name, is not a missing blob: a spilled body stays pending)
   sniff = sniff_type(Host::blob_read(h.cid, 0, 4096))
   require normalise(declared blobRef.mimeType) = normalise(sniff) ∧ that type is on the display allowlist (§11.2)
           else: download card only
@@ -1420,7 +1424,7 @@ pub enum BlobError     { Host(HostError), Status(u16, Option<String>), TooLarge,
 ```
 
 - `fetch_blob` sends `GET <pds>/xrpc/com.atproto.sync.getBlob?did=<did>&cid=<cid>` (Anon, no redirects), streams the body, counts bytes against `max_bytes`, hashes it with sha256, compares the digest with the raw-codec CID, and only on a match stores the bytes under the CID in the host's blob storage and returns a handle. On any failure nothing is stored. An already stored CID returns its handle without a request.
-- **One download per CID at a time.** A `fetch_blob` of a CID being downloaded awaits that download instead of starting another, and a caller that stops awaiting (dropping the future, as the engine does after `BODY_BLOB_WAIT_MS` for a spilled body, `limits.md` §5) does not cancel it: natively the download is a detached task, capped by `BLOB_TOTAL_TIMEOUT_MS`; in the browser it is the running `fetch`. So the stored copy is there for the next caller, and a slow body is never restarted and aborted on every view. The first caller's `max_bytes` caps the download; the core holds a stored copy to its own declaration (§11.1).
+- **One download per copy at a time.** A `fetch_blob` of a copy (the same `pds`, `did` and `cid`) being downloaded awaits that download instead of starting another, and a caller that stops awaiting (dropping the future, as the engine does after `BODY_BLOB_WAIT_MS` for a spilled body, `limits.md` §5) does not cancel it: natively the download is a detached task, capped by `BLOB_TOTAL_TIMEOUT_MS`; in the browser it is the running `fetch`. So the stored copy is there for the next caller, and a slow body is never restarted and aborted on every view. The first caller's `max_bytes` caps the download; the core holds a stored copy to its own declaration (§11.1). A fetch of the same CID from another author or PDS never joins it: that author's PDS may fail (HTTP 400, a CID mismatch, a stall) where the other's succeeds. Likewise the engine keeps only a verified spilled body by its bare CID; a failure (missing, failed verification, too large, unreadable) or a pending fetch is kept per (author, CID), so one author's failing copy never changes another author's body (`engine-api.md` §3.4 `body_source`, §3.8).
 - `blob_open` returns the handle of a stored CID; `blob_read` returns at most 1,048,576 bytes from an offset; `blob_delete` removes the stored bytes.
 - The browser UI obtains object URLs from the host's blob storage by CID, outside the core.
 

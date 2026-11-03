@@ -28,9 +28,11 @@ use social_gen::{
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::wasm_bindgen_test as test;
 
-/// The parity digest per namespace (recorded natively; last re-recorded at M6 for the reviewed
-/// M4/M5 fold projections and parity-mode read-mark exclusion). Both targets produced this same
-/// digest before the baseline was updated; this is not a native/wasm divergence.
+/// The parity digest per namespace (recorded natively). Last re-recorded in e570a55 for the
+/// `social.md` §14 sequence library that 0e5e421 implemented (`ForumView.library` went from
+/// pending to computed); the golden lagged behind that fold change from 0e5e421 to e570a55, so
+/// P9 failed natively on those commits. No other fold change moved it, and both targets produced
+/// this digest: it is not a native/wasm divergence.
 const GOLDEN: &[(&str, &str)] = &[
     (
         "online.7778777.lessdugin.temp",

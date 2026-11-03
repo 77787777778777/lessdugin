@@ -485,8 +485,8 @@ pub async fn call<H: Host>(engine: &Engine<H>, op: &str, a: &str) -> Result<Stri
                 .await?)
         }
         "getPost" => {
-            let (uri,): (String,) = args(op, a)?;
-            out(&engine.get_post(&uri).await?)
+            let (uri, sequence): (String, Option<String>) = padded(op, a, 2)?;
+            out(&engine.get_post_in(&uri, sequence.as_deref()).await?)
         }
         "backlinks" => {
             let (uri,): (String,) = args(op, a)?;

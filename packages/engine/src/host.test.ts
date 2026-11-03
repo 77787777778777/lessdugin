@@ -93,6 +93,36 @@ describe("fetchBlob through the JS host", () => {
     expect(requests).toBe(1);
   });
 
+  it("does not join another author's copy of the CID (review m3m4-continuation-1)", async () => {
+    const data = new TextEncoder().encode("bob's spilled body");
+    const cid = rawCid(data);
+    const MALLORY_PDS = "https://mallory.example.com";
+    const hits: string[] = [];
+    let fail: (() => void) | null = null;
+    // mallory's PDS answers 400 when the test releases it; bob's serves the bytes
+    const fetchFn = (async (input: RequestInfo | URL) => {
+      const url = String(input instanceof Request ? input.url : input);
+      hits.push(new URL(url).origin);
+      if (url.startsWith(MALLORY_PDS)) {
+        await new Promise<void>((r) => {
+          fail = r;
+        });
+        return new Response(JSON.stringify({ error: "InvalidRequest" }), { status: 400 });
+      }
+      return new Response(data, { status: 200 });
+    }) as typeof fetch;
+    const blobs = new MemoryBlobStore();
+    const h = host(fetchFn, blobs);
+    const failing = h.fetchBlob(MALLORY_PDS, "did:plc:mallory", cid, 1024);
+    const bobs = h.fetchBlob(PDS, DID, cid, 1024);
+    expect(bobs).not.toBe(failing);
+    expect(await bobs).toEqual({ cid, size: data.length, locator: `mem:${cid}` });
+    while (fail === null) await new Promise((r) => setTimeout(r, 1));
+    (fail as unknown as () => void)();
+    await expect(failing).rejects.toMatchObject({ kind: "httpStatus" });
+    expect(hits.sort()).toEqual([MALLORY_PDS, PDS].sort());
+  });
+
   it("forgets a download that failed, so the next call tries again", async () => {
     let requests = 0;
     const fetchFn = (async () => {

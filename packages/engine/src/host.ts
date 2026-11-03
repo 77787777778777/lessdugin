@@ -5,9 +5,11 @@
 //
 // - `http(...)`: `Target::Anon` requests through `fetchAnon` (fetch.ts); `Target::UserPds`
 //   requests through `userPds` (the worker: the main thread's AuthBridge);
-// - `fetchBlob(...)`: blobs.ts, one download per CID at a time (sync.md §12.2): a second call
-//   for a CID being downloaded awaits the same promise, and a caller that stops waiting (the
-//   core's `BODY_BLOB_WAIT_MS` for a spilled body) neither stops it nor starts another;
+// - `fetchBlob(...)`: blobs.ts, one download per copy (PDS, DID, CID) at a time (sync.md
+//   §12.2): a second call for a copy being downloaded awaits the same promise, and a caller
+//   that stops waiting (the core's `BODY_BLOB_WAIT_MS` for a spilled body) neither stops it nor
+//   starts another; another author's copy of the CID never joins it (it may fail where this
+//   one succeeds);
 //   `blobOpen`, `blobRead`, `blobDelete`: the same store, by CID (`blobRead` slices the stored
 //   `Blob`, so only the window it returns enters wasm memory);
 // - `websocket(url, maxBytes)`: a native browser WebSocket, with one bounded-message FIFO per
@@ -256,7 +258,7 @@ async function openWebSocket(
 
 export function createJsHost(deps: HostDeps): JsHostImports {
   const now = deps.now ?? (() => Date.now());
-  /** The downloads in flight, by CID (see the module comment). */
+  /** The downloads in flight, by copy (PDS, DID, CID; see the module comment). */
   const downloads = new Map<string, Promise<BlobHandleValue>>();
   return {
     async http(method, url, account, path, headers, body, maxBytes, timeoutMs, redirects) {
@@ -293,7 +295,10 @@ export function createJsHost(deps: HostDeps): JsHostImports {
       }
     },
     fetchBlob(pds, did, cid, maxBytes) {
-      const running = downloads.get(cid);
+      // one download per copy (PDS, DID, CID): another author's copy of the CID may fail where
+      // this one succeeds, so it never joins this one (sync.md §12.2)
+      const key = `${pds}\n${did}\n${cid}`;
+      const running = downloads.get(key);
       if (running) return running;
       const p: Promise<BlobHandleValue> = fetchBlob(
         { ...deps.fetch, store: deps.blobs },
@@ -306,9 +311,9 @@ export function createJsHost(deps: HostDeps): JsHostImports {
           throw asHostError(e);
         })
         .finally(() => {
-          if (downloads.get(cid) === p) downloads.delete(cid);
+          if (downloads.get(key) === p) downloads.delete(key);
         });
-      downloads.set(cid, p);
+      downloads.set(key, p);
       return p;
     },
     async blobOpen(cid) {

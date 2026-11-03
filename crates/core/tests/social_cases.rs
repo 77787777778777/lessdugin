@@ -20,6 +20,7 @@
 //! | `malformed_*`, `reserved_key_*` | §1.1 malformed inputs are rejected; §20.1 item 43 |
 //! | `co5_*` | CO5 compares only a valid root (§20.1 item 51) |
 //! | `hot_bits_*` | §1.3 rule 3: `libm::pow` bit patterns are pinned |
+//! | `sequence_library_*` | §14 library eligibility (V1–V5, deleted), the gate or a forum pin, and the order `(pin, score, t_rank, uri)`, with explicit expected results: no vector kind covers the library, and the reference model's `sequences.py` is still a stub |
 //!
 //! Any namespace build: `cargo test -p lessdugin-core --test social_cases`.
 
@@ -971,6 +972,117 @@ fn sequence_library_orders_eligible_sequences_and_preserves_chapter_entries() {
     );
     let v = run(&f, &Query::default());
     assert_eq!(v.library.as_ref().unwrap().listed, vec![s2, s5, s4, s3]);
+}
+
+/// §14 with explicit library results (no fold vector covers the library yet; the reference
+/// model's `sequences.py` is still a stub). A pinned below-gate sequence is listed first; an
+/// unpinned below-gate one is eligible but unlisted; a higher score beats a newer `t_rank`;
+/// equal (pin, score) go to the newer `t_rank`, then to the smaller uri; a sequence hidden by
+/// V1–V5 (a forum hide, a banned author, a `sequence` restriction) is not eligible even when
+/// pinned, and a deleted one is no input.
+#[test]
+fn sequence_library_explicit_results() {
+    let mut f = forum("approval", json!({"gates": {"sequence": 1000}}));
+    let (owner, admin, a, b, c, d) = (user(0), user(1), user(3), user(4), user(5), user(6));
+    for x in [&a, &b, &d] {
+        grant(&mut f, x);
+    }
+    // approval mode: a banned member still participates (§3.1), so V4 applies
+    f.membership(&c);
+    let p = post(&mut f, &a, 10);
+    let sequence = |f: &mut Forum, author: &str, minute: i64| {
+        let uri = f.ranged_uri(author, "sequence", minute);
+        let v = json!({
+            "$type": format!("{NS}.sequence"),
+            "forum": f.uri,
+            "title": format!("Sequence {minute}"),
+            "createdAt": at(minute),
+            "chapters": [{"posts": [p]}],
+        });
+        f.put(&uri, Kind::Sequence, v, true, Forum::seen(minute))
+            .unwrap();
+        uri
+    };
+    let pin = json!({"$type": ty("pin"), "scope": "forum", "pinned": true});
+    // below the gate (a and b are seeds without 1,000 karma); b's is pinned
+    let below = sequence(&mut f, &a, 20);
+    let pinned = sequence(&mut f, &b, 21);
+    act(&mut f, &owner, &pinned, pin.clone(), 22);
+    // authorities pass the gate: the oldest one gets the votes
+    let voted = sequence(&mut f, &owner, 25);
+    vote(&mut f, &admin, &voted, "up");
+    vote(&mut f, &a, &voted, "up");
+    let older = sequence(&mut f, &owner, 30);
+    let newer = sequence(&mut f, &admin, 31);
+    // the same minute and first-seen time: the same `t_rank`, ordered by uri
+    let tie_admin = sequence(&mut f, &admin, 40);
+    let tie_owner = sequence(&mut f, &owner, 40);
+    // hidden by V1–V5, each also pinned
+    let hidden = sequence(&mut f, &admin, 50);
+    act(&mut f, &owner, &hidden, json!({"$type": ty("hide")}), 51);
+    let banned = sequence(&mut f, &c, 52);
+    act(
+        &mut f,
+        &owner,
+        &c,
+        json!({"$type": ty("access"), "level": "banned"}),
+        53,
+    );
+    let restricted = sequence(&mut f, &d, 54);
+    let restrict = json!({"$type": ty("restrict"), "capabilities": ["sequence"]});
+    act(&mut f, &owner, &d, restrict, 55);
+    for s in [&hidden, &banned, &restricted] {
+        act(&mut f, &owner, s, pin.clone(), 56);
+    }
+    // deleted: a tombstone, not a record of the input
+    let gone = f.ranged_uri(&owner, "sequence", 60);
+    let gone_value = json!({"$type": format!("{NS}.sequence"), "forum": f.uri, "title": "Gone",
+        "createdAt": at(60), "chapters": []});
+    f.ghost(&gone, &gone_value, true);
+
+    let v = run(&f, &Query::default());
+    let lib = v.library.as_ref().unwrap();
+    let scores = v.scores.as_ref().unwrap();
+    assert!(
+        scores[&voted].score > scores[&newer].score,
+        "the votes count"
+    );
+    assert_eq!(scores[&older].score, scores[&newer].score);
+    assert_eq!(scores[&tie_admin].score, scores[&tie_owner].score);
+    assert_eq!(v.times[&tie_admin].t_rank, v.times[&tie_owner].t_rank);
+    assert!(v.times[&newer].t_rank > v.times[&older].t_rank);
+    // user(0) < user(1) as DIDs, so the owner's uri is the smaller one
+    assert!(tie_owner < tie_admin);
+    assert_eq!(
+        lib.eligible,
+        BTreeSet::from([
+            below.clone(),
+            pinned.clone(),
+            voted.clone(),
+            older.clone(),
+            newer.clone(),
+            tie_admin.clone(),
+            tie_owner.clone(),
+        ])
+    );
+    assert_eq!(lib.entries[&below], vec![p.clone()]);
+    assert_eq!(
+        lib.listed,
+        vec![pinned, voted, tie_owner, tie_admin, newer, older],
+        "pinned first, then score, then the newer t_rank, then the smaller uri"
+    );
+    for s in [&below, &hidden, &banned, &restricted, &gone] {
+        assert!(!lib.listed.contains(s), "{s} is not listed");
+    }
+    assert!(!lib.entries.contains_key(&hidden));
+    let hidden_by = |s: &str| match v.v1_v5.get(s) {
+        Some(Some(State::Hidden(r))) => Some(r.clone()),
+        _ => None,
+    };
+    assert!(matches!(hidden_by(&hidden), Some(HiddenReason::Removed(_))));
+    assert_eq!(hidden_by(&banned), Some(HiddenReason::Banned));
+    assert_eq!(hidden_by(&restricted), Some(HiddenReason::Restricted));
+    assert_eq!(hidden_by(&below), None);
 }
 
 /// §0.4: CIDs compare by their canonical string form, so `B` + upper-case base32 (which G2

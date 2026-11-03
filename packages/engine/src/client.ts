@@ -101,6 +101,7 @@ export const OP_ARITY: Readonly<Record<string, number>> = Object.freeze({
   syncForum: 2,
   syncThread: 2,
   recentDiscussion: 3,
+  getPost: 2,
   getThread: 2,
   edit: 3,
   render: 3,

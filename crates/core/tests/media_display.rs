@@ -248,6 +248,46 @@ fn a_blob_the_pds_does_not_have_is_missing() {
 }
 
 #[test]
+fn media_of_a_repo_that_is_not_served_now_is_not_missing() {
+    // sync.md §11.1: only "Blob not found" is a missing blob. load_media took every getBlob
+    // 400 for one, so a deactivated repo's media (or a 400 naming an error this client does not
+    // know) read as gone for good (review m3m4-continuation-1)
+    let mut n = Net::new();
+    let bob = n
+        .net
+        .add_pds("bob.example.com")
+        .add_account("bob.example.com");
+    let f = forum(&n, &bob);
+    let blob = bob.upload_blob(tiny_png(9), "image/png");
+    let cid = blob["ref"]["$link"].as_str().unwrap().to_owned();
+    post(&n, &bob, &f, image_body(&blob));
+    // a PDS serves only the blobs a record references
+    bob.commit_now();
+    let e = n.device("anon", None);
+    let owner = || Some(MediaOwner::author(bob.did().as_str()));
+    for (name, message) in [
+        ("RepoDeactivated", "Repo has been deactivated"),
+        ("AccountNotServedHere", "Try again later"),
+    ] {
+        n.net.inject(
+            Fault::error(400, name, message)
+                .on_nsid("com.atproto.sync.getBlob")
+                .once(),
+        );
+        let err = block_on(e.load_media(&cid, owner())).unwrap_err();
+        let detail = err.detail.clone().unwrap();
+        assert_ne!(detail.get("kind"), Some(&json!("mediaMissing")), "{name}");
+        assert_eq!(detail["error"], name);
+        assert!(err.retryable, "{name}: {err:?}");
+        assert_eq!(block_on(e.host().blob_open(&cid)).unwrap(), None, "{name}");
+        // asked for again: the blob is served
+        let loaded = block_on(e.load_media(&cid, owner())).unwrap();
+        assert_eq!(loaded.mime.as_deref(), Some("image/png"), "{name}");
+        block_on(e.host().blob_delete(&cid)).unwrap();
+    }
+}
+
+#[test]
 fn a_download_card_carries_the_sniffed_type() {
     // a file outside the display allowlist was saved as <cid>.bin: LoadedMedia carried a type
     // only for display, so no client could pick the extension from the sniffed type (§11.2)
@@ -507,6 +547,120 @@ fn a_spilled_body_is_fetched_from_its_authors_pds_and_rendered() {
     };
     assert_eq!(root.body.html, pv.body.html);
     assert!(blob_requests(&n).is_empty());
+}
+
+#[test]
+fn another_authors_failing_copy_of_a_text_blob_does_not_change_a_body() {
+    // review m3m4-continuation-1: the spilled-body cache kept every result by the blob CID, so
+    // a post of mallory's naming bob's textBlob, which her PDS answers 400 for, made bob's body
+    // "missing" (and body_source refuse it) for the engine's lifetime, in any forum
+    let mut n = Net::new();
+    let bob = n
+        .net
+        .add_pds("bob.example.com")
+        .add_account("bob.example.com");
+    let mallory = n
+        .net
+        .add_pds("mallory.example.com")
+        .add_account("mallory.example.com");
+    let f = forum(&n, &bob);
+    let mf = forum(&n, &mallory);
+    let mut source = "# Bob's long text\n\n".to_owned();
+    while source.len() <= 65_536 {
+        source.push_str("Honest words. ");
+    }
+    let bob_post = spilled_post(&n, &bob, &f, source.as_bytes());
+    let blob = bob
+        .get(nsid::POST, bob_post.rsplit('/').next().unwrap())
+        .unwrap()["body"]["textBlob"]
+        .clone();
+    let at = n.now();
+    let v = json!({
+        "$type": nsid::POST, "forum": mf, "title": "Copy", "excerpt": "x",
+        "body": {"$type": nsid::MARKDOWN, "textBlob": blob}, "createdAt": dt(at),
+    });
+    let rkey = keys::post_rkey(&mf, tid_at_ms(at).as_str()).unwrap();
+    mallory.put(nsid::POST, &rkey, &v);
+    let mal_post = mallory.uri(nsid::POST, &rkey);
+    n.tick(MINUTE);
+    let e = n.device("anon", None);
+    n.net.clear_requests();
+    let m = read(&e, &mf, &mal_post);
+    assert_eq!(
+        m.body.notices,
+        [lessdugin_core::model::render::NOTICE_MISSING_BODY]
+    );
+    let b = read(&e, &f, &bob_post);
+    assert!(b.body.notices.is_empty(), "{:?}", b.body.notices);
+    assert!(b.body.html.contains("Honest words"));
+    assert_eq!(
+        blob_requests(&n),
+        [
+            (mallory.pds_base(), mallory.did().to_string()),
+            (bob.pds_base(), bob.did().to_string())
+        ],
+        "each author's copy is asked for at that author's PDS"
+    );
+    let src = block_on(e.body_source(&bob_post)).unwrap();
+    assert_eq!(src.markdown, source);
+    // and bob's verified source is the same bytes for mallory's reference
+    let m = block_on(e.get_post(&mal_post)).unwrap();
+    assert!(m.body.html.contains("Honest words"));
+}
+
+#[test]
+fn a_spilled_body_of_a_repo_that_is_not_served_now_stays_pending() {
+    // a deactivated (or taken-down, suspended) repo answers getBlob with HTTP 400 too; that is
+    // not a missing blob (sync.md §3.4, §11.1), so the body stays pending and is asked again
+    let mut n = Net::new();
+    let bob = n
+        .net
+        .add_pds("bob.example.com")
+        .add_account("bob.example.com");
+    let f = forum(&n, &bob);
+    let uri = spilled_post(&n, &bob, &f, b"# The whole body");
+    n.net.inject(
+        Fault::error(400, "RepoDeactivated", "Repo has been deactivated")
+            .on_nsid("com.atproto.sync.getBlob")
+            .once(),
+    );
+    let e = n.device("anon", None);
+    let pv = read(&e, &f, &uri);
+    assert_eq!(
+        pv.body.notices,
+        [lessdugin_core::model::render::NOTICE_SPILLED]
+    );
+    n.tick(lessdugin_core::limits::BODY_BLOB_RETRY_MS);
+    let pv = block_on(e.get_post(&uri)).unwrap();
+    assert_eq!(pv.body.text, "The whole body");
+}
+
+#[test]
+fn a_spilled_body_is_missing_only_when_the_pds_says_the_blob_is_not_found() {
+    // sync.md §11.1: only "Blob not found" is missing for good; a 400 naming another error
+    // (one this client does not know, here) says nothing about the blob, so the body stays
+    // pending and is asked for again (review m3m4-continuation-1)
+    let mut n = Net::new();
+    let bob = n
+        .net
+        .add_pds("bob.example.com")
+        .add_account("bob.example.com");
+    let f = forum(&n, &bob);
+    let uri = spilled_post(&n, &bob, &f, b"# The whole body");
+    n.net.inject(
+        Fault::error(400, "AccountNotServedHere", "Try again later")
+            .on_nsid("com.atproto.sync.getBlob")
+            .once(),
+    );
+    let e = n.device("anon", None);
+    let pv = read(&e, &f, &uri);
+    assert_eq!(
+        pv.body.notices,
+        [lessdugin_core::model::render::NOTICE_SPILLED]
+    );
+    n.tick(lessdugin_core::limits::BODY_BLOB_RETRY_MS);
+    let pv = block_on(e.get_post(&uri)).unwrap();
+    assert_eq!(pv.body.text, "The whole body");
 }
 
 #[test]

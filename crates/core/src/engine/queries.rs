@@ -175,7 +175,22 @@ impl<H: Host> Engine<H> {
     /// `get_post(uri)`: the post with its rendered body and reacts (hidden posts carry an
     /// empty body and no reacts).
     pub async fn get_post(&self, uri: &str) -> Result<PostView, EngineError> {
+        self.get_post_in(uri, None).await
+    }
+
+    /// `get_post(uri, sequence?)`: [`Self::get_post`] opened from `sequence`, the sequence the
+    /// reader came from (`social.md` §14): when it is eligible and contains the post, `sequences`
+    /// navigates it, and it becomes the sequence's "continue reading" position on this device
+    /// (`SequenceView.continueReading`, §16).
+    pub async fn get_post_in(
+        &self,
+        uri: &str,
+        sequence: Option<&str>,
+    ) -> Result<PostView, EngineError> {
         let u = parse_uri(uri)?;
+        let from = sequence
+            .map(|s| parse_uri(s).map(|s| s.to_string()))
+            .transpose()?;
         let key = self.forum_of(&u).await?;
         let l = self.loaded(&key).await?;
         let uri = u.to_string();
@@ -185,9 +200,21 @@ impl<H: Host> Engine<H> {
             .await;
         let mut values = vec![uri.clone()];
         values.extend(sequence_contexts(&l.model, &uri));
-        self.with_views(&l, &values, one, |v| v.post_view(&uri))
+        let view = self
+            .with_views(&l, &values, one, |v| v.post_view_in(&uri, from.as_deref()))
             .await?
-            .ok_or_else(|| EngineError::not_found(format!("no post {uri} in the forum")))
+            .ok_or_else(|| EngineError::not_found(format!("no post {uri} in the forum")))?;
+        if let Some(nav) = view
+            .sequences
+            .first()
+            .filter(|n| from.as_deref() == Some(n.sequence.as_str()))
+        {
+            // a side effect of the read: a state store that cannot keep it never fails the read
+            if let Err(e) = self.set_reading_position(&nav.sequence, &uri).await {
+                tracing::warn!(sequence = %nav.sequence, error = %e, "continue reading not recorded");
+            }
+        }
+        Ok(view)
     }
 
     /// `get_thread(uri, ThreadOpts)`: the post and its displayed comments in pre-order with
@@ -343,7 +370,9 @@ impl<H: Host> Engine<H> {
 
     /// `mod_queue(forum)` (`social.md` §4.12), for the forum's authorities: applicants,
     /// top-rank tag-head conflicts, stale positive assertions, and (open mode) the newest
-    /// newcomer items. `blocked` for anyone else.
+    /// newcomer items; in approval mode a banner says applicants are found only through CORE+
+    /// hints, or (direct sources) not looked for (`sync.md` §4.4, O-8). `blocked` for anyone
+    /// else.
     pub async fn mod_queue(&self, forum: &str) -> Result<ModQueue, EngineError> {
         let key = self.forum_key(forum).await?;
         let l = self.loaded(&key).await?;
@@ -360,7 +389,9 @@ impl<H: Host> Engine<H> {
         if let Ok(vis) = &v.visibility {
             people.extend(vis.states.keys().cloned());
         }
-        self.with_views(&l, &[], &people, |v| v.mod_queue()).await
+        let direct = self.sources().await? == super::Sources::Direct;
+        self.with_views(&l, &[], &people, |v| v.mod_queue(direct))
+            .await
     }
 
     /// `mod_log(forum, cursor?, limit)` (`social.md` §4.12): every listed modAction of the forum
@@ -471,11 +502,11 @@ impl<H: Host> Engine<H> {
             .with_detail("kind", "unknownBody"));
         };
         let renders = &self.rt.renders;
-        if renders.spilled(blob).is_none() {
+        if renders.spilled(did.as_str(), blob).is_none() {
             self.fetch_spilled(&forum, &[(u.as_str(), did.as_str(), blob)], renders)
                 .await;
         }
-        let Some(spilled) = renders.spilled(blob) else {
+        let Some(spilled) = renders.spilled(did.as_str(), blob) else {
             return Err(EngineError::new(
                 ErrorCode::Network,
                 format!(

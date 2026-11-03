@@ -8,13 +8,13 @@ use lessdugin_lexicon::records::{Chapter, Md, Sequence, StrongRef, WikiRevision}
 use serde_json::{Map, Value};
 
 use crate::dto::{
-    SequenceDraft, SequencePosition, SequenceSummary, SequenceView, TagSummary, TagView, WikiDraft,
-    WriteTicket,
+    SequenceDraft, SequencePosition, SequenceSummary, SequenceView, TagSummary, TagView, Topic,
+    WikiDraft, WriteTicket,
 };
 use crate::engine::forums::{excerpt_of, markdown_body};
 use crate::engine::queries::fold_pending;
 use crate::engine::{Engine, EngineError};
-use crate::host::Host;
+use crate::host::{Host, KvStore};
 use crate::outbox::ContentOpts;
 
 impl<H: Host> Engine<H> {
@@ -112,13 +112,60 @@ impl<H: Host> Engine<H> {
         );
         self.load_spilled_bodies(&l.model, std::slice::from_ref(&uris[0]), &self.rt.renders)
             .await;
-        self.with_views(&l, &uris, &uris, |views| views.sequence_view(uri.as_str()))
-            .await?
-            .ok_or_else(|| EngineError::not_found(format!("sequence {uri}")))
+        // device-local, so parity mode leaves it out (engine-api.md §2.1)
+        let reading = match self.config.parity_now_ms {
+            Some(_) => None,
+            None => {
+                self.loc_row::<ReadingRow>(reading_key(uri.as_str()))
+                    .await?
+            }
+        };
+        self.with_views(&l, &uris, &uris, |views| {
+            let mut view = views.sequence_view(uri.as_str())?;
+            view.continue_reading =
+                reading.and_then(|r| views.continue_reading(uri.as_str(), &r.post, r.at));
+            Some(view)
+        })
+        .await?
+        .ok_or_else(|| EngineError::not_found(format!("sequence {uri}")))
     }
 
-    /// Create an immutable wiki revision. An edit names exactly the current canonical revision
-    /// and its model CID as its parent; a new page has no parent.
+    /// Records `post` as the "continue reading" position of `sequence` (`social.md` §14, §16:
+    /// local, `("loc", "seqpos", sequence)`, device-wide like the read marks), emitting
+    /// `Changed [Thread(sequence)]` when it moved. [`Self::get_post_in`] calls it when the reader
+    /// opened the post from the sequence.
+    pub(crate) async fn set_reading_position(
+        &self,
+        sequence: &str,
+        post: &str,
+    ) -> Result<(), EngineError> {
+        let key = reading_key(sequence);
+        if self
+            .loc_row::<ReadingRow>(key.clone())
+            .await?
+            .is_some_and(|r| r.post == post)
+        {
+            return Ok(());
+        }
+        let row = ReadingRow {
+            v: READING_ROW_V,
+            post: post.to_owned(),
+            at: self.host.now_ms(),
+        };
+        self.host
+            .state()
+            .write(vec![crate::engine::notify_local::encode(key, &row)?])
+            .await?;
+        self.rt.bus.changed([Topic::Thread {
+            uri: sequence.to_owned(),
+        }]);
+        Ok(())
+    }
+
+    /// Create an immutable wiki revision. An edit names exactly one parent with its model CID:
+    /// the draft's `base` (the head the author edited, decision O-2), which must still be the
+    /// cached canonical revision (`conflict` otherwise), or without one the current canonical
+    /// revision; a new page has no parent.
     pub async fn wiki_edit(
         &self,
         forum: &str,
@@ -129,10 +176,26 @@ impl<H: Host> Engine<H> {
         let key = self.forum_key(forum).await?;
         let l = self.loaded(&key).await?;
         let wiki = l.model.view.wiki.as_ref().map_err(fold_pending)?;
-        let parents = wiki
+        let head = wiki
             .pages
             .get(slug)
-            .and_then(|page| page.canonical.as_ref())
+            .and_then(|page| page.canonical.as_ref());
+        if let Some(base) = &draft.base {
+            let base = records_uri(base)?.to_string();
+            if head != Some(&base) {
+                let mut e = EngineError::conflict(format!(
+                    "the page {slug} has changed since {base} was loaded: reload it and edit the \
+                     current head"
+                ))
+                .with_detail("kind", "wikiHeadMoved")
+                .with_detail("base", base);
+                if let Some(head) = head {
+                    e = e.with_detail("head", head.clone());
+                }
+                return Err(e);
+            }
+        }
+        let parents = head
             .map(|canonical| {
                 let skel = l.model.skel(canonical).ok_or_else(|| {
                     EngineError::internal(format!("missing canonical wiki skeleton: {canonical}"))
@@ -491,4 +554,21 @@ impl<H: Host> Engine<H> {
 
 fn records_uri(uri: &str) -> Result<AtUri, EngineError> {
     AtUri::parse(uri).map_err(|e| EngineError::invalid_ref(e.to_string()))
+}
+
+/// The "continue reading" row's version.
+const READING_ROW_V: u32 = 1;
+
+/// `("loc", "seqpos", sequence)`: the post of `sequence` the reader last opened from it.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct ReadingRow {
+    pub(crate) v: u32,
+    /// The post uri.
+    pub(crate) post: String,
+    /// When (ms).
+    pub(crate) at: i64,
+}
+
+pub(crate) fn reading_key(sequence: &str) -> Vec<u8> {
+    crate::key!("loc", "seqpos", sequence)
 }

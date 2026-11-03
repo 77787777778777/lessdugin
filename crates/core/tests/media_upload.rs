@@ -348,6 +348,67 @@ fn an_edit_keeps_the_link_card_the_draft_does_not_change() {
     );
 }
 
+#[test]
+fn an_edit_can_drop_a_link_card_and_keep_the_link() {
+    // review m3m4-continuation-7: since robustness-7 a draft with the cached uri keeps the
+    // cached card, so no edit could remove a card (its thumb above all) while keeping the link;
+    // `EditOpts.dropLinkCard` writes the draft's link as it is
+    let a = Author::new(PdsConfig::default());
+    let mut d = PostDraft::article(&a.forum, "A link", "See this.");
+    d.kind = PostKind::Link;
+    d.link = Some(ExternalLinkDraft {
+        uri: "https://example.com/x".into(),
+        title: Some("Example".into()),
+        description: Some("A misleading description".into()),
+    });
+    let uri = a.done(&block_on(a.engine.publish(&d)).unwrap());
+    let thumb = a.acct.upload_blob(noise_png(8, 8, 9), "image/png");
+    let rkey = uri.rsplit('/').next().unwrap().to_owned();
+    let mut rec = a.record(&uri);
+    rec["link"]["thumb"] = thumb;
+    a.acct.put(nsid::POST, &rkey, &rec);
+    let r = block_on(a.engine.sync_forum(&a.forum, &SyncOpts::default())).unwrap();
+    assert!(r.errors.is_empty(), "{r:?}");
+    let opts = EditOpts {
+        drop_link_card: true,
+        ..EditOpts::default()
+    };
+    // the uri alone, with dropLinkCard: a link with no card
+    let mut e = d.clone();
+    e.link = Some(ExternalLinkDraft {
+        uri: "https://example.com/x".into(),
+        title: None,
+        description: None,
+    });
+    let t = block_on(
+        a.engine
+            .edit(&uri, &Draft::Post { id: None, post: e }, &opts),
+    )
+    .unwrap();
+    assert_eq!(a.done(&t), uri);
+    assert_eq!(
+        a.record(&uri)["link"],
+        serde_json::json!({"uri": "https://example.com/x"})
+    );
+    // a dropLinkCard edit that names a title writes only that title
+    let mut e = d.clone();
+    e.link = Some(ExternalLinkDraft {
+        uri: "https://example.com/x".into(),
+        title: Some("Example".into()),
+        description: None,
+    });
+    let t = block_on(
+        a.engine
+            .edit(&uri, &Draft::Post { id: None, post: e }, &opts),
+    )
+    .unwrap();
+    a.done(&t);
+    assert_eq!(
+        a.record(&uri)["link"],
+        serde_json::json!({"uri": "https://example.com/x", "title": "Example"})
+    );
+}
+
 /// Every `state` row under `prefix`, with its value.
 fn rows(host: &MemHost, prefix: Vec<u8>) -> Vec<(Vec<u8>, Vec<u8>)> {
     use lessdugin_core::host::{Dir, Host, KeyRange, KvStore};
