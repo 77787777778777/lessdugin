@@ -20,6 +20,7 @@
 //! | `activity` | `recent_discussion` | `Tab` on a forum |
 //! | `sort <sort>`, `filter <filter>` | `list_posts`, `get_thread` | `s`, `f` |
 //! | `user [actor]`, `search <terms>`, `tags [slug]`, `sequences`, `sequence <uri>` | `user`, `search`, `tags`/`tag`, `sequences`/`sequence` | - |
+//! | a post opened from `sequence <uri>` (or its "Continue reading"), and stepped along it | `get_post(uri, sequence)` | `Enter`, then `[`/`]` |
 //! | `wiki edit` (on the page as loaded, based on its head) | `tag`, then `wiki_edit` | - |
 //! | `sequence create\|edit\|add\|remove\|move` | `seq_*` | - |
 //! | `mods [role]` | the forum view's `moderators` | - |

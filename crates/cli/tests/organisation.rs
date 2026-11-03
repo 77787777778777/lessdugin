@@ -158,3 +158,121 @@ fn a_wiki_edit_against_a_moved_head_is_refused_and_the_text_kept() {
     assert!(!alice.ok(&["draft", "ls"]).contains("Piped"));
     assert_eq!(alice.account.list(nsid::WIKI_REVISION).len(), 3);
 }
+
+/// Publishes a post titled `title` in alice's forum; returns its uri.
+fn post(u: &fakenet::User, title: &str) -> String {
+    let f = u.file(
+        &format!("{title}.md"),
+        &format!("---\ntitle: {title}\n---\nAbout {title}.\n"),
+    );
+    done_uri(&u.json(&["post", s(&f), "--yes"]))
+}
+
+/// Creates a one-chapter sequence of `posts`; returns its uri.
+fn sequence(u: &fakenet::User, title: &str, posts: &[&str]) -> String {
+    let f = u.file(
+        &format!("{title}.json"),
+        &serde_json::json!({
+            "forum": "alice.test/meta",
+            "title": title,
+            "chapters": [{ "title": "One", "posts": posts }],
+        })
+        .to_string(),
+    );
+    done_uri(&u.json(&["sequence", "create", s(&f)]))
+}
+
+/// The first `SequenceNav` of a `read --no-comments --json` (a `PostView`).
+fn nav(v: &Value) -> (String, Option<String>, Option<String>) {
+    let n = &v["sequences"][0];
+    (
+        n["sequence"].as_str().unwrap_or_default().to_owned(),
+        n["prev"].as_str().map(str::to_owned),
+        n["next"].as_str().map(str::to_owned),
+    )
+}
+
+/// `social.md` §14, `engine-api.md` §3.4 `get_post(uri, sequence?)` (review m5-acceptance-8):
+/// a post opened from a sequence is read in it. `sequence read` numbers its posts and `read
+/// <n>` reads the n-th in that sequence; `read next` and `read prev` follow the sequence the
+/// last `read` showed; `--sequence` names one. Next and previous are that sequence's, also for
+/// a post in two sequences, and the sequence's continue-reading line shows the post last read
+/// from it.
+#[test]
+fn posts_opened_from_a_sequence_are_read_in_it() {
+    let net = Net::new();
+    let alice = net.user("alice.test", true);
+    alice.json(&["forum", "create", "meta", "--frontpage"]);
+    let (p1, p2, p3) = (
+        post(&alice, "One"),
+        post(&alice, "Two"),
+        post(&alice, "Three"),
+    );
+    let forward = sequence(&alice, "Forward", &[&p1, &p2, &p3]);
+    let backward = sequence(&alice, "Backward", &[&p3, &p2, &p1]);
+    let reader = net.reader(&alice);
+    reader.ok(&["sync", "alice.test/meta"]);
+
+    // the listing numbers the backward sequence's posts; `read 2` is Two, read in it
+    let out = reader.ok(&["sequence", "read", &backward]);
+    assert!(out.contains("1  Three"), "{out}");
+    assert!(out.contains("2  Two"), "{out}");
+    assert!(!out.contains("Continue reading"), "{out}");
+    let v = reader.json(&["read", "2", "--no-comments"]);
+    assert_eq!(v["post"]["uri"], p2.as_str(), "{v}");
+    assert_eq!(
+        nav(&v),
+        (backward.clone(), Some(p3.clone()), Some(p1.clone())),
+        "{v}"
+    );
+    // `read next` follows it to One, still in the backward sequence: its last post
+    let v = reader.json(&["read", "next", "--no-comments"]);
+    assert_eq!(v["post"]["uri"], p1.as_str(), "{v}");
+    assert_eq!(nav(&v), (backward.clone(), Some(p2.clone()), None), "{v}");
+    let e = reader.fails(1, &["read", "next"]);
+    assert_eq!(e["code"], "invalid_ref", "{e}");
+    assert!(e["message"].as_str().unwrap().contains("last"), "{e}");
+    // the sequence continues where it was left
+    let sv = reader.json(&["sequence", "read", &backward]);
+    assert_eq!(sv["continueReading"]["post"], p1.as_str(), "{sv}");
+    let out = reader.ok(&["sequence", "read", &backward]);
+    assert!(out.contains("Continue reading: One  (`read 3`)"), "{out}");
+    // the text shows the post's place in the sequence and how to step along it
+    let out = reader.ok(&["read", "prev", "--no-pager"]);
+    assert!(out.contains("sequence: Backward"), "{out}");
+    assert!(
+        out.contains(&format!("previous: {p3}  (`read prev`)")),
+        "{out}"
+    );
+    assert!(
+        out.contains(&format!("next:     {p1}  (`read next`)")),
+        "{out}"
+    );
+
+    // `--sequence` names the other one: Two between One and Three
+    let v = reader.json(&["read", &p2, "--sequence", &forward, "--no-comments"]);
+    assert_eq!(
+        nav(&v),
+        (forward.clone(), Some(p1.clone()), Some(p3.clone())),
+        "{v}"
+    );
+    let sv = reader.json(&["sequence", "read", &forward]);
+    assert_eq!(sv["continueReading"]["post"], p2.as_str(), "{sv}");
+    // the backward sequence kept its own position
+    let sv = reader.json(&["sequence", "read", &backward]);
+    assert_eq!(sv["continueReading"]["post"], p2.as_str(), "{sv}");
+    // a number of a later `ls` reads in no sequence: the listing's context is gone, so no
+    // sequence's position moves
+    let ls = reader.json(&["ls", "alice.test/meta", "--all"]);
+    let first = ls["items"][0]["uri"].as_str().unwrap().to_owned();
+    assert_ne!(first, p2, "{ls}");
+    let v = reader.json(&["read", "1", "--no-comments"]);
+    assert_eq!(v["post"]["uri"], first.as_str(), "{v}");
+    for sequence in [&forward, &backward] {
+        let sv = reader.json(&["sequence", "read", sequence]);
+        assert_eq!(sv["continueReading"]["post"], p2.as_str(), "{sv}");
+    }
+    // an unparsable sequence is refused
+    let e = reader.fails(1, &["read", &p2, "--sequence", "not a sequence"]);
+    assert_eq!(e["code"], "invalid_ref", "{e}");
+}

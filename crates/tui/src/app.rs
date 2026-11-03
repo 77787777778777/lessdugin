@@ -69,8 +69,9 @@ pub struct ForumData {
     pub list: PostList,
 }
 
-/// The Thread screen's data: the engine's `ThreadView` exactly as `get_thread` returned it,
-/// and the bodies to show.
+/// The Thread screen's data: the engine's `ThreadView` exactly as `get_thread` returned it
+/// (for a thread opened from a sequence, with the post's `sequences` as `get_post(uri,
+/// sequence)` returns them), and the bodies to show.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ThreadData {
     /// The view (dto/1).
@@ -223,7 +224,8 @@ pub enum Effect {
         /// Who asked.
         origin: Origin,
     },
-    /// `get_thread` and the bodies.
+    /// `get_thread` and the bodies; with a sequence, the post's navigation in it
+    /// (`get_post(uri, sequence)`).
     LoadThread {
         /// The screen.
         screen: ScreenId,
@@ -231,6 +233,8 @@ pub enum Effect {
         uri: String,
         /// The comment sort (`s` on the thread).
         opts: ThreadOpts,
+        /// The sequence the thread was opened from (`social.md` §14).
+        sequence: Option<String>,
         /// Who asked.
         origin: Origin,
     },
@@ -1225,6 +1229,9 @@ impl ForumScreen {
 pub struct ThreadScreen {
     /// The uri opened (a post, or a comment of the thread).
     pub uri: String,
+    /// The sequence it was opened from (a sequence's panel, or `[` and `]` along one): the
+    /// post's next and previous are that sequence's, and it continues there (`social.md` §14).
+    pub sequence: Option<String>,
     /// The comment sort (`s`: magic, top, new, old, latest reply; `social.md` §12.4).
     pub opts: ThreadOpts,
     /// The data, once loaded.
@@ -1489,6 +1496,9 @@ pub struct PanelItem {
     pub line: usize,
     /// Its stable reference, resolved by the ordinary `:open` path.
     pub target: String,
+    /// The sequence a post of a sequence's panel is read in (`social.md` §14): its thread
+    /// opens with that sequence's next and previous.
+    pub sequence: Option<String>,
 }
 
 /// A text panel over the screen (`:members`, `:raw`, `:settings`): the navigation keys
@@ -1579,6 +1589,7 @@ impl Screen {
                 screen,
                 uri: t.uri.clone(),
                 opts: t.opts.clone(),
+                sequence: t.sequence.clone(),
                 origin,
             },
             ScreenKind::Mod(m) => Effect::LoadQueue {
@@ -2746,9 +2757,16 @@ impl State {
     }
 
     fn push_thread(&mut self, uri: String, fx: &mut Vec<Effect>) {
+        self.push_thread_in(uri, None, fx);
+    }
+
+    /// Opens the thread of `uri` read in `sequence`, the sequence the reader came from
+    /// (`social.md` §14: `get_post(uri, sequence)`).
+    fn push_thread_in(&mut self, uri: String, sequence: Option<String>, fx: &mut Vec<Effect>) {
         let i = self.push(
             ScreenKind::Thread(Box::new(ThreadScreen {
                 uri: uri.clone(),
+                sequence,
                 viewer: self.account.as_ref().map(|a| a.did.clone()),
                 ..ThreadScreen::default()
             })),
@@ -2957,9 +2975,17 @@ impl State {
                         p.scroll = p.items[p.selected].line;
                     }
                     Some(Cmd::Open) => {
-                        let target = p.items[p.selected].target.clone();
+                        let item = p.items[p.selected].clone();
                         self.panel = None;
-                        fx.push(Effect::Open { target });
+                        match item.sequence {
+                            // a post of a sequence's panel: read in that sequence
+                            Some(sequence) => {
+                                self.push_thread_in(item.target, Some(sequence), fx);
+                            }
+                            None => fx.push(Effect::Open {
+                                target: item.target,
+                            }),
+                        }
                     }
                     _ => self.panel = None,
                 }
@@ -3022,6 +3048,8 @@ impl State {
             Cmd::Undo => self.undo_last(fx),
             Cmd::ReactPalette => self.open_react(),
             Cmd::History => self.open_history(fx),
+            Cmd::SequenceNext => self.sequence_step(true, fx),
+            Cmd::SequencePrev => self.sequence_step(false, fx),
             Cmd::LoadMedia => self.load_media(fx),
             Cmd::ModMenu => self.open_mod_menu(),
             Cmd::Notifications => self.open_notifications(fx),
@@ -3142,6 +3170,42 @@ impl State {
                 }
             }
         }
+    }
+
+    /// `]` / `[`: the next or previous post of the sequence the thread's post shows
+    /// (`PostView.sequences`, `social.md` §14), read in that sequence; it replaces the thread
+    /// on top, so `h` still goes back to where the reading started.
+    fn sequence_step(&mut self, next: bool, fx: &mut Vec<Effect>) {
+        let Some(t) = self.top_thread() else {
+            self.say(
+                Tone::Info,
+                lit("Open a post of a sequence to step along it with [ and ]."),
+            );
+            return;
+        };
+        let Some(nav) = t.post().and_then(|p| p.sequences.first()) else {
+            self.say(Tone::Info, lit("This post is in no sequence."));
+            return;
+        };
+        let Some(uri) = (if next { &nav.next } else { &nav.prev }).clone() else {
+            self.say(
+                Tone::Info,
+                cat([
+                    lit(if next {
+                        "This is the last post of "
+                    } else {
+                        "This is the first post of "
+                    }),
+                    tt(&nav.title),
+                    lit("."),
+                ]),
+            );
+            return;
+        };
+        let sequence = nav.sequence.clone();
+        self.follow_own = None;
+        self.stack.pop();
+        self.push_thread_in(uri, Some(sequence), fx);
     }
 
     /// `s`: the next post sort on a forum (`social.md` §12.2), the next comment sort on a
@@ -6140,7 +6204,12 @@ fn rendered_lines(out: &mut Vec<TermText>, body: &lessdugin_core::dto::RenderedB
 }
 
 /// Appends one openable post to an organisation panel.
-fn push_post_result(lines: &mut Vec<TermText>, items: &mut Vec<PanelItem>, post: &PostSummary) {
+fn push_post_result(
+    lines: &mut Vec<TermText>,
+    items: &mut Vec<PanelItem>,
+    post: &PostSummary,
+    sequence: Option<&str>,
+) {
     let line = lines.len();
     lines.push(cat([post_title(post), lit("  "), actor(&post.author)]));
     if !post.excerpt.trim().is_empty() {
@@ -6150,6 +6219,7 @@ fn push_post_result(lines: &mut Vec<TermText>, items: &mut Vec<PanelItem>, post:
     items.push(PanelItem {
         line,
         target: post.uri.clone(),
+        sequence: sequence.map(str::to_owned),
     });
 }
 
@@ -6181,6 +6251,7 @@ fn search_lines(results: &SearchResults) -> (Vec<TermText>, Vec<PanelItem>) {
         items.push(PanelItem {
             line,
             target: uri.to_owned(),
+            sequence: None,
         });
     }
     (lines, items)
@@ -6218,7 +6289,7 @@ fn user_lines(view: &UserView) -> (Vec<TermText>, Vec<PanelItem>) {
         if !posts.is_empty() {
             lines.push(lit(heading));
             for post in posts {
-                push_post_result(&mut lines, &mut items, post);
+                push_post_result(&mut lines, &mut items, post, None);
             }
         }
     }
@@ -6232,6 +6303,7 @@ fn user_lines(view: &UserView) -> (Vec<TermText>, Vec<PanelItem>) {
             items.push(PanelItem {
                 line,
                 target: comment.uri.clone(),
+                sequence: None,
             });
         }
     }
@@ -6281,7 +6353,7 @@ fn tag_lines(view: &TagView) -> (Vec<TermText>, Vec<PanelItem>) {
     if !view.posts.is_empty() {
         lines.push(lit("Tagged posts"));
         for post in &view.posts {
-            push_post_result(&mut lines, &mut items, post);
+            push_post_result(&mut lines, &mut items, post, None);
         }
     }
     (lines, items)
@@ -6310,12 +6382,15 @@ fn sequences_lines(sequences: &[SequenceSummary]) -> (Vec<TermText>, Vec<PanelIt
         items.push(PanelItem {
             line,
             target: sequence.uri.clone(),
+            sequence: None,
         });
     }
     (lines, items)
 }
 
-/// `:sequence <uri>`: its body, chapters and openable chapter posts.
+/// `:sequence <uri>`: where this device stopped reading it, its body, chapters and openable
+/// chapter posts, each opened in this sequence (`social.md` §14: next and previous follow it,
+/// and it continues there).
 fn sequence_lines(view: &SequenceView) -> (Vec<TermText>, Vec<PanelItem>) {
     let mut lines = vec![
         tt(&view.sequence.title),
@@ -6323,6 +6398,21 @@ fn sequence_lines(view: &SequenceView) -> (Vec<TermText>, Vec<PanelItem>) {
         tt(&view.sequence.uri),
     ];
     let mut items = Vec::new();
+    let here = Some(view.sequence.uri.as_str());
+    if let Some(at) = &view.continue_reading {
+        let title = view
+            .chapters
+            .iter()
+            .flat_map(|c| &c.posts)
+            .find(|p| p.uri == at.post)
+            .map_or_else(|| tt(&at.post), post_title);
+        items.push(PanelItem {
+            line: lines.len(),
+            target: at.post.clone(),
+            sequence: here.map(str::to_owned),
+        });
+        lines.push(cat([lit("Continue reading: "), title]));
+    }
     if let Some(body) = &view.body {
         rendered_lines(&mut lines, body);
     }
@@ -6335,7 +6425,7 @@ fn sequence_lines(view: &SequenceView) -> (Vec<TermText>, Vec<PanelItem>) {
             rendered_lines(&mut lines, body);
         }
         for post in &chapter.posts {
-            push_post_result(&mut lines, &mut items, post);
+            push_post_result(&mut lines, &mut items, post, here);
         }
     }
     (lines, items)

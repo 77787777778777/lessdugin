@@ -114,7 +114,8 @@ pub enum SequenceAction {
         #[arg(long, value_name = "FORUM")]
         forum: Option<String>,
     },
-    /// Read a sequence.
+    /// Read a sequence: its posts are numbered (`read 2` reads the second in this sequence),
+    /// with where this device stopped reading it.
     Read {
         /// Sequence at-uri.
         #[arg(value_name = "URI")]

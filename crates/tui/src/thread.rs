@@ -301,6 +301,17 @@ pub fn layout_for(
                     lines.push(line([(t, dim())]));
                 }
             }
+            // its place in a sequence (social.md §14), which `[` and `]` step along
+            for nav in &p.sequences {
+                let mut parts = vec![lit("sequence: "), tt(&nav.title)];
+                if nav.prev.is_some() {
+                    parts.push(lit("  [ previous"));
+                }
+                if nav.next.is_some() {
+                    parts.push(lit("  ] next"));
+                }
+                lines.push(line([(crate::text::cat(parts), dim())]));
+            }
         }
         ThreadRoot::Missing { missing } => {
             lines.push(line([(lit("[the post is not available]"), dim())]));

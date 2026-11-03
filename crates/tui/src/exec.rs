@@ -89,11 +89,12 @@ pub async fn run<H: Host>(engine: &Engine<H>, effect: Effect, opts: ExecOpts) ->
             screen,
             uri,
             opts: thread_opts,
+            sequence,
             origin,
         } => Action::ThreadLoaded {
             screen,
             origin,
-            result: load_thread(engine, &uri, &thread_opts, opts)
+            result: load_thread(engine, &uri, &thread_opts, sequence.as_deref(), opts)
                 .await
                 .map(Box::new),
         },
@@ -1242,6 +1243,7 @@ pub async fn load_thread<H: Host>(
     engine: &Engine<H>,
     uri: &str,
     thread_opts: &ThreadOpts,
+    sequence: Option<&str>,
     opts: ExecOpts,
 ) -> Result<ThreadData, EngineError> {
     let mut view = engine.get_thread(uri, thread_opts).await?;
@@ -1257,6 +1259,14 @@ pub async fn load_thread<H: Host>(
         && engine.verify_handles(VERIFY_HANDLES).await > 0
     {
         view = engine.get_thread(uri, thread_opts).await?;
+    }
+    // opened from a sequence: the post's next and previous are that sequence's, and it becomes
+    // the sequence's continue-reading position (`get_post(uri, sequence)`, `social.md` §14)
+    if let (Some(sequence), ThreadRoot::Post(p)) = (sequence, &mut view.post) {
+        p.sequences = engine
+            .get_post_in(&p.post.uri, Some(sequence))
+            .await?
+            .sequences;
     }
     let mut bodies = BTreeMap::new();
     if let ThreadRoot::Post(p) = &view.post {

@@ -3,8 +3,9 @@
 //!
 //! - `cli/state.json`: the current forum (`forum use`, `join`);
 //! - `cli/refs-<h>.json`: the last listings of one terminal session, so `3` (a post of the
-//!   last `ls`), `c12` (a comment of the last `read`) and a forum number (the last `forum ls`)
-//!   work as references (synthesis §6.10). `<h>` is a hash of the session key: the terminal
+//!   last `ls` or `sequence read`), `c12` (a comment of the last `read`), `next` and `prev`
+//!   (the sequence neighbours of the post the last `read` showed) and a forum number (the last
+//!   `forum ls`) work as references (synthesis §6.10). `<h>` is a hash of the session key: the terminal
 //!   of standard input/output (Linux `/proc/self/fd`), else the parent process (the shell), or
 //!   `LESSDUGIN_SESSION` when set (tests, scripts).
 //!
@@ -16,6 +17,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+use lessdugin_core::dto::SequenceNav;
 use lessdugin_native::config::{Paths, lock_hash};
 use lessdugin_native::fsutil::{ensure_private_dir, read_private, write_private_atomic};
 use serde::{Deserialize, Serialize};
@@ -56,7 +58,7 @@ fn now_ms() -> i64 {
 }
 
 /// `cli/refs-<h>.json`: the listings of one terminal session.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Listings {
     /// The forum of the last `ls`.
@@ -65,6 +67,14 @@ pub struct Listings {
     /// The posts of the last `ls`, in order (`1` is the first).
     #[serde(default)]
     pub posts: Vec<String>,
+    /// The sequence the posts of the last listing come from (`sequence read`): `read <n>` reads
+    /// the post in it (`get_post(uri, sequence)`, `social.md` §14).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub posts_sequence: Option<String>,
+    /// The sequence navigation of the post the last `read` showed: `next` and `prev` are its
+    /// next and previous posts, read in that sequence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sequence_nav: Option<SequenceNav>,
     /// The thread of the last `read`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread: Option<String>,

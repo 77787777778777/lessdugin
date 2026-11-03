@@ -18,10 +18,11 @@ expression: help
                                                 │  r               reply in $EDITOR                            │
   1 comment                                     │  c               comment on the post in $EDITOR              │
                                                 │  s               comment sort (magic, top, new, old, latest) │
-  @bob.example.com · 2025-10-09 08:57 UTC · 1 po│  i               load the item's images (their host sees you)│
-    Thanks for the forum!                       │Forums                                                        │
-                                                │  s               sort: magic, top, new, old, recent comments │
-    It looks great.                             │  f               filter: frontpage, all, curated             │
+  @bob.example.com · 2025-10-09 08:57 UTC · 1 po│  [ ]             previous / next post of its sequence        │
+    Thanks for the forum!                       │  i               load the item's images (their host sees you)│
+                                                │Forums                                                        │
+    It looks great.                             │  s               sort: magic, top, new, old, recent comments │
+                                                │  f               filter: frontpage, all, curated             │
                                                 │  Tab             posts / activity                            │
                                                 │  P               new post in $EDITOR                         │
                                                 │  R               sync and show new items                     │
@@ -46,7 +47,6 @@ expression: help
                                                 │                                                              │
                                                 │Any key closes this help.                                     │
                                                 └──────────────────────────────────────────────────────────────┘
-
 
 
  r reply · c comment · Space fold · p parent · R sync · ? help · h back

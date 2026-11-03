@@ -185,6 +185,7 @@ pub async fn ls(ctx: &Ctx, args: LsArgs) -> Result<(), CliError> {
     let saved = ctx.state.update_listings(|l| {
         l.posts_forum = Some(list.forum.clone());
         l.posts = list.items.iter().map(|p| p.uri.clone()).collect();
+        l.posts_sequence = None;
     });
     if let Err(e) = saved {
         ctx.out.warn(cat([
@@ -321,6 +322,7 @@ pub async fn linked(ctx: &Ctx, args: RefArgs) -> Result<(), CliError> {
     let saved = ctx.state.update_listings(|l| {
         l.posts_forum = None;
         l.posts = posts.iter().map(|p| p.uri.clone()).collect();
+        l.posts_sequence = None;
     });
     if let Err(e) = saved {
         ctx.out.warn(cat([
@@ -337,8 +339,16 @@ pub async fn linked(ctx: &Ctx, args: RefArgs) -> Result<(), CliError> {
 }
 
 /// `lessdugin read <ref>`.
+///
+/// A post read from a sequence (`--sequence`, a number of `sequence read`, `next`, `prev`) is
+/// read in it (`get_post(uri, sequence)`, `social.md` §14): the thread's post carries that
+/// sequence's navigation, and the post becomes its continue-reading position on this device.
 pub async fn read(ctx: &Ctx, args: ReadArgs) -> Result<(), CliError> {
     let engine = ctx.reader().await?;
+    let sequence = args
+        .sequence
+        .clone()
+        .or_else(|| refs::sequence_of(ctx, &args.reference));
     let (uri, is_comment) = refs::post_or_comment(ctx, &engine, &args.reference).await?;
     if args.raw {
         sync_thread_quietly(ctx, &engine, &uri).await;
@@ -385,13 +395,25 @@ pub async fn read(ctx: &Ctx, args: ReadArgs) -> Result<(), CliError> {
             ),
         ]));
     }
+    // next and previous follow the sequence the post was read from
+    if let (Some(sequence), ThreadRoot::Post(p)) = (&sequence, &mut thread.post) {
+        p.sequences = engine
+            .get_post_in(&p.post.uri, Some(sequence))
+            .await?
+            .sequences;
+    }
     let root = match &thread.post {
         ThreadRoot::Post(p) => p.post.uri.clone(),
         ThreadRoot::Missing { missing } => missing.clone(),
     };
+    let nav = match &thread.post {
+        ThreadRoot::Post(p) => p.sequences.first().cloned(),
+        ThreadRoot::Missing { .. } => None,
+    };
     let saved = ctx.state.update_listings(|l| {
         l.thread = Some(root.clone());
         l.comments = thread.comments.iter().map(|c| c.uri.clone()).collect();
+        l.sequence_nav = nav;
     });
     if let Err(e) = saved {
         ctx.out.warn(cat([
@@ -623,6 +645,41 @@ async fn post_text(
         );
     }
     s.push_str(&react_lines(ctx, &p.reacts, 0, handle_of));
+    s.push_str(&sequence_lines(ctx, &p.sequences));
+    s
+}
+
+/// The post's place in a sequence (`social.md` §14): the sequence, and its previous and next
+/// posts, which `read prev` and `read next` read in it.
+fn sequence_lines(ctx: &Ctx, navs: &[lessdugin_core::dto::SequenceNav]) -> String {
+    let mut s = String::new();
+    for nav in navs {
+        s.push('\n');
+        s.push_str(&line(
+            ctx,
+            &[
+                (lit("sequence: "), Style::Dim),
+                (tt(&nav.title), Style::Bold),
+                (lit("  "), Style::Plain),
+                (tt(&nav.sequence), Style::Dim),
+            ],
+        ));
+        for (label, step, word) in [
+            ("  previous: ", &nav.prev, "prev"),
+            ("  next:     ", &nav.next, "next"),
+        ] {
+            if let Some(uri) = step {
+                s.push_str(&line(
+                    ctx,
+                    &[
+                        (lit(label), Style::Dim),
+                        (tt(uri), Style::Plain),
+                        (cat([lit("  (`read "), lit(word), lit("`)")]), Style::Dim),
+                    ],
+                ));
+            }
+        }
+    }
     s
 }
 

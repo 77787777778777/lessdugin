@@ -129,6 +129,12 @@ pub struct ReadArgs {
     /// Print directly instead of through `less -R`.
     #[arg(long)]
     pub no_pager: bool,
+    /// Read the post as part of this sequence: its next and previous posts are this sequence's,
+    /// and it becomes the sequence's continue-reading position on this device (default: the
+    /// sequence of `sequence read` for a number it listed, and of the last `read` for `next`
+    /// and `prev`).
+    #[arg(long, value_name = "SEQUENCE", conflicts_with = "raw")]
+    pub sequence: Option<String>,
 }
 
 /// `ls`.

@@ -82,8 +82,16 @@ fn post_title(post: &PostSummary) -> TermText {
     }
 }
 
-fn print_post(ctx: &Ctx, post: &PostSummary) {
-    ctx.out.line(&[(post_title(post), Style::Bold)]);
+/// A post of a listing, numbered `n` when the listing saves its numbers (`sequence read`).
+fn print_post(ctx: &Ctx, post: &PostSummary, n: Option<usize>) {
+    match n {
+        Some(n) => ctx.out.line(&[
+            (tt(&n.to_string()), Style::Bold),
+            (lit("  "), Style::Plain),
+            (post_title(post), Style::Bold),
+        ]),
+        None => ctx.out.line(&[(post_title(post), Style::Bold)]),
+    }
     let mut meta = vec![
         render::actor(&post.author),
         tt(&render::time(post.t_rank_ms)),
@@ -100,7 +108,7 @@ fn print_posts(ctx: &Ctx, heading: &'static str, posts: &[PostSummary]) {
     }
     ctx.out.line(&[(lit(heading), Style::Bold)]);
     for post in posts {
-        print_post(ctx, post);
+        print_post(ctx, post, None);
     }
 }
 
@@ -456,16 +464,38 @@ async fn canonical_draft_forum(
     Ok(())
 }
 
+/// The posts of a sequence's chapters, in order: what `sequence read` numbers.
+fn sequence_posts(view: &SequenceView) -> Vec<&PostSummary> {
+    view.chapters.iter().flat_map(|c| &c.posts).collect()
+}
+
 fn print_sequence(ctx: &Ctx, view: &SequenceView) {
     let sequence = &view.sequence;
     ctx.out.line(&[(tt(&sequence.title), Style::Bold)]);
     ctx.out
         .line(&[(render::actor(&sequence.author), Style::Dim)]);
     ctx.out.line(&[(tt(&sequence.uri), Style::Dim)]);
+    // where this device stopped reading it (local, `social.md` §14)
+    if let Some(at) = &view.continue_reading {
+        let posts = sequence_posts(view);
+        let n = posts.iter().position(|p| p.uri == at.post);
+        let mut spans = vec![
+            (lit("Continue reading: "), Style::Bold),
+            (
+                n.map_or_else(|| tt(&at.post), |i| post_title(posts[i])),
+                Style::Plain,
+            ),
+        ];
+        if let Some(i) = n {
+            spans.push((tt(&format!("  (`read {}`)", i + 1)), Style::Dim));
+        }
+        ctx.out.line(&spans);
+    }
     if let Some(body) = &view.body {
         ctx.out
             .page(&render::view_body(body, &body_style(ctx), 0), true);
     }
+    let mut n = 0;
     for (i, chapter) in view.chapters.iter().enumerate() {
         let heading = chapter
             .title
@@ -477,7 +507,8 @@ fn print_sequence(ctx: &Ctx, view: &SequenceView) {
                 .page(&render::view_body(body, &body_style(ctx), 2), false);
         }
         for post in &chapter.posts {
-            print_post(ctx, post);
+            n += 1;
+            print_post(ctx, post, Some(n));
         }
     }
 }
@@ -534,6 +565,21 @@ pub async fn sequence(ctx: &Ctx, args: SequenceArgs) -> Result<(), CliError> {
                         " is still not loaded from its author's PDS (the excerpt shows); read \
                          it again later",
                     ),
+                ]));
+            }
+            // `read <n>` reads the n-th post in this sequence (as `ls` numbers a forum's)
+            let saved = ctx.state.update_listings(|l| {
+                l.posts_forum = None;
+                l.posts = sequence_posts(&view)
+                    .iter()
+                    .map(|p| p.uri.clone())
+                    .collect();
+                l.posts_sequence = Some(view.sequence.uri.clone());
+            });
+            if let Err(e) = saved {
+                ctx.out.warn(cat([
+                    lit("could not save the listing: "),
+                    tt(&e.to_string()),
                 ]));
             }
             if ctx.out.is_json() {

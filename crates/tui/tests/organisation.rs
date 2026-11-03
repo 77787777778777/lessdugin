@@ -438,3 +438,131 @@ fn a_wiki_edit_whose_page_moved_is_refused_and_redone_on_the_new_head() {
             .unwrap();
     assert_eq!(rec["body"]["text"], "My redo text.");
 }
+
+/// `social.md` §14, `engine-api.md` §3.4 `get_post(uri, sequence?)` (review m5-acceptance-8) in
+/// the TUI: a post opened from a sequence's panel is read in that sequence, and `]` and `[`
+/// step along it (each step read in it too, in place of the thread on top). For a post in two
+/// sequences, next and previous are the ones of the sequence the reader came from; the
+/// sequence's panel then offers "Continue reading" first, opened in it.
+#[test]
+fn posts_opened_from_a_sequence_are_read_in_it() {
+    let s = scenario();
+    let alice = &s.w.alice;
+    let publish = |title: &str| {
+        let t = block_on(
+            alice
+                .engine
+                .publish(&lessdugin_core::dto::PostDraft::article(
+                    &s.forum,
+                    title,
+                    format!("About {title}."),
+                )),
+        )
+        .unwrap();
+        alice.flush();
+        alice.done(&t)
+    };
+    let (p1, p2, p3) = (publish("One"), publish("Two"), publish("Three"));
+    let sequence = |title: &str, posts: Vec<String>| {
+        let t = block_on(alice.engine.seq_create(&SequenceDraft {
+            forum: s.forum.clone(),
+            title: title.into(),
+            body: None,
+            chapters: vec![SequenceChapterDraft {
+                title: Some("One".into()),
+                body: None,
+                posts,
+            }],
+        }))
+        .unwrap();
+        alice.flush();
+        alice.done(&t)
+    };
+    let forward = sequence("Forward", vec![p1.clone(), p2.clone(), p3.clone()]);
+    let backward = sequence("Backward", vec![p3.clone(), p2.clone(), p1.clone()]);
+    s.w.tick(MINUTE);
+    s.w.carol.sync(&s.forum);
+
+    let mut t = common::tui(&s, 100, 32);
+    block_on(t.start(Some(s.forum.clone())));
+    let depth = t.state.stack.len();
+    let nav = |t: &Tui| {
+        let n = &t.thread_view().expect("a thread").post;
+        let lessdugin_core::dto::ThreadRoot::Post(p) = n else {
+            panic!("{n:?}");
+        };
+        let n = p.sequences.first().expect("a sequence nav");
+        (
+            p.post.uri.clone(),
+            n.sequence.clone(),
+            n.prev.clone(),
+            n.next.clone(),
+        )
+    };
+
+    // the backward sequence's second post, opened from its panel
+    run_command(&mut t, &format!("sequence {backward}"));
+    let panel = t.state.panel.as_ref().expect("the sequence panel");
+    assert!(
+        !panel
+            .lines
+            .iter()
+            .any(|l| l.to_plain_string().contains("Continue reading")),
+        "{panel:?}"
+    );
+    block_on(t.press("j"));
+    block_on(t.press("Enter"));
+    assert_eq!(
+        t.state.top_thread().unwrap().sequence.as_deref(),
+        Some(backward.as_str())
+    );
+    assert_eq!(
+        nav(&t),
+        (
+            p2.clone(),
+            backward.clone(),
+            Some(p3.clone()),
+            Some(p1.clone())
+        )
+    );
+    let screen = t.render();
+    assert!(
+        screen.contains("sequence: Backward  [ previous  ] next"),
+        "{screen}"
+    );
+
+    // `]` steps to One, in the same sequence, in place of the thread
+    block_on(t.press("]"));
+    assert_eq!(t.state.stack.len(), depth + 1);
+    assert_eq!(
+        nav(&t),
+        (p1.clone(), backward.clone(), Some(p2.clone()), None)
+    );
+    block_on(t.press("]"));
+    let status = t.state.status.as_ref().unwrap().text.to_plain_string();
+    assert!(status.contains("last post of Backward"), "{status}");
+    block_on(t.press("["));
+    assert_eq!(nav(&t).0, p2);
+
+    // the sequence continues there: offered first, and opened in it
+    block_on(t.press("h"));
+    run_command(&mut t, &format!("sequence {backward}"));
+    let panel = t.state.panel.as_ref().expect("the sequence panel");
+    assert!(
+        panel
+            .lines
+            .iter()
+            .any(|l| l.to_plain_string() == "Continue reading: Two"),
+        "{panel:?}"
+    );
+    assert_eq!(panel.items[0].target, p2);
+    block_on(t.press("Enter"));
+    assert_eq!(nav(&t).1, backward);
+
+    // from the forward sequence, the same post is between One and Three
+    block_on(t.press("h"));
+    run_command(&mut t, &format!("sequence {forward}"));
+    block_on(t.press("j"));
+    block_on(t.press("Enter"));
+    assert_eq!(nav(&t), (p2, forward, Some(p1), Some(p3)));
+}
