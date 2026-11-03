@@ -210,7 +210,12 @@ async fn confirm_absent(indexer: &Indexer, forum: &str) -> bool {
     let Ok(uri) = AtUri::parse(forum) else {
         return false;
     };
-    match indexer.engine.resolver().resolve_did_doc(uri.did(), 0).await {
+    match indexer
+        .engine
+        .resolver()
+        .resolve_did_doc(uri.did(), 0)
+        .await
+    {
         Ok(id) if id.level == IdentityLevel::Doc => {}
         _ => return false,
     }
@@ -251,13 +256,14 @@ pub async fn sync_forum(indexer: &Indexer, forum: &str) -> anyhow::Result<()> {
             Ok(())
         }
         Err(e) => {
-            let next = match indexer
-                .store
-                .note_forum_failed(forum, indexer.now_ms(), &e.to_string())?
-            {
-                Some(retry) => format!("forum retry at {retry}"),
-                None => "a seed that never synced failed for a week and was dropped".to_owned(),
-            };
+            let next =
+                match indexer
+                    .store
+                    .note_forum_failed(forum, indexer.now_ms(), &e.to_string())?
+                {
+                    Some(retry) => format!("forum retry at {retry}"),
+                    None => "a seed that never synced failed for a week and was dropped".to_owned(),
+                };
             Err(e.context(next))
         }
     }

@@ -1582,7 +1582,10 @@ mod tests {
         store.add_forum_seed(FORUM).unwrap();
         assert_eq!(store.forums_for_pass(0), vec![FORUM.to_owned()]);
         // Exponential back-off from one minute; the forum leaves passes until it is due.
-        let first = store.note_forum_failed(FORUM, 1_000, "boom").unwrap().unwrap();
+        let first = store
+            .note_forum_failed(FORUM, 1_000, "boom")
+            .unwrap()
+            .unwrap();
         assert_eq!(first, 1_000 + RETRY_BASE_MS);
         assert!(store.forums_for_pass(1_001).is_empty());
         assert!(store.forums_due(first - 1).is_empty());
@@ -1670,7 +1673,12 @@ mod tests {
             .unwrap();
         let start = 1_000;
         for forum in [hinted, indexed, FORUM] {
-            assert!(store.note_forum_failed(forum, start, "e").unwrap().is_some());
+            assert!(
+                store
+                    .note_forum_failed(forum, start, "e")
+                    .unwrap()
+                    .is_some()
+            );
             assert!(
                 store
                     .note_forum_failed(forum, start + ABSENT_DROP_MS - 1, "e")
@@ -1684,7 +1692,10 @@ mod tests {
                 .unwrap(),
             None
         );
-        assert!(store.forum_row(hinted).is_none(), "the failing seed was kept");
+        assert!(
+            store.forum_row(hinted).is_none(),
+            "the failing seed was kept"
+        );
         for forum in [indexed, FORUM] {
             assert!(
                 store
@@ -1695,7 +1706,9 @@ mod tests {
             assert!(store.forum_row(forum).is_some(), "{forum} was dropped");
         }
         // A success ends the run of failures: the week counts from the next failure.
-        store.add_forum_hint(hinted, "did:plc:nnnnnnnnnnnnnnnnnnnnnnnn", "spam.test").unwrap();
+        store
+            .add_forum_hint(hinted, "did:plc:nnnnnnnnnnnnnnnnnnnnnnnn", "spam.test")
+            .unwrap();
         store.note_forum_failed(hinted, 0, "e").unwrap();
         store.note_forum_absent(hinted, 1).unwrap();
         store.lift_quarantine(hinted, 2).unwrap();

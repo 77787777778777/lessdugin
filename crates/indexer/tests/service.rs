@@ -513,7 +513,10 @@ async fn only_a_missing_declaration_quarantines_an_indexed_forum() {
     f.owner.delete(nsid::FORUM, "m6");
     ingest::sync_forum(&f.indexer, forum).await.unwrap();
     let row = f.indexer.store.forum_row(forum).unwrap();
-    assert!(row.absent_ms > 0, "a deleted declaration was not quarantined");
+    assert!(
+        row.absent_ms > 0,
+        "a deleted declaration was not quarantined"
+    );
     assert!(f.indexer.store.forum(forum).is_none());
     assert!(
         f.indexer

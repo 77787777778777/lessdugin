@@ -39,7 +39,11 @@ cannot fill the index with seeds. A forum whose sync fails backs off on its own 
 doubling up to six hours) without re-running discovery. A seed whose declaration is proven
 absent is quarantined: it is no longer listed or synced, is rechecked daily (or as soon as a
 live commit shows the declaration again), and is dropped after a week. A forum that was indexed
-and whose declaration is deleted logs a delete for each of its records.
+and whose declaration is deleted logs a delete for each of its records. Only `RecordNotFound`
+for the declaration, from the PDS that a freshly fetched DID document names, counts as absence:
+a deactivated, taken-down or suspended owner, a bare 404 or an owner DID that does not resolve
+only backs the forum off, and its records stay served. A seed found through a hint that has
+never synced is dropped after a week of failed syncs; `--forum` seeds are kept.
 
 Daily reconcile makes one `getLatestCommit` head check per unique indexed owner/participant DID and
 refreshes only forums containing a repo whose head moved; an individual head failure is logged and
