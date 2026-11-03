@@ -142,6 +142,11 @@ const postRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/p/$author/$rkey",
   component: PostPage,
+  // `seq`: the sequence the post was opened from (engine-api.md §3.4 `get_post(uri, sequence)`)
+  validateSearch: (s: Record<string, unknown>): { seq?: string } => {
+    const seq = str(s.seq);
+    return seq && parseAtUri(seq) ? { seq } : {};
+  },
 });
 const commentRoute = createRoute({
   getParentRoute: () => rootRoute,

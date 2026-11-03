@@ -15,7 +15,14 @@ import styles from "./PostListItem.module.css";
 import { collapseNote, KindBadge, postTitle, TagChips, TierBadge } from "./PostMeta.tsx";
 import { RecordLink } from "./RecordLink.tsx";
 
-export function PostListItem({ post }: { post: PostSummary }) {
+/** `sequence`: the sequence page listing the post, which its links carry. */
+export function PostListItem({
+  post,
+  sequence,
+}: {
+  post: PostSummary;
+  sequence?: string | undefined;
+}) {
   const titleId = useId();
   const viewer = useActiveAccount().data?.did ?? null;
   const collapsed = post.state.kind === "collapsed" ? post.state.reason : null;
@@ -48,7 +55,7 @@ export function PostListItem({ post }: { post: PostSummary }) {
               <span className="visually-hidden">Pinned: </span>
             </span>
           )}
-          <RecordLink uri={post.uri} className={styles.titleLink}>
+          <RecordLink uri={post.uri} className={styles.titleLink} sequence={sequence}>
             <bdi>{postTitle(post)}</bdi>
           </RecordLink>{" "}
           <KindBadge kind={post.kind} />
@@ -73,7 +80,7 @@ export function PostListItem({ post }: { post: PostSummary }) {
         </div>
       </div>
       <div className={styles.side}>
-        <RecordLink uri={post.uri} className={styles.comments}>
+        <RecordLink uri={post.uri} className={styles.comments} sequence={sequence}>
           <span aria-hidden="true">💬</span> {post.commentCount}
           <span className="visually-hidden"> comments</span>
           {post.unreadComments !== undefined && post.unreadComments > 0 && (

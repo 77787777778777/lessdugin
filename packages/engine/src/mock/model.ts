@@ -25,6 +25,7 @@ import type {
   MyOpinion,
   NotificationReason,
   PostKind,
+  ReadingPosition,
   RenderedBody,
   Settings,
   Slug,
@@ -244,6 +245,8 @@ export interface MockState {
   // local state
   followed: Map<AtUri, string | undefined>;
   lastVisited: Map<AtUri, number>;
+  /** "Continue reading" (social.md §14, §16): by sequence, the post last opened from it. */
+  seqpos: Map<AtUri, ReadingPosition>;
   drafts: Map<string, DraftEntry>;
   bookmarks: Map<AtUri, BookmarkEntry>;
   subscriptions: SubscriptionEntry[];

@@ -144,6 +144,28 @@ for (const scheme of ["light", "dark"] as const) {
       expect(w.errors).toEqual([]);
     });
 
+    test("a post in a sequence, and the sequence's continue reading", async ({ page }) => {
+      const w = await watch(page);
+      const found: string[] = [];
+      await open(page, SEQUENCE_PATH, () =>
+        expect(page.getByRole("heading", { level: 1, name: "Map and Territory" })).toBeVisible(),
+      );
+      await page.getByRole("link", { name: "Map and Territory, part 1: models" }).click();
+      await expect(
+        page.getByRole("navigation", { name: "Sequence: Map and Territory" }),
+      ).toBeVisible();
+      await page.waitForLoadState("networkidle");
+      found.push(...(await axe(page, "post opened from a sequence")));
+      await page
+        .getByRole("navigation", { name: "Sequence: Map and Territory" })
+        .getByRole("link", { name: "Map and Territory" })
+        .click();
+      await expect(page.getByTestId("continue-reading")).toBeVisible();
+      found.push(...(await axe(page, "sequence with continue reading")));
+      expect(found).toEqual([]);
+      expect(w.errors).toEqual([]);
+    });
+
     test("mod queue banners of an approval forum (O-8)", async ({ page }) => {
       const w = await watch(page);
       const found: string[] = [];

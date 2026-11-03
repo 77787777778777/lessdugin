@@ -102,6 +102,7 @@ import {
   type PublicActionKind,
   type RawView,
   type ReactTally,
+  type ReadingPosition,
   type Ref,
   type RefContext,
   type RenderedBody,
@@ -635,7 +636,7 @@ export class MockEngine implements EngineApi {
     return uri === FORUM_URI ? FK : b32hash(`lessdugin-fk/1:${uri}`, 12);
   }
 
-  private postView(p: PostRec): PostView {
+  private postView(p: PostRec, from?: AtUri): PostView {
     const summary = this.postSummary(p);
     const hidden = p.state.kind === "hidden";
     const view: PostView = {
@@ -646,10 +647,21 @@ export class MockEngine implements EngineApi {
       history: { revisions: p.revisions.length, redacted: p.redacted },
       sequences: [],
     };
-    for (const seq of this.s.sequences.values()) {
-      const entries = seq.chapters.flatMap((c) => c.posts).filter((u) => this.s.posts.has(u));
+    // next and previous follow one context (social.md §14): the sequence the reader came from
+    // if it contains the post, else the author's own, else a listed one (score desc, uri asc)
+    const containing = [...this.s.sequences.values()]
+      .filter((s) => this.seqEntries(s).includes(p.uri))
+      .sort((a, b) => {
+        const d = this.scoreView(b.uri, b.base).score - this.scoreView(a.uri, a.base).score;
+        return d !== 0 ? d : a.uri < b.uri ? -1 : a.uri > b.uri ? 1 : 0;
+      });
+    const seq =
+      containing.find((s) => s.uri === from) ??
+      containing.find((s) => s.author === p.author) ??
+      containing[0];
+    if (seq) {
+      const entries = this.seqEntries(seq);
       const i = entries.indexOf(p.uri);
-      if (i < 0) continue;
       const nav: PostView["sequences"][number] = { sequence: seq.uri, title: seq.title };
       const prev = entries[i - 1];
       const next = entries[i + 1];
@@ -1534,8 +1546,22 @@ export class MockEngine implements EngineApi {
     return out;
   }
 
-  async getPost(uri: AtUri): Promise<PostView> {
-    return this.postView(this.postRec(uri));
+  /** `sequence`: the sequence the reader came from (engine-api.md §3.4 `get_post`): navigated
+   * when it contains the post, which then becomes its "continue reading" position. */
+  async getPost(uri: AtUri, sequence?: AtUri): Promise<PostView> {
+    if (sequence !== undefined && !splitAtUri(sequence)) {
+      throw err("invalid_ref", `Not an at-uri: ${sequence}`);
+    }
+    const view = this.postView(this.postRec(uri), sequence);
+    const nav = view.sequences[0];
+    if (nav !== undefined && nav.sequence === sequence) {
+      // a side effect of the read, announced only when the position moved
+      if (this.s.seqpos.get(sequence)?.post !== uri) {
+        this.s.seqpos.set(sequence, { post: uri, atMs: this.now() });
+        this.changed({ kind: "thread", uri: sequence });
+      }
+    }
+    return view;
   }
 
   async backlinks(uri: AtUri): Promise<PostSummary[]> {
@@ -1679,7 +1705,22 @@ export class MockEngine implements EngineApi {
       }),
     };
     if (seq.body !== undefined) view.body = renderMarkdown(seq.body).body;
+    // only while the post is a displayable entry, so a stale position shows nothing
+    const at = this.s.seqpos.get(uri);
+    if (at !== undefined && this.seqEntries(seq).includes(at.post)) {
+      view.continueReading = clone(at);
+    }
     return view;
+  }
+
+  /** A sequence's displayable entries (social.md §14 "Entries"), in order. */
+  private seqEntries(seq: SequenceRec): AtUri[] {
+    return seq.chapters
+      .flatMap((c) => c.posts)
+      .filter((u) => {
+        const p = this.s.posts.get(u);
+        return p !== undefined && listed(p.state);
+      });
   }
 
   async user(forum: AtUri | undefined, actor: string): Promise<UserView> {
@@ -2983,6 +3024,7 @@ export class MockEngine implements EngineApi {
         alias === undefined ? { uri } : { uri, alias },
       ),
       lastVisited: Object.fromEntries(this.s.lastVisited),
+      seqpos: clone(Object.fromEntries(this.s.seqpos)) as unknown as Json,
       drafts: clone([...this.s.drafts.values()]) as unknown as Json,
       bookmarks: clone([...this.s.bookmarks.values()]) as unknown as Json,
       subscriptions: clone(this.s.subscriptions) as unknown as Json,
@@ -3005,6 +3047,7 @@ export class MockEngine implements EngineApi {
     const j = json as unknown as {
       followed?: { uri: string; alias?: string }[];
       lastVisited?: Record<string, number>;
+      seqpos?: Record<string, ReadingPosition>;
       drafts?: DraftEntry[];
       bookmarks?: BookmarkEntry[];
       subscriptions?: SubscriptionEntry[];
@@ -3013,6 +3056,7 @@ export class MockEngine implements EngineApi {
     };
     if (j.followed) this.s.followed = new Map(j.followed.map((f) => [f.uri, f.alias]));
     if (j.lastVisited) this.s.lastVisited = new Map(Object.entries(j.lastVisited));
+    if (j.seqpos) this.s.seqpos = new Map(Object.entries(j.seqpos));
     if (j.drafts) this.s.drafts = new Map(j.drafts.map((d) => [d.id, d]));
     if (j.bookmarks) this.s.bookmarks = new Map(j.bookmarks.map((b) => [b.uri, b]));
     if (j.subscriptions) this.s.subscriptions = j.subscriptions;

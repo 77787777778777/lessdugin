@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { FORUM_URI } from "./mock/fixture.ts";
+import { buildFixture, FORUM_URI } from "./mock/fixture.ts";
 import { MockEngine, mockSafeHref } from "./mock.ts";
 import { type EngineEvent, isMissingRoot, OPINION_UNDO_WINDOW_MS } from "./types.ts";
 
@@ -311,6 +311,57 @@ describe("MockEngine writes", () => {
     expect((await e.modQueue(s.uri)).banners?.map((b) => b.code)).toEqual([
       "applicantsNotDiscovered",
     ]);
+  });
+
+  // engine-api.md §3.4 `get_post(uri, sequence?)`, social.md §14 next and previous
+  it("navigates the sequence a post was opened from and records it as continue reading", async () => {
+    const e = new MockEngine({ sendMs: 10 });
+    const { postUri, sequenceUri } = buildFixture();
+    const map1 = postUri.map1 ?? "";
+    const map2 = postUri.map2 ?? "";
+    const confusion = postUri.confusion ?? "";
+    const t = await e.seqCreate({
+      forum: FORUM_URI,
+      title: "Mine",
+      chapters: [{ posts: [confusion, map2, map1] }],
+    });
+    await vi.advanceTimersByTimeAsync(50);
+    const s = (await e.writes()).find((w) => w.id === t.id)?.state;
+    if (s?.kind !== "done") throw new Error("not written");
+    const mine = s.uri;
+    // without a context: one sequence, the author's own (ada's)
+    expect((await e.getPost(map2)).sequences).toEqual([
+      { sequence: sequenceUri, title: "Map and Territory", prev: map1, next: confusion },
+    ]);
+    expect((await e.sequence(mine)).continueReading).toBeUndefined();
+    const events: EngineEvent[] = [];
+    e.subscribe((ev) => events.push(ev));
+    expect((await e.getPost(map2, mine)).sequences).toEqual([
+      { sequence: mine, title: "Mine", prev: confusion, next: map1 },
+    ]);
+    expect((await e.sequence(mine)).continueReading?.post).toBe(map2);
+    expect((await e.sequence(sequenceUri)).continueReading).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(events).toEqual([{ kind: "changed", topics: [{ kind: "thread", uri: mine }] }]);
+    // the same position again announces nothing; another one moves it
+    await e.getPost(map2, mine);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(events).toHaveLength(1);
+    await e.getPost(map1, mine);
+    expect((await e.sequence(mine)).continueReading?.post).toBe(map1);
+    // a sequence that does not contain the post is ignored and records nothing
+    const welcome = postUri.welcome ?? "";
+    expect((await e.getPost(welcome, mine)).sequences).toEqual([]);
+    expect((await e.sequence(mine)).continueReading?.post).toBe(map1);
+    await expect(e.getPost(map1, "not an at-uri")).rejects.toMatchObject({ code: "invalid_ref" });
+    // the position is device-local state, exported and imported
+    const exported = (await e.exportLocal()) as { seqpos: Record<string, { post: string }> };
+    expect(exported.seqpos[mine]?.post).toBe(map1);
+    const other = new MockEngine();
+    await other.importLocal(exported);
+    expect((await other.exportLocal()) as unknown).toMatchObject({
+      seqpos: { [mine]: { post: map1 } },
+    });
   });
 
   // views.rs `tag_summary`: a page that exists but is not a tag (applicable = false) is no tag

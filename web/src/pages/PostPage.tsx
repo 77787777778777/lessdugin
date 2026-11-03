@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // A post: title, byline, ToC sidebar (from body.toc), the rendered body with footnotes as
 // sidenotes on wide screens, votes and reacts, history, sequence navigation, and the thread.
+// Opened from a sequence (`?seq=`, its page or its next and previous links), the post is read
+// with `getPost(uri, sequence)`, so the navigation follows that sequence and the engine records
+// it as the sequence's "continue reading" position (engine-api.md §3.4 `get_post`).
 
-import type { CommentNode, CommentSort, PostView } from "@lessdugin/engine/types";
+import type { CommentNode, CommentSort, PostView, SequenceNav } from "@lessdugin/engine/types";
 import { COMMENT_SORTS, isMissingRoot } from "@lessdugin/engine/types";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { getRouteApi, Link, useNavigate } from "@tanstack/react-router";
@@ -232,11 +235,14 @@ function OwnPostActions({ uri, forum }: { uri: string; forum: string }) {
 
 function PostBody({
   view,
+  sequences,
   ctx,
   myDid,
   children,
 }: {
   view: PostView | null;
+  /** The sequence navigation to show (the view's, or the one of the sequence opened from). */
+  sequences: readonly SequenceNav[];
   ctx: ThreadContext;
   myDid: string | null;
   /** The thread, rendered in the article column below the post. */
@@ -254,7 +260,7 @@ function PostBody({
     );
   }
   return (
-    <PostBodyView view={view} ctx={ctx} myDid={myDid}>
+    <PostBodyView view={view} sequences={sequences} ctx={ctx} myDid={myDid}>
       {children}
     </PostBodyView>
   );
@@ -262,11 +268,13 @@ function PostBody({
 
 function PostBodyView({
   view,
+  sequences,
   ctx,
   myDid,
   children,
 }: {
   view: PostView;
+  sequences: readonly SequenceNav[];
   ctx: ThreadContext;
   myDid: string | null;
   children: ReactNode;
@@ -336,17 +344,30 @@ function PostBodyView({
         ) : (
           <RenderedHtml html={body.html} media={body.media} sidenotes ref={bodyRef} />
         )}
-        {view.sequences.map((s) => (
+        {sequences.map((s) => (
           <nav
             key={s.sequence}
             className={styles.seqNav}
             aria-label={`Sequence: ${cleanName(s.title, 300)}`}
           >
-            {s.prev ? <RecordLink uri={s.prev}>← Previous</RecordLink> : <span />}
+            {/* next and previous keep following this sequence */}
+            {s.prev ? (
+              <RecordLink uri={s.prev} sequence={s.sequence}>
+                ← Previous
+              </RecordLink>
+            ) : (
+              <span />
+            )}
             <RecordLink uri={s.sequence}>
               <bdi>{cleanName(s.title, 300)}</bdi>
             </RecordLink>
-            {s.next ? <RecordLink uri={s.next}>Next →</RecordLink> : <span />}
+            {s.next ? (
+              <RecordLink uri={s.next} sequence={s.sequence}>
+                Next →
+              </RecordLink>
+            ) : (
+              <span />
+            )}
           </nav>
         ))}
         <div className={styles.postFooter}>
@@ -403,7 +424,8 @@ function PostBodyView({
   );
 }
 
-export function PostThread({ uri }: { uri: string }) {
+/** `sequence`: the sequence the post was opened from (`?seq=`). */
+export function PostThread({ uri, sequence }: { uri: string; sequence?: string | undefined }) {
   const engine = useEngine();
   const announceQueued = useAnnounceQueued();
   const [sort, setSort] = useState<CommentSort>("magic");
@@ -416,6 +438,16 @@ export function PostThread({ uri }: { uri: string }) {
   const active = useActiveAccount();
   const root = thread.data?.post;
   const postView = root && !isMissingRoot(root) ? root : null;
+  // read with the sequence it was opened from: its navigation, and the reading position
+  const inSequence = useQuery({
+    queryKey: qk.postIn(uri, sequence ?? ""),
+    queryFn: () => engine.getPost(uri, sequence ?? ""),
+    enabled: sequence !== undefined,
+  });
+  const sequences =
+    sequence === undefined || inSequence.isError
+      ? (postView?.sequences ?? [])
+      : (inSequence.data?.sequences ?? []);
   const forumUri = postView?.post.forum;
   const forum = useForum(forumUri);
   const loaded = thread.data !== undefined;
@@ -487,7 +519,7 @@ export function PostThread({ uri }: { uri: string }) {
 
   return (
     <ParticipantsProvider forum={forum.data} items={participantItems}>
-      <PostBody view={postView} ctx={ctx} myDid={myDid}>
+      <PostBody view={postView} sequences={sequences} ctx={ctx} myDid={myDid}>
         <section aria-labelledby={headingId}>
           <div className={styles.commentsHeader}>
             <h2 id={headingId} className={styles.commentsTitle} data-testid="comment-count">
@@ -585,10 +617,11 @@ export function PostThread({ uri }: { uri: string }) {
 
 export function PostPage() {
   const { author, rkey } = route.useParams();
+  const { seq } = route.useSearch();
   const ref = useParsedRef(`#/p/${author}/${rkey}`);
   if (ref.isPending) return <Loading />;
   if (ref.isError) return <ErrorView page error={ref.error} title="Unknown post" />;
   if (ref.data.kind !== "post")
     return <ErrorView page error={new Error("This address is not a post.")} />;
-  return <PostThread key={ref.data.uri} uri={ref.data.uri} />;
+  return <PostThread key={ref.data.uri} uri={ref.data.uri} sequence={seq} />;
 }

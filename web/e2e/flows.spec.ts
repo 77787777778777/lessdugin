@@ -4,6 +4,7 @@
 // policy and nothing logged an error.
 
 import { expect, type Page, test } from "@playwright/test";
+import { buildFixture } from "../../packages/engine/src/mock/fixture.ts";
 import { FORUM, FORUM_PATH, type Watch, WELCOME, WELCOME_PATH, watch } from "./helpers.ts";
 import { startStaticServer } from "./serve.mjs";
 
@@ -394,6 +395,68 @@ test("a wiki save that meets a newer head keeps the text and is redone after a r
   // the genesis, carol's edit, the concurrent edit and the redone one, in one chain
   await expect(revisions).toHaveCount(4);
   await expect(revisions.nth(1)).toContainText("A concurrent edit");
+});
+
+test("posts opened from a sequence follow it, and its page offers continue reading (§3.4)", async ({
+  page,
+}) => {
+  const { postUri } = buildFixture();
+  const path = (uri: string | undefined): string => {
+    const [, , did, , rkey] = (uri ?? "").split("/");
+    return `/p/${did}/${rkey}`;
+  };
+  const part1 = "Map and Territory, part 1: models";
+  const part2 = "Map and Territory, part 2: updating";
+  // an own sequence that lists part 2 after another post
+  await go(page, `${FORUM_PATH}/seqs`, FORUM);
+  await page.getByRole("link", { name: "New sequence" }).click();
+  await page.getByRole("textbox", { name: "Title", exact: true }).fill("Reading order");
+  const add = page.getByRole("textbox", { name: "Add a post to chapter 1" });
+  await add.fill(`#${path(postUri.confusion)}`);
+  await page.getByRole("button", { name: "Add", exact: true }).click();
+  await add.fill(`#${path(postUri.map2)}`);
+  await page.getByRole("button", { name: "Add", exact: true }).click();
+  await expect(page.getByRole("list", { name: "Posts of chapter 1" })).toContainText(part2);
+  await page.getByRole("button", { name: "Create sequence" }).click();
+  await expect(page.getByRole("heading", { level: 1, name: "Reading order" })).toBeVisible();
+  await expect(page.getByTestId("continue-reading")).toHaveCount(0);
+
+  // opened from this sequence, part 2 navigates it rather than its author's own
+  await page.getByRole("link", { name: part2, exact: true }).click();
+  await expect(page.getByRole("heading", { level: 1, name: part2 })).toBeVisible();
+  const nav = page.getByRole("navigation", { name: "Sequence: Reading order" });
+  await expect(nav).toBeVisible();
+  await expect(page.getByRole("navigation", { name: "Sequence: Map and Territory" })).toHaveCount(
+    0,
+  );
+  await nav.getByRole("link", { name: "← Previous" }).click();
+  await expect(page.getByRole("heading", { level: 1, name: "Noticing confusion" })).toBeVisible();
+  // the previous link kept the sequence: its next leads back to part 2
+  await expect(
+    page.getByRole("navigation", { name: "Sequence: Reading order" }).getByRole("link", {
+      name: "Next →",
+    }),
+  ).toBeVisible();
+  await page
+    .getByRole("navigation", { name: "Sequence: Reading order" })
+    .getByRole("link", { name: "Reading order" })
+    .click();
+  const resume = page.getByTestId("continue-reading");
+  await expect(resume).toContainText("Continue reading: Noticing confusion");
+  await resume.getByRole("link").click();
+  await expect(page.getByRole("heading", { level: 1, name: "Noticing confusion" })).toBeVisible();
+
+  // opened on its own, part 1 navigates its author's sequence; next keeps following it
+  await go(page, path(postUri.map1), part1);
+  const theirs = page.getByRole("navigation", { name: "Sequence: Map and Territory" });
+  await theirs.getByRole("link", { name: "Next →" }).click();
+  await expect(page.getByRole("heading", { level: 1, name: part2 })).toBeVisible();
+  await expect(page.getByRole("navigation", { name: "Sequence: Map and Territory" })).toBeVisible();
+  await page
+    .getByRole("navigation", { name: "Sequence: Map and Territory" })
+    .getByRole("link", { name: "Map and Territory" })
+    .click();
+  await expect(page.getByTestId("continue-reading")).toContainText(`Continue reading: ${part2}`);
 });
 
 test("create a sequence, then reorder and remove its entries (engine-api.md §3.5)", async ({

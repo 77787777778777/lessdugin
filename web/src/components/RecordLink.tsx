@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Router links for engine-supplied at-uris (post, comment, sequence, forum; anything else goes
-// through the #/at/* resolver).
+// through the #/at/* resolver). A post opened from a sequence carries it (`?seq=`), so the post
+// page navigates that sequence (engine-api.md §3.4 `get_post(uri, sequence)`).
 
 import type { Ref } from "@lessdugin/engine/types";
 import { Link, useNavigate } from "@tanstack/react-router";
@@ -11,17 +12,25 @@ export function RecordLink({
   uri,
   children,
   className,
+  sequence,
 }: {
   uri: string;
   children: ReactNode;
   className?: string | undefined;
+  /** For a post: the sequence it is opened from. */
+  sequence?: string | undefined;
 }) {
   const p = parseAtUri(uri);
   if (!p) return <span className={className}>{children}</span>;
   switch (recordKind(p.collection)) {
     case "post":
       return (
-        <Link to="/p/$author/$rkey" params={{ author: p.did, rkey: p.rkey }} className={className}>
+        <Link
+          to="/p/$author/$rkey"
+          params={{ author: p.did, rkey: p.rkey }}
+          search={sequence !== undefined ? { seq: sequence } : {}}
+          className={className}
+        >
           {children}
         </Link>
       );

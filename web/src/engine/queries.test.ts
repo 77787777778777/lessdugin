@@ -30,6 +30,16 @@ describe("changed topics → query invalidation (engine-api.md §3.8)", () => {
     expect(keysForTopic({ kind: "outbox" })).toEqual([]);
   });
 
+  it("refreshes a sequence on its thread topic (its continue-reading position moved)", () => {
+    const qc = new QueryClient();
+    const SEQ = "at://did:plc:abcdefghijklmnopqrstuvwx/online.7778777.lessdugin.temp.sequence/s";
+    qc.setQueryData([...qk.sequence(SEQ)], 1);
+    qc.setQueryData([...qk.sequence(`${SEQ}2`)], 1);
+    invalidateTopics(qc, [{ kind: "thread", uri: SEQ }]);
+    expect(qc.getQueryState([...qk.sequence(SEQ)])?.isInvalidated).toBe(true);
+    expect(qc.getQueryState([...qk.sequence(`${SEQ}2`)])?.isInvalidated).toBe(false);
+  });
+
   it("re-queries notifications on forum and thread topics (they are computed lazily)", () => {
     const qc = new QueryClient();
     for (const topic of [
