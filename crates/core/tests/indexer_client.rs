@@ -909,6 +909,99 @@ fn audit_proof_check_counts_only_rejected_proofs_as_contradictions() {
     assert_eq!(a5.counts.contradictions, 0);
 }
 
+fn post_hint(uri: &str) -> Value {
+    json!({"ref": {"uri": uri}, "effectiveAt": "2025-01-01T00:00:00Z", "state": "visible"})
+}
+
+fn posts_page(posts: Value, cursor: Option<&str>) -> lessdugin_core::host::HttpResponse {
+    resp::ok_json(&with_meta(
+        json!({
+            "posts": posts, "cursor": cursor,
+            "policy": {"karma": "karma/1", "ranking": "magic/1"}, "inputDigest": "00"
+        }),
+        0,
+    ))
+}
+
+#[test]
+fn audit_leaves_an_unreachable_pds_unchecked_instead_of_failing() {
+    use lessdugin_testkit::fake_pds::Fault;
+    let w = forum_world();
+    w.host.advance_ms(180_000);
+    // The indexer lists the local post and one more of the same author that is not local.
+    let rkey = keys::post_rkey(
+        w.key.uri.as_str(),
+        tid_at_ms(w.host.now() - 600_000).as_ref(),
+    )
+    .unwrap();
+    let other = w.owner.uri(nsid::POST, &rkey);
+    serve_honest_audit(&w, json!([post_hint(&w.post), post_hint(&other)]));
+    // From now on the author's PDS answers nothing but 503s.
+    w._net
+        .inject(Fault::status(503).on_repo(w.owner.did().as_str()));
+    let report = block_on(w.engine.audit_indexer(w.key.uri.as_str()))
+        .unwrap()
+        .unwrap();
+    let a1 = check(&report, "A1 heads");
+    assert_eq!(a1.counts.checked, 0, "{report:?}");
+    assert!(a1.findings.is_empty(), "{report:?}");
+    let a3 = check(&report, "A3 records");
+    // The local post was compared; the other one could not be fetched and stays unchecked.
+    assert_eq!(a3.counts.checked, 2, "{report:?}");
+    assert!(a3.findings.is_empty(), "{report:?}");
+    assert!(
+        check(&report, "A5 proofs").findings.is_empty(),
+        "{report:?}"
+    );
+    assert_eq!(report.counts.omissions, 0, "{report:?}");
+}
+
+#[test]
+fn audit_pages_listings_past_short_pages_until_the_cursor_ends() {
+    let w = forum_world();
+    w.host.advance_ms(180_000);
+    serve_honest_audit(&w, json!([]));
+    // Page 1 is short (every row was blocklisted after paging) but carries a cursor; the post
+    // is on page 2. The last answer serves the digest read.
+    w.host.respond_seq(
+        &endpoint("listPosts"),
+        vec![
+            Ok(posts_page(json!([]), Some("c1"))),
+            Ok(posts_page(json!([post_hint(&w.post)]), Some("c2"))),
+            Ok(posts_page(json!([]), None)),
+            Ok(posts_page(json!([]), None)),
+        ],
+    );
+    let report = block_on(w.engine.audit_indexer(w.key.uri.as_str()))
+        .unwrap()
+        .unwrap();
+    let a3 = check(&report, "A3 records");
+    assert!(a3.findings.is_empty(), "{report:?}");
+    let pages = w.host.requests_to(&endpoint("listPosts"));
+    assert!(pages[1].url.contains("cursor=c1"), "{}", pages[1].url);
+    assert!(pages[2].url.contains("cursor=c2"), "{}", pages[2].url);
+
+    // A repeated cursor ends the listing instead of failing the audit.
+    let w = forum_world();
+    w.host.advance_ms(180_000);
+    serve_honest_audit(&w, json!([]));
+    w.host.respond_seq(
+        &endpoint("listPosts"),
+        vec![
+            Ok(posts_page(json!([post_hint(&w.post)]), Some("c1"))),
+            Ok(posts_page(json!([]), Some("c1"))),
+            Ok(posts_page(json!([]), None)),
+        ],
+    );
+    let report = block_on(w.engine.audit_indexer(w.key.uri.as_str()))
+        .unwrap()
+        .unwrap();
+    assert!(
+        check(&report, "A3 records").findings.is_empty(),
+        "{report:?}"
+    );
+}
+
 #[test]
 fn production_endpoints_are_exact_and_devnet_is_loopback_only() {
     use lessdugin_core::indexer::endpoint_allowed;

@@ -21,6 +21,8 @@ pub use crate::dto::{AuditCheck, AuditCounts, AuditFinding, AuditKind, AuditRepo
 
 const TWO_MINUTES_MS: i64 = 120_000;
 const MAX_AUDIT_ITEMS: usize = 10_000;
+/// Pages read from one paged listing, so a stream of empty pages cannot hold the audit.
+const MAX_AUDIT_PAGES: usize = 1_000;
 
 impl AuditCounts {
     fn count(&mut self, kind: AuditKind) {
@@ -121,8 +123,12 @@ pub(crate) async fn run<H: Host>(
         let by_did: BTreeMap<&str, &RepoHeadHint> =
             heads.heads.iter().map(|h| (h.did.as_str(), h)).collect();
         for did in chunk {
+            // One deactivated or unreachable PDS leaves its repo unchecked, not the audit.
+            if let Err(e) = engine.syncer().head_check(session, did, false).await {
+                a1.unchecked(did.as_str(), e);
+                continue;
+            }
             a1.checked(1);
-            engine.syncer().head_check(session, did, false).await?;
             let head = store
                 .repo(did.as_str())
                 .await
@@ -222,7 +228,7 @@ pub(crate) async fn run<H: Host>(
                 && complete_dids.contains(r.did.as_str())
         })
         .collect();
-    a3.checked(eligible.len() + remote_owned.len());
+    a3.checked(eligible.len());
     for post in &eligible {
         if !remote_owned.contains(&post.uri) {
             a3.finding(
@@ -241,20 +247,36 @@ pub(crate) async fn run<H: Host>(
         .collect();
     for uri in &remote_owned {
         if local_uris.contains(uri.as_str()) {
+            a3.checked(1);
             continue;
         }
         let Ok(parsed) = AtUri::parse(uri) else {
             continue;
         };
-        if matches!(
-            engine.syncer().point_fetch(session, &parsed, None).await?,
-            PointOutcome::NotFound { .. }
-        ) {
+        // A post of this forum is in its fk range (data-model.md §6.3). Anything else is a false
+        // claim on its face, and is never fetched from a DID the indexer chose.
+        if parsed.collection().as_str() != Collection::Post.nsid()
+            || !crate::store::schema::in_range(&key.fk, parsed.rkey().as_str())
+        {
+            a3.checked(1);
             a3.finding(
                 AuditKind::Contradiction,
                 uri,
-                "indexer lists a post that the author's PDS confirms absent",
+                "indexer lists a record that is not a post of this forum",
             );
+            continue;
+        }
+        match engine.syncer().point_fetch(session, &parsed, None).await {
+            Ok(PointOutcome::NotFound { .. }) => {
+                a3.checked(1);
+                a3.finding(
+                    AuditKind::Contradiction,
+                    uri,
+                    "indexer lists a post that the author's PDS confirms absent",
+                );
+            }
+            Ok(_) => a3.checked(1),
+            Err(e) => a3.unchecked(uri, e),
         }
     }
     if !loaded.completeness.partial {
@@ -356,19 +378,20 @@ async fn all_posts<H: Host>(
     let mut out = Vec::new();
     let mut cursor = None;
     let mut seen = BTreeSet::new();
-    for _ in 0..100 {
+    // A short page is not the end: the indexer drops blocklisted rows after paging. Page until
+    // the cursor is absent or repeats, within the item cap and a page bound.
+    for _ in 0..MAX_AUDIT_PAGES {
         let page: PostsPage = client
             .list_posts(session, forum, "new", 100, cursor.as_deref())
             .await?;
-        let done = page.posts.len() < 100;
         cursor = page.cursor;
         out.extend(page.posts);
-        if done || out.len() >= MAX_AUDIT_ITEMS {
+        if out.len() >= MAX_AUDIT_ITEMS {
             break;
         }
         let Some(c) = cursor.clone() else { break };
         if !seen.insert(c) {
-            return Err(EngineError::invalid_input("listPosts repeated a cursor"));
+            break;
         }
     }
     out.truncate(MAX_AUDIT_ITEMS);
