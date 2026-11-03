@@ -201,12 +201,9 @@ fn declaration_absent(e: &anyhow::Error) -> bool {
 /// absent is a successful outcome: the snapshot is emptied (each record logged as deleted) and
 /// the seed quarantined. Any other failure backs off this forum only.
 pub async fn sync_forum(indexer: &Indexer, forum: &str) -> anyhow::Result<()> {
-    let started = indexer.now_ms();
     match sync_forum_inner(indexer, forum).await {
         Ok(()) => {
-            indexer
-                .store
-                .note_forum_synced(forum, started, indexer.now_ms())?;
+            indexer.store.note_forum_synced(forum, indexer.now_ms())?;
             Ok(())
         }
         Err(e) if declaration_absent(&e) => {

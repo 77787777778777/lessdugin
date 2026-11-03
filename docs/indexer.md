@@ -50,7 +50,8 @@ Two configured Jetstream endpoints are consumed concurrently with a shared dedup
 independent durable cursors; reconnects rewind ten seconds. A live commit is point-fetched and
 the affected forums are re-projected from the cache, so a write is served within seconds without
 a forum-wide sync; only membership and declaration changes request an ordinary forum sync, debounced
-by two seconds and spaced by ten times the forum's last sync duration. Fetches of different frames run concurrently, each bounded to 30 seconds. Cursors advance
+by two seconds and spaced by 200 ms per participant after the last one (ten minutes at 3,000
+participants), so membership writes cannot keep a large forum in back-to-back syncs. Fetches of different frames run concurrently, each bounded to 30 seconds. Cursors advance
 over the completed prefix of frames: a frame is complete when it was projected or, after any
 failure, when its repository was handed to the durable per-repo retry (two seconds, doubling up
 to six hours). One failing record, PDS or deleted forum therefore never stalls the stream. Live

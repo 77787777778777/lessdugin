@@ -32,10 +32,11 @@ pub const ABSENT_RECHECK_MS: i64 = 24 * 60 * 60 * 1000;
 /// A seed whose declaration has been absent this long (and never indexed since) is dropped.
 pub const ABSENT_DROP_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 /// An ordinary sync requested by a live event (a membership or declaration change) starts no
-/// sooner than this many times the forum's last ordinary sync took, after it ended: each such
-/// sync checks every participant, so a stream of cheap membership writes costs at most about a
-/// tenth of the forum's sync capacity.
-pub const ROSTER_SYNC_COST_FACTOR: i64 = 10;
+/// sooner than this long per participant after the forum's last ordinary sync ended. Each such
+/// sync checks every participant's head, so however often memberships are written, those checks
+/// average at most five per second per forum (ten minutes between syncs at 3,000 participants;
+/// only the debounce for a small forum).
+pub const ROSTER_SYNC_MS_PER_PARTICIPANT: i64 = 200;
 
 #[derive(Clone)]
 pub struct Store(Arc<Inner>);
@@ -375,11 +376,11 @@ impl Store {
     }
 
     /// [`Store::schedule_forum_sync`] for a live event: no sooner than `earliest_ms`, nor than
-    /// [`ROSTER_SYNC_COST_FACTOR`] times the last ordinary sync's duration after it ended.
+    /// [`ROSTER_SYNC_MS_PER_PARTICIPANT`] per participant after the last ordinary sync ended.
     pub fn schedule_roster_sync(&self, forum: &str, earliest_ms: i64) -> rusqlite::Result<()> {
         self.db().execute(
-            "UPDATE forums SET sync_due_ms=MAX(?2,ordinary_ms+?3*ordinary_cost_ms) WHERE uri=?1 AND (sync_due_ms=0 OR sync_due_ms>MAX(?2,ordinary_ms+?3*ordinary_cost_ms))",
-            params![forum, earliest_ms, ROSTER_SYNC_COST_FACTOR],
+            "UPDATE forums SET sync_due_ms=MAX(?2,ordinary_ms+?3*participant_count) WHERE uri=?1 AND (sync_due_ms=0 OR sync_due_ms>MAX(?2,ordinary_ms+?3*participant_count))",
+            params![forum, earliest_ms, ROSTER_SYNC_MS_PER_PARTICIPANT],
         )?;
         Ok(())
     }
@@ -393,17 +394,12 @@ impl Store {
         Ok(())
     }
 
-    /// A successful ordinary sync from `started_ms` to `ended_ms`: clears the back-off,
-    /// quarantine and pending sync request, and records its duration for the roster throttle.
-    pub fn note_forum_synced(
-        &self,
-        forum: &str,
-        started_ms: i64,
-        ended_ms: i64,
-    ) -> rusqlite::Result<()> {
+    /// A successful ordinary sync, ended at `ended_ms`: clears the back-off, quarantine and
+    /// pending sync request, and starts the spacing of live-requested syncs.
+    pub fn note_forum_synced(&self, forum: &str, ended_ms: i64) -> rusqlite::Result<()> {
         self.db().execute(
-            "UPDATE forums SET failures=0,retry_ms=0,absent_ms=0,sync_due_ms=0,error='',ordinary_ms=?2,ordinary_cost_ms=?3 WHERE uri=?1",
-            params![forum, ended_ms, ended_ms.saturating_sub(started_ms).max(0)],
+            "UPDATE forums SET failures=0,retry_ms=0,absent_ms=0,sync_due_ms=0,error='',ordinary_ms=?2 WHERE uri=?1",
+            params![forum, ended_ms],
         )?;
         Ok(())
     }
@@ -1158,7 +1154,6 @@ fn migrate_forums(conn: &Connection) -> rusqlite::Result<()> {
         ("via", "TEXT NOT NULL DEFAULT ''"),
         ("via_host", "TEXT NOT NULL DEFAULT ''"),
         ("ordinary_ms", "INTEGER NOT NULL DEFAULT 0"),
-        ("ordinary_cost_ms", "INTEGER NOT NULL DEFAULT 0"),
     ] {
         if !columns.iter().any(|column| column == name) {
             conn.execute(
@@ -1542,7 +1537,7 @@ mod tests {
             store.note_forum_failed(FORUM, 0, "boom").unwrap();
         }
         assert_eq!(store.forum_row(FORUM).unwrap().retry_ms, RETRY_MAX_MS);
-        store.note_forum_synced(FORUM, 0, 0).unwrap();
+        store.note_forum_synced(FORUM, 0).unwrap();
         assert_eq!(store.forum_row(FORUM).unwrap().failures, 0);
 
         // An indexed forum whose declaration is proven absent logs a delete per record and
@@ -1592,18 +1587,27 @@ mod tests {
 
     /// A burst of live membership events cannot keep a forum in back-to-back ordinary syncs.
     #[test]
-    fn live_roster_syncs_are_spaced_by_the_last_syncs_cost() {
+    fn live_roster_syncs_are_spaced_by_the_participant_count() {
         let store = Store::in_memory().unwrap();
         store.add_forum_seed(FORUM).unwrap();
         let due = |s: &Store| s.forum_row(FORUM).unwrap().sync_due_ms;
         // Never synced: only the debounce applies.
         store.schedule_roster_sync(FORUM, 2_000).unwrap();
         assert_eq!(due(&store), 2_000);
-        // A sync that took 15 s, ending at 100 s: the next live request waits 150 s more.
-        store.note_forum_synced(FORUM, 85_000, 100_000).unwrap();
+        // 3,000 participants, last synced at 100 s: the next live request waits ten minutes.
+        grow(&store, 0, 3_000);
+        store
+            .db()
+            .execute(
+                "UPDATE forums SET participant_count=3000 WHERE uri=?1",
+                [FORUM],
+            )
+            .unwrap();
+        store.note_forum_synced(FORUM, 100_000).unwrap();
         assert_eq!(due(&store), 0);
         store.schedule_roster_sync(FORUM, 102_000).unwrap();
-        let spaced = 100_000 + ROSTER_SYNC_COST_FACTOR * 15_000;
+        let spaced = 100_000 + 3_000 * ROSTER_SYNC_MS_PER_PARTICIPANT;
+        assert_eq!(spaced, 700_000);
         assert_eq!(due(&store), spaced);
         assert!(store.forums_due(spaced - 1).is_empty());
         assert_eq!(store.forums_due(spaced), vec![FORUM.to_owned()]);
@@ -1612,8 +1616,12 @@ mod tests {
         assert_eq!(due(&store), spaced);
         store.schedule_forum_sync(FORUM, 103_000).unwrap();
         assert_eq!(due(&store), 103_000);
-        // A cheap sync leaves the debounce as the only delay.
-        store.note_forum_synced(FORUM, 200_000, 200_050).unwrap();
+        // A small forum: the debounce is the only delay.
+        store
+            .db()
+            .execute("UPDATE forums SET participant_count=2 WHERE uri=?1", [FORUM])
+            .unwrap();
+        store.note_forum_synced(FORUM, 200_000).unwrap();
         store.schedule_roster_sync(FORUM, 202_000).unwrap();
         assert_eq!(due(&store), 202_000);
     }

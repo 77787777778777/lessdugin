@@ -43,7 +43,7 @@ const IN_FLIGHT: usize = 64;
 /// Live proof fetches waiting for the proof task; beyond it a proof is left to `getRecordProofs`.
 const PROOF_QUEUE: usize = 4_096;
 /// An ordinary forum sync requested by a membership or declaration event waits this long, so
-/// a burst of newcomers costs one sync (and see [`crate::store::ROSTER_SYNC_COST_FACTOR`]).
+/// a burst of newcomers costs one sync (and see [`crate::store::ROSTER_SYNC_MS_PER_PARTICIPANT`]).
 pub const ROSTER_SYNC_DEBOUNCE_MS: i64 = 2_000;
 /// The longest one event's fetches may take. Frames are fetched concurrently, so a slow or
 /// hanging PDS delays only its own events, by at most this long, and then they are handed off.

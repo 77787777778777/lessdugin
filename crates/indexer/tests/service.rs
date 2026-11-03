@@ -2125,6 +2125,45 @@ async fn record_proofs_use_cached_identities_and_a_bounded_pool() {
     );
 }
 
+/// security-net-10: requests queued on one slow origin (PLC, a hanging PDS) wait for that
+/// origin's permit and rate slot before taking a global permit, so they never hold the global
+/// budget that every other origin needs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_slow_origin_never_holds_the_global_request_budget() {
+    use lessdugin_core::host::{HttpRequest, Target};
+    let net = FakeNet::serve_http(SystemClock);
+    let slow = net.add_pds("slow.test");
+    let fast = net.add_pds("fast.test");
+    let owner = slow.add_account("owner.test");
+    let forum = ForumKey::new(owner.did(), "m6").unwrap();
+    let f = Fixture::with(&TempDir::new().unwrap().keep(), net, owner, forum, &[]).await;
+    f.net
+        .inject(lessdugin_testkit::fake_pds::Fault::latency(3_000).on_host(slow.base()));
+    let get = |base: Url| {
+        let host = f.indexer.engine.host().clone();
+        async move {
+            let url = base
+                .join("/xrpc/com.atproto.server.describeServer")
+                .unwrap();
+            host.http(HttpRequest::get(Target::Anon(url))).await
+        }
+    };
+    // More requests queued on the slow origin than there are global permits (200).
+    let queued = (0..210)
+        .map(|_| tokio::spawn(get(slow.url())))
+        .collect::<Vec<_>>();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    get(fast.url()).await.unwrap();
+    // The other origin was answered while the slow origin's first requests still waited.
+    assert!(
+        queued.iter().all(|t| !t.is_finished()),
+        "a request to another origin waited for the slow origin's queue"
+    );
+    for t in queued {
+        t.abort();
+    }
+}
+
 /// robustness-12: the daily pass drops tombstones past the 30-day retention from the core record
 /// store, and cached proofs of records no forum indexes any more.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
