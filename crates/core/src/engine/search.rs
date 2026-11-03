@@ -65,13 +65,15 @@ impl<H: Host> Engine<H> {
 
     /// The search index of a loaded forum (`sync.md` §13): built on first use from the title and
     /// P of every listed post and comment (bodies are read in batches, never rendered, and
-    /// released), and kept until the model is replaced.
+    /// released), and kept until the model is replaced. The tokens of an item the forum's
+    /// previous index held at the same CID are carried over; only the others are read.
     async fn search_index(&self, l: &Loaded) -> Result<Arc<ForumIndex>, EngineError> {
         let model = &l.model;
         let f = model.key.uri.as_str();
-        if let Some(ix) = self.rt.search.get(f, model) {
-            return Ok(ix);
-        }
+        let previous = match self.rt.search.get(f, model) {
+            Ok(ix) => return Ok(ix),
+            Err(previous) => previous,
+        };
         let docs: Vec<String> = model
             .input
             .records
@@ -85,7 +87,19 @@ impl<H: Host> Engine<H> {
             .map(|(uri, _)| uri.clone())
             .collect();
         let mut builder = index::Builder::default();
-        for batch in docs.chunks(INDEX_BATCH) {
+        let carried = previous
+            .as_deref()
+            .map(ForumIndex::tokens_by_item)
+            .unwrap_or_default();
+        let cid = |uri: &str| model.skel(uri).map_or("", |x| x.cid.as_str());
+        let mut read = Vec::new();
+        for uri in docs {
+            match carried.get(uri.as_str()) {
+                Some((at, tokens)) if *at == cid(&uri) => builder.add_tokens(&uri, at, tokens),
+                _ => read.push(uri),
+            }
+        }
+        for batch in read.chunks(INDEX_BATCH) {
             let values = self.values(model, batch).await?;
             for uri in batch {
                 let title = match model.skel(uri).map(|x| &x.data) {
@@ -96,7 +110,7 @@ impl<H: Host> Engine<H> {
                     Some(md) => projection(md, &model.input.ns, &self.rt.renders).map(|p| p.text),
                     None => Some(String::new()),
                 };
-                builder.add(uri, title, p.as_deref());
+                builder.add(uri, cid(uri), title, p.as_deref());
             }
         }
         let ix = Arc::new(builder.finish(model));

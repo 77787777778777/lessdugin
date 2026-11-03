@@ -1510,7 +1510,7 @@ build(F):
 - **Provisional items** (§1.5) are evaluated against the model's current result and never enter `records`.
 - **Search.** Each client builds the core's in-memory inverted index per forum from titles and the plain-text projection P (`lfm-1.md` §10) of listed items. SQLite fts5 is used only inside the indexer (§15). Like lists, search results leave out comments under a Missing root (`social.md` §11), as user pages do.
   - The index maps each case-folded token of a title or P (split at White_Space) to the items holding it. A query's whitespace-separated terms are ANDed, each matching every token it is a substring of; a term holds no white space, so this finds every item whose title or P contains all the terms case-insensitively, and only those candidates are rendered and checked. A spilled body whose source is not in memory is always a candidate.
-  - An index belongs to one model build: the first search after the model is built (or rebuilt, after a `Changed` event) builds it, reading the bodies in batches without rendering them, and it is dropped with the model.
+  - An index belongs to one model build: the first search after the model is built (or rebuilt, after a `Changed` event) builds it, reading the bodies in batches without rendering them, and it is dropped with the model. An item's tokens depend only on its record, so the new build carries over the tokens of the items the forum's previous index held at the same uri and CID (a spilled body whose source was not in memory excepted) and reads only the other bodies.
 - **Rendering.** Render output is cached in an in-memory LRU keyed by `(cid, RENDERER_VERSION)`.
 - The model also keeps `BlobRow.refs` current (§11.4) and records `ForumRow.lastViewed`.
 

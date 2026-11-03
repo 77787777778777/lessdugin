@@ -11,8 +11,8 @@ use std::time::Duration;
 use common::block_on;
 use lessdugin_atp::syntax::Did;
 use lessdugin_core::dto::{
-    CommentDraft, ForumDraft, MembershipMode, PostDraft, SearchItem, SearchQuery, SearchResults,
-    SyncOpts, WriteState, WriteTicket,
+    CommentDraft, Draft, EditOpts, ForumDraft, MembershipMode, PostDraft, SearchItem, SearchQuery,
+    SearchResults, SyncOpts, WriteState, WriteTicket,
 };
 use lessdugin_core::engine::{AccountInfo, Engine, EngineConfig};
 use lessdugin_core::host::{
@@ -378,13 +378,28 @@ fn search_reads_only_the_candidates_of_the_forum_index() {
     block_on(engine.sync_forum(&w.forum, &SyncOpts::default())).unwrap();
     host.take_keys();
     let (hits, rebuilt) = search("zqrareword");
-    let mut expected = vec![rare, second];
+    let mut expected = vec![rare.clone(), second.clone()];
     expected.sort();
     assert_eq!(hits, expected);
+    // the new model is indexed again, carrying over the items it held at the same CID: only
+    // the new post's body is read for it (then the two candidates' to render them)
     assert!(
-        rebuilt > 42,
-        "the new model is indexed again ({rebuilt} keys)"
+        rebuilt < 15,
+        "only the new item is read ({rebuilt} keys, {built} for the first index)"
     );
+
+    // an item at a new CID is read again: its old tokens are not carried over
+    let edit = Draft::Post {
+        id: None,
+        post: PostDraft::article(&w.forum, "Rare", "Now an ordinary post."),
+    };
+    let ticket = block_on(w.alice.engine.edit(&rare, &edit, &EditOpts::default())).unwrap();
+    w.alice.done(&ticket);
+    block_on(engine.sync_forum(&w.forum, &SyncOpts::default())).unwrap();
+    let (hits, _) = search("zqrareword");
+    assert_eq!(hits, [second]);
+    let (hits, _) = search("ordinary");
+    assert_eq!(hits, [rare]);
 }
 
 /// Search and the user page leave out comments under a Missing root, as lists and Recent
