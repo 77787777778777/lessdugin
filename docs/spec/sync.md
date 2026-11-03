@@ -335,6 +335,8 @@ DIDs that merely appear in records are never resolved eagerly.
 
 Requests to the PLC directory: at most 8 in flight and at most `plcRate` requests per second, where `plcRate` starts at 20. On 429: honour `Retry-After`, and set `plcRate = max(1, plcRate / 2)`. After every 60 s without a 429: `plcRate = min(20, plcRate + 2)`. PLC sends no rate-limit headers (ADR 0004).
 
+The paced slots go to waiting requests in the order of §9.1, by priority and then arrival, and a slot is taken only when it is used. A P0 request (an author on screen, §14.3) therefore waits at most for the next free slot, never behind a forum sync's queued participant documents, and a request whose slot would come only after its time budget ends leaves without taking one, so a spent budget never delays later requests.
+
 ### 3.6 Login binding
 
 These checks apply to every OAuth session (`data-model.md` §10.5) before it is used for any write:
@@ -566,12 +568,12 @@ sync_repo(did, scopes, reason) -> Clean | Applied | Unstable | Rollback | Failed
      remove every mark with rev ≤ h1.rev (§6.5)
   repo.colls/collsAt/collsRev/collsDirty updated if describeRepo ran (collsRev = h1.rev); repo.checkedAt = now; repo.fails = 0; repo.lastOk = now
   KvStore::write(cache, batch ++ [put repo row])                                    // one atomic batch
-  if ¬stable: enqueue(did, minRev = h2.rev, P1, "unstable"); return Unstable
+  if ¬stable: enqueue(did, minRev = h2.rev, P1, "unstable", fks = the pass's fk scopes); return Unstable
   emit Changed; return Applied
 ```
 
 **Rules**
-- An unstable pass (the head moved during listing) still admits what it listed, but writes no tombstones and advances no `listed` entry. After 3 consecutive unstable passes the repo is re-queued at P3 with the repo backoff (§9.4).
+- An unstable pass (the head moved during listing, or its head re-check failed, as when its time budget ran out while a listing was held) still admits what it listed, but writes no tombstones and advances no `listed` entry. After 3 consecutive unstable passes the repo is re-queued at P3 with the repo backoff (§9.4). The queued item carries the pass's forum scopes (§6.1), so the pass is finished also for a forum open in a view that is not followed.
 - **`describeRepo` freshness.** `repo.colls` is reused for up to 24 h. It is refreshed early when `repo.collsDirty` is set: a hint or an own write named a collection in `OURS` that is not in `repo.colls`. A background pass can therefore miss a collection created less than 24 h ago and named by no hint until the next reconcile, which always refreshes. A **user-initiated** pass (`sync_forum`, `sync_thread`, `sync --full`; `engine-api.md` §3.3) of a forum scope trusts `repo.colls` only at the head it was described at (`repo.collsRev`): when the head moved and a ranged collection or `NS.membership` is missing from `repo.colls`, it calls `describeRepo` again, even when the pass would otherwise be `Clean`. An explicit refresh therefore sees the first records of a newly granted or newly joined participant at once. If `describeRepo` fails, `colls = OURS`.
 - **Partial results.** A range that failed or hit a byte cap leaves its scope unlisted; the other ranges are still applied.
 
@@ -727,7 +729,8 @@ So a subject counts as absent only if a delete was confirmed, or its range was c
 #### 5.6.5 `obs` (first-seen times)
 
 - `firstSeen(u, cid)` is the earliest time (µs) at which this client observed that exact version from **any** source, hints included: a Jetstream commit event carrying `(u, cid)`, an indexer `#recordRef` or `#change`, or the admission itself. Hint times are kept in memory and applied when the version is admitted.
-- In assisted mode, an indexer's `#recordRef.firstSeen` is also a candidate, and the minimum is taken.
+- The time of a hint is when this client received it: a Jetstream commit's local receive time (§6.4), and for an indexer `#change` the time its `getChanges` page arrived (§6.6), never the page's `asOf.timeUs` (the indexer's clock, like a Jetstream `time_us`).
+- In assisted mode, an indexer's `#recordRef.firstSeen` is also a candidate, and the minimum is taken. A `#change` carries no `firstSeen`, so it offers none.
 - Each stored row keeps `firstSeen` for its current CID, plus `firstCid` and `firstSeenUri` for the earliest version ever admitted. The fold's `obs` therefore contains `(u, cid) → firstSeen` and `(u, firstCid) → firstSeenUri`, so `t_obs` is the record's first-seen time across edits (`social.md` §2.2).
 - First-seen values are never moved later.
 - **Parity mode** (test-only, devnet-only; `engine-api.md` §2.1): the engine passes the fold one fixed time as the `obs` of every admitted version and as `now`, instead of the stored first-seen times and the clock. The stored values are not changed.
@@ -800,7 +803,7 @@ Every response is byte-counted while streaming, after decompression; the host ab
 
 ### 6.1 The dirty queue
 
-Every change source feeds one queue of items `(did, minRev?, priority, reasons, uris?)`:
+Every change source feeds one queue of items `(did, minRev?, priority, reasons, uris?, fks?)`:
 - Jetstream (§6.2–§6.4);
 - the indexer change feed (§6.6);
 - polling (§6.7);
@@ -809,7 +812,9 @@ Every change source feeds one queue of items `(did, minRev?, priority, reasons, 
 - discovery (§4);
 - opening a view (§6.7).
 
-**Coalescing.** The queue holds at most one item per DID. Merging takes the highest priority (P0 highest), the greatest `minRev`, the union of reasons and uris, and the earliest ready time.
+**Coalescing.** The queue holds at most one item per DID. Merging takes the highest priority (P0 highest), the greatest `minRev`, the union of reasons, uris and fks, and the earliest ready time.
+
+**Scopes.** An item's `sync_repo` covers the DID's forum scopes that the queue's server knows (the followed forums it is relevant to, and those its repo was listed for) and the item's own `fks`: the scopes of the pass that queued it (an unstable pass, §5.2). Without them, a pass a forum page's sync left unfinished (its budget spent while a participant's listing was held) would be dropped for a forum that is open but not followed, and the page would not converge until another explicit sync.
 
 | Priority | Content | Ready after (debounce plus jitter, *tunable*) |
 |---|---|---|
@@ -917,7 +922,8 @@ Events MAY also drive counts and placeholders ("3 new comments"), which never mo
 
 With an active indexer that advertises `getChanges` (assisted mode):
 - poll `getChanges(forum = F, since = cursor)` every 10 s while a view of F is open (its model is loaded) and every 60 s otherwise (*tunable*), per followed forum the indexer serves; `live_tail` runs these polls, and a `sync_forum` polls once before its PDS sync. A successful poll makes the change feed a healthy live source (§6.2). `live_tail` polls after its round's queue work and one forum per round, the most overdue first, so a slow indexer delays neither the dirty queue nor the next Jetstream read by more than one poll. A view opened since a forum's last poll makes its next poll due 10 s after that poll;
-- each `#change` is handled like a Jetstream commit for that uri (§6.4), deduplicated with the same LRU: a commit that Jetstream already delivered (applied, or still unacknowledged) is skipped, and a queued `#change` makes the same commit on Jetstream a duplicate. The poll of a `sync_forum`, which a PDS sync follows, does not use the LRU;
+- each `#change` is handled like a Jetstream commit for that uri (§6.4): its first-seen time is the local time its page was received (§5.6.5); it is deduplicated with the same LRU: a commit that Jetstream already delivered (applied, or still unacknowledged) is skipped, and a queued `#change` makes the same commit on Jetstream a duplicate. The poll of a `sync_forum`, which a PDS sync follows, does not use the LRU;
+- a newcomer candidate of the feed (§15.4 Scope) is confirmed like the other newcomer hints, after them and within the same budget (§4.4). A `sync_forum`'s poll adds the candidates to that sync's newcomers. A `live_tail` poll hands them on as it does a Jetstream candidate (§6.4): each gets its discovery row, with the source `hint:indexer` and the same 10,000-row cap, and one background discovery pass of the forum (30 s, 64 requests, *tunable*) confirms them at their PDSes. Nothing is fetched for them before that pass, and a pass that fails leaves the rows for the next forum sync;
 - the cursor (`cur/indexer:<did>:<fk>`) is the returned `cursor`. Without one, the first poll starts at the indexer's current `asOf.seq` (from `describeIndexer`), not at 0: the PDS sync covers what came before, and the log is not replayed as point fetches;
 - `CursorTooOld`: run a full reconcile of F (§6.8) and restart from the `asOf.seq` of that response.
 
@@ -1110,6 +1116,8 @@ for each item (independently):
   pass → a third-party proof (§1.2): current or [stale]
   fail → drop the item; count a failure against the indexer (§15.4)
 ```
+
+A `BadSignature` against a document fetched before the bundle arrived is checked once more against one fetched now before it counts (the key may have rotated within the hour, as for the indexer in §15.1); §8.7 then applies.
 
 A `ProvenAbsent` that is current produces a tombstone (key `(rev, sentAt of the head check)`). A stale one is ignored.
 
@@ -1306,12 +1314,13 @@ HostRow    { rangeCursor: "unknown" | "yes" | "no", rcAt: ms, shortPageEnds: boo
 | Lock | Native | Browser | Holder does |
 |---|---|---|---|
 | sync leader | exclusive `fd-lock` on `<cache dir>/cache.lock`, tried without waiting | Web Lock `lessdugin-sync-leader`, requested once and held for the tab's lifetime | live sources, polling, reconcile, discovery, P1–P3 sync, eviction |
-| repo `d` | `fd-lock` on `<cache dir>/locks/repo-<h(d)>.lock` | Web Lock `lessdugin-repo-<d>` | the read-diff-write of `sync_repo`, point fetches and admissions for d |
+| repo `d` | `fd-lock` on `<cache dir>/locks/repo-<h(d)>.lock` | Web Lock `lessdugin-repo-<d>` | the read-diff-write of `sync_repo` (its identity is resolved before, so a pass waiting for PLC pacing does not hold it), point fetches and admissions for d |
 | outbox `a` | `fd-lock` on `<data dir>/locks/outbox-<h(a)>.lock` | Web Lock `lessdugin-outbox-<a>`; in `lessdugin web`, whose `state` is the native one, then also the native lock through `POST /bridge/lock` (`threat-model.md` §7.4) | the pump for account a (§7.1) |
 
 `h(x)` = the first 16 characters of `b32s(sha256(UTF8(x)))` (`data-model.md` §3.1).
 
 - Processes and tabs that are not the leader read the cache and do only P0 fetches, each under the repo lock.
+- **Head checks.** A head check (§6.7, §14.3 step 4) sends its `getLatestCommit` without the repo lock and takes the lock only to record `headSeen`, and only if it is free: while another job holds the repo (a sync in flight), it hands its observation to that job, which records it with its own write (the latest by send time wins, §5.9), and a currency check (§1.2) uses it meanwhile. A head check of an author on screen therefore never waits for a sync of that author's repo, and neither write loses the other's state. The cold page's membership reads (§14.3 step 4) do not take the lock either: they admit one record and change no repo state.
 - **Change notification.** Browser: every committed batch's `Changed{topics}` is posted on BroadcastChannel `lessdugin-changes`. Native: followers (for example a TUI next to a CLI) poll SQLite `PRAGMA data_version` every 2 s and rescan. This is a host concern and not part of the trait.
 - When the leader exits, another process or tab takes the lock and resumes from the persisted cursors and queue state.
 
@@ -1564,7 +1573,7 @@ Read budgets are per host (ADR 0004), so a cold sync spread over many Bluesky PD
 1. Forum resolution: about 3 requests (PLC, declaration, declaration proof).
 2. `listPosts`: placeholders render (`[hint]`, no text).
 3. `getRecordProofs` for the visible posts (about 30), in 1–2 requests; each item is verified (§8.6).
-4. One `getLatestCommit` per author on screen, in parallel: current proofs are admitted and their text appears `[verified]`; stale ones are point-fetched from the PDS (§1.2.1).
+4. One `getLatestCommit` per author on screen, in parallel, and in parallel with step 3, at P0: a forum sync's participant sweep that runs beside the page goes after them (§3.5), and a sync of an author's repo in flight does not hold the check up (§10.6). Each author's DID document is resolved once, at most 1 h old (§8.6), and serves both the head check and the verification of the author's proofs. For each author who is not an authority and whose membership record at the forum's key is neither cached nor tombstoned, one P0 `getRecord` of that record at the author's PDS runs in parallel with the head check, admitted as a point fetch (§5.7) without the repo lock (§10.6): an author is a participant only once their membership record is held (`social.md` §3.1), and a granted member's is otherwise read only inside their repo sync (§4.2.1), so without it the page could not list a granted member's post before that sync. Current proofs are admitted and their text appears `[verified]`; stale ones are point-fetched from the PDS (§1.2.1).
 5. Authorities sync at P0 in parallel; the view is `degraded` until they complete. Text appears in about 1–2 s.
 
 ---
@@ -1623,7 +1632,7 @@ Displayed values are always recomputed locally from admitted records. Indexer ag
 
 **Scope.** An indexer's hints never choose whom the client contacts:
 - a `#change` of `getChanges(forum = F)` is handled (§6.6) only for a record of F (an rkey of F's scope, §10.4: its `{fk}-` range or its membership key; F's declaration; or a profile) written by a DID in C(F) (§4.5), a granted DID, a confirmed participant or an own account. A membership at F's key by any other DID is a newcomer candidate when F ∈ F_new (§6.4): nothing is fetched for it, and the next forum sync confirms it like the other newcomer hints, after them and within the same budget (§4.4). Every other change is dropped, also before any identity resolution;
-- `listPosts` uris are hydrated (§14.3) only for posts in F's `{fk}-` range and, once a discovery pass of F has completed (§4.2), only for posts by those DIDs. A cold start cannot tell participants yet; its one visible page bounds it;
+- `listPosts` uris are hydrated (§14.3) only for posts in F's `{fk}-` range and, once a discovery pass of F has completed (§4.2), only for posts by those DIDs; the memberships the page reads are those of these posts' authors. A cold start cannot tell participants yet; its one visible page bounds it;
 - a `getRepoHeads` head for a DID that was not asked about is ignored;
 - `CursorTooOld` reconciles F as a Jetstream gap does (§6.3): authorities at P1, the other DIDs of C(F) at P3. A feed that keeps answering `CursorTooOld` gets this at most once per 24 h for each indexer and forum (the cursor row's `timeUs` records the last one); the daily reconcile (§6.8) bounds what it can hide.
 

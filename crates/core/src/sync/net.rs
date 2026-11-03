@@ -13,7 +13,8 @@
 //!   breaker open (§9.4)                           → Blocked, no request
 //!   budget below the priority's floor, or 429'd   → wait until the window resets (≤ 60 s),
 //!                                                    else a local 429 with Retry-After
-//!   PLC: wait for the pacing slot (§3.5)
+//!   PLC: wait for the pacing slot (§3.5), taken by (priority, arrival); none if the time
+//!        budget ends first
 //!   wait for a slot: global, per host, PLC, DoH (§9.1); waiters by (priority, arrival)
 //!   send; count it; read RateLimit-* (§9.2); 5xx / network / timeout / too large → breaker
 //! ```
@@ -316,15 +317,25 @@ impl Default for PlcPacing {
 }
 
 impl PlcPacing {
-    /// Takes the next slot at `now`; returns how long to wait for it.
-    fn slot(&mut self, now: i64) -> i64 {
-        // +2/s after every 60 s without a 429
+    /// +2/s after every 60 s without a 429.
+    fn recover(&mut self, now: i64) {
         let since = now.saturating_sub(self.last_429.max(self.last_raise));
         if self.rate < PLC_RATE_MAX && since >= PLC_RECOVER_MS {
             let steps = (since / PLC_RECOVER_MS).min(10) as u32;
             self.rate = (self.rate + 2 * steps).min(PLC_RATE_MAX);
             self.last_raise = now;
         }
+    }
+
+    /// When the next slot is free, at `now` or later; nothing is taken.
+    fn next_slot(&mut self, now: i64) -> i64 {
+        self.recover(now);
+        self.next_at.max(now)
+    }
+
+    /// Takes the next slot at `now`; returns how long to wait for it.
+    fn slot(&mut self, now: i64) -> i64 {
+        self.recover(now);
         let spacing = 1000 / i64::from(self.rate.max(1));
         let at = self.next_at.max(now);
         self.next_at = at.saturating_add(spacing);
@@ -352,6 +363,8 @@ struct State {
     waiters: BTreeMap<(Priority, u64), Waiter>,
     seq: u64,
     plc_pacing: PlcPacing,
+    /// Requests waiting for a PLC pacing slot, served by (priority, arrival) (§3.5, §9.1).
+    plc_queue: BTreeMap<(Priority, u64), Option<Waker>>,
     locked: BTreeSet<String>,
     lock_waiters: BTreeMap<String, BTreeMap<u64, Option<Waker>>>,
 }
@@ -428,6 +441,131 @@ impl State {
             if let Some(wk) = w.waker.take() {
                 wk.wake();
             }
+        }
+    }
+
+    /// One step of a PLC request's wait for its pacing slot (§3.5): only the first waiter by
+    /// (priority, arrival) may take a slot, and only once it is free, so a P0 request that
+    /// arrives behind a queue of background ones goes next. A slot is taken only when it is
+    /// used: a waiter that leaves (its time budget is spent) costs none.
+    /// `slept`: the waiter, first in line, has just waited for the slot it was told of; it takes
+    /// the slot then even if the host's clock did not move.
+    fn plc_step(
+        &mut self,
+        ticket: &mut Option<(Priority, u64)>,
+        prio: Priority,
+        now: i64,
+        slept: bool,
+    ) -> PlcStep {
+        let key = match *ticket {
+            Some(k) => k,
+            None => {
+                self.seq += 1;
+                let k = (prio, self.seq);
+                self.plc_queue.insert(k, None);
+                *ticket = Some(k);
+                k
+            }
+        };
+        if self.plc_queue.keys().next() != Some(&key) {
+            return PlcStep::Queued;
+        }
+        let at = self.plc_pacing.next_slot(now);
+        if at > now && !slept {
+            return PlcStep::Wait(at - now);
+        }
+        self.plc_pacing.slot(now);
+        self.plc_leave(key);
+        *ticket = None;
+        PlcStep::Go
+    }
+
+    /// Removes a PLC waiter; the next one, now first, is woken to take its turn.
+    fn plc_leave(&mut self, key: (Priority, u64)) {
+        let first = self.plc_queue.keys().next() == Some(&key);
+        self.plc_queue.remove(&key);
+        if first && let Some(w) = self.plc_queue.values_mut().next().and_then(Option::take) {
+            w.wake();
+        }
+    }
+}
+
+/// What a PLC request waiting for its pacing slot does next.
+enum PlcStep {
+    /// Send now (the slot is taken).
+    Go,
+    /// First in line: the slot is free after this many ms.
+    Wait(i64),
+    /// Behind other waiters: wait until woken.
+    Queued,
+}
+
+/// A PLC request's place in the pacing queue; dropping it (a cancelled or refused request)
+/// leaves the queue.
+struct PlcTicket<'a> {
+    net: &'a Net,
+    key: Option<(Priority, u64)>,
+}
+
+impl PlcTicket<'_> {
+    /// Waits for its pacing slot at `prio`. `Err(())` when the slot comes only after the
+    /// time budget of `stats`: no slot is taken then.
+    async fn wait<H: Host>(&mut self, host: &H, prio: Priority, stats: &Stats) -> Result<(), ()> {
+        let mut slept = false;
+        loop {
+            let now = host.now_ms();
+            let step = self.net.lock().plc_step(&mut self.key, prio, now, slept);
+            slept = false;
+            match step {
+                PlcStep::Go => return Ok(()),
+                PlcStep::Wait(ms) => {
+                    if stats.expired(now.saturating_add(ms)) {
+                        return Err(());
+                    }
+                    host.sleep(u64::try_from(ms).unwrap_or(0)).await;
+                    slept = true;
+                }
+                PlcStep::Queued => {
+                    if stats.expired(now) {
+                        return Err(());
+                    }
+                    PlcTurn { ticket: self }.await;
+                }
+            }
+        }
+    }
+}
+
+impl Drop for PlcTicket<'_> {
+    fn drop(&mut self) {
+        if let Some(k) = self.key.take() {
+            self.net.lock().plc_leave(k);
+        }
+    }
+}
+
+/// Pending until its waiter is first in the PLC queue.
+struct PlcTurn<'t, 'a> {
+    ticket: &'t PlcTicket<'a>,
+}
+
+impl Future for PlcTurn<'_, '_> {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        let Some(key) = self.ticket.key else {
+            return Poll::Ready(());
+        };
+        let mut st = self.ticket.net.lock();
+        if st.plc_queue.keys().next() == Some(&key) {
+            return Poll::Ready(());
+        }
+        match st.plc_queue.get_mut(&key) {
+            Some(w) => {
+                *w = Some(cx.waker().clone());
+                Poll::Pending
+            }
+            None => Poll::Ready(()),
         }
     }
 }
@@ -673,14 +811,14 @@ impl Net {
             }
         };
         if class == Class::Plc {
-            let now = host.now_ms();
-            let wait = self.lock().plc_pacing.slot(now);
-            if wait > 0 {
-                if stats.expired(now.saturating_add(wait)) {
-                    self.record_outcome(&origin, None, probe, now);
-                    return Err(HostError::Blocked(TIME_BUDGET_SPENT.into()));
-                }
-                host.sleep(wait as u64).await;
+            let mut ticket = PlcTicket {
+                net: self,
+                key: None,
+            };
+            if ticket.wait(host, prio, stats).await.is_err() {
+                drop(ticket);
+                self.record_outcome(&origin, None, probe, host.now_ms());
+                return Err(HostError::Blocked(TIME_BUDGET_SPENT.into()));
             }
         }
         let _permit = Acquire::new(self, &origin, class, prio).await;
@@ -743,6 +881,17 @@ impl Net {
             ticket: None,
             held: false,
         }
+    }
+
+    /// The lock of repo `did` if it is free and no job waits for it; never waits.
+    pub fn try_repo_lock(&self, did: &Did) -> Option<RepoGuard<'_>> {
+        let key = did.to_string();
+        let mut st = self.lock();
+        if st.locked.contains(&key) || st.lock_waiters.get(&key).is_some_and(|q| !q.is_empty()) {
+            return None;
+        }
+        st.locked.insert(key.clone());
+        Some(RepoGuard { net: self, key })
     }
 }
 

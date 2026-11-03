@@ -341,11 +341,56 @@ impl<H: Host> Engine<H> {
                         .is_none_or(|s| s.participants.contains(u.did().as_str()))
             })
             .collect();
-        let report =
-            crate::indexer::proofs::hydrate_visible(&self.syncer(), &client, &session, &uris)
-                .await?;
+        let memberships = self.page_memberships(&key, &uris).await?;
+        let report = crate::indexer::proofs::hydrate_page(
+            &self.syncer(),
+            &client,
+            &session,
+            &uris,
+            &memberships,
+        )
+        .await?;
         self.rt.invalidate(key.uri.as_str());
         Ok(Some(report))
+    }
+
+    /// The membership records at the forum's key that the cold page reads with its posts
+    /// (`sync.md` §14.3 step 4): an author is a participant only once their membership record is
+    /// held (`social.md` §3.1), and a granted member's is otherwise read only inside their repo
+    /// sync (§4.2.1). So that of each author of `posts` who is not an authority and whose
+    /// membership is neither cached nor known deleted is read at P0 from the author's PDS, in
+    /// parallel with the author's head check; no repo sync of the author is needed.
+    async fn page_memberships(
+        &self,
+        key: &ForumKey,
+        posts: &[AtUri],
+    ) -> Result<Vec<AtUri>, EngineError> {
+        use lessdugin_lexicon::collection::nsid;
+        // A forum that cannot be opened lists nothing: only its owner is known to need none.
+        let authorities: BTreeSet<String> = match self.open_key(key, false).await {
+            Ok(opened) => opened.authorities.into_keys().collect(),
+            Err(e) => {
+                tracing::debug!(forum = %key.uri, error = %e, "cold page: forum not opened");
+                BTreeSet::from([key.owner.to_string()])
+            }
+        };
+        let store = crate::store::records::RecordStore::new(self.host.cache());
+        let authors: BTreeSet<&Did> = posts.iter().map(AtUri::did).collect();
+        let mut out = Vec::new();
+        for did in authors {
+            if authorities.contains(did.as_str()) {
+                continue;
+            }
+            let k = crate::store::schema::RecKey::new(nsid::MEMBERSHIP, did.as_str(), &key.fk);
+            if matches!(
+                store.slot(&k).await.map_err(super::models::store_error)?,
+                crate::store::records::Slot::Empty
+            ) {
+                let uri = format!("at://{did}/{}/{}", nsid::MEMBERSHIP, key.fk);
+                out.push(AtUri::parse(&uri).map_err(|e| EngineError::internal(e.to_string()))?);
+            }
+        }
+        Ok(out)
     }
 
     /// Ordering/provisional-placeholder input only. Display callers must still use local queries.

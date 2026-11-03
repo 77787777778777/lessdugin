@@ -1653,3 +1653,47 @@ fn production_endpoints_are_exact_and_devnet_is_loopback_only() {
         EndpointPolicy::Production
     ));
 }
+
+#[test]
+fn a_change_is_first_seen_when_it_is_received_not_at_the_indexer_snapshot() {
+    let w = forum_world();
+    // An edit the feed reports; the stored version is the one the forum sync listed.
+    let rkey = w.post.rsplit('/').next().unwrap().to_owned();
+    let dt = lessdugin_atp::syntax::Datetime::from_millis(w.host.now() - 3_600_000).unwrap();
+    let edited = Post::article(w.key.uri.clone(), "Edited", "Body", dt);
+    let cid = w
+        .owner
+        .put(nsid::POST, &rkey, &serde_json::to_value(edited).unwrap());
+    let (_, rev) = w.owner.head();
+    // The indexer's snapshot time is a day before the poll: it is the indexer's own clock, not
+    // when this client saw the change (sync.md §6.4, §6.6).
+    let snapshot_us = (w.host.now() - 86_400_000) * 1000;
+    let meta = json!({
+        "asOf": {"seq": 8, "timeUs": snapshot_us, "lagMs": 0},
+        "indexer": {"did": "did:web:index.example.com", "coreVersion": "test"}
+    });
+    let mut page = json!({
+        "changes": [{"seq": 8, "uri": w.post, "cid": cid.to_string(), "did": w.owner.did(), "rev": rev.to_string(), "op": "update"}],
+        "cursor": 8
+    });
+    page.as_object_mut()
+        .unwrap()
+        .extend(meta.as_object().unwrap().clone());
+    describe(&w.host, &["getChanges"], 0);
+    w.host
+        .respond_get(&endpoint("getChanges"), resp::ok_json(&page));
+    drain_queue(&w.engine);
+    let received_us = w.host.now() * 1000;
+    let polled = block_on(w.engine.poll_indexer_changes(w.key.uri.as_str()))
+        .unwrap()
+        .unwrap();
+    assert_eq!(polled.queued, 1, "{polled:?}");
+    // The point fetch runs later; the version keeps the time the change was received.
+    w.host.advance_ms(60_000);
+    block_on(w.engine.live_step()).unwrap();
+    let row = block_on(RecordStore::new(w.host.cache()).get(&AtUri::parse(&w.post).unwrap()))
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.cid, cid, "the edit was not fetched");
+    assert_eq!(row.first_seen, received_us, "{row:?}");
+}

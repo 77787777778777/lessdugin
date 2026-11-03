@@ -2257,3 +2257,66 @@ fn a_change_jetstream_handled_is_not_fetched_again() {
         tail.await.unwrap();
     });
 }
+
+#[test]
+fn a_change_feed_newcomer_is_handed_to_discovery_like_a_jetstream_candidate() {
+    futures::executor::block_on(async {
+        use lessdugin_lexicon::collection::nsid;
+        use lessdugin_lexicon::records::Membership;
+        let host = MemHost::new();
+        let net = FakeNet::on(&host);
+        let owner = net.add_account("alice.example.com");
+        let key = open_forum(&host, &owner);
+        serve_change_feed(&host, json!([]), 500);
+        let engine = change_feed_engine(&host, &[&key]).await;
+        // A newcomer joins the open forum; only the indexer's change feed names it.
+        let newbie = net.add_account("newbie.example.com");
+        let dt = lessdugin_atp::syntax::Datetime::from_millis(host.now()).unwrap();
+        let cid = newbie.put(
+            nsid::MEMBERSHIP,
+            &key.fk,
+            &serde_json::to_value(Membership::new(key.uri.clone(), dt)).unwrap(),
+        );
+        let (_, rev) = newbie.head();
+        let uri = newbie.uri(nsid::MEMBERSHIP, &key.fk);
+        serve_change_feed(
+            &host,
+            json!([{"seq": 501, "uri": uri, "cid": cid.to_string(), "did": newbie.did(), "rev": rev.to_string(), "op": "create"}]),
+            501,
+        );
+        host.park_sleeps(true);
+        let tail = engine.live_tail();
+        futures::pin_mut!(tail);
+        let confirmed = || async {
+            lessdugin_core::discovery::state::disc_rows(host.cache(), &key.fk)
+                .await
+                .unwrap()
+                .get(newbie.did().as_str())
+                .is_some_and(|r| r.state == lessdugin_core::discovery::DiscState::Confirmed)
+        };
+        for _ in 0..600 {
+            assert!(futures::poll!(tail.as_mut()).is_pending());
+            if confirmed().await {
+                break;
+            }
+            host.advance_ms(100);
+        }
+        // sync.md §6.6 and §15.4: a newcomer named by the feed is a candidate, confirmed by the
+        // discovery pass a Jetstream candidate gets (§6.4), with its own source.
+        let rows = lessdugin_core::discovery::state::disc_rows(host.cache(), &key.fk)
+            .await
+            .unwrap();
+        let row = rows
+            .get(newbie.did().as_str())
+            .expect("the feed's newcomer has no discovery row");
+        assert!(row.src.iter().any(|s| s == "hint:indexer"), "{row:?}");
+        assert_eq!(
+            row.state,
+            lessdugin_core::discovery::DiscState::Confirmed,
+            "{row:?}"
+        );
+        engine.live_stop();
+        host.park_sleeps(false);
+        tail.await.unwrap();
+    });
+}

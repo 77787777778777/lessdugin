@@ -3,7 +3,7 @@
 //! the indexer change feed, polling, reconcile, own writes, discovery, opening a view).
 //!
 //! **Coalescing.** Merging two items for a DID takes the highest priority (P0 highest), the
-//! greatest `minRev`, the union of reasons and uris, and the earliest ready time.
+//! greatest `minRev`, the union of reasons, uris and forum scopes, and the earliest ready time.
 //!
 //! **Ready times** (debounce plus jitter, *tunable*): P0 `uniform(0, 5 s)`, P1 `uniform(2 s,
 //! 30 s)`, P2 `uniform(30 s, 600 s)`, P3 at its scheduled time.
@@ -63,6 +63,11 @@ pub struct DirtyItem {
     pub uris: BTreeSet<String>,
     /// CID hints by URI (`None`: the hint reported a delete).
     pub mark_hints: BTreeMap<String, Option<String>>,
+    /// Forum scopes (fks) to sync besides those the server of the queue knows for the DID: the
+    /// scopes of the pass that queued it (an unstable pass, such as one whose time budget ran
+    /// out while a listing was held), so that a forum open in a view but not followed converges
+    /// too (`sync.md` §5.2, §6.1).
+    pub fks: BTreeSet<String>,
     /// Not before (ms).
     pub ready_at: i64,
 }
@@ -77,6 +82,7 @@ impl DirtyItem {
             reasons: BTreeSet::from([reason]),
             uris: BTreeSet::new(),
             mark_hints: BTreeMap::new(),
+            fks: BTreeSet::new(),
             ready_at,
         }
     }
@@ -91,6 +97,12 @@ impl DirtyItem {
     /// Sets `minRev`.
     pub fn with_min_rev(mut self, rev: impl Into<String>) -> Self {
         self.min_rev = Some(rev.into());
+        self
+    }
+
+    /// Adds forum scopes to sync.
+    pub fn with_fks<S: Into<String>>(mut self, fks: impl IntoIterator<Item = S>) -> Self {
+        self.fks.extend(fks.into_iter().map(Into::into));
         self
     }
 
@@ -110,6 +122,7 @@ impl DirtyItem {
         self.reasons.extend(other.reasons);
         self.uris.extend(other.uris);
         self.mark_hints.extend(other.mark_hints);
+        self.fks.extend(other.fks);
         self.ready_at = self.ready_at.min(other.ready_at);
     }
 
