@@ -19,17 +19,21 @@
 //!
 //! then sleeps (with the host) until the next queue item or poll is due, at most
 //! [`limits::LIVE_TAIL_IDLE_MS`]. Jetstream (§6.4) and indexer `getChanges` (§6.6) feed the same
-//! queue from M5 and M6. Errors are logged and the round is retried; they are never returned.
+//! queue from M5 and M6: between rounds `live_tail` reads Jetstream frames (several per round;
+//! while frames arrive a round runs at most once per [`LIVE_FRAME_STEP_MS`]) and polls the
+//! change feed of each followed forum the consented indexer serves. A live frame whose
+//! application fails is retried with back-off and then left to the dirty queue, so it never
+//! holds the stream. Errors are logged and the round is retried; they are never returned.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use futures::StreamExt;
 use lessdugin_atp::syntax::{AtUri, Did};
 
-use crate::dto::Topic;
-use crate::host::{Dir, Host, KeyRange, KvStore};
+use crate::dto::{Event, Topic};
+use crate::host::{Dir, Host, KeyRange, KvOp, KvStore};
 use crate::limits;
 use crate::live::{
     Action as LiveAction, Context as LiveContext, LiveConfig, LiveSource, SourceStatus,
@@ -43,8 +47,32 @@ use crate::sync::queue::ready_time;
 use crate::sync::schedule::{self, ReconcileRole};
 use crate::sync::{Action, DirtyItem, Priority, Reason, RepoOutcome, Scope, Stats};
 
-use super::models::store_error;
-use super::{Engine, EngineError};
+use super::events::SubscriptionId;
+use super::models::{Runtime, store_error};
+use super::{Engine, EngineError, IndexerMode};
+
+/// A live frame whose application fails is tried this many times in all, then acknowledged and
+/// left to the dirty queue (`sync.md` §6.4, *tunable*).
+const LIVE_APPLY_ATTEMPTS: u32 = 3;
+/// The delay before the second try of a failed live frame, doubled for each later one (ms,
+/// *tunable*).
+const LIVE_RETRY_MS: i64 = 2_000;
+/// While Jetstream frames arrive, a `live_step` round runs at most this often (ms).
+const LIVE_FRAME_STEP_MS: i64 = 1_000;
+/// The live filter context is rebuilt after a change at most this often (ms).
+const CONTEXT_MIN_MS: i64 = 1_000;
+/// The live filter context is rebuilt at least this often (ms; changes another engine makes to
+/// the stores emit no event here).
+const CONTEXT_TTL_MS: i64 = 30_000;
+/// Indexer `getChanges` cadence per followed forum while its model is loaded (a view of it is
+/// open) and otherwise (`sync.md` §6.6, ms, *tunable*).
+const CHANGES_OPEN_MS: i64 = 10_000;
+const CHANGES_IDLE_MS: i64 = 60_000;
+/// A live source is healthy for this long after its last good frame or poll (`sync.md` §6.2).
+const HEALTHY_MS: i64 = 120_000;
+/// Discovery rows kept per forum: past it, the oldest rows that are not confirmed are dropped
+/// (`sync.md` §6.4, *tunable*).
+pub(crate) const DISC_ROWS_MAX: usize = 10_000;
 
 /// What one `live_tail` round did.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -86,25 +114,169 @@ fn jitter(did: &str, row: Option<&RepoRow>) -> u64 {
     h ^ row.map_or(0, |r| r.checked_at as u64)
 }
 
+/// The discovery rows to drop so that at most [`DISC_ROWS_MAX`] remain: the oldest rows that
+/// are not confirmed (by first-seen time, then DID), never `keep` (the row just written).
+pub(crate) fn disc_rows_over_cap(
+    rows: &BTreeMap<String, crate::discovery::DiscRow>,
+    keep: &str,
+) -> Vec<String> {
+    let Some(excess) = rows.len().checked_sub(DISC_ROWS_MAX).filter(|n| *n > 0) else {
+        return Vec::new();
+    };
+    let mut unconfirmed: Vec<(&i64, &String)> = rows
+        .iter()
+        .filter(|(d, r)| {
+            d.as_str() != keep && r.state != crate::discovery::state::DiscState::Confirmed
+        })
+        .map(|(d, r)| (&r.first, d))
+        .collect();
+    unconfirmed.sort();
+    unconfirmed
+        .into_iter()
+        .take(excess)
+        .map(|(_, d)| d.clone())
+        .collect()
+}
+
+/// The actionable live frame `live_tail` is applying.
+#[derive(Default)]
+struct LiveFrame {
+    actions: Vec<LiveAction>,
+    /// Failed tries so far.
+    attempts: u32,
+    /// The next try is not before this (ms).
+    retry_at_ms: i64,
+    /// Given up on: left to the dirty queue, only its acknowledgement is pending.
+    deferred: bool,
+}
+
+/// The live filter context (`sync.md` §6.4), kept between frames: it is rebuilt after a
+/// `Changed` event or one of `live_tail`'s own applied frames (at most once per
+/// [`CONTEXT_MIN_MS`]), and at least every [`CONTEXT_TTL_MS`].
+struct ContextCache {
+    rt: Arc<Runtime>,
+    sub: SubscriptionId,
+    dirty: Arc<AtomicBool>,
+    cx: Option<LiveContext>,
+    built_ms: i64,
+    retry_at_ms: i64,
+}
+
+impl ContextCache {
+    fn new(rt: &Arc<Runtime>) -> Self {
+        let dirty = Arc::new(AtomicBool::new(true));
+        let flag = Arc::clone(&dirty);
+        let sub = rt.bus.subscribe(Arc::new(move |e: Event| {
+            if matches!(e, Event::Changed { .. }) {
+                flag.store(true, Ordering::SeqCst);
+            }
+        }));
+        Self {
+            rt: Arc::clone(rt),
+            sub,
+            dirty,
+            cx: None,
+            built_ms: 0,
+            retry_at_ms: 0,
+        }
+    }
+
+    fn invalidate(&self) {
+        self.dirty.store(true, Ordering::SeqCst);
+    }
+
+    /// The context, rebuilt first if it is due. `None` if it was never built (a failed build
+    /// keeps the previous one).
+    async fn get<H: Host>(&mut self, engine: &Engine<H>) -> Option<&LiveContext> {
+        let now = engine.host.now_ms();
+        let age = now.saturating_sub(self.built_ms);
+        let due = self.cx.is_none()
+            || age >= CONTEXT_TTL_MS
+            || (age >= CONTEXT_MIN_MS && self.dirty.load(Ordering::SeqCst));
+        if due && now >= self.retry_at_ms {
+            // cleared first, so a change made while it is built marks it again
+            self.dirty.store(false, Ordering::SeqCst);
+            match engine.live_context().await {
+                Ok(cx) => {
+                    self.cx = Some(cx);
+                    self.built_ms = now;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "live tail: building the live context failed");
+                    self.dirty.store(true, Ordering::SeqCst);
+                    self.retry_at_ms = now.saturating_add(outbox::ERROR_WAIT_MS);
+                }
+            }
+        }
+        self.cx.as_ref()
+    }
+}
+
+impl Drop for ContextCache {
+    fn drop(&mut self) {
+        self.rt.bus.unsubscribe(self.sub);
+    }
+}
+
+/// When each followed forum's indexer change feed is polled next (`sync.md` §6.6).
+#[derive(Default)]
+struct ChangeFeeds {
+    next_at: BTreeMap<String, i64>,
+    /// The last successful poll (ms): a healthy live source (§6.2).
+    healthy_ms: Option<i64>,
+    /// Not before this (ms; the followed list could not be read).
+    retry_at_ms: i64,
+}
+
+impl ChangeFeeds {
+    fn healthy(&self, now_ms: i64) -> bool {
+        self.healthy_ms
+            .is_some_and(|t| now_ms.saturating_sub(t) < HEALTHY_MS)
+    }
+
+    /// When the next poll is due (ms).
+    fn due_at(&self) -> i64 {
+        self.next_at
+            .values()
+            .copied()
+            .min()
+            .unwrap_or(i64::MAX)
+            .max(self.retry_at_ms)
+    }
+}
+
 impl<H: Host> Engine<H> {
     /// `live_tail()` (long-lived, `engine-api.md` §3.3): runs [`Engine::live_step`] rounds,
-    /// sleeping between them, until [`Engine::live_stop`]. Start it once (before or after
-    /// login); the host drives the future. A `live_tail` started after a stop runs normally.
+    /// reading Jetstream frames and polling indexer change feeds between them, until
+    /// [`Engine::live_stop`]. Start it once (before or after login); the host drives the
+    /// future. A `live_tail` started after a stop runs normally. It never returns an error.
     pub async fn live_tail(&self) -> Result<(), EngineError> {
         let generation = self.rt.live_gen.load(Ordering::SeqCst);
         let mut woken = self.rt.live_waker();
         let running = || self.rt.live_gen.load(Ordering::SeqCst) == generation;
         let mut source: Option<LiveSource<H>> = None;
         let mut proof_batch: Option<crate::indexer::LiveProofBatch> = None;
-        let mut pending_actions: Vec<LiveAction> = Vec::new();
-        let mut wait = 1;
+        let mut frame = LiveFrame::default();
+        let mut contexts = ContextCache::new(&self.rt);
+        let mut feeds = ChangeFeeds::default();
+        let mut step_at = self.host.now_ms();
+        let mut last_step_ms = i64::MIN;
+        let mut wait: i64 = 1;
         while running() {
-            let assisted = self.sources().await? == super::Sources::Assisted;
+            let assisted = match self.sources().await {
+                Ok(s) => s == super::Sources::Assisted,
+                Err(e) => {
+                    tracing::warn!(error = %e, "live tail: reading the sources setting failed");
+                    source.is_some()
+                }
+            };
             if !assisted && let Some(mut old) = source.take() {
                 old.stop().await;
             }
+            let sleep_ms = u64::try_from(wait.max(1)).unwrap_or(1);
             let mut actions = Vec::new();
-            if assisted {
+            let mut received = false;
+            if assisted && frame.actions.is_empty() {
                 let live = source.get_or_insert_with(|| {
                     LiveSource::new(
                         self.shared_host(),
@@ -114,44 +286,38 @@ impl<H: Host> Engine<H> {
                         ),
                     )
                 });
-                // An unacknowledged proof frame is retained locally until its timer fires. Do
-                // not poll `next` in a busy loop: it intentionally replays that frame at once.
-                if pending_actions.is_empty() {
-                    let cx = self.live_context().await?;
-                    let retry = live.retry_in_ms();
-                    let next = async {
-                        if retry > 0 {
-                            // Do not let an immediately-ready Waiting result starve the stop waker
-                            // while a fake host clock is parked during reconnect backoff.
-                            futures::future::pending().await
-                        } else {
-                            live.next(&cx).await
-                        }
-                    };
-                    futures::pin_mut!(next);
-                    let sleep = self.host.sleep(u64::try_from(wait.max(1)).unwrap_or(1));
-                    futures::pin_mut!(sleep);
-                    let wake = woken.next();
-                    futures::pin_mut!(wake);
-                    let timeout = futures::future::select(sleep, wake);
-                    futures::pin_mut!(timeout);
-                    if let futures::future::Either::Left((result, _)) =
-                        futures::future::select(next, timeout).await
-                    {
-                        match result {
-                            Ok(SourceStatus::Actions(a)) => actions = a,
-                            Ok(SourceStatus::Stopped) => break,
-                            Ok(SourceStatus::Waiting | SourceStatus::LeaderUnavailable) => {}
-                            Err(e) => tracing::warn!(error = %e, "live source round failed"),
-                        }
+                let retry = live.retry_in_ms();
+                // A failed context build keeps the last one; without any, frames wait.
+                let cx = contexts.get(self).await;
+                let next = async {
+                    match cx {
+                        // Do not let an immediately-ready Waiting result starve the stop waker
+                        // while a fake host clock is parked during reconnect backoff.
+                        Some(cx) if retry == 0 => Some(live.next(cx).await),
+                        _ => futures::future::pending().await,
                     }
-                } else {
-                    let sleep = self.host.sleep(u64::try_from(wait.max(1)).unwrap_or(1));
-                    futures::pin_mut!(sleep);
-                    futures::future::select(sleep, woken.next()).await;
+                };
+                futures::pin_mut!(next);
+                let sleep = self.host.sleep(sleep_ms);
+                futures::pin_mut!(sleep);
+                let wake = woken.next();
+                futures::pin_mut!(wake);
+                let timeout = futures::future::select(sleep, wake);
+                futures::pin_mut!(timeout);
+                // LiveSource::next is cancellation-safe: a timer that wins loses no frame.
+                if let futures::future::Either::Left((Some(result), _)) =
+                    futures::future::select(next, timeout).await
+                {
+                    received = true;
+                    match result {
+                        Ok(SourceStatus::Actions(a)) => actions = a,
+                        Ok(SourceStatus::Stopped) => break,
+                        Ok(SourceStatus::Waiting | SourceStatus::LeaderUnavailable) => {}
+                        Err(e) => tracing::warn!(error = %e, "live source round failed"),
+                    }
                 }
             } else {
-                let sleep = self.host.sleep(u64::try_from(wait.max(1)).unwrap_or(1));
+                let sleep = self.host.sleep(sleep_ms);
                 futures::pin_mut!(sleep);
                 futures::future::select(sleep, woken.next()).await;
             }
@@ -159,16 +325,22 @@ impl<H: Host> Engine<H> {
                 break;
             }
             if !actions.is_empty() {
-                pending_actions = actions;
+                frame = LiveFrame {
+                    actions,
+                    ..LiveFrame::default()
+                };
             }
-            if !pending_actions.is_empty() {
-                let has_proofs = pending_actions
-                    .iter()
-                    .any(|a| matches!(a, LiveAction::PointFetch { .. }));
+            let mut applied = false;
+            let now = self.host.now_ms();
+            if !frame.actions.is_empty() && now >= frame.retry_at_ms {
+                let has_proofs = !frame.deferred
+                    && frame
+                        .actions
+                        .iter()
+                        .any(|a| matches!(a, LiveAction::PointFetch { .. }));
                 if has_proofs && proof_batch.as_ref().is_none_or(|b| b.is_empty()) {
-                    let mut batch =
-                        crate::indexer::LiveProofBatch::new(self.host.now_ms(), self.live_random());
-                    for action in &pending_actions {
+                    let mut batch = crate::indexer::LiveProofBatch::new(now, self.live_random());
+                    for action in &frame.actions {
                         if let LiveAction::PointFetch { uri, .. } = action
                             && let Ok(uri) = AtUri::parse(uri)
                         {
@@ -179,72 +351,199 @@ impl<H: Host> Engine<H> {
                 }
                 let due = proof_batch
                     .as_ref()
-                    .is_none_or(|b| b.is_empty() || b.is_due(self.host.now_ms()));
+                    .is_none_or(|b| b.is_empty() || b.is_due(now));
                 if due {
-                    let result = if has_proofs {
-                        self.apply_batched_live_actions(
-                            pending_actions.clone(),
-                            proof_batch.as_mut().expect("proof batch created"),
-                        )
-                        .await
+                    let done = if frame.deferred {
+                        true
                     } else {
-                        self.apply_live_actions(pending_actions.clone()).await
-                    };
-                    match result {
-                        Ok(()) => {
-                            let acknowledged = if let Some(live) = &mut source {
-                                match live.acknowledge().await {
-                                    Ok(()) => true,
-                                    Err(e) => {
-                                        tracing::warn!(error = %e, "acknowledging live source actions failed");
-                                        false
-                                    }
+                        let result = if has_proofs {
+                            self.apply_batched_live_actions(
+                                frame.actions.clone(),
+                                proof_batch.as_mut().expect("proof batch created"),
+                            )
+                            .await
+                        } else {
+                            self.apply_live_actions(frame.actions.clone()).await
+                        };
+                        match result {
+                            Ok(()) => true,
+                            Err(e) => {
+                                frame.attempts = frame.attempts.saturating_add(1);
+                                if frame.attempts >= LIVE_APPLY_ATTEMPTS {
+                                    // The frame must not hold the stream: its repos go to the
+                                    // dirty queue, which has its own retries and breakers.
+                                    tracing::warn!(
+                                        error = %e,
+                                        attempts = frame.attempts,
+                                        "live frame failed; left to the dirty queue"
+                                    );
+                                    self.defer_live_actions(&frame.actions);
+                                    frame.deferred = true;
+                                    true
+                                } else {
+                                    // The actionable frame stays unacknowledged. Its old cursor
+                                    // and all live actions are replayed after the back-off.
+                                    tracing::warn!(
+                                        error = %e,
+                                        attempts = frame.attempts,
+                                        "applying live source actions failed"
+                                    );
+                                    frame.retry_at_ms = now.saturating_add(
+                                        LIVE_RETRY_MS << (frame.attempts - 1).min(8),
+                                    );
+                                    proof_batch = None;
+                                    false
                                 }
-                            } else {
-                                true
-                            };
-                            if acknowledged {
-                                pending_actions.clear();
-                                proof_batch = None;
                             }
                         }
-                        Err(e) => {
-                            // The actionable frame stays unacknowledged. Its old cursor and all
-                            // live actions are replayed; no failed proof batch can advance it.
-                            tracing::warn!(error = %e, "applying live source actions failed");
+                    };
+                    if done {
+                        let acknowledged = match &mut source {
+                            Some(live) => match live.acknowledge().await {
+                                Ok(()) => true,
+                                Err(e) => {
+                                    tracing::warn!(error = %e, "acknowledging live source actions failed");
+                                    false
+                                }
+                            },
+                            None => true,
+                        };
+                        if acknowledged {
+                            frame = LiveFrame::default();
+                            proof_batch = None;
+                            contexts.invalidate();
+                            applied = true;
+                        } else {
+                            frame.retry_at_ms = now.saturating_add(LIVE_RETRY_MS);
                         }
                     }
                 }
             }
-            let polling = !assisted || source.as_ref().is_none_or(LiveSource::polling_enabled);
-            wait = match self.live_step_with_polling(polling).await {
-                Ok(r) => r.next_ms,
-                Err(e) => {
-                    tracing::warn!(error = %e, "live tail round failed");
-                    outbox::ERROR_WAIT_MS
-                }
-            };
-            if let Some(batch) = &proof_batch
-                && !pending_actions.is_empty()
-            {
-                wait = wait.min(
-                    batch
-                        .flush_at_ms()
-                        .saturating_sub(self.host.now_ms())
-                        .max(1),
-                );
+            if assisted && self.host.now_ms() >= feeds.due_at() {
+                self.poll_change_feeds(&mut feeds).await;
             }
-            if let Some(live) = &source {
-                let retry = live.retry_in_ms();
-                if retry > 0 {
-                    wait = wait.min(retry);
+            let now = self.host.now_ms();
+            if received {
+                // Frames are read several per round: one round per second at most while they
+                // arrive, so network noise does not run a round per frame.
+                step_at = step_at.min(last_step_ms.saturating_add(LIVE_FRAME_STEP_MS));
+            }
+            if applied && let Some(t) = self.syncer().queue_snapshot().next_ready_at() {
+                step_at = step_at.min(t);
+            }
+            if now >= step_at {
+                last_step_ms = now;
+                let polling = !assisted
+                    || (source.as_ref().is_none_or(LiveSource::polling_enabled)
+                        && !feeds.healthy(now));
+                step_at = match self.live_step_with_polling(polling).await {
+                    Ok(r) => {
+                        if r.synced > 0 || !r.changed.is_empty() {
+                            contexts.invalidate();
+                        }
+                        self.host.now_ms().saturating_add(r.next_ms)
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "live tail round failed");
+                        self.host.now_ms().saturating_add(outbox::ERROR_WAIT_MS)
+                    }
+                };
+            }
+            let now = self.host.now_ms();
+            let mut until = step_at;
+            if !frame.actions.is_empty() {
+                let mut at = frame.retry_at_ms;
+                if let Some(batch) = &proof_batch
+                    && !batch.is_empty()
+                {
+                    at = at.max(batch.flush_at_ms());
+                }
+                until = until.min(at);
+            }
+            if assisted {
+                until = until.min(feeds.due_at());
+                if let Some(live) = &source {
+                    let retry = live.retry_in_ms();
+                    if retry > 0 {
+                        until = until.min(now.saturating_add(retry));
+                    }
+                }
+                if contexts.cx.is_none() {
+                    until = until.min(contexts.retry_at_ms);
                 }
             }
+            wait = until.saturating_sub(now).max(1);
         }
         if let Some(mut live) = source {
             live.stop().await;
         }
         Ok(())
+    }
+
+    /// Polls `getChanges` for each followed forum that is due (`sync.md` §6.6); a successful
+    /// poll makes the change feed a healthy live source. Without an indexer it does nothing.
+    async fn poll_change_feeds(&self, feeds: &mut ChangeFeeds) {
+        let now = self.host.now_ms();
+        if self.config.indexer_mode == IndexerMode::None {
+            feeds.retry_at_ms = now.saturating_add(CHANGES_IDLE_MS);
+            return;
+        }
+        let followed = match self.followed_keys().await {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::warn!(error = %e, "live tail: reading the followed forums failed");
+                feeds.retry_at_ms = now.saturating_add(outbox::ERROR_WAIT_MS);
+                return;
+            }
+        };
+        feeds.retry_at_ms = 0;
+        feeds
+            .next_at
+            .retain(|uri, _| followed.iter().any(|k| k.uri.as_str() == uri));
+        let open = self.rt.loaded_forums();
+        for key in followed {
+            let uri = key.uri.to_string();
+            if feeds.next_at.get(&uri).is_some_and(|t| now < *t) {
+                continue;
+            }
+            let every = if open.contains(&uri) {
+                CHANGES_OPEN_MS
+            } else {
+                CHANGES_IDLE_MS
+            };
+            feeds.next_at.insert(uri, now.saturating_add(every));
+            match self.poll_indexer_changes_resolved(&key).await {
+                Ok(Some(report)) => {
+                    feeds.healthy_ms = Some(self.host.now_ms());
+                    tracing::debug!(forum = %key.uri, changes = report.changes, "indexer changes");
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::debug!(forum = %key.uri, error = %e, "indexer changes unavailable");
+                }
+            }
+        }
+    }
+
+    /// A live frame given up on: every repo it names goes to the dirty queue for a sync of its
+    /// scopes (the reconcile path, with its own retries and breakers).
+    fn defer_live_actions(&self, actions: &[LiveAction]) {
+        let sy = self.syncer();
+        let dids: BTreeSet<&str> = actions
+            .iter()
+            .filter_map(|a| match a {
+                LiveAction::PointFetch { did, .. }
+                | LiveAction::Candidate { did, .. }
+                | LiveAction::InvalidateIdentity { did, .. }
+                | LiveAction::AccountStatus { did, .. }
+                | LiveAction::Resync { did }
+                | LiveAction::CatchUp { did } => Some(did.as_str()),
+                LiveAction::Reconcile(_) => None,
+            })
+            .collect();
+        for did in dids {
+            sy.enqueue(self.live_item(did, Priority::P1, Reason::Reconcile));
+        }
     }
 
     /// Stops the running `live_tail`s (they return after their current round).
@@ -258,17 +557,20 @@ impl<H: Host> Engine<H> {
         Ok(())
     }
 
-    /// The repos `live_tail` keeps fresh: the authorities and participants of the followed
-    /// forums, and the accounts' own repos.
+    /// The repos `live_tail` keeps fresh: the authorities, participants and grants of the
+    /// followed forums, their confirmed discovery candidates, and the accounts' own repos. A
+    /// candidate that is not confirmed is not: hints reach a repo only through `confirm`, under
+    /// its back-off and budget (`sync.md` §4.2.1, §4.4, §6.2).
     async fn relevant_repos(&self) -> Result<BTreeMap<String, Relevance>, EngineError> {
         let mut rel: BTreeMap<String, Relevance> = BTreeMap::new();
         for key in self.followed_keys().await? {
-            for did in crate::discovery::state::disc_rows(self.host.cache(), &key.fk)
+            for (did, row) in crate::discovery::state::disc_rows(self.host.cache(), &key.fk)
                 .await
                 .map_err(store_error)?
-                .into_keys()
             {
-                rel.entry(did).or_default().fks.insert(key.fk.clone());
+                if row.state == crate::discovery::state::DiscState::Confirmed {
+                    rel.entry(did).or_default().fks.insert(key.fk.clone());
+                }
             }
             let l = match self.loaded(&key).await {
                 Ok(l) => l,
@@ -283,7 +585,7 @@ impl<H: Host> Engine<H> {
                 r.fks.insert(key.fk.clone());
                 r.authority = true;
             }
-            for p in &f.participation.p {
+            for p in f.participation.p.iter().chain(&f.participation.g) {
                 rel.entry(p.clone()).or_default().fks.insert(key.fk.clone());
             }
         }
@@ -327,8 +629,10 @@ impl<H: Host> Engine<H> {
         Ok(out)
     }
 
-    /// Builds live filtering state from all identity/discovery rows. Fold completeness is not a
-    /// substitute for having finished discovery: an incomplete fold may still have a known D set.
+    /// Builds live filtering state from all identity rows and the relevant repos. Fold
+    /// completeness is not a substitute for having finished discovery: an incomplete fold may
+    /// still have a known D set. D (the browser's DID filter) and the newcomers already synced
+    /// are the relevant repos: rejected and unconfirmed hints are in neither (`sync.md` §6.2).
     async fn live_context(&self) -> Result<LiveContext, EngineError> {
         let rel = self.relevant_repos().await?;
         let followed = self.followed_keys().await?;
@@ -341,6 +645,8 @@ impl<H: Host> Engine<H> {
         for (did, relevance) in &rel {
             if relevance.own {
                 cx.own_dids.insert(did.clone());
+            } else if !relevance.authority {
+                cx.newcomer_dids.insert(did.clone());
             }
             if relevance.authority {
                 cx.authorities.insert(did.clone());
@@ -351,11 +657,6 @@ impl<H: Host> Engine<H> {
         for key in followed {
             cx.declarations
                 .insert((key.owner.to_string(), key.slug.clone()));
-            let disc = crate::discovery::state::disc_rows(self.host.cache(), &key.fk)
-                .await
-                .map_err(store_error)?;
-            cx.filter_dids.extend(disc.keys().cloned());
-            cx.newcomer_dids.extend(disc.keys().cloned());
             complete &= crate::discovery::state::discovery_complete(self.host.cache(), &key.fk)
                 .await
                 .map_err(store_error)?;
@@ -522,12 +823,20 @@ impl<H: Host> Engine<H> {
                         .await
                         .map_err(store_error)?;
                     let now = self.host.now_ms();
-                    rows.entry(did.clone())
-                        .or_insert_with(|| crate::discovery::DiscRow::new("hint:jetstream", now))
-                        .add_src("hint:jetstream");
-                    crate::discovery::state::put_disc_rows(self.host.cache(), &fk, &rows)
-                        .await
-                        .map_err(store_error)?;
+                    let row = rows
+                        .entry(did.clone())
+                        .or_insert_with(|| crate::discovery::DiscRow::new("hint:jetstream", now));
+                    row.add_src("hint:jetstream");
+                    let mut ops = vec![KvOp::Put(
+                        crate::discovery::state::disc_key(&fk, &did),
+                        crate::store::row::encode(&*row).map_err(|e| store_error(e.into()))?,
+                    )];
+                    ops.extend(
+                        disc_rows_over_cap(&rows, &did)
+                            .into_iter()
+                            .map(|d| KvOp::Delete(crate::discovery::state::disc_key(&fk, &d))),
+                    );
+                    self.host.cache().write(ops).await?;
                     if let Some(cid) = &cid {
                         sy.note_hint_first_seen(&uri, cid, first_seen_us);
                     }
@@ -914,9 +1223,19 @@ mod context_tests {
                 )])
                 .await
                 .unwrap();
+            // sync.md §6.2: D holds confirmed participants, never hints that are not.
             let candidate = "did:plc:candidate".to_owned();
-            let rows =
-                BTreeMap::from([(candidate.clone(), DiscRow::new("hint:test", host.now_ms()))]);
+            let unconfirmed = "did:plc:unconfirmed".to_owned();
+            let rejected = "did:plc:rejected".to_owned();
+            let mut confirmed_row = DiscRow::new("hint:test", host.now_ms());
+            confirmed_row.set(crate::discovery::state::DiscState::Confirmed, host.now_ms());
+            let mut rejected_row = DiscRow::new("hint:test", host.now_ms());
+            rejected_row.reject(host.now_ms());
+            let rows = BTreeMap::from([
+                (candidate.clone(), confirmed_row),
+                (unconfirmed.clone(), DiscRow::new("hint:test", host.now_ms())),
+                (rejected.clone(), rejected_row),
+            ]);
             crate::discovery::state::put_disc_rows(host.cache(), &key.fk, &rows)
                 .await
                 .unwrap();
@@ -932,6 +1251,12 @@ mod context_tests {
             let cx = engine.live_context().await.unwrap();
             assert!(cx.known_dids.contains(unrelated));
             assert!(cx.filter_dids.contains(&candidate));
+            assert!(cx.newcomer_dids.contains(&candidate));
+            for hint in [&unconfirmed, &rejected] {
+                assert!(!cx.filter_dids.contains(hint), "{hint} is in D");
+                assert!(!cx.newcomer_dids.contains(hint), "{hint} is a known newcomer");
+            }
+            assert!(!engine.relevant_repos().await.unwrap().contains_key(&rejected));
             assert!(!cx.participants_known);
 
             crate::discovery::state::mark_discovery_complete(host.cache(), &key.fk, host.now_ms())
