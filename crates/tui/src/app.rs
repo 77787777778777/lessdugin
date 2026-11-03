@@ -3773,7 +3773,6 @@ impl State {
         })
     }
 
-    /// True if the thread on top holds `uri` (its react tallies are known).
     /// The viewer's own tag vote on `slug` of the post `post`, as the thread on top shows it
     /// (`PostView.tagRelevance[].mine`, `social.md` §13.3): `None` when it is not known there,
     /// that is when the thread does not show that post or an opinion write of this TUI is still
@@ -3794,6 +3793,7 @@ impl State {
         )
     }
 
+    /// True if the thread on top holds `uri` (its react tallies are known).
     fn thread_holds(&self, uri: &str) -> bool {
         self.top_thread()
             .and_then(|t| t.data.as_ref())
