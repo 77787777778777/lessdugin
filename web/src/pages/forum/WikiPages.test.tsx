@@ -4,7 +4,7 @@
 // because the head moved says so, a new page is written without a parent, and the history walks
 // the revisions from the head (social.md §13.2).
 import { MockEngine } from "@lessdugin/engine/mock";
-import type { ForumView } from "@lessdugin/engine/types";
+import type { ForumView, RawView } from "@lessdugin/engine/types";
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { renderWithApp } from "../../test/render.tsx";
@@ -114,5 +114,62 @@ describe("WikiHistoryPage", () => {
     expect(items[0]?.textContent).toContain("Classic problems and further reading");
     expect(items[1]?.textContent).toContain("New page");
     expect(screen.getByText(/1 unmerged edit:/)).toBeTruthy();
+  });
+
+  // social.md §13.2 `par`: a parent of another page gives no edge, so a longer chain there
+  // never becomes this page's history
+  it("leaves out a parent of another page, however deep its chain", async () => {
+    const engine = new MockEngine({ holdMs: 0, sendMs: 0 });
+    const forum = (await engine.followed())[0]?.uri ?? "";
+    const head = (await engine.tag(forum, SLUG)).head ?? "";
+    const collection = head.split("/")[3] ?? "";
+    const did = head.split("/")[2] ?? "";
+    const [x1, x2] = [`at://${did}/${collection}/3kxx1`, `at://${did}/${collection}/3kxx2`];
+    const other = (uri: string, parents: string[]): RawView => ({
+      dto: 1,
+      uri,
+      cid: `cid-${uri}`,
+      level: "pds",
+      record: {
+        $type: collection,
+        forum,
+        slug: "other-page",
+        name: "Another page",
+        parents: parents.map((p) => ({ uri: p, cid: `cid-${p}` })),
+        createdAt: "2026-01-01T00:00:00.000Z",
+      },
+      validity: [],
+      assertions: [],
+    });
+    const raw = engine.raw.bind(engine);
+    vi.spyOn(engine, "raw").mockImplementation(async (uri) => {
+      if (uri === x1) return other(x1, [x2]);
+      if (uri === x2) return other(x2, []);
+      const view = await raw(uri);
+      if (uri !== head) return view;
+      const record = view.record as { parents: { uri: string; cid: string }[] };
+      return {
+        ...view,
+        record: { ...record, parents: [...record.parents, { uri: x1, cid: `cid-${x1}` }] },
+      };
+    });
+    const view: ForumView = await engine.forumOpen(forum);
+    const { owner, slug } = forumParams(forum);
+    renderWithApp(
+      <ForumContext value={view}>
+        <WikiHistoryPage />
+      </ForumContext>,
+      {
+        engine,
+        route: {
+          path: "/f/$owner/$slug/t/$tag/history",
+          at: `/f/${owner}/${slug}/t/${SLUG}/history`,
+        },
+      },
+    );
+    const list = await screen.findByRole("list", { name: "Revisions" });
+    const items = within(list).getAllByRole("listitem");
+    expect(items.map((li) => li.getAttribute("aria-label"))).toEqual(["Revision 2", "Revision 1"]);
+    expect(list.textContent).not.toContain("Another page");
   });
 });

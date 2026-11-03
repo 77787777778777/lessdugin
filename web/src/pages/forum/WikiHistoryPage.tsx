@@ -85,7 +85,8 @@ export function WikiHistoryPage() {
   const nodes = useQuery({
     // under the tag's key, so what refreshes the page refreshes its history
     queryKey: [...qk.tag(forum.uri, tag), "history", head ?? null],
-    queryFn: () => loadWikiNodes((uri) => engine.raw(uri), head ?? ""),
+    queryFn: () =>
+      loadWikiNodes((uri) => engine.raw(uri), head ?? "", { forum: forum.uri, slug: tag }),
     enabled: head !== undefined,
   });
   if (view.isPending) return <Loading />;

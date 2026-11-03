@@ -3,10 +3,12 @@
 // starts from the canonical revision's own record (`raw(head)`), so its media, parent tags and
 // `isTag` are kept unless the author changes them. The engine has no history operation for a
 // page, so the history is read revision by revision from the raw records, following `parents`
-// as social.md §13.2 "History view" says. Record JSON is untrusted: every field is checked.
+// as social.md §13.2 "History view" says. Only the page's own revisions are steps (§13.2 `par`).
+// Record JSON is untrusted: every field is checked.
 
 import type { MediaRef, RawView } from "@lessdugin/engine/types";
 import { isSpilledBody, markdownOf, mediaRefsOf, objectField, stringField } from "./records.ts";
+import { parseAtUri } from "./uri.ts";
 
 /** The lexicon's `parents` cap (`wikiRevision.parents`, maxLength 8). */
 const MAX_PARENTS = 8;
@@ -77,10 +79,29 @@ export interface WikiChain {
   parentUnavailable: boolean;
 }
 
-/** A raw view as a history node. */
-export function wikiNodeOf(uri: string, raw: RawView | undefined): WikiNode {
+/** The page a history belongs to (social.md §13.1): its forum's uri and its slug. */
+export interface WikiPageRef {
+  forum: string;
+  slug: string;
+}
+
+/** A raw view as a history node of `page`, whose revisions are in `collection` (the head's: the
+ * build's wikiRevision NSID). A record of another collection, forum or slug is on no step: in
+ * social.md §13.2 `par(r)` keeps only the parents in `uris(page)`. */
+export function wikiNodeOf(
+  uri: string,
+  raw: RawView | undefined,
+  page: WikiPageRef & { collection: string },
+): WikiNode {
   if (!raw) return { uri, parents: [], available: false };
-  const list = (raw.record as { parents?: unknown } | null)?.parents;
+  const record = raw.record;
+  const onPage =
+    parseAtUri(uri)?.collection === page.collection &&
+    stringField(record, "$type") === page.collection &&
+    stringField(record, "forum") === page.forum &&
+    stringField(record, "slug") === page.slug;
+  if (!onPage) return { uri, cid: raw.cid, parents: [], available: false, raw };
+  const list = (record as { parents?: unknown } | null)?.parents;
   const parents: WikiNode["parents"] = [];
   for (const p of Array.isArray(list) ? list.slice(0, MAX_PARENTS) : []) {
     const u = stringField(p, "uri");
@@ -91,7 +112,7 @@ export function wikiNodeOf(uri: string, raw: RawView | undefined): WikiNode {
     uri,
     cid: raw.cid,
     parents,
-    available: raw.record !== undefined && raw.validity.length === 0 && !hidden,
+    available: record !== undefined && raw.validity.length === 0 && !hidden,
     raw,
   };
 }
@@ -143,21 +164,25 @@ export function wikiChain(head: string, nodes: ReadonlyMap<string, WikiNode>): W
   }
 }
 
-/** Reads the revisions reachable from `head` through `parents`, at most `max` of them. A
- * revision the engine does not have (`raw` fails) is an unavailable node. */
+/** Reads the revisions of `page` reachable from `head` through `parents`, at most `max` of
+ * them. A revision the engine does not have (`raw` fails) is an unavailable node; the parents of
+ * an unavailable node are not read, since no step goes through it. */
 export async function loadWikiNodes(
   raw: (uri: string) => Promise<RawView>,
   head: string,
+  page: WikiPageRef,
   max = WIKI_HISTORY_MAX,
 ): Promise<Map<string, WikiNode>> {
+  const on = { ...page, collection: parseAtUri(head)?.collection ?? "" };
   const nodes = new Map<string, WikiNode>();
   const queue = [head];
   while (queue.length > 0 && nodes.size < max) {
     const uri = queue.shift() as string;
     if (nodes.has(uri)) continue;
     const view = await raw(uri).catch(() => undefined);
-    const node = wikiNodeOf(uri, view);
+    const node = wikiNodeOf(uri, view, on);
     nodes.set(uri, node);
+    if (!node.available) continue;
     for (const p of node.parents) if (!nodes.has(p.uri)) queue.push(p.uri);
   }
   return nodes;
