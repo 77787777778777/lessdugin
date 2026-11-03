@@ -420,48 +420,65 @@ fn all_posts(forum: &ForumKey) -> lessdugin_core::dto::ListPostsQuery {
 
 /// `social.md` §3.1 makes an author a participant only once their membership record is held,
 /// and §4.2.1 reads a granted member's membership only inside their repo sync. The cold page
-/// (`sync.md` §14.3) therefore reads it itself: a granted member's post hydrated from the
-/// indexer is listed while the member's own repo cannot be listed at all.
+/// (`sync.md` §14.3 step 4) therefore reads it itself, at the member's PDS: a granted member's
+/// post hydrated from the indexer is listed while a sync of the member's repo is held at its
+/// listings, without waiting for it (§10.6).
 #[test]
 fn a_granted_members_hydrated_post_is_listed_before_their_repo_sync() {
-    futures::executor::block_on(async {
-        let mem = MemHost::new();
-        let net = FakeNet::on(&mem);
-        let _ = net.default_pds();
-        let owner = net.add_account("owner.example.com");
-        let key = forum(&mem, &owner, MembershipMode::Approval);
-        let member = net.add_account("member.example.com");
-        join(&mem, &member, &key);
-        grant(&mem, &owner, &key, member.did());
-        let mine = post(&mem, &owner, &key, "Owner's post", 1);
-        let theirs = post(&mem, &member, &key, "Member's post", 2);
-        serve_indexer(&mem, &net, &[theirs.clone(), mine.clone()]);
-        // The member's repo cannot be listed or described: only the cold path can read it.
-        for m in [
-            "com.atproto.repo.listRecords",
-            "com.atproto.repo.describeRepo",
-        ] {
-            net.inject(Fault::status(500).on_repo(member.did().as_str()).on_nsid(m));
-        }
-        let engine = assisted(mem.clone());
-        engine.forum_open(key.uri.as_str()).await.unwrap();
-        let page = engine
-            .list_posts_page(&all_posts(&key), &lessdugin_core::dto::SyncOpts::default())
-            .await
-            .unwrap();
-        let listed: Vec<&str> = page.items.iter().map(|p| p.uri.as_str()).collect();
-        assert_eq!(listed, [theirs.as_str(), mine.as_str()], "{page:?}");
-        let item = &page.items[0];
-        assert_eq!(item.title.as_deref(), Some("Member's post"));
-        // The membership came with the page's proofs, not from a point fetch at the PDS.
-        let fetched: Vec<String> = mem
-            .requests()
-            .into_iter()
-            .map(|r| r.url)
-            .filter(|u| u.contains("com.atproto.repo.getRecord") && u.contains(tail(member.did())))
-            .collect();
-        assert!(fetched.is_empty(), "{fetched:?}");
-    });
+    let mem = MemHost::new();
+    let net = FakeNet::on(&mem);
+    let _ = net.default_pds();
+    let owner = net.add_account("owner.example.com");
+    let key = forum(&mem, &owner, MembershipMode::Approval);
+    let member = net.add_account("member.example.com");
+    join(&mem, &member, &key);
+    grant(&mem, &owner, &key, member.did());
+    let mine = post(&mem, &owner, &key, "Owner's post", 1);
+    let theirs = post(&mem, &member, &key, "Member's post", 2);
+    serve_indexer(&mem, &net, &[theirs.clone(), mine.clone()]);
+    let host = HoldHost::new(&mem);
+    let engine = assisted(host.clone());
+    futures::executor::block_on(engine.forum_open(key.uri.as_str())).unwrap();
+    // The page's forum sync is listing the member's repo, and its listings are slow.
+    host.hold(&["com.atproto.repo.listRecords", tail(member.did())]);
+    let sy = engine.syncer();
+    let s = sy.session(Priority::P1, Arc::new(Stats::capped(None)));
+    let req = SyncRequest::forum(member.did().clone(), &key.fk, Reason::Participant);
+    let mut sync = Box::pin(sy.sync_repo(&s, &req));
+    assert!(poll_once(&mut sync).is_pending());
+    assert!(
+        !host.held().is_empty(),
+        "the sync did not reach its listings"
+    );
+
+    let query = all_posts(&key);
+    let fallback = lessdugin_core::dto::SyncOpts::default();
+    let mut page = Box::pin(engine.list_posts_page(&query, &fallback));
+    let page = (0..1_000)
+        .find_map(|_| match poll_once(&mut page) {
+            Poll::Ready(r) => Some(r.unwrap()),
+            Poll::Pending => None,
+        })
+        .expect("the cold page waited for the member's sync");
+    let listed: Vec<&str> = page.items.iter().map(|p| p.uri.as_str()).collect();
+    assert_eq!(listed, [theirs.as_str(), mine.as_str()], "{page:?}");
+    assert_eq!(page.items[0].title.as_deref(), Some("Member's post"));
+    // The membership was read at the member's PDS; the member's repo is still not listed.
+    let membership = AtUri::parse(&member.uri(nsid::MEMBERSHIP, &key.fk)).unwrap();
+    let row = futures::executor::block_on(RecordStore::new(mem.cache()).get(&membership))
+        .unwrap()
+        .expect("the membership is not held");
+    assert_eq!(row.level, lessdugin_core::store::Level::Pds, "{row:?}");
+    assert!(
+        futures::executor::block_on(RecordStore::new(mem.cache()).repo(member.did().as_str()))
+            .unwrap()
+            .is_none_or(|r| r.listed.is_empty()),
+        "the member's repo was listed"
+    );
+
+    host.hold.release();
+    let report = futures::executor::block_on(sync);
+    assert!(report.error.is_none(), "{report:?}");
 }
 
 /// `sync.md` §14.3 step 4 and §3.5: the identities and heads of the authors on screen are

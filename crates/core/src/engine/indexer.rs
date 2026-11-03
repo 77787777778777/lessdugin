@@ -330,7 +330,7 @@ impl<H: Host> Engine<H> {
         } else {
             None
         };
-        let mut uris: Vec<AtUri> = ordering
+        let uris: Vec<AtUri> = ordering
             .uris
             .into_iter()
             .filter(|u| {
@@ -341,20 +341,25 @@ impl<H: Host> Engine<H> {
                         .is_none_or(|s| s.participants.contains(u.did().as_str()))
             })
             .collect();
-        uris.extend(self.page_memberships(&key, &uris).await?);
-        let report =
-            crate::indexer::proofs::hydrate_visible(&self.syncer(), &client, &session, &uris)
-                .await?;
+        let memberships = self.page_memberships(&key, &uris).await?;
+        let report = crate::indexer::proofs::hydrate_page(
+            &self.syncer(),
+            &client,
+            &session,
+            &uris,
+            &memberships,
+        )
+        .await?;
         self.rt.invalidate(key.uri.as_str());
         Ok(Some(report))
     }
 
-    /// The membership records at the forum's key that the cold page proves with its posts
-    /// (`sync.md` §14.3 step 3): an author is a participant only once their membership record is
-    /// held (`social.md` §3.1), and a granted member's is read only inside their repo sync
-    /// (§4.2.1). So each author of `posts` who is not an authority and whose membership is
-    /// neither cached nor known deleted is asked for, admitted under the currency rule (§1.2)
-    /// like the posts; no repo sync of the author is needed.
+    /// The membership records at the forum's key that the cold page reads with its posts
+    /// (`sync.md` §14.3 step 4): an author is a participant only once their membership record is
+    /// held (`social.md` §3.1), and a granted member's is otherwise read only inside their repo
+    /// sync (§4.2.1). So that of each author of `posts` who is not an authority and whose
+    /// membership is neither cached nor known deleted is read at P0 from the author's PDS, in
+    /// parallel with the author's head check; no repo sync of the author is needed.
     async fn page_memberships(
         &self,
         key: &ForumKey,

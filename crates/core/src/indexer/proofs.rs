@@ -148,16 +148,29 @@ fn store_error(e: crate::store::StoreError) -> XrpcCallError {
 
 /// Hydrates visible URIs in independent bundles of at most 25. Cold-start callers pass their
 /// visible page (normally 25, or two pages of 25), so no background fan-out is needed.
-///
-/// The bundle requests and one head check per author run at once, all at the session's
-/// priority (P0 for a page on screen, `sync.md` §14.3 steps 3 and 4). Each author's DID document
-/// is resolved first, at most 1 h old (§8.6), and then serves both the head check and the
-/// verification of the author's proofs.
 pub async fn hydrate_visible<H: Host>(
     syncer: &Syncer<H>,
     client: &Client,
     session: &Session<H>,
     uris: &[AtUri],
+) -> Result<ProofReport, XrpcCallError> {
+    hydrate_page(syncer, client, session, uris, &[]).await
+}
+
+/// [`hydrate_visible`] for a page on screen, which also reads `records` (each by a DID among
+/// the authors of `uris`) from their authors' PDSes (`sync.md` §14.3 step 4).
+///
+/// The bundle requests and one head check per author run at once, all at the session's
+/// priority (P0 for a page on screen, §14.3 steps 3 and 4). Each author's DID document is
+/// resolved first, at most 1 h old (§8.6), and then serves the head check, the author's reads
+/// and the verification of the author's proofs. Neither the head check nor a read waits for a
+/// sync of the author's repo in flight (§10.6).
+pub async fn hydrate_page<H: Host>(
+    syncer: &Syncer<H>,
+    client: &Client,
+    session: &Session<H>,
+    uris: &[AtUri],
+    records: &[AtUri],
 ) -> Result<ProofReport, XrpcCallError> {
     let authors: BTreeSet<&Did> = uris.iter().map(AtUri::did).collect();
     let checks = join_all(authors.into_iter().map(|did| async move {
@@ -167,10 +180,19 @@ pub async fn hydrate_visible<H: Host>(
             .resolver()
             .resolve_did_doc(did, THIRD_PARTY_DOC_MAX_AGE_MS)
             .await
-            .is_ok()
+            .is_err()
         {
-            let _ = syncer.head_check(session, did, false).await;
+            return;
         }
+        let reads = records
+            .iter()
+            .filter(|r| r.did() == did)
+            .map(|r| async move {
+                if let Err(e) = syncer.view_fetch(session, r).await {
+                    tracing::debug!(uri = %r, error = %e, "cold page read failed");
+                }
+            });
+        let _ = futures::join!(syncer.head_check(session, did, false), join_all(reads));
     }));
     let chunks: Vec<&[AtUri]> = uris.chunks(MAX_PROOF_URIS).collect();
     let fetches = join_all(chunks.iter().map(|c| fetch_bundle(client, session, c)));

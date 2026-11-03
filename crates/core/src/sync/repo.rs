@@ -1632,6 +1632,61 @@ impl<H: Host> Syncer<H> {
         Ok(())
     }
 
+    /// A point fetch for a page on screen (§14.3 step 4): admitted as [`Syncer::point_fetch`]
+    /// admits it, but without the repo lock and without changing the repo row (its marks and
+    /// collections), so a sync of the repo in flight never holds the page up (§10.6). The order
+    /// key's `revLo` is the latest head observation, a handed one included.
+    pub(crate) async fn view_fetch(
+        &self,
+        s: &Session<H>,
+        uri: &AtUri,
+    ) -> Result<PointOutcome, SyncError> {
+        let did = uri.did();
+        let (svc, _, id_hint) = self.pds_of(s, did).await?;
+        let store = RecordStore::new(s.host().cache());
+        let stored = store.repo(did.as_str()).await?.and_then(|r| r.head_seen);
+        let head_rev = match (stored, self.pending_head(did.as_str())) {
+            (Some(a), Some(b)) if b.sent_at > a.sent_at => b.rev,
+            (a, b) => a.or(b).map(|h| h.rev).unwrap_or_default(),
+        };
+        let coll = uri.collection().as_str();
+        let rkey = uri.rkey().as_str();
+        let fetched = match self.fetch(s, &svc, did, coll, rkey).await {
+            Ok(f) => f,
+            Err(e) => {
+                if matches!(e, SyncError::Admission(_)) {
+                    self.net().strike(&service_origin(&svc), s.host().now_ms());
+                }
+                return Err(e);
+            }
+        };
+        let found = match &fetched {
+            Fetched::Found { rec, .. } => Some((rec.cid, rec.validity.is_valid())),
+            Fetched::NotFound { .. } => None,
+        };
+        let now = s.host().now_ms();
+        let mut batch = store.batch();
+        let (changed, adm) = self
+            .apply_fetched(
+                &mut batch, did, coll, rkey, fetched, &head_rev, id_hint, now, true,
+            )
+            .await?;
+        batch.commit().await?;
+        if let Some(a) = &adm {
+            self.note_conflict(did, uri.as_str(), a, now);
+        }
+        Ok(match found {
+            Some((cid, valid)) => PointOutcome::Admitted {
+                cid,
+                valid,
+                changed,
+            },
+            None => PointOutcome::NotFound {
+                tombstoned: changed,
+            },
+        })
+    }
+
     /// A point fetch (§5.7): `getRecord(uri)` at the author's PDS, admitted at level `pds` with
     /// key `(repo.headSeen.rev, sentAt)`; `RecordNotFound` tombstones it. A matching `hint`
     /// satisfies the uri's dirty mark (§6.5).
