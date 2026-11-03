@@ -43,7 +43,7 @@ const IN_FLIGHT: usize = 64;
 /// Live proof fetches waiting for the proof task; beyond it a proof is left to `getRecordProofs`.
 const PROOF_QUEUE: usize = 4_096;
 /// An ordinary forum sync requested by a membership or declaration event waits this long, so
-/// a burst of newcomers costs one sync.
+/// a burst of newcomers costs one sync (and see [`crate::store::ROSTER_SYNC_COST_FACTOR`]).
 pub const ROSTER_SYNC_DEBOUNCE_MS: i64 = 2_000;
 /// The longest one event's fetches may take. Frames are fetched concurrently, so a slow or
 /// hanging PDS delays only its own events, by at most this long, and then they are handed off.
@@ -750,7 +750,7 @@ async fn handle(indexer: &Indexer, action: Action, work: &mut Work) {
                     Ok(true) => {
                         if let Err(e) = indexer
                             .store
-                            .schedule_forum_sync(&forum, now + ROSTER_SYNC_DEBOUNCE_MS)
+                            .schedule_roster_sync(&forum, now + ROSTER_SYNC_DEBOUNCE_MS)
                         {
                             warn!(forum=%forum,error=%e,"scheduling a newcomer sync failed");
                             work.unrecorded = true;
@@ -775,7 +775,7 @@ async fn handle(indexer: &Indexer, action: Action, work: &mut Work) {
                         .store
                         .forum_row(&forum)
                         .is_some_and(|f| f.did == did)
-                        && indexer.store.schedule_forum_sync(&forum, now).is_err()
+                        && indexer.store.schedule_roster_sync(&forum, now).is_err()
                     {
                         work.unrecorded = true;
                     }
@@ -910,7 +910,7 @@ async fn point(
         if (roster || !indexed)
             && let Err(e) = indexer
                 .store
-                .schedule_forum_sync(&forum, indexer.now_ms() + ROSTER_SYNC_DEBOUNCE_MS)
+                .schedule_roster_sync(&forum, indexer.now_ms() + ROSTER_SYNC_DEBOUNCE_MS)
         {
             warn!(forum=%forum,error=%e,"scheduling a roster sync failed");
             work.unrecorded = true;
