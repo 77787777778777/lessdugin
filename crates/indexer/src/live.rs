@@ -325,6 +325,7 @@ pub(crate) async fn read_connection<W: WebSocket>(
 }
 
 /// Cursor writes of one frame.
+#[derive(Debug, PartialEq, Eq)]
 enum Ack {
     Advance(String, i64),
     Set(String, i64),
@@ -342,19 +343,36 @@ struct Work {
     proofs: Vec<String>,
 }
 
+/// Two commits of one record in a batch: the projection reads the newer version, so the newer
+/// commit (by rev) is the one whose rev and CID can match it.
+fn note_live(live: &mut BTreeMap<String, LiveChange>, uri: String, change: LiveChange) {
+    match live.entry(uri) {
+        std::collections::btree_map::Entry::Occupied(mut e) => {
+            if change.rev > e.get().rev {
+                e.insert(change);
+            }
+        }
+        std::collections::btree_map::Entry::Vacant(e) => {
+            e.insert(change);
+        }
+    }
+}
+
 impl Work {
     fn project(&mut self, forum: &str, author: &str, live: Option<(&str, LiveChange)>) {
         let entry = self.project.entry(forum.to_owned()).or_default();
         entry.1.insert(author.to_owned());
         if let Some((uri, change)) = live {
-            entry.0.insert(uri.to_owned(), change);
+            note_live(&mut entry.0, uri.to_owned(), change);
         }
     }
 
     fn merge(&mut self, other: Work) {
         for (forum, (live, authors)) in other.project {
             let entry = self.project.entry(forum).or_default();
-            entry.0.extend(live);
+            for (uri, change) in live {
+                note_live(&mut entry.0, uri, change);
+            }
             entry.1.extend(authors);
         }
         self.reconcile |= other.reconcile;
@@ -377,6 +395,14 @@ impl Work {
             Err(e) => {
                 warn!(did=%did,forum=%forum,error=%e,"live event hand-off failed");
                 self.unrecorded = true;
+            }
+        }
+    }
+
+    fn hand_off_all(&mut self, indexer: &Indexer, targets: &[Target], error: &str) {
+        for (did, forums) in targets.iter().flatten() {
+            for forum in forums {
+                self.hand_off(indexer, did, forum, error);
             }
         }
     }
@@ -409,13 +435,15 @@ impl Order {
 }
 
 async fn applier(indexer: Indexer, mut rx: mpsc::Receiver<Item>, proofs: mpsc::Sender<String>) {
-    use futures::StreamExt;
-    use futures::stream::FuturesUnordered;
     let mut filter = EventFilter::with_dedup_capacity(DEDUP_CAPACITY);
     let mut cx: Option<(u64, Context)> = None;
     let mut order = Order::default();
     let mut work = Work::default();
-    let mut inflight = FuturesUnordered::new();
+    // Fetches run as tasks, so they keep going while a batch is projected; dropping the set (the
+    // applier stopped) aborts them.
+    let mut inflight: tokio::task::JoinSet<Work> = tokio::task::JoinSet::new();
+    let mut ids: std::collections::HashMap<tokio::task::Id, (u64, Vec<Target>)> =
+        Default::default();
     let mut next = 0u64;
     // Once a hand-off could not be recorded, no cursor moves again in this process: a restart
     // replays from the last safe position.
@@ -424,9 +452,8 @@ async fn applier(indexer: Indexer, mut rx: mpsc::Receiver<Item>, proofs: mpsc::S
     loop {
         tokio::select! {
             biased;
-            Some((id, done)) = inflight.next(), if !inflight.is_empty() => {
-                work.merge(done);
-                order.fetched.insert(id);
+            Some(joined) = inflight.join_next_with_id(), if !inflight.is_empty() => {
+                finished(&indexer, &mut ids, &mut order, &mut work, joined);
             }
             item = rx.recv(), if open && inflight.len() < IN_FLIGHT => match item {
                 None => open = false,
@@ -438,23 +465,27 @@ async fn applier(indexer: Indexer, mut rx: mpsc::Receiver<Item>, proofs: mpsc::S
                     if actions.is_empty() {
                         order.fetched.insert(id);
                     } else {
-                        let indexer = indexer.clone();
-                        inflight.push(async move {
-                            let mut done = Work::default();
-                            for action in actions {
-                                done.merge(run(&indexer, action).await);
-                            }
-                            (id, done)
-                        });
+                        let targets: Vec<Target> =
+                            actions.iter().map(|a| target(&indexer, a)).collect();
+                        let task = {
+                            let (indexer, targets) = (indexer.clone(), targets.clone());
+                            inflight.spawn(async move {
+                                let mut done = Work::default();
+                                for (action, target) in actions.into_iter().zip(&targets) {
+                                    done.merge(run(&indexer, action, target).await);
+                                }
+                                done
+                            })
+                        };
+                        ids.insert(task.id(), (id, targets));
                     }
                 }
             },
             else => return,
         }
         // Take whatever else is ready, so a burst is projected once.
-        while let Some(Some((id, done))) = futures::FutureExt::now_or_never(inflight.next()) {
-            work.merge(done);
-            order.fetched.insert(id);
+        while let Some(joined) = inflight.try_join_next_with_id() {
+            finished(&indexer, &mut ids, &mut order, &mut work, joined);
         }
         let more = open && !rx.is_empty() && inflight.len() < IN_FLIGHT;
         if order.fetched.is_empty() || (more && order.fetched.len() < 32) {
@@ -482,6 +513,32 @@ async fn applier(indexer: Indexer, mut rx: mpsc::Receiver<Item>, proofs: mpsc::S
             }
         }
     }
+}
+
+/// Records a finished fetch task. A task that failed (panicked) lost its frame's effects: its
+/// repositories are handed off like any other failure.
+fn finished(
+    indexer: &Indexer,
+    ids: &mut std::collections::HashMap<tokio::task::Id, (u64, Vec<Target>)>,
+    order: &mut Order,
+    work: &mut Work,
+    joined: Result<(tokio::task::Id, Work), tokio::task::JoinError>,
+) {
+    let (task, failed) = match joined {
+        Ok((task, done)) => {
+            work.merge(done);
+            (task, None)
+        }
+        Err(e) => (e.id(), Some(e)),
+    };
+    let Some((id, targets)) = ids.remove(&task) else {
+        return;
+    };
+    if let Some(e) = failed {
+        warn!(error=%e,"a live fetch task failed");
+        work.hand_off_all(indexer, &targets, &format!("fetch task: {e}"));
+    }
+    order.fetched.insert(id);
 }
 
 /// Filters one item in arrival order: its cursor writes and the actions to run.
@@ -632,9 +689,11 @@ fn record_forums(indexer: &Indexer, uri: &AtUri) -> Vec<String> {
     out.into_iter().collect()
 }
 
-/// One action within [`ACTION_TIMEOUT`]; past it, the repository is handed off.
-async fn run(indexer: &Indexer, action: Action) -> Work {
-    let target = match &action {
+/// The repository and forums an action is handed off for when it cannot complete.
+type Target = Option<(String, Vec<String>)>;
+
+fn target(indexer: &Indexer, action: &Action) -> Target {
+    match action {
         Action::PointFetch { did, uri, .. } => AtUri::parse(uri)
             .ok()
             .map(|u| (did.clone(), record_forums(indexer, &u))),
@@ -642,7 +701,11 @@ async fn run(indexer: &Indexer, action: Action) -> Work {
             Some((did.clone(), indexer.store.did_forums(did)))
         }
         _ => None,
-    };
+    }
+}
+
+/// One action within [`ACTION_TIMEOUT`]; past it, the repository is handed off.
+async fn run(indexer: &Indexer, action: Action, target: &Target) -> Work {
     let mut work = Work::default();
     if tokio::time::timeout(ACTION_TIMEOUT, handle(indexer, action, &mut work))
         .await
@@ -651,11 +714,7 @@ async fn run(indexer: &Indexer, action: Action) -> Work {
         return work;
     }
     let mut work = Work::default();
-    if let Some((did, forums)) = target {
-        for forum in forums {
-            work.hand_off(indexer, &did, &forum, "timed out");
-        }
-    }
+    work.hand_off_all(indexer, std::slice::from_ref(target), "timed out");
     work
 }
 
@@ -1023,6 +1082,49 @@ mod tests {
         assert_eq!(state.on_oversize(T + 2), None);
         state.on_frame(T + 3);
         assert_eq!(state.on_oversize(T + 3), None);
+    }
+
+    /// robustness-2: one endpoint's copy of a frame the other endpoint is still applying never
+    /// moves a cursor first, and nothing behind it does either.
+    #[test]
+    fn a_duplicate_from_the_other_endpoint_waits_for_the_original() {
+        let mut order = Order::default();
+        // A's actionable frame (in flight), B's deduplicated copy, then B's next frame.
+        order.frames.push_back((0, vec![Ack::Advance("a".into(), 10)]));
+        order.frames.push_back((1, vec![Ack::Advance("b".into(), 10)]));
+        order.frames.push_back((2, vec![Ack::Advance("b".into(), 11)]));
+        order.done.extend([1, 2]);
+        assert!(order.completed().is_empty(), "B leapfrogged A's frame");
+        order.done.insert(0);
+        assert_eq!(
+            order.completed(),
+            vec![
+                Ack::Advance("a".into(), 10),
+                Ack::Advance("b".into(), 10),
+                Ack::Advance("b".into(), 11)
+            ]
+        );
+        assert!(order.frames.is_empty() && order.done.is_empty());
+    }
+
+    /// m6-acceptance-3: of two commits of one record in a batch, the newer one is logged.
+    #[test]
+    fn a_batch_keeps_the_newest_commit_of_a_record() {
+        let change = |rev: &str| LiveChange {
+            rev: rev.into(),
+            cid: Some(format!("cid-{rev}")),
+        };
+        let (forum, did, uri) = ("f", "did:plc:x", "at://did:plc:x/c/r");
+        let mut newer_first = Work::default();
+        newer_first.project(forum, did, Some((uri, change("3l2s5xxv2zaa3"))));
+        let mut older = Work::default();
+        older.project(forum, did, Some((uri, change("3l2s5xxv2zaa2"))));
+        newer_first.merge(older);
+        assert_eq!(newer_first.project[forum].0[uri], change("3l2s5xxv2zaa3"));
+        let mut older_first = Work::default();
+        older_first.project(forum, did, Some((uri, change("3l2s5xxv2zaa2"))));
+        older_first.project(forum, did, Some((uri, change("3l2s5xxv2zaa3"))));
+        assert_eq!(older_first.project[forum].0[uri], change("3l2s5xxv2zaa3"));
     }
 
     #[tokio::test]
