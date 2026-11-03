@@ -2406,6 +2406,25 @@ async fn a_live_event_never_quarantines_an_unsynced_seed() {
     }
 }
 
+/// Fills quota rows in one transaction of a second connection to the fixture's database (one
+/// commit instead of one per row).
+fn bulk(f: &Fixture, fill: impl FnOnce(&rusqlite::Transaction<'_>)) {
+    let mut db = rusqlite::Connection::open(Paths::under(&f.dir).state_db()).unwrap();
+    let tx = db.transaction().unwrap();
+    fill(&tx);
+    tx.commit().unwrap();
+}
+
+/// A valid generated did:plc (24 characters of `[a-z2-7]`).
+fn plc(tag: char, mut n: usize) -> String {
+    let mut id = [b'a'; 23];
+    for c in id.iter_mut().rev() {
+        *c = b'a' + (n % 26) as u8;
+        n /= 26;
+    }
+    format!("did:plc:{tag}{}", std::str::from_utf8(&id).unwrap())
+}
+
 /// security-net-11: a live membership hint counts against its newcomer's PDS host when the
 /// indexer knows that host (an indexed head or a cached DID document; the live path makes no
 /// identity request), and otherwise against one shared unknown-host bucket with the same cap.
@@ -2437,6 +2456,7 @@ async fn live_membership_hints_count_against_their_host() {
             &f.forum.fk,
             &serde_json::to_value(Membership::new(f.forum.uri.clone(), at)).unwrap(),
         );
+        f.net.flush();
     };
     // No scheduler runs, so pending hints stay pending; wait for the cursors alone.
     let passed = || async {
@@ -2460,33 +2480,28 @@ async fn live_membership_hints_count_against_their_host() {
             .iter()
             .any(|(d, _, _)| d == did)
     };
+    // The newcomers' host is one hint short of its cap; the unknown-host bucket is full.
+    bulk(&f, |tx| {
+        let mut add = tx
+            .prepare("INSERT INTO forum_candidates(forum,did,cid,created_ms,state,observed_ms,host) VALUES(?1,?2,'cid',1,'pending',0,?3)")
+            .unwrap();
+        for n in 1..CANDIDATES_PER_HOST as usize {
+            add.execute(rusqlite::params![forum, plc('h', n), host])
+                .unwrap();
+        }
+        for n in 0..CANDIDATES_PER_HOST as usize {
+            add.execute(rusqlite::params![forum, plc('u', n), UNKNOWN_HOST])
+                .unwrap();
+        }
+    });
     let tasks = live::spawn(f.indexer.clone());
     connected(&f.indexer, 2).await;
     join(&early);
     passed().await;
     assert!(
         pending(early.did().as_str()),
-        "a hint below the caps was refused"
+        "the last hint below the host cap was refused"
     );
-    // The newcomers' host is at its cap with `early`; so is the unknown-host bucket.
-    for n in 1..CANDIDATES_PER_HOST {
-        let did = format!("did:plc:h{n:023}");
-        assert!(
-            f.indexer
-                .store
-                .add_candidate_from(forum, &did, "cid", 1, &host)
-                .unwrap()
-        );
-    }
-    for n in 0..CANDIDATES_PER_HOST {
-        let did = format!("did:plc:u{n:023}");
-        assert!(
-            f.indexer
-                .store
-                .add_candidate_from(forum, &did, "cid", 1, UNKNOWN_HOST)
-                .unwrap()
-        );
-    }
     join(&known);
     join(&unknown);
     passed().await;
@@ -2531,18 +2546,18 @@ async fn an_indexed_forum_counts_against_its_owners_host() {
             )
             .unwrap()
     );
-    let mut seeds = 1;
-    'fill: for d in 0.. {
-        let via = format!("did:plc:s{d:023}");
-        for k in 0..SEEDS_PER_DID {
-            if seeds == SEEDS_PER_HOST {
-                break 'fill;
-            }
-            let seed = format!("at://did:plc:t{d:023}/{}/f{k}", nsid::FORUM);
-            assert!(store.add_forum_hint(&seed, &via, "spam.test").unwrap());
-            seeds += 1;
+    bulk(&f, |tx| {
+        let mut add = tx
+            .prepare("INSERT INTO forums(uri,did,rkey,fk,via,via_host) VALUES(?1,?2,?3,'',?4,'spam.test')")
+            .unwrap();
+        for n in 1..SEEDS_PER_HOST as usize {
+            let (owner, rkey) = (plc('t', n), format!("f{n}"));
+            let seed = format!("at://{owner}/{}/{rkey}", nsid::FORUM);
+            let via = plc('s', n / SEEDS_PER_DID as usize);
+            add.execute(rusqlite::params![seed, owner, rkey, via])
+                .unwrap();
         }
-    }
+    });
     let extra = |i: u32| format!("at://did:plc:xxxxxxxxxxxxxxxxxxxxxxxx/{}/x{i}", nsid::FORUM);
     let other = "did:plc:yyyyyyyyyyyyyyyyyyyyyyyy";
     assert!(
