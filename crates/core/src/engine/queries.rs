@@ -421,8 +421,9 @@ impl<H: Host> Engine<H> {
         })
     }
 
-    /// `body_source(uri)` (`engine-api.md` §3.4): the markdown source of a post's or comment's
-    /// body, or of a forum's `about`, as a composer edits it (`""` for an item without one): the
+    /// `body_source(uri)` (`engine-api.md` §3.4): the markdown source of the `body` of a post, a
+    /// comment, a wiki revision or a sequence (its introduction; chapter bodies are inline only),
+    /// or of a forum's `about`, as a composer edits it (`""` for an item without one): the
     /// inline `text`, or the spilled `textBlob` (`lfm-1.md` §1.3) decoded as the views decode
     /// it, from the copy the host holds (stored CID-checked when the engine fetched it) or
     /// fetched now from the author's PDS, waiting at most `BODY_BLOB_WAIT_MS` as a view does. A
@@ -452,7 +453,11 @@ impl<H: Host> Engine<H> {
                 l.model.input.decl_cid.clone(),
                 md,
             )
-        } else if coll == nsid::POST || coll == nsid::COMMENT {
+        } else if coll == nsid::POST
+            || coll == nsid::COMMENT
+            || coll == nsid::WIKI_REVISION
+            || coll == nsid::SEQUENCE
+        {
             let key = self.forum_of(&u).await?;
             let l = self.loaded(&key).await?;
             let uri = u.to_string();
@@ -474,7 +479,7 @@ impl<H: Host> Engine<H> {
             )
         } else {
             return Err(EngineError::invalid_ref(format!(
-                "{u} is not a post, a comment or a forum"
+                "{u} is not a post, a comment, a wiki revision, a sequence or a forum"
             )));
         };
         let Some(md) = md else {

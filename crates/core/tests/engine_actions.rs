@@ -486,6 +486,80 @@ fn wiki_edits_parent_their_base_and_refuse_a_moved_head() {
     assert_eq!(parents[0]["uri"], r2.as_str());
 }
 
+/// A wiki revision's and a sequence's `body` may spill into a blob (`data-model.md` §5.2 rule
+/// 2), and `body_source` refused both collections (`invalid_ref`), so a client could not edit
+/// such a page or sequence from its source (engine-api.md §3.4).
+#[test]
+fn body_source_reads_the_body_of_a_wiki_revision_and_a_sequence() {
+    let w = World::new();
+    let mut long = "# The whole page\n\nEvery word of it.\n\n".to_owned();
+    while long.len() <= 65_536 {
+        long.push_str("More words in the long body. ");
+    }
+    let page = |slug: &str, body: Option<BodyDraft>| {
+        let t = block_on(w.alice.engine.wiki_edit(
+            &w.forum,
+            slug,
+            WikiDraft {
+                name: slug.to_owned(),
+                description: None,
+                body,
+                is_tag: true,
+                parent_tags: vec![],
+                summary: None,
+                base: None,
+            },
+        ))
+        .unwrap();
+        w.alice.flush();
+        w.alice.done(&t)
+    };
+    let spilled_page = page("rust", Some(BodyDraft::text(long.clone())));
+    let inline_page = page("go", Some(BodyDraft::text("About *Go*")));
+    let bare_page = page("zig", None);
+    let rkey = |uri: &str| uri.rsplit('/').next().unwrap().to_owned();
+    let record = w
+        .alice
+        .record(nsid::WIKI_REVISION, &rkey(&spilled_page))
+        .unwrap();
+    assert!(record["body"].get("textBlob").is_some(), "{record}");
+    let seq = |body: &str| {
+        let t = block_on(w.alice.engine.seq_create(&SequenceDraft {
+            forum: w.forum.clone(),
+            title: "A reading list".to_owned(),
+            body: Some(BodyDraft::text(body)),
+            chapters: vec![SequenceChapterDraft {
+                title: Some("First".to_owned()),
+                body: Some(BodyDraft::text("Chapter one")),
+                posts: vec![w.welcome.clone()],
+            }],
+        }))
+        .unwrap();
+        w.alice.flush();
+        w.alice.done(&t)
+    };
+    let spilled_seq = seq(&long);
+    let inline_seq = seq("Sequence **introduction**");
+    let record = w.alice.record(nsid::SEQUENCE, &rkey(&spilled_seq)).unwrap();
+    assert!(record["body"].get("textBlob").is_some(), "{record}");
+    w.sync_all();
+    for (uri, markdown, spilled) in [
+        (&spilled_page, long.as_str(), true),
+        (&inline_page, "About *Go*", false),
+        (&bare_page, "", false),
+        (&spilled_seq, long.as_str(), true),
+        (&inline_seq, "Sequence **introduction**", false),
+    ] {
+        // another reader's device, as an editor of the page or a reader of the sequence is
+        let s = block_on(w.carol.engine.body_source(uri)).unwrap();
+        assert_eq!(s.markdown, markdown, "{uri}");
+        assert_eq!(s.spilled, spilled, "{uri}");
+        // the record's CID, as raw names it, never the blob's
+        let raw = block_on(w.carol.engine.raw(uri)).unwrap();
+        assert_eq!(raw.cid.as_deref(), Some(s.cid.as_str()), "{uri}");
+    }
+}
+
 #[test]
 fn a_seed_tag_vote_resolves_on_another_users_post() {
     let w = World::new();
