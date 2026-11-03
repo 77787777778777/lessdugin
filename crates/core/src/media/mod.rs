@@ -1560,13 +1560,20 @@ impl<H: crate::host::Host> crate::engine::Engine<H> {
             .map_err(|e| EngineError::internal(format!("the PDS URL {pds:?}: {e}")))?;
         let handle = match self.host().fetch_blob(pds, did, cid.to_owned(), max).await {
             Ok(h) => h,
-            Err(HostError::HttpStatus(400, _)) => {
+            Err(HostError::HttpStatus(400, Some(name)))
+                if BLOB_NOT_FOUND.contains(&name.as_str()) =>
+            {
                 // "Blob not found": missing, not retried (sync.md §11.1). Nothing was stored: a
                 // stored copy is returned without a request (§12.2), so there is none to purge
                 return Err(EngineError::not_found(
                     "the author's PDS does not have this file (any more)",
                 )
                 .with_detail("kind", "mediaMissing"));
+            }
+            // any other 400 (a repo that is not served now: deactivated, taken down, suspended;
+            // an error this client does not know) says nothing about the blob: asked again later
+            Err(e @ HostError::HttpStatus(400, _)) => {
+                return Err(EngineError::from(e).with_retryable(true));
             }
             Err(HostError::CidMismatch) => {
                 return Err(EngineError::new(

@@ -248,6 +248,44 @@ fn a_blob_the_pds_does_not_have_is_missing() {
 }
 
 #[test]
+fn media_of_a_repo_that_is_not_served_now_is_not_missing() {
+    // sync.md §11.1: only "Blob not found" is a missing blob. load_media took every getBlob
+    // 400 for one, so a deactivated repo's media (or a 400 naming an error this client does not
+    // know) read as gone for good (review m3m4-continuation-1)
+    let mut n = Net::new();
+    let bob = n
+        .net
+        .add_pds("bob.example.com")
+        .add_account("bob.example.com");
+    let f = forum(&n, &bob);
+    let blob = bob.upload_blob(tiny_png(9), "image/png");
+    let cid = blob["ref"]["$link"].as_str().unwrap().to_owned();
+    post(&n, &bob, &f, image_body(&blob));
+    let e = n.device("anon", None);
+    let owner = || Some(MediaOwner::author(bob.did().as_str()));
+    for (name, message) in [
+        ("RepoDeactivated", "Repo has been deactivated"),
+        ("AccountNotServedHere", "Try again later"),
+    ] {
+        n.net.inject(
+            Fault::error(400, name, message)
+                .on_nsid("com.atproto.sync.getBlob")
+                .once(),
+        );
+        let err = block_on(e.load_media(&cid, owner())).unwrap_err();
+        let detail = err.detail.clone().unwrap();
+        assert_ne!(detail.get("kind"), Some(&json!("mediaMissing")), "{name}");
+        assert_eq!(detail["error"], name);
+        assert!(err.retryable, "{name}: {err:?}");
+        assert_eq!(block_on(e.host().blob_open(&cid)).unwrap(), None, "{name}");
+        // asked for again: the blob is served
+        let loaded = block_on(e.load_media(&cid, owner())).unwrap();
+        assert_eq!(loaded.mime.as_deref(), Some("image/png"), "{name}");
+        block_on(e.host().blob_delete(&cid)).unwrap();
+    }
+}
+
+#[test]
 fn a_download_card_carries_the_sniffed_type() {
     // a file outside the display allowlist was saved as <cid>.bin: LoadedMedia carried a type
     // only for display, so no client could pick the extension from the sniffed type (§11.2)
