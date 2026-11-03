@@ -14,9 +14,11 @@ use lessdugin_atp::xrpc::{ListRecords, ListReposByCollection};
 use lessdugin_core::discovery::{ForumKey, SyncOpts};
 use lessdugin_core::engine::{EngineError, ErrorCode};
 use lessdugin_core::host::Host;
+use lessdugin_core::identity::IdentityLevel;
 use lessdugin_core::model::{ForumModel, ModelError};
 use lessdugin_core::store::records::RecordStore;
 use lessdugin_core::store::repo::AccountStatus;
+use lessdugin_core::sync::repo::PointOutcome;
 use lessdugin_core::sync::{Priority, Reason, Stats, SyncRequest};
 use lessdugin_core::xrpc::{CallOpts, Service};
 use tracing::{info, warn};
@@ -188,35 +190,75 @@ pub async fn reconcile(indexer: &Indexer) {
     }
 }
 
-/// The declaration (or its owner's DID) is proven absent, not merely unreachable.
-fn declaration_absent(e: &anyhow::Error) -> bool {
+/// The failure may be the declaration's absence: a `not_found` sync error, or a projection
+/// without a declaration. It proves nothing by itself, since `not_found` also covers the
+/// owner's account status, a bare HTTP 404 and an identity that does not resolve
+/// ([`confirm_absent`] decides).
+fn maybe_absent(e: &anyhow::Error) -> bool {
     e.downcast_ref::<EngineError>()
         .is_some_and(|e| e.code == ErrorCode::NotFound)
         || e.downcast_ref::<ModelError>()
             .is_some_and(|e| matches!(e, ModelError::NoDeclaration(_)))
 }
 
+/// The declaration of `forum` is proven absent: the owner's PDS, named by a DID document
+/// fetched now (a cached one may name a former PDS), answers `RecordNotFound` for it. An
+/// account status (`RepoDeactivated`, `RepoTakendown`, `RepoSuspended`), `RepoNotFound`, a bare
+/// HTTP 404 or 410, an identity that does not resolve or is only a hint, and any other failure
+/// prove nothing.
+async fn confirm_absent(indexer: &Indexer, forum: &str) -> bool {
+    let Ok(uri) = AtUri::parse(forum) else {
+        return false;
+    };
+    match indexer.engine.resolver().resolve_did_doc(uri.did(), 0).await {
+        Ok(id) if id.level == IdentityLevel::Doc => {}
+        _ => return false,
+    }
+    let session = indexer
+        .engine
+        .syncer()
+        .session(Priority::P3, Arc::new(Stats::new()));
+    matches!(
+        indexer
+            .engine
+            .syncer()
+            .point_fetch(&session, &uri, None)
+            .await,
+        Ok(PointOutcome::NotFound { .. })
+    )
+}
+
 /// An ordinary forum sync (backfill, poll, reconcile, newcomer confirmation, a changed roster):
 /// the core sync of the authorities and participants, then a projection. A declaration proven
-/// absent is a successful outcome: the snapshot is emptied (each record logged as deleted) and
-/// the seed quarantined. Any other failure backs off this forum only.
+/// absent ([`confirm_absent`]) is a successful outcome: the snapshot is emptied (each record
+/// logged as deleted) and the seed quarantined. Any other failure backs off this forum only and
+/// keeps its snapshot.
 pub async fn sync_forum(indexer: &Indexer, forum: &str) -> anyhow::Result<()> {
-    match sync_forum_inner(indexer, forum).await {
+    let result = sync_forum_inner(indexer, forum).await;
+    let absent = match &result {
+        Err(e) if maybe_absent(e) => confirm_absent(indexer, forum).await,
+        _ => false,
+    };
+    match result {
         Ok(()) => {
             indexer.store.note_forum_synced(forum, indexer.now_ms())?;
             Ok(())
         }
-        Err(e) if declaration_absent(&e) => {
+        Err(_) if absent => {
             let deletes = indexer.store.note_forum_absent(forum, indexer.now_ms())?;
             lock(&indexer.models).remove(forum);
             info!(forum=%forum,deletes,"forum declaration is absent; seed quarantined");
             Ok(())
         }
         Err(e) => {
-            let retry = indexer
+            let next = match indexer
                 .store
-                .note_forum_failed(forum, indexer.now_ms(), &e.to_string())?;
-            Err(e.context(format!("forum retry at {retry}")))
+                .note_forum_failed(forum, indexer.now_ms(), &e.to_string())?
+            {
+                Some(retry) => format!("forum retry at {retry}"),
+                None => "a seed that never synced failed for a week and was dropped".to_owned(),
+            };
+            Err(e.context(next))
         }
     }
 }
@@ -499,7 +541,8 @@ pub async fn retry_repo(indexer: &Indexer, did: &str, forum: &str) {
         Ok(()) => {
             indexer.store.clear_repo_retry(did, forum).ok();
         }
-        Err(e) if declaration_absent(&e) => {
+        Err(e) if maybe_absent(&e) => {
+            // The forum sync proves (or refutes) the absence.
             indexer.store.clear_repo_retry(did, forum).ok();
             indexer
                 .store

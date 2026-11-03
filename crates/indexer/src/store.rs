@@ -29,7 +29,8 @@ pub const RETRY_MAX_MS: i64 = 6 * 60 * 60 * 1000;
 pub const REPO_RETRY_BASE_MS: i64 = 2_000;
 /// A seed whose declaration is proven absent is rechecked at most this often.
 pub const ABSENT_RECHECK_MS: i64 = 24 * 60 * 60 * 1000;
-/// A seed whose declaration has been absent this long (and never indexed since) is dropped.
+/// A seed whose declaration has been absent this long (and never indexed since) is dropped, as
+/// is a hinted seed that never synced and whose syncs have failed this long.
 pub const ABSENT_DROP_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 /// An ordinary sync requested by a live event (a membership or declaration change) starts no
 /// sooner than this long per participant after the forum's last ordinary sync ended. Each such
@@ -398,35 +399,50 @@ impl Store {
     /// pending sync request, and starts the spacing of live-requested syncs.
     pub fn note_forum_synced(&self, forum: &str, ended_ms: i64) -> rusqlite::Result<()> {
         self.db().execute(
-            "UPDATE forums SET failures=0,retry_ms=0,absent_ms=0,sync_due_ms=0,error='',ordinary_ms=?2 WHERE uri=?1",
+            "UPDATE forums SET failures=0,retry_ms=0,failing_ms=0,absent_ms=0,sync_due_ms=0,error='',ordinary_ms=?2 WHERE uri=?1",
             params![forum, ended_ms],
         )?;
         Ok(())
     }
 
-    /// A failed sync: exponential per-forum back-off. Returns the retry time.
+    /// A failed sync: exponential per-forum back-off; the forum keeps its snapshot. Returns the
+    /// retry time, or `None` when the seed was dropped: a hinted seed that never synced and has
+    /// failed for [`ABSENT_DROP_MS`] (an operator seed is kept).
     pub fn note_forum_failed(
         &self,
         forum: &str,
         now_ms: i64,
         error: &str,
-    ) -> rusqlite::Result<i64> {
+    ) -> rusqlite::Result<Option<i64>> {
         let mut db = self.db();
         let tx = db.transaction()?;
-        let failures: i64 = tx
-            .query_row("SELECT failures FROM forums WHERE uri=?1", [forum], |r| {
-                r.get(0)
-            })
+        let (failures, failing_ms, never_synced): (i64, i64, bool) = tx
+            .query_row(
+                "SELECT failures,failing_ms,via<>'' AND synced_ms=0 AND ordinary_ms=0 FROM forums WHERE uri=?1",
+                [forum],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
             .optional()?
-            .unwrap_or(0i64)
-            .saturating_add(1);
+            .unwrap_or((0, 0, false));
+        let failures = failures.saturating_add(1);
+        let since = if failures == 1 || failing_ms == 0 {
+            now_ms
+        } else {
+            failing_ms
+        };
+        if never_synced && now_ms.saturating_sub(since) >= ABSENT_DROP_MS {
+            drop_seed(&tx, forum)?;
+            tx.commit()?;
+            self.bump();
+            return Ok(None);
+        }
         let at = now_ms.saturating_add(backoff_ms(RETRY_BASE_MS, failures));
         tx.execute(
-            "UPDATE forums SET failures=?2,retry_ms=?3,sync_due_ms=0,error=?4 WHERE uri=?1",
-            params![forum, failures, at, error],
+            "UPDATE forums SET failures=?2,retry_ms=?3,sync_due_ms=0,error=?4,failing_ms=?5 WHERE uri=?1",
+            params![forum, failures, at, error, since],
         )?;
         tx.commit()?;
-        Ok(at)
+        Ok(Some(at))
     }
 
     /// The declaration is proven absent: the forum's snapshot is replaced by an empty one (each
@@ -464,12 +480,10 @@ impl Store {
         tx.execute("DELETE FROM record_state WHERE forum=?1", [forum])?;
         tx.execute("DELETE FROM participants WHERE forum=?1", [forum])?;
         if since > 0 && now_ms.saturating_sub(since) >= ABSENT_DROP_MS {
-            tx.execute("DELETE FROM forum_candidates WHERE forum=?1", [forum])?;
-            tx.execute("DELETE FROM repo_retry WHERE forum=?1", [forum])?;
-            tx.execute("DELETE FROM forums WHERE uri=?1", [forum])?;
+            drop_seed(&tx, forum)?;
         } else {
             tx.execute(
-                "UPDATE forums SET synced_ms=0,cid='',input_digest='',participant_count=0,post_count=0,failures=0,retry_ms=0,sync_due_ms=0,error='absent',absent_ms=CASE WHEN absent_ms=0 THEN ?2 ELSE absent_ms END WHERE uri=?1",
+                "UPDATE forums SET synced_ms=0,cid='',input_digest='',participant_count=0,post_count=0,failures=0,retry_ms=0,failing_ms=0,sync_due_ms=0,error='absent',absent_ms=CASE WHEN absent_ms=0 THEN ?2 ELSE absent_ms END WHERE uri=?1",
                 params![forum, now_ms],
             )?;
         }
@@ -1093,6 +1107,14 @@ impl Store {
     }
 }
 
+/// Removes a seed with its candidates and repository retries (its snapshot is already empty).
+fn drop_seed(tx: &rusqlite::Transaction<'_>, forum: &str) -> rusqlite::Result<()> {
+    tx.execute("DELETE FROM forum_candidates WHERE forum=?1", [forum])?;
+    tx.execute("DELETE FROM repo_retry WHERE forum=?1", [forum])?;
+    tx.execute("DELETE FROM forums WHERE uri=?1", [forum])?;
+    Ok(())
+}
+
 const FORUM_COLUMNS: &str = "uri,did,name,description,created_at,cid,synced_ms,input_digest,participant_count,post_count,fk,failures,retry_ms,absent_ms,sync_due_ms";
 
 /// The snapshot rows of `m`: every fold input record and the declaration.
@@ -1154,6 +1176,7 @@ fn migrate_forums(conn: &Connection) -> rusqlite::Result<()> {
         ("via", "TEXT NOT NULL DEFAULT ''"),
         ("via_host", "TEXT NOT NULL DEFAULT ''"),
         ("ordinary_ms", "INTEGER NOT NULL DEFAULT 0"),
+        ("failing_ms", "INTEGER NOT NULL DEFAULT 0"),
     ] {
         if !columns.iter().any(|column| column == name) {
             conn.execute(
@@ -1559,12 +1582,15 @@ mod tests {
         store.add_forum_seed(FORUM).unwrap();
         assert_eq!(store.forums_for_pass(0), vec![FORUM.to_owned()]);
         // Exponential back-off from one minute; the forum leaves passes until it is due.
-        let first = store.note_forum_failed(FORUM, 1_000, "boom").unwrap();
+        let first = store.note_forum_failed(FORUM, 1_000, "boom").unwrap().unwrap();
         assert_eq!(first, 1_000 + RETRY_BASE_MS);
         assert!(store.forums_for_pass(1_001).is_empty());
         assert!(store.forums_due(first - 1).is_empty());
         assert_eq!(store.forums_due(first), vec![FORUM.to_owned()]);
-        let second = store.note_forum_failed(FORUM, first, "boom").unwrap();
+        let second = store
+            .note_forum_failed(FORUM, first, "boom")
+            .unwrap()
+            .unwrap();
         assert_eq!(second, first + 2 * RETRY_BASE_MS);
         for _ in 0..40 {
             store.note_forum_failed(FORUM, 0, "boom").unwrap();
@@ -1615,6 +1641,69 @@ mod tests {
         assert!(
             store.forum_row(FORUM).is_none(),
             "an absent seed is dropped"
+        );
+    }
+
+    /// A failure is never a proof of absence, so a hinted seed that never syncs (an owner DID
+    /// that does not resolve, a host that never answers) is dropped after a week of failures
+    /// instead of being retried forever. Operator seeds and indexed forums are kept.
+    #[test]
+    fn a_hinted_seed_that_never_syncs_is_dropped_after_a_week_of_failures() {
+        let store = Store::in_memory().unwrap();
+        let hinted = "at://did:plc:cccccccccccccccccccccccc/online.7778777.lessdugin.temp.forum/h";
+        let indexed = "at://did:plc:dddddddddddddddddddddddd/online.7778777.lessdugin.temp.forum/i";
+        for forum in [hinted, indexed] {
+            assert!(
+                store
+                    .add_forum_hint(forum, "did:plc:nnnnnnnnnnnnnnnnnnnnnnnn", "spam.test")
+                    .unwrap()
+            );
+        }
+        store.add_forum_seed(FORUM).unwrap();
+        store.note_forum_synced(indexed, 1).unwrap();
+        store
+            .db()
+            .execute(
+                "UPDATE forums SET synced_ms=1,cid='decl' WHERE uri=?1",
+                [indexed],
+            )
+            .unwrap();
+        let start = 1_000;
+        for forum in [hinted, indexed, FORUM] {
+            assert!(store.note_forum_failed(forum, start, "e").unwrap().is_some());
+            assert!(
+                store
+                    .note_forum_failed(forum, start + ABSENT_DROP_MS - 1, "e")
+                    .unwrap()
+                    .is_some()
+            );
+        }
+        assert_eq!(
+            store
+                .note_forum_failed(hinted, start + ABSENT_DROP_MS, "e")
+                .unwrap(),
+            None
+        );
+        assert!(store.forum_row(hinted).is_none(), "the failing seed was kept");
+        for forum in [indexed, FORUM] {
+            assert!(
+                store
+                    .note_forum_failed(forum, start + 2 * ABSENT_DROP_MS, "e")
+                    .unwrap()
+                    .is_some()
+            );
+            assert!(store.forum_row(forum).is_some(), "{forum} was dropped");
+        }
+        // A success ends the run of failures: the week counts from the next failure.
+        store.add_forum_hint(hinted, "did:plc:nnnnnnnnnnnnnnnnnnnnnnnn", "spam.test").unwrap();
+        store.note_forum_failed(hinted, 0, "e").unwrap();
+        store.note_forum_absent(hinted, 1).unwrap();
+        store.lift_quarantine(hinted, 2).unwrap();
+        assert!(
+            store
+                .note_forum_failed(hinted, ABSENT_DROP_MS, "e")
+                .unwrap()
+                .is_some()
         );
     }
 

@@ -447,6 +447,83 @@ async fn a_failed_backfill_sync_retries_within_one_minute() {
     task.abort();
 }
 
+/// robustness-1: only `RecordNotFound` for the declaration, at the PDS a fresh DID document
+/// names, proves a forum absent. A bare HTTP 404, an owner DID the directory does not know and a
+/// deactivated owner are failures that back off: the indexed snapshot stays served and no delete
+/// is logged.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn only_a_missing_declaration_quarantines_an_indexed_forum() {
+    use lessdugin_testkit::fake_pds::{AccountStatus, Fault};
+    let f = Fixture::new().await;
+    let post = f.post("kept");
+    let forum = f.forum.uri.as_str();
+    let owner = f.owner.did().as_str();
+    ingest::sync_forum(&f.indexer, forum).await.unwrap();
+    assert!(f.indexer.store.record_cid(forum, &post).is_some());
+    let before = f.indexer.store.latest_seq();
+    let kept = |failures: i64, case: &str| {
+        let row = f.indexer.store.forum_row(forum).unwrap();
+        assert_eq!(row.absent_ms, 0, "{case}: the forum was quarantined");
+        assert_eq!(row.failures, failures, "{case}: the sync did not fail");
+        assert!(f.indexer.store.forum(forum).is_some(), "{case}: unlisted");
+        assert!(
+            f.indexer.store.record_cid(forum, &post).is_some(),
+            "{case}: the snapshot was emptied"
+        );
+        assert!(
+            f.indexer
+                .store
+                .changes(Some(forum), before, 100)
+                .iter()
+                .all(|c| c.op != "delete"),
+            "{case}: a delete was logged"
+        );
+    };
+
+    // A bare 404 (no XRPC error) for the declaration.
+    let bare = f.net.inject(
+        Fault::respond(lessdugin_core::host::HttpResponse {
+            status: 404,
+            headers: vec![("content-type".into(), "text/plain".into())],
+            body: b"no such page".to_vec(),
+        })
+        .on_repo(owner)
+        .on_nsid("com.atproto.repo.getRecord"),
+    );
+    assert!(ingest::sync_forum(&f.indexer, forum).await.is_err());
+    kept(1, "bare 404");
+    f.net.remove_fault(bare);
+
+    // The directory does not know the owner's DID (the cached document is dropped first).
+    let unknown = f
+        .net
+        .inject(Fault::status(404).on_nsid("plc").on_repo(owner));
+    f.indexer.engine.invalidate_identity(owner).await.unwrap();
+    assert!(ingest::sync_forum(&f.indexer, forum).await.is_err());
+    kept(2, "unknown DID");
+    f.net.remove_fault(unknown);
+
+    // The owner's account is deactivated.
+    f.owner.set_status(AccountStatus::Deactivated);
+    assert!(ingest::sync_forum(&f.indexer, forum).await.is_err());
+    kept(3, "deactivated owner");
+    f.owner.set_status(AccountStatus::Active);
+
+    // A deleted declaration is proven absent: deletes are logged and the seed is quarantined.
+    f.owner.delete(nsid::FORUM, "m6");
+    ingest::sync_forum(&f.indexer, forum).await.unwrap();
+    let row = f.indexer.store.forum_row(forum).unwrap();
+    assert!(row.absent_ms > 0, "a deleted declaration was not quarantined");
+    assert!(f.indexer.store.forum(forum).is_none());
+    assert!(
+        f.indexer
+            .store
+            .changes(Some(forum), before, 100)
+            .iter()
+            .any(|c| c.op == "delete" && c.uri == post)
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn failed_repository_discovery_is_not_a_successful_backfill() {
     let net = FakeNet::serve_http(SystemClock);
