@@ -60,10 +60,15 @@ export const NOT_A_TAG_WARNING =
   "Once saved, a page that is not a tag leaves the tags list and no longer applies to posts, " +
   "and this app cannot open it again: an edit here would start from an empty page.";
 
+/** The author's edit as a reload carries it: the form, and the edit summary they wrote. */
+export interface CarriedEdit extends WikiForm {
+  summary: string;
+}
+
 /** The form (exported for its tests). `base`: the head the form started from, absent for a page
  * with no revision yet. `moved`: the page's head is no longer `base` (or a page appeared where
- * there was none). `onReload` gets the author's current text, or null when they changed nothing
- * since the form loaded (what a reload carried is then still theirs), and `carried` is the text a
+ * there was none). `onReload` gets the author's current edit, or null when they wrote nothing
+ * since the form loaded (what a reload carried is then still theirs), and `carried` is the edit a
  * reload kept. */
 export function WikiPageForm({
   slug,
@@ -78,8 +83,8 @@ export function WikiPageForm({
   base: string | undefined;
   initial: WikiForm;
   moved?: boolean;
-  onReload?: (mine: WikiForm | null) => void;
-  carried?: WikiForm | null;
+  onReload?: (mine: CarriedEdit | null) => void;
+  carried?: CarriedEdit | null;
   onDismissCarried?: () => void;
 }) {
   const engine = useEngine();
@@ -175,17 +180,19 @@ export function WikiPageForm({
     }
   };
 
-  const mine = (): WikiForm => ({
+  const mine = (): CarriedEdit => ({
     name,
     description,
     markdown,
     media,
     isTag,
     parentTags,
+    summary,
   });
   const reload = (): void => {
     // only text the author wrote is carried: an unchanged form is the head it loaded
-    if (onReload) onReload(sameWikiForm(mine(), initial) ? null : mine());
+    const wrote = !sameWikiForm(mine(), initial) || summary.trim() !== "";
+    if (onReload) onReload(wrote ? mine() : null);
     else void qc.invalidateQueries({ queryKey: qk.tag(forum.uri, slug) });
   };
 
@@ -223,12 +230,17 @@ export function WikiPageForm({
                   ))}
             </p>
           )}
+          {carried.summary.trim() !== "" && (
+            <p>
+              Your edit summary: <bdi>{carried.summary}</bdi>
+            </p>
+          )}
           <label className={ui.label}>
             Your unsaved text
             <textarea className={ui.input} rows={8} value={carried.markdown} readOnly />
           </label>
           <div className={ui.row}>
-            {/* the whole edit: its text with the media it refers to, and its page settings */}
+            {/* the whole edit: its text and the media it refers to, settings and summary */}
             <button
               type="button"
               className={ui.button}
@@ -239,6 +251,7 @@ export function WikiPageForm({
                 setMedia(carried.media);
                 setIsTag(carried.isTag);
                 setParentTags(carried.parentTags);
+                setSummary(carried.summary);
               }}
             >
               Use my text
@@ -392,7 +405,7 @@ function WikiEditor({ tag }: { tag: string }) {
   // The head the form started from, kept until the author reloads: a newer head arriving while
   // they write never replaces their text, and their save names this one as `base` (O-2).
   const [pinned, setPinned] = useState<{ head: string | undefined; isNew: boolean } | null>(null);
-  const [carried, setCarried] = useState<WikiForm | null>(null);
+  const [carried, setCarried] = useState<CarriedEdit | null>(null);
   if (pinned === null && (view.isSuccess || notFound)) {
     setPinned({ head: view.data?.head, isNew: notFound });
   }
@@ -404,7 +417,7 @@ function WikiEditor({ tag }: { tag: string }) {
     enabled: head !== undefined,
   });
   // `mine` null: the author changed nothing since the last load, so what is carried stays
-  const reload = async (mine: WikiForm | null): Promise<void> => {
+  const reload = async (mine: CarriedEdit | null): Promise<void> => {
     try {
       const fresh = await qc.fetchQuery({
         queryKey: qk.tag(forum.uri, tag),

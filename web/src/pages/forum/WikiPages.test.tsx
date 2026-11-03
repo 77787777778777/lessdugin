@@ -200,7 +200,7 @@ describe("WikiEditPage", () => {
     expect(edit.mock.calls[0]?.[2].body?.markdown).toBe("My second try.");
   });
 
-  it("carries the author's tag setting and parent tags, and restores them with their text", async () => {
+  it("carries the author's tag setting and parent tags, and restores them", async () => {
     const engine = new MockEngine({ holdMs: 0, sendMs: 0, wikiRace: true });
     const { forum } = await setup("edit", SLUG, engine);
     await screen.findByRole("textbox", { name: /^Page/ });
@@ -235,6 +235,29 @@ describe("WikiEditPage", () => {
       parentTags: ["rationality"],
       base: moved,
     });
+  });
+
+  it("carries the author's edit summary, even when it is all they wrote", async () => {
+    const engine = new MockEngine({ holdMs: 0, sendMs: 0, wikiRace: true });
+    const { forum } = await setup("edit", SLUG, engine);
+    const summary = (await screen.findByRole("textbox", {
+      name: /Edit summary/,
+    })) as HTMLInputElement;
+    fireEvent.change(summary, { target: { value: "Checked the links" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save page" }));
+    const alert = await screen.findByRole("alert");
+    fireEvent.click(within(alert).getByRole("button", { name: "Reload the page" }));
+    const kept = await screen.findByRole("region", { name: "Your unsaved edit" });
+    expect(kept.textContent).toContain("Your edit summary: Checked the links");
+    const fresh = screen.getByRole("textbox", { name: /Edit summary/ }) as HTMLInputElement;
+    expect(fresh.value).toBe("");
+    const moved = (await engine.tag(forum, SLUG)).head;
+    fireEvent.click(within(kept).getByRole("button", { name: "Use my text" }));
+    expect(fresh.value).toBe("Checked the links");
+    const edit = vi.spyOn(engine, "wikiEdit");
+    fireEvent.click(screen.getByRole("button", { name: "Save page" }));
+    await waitFor(() => expect(edit).toHaveBeenCalledTimes(1));
+    expect(edit.mock.calls[0]?.[2]).toMatchObject({ summary: "Checked the links", base: moved });
   });
 
   it("restores the media the author's text refers to with it", async () => {
