@@ -372,7 +372,7 @@ pub async fn read(ctx: &Ctx, args: ReadArgs) -> Result<(), CliError> {
     if unverified(ctx, actors(&thread).iter()) && verify_handles(&engine).await {
         thread = engine.get_thread(&uri, &opts).await?;
     }
-    if await_pending_bodies(ctx, &engine, &thread).await {
+    if await_spilled(ctx, &engine, "body", &pending_bodies(&thread)).await {
         thread = engine.get_thread(&uri, &opts).await?;
     }
     for (item, _) in pending_bodies(&thread) {
@@ -451,15 +451,20 @@ fn pending_bodies(thread: &ThreadView) -> Vec<(String, String)> {
     out
 }
 
-/// Awaits the host download of every spilled body `thread` shows pending: the one its view
-/// started (the host runs one per CID, so this joins it, `sync.md` §12.2), else a new one, each
-/// capped by `BLOB_TOTAL_TIMEOUT_MS`. The blob comes from the author's PDS as their DID document
-/// names it, as the engine's own fetch does (`sync.md` §11.1). Returns true when one was stored,
-/// so the thread is read again; nothing is waited for `--offline`.
-async fn await_pending_bodies(ctx: &Ctx, engine: &Engine<NativeHost>, thread: &ThreadView) -> bool {
+/// Awaits the host download of every spilled body in `pending` (the item, its author), the
+/// `field` of the item's cached record: the one its view started (the host runs one per CID,
+/// so this joins it, `sync.md` §12.2), else a new one, each capped by `BLOB_TOTAL_TIMEOUT_MS`.
+/// The blob comes from the author's PDS as their DID document names it, as the engine's own
+/// fetch does (`sync.md` §11.1). Returns true when one was stored, so the caller views again;
+/// nothing is waited for `--offline`. `read` and `forum show` (a spilled `about`) use it.
+pub(crate) async fn await_spilled(
+    ctx: &Ctx,
+    engine: &Engine<NativeHost>,
+    field: &str,
+    pending: &[(String, String)],
+) -> bool {
     use lessdugin_core::host::Host;
     use lessdugin_core::identity::IdentityLevel;
-    let pending = pending_bodies(thread);
     if pending.is_empty() || ctx.offline() {
         return false;
     }
@@ -477,7 +482,7 @@ async fn await_pending_bodies(ctx: &Ctx, engine: &Engine<NativeHost>, thread: &T
     )]);
     let fetches = pending.iter().map(|(item, author)| async move {
         let (_, record) = crate::cmd::write::cached(engine, item).await.ok()?;
-        let cid = lessdugin_core::model::render::text_blob_cid(record.get("body")?)?.to_owned();
+        let cid = lessdugin_core::model::render::text_blob_cid(record.get(field)?)?.to_owned();
         let identity = engine.resolve_identity(author).await.ok()?.identity;
         if identity.level != IdentityLevel::Doc {
             return None;

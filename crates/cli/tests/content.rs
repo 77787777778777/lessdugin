@@ -1138,6 +1138,81 @@ fn read_waits_for_a_slow_spilled_body() {
     );
 }
 
+/// `forum show` is one view per process too, and `forum_open` waits `BODY_BLOB_WAIT_MS` (3 s)
+/// for a spilled `about`: the CLI awaits the download the view started before it prints, so an
+/// about slower than that still shows (m3m4-continuation-5, `limits.md` `BODY_BLOB_WAIT_MS`).
+/// One that cannot be downloaded at all shows its notice, and a warning says so.
+#[test]
+#[allow(clippy::disallowed_methods)] // a real clock for a real process
+fn forum_show_waits_for_a_slow_spilled_about() {
+    use lessdugin_core::model::render::NOTICE_SPILLED;
+    use lessdugin_testkit::fake_pds::Fault;
+    let net = Net::new();
+    let alice = net.user("alice.test", true);
+    let forum_of = |name: &str| {
+        // each about its own blob, over 64 KiB so it spills (`data-model.md` §5.3)
+        let about = format!(
+            "# About {name}\n\n{}\n\nThe last words.\n",
+            "All about it. ".repeat(5_000)
+        );
+        let c = alice.json(&["forum", "create", name, "--about", &about]);
+        assert_eq!(c["state"]["kind"], "done", "{c}");
+        let decl = alice.account.get(nsid::FORUM, name).unwrap();
+        assert!(decl["about"]["textBlob"].is_object(), "spilled: {decl}");
+        format!("alice.test/{name}")
+    };
+    let slow = forum_of("slow");
+    let reader = net.reader(&alice);
+    let about_of = |out: &std::process::Output| {
+        let v: ForumView = serde_json::from_slice(&out.stdout)
+            .unwrap_or_else(|e| panic!("{e}: {}", text(&out.stderr)));
+        v.about.expect("an about")
+    };
+
+    // the owner's PDS takes 6 s to answer getBlob: twice the view's wait
+    alice.account.inject(
+        Fault::latency(6_000)
+            .on_nsid("com.atproto.sync.getBlob")
+            .once(),
+    );
+    let started = std::time::Instant::now();
+    let out = reader.run(&["--json", "forum", "show", &slow]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(started.elapsed() >= std::time::Duration::from_secs(5));
+    let about = about_of(&out);
+    assert!(about.text.contains("The last words."), "{about:?}");
+    assert!(!about.notices.iter().any(|n| n == NOTICE_SPILLED), "{about:?}");
+    assert!(
+        !text(&out.stderr).contains("still not loaded"),
+        "{}",
+        text(&out.stderr)
+    );
+
+    // an about its PDS will not serve: the notice, and a warning, in both outputs
+    let broken = forum_of("broken");
+    alice
+        .account
+        .inject(Fault::status(500).on_nsid("com.atproto.sync.getBlob"));
+    let out = reader.run(&["--json", "forum", "show", &broken]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let about = about_of(&out);
+    assert!(!about.text.contains("The last words."), "{about:?}");
+    assert!(about.notices.iter().any(|n| n == NOTICE_SPILLED), "{about:?}");
+    assert!(
+        text(&out.stderr).contains("about is still not loaded"),
+        "{}",
+        text(&out.stderr)
+    );
+    let out = reader.run(&["forum", "show", &broken]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(text(&out.stdout).contains(NOTICE_SPILLED), "{}", text(&out.stdout));
+    assert!(
+        text(&out.stderr).contains("about is still not loaded"),
+        "{}",
+        text(&out.stderr)
+    );
+}
+
 /// An edit keeps a link post's card (`link.title`, `link.description`, entered by another
 /// client) while the uri stays: the engine writes `link` from the draft (`data-model.md`
 /// §8.3), so a title-only or text-only edit must send the card again (robustness-7). A new
