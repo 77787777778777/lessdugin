@@ -187,6 +187,9 @@ pub async fn poll_changes<H: Host>(
             }
             other => other?,
         };
+        // A `#change` is handled like a Jetstream commit (sync.md §6.6): its first-seen is when
+        // this client received it, never the indexer's `asOf` (§6.4, §5.6.5).
+        let received_us = session.host().now_ms().saturating_mul(1000);
         let mut previous = cursor;
         let mut valid = Vec::with_capacity(page.changes.len());
         for change in &page.changes {
@@ -231,7 +234,7 @@ pub async fn poll_changes<H: Host>(
                 .await
                 .map_err(sync_error)?;
             if let Some(cid) = &change.cid {
-                syncer.note_hint_first_seen(uri.as_str(), cid, page.meta.as_of.time_us);
+                syncer.note_hint_first_seen(uri.as_str(), cid, received_us);
             }
             let at = ready_time(Priority::P1, now, change.seq.unsigned_abs(), None);
             syncer.enqueue(

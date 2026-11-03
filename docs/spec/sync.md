@@ -727,7 +727,8 @@ So a subject counts as absent only if a delete was confirmed, or its range was c
 #### 5.6.5 `obs` (first-seen times)
 
 - `firstSeen(u, cid)` is the earliest time (µs) at which this client observed that exact version from **any** source, hints included: a Jetstream commit event carrying `(u, cid)`, an indexer `#recordRef` or `#change`, or the admission itself. Hint times are kept in memory and applied when the version is admitted.
-- In assisted mode, an indexer's `#recordRef.firstSeen` is also a candidate, and the minimum is taken.
+- The time of a hint is when this client received it: a Jetstream commit's local receive time (§6.4), and for an indexer `#change` the time its `getChanges` page arrived (§6.6), never the page's `asOf.timeUs` (the indexer's clock, like a Jetstream `time_us`).
+- In assisted mode, an indexer's `#recordRef.firstSeen` is also a candidate, and the minimum is taken. A `#change` carries no `firstSeen`, so it offers none.
 - Each stored row keeps `firstSeen` for its current CID, plus `firstCid` and `firstSeenUri` for the earliest version ever admitted. The fold's `obs` therefore contains `(u, cid) → firstSeen` and `(u, firstCid) → firstSeenUri`, so `t_obs` is the record's first-seen time across edits (`social.md` §2.2).
 - First-seen values are never moved later.
 - **Parity mode** (test-only, devnet-only; `engine-api.md` §2.1): the engine passes the fold one fixed time as the `obs` of every admitted version and as `now`, instead of the stored first-seen times and the clock. The stored values are not changed.
@@ -917,7 +918,7 @@ Events MAY also drive counts and placeholders ("3 new comments"), which never mo
 
 With an active indexer that advertises `getChanges` (assisted mode):
 - poll `getChanges(forum = F, since = cursor)` every 10 s while a view of F is open (its model is loaded) and every 60 s otherwise (*tunable*), per followed forum the indexer serves; `live_tail` runs these polls, and a `sync_forum` polls once before its PDS sync. A successful poll makes the change feed a healthy live source (§6.2). `live_tail` polls after its round's queue work and one forum per round, the most overdue first, so a slow indexer delays neither the dirty queue nor the next Jetstream read by more than one poll. A view opened since a forum's last poll makes its next poll due 10 s after that poll;
-- each `#change` is handled like a Jetstream commit for that uri (§6.4), deduplicated with the same LRU: a commit that Jetstream already delivered (applied, or still unacknowledged) is skipped, and a queued `#change` makes the same commit on Jetstream a duplicate. The poll of a `sync_forum`, which a PDS sync follows, does not use the LRU;
+- each `#change` is handled like a Jetstream commit for that uri (§6.4): its first-seen time is the local time its page was received (§5.6.5); it is deduplicated with the same LRU: a commit that Jetstream already delivered (applied, or still unacknowledged) is skipped, and a queued `#change` makes the same commit on Jetstream a duplicate. The poll of a `sync_forum`, which a PDS sync follows, does not use the LRU;
 - the cursor (`cur/indexer:<did>:<fk>`) is the returned `cursor`. Without one, the first poll starts at the indexer's current `asOf.seq` (from `describeIndexer`), not at 0: the PDS sync covers what came before, and the log is not replayed as point fetches;
 - `CursorTooOld`: run a full reconcile of F (§6.8) and restart from the `asOf.seq` of that response.
 
