@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use lessdugin_atp::syntax::{Datetime, Tid};
 use lessdugin_core::discovery::state::{DiscState, disc_rows};
 use lessdugin_core::discovery::{ForumKey, SyncOpts};
-use lessdugin_core::dto::{ListPostsQuery, PostSort};
+use lessdugin_core::dto::{ListPostsQuery, PostFilter, PostSort};
 use lessdugin_core::engine::{Engine, Platform};
 use lessdugin_core::host::{Host, KvOp, KvStore};
 use lessdugin_core::live::SourceStatus;
@@ -193,42 +193,74 @@ async fn open_mode_scenario(wire: Wire) {
     let late_post = put_post(&late, &forum, "Late joiner", now.clone());
     late.head();
 
-    // P1 live hints intentionally wait for the 2–30 s dirty-queue debounce (sync.md §6.1).
-    let deadline = Instant::now() + Duration::from_secs(40);
-    let (view, late_view) = loop {
-        match (
-            engine.get_post(&post_uri).await,
-            engine.get_post(&late_post).await,
-        ) {
-            (Ok(view), Ok(late_view)) => break (view, late_view),
-            (a, b) if Instant::now() >= deadline => {
-                panic!("live posts were not fetched from the PDS: {:?} / {:?}", a.err(), b.err())
-            }
-            _ => tokio::time::sleep(Duration::from_millis(25)).await,
+    // Only the cache is read until then: get_post would fetch a missing post itself (and
+    // resolve its author, who would then be KNOWN before the Jetstream frame is handled). P1
+    // live hints intentionally wait for the 2–30 s dirty-queue debounce (sync.md §6.1).
+    let listed = |engine: &Engine<NativeHost<MemKv>>| {
+        let engine = engine.clone();
+        let forum = forum.uri.to_string();
+        async move {
+            engine
+                .list_posts(&ListPostsQuery {
+                    sort: PostSort::New,
+                    // newcomers' posts are not on the frontpage (social.md V8)
+                    filter: PostFilter::All,
+                    ..ListPostsQuery::new(&forum)
+                })
+                .await
+                .unwrap()
+                .items
+                .into_iter()
+                .map(|p| p.uri)
+                .collect::<Vec<_>>()
         }
     };
+    let deadline = Instant::now() + Duration::from_secs(40);
+    loop {
+        let uris = listed(&engine).await;
+        let late_row = disc_rows(host.cache(), &forum.fk)
+            .await
+            .unwrap()
+            .remove(late.did().as_str());
+        if uris.contains(&post_uri)
+            && uris.contains(&late_post)
+            && late_row.is_some_and(|r| r.state == DiscState::Confirmed)
+        {
+            break;
+        }
+        if Instant::now() >= deadline {
+            let store = lessdugin_core::store::records::RecordStore::new(host.cache());
+            let cached = store
+                .get(&lessdugin_atp::syntax::AtUri::parse(&post_uri).unwrap())
+                .await
+                .unwrap()
+                .is_some();
+            let rows = disc_rows(host.cache(), &forum.fk).await.unwrap();
+            panic!(
+                "live updates did not arrive: listed {uris:?}; post cached {cached}; late row {:?}; queue {:?}; jetstream sent {:?}",
+                rows.get(late.did().as_str()),
+                engine.syncer().queue_snapshot(),
+                server.requests().iter().map(|r| r.sent.len()).collect::<Vec<_>>()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let view = engine.get_post(&post_uri).await.unwrap();
     assert_eq!(view.post.title.as_deref(), Some("Live newcomer"));
     assert_eq!(view.post.author.did, newcomer.did().as_str());
+    let late_view = engine.get_post(&late_post).await.unwrap();
     assert_eq!(late_view.post.title.as_deref(), Some("Late joiner"));
     let late_row = disc_rows(host.cache(), &forum.fk)
         .await
         .unwrap()
         .remove(late.did().as_str())
         .expect("the late newcomer has no discovery row");
-    assert_eq!(late_row.state, DiscState::Confirmed);
     assert!(
         late_row.src.iter().any(|s| s == "hint:jetstream"),
         "the late newcomer was not found through Jetstream: {:?}",
         late_row.src
     );
-    let listed = engine
-        .list_posts(&ListPostsQuery {
-            sort: PostSort::New,
-            ..ListPostsQuery::new(forum.uri.as_str())
-        })
-        .await
-        .unwrap();
-    assert!(!listed.items.iter().any(|p| p.uri == stranger_post));
+    assert!(!listed(&engine).await.contains(&stranger_post));
     engine.live_stop();
     tokio::time::timeout(Duration::from_secs(5), tail)
         .await
