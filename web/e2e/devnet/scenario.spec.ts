@@ -70,6 +70,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
+import { createServer as createHttpServer, request as httpRequest } from "node:http";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -351,6 +352,46 @@ class Indexer {
 
   stop(): Promise<void> {
     return stop(this.child);
+  }
+}
+
+/** A loopback proxy in front of `target` (the indexer) that records the path of every request,
+ * so the scenario can tell which indexer methods one native reader used. */
+class RecordingProxy {
+  readonly paths: string[] = [];
+  private constructor(
+    readonly url: string,
+    private readonly server: ReturnType<typeof createHttpServer>,
+  ) {}
+
+  static async start(target: string): Promise<RecordingProxy> {
+    let proxy: RecordingProxy | null = null;
+    const server = createHttpServer((req, res) => {
+      const url = new URL(req.url ?? "/", target);
+      proxy?.paths.push(url.pathname);
+      const upstream = httpRequest(
+        url,
+        { method: req.method, headers: { ...req.headers, host: url.host } },
+        (r) => {
+          res.writeHead(r.statusCode ?? 502, r.headers);
+          r.pipe(res);
+        },
+      );
+      upstream.on("error", () => {
+        res.writeHead(502);
+        res.end();
+      });
+      req.pipe(upstream);
+    });
+    await new Promise<void>((ok) => server.listen(0, "127.0.0.1", ok));
+    const address = server.address();
+    const port = typeof address === "object" && address ? address.port : 0;
+    proxy = new RecordingProxy(`http://127.0.0.1:${port}`, server);
+    return proxy;
+  }
+
+  close(): Promise<void> {
+    return new Promise((ok) => this.server.close(() => ok()));
   }
 }
 
@@ -1195,10 +1236,18 @@ async function runScenario(
       spa: { thread: "", list: "" } as Outputs,
       requests: {} as Record<string, number>,
       spaPaths: [] as string[],
+      cliPaths: [] as string[],
+      tuiPaths: [] as string[],
     };
     const runIndexer = indexer as Indexer | null;
     if (runIndexer) {
       const idxUrl = runIndexer.url;
+      // the native readers reach the indexer through a recording proxy each, so the methods
+      // each one used are known (the SPA's requests are seen by the page)
+      const cliProxy = await RecordingProxy.start(idxUrl);
+      const tuiProxy = await RecordingProxy.start(idxUrl);
+      idx.cliPaths = cliProxy.paths;
+      idx.tuiPaths = tuiProxy.paths;
       await step("indexer: converged on the devnet heads", async () => {
         const required = [s.devnet.accounts.alice.did, s.devnet.accounts.bob.did];
         if (approval) required.push(s.devnet.accounts.carol.did);
@@ -1210,8 +1259,8 @@ async function runScenario(
         await body();
         idx.requests[client] = (await runIndexer.requests()) - before - 1;
       };
-      const idxCli = user("idx-cli", idxUrl);
-      const idxTui = user("idx-tui", idxUrl);
+      const idxCli = user("idx-cli", cliProxy.url);
+      const idxTui = user("idx-tui", tuiProxy.url);
       await step("read with the indexer: CLI", () =>
         counted("cli", async () => {
           idx.cli.list = await idxCli.cli("ls", ["--json", "ls", forum]);
@@ -1254,6 +1303,8 @@ async function runScenario(
           await ictx.close();
         }),
       );
+      await cliProxy.close();
+      await tuiProxy.close();
     }
 
     for (const [name, text] of [
@@ -1344,7 +1395,7 @@ async function runScenario(
     );
     writeFileSync(
       join(out, "result.json"),
-      `${JSON.stringify({ parityNowMs: t, mode, sources, forum, wiki, tag: TAG_SLUG, post, reply, newcomer, newcomerComment, mediaCid, socialVote, cachedRender, corePlus, indexer: runIndexer ? { url: runIndexer.url, requests: idx.requests, spaPaths: idx.spaPaths } : null, identical: problems.length === 0, problems }, null, 2)}\n`,
+      `${JSON.stringify({ parityNowMs: t, mode, sources, forum, wiki, tag: TAG_SLUG, post, reply, newcomer, newcomerComment, mediaCid, socialVote, cachedRender, corePlus, indexer: runIndexer ? { url: runIndexer.url, requests: idx.requests, cliPaths: idx.cliPaths, tuiPaths: idx.tuiPaths, spaPaths: idx.spaPaths } : null, identical: problems.length === 0, problems }, null, 2)}\n`,
     );
     expect(problems, `the clients disagree; diffs in ${out}`).toEqual([]);
 
@@ -1386,17 +1437,22 @@ async function runScenario(
       for (const did of NOISE_DIDS) expect(text).not.toContain(did);
     }
     if (runIndexer) {
-      // the indexer path was taken: every indexer-on reader asked the indexer, and the SPA's
-      // cold page was hydrated from its ordering and a proof bundle
+      // the indexer path was taken: every indexer-on reader asked the indexer; the TUI's and
+      // the SPA's cold forum page was hydrated from its ordering and a proof bundle
+      // (hydrate_indexer_page, list_posts_page), and the forum syncs of the CLI and the SPA
+      // polled its change feed (poll_indexer_changes) instead of starting from a full sync
       for (const client of ["cli", "tui", "spa"]) {
         expect(idx.requests[client], `${client}: requests to the indexer`).toBeGreaterThan(0);
       }
-      expect(idx.spaPaths, "the SPA's cold page hydration").toEqual(
-        expect.arrayContaining([
-          `/xrpc/${NS}.index.listPosts`,
-          `/xrpc/${NS}.index.getRecordProofs`,
-        ]),
+      const hydration = [`/xrpc/${NS}.index.listPosts`, `/xrpc/${NS}.index.getRecordProofs`];
+      const changes = `/xrpc/${NS}.index.getChanges`;
+      expect(idx.tuiPaths, "the TUI's cold page hydration").toEqual(
+        expect.arrayContaining(hydration),
       );
+      expect(idx.spaPaths, "the SPA's cold page hydration and change feed").toEqual(
+        expect.arrayContaining([...hydration, changes]),
+      );
+      expect(idx.cliPaths, "the CLI's change feed").toContain(changes);
       // and their proof bundles admitted records at level proven (the badge U-D2 lets differ)
       for (const [client, text] of [
         ["TUI", idx.tui.list.compact],
