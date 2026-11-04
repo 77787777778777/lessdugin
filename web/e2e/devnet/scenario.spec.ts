@@ -1656,14 +1656,14 @@ async function runScenario(
       expect(body.html, `${client}: the image in the body`).toContain(`data-cid="${mediaCid}"`);
     }
     // steps 4 and 5 (the social subset, M3): the counted opinions and the pin. In approval mode
-    // carol's pre-edit vote is the one weighted, earlier-version vote, with her agreement. In open
-    // mode alice's seed upvote is weighted, while carol's newcomer vote carries no weight; it is
-    // absent from the direct readers' input (reposTotal 2 below) and, found through CORE+, an
-    // unweighted vote in the assisted readers' (sync.md §4.3: "K, scores and the visibility of
-    // other users are the same with or without CORE+ discovery. `unweighted` counts and the
-    // collapsed content of newcomers do differ"). Alice's later tag action updates that same
-    // opinion to the edited post's current CID, so her open-mode vote no longer counts as cast on
-    // an earlier version.
+    // carol's vote is the one weighted vote, with her agreement. In open mode alice's seed upvote
+    // is weighted, while carol's newcomer vote carries no weight; it is absent from the direct
+    // readers' input (reposTotal 2 below) and, found through CORE+, an unweighted vote in the
+    // assisted readers' (sync.md §4.3: "K, scores and the visibility of other users are the same
+    // with or without CORE+ discovery. `unweighted` counts and the collapsed content of newcomers
+    // do differ"). No vote counts as cast on an earlier version: every update of an opinion sets
+    // its subject.cid to the subject's current CID (data-model.md §8.5), and both voters updated
+    // theirs after bob's edit, alice with her tag action (6c) and carol with her tag vote (7).
     const introduced = !approval && sources === "assisted";
     const score = thread.post.post.score as {
       score: number;
@@ -1676,7 +1676,7 @@ async function runScenario(
     expect(score.score, `the counted upvote: ${shown}`).toBeGreaterThan(0);
     expect([score.weightedVotes, score.earlierVersionVotes, score.unweighted], shown).toEqual([
       1,
-      approval ? 1 : 0,
+      0,
       introduced ? 1 : 0,
     ]);
     expect(score.agreement, `carol's agreement counts only when she is established: ${shown}`).toBe(
