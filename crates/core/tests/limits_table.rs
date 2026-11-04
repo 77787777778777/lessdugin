@@ -92,6 +92,7 @@ fn constants() -> BTreeMap<&'static str, i128> {
         FOLLOW_SEED_PAGES,
         FORUM_REOPEN_MS,
         FORUM_OPEN_SYNC_BUDGET_MS,
+        COLD_PAGE_HOLD_MS,
         FORUM_DECL_CACHED_BUDGET_MS,
         FORUM_DECL_FIRST_BUDGET_MS,
         LIVE_TAIL_IDLE_MS,

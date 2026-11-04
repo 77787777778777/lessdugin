@@ -407,6 +407,7 @@ Blobs are uploaded in the `sending` step of the `PendingWrite` that references t
 | `FOLLOW_SEED_PAGES` | 10 | O | `listRecords` pages of own `membership` records read when seeding the followed list | `sync.md` §4.8 |
 | `FORUM_REOPEN_MS` | 300,000 (5 min) | O | `forum_open` within this time of the last open reuses its result (no declaration refetch) | `engine-api.md` §3.2 |
 | `FORUM_OPEN_SYNC_BUDGET_MS` | 10,000 (10 s) | O | time budget of the P0 sync `forum_open` runs for authorities with no synced range | `engine-api.md` §3.2 |
+| `COLD_PAGE_HOLD_MS` | 3,000 (3 s) | O | longest a forum sync's participant sweep waits for a first post page being read to be listed | `sync.md` §14.3 |
 | `LIVE_TAIL_IDLE_MS` | 60,000 (1 min) | O | longest sleep of `live_tail` between rounds | `engine-api.md` §3.3 |
 | `LIVE_TAIL_BATCH` | 16 | O | dirty-queue items served per `live_tail` round | `sync.md` §6.1 |
 | `HANDLE_VERIFY_BATCH` | 32 | O | author handles verified per `live_tail` round | `sync.md` §3.3 |
