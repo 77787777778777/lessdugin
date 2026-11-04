@@ -219,7 +219,7 @@ A milestone is done when all of the following hold:
 - axe scores **100** on all 16 scanned routes, in light and dark mode, with no violation (`web/e2e/a11y.spec.ts`; the criterion is ≥ 90).
 - The full parity scenario (§4.2, steps 1–7, including carol's TUI tag vote) is byte-identical across CLI `--json`, the SPA and the TUI. It passes in approval and open mode with `sources` direct and assisted, and in the assisted variants the indexer-on views match the indexer-off views apart from provenance badges (U-D2).
 
-`CI=1 cargo xtask ci` and `cargo xtask e2e` (the Rust devnet tests and 8 Chromium devnet tests) pass at a9dd934. The [user] criteria are **pending user run** (§8): login on bsky.social through CLI loopback, CLI hosted-native, the hosted SPA and `lessdugin web` (S1, S2), and S11 on Safari and iOS.
+`CI=1 cargo xtask ci` and `cargo xtask e2e` (the Rust devnet tests and 8 Chromium devnet tests) pass at a9dd934, and GitHub CI passes at the merge 34f52d8 (run 41762728389). The [user] criteria are **pending user run** (§8): login on bsky.social through CLI loopback, CLI hosted-native, the hosted SPA and `lessdugin web` (S1, S2), and S11 on Safari and iOS.
 
 **Scope**
 - **Tags:** relevance; the wiki with **linear history** (the page head is the latest revision by an eligible author, or the moderator's `#tag.head`; a deleted parent makes its child a flagged root); the moderator tag actions `#tag{removed, head}`. Forks, merges and `aliasOf` are Reserved (P2); the `parents[]` schema stays.
@@ -256,7 +256,7 @@ A milestone is done when all of the following hold:
 - **`--audit`** flags an injected omission and a forged proof (`audit_reports_omissions_and_forged_proofs` in `crates/core/tests/indexer_client.rs`, `proof_omission_and_forgery_are_detectable` in the indexer service tests).
 - **Image:** `crates/indexer/Dockerfile` builds with podman at a9dd934: a 45 MB distroless image that runs as user 65532, and its binary starts in it. GHCR publication (`.github/workflows/indexer.yml`) has not been run.
 - **wasm module:** the release build is 8,333,791 B raw and 3,034,057 B gzipped. It is built for speed (ADR 0010), and the size is reported, not targeted.
-- **Local gate:** `CI=1 cargo xtask ci`, `cargo xtask e2e` and the cold start pass at a9dd934. GitHub CI is recorded after the push.
+- **Gate:** `CI=1 cargo xtask ci`, `cargo xtask e2e` and the cold start pass locally at a9dd934. GitHub passes at the merge 34f52d8: `ci.yml` run 41762728389 (all five jobs) and the `indexer` workflow run 41762728448, which builds and smoke-tests the image.
 
 Known residuals, which do not block M6:
 - The §14 sequence library has no independent oracle. The reference model's `sequences.py` is a stub and the social vectors carry no library projection, so only Rust tests check it.
