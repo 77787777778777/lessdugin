@@ -213,6 +213,14 @@ A milestone is done when all of the following hold:
 
 ### M5 — Organisation and discovery
 
+**Status:** done (2026-11-04). Every [auto] criterion passes on the integrated tree:
+- The open-mode scenario runs over the mini-Jetstream on both wires and over the fake Constellation, whose short pages still carry a cursor. Identity and account events of unrelated DIDs cause no PLC or PDS request (`crates/native/tests/assisted.rs`, `open_mode_discovers_and_applies_live_updates_over_v1` and `…_over_v2`).
+- A cached forum renders in **495, 451, 473 and 466 ms** in the four parity variants, with every repository and CORE+ request refused during the reload (`web/e2e/devnet/scenario.spec.ts`, each variant's `cached-render.json`).
+- axe scores **100** on all 16 scanned routes, in light and dark mode, with no violation (`web/e2e/a11y.spec.ts`; the criterion is ≥ 90).
+- The full parity scenario (§4.2, steps 1–7, including carol's TUI tag vote) is byte-identical across CLI `--json`, the SPA and the TUI. It passes in approval and open mode with `sources` direct and assisted, and in the assisted variants the indexer-on views match the indexer-off views apart from provenance badges (U-D2).
+
+`CI=1 cargo xtask ci` and `cargo xtask e2e` (the Rust devnet tests and 8 Chromium devnet tests) pass at a9dd934. The [user] criteria are **pending user run** (§8): login on bsky.social through CLI loopback, CLI hosted-native, the hosted SPA and `lessdugin web` (S1, S2), and S11 on Safari and iOS.
+
 **Scope**
 - **Tags:** relevance; the wiki with **linear history** (the page head is the latest revision by an eligible author, or the moderator's `#tag.head`; a deleted parent makes its child a flagged root); the moderator tag actions `#tag{removed, head}`. Forks, merges and `aliasOf` are Reserved (P2); the `parents[]` schema stays.
 - **Sequences:** library listing, next and previous, "continue reading" (local).
@@ -235,37 +243,26 @@ A milestone is done when all of the following hold:
 
 ### M6 — Optional indexer
 
-**Status:** implementation and automatic acceptance verification, 2026-11-01; M7 not started.
-The signed loopback cold-start fixture (`scripts/m6-cold-start.sh`, invoked by
-`pnpm --filter @lessdugin/web run e2e:cold-start`) contains 2,000 distinct signed participant DIDs,
-1,999 approval grants, and a signed post. Three fresh Chromium contexts painted its verified title
-in **1.606 s, 1.449 s and 1.432 s** on the final integrated tree, with real proof CARs, PDS head
-checks, no post point fetch and no browser/CSP errors. Pre-indexing all 2,000 repos took
-**453.834 s** and is deliberately outside the browser measurement. Evidence:
-`/home/wrath/.cache/lessdugin-orchestrator/state/m6-cold-start-results-final.json`. On NixOS, run
-it through `nix develop .#ci -c pnpm --filter @lessdugin/web run e2e:cold-start` so the pinned
-browser environment is available. The native service tests cover convergence, restart,
-proof omission/forgery, membership-hint backfill paging, and live proof failure replay. A failed
-proof-service request now falls back to each author's PDS. An old bad signature is stale-proof
-only below a fresh PDS head: it fetches a new author-PDS proof and does not strike the indexer.
-A cold assisted page with failed or unavailable hydration falls back to a bounded ordinary PDS
-sync; cursor pages and already-discovered forums remain local reads. The
-distroless image builds locally with a non-root user and the configured source URL. GHCR workflow
-dispatch has not been run. The [target] 1M-record 200 r/s benchmark remains **unmeasured**; it is
-not claimed as passed. Full workspace CI exposed two pre-M5 CLI tag-fixture failures
-(`a_forum_from_creation_to_deletion`, `tags_links_stdin_follows_and_accounts`). Their fixtures
-now create real tag pages before publishing, then assert applied tags and filtering, retaining
-the normative rule that unknown tags never apply (social.md §13.3). All 13 CLI content tests pass.
-The independent review's live-replay and relay-candidate findings were corrected: actionable frames
-are retried until their effects are acknowledged before cursor advancement, candidate confirmation
-uses the core's discovery state, unchanged rejected hints become eligible after the 24-hour
-back-off, and persisted signed-membership recency drives the newcomer budget. Native and wasm
-social parity agrees in both namespaces; their M3 golden digests were re-recorded after the
-reviewed M4/M5 fold changes. Two deep forum-open/per-repository async chains are boxed to avoid
-small native test-stack overflows, with the original TUI e2e and dispatcher repros passing.
-GitHub Actions runs for the final integration commit are not yet verified; local acceptance logs
-live in `/home/wrath/.cache/lessdugin-orchestrator`. M5's production login and Safari/iOS checks
-remain **pending user run** (§8). M7 has not started.
+**Status:** done (2026-11-04) for every [auto] criterion. The [target] benchmark (`listPosts` p95 under 50 ms at 200 requests/s on 1M records) is **unmeasured** and not claimed. M7 has not started; it needs the user.
+- **Convergence and restart:** `crates/indexer/tests/service.rs` (`durable_poll_converges_within_five_seconds`, `a_live_restart_resumes_from_the_persisted_cursor`, `native_devnet_all_first_pass_methods_and_restart`).
+- **Identical views with and without the indexer:** the parity scenario's assisted variants read every client again with `lessdugin-indexer --poll` serving the forum. Those views match the indexer-off views apart from provenance badges (U-D2).
+- **Cold paint:** `cargo xtask e2e --cold-start` (`scripts/m6-cold-start.sh`) builds an approval forum with 2,000 signed participants on 40 PDSes, each with a validated membership, and 31 posts. Its first page holds 20 posts by 20 different authors. Three fresh Chromium contexts painted all 20 titles in **1,592, 1,460 and 1,443 ms** (a9dd934, 2026-11-04). Each run used real proof CARs, one PDS head check per author on screen, no post point fetch, and had no CSP or console problem (evidence: `state/m6-cold-start-results-a9dd934.json` in the orchestrator cache).
+  - Pre-indexing (415 s) is outside the measurement.
+  - The fixture requests the proofs of all 31 posts through the indexer before the browser starts, as a serving indexer holds them after the first request. The browser contexts start empty.
+  - Three changes made the budget hold:
+    - PLC pacing now reads "per second" as a sliding window, so the about 20 documents of the authors on screen go out together at P0 (O-16, §3.5). Background requests keep the even spacing, so a P0 request behind a running sweep waits at most one spacing.
+    - An indexer query no longer refolds a forum whose cached model has passed its age. The model is served while a background fold refreshes it (`sync.md` §15.3). Before the fix, the first query took 7.9 s under load.
+    - A forum sync that the client starts while a first post page is being read waits for that page, for at most 3 s (§14.3 step 4). Background syncs are not held. Before the fix the runs took 1.96 and 2.50 s.
+- **`--audit`** flags an injected omission and a forged proof (`audit_reports_omissions_and_forged_proofs` in `crates/core/tests/indexer_client.rs`, `proof_omission_and_forgery_are_detectable` in the indexer service tests).
+- **Image:** `crates/indexer/Dockerfile` builds with podman at a9dd934: a 45 MB distroless image that runs as user 65532, and its binary starts in it. GHCR publication (`.github/workflows/indexer.yml`) has not been run.
+- **wasm module:** the release build is 8,333,791 B raw and 3,034,057 B gzipped. It is built for speed (ADR 0010), and the size is reported, not targeted.
+- **Local gate:** `CI=1 cargo xtask ci`, `cargo xtask e2e` and the cold start pass at a9dd934. GitHub CI is recorded after the push.
+
+Known residuals, which do not block M6:
+- The §14 sequence library has no independent oracle. The reference model's `sequences.py` is a stub and the social vectors carry no library projection, so only Rust tests check it.
+- A missing blob is recognised by its XRPC error name (`sync.md` §11.1, decision O-15). Two names count: `BlobNotFound`, and `InvalidRequest`, which the reference PDS answers with "Blob not found". Since `InvalidRequest` is generic, a `getBlob` refused as invalid for another reason also reads as a missing blob.
+- The per-DID write lock is in-process (`sync.md` §10.6). Engines in different processes that share one store (CLI and TUI, or two browser tabs) are ordered only by the repo lock. That lock serializes whole passes, but not lockless admissions.
+- One indexer service test, `live_proof_batches_replay_failures_without_losing_frames`, fails about one run in ten, at the same rate before and after the 2026-11-04 cold-path changes (2 of 20 runs before them). In failing runs the client's point fallback, taken when the proof request has used up its retries, succeeds. The frame is then acknowledged with the post at PDS level, so the test's "newest proof becomes current" and "no post point fetch" assertions fail. No frame is lost. The race is not yet root-caused.
 
 **Scope**
 - **Ingest:** the Jetstream wildcard from two endpoints, with a 10 s cursor rewind; a backfill every 6 h (relay `listReposByCollection` per NSID, then range listing); a daily reconcile; `--poll <pds>` mode for the devnet and air-gapped setups; per-host politeness; a `sync.getRecord` proof per live event, and lazily for backfilled records.
