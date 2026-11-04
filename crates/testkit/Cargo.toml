@@ -12,6 +12,16 @@ publish = false
 # Serve a FakeNet over real HTTP on 127.0.0.1 (CLI tests): axum on an owned Tokio runtime.
 http = ["dep:axum", "dep:tokio", "dep:tokio-tungstenite"]
 
+# The node devnet's CORE+ services for the Playwright parity scenario (devnet_services.rs).
+[[example]]
+name = "devnet_services"
+required-features = ["http"]
+
+# Its CORE+ services against the node devnet (LESSDUGIN_E2E=1; `cargo xtask e2e --rust`).
+[[test]]
+name = "e2e_devnet_services"
+required-features = ["http"]
+
 [dependencies]
 lessdugin-atp.workspace = true
 lessdugin-lexicon.workspace = true

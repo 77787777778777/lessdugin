@@ -1,0 +1,36 @@
+---
+source: crates/tui/tests/organisation.rs
+expression: t.render()
+---
+ lessdugin › Meta                                                                @carol.example.com
+  posts  activity  sort:  magic   filter:  frontpage   synced 08:58 UTC
+▌ Hello from bob
+▌ @bob.example.com · 2025-10-09 08:56 UTC · 0 comments · 1 point
+  Welcome
+  @alice.example.com · 2025-10-09 08:54 UTC · 1 comment · 1 point
+
+
+
+
+            ┌ Local search ────────────────────────────────────────────────────────────┐
+            │1. post  Hello from bob                                                   │
+            │Hello from bob My first post.                                             │
+            │at://did:plc:ochphg43iudrrgiqczqt6zeb/online.7778777.lessdugin.temp.post/w│
+            │5cs3cry7ban-3m2qrwsmq4lqi                                                 │
+            │▌ 2. post  Welcome                                                        │
+            │Welcome Hello everyone, and welcome to the forum. Rules Be kind. Stay on t│
+            │opic; see the guide. lessdugin tui                                        │
+            │at://did:plc:whanakmuiogult5m5wu7xbj4/online.7778777.lessdugin.temp.post/w│
+            │5cs3cry7ban-3m2qrta53s3hj                                                 │
+            └ result 2/2 · n/N next/previous · Enter opens · Esc closes ───────────────┘
+
+
+
+
+
+
+
+
+
+
+ Enter open · s sort · f filter · P post · R sync · ? help · h back

@@ -9,6 +9,12 @@
 //! `--json` prints the engine's DTO exactly (`PostList`, `ThreadView`, `PostView`, `RawView`,
 //! `HistoryView`). The listing numbers (`3`) and comment labels (`c12`) are saved for this
 //! terminal even with `--json`.
+//!
+//! A view waits `BODY_BLOB_WAIT_MS` for a spilled body and returns it pending; its download runs
+//! on, but only while the process does, and `read` is one view per process. So `read` waits for
+//! the host downloads of the bodies its view left pending (each capped by
+//! `BLOB_TOTAL_TIMEOUT_MS`) and reads the thread again, or says which body is still not loaded
+//! (`limits.md` `BODY_BLOB_WAIT_MS`, `lfm-1.md` §1.3).
 
 use std::collections::BTreeMap;
 
@@ -179,6 +185,7 @@ pub async fn ls(ctx: &Ctx, args: LsArgs) -> Result<(), CliError> {
     let saved = ctx.state.update_listings(|l| {
         l.posts_forum = Some(list.forum.clone());
         l.posts = list.items.iter().map(|p| p.uri.clone()).collect();
+        l.posts_sequence = None;
     });
     if let Err(e) = saved {
         ctx.out.warn(cat([
@@ -315,6 +322,7 @@ pub async fn linked(ctx: &Ctx, args: RefArgs) -> Result<(), CliError> {
     let saved = ctx.state.update_listings(|l| {
         l.posts_forum = None;
         l.posts = posts.iter().map(|p| p.uri.clone()).collect();
+        l.posts_sequence = None;
     });
     if let Err(e) = saved {
         ctx.out.warn(cat([
@@ -331,8 +339,16 @@ pub async fn linked(ctx: &Ctx, args: RefArgs) -> Result<(), CliError> {
 }
 
 /// `lessdugin read <ref>`.
+///
+/// A post read from a sequence (`--sequence`, a number of `sequence read`, `next`, `prev`) is
+/// read in it (`get_post(uri, sequence)`, `social.md` §14): the thread's post carries that
+/// sequence's navigation, and the post becomes its continue-reading position on this device.
 pub async fn read(ctx: &Ctx, args: ReadArgs) -> Result<(), CliError> {
     let engine = ctx.reader().await?;
+    let sequence = args
+        .sequence
+        .clone()
+        .or_else(|| refs::sequence_of(ctx, &args.reference));
     let (uri, is_comment) = refs::post_or_comment(ctx, &engine, &args.reference).await?;
     if args.raw {
         sync_thread_quietly(ctx, &engine, &uri).await;
@@ -366,13 +382,38 @@ pub async fn read(ctx: &Ctx, args: ReadArgs) -> Result<(), CliError> {
     if unverified(ctx, actors(&thread).iter()) && verify_handles(&engine).await {
         thread = engine.get_thread(&uri, &opts).await?;
     }
+    if await_spilled(ctx, &engine, "body", &pending_bodies(&thread)).await {
+        thread = engine.get_thread(&uri, &opts).await?;
+    }
+    for (item, _) in pending_bodies(&thread) {
+        ctx.out.warn(cat([
+            lit("the body of "),
+            tt(&item),
+            lit(
+                " is still not loaded from its author's PDS (the excerpt shows); read it again \
+                 later",
+            ),
+        ]));
+    }
+    // next and previous follow the sequence the post was read from
+    if let (Some(sequence), ThreadRoot::Post(p)) = (&sequence, &mut thread.post) {
+        p.sequences = engine
+            .get_post_in(&p.post.uri, Some(sequence))
+            .await?
+            .sequences;
+    }
     let root = match &thread.post {
         ThreadRoot::Post(p) => p.post.uri.clone(),
         ThreadRoot::Missing { missing } => missing.clone(),
     };
+    let nav = match &thread.post {
+        ThreadRoot::Post(p) => p.sequences.first().cloned(),
+        ThreadRoot::Missing { .. } => None,
+    };
     let saved = ctx.state.update_listings(|l| {
         l.thread = Some(root.clone());
         l.comments = thread.comments.iter().map(|c| c.uri.clone()).collect();
+        l.sequence_nav = nav;
     });
     if let Err(e) = saved {
         ctx.out.warn(cat([
@@ -410,6 +451,90 @@ pub async fn read(ctx: &Ctx, args: ReadArgs) -> Result<(), CliError> {
     let text = thread_text(ctx, &engine, &thread, target, !args.no_comments).await;
     ctx.out.page(&text, !args.no_pager);
     Ok(())
+}
+
+/// Whether a view left this spilled body pending (`lfm-1.md` §1.3: it carries
+/// `NOTICE_SPILLED`).
+pub(crate) fn spilled_pending(body: &lessdugin_core::dto::RenderedBody) -> bool {
+    use lessdugin_core::model::render::NOTICE_SPILLED;
+    body.notices.iter().any(|n| n == NOTICE_SPILLED)
+}
+
+/// The items of `thread` whose spilled body its view left pending, with their authors.
+fn pending_bodies(thread: &ThreadView) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    if let ThreadRoot::Post(p) = &thread.post
+        && spilled_pending(&p.body)
+    {
+        out.push((p.post.uri.clone(), p.post.author.did.clone()));
+    }
+    for c in &thread.comments {
+        if spilled_pending(&c.body) {
+            out.push((c.uri.clone(), c.author.did.clone()));
+        }
+    }
+    out
+}
+
+/// Awaits the host download of every spilled body in `pending` (the item, its author), the
+/// `field` of the item's cached record: the one its view started (the host runs one per CID,
+/// so this joins it, `sync.md` §12.2), else a new one, each capped by `BLOB_TOTAL_TIMEOUT_MS`.
+/// The blob comes from the author's PDS as their DID document names it, as the engine's own
+/// fetch does (`sync.md` §11.1). Returns true when one was stored, so the caller views again;
+/// nothing is waited for `--offline`. `read`, `forum show` (a spilled `about`), `tag <slug>` (its
+/// page) and `sequence read` use it.
+pub(crate) async fn await_spilled(
+    ctx: &Ctx,
+    engine: &Engine<NativeHost>,
+    field: &str,
+    pending: &[(String, String)],
+) -> bool {
+    use lessdugin_core::host::Host;
+    use lessdugin_core::identity::IdentityLevel;
+    if pending.is_empty() || ctx.offline() {
+        return false;
+    }
+    ctx.out.note(&[(
+        cat([
+            lit("Waiting for "),
+            render::count(
+                u32::try_from(pending.len()).unwrap_or(u32::MAX),
+                "body",
+                "bodies",
+            ),
+            lit(" still downloading from the author's PDS (Ctrl-C stops)..."),
+        ]),
+        Style::Dim,
+    )]);
+    let fetches = pending.iter().map(|(item, author)| async move {
+        let (_, record) = crate::cmd::write::cached(engine, item).await.ok()?;
+        let cid = lessdugin_core::model::render::text_blob_cid(record.get(field)?)?.to_owned();
+        let identity = engine.resolve_identity(author).await.ok()?.identity;
+        if identity.level != IdentityLevel::Doc {
+            return None;
+        }
+        let pds = url::Url::parse(identity.pds.as_deref()?).ok()?;
+        match engine
+            .host()
+            .fetch_blob(
+                pds,
+                identity.did,
+                cid,
+                lessdugin_core::limits::BLOB_TEXT_MAX_BYTES,
+            )
+            .await
+        {
+            Ok(_) => Some(()),
+            Err(e) => {
+                tracing::debug!(uri = %item, error = %e, "a spilled body did not download");
+                None
+            }
+        }
+    });
+    futures::future::join_all(fetches)
+        .await
+        .iter()
+        .any(Option::is_some)
 }
 
 fn line(ctx: &Ctx, spans: &[Span]) -> String {
@@ -493,6 +618,9 @@ async fn post_text(
         meta.push(render::count(p.history.revisions, "revision", "revisions"));
     }
     s.push_str(&line(ctx, &[(joined(meta), Style::Dim)]));
+    if let Some(tags) = render::tag_relevance(&p.tag_relevance) {
+        s.push_str(&line(ctx, &[(tags, Style::Dim)]));
+    }
     if let Some(l) = &p.post.link {
         s.push_str(&line(
             ctx,
@@ -520,6 +648,41 @@ async fn post_text(
         );
     }
     s.push_str(&react_lines(ctx, &p.reacts, 0, handle_of));
+    s.push_str(&sequence_lines(ctx, &p.sequences));
+    s
+}
+
+/// The post's place in a sequence (`social.md` §14): the sequence, and its previous and next
+/// posts, which `read prev` and `read next` read in it.
+fn sequence_lines(ctx: &Ctx, navs: &[lessdugin_core::dto::SequenceNav]) -> String {
+    let mut s = String::new();
+    for nav in navs {
+        s.push('\n');
+        s.push_str(&line(
+            ctx,
+            &[
+                (lit("sequence: "), Style::Dim),
+                (tt(&nav.title), Style::Bold),
+                (lit("  "), Style::Plain),
+                (tt(&nav.sequence), Style::Dim),
+            ],
+        ));
+        for (label, step, word) in [
+            ("  previous: ", &nav.prev, "prev"),
+            ("  next:     ", &nav.next, "next"),
+        ] {
+            if let Some(uri) = step {
+                s.push_str(&line(
+                    ctx,
+                    &[
+                        (lit(label), Style::Dim),
+                        (tt(uri), Style::Plain),
+                        (cat([lit("  (`read "), lit(word), lit("`)")]), Style::Dim),
+                    ],
+                ));
+            }
+        }
+    }
     s
 }
 

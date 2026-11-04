@@ -259,4 +259,5 @@ A claim is valid only while the implementation passes every normative vector of 
 
 **Open questions**
 - Confirm Level 0's treatment of author moderation (not evaluated, disclosed) rather than the alternative of applying author-scope hides without gates.
+- *(Orchestrator decision O-7, for the U7 review.)* The TUI's `n` and `N` step to the next and previous hit only inside the search results; `N` stays Notifications everywhere else, and `/` opens the command line on `search ` (the key map is the TUI's; `synthesis-v1.md` §6.11 is informative).
 - *(Resolved at M4.)* K3 (math normaliser and pre-scan, ADR 0002 against `lfm-1.md` §7 and its vectors): ADR 0002 is folded into `lfm-1.md` §7 and §8.2 unchanged, so no new ADR was needed.

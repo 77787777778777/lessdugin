@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// docs/plan.md M6: a fresh SPA context cold-paints a proof-backed title from a synthetic forum
-// with 2,000 actual signed participant DIDs in under two seconds. No mock engine or PDS shortcut.
+// docs/plan.md M6: a fresh SPA context cold-paints the first page of a synthetic forum with
+// 2,000 actual signed participant DIDs in under two seconds. The page holds posts by distinct
+// participants (crates/indexer/examples/cold_start_devnet.rs seeds the owner's post and one post
+// by each of 30 members), so the paint pays what sync.md §14.3 prices: proofs for the visible
+// posts, and a head check and a DID document for every author on screen. No mock engine or PDS
+// shortcut. `cargo xtask e2e --cold-start` runs it (scripts/m6-cold-start.sh), and e2e.yml
+// nightly.
 
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -9,7 +14,14 @@ import { performance } from "node:perf_hooks";
 import { expect, test } from "@playwright/test";
 import { route, watchStrict } from "../devnet/state.ts";
 
+interface Post {
+  uri: string;
+  title: string;
+  author: string;
+}
+
 interface Fixture {
+  posts: Post[];
   pds: string;
   plc: string;
   indexer: string;
@@ -38,6 +50,11 @@ const app = process.env.LESSDUGIN_COLD_START_APP;
 if (!app) throw new Error("LESSDUGIN_COLD_START_APP is required (global setup did not run)");
 const resultsPath =
   process.env.LESSDUGIN_COLD_START_RESULTS ?? "test-results/m6-cold-start/results.json";
+/** The SPA's forum page size (web/src/pages/forum/ForumPostsPage.tsx, `PAGE`). */
+const FIRST_PAGE = 20;
+// the fixture's posts are newest first (the owner's, then member 1's, member 2's, …)
+const firstPage = fixture.posts.slice(0, FIRST_PAGE);
+const firstPageAuthors = [...new Set(firstPage.map((p) => p.author))];
 
 function xrpc(url: string): string {
   const u = new URL(url);
@@ -50,9 +67,14 @@ function requestSummary(requests: RequestRow[]) {
   return { count: requests.length, byMethod, requests };
 }
 
-test("M6: three fresh Chromium contexts cold-paint the signed post title under 2 s", async ({
+test("M6: three fresh Chromium contexts cold-paint a first page by distinct participants under 2 s", async ({
   browser,
 }) => {
+  // more posts than a page, each by a distinct participant; the page is full
+  expect(fixture.posts.length).toBeGreaterThanOrEqual(26);
+  expect(new Set(fixture.posts.map((p) => p.author)).size).toBe(fixture.posts.length);
+  expect(firstPage[0]?.uri).toBe(fixture.post);
+  expect(firstPageAuthors).toHaveLength(FIRST_PAGE);
   expect(fixture.participants).toBe(2_000);
   expect(fixture.participantDids).toHaveLength(2_000);
   expect(new Set(fixture.participantDids).size).toBe(2_000);
@@ -119,8 +141,15 @@ test("M6: three fresh Chromium contexts cold-paint the signed post title under 2
       started = performance.now();
       await page.goto(url, { waitUntil: "domcontentloaded" });
       await page.getByText(fixture.title, { exact: true }).waitFor({ state: "visible" });
+      // the whole first page, every title painted (checked each frame)
+      await page.waitForFunction(
+        (titles) => titles.every((t) => document.body.innerText.includes(t)),
+        firstPage.map((p) => p.title),
+        { polling: "raf", timeout: 12_000 },
+      );
       result.durationMs = Math.round((performance.now() - started) * 1000) / 1000;
       result.titleVisible = true;
+      result.firstPageVisible = firstPage.length;
       await Promise.all(responseTasks);
 
       const atTitle = [...requests];
@@ -134,15 +163,32 @@ test("M6: three fresh Chromium contexts cold-paint the signed post title under 2
         return (
           decoded.includes("com.atproto.repo.getRecord") &&
           decoded.includes("lessdugin.temp.post") &&
-          decoded.includes(fixture.post.split("/").at(-1) ?? "")
+          firstPage.some((p) => decoded.includes(p.uri.split("/").at(-1) ?? ""))
         );
       });
       const ownerDocuments = atTitle.filter(
         (r) => r.url.startsWith(fixture.plc) && r.url.endsWith(`/${fixture.ownerDid}`),
       );
+      // every author on screen: a fresh head check at their PDS and their DID document
+      const perAuthor = Object.fromEntries(
+        firstPageAuthors.map((did) => [
+          did,
+          {
+            headChecks: atTitle.filter(
+              (r) =>
+                r.url.includes("com.atproto.sync.getLatestCommit") &&
+                decodeURIComponent(r.url).includes(did),
+            ).length,
+            documents: atTitle.filter(
+              (r) => r.url.startsWith(fixture.plc) && r.url.endsWith(`/${did}`),
+            ).length,
+          },
+        ]),
+      );
       result.networkAtTitle = requestSummary(atTitle);
       result.evidenceAtTitle = {
         headChecks,
+        perAuthor,
         ownerDocuments,
         postPointFetches,
         proofResponses,
@@ -152,9 +198,9 @@ test("M6: three fresh Chromium contexts cold-paint the signed post title under 2
       // This query reads the same locally admitted record. It must carry the proof trust badge;
       // indexer JSON itself is checked below to ensure it never supplied the title text.
       const dtoText = await page.evaluate(
-        (forum) =>
-          window.__lessduginE2E?.listPosts({ forum, sort: "new", filter: "all", limit: 20 }),
-        fixture.forum,
+        ([forum, limit]) =>
+          window.__lessduginE2E?.listPosts({ forum, sort: "new", filter: "all", limit }),
+        [fixture.forum, FIRST_PAGE] as const,
       );
       const dto = JSON.parse(dtoText ?? "{}") as {
         items?: { uri?: string; title?: string; badges?: { verified?: boolean } }[];
@@ -165,6 +211,10 @@ test("M6: three fresh Chromium contexts cold-paint the signed post title under 2
 
       expect(headChecks.length, "fresh owner PDS head check").toBeGreaterThan(0);
       expect(ownerDocuments.length, "fresh owner PLC document").toBeGreaterThan(0);
+      for (const [did, seen] of Object.entries(perAuthor)) {
+        expect(seen.headChecks, `a head check for ${did} on screen`).toBeGreaterThan(0);
+        expect(seen.documents, `the DID document of ${did} on screen`).toBeGreaterThan(0);
+      }
       expect(postPointFetches, "proof hydration must not fall back to a post point fetch").toEqual(
         [],
       );
@@ -181,6 +231,10 @@ test("M6: three fresh Chromium contexts cold-paint the signed post title under 2
       }
       expect(item?.title).toBe(fixture.title);
       expect(item?.badges?.verified).toBe(true);
+      // the painted page is the proof-backed first page, in the fixture's order
+      expect(dto.items?.map((p) => [p.uri, p.title, p.badges?.verified])).toEqual(
+        firstPage.map((p) => [p.uri, p.title, true]),
+      );
       expect(result.strictProblems).toEqual([]);
     } catch (error) {
       result.error = String(error);
@@ -207,6 +261,8 @@ test("M6: three fresh Chromium contexts cold-paint the signed post title under 2
     indexer: fixture.indexer,
     participantDids: fixture.participantDids,
     fixture: {
+      posts: fixture.posts.length,
+      firstPageAuthors: firstPageAuthors.length,
       participants: fixture.participants,
       pdsCount: fixture.pdsCount,
       seedMs: fixture.seedMs,

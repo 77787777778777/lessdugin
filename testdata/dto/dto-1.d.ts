@@ -66,6 +66,7 @@ export interface AuditCounts {
     contradictions: number;
     omissions: number;
     lag: number;
+    unchecked?: number;
 }
 
 export interface AuditFinding {
@@ -75,7 +76,7 @@ export interface AuditFinding {
     detail: string;
 }
 
-export type AuditKind = "contradiction" | "omission" | "lag";
+export type AuditKind = "contradiction" | "omission" | "lag" | "unchecked";
 
 export interface AuditReport {
     forum: string;
@@ -196,6 +197,7 @@ export type DtoVersion = number;
 export interface EditOpts {
     history: boolean;
     summary?: string;
+    dropLinkCard?: boolean;
 }
 
 export interface EffectivePolicy {
@@ -433,6 +435,7 @@ export type ModLogStatus = "effective" | "overridden" | "lapsed" | "expired" | "
 export interface ModQueue {
     dto: DtoVersion;
     items: ModQueueItem[];
+    banners?: Banner[];
 }
 
 export interface ModQueueItem {
@@ -552,6 +555,13 @@ export interface PostSummary {
     labels: string[];
 }
 
+export interface PostTag {
+    slug: string;
+    relevance: number;
+    applies: boolean;
+    mine?: KarmaValue;
+}
+
 export interface PostView {
     dto: DtoVersion;
     post: PostSummary;
@@ -559,6 +569,7 @@ export interface PostView {
     reacts: ReactTally[];
     history: HistorySummary;
     sequences: SequenceNav[];
+    tagRelevance?: PostTag[];
 }
 
 export type PublicActionKind = "vote" | "react" | "tagVote" | "join" | "modAction";
@@ -587,6 +598,11 @@ export interface ReactTally {
     creator?: string;
     mine?: Stance;
     uncounted?: boolean;
+}
+
+export interface ReadingPosition {
+    post: string;
+    atMs: number;
 }
 
 export type Ref = { kind: "forum"; uri: string } | { kind: "post"; uri: string } | { kind: "comment"; uri: string } | { kind: "sequence"; uri: string } | { kind: "record"; uri: string } | { kind: "actor"; did: string };
@@ -678,6 +694,7 @@ export interface SequenceView {
     sequence: SequenceSummary;
     body?: RenderedBody;
     chapters: ChapterView[];
+    continueReading?: ReadingPosition;
 }
 
 export interface Settings {
@@ -863,6 +880,17 @@ export interface WikiDraft {
     isTag: boolean;
     parentTags?: string[];
     summary?: string;
+    base?: string;
+}
+
+export interface WikiPageView {
+    dto: DtoVersion;
+    forum: string;
+    slug: string;
+    head?: string;
+    exists: boolean;
+    applicable: boolean;
+    unmergedEdits: number;
 }
 
 export type WriteState = { kind: "pending"; notBeforeMs?: number; held?: boolean; throttled?: boolean; needsLogin?: boolean; error?: EngineError } | { kind: "sending" } | { kind: "done"; uri: string; cid?: string; report?: string[] } | { kind: "failed"; error: EngineError } | { kind: "undone" };

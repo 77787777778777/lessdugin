@@ -25,11 +25,13 @@ import type {
   MyOpinion,
   NotificationReason,
   PostKind,
+  ReadingPosition,
   RenderedBody,
   Settings,
   Slug,
   Stance,
   SubscriptionEntry,
+  TagVoteValue,
   TextQuote,
   Tier,
   VersionEntry,
@@ -135,6 +137,8 @@ export interface MyReact {
 
 export interface MyOpinionRec extends MyOpinion {
   reacts: MyReact[];
+  /** The `#tagVote` entries, by slug (social.md §13.3). */
+  tags?: Record<Slug, TagVoteValue>;
 }
 
 export interface TagRec {
@@ -144,6 +148,26 @@ export interface TagRec {
   page?: string;
   head?: AtUri;
   unmergedEdits: number;
+  /** The canonical revision's `isTag` (absent: true); a page that is not a tag never applies. */
+  isTag?: boolean;
+}
+
+/** A wiki revision record (data-model.md §6.8): immutable; `parents` as written. */
+export interface WikiRevRec {
+  uri: AtUri;
+  cid: string;
+  author: Did;
+  forum: AtUri;
+  slug: Slug;
+  parents: { uri: AtUri; cid: string }[];
+  name: string;
+  description?: string;
+  /** The body's markdown (inline). */
+  body?: string;
+  isTag?: boolean;
+  parentTags: Slug[];
+  summary?: string;
+  createdAtMs: number;
 }
 
 export interface SequenceRec {
@@ -211,6 +235,8 @@ export interface MockState {
   posts: Map<AtUri, PostRec>;
   comments: Map<AtUri, CommentRec>;
   tags: Map<AtUri, Map<Slug, TagRec>>;
+  /** Every wiki revision, by uri (a page's head is `TagRec.head`). */
+  wiki: Map<AtUri, WikiRevRec>;
   sequences: Map<AtUri, SequenceRec>;
   /** opinions[account][subject] */
   opinions: Map<Did, Map<AtUri, MyOpinionRec>>;
@@ -222,6 +248,8 @@ export interface MockState {
   // local state
   followed: Map<AtUri, string | undefined>;
   lastVisited: Map<AtUri, number>;
+  /** "Continue reading" (social.md §14, §16): by sequence, the post last opened from it. */
+  seqpos: Map<AtUri, ReadingPosition>;
   drafts: Map<string, DraftEntry>;
   bookmarks: Map<AtUri, BookmarkEntry>;
   subscriptions: SubscriptionEntry[];

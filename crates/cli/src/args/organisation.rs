@@ -76,6 +76,12 @@ pub enum WikiAction {
         /// Parent tag slug (repeatable).
         #[arg(long = "parent-tag")]
         parent_tags: Vec<String>,
+        /// The revision the text was edited from, as `tag <slug>` shows it (default: the one
+        /// `tag <slug>` last showed in this terminal, or this terminal's last `wiki edit` of
+        /// the page wrote). The edit is refused when the page has moved on, or when the page
+        /// exists and none of its revisions was shown here.
+        #[arg(long, value_name = "REVISION")]
+        base: Option<String>,
         /// The forum (default: the current forum).
         #[arg(long, value_name = "FORUM")]
         forum: Option<String>,
@@ -110,7 +116,8 @@ pub enum SequenceAction {
         #[arg(long, value_name = "FORUM")]
         forum: Option<String>,
     },
-    /// Read a sequence.
+    /// Read a sequence: its posts are numbered (`read 2` reads the second in this sequence),
+    /// with where this device stopped reading it.
     Read {
         /// Sequence at-uri.
         #[arg(value_name = "URI")]

@@ -4,8 +4,9 @@
 import { MockEngine } from "@lessdugin/engine/mock";
 import type { ForumIndexer, IndexerConsent } from "@lessdugin/engine/types";
 
-import { fireEvent, screen, waitFor } from "@testing-library/react";
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { qk } from "../engine/queries.ts";
 import { renderWithApp } from "../test/render.tsx";
 import { SettingsPage } from "./SettingsPage.tsx";
 
@@ -25,6 +26,35 @@ describe("SettingsPage", () => {
       expect((screen.getByRole("radio", { name: /Weekly/ }) as HTMLInputElement).checked).toBe(
         true,
       ),
+    );
+  });
+
+  it("says that assisted mode names the participants' DIDs to Jetstream (U-D1, PRIV-11)", async () => {
+    renderWithApp(<SettingsPage />, { engine: new MockEngine() });
+    const sources = await screen.findByRole("region", { name: "Data sources" });
+    const note = (within(sources).getByTestId("jetstream-disclosure").textContent ?? "").replace(
+      /\s+/g,
+      " ",
+    );
+    expect(note).toMatch(/^Assisted, in this browser/);
+    expect(note).toMatch(/participants of your followed and open forums/);
+    // sync.md §6.2: D also holds the own account DIDs, so the operator learns who reads
+    expect(note).toMatch(/ask Jetstream only for your own accounts and those participants/);
+    expect(note).toMatch(/Jetstream server's operator then learns all of these DIDs/);
+    expect(note).toMatch(/which forums your accounts read/);
+  });
+
+  it("refreshes the mod queues when the sources change (their banner names them, O-8)", async () => {
+    const engine = new MockEngine();
+    const { queryClient } = renderWithApp(<SettingsPage />, { engine });
+    const key = qk.modQueue("at://did:plc:owner/forum/x");
+    queryClient.setQueryData(key, { dto: 1, items: [] });
+    queryClient.setQueryData(qk.members("at://did:plc:owner/forum/x"), []);
+    fireEvent.click(await screen.findByRole("radio", { name: /^Direct/ }));
+    await waitFor(() => expect(queryClient.getQueryState(key)?.isInvalidated).toBe(true));
+    expect(await engine.settings()).toMatchObject({ sources: "direct" });
+    expect(queryClient.getQueryState(qk.members("at://did:plc:owner/forum/x"))?.isInvalidated).toBe(
+      false,
     );
   });
 

@@ -381,6 +381,23 @@ async fn show(ctx: &Ctx, forum: Option<&str>) -> Result<(), CliError> {
     if unverified && !ctx.offline() && engine.verify_handles(64).await > 0 {
         v = engine.forum_open(&uri).await?;
     }
+    // one view per process, as `read`: the download of a spilled about the view left pending
+    // ends with the process, so it is awaited and the forum opened again (`limits.md`
+    // `BODY_BLOB_WAIT_MS`)
+    let about_pending =
+        |v: &lessdugin_core::dto::ForumView| v.about.as_ref().is_some_and(read::spilled_pending);
+    if about_pending(&v) {
+        let owner = [(v.forum.uri.clone(), v.forum.owner.did.clone())];
+        if read::await_spilled(ctx, &engine, "about", &owner).await {
+            v = engine.forum_open(&uri).await?;
+        }
+    }
+    if about_pending(&v) {
+        ctx.out.warn(lit(
+            "the forum's about is still not loaded from its owner's PDS (the excerpt shows); \
+             show it again later",
+        ));
+    }
     if ctx.out.is_json() {
         ctx.out.json(&v);
         return Ok(());
@@ -886,6 +903,7 @@ fn print_audit(ctx: &Ctx, report: &AuditReport) {
                     lessdugin_core::indexer::AuditKind::Contradiction => "CONTRADICTION: ",
                     lessdugin_core::indexer::AuditKind::Omission => "OMISSION: ",
                     lessdugin_core::indexer::AuditKind::Lag => "LAG: ",
+                    lessdugin_core::indexer::AuditKind::Unchecked => "UNCHECKED: ",
                 }),
                 tt(&finding.subject),
                 lit(" — "),

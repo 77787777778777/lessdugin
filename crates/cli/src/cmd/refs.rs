@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! References on the command line (synthesis §6.10): listing indices (`3`, `c12`, a forum
-//! number) are resolved here from this terminal's listings ([`crate::state`]); everything
-//! else goes to the engine's `parse_ref` (at-uris, SPA links, `<handle>/<rkey>` in the current
-//! forum). Forums are also accepted by alias or slug when they are followed.
+//! number) and the sequence steps `next` and `prev` are resolved here from this terminal's
+//! listings ([`crate::state`]); everything else goes to the engine's `parse_ref` (at-uris, SPA
+//! links, `<handle>/<rkey>` in the current forum). Forums are also accepted by alias or slug
+//! when they are followed.
 
 use lessdugin_atp::syntax::{AtIdentifier, Did};
 use lessdugin_core::discovery::{ForumKey, parse_forum_ref};
@@ -37,9 +38,47 @@ fn index(s: &str) -> Option<usize> {
         .flatten()
 }
 
+/// `next` or `prev` (`previous`): a step along the sequence the last `read` showed; true for
+/// the next post.
+fn sequence_step(s: &str) -> Option<bool> {
+    match s {
+        "next" => Some(true),
+        "prev" | "previous" => Some(false),
+        _ => None,
+    }
+}
+
+/// The sequence a reference reads its post in (`get_post(uri, sequence)`, `social.md` §14): a
+/// number of a `sequence read` listing, or `next` and `prev`, are read in their sequence.
+pub fn sequence_of(ctx: &Ctx, input: &str) -> Option<String> {
+    let t = input.trim();
+    let l = ctx.state.listings();
+    if index(t).is_some() {
+        return l.posts_sequence;
+    }
+    sequence_step(t).and(l.sequence_nav.map(|n| n.sequence))
+}
+
 /// Resolves a post or comment reference (or any other the engine accepts).
 pub async fn item(ctx: &Ctx, engine: &Engine<NativeHost>, input: &str) -> Result<Ref, CliError> {
     let t = input.trim();
+    if let Some(next) = sequence_step(t) {
+        let Some(nav) = ctx.state.listings().sequence_nav else {
+            return Err(bad(format!(
+                "the post last read in this terminal is in no sequence, so it has no {t} post; \
+                 `lessdugin sequence read <sequence>` lists one"
+            )));
+        };
+        let step = if next { nav.next } else { nav.prev };
+        return match step {
+            Some(uri) => Ok(Ref::Post { uri }),
+            None => Err(bad(format!(
+                "the post last read is the {} of the sequence {:?}",
+                if next { "last" } else { "first" },
+                nav.title
+            ))),
+        };
+    }
     if let Some(n) = index(t) {
         let l = ctx.state.listings();
         return Ok(Ref::Post {

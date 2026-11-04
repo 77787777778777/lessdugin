@@ -13,10 +13,13 @@
 //! | [`kv`] | the shared `KvStore` contract suite |
 //! | [`store`] | the shared record-store scenario, run over any `KvStore` |
 //! | [`node_devnet`] | the node devnet process for the `LESSDUGIN_E2E=1` tests (native only) |
+//! | [`devnet_services`] | the node devnet's CORE+ services: firehose mirror, Jetstream (both wires, with noise), Constellation, relay (feature `http`) |
 
 #![forbid(unsafe_code)]
 
 pub mod constellation;
+#[cfg(feature = "http")]
+pub mod devnet_services;
 pub mod fake_pds;
 pub mod identity;
 #[cfg(feature = "http")]

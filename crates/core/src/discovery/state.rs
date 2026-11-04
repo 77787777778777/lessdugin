@@ -14,6 +14,12 @@
 //! is left out of C(F): it has nothing to sync for the forum, and counting it would keep the
 //! forum `[partial]` for ever. (`sync.md` §4.5 lists G in C(F) without saying what happens to a
 //! granted DID that has no membership record; this is the reading taken here.)
+//!
+//! A relay entry names a repo with some membership record, not one of this forum (`sync.md`
+//! §4.4): a relay-only candidate becomes a disc row only once confirmed. Its rejection is a
+//! `("disc.relay", fk, did)` row instead, which keeps the back-off and is no discovery row, so
+//! the relay's whole membership directory never becomes repos that are followed or put in a
+//! Jetstream filter. A forum keeps at most [`DISC_ROWS_MAX`] rows of each kind.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -33,6 +39,13 @@ use crate::store::{StoreError, schema};
 
 /// The key tag of discovery rows.
 pub const DISC: &str = "disc";
+
+/// The key tag of relay-only candidates checked and rejected (`sync.md` §4.4, §10.4).
+pub const DISC_RELAY: &str = "disc.relay";
+
+/// Rows of each kind kept per forum: past it, the oldest rows that are not confirmed are
+/// dropped (`sync.md` §4.4, §6.4, *tunable*).
+pub const DISC_ROWS_MAX: usize = 10_000;
 
 /// A discovery candidate's state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -155,13 +168,34 @@ pub fn disc_key(fk: &str, did: &str) -> Vec<u8> {
     schema::prefix(DISC, &[fk, did])
 }
 
+/// The key `("disc.relay", fk, did)`.
+pub fn relay_key(fk: &str, did: &str) -> Vec<u8> {
+    schema::prefix(DISC_RELAY, &[fk, did])
+}
+
 /// Every discovery row of forum `fk`.
 pub async fn disc_rows<K: KvStore>(
     kv: &K,
     fk: &str,
 ) -> Result<BTreeMap<String, DiscRow>, StoreError> {
+    scan_rows(kv, DISC, fk).await
+}
+
+/// Every relay-only candidate of forum `fk` checked and rejected, by DID.
+pub async fn relay_rows<K: KvStore>(
+    kv: &K,
+    fk: &str,
+) -> Result<BTreeMap<String, DiscRow>, StoreError> {
+    scan_rows(kv, DISC_RELAY, fk).await
+}
+
+async fn scan_rows<K: KvStore>(
+    kv: &K,
+    tag: &str,
+    fk: &str,
+) -> Result<BTreeMap<String, DiscRow>, StoreError> {
     let mut out = BTreeMap::new();
-    let prefix = schema::prefix(DISC, &[fk]);
+    let prefix = schema::prefix(tag, &[fk]);
     let mut range = Some(KeyRange::prefix(&prefix));
     while let Some(r) = range.take() {
         let page = kv.scan(r.clone(), Dir::Forward, 1_000).await?;
@@ -206,6 +240,60 @@ pub async fn put_disc_rows<K: KvStore>(
         ops.push(KvOp::Put(disc_key(fk, did), row::encode(r)?));
     }
     kv.write(ops).await?;
+    Ok(())
+}
+
+/// The rows to drop so that at most [`DISC_ROWS_MAX`] remain: the oldest rows that are not
+/// confirmed (by first-seen time, then DID), never `keep`.
+pub fn disc_rows_over_cap(rows: &BTreeMap<String, DiscRow>, keep: &str) -> Vec<String> {
+    let Some(excess) = rows.len().checked_sub(DISC_ROWS_MAX).filter(|n| *n > 0) else {
+        return Vec::new();
+    };
+    let mut unconfirmed: Vec<(i64, &String)> = rows
+        .iter()
+        .filter(|(d, r)| d.as_str() != keep && r.state != DiscState::Confirmed)
+        .map(|(d, r)| (r.first, d))
+        .collect();
+    unconfirmed.sort();
+    unconfirmed
+        .into_iter()
+        .take(excess)
+        .map(|(_, d)| d.clone())
+        .collect()
+}
+
+/// The writes of one discovery pass to forum `fk`, in one atomic write: discovery rows put and
+/// dropped, relay rejections put and dropped.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DiscWrite {
+    /// Discovery rows to put.
+    pub rows: BTreeMap<String, DiscRow>,
+    /// Discovery rows to drop.
+    pub dropped: BTreeSet<String>,
+    /// Relay rejections to put.
+    pub relay: BTreeMap<String, DiscRow>,
+    /// Relay rejections to drop.
+    pub relay_dropped: BTreeSet<String>,
+}
+
+/// Applies `w` to forum `fk` in one atomic write.
+pub async fn write_disc<K: KvStore>(kv: &K, fk: &str, w: &DiscWrite) -> Result<(), StoreError> {
+    let mut ops = Vec::new();
+    for (did, r) in &w.rows {
+        ops.push(KvOp::Put(disc_key(fk, did), row::encode(r)?));
+    }
+    ops.extend(w.dropped.iter().map(|d| KvOp::Delete(disc_key(fk, d))));
+    for (did, r) in &w.relay {
+        ops.push(KvOp::Put(relay_key(fk, did), row::encode(r)?));
+    }
+    ops.extend(
+        w.relay_dropped
+            .iter()
+            .map(|d| KvOp::Delete(relay_key(fk, d))),
+    );
+    if !ops.is_empty() {
+        kv.write(ops).await?;
+    }
     Ok(())
 }
 
@@ -401,5 +489,26 @@ mod tests {
         let bytes = row::encode(&r).unwrap();
         assert_eq!(row::decode::<DiscRow>(&bytes).unwrap(), r);
         assert!(disc_key("aaaaaaaaaaaa", "did:x").starts_with(&schema::prefix(DISC, &[])));
+        // a relay rejection is no discovery row: a scan of the disc rows never sees it
+        let fk = "aaaaaaaaaaaa";
+        assert!(!relay_key(fk, "did:x").starts_with(&schema::prefix(DISC, &[fk])));
+    }
+
+    #[test]
+    fn rows_past_the_cap_drop_the_oldest_unconfirmed() {
+        let mut rows = BTreeMap::new();
+        for i in 0..DISC_ROWS_MAX {
+            let mut r = DiscRow::new("hint:constellation", i as i64);
+            if i < 5 {
+                r.set(DiscState::Confirmed, 1);
+            }
+            rows.insert(format!("did:plc:{i:024}"), r);
+        }
+        assert!(disc_rows_over_cap(&rows, "").is_empty());
+        rows.insert("did:plc:new".into(), DiscRow::new("hint:relay", 0));
+        rows.insert("did:plc:newer".into(), DiscRow::new("hint:relay", 0));
+        // the confirmed rows are never dropped, `keep` neither; then the oldest, then by DID
+        let dropped = disc_rows_over_cap(&rows, "did:plc:new");
+        assert_eq!(dropped, ["did:plc:newer", &format!("did:plc:{:024}", 5)]);
     }
 }

@@ -42,8 +42,10 @@ export async function loadEngine(choice: EngineChoice): Promise<EngineHandle> {
     if (!MOCK_BUILD) throw new Error("this build does not include the demo engine");
     const { createMockHandle } = await import("./mock.ts");
     const { MockEngine } = await import("@lessdugin/engine/mock");
+    // `?spilled`: bodies served as blobs; `?wikirace`: the first wiki save meets a newer head
+    const params = new URLSearchParams(location.search);
     return createMockHandle(
-      new MockEngine({ spilledBodies: new URLSearchParams(location.search).has("spilled") }),
+      new MockEngine({ spilledBodies: params.has("spilled"), wikiRace: params.has("wikirace") }),
     );
   }
   const { createRealEngine } = await import("./real.ts");

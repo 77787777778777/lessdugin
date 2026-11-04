@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! A small Constellation index over the committed records of a [`FakeNet`].
+//! A small Constellation index over the committed records of a [`FakeNet`] (or, through
+//! [`crate::devnet_services`], of the node devnet's firehose).
 //!
 //! It answers only `getBacklinks` and `getBacklinksCount` for `NS.membership:forum` and
 //! `NS.post:forum`. The results are discovery hints, not verified content: the core still reads
@@ -44,10 +45,28 @@ struct Link {
     seq: u64,
 }
 
+/// The committed records a [`Constellation`] indexes. Crate-private, like the snapshot itself,
+/// so test code cannot use it to bypass PDS verification in the core.
+pub(crate) trait BacklinkSource: Send + Sync + 'static {
+    /// Every active repo's committed records.
+    fn snapshot(&self) -> super::fake_pds::BacklinkSnapshot;
+}
+
+impl BacklinkSource for FakeNet {
+    /// Take a consistent snapshot and flush pending writes before indexing it. This is the same
+    /// commit barrier the fake PDS uses for requests, not a direct view of uncommitted writes.
+    fn snapshot(&self) -> super::fake_pds::BacklinkSnapshot {
+        self.commit_all();
+        self.backlink_records()
+    }
+}
+
 /// A deterministic, local-only Constellation test service.
 #[derive(Clone)]
 pub struct Constellation {
-    net: FakeNet,
+    source: Arc<dyn BacklinkSource>,
+    /// The last non-empty page still carries a cursor, to an empty final page (devnet mirror).
+    trailing_empty_page: bool,
     base: Arc<str>,
     seq: Arc<AtomicU64>,
     /// Per-record observation order. Updating a record retains its original event order.
@@ -89,7 +108,8 @@ impl Constellation {
         let base = base.trim_end_matches('/');
         url::Url::parse(base).expect("Constellation base URL");
         let this = Self {
-            net: net.clone(),
+            source: Arc::new(net.clone()),
+            trailing_empty_page: false,
             base: Arc::from(base.to_owned()),
             seq: Arc::new(AtomicU64::new(0)),
             observed: Arc::new(Mutex::new(BTreeMap::new())),
@@ -121,7 +141,8 @@ impl Constellation {
             .build()
             .expect("Constellation runtime");
         let service = Self {
-            net: net.clone(),
+            source: Arc::new(net.clone()),
+            trailing_empty_page: false,
             base: Arc::from(base.clone()),
             seq: Arc::new(AtomicU64::new(0)),
             observed: Arc::new(Mutex::new(BTreeMap::new())),
@@ -167,14 +188,20 @@ impl Constellation {
         &self.base
     }
 
-    /// Take a consistent snapshot and flush pending writes before indexing it. This is the same
-    /// commit barrier the fake PDS uses for requests, not a direct view of uncommitted writes.
-    fn snapshot(&self) -> super::fake_pds::BacklinkSnapshot {
-        self.net.commit_all();
-        self.net.backlink_records()
+    /// A service over `source` at `base`, whose pages are short and whose last non-empty page
+    /// still carries a cursor (to an empty final page), for the devnet mirror.
+    #[cfg(feature = "http")]
+    pub(crate) fn over(source: Arc<dyn BacklinkSource>, base: &str) -> Self {
+        Self {
+            source,
+            trailing_empty_page: true,
+            base: Arc::from(base.trim_end_matches('/').to_owned()),
+            seq: Arc::new(AtomicU64::new(0)),
+            observed: Arc::new(Mutex::new(BTreeMap::new())),
+        }
     }
 
-    fn answer(
+    pub(crate) fn answer(
         &self,
         req: &HttpRequest,
         count: bool,
@@ -245,7 +272,7 @@ impl Constellation {
                 })
             })
             .collect::<Vec<_>>();
-        let cursor = if end < total {
+        let cursor = if end < total || (self.trailing_empty_page && offset < total) {
             Value::String(format!("o:{end}"))
         } else {
             Value::Null
@@ -256,7 +283,7 @@ impl Constellation {
     }
 
     fn links(&self, subject: &str, collection: &str, exact_did: Option<&Did>) -> Vec<Link> {
-        let snapshot = self.snapshot();
+        let snapshot = self.source.snapshot();
         let mut observed = lock(&self.observed);
         let mut links = Vec::new();
         for (did, records) in snapshot {

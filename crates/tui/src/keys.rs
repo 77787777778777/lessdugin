@@ -74,14 +74,19 @@ pub enum Cmd {
     ReactPalette,
     /// `E`: show the version history of the selected item (M4).
     History,
+    /// `]` (on a thread): the next post of the post's sequence (`social.md` §14).
+    SequenceNext,
+    /// `[` (on a thread): the previous post of the post's sequence.
+    SequencePrev,
     /// `i`: load the selected item's images (their author's PDS sees the address).
     LoadMedia,
     /// `Tab` (inside the react palette): switch the stance.
     Stance,
     /// `m`: open the mod menu on the selected item (or its author).
     ModMenu,
-    /// `N`: open the Notifications screen (`synthesis-v1.md` §6.11 lists it; `n`/`N` are
-    /// reserved for search matches there, and search is not built yet).
+    /// `N`: open the Notifications screen (`synthesis-v1.md` §6.11). In the search results
+    /// panel `n` and `N` step to the next and previous hit instead (decision O-7); `n` is no
+    /// command anywhere else.
     Notifications,
     /// `M` (on the Notifications screen): mark every listed notification read.
     MarkAllRead,
@@ -91,6 +96,8 @@ pub enum Cmd {
     Help,
     /// `:`: the command line overlay (`synthesis-v1.md` §6.11 Overlays).
     Command,
+    /// `/`: the command line, opened on `search ` (the local search, `:search`).
+    Search,
 }
 
 /// The command of a key press, if any (key releases and repeats on some platforms are ignored).
@@ -133,6 +140,8 @@ pub fn command(k: &KeyEvent) -> Option<Cmd> {
         KeyCode::Backspace => Cmd::Undo,
         KeyCode::Char('x') => Cmd::ReactPalette,
         KeyCode::Char('E') => Cmd::History,
+        KeyCode::Char(']') => Cmd::SequenceNext,
+        KeyCode::Char('[') => Cmd::SequencePrev,
         KeyCode::Char('i') => Cmd::LoadMedia,
         KeyCode::Tab => Cmd::Stance,
         KeyCode::Char('m') => Cmd::ModMenu,
@@ -140,6 +149,7 @@ pub fn command(k: &KeyEvent) -> Option<Cmd> {
         KeyCode::Char('M') => Cmd::MarkAllRead,
         KeyCode::Char('?') => Cmd::Help,
         KeyCode::Char(':') => Cmd::Command,
+        KeyCode::Char('/') => Cmd::Search,
         _ => return None,
     })
 }
@@ -206,6 +216,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("r", "reply in $EDITOR"),
             ("c", "comment on the post in $EDITOR"),
             ("s", "comment sort (magic, top, new, old, latest)"),
+            ("[ ]", "previous / next post of its sequence"),
             ("i", "load the item's images (their host sees you)"),
         ],
     ),
@@ -236,6 +247,8 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
         &[
             ("m", "mod menu (queue, log, actions)"),
             (":", "command line (any M3 verb; : help)"),
+            ("/", "search the synced cache"),
+            ("n N", "next / previous hit (search results)"),
             ("E", "versions of the selected item"),
             ("N", "notifications"),
             ("M", "mark all notifications read"),
@@ -279,8 +292,13 @@ mod tests {
         assert_eq!(c("N"), Some(Cmd::Notifications));
         assert_eq!(c("M"), Some(Cmd::MarkAllRead));
         assert_eq!(c("i"), Some(Cmd::LoadMedia));
+        assert_eq!(c("]"), Some(Cmd::SequenceNext));
+        assert_eq!(c("["), Some(Cmd::SequencePrev));
         // the `:` command line (synthesis §6.11 Overlays)
         assert_eq!(c(":"), Some(Cmd::Command));
+        // `/` searches; `n` is no command outside the search results (decision O-7)
+        assert_eq!(c("/"), Some(Cmd::Search));
+        assert_eq!(c("n"), None);
         assert_eq!(c("Ctrl-x"), None);
         assert!(parse_key("Ctrl-").is_none());
     }

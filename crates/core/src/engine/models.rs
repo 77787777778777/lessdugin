@@ -25,7 +25,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use futures::channel::mpsc;
+use futures::channel::{mpsc, oneshot};
 use futures::future::join_all;
 use futures::lock::Mutex as AsyncMutex;
 use lessdugin_atp::syntax::{AtIdentifier, AtUri, Did};
@@ -142,7 +142,15 @@ pub(crate) struct Runtime {
     flights: Mutex<BTreeMap<String, Arc<AsyncMutex<()>>>>,
     /// A cold assisted page may need one bounded ordinary PDS sync, shared with other queries.
     pub(crate) cold_sync: AsyncMutex<()>,
+    /// First post pages being read, and the forum syncs waiting for them (`sync.md` §14.3 step
+    /// 4): see [`Runtime::page_reading`].
+    pages: Mutex<(usize, Vec<oneshot::Sender<()>>)>,
     pub(crate) renders: RenderCache,
+    /// Search indexes, one per forum, each for the model it was built from (`sync.md` §13).
+    pub(crate) search: crate::search::index::IndexCache,
+    /// The relay newcomer source crossed its 5,000-DID union: off for the session (`sync.md`
+    /// §4.4).
+    pub(crate) relay_newcomers_off: Arc<std::sync::atomic::AtomicBool>,
     /// The last `open_forum` result per forum, with its time (ms).
     opened: Mutex<BTreeMap<String, (i64, OpenedForum)>>,
     /// Authors shown whose handle state is due (`sync.md` §3.3), verified by `live_tail`.
@@ -165,6 +173,22 @@ pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// A first post page being read ([`Runtime::page_reading`]); the last one to drop wakes the
+/// forum syncs waiting for it.
+pub(crate) struct PageReading(Arc<Runtime>);
+
+impl Drop for PageReading {
+    fn drop(&mut self) {
+        let mut pages = lock(&self.0.pages);
+        pages.0 = pages.0.saturating_sub(1);
+        if pages.0 == 0 {
+            for tx in pages.1.drain(..) {
+                let _ = tx.send(());
+            }
+        }
+    }
+}
+
 impl Runtime {
     pub(crate) fn new() -> Self {
         Self {
@@ -172,7 +196,10 @@ impl Runtime {
             models: Mutex::new(Models::default()),
             flights: Mutex::new(BTreeMap::new()),
             cold_sync: AsyncMutex::new(()),
+            pages: Mutex::new((0, Vec::new())),
             renders: RenderCache::default(),
+            search: Default::default(),
+            relay_newcomers_off: Arc::default(),
             opened: Mutex::new(BTreeMap::new()),
             verify: Mutex::new(BTreeSet::new()),
             live_gen: AtomicU64::new(0),
@@ -181,6 +208,26 @@ impl Runtime {
             notify: AsyncMutex::new(()),
             authority_failed: Mutex::new(BTreeMap::new()),
         }
+    }
+
+    /// Marks a first post page as being read until the returned guard drops: a forum sync's
+    /// participant sweep starts after it ([`Runtime::pages_read`]).
+    pub(crate) fn page_reading(self: &Arc<Self>) -> PageReading {
+        lock(&self.pages).0 += 1;
+        PageReading(Arc::clone(self))
+    }
+
+    /// Resolves once no first post page is being read, or `None` at once if none is.
+    pub(crate) fn pages_read(&self) -> Option<oneshot::Receiver<()>> {
+        let mut pages = lock(&self.pages);
+        if pages.0 == 0 {
+            return None;
+        }
+        // syncs that stopped waiting (their hold expired) leave their senders behind
+        pages.1.retain(|tx| !tx.is_canceled());
+        let (tx, rx) = oneshot::channel();
+        pages.1.push(tx);
+        Some(rx)
     }
 
     /// `false` if `forum_open`'s sync of authority `did` failed less than

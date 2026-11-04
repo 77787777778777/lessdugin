@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 
 use lessdugin_core::dto::{
     ActorView, AgreementValue, Badges, Banner, CollapseReason, HandleState, HiddenReason,
-    ItemState, KarmaValue, PostKind, PostSummary, ReactTally, ScoreView, Stance,
+    ItemState, KarmaValue, PostKind, PostSummary, PostTag, ReactTally, ScoreView, Stance,
 };
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -436,6 +436,86 @@ pub fn notification_line(n: &lessdugin_core::dto::NotificationView) -> TermText 
     }
     parts.push(tt(&time(n.at_ms)));
     cat(parts)
+}
+
+/// A post view's tags (`PostView.tagRelevance`, `social.md` §13.3): each slug with its
+/// relevance, whether it applies, and the viewer's own tag vote; `None` when it lists none.
+pub fn tag_relevance(tags: &[PostTag]) -> Option<TermText> {
+    if tags.is_empty() {
+        return None;
+    }
+    let mut parts = vec![lit("tags: ")];
+    for (i, t) in tags.iter().enumerate() {
+        if i > 0 {
+            parts.push(tt(" \u{b7} "));
+        }
+        parts.push(cat([lit("#"), name(&t.slug)]));
+        parts.push(tt(&format!(" relevance {}", t.relevance)));
+        if !t.applies {
+            parts.push(lit(" (not applied)"));
+        }
+        if let Some(v) = t.mine {
+            parts.push(cat([
+                lit(" [your vote: "),
+                lit(match v {
+                    KarmaValue::Up => "up",
+                    KarmaValue::StrongUp => "strong up",
+                    KarmaValue::Down => "down",
+                    KarmaValue::StrongDown => "strong down",
+                }),
+                lit("]"),
+            ]));
+        }
+    }
+    Some(cat(parts))
+}
+
+/// The mod queue's banner that is a notice, not a warning (`engine-api.md` §4.2 `Banner`).
+pub const APPLICANTS_VIA_HINTS: &str = "applicantsViaHints";
+
+/// The mod queue's banners, drawn above it also when it is empty (in approval mode, where the
+/// applicants come from: `sync.md` §4.4, decision O-8), each wrapped at `width` columns after a
+/// two-column margin: `applicantsViaHints` (assisted sources) in the `notice` style, any other
+/// (`applicantsNotDiscovered`, direct sources, which look for none) as a warning.
+pub fn queue_banner_lines(
+    banners: &[Banner],
+    width: usize,
+    warn: Style,
+    notice: Style,
+) -> Vec<Line<'static>> {
+    use unicode_width::UnicodeWidthStr;
+    // the text after the margin and the `! ` / `i ` mark (continuation lines hang under it)
+    let room = width.saturating_sub(4).max(1);
+    let mut out = Vec::new();
+    for b in banners {
+        let (mark, style) = if b.code == APPLICANTS_VIA_HINTS {
+            ("i ", notice)
+        } else {
+            ("! ", warn)
+        };
+        // by words; a word longer than the room is wrapped where it ends up
+        let mut rows: Vec<String> = vec![String::new()];
+        for word in tt(&b.message).to_plain_string().split_whitespace() {
+            let cur = rows.last_mut().expect("one row");
+            if !cur.is_empty() && cur.width() + 1 + word.width() > room {
+                rows.push(word.to_owned());
+            } else {
+                if !cur.is_empty() {
+                    cur.push(' ');
+                }
+                cur.push_str(word);
+            }
+        }
+        for (i, row) in rows.iter().enumerate() {
+            let lead = if i == 0 { mark } else { "  " };
+            for l in wrapped(&tt(row), style, room) {
+                let mut spans = vec![Span::raw("  "), Span::styled(lead, style)];
+                spans.extend(l.spans);
+                out.push(Line::from(spans));
+            }
+        }
+    }
+    out
 }
 
 /// One mod-queue row (`social.md` §4.12): its kind, subject, reason and actor.

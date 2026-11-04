@@ -3,7 +3,9 @@
 // autosaved locally; `?draft=<id>` resumes one. `?edit=<uri>` edits one of the viewer's own
 // posts (edit protocol, data-model.md §8.3): the form starts from the record, its media and
 // labels are kept, and the previous version stays in the public history unless the author
-// chooses to replace it without history.
+// chooses to replace it without history. A link post's card (title, description, preview
+// image) is kept by the engine for the same link, unless the author removes it
+// (`EditOpts.dropLinkCard`, engine-api.md §3.5 `edit`).
 
 import type { Draft, MediaRef, PostDraft, PostKind } from "@lessdugin/engine/types";
 import { POST_KINDS } from "@lessdugin/engine/types";
@@ -37,6 +39,16 @@ import { useForumView } from "./forumContext.tsx";
 
 const route = getRouteApi("/f/$owner/$slug/new");
 const KINDS: PostKind[] = ["article", "question", "link", "quickTake"];
+
+/** Whether the record's link has a card: a title, a description or a preview image. */
+export function hasLinkCard(record: unknown): boolean {
+  const link = objectField(record, "link");
+  return (
+    stringField(link, "title") !== undefined ||
+    stringField(link, "description") !== undefined ||
+    objectField(link, "thumb") !== undefined
+  );
+}
 
 /** The post record being edited, as a draft (record JSON is untrusted: every field checked).
  * `source`: the markdown of a body that spilled into a blob (engine-api.md §3.4 `body_source`),
@@ -76,6 +88,7 @@ export function PostForm({
   draftId,
   editing,
   suspends,
+  linkCard = false,
 }: {
   initial: PostDraft | null;
   draftId: string | undefined;
@@ -83,6 +96,8 @@ export function PostForm({
   editing?: string | undefined;
   /** Edit mode: the warning that the edit suspends the post's positive assertions. */
   suspends?: string | null | undefined;
+  /** Edit mode: the record's link has a card, which the author may remove. */
+  linkCard?: boolean;
 }) {
   const engine = useEngine();
   const { forum } = useForumView();
@@ -94,10 +109,15 @@ export function PostForm({
   const [tags, setTags] = useState<string[]>(initial?.tags ?? []);
   const [keepHistory, setKeepHistory] = useState(true);
   const [summary, setSummary] = useState("");
+  const [dropCard, setDropCard] = useState(false);
   const tagList = useQuery({ queryKey: qk.tags(forum.uri), queryFn: () => engine.tags(forum.uri) });
-  const ids = { title: useId(), link: useId(), summary: useId() };
-  const latest = useRef({ kind, title, link, tags });
-  latest.current = { kind, title, link, tags };
+  const ids = { title: useId(), link: useId(), summary: useId(), dropCard: useId() };
+  // the card can be removed while the link is the record's (another link has no card anyway)
+  const cardShown =
+    editing !== undefined && linkCard && kind === "link" && link.trim() === initial?.link?.uri;
+  const removeCard = cardShown && dropCard;
+  const latest = useRef({ kind, title, link, tags, removeCard });
+  latest.current = { kind, title, link, tags, removeCard };
   // Kept as they are: the composer edits only the markdown.
   const media = useRef<MediaRef[]>(initial?.body.media ?? []);
   const [editMedia, setEditMedia] = useState<readonly MediaRef[]>(initial?.body.media ?? []);
@@ -106,7 +126,7 @@ export function PostForm({
 
   const draftFor = useCallback(
     (markdown: string, withMedia: MediaRef[] = media.current): PostDraft => {
-      const { kind: k, title: t, link: l, tags: tg } = latest.current;
+      const { kind: k, title: t, link: l, tags: tg, removeCard: rc } = latest.current;
       const d: PostDraft = {
         forum: forum.uri,
         kind: k,
@@ -117,7 +137,7 @@ export function PostForm({
       if (k !== "quickTake" && t.trim() !== "") d.title = t.trim();
       if (k === "link" && l.trim() !== "") {
         const prev = linkMeta.current;
-        d.link = prev && prev.uri === l.trim() ? { ...prev } : { uri: l.trim() };
+        d.link = prev && prev.uri === l.trim() && !rc ? { ...prev } : { uri: l.trim() };
       }
       return d;
     },
@@ -149,6 +169,7 @@ export function PostForm({
           {
             history: keepHistory,
             ...(keepHistory && summary.trim() !== "" ? { summary: summary.trim() } : {}),
+            ...(removeCard ? { dropLinkCard: true } : {}),
           },
         )
       : await engine.publish(draftFor(markdown, withMedia));
@@ -222,6 +243,22 @@ export function PostForm({
           <span className={ui.hint}>
             The app never fetches link cards; add a summary in the body.
           </span>
+          {cardShown && (
+            <>
+              <label className={ui.row}>
+                <input
+                  type="checkbox"
+                  checked={dropCard}
+                  onChange={(e) => setDropCard(e.target.checked)}
+                  aria-describedby={ids.dropCard}
+                />
+                <span>Remove the link card</span>
+              </label>
+              <span id={ids.dropCard} className={ui.hint}>
+                Its title, description and preview image are removed; the link stays.
+              </span>
+            </>
+          )}
         </div>
       )}
       <fieldset className={ui.field}>
@@ -361,6 +398,7 @@ export function EditPost({ uri }: { uri: string }) {
         draftId={undefined}
         editing={uri}
         suspends={preflight.data ? suspendsNotice(preflight.data) : null}
+        linkCard={hasLinkCard(source.data.raw.record)}
       />
     </section>
   );

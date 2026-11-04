@@ -40,20 +40,22 @@ fn indexers(cfg: &Config) -> Vec<lessdugin_core::engine::IndexerConsent> {
 
 /// Maps the native configuration to the engine's (without parity mode; see [`open_engine`]).
 pub fn engine_config(cfg: &Config) -> EngineConfig {
-    // A file setting pins sources like a flag (O-9). Devnet defaults to direct, but an
-    // explicit setting may enable only its explicitly configured local CORE+ services.
+    // A file setting pins sources like a flag (O-9). A devnet is pinned to direct, whatever a
+    // stored setting says (`EngineConfig::devnet`): only an explicit config.toml `sources` may
+    // enable its explicitly configured local CORE+ services.
     let sources = cfg.sources.map(|s| match s {
         Sources::Direct => EngineSources::Direct,
         Sources::Assisted => EngineSources::Assisted,
     });
     let devnet = matches!(&cfg.network, NetworkProfile::Devnet(_));
+    let sources_flag = if devnet {
+        sources.or(Some(EngineSources::Direct))
+    } else {
+        sources
+    };
     let common = EngineConfig {
-        sources: sources.unwrap_or(if devnet {
-            EngineSources::Direct
-        } else {
-            EngineSources::Assisted
-        }),
-        sources_flag: sources,
+        sources: sources_flag.unwrap_or(EngineSources::Assisted),
+        sources_flag,
         verify: match cfg.verify {
             VerifyMode::Pds => EngineVerifyMode::Pds,
             VerifyMode::Proof => EngineVerifyMode::Proof,
@@ -126,6 +128,39 @@ mod tests {
         assert!(c.slingshot.is_none());
         assert!(c.doh.is_empty());
         assert_eq!(c.sources, EngineSources::Assisted);
+    }
+
+    /// A devnet without a `sources` line is pinned to direct, so a stored `sources = assisted`
+    /// never turns on CORE+ there (`EngineConfig::devnet`).
+    #[tokio::test]
+    async fn a_devnet_pins_direct_unless_the_file_states_sources() {
+        let cfg = Config::devnet(
+            url::Url::parse("http://127.0.0.1:2582").unwrap(),
+            url::Url::parse("http://127.0.0.1:2583").unwrap(),
+        );
+        assert_eq!(cfg.sources, None);
+        assert_eq!(
+            engine_config(&cfg).sources_flag,
+            Some(EngineSources::Direct)
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::under(dir.path());
+        let engine = open_engine(&paths, &cfg).unwrap();
+        let assisted = serde_json::json!("assisted");
+        engine
+            .set_setting("sources", Some(&assisted))
+            .await
+            .unwrap();
+        assert_eq!(
+            engine.settings().await.unwrap().sources,
+            lessdugin_core::dto::Sources::Direct
+        );
+        let mut stated = cfg.clone();
+        stated.sources = Some(Sources::Assisted);
+        assert_eq!(
+            engine_config(&stated).sources_flag,
+            Some(EngineSources::Assisted)
+        );
     }
 
     #[test]

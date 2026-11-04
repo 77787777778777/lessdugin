@@ -3,6 +3,11 @@
 //!
 //! The process seeds 2,000 accounts (including the owner), pre-indexes every repository, writes
 //! the loopback endpoints to JSON, and stays alive for the focused Playwright acceptance test.
+//! Besides the owner's post, [`MEMBER_POSTS`] distinct members each post once, so the first page
+//! the browser paints holds posts by distinct participants: one proof per post, and one head
+//! check and one DID document per author on screen (`sync.md` §14.3). The pre-index also caches
+//! the posts' proofs, as live ingest does for a new post (`sync.md` §15.1), so the measured
+//! readers do not pay the lazy proof fetch of a freshly backfilled record.
 //! It never configures or contacts a production service.
 
 use std::collections::BTreeSet;
@@ -33,6 +38,8 @@ use serde_json::json;
 use url::Url;
 
 const TITLE: &str = "M6 cold start: proof-backed title from 2,000 signed participants";
+/// Members with one post each (more than a first page: the SPA lists 20, the CLI 30).
+const MEMBER_POSTS: usize = 30;
 
 fn arg<T: std::str::FromStr>(name: &str, default: T) -> Result<T>
 where
@@ -51,8 +58,8 @@ async fn main() -> Result<()> {
     let output = arg("--json", PathBuf::from("cold-start-devnet.json"))?;
     let participants = arg("--participants", 2_000usize)?;
     let pds_count = arg("--pds-count", 40usize)?;
-    if participants < 2 || pds_count == 0 {
-        bail!("need at least two participants and one PDS");
+    if participants <= MEMBER_POSTS || pds_count == 0 {
+        bail!("need more than {MEMBER_POSTS} participants and one PDS");
     }
 
     // Wall-clock elapsed time is benchmark evidence only, never input to repository state.
@@ -65,7 +72,10 @@ async fn main() -> Result<()> {
     let owner = pds[0].add_account("owner.test");
     let forum = ForumKey::new(owner.did(), "cold-start")?;
     let now = Datetime::from_millis(net.now_ms() - 3_600_000)?;
-    let declaration = Forum::create("M6 cold start", now.clone(), MembershipMode::Approval);
+    // declared before every post: a post's t_rank is max(t_decl, its createdAt) (social.md §2.2),
+    // so a declaration after the posts would rank them all at t_decl and order them by uri
+    let declared = Datetime::from_millis(net.now_ms() - 7_200_000)?;
+    let declaration = Forum::create("M6 cold start", declared, MembershipMode::Approval);
     let membership = Membership::new(forum.uri.clone(), now.clone());
 
     let accounts = (1..participants)
@@ -78,6 +88,26 @@ async fn main() -> Result<()> {
             &forum.fk,
             &serde_json::to_value(membership)?,
         );
+    }
+    // one post by each of the first MEMBER_POSTS members, a minute apart and all older than the
+    // owner's post (dated `now`), so `new` order is fixed: the owner's, then member 1's, …
+    let mut member_posts = Vec::new();
+    for (i, account) in accounts.iter().take(MEMBER_POSTS).enumerate() {
+        let at_ms = now.timestamp_micros() / 1000 - 60_000 * (i64::try_from(i)? + 1);
+        let rkey = keys::post_rkey(forum.uri.as_str(), tid_at_ms(at_ms).as_ref())?;
+        let title = format!("M6 cold start post {} of {MEMBER_POSTS}", i + 1);
+        let post = Post::article(
+            forum.uri.clone(),
+            title.clone(),
+            "A post by a distinct signed participant.",
+            Datetime::from_millis(at_ms)?,
+        );
+        account.put(nsid::POST, &rkey, &serde_json::to_value(post)?);
+        member_posts.push(json!({
+            "uri": account.uri(nsid::POST, &rkey),
+            "title": title,
+            "author": account.did(),
+        }));
     }
 
     let post_rkey = keys::post_rkey(forum.uri.as_str(), tid_at_ms(net.now_ms()).as_ref())?;
@@ -189,7 +219,7 @@ async fn main() -> Result<()> {
         .store
         .forum(forum.uri.as_str())
         .context("indexed forum")?;
-    if indexed.participants != participants || indexed.posts != 1 {
+    if indexed.participants != participants || indexed.posts != 1 + MEMBER_POSTS {
         bail!(
             "pre-index incomplete: {} participants (expected {participants}), {} posts",
             indexed.participants,
@@ -273,6 +303,30 @@ async fn main() -> Result<()> {
     assert_eq!(served.rev, proven.rev);
     assert_eq!(served.commit_cid, proven.commit_cid);
     assert_eq!(served.record_cid(), proven.record_cid());
+    // The posts' proofs are in the cache, as live ingest puts each new post's there (sync.md
+    // §15.1 "Proofs"): only a backfilled record's proof is fetched lazily, on the first
+    // getRecordProofs that names it, and the measured readers are not a backfill's first.
+    let post_uris: Vec<String> = std::iter::once(post_uri.clone())
+        .chain(
+            member_posts
+                .iter()
+                .filter_map(|p| p["uri"].as_str().map(String::from)),
+        )
+        .collect();
+    let mut warmed = 0;
+    for page in post_uris.chunks(25) {
+        let bundle = lessdugin_indexer::proofs::bundle(&indexer, page)
+            .await
+            .context("warm the post proofs")?;
+        warmed += ProofBundle::parse(&bundle, &Default::default())?
+            .items
+            .len();
+    }
+    anyhow::ensure!(
+        warmed == post_uris.len(),
+        "{warmed} of {} post proofs warmed",
+        post_uris.len()
+    );
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let indexer_url = Url::parse(&format!("http://{}", listener.local_addr()?))?;
@@ -285,6 +339,10 @@ async fn main() -> Result<()> {
         "post": post_uri,
         "title": TITLE,
         "ownerDid": owner.did(),
+        // every post, newest first: the owner's, then the members'
+        "posts": std::iter::once(json!({"uri": post_uri, "title": TITLE, "author": owner.did()}))
+            .chain(member_posts)
+            .collect::<Vec<_>>(),
         "participants": participants,
         "participantDids": participant_dids,
         "pdsCount": pds_count,
@@ -306,6 +364,7 @@ async fn main() -> Result<()> {
                 "titleVerified": true,
                 "currentHeadVerified": true,
             },
+            "warmedPostProofs": warmed,
             "servedProofBundle": {
                 "bytes": bundle.len(),
                 "items": parsed.items.len(),

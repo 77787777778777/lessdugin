@@ -5,6 +5,7 @@ expression: "redact(&users, &alice.ok(&[\"read\", \"1\"]))"
 ---
 Hello, world
 @alice.test · <time> · 2 comments · 1 point · #intro
+tags: #intro relevance 1
 at://<alice>/online.7778777.lessdugin.temp.post/kdjl3qv6jmgz-<tid>
 
 First post, see the docs ⟨example.com⟩.

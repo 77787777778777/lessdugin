@@ -639,6 +639,7 @@ fn comments_and_history_checks() {
         &EditOpts {
             history: false,
             summary: None,
+            drop_link_card: false,
         },
     ))
     .unwrap();

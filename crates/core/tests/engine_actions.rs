@@ -291,6 +291,39 @@ impl World {
     }
 }
 
+/// `sync.md` §4.4, decision O-8: approval-mode applicants are found only through CORE+ hints,
+/// and the mod queue says so, more strongly when this device uses direct sources only.
+#[test]
+fn the_approval_mode_mod_queue_says_where_applicants_come_from() {
+    let w = World::new();
+    let codes = |u: &User| {
+        block_on(u.engine.mod_queue(&w.forum))
+            .unwrap()
+            .banners
+            .into_iter()
+            .map(|b| b.code)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(codes(&w.alice), ["applicantsViaHints"]);
+    block_on(
+        w.alice
+            .engine
+            .set_setting("sources", Some(&json!("direct"))),
+    )
+    .unwrap();
+    assert_eq!(codes(&w.alice), ["applicantsNotDiscovered"]);
+    let q = block_on(w.alice.engine.mod_queue(&w.forum)).unwrap();
+    assert!(q.banners[0].message.contains("direct sources"), "{q:?}");
+    let open = World::with_mode(MembershipMode::Open);
+    assert!(
+        block_on(open.alice.engine.mod_queue(&open.forum))
+            .unwrap()
+            .banners
+            .is_empty(),
+        "open mode has no applicants"
+    );
+}
+
 // ---------------------------------------------------------------------------------------------
 // Wiki and tags (M5)
 
@@ -304,6 +337,7 @@ fn wiki_revisions_parent_the_canonical_head_and_drive_tag_views() {
         is_tag,
         parent_tags: vec!["programming".to_owned()],
         summary: Some("test revision".to_owned()),
+        base: None,
     };
     let first = block_on(w.alice.engine.wiki_edit(
         &w.forum,
@@ -384,6 +418,240 @@ fn wiki_revisions_parent_the_canonical_head_and_drive_tag_views() {
     );
 }
 
+/// Decision O-2: an edit names the head its author loaded (`WikiDraft.base`), and is refused
+/// when the cached canonical head has moved past it, instead of silently parenting the newer
+/// head (which overwrote the other editor's change).
+#[test]
+fn wiki_edits_parent_their_base_and_refuse_a_moved_head() {
+    let w = World::new();
+    let draft = |name: &str, base: Option<&str>| WikiDraft {
+        name: name.to_owned(),
+        description: None,
+        body: Some(BodyDraft::text(format!("About {name}"))),
+        is_tag: true,
+        parent_tags: vec![],
+        summary: None,
+        base: base.map(str::to_owned),
+    };
+    let edit = |u: &User, d: WikiDraft| block_on(u.engine.wiki_edit(&w.forum, "rust", d));
+    // a new page: no base, no parent
+    let t = edit(&w.alice, draft("Rust", None)).unwrap();
+    w.alice.flush();
+    let (r1, r1_cid) = match w.alice.state(&t.id) {
+        WriteState::Done { uri, cid, .. } => (uri, cid.unwrap()),
+        other => panic!("wiki write is {other:?}"),
+    };
+    w.sync_all();
+    // both editors load the page at r1
+    let loaded = block_on(w.bob.engine.tag(&w.forum, "rust")).unwrap();
+    assert_eq!(loaded.head.as_deref(), Some(r1.as_str()));
+    // alice saves first
+    let t = edit(&w.alice, draft("Rust two", Some(&r1))).unwrap();
+    w.alice.flush();
+    let r2 = w.alice.done(&t);
+    assert_eq!(
+        w.alice
+            .record(nsid::WIKI_REVISION, r2.rsplit('/').next().unwrap())
+            .unwrap()["parents"],
+        json!([{"uri": r1, "cid": r1_cid}])
+    );
+    w.sync_all();
+    // bob saves the edit he made against r1: refused, nothing is queued
+    let before = block_on(w.bob.engine.writes()).unwrap().len();
+    let e = edit(&w.bob, draft("Rust three", Some(&r1))).unwrap_err();
+    assert_eq!(e.code, ErrorCode::Conflict, "{e:?}");
+    let detail = e.detail.unwrap();
+    assert_eq!(detail["kind"], "wikiHeadMoved");
+    assert_eq!(detail["base"], r1.as_str());
+    assert_eq!(detail["head"], r2.as_str());
+    assert_eq!(block_on(w.bob.engine.writes()).unwrap().len(), before);
+    // a base that is not the page's head at all (here: no page) is refused too
+    let e = block_on(
+        w.bob
+            .engine
+            .wiki_edit(&w.forum, "python", draft("Python", Some(&r2))),
+    )
+    .unwrap_err();
+    assert_eq!(e.code, ErrorCode::Conflict);
+    assert!(e.detail.unwrap().get("head").is_none());
+    // reloaded at r2, his edit parents r2
+    let t = edit(&w.bob, draft("Rust three", Some(&r2))).unwrap();
+    w.bob.flush();
+    let r3 = w.bob.done(&t);
+    let parents = &w
+        .bob
+        .record(nsid::WIKI_REVISION, r3.rsplit('/').next().unwrap())
+        .unwrap()["parents"];
+    assert_eq!(parents.as_array().unwrap().len(), 1);
+    assert_eq!(parents[0]["uri"], r2.as_str());
+}
+
+/// `tag` is `not_found` for a page that is not a tag or whose tag was removed, so an editor had
+/// no head to start from and overwrote the page from an empty form. `wiki_page` gives the head
+/// and the state of any page (engine-api.md §3.4), and an edit passing it as `base` parents it.
+#[test]
+fn wiki_page_gives_the_head_of_a_page_that_is_not_a_tag_or_was_removed() {
+    use lessdugin_core::dto::WikiPageView;
+    let w = World::new();
+    let edit = |slug: &str, is_tag: bool, base: Option<String>| {
+        let t = block_on(w.alice.engine.wiki_edit(
+            &w.forum,
+            slug,
+            WikiDraft {
+                name: slug.to_owned(),
+                description: None,
+                body: Some(BodyDraft::text(format!("About {slug}"))),
+                is_tag,
+                parent_tags: vec![],
+                summary: None,
+                base,
+            },
+        ))
+        .unwrap();
+        w.alice.flush();
+        w.alice.done(&t)
+    };
+    let notes = edit("notes", false, None);
+    let rust = edit("rust", true, None);
+    let go = edit("go", true, None);
+    // a moderator removes the go tag: the page keeps its revisions
+    w.alice.mod_action(assert_mod(
+        &w.forum,
+        "tag:go",
+        ModActionValue::Tag {
+            removed: true,
+            head: None,
+        },
+    ));
+    w.alice.flush();
+    w.sync_all();
+    let page = |slug: &str| block_on(w.carol.engine.wiki_page(&w.forum, slug)).unwrap();
+    let view = |slug: &str, head: Option<&str>, exists: bool, applicable: bool| WikiPageView {
+        dto: Default::default(),
+        forum: w.forum.clone(),
+        slug: slug.to_owned(),
+        head: head.map(str::to_owned),
+        exists,
+        applicable,
+        unmerged_edits: 0,
+    };
+    // a tag: what tag() says
+    assert_eq!(page("rust"), view("rust", Some(&rust), true, true));
+    let tag = block_on(w.carol.engine.tag(&w.forum, "rust")).unwrap();
+    assert_eq!(tag.head.as_deref(), Some(rust.as_str()));
+    // not a tag, and a removed tag: tag() has nothing, wiki_page has the head
+    for (slug, head, exists) in [("notes", &notes, true), ("go", &go, false)] {
+        let e = block_on(w.carol.engine.tag(&w.forum, slug)).unwrap_err();
+        assert_eq!(e.code, ErrorCode::NotFound, "{slug}: {e:?}");
+        assert_eq!(page(slug), view(slug, Some(head), exists, false));
+    }
+    // no page: no head, an edit is a new page
+    assert_eq!(page("python"), view("python", None, false, false));
+    // the JSON a client reads
+    let json = serde_json::to_value(page("notes")).unwrap();
+    assert_eq!(
+        json,
+        json!({
+            "dto": 1, "forum": w.forum, "slug": "notes", "head": notes,
+            "exists": true, "applicable": false, "unmergedEdits": 0,
+        })
+    );
+    assert!(
+        serde_json::to_value(page("python"))
+            .unwrap()
+            .get("head")
+            .is_none()
+    );
+    // the editor's base: the edit parents the head it loaded, and the page moves on
+    let head = page("notes").head;
+    let second = edit("notes", false, head);
+    let parents = &w
+        .alice
+        .record(nsid::WIKI_REVISION, second.rsplit('/').next().unwrap())
+        .unwrap()["parents"];
+    assert_eq!(parents.as_array().unwrap().len(), 1);
+    assert_eq!(parents[0]["uri"], notes.as_str());
+    w.sync_all();
+    assert_eq!(page("notes").head.as_deref(), Some(second.as_str()));
+    // an unknown forum is not a page
+    let e = block_on(w.carol.engine.wiki_page("not a forum", "notes")).unwrap_err();
+    assert_eq!(e.code, ErrorCode::InvalidRef, "{e:?}");
+}
+
+/// A wiki revision's and a sequence's `body` may spill into a blob (`data-model.md` §5.2 rule
+/// 2), and `body_source` refused both collections (`invalid_ref`), so a client could not edit
+/// such a page or sequence from its source (engine-api.md §3.4).
+#[test]
+fn body_source_reads_the_body_of_a_wiki_revision_and_a_sequence() {
+    let w = World::new();
+    let mut long = "# The whole page\n\nEvery word of it.\n\n".to_owned();
+    while long.len() <= 65_536 {
+        long.push_str("More words in the long body. ");
+    }
+    let page = |slug: &str, body: Option<BodyDraft>| {
+        let t = block_on(w.alice.engine.wiki_edit(
+            &w.forum,
+            slug,
+            WikiDraft {
+                name: slug.to_owned(),
+                description: None,
+                body,
+                is_tag: true,
+                parent_tags: vec![],
+                summary: None,
+                base: None,
+            },
+        ))
+        .unwrap();
+        w.alice.flush();
+        w.alice.done(&t)
+    };
+    let spilled_page = page("rust", Some(BodyDraft::text(long.clone())));
+    let inline_page = page("go", Some(BodyDraft::text("About *Go*")));
+    let bare_page = page("zig", None);
+    let rkey = |uri: &str| uri.rsplit('/').next().unwrap().to_owned();
+    let record = w
+        .alice
+        .record(nsid::WIKI_REVISION, &rkey(&spilled_page))
+        .unwrap();
+    assert!(record["body"].get("textBlob").is_some(), "{record}");
+    let seq = |body: &str| {
+        let t = block_on(w.alice.engine.seq_create(&SequenceDraft {
+            forum: w.forum.clone(),
+            title: "A reading list".to_owned(),
+            body: Some(BodyDraft::text(body)),
+            chapters: vec![SequenceChapterDraft {
+                title: Some("First".to_owned()),
+                body: Some(BodyDraft::text("Chapter one")),
+                posts: vec![w.welcome.clone()],
+            }],
+        }))
+        .unwrap();
+        w.alice.flush();
+        w.alice.done(&t)
+    };
+    let spilled_seq = seq(&long);
+    let inline_seq = seq("Sequence **introduction**");
+    let record = w.alice.record(nsid::SEQUENCE, &rkey(&spilled_seq)).unwrap();
+    assert!(record["body"].get("textBlob").is_some(), "{record}");
+    w.sync_all();
+    for (uri, markdown, spilled) in [
+        (&spilled_page, long.as_str(), true),
+        (&inline_page, "About *Go*", false),
+        (&bare_page, "", false),
+        (&spilled_seq, long.as_str(), true),
+        (&inline_seq, "Sequence **introduction**", false),
+    ] {
+        // another reader's device, as an editor of the page or a reader of the sequence is
+        let s = block_on(w.carol.engine.body_source(uri)).unwrap();
+        assert_eq!(s.markdown, markdown, "{uri}");
+        assert_eq!(s.spilled, spilled, "{uri}");
+        // the record's CID, as raw names it, never the blob's
+        let raw = block_on(w.carol.engine.raw(uri)).unwrap();
+        assert_eq!(raw.cid.as_deref(), Some(s.cid.as_str()), "{uri}");
+    }
+}
+
 #[test]
 fn a_seed_tag_vote_resolves_on_another_users_post() {
     let w = World::new();
@@ -397,6 +665,7 @@ fn a_seed_tag_vote_resolves_on_another_users_post() {
             is_tag: true,
             parent_tags: vec![],
             summary: None,
+            base: None,
         },
     ))
     .unwrap();
@@ -431,6 +700,15 @@ fn a_seed_tag_vote_resolves_on_another_users_post() {
     );
     let view = block_on(w.carol.engine.get_post(&w.bob_post)).unwrap();
     assert_eq!(view.post.tags, vec!["rust".to_owned()]);
+    // PostView.tagRelevance (m5-acceptance-12): the relevance for every reader, the vote for
+    // its voter only
+    let tag = |v: &lessdugin_core::dto::PostView| {
+        let t = v.tag_relevance.iter().find(|t| t.slug == "rust").cloned();
+        t.map(|t| (t.relevance > 0, t.applies, t.mine))
+    };
+    assert_eq!(tag(&view), Some((true, true, None)));
+    let mine = block_on(w.alice.engine.get_post(&w.bob_post)).unwrap();
+    assert_eq!(tag(&mine), Some((true, true, Some(KarmaValue::Up))));
 }
 
 #[test]

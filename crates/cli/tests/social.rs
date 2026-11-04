@@ -140,10 +140,7 @@ fn local_state_commands_round_trip() {
     );
     let settings = alice.json(&["config", "set", "sources"]);
     assert_eq!(settings["settings"]["sources"], "direct");
-    assert!(
-        settings.get("pinned").is_none(),
-        "a stored setting is not a config.toml pin: {settings}"
-    );
+    assert_eq!(settings["pinned"], serde_json::json!(["sources"]));
     let e = alice.fails(1, &["config", "get", "notASetting"]);
     assert_eq!(e["detail"]["kind"], "unknownSetting", "{e}");
     let e = alice.fails(1, &["config", "set", "karmaNotifications", "hourly"]);
@@ -388,6 +385,55 @@ fn votes_refuse_what_cannot_count_and_activity_lists_discussion() {
     assert_eq!(hides[0]["reason"], "off topic", "{log}");
 }
 
+/// Decision O-8 (`engine-api.md` §3.4 `mod_queue`, `sync.md` §4.4): in approval mode `mod
+/// queue` says where its applicants come from, above the queue and also when it is empty: a
+/// warning with direct sources (a devnet's pin), which look for no applicants, a notice with
+/// assisted ones (config.toml's explicit `sources`), which find them only through CORE+ hints.
+/// An open forum's queue has none; `--json` carries the banners as `ModQueue.banners`.
+#[test]
+fn the_mod_queue_says_where_its_applicants_come_from() {
+    let net = Net::new();
+    let alice = net.user("alice.test", true);
+    alice.json(&["forum", "create", "meta"]);
+    alice.json(&["forum", "create", "lounge", "--mode", "open"]);
+    let first_lines = |out: &str| -> (String, String) {
+        let mut l = out.lines();
+        (
+            l.next().unwrap_or_default().to_owned(),
+            out.lines().last().unwrap_or_default().to_owned(),
+        )
+    };
+
+    let out = alice.ok(&["mod", "queue", "alice.test/meta"]);
+    let (first, last) = first_lines(&out);
+    assert!(
+        first.starts_with("! This device uses direct sources only"),
+        "{out}"
+    );
+    assert!(
+        first.ends_with("hear from applicants out of band."),
+        "{out}"
+    );
+    assert_eq!(last, "The queue is empty.", "{out}");
+    let q = alice.json(&["mod", "queue", "alice.test/meta"]);
+    assert_eq!(q["banners"].as_array().unwrap().len(), 1, "{q}");
+    assert_eq!(q["banners"][0]["code"], "applicantsNotDiscovered", "{q}");
+
+    alice.file("config.toml", "sources = \"assisted\"\n");
+    let out = alice.ok(&["mod", "queue", "alice.test/meta"]);
+    let (first, last) = first_lines(&out);
+    assert!(
+        first.starts_with("note: Applicants are found only through"),
+        "{out}"
+    );
+    assert_eq!(last, "The queue is empty.", "{out}");
+    let q = alice.json(&["mod", "queue", "alice.test/meta"]);
+    assert_eq!(q["banners"][0]["code"], "applicantsViaHints", "{q}");
+
+    let out = alice.ok(&["mod", "queue", "alice.test/lounge"]);
+    assert_eq!(out.trim_end(), "The queue is empty.", "{out}");
+}
+
 /// Joining (with its note) and granting are public actions too (`social.md` §17): the first
 /// `join`, `approve` and `mod approve` (a grant is an `#access` mod action) show the
 /// interstitial, which headless use confirms with `--yes`; without it nothing is written. Once
@@ -445,6 +491,98 @@ fn join_and_approve_ask_for_the_public_interstitial_once() {
     // and her later mod actions ask nothing
     let m = carol.json(&["mods", "add", "bob.test"]);
     assert_eq!(m["state"]["kind"], "done", "{m}");
+}
+
+/// Tag votes and the moderator `#tag` from the CLI (`docs/plan.md` §M3: every MVP action is
+/// reachable in every client): carol applies a wiki-backed tag to alice's post with `vote
+/// --tag` behind its own public interstitial and takes it back; the owner removes the tag, pins
+/// its page to a revision and removes her assertion again.
+#[test]
+fn tag_votes_and_tag_moderation() {
+    use lessdugin_lexicon::collection::nsid;
+    let w = World::new();
+    let page = w.alice.file("rust.md", "About Rust.\n");
+    let t = w
+        .alice
+        .json(&["wiki", "edit", "rust", "--name", "Rust", "--file", s(&page)]);
+    assert_eq!(t["state"]["kind"], "done", "{t}");
+    let revision = t["state"]["uri"].as_str().unwrap().to_owned();
+    w.carol.ok(&["sync", &w.forum]);
+
+    // a tag vote is its own public action (`social.md` §17): headless, the first needs --yes
+    let e = w.carol.fails(2, &["vote", &w.post, "up", "--tag", "rust"]);
+    assert!(
+        e["message"]
+            .as_str()
+            .unwrap()
+            .contains("tag votes are public"),
+        "{e}"
+    );
+    assert!(w.carol.account.list(nsid::OPINION).is_empty());
+    let out = w
+        .carol
+        .run(&["vote", &w.post, "up", "--tag", "#rust", "--yes"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stdout).contains("Tag vote recorded"),
+        "{}",
+        text(&out.stdout)
+    );
+    let opinions = w.carol.account.list(nsid::OPINION);
+    assert_eq!(opinions.len(), 1, "{opinions:?}");
+    let rec = w.carol.account.get(nsid::OPINION, &opinions[0].0).unwrap();
+    assert_eq!(
+        rec["tags"],
+        serde_json::json!([{ "tag": "rust", "value": "up" }]),
+        "{rec}"
+    );
+    assert!(rec.get("karma").is_none(), "a tag vote is not karma: {rec}");
+    // `clear` takes it back; the empty opinion is deleted
+    let t = w.carol.json(&["vote", &w.post, "clear", "--tag", "rust"]);
+    assert_eq!(t["state"]["kind"], "done", "{t}");
+    assert!(w.carol.account.list(nsid::OPINION).is_empty());
+
+    // the owner's `#tag` (her first mod action was the approval: nothing is asked)
+    let tag_record = || {
+        w.alice
+            .account
+            .list(nsid::MOD_ACTION)
+            .into_iter()
+            .filter_map(|(rkey, _)| w.alice.account.get(nsid::MOD_ACTION, &rkey))
+            .find(|r| r["subject"] == "tag:rust")
+    };
+    let t = w
+        .alice
+        .json(&["mod", "tag", "rust", "--removed", "--reason", "off topic"]);
+    assert_eq!(t["state"]["kind"], "done", "{t}");
+    let rec = tag_record().expect("a #tag record");
+    assert_eq!(rec["action"]["removed"], true, "{rec}");
+    assert_eq!(rec["reason"], "off topic", "{rec}");
+    assert!(rec["action"].get("head").is_none(), "{rec}");
+    // pinning the page head restates the record: not removed, the head bound to its CID
+    let t = w
+        .alice
+        .json(&["mod", "tag", "tag:rust", "--head", &revision]);
+    assert_eq!(t["state"]["kind"], "done", "{t}");
+    let rec = tag_record().expect("a #tag record");
+    assert_ne!(rec["action"]["removed"], true, "{rec}");
+    assert_eq!(rec["action"]["head"]["uri"], revision.as_str(), "{rec}");
+    let log = w.alice.json(&["mod", "log"]);
+    assert!(
+        log["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["subject"] == "tag:rust" && e["action"] == "tag"),
+        "{log}"
+    );
+    // `mod untag` removes her assertion
+    let t = w.alice.json(&["mod", "untag", "rust"]);
+    assert_eq!(t["state"]["kind"], "done", "{t}");
+    assert!(tag_record().is_none());
+    // a #tag must say something
+    let out = w.alice.run(&["mod", "tag", "rust"]);
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
 }
 
 /// Author moderation (`social.md` §4.9) reaches every author-scope action and its undo: the

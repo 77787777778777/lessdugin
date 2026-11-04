@@ -15,6 +15,7 @@
 //! | `("meta", "schema")` | integer | [`open_cache`] |
 //! | `("id", "did" \| "handle", …)` | identity rows | [`crate::identity`] (owns its keys) |
 //! | `("disc", fk, did)` | discovery rows | discovery |
+//! | `("disc.relay", fk, did)` | relay-only candidates rejected | discovery |
 //!
 //! **Scope.** `scope = rkey[0..12]` if `coll` ∈ `RANGED ∪ {NS.membership}` and `rkey` matches
 //! `^FK$` or `^FK-` (`FK = [2-7a-z]{12}`); otherwise [`GLOBAL_SCOPE`] (`"_"`). A forum is then one

@@ -42,9 +42,10 @@ use crate::dto::{
     CommentSort, Completeness, DtoVersion, ExternalLinkView, ForumRole, ForumSummary, ForumView,
     HandleState, HiddenReason, HistorySummary, HistoryView, ItemState, KarmaValue, MemberView,
     MembersQuery, MembershipMode as DtoMode, ModLogEntry, ModLogStatus, ModQueue, ModQueueItem,
-    ModRole, ModeratorView, MyOpinion, PostKind, PostSummary, PostView, ReactTally, RenderedBody,
-    ScoreView, SequenceNav, SequenceSummary, SequenceView, Stance as DtoStance, TagSummary,
-    TagView, TextQuote, ThreadRoot, ThreadView, Tier, VersionEntry, VersionRef, ViewerCaps,
+    ModRole, ModeratorView, MyOpinion, PostKind, PostSummary, PostTag, PostView, ReactTally,
+    ReadingPosition, RenderedBody, ScoreView, SequenceNav, SequenceSummary, SequenceView,
+    Stance as DtoStance, TagSummary, TagView, TextQuote, ThreadRoot, ThreadView, Tier,
+    VersionEntry, VersionRef, ViewerCaps,
 };
 use crate::identity::short_did;
 use crate::model::build::ForumModel;
@@ -68,6 +69,18 @@ pub const NEWCOMER_QUEUE_MAX: usize = 100;
 /// the `relayDependent` banner: open mode finds brand-new members only through third-party
 /// infrastructure.
 pub const OPEN_MODE_LABEL: &str = "Open mode relies on Bluesky relay, Jetstream and Constellation";
+
+/// The approval-mode mod queue's `applicantsViaHints` banner (`sync.md` §4.4, decision O-8):
+/// applicants are found only through CORE+ hints, so the list may be incomplete.
+pub const APPLICANTS_ASSISTED: &str = "Applicants are found only through Constellation, \
+    Jetstream, a relay or an indexer, so some may be missing. Applicants can also reach you out \
+    of band.";
+
+/// The `applicantsNotDiscovered` banner: with direct sources this device looks for applicants
+/// nowhere, so the list holds only those it found before.
+pub const APPLICANTS_DIRECT: &str = "This device uses direct sources only, so it does not look \
+    for applicants: the list shows only those found before. Switch sources to assisted, or hear \
+    from applicants out of band.";
 
 /// An actor view with only the DID (no cached identity).
 pub fn bare_actor(did: &str) -> ActorView {
@@ -649,8 +662,9 @@ impl Views<'_> {
             return None;
         }
         let body = self.values.get(uri)?.get("body")?;
-        let fetched = crate::model::render::text_blob_cid(body)
-            .is_some_and(|b| self.renders.spilled(b).is_some() || self.renders.contains(&x.cid));
+        let fetched = crate::model::render::text_blob_cid(body).is_some_and(|b| {
+            self.renders.spilled(&x.did, b).is_some() || self.renders.contains(&x.cid)
+        });
         if body.get("textBlob").is_some() && !fetched {
             return None;
         }
@@ -800,6 +814,12 @@ impl Views<'_> {
 
     /// The view of post `uri` with its rendered body and reacts (M5: sequences).
     pub fn post_view(&self, uri: &str) -> Option<PostView> {
+        self.post_view_in(uri, None)
+    }
+
+    /// [`Self::post_view`] read from sequence `from` (`social.md` §14 "the sequence the reader
+    /// came from"): its navigation follows `from` when that sequence contains the post.
+    pub fn post_view_in(&self, uri: &str, from: Option<&str>) -> Option<PostView> {
         let post = self.post_summary(uri)?;
         let x = self.model.skel(uri)?;
         let listed = self.listed(uri);
@@ -816,8 +836,66 @@ impl Views<'_> {
             body,
             reacts,
             history: self.history_summary(uri),
-            sequences: self.sequence_nav(uri),
+            sequences: self.sequence_nav(uri, from),
+            tag_relevance: self.post_tags(uri, listed),
         })
+    }
+
+    /// `PostView.tagRelevance`: `rel(p, slug)` and `applies(p, slug)` of every slug with a
+    /// non-zero relevance or a tag vote of the viewer's, by slug (`social.md` §13.3). The
+    /// viewer's vote on a slug is its entries' one value (OP3: unknown values dropped; OP4:
+    /// conflicting entries give none). A post that is not listed shows none, except to the
+    /// forum's authorities.
+    fn post_tags(&self, uri: &str, listed: bool) -> Vec<PostTag> {
+        if !listed && !self.viewer_is_authority() {
+            return Vec::new();
+        }
+        let Ok(wiki) = self.model.view.wiki.as_ref() else {
+            return Vec::new();
+        };
+        let mut mine: BTreeMap<String, Option<VoteValue>> = BTreeMap::new();
+        let entries = self
+            .my_opinion(uri)
+            .and_then(|(_, v)| v.get("tags")?.as_array().cloned())
+            .unwrap_or_default();
+        for e in &entries {
+            let (Some(slug), Some(value)) = (
+                e.get("tag").and_then(Value::as_str),
+                e.get("value")
+                    .and_then(Value::as_str)
+                    .and_then(VoteValue::parse),
+            ) else {
+                continue;
+            };
+            mine.entry(slug.to_owned())
+                .and_modify(|v| {
+                    if *v != Some(value) {
+                        *v = None;
+                    }
+                })
+                .or_insert(Some(value));
+        }
+        let rel = wiki.rel.get(uri);
+        let slugs: BTreeSet<&str> = rel
+            .into_iter()
+            .flat_map(|r| r.keys())
+            .chain(mine.keys())
+            .map(String::as_str)
+            .collect();
+        slugs
+            .into_iter()
+            .map(|slug| PostTag {
+                slug: slug.to_owned(),
+                relevance: rel.and_then(|r| r.get(slug)).copied().unwrap_or(0),
+                applies: wiki.applies_to(uri, slug),
+                mine: mine.get(slug).copied().flatten().map(|v| match v {
+                    VoteValue::Up => KarmaValue::Up,
+                    VoteValue::Down => KarmaValue::Down,
+                    VoteValue::StrongUp => KarmaValue::StrongUp,
+                    VoteValue::StrongDown => KarmaValue::StrongDown,
+                }),
+            })
+            .collect()
     }
 
     fn wiki_revision(&self, uri: &str) -> Option<lessdugin_lexicon::records::WikiRevision> {
@@ -983,12 +1061,32 @@ impl Views<'_> {
             sequence: self.sequence_summary(uri)?,
             body,
             chapters,
+            continue_reading: None,
         })
     }
 
-    /// Sequence navigation around the first displayable occurrence of a post. The post author's
-    /// eligible sequence wins (score desc, uri asc), then a listed sequence in the same order.
-    pub fn sequence_nav(&self, post: &str) -> Vec<SequenceNav> {
+    /// The "continue reading" position of `sequence` (`social.md` §14, §16) from a stored row:
+    /// only while `post` is a displayable entry of it, so a stale or planted row shows nothing.
+    pub fn continue_reading(
+        &self,
+        sequence: &str,
+        post: &str,
+        at_ms: i64,
+    ) -> Option<ReadingPosition> {
+        self.sequence_posts(sequence)
+            .iter()
+            .any(|p| p.uri == post)
+            .then(|| ReadingPosition {
+                post: post.to_owned(),
+                at_ms,
+            })
+    }
+
+    /// Sequence navigation around the first displayable occurrence of a post (`social.md`
+    /// §14). The context is `from`, the sequence the reader came from, when it is eligible and
+    /// contains the post; else the post author's eligible sequence (score desc, uri asc); else a
+    /// listed sequence in the same order.
+    pub fn sequence_nav(&self, post: &str, from: Option<&str>) -> Vec<SequenceNav> {
         let Ok(library) = self.model.view.library.as_ref() else {
             return Vec::new();
         };
@@ -1018,7 +1116,10 @@ impl Views<'_> {
                 .cmp(&self.raw_score(a).map(|s| s.score).unwrap_or(0))
                 .then_with(|| a.cmp(b))
         });
-        let selected = own.first().copied().or_else(|| {
+        let came_from = from
+            .and_then(|s| library.eligible.get(s))
+            .filter(|s| contains(s));
+        let selected = came_from.or_else(|| own.first().copied()).or_else(|| {
             let mut listed: Vec<_> = library.listed.iter().filter(|uri| contains(uri)).collect();
             listed.sort_by(|a, b| {
                 self.raw_score(b)
@@ -1065,15 +1166,13 @@ impl Views<'_> {
         }) else {
             return Vec::new();
         };
+        let skel = self.model.skel(uri);
         self.renders.links(
-            &self
-                .model
-                .skel(uri)
-                .map(|s| s.cid.clone())
-                .unwrap_or_default(),
+            &skel.map(|s| s.cid.clone()).unwrap_or_default(),
             &serde_json::to_value(post.body).unwrap_or(Value::Null),
             NS,
             post.excerpt.as_deref(),
+            skel.map_or("", |s| s.did.as_str()),
         )
     }
 
@@ -1438,7 +1537,10 @@ impl Views<'_> {
         let d = &self.model.decl;
         let about = d.about.as_ref().and_then(|md| {
             let v = serde_json::to_value(md).ok()?;
-            Some(self.renders.uncached(&v, &self.model.input.ns))
+            Some(
+                self.renders
+                    .uncached(&v, &self.model.input.ns, self.model.key.owner.as_str()),
+            )
         });
         let moderators = lessdugin_lexicon::validity::entry::moderators(d, &self.model.key.owner)
             .into_iter()
@@ -1479,8 +1581,10 @@ impl Views<'_> {
 
     /// The mod queue (`social.md` §4.12): applicants, top-rank tag-head conflicts and stale
     /// positive assertions (the fold's, by type then key), then, in open mode, the newest
-    /// [`NEWCOMER_QUEUE_MAX`] collapsed or hidden newcomer items (`t_rank` desc, uri).
-    pub fn mod_queue(&self) -> ModQueue {
+    /// [`NEWCOMER_QUEUE_MAX`] collapsed or hidden newcomer items (`t_rank` desc, uri). In approval
+    /// mode it says where applicants come from (`sync.md` §4.4, decision O-8): `direct` is whether
+    /// this device uses direct sources only, so it discovers no applicants at all.
+    pub fn mod_queue(&self, direct: bool) -> ModQueue {
         let v = &self.model.view;
         let mut items = Vec::new();
         for q in &v.mod_queue {
@@ -1562,9 +1666,25 @@ impl Views<'_> {
                 });
             }
         }
+        let banners = if v.policy.membership == MembershipMode::Approval {
+            vec![if direct {
+                Banner {
+                    code: "applicantsNotDiscovered".into(),
+                    message: APPLICANTS_DIRECT.into(),
+                }
+            } else {
+                Banner {
+                    code: "applicantsViaHints".into(),
+                    message: APPLICANTS_ASSISTED.into(),
+                }
+            }]
+        } else {
+            Vec::new()
+        };
         ModQueue {
             dto: DtoVersion::default(),
             items,
+            banners,
         }
     }
 

@@ -52,7 +52,7 @@ use crate::store::admit::{self, AdmittedRecord, Expect, LexiconValidator};
 use crate::store::records::{
     Admission, Batch, Delete, DeleteEvidence, OrderKey, RecordStore, Slot,
 };
-use crate::store::repo::{AccountStatus, HostRow, RangeCursor, RepoRow};
+use crate::store::repo::{AccountStatus, HeadSeen, HostRow, RangeCursor, RepoRow};
 use crate::store::{Observation, schema};
 use crate::sync::list::{self, ListError, Lister, RangeListing, RangeVerdict};
 use crate::sync::net::{self, Priority, url_origin};
@@ -501,9 +501,12 @@ struct HostDelta {
 impl<H: Host> Syncer<H> {
     /// `sync_repo` (§5.2). Never panics; failures are reported in the [`RepoReport`].
     pub async fn sync_repo(&self, s: &Session<H>, req: &SyncRequest) -> RepoReport {
+        // The identity first, outside the repo lock: a pass waiting for its PLC slot (§3.5)
+        // does not hold the repo (§10.6).
+        let identity = self.pds_of(s, &req.did).await;
         let _guard = self.net().repo_lock(&req.did).await;
         let mut rep = RepoReport::new(&req.did);
-        match self.sync_repo_locked(s, req, &mut rep).await {
+        match self.sync_repo_locked(s, req, &mut rep, identity).await {
             Ok(outcome) => rep.outcome = outcome,
             Err(e) => {
                 rep.outcome = RepoOutcome::Failed;
@@ -511,7 +514,29 @@ impl<H: Host> Syncer<H> {
                 rep.error = Some(e);
             }
         }
+        // a head check made while this pass held the repo is recorded with its write (§10.6)
+        if let Err(e) = self.record_pending_head(s, &req.did).await {
+            tracing::debug!(did = %req.did, error = %e, "recording a handed head failed");
+        }
         rep
+    }
+
+    /// Writes the head observation handed to the holder of `did`'s repo into its row (the
+    /// latest by send time wins). The caller holds the repo lock.
+    async fn record_pending_head(&self, s: &Session<H>, did: &Did) -> Result<(), SyncError> {
+        let Some((head, pds)) = self.take_pending_head(did.as_str()) else {
+            return Ok(());
+        };
+        let store = RecordStore::new(s.host().cache());
+        let mut repo = store
+            .repo(did.as_str())
+            .await?
+            .unwrap_or_else(|| RepoRow::new(&pds));
+        repo.observe_head(&head.rev, head.cid, head.sent_at);
+        let mut b = store.batch();
+        b.put_repo(did.as_str(), &repo)?;
+        b.commit().await?;
+        Ok(())
     }
 
     /// The PDS service of `did` from its document (level `doc`, or a hint).
@@ -798,6 +823,7 @@ impl<H: Host> Syncer<H> {
         s: &Session<H>,
         req: &SyncRequest,
         rep: &mut RepoReport,
+        identity: Result<(Service, String, bool), SyncError>,
     ) -> Result<RepoOutcome, SyncError> {
         let host = s.host();
         let now = host.now_ms();
@@ -806,7 +832,7 @@ impl<H: Host> Syncer<H> {
         let full = req.reason == Reason::Full;
 
         // identity and PDS
-        let (svc, pds, id_hint) = self.pds_of(s, did).await?;
+        let (svc, pds, id_hint) = identity?;
         rep.id_hint = id_hint;
         rep.pds = Some(pds.clone());
         if id_hint && req.confirm.is_some() {
@@ -1009,6 +1035,7 @@ impl<H: Host> Syncer<H> {
             let check = membership_check(&fetched, &c.forum);
             rep.membership.insert(c.fk.clone(), check.clone());
             if check.rejects() {
+                let _write = self.net().write_lock(did).await;
                 let mut batch = store.batch();
                 let (changed, adm) = self
                     .apply_fetched(
@@ -1224,7 +1251,8 @@ impl<H: Host> Syncer<H> {
             }
         };
 
-        // one batch
+        // one batch, its read-diff-write under the write lock (no request until the commit)
+        let write = self.net().write_lock(did).await;
         let now = host.now_ms();
         let mut batch = store.batch();
         let mut scopes: BTreeMap<String, ScopeState> = req
@@ -1521,6 +1549,7 @@ impl<H: Host> Syncer<H> {
         batch.put_repo(did.as_str(), &repo)?;
         self.put_host(&mut batch, &origin, &host_delta, now).await?;
         batch.commit().await?;
+        drop(write);
         rep.changed = changed;
         for (u, a) in &conflicts {
             self.note_conflict(did, u, a, now);
@@ -1542,7 +1571,8 @@ impl<H: Host> Syncer<H> {
                 Some(h) => item.with_min_rev(h.rev.clone()),
                 None => item,
             };
-            self.enqueue(item);
+            // the pass's forum scopes go with it, also for a forum nobody follows (§6.1)
+            self.enqueue(item.with_fks(fk_scopes.iter().copied()));
             return Ok(RepoOutcome::Unstable);
         }
         Ok(RepoOutcome::Applied)
@@ -1605,6 +1635,64 @@ impl<H: Host> Syncer<H> {
         Ok(())
     }
 
+    /// A point fetch for a page on screen (§14.3 step 4): admitted as [`Syncer::point_fetch`]
+    /// admits it, but without the repo lock and without changing the repo row (its marks and
+    /// collections), so a sync of the repo in flight never holds the page up (§10.6): only its
+    /// local read-diff-write takes the write lock, which no writer holds across a request. The
+    /// order key's `revLo` is the latest head observation, a handed one included.
+    pub(crate) async fn view_fetch(
+        &self,
+        s: &Session<H>,
+        uri: &AtUri,
+    ) -> Result<PointOutcome, SyncError> {
+        let did = uri.did();
+        let (svc, _, id_hint) = self.pds_of(s, did).await?;
+        let store = RecordStore::new(s.host().cache());
+        let stored = store.repo(did.as_str()).await?.and_then(|r| r.head_seen);
+        let head_rev = match (stored, self.pending_head(did.as_str())) {
+            (Some(a), Some(b)) if b.sent_at > a.sent_at => b.rev,
+            (a, b) => a.or(b).map(|h| h.rev).unwrap_or_default(),
+        };
+        let coll = uri.collection().as_str();
+        let rkey = uri.rkey().as_str();
+        let fetched = match self.fetch(s, &svc, did, coll, rkey).await {
+            Ok(f) => f,
+            Err(e) => {
+                if matches!(e, SyncError::Admission(_)) {
+                    self.net().strike(&service_origin(&svc), s.host().now_ms());
+                }
+                return Err(e);
+            }
+        };
+        let found = match &fetched {
+            Fetched::Found { rec, .. } => Some((rec.cid, rec.validity.is_valid())),
+            Fetched::NotFound { .. } => None,
+        };
+        let write = self.net().write_lock(did).await;
+        let now = s.host().now_ms();
+        let mut batch = store.batch();
+        let (changed, adm) = self
+            .apply_fetched(
+                &mut batch, did, coll, rkey, fetched, &head_rev, id_hint, now, true,
+            )
+            .await?;
+        batch.commit().await?;
+        drop(write);
+        if let Some(a) = &adm {
+            self.note_conflict(did, uri.as_str(), a, now);
+        }
+        Ok(match found {
+            Some((cid, valid)) => PointOutcome::Admitted {
+                cid,
+                valid,
+                changed,
+            },
+            None => PointOutcome::NotFound {
+                tombstoned: changed,
+            },
+        })
+    }
+
     /// A point fetch (§5.7): `getRecord(uri)` at the author's PDS, admitted at level `pds` with
     /// key `(repo.headSeen.rev, sentAt)`; `RecordNotFound` tombstones it. A matching `hint`
     /// satisfies the uri's dirty mark (§6.5).
@@ -1651,6 +1739,7 @@ impl<H: Host> Syncer<H> {
                 return Err(e);
             }
         };
+        let write = self.net().write_lock(did).await;
         let now = s.host().now_ms();
         let mut batch = store.batch();
         let found = match &fetched {
@@ -1684,6 +1773,7 @@ impl<H: Host> Syncer<H> {
         }
         batch.put_repo(did.as_str(), &repo)?;
         batch.commit().await?;
+        drop(write);
         if let Some(a) = &adm {
             self.note_conflict(did, uri.as_str(), a, now);
         }
@@ -1707,15 +1797,60 @@ impl<H: Host> Syncer<H> {
         did: &Did,
         authority: bool,
     ) -> Result<Option<Priority>, SyncError> {
-        let _guard = self.net().repo_lock(did).await;
+        Ok(self.head_check_seen(s, did, authority).await?.1)
+    }
+
+    /// [`Syncer::head_check`], also returning the head it observed (`None` under an identity
+    /// hint, whose head is never `headSeen`, §1.5). The request is sent without the repo lock,
+    /// and the row is written under it only if it is free: while another job holds the repo (a
+    /// sync in flight), the observation is handed to that job, which records it with its own
+    /// write, so a head check never waits for it (§10.6, §14.3).
+    pub(crate) async fn head_check_seen(
+        &self,
+        s: &Session<H>,
+        did: &Did,
+        authority: bool,
+    ) -> Result<(Option<HeadSeen>, Option<Priority>), SyncError> {
         let (svc, pds, id_hint) = self.pds_of(s, did).await?;
+        let got = get_head(&s.xrpc(), &svc, did).await;
         let store = RecordStore::new(s.host().cache());
+        let now = s.host().now_ms();
+        // a hint PDS's head is never `headSeen` (§1.5): it could pin it far ahead
+        let seen = match &got {
+            Ok(h) if !id_hint => Some(HeadSeen {
+                rev: h.rev.clone(),
+                cid: h.cid,
+                sent_at: h.sent_at,
+            }),
+            _ => None,
+        };
+        let Some(_guard) = self.net().try_repo_lock(did) else {
+            // the job holding the repo observes the PDS itself, so a failure is only reported
+            let h = got?;
+            let Some(seen) = seen else {
+                return Ok((None, None));
+            };
+            self.hand_head(did.as_str(), seen.clone(), &pds);
+            let mut repo = store
+                .repo(did.as_str())
+                .await?
+                .unwrap_or_else(|| RepoRow::new(&pds));
+            repo.observe_head(&seen.rev, seen.cid, seen.sent_at);
+            let follow = schedule::poll_followup(&repo, repo.class_at(now, authority));
+            if let Some(p) = follow {
+                let at = ready_time(p, now, self.random(), None);
+                self.enqueue(DirtyItem::new(did.as_str(), p, Reason::Poll, at).with_min_rev(h.rev));
+            }
+            return Ok((Some(seen), follow));
+        };
         let mut repo = store
             .repo(did.as_str())
             .await?
             .unwrap_or_else(|| RepoRow::new(&pds));
-        let now = s.host().now_ms();
-        let h = match get_head(&s.xrpc(), &svc, did).await {
+        if let Some((head, _)) = self.take_pending_head(did.as_str()) {
+            repo.observe_head(&head.rev, head.cid, head.sent_at);
+        }
+        let h = match got {
             Ok(h) => h,
             Err(e) => {
                 if !id_hint && e.is_repo_status() {
@@ -1729,7 +1864,6 @@ impl<H: Host> Syncer<H> {
             }
         };
         if !id_hint {
-            // a hint PDS's head is never `headSeen` (§1.5): it could pin it far ahead
             repo.observe_head(&h.rev, h.cid, h.sent_at);
         }
         repo.checked_at = now;
@@ -1742,7 +1876,7 @@ impl<H: Host> Syncer<H> {
             let at = ready_time(p, now, self.random(), None);
             self.enqueue(DirtyItem::new(did.as_str(), p, Reason::Poll, at).with_min_rev(h.rev));
         }
-        Ok(follow)
+        Ok((seen, follow))
     }
 
     /// Runs due polls (§6.7, [`schedule::due_polls`]): one `getLatestCommit` each, concurrently
@@ -1803,6 +1937,7 @@ impl<H: Host> Syncer<H> {
                 (h.rev, sent_at, false)
             }
         };
+        let write = self.net().write_lock(account).await;
         let now = s.host().now_ms();
         let mut out = OwnWritesApplied {
             rev: rev.clone(),
@@ -1850,6 +1985,7 @@ impl<H: Host> Syncer<H> {
         }
         batch.put_repo(account.as_str(), &repo)?;
         batch.commit().await?;
+        drop(write);
         for u in &out.refetch {
             let at = ready_time(Priority::P0, now, self.random(), None);
             self.enqueue(DirtyItem::point(account.as_str(), u, Priority::P0, at));
@@ -1863,8 +1999,8 @@ impl<H: Host> Syncer<H> {
 
     /// Serves up to `max` ready queue items (§6.1), concurrently within the scheduler's limits
     /// and each at its own priority (counted in `s`'s stats): point fetches for uri-only items,
-    /// else `sync_repo` with the scopes `scopes_of(did)` gives (an item without scopes is
-    /// dropped). Returns the `sync_repo` reports, in dispatch order.
+    /// else `sync_repo` with the scopes `scopes_of(did)` gives and the item's own forum scopes
+    /// (an item without scopes is dropped). Returns the `sync_repo` reports, in dispatch order.
     pub async fn run_ready(
         &self,
         s: &Session<H>,
@@ -1901,7 +2037,13 @@ impl<H: Host> Syncer<H> {
                         .collect(),
                 ),
                 crate::sync::queue::Action::Sync => {
-                    let scopes = scopes_of(&item.did);
+                    let mut scopes = scopes_of(&item.did);
+                    for fk in &item.fks {
+                        let sc = Scope::Forum(fk.clone());
+                        if !scopes.contains(&sc) {
+                            scopes.push(sc);
+                        }
+                    }
                     if scopes.is_empty() {
                         continue;
                     }

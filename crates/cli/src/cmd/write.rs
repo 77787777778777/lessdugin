@@ -479,7 +479,8 @@ fn edit_draft_file(
     Err(e)
 }
 
-/// `lessdugin comment <ref> [file|-] [-m text]`.
+/// `lessdugin comment <ref> [file|-] [-m text] [--yes]` (`--yes` confirms the uploads of a
+/// file of the drafts directory, as `post --yes` does: FILE-2).
 pub async fn comment(ctx: &Ctx, args: CommentArgs) -> Result<(), CliError> {
     let w = ctx.writer().await?;
     let (uri, is_comment) = refs::post_or_comment(ctx, &w.engine, &args.reference).await?;
@@ -509,7 +510,7 @@ pub async fn comment(ctx: &Ctx, args: CommentArgs) -> Result<(), CliError> {
             }
             let mut d = CommentDraft::new(root, parent, doc.body_text());
             let dir = ctx.paths.drafts_dir();
-            attach_media(ctx, &w, &mut d.body, Some(&dir), false, false, Some(&id)).await?;
+            attach_media(ctx, &w, &mut d.body, Some(&dir), false, args.yes, Some(&id)).await?;
             return queue_from_draft(ctx, &w, &id, w.engine.comment(&d), "Commented").await;
         }
     };
@@ -517,7 +518,16 @@ pub async fn comment(ctx: &Ctx, args: CommentArgs) -> Result<(), CliError> {
         return Err(CliError::usage("the comment is empty; nothing was posted"));
     }
     let mut d = CommentDraft::new(root, parent, text);
-    attach_media(ctx, &w, &mut d.body, dir.as_deref(), foreign, false, None).await?;
+    attach_media(
+        ctx,
+        &w,
+        &mut d.body,
+        dir.as_deref(),
+        foreign,
+        args.yes,
+        None,
+    )
+    .await?;
     send_comment(ctx, &w, &d).await
 }
 
@@ -751,6 +761,10 @@ fn edit_doc(uri: &str, c: &Current) -> Doc {
         );
         doc.set("kind", draft::Value::Str(c.kind.clone()));
         doc.set_opt("link", c.link.as_deref());
+        if c.link.is_some() {
+            // the author sets it to `true` to drop the card, as `--drop-link-card` does
+            doc.set(DROP_LINK_CARD, draft::Value::Str("false".into()));
+        }
         doc.set("tags", draft::Value::List(c.tags.clone()));
     }
     doc.set("summary", draft::Value::Str(String::new()));
@@ -813,6 +827,33 @@ fn edit_draft(c: &Current, doc: &Doc, body: Option<String>) -> Result<Draft, Cli
                 quote: c.quote.clone(),
             },
         })
+    }
+}
+
+/// The edit draft field (frontmatter) that does what `edit --drop-link-card` does: the
+/// `$EDITOR` template of a post with a link has it (`false`), and an edit file or a kept edit
+/// draft that sets it to `true` drops the card when it is published.
+const DROP_LINK_CARD: &str = "dropLinkCard";
+
+/// `--drop-link-card` (`EditOpts.dropLinkCard`, `engine-api.md` §3.5 `edit`): the post's link
+/// is sent as the uri alone, which the engine then writes as it is, without the card (title,
+/// description, image) it otherwise keeps for the same uri.
+fn drop_link_card(d: &mut Draft, drop: bool) -> Result<(), CliError> {
+    if !drop {
+        return Ok(());
+    }
+    match d {
+        Draft::Post { post, .. } => match &mut post.link {
+            Some(link) => {
+                link.title = None;
+                link.description = None;
+                Ok(())
+            }
+            None => Err(CliError::usage("--drop-link-card: the post has no link")),
+        },
+        Draft::Comment { .. } => Err(CliError::usage(
+            "--drop-link-card applies to posts only (a comment has no link card)",
+        )),
     }
 }
 
@@ -888,7 +929,9 @@ async fn send_edit(
     report(ctx, &t, "Edited")
 }
 
-/// `lessdugin edit <ref> [file|-] [-m text] [--title t] [--summary s] [--no-history]`.
+/// `lessdugin edit <ref> [file|-] [-m text] [--title t] [--summary s] [--no-history]
+/// [--drop-link-card] [--yes]` (`--yes` confirms what the edit suspends and the uploads of a
+/// file of the drafts directory).
 pub async fn edit(ctx: &Ctx, args: EditArgs) -> Result<(), CliError> {
     let reader = ctx.reader().await?;
     let (uri, _) = refs::post_or_comment(ctx, &reader, &args.reference).await?;
@@ -900,6 +943,7 @@ pub async fn edit(ctx: &Ctx, args: EditArgs) -> Result<(), CliError> {
     let mut opts = EditOpts {
         history: !args.no_history,
         summary: args.summary.clone(),
+        drop_link_card: args.drop_link_card,
     };
     let (dir, foreign) = text_dir(ctx, args.message.as_ref(), args.file.as_deref());
     let given = text_arg(args.message, args.file.as_deref())?;
@@ -907,10 +951,12 @@ pub async fn edit(ctx: &Ctx, args: EditArgs) -> Result<(), CliError> {
         Some(text) => {
             // a file may carry post fields in frontmatter
             let doc = Doc::parse(&text).map_err(EngineError::invalid_input)?;
+            opts.drop_link_card |= doc.get(DROP_LINK_CARD) == Some("true");
             let body = doc.body_text();
             (doc, Some(body))
         }
-        None if args.title.is_some() => (Doc::default(), None),
+        // a new title, or dropping the link card, alone leaves the text as it is
+        None if args.title.is_some() || args.drop_link_card => (Doc::default(), None),
         None => {
             let drafts = Drafts::new(ctx);
             let id = drafts.new_id(w.engine.host());
@@ -920,8 +966,11 @@ pub async fn edit(ctx: &Ctx, args: EditArgs) -> Result<(), CliError> {
             if opts.summary.is_none() {
                 opts.summary = doc.get("summary").map(str::to_owned);
             }
+            opts.drop_link_card = doc.get(DROP_LINK_CARD) == Some("true");
             let body = doc.body_text();
-            let mut d = match edit_draft(&c, &doc, Some(body)) {
+            let mut d = match edit_draft(&c, &doc, Some(body))
+                .and_then(|mut d| drop_link_card(&mut d, opts.drop_link_card).map(|()| d))
+            {
                 Ok(d) => d,
                 Err(e) => {
                     kept_note(ctx, &id);
@@ -938,7 +987,7 @@ pub async fn edit(ctx: &Ctx, args: EditArgs) -> Result<(), CliError> {
                 body_mut(&mut d),
                 Some(&dir),
                 false,
-                false,
+                args.yes,
                 Some(&id),
             )
             .await?;
@@ -955,6 +1004,7 @@ pub async fn edit(ctx: &Ctx, args: EditArgs) -> Result<(), CliError> {
             }
         }
     }
+    drop_link_card(&mut d, opts.drop_link_card)?;
     // a new title alone leaves the text as it is
     if body_given {
         attach_media(
@@ -963,7 +1013,7 @@ pub async fn edit(ctx: &Ctx, args: EditArgs) -> Result<(), CliError> {
             body_mut(&mut d),
             dir.as_deref(),
             foreign,
-            false,
+            args.yes,
             None,
         )
         .await?;
@@ -983,11 +1033,14 @@ pub async fn publish_edit_draft(ctx: &Ctx, id: &str, doc: Doc, yes: bool) -> Res
     let c = current(&w, &uri).await?;
     confirm_suspension(ctx, &w.engine, &uri, yes).await?;
     let mut d = edit_draft(&c, &doc, Some(doc.body_text()))?;
+    let drop = doc.get(DROP_LINK_CARD) == Some("true");
+    drop_link_card(&mut d, drop)?;
     let dir = ctx.paths.drafts_dir();
     attach_media(ctx, &w, body_mut(&mut d), Some(&dir), false, yes, Some(id)).await?;
     let opts = EditOpts {
         history: doc.get("history") != Some("false"),
         summary: doc.get("summary").map(str::to_owned),
+        drop_link_card: drop,
     };
     queue_from_draft(ctx, &w, id, w.engine.edit(&uri, &d, &opts), "Edited").await
 }

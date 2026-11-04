@@ -565,3 +565,33 @@ fn drafts_saved_before_they_were_per_account_are_adopted_and_purged() {
     block_on(e.remove_account(b, true)).unwrap();
     assert!(rows(&host).is_empty(), "{:?}", rows(&host));
 }
+
+/// m5-acceptance-8: a "continue reading" row (`("loc","seqpos",sequence)`) is imported only in
+/// the shape `get_post` stores; anything else is refused.
+#[test]
+fn an_import_takes_only_well_formed_continue_reading_rows() {
+    let (host, _pds, alice, _bob) = setup();
+    let e = engine(&host);
+    block_on(e.add_account(AccountInfo::app_password(alice.did.as_str(), PDS))).unwrap();
+    let mut x = block_on(e.export_local(ExportScope::Mine)).unwrap();
+    let seq = "at://did:plc:x/online.7778777.lessdugin.temp.sequence/s";
+    let good = lessdugin_core::store::row::encode(&serde_json::json!({
+        "v": 1, "post": "at://did:plc:x/online.7778777.lessdugin.temp.post/p", "at": 5,
+    }))
+    .unwrap();
+    x.members = vec![
+        loc_member(&["loc", "seqpos", seq], &good),
+        loc_member(
+            &[
+                "loc",
+                "seqpos",
+                "at://did:plc:x/online.7778777.lessdugin.temp.sequence/t",
+            ],
+            b"1",
+        ),
+        loc_member(&["loc", "seqpos", seq, "extra"], &good),
+    ];
+    let r = block_on(e.import_local(&x, ExportScope::Mine)).unwrap();
+    assert_eq!((r.imported, r.refused), (1, 2), "{r:?}");
+    assert_eq!(r.kinds, vec![("seqpos".to_owned(), 1)]);
+}

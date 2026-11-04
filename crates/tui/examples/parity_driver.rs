@@ -22,6 +22,10 @@
 //!     exactly as dto.rs serialises it, the bytes the wasm boundary carries), list.pretty.json
 //!     and thread.pretty.json (the same, as `lessdugin --json` prints them to a pipe), and the
 //!     screens as text (forum-screen.txt, thread-screen.txt, thread-document.txt).
+//! parity_driver tag <forum-uri> <post-uri> <slug>
+//!     As the logged-in account: opens the post and types `:vote up --tag <slug>` (`docs/plan.md`
+//!     §4.2 step 7, the tag applied from the TUI), past the public-action interstitial; the
+//!     write is sent before it returns. Prints {"subject": <post>, "tag": <slug>}.
 //! ```
 //!
 //! Options: `--width N` and `--height N` (default 100 × 30). Exit code 0 on success, 1 on an
@@ -286,6 +290,73 @@ async fn votes(forum: &str, post: &str, size: (u16, u16)) -> Res<()> {
     Ok(())
 }
 
+/// The parity scenario's step 7 (`docs/plan.md` §4.2): the account applies `slug` to `post`
+/// through the `:` command line (`vote up --tag <slug>`), as a TUI user types it.
+async fn tag(forum: &str, post: &str, slug: &str, size: (u16, u16)) -> Res<()> {
+    let d = open()?;
+    let account = d
+        .engine
+        .active_account()
+        .await
+        .map_err(|e| e.message)?
+        .ok_or("not logged in: run `lessdugin --dev login` with this data directory first")?;
+    let store = SecretStore::new(&d.paths).with_keyring_service(d.keyring_service.clone());
+    let account = restore_session(&d.engine, &store, &d.paths, &account)
+        .await
+        .map_err(|e| e.message)?;
+    let engine = d
+        .engine
+        .acting_as(&account.did)
+        .await
+        .map_err(|e| e.message)?;
+    let mut h = Headless::new(
+        engine.clone(),
+        HeadlessOpts {
+            width: size.0,
+            height: size.1,
+            ..HeadlessOpts::default()
+        },
+    )
+    .await
+    .map_err(|e| e.message)?;
+    open_post(&mut h, forum, post).await?;
+    h.press(":").await;
+    for c in format!("vote up --tag {slug}").chars() {
+        h.press(&c.to_string()).await;
+    }
+    h.press("Enter").await;
+    go_past_public_notice(&mut h).await;
+    let screen = h.render();
+    let status = h
+        .state
+        .status
+        .as_ref()
+        .map(|s| s.text.to_plain_string())
+        .unwrap_or_default();
+    if !status.contains("Tag vote recorded") {
+        return Err(format!("the tag vote was not queued: {status}\n{screen}"));
+    }
+    engine
+        .outbox_flush()
+        .await
+        .map_err(|e| format!("sending the tag vote: {}", e.message))?;
+    h.settle().await;
+    let writes = engine.writes().await.map_err(|e| e.message)?;
+    let open: Vec<_> = writes
+        .iter()
+        .filter(|w| !matches!(w.state, lessdugin_core::dto::WriteState::Done { .. }))
+        .collect();
+    if !open.is_empty() {
+        return Err(format!(
+            "the tag vote was not sent: {}\n{screen}",
+            serde_json::to_string(&open).unwrap_or_default()
+        ));
+    }
+    eprintln!("{}", h.render());
+    println!("{}", serde_json::json!({ "subject": post, "tag": slug }));
+    Ok(())
+}
+
 fn write(dir: &Path, name: &str, text: &str) -> Res<()> {
     std::fs::write(dir.join(name), text).map_err(|e| format!("{name}: {e}"))
 }
@@ -365,7 +436,7 @@ async fn read(forum: &str, post: &str, out: &Path, size: (u16, u16)) -> Res<()> 
     Ok(())
 }
 
-const USAGE: &str = "usage: parity_driver reply <forum-uri> <post-uri> [--width N] [--height N]\n       parity_driver read <forum-uri> <post-uri> <out-dir> [--width N] [--height N]\n       parity_driver votes <forum-uri> <post-uri> [--width N] [--height N]";
+const USAGE: &str = "usage: parity_driver reply <forum-uri> <post-uri> [--width N] [--height N]\n       parity_driver read <forum-uri> <post-uri> <out-dir> [--width N] [--height N]\n       parity_driver votes <forum-uri> <post-uri> [--width N] [--height N]\n       parity_driver tag <forum-uri> <post-uri> <slug> [--width N] [--height N]";
 
 fn main() -> ExitCode {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
@@ -401,6 +472,7 @@ fn main() -> ExitCode {
     let res = match args.as_slice() {
         ["reply", forum, post] => rt.block_on(reply(forum, post, size)),
         ["votes", forum, post] => rt.block_on(votes(forum, post, size)),
+        ["tag", forum, post, slug] => rt.block_on(tag(forum, post, slug, size)),
         ["read", forum, post, out] => rt.block_on(read(forum, post, Path::new(out), size)),
         _ => {
             eprintln!("{USAGE}");

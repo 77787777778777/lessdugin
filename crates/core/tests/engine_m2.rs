@@ -226,6 +226,7 @@ fn scenario() -> Scenario {
     let opts = EditOpts {
         history: true,
         summary: Some("clarify".into()),
+        ..EditOpts::default()
     };
     block_on(alice.engine.edit(&welcome, &edit, &opts)).unwrap();
     alice.flush();

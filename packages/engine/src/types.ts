@@ -298,6 +298,17 @@ export interface PostView {
   reacts: ReactTally[];
   history: HistorySummary;
   sequences: SequenceNav[];
+  /** Tag relevance (social.md §13.3) and the viewer's own tag votes, by slug; empty for a post
+   * that is not listed, except to the forum's authorities. */
+  tagRelevance?: PostTag[];
+}
+
+/** A tag of a post: `rel(p, slug)`, whether it applies, and the viewer's own tag vote. */
+export interface PostTag {
+  slug: Slug;
+  relevance: number;
+  applies: boolean;
+  mine?: KarmaValue;
 }
 
 /** Untagged: `{ revision: n }` ("on revision n") or `{ unavailable }` ("on an unavailable
@@ -527,6 +538,22 @@ export interface TagView {
   posts: PostSummary[];
 }
 
+/** `wikiPage`'s result (engine-api.md §3.4, M5): a wiki page's head and state, also for a page
+ * that is not a tag or whose tag was removed (`tag` is `not_found` for those). */
+export interface WikiPageView {
+  dto: DtoVersion;
+  forum: AtUri;
+  slug: Slug;
+  /** The canonical revision, whatever `exists` and `applicable` say: the `WikiDraft.base` of an
+   * edit. Absent: no page (or no eligible revision), an edit is a new page. */
+  head?: AtUri;
+  /** A head and no `tag.removed` in effect; a head without it: the tag was removed. */
+  exists: boolean;
+  /** It exists and its head is a tag: `tag` answers for it. */
+  applicable: boolean;
+  unmergedEdits: number;
+}
+
 export interface SequenceSummary {
   uri: string;
   author: ActorView;
@@ -548,6 +575,15 @@ export interface SequenceView {
   sequence: SequenceSummary;
   body?: RenderedBody;
   chapters: ChapterView[];
+  /** "Continue reading" (local, social.md §14, §16): the post of this sequence last opened
+   * from it (`getPost(uri, sequence)`), while it is a displayable entry; absent in parity mode. */
+  continueReading?: ReadingPosition;
+}
+
+/** Where the reader stopped in a sequence: the last post opened from it, and when. */
+export interface ReadingPosition {
+  post: AtUri;
+  atMs: number;
 }
 
 /** Untagged `PostSummary | CommentNode` (see `isCommentNode`). */
@@ -632,6 +668,10 @@ export interface ModQueueItem {
 export interface ModQueue {
   dto: DtoVersion;
   items: ModQueueItem[];
+  /** Approval mode (sync.md §4.4, decision O-8): `applicantsViaHints` (applicants are found
+   * only through CORE+ hints) or `applicantsNotDiscovered` (direct sources: none are looked
+   * for). Shown above the queue. */
+  banners?: Banner[];
 }
 
 /** The status of a mod-log entry (social.md §4.12). */
@@ -987,6 +1027,10 @@ export interface WikiDraft {
   isTag: boolean;
   parentTags?: Slug[];
   summary?: string;
+  /** The head the author edited (`WikiPageView.head` or `TagView.head`, decision O-2): written
+   * as the only parent; `conflict` (`detail.kind = "wikiHeadMoved"`) when the cached head is
+   * another revision. Absent: the current head, or none for a new page. */
+  base?: AtUri;
 }
 
 /** A draft for `edit` and for the local draft store, tagged by what is drafted (sequence
@@ -998,6 +1042,9 @@ export type Draft =
 export interface EditOpts {
   history: boolean;
   summary?: string;
+  /** Write the draft's `link` as it is, dropping the cached card (title, description, thumb)
+   * even for the cached uri: how a client removes a card and keeps the link (§3.5 `edit`). */
+  dropLinkCard?: boolean;
 }
 
 /** `Karma(v|clear) | Agreement(v|clear) | React{…} | Tag{slug, v|clear}`; an absent `value`
@@ -1174,7 +1221,9 @@ export interface ForumIndexer {
   consented: boolean;
 }
 
-export type AuditKind = "contradiction" | "omission" | "lag";
+/** `unchecked` (M6): an item the audit could not check, the reason in `detail`; never a
+ * contradiction or an omission. */
+export type AuditKind = "contradiction" | "omission" | "lag" | "unchecked";
 
 export interface AuditFinding {
   check: string;
@@ -1188,6 +1237,8 @@ export interface AuditCounts {
   contradictions: number;
   omissions: number;
   lag: number;
+  /** The unchecked findings (M6), never counted as checked; omitted when 0. */
+  unchecked?: number;
 }
 
 export interface AuditCheck {

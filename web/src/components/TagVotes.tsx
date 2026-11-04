@@ -2,17 +2,20 @@
 // Tag votes on a post (social.md §13.3): anyone but the author votes on whether a tag applies,
 // which is how a reader applies a tag (there are no separate tag-relation records). A vote is a
 // `#tagVote` entry in the viewer's public opinion record, held for the undo window like any
-// opinion. The engine's views do not report the viewer's own tag votes, so the buttons show the
-// votes made on this page; the tags shown as applied are the post's resolved tags.
+// opinion. The buttons show the viewer's recorded vote (`PostView.tagRelevance[].mine`), or the
+// one in flight until the write settles and the view is read again; each tag also shows its
+// relevance and whether it applies.
 
 import {
+  type KarmaValue,
   OPINION_UNDO_WINDOW_MS,
+  type PostTag,
   type TagVoteValue,
   type ViewerCaps,
 } from "@lessdugin/engine/types";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
-import { useId, useState } from "react";
+import { useId, useRef, useState } from "react";
 import { useEngine } from "../engine/context.tsx";
 import { qk } from "../engine/queries.ts";
 import { writeStore } from "../engine/writes.ts";
@@ -29,10 +32,18 @@ const CHOICES: { value: TagVoteValue; label: string; glyph: string }[] = [
   { value: "down", label: "Does not apply", glyph: "▼" },
 ];
 
+/** The direction of a vote: a strong vote (from another client) presses its button too. */
+function direction(v: KarmaValue | TagVoteValue | null | undefined): TagVoteValue | null {
+  if (v === "up" || v === "strongUp") return "up";
+  if (v === "down" || v === "strongDown") return "down";
+  return null;
+}
+
 export function TagVotes({
   post,
   forum,
   applied,
+  relevance,
   signedIn,
   caps,
 }: {
@@ -40,17 +51,21 @@ export function TagVotes({
   forum: string;
   /** The post's resolved tags (slugs). */
   applied: readonly string[];
+  /** `PostView.tagRelevance`: each tag's relevance, whether it applies, the viewer's vote. */
+  relevance: readonly PostTag[] | undefined;
   signedIn: boolean;
   /** `ForumView.viewer` (social.md §8): tag votes are karma votes on the tag axis; a viewer
    * who cannot vote cannot tag-vote either. Absent (signed out) never disables. */
   caps?: ViewerCaps | undefined;
 }) {
   const engine = useEngine();
+  const qc = useQueryClient();
   const navigate = useNavigate();
   const requestAck = usePublicAck();
   const selectId = useId();
   const [open, setOpen] = useState(false);
-  const [mine, setMine] = useState<Record<string, TagVoteValue | null>>({});
+  /** Votes in flight, by slug, shown until the write settles and the view is read again. */
+  const [sending, setSending] = useState<Record<string, TagVoteValue | null>>({});
   /** Slugs with a vote in flight (one at a time per tag; other tags stay usable). */
   const [busy, setBusy] = useState<ReadonlySet<string>>(() => new Set());
   const [extra, setExtra] = useState("");
@@ -63,7 +78,17 @@ export function TagVotes({
     const t = tags.data?.find((x) => x.slug === slug);
     return t ? cleanName(t.name) : slug;
   };
-  const shown = [...new Set([...applied, ...Object.keys(mine)])];
+  const recorded = new Map((relevance ?? []).map((t) => [t.slug, t]));
+  const mine = (slug: string): TagVoteValue | null =>
+    slug in sending ? (sending[slug] ?? null) : direction(recorded.get(slug)?.mine);
+  // a tag keeps its place while the panel is open, also once a vote changes where it sorts
+  const order = useRef<string[]>([]);
+  for (const slug of [...applied, ...recorded.keys(), ...Object.keys(sending)]) {
+    if (!order.current.includes(slug)) order.current.push(slug);
+  }
+  const shown = order.current.filter(
+    (slug) => applied.includes(slug) || recorded.has(slug) || slug in sending,
+  );
   const others = (tags.data ?? []).filter((t) => !shown.includes(t.slug));
 
   const vote = async (slug: string, value: TagVoteValue | null): Promise<void> => {
@@ -74,8 +99,7 @@ export function TagVotes({
     if (!allows(caps, "vote")) return;
     if (busy.has(slug) || !(await requestAck("tagVote"))) return;
     setBusy((b) => new Set(b).add(slug));
-    const before = mine[slug] ?? null;
-    setMine((m) => ({ ...m, [slug]: value }));
+    setSending((m) => ({ ...m, [slug]: value }));
     try {
       const ticket = await engine.opinion(post, {
         kind: "tag",
@@ -98,7 +122,6 @@ export function TagVotes({
       });
       const final = await writeStore.wait(ticket.id);
       if (final.kind !== "done") {
-        setMine((m) => ({ ...m, [slug]: before }));
         toasts.dismiss(toastId);
         toasts.show(
           final.kind === "failed"
@@ -106,10 +129,16 @@ export function TagVotes({
             : { message: "Tag vote undone" },
         );
       }
+      // the recorded vote is the view's from here on
+      await qc.invalidateQueries({ queryKey: ["post", post] });
     } catch (e) {
-      setMine((m) => ({ ...m, [slug]: before }));
       toasts.show({ message: errorMessage(e), tone: "error" });
     } finally {
+      setSending((m) => {
+        const next = { ...m };
+        delete next[slug];
+        return next;
+      });
       setBusy((b) => {
         const next = new Set(b);
         next.delete(slug);
@@ -138,12 +167,18 @@ export function TagVotes({
           {shown.length === 0 && <p className={ui.muted}>This post has no tags yet.</p>}
           <ul className={styles.list}>
             {shown.map((slug) => {
-              const current = mine[slug] ?? null;
+              const current = mine(slug);
+              const tag = recorded.get(slug);
               return (
                 <li key={slug} className={styles.item}>
                   <span className={styles.name}>
                     <bdi>{nameOf(slug)}</bdi>
                   </span>
+                  {tag && (
+                    <span className={ui.small}>
+                      relevance {tag.relevance} · {tag.applies ? "applies" : "does not apply"}
+                    </span>
+                  )}
                   {CHOICES.map((c) => (
                     <button
                       key={c.value}

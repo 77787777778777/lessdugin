@@ -16,11 +16,14 @@ import { ForumLayout } from "./pages/forum/ForumLayout.tsx";
 import { ForumMembersPage } from "./pages/forum/ForumMembersPage.tsx";
 import { ForumModPage } from "./pages/forum/ForumModPage.tsx";
 import { ForumNewPostPage } from "./pages/forum/ForumNewPostPage.tsx";
+import { ForumNewSequencePage } from "./pages/forum/ForumNewSequencePage.tsx";
 import { ForumPostsPage } from "./pages/forum/ForumPostsPage.tsx";
 import { ForumSequencesPage } from "./pages/forum/ForumSequencesPage.tsx";
 import { ForumSettingsPage } from "./pages/forum/ForumSettingsPage.tsx";
 import { ForumTagsPage } from "./pages/forum/ForumTagsPage.tsx";
 import { TagPage } from "./pages/forum/TagPage.tsx";
+import { WikiEditPage } from "./pages/forum/WikiEditPage.tsx";
+import { WikiHistoryPage } from "./pages/forum/WikiHistoryPage.tsx";
 import { HomePage } from "./pages/HomePage.tsx";
 import { LoginPage } from "./pages/LoginPage.tsx";
 import { NotFoundPage } from "./pages/NotFoundPage.tsx";
@@ -28,6 +31,7 @@ import { NotificationsPage } from "./pages/NotificationsPage.tsx";
 import { OutboxPage } from "./pages/OutboxPage.tsx";
 import { PostPage } from "./pages/PostPage.tsx";
 import { SearchPage } from "./pages/SearchPage.tsx";
+import { SequenceEditPage } from "./pages/SequenceEditPage.tsx";
 import { SequencePage } from "./pages/SequencePage.tsx";
 import { SettingsPage } from "./pages/SettingsPage.tsx";
 import { UserPage } from "./pages/UserPage.tsx";
@@ -98,10 +102,25 @@ const forumTagRoute = createRoute({
   path: "t/$tag",
   component: TagPage,
 });
+const forumTagEditRoute = createRoute({
+  getParentRoute: () => forumRoute,
+  path: "t/$tag/edit",
+  component: WikiEditPage,
+});
+const forumTagHistoryRoute = createRoute({
+  getParentRoute: () => forumRoute,
+  path: "t/$tag/history",
+  component: WikiHistoryPage,
+});
 const forumSeqsRoute = createRoute({
   getParentRoute: () => forumRoute,
   path: "seqs",
   component: ForumSequencesPage,
+});
+const forumNewSeqRoute = createRoute({
+  getParentRoute: () => forumRoute,
+  path: "seqs/new",
+  component: ForumNewSequencePage,
 });
 const forumModRoute = createRoute({
   getParentRoute: () => forumRoute,
@@ -123,6 +142,11 @@ const postRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/p/$author/$rkey",
   component: PostPage,
+  // `seq`: the sequence the post was opened from (engine-api.md §3.4 `get_post(uri, sequence)`)
+  validateSearch: (s: Record<string, unknown>): { seq?: string } => {
+    const seq = str(s.seq);
+    return seq && parseAtUri(seq) ? { seq } : {};
+  },
 });
 const commentRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -133,6 +157,11 @@ const sequenceRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/s/$author/$rkey",
   component: SequencePage,
+});
+const sequenceEditRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/s/$author/$rkey/edit",
+  component: SequenceEditPage,
 });
 const userRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -193,7 +222,10 @@ export const routeTree = rootRoute.addChildren([
     forumNewRoute,
     forumTagsRoute,
     forumTagRoute,
+    forumTagEditRoute,
+    forumTagHistoryRoute,
     forumSeqsRoute,
+    forumNewSeqRoute,
     forumModRoute,
     forumMembersRoute,
     forumSettingsRoute,
@@ -201,6 +233,7 @@ export const routeTree = rootRoute.addChildren([
   postRoute,
   commentRoute,
   sequenceRoute,
+  sequenceEditRoute,
   userRoute,
   atRoute,
   notificationsRoute,

@@ -26,8 +26,14 @@ only by `lessdugin_atp::proof::ProofBundle` (`proofs/1`), never by JSON or an En
 Head hints can queue a PDS sync but cannot write `headSeen`, `listed`, or a repo revision.
 `getChanges` validates ascending exclusive sequence numbers, persists its integer cursor under
 `indexer:<did>:<fk>`, writes ordinary dirty marks, and enqueues point fetches. A malformed page
-does not advance the cursor. `CursorTooOld` queues reconciliation and restarts at the current
-`asOf.seq`.
+does not advance the cursor. Each change is first scoped to the polled forum (`ChangeScope`):
+only that forum's records by C(F), granted DIDs, confirmed participants and own accounts are
+marked and fetched; a membership at the forum key by another DID is returned as a candidate,
+which `sync_forum` confirms as a newcomer hint; everything else is dropped before any identity
+lookup. `CursorTooOld` queues reconciliation (authorities P1, other participants P3, at most once
+per 24 h, stamped in the cursor row's `timeUs`) and restarts at the current `asOf.seq`.
+`hydrate_indexer_page` hydrates only post URIs in the forum's range, and only participants'
+once discovery has completed; head hints for DIDs that were not asked about are ignored.
 
 `listPosts`, `listRecentDiscussion` and `getThread` expose `OrderingHint`: AT URIs, an opaque
 cursor and (where defined) `inputDigest`. Hint text, state, badges, rank and tallies never enter
@@ -39,7 +45,9 @@ author's current PDS head. A proof is admitted only when its commit revision is 
 head and the head observation is no more than 60 seconds older than bundle receipt. Current
 proofs use the normal record validator and `Source::Indexer`; stale, missing, mismatched and
 failed items are never fold inputs and fall back to `point_fetch`. Bundle failures add persistent
-host strikes, with one breaker failure per bundle.
+host strikes, with one breaker failure per bundle. A request that returns no bundle
+(`Unavailable`) and a single URI still over the cap (`TooLarge`) also fall back to the PDS, but
+are not strikes and are not audit contradictions.
 
 `LiveProofBatch` holds at most 25 URIs and flushes a non-full batch after a host-selected 1–3
 second delay. Core does not spawn a task: the native service agent owns the timer and calls
@@ -51,7 +59,11 @@ one request per 25 visible URIs (two for 26–50).
 `Engine::audit_indexer` is the shared A1–A5 implementation. `lessdugin sync <forum> --audit`
 prints per-check and total counts and exits 6 for any contradiction or omission. A2 uses bounded
 session-local Jetstream observations; it intentionally does not invent a persistent Jetstream
-history. Audit does not automatically demote an indexer (P2).
+history. It reads `getChanges` back from the head in doubling windows (restarting a window at
+the oldest accepted cursor after `CursorTooOld`) and accepts a row at a later rev, or at the
+observed rev and CID, so both commit-rev rows and snapshot-diff rows at the repo head match
+(`sync.md` §15.4). Items the audit cannot reach (an unreachable PDS, no proof bundle, a scan
+that stopped early) are logged as unchecked; they are not findings. Audit does not automatically demote an indexer (P2).
 
 The eventual service agent should reuse `poll_indexer_changes`, the ordering methods,
 `hydrate_indexer_records`, `LiveProofBatch`, and `audit_indexer`. It must schedule the returned

@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: CC0-1.0 -->
 # ADR 0008 — The wasm size limit is a tripwire, not a budget
 
-- Status: Accepted
+- Status: Superseded by ADR 0010 (2026-11-03)
 - Date: 2026-10-23
 - Supersedes: ADR 0002 decision 4 (the 900 KB gz target and the 1.1 MB gz CI failure line) and
   the 900 KB condition of ADR 0002 rule 5

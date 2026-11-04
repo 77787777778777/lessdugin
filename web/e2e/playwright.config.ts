@@ -7,13 +7,19 @@ import { fileURLToPath } from "node:url";
 import { defineConfig, devices } from "@playwright/test";
 
 const webDir = fileURLToPath(new URL("..", import.meta.url));
+const e2eDir = fileURLToPath(new URL(".", import.meta.url));
 const PORT = 4173;
+
+/** The mock suite is the specs directly in e2e/. Every subdirectory holds a suite with its own
+ * config and environment (devnet/, cold-start/), so none of their files is collected here
+ * (checked by src/test/e2eCollect.test.ts). Playwright matches against the absolute path. */
+export const MOCK_SPECS = new RegExp(
+  `^${e2eDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[^/]+\\.spec\\.ts$`,
+);
 
 export default defineConfig({
   testDir: ".",
-  testMatch: /.*\.spec\.ts$/,
-  // The devnet tests have their own config (e2e/devnet/playwright.config.ts).
-  testIgnore: /devnet\//,
+  testMatch: MOCK_SPECS,
   fullyParallel: false,
   workers: 1,
   timeout: 90_000,

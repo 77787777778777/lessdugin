@@ -333,7 +333,9 @@ DIDs that merely appear in records are never resolved eagerly.
 
 ### 3.5 PLC pacing
 
-Requests to the PLC directory: at most 8 in flight and at most `plcRate` requests per second, where `plcRate` starts at 20. On 429: honour `Retry-After`, and set `plcRate = max(1, plcRate / 2)`. After every 60 s without a 429: `plcRate = min(20, plcRate + 2)`. PLC sends no rate-limit headers (ADR 0004).
+Requests to the PLC directory: at most 8 in flight and at most `plcRate` requests per second, where `plcRate` starts at 20. "Per second" is a sliding window: no more than `plcRate` slots in any one second, so a P0 burst of up to `plcRate` documents (the authors on a cold page) goes out at once, within the in-flight cap, rather than one every `1000 / plcRate` ms (decision O-16). Background (P1, P2) requests also keep `1000 / plcRate` ms after the last slot, so a sweep never fills the window at once and a P0 request behind a running sweep waits at most that long. On 429: honour `Retry-After`, and set `plcRate = max(1, plcRate / 2)`. After every 60 s without a 429: `plcRate = min(20, plcRate + 2)`. PLC sends no rate-limit headers (ADR 0004).
+
+The paced slots go to waiting requests in the order of §9.1, by priority and then arrival, and a slot is taken only when it is used. A P0 request (an author on screen, §14.3) therefore waits at most for the next free slot, never behind a forum sync's queued participant documents, and a request whose slot would come only after its time budget ends leaves without taking one, so a spent budget never delays later requests.
 
 ### 3.6 Login binding
 
@@ -362,7 +364,8 @@ bind_login(token_response, intended?):       // intended = the DID the user aske
 Devnet mode (`--dev` or a config profile; never enabled implicitly; ADR 0006):
 - handles resolve through the PDS's `com.atproto.identity.resolveHandle` (method `devnet`), and `.test` handles are allowed;
 - the PLC base URL is configurable, and `http://` PDS, PLC and Jetstream endpoints and IP-literal hosts are allowed;
-- the SSRF guard (§12.1) allows loopback.
+- the SSRF guard (§12.1) allows loopback;
+- `sources` is pinned to `direct` at the flag level (`EngineConfig.sources_flag`), whatever the stored setting says, unless a CLI flag or the native `config.toml` states `sources`: a stored `sources = assisted` never turns on CORE+ services in a devnet.
 
 ---
 
@@ -449,12 +452,14 @@ Newcomers are participants found only through hints. They are discovered in `ass
 
 | Source | Exact use |
 |---|---|
-| Constellation | `GET <constellation>/xrpc/blue.microcosm.links.getBacklinks?subject=<F>&source=<NS>.membership:forum&limit=100[&cursor=…]`. Keep paging while `cursor ≠ null`: a short page does not mean the end. Entries `{did, collection, rkey}` with `rkey ≠ fk` are dropped without a fetch. `getBacklinksCount` with the same parameters gives the "N members (hint)" badge. (ADR 0003) |
+| Constellation | `GET <constellation>/xrpc/blue.microcosm.links.getBacklinks?subject=<F>&source=<NS>.membership:forum&limit=100[&cursor=…]`. Keep paging while `cursor ≠ null`: a short page does not mean the end. Entries `{did, collection, rkey}` with `rkey ≠ fk` are dropped without a fetch. At most `CONSTELLATION_HINTS_MAX` (1,000, twice the budget) entries are read, newest first; paging stops there. `getBacklinksCount` with the same parameters gives the "N members (hint)" badge. (ADR 0003) |
 | Jetstream | commit events of `NS.membership` with `rkey = fk` (§6.4) |
 | Indexer | `listParticipants(forum = F)`, paging by cursor |
-| Relay | `listReposByCollection(collection = NS.membership, limit = 500)` across `network.relays`, only while the union of returned DIDs is ≤ 5,000. Above that, this source is disabled for the session. |
+| Relay | `listReposByCollection(collection = NS.membership, limit = 500)` across `network.relays`, only while the union of returned DIDs is ≤ 5,000. Above that, this source is disabled for the session. An entry names a repo with some membership record, not a forum: each DID is a candidate confirmed at its PDS (§4.2.1), with no per-DID query to another service, and a relay entry is never a new hint for a rejected candidate. A **relay-only** candidate (no other hint names it and it has no `disc` row) gets a `disc` row only once confirmed: a check that rejects it writes a `("disc.relay", fk, did)` row instead (§10.4), which keeps its back-off and is no discovery row, and one left over the budget is not kept (the relay lists it again). The relay's membership directory therefore never becomes repos that `live_tail` follows or DIDs of a Jetstream filter (§6.2). |
 
-- **Budget.** At most 500 newcomer candidates per forum are confirmed and synced (*tunable*). Candidates are taken most recent first: by Jetstream `time_us`, then Constellation order (newest first), then indexer order; ties by DID ascending. The rest stay as `disc` rows.
+- **Budget.** At most 500 newcomer candidates per forum are confirmed and synced (*tunable*). Candidates are taken most recent first: by Jetstream `time_us`, then Constellation order (newest first), then indexer order; ties by DID ascending. A rejected relay candidate still in its back-off (§4.2.1) is taken after all the others, so it never holds a place another candidate could use. The rest stay as `disc` rows, except relay-only ones. A forum keeps at most `DISC_ROWS_MAX` (10,000, *tunable*) `disc` rows, and as many `disc.relay` rows: past that, a discovery pass drops the oldest that are not confirmed (by first-seen time, then DID), as the Jetstream candidate write does (§6.4).
+- **Bounds.** A listing page with more entries than the `limit` it asked for is malformed, and that source fails. Constellation is read newest first up to its bound (`CONSTELLATION_HINTS_MAX` membership entries; `RECENT_POSTS_DISCOVERY` post entries for step 3 of §4.5); paging stops there and the older entries are dropped with a warning.
+- **Independent sources.** Recently active authors, Constellation newcomers and relay newcomers are independent and best-effort: a source that fails (its service is down, malformed, or over a bound that fails it) is logged and reported, and the other sources' hints are still used; the PDS sync of §4.5 runs either way. `sources = direct` contacts none of them (§2.3). One `sync_forum` discovers hints once.
 - **Applications (approval mode).** Applicants (`member(d) ∧ access(d) = none`) are found in the same way, so moderators see them only through CORE+ or out of band. The mod queue says so.
 
 ### 4.5 Sync order and completeness
@@ -499,7 +504,11 @@ directory():
   group by owner: the verified handle, else short_did (F9); sort groups by handle, then DID
 ```
 
-`listReposByCollection` takes one exact NSID; wildcards are rejected (ADR 0003). Its entries carry only `did`. The directory is CORE+ (relay) or EXT; a forum can always be opened directly by reference.
+- Both sources give only owner DIDs: an indexer entry's uri names the owner, whose `NS.forum` collection is then listed at its PDS like a relay owner's; the indexer's own text is never shown or matched. Each owner is listed once.
+- Either source may fail alone, and the directory then shows the other's forums (an empty list when the other answered with none); it fails only when no configured source answered, or in `sources = direct`. A source that is not configured (no `network.relays`, no consented indexer) gives nothing and does not answer: with no relay configured, a failing indexer fails the directory.
+- The result is one list in group order: owners with a verified handle first, by handle, then the others by DID; within an owner, forums by name (case-insensitive), then uri. Forums of one owner are therefore never interleaved with another's, so a lookalike name shows under its real owner.
+
+`listReposByCollection` takes one exact NSID; wildcards are rejected (ADR 0003). Its entries carry only `did`. A page with more than the 500 entries asked for is malformed, and at most `DIRECTORY_OWNERS_MAX` (10,000) distinct owners are read; further owners are dropped with a warning. The directory is CORE+ (relay) or EXT; a forum can always be opened directly by reference.
 
 ### 4.8 Followed forums
 
@@ -543,6 +552,7 @@ sync_repo(did, scopes, reason) -> Clean | Applied | Unstable | Rollback | Failed
      an invalid record is kept with valid = false
   h2     = getLatestCommit(did)
   stable = (h2.rev = h1.rev ∧ h2.cid = h1.cid)
+  take the write lock (§10.6)                                   // until the write below; no request
   batch  = []
   for each (s, c):
      for each listed row: batch += admit(row, key = (h1.rev, sentAt of its page), exact = stable)      // §5.6
@@ -559,12 +569,12 @@ sync_repo(did, scopes, reason) -> Clean | Applied | Unstable | Rollback | Failed
      remove every mark with rev ≤ h1.rev (§6.5)
   repo.colls/collsAt/collsRev/collsDirty updated if describeRepo ran (collsRev = h1.rev); repo.checkedAt = now; repo.fails = 0; repo.lastOk = now
   KvStore::write(cache, batch ++ [put repo row])                                    // one atomic batch
-  if ¬stable: enqueue(did, minRev = h2.rev, P1, "unstable"); return Unstable
+  if ¬stable: enqueue(did, minRev = h2.rev, P1, "unstable", fks = the pass's fk scopes); return Unstable
   emit Changed; return Applied
 ```
 
 **Rules**
-- An unstable pass (the head moved during listing) still admits what it listed, but writes no tombstones and advances no `listed` entry. After 3 consecutive unstable passes the repo is re-queued at P3 with the repo backoff (§9.4).
+- An unstable pass (the head moved during listing, or its head re-check failed, as when its time budget ran out while a listing was held) still admits what it listed, but writes no tombstones and advances no `listed` entry. After 3 consecutive unstable passes the repo is re-queued at P3 with the repo backoff (§9.4). The queued item carries the pass's forum scopes (§6.1), so the pass is finished also for a forum open in a view that is not followed.
 - **`describeRepo` freshness.** `repo.colls` is reused for up to 24 h. It is refreshed early when `repo.collsDirty` is set: a hint or an own write named a collection in `OURS` that is not in `repo.colls`. A background pass can therefore miss a collection created less than 24 h ago and named by no hint until the next reconcile, which always refreshes. A **user-initiated** pass (`sync_forum`, `sync_thread`, `sync --full`; `engine-api.md` §3.3) of a forum scope trusts `repo.colls` only at the head it was described at (`repo.collsRev`): when the head moved and a ranged collection or `NS.membership` is missing from `repo.colls`, it calls `describeRepo` again, even when the pass would otherwise be `Clean`. An explicit refresh therefore sees the first records of a newly granted or newly joined participant at once. If `describeRepo` fails, `colls = OURS`.
 - **Partial results.** A range that failed or hit a byte cap leaves its scope unlisted; the other ranges are still applied.
 
@@ -720,7 +730,8 @@ So a subject counts as absent only if a delete was confirmed, or its range was c
 #### 5.6.5 `obs` (first-seen times)
 
 - `firstSeen(u, cid)` is the earliest time (µs) at which this client observed that exact version from **any** source, hints included: a Jetstream commit event carrying `(u, cid)`, an indexer `#recordRef` or `#change`, or the admission itself. Hint times are kept in memory and applied when the version is admitted.
-- In assisted mode, an indexer's `#recordRef.firstSeen` is also a candidate, and the minimum is taken.
+- The time of a hint is when this client received it: a Jetstream commit's local receive time (§6.4), and for an indexer `#change` the time its `getChanges` page arrived (§6.6), never the page's `asOf.timeUs` (the indexer's clock, like a Jetstream `time_us`).
+- In assisted mode, an indexer's `#recordRef.firstSeen` is also a candidate, and the minimum is taken. A `#change` carries no `firstSeen`, so it offers none.
 - Each stored row keeps `firstSeen` for its current CID, plus `firstCid` and `firstSeenUri` for the earliest version ever admitted. The fold's `obs` therefore contains `(u, cid) → firstSeen` and `(u, firstCid) → firstSeenUri`, so `t_obs` is the record's first-seen time across edits (`social.md` §2.2).
 - First-seen values are never moved later.
 - **Parity mode** (test-only, devnet-only; `engine-api.md` §2.1): the engine passes the fold one fixed time as the `obs` of every admitted version and as `now`, instead of the stored first-seen times and the clock. The stored values are not changed.
@@ -793,7 +804,7 @@ Every response is byte-counted while streaming, after decompression; the host ab
 
 ### 6.1 The dirty queue
 
-Every change source feeds one queue of items `(did, minRev?, priority, reasons, uris?)`:
+Every change source feeds one queue of items `(did, minRev?, priority, reasons, uris?, fks?)`:
 - Jetstream (§6.2–§6.4);
 - the indexer change feed (§6.6);
 - polling (§6.7);
@@ -802,7 +813,9 @@ Every change source feeds one queue of items `(did, minRev?, priority, reasons, 
 - discovery (§4);
 - opening a view (§6.7).
 
-**Coalescing.** The queue holds at most one item per DID. Merging takes the highest priority (P0 highest), the greatest `minRev`, the union of reasons and uris, and the earliest ready time.
+**Coalescing.** The queue holds at most one item per DID. Merging takes the highest priority (P0 highest), the greatest `minRev`, the union of reasons, uris and fks, and the earliest ready time.
+
+**Scopes.** An item's `sync_repo` covers the DID's forum scopes that the queue's server knows (the followed forums it is relevant to, and those its repo was listed for) and the item's own `fks`: the scopes of the pass that queued it (an unstable pass, §5.2). Without them, a pass a forum page's sync left unfinished (its budget spent while a participant's listing was held) would be dropped for a forum that is open but not followed, and the page would not converge until another explicit sync.
 
 | Priority | Content | Ready after (debounce plus jitter, *tunable*) |
 |---|---|---|
@@ -831,23 +844,27 @@ Jetstream is used only in `assisted` mode. It is a **"this repo changed" signal*
 | `wildcard` | native, always; browser until participants are known | v2, `collections=<NS>.*`, no DID filter |
 | `filtered` | browser, once participants are known and D holds between 1 and 10,000 DIDs | at most 150 DIDs: v2 with `dids=` for each DID in D; more than 150: v1 with `options_update{wantedDids: D}` (the request-line limit makes 400 DIDs fail with 414, ADR 0003). Plus, if `F_new ≠ ∅`, a side connection: v2 `collections=<NS>.membership&kinds=commit` with no DID filter. |
 
-- `D` = the own account DIDs ∪, over every followed or open forum, its authorities, confirmed participants and candidates being synced.
-- "Participants are known" means every followed or open forum has finished one discovery pass (§4.2). The browser then switches to `filtered`. When D changes it reconnects with the new set, at most once per 10 minutes (*tunable*), and DIDs newly added to D get a P2 `sync_repo` to cover the events they missed. If `|D| > 10,000`, the browser stays in `wildcard`.
+- `D` = the own account DIDs ∪, over every followed or open forum, its authorities and confirmed participants (discovery rows in state `Confirmed`, and grants). These are also the repos `live_tail` keeps fresh (polling §6.7, reconcile §6.8): a discovery row that is still a candidate, or a rejected or unconfirmed hint, is in neither. Such a DID reaches its PDS only through confirmation (§4.2.1), under its back-off and the newcomer budget (§4.4), and joins D once confirmed.
+- "Participants are known" means every followed or open forum has finished one discovery pass (§4.2). The browser then switches to `filtered` at once, and so does a `wildcard` connection made while they were not known (a forum followed meanwhile), however recent the last `filtered` connection. When D changes later, it reconnects with the new set at most once per 10 minutes (*tunable*, counted from the last `filtered` connection), and DIDs newly added to D get a P2 `sync_repo` to cover the events they missed (none after a `wildcard` connection, which missed nothing). If `|D| > 10,000`, the browser stays in `wildcard`.
+- The side connection exists while the main one is `filtered` and `F_new ≠ ∅`, and is closed otherwise. It shares the deduplication LRU (§6.3) with the main connection. Its cursor is kept in memory and is never persisted: it resumes from its own cursor, else from the main cursor (`timeUs − 5 s` across a restart); a gap (`#info`) on it restarts its cursor at `now − 5 s` and schedules no reconcile. Its frames do not count as a healthy live source. Its reconnect delay follows the main connection's rule with its own failure count.
+- The DID filter discloses D to the Jetstream operator (decision U-D1, ADR 0009, `threat-model.md` PRIV-11).
 - **Reserved (P2):** switching the native client to `filtered` automatically when lessdugin-wide traffic exceeds about 50 events/s.
 - `<NS>.*` also matches `<NS>.temp.*` and `<NS>.index.*` collections; events are filtered by exact collection (§6.4).
 - Compression: v1 MAY negotiate `permessage-deflate`. Byte caps apply after decompression.
 
 **Endpoints and reconnect** (*tunable*)
-- Connect to the first host in `network.jetstream`. Reconnect after any close or error with delay `min(60 s, 1 s · 2^(n−1)) · uniform(0.8, 1.2)` for the n-th consecutive failure. After 3 consecutive failures, fail over to the next host.
+- Connect to the first host in `network.jetstream`. Reconnect after any close or error with delay `min(60 s, 1 s · 2^(n−1)) · uniform(0.8, 1.2)` for the n-th consecutive failure. After 3 consecutive failures, fail over to the next host. A frame that parses ends the failure count, except a gap (`#info`, §6.3): within a **gap streak**, `n` is the larger of the failure count and the number of gaps in the streak, so an endpoint that answers every connection with a gap backs off and fails over like a failing one. A streak ends when a frame other than a gap arrives 2 minutes (*tunable*) or more after the streak's last gap.
+- The leader keeps at most one receive in flight per socket, and one connect and one leader-lock request, across rounds: a round that stops waiting (a timer won) leaves them in flight for the next round, so no frame is handed to an abandoned receive and no socket is opened twice (browser socket handles are not cancellation-safe). Stopping the source closes its sockets, and waits up to 1 s for a connect or lock request in flight so it can close or release what that returns.
 - A message over 1,200,000 bytes closes the connection. If two consecutive connections fail on oversize at the same cursor, the client resumes at `timeUs + 1 s` and schedules a full reconcile (§6.8) at P3.
-- While no live source (Jetstream, or an indexer change feed) has been healthy for 2 minutes, polling (§6.7) runs.
+- The browser's WebSocket API has no backpressure, so the browser host buffers at most 256 frames or 16 MiB (*tunable*) that the core has not read yet; a frame that arrives while a read waits is never buffered. On overflow it closes the socket with a network error: the frames already buffered are still read, then the core reconnects from its cursor with the delay above.
+- While no live source (Jetstream, or an indexer change feed) has been healthy for 2 minutes, polling (§6.7) runs. Only frames of the main connection other than gaps make Jetstream healthy.
 
 ### 6.3 Cursor handling
 
 - **Persisted** in `cur/jetstream` (§10.4) every 5 s or every 1,000 events: `{wire, instance, seq?, timeUs}`. On v2, `seq` is the payload's `seq` and `timeUs` is `µs(witnessedAt)`; on v1, `timeUs` is `time_us`.
 - **Resume.** Same instance and wire v2: `cursor = seq` (inclusive, so the first event repeats). Otherwise (another instance, or a change of wire): `cursor = timeUs − 5,000,000`.
 - **Deduplication.** An LRU of 10,000 keys (*tunable*): `(did, rev, collection, rkey, operation)` for commits, `(did, kind, inner seq)` for identity and account events.
-- **Gaps.** `#info OutdatedCursor`, or a persisted cursor older than 36 h, triggers a full reconcile (§6.8): every participant of every followed forum is enqueued at P3 and every authority at P1; the cursor restarts at `now − 5 s`. `#info FutureCursor` restarts the cursor at `now − 5 s`.
+- **Gaps.** `#info OutdatedCursor`, or a persisted cursor older than 36 h, triggers a full reconcile (§6.8): every participant of every followed forum is enqueued at P3 and every authority at P1; the cursor restarts at `now − 5 s`. `#info FutureCursor` restarts the cursor at `now − 5 s`. Each gap closes the connection and restarts the cursor. An `OutdatedCursor` schedules the reconcile only if it is the first `OutdatedCursor` of its gap streak (§6.2; a `FutureCursor` before it does not count) and no gap reconcile was scheduled for the same endpoint in the last hour (*tunable*; the authority reconcile period, §6.8). A Jetstream that reports a gap on every connection, or that spaces its gaps between valid frames, therefore causes at most one reconcile an hour, not one per connection.
 - **Replay at forum open** (§4.5 step 3, assisted only). When a forum is opened for the first time, the client MAY open a temporary v2 connection with `cursor = now − 36 h` and close it when it reaches the live cursor. It collects only the DIDs of commits in that forum's `{fk}-` ranges, as recently-active hints.
 
 ### 6.4 Event filtering and handling
@@ -868,7 +885,7 @@ on event e:
     if ¬relevant: drop
     if ¬KNOWN(e.did):
        if e.collection = NS.membership ∧ e.rkey ∈ F_new: newcomer candidate (§4.4); else drop
-    else: dedup; record firstSeen(uri, e.cid) (§5.6.5); add a dirty mark (§6.5); handle per the table
+    else: dedup; record firstSeen(uri, e.cid) = the local receive time (§5.6.5); add a dirty mark (§6.5); handle per the table
   #identity, #account, #sync:
     if ¬KNOWN(e.did): drop                                      // network-wide noise (ADR 0003)
     else: handle per the table
@@ -884,6 +901,14 @@ on event e:
 | account | `getRepoStatus` at P1 (§3.4) |
 | sync (v2 `#sync`) | `enqueue(did, P1, "sync")` for every scope: a full re-list |
 
+**Failures.** A frame is acknowledged (and the cursor moves past it) only once its actions are applied. A frame whose handling fails (a store error, a failed `getRepoStatus`, a proof batch or `sync_forum` that fails) is tried again after 2 s and 4 s (*tunable*); after the third failure it is acknowledged and every repo it names is enqueued at P1 for a `sync_repo` of its scopes, which has its own retries and breakers (§9.4). A gap's full reconcile (§6.3) names every relevant repo: it stays due and is enqueued by the next round that can read them. No frame holds the cursor or the later frames for longer.
+
+**Context.** KNOWN, F, F_new and D may be evaluated against a cached snapshot, rebuilt after a change (a `Changed` event, or an applied frame) at most once per second and at least every 30 s (*tunable*); network noise therefore costs one lookup per frame, not a scan of the identity cache. While frames arrive, the client reads several per round and runs its other live work (queue, polls, reconcile) at most once per second.
+
+**Candidates.** A newcomer candidate (§4.4) writes its discovery row with the source `hint:jetstream`, and that write keeps at most 10,000 discovery rows (*tunable*) for the forum: past that, the oldest rows that are not confirmed are dropped, so a Jetstream that names many DIDs cannot grow the cache without bound.
+
+The firstSeen a Jetstream event records is the time this client received it, never the event's `time_us` or `witnessedAt`: the Jetstream sets those, and one that moved them back could make an honest post `future(x)` and rank it last (`social.md` §2.2); they serve only as the cursor (§6.3).
+
 Events MAY also drive counts and placeholders ("3 new comments"), which never move the cursor in the TUI and never supply text.
 
 ### 6.5 Dirty marks
@@ -897,9 +922,10 @@ Events MAY also drive counts and placeholders ("3 new comments"), which never mo
 ### 6.6 Indexer change feed
 
 With an active indexer that advertises `getChanges` (assisted mode):
-- poll `getChanges(forum = F, since = cursor)` every 10 s while a view of F is open and every 60 s otherwise (*tunable*), per followed forum the indexer serves;
-- each `#change` is handled like a Jetstream commit for that uri (§6.4), deduplicated with the same LRU;
-- the cursor (`cur/indexer:<did>:<fk>`) is the returned `cursor`;
+- poll `getChanges(forum = F, since = cursor)` every 10 s while a view of F is open (its model is loaded) and every 60 s otherwise (*tunable*), per followed forum the indexer serves; `live_tail` runs these polls, and a `sync_forum` polls once before its PDS sync. A successful poll makes the change feed a healthy live source (§6.2). `live_tail` polls after its round's queue work and one forum per round, the most overdue first, so a slow indexer delays neither the dirty queue nor the next Jetstream read by more than one poll. A view opened since a forum's last poll makes its next poll due 10 s after that poll;
+- each `#change` is handled like a Jetstream commit for that uri (§6.4): its first-seen time is the local time its page was received (§5.6.5); it is deduplicated with the same LRU: a commit that Jetstream already delivered (applied, or still unacknowledged) is skipped, and a queued `#change` makes the same commit on Jetstream a duplicate. The poll of a `sync_forum`, which a PDS sync follows, does not use the LRU;
+- a newcomer candidate of the feed (§15.4 Scope) is confirmed like the other newcomer hints, after them and within the same budget (§4.4). A `sync_forum`'s poll adds the candidates to that sync's newcomers. A `live_tail` poll hands them on as it does a Jetstream candidate (§6.4): each gets its discovery row, with the source `hint:indexer` and the same 10,000-row cap, and one background discovery pass of the forum (30 s, 64 requests, *tunable*) confirms them at their PDSes. Nothing is fetched for them before that pass, and a pass that fails leaves the rows for the next forum sync;
+- the cursor (`cur/indexer:<did>:<fk>`) is the returned `cursor`. Without one, the first poll starts at the indexer's current `asOf.seq` (from `describeIndexer`), not at 0: the PDS sync covers what came before, and the log is not replayed as point fetches;
 - `CursorTooOld`: run a full reconcile of F (§6.8) and restart from the `asOf.seq` of that response.
 
 ### 6.7 Polling
@@ -1079,7 +1105,8 @@ verify_proof(…):
 `getRecordProofs(uris ≤ 25)` returns `application/vnd.ipld.car` (`data-model.md` §11.3):
 - the root block is a DAG-CBOR manifest `{v: 1, items: [{uri, cid: CID | null, commit: CID}]}`, followed by deduplicated blocks;
 - the manifest's `v` MUST be 1; unknown keys are ignored; `items` ≤ 25;
-- a response over the bundle byte cap is retried with the `uris` list halved, down to one uri; an item still too large is fetched from the author's PDS instead (`limits.md` §5).
+- a response over the bundle byte cap is retried with the `uris` list halved, down to one uri; an item still too large is fetched from the author's PDS instead (`limits.md` §5);
+- a request that returns no bundle (a transport or XRPC error after the retries of §9.3) presents no proof: its items are fetched from the authors' PDSes. Neither this nor an item still too large is a failure, and neither counts against the indexer. A requested uri that the bundle omits or repeats does count against it.
 
 ```
 for each item (independently):
@@ -1090,6 +1117,8 @@ for each item (independently):
   pass → a third-party proof (§1.2): current or [stale]
   fail → drop the item; count a failure against the indexer (§15.4)
 ```
+
+A `BadSignature` against a document fetched before the bundle arrived is checked once more against one fetched now before it counts (the key may have rotated within the hour, as for the indexer in §15.1); §8.7 then applies.
 
 A `ProvenAbsent` that is current produces a tombstone (key `(rev, sentAt of the head check)`). A stale one is ignored.
 
@@ -1231,6 +1260,7 @@ The key of a tuple is the concatenation of its elements. A prefix scan over `(e1
 | cache | `("id", "did", did)` | `IdentityRow` | |
 | cache | `("id", "handle", handle)` | `HandleRow` | |
 | cache | `("disc", fk, did)` | `DiscRow` | discovery candidates; not records |
+| cache | `("disc.relay", fk, did)` | `DiscRow` | a relay-only candidate whose check rejected it, with its back-off (§4.4); not a discovery row |
 | cache | `("blob", cid)` | `BlobRow` | the bytes live in the host's blob storage (§12.2) |
 | cache | `("blob.ref", cid, fk)` | `BlobRefRow` | how many of forum fk's counted records reference the CID (§11.4); absent at 0 |
 | cache | `("blob.forum", fk, cid)` | `BlobRefRow` | the same row, by forum: what the next build of fk and its eviction start from |
@@ -1285,12 +1315,14 @@ HostRow    { rangeCursor: "unknown" | "yes" | "no", rcAt: ms, shortPageEnds: boo
 | Lock | Native | Browser | Holder does |
 |---|---|---|---|
 | sync leader | exclusive `fd-lock` on `<cache dir>/cache.lock`, tried without waiting | Web Lock `lessdugin-sync-leader`, requested once and held for the tab's lifetime | live sources, polling, reconcile, discovery, P1–P3 sync, eviction |
-| repo `d` | `fd-lock` on `<cache dir>/locks/repo-<h(d)>.lock` | Web Lock `lessdugin-repo-<d>` | the read-diff-write of `sync_repo`, point fetches and admissions for d |
+| repo `d` | `fd-lock` on `<cache dir>/locks/repo-<h(d)>.lock` | Web Lock `lessdugin-repo-<d>` | a whole pass of `sync_repo` (its identity is resolved before, so a pass waiting for PLC pacing does not hold it), point fetches and admissions for d, except the cold page's (below) |
 | outbox `a` | `fd-lock` on `<data dir>/locks/outbox-<h(a)>.lock` | Web Lock `lessdugin-outbox-<a>`; in `lessdugin web`, whose `state` is the native one, then also the native lock through `POST /bridge/lock` (`threat-model.md` §7.4) | the pump for account a (§7.1) |
 
 `h(x)` = the first 16 characters of `b32s(sha256(UTF8(x)))` (`data-model.md` §3.1).
 
 - Processes and tabs that are not the leader read the cache and do only P0 fetches, each under the repo lock.
+- **Head checks.** A head check (§6.7, §14.3 step 4) sends its `getLatestCommit` without the repo lock and takes the lock only to record `headSeen`, and only if it is free: while another job holds the repo (a sync in flight), it hands its observation to that job, which records it with its own write (the latest by send time wins, §5.9), and a currency check (§1.2) uses it meanwhile. A head check of an author on screen therefore never waits for a sync of that author's repo, and neither write loses the other's state. The cold page's membership reads and proof admissions (§14.3 steps 3 and 4) do not take the lock either: they change no repo state, and their record writes are ordered with the sync's by the write lock.
+- **Write lock.** The store has no interactive transactions (§12.4), so every write of a record or tombstone is a read-diff-write: a batch reads the uri's slot, decides (§5.6.2, §5.6.3) and commits. Every writer of `d`'s record slots, with the repo lock or without it, holds the in-process write lock of `d` for exactly that local phase, from its batch's first slot read to its commit, with no request in between; the repo lock still serializes whole passes. Lock order: the write lock is taken last, after the repo lock if any, and is never held while taking the repo lock or awaiting the network, so it is held only for local work and no two jobs deadlock. A lockless admission therefore waits at most for another writer's local phase, never for a sync held at its listings, and is still safe: two writers never decide from the same stale slot, so neither commit overwrites the other's (which could move a first-seen time later, §5.6.5, or put a record back beside the newer tombstone that removed it).
 - **Change notification.** Browser: every committed batch's `Changed{topics}` is posted on BroadcastChannel `lessdugin-changes`. Native: followers (for example a TUI next to a CLI) poll SQLite `PRAGMA data_version` every 2 s and rescan. This is a host concern and not part of the trait.
 - When the leader exits, another process or tab takes the lock and resumes from the persisted cursors and queue state.
 
@@ -1321,6 +1353,10 @@ fetch_media(did, blobRef, policy):
      CidMismatch → discard; strike against the host; show "media failed verification"
      HTTP 400 "Blob not found" → missing: not retried (ADR 0005); nothing is stored, and a
                                   stored CID is never asked for (§12.2), so there is no copy to purge
+                                  (only a 400 naming BlobNotFound, or InvalidRequest as the reference PDS
+                                  answers "Blob not found"; any other 400, such as RepoNotFound,
+                                  RepoDeactivated, RepoTakendown or RepoSuspended (the repo's status,
+                                  §3.4), or an unknown name, is not a missing blob: a spilled body stays pending)
   sniff = sniff_type(Host::blob_read(h.cid, 0, 4096))
   require normalise(declared blobRef.mimeType) = normalise(sniff) ∧ that type is on the display allowlist (§11.2)
           else: download card only
@@ -1420,7 +1456,7 @@ pub enum BlobError     { Host(HostError), Status(u16, Option<String>), TooLarge,
 ```
 
 - `fetch_blob` sends `GET <pds>/xrpc/com.atproto.sync.getBlob?did=<did>&cid=<cid>` (Anon, no redirects), streams the body, counts bytes against `max_bytes`, hashes it with sha256, compares the digest with the raw-codec CID, and only on a match stores the bytes under the CID in the host's blob storage and returns a handle. On any failure nothing is stored. An already stored CID returns its handle without a request.
-- **One download per CID at a time.** A `fetch_blob` of a CID being downloaded awaits that download instead of starting another, and a caller that stops awaiting (dropping the future, as the engine does after `BODY_BLOB_WAIT_MS` for a spilled body, `limits.md` §5) does not cancel it: natively the download is a detached task, capped by `BLOB_TOTAL_TIMEOUT_MS`; in the browser it is the running `fetch`. So the stored copy is there for the next caller, and a slow body is never restarted and aborted on every view. The first caller's `max_bytes` caps the download; the core holds a stored copy to its own declaration (§11.1).
+- **One download per copy at a time.** A `fetch_blob` of a copy (the same `pds`, `did` and `cid`) being downloaded awaits that download instead of starting another, and a caller that stops awaiting (dropping the future, as the engine does after `BODY_BLOB_WAIT_MS` for a spilled body, `limits.md` §5) does not cancel it: natively the download is a detached task, capped by `BLOB_TOTAL_TIMEOUT_MS`; in the browser it is the running `fetch`. So the stored copy is there for the next caller, and a slow body is never restarted and aborted on every view. The first caller's `max_bytes` caps the download; the core holds a stored copy to its own declaration (§11.1). A fetch of the same CID from another author or PDS never joins it: that author's PDS may fail (HTTP 400, a CID mismatch, a stall) where the other's succeeds. Likewise the engine keeps only a verified spilled body by its bare CID; a failure (missing, failed verification, too large, unreadable) or a pending fetch is kept per (author, CID), so one author's failing copy never changes another author's body (`engine-api.md` §3.4 `body_source`, §3.8).
 - `blob_open` returns the handle of a stored CID; `blob_read` returns at most 1,048,576 bytes from an offset; `blob_delete` removes the stored bytes.
 - The browser UI obtains object URLs from the host's blob storage by CID, outside the core.
 
@@ -1501,7 +1537,9 @@ build(F):
 - **Skeletons.** For each record the model keeps what the fold and list views need: uri, cid, author, collection, rkey, references (forum, root, parent, subject, adopts, head, parents, chapter entries), opinion values, modAction fields, kind, title, tags, self-labels, `createdAt`, `updatedAt`, TID time, `obs`, validity and rule ID. Bodies are dropped and re-read with `get_many` when a stage or a view needs them (quote and react anchors, rendering, search indexing), then released.
 - **Incremental updates** on `Changed` events (own commits and broadcasts) re-run the affected layers. Incremental results MUST be property-tested equal to the batch fold (`social.md` §1.3).
 - **Provisional items** (§1.5) are evaluated against the model's current result and never enter `records`.
-- **Search.** Each client builds the core's in-memory inverted index per forum from titles and the plain-text projection P (`lfm-1.md` §10) of listed items. SQLite fts5 is used only inside the indexer (§15).
+- **Search.** Each client builds the core's in-memory inverted index per forum from titles and the plain-text projection P (`lfm-1.md` §10) of listed items. SQLite fts5 is used only inside the indexer (§15). Like lists, search results leave out comments under a Missing root (`social.md` §11), as user pages do.
+  - The index maps each case-folded token of a title or P (split at White_Space) to the items holding it. A query's whitespace-separated terms are ANDed, each matching every token it is a substring of; a term holds no white space, so this finds every item whose title or P contains all the terms case-insensitively, and only those candidates are rendered and checked. A spilled body whose source is not in memory is always a candidate.
+  - An index belongs to one model build: the first search after the model is built (or rebuilt, after a `Changed` event) builds it, reading the bodies in batches without rendering them, and it is dropped with the model. An item's tokens depend only on its record, so the new build carries over the tokens of the items the forum's previous index held at the same uri and CID (a spilled body whose source was not in memory excepted) and reads only the other bodies.
 - **Rendering.** Render output is cached in an in-memory LRU keyed by `(cid, RENDERER_VERSION)`.
 - The model also keeps `BlobRow.refs` current (§11.4) and records `ForumRow.lastViewed`.
 
@@ -1537,7 +1575,7 @@ Read budgets are per host (ADR 0004), so a cold sync spread over many Bluesky PD
 1. Forum resolution: about 3 requests (PLC, declaration, declaration proof).
 2. `listPosts`: placeholders render (`[hint]`, no text).
 3. `getRecordProofs` for the visible posts (about 30), in 1–2 requests; each item is verified (§8.6).
-4. One `getLatestCommit` per author on screen, in parallel: current proofs are admitted and their text appears `[verified]`; stale ones are point-fetched from the PDS (§1.2.1).
+4. One `getLatestCommit` per author on screen, in parallel, and in parallel with step 3, at P0: a forum sync's participant sweep that runs beside the page goes after them (§3.5), and a sync of an author's repo in flight does not hold the check up (§10.6). A forum sync that the client starts while a first page is being hydrated and listed (from its `listPosts` until the page is listed, or until it falls back to an ordinary sync; a page of any forum, since one engine does both) begins once the page is listed, or after at most 3 s (`COLD_PAGE_HOLD_MS`, *tunable*): its local work (reading and writing the cache, folding) runs on the same engine as the page and would otherwise delay it. Background syncs (`live_tail`'s) are not held. Each author's DID document is resolved once, at most 1 h old (§8.6), and serves both the head check and the verification of the author's proofs. For each author who is not an authority and whose membership record at the forum's key is neither cached nor tombstoned, one P0 `getRecord` of that record at the author's PDS runs in parallel with the head check, admitted as a point fetch (§5.7) without the repo lock, its write under the author's write lock only (§10.6): an author is a participant only once their membership record is held (`social.md` §3.1), and a granted member's is otherwise read only inside their repo sync (§4.2.1), so without it the page could not list a granted member's post before that sync. Current proofs are admitted and their text appears `[verified]`; stale ones are point-fetched from the PDS (§1.2.1).
 5. Authorities sync at P0 in parallel; the view is `degraded` until they complete. Text appears in about 1–2 s.
 
 ---
@@ -1548,12 +1586,18 @@ The indexer is the same core engine (native host, `SqliteKv`) running continuous
 
 ### 15.1 Ingest
 
-- **Live:** Jetstream `wildcard` mode (§6.2) from two endpoints at once, deduplicated, with the cursor rewound 10 s on restart. `identity`, `account` and `sync` events for DIDs outside its participant and candidate sets are dropped; the rest are handled as in §6.4 and §3.4.
-- **Proofs:** for each relevant commit event, one `sync.getRecord` at the author's PDS; the verified proof is stored in `proof_cache` keyed by `(uri, rev)`. Proofs of backfilled records are fetched lazily on the first `getRecordProofs` request and cached per rev.
-- **Backfill:** every 6 h, `listReposByCollection` for each collection in `OURS` across `network.relays` (one NSID per call); then `sync_repo` of each forum owner and participant (level `pds`).
+- **Live:** Jetstream `wildcard` mode (§6.2) from two endpoints at once, deduplicated, with the cursor rewound 10 s on restart. `identity`, `account` and `sync` events for DIDs outside its participant and candidate sets are dropped; the rest are handled as in §6.4 and §3.4:
+  - a commit is point-fetched at the author's PDS, and each forum whose range holds it is **re-projected from the cache** (fold, side tables, change log). A live event never runs an ordinary forum sync (§4.5): that sync, which checks every authority and participant, runs for backfill, reconcile, and, debounced by 2 s, for a membership or declaration change (newcomer confirmation, a changed roster); such a live-requested sync also starts no sooner than 200 ms (*tunable*) per participant after the forum's last ordinary sync ended, so however often memberships are written its head checks average at most 5 per second per forum. A newcomer's membership (§6.4 `Candidate`) only records a durable candidate hint. `#sync` re-lists that one repo;
+  - frames are filtered in arrival order and their fetches run concurrently, each within 30 s (*tunable*). Both cursors advance only over the completed prefix of frames: a frame is complete once its fetch was projected or, after any failure (a refused or failed fetch, the 30 s bound, a failed projection), once the repo was handed to a durable **per-repo retry** (a `sync_repo` of its forum range, then a projection; back-off from 2 s doubling to 6 h). No single event can hold a cursor;
+  - a declaration proven absent (`RecordNotFound`) empties the forum's snapshot, logs each indexed record as deleted (at its repo's last head rev), and quarantines the seed (below);
+  - a message over 1,200,000 bytes follows the oversize rule of §6.2: after the first failure the endpoint reconnects at exactly the position of the last frame read; if that connection fails on oversize at the same position, it resumes 1 s past it and schedules a reconcile. Progress past the position resets the count; a replay of earlier frames does not. A non-UTF-8 binary frame is skipped. A socket with no frame for 120 s (*tunable*) is presumed half-open and replaced;
+  - a change log row of a live change carries the commit's `rev` (and CID) when the projection admitted that same version; other rows carry the repo's synced head rev.
+- **Proofs:** for each relevant commit event, one `sync.getRecord` at the author's PDS, fetched off the ingest path; the verified proof is stored in `proof_cache` keyed by `(uri, rev)`. A proof that cannot be fetched or verified is simply not cached: the record is still indexed. Proofs are verified against a DID document at most 1 hour old (§1.1, third-party proofs), and once more against a fresh one when that fails. Proofs of backfilled records are fetched lazily on the first `getRecordProofs` request and cached per rev (§15.3).
+- **Backfill:** every 6 h, `listReposByCollection` for each collection in `OURS` across `network.relays` (one NSID per call); then `sync_repo` of each forum owner and participant (level `pds`). The 6 h cadence does not depend on individual forums: a failed discovery retries after 1 min, doubling to 6 h, and a forum whose sync fails backs off on its own (1 min, doubling to 6 h, *tunable*) without re-running discovery.
 - **Reconcile:** daily `getLatestCommit` for every indexed repo (§6.8).
-- **Scope and quotas:** only forum declarations and confirmed forum participants are indexed, with the normative fetch caps per range (§5.4), and per-host politeness of at most 5 requests/s and 4 in flight per PDS host, 200 in flight globally (*tunable*).
-- `--poll <pds>…` replaces Jetstream with polling of the listed PDSes, for the devnet and air-gapped setups.
+- **Scope and quotas:** only forum declarations and confirmed forum participants are indexed, with the normative fetch caps per range (§5.4), and per-host politeness of at most 5 requests/s and 4 in flight per PDS host, 200 in flight globally (*tunable*); a request takes its host's permit and rate slot before a global permit. Discovery hints are capped (`threat-model.md` INFRA-12, *tunable*): at most 32 forum seeds attributed to one DID (its declarations and the forums its memberships name) and 2,000 to the DIDs of one PDS host; at most 500 pending membership hints per forum from one host and 10,000 per forum. A live membership hint (§6.4 `Candidate`) counts against the host that its newcomer's indexed head or cached DID document names, since the live path makes no identity request; hints whose host is not known yet share one quota of the same size. Once indexed, a forum counts against its owner and the owner's host, not against the account that first named it. A seed whose declaration is proven absent is quarantined: it is not served or synced, it is rechecked at most daily, counted from its last recheck, whether that recheck found it absent again or failed (or at once when a live commit shows the declaration again), and it is dropped 7 days after it was first found absent. Only `RecordNotFound` for the declaration proves absence: from the point fetch of a live commit of it (identity events keep the owner's DID document current), or, when an ordinary sync fails with `not_found`, from the owner's PDS as named by a DID document fetched at that moment (a cached one may name a former PDS). The owner's account status (`RepoDeactivated`, `RepoTakendown`, `RepoSuspended`), `RepoNotFound`, a bare HTTP 404 or 410 and an owner identity that does not resolve prove nothing: the sync fails, the forum backs off and its snapshot stays served. A hinted seed that never synced is dropped after 7 days of failed syncs (an operator seed is kept).
+- **Garbage collection:** daily, tombstones older than the 30-day retention leave the record store (§5.6.3), and cached proofs of records no forum indexes any more leave `proof_cache` after the same retention.
+- `--poll <pds>…` replaces Jetstream with polling of the listed PDSes, for the devnet and air-gapped setups. It selects a source, never a network: devnet mode needs `--dev` (or a devnet profile) and a development build (`threat-model.md` INFRA-9), and outside devnet mode a poll URL must be `https`.
 
 ### 15.2 Storage
 
@@ -1563,16 +1607,20 @@ The indexer is the same core engine (native host, `SqliteKv`) running continuous
 - `proof_cache(uri, rev, car)`;
 - `backlink` and `fts5`: only with `listBacklinks` and `searchPosts`, **Reserved (P2)**.
 
+Per-forum participant and post counts are maintained columns, and the record snapshot is indexed by uri, so no query scans the indexed records or every forum. Projections write only the rows that changed. The per-forum back-off, quarantine and per-repo retries are durable.
+
 It is comfortable up to about 50M records; a Postgres adapter can come later.
 
 ### 15.3 Serving
 
 - **First pass (M6):** `describeIndexer`, `listForums`, `listParticipants`, `getRepoHeads`, `getChanges`, `listPosts`, `listRecentDiscussion`, `getThread`, `getRecordProofs`. **Reserved (P2):** `searchPosts` (fts5), `listBacklinks`, `getActivity`, `getKarma`, `getTallies`, `getRecords`. `describeIndexer.features` lists exactly the served methods, and clients call nothing else.
-- Every method is an unauthenticated GET with `Access-Control-Allow-Origin: *`. JSON responses carry `asOf` and `indexer`; lists are `Cache-Control: max-age=5` with ETags; nothing is `immutable`.
-- `listPosts`, `getThread` and `getKarma` carry the fold's `inputDigest` (`social.md` §1.2), which includes `absent`.
+- Every method is an unauthenticated GET with `Access-Control-Allow-Origin: *`. JSON responses carry `asOf` and `indexer`; lists are `Cache-Control: max-age=5` with ETags; nothing is `immutable`. Absent optional fields (a last page's `cursor`, a delete's `cid`, a top-level comment's `parent`) are left out, never `null`.
+- `listForums` and `describeIndexer` list only synced forums with a declaration CID: a seed named by a membership is never advertised before its declaration was fetched.
+- `listPosts`, `getThread` and `getKarma` carry the fold's `inputDigest` (`social.md` §1.2), which includes `absent`. Queries read the forum's last folded model: the one each projection leaves, fresh like the engine's own model cache for at least 60 s or 30 times its fold cost (so `now`-dependent ranking follows the clock). Past that age it is still served while one background fold refreshes it; a request folds only a forum with no model yet (after a restart or an eviction). Folds for queries run one at a time and never in the way of a projection, so no request waits for a refold of a forum it has a model of.
+- `getRecordProofs` serves cached proofs; it fetches at most 2 missing proofs at a time (*tunable*), so requests never queue on the ingest budget. A request waits at most 5 s in all (*tunable*) for a fetch slot, then omits its remaining missing items.
 - Rate limit 20 requests/s per client IP (HTTP 429 `RateLimitExceeded`); per-actor limits on `getActivity` when it ships.
 - `/metrics` (Prometheus), `/_health`, and `/` (a status page with the source link, AGPL §13).
-- **Operations.** An operator blocklist of DIDs, uris, CIDs and hosts is applied at query time. Takedowns and deactivations reported by the relay are honoured within minutes. No blobs are stored. It ships as a distroless image on GHCR.
+- **Operations.** An operator blocklist of DIDs, uris, CIDs and hosts is applied at query time, to every method: a host entry hides its accounts' records, participant entries and repo heads, and a forum owned on a blocked host is no longer listed (forum-scoped queries still answer, with that host's records hidden). Takedowns and deactivations reported by the relay are honoured within minutes. No blobs are stored. It ships as a distroless image on GHCR.
 
 ### 15.4 Client rules and audit
 
@@ -1584,17 +1632,27 @@ It is comfortable up to about 50M records; a Postgres adapter can come later.
 
 Displayed values are always recomputed locally from admitted records. Indexer aggregates MAY show as `~n` until then. `getRepoHeads` results are hints: they can mark repos dirty but never count as head observations.
 
+**Scope.** An indexer's hints never choose whom the client contacts:
+- a `#change` of `getChanges(forum = F)` is handled (§6.6) only for a record of F (an rkey of F's scope, §10.4: its `{fk}-` range or its membership key; F's declaration; or a profile) written by a DID in C(F) (§4.5), a granted DID, a confirmed participant or an own account. A membership at F's key by any other DID is a newcomer candidate when F ∈ F_new (§6.4): nothing is fetched for it, and the next forum sync confirms it like the other newcomer hints, after them and within the same budget (§4.4). Every other change is dropped, also before any identity resolution;
+- `listPosts` uris are hydrated (§14.3) only for posts in F's `{fk}-` range and, once a discovery pass of F has completed (§4.2), only for posts by those DIDs; the memberships the page reads are those of these posts' authors. A cold start cannot tell participants yet; its one visible page bounds it;
+- a `getRepoHeads` head for a DID that was not asked about is ignored;
+- `CursorTooOld` reconciles F as a Jetstream gap does (§6.3): authorities at P1, the other DIDs of C(F) at P3. A feed that keeps answering `CursorTooOld` gets this at most once per 24 h for each indexer and forum (the cursor row's `timeUs` records the last one); the daily reconcile (§6.8) bounds what it can hide.
+
+**Change cursor.** The operator blocklist is applied after paging (§15.3), so a `getChanges` cursor may be above the last returned seq (and above `since` on an empty page). The client follows it. A cursor below the last returned seq, or above both that seq and the response's `asOf.seq`, is refused and does not advance the stored cursor.
+
 **Audit.** `lessdugin sync <forum> --audit` (and an SPA settings action) cross-checks one indexer for one forum:
 
 | Check | Procedure | Finding |
 |---|---|---|
 | A1 heads | `getRepoHeads` for every repo in the completeness set (batches of 50), then `getLatestCommit` at each PDS | the indexer's rev is above the PDS head → contradiction; below it by more than `asOf.lagMs + 2 min` → lag |
-| A2 changes | for every change the client saw from Jetstream during the session, more than 2 minutes old, with a matching fk | missing from `getChanges` → omission |
-| A3 records | the client's eligible, listed posts (complete repos only, older than 2 minutes) against `listPosts(sort = new)`, all pages up to 10,000 | missing → omission; present at the indexer but confirmed absent at the PDS → contradiction |
+| A2 changes | for every change the client saw from Jetstream during the session, more than 2 minutes old, with a matching fk, against `getChanges(forum)` read back as below | no matching row → omission |
+| A3 records | the client's eligible, listed posts (listed by the local fold, `Visible` or `Collapsed` (`social.md` §10.1), so a hidden or removed post is not one; complete repos only, older than 2 minutes) against `listPosts(sort = new)`, all pages up to 10,000 (a short page is not the end: paging stops when the cursor is absent or repeats) | missing → omission; present at the indexer but confirmed absent at the PDS, or not a post in the forum's `{fk}-` range (never fetched) → contradiction |
 | A4 digest and aggregates | when the local view is complete: `inputDigest` and every `#tally` (score, agreement, unweighted) against local recomputation | digest mismatch, or equal digests with unequal tallies → contradiction |
-| A5 proofs | `getRecordProofs` for up to 25 sampled uris | an item that fails `proofs/1` (other than `stale-proof`) → contradiction |
+| A5 proofs | `getRecordProofs` for up to 25 sampled uris | an item whose presented proof fails `proofs/1` (other than `stale-proof`) → contradiction; a requested uri the bundle omits → omission |
 
-The report lists findings with counts, and the command exits with code 6 if any contradiction or omission was found. Every failed proof item (§8.6) is also counted against the indexer in `HostRow.strikes`.
+**A2 rows.** A change observed at `(rev, cid)` (`cid` absent for a delete) is matched by a `#change` row for the same uri and DID whose rev is above `rev`, whatever its CID or op (a later version supersedes the observed one), or whose rev is `rev` with the same CID (none for a delete). This holds whether the indexer logs a live event's own commit rev and CID, or logs a change found by a snapshot diff at the repo's head rev, which may be above the commit's rev and covers versions collapsed between two snapshots. The log is kept 30 days (§15.2) and the session's changes are its newest rows, so the client reads it back from its head: a first window of 5,000 seqs below `asOf.seq` (from `describeIndexer`), paged until the cursor stops advancing, then windows of doubling width below it, until every observed change is matched or the oldest retained row has been read. `CursorTooOld` at a window's start restarts that window at the oldest cursor the indexer accepts, found by bisection with `limit = 1`. A short or empty page is not the end (the indexer drops blocklisted rows after paging). A change still unmatched when the scan stops early (at most 1,000 pages) is unchecked, not an omission.
+
+The report lists findings with counts, and the command exits with code 6 if any contradiction or omission was found. An item the audit cannot check is an `unchecked` finding with the reason (counted as unchecked, never as checked, a contradiction or an omission, `engine-api.md` §4.3), and never ends the audit: in A1 and A3, a repo whose head check or point fetch fails (an unreachable or deactivated PDS); in A5, an item for which no proof could be fetched (a transport failure, or a single proof still over the cap, §8.6). Every failed proof item (§8.6) is also counted against the indexer in `HostRow.strikes`.
 
 **Reserved (P2):** the automatic 1%-per-hour audit sample, and automatic demotion of an indexer above the thresholds (more than 2% contradictions, or more than 3 omissions per day) with a warning.
 
@@ -1658,5 +1716,7 @@ These choices fill gaps or resolve ambiguities in the sources. Each takes the si
 3. Does Jetstream's DID filter also filter `identity` and `account` events? This document drops unknown DIDs client-side either way. M5 should measure it, because it changes browser bandwidth.
 4. ADR 0004's per-host verdict is statistical (rotating egress IPs). The M1 fixed-IP check may still show a shared budget, which would change §9.2 and §14.
 5. ADR 0003 asks whether the public v1 Jetstream hosts will be retired. If they are, filters of more than 150 DIDs need several v2 connections of at most 150 DIDs each.
-6. *(Orchestrator decisions O-3 and O-9, for the U7 review.)* The `sources` setting is honoured at runtime by the running engine (§2.3). In `direct`, no CORE+ or EXT endpoint is contacted. A `sources` the native configuration file states is an explicit local pin at the flag level: `crates/native` passes it as `EngineConfig.sources_flag`. Precedence: CLI flag > `config.toml` > stored setting > build default. A file that does not state `sources` leaves it to the stored setting.
+6. *(Orchestrator decisions O-3 and O-9, for the U7 review.)* The `sources` setting is honoured at runtime by the running engine (§2.3). In `direct`, no CORE+ or EXT endpoint is contacted. A `sources` the native configuration file states is an explicit local pin at the flag level: `crates/native` passes it as `EngineConfig.sources_flag`. Precedence: CLI flag > `config.toml` > stored setting > build default. A file that does not state `sources` leaves it to the stored setting, except in devnet mode, where it pins `direct` (§3.7).
 7. **Blob deletion on forum eviction depends on eviction (review finding m4-27, M3–M6 review).** §10.7 says evicting a forum drops its blob references and deletes the blobs no forum references any more (§11.4). No client implements the §10.7 budget yet, so no forum is evicted and that deletion never runs: a blob referenced only by a forum the user stopped visiting stays stored until the cache is cleared. The reference counting, the deletion of a blob that loses its last counted reference and the purge of loose blobs (§11.4, m4-27) are in place and will serve eviction when it lands; until then this is a recorded, accepted limit.
+8. *(Orchestrator decision O-15, for the U7 review.)* A missing blob (§11.1) is recognised by the XRPC error name only: `BlobNotFound`, or `InvalidRequest`, which the reference PDS answers with the message "Blob not found". The host error carries no message, so any `InvalidRequest` 400 counts as missing. A read-only probe of the user's jazware vlpds 1.2.2 answered `BlobNotFound` for a missing blob and `RepoNotFound` for an unknown repo, so the rule is exact there; for the reference PDS it is a known, low-risk over-approximation.
+9. *(Orchestrator decision O-16, for the U7 review.)* PLC pacing (§3.5) reads "at most `plcRate` requests per second" as a sliding one-second window, not an even spacing. The M6 cold page needs one document per author on screen, about 20; spaced at 50 ms they took about a second of a 2 s paint budget. The burst stays within the 8-in-flight cap and the per-second rate, and a 429 still halves the rate. Only P0 requests burst: background ones keep the even spacing, so a sweep cannot take the whole window ahead of a P0 request.

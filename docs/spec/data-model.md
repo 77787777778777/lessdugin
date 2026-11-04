@@ -976,7 +976,7 @@ edit(target, base, newValue, summary?):          // base = CID the user edited; 
 | Join | Create-if-absent of `NS.membership` with rkey `fk` (below). If it already exists, re-read; an existing record means success. |
 | Leave | `deleteRecord(NS.membership, fk, swapRecord = cid)`. |
 | First content in a forum | `applyWrites[#create membership (only if a fresh getRecord shows it absent), #create post or comment]` with `swapCommit` = fresh head. If the batch fails (an HTTP 500 is ambiguous), re-read the membership and the head, and retry once without the membership if it now exists. |
-| Create post, comment, sequence or wikiRevision | `createRecord(rkey)` with the rkey fixed per W6. The MVP wiki writes `parents` = [the current head] or [] (§6.8). |
+| Create post, comment, sequence or wikiRevision | `createRecord(rkey)` with the rkey fixed per W6. The MVP wiki writes `parents` = [the head the author edited] or [] (§6.8); the engine refuses the edit (`conflict`) when its cached head is no longer that revision (`engine-api.md` §3.5 `wiki_edit`, orchestrator decision O-2). |
 | Edit content | Edit protocol (§8.3). |
 | Delete content (post, comment, sequence, forum) | Delete protocol (§8.7): removes the target and purges its revisions. |
 | Delete wikiRevision | `deleteRecord`. A wikiRevision has no revisions. |
@@ -1261,6 +1261,7 @@ The port of a loopback redirect is ignored when matching. The CLI listens on an 
 - `pct` is percent-encoding (RFC 3986, unreserved characters kept).
 - The `client_id` has no port and an empty path.
 - The hosted native metadata is used automatically after `invalid_client`, or with `--oauth-client hosted`.
+- Its `client_id` is the production URL above unless `login --oauth-client-id <url>` or the native `config.toml` (`oauth_client_id`) names another, in that order: an `https` URL of the native document as another origin serves it for itself (a preview deployment, a self-hosted site; decision O-6). A `.temp` build needs a document whose `scope` is the `.temp` `SUPERSET`.
 
 **Self-hosting.** `xtask site --origin <url>` regenerates both files, substituting the origin in `client_id`, `client_uri` and `redirect_uris`. `client_uri` MUST have the same host as `client_id`.
 
@@ -1344,7 +1345,7 @@ An indexer advertises the methods it serves in `describeIndexer.features`. Clien
 | `listForums` | first | `q?: s(512b)`, `limit?: int[1..100] =50`, `cursor?` | `{forums!: [#forumSummary]≤100, cursor?}` |
 | `listParticipants` | first | `forum!: atu`, `status?: kv{owner, admin, moderator, member, established, newcomer}`, `limit?: int[1..1000] =500`, `cursor?` | `{participants!: [#participant]≤1000, cursor?}` |
 | `getRepoHeads` | first | `dids!: [did]≤50` | `{heads!: [#repoHead]≤50}` |
-| `getChanges` | first | `forum?: atu`, `since!: count` (exclusive), `limit?: int[1..1000] =500` | `{changes!: [#change]≤1000 (seq ascending), cursor!: count}`; `cursor` is the last returned seq, or `since` when `changes` is empty, and is the next `since`; error `CursorTooOld` when `since` is older than the retained log (30 days) |
+| `getChanges` | first | `forum?: atu`, `since!: count` (exclusive), `limit?: int[1..1000] =500` | `{changes!: [#change]≤1000 (seq ascending), cursor!: count}`; `cursor` is the last seq the page consumed: at or above the last returned seq (the indexer drops blocklisted rows after paging, `sync.md` §15.4 "Change cursor"), at least `since`, and at most `asOf.seq`; it is the next `since`; error `CursorTooOld` when `since` is older than the retained log (30 days) |
 | `listPosts` | first | `forum!: atu`, `sort?: kv{magic, top, new, old, recentComments} =magic`, `tier?: kv{personal, frontpage, curated}` (minimum tier; absent = all visible), `tag?: slug`, `author?: did`, `kind?: kv{article, link, question, quickTake}`, `hydrate?: bool`, `limit?: int[1..100] =25`, `cursor?` | `{posts!: [#postView]≤100, cursor?, policy!: #policyIds, inputDigest!: s(64b) (hex sha256)}` |
 | `listRecentDiscussion` | first | `forum!: atu`, `limit?: int[1..50] =20`, `cursor?` | `{items!: [#discussionItem]≤50, cursor?}` |
 | `getThread` | first | `post!: atu`, `sort?: kv{magic, top, new, old, latestReply} =magic`, `hydrate?: bool` | `{post!: #postView, comments!: [#commentView]≤10000 (pre-order), truncated!: bool, inputDigest!: s(64b)}` |
@@ -1502,7 +1503,7 @@ These choices fill gaps or resolve ambiguities in the sources. Each takes the si
     - **Named defs.** Lexicon forbids inline objects in arrays and properties, so the indexer's inline output objects became method-local defs (§11.3). `searchPosts.highlights` changed from `[[start, end]]` pairs to `[#highlight{start, end}]`, because Lexicon has no arrays of arrays.
     - **Integer bounds.** The unbounded indexer integers got final bounds: `count` for counts and sequence numbers, `sint` for scores and karma (§2.1). The 2^53−1 limit keeps every value exact in JavaScript.
     - **Array limits.** Top-level output arrays are capped at the method's maximum page size. They are required and may be empty, so that clients never have to tell "absent" from "empty".
-    - **`getChanges.cursor`** is required. When `changes` is empty it equals `since`.
+    - **`getChanges.cursor`** is required. When `changes` is empty it equals `since`, unless the page's rows were all blocklisted after paging (§11.3: the cursor is the last seq the page consumed).
     - **Errors.** Only `NotIndexed` and `CursorTooOld` are declared. `InvalidRequest` and `RateLimitExceeded` are generic XRPC errors. `getThread` also returns `NotIndexed`, for an unknown post or a post in a forum the indexer does not serve.
     - **Permission sets** carry a `description` next to `title` and `detail`.
     - **Lint.** `goat lex lint` warns `large-string` on `markdown.text` (100,000 bytes against goat's 20,480-byte threshold). The limit is deliberate, so the lint step ignores that rule (§1.4). CI and `xtask lex lint` must pass `-I large-string`.
@@ -1529,4 +1530,5 @@ These choices fill gaps or resolve ambiguities in the sources. Each takes the si
 - confirm item 6 (quickTake requires a body);
 - confirm the opt-out in item 11;
 - `goat lex validate` rejects every record whose union holds `com.atproto.label.defs#selfLabels` ("NSID syntax didn't validate via regex"), `app.bsky.feed.post` included. This is a goat bug. Spike S4 should record it, and no lessdugin check may rely on `goat lex validate` for `post`.
+- *(Orchestrator decision O-6, for the U7 review.)* The hosted native `client_id` is configurable (§10.4: `login --oauth-client-id`, then `config.toml` `oauth_client_id`), so a preview origin can serve `.temp` native metadata; the production default is unchanged.
 - *(Orchestrator decision O-10, for the U7 review.)* "Redact history" (§8) is decided by the listing made when the write is sent, so a client never refuses a redaction because its cached view shows no history (a sync that failed quietly, a device that never synced the item, invalid revisions): the CLI's `redact --yes` always sends it, and without `--yes` only reports what its view holds.

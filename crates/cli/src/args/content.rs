@@ -129,6 +129,12 @@ pub struct ReadArgs {
     /// Print directly instead of through `less -R`.
     #[arg(long)]
     pub no_pager: bool,
+    /// Read the post as part of this sequence: its next and previous posts are this sequence's,
+    /// and it becomes the sequence's continue-reading position on this device (default: the
+    /// sequence of `sequence read` for a number it listed, and of the last `read` for `next`
+    /// and `prev`).
+    #[arg(long, value_name = "SEQUENCE", conflicts_with = "raw")]
+    pub sequence: Option<String>,
 }
 
 /// `ls`.
@@ -202,6 +208,10 @@ pub struct CommentArgs {
     /// The comment text.
     #[arg(long, short = 'm', value_name = "TEXT")]
     pub message: Option<String>,
+    /// Do not ask: confirms uploading the local images of a file under the drafts directory
+    /// (a file elsewhere is confirmed on a terminal, even with --yes).
+    #[arg(long, short = 'y')]
+    pub yes: bool,
 }
 
 /// `edit`.
@@ -226,8 +236,16 @@ pub struct EditArgs {
     /// Do not keep the old version as a revision.
     #[arg(long)]
     pub no_history: bool,
+    /// Drop the post's link card (its title, description and image) and keep the link (alone,
+    /// without new text, the text stays as it is; in the editor or a file's frontmatter,
+    /// `dropLinkCard: true` does the same); an edit otherwise keeps the card while the link
+    /// stays the same.
+    #[arg(long)]
+    pub drop_link_card: bool,
     /// Do not ask for confirmation when the edit suspends a keep, a frontpage or curated tier
-    /// or a pin of the item (needed then when not running interactively).
+    /// or a pin of the item, nor before uploading the local images of a file under the drafts
+    /// directory (needed then when not running interactively; a file elsewhere is confirmed on
+    /// a terminal, even with --yes).
     #[arg(long, short = 'y')]
     pub yes: bool,
 }

@@ -7,8 +7,9 @@ use std::collections::BTreeSet;
 use lessdugin_atp::syntax::{AtUri, Did};
 
 use crate::discovery::forum_ref::ForumKey;
-use crate::discovery::state::ForumState;
+use crate::discovery::state::{self, DiscState, ForumState};
 use crate::host::Host;
+use crate::indexer::changes::ChangeScope;
 use crate::indexer::client::endpoint_allowed;
 use crate::indexer::contract::{ForumsPage, OrderingHint, ParticipantsPage};
 use crate::indexer::{AuditReport, ChangePollReport, Client, Consent, EndpointPolicy, ProofReport};
@@ -198,12 +199,13 @@ impl<H: Host> Engine<H> {
         forum: &str,
     ) -> Result<Option<ChangePollReport>, EngineError> {
         let key = self.forum_key(forum).await?;
-        self.poll_indexer_changes_resolved(&key).await
+        self.poll_indexer_changes_resolved(&key, None).await
     }
 
     pub(crate) async fn poll_indexer_changes_resolved(
         &self,
         key: &ForumKey,
+        dedup: Option<&mut crate::live::events::Dedup>,
     ) -> Result<Option<ChangePollReport>, EngineError> {
         let Some((client, session)) = self.selected(Some(key), false).await? else {
             return Ok(None);
@@ -211,6 +213,23 @@ impl<H: Host> Engine<H> {
         if !client.supports("getChanges") {
             return Ok(None);
         }
+        let scope = self.change_scope(key).await?;
+        Ok(Some(
+            crate::indexer::changes::poll_changes(
+                &self.syncer(),
+                &client,
+                &session,
+                Some(&key.uri),
+                &scope,
+                dedup,
+            )
+            .await?,
+        ))
+    }
+
+    /// The DIDs whose records an indexer hint for this forum may make the client fetch
+    /// (`sync.md` §15.4): A, G and C(F), confirmed participants and the viewer's own accounts.
+    async fn change_scope(&self, key: &ForumKey) -> Result<ChangeScope, EngineError> {
         let opened = self.open_key(key, false).await?;
         let state = ForumState::load(
             self.host.cache(),
@@ -220,21 +239,27 @@ impl<H: Host> Engine<H> {
         )
         .await
         .map_err(super::models::store_error)?;
-        let dids = state
-            .completeness_set()
-            .iter()
-            .filter_map(|d| Did::parse(d).ok())
-            .collect::<Vec<_>>();
-        Ok(Some(
-            crate::indexer::changes::poll_changes(
-                &self.syncer(),
-                &client,
-                &session,
-                Some(&key.uri),
-                &dids,
-            )
-            .await?,
-        ))
+        let reconcile = state.completeness_set();
+        let own: BTreeSet<String> = self.accounts().await?.into_iter().map(|a| a.did).collect();
+        let authorities: BTreeSet<String> = state.roster.authorities.keys().cloned().collect();
+        let mut participants = reconcile.clone();
+        participants.extend(state.roster.granted.iter().cloned());
+        participants.extend(
+            state
+                .disc
+                .iter()
+                .filter(|(_, row)| row.state == DiscState::Confirmed)
+                .map(|(did, _)| did.clone()),
+        );
+        participants.extend(own.iter().cloned());
+        Ok(ChangeScope {
+            fk: key.fk.clone(),
+            declaration: (key.owner.to_string(), key.uri.rkey().to_string()),
+            participants,
+            newcomers: state.roster.is_open() || own.iter().any(|d| authorities.contains(d)),
+            authorities,
+            reconcile,
+        })
     }
 
     /// Cold-start/live hydration entry point for native and service hosts. Every URI still has a
@@ -294,15 +319,78 @@ impl<H: Host> Engine<H> {
         let ordering = client
             .post_ordering(&session, &key.uri, sort, limit.max(1), None)
             .await?;
-        let report = crate::indexer::proofs::hydrate_visible(
+        // Only posts of this forum (its {fk}- range) are hydrated, and once the forum's
+        // participants are known, only theirs: the indexer does not choose whom the client
+        // contacts. A cold start (§14.3) cannot tell participants yet; one visible page bounds it.
+        let scope = if state::discovery_complete(self.host.cache(), &key.fk)
+            .await
+            .map_err(super::models::store_error)?
+        {
+            Some(self.change_scope(&key).await?)
+        } else {
+            None
+        };
+        let uris: Vec<AtUri> = ordering
+            .uris
+            .into_iter()
+            .filter(|u| {
+                u.collection().as_str() == lessdugin_lexicon::collection::nsid::POST
+                    && crate::store::schema::in_range(&key.fk, u.rkey().as_str())
+                    && scope
+                        .as_ref()
+                        .is_none_or(|s| s.participants.contains(u.did().as_str()))
+            })
+            .collect();
+        let memberships = self.page_memberships(&key, &uris).await?;
+        let report = crate::indexer::proofs::hydrate_page(
             &self.syncer(),
             &client,
             &session,
-            &ordering.uris,
+            &uris,
+            &memberships,
         )
         .await?;
         self.rt.invalidate(key.uri.as_str());
         Ok(Some(report))
+    }
+
+    /// The membership records at the forum's key that the cold page reads with its posts
+    /// (`sync.md` §14.3 step 4): an author is a participant only once their membership record is
+    /// held (`social.md` §3.1), and a granted member's is otherwise read only inside their repo
+    /// sync (§4.2.1). So that of each author of `posts` who is not an authority and whose
+    /// membership is neither cached nor known deleted is read at P0 from the author's PDS, in
+    /// parallel with the author's head check; no repo sync of the author is needed.
+    async fn page_memberships(
+        &self,
+        key: &ForumKey,
+        posts: &[AtUri],
+    ) -> Result<Vec<AtUri>, EngineError> {
+        use lessdugin_lexicon::collection::nsid;
+        // A forum that cannot be opened lists nothing: only its owner is known to need none.
+        let authorities: BTreeSet<String> = match self.open_key(key, false).await {
+            Ok(opened) => opened.authorities.into_keys().collect(),
+            Err(e) => {
+                tracing::debug!(forum = %key.uri, error = %e, "cold page: forum not opened");
+                BTreeSet::from([key.owner.to_string()])
+            }
+        };
+        let store = crate::store::records::RecordStore::new(self.host.cache());
+        let authors: BTreeSet<&Did> = posts.iter().map(AtUri::did).collect();
+        let mut out = Vec::new();
+        for did in authors {
+            if authorities.contains(did.as_str()) {
+                continue;
+            }
+            let k = crate::store::schema::RecKey::new(nsid::MEMBERSHIP, did.as_str(), &key.fk);
+            if matches!(
+                store.slot(&k).await.map_err(super::models::store_error)?,
+                crate::store::records::Slot::Empty
+            ) {
+                let uri = format!("at://{did}/{}/{}", nsid::MEMBERSHIP, key.fk);
+                out.push(AtUri::parse(&uri).map_err(|e| EngineError::internal(e.to_string()))?);
+            }
+        }
+        Ok(out)
     }
 
     /// Ordering/provisional-placeholder input only. Display callers must still use local queries.
@@ -379,7 +467,8 @@ impl<H: Host> Engine<H> {
         for chunk in dids.chunks(50) {
             let hints = client.get_repo_heads(&session, chunk).await?;
             for hint in hints.heads {
-                if Did::parse(&hint.did).is_err() {
+                // A head for a DID that was not asked about is not a hint about this forum.
+                if !chunk.iter().any(|d| d.as_str() == hint.did) {
                     continue;
                 }
                 self.syncer().enqueue(DirtyItem::new(

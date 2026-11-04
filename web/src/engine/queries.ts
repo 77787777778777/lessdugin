@@ -32,6 +32,8 @@ export const qk = {
   /** `forum` is part of the key: `handle/rkey` refs resolve against the current forum. */
   ref: (input: string, forum?: string) => ["ref", input, forum ?? null] as const,
   post: (uri: string) => ["post", uri, "view"] as const,
+  /** `getPost(uri, sequence)`: the view navigating the sequence the post was opened from. */
+  postIn: (uri: string, sequence: string) => ["post", uri, "view", sequence] as const,
   thread: (uri: string, sort: CommentSort, unreadOnly: boolean) =>
     ["post", uri, "thread", sort, unreadOnly] as const,
   history: (uri: string) => ["post", uri, "history"] as const,
@@ -83,7 +85,15 @@ export function keysForTopic(topic: Topic): readonly (readonly unknown[])[] {
         ["notifications"],
       ];
     case "thread":
-      return [["post", topic.uri], ["raw"], ["bookmarks"], ["search"], ["notifications"]];
+      // a sequence's thread topic: its "continue reading" moved (engine-api.md §3.4 `get_post`)
+      return [
+        ["post", topic.uri],
+        ["sequence", topic.uri],
+        ["raw"],
+        ["bookmarks"],
+        ["search"],
+        ["notifications"],
+      ];
     case "user":
       return [["user"]];
     case "notifications":

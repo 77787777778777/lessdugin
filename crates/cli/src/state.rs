@@ -3,10 +3,12 @@
 //!
 //! - `cli/state.json`: the current forum (`forum use`, `join`);
 //! - `cli/refs-<h>.json`: the last listings of one terminal session, so `3` (a post of the
-//!   last `ls`), `c12` (a comment of the last `read`) and a forum number (the last `forum ls`)
-//!   work as references (synthesis §6.10). `<h>` is a hash of the session key: the terminal
-//!   of standard input/output (Linux `/proc/self/fd`), else the parent process (the shell), or
-//!   `LESSDUGIN_SESSION` when set (tests, scripts).
+//!   last `ls` or `sequence read`), `c12` (a comment of the last `read`), `next` and `prev`
+//!   (the sequence neighbours of the post the last `read` showed) and a forum number (the last
+//!   `forum ls`) work as references (synthesis §6.10), and the wiki heads `tag <slug>` showed,
+//!   which `wiki edit` names as the head its text was edited from. `<h>` is a hash of the
+//!   session key: the terminal of standard input/output (Linux `/proc/self/fd`), else the parent
+//!   process (the shell), or `LESSDUGIN_SESSION` when set (tests, scripts).
 //!
 //! Files are written atomically with private permissions. Unreadable or malformed files are
 //! treated as empty: this state is a convenience, never needed for correctness. Listing files
@@ -16,6 +18,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+use lessdugin_core::dto::SequenceNav;
 use lessdugin_native::config::{Paths, lock_hash};
 use lessdugin_native::fsutil::{ensure_private_dir, read_private, write_private_atomic};
 use serde::{Deserialize, Serialize};
@@ -47,6 +50,9 @@ pub const FORUM_FRESH_MS: i64 = 5 * 60 * 1000;
 /// At most this many forums are remembered in [`Global::synced`] (the oldest are dropped).
 const SYNCED_MAX: usize = 256;
 
+/// At most this many pages are remembered in [`Listings::wiki_heads`] (the oldest are dropped).
+const WIKI_HEADS_MAX: usize = 64;
+
 /// The wall clock (native only; the CLI's own state is not part of the engine).
 #[allow(clippy::disallowed_methods)]
 fn now_ms() -> i64 {
@@ -56,7 +62,7 @@ fn now_ms() -> i64 {
 }
 
 /// `cli/refs-<h>.json`: the listings of one terminal session.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Listings {
     /// The forum of the last `ls`.
@@ -65,6 +71,14 @@ pub struct Listings {
     /// The posts of the last `ls`, in order (`1` is the first).
     #[serde(default)]
     pub posts: Vec<String>,
+    /// The sequence the posts of the last listing come from (`sequence read`): `read <n>` reads
+    /// the post in it (`get_post(uri, sequence)`, `social.md` §14).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub posts_sequence: Option<String>,
+    /// The sequence navigation of the post the last `read` showed: `next` and `prev` are its
+    /// next and previous posts, read in that sequence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sequence_nav: Option<SequenceNav>,
     /// The thread of the last `read`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread: Option<String>,
@@ -74,6 +88,45 @@ pub struct Listings {
     /// The forums of the last `forum ls`, in order.
     #[serde(default)]
     pub forums: Vec<String>,
+    /// The head of each wiki page this terminal last showed (`tag <slug>`) or wrote (`wiki
+    /// edit`), the oldest first: `wiki edit` without `--base` names it as the head its text was
+    /// edited from (decision O-2). A sync does not move it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wiki_heads: Vec<WikiHead>,
+}
+
+/// A wiki page head of [`Listings::wiki_heads`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WikiHead {
+    /// The forum's uri.
+    pub forum: String,
+    pub slug: String,
+    /// The revision shown.
+    pub head: String,
+}
+
+impl Listings {
+    /// The head of `slug` in `forum` this terminal last showed or wrote.
+    pub fn wiki_head(&self, forum: &str, slug: &str) -> Option<&str> {
+        self.wiki_heads
+            .iter()
+            .find(|h| h.forum == forum && h.slug == slug)
+            .map(|h| h.head.as_str())
+    }
+
+    /// Records `head` as the head of `slug` in `forum` shown now.
+    pub fn set_wiki_head(&mut self, forum: &str, slug: &str, head: &str) {
+        self.wiki_heads
+            .retain(|h| h.forum != forum || h.slug != slug);
+        self.wiki_heads.push(WikiHead {
+            forum: forum.to_owned(),
+            slug: slug.to_owned(),
+            head: head.to_owned(),
+        });
+        let over = self.wiki_heads.len().saturating_sub(WIKI_HEADS_MAX);
+        self.wiki_heads.drain(..over);
+    }
 }
 
 /// The CLI state of one data directory.
@@ -243,5 +296,22 @@ mod tests {
             ..st.clone()
         };
         assert_ne!(other.refs_file(), st.refs_file());
+    }
+
+    #[test]
+    fn wiki_heads_keep_the_last_shown_head_of_each_page() {
+        let mut l = Listings::default();
+        l.set_wiki_head("f", "rust", "r1");
+        l.set_wiki_head("g", "rust", "g1");
+        l.set_wiki_head("f", "rust", "r2");
+        assert_eq!(l.wiki_head("f", "rust"), Some("r2"));
+        assert_eq!(l.wiki_head("g", "rust"), Some("g1"));
+        assert_eq!(l.wiki_head("f", "go"), None);
+        for i in 0..WIKI_HEADS_MAX {
+            l.set_wiki_head("f", &format!("s{i}"), "x");
+        }
+        assert_eq!(l.wiki_heads.len(), WIKI_HEADS_MAX);
+        assert_eq!(l.wiki_head("g", "rust"), None);
+        assert_eq!(l.wiki_head("f", "s0"), Some("x"));
     }
 }

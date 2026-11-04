@@ -318,14 +318,39 @@ impl Lru {
     }
 }
 
-/// The spilled bodies fetched (by blob CID), at most [`SPILLED_ENTRIES`], oldest dropped first,
-/// and the ones that could not be fetched, with the time to ask again and whose they are, at
-/// most [`SPILLED_PENDING_ENTRIES`], the soonest due dropped first.
+/// The spilled bodies fetched, at most [`SPILLED_ENTRIES`] sources and as many other results,
+/// oldest dropped first, and the ones that could not be fetched, with the time to ask again and
+/// whose they are, at most [`SPILLED_PENDING_ENTRIES`], the soonest due dropped first.
+///
+/// Only a verified source is the same whoever's PDS served it, so only [`Spilled::Text`] is kept
+/// by the bare blob CID; anything else (missing, unverified, too large, unreadable) and a pending
+/// fetch are kept by (author DID, blob CID): another author's PDS may answer otherwise, and one
+/// author's failing copy must not change another's body (review m3m4-continuation-1).
 #[derive(Default)]
 struct SpilledMap {
     tick: u64,
     texts: BTreeMap<String, (u64, Arc<Spilled>)>,
-    pending: BTreeMap<String, PendingSpilled>,
+    failed: BTreeMap<(String, String), (u64, Arc<Spilled>)>,
+    pending: BTreeMap<(String, String), PendingSpilled>,
+}
+
+/// The `(author, blob)` key of the per-author entries.
+fn by_author(did: &str, blob: &str) -> (String, String) {
+    (did.to_owned(), blob.to_owned())
+}
+
+/// Drops the least recently put entries of `m` past `cap`.
+fn evict<K: Ord + Clone>(m: &mut BTreeMap<K, (u64, Arc<Spilled>)>, cap: usize) {
+    while m.len() > cap {
+        let Some(oldest) = m
+            .iter()
+            .min_by_key(|(_, (t, _))| *t)
+            .map(|(k, _)| k.clone())
+        else {
+            break;
+        };
+        m.remove(&oldest);
+    }
 }
 
 /// Spilled sources kept in memory: each is at most `BLOB_TEXT_MAX_BYTES`, and once rendered the
@@ -404,43 +429,46 @@ impl RenderCache {
             .contains_key(&(cid.to_owned(), RENDERER_VERSION))
     }
 
-    /// What was fetched for the spilled body whose blob is `blob` (`None`: pending).
-    pub fn spilled(&self, blob: &str) -> Option<Arc<Spilled>> {
-        self.spilled_map()
-            .texts
+    /// What was fetched for the spilled body of `did` whose blob is `blob` (`None`: pending): the
+    /// verified source, whoever's copy it came from, else what the fetch from `did`'s PDS found.
+    pub fn spilled(&self, did: &str, blob: &str) -> Option<Arc<Spilled>> {
+        let m = self.spilled_map();
+        m.texts
             .get(blob)
+            .or_else(|| m.failed.get(&by_author(did, blob)))
             .map(|(_, v)| Arc::clone(v))
     }
 
-    /// Records what was fetched for the blob `blob`.
-    pub fn put_spilled(&self, blob: &str, v: Spilled) {
+    /// Records what was fetched for the blob `blob` from `did`'s PDS: a verified source by the
+    /// blob alone, anything else for `did` only.
+    pub fn put_spilled(&self, did: &str, blob: &str, v: Spilled) {
         let mut m = self.spilled_map();
         m.tick += 1;
         let tick = m.tick;
-        m.pending.remove(blob);
-        m.texts.insert(blob.to_owned(), (tick, Arc::new(v)));
-        while m.texts.len() > SPILLED_ENTRIES {
-            let Some(oldest) = m
-                .texts
-                .iter()
-                .min_by_key(|(_, (t, _))| *t)
-                .map(|(k, _)| k.clone())
-            else {
-                break;
-            };
-            m.texts.remove(&oldest);
+        let key = by_author(did, blob);
+        m.pending.remove(&key);
+        if matches!(v, Spilled::Text(_)) {
+            m.failed.remove(&key);
+            m.texts.insert(blob.to_owned(), (tick, Arc::new(v)));
+            evict(&mut m.texts, SPILLED_ENTRIES);
+        } else {
+            m.failed.insert(key, (tick, Arc::new(v)));
+            evict(&mut m.failed, SPILLED_ENTRIES);
         }
     }
 
-    /// When the blob `blob`, which could not be fetched, may be asked for again (ms).
-    pub fn spilled_retry_at(&self, blob: &str) -> Option<i64> {
-        self.spilled_map().pending.get(blob).map(|p| p.at_ms)
+    /// When the blob `blob` of `did`, which could not be fetched, may be asked for again (ms).
+    pub fn spilled_retry_at(&self, did: &str, blob: &str) -> Option<i64> {
+        self.spilled_map()
+            .pending
+            .get(&by_author(did, blob))
+            .map(|p| p.at_ms)
     }
 
-    /// The blob `blob` could not be fetched: it stays pending until `p.at_ms`.
+    /// The blob `blob` of `p.did` could not be fetched: it stays pending until `p.at_ms`.
     pub fn spilled_unavailable(&self, blob: &str, p: PendingSpilled) {
         let mut m = self.spilled_map();
-        m.pending.insert(blob.to_owned(), p);
+        m.pending.insert(by_author(&p.did, blob), p);
         while m.pending.len() > SPILLED_PENDING_ENTRIES {
             let Some(soonest) = m
                 .pending
@@ -454,12 +482,12 @@ impl RenderCache {
         }
     }
 
-    /// The spilled bodies left pending, by blob CID.
+    /// The spilled bodies left pending, as (blob CID, entry), by author then blob.
     pub fn spilled_pending(&self) -> Vec<(String, PendingSpilled)> {
         self.spilled_map()
             .pending
             .iter()
-            .map(|(b, p)| (b.clone(), p.clone()))
+            .map(|((_, b), p)| (b.clone(), p.clone()))
             .collect()
     }
 
@@ -504,11 +532,12 @@ impl RenderCache {
         v
     }
 
-    /// A body with no record CID of its own to cache it under (a forum's `about`), rendered
-    /// each time: a spilled one from its fetched source, while that is pending the pending body.
-    pub fn uncached(&self, md: &Value, ns: &str) -> RenderedBody {
+    /// A body of `author` with no record CID of its own to cache it under (a forum's `about`),
+    /// rendered each time: a spilled one from its fetched source, while that is pending the
+    /// pending body.
+    pub fn uncached(&self, md: &Value, ns: &str, author: &str) -> RenderedBody {
         let spilled = text_blob_cid(md).filter(|_| md.get("text").is_none());
-        match spilled.and_then(|b| self.spilled(b)) {
+        match spilled.and_then(|b| self.spilled(author, b)) {
             Some(v) => render_spilled(md, &v),
             None => render_md(md, ns, None),
         }
@@ -529,9 +558,9 @@ impl RenderCache {
         item: &BodyItem<'_>,
     ) -> RenderedBody {
         let spilled = text_blob_cid(md).filter(|_| md.get("text").is_none());
-        let cached = match spilled.map(|b| self.spilled(b)) {
+        let cached = match spilled.map(|b| self.spilled(author, b)) {
             None => self.get_or_render_cached(cid, || render_md_cached(md, ns, excerpt)),
-            Some(Some(v)) => self.get_or_render_cached(cid, || render_spilled_cached(md, &v)),
+            Some(Some(v)) => self.spilled_render(cid, md, &v),
             // pending: what an earlier fetch rendered, or the notice (never cached)
             Some(None) => {
                 let earlier = self.lock().get(&(cid.to_owned(), RENDERER_VERSION));
@@ -565,12 +594,35 @@ impl RenderCache {
         }
         b
     }
-    /// Canonical record links from the cached rendered body, rendering first on a miss.
-    pub fn links(&self, cid: &str, md: &Value, ns: &str, excerpt: Option<&str>) -> Vec<AtUri> {
+
+    /// The render of a spilled body from what was fetched: a verified source is cached under the
+    /// record CID (any author's record with that CID names the same blob); anything else depends
+    /// on whose PDS was asked, so it is never cached and gives way to a verified render the LRU
+    /// still holds.
+    fn spilled_render(&self, cid: &str, md: &Value, v: &Spilled) -> Arc<CachedBody> {
+        match v {
+            Spilled::Text(_) => self.get_or_render_cached(cid, || render_spilled_cached(md, v)),
+            _ => self
+                .lock()
+                .get(&(cid.to_owned(), RENDERER_VERSION))
+                .unwrap_or_else(|| Arc::new(render_spilled_cached(md, v))),
+        }
+    }
+
+    /// Canonical record links from the cached rendered body of `author`'s record, rendering first
+    /// on a miss.
+    pub fn links(
+        &self,
+        cid: &str,
+        md: &Value,
+        ns: &str,
+        excerpt: Option<&str>,
+        author: &str,
+    ) -> Vec<AtUri> {
         let spilled = text_blob_cid(md).filter(|_| md.get("text").is_none());
-        match spilled.map(|b| self.spilled(b)) {
+        match spilled.map(|b| self.spilled(author, b)) {
             None => self.get_or_render_cached(cid, || render_md_cached(md, ns, excerpt)),
-            Some(Some(v)) => self.get_or_render_cached(cid, || render_spilled_cached(md, &v)),
+            Some(Some(v)) => self.spilled_render(cid, md, &v),
             Some(None) => {
                 return self
                     .lock()
@@ -649,13 +701,46 @@ mod tests {
             "text": format!("[target]({target})"),
             "links": [hint],
         });
-        let links = cache.links("cid", &md, NS, None);
+        let links = cache.links("cid", &md, NS, None, "did:plc:a");
         assert_eq!(
             links.iter().map(ToString::to_string).collect::<Vec<_>>(),
             [target]
         );
         assert!(!links.iter().any(|link| link.as_str() == hint));
-        assert_eq!(cache.links("cid", &md, NS, None), links);
+        assert_eq!(cache.links("cid", &md, NS, None, "did:plc:a"), links);
+    }
+
+    #[test]
+    fn only_a_verified_source_is_shared_between_authors() {
+        let c = RenderCache::default();
+        let (a, b, blob) = ("did:plc:a", "did:plc:b", "bafkblob");
+        let pending = |did: &str| PendingSpilled {
+            at_ms: 5,
+            forum: "f".into(),
+            uri: "u".into(),
+            did: did.into(),
+        };
+        c.spilled_unavailable(blob, pending(a));
+        assert_eq!(c.spilled_retry_at(a, blob), Some(5));
+        assert_eq!(c.spilled_retry_at(b, blob), None);
+        c.put_spilled(a, blob, Spilled::Missing);
+        assert_eq!(c.spilled(a, blob).as_deref(), Some(&Spilled::Missing));
+        assert_eq!(c.spilled(b, blob), None, "a's PDS answered for a only");
+        assert_eq!(c.spilled_retry_at(a, blob), None);
+        c.put_spilled(b, blob, Spilled::Text("verified".into()));
+        assert_eq!(
+            c.spilled(a, blob).as_deref(),
+            Some(&Spilled::Text("verified".into())),
+            "verified bytes are the blob's, whoever served them"
+        );
+        // a failure is never cached as the record's render; a verified render is
+        let md = json!({"$type": format!("{NS}.markdown"), "textBlob": {"ref": {"$link": "x"}}});
+        c.put_spilled(a, "x", Spilled::Unverified);
+        c.links("rec", &md, NS, None, a);
+        assert!(!c.contains("rec"));
+        c.put_spilled(b, "x", Spilled::Text("# Hi".into()));
+        c.links("rec", &md, NS, None, b);
+        assert!(c.contains("rec"));
     }
 
     #[test]

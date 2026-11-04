@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { FORUM_URI } from "./mock/fixture.ts";
+import { buildFixture, FORUM_URI } from "./mock/fixture.ts";
 import { MockEngine, mockSafeHref } from "./mock.ts";
-import { type EngineEvent, isMissingRoot, OPINION_UNDO_WINDOW_MS } from "./types.ts";
+import { type Draft, type EngineEvent, isMissingRoot, OPINION_UNDO_WINDOW_MS } from "./types.ts";
 
 const LFM_ROOT = '<div class="lfm" dir="auto">';
 
@@ -35,6 +35,29 @@ describe("MockEngine fixture", () => {
     );
     expect(linked.every((p) => p.state.kind !== "hidden")).toBe(true);
     await expect(e.backlinks("not an at-uri")).rejects.toMatchObject({ code: "invalid_ref" });
+  });
+
+  // sync.md §4.7: verified owners by handle, then the others by DID; by name within an owner
+  it("orders the directory by owner group, then by name", async () => {
+    vi.useFakeTimers();
+    try {
+      const e = new MockEngine({ sendMs: 10 });
+      for (const [slug, name] of [
+        ["zeta", "zeta"],
+        ["alpha", "Alpha"],
+      ] as const) {
+        await e.forumCreate({ slug, name, membership: "open", defaultTier: "personal" });
+      }
+      await vi.advanceTimersByTimeAsync(50);
+      const all = await e.forumDiscover("");
+      expect(all.map((f) => [f.owner.handle, f.name])).toEqual([
+        ["ada.test", "LessDugin Test Forum"],
+        ["you.test", "Alpha"],
+        ["you.test", "zeta"],
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("lists posts of every kind with the frontpage filter excluding quick takes", async () => {
@@ -203,6 +226,303 @@ describe("MockEngine writes", () => {
     expect(mine?.body.html).toContain("<strong>new</strong>");
     expect((await e.getPost(post.uri)).post.commentCount).toBe(post.commentCount + 1);
     expect(ticket.state.kind).toBe("pending");
+  });
+
+  it("lists a post's applied tags, sorted, not its declared ones (social.md §13.3)", async () => {
+    const e = new MockEngine({ sendMs: 10 });
+    const all = await e.listPosts({ forum: FORUM_URI, sort: "new", filter: "all", limit: 100 });
+    // declared in the order rationality, practical; both have a page
+    const declaredOutOfOrder = all.items.find((p) => p.title === "Noticing confusion");
+    expect(declaredOutOfOrder?.tags).toEqual(["practical", "rationality"]);
+    const ticket = await e.publish({
+      forum: FORUM_URI,
+      kind: "article",
+      title: "Tagged without a page",
+      body: { markdown: "Body", media: [] },
+      tags: ["no-such-page", "meta", "meta"],
+    });
+    await vi.advanceTimersByTimeAsync(50);
+    const state = (await e.writes()).find((w) => w.id === ticket.id)?.state;
+    if (state?.kind !== "done") throw new Error("the publish did not finish");
+    // a tag without a wiki page never applies; the record keeps what the author declared
+    expect((await e.getPost(state.uri)).post.tags).toEqual(["meta"]);
+    expect((await e.raw(state.uri)).record).toMatchObject({
+      tags: ["no-such-page", "meta", "meta"],
+    });
+    const byMissing = await e.listPosts({
+      forum: FORUM_URI,
+      sort: "new",
+      filter: "all",
+      tag: "no-such-page",
+      limit: 100,
+    });
+    expect(byMissing.items).toEqual([]);
+    const byMeta = await e.listPosts({
+      forum: FORUM_URI,
+      sort: "new",
+      filter: "all",
+      tag: "meta",
+      limit: 100,
+    });
+    expect(byMeta.items.map((p) => p.uri)).toContain(state.uri);
+  });
+
+  it("writes a wiki revision on its base, and refuses one whose head moved (O-2)", async () => {
+    const e = new MockEngine({ sendMs: 10 });
+    const slug = "decision-theory";
+    const head = (await e.tag(FORUM_URI, slug)).head ?? "";
+    // a page's revisions are records: the head names the genesis as its parent
+    const genesis = (await e.raw(head)).record as { parents: { uri: string }[] };
+    expect(genesis.parents).toHaveLength(1);
+    expect((await e.raw(genesis.parents[0]?.uri ?? "")).record).toMatchObject({
+      slug,
+      parents: [],
+    });
+    const draft = { name: "Decision theory", isTag: true, base: head };
+    await e.wikiEdit(FORUM_URI, slug, draft);
+    await vi.advanceTimersByTimeAsync(50);
+    const next = (await e.tag(FORUM_URI, slug)).head ?? "";
+    expect(next).not.toBe(head);
+    expect((await e.raw(next)).record).toMatchObject({ parents: [{ uri: head }] });
+    await expect(e.wikiEdit(FORUM_URI, slug, draft)).rejects.toMatchObject({
+      code: "conflict",
+      detail: { kind: "wikiHeadMoved", base: head, head: next },
+    });
+  });
+
+  it("with wikiRace, meets another participant's revision on the first edit with a base", async () => {
+    const e = new MockEngine({ sendMs: 10, wikiRace: true });
+    const slug = "decision-theory";
+    const head = (await e.tag(FORUM_URI, slug)).head ?? "";
+    const events: EngineEvent[] = [];
+    e.subscribe((ev) => events.push(ev));
+    const draft = { name: "Decision theory", isTag: true, base: head };
+    await expect(e.wikiEdit(FORUM_URI, slug, draft)).rejects.toMatchObject({
+      code: "conflict",
+      detail: { kind: "wikiHeadMoved", base: head },
+    });
+    const moved = (await e.tag(FORUM_URI, slug)).head ?? "";
+    expect(moved).not.toBe(head);
+    const race = (await e.raw(moved)).record as { parents: { uri: string }[]; summary: string };
+    expect(race.parents.map((p) => p.uri)).toEqual([head]);
+    expect(moved.split("/")[2]).not.toBe((await e.activeAccount())?.did);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(events).toContainEqual({ kind: "changed", topics: [{ kind: "forum", uri: FORUM_URI }] });
+    // only once: the edit redone on the newer head is written
+    await e.wikiEdit(FORUM_URI, slug, { ...draft, base: moved });
+    await vi.advanceTimersByTimeAsync(50);
+    const next = (await e.tag(FORUM_URI, slug)).head ?? "";
+    expect((await e.raw(next)).record).toMatchObject({ parents: [{ uri: moved }] });
+  });
+
+  it("says in an approval-mode mod queue where applicants come from (O-8)", async () => {
+    const e = new MockEngine({ sendMs: 10 });
+    expect((await e.modQueue(FORUM_URI)).banners).toBeUndefined();
+    const t = await e.forumCreate({
+      slug: "by-approval",
+      name: "By approval",
+      membership: "approval",
+      defaultTier: "personal",
+    });
+    await vi.advanceTimersByTimeAsync(50);
+    const s = (await e.writes()).find((w) => w.id === t.id)?.state;
+    if (s?.kind !== "done") throw new Error("not written");
+    const queue = await e.modQueue(s.uri);
+    expect(queue.items).toEqual([]);
+    expect(queue.banners?.map((b) => b.code)).toEqual(["applicantsViaHints"]);
+    await e.setSetting("sources", "direct");
+    expect((await e.modQueue(s.uri)).banners?.map((b) => b.code)).toEqual([
+      "applicantsNotDiscovered",
+    ]);
+  });
+
+  // engine-api.md §3.5 `edit` (decision O-14): the cached card stays for a draft of its uri alone
+  it("keeps a link card on an edit of its uri alone, and drops it with dropLinkCard", async () => {
+    const e = new MockEngine({ sendMs: 10 });
+    const t = await e.publish({
+      forum: FORUM_URI,
+      kind: "link",
+      title: "A paper",
+      body: { markdown: "Worth reading.", media: [] },
+      link: { uri: "https://example.test/paper", title: "The paper", description: "Abstract" },
+    });
+    await vi.advanceTimersByTimeAsync(50);
+    const s = (await e.writes()).find((w) => w.id === t.id)?.state;
+    if (s?.kind !== "done") throw new Error("not written");
+    const draft = (link: { uri: string; title?: string }): Draft => ({
+      kind: "post",
+      post: {
+        forum: FORUM_URI,
+        kind: "link",
+        title: "A paper",
+        body: { markdown: "Edited.", media: [] },
+        link,
+      },
+    });
+    await e.edit(s.uri, draft({ uri: "https://example.test/paper" }), { history: true });
+    await vi.advanceTimersByTimeAsync(50);
+    expect((await e.getPost(s.uri)).post.link).toMatchObject({
+      uri: "https://example.test/paper",
+      title: "The paper",
+      description: "Abstract",
+    });
+    // a draft naming a title writes it as given
+    await e.edit(s.uri, draft({ uri: "https://example.test/paper", title: "Renamed" }), {
+      history: true,
+    });
+    await vi.advanceTimersByTimeAsync(50);
+    expect((await e.getPost(s.uri)).post.link?.title).toBe("Renamed");
+    expect((await e.getPost(s.uri)).post.link?.description).toBeUndefined();
+    await e.edit(s.uri, draft({ uri: "https://example.test/paper" }), {
+      history: true,
+      dropLinkCard: true,
+    });
+    await vi.advanceTimersByTimeAsync(50);
+    const link = (await e.getPost(s.uri)).post.link;
+    expect(link?.uri).toBe("https://example.test/paper");
+    expect(link?.title).toBeUndefined();
+  });
+
+  // engine-api.md §4.2 `PostView.tagRelevance`, social.md §13.3
+  it("records tag votes and serves them as tagRelevance, with the applied tags", async () => {
+    const e = new MockEngine({ sendMs: 10 });
+    const { postUri } = buildFixture();
+    const welcome = postUri.welcome ?? "";
+    // declared meta and rationality (both pages); no vote yet
+    expect((await e.getPost(welcome)).tagRelevance).toEqual([
+      { slug: "meta", relevance: 1, applies: true },
+      { slug: "rationality", relevance: 1, applies: true },
+    ]);
+    await e.opinion(welcome, { kind: "tag", slug: "meta", value: "down" });
+    await e.opinion(welcome, { kind: "tag", slug: "practical", value: "up" });
+    await e.opinion(welcome, { kind: "tag", slug: "no-such-page", value: "strongUp" });
+    await vi.advanceTimersByTimeAsync(OPINION_UNDO_WINDOW_MS + 100);
+    const view = await e.getPost(welcome);
+    // the viewer (an authority, in E) counts: meta drops out, practical applies
+    expect(view.tagRelevance).toEqual([
+      { slug: "meta", relevance: 0, applies: false, mine: "down" },
+      { slug: "no-such-page", relevance: 3, applies: false, mine: "strongUp" },
+      { slug: "practical", relevance: 1, applies: true, mine: "up" },
+      { slug: "rationality", relevance: 1, applies: true },
+    ]);
+    // PostSummary.tags stays the applied set, sorted
+    expect(view.post.tags).toEqual(["practical", "rationality"]);
+    const byPractical = await e.listPosts({
+      forum: FORUM_URI,
+      sort: "new",
+      filter: "all",
+      tag: "practical",
+      limit: 100,
+    });
+    expect(byPractical.items.map((p) => p.uri)).toContain(welcome);
+    // clearing a vote removes its entry
+    await e.opinion(welcome, { kind: "tag", slug: "no-such-page" });
+    await vi.advanceTimersByTimeAsync(OPINION_UNDO_WINDOW_MS + 100);
+    expect((await e.getPost(welcome)).tagRelevance?.map((t) => t.slug)).toEqual([
+      "meta",
+      "practical",
+      "rationality",
+    ]);
+  });
+
+  // engine-api.md §3.4 `get_post(uri, sequence?)`, social.md §14 next and previous
+  it("navigates the sequence a post was opened from and records it as continue reading", async () => {
+    const e = new MockEngine({ sendMs: 10 });
+    const { postUri, sequenceUri } = buildFixture();
+    const map1 = postUri.map1 ?? "";
+    const map2 = postUri.map2 ?? "";
+    const confusion = postUri.confusion ?? "";
+    const t = await e.seqCreate({
+      forum: FORUM_URI,
+      title: "Mine",
+      chapters: [{ posts: [confusion, map2, map1] }],
+    });
+    await vi.advanceTimersByTimeAsync(50);
+    const s = (await e.writes()).find((w) => w.id === t.id)?.state;
+    if (s?.kind !== "done") throw new Error("not written");
+    const mine = s.uri;
+    // without a context: one sequence, the author's own (ada's)
+    expect((await e.getPost(map2)).sequences).toEqual([
+      { sequence: sequenceUri, title: "Map and Territory", prev: map1, next: confusion },
+    ]);
+    expect((await e.sequence(mine)).continueReading).toBeUndefined();
+    const events: EngineEvent[] = [];
+    e.subscribe((ev) => events.push(ev));
+    expect((await e.getPost(map2, mine)).sequences).toEqual([
+      { sequence: mine, title: "Mine", prev: confusion, next: map1 },
+    ]);
+    expect((await e.sequence(mine)).continueReading?.post).toBe(map2);
+    expect((await e.sequence(sequenceUri)).continueReading).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(events).toEqual([{ kind: "changed", topics: [{ kind: "thread", uri: mine }] }]);
+    // the same position again announces nothing; another one moves it
+    await e.getPost(map2, mine);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(events).toHaveLength(1);
+    await e.getPost(map1, mine);
+    expect((await e.sequence(mine)).continueReading?.post).toBe(map1);
+    // a sequence that does not contain the post is ignored and records nothing
+    const welcome = postUri.welcome ?? "";
+    expect((await e.getPost(welcome, mine)).sequences).toEqual([]);
+    expect((await e.sequence(mine)).continueReading?.post).toBe(map1);
+    await expect(e.getPost(map1, "not an at-uri")).rejects.toMatchObject({ code: "invalid_ref" });
+    // the position is device-local state, exported and imported
+    const exported = (await e.exportLocal()) as { seqpos: Record<string, { post: string }> };
+    expect(exported.seqpos[mine]?.post).toBe(map1);
+    const other = new MockEngine();
+    await other.importLocal(exported);
+    expect((await other.exportLocal()) as unknown).toMatchObject({
+      seqpos: { [mine]: { post: map1 } },
+    });
+  });
+
+  // views.rs `tag_summary`: a page that exists but is not a tag (applicable = false) is no tag
+  it("treats a page that is not a tag as no tag, and edits it on its head", async () => {
+    const e = new MockEngine({ sendMs: 10 });
+    const slug = "decision-theory";
+    const head = (await e.tag(FORUM_URI, slug)).head ?? "";
+    const notTag = { name: "Glossary", isTag: false, base: head };
+    const t = await e.wikiEdit(FORUM_URI, slug, notTag);
+    await vi.advanceTimersByTimeAsync(50);
+    const s = (await e.writes()).find((w) => w.id === t.id)?.state;
+    if (s?.kind !== "done") throw new Error("not written");
+    await expect(e.tag(FORUM_URI, slug)).rejects.toMatchObject({ code: "not_found" });
+    expect((await e.tags(FORUM_URI)).map((x) => x.slug)).not.toContain(slug);
+    // an edit without a base still names the page's head, as organisation.rs `wiki_edit` does
+    await e.wikiEdit(FORUM_URI, slug, { name: "Decision theory", isTag: true });
+    await vi.advanceTimersByTimeAsync(50);
+    const back = (await e.tag(FORUM_URI, slug)).head ?? "";
+    expect((await e.raw(back)).record).toMatchObject({ parents: [{ uri: s.uri }] });
+  });
+
+  it("bounds sequence positions before enqueueing, as the engine does", async () => {
+    const e = new MockEngine({ sendMs: 10 });
+    const posts = (await e.listPosts({ forum: FORUM_URI, sort: "new", filter: "all", limit: 3 }))
+      .items;
+    const [a, b] = posts;
+    if (!a || !b) throw new Error("no posts");
+    const t = await e.seqCreate({
+      forum: FORUM_URI,
+      title: "Mine",
+      chapters: [{ posts: [a.uri] }],
+    });
+    await vi.advanceTimersByTimeAsync(50);
+    const s = (await e.writes()).find((w) => w.id === t.id)?.state;
+    if (s?.kind !== "done") throw new Error("not created");
+    await expect(e.seqAdd(s.uri, b.uri, { chapter: 0, index: 2 })).rejects.toMatchObject({
+      code: "invalid_input",
+    });
+    await expect(e.seqAdd(s.uri, s.uri, { chapter: 0, index: 0 })).rejects.toMatchObject({
+      code: "invalid_input",
+    });
+    await expect(
+      e.seqMove(s.uri, { chapter: 0, index: 0 }, { chapter: 0, index: 1 }),
+    ).rejects.toMatchObject({ code: "invalid_input" });
+    await e.seqAdd(s.uri, b.uri, { chapter: 0, index: 1 });
+    await vi.advanceTimersByTimeAsync(50);
+    await e.seqMove(s.uri, { chapter: 0, index: 1 }, { chapter: 0, index: 0 });
+    await vi.advanceTimersByTimeAsync(50);
+    expect((await e.sequence(s.uri)).chapters[0]?.posts.map((p) => p.uri)).toEqual([b.uri, a.uri]);
   });
 
   it("keeps the #restrict dimension an intent leaves out, as the engine merges (m3r-2)", async () => {

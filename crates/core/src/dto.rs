@@ -102,8 +102,9 @@ dto! {
 }
 
 string_enum! {
-    /// Severity of a manual indexer audit finding.
-    pub enum AuditKind { Contradiction, Omission, Lag }
+    /// Severity of a manual indexer audit finding. `unchecked` (M6) records an item the audit
+    /// could not check, with the reason in `detail`: it is never a contradiction or an omission.
+    pub enum AuditKind { Contradiction, Omission, Lag, Unchecked }
 }
 
 dto! {
@@ -122,7 +123,16 @@ dto! {
         pub contradictions: usize,
         pub omissions: usize,
         pub lag: usize,
+        /// Items the audit could not check (M6): `unchecked` findings, never counted as
+        /// checked. Omitted when 0.
+        #[serde(default, skip_serializing_if = "is_zero_count")]
+        pub unchecked: usize,
     }
+}
+
+/// `usize` counts omitted when zero.
+fn is_zero_count(n: &usize) -> bool {
+    *n == 0
 }
 
 dto! {
@@ -413,6 +423,11 @@ pub struct WikiDraft {
     pub parent_tags: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
+    /// The page head the author edited (`WikiPageView.head`, or `TagView.head`): written as the
+    /// only parent, and the edit is refused (`conflict`) when the cached canonical head is
+    /// another revision or there is none. Absent: the current canonical head, or none for a new page (engine API v0).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
 }
 
 dto! {
@@ -589,6 +604,23 @@ dto! {
         pub reacts: Vec<ReactTally>,
         pub history: HistorySummary,
         pub sequences: Vec<SequenceNav>,
+        /// Tag relevance (`social.md` §13.3) and the viewer's own tag votes, by slug: every
+        /// slug with a non-zero `rel(p, slug)` or a tag vote of the viewer's. Empty for a post
+        /// that is not listed, except to the forum's authorities (like its score).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub tag_relevance: Vec<PostTag>,
+    }
+}
+
+dto! {
+    /// A tag of a post (`social.md` §13.3): `rel(p, slug)`, whether it applies, and the viewer's
+    /// own tag vote on it, as its cached opinion record carries it.
+    pub struct PostTag {
+        pub slug: String,
+        pub relevance: i64,
+        pub applies: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub mine: Option<KarmaValue>,
     }
 }
 
@@ -936,6 +968,28 @@ dto! {
 }
 
 dto! {
+    /// `wiki_page(forum, slug)`'s result (`engine-api.md` §3.4, M5): a wiki page's head and
+    /// state, also for a page that `tag` answers `not_found` for (one that is not a tag, or whose
+    /// tag a moderator removed), so an editor starts from the head instead of an empty form.
+    pub struct WikiPageView {
+        pub dto: DtoVersion,
+        pub forum: String,
+        pub slug: String,
+        /// The canonical revision (`social.md` §13.2), whatever `exists` and `applicable` say:
+        /// the `WikiDraft.base` of an edit. Absent when the page has none (an unknown slug, or
+        /// no eligible revision): an edit is then a new page.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub head: Option<String>,
+        /// `exists(slug)`: a head and no `tag.removed` in effect. A head without it: removed.
+        pub exists: bool,
+        /// `applicable(slug)`: it exists and its head is a tag (`isTag`); `tag` answers then.
+        pub applicable: bool,
+        /// "N unmerged edits" (`social.md` §13.2).
+        pub unmerged_edits: u32,
+    }
+}
+
+dto! {
     /// A sequence in a list.
     pub struct SequenceSummary {
         pub uri: String,
@@ -967,6 +1021,19 @@ dto! {
         #[serde(skip_serializing_if = "Option::is_none")]
         pub body: Option<RenderedBody>,
         pub chapters: Vec<ChapterView>,
+        /// "Continue reading" (`social.md` §14, §16; local): the post of this sequence the
+        /// reader last opened from it (`get_post` with this sequence as its context), while it
+        /// is a displayable entry. Absent in parity mode (`engine-api.md` §2.1).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub continue_reading: Option<ReadingPosition>,
+    }
+}
+
+dto! {
+    /// Where the reader stopped in a sequence: the last post opened from it, and when.
+    pub struct ReadingPosition {
+        pub post: String,
+        pub at_ms: i64,
     }
 }
 
@@ -1059,6 +1126,11 @@ dto! {
     pub struct ModQueue {
         pub dto: DtoVersion,
         pub items: Vec<ModQueueItem>,
+        /// In approval mode, what the applicant list relies on (`sync.md` §4.4, decision O-8):
+        /// `applicantsViaHints` (assisted sources: applicants are found only through CORE+
+        /// hints), or `applicantsNotDiscovered` (direct sources: this device looks for none).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub banners: Vec<Banner>,
     }
 }
 
@@ -1691,6 +1763,11 @@ dto! {
         pub history: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub summary: Option<String>,
+        /// Write a post draft's `link` exactly as the draft gives it, dropping the cached card
+        /// (its title, description and thumb) even when the uri is the cached one: how a client
+        /// removes a link's card and keeps the link (`engine-api.md` §3.5 `edit`).
+        #[serde(default, skip_serializing_if = "is_false")]
+        pub drop_link_card: bool,
     }
 }
 
@@ -1699,6 +1776,7 @@ impl Default for EditOpts {
         Self {
             history: true,
             summary: None,
+            drop_link_card: false,
         }
     }
 }

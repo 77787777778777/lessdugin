@@ -215,13 +215,13 @@ PARAMS = membership, defaultTier, voting, authorModeration, tagCreation, pairCap
 | L3 | opinion validity (§5); K1, `seedUp`, E, KP, K (§6) | L0–L2, opinions, items, `absent` |
 | L3.5 | score, agreement, unweighted (§7) | L0–L3 |
 | L4 | gates (§8) | L0–L3 |
-| L5 | author-tier moderation (§4.9), reacts (§9), tag relevance and wiki heads (§13), the sequence library (§14) | L0–L4, plus states from rules V1–V5 |
+| L5 | author-tier moderation (§4.9), reacts (§9), tag relevance and wiki heads (§13), the sequence library (§14) | L0–L4, plus states from rules V1–V5; the library order also reads time (below) |
 | L6 | visibility V1–V10 and the thread pass (§10); threads (§11); ranking (§12) | L0–L5, time |
 | L7 | lens (§10.3) | L6, local state |
 
 **Rules that sit outside the layer stack**
 - Rules V1–V5 read only validity and layers L0–L2, so L5 may use their results.
-- Time (§2) and thread placement (§11, steps 1–4) read only validity, `obs` and `decl`. Any layer may use them, but only L6 and display do.
+- Time (§2) and thread placement (§11, steps 1–4) read only validity, `obs` and `decl`. Any layer may use them, but only L6, display and the §14 library order do: the library breaks a tie of (forum-pinned, score) by `t_rank`, so moving first-seen times can re-sort such ties and change nothing else in L5 (§6.3 P3; §20.1 item 52).
 
 ### 1.5 Unknown is not absent; partial input
 
@@ -1207,7 +1207,7 @@ Sequence scores come from opinions on the sequence. They earn no karma.
    - else none.
 2. Next and previous are the adjacent displayable entries around the **first** occurrence of p in `entries(context)`.
 
-"Continue reading" is local state (§17).
+"Continue reading" is local state (§17): per sequence, the post the reader last opened from that sequence (the sequence it came from, step 1), shown on the sequence's page while that post is a displayable entry of it. It is device-wide like the read marks (§16), exported and imported with them, and ignored by parity mode (`engine-api.md` §2.1, §3.4 `get_post`).
 
 ---
 
@@ -1328,7 +1328,7 @@ Everything in this section is computed locally from the fold and local state. Th
 | `thread/thread.json`, `thread/depth.json` | `mod/1` | `thread` | §11 placement, steps 1–4 |
 | `fold/digest.json` | `mod/1,karma/1,magic/1,default/1` | `digest` | §1.2 `inputDigest` |
 
-Gates and tags have no kind or directory of their own, because both belong to `karma/1` (§0.3).
+Gates and tags have no kind or directory of their own, because both belong to `karma/1` (§0.3). The §14 sequence library has no vector kind yet: the reference model's `sequences.py` is still a stub (it raises `NotModelled`) and the projection has no `library` field. Until the reference models it, Rust cases with explicit expected results pin the library (`crates/core/tests/social_cases.rs`, `sequence_library_*`: a pinned below-gate sequence, an unpinned below-gate one, score over `t_rank`, ties by `t_rank` and by uri, and sequences hidden by V1–V5 or deleted).
 
 - **Format:** each file is `{behaviour, kind, ns, description, vectors}`, and each vector `{name, input, expected, note?}`. `input` is `{fold: FoldInput, query?: Query}`, with `now` and `obs` injected, except for the kinds `conversion` (µs(datetime), tidTime) and `power` (power(k, x)), whose input names the function's arguments. `expected` lists only the fields a vector asserts. `testdata/vectors/README.md`, section "Social fold vectors", defines the JSON form of `FoldInput` and `Query`, and the name and shape of every projected field; implementations project their `ForumView` onto those fields.
 - **Namespace:** vector files carry `ns`, the NS under which keys, CIDs and `inputDigest` were derived. Runners evaluate the fold, record validity and key derivation with NS = `ns`: the fold takes the namespace as a parameter, or the runner is built with that NS (the Rust `final-ns` feature). Rewriting strings does not work, because every `fk`, `h16` and CID hashes the namespace. This is how `.temp` CI builds run vectors written in the final namespace (`data-model.md` §1.3).
@@ -1507,6 +1507,7 @@ These choices fill gaps in the sources or resolve ambiguities. Each takes the si
     - A valid root in F's key range names F (G9), so CO5 fails only on a 60-bit fk collision, like the other forum checks (item 23).
     - P7 holds without hypothesis (c), which is withdrawn.
     - Vectors: `visibility/visibility.json` `v1-before-v2-and-v3` and `karma/staged.json` `opinions-that-never-count` were regenerated (the comment under a root whose `forum` names another forum is no longer Excluded, and the opinion on it counts), and `visibility/visibility.json` `co5-invalid-root-is-a-missing-root`, `karma/staged.json` `co5-invalid-root-opinions-count` and `thread/thread.json` `root-names-another-forum` pin the edit-the-root case.
+52. **The library order reads time (§1.4, §6.3 P3, §14).** §14 orders the listed sequences by `(forum-pinned desc, score desc, t_rank desc, uri asc)`, but §1.4 said only L6 and display read time, and P3 checked that moving first-seen times changed no layer below L6. The two disagreed whenever two listed sequences tied on pin and score (CI run 41336047294). §14 is kept: a newer sequence is the better tie-break for a reader. §1.4 now names the library order as the one L5 use of time, and P3 allows exactly that: the eligible set and the entries are unchanged, and `listed` is the same set in §14 order under the moved `t_rank` (`crates/core/tests/social_props.rs`, `p3_library_ties_follow_time`).
 
 ### 20.2 Open questions
 
@@ -1517,3 +1518,5 @@ These choices fill gaps in the sources or resolve ambiguities. Each takes the si
 5. *(Resolved: CO5 compares only a valid root; see 20.1 item 51.)*
 6. **Own newcomer items are shown expanded (§10.3; orchestrator decision O-4, M3–M6 review).** V8 collapses a newcomer's items for every viewer, the newcomer included, so a newcomer could not see what they had just written. Clients now show the viewer's own `Collapsed(NewUser)` items expanded with the label kept, matching the M3 banner "collapsed for other readers". For the U7 review.
 7. **The `restrict` dimension merge is a semantic exception to the dto/1 freeze (§4.2; orchestrator decision O-12, M3–M6 review).** A `restrict` input that names `capabilities` and leaves `nullifyVotes` out no longer clears an in-effect nullification (and keeps its `until` and `reason`), although under engine API v0 that input asserted `nullifyVotes: false` (the record states the complete desired state, §4.2). The v0 reading made every client's `restrict` silently un-nullify the user (defect m3r-2), and `engine-api.md` §1 lists "changing what an operation means" as a breaking change, so this is a deliberate exception: the freeze freezes shapes, not defects. A client that wants both dimensions reset names both. For the U7 review.
+8. **Wiki edits name their base (§13.2; `data-model.md` §6.8; orchestrator decision O-2, M3–M6 review).** The engine wrote every wiki edit with `parents` = [the canonical revision when the write was queued], so an edit made against an older head silently became the child of a newer one and replaced it. `WikiDraft` now carries an optional `base`, the head the author edited: it is written as the only parent (`parents` = [base], or [] for a new page), and the edit is refused with `conflict` when the cached canonical head is no longer `base` (`engine-api.md` §3.5 `wiki_edit`). A draft without `base` keeps engine API v0's reading (the current head), so clients that loaded a head pass it. For the U7 review.
+9. **The mod queue says where applicants come from (§3.2, §4.12; `sync.md` §4.4; orchestrator decision O-8, M3–M6 review).** Approval-mode applicants (`member(d) ∧ access(d) = none`) are found only through CORE+ hints (Constellation, Jetstream, a relay, an indexer), so with direct sources a device finds none, and an owner could not tell an empty queue from an incomplete one. The mod queue of an approval-mode forum now carries a banner (`engine-api.md` §3.4 `mod_queue`, a compatible optional field): `applicantsViaHints` with assisted sources, and the stronger `applicantsNotDiscovered` with direct sources. For the U7 review.

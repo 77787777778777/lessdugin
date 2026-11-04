@@ -2,6 +2,10 @@
 //! Loopback mini-Jetstream for devnet tests. It serves signed commit hints, never record text:
 //! clients must still read and verify each record from its author's PDS. The owned runtime
 //! stops with this value; no socket task can outlive the test network.
+//!
+//! The events come from an [`EventLog`]: a [`FakeNet`]'s, or the firehose mirror of the node
+//! devnet ([`crate::devnet_services`]). A listener serves one wire, or both
+//! ([`Jetstream::start_both`]: the wire follows the request path, as on a real instance).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -36,6 +40,8 @@ pub enum Wire {
 pub struct RequestLog {
     /// URL path and query.
     pub url: String,
+    /// The wire this connection is served.
+    pub wire: Wire,
     /// `options_update` payload, if received.
     pub options: Option<Value>,
     /// Frames sent on this connection (test diagnostics; no record bodies are ever present).
@@ -73,9 +79,48 @@ impl Filters {
     }
 }
 
+/// Where a mini-Jetstream reads its events.
+pub trait EventLog: Clone + Send + Sync + 'static {
+    /// Every event so far, in sequence order.
+    fn events(&self) -> Vec<RepoEvent>;
+    /// The events with `seq > after`.
+    fn events_since(&self, after: u64) -> Vec<RepoEvent>;
+}
+
+impl EventLog for FakeNet {
+    fn events(&self) -> Vec<RepoEvent> {
+        FakeNet::events(self)
+    }
+
+    fn events_since(&self, after: u64) -> Vec<RepoEvent> {
+        FakeNet::events_since(self, after)
+    }
+}
+
+/// The wire of a connection to a listener that serves both: v1 at `/subscribe`, v2 elsewhere
+/// (`network.bsky.jetstream.subscribeEvents`).
+fn wire_of_path(url: &str) -> Wire {
+    let path = url.split('?').next().unwrap_or_default();
+    if path.trim_end_matches('/') == "/subscribe" {
+        Wire::V1
+    } else {
+        Wire::V2
+    }
+}
+
 impl Jetstream {
     /// Start a Jetstream backed by `net`'s event log. Only loopback TCP is used.
     pub fn start(net: &FakeNet, wire: Wire) -> Self {
+        Self::listen(net.clone(), Some(wire))
+    }
+
+    /// Start a Jetstream over `log` that serves both wires on one listener, choosing each
+    /// connection's wire by its path. Only loopback TCP is used.
+    pub fn start_both(log: impl EventLog) -> Self {
+        Self::listen(log, None)
+    }
+
+    fn listen<L: EventLog>(log: L, wire: Option<Wire>) -> Self {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind mini-Jetstream");
         listener
             .set_nonblocking(true)
@@ -88,15 +133,14 @@ impl Jetstream {
             .build()
             .expect("Jetstream runtime");
         let requests = Arc::new(Mutex::new(Vec::new()));
-        let log = Arc::clone(&requests);
-        let net = net.clone();
+        let shared = Arc::clone(&requests);
         runtime.spawn(async move {
             let listener = TcpListener::from_std(listener).expect("tokio listener");
             while let Ok((tcp, _)) = listener.accept().await {
-                let net = net.clone();
-                let log = Arc::clone(&log);
+                let events = log.clone();
+                let shared = Arc::clone(&shared);
                 tokio::spawn(async move {
-                    serve(tcp, net, log, wire).await;
+                    serve(tcp, events, shared, wire).await;
                 });
             }
         });
@@ -126,11 +170,11 @@ impl Drop for Jetstream {
     }
 }
 
-async fn serve(
+async fn serve<L: EventLog>(
     tcp: tokio::net::TcpStream,
-    net: FakeNet,
+    net: L,
     requests: Arc<Mutex<Vec<RequestLog>>>,
-    wire: Wire,
+    wire: Option<Wire>,
 ) {
     let log = Arc::clone(&requests);
     let (url_tx, mut url_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -145,6 +189,7 @@ async fn serve(
         let url = req.uri().to_string();
         lock(&log).push(RequestLog {
             url: url.clone(),
+            wire: wire.unwrap_or_else(|| wire_of_path(&url)),
             options: None,
             sent: Vec::new(),
         });
@@ -157,6 +202,7 @@ async fn serve(
     let Some(first_url) = url_rx.recv().await else {
         return;
     };
+    let wire = wire.unwrap_or_else(|| wire_of_path(&first_url));
     let Ok(parsed) = url::Url::parse(&format!("ws://localhost{}", first_url)) else {
         return;
     };
@@ -175,6 +221,7 @@ async fn serve(
                 let options = value.get("payload").cloned().unwrap_or(Value::Null);
                 lock(&requests).push(RequestLog {
                     url: first_url.clone(),
+                    wire,
                     options: Some(options.clone()),
                     sent: Vec::new(),
                 });

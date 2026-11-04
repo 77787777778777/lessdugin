@@ -10,8 +10,8 @@
 
 use lessdugin_atp::syntax::AtUri;
 use lessdugin_core::dto::{
-    ActorView, Anchor, Badges, CollapseReason, HandleState, HiddenReason, ItemState, ReactTally,
-    RenderedBody, ScoreView, Stance,
+    ActorView, Anchor, Badges, CollapseReason, HandleState, HiddenReason, ItemState, KarmaValue,
+    PostTag, ReactTally, RenderedBody, ScoreView, Stance,
 };
 use lessdugin_core::host::Host;
 use lessdugin_core::store::records::RecordStore;
@@ -177,6 +177,38 @@ pub fn score(s: &ScoreView) -> Vec<TermText> {
         )));
     }
     v
+}
+
+/// A post view's tags (`PostView.tagRelevance`, `social.md` §13.3): each slug with its
+/// relevance, whether it applies, and the viewer's own tag vote; `None` when it lists none.
+pub fn tag_relevance(tags: &[PostTag]) -> Option<TermText> {
+    if tags.is_empty() {
+        return None;
+    }
+    let mut parts = vec![lit("tags: ")];
+    for (i, t) in tags.iter().enumerate() {
+        if i > 0 {
+            parts.push(tt(" · "));
+        }
+        parts.push(cat([lit("#"), name(&t.slug)]));
+        parts.push(tt(&format!(" relevance {}", t.relevance)));
+        if !t.applies {
+            parts.push(lit(" (not applied)"));
+        }
+        if let Some(v) = t.mine {
+            parts.push(cat([
+                lit(" [your vote: "),
+                lit(match v {
+                    KarmaValue::Up => "up",
+                    KarmaValue::StrongUp => "strong up",
+                    KarmaValue::Down => "down",
+                    KarmaValue::StrongDown => "strong down",
+                }),
+                lit("]"),
+            ]));
+        }
+    }
+    Some(cat(parts))
 }
 
 /// One react tally as it is listed under its item (`social.md` §9.2 "Display", "Anchors"): the
