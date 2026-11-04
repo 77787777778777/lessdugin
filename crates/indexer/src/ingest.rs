@@ -493,7 +493,8 @@ pub async fn project_forum(
 /// under the projection lock.
 pub async fn model(indexer: &Indexer, key: &ForumKey) -> anyhow::Result<Arc<ForumModel>> {
     let forum = key.uri.as_str();
-    match lock(&indexer.models).get(forum, indexer.now_ms()) {
+    let cached = lock(&indexer.models).get(forum, indexer.now_ms());
+    match cached {
         Cached::Fresh(m) => return Ok(m),
         Cached::Stale(m) => {
             refresh_model(indexer, key);
@@ -522,7 +523,9 @@ pub async fn model(indexer: &Indexer, key: &ForumKey) -> anyhow::Result<Arc<Foru
 }
 
 /// Refolds the expired query model of `key` in the background, unless a query fold is
-/// already running (a later request asks again).
+/// already running (a later request asks again). After a failed refold the model counts as
+/// fresh again for its age bound, so a forum whose fold keeps failing is retried at that pace,
+/// not on every request.
 fn refresh_model(indexer: &Indexer, key: &ForumKey) {
     let Ok(permit) = Arc::clone(&indexer.query_folds).try_acquire_owned() else {
         return;
@@ -548,7 +551,14 @@ fn refresh_model(indexer: &Indexer, key: &ForumKey) {
                     .query_model_refreshes
                     .fetch_add(1, Ordering::Relaxed);
             }
-            Err(e) => warn!(forum = %key.uri, error = %e, "query model refresh failed"),
+            Err(e) => {
+                lock(&indexer.models).postpone(key.uri.as_str(), indexer.now_ms());
+                indexer
+                    .metrics
+                    .query_model_refresh_failures
+                    .fetch_add(1, Ordering::Relaxed);
+                warn!(forum = %key.uri, error = %e, "query model refresh failed");
+            }
         }
     });
 }

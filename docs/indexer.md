@@ -96,7 +96,8 @@ real `inputDigest`; their values and tallies remain hints. Queries read each for
 folded model. It is fresh for at least 60 s or 30 times its fold cost; past that it is still
 served while one background fold refreshes it (one query fold at a time, never in the way of live
 projections), so a request folds only a forum with no model yet, after a restart or an eviction
-(metrics `query_model_builds_total` and `query_model_refreshes_total`). `getRecordProofs` accepts at most 25 `uris`
+(metrics `query_model_builds_total`, `query_model_refreshes_total` and
+`query_model_refresh_failures_total`; a failed refresh is retried after the age bound). `getRecordProofs` accepts at most 25 `uris`
 and returns an `application/vnd.ipld.car` manifest bundle. It serves cached proofs and fetches at
 most two missing ones at a time (a request waits at most five seconds in all for a slot); failed or
 not-yet-available items are omitted; absence proofs have `cid: null`.

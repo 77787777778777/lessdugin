@@ -108,9 +108,10 @@ impl<H: Host> Engine<H> {
     /// forum discovery has completed, a cold page converges through one bounded ordinary PDS
     /// sync. Cursor pages and already-discovered forums never trigger this fallback.
     ///
-    /// A first page is marked as being read from the call until it is listed (or falls back):
-    /// a forum sync's participant sweep that starts meanwhile goes after it (`sync.md` §14.3
-    /// step 4), so the sweep's work does not hold up the page.
+    /// A first page is marked as being read while its indexer hydration and its listing run (it
+    /// is unmarked before a fallback sync): a client-started forum sync that starts meanwhile
+    /// goes after it (`sync.md` §14.3 step 4), so the sync's local work does not hold the page
+    /// up.
     pub async fn list_posts_page(
         &self,
         query: &dto::ListPostsQuery,
@@ -156,9 +157,10 @@ impl<H: Host> Engine<H> {
     /// `sync_forum(uri, SyncOpts)` (`engine-api.md` §3.3): opens the forum and syncs its
     /// authorities and confirmed participants in the order of `sync.md` §4.5. Emits
     /// `SyncProgress` as repos finish (see the module docs) and `Changed [Forum]`; the forum's
-    /// authorities are queued for handle verification. A first post page being read when the
-    /// sync is about to start goes first (`sync.md` §14.3 step 4): the sync waits until it is
-    /// listed, at most [`limits::COLD_PAGE_HOLD_MS`].
+    /// authorities are queued for handle verification. A first post page of any forum that is
+    /// being read when the sync starts goes first (`sync.md` §14.3 step 4): the sync waits
+    /// until it is listed, at most [`limits::COLD_PAGE_HOLD_MS`]. Background syncs are not
+    /// held.
     pub async fn sync_forum(
         &self,
         forum: &str,
@@ -200,7 +202,11 @@ impl<H: Host> Engine<H> {
                     .map(|d| (d, "indexer".to_owned())),
             );
         }
-        if after_pages && let Some(read) = self.rt.pages_read() {
+        // a background sync (`live_tail`'s) is never held: only the one a client starts
+        if after_pages
+            && !opts.background
+            && let Some(read) = self.rt.pages_read()
+        {
             let hold = self.host.sleep(limits::COLD_PAGE_HOLD_MS);
             futures::pin_mut!(hold);
             futures::future::select(read, hold).await;

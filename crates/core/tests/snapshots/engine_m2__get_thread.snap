@@ -8,7 +8,7 @@ expression: thread
     "dto": 1,
     "post": {
       "uri": "at://did:plc:whanakmuiogult5m5wu7xbj4/online.7778777.lessdugin.temp.post/w5cs3cry7ban-3m2qrta53s3hj",
-      "cid": "bafyreigfnufqlho76bpvugfo54asmpfshvir3muv2ej2ecf5lnmhe6ilta",
+      "cid": "bafyreicn2rnqobesrmlszmllurpixq4ztezwgvkewl5sdpg6l6fuhojkpa",
       "forum": "at://did:plc:whanakmuiogult5m5wu7xbj4/online.7778777.lessdugin.temp.forum/meta",
       "author": {
         "did": "did:plc:whanakmuiogult5m5wu7xbj4",
@@ -26,7 +26,7 @@ expression: thread
       "createdAtMs": 1760000060000,
       "tRankMs": 1760000060000,
       "commentCount": 3,
-      "lastCommentAtMs": 1760000420000,
+      "lastCommentAtMs": 1760000420050,
       "score": {
         "score": 1,
         "agreement": 0,
@@ -61,8 +61,8 @@ expression: thread
   },
   "comments": [
     {
-      "uri": "at://did:plc:2hjzbjveisqcpwgiji7hkgqm/online.7778777.lessdugin.temp.comment/w5cs3cry7ban-3m2qrta53s3hj-3m2qs46aek3zh",
-      "cid": "bafyreig3ola4iv227oh2wwuhc75emsedt76c5ux7irb4kl36ahajf7qefu",
+      "uri": "at://did:plc:2hjzbjveisqcpwgiji7hkgqm/online.7778777.lessdugin.temp.comment/w5cs3cry7ban-3m2qrta53s3hj-3m2qs46bvelzh",
+      "cid": "bafyreiewm4lpzhzcd6ucocgyxgpitrn3m5wm4ez2m3ojpolqakcs5k4j3m",
       "root": "at://did:plc:whanakmuiogult5m5wu7xbj4/online.7778777.lessdugin.temp.post/w5cs3cry7ban-3m2qrta53s3hj",
       "depth": 1,
       "author": {
@@ -82,8 +82,8 @@ expression: thread
         "notices": [],
         "rendererVersion": "6"
       },
-      "createdAtMs": 1760000360000,
-      "tRankMs": 1760000360000,
+      "createdAtMs": 1760000360050,
+      "tRankMs": 1760000360050,
       "score": {
         "score": 1,
         "agreement": 0,
@@ -106,8 +106,8 @@ expression: thread
       "pinned": false
     },
     {
-      "uri": "at://did:plc:ochphg43iudrrgiqczqt6zeb/online.7778777.lessdugin.temp.comment/w5cs3cry7ban-3m2qrta53s3hj-3m2qrylsb23qi",
-      "cid": "bafyreibjwjigq2jkqdstxhgxyxndwqg4nuqvie643n5td4sxufe3hlidma",
+      "uri": "at://did:plc:ochphg43iudrrgiqczqt6zeb/online.7778777.lessdugin.temp.comment/w5cs3cry7ban-3m2qrta53s3hj-3m2qryltrulqi",
+      "cid": "bafyreic3ogihrlx5ph5orwbfixmimnc2ykhz2zdd46e7ho3e4jpnbmuuum",
       "root": "at://did:plc:whanakmuiogult5m5wu7xbj4/online.7778777.lessdugin.temp.post/w5cs3cry7ban-3m2qrta53s3hj",
       "depth": 1,
       "author": {
@@ -127,8 +127,8 @@ expression: thread
         "notices": [],
         "rendererVersion": "6"
       },
-      "createdAtMs": 1760000240000,
-      "tRankMs": 1760000240000,
+      "createdAtMs": 1760000240050,
+      "tRankMs": 1760000240050,
       "score": {
         "score": 1,
         "agreement": 0,
@@ -151,10 +151,10 @@ expression: thread
       "pinned": false
     },
     {
-      "uri": "at://did:plc:2hjzbjveisqcpwgiji7hkgqm/online.7778777.lessdugin.temp.comment/w5cs3cry7ban-3m2qrta53s3hj-3m2qs5xhgc3zh",
-      "cid": "bafyreigtrbpqtglu2kgs6lpl73ddydmijip2572xusnvkisumzl4trri7e",
+      "uri": "at://did:plc:2hjzbjveisqcpwgiji7hkgqm/online.7778777.lessdugin.temp.comment/w5cs3cry7ban-3m2qrta53s3hj-3m2qs5xix4lzh",
+      "cid": "bafyreibh4fr7jisl6drug7xeqouiasoyt2nlshh4kebao5yuqe32cbav4q",
       "root": "at://did:plc:whanakmuiogult5m5wu7xbj4/online.7778777.lessdugin.temp.post/w5cs3cry7ban-3m2qrta53s3hj",
-      "parent": "at://did:plc:ochphg43iudrrgiqczqt6zeb/online.7778777.lessdugin.temp.comment/w5cs3cry7ban-3m2qrta53s3hj-3m2qrylsb23qi",
+      "parent": "at://did:plc:ochphg43iudrrgiqczqt6zeb/online.7778777.lessdugin.temp.comment/w5cs3cry7ban-3m2qrta53s3hj-3m2qryltrulqi",
       "depth": 2,
       "author": {
         "did": "did:plc:2hjzbjveisqcpwgiji7hkgqm",
@@ -173,8 +173,8 @@ expression: thread
         "notices": [],
         "rendererVersion": "6"
       },
-      "createdAtMs": 1760000420000,
-      "tRankMs": 1760000420000,
+      "createdAtMs": 1760000420050,
+      "tRankMs": 1760000420050,
       "score": {
         "score": 1,
         "agreement": 0,

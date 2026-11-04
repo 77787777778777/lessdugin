@@ -223,6 +223,8 @@ impl Runtime {
         if pages.0 == 0 {
             return None;
         }
+        // syncs that stopped waiting (their hold expired) leave their senders behind
+        pages.1.retain(|tx| !tx.is_canceled());
         let (tx, rx) = oneshot::channel();
         pages.1.push(tx);
         Some(rx)

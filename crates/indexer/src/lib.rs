@@ -171,6 +171,14 @@ impl<M: Clone> Models<M> {
         }
     }
 
+    /// Counts the cached model of `forum` as folded at `now_ms`: its refold failed, and is tried
+    /// again only once the model's age bound has passed again.
+    pub(crate) fn postpone(&mut self, forum: &str, now_ms: i64) {
+        if let Some(entry) = self.entries.get_mut(forum) {
+            entry.built_ms = now_ms;
+        }
+    }
+
     /// Puts every cached model past its age bound (tests).
     fn expire(&mut self) {
         for entry in self.entries.values_mut() {
@@ -265,6 +273,8 @@ pub struct Metrics {
     pub query_model_builds: AtomicU64,
     /// Background folds of a cached query model past its age bound, served meanwhile.
     pub query_model_refreshes: AtomicU64,
+    /// Background folds that failed (the model is served on and refolded after its age bound).
+    pub query_model_refresh_failures: AtomicU64,
 }
 
 impl Metrics {
@@ -330,6 +340,10 @@ impl Metrics {
             (
                 "lessdugin_indexer_query_model_refreshes_total",
                 self.query_model_refreshes.load(Ordering::Relaxed),
+            ),
+            (
+                "lessdugin_indexer_query_model_refresh_failures_total",
+                self.query_model_refresh_failures.load(Ordering::Relaxed),
             ),
         ];
         let mut out = String::new();
@@ -480,6 +494,16 @@ mod tests {
         assert_eq!(models.get(F, 999), Cached::Stale(2));
         models.expire();
         assert_eq!(models.get(F, 1_000), Cached::Stale(2));
+        // a failed refold counts as a fold now: fresh again for the age bound
+        models.postpone(F, 5_000);
+        assert_eq!(
+            models.get(F, 5_000 + MODEL_AGE_FACTOR * max),
+            Cached::Fresh(2)
+        );
+        assert_eq!(
+            models.get(F, 5_000 + MODEL_AGE_FACTOR * max + 1),
+            Cached::Stale(2)
+        );
     }
 
     #[test]

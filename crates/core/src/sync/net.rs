@@ -296,8 +296,10 @@ enum Gate {
     Wait(i64),
 }
 
-/// PLC pacing (`sync.md` §3.5): at most `rate` slots in any one second, not one every
-/// `1000 / rate` ms (decision O-16).
+/// PLC pacing (`sync.md` §3.5): at most `rate` slots in any one second (decision O-16). P0
+/// slots may burst within that window; background slots also keep `1000 / rate` ms after the
+/// last slot, so a running sweep never fills the window at once and a P0 behind it waits at
+/// most that long.
 #[derive(Debug)]
 struct PlcPacing {
     rate: u32,
@@ -330,19 +332,25 @@ impl PlcPacing {
     }
 
     /// When the next slot is free, at `now` or later; nothing is taken. It is a second after the
-    /// `rate`-th most recent slot.
-    fn next_slot(&mut self, now: i64) -> i64 {
+    /// `rate`-th most recent slot, and for a background slot (`burst` false) also `1000 / rate`
+    /// ms after the last one.
+    fn next_slot(&mut self, now: i64, burst: bool) -> i64 {
         self.recover(now);
-        let rate = self.rate.max(1) as usize;
-        match self.taken.len().checked_sub(rate) {
-            Some(i) => self.taken[i].saturating_add(1000).max(now),
+        let rate = self.rate.max(1);
+        let window = match self.taken.len().checked_sub(rate as usize) {
+            Some(i) => self.taken[i].saturating_add(1000),
             None => now,
-        }
+        };
+        let spaced = match self.taken.back() {
+            Some(last) if !burst => last.saturating_add(1000 / i64::from(rate)),
+            _ => now,
+        };
+        window.max(spaced).max(now)
     }
 
-    /// Takes the next slot at `now`; returns how long to wait for it.
-    fn slot(&mut self, now: i64) -> i64 {
-        let at = self.next_slot(now);
+    /// Takes the next slot at `now` (a P0 one if `burst`); returns how long to wait for it.
+    fn slot(&mut self, now: i64, burst: bool) -> i64 {
+        let at = self.next_slot(now, burst);
         self.taken.push_back(at);
         if self.taken.len() > PLC_RATE_MAX as usize {
             self.taken.pop_front();
@@ -478,11 +486,12 @@ impl State {
         if self.plc_queue.keys().next() != Some(&key) {
             return PlcStep::Queued;
         }
-        let at = self.plc_pacing.next_slot(now);
+        let burst = prio == Priority::P0;
+        let at = self.plc_pacing.next_slot(now, burst);
         if at > now && !slept {
             return PlcStep::Wait(at - now);
         }
-        self.plc_pacing.slot(now);
+        self.plc_pacing.slot(now, burst);
         self.plc_leave(key);
         *ticket = None;
         PlcStep::Go
@@ -1445,24 +1454,49 @@ mod tests {
 
     #[test]
     fn plc_pacing_halves_and_recovers() {
-        // twenty slots in any one second (O-16): the 21st comes a second after the first, the
-        // 22nd a second after the second
+        // twenty P0 slots in any one second (O-16): the 21st comes a second after the first,
+        // the 22nd a second after the second
         let mut p = PlcPacing::default();
         for _ in 0..20 {
-            assert_eq!(p.slot(0), 0);
+            assert_eq!(p.slot(0, true), 0);
         }
-        assert_eq!(p.slot(0), 1000);
-        assert_eq!(p.slot(500), 500);
-        assert_eq!(p.slot(2_000), 0);
+        assert_eq!(p.slot(0, true), 1000);
+        assert_eq!(p.slot(500, true), 500);
+        assert_eq!(p.slot(2_000, true), 0);
         let mut p = PlcPacing::default();
         p.on_429(0);
         assert_eq!(p.rate, 10);
         for _ in 0..10 {
-            assert_eq!(p.slot(0), 0);
+            assert_eq!(p.slot(0, true), 0);
         }
-        assert_eq!(p.slot(0), 1000);
-        let _ = p.slot(PLC_RECOVER_MS);
+        assert_eq!(p.slot(0, true), 1000);
+        let _ = p.slot(PLC_RECOVER_MS, true);
         assert_eq!(p.rate, 12);
+    }
+
+    #[test]
+    fn a_p0_slot_waits_at_most_one_spacing_behind_a_running_sweep() {
+        // background slots keep 1000 / rate ms apart, so a sweep never fills the window at once
+        let mut p = PlcPacing::default();
+        assert_eq!(p.slot(0, false), 0);
+        assert_eq!(p.slot(0, false), 50);
+        // a sweep in its steady state: twenty slots 50 ms apart in the last second
+        let mut p = PlcPacing::default();
+        for i in 0..40 {
+            let now = i * 50;
+            assert_eq!(p.slot(now, false), 0, "background slot {i}");
+        }
+        // a P0 arriving just after a background slot (1,950) waits for the window's oldest slot
+        // (1,000) to expire: less than one spacing
+        assert_eq!(p.slot(1_960, true), 40);
+        // and the sweep's next slot keeps its spacing after the P0's
+        assert_eq!(p.next_slot(2_000, false), 2_050);
+        // a P0 burst still goes out at once when the window has room
+        let mut p = PlcPacing::default();
+        assert_eq!(p.slot(0, false), 0);
+        for _ in 0..19 {
+            assert_eq!(p.slot(1, true), 0);
+        }
     }
 
     #[test]

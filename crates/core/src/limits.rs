@@ -160,8 +160,8 @@ pub const FOLLOW_SEED_PAGES: u32 = 10;
 pub const FORUM_REOPEN_MS: i64 = 300_000;
 /// Time budget of the P0 sync `forum_open` runs for authorities never synced (ms, *tunable*).
 pub const FORUM_OPEN_SYNC_BUDGET_MS: i64 = 10_000;
-/// The longest a forum sync's participant sweep waits for the first pages being read to be
-/// listed (`sync.md` §14.3 step 4; ms, *tunable*).
+/// The longest a client-started forum sync waits for the first post pages being read (hydrated
+/// from an indexer and listed) before it starts (`sync.md` §14.3 step 4; ms, *tunable*).
 pub const COLD_PAGE_HOLD_MS: u64 = 3_000;
 /// The time budget (ms) of a forum open's declaration fetch when the declaration is cached:
 /// past it the cached declaration is used (`sync.md` §4.2), so a hung owner PDS never blocks a

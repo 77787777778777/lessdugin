@@ -3,7 +3,8 @@
 //! checks that a sync in flight does not hold up, the membership of a granted author on a
 //! hydrated page, the order in which the authors on screen are resolved, a proof admitted while
 //! a sync of its author commits, a forum sync that its budget cut short, and a forum sync
-//! started beside a cold page, which goes after it for a bounded time. Offline, over
+//! started beside a cold page, which goes after it for a bounded time unless it is a background
+//! one. Offline, over
 //! `FakeNet` on a `MemHost`, with a host that can hold chosen requests (a slow PDS) and a chosen
 //! write to its cache (a slow store) until the test releases them.
 
@@ -1015,5 +1016,45 @@ fn a_cold_page_holds_the_forum_sync_beside_it_for_a_bounded_time() {
     mem.park_sleeps(false);
     let page = futures::executor::block_on(page).unwrap();
     assert_eq!(unlisted(&page, &posts), Vec::<&String>::new());
+    futures::executor::block_on(sweep).unwrap();
+}
+
+/// Only a sync the client starts goes after the page: a background forum sync (`live_tail`'s,
+/// confirming a Jetstream newcomer) is not held by a cold page being read.
+#[test]
+fn a_background_forum_sync_is_not_held_by_a_cold_page() {
+    let mem = MemHost::new();
+    let (host, engine, key, _posts, off_screen) = page_then_sync(&mem);
+    mem.park_sleeps(true);
+    let query = all_posts(&key);
+    let fallback = lessdugin_core::dto::SyncOpts::default();
+    let mut page = Box::pin(engine.list_posts_page(&query, &fallback));
+    assert!(poll_once(&mut page).is_pending());
+    let opts = lessdugin_core::discovery::SyncOpts {
+        budget_ms: Some(8_000),
+        max_requests: Some(400),
+        background: true,
+        ..lessdugin_core::discovery::SyncOpts::default()
+    };
+    let started = mem.now();
+    let mut sweep = Box::pin(engine.sync_forum(key.uri.as_str(), &opts));
+    let mut reached = None;
+    for _ in 0..1_000 {
+        assert!(poll_once(&mut page).is_pending(), "the held page finished");
+        let _ = poll_once(&mut sweep);
+        if names_any(&mem, &off_screen) {
+            reached = Some(mem.now());
+            break;
+        }
+        mem.advance_ms(10);
+    }
+    let waited = reached.expect("the background sync never reached a participant") - started;
+    assert!(
+        waited < 1_000,
+        "the background sync waited {waited} ms for the page"
+    );
+    host.hold.release();
+    mem.park_sleeps(false);
+    futures::executor::block_on(page).unwrap();
     futures::executor::block_on(sweep).unwrap();
 }
